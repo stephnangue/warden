@@ -5,6 +5,7 @@ from binance.client import Client
 from binance.enums import *
 from binance.exceptions import *
 from numbers import Number
+import math
 
 app = flask.Flask(__name__)
 app.config["DEBUG"] = True
@@ -25,61 +26,67 @@ def process_signal():
     if(signal_is_valid):
         # extraire les parmètres du signal
         crypto = signal['crypto']
-        paring = signal['paring']
+        pairing = signal['pairing']
         range_low = signal['range_low']
         range_high = signal['range_high']
         target = signal['targets'][0]
         stoploss = signal['stoploss']
         
         # si la liste de clés n'est pas vide,
+        result = {}
         if keys:
+            i = 0
             # pour chaque couple (clé publique, clé privée), soumettre des OCOs
             for key in keys:
                 api_key = key['public_key']
                 api_secret = key['private_key']
-                results = send_oco_orders(api_key=api_key, api_secret=api_secret, crypto=crypto, paring=paring,range_low=range_low, range_high=range_high, target=target, stoploss=stoploss)
-            return results
+                result[i] = send_oco_orders(api_key=api_key, api_secret=api_secret, crypto=crypto, pairing=pairing,range_low=range_low, range_high=range_high, target=target, stoploss=stoploss)
+                i = i + 1
+            return json.dumps(result)
         else:
             return "The keys is empty."
     else:
         return message
 
 
-def send_oco_orders(api_key, api_secret, crypto, paring, range_low, range_high, target, stoploss):
+def send_oco_orders(api_key, api_secret, crypto, pairing, range_low, range_high, target, stoploss):
     client = Client(api_key, api_secret)
+    
+    symbol1 = crypto + pairing
+    stepSize = client.get_symbol_info(symbol1)['filters'][2]['stepSize']
+    precision1 = int(round(-1*math.log(float(stepSize),10),0))
     
     balance = client.get_asset_balance(asset=crypto)
     free_crypto = float(balance['free'])
-    free_crypto = "{:0.0{}f}".format(free_crypto, 6)
+    free_crypto = "{:0.0{}f}".format(free_crypto, precision1)
     
-    balance = client.get_asset_balance(asset=paring)
-    free_paring = float(balance['free'])
-    free_paring = "{:0.0{}f}".format(free_paring, 6)
+    symbol2 = pairing + crypto
+    stepSize = client.get_symbol_info(symbol2)['filters'][2]['stepSize']
+    precision2 = int(round(-1*math.log(float(stepSize),10),0))
     
-    symbol = crypto + paring
+    balance = client.get_asset_balance(asset=pairing)
+    free_pairing = float(balance['free'])
+    quantity = float(free_pairing)/float(range_high)
+    quantity = "{:0.0{}f}".format(quantity, precision2)
+    
     try:
         sell_order = client.create_oco_order(
-            symbol=symbol,
+            symbol=symbol1,
             side=SIDE_SELL,
             stopLimitTimeInForce=TIME_IN_FORCE_GTC,
             quantity=free_crypto,
-            stopPrice=stoploss+0.1,
+            stopPrice=stoploss,
             stopLimitPrice=stoploss,
             price=target)
 
         buy_low_order = client.create_oco_order(
-            symbol=symbol,
+            symbol=symbol2,
             side=SIDE_BUY,
             stopLimitTimeInForce=TIME_IN_FORCE_GTC,
-            quantity=free_paring*0.5,
+            quantity=quantity,
+            stopPrice=range_high,
+            stopLimitPrice=range_high,
             price=range_low)
-
-        buy_high_order = client.create_oco_order(
-            symbol=symbol,
-            side=SIDE_BUY,
-            stopLimitTimeInForce=TIME_IN_FORCE_GTC,
-            quantity=free_paring*0.5,
-            price=range_high)
             
     except BinanceRequestException as e:
         print(e)
@@ -98,7 +105,7 @@ def send_oco_orders(api_key, api_secret, crypto, paring, range_low, range_high, 
     except BinanceOrderInactiveSymbolException as e:
         print(e)
     else:
-        return sell_order
+        return buy_low_order
     
         
 def validate_signal(signal):
