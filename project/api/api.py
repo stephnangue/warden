@@ -1,14 +1,20 @@
 import json
 import flask
+import math
 from flask import request
-from binance.client import Client
+from numbers import Number
+from flask_celery import make_celery
 from binance.enums import *
 from binance.exceptions import *
-from numbers import Number
-import math
+from binance.client import Client
 
 app = flask.Flask(__name__)
-app.config["DEBUG"] = True
+app.config.update(
+    CELERY_BROKER_URL='pyamqp://',
+    CELERY_RESULT_BACKEND='rpc://'
+)
+
+celery = make_celery(app)
 
 @app.route('/bcube/api/v1/signal', methods=['POST'])
 def process_signal():
@@ -33,80 +39,36 @@ def process_signal():
         stoploss = signal['stoploss']
         
         # si la liste de clés n'est pas vide,
-        result = {}
+        result_array = []
         if keys:
             i = 0
             # pour chaque couple (clé publique, clé privée), soumettre des OCOs
             for key in keys:
+                result = {}
                 api_key = key['public_key']
                 api_secret = key['private_key']
-                result[i] = send_oco_orders(api_key=api_key, api_secret=api_secret, crypto=crypto, pairing=pairing,range_low=range_low, range_high=range_high, target=target, stoploss=stoploss)
+                result['api_key'] = api_key
+                buy_result = send_buy_oco_order.delay(api_key=api_key, 
+                                                             api_secret=api_secret, 
+                                                             crypto=crypto, 
+                                                             pairing=pairing,
+                                                             range_low=range_low, 
+                                                             range_high=range_high)
+                result['buy_task_id'] = buy_result.id
+                sell_result = send_sell_oco_order.delay(api_key=api_key, 
+                                                               api_secret=api_secret, 
+                                                               crypto=crypto, 
+                                                               pairing=pairing, 
+                                                               target=target, 
+                                                               stoploss=stoploss)
+                result['sell_task_id'] = sell_result.id
+                result_array.append(result)
                 i = i + 1
-            return json.dumps(result)
+            return json.dumps(result_array)
         else:
             return "The keys is empty."
     else:
         return message
-
-
-def send_oco_orders(api_key, api_secret, crypto, pairing, range_low, range_high, target, stoploss):
-    client = Client(api_key, api_secret)
-    
-    symbol1 = crypto + pairing
-    stepSize = client.get_symbol_info(symbol1)['filters'][2]['stepSize']
-    precision1 = int(round(-1*math.log(float(stepSize),10),0))
-    
-    balance = client.get_asset_balance(asset=crypto)
-    free_crypto = float(balance['free'])
-    free_crypto = "{:0.0{}f}".format(free_crypto, precision1)
-    
-    symbol2 = pairing + crypto
-    stepSize = client.get_symbol_info(symbol2)['filters'][2]['stepSize']
-    precision2 = int(round(-1*math.log(float(stepSize),10),0))
-    
-    balance = client.get_asset_balance(asset=pairing)
-    free_pairing = float(balance['free'])
-    quantity = float(free_pairing)/float(range_high)
-    quantity = "{:0.0{}f}".format(quantity, precision2)
-    
-    try:
-        sell_order = client.create_oco_order(
-            symbol=symbol1,
-            side=SIDE_SELL,
-            stopLimitTimeInForce=TIME_IN_FORCE_GTC,
-            quantity=free_crypto,
-            stopPrice=stoploss,
-            stopLimitPrice=stoploss,
-            price=target)
-
-        buy_low_order = client.create_oco_order(
-            symbol=symbol2,
-            side=SIDE_BUY,
-            stopLimitTimeInForce=TIME_IN_FORCE_GTC,
-            quantity=quantity,
-            stopPrice=range_high,
-            stopLimitPrice=range_high,
-            price=range_low)
-            
-    except BinanceRequestException as e:
-        print(e)
-    except BinanceAPIException as e:
-        print(e)
-    except BinanceOrderException as e:
-        print(e)
-    except BinanceOrderMinAmountException as e:
-        print(e)
-    except BinanceOrderMinPriceException as e:
-        print(e)
-    except BinanceOrderMinTotalException as e:
-        print(e)
-    except BinanceOrderUnknownSymbolException as e:
-        print(e)
-    except BinanceOrderInactiveSymbolException as e:
-        print(e)
-    else:
-        return buy_low_order
-    
         
 def validate_signal(signal):
     data = {}
@@ -152,4 +114,107 @@ def validate_signal(signal):
     result = json.dumps(data)
     return result
 
-app.run()
+@celery.task(name='bcube_api.send_sell_oco_order')
+def send_sell_oco_order(api_key, api_secret, crypto, pairing, target, stoploss):
+    client = Client(api_key, api_secret)
+    
+    symbol = crypto + pairing
+    
+    symbol_info = client.get_symbol_info(symbol)
+    if symbol_info is None:
+        return "The pair "+symbol+" is not valid."
+    else:
+        minQty = client.get_symbol_info(symbol)['filters'][2]['minQty']
+
+    precision = int(round(-1*math.log(float(minQty),10),0))
+
+    balance = client.get_asset_balance(asset=crypto)
+    free_crypto = float(balance['free'])
+    
+    if(float(free_crypto) > float(minQty)):
+        try:
+            free_crypto = "{:0.0{}f}".format(free_crypto, precision)
+
+            oco_order = client.create_oco_order(
+                symbol=symbol,
+                side=SIDE_SELL,
+                stopLimitTimeInForce=TIME_IN_FORCE_GTC,
+                quantity=free_crypto,
+                stopPrice=stoploss,
+                stopLimitPrice=stoploss,
+                price=target)
+                
+        except BinanceRequestException as e:
+            return e
+        except BinanceAPIException as e:
+            return e
+        except BinanceOrderException as e:
+            return e
+        except BinanceOrderMinAmountException as e:
+            return e
+        except BinanceOrderMinPriceException as e:
+            return e
+        except BinanceOrderMinTotalException as e:
+            return e
+        except BinanceOrderUnknownSymbolException as e:
+            return e
+        except BinanceOrderInactiveSymbolException as e:
+            return e
+        else:
+            return oco_order
+    else:
+        return "empty_sell_order"
+
+@celery.task(name='bcube_api.send_buy_oco_order')
+def send_buy_oco_order(api_key, api_secret, crypto, pairing, range_low, range_high):
+    client = Client(api_key, api_secret)
+    
+    symbol = pairing + crypto
+    
+    symbol_info = client.get_symbol_info(symbol)
+    if symbol_info is None:
+        return "The pair "+symbol+" is not valid."
+    else:
+        minQty = client.get_symbol_info(symbol)['filters'][2]['minQty']
+    
+    precision = int(round(-1*math.log(float(minQty),10),0))
+    
+    balance = client.get_asset_balance(asset=pairing)
+    free_pairing = float(balance['free'])
+    
+    if(float(free_pairing) > float(minQty)):
+        try:
+            quantity = float(free_pairing)/float(range_high)
+            quantity = "{:0.0{}f}".format(quantity, precision)
+            
+            oco_order = client.create_oco_order(
+                symbol=symbol,
+                side=SIDE_BUY,
+                stopLimitTimeInForce=TIME_IN_FORCE_GTC,
+                quantity=quantity,
+                stopPrice=range_high,
+                stopLimitPrice=range_high,
+                price=range_low)
+        except BinanceRequestException as e:
+            return e
+        except BinanceAPIException as e:
+            return e
+        except BinanceOrderException as e:
+            return e
+        except BinanceOrderMinAmountException as e:
+            return e
+        except BinanceOrderMinPriceException as e:
+            return e
+        except BinanceOrderMinTotalException as e:
+            return e
+        except BinanceOrderUnknownSymbolException as e:
+            return e
+        except BinanceOrderInactiveSymbolException as e:
+            return e
+        else:
+            return oco_order
+    else:
+        return "empty_buy_order"
+
+if(__name__== '__main__'):
+    app.run(debug=True)
