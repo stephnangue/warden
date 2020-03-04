@@ -54,6 +54,7 @@ def process_signal():
                                                              pairing=pairing,
                                                              range_low=range_low, 
                                                              range_high=range_high)
+                #print(buy_result)
                 result['buy_task_id'] = buy_result.id
                 sell_result = send_sell_oco_order.delay(api_key=api_key, 
                                                                api_secret=api_secret, 
@@ -61,6 +62,7 @@ def process_signal():
                                                                pairing=pairing, 
                                                                target=target, 
                                                                stoploss=stoploss)
+                #print(sell_result)
                 result['sell_task_id'] = sell_result.id
                 result_array.append(result)
                 i = i + 1
@@ -122,7 +124,7 @@ def send_sell_oco_order(api_key, api_secret, crypto, pairing, target, stoploss):
     
     symbol_info = client.get_symbol_info(symbol)
     if symbol_info is None:
-        return "The pair "+symbol+" is not valid."
+        raise Exception("The pair "+symbol+" is not valid.")
     else:
         minQty = client.get_symbol_info(symbol)['filters'][2]['minQty']
 
@@ -144,26 +146,12 @@ def send_sell_oco_order(api_key, api_secret, crypto, pairing, target, stoploss):
                 stopLimitPrice=stoploss,
                 price=target)
                 
-        except BinanceRequestException as e:
-            return e
-        except BinanceAPIException as e:
-            return e
-        except BinanceOrderException as e:
-            return e
-        except BinanceOrderMinAmountException as e:
-            return e
-        except BinanceOrderMinPriceException as e:
-            return e
-        except BinanceOrderMinTotalException as e:
-            return e
-        except BinanceOrderUnknownSymbolException as e:
-            return e
-        except BinanceOrderInactiveSymbolException as e:
-            return e
+        except Exception as e:
+            raise e
         else:
             return oco_order
     else:
-        return "empty_sell_order"
+        raise Exception("The available quantity is lower than the minimun tradable quantity")
 
 @celery.task(name='bcube_api.send_buy_oco_order')
 def send_buy_oco_order(api_key, api_secret, crypto, pairing, range_low, range_high):
@@ -173,13 +161,13 @@ def send_buy_oco_order(api_key, api_secret, crypto, pairing, range_low, range_hi
     
     symbol_info = client.get_symbol_info(symbol)
     if symbol_info is None:
-        return "The pair "+symbol+" is not valid."
+        raise Exception("The pair "+symbol+" is not valid.")
     else:
         minQty = client.get_symbol_info(symbol)['filters'][2]['minQty']
     
     precision = int(round(-1*math.log(float(minQty),10),0))
     
-    balance = client.get_asset_balance(asset=pairing)
+    balance = client.get_asset_balance(asset=crypto)
     free_pairing = float(balance['free'])
     
     if(float(free_pairing) > float(minQty)):
@@ -195,26 +183,12 @@ def send_buy_oco_order(api_key, api_secret, crypto, pairing, range_low, range_hi
                 stopPrice=range_high,
                 stopLimitPrice=range_high,
                 price=range_low)
-        except BinanceRequestException as e:
-            return e
-        except BinanceAPIException as e:
-            return e
-        except BinanceOrderException as e:
-            return e
-        except BinanceOrderMinAmountException as e:
-            return e
-        except BinanceOrderMinPriceException as e:
-            return e
-        except BinanceOrderMinTotalException as e:
-            return e
-        except BinanceOrderUnknownSymbolException as e:
-            return e
-        except BinanceOrderInactiveSymbolException as e:
-            return e
+        except Exception as e:
+            raise e
         else:
             return oco_order
     else:
-        return "empty_buy_order"
+        raise Exception("The available quantity is lower than the minimun tradable quantity")
 
 if(__name__== '__main__'):
     app.run(debug=True)
