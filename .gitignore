@@ -1,0 +1,62 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+mysql-proxy
+covenant
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Environment files
+.env
+*.env
+!.env.example
+
+# Vault data
+vault-data/
+vault-logs/
+vault-init/*.txt
+vault-init/approle-creds.txt
+
+# MySQL data
+mysql-data/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Backup files
+*.sql
+!mysql-init/*.sql
+
+# Docker
+.docker/
+
+# Temporary files
+tmp/
+temp/
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl

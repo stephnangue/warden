@@ -1,0 +1,2 @@
+subjectAltName = DNS:mysql-server,DNS:localhost,IP:127.0.0.1
+extendedKeyUsage = serverAuth

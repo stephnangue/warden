@@ -1,0 +1,69 @@
+# Git
+.git
+.gitignore
+.github
+
+# Build artifacts
+covenant
+warden
+*.exe
+*.test
+*.out
+__debug_bin
+bin/
+dist/
+
+# Dependencies (already in go.mod/go.sum)
+vendor/
+
+# Development files
+.env
+.env.*
+!.env.example
+*.log
+logs/
+tmp/
+temp/
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation
+README.md
+*.md
+docs/
+
+# Test files
+*_test.go
+testdata/
+coverage.out
+coverage.html
+
+# CI/CD
+.gitlab-ci.yml
+.travis.yml
+Jenkinsfile
+.github/
+
+# Backup files
+*.sql
+backup_*
+*.bak
+
+# Scripts (not needed in container)
+scripts/
+*.sh
+!generate-certs.sh
+
+# Certificates (should be mounted)
+certs/
