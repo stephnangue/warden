@@ -14,7 +14,7 @@ require (
 	github.com/pires/go-proxyproto v0.8.1
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.1
-	github.com/stephnangue/warden/api/auth/jwt v0.0.0-00010101000000-000000000000
+	github.com/stephnangue/warden/api/auth/jwt v0.0.0-20251126173353-7c20452911ca
 	github.com/stretchr/testify v1.11.1
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
