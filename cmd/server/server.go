@@ -42,8 +42,17 @@ var (
 
 	ServerCmd = &cobra.Command{
 		Use:   "server",
-		Short: "This command starts Warden server that proxies requests to cloud APIs",
-		Long:  `This command starts Warden server that proxies requests to cloud APIs`,
+		Short: "This command starts a Warden server that responds to API requests",
+		Long:  `
+Usage: warden server [options]
+
+  This command starts a Warden server that responds to API requests. By default,
+  Start a server with a configuration file:
+
+      $ warden server --config=/etc/warden/config.hcl
+
+  For a full list of examples, please see the documentation.
+  `,
 		RunE:  run,
 	}
 
