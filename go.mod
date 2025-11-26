@@ -14,6 +14,7 @@ require (
 	github.com/pires/go-proxyproto v0.8.1
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.1
+	github.com/stephnangue/warden/api v0.0.0-20251126173353-7c20452911ca
 	github.com/stephnangue/warden/api/auth/jwt v0.0.0-20251126173353-7c20452911ca
 	github.com/stretchr/testify v1.11.1
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
@@ -80,7 +81,6 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/shopspring/decimal v1.3.1 // indirect
-	github.com/stephnangue/warden/api v0.0.0-20251126000724-32fd95d98c65
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/zclconf/go-cty v1.16.3 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
