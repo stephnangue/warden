@@ -102,6 +102,7 @@ func (m *JWTAuthMethod) setupRouter() {
 
 	r.Route("/", func(roles chi.Router) {
 		roles.Post("/login", m.handleLogin)
+		roles.Put("/login", m.handleLogin)
 	})
 
 	m.router = r

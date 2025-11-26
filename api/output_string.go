@@ -76,14 +76,6 @@ func (d *OutputStringError) buildCurlString() (string, error) {
 		clientKey := strings.ReplaceAll(d.ClientKey, "'", "'\"'\"'")
 		finalCurlString = fmt.Sprintf("%s--key '%s' ", finalCurlString, clientKey)
 	}
-	for k, v := range d.Header {
-		for _, h := range v {
-			if strings.ToLower(k) == "x-vault-token" {
-				h = `$(bao print token)`
-			}
-			finalCurlString = fmt.Sprintf("%s-H \"%s: %s\" ", finalCurlString, k, h)
-		}
-	}
 
 	if len(body) > 0 {
 		// We need to escape single quotes since that's what we're using to

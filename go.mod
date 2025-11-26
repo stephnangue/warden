@@ -15,7 +15,6 @@ require (
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.1
 	github.com/stephnangue/warden/api v0.0.0-20251126173353-7c20452911ca
-	github.com/stephnangue/warden/api/auth/jwt v0.0.0-20251126173353-7c20452911ca
 	github.com/stretchr/testify v1.11.1
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
@@ -96,3 +95,5 @@ require (
 	golang.org/x/tools v0.38.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/stephnangue/warden/api => ./api
