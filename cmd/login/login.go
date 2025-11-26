@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/renderer"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/cobra"
 	"github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/cmd/client"
@@ -78,7 +80,7 @@ func run(cmd *cobra.Command, args []string) error {
 	authHandler, ok := Handlers[flagMethod]
 	if !ok {
 		return fmt.Errorf("unknown auth method: %s. Use 'warden auth list' to see the complete list of auth methods. Additionally, some "+
-			"auth methods are only available via the CLI", flagMethod)
+				"auth methods are only available via the API.", flagMethod)
 	}
 
 	if flagRole == "" {
@@ -127,9 +129,45 @@ func printResultTable(result *api.Resource) {
 		return
 	}
 
-	table := tablewriter.NewTable(os.Stdout)
+	cnf := tablewriter.Config{
+		Header: tw.CellConfig{
+			Alignment: tw.CellAlignment{Global: tw.AlignLeft},
+		},
+		Row: tw.CellConfig{
+			Merging:   tw.CellMerging{Mode: tw.MergeHierarchical},
+			Alignment: tw.CellAlignment{Global: tw.AlignLeft},
+		},
+		Debug: false,
+	}
+
+	symbols := tw.NewSymbolCustom("Warden").
+		WithRow(" ").
+		WithColumn(" ").
+		WithTopLeft("").
+		WithTopMid(" ").
+		WithTopRight(" ").
+		WithMidLeft(" ").
+		WithCenter(" ").
+		WithMidRight(" ").
+		WithBottomLeft(" ").
+		WithBottomMid(" ").
+		WithBottomRight(" ")
+
+	rd := tw.Rendition{Symbols: symbols}
+	rd.Settings.Lines.ShowHeaderLine = tw.Off
+
+	table := tablewriter.NewTable(os.Stdout, 
+		tablewriter.WithRenderer(renderer.NewBlueprint(rd)),
+		tablewriter.WithConfig(cnf),
+	)
 	table.Header("Key", "Value")
-	table.Bulk(result.Data)
+
+	// Convert map to rows
+	var data [][]any
+	for key, value := range result.Data {
+		data = append(data, []any{key, value})
+	}
+	table.Bulk(data)
 	table.Render()
 }
 
