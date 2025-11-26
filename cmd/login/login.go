@@ -134,11 +134,11 @@ func printResultTable(result *api.Resource) {
 	table.SetAutoWrapText(false)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
 	table.SetCenterSeparator("")
-	table.SetColumnSeparator("")
+	table.SetColumnSeparator(" ")
 	table.SetRowSeparator("")
 	table.SetHeaderLine(false)
 	table.SetBorder(false)
-	table.SetTablePadding("    ") // 4 spaces padding like Vault
+	table.SetTablePadding("\t") // Tab padding like Vault
 	table.SetNoWhiteSpace(true)
 	table.SetAutoFormatHeaders(false)
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)

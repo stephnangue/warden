@@ -13,9 +13,6 @@ covenant
 # Output of the go coverage tool
 *.out
 
-# Go workspace file
-go.work
-
 # Environment files
 .env
 *.env
