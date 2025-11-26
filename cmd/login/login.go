@@ -13,7 +13,7 @@ import (
 
 var (
 	LoginCmd = &cobra.Command{
-		Use:   "server",
+		Use:   "login",
 		Short: "This command is used to authenticate to Warden server.",
 		Long:  `
 Usage: warden login [options] [AUTH K=V...]
@@ -77,9 +77,8 @@ func run(cmd *cobra.Command, args []string) error {
 	// Get the handler function
 	authHandler, ok := Handlers[flagMethod]
 	if !ok {
-		return fmt.Errorf("Unknown auth method: %s. Use \"warden auth list\" to see the "+
-				"complete list of auth methods. Additionally, some "+
-				"auth methods are only available via the CLI.", flagMethod)
+		return fmt.Errorf("unknown auth method: %s. Use 'warden auth list' to see the complete list of auth methods. Additionally, some "+
+			"auth methods are only available via the CLI", flagMethod)
 	}
 
 	if flagRole == "" {
@@ -112,7 +111,7 @@ func run(cmd *cobra.Command, args []string) error {
 	// Authenticate delegation to the auth handler
 	result, err := authHandler.Auth(cmd.Context(), c, config)
 	if err != nil {
-		return fmt.Errorf("Error authenticating: %s", err)
+		return fmt.Errorf("error authenticating: %s", err)
 	}
 
 	// Print result in table format
@@ -128,46 +127,9 @@ func printResultTable(result *api.Resource) {
 		return
 	}
 
-	table := tablewriter.NewWriter(os.Stdout)
-
-	// Configure table to look like Vault CLI output
-	table.SetAutoWrapText(false)
-	table.SetAlignment(tablewriter.ALIGN_LEFT)
-	table.SetCenterSeparator("")
-	table.SetColumnSeparator(" ")
-	table.SetRowSeparator("")
-	table.SetHeaderLine(false)
-	table.SetBorder(false)
-	table.SetTablePadding("\t") // Tab padding like Vault
-	table.SetNoWhiteSpace(true)
-	table.SetAutoFormatHeaders(false)
-	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-
-	// Add rows without header (Vault style)
-	for key, value := range result.Data {
-		formattedValue := formatValue(value)
-		table.Append([]string{key, formattedValue})
-	}
-
+	table := tablewriter.NewTable(os.Stdout)
+	table.Header("Key", "Value")
+	table.Bulk(result.Data)
 	table.Render()
 }
 
-// formatValue formats a value for display, handling nested structures
-func formatValue(value interface{}) string {
-	switch v := value.(type) {
-	case map[string]interface{}:
-		// Format nested maps with indentation
-		var parts []string
-		for k, val := range v {
-			parts = append(parts, fmt.Sprintf("%s=%v", k, val))
-		}
-		return fmt.Sprintf("map[%s]", fmt.Sprint(parts))
-	case []interface{}:
-		// Format slices
-		return fmt.Sprintf("%v", v)
-	case nil:
-		return "n/a"
-	default:
-		return fmt.Sprintf("%v", v)
-	}
-}
