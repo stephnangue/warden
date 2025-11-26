@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/stephnangue/warden/cmd/login"
 	"github.com/stephnangue/warden/cmd/server"
 )
 
@@ -28,4 +29,5 @@ func Execute() {
 
 func init() {
 	wardenCmd.AddCommand(server.ServerCmd)
+	wardenCmd.AddCommand(login.LoginCmd)
 }
