@@ -165,13 +165,13 @@ type TLSConfig struct {
 // DefaultConfig returns a default configuration for the client. It is
 // safe to modify the return value of this function.
 //
-// The default Address is https://127.0.0.1:5000, but this can be overridden by
+// The default Address is http://127.0.0.1:5000, but this can be overridden by
 // setting the `WARDEN_ADDR` environment variable.
 //
 // If an error is encountered, the Error field on the returned *Config will be populated with the specific error.
 func DefaultConfig() *Config {
 	config := &Config{
-		Address:      "https://127.0.0.1:5000",
+		Address:      "http://127.0.0.1:5000",
 		HttpClient:   cleanhttp.DefaultPooledClient(),
 		Timeout:      time.Second * 60,
 		MinRetryWait: time.Millisecond * 1000,
