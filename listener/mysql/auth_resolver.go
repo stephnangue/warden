@@ -16,7 +16,7 @@ func NewAuthResolver(tokenStore token.TokenAccess) *AuthResolver {
 	}
 }
 
-func(r *AuthResolver) Resolve(tokenAccessor string, reqContext map[string]string) (string, string, bool, error) {
+func (r *AuthResolver) Resolve(tokenAccessor string, reqContext map[string]string) (string, string, bool, error) {
 
 	id, role, err := r.tokenStore.ResolveToken(context.Background(), tokenAccessor, reqContext)
 

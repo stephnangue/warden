@@ -14,19 +14,19 @@ import (
 )
 
 type ApiListener struct {
-	logger       logger.Logger
-	server       *http.Server
-	stopped      atomic.Bool
+	logger  logger.Logger
+	server  *http.Server
+	stopped atomic.Bool
 }
 
 type ApiListenerConfig struct {
-	Logger            logger.Logger
-	Protocol          string 
-	Address           string
-	TLSCertFile       string
-	TLSKeyFile        string
-	TLSClientCAFile   string
-	TLSEnabled        bool 
+	Logger          logger.Logger
+	Protocol        string
+	Address         string
+	TLSCertFile     string
+	TLSKeyFile      string
+	TLSClientCAFile string
+	TLSEnabled      bool
 }
 
 func NewApiListener(cfg ApiListenerConfig, core *core.Core) (*ApiListener, error) {
@@ -38,10 +38,10 @@ func NewApiListener(cfg ApiListenerConfig, core *core.Core) (*ApiListener, error
 	handler = middleware.Recoverer(handler)
 
 	server := &http.Server{
-		Addr:   cfg.Address,
-		Handler: handler,
-		IdleTimeout: time.Minute,
-		ReadTimeout: 5 * time.Second,
+		Addr:         cfg.Address,
+		Handler:      handler,
+		IdleTimeout:  time.Minute,
+		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
 
@@ -51,7 +51,7 @@ func NewApiListener(cfg ApiListenerConfig, core *core.Core) (*ApiListener, error
 	}, nil
 }
 
-func (l *ApiListener) Addr() string{
+func (l *ApiListener) Addr() string {
 	return l.server.Addr
 }
 

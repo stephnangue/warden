@@ -20,7 +20,7 @@ import (
 func (c *Core) auditRequest(req *http.Request) bool {
 	// Read body for logging
 	bodyBytes, _ := io.ReadAll(req.Body)
-	
+
 	// Restore body for next handlers
 	req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
@@ -41,13 +41,13 @@ func (c *Core) auditRequest(req *http.Request) bool {
 	entry := audit.LogEntry{
 		Type:      string(audit.EntryTypeRequest),
 		Timestamp: time.Now(),
-		Request:   &audit.Request{
-			ID:            middleware.GetReqID(req.Context()),
-			Method:        req.Method,
-			ClientIP:      clientIP,
-			Path:          req.URL.Path,
-			Headers:       headersCopy,
-			Data: 		   data,
+		Request: &audit.Request{
+			ID:       middleware.GetReqID(req.Context()),
+			Method:   req.Method,
+			ClientIP: clientIP,
+			Path:     req.URL.Path,
+			Headers:  headersCopy,
+			Data:     data,
 		},
 	}
 
@@ -60,13 +60,13 @@ func (c *Core) auditRequest(req *http.Request) bool {
 
 func (c *Core) LoadAudits(ctx context.Context) error {
 	err := c.EnableAudit(ctx, &MountEntry{
-		Class: "audit",
-		Type: "file",
-		Path: "file-device",
+		Class:       "audit",
+		Type:        "file",
+		Path:        "file-device",
 		Description: "file audit device",
 		Config: map[string]any{
 			"file_path": "/logs/warden-audit.log",
-			"hmac_key": "your-secret-key-here",
+			"hmac_key":  "your-secret-key-here",
 		}}, false)
 	if err != nil {
 		return err
@@ -125,7 +125,7 @@ func (c *Core) EnableAudit(ctx context.Context, entry *MountEntry, updateStorage
 		// Test the new audit device and report failure if it doesn't work.
 		err = backend.LogTestRequest(ctx)
 		if err != nil {
-			c.logger.Error("new audit backend failed test", 
+			c.logger.Error("new audit backend failed test",
 				logger.String("path", entry.Path),
 				logger.String("type", entry.Type),
 				logger.Err(err),
@@ -230,6 +230,3 @@ func (c *Core) DisableAudit(ctx context.Context, path string, updateStorage bool
 
 	return true, nil
 }
-
-
-

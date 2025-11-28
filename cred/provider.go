@@ -8,23 +8,23 @@ import (
 
 	ristretto "github.com/dgraph-io/ristretto/v2"
 	"github.com/go-chi/chi/middleware"
+	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/role"
 	"golang.org/x/sync/singleflight"
 )
 
 type CredentialProvider struct {
-	log            logger.Logger
-	cache          *ristretto.Cache[string, *Credential] // key: tokenId -> value: Credential
-	fetchers       sync.Map // key: roleName -> value: *CredentialFetcher
-	roles          *role.RoleRegistry
-	credSources    *CredSourceRegistry
-	group          singleflight.Group
+	log         logger.Logger
+	cache       *ristretto.Cache[string, *Credential] // key: tokenId -> value: Credential
+	fetchers    sync.Map                              // key: roleName -> value: *CredentialFetcher
+	roles       *authorize.RoleRegistry
+	credSources *CredSourceRegistry
+	group       singleflight.Group
 }
 
 // NewCredentialProvider creates a new credential provider with caching
 func NewCredentialProvider(
-	roles *role.RoleRegistry,
+	roles *authorize.RoleRegistry,
 	credSources *CredSourceRegistry,
 	logger logger.Logger) (*CredentialProvider, error) {
 
@@ -110,10 +110,10 @@ func (cp *CredentialProvider) GetCredentials(ctx context.Context, tokenId, roleN
 
 		cacheTtl := tokenTTL
 		if cred.LeaseTTL > 0 {
-			cacheTtl = min(tokenTTL, cred.LeaseTTL * 4/5)
+			cacheTtl = min(tokenTTL, cred.LeaseTTL*4/5)
 		}
 		cp.cache.SetWithTTL(tokenId, cred, 1, cacheTtl)
-		
+
 		// Wait for value to be processed (Ristretto is async)
 		cp.cache.Wait()
 
@@ -126,9 +126,9 @@ func (cp *CredentialProvider) GetCredentials(ctx context.Context, tokenId, roleN
 		return cred, nil
 	})
 
-    if err != nil {
-        return nil, err
-    }
+	if err != nil {
+		return nil, err
+	}
 
 	return v.(*Credential), nil
 }
@@ -160,7 +160,7 @@ func (cp *CredentialProvider) fetchCredentials(ctx context.Context, roleName str
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// store the new fetcher
 	cp.fetchers.Store(roleName, fetcher)
 
@@ -180,4 +180,3 @@ func (cp *CredentialProvider) Stop() {
 	cp.cache.Close()
 	cp.log.Debug("credential provider cache closed")
 }
-

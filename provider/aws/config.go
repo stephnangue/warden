@@ -4,14 +4,14 @@ import "time"
 
 // ProviderConfig holds parsed configuration
 type ProviderConfig struct {
-	ProxyDomains       []string
-	MaxBodySize        int64
-	Timeout            time.Duration
+	ProxyDomains []string
+	MaxBodySize  int64
+	Timeout      time.Duration
 }
 
 func parseConfig(conf map[string]any) ProviderConfig {
 	config := ProviderConfig{
-		ProxyDomains:      []string{"localhost"},
+		ProxyDomains: []string{"localhost"},
 	}
 	// Parse proxy_domains
 	if domains, ok := conf["proxy_domains"].([]interface{}); ok {
@@ -24,7 +24,7 @@ func parseConfig(conf map[string]any) ProviderConfig {
 	}
 
 	// Parse max_body_size
-	maxBodySize  := int64(10485760)
+	maxBodySize := int64(10485760)
 	if maxSize, ok := conf["max_body_size"].(int64); ok {
 		maxBodySize = maxSize
 	} else if maxSize, ok := conf["max_body_size"].(int); ok {

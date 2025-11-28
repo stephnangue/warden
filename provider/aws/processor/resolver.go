@@ -78,20 +78,20 @@ func getPartition(region string) Partition {
 
 // Global services that don't use regional endpoints
 var globalServices = map[string]struct{}{
-	"iam":                {},
-	"cloudfront":         {},
-	"route53":            {},
-	"route53domains":     {},
-	"waf":                {},
-	"shield":             {},
-	"globalaccelerator":  {},
-	"organizations":      {},
-	"budgets":            {},
-	"importexport":       {},
-	"artifact":           {},
-	"health":             {},
-	"ce":                 {}, // Cost Explorer
-	"cur":                {}, // Cost and Usage Report
+	"iam":                          {},
+	"cloudfront":                   {},
+	"route53":                      {},
+	"route53domains":               {},
+	"waf":                          {},
+	"shield":                       {},
+	"globalaccelerator":            {},
+	"organizations":                {},
+	"budgets":                      {},
+	"importexport":                 {},
+	"artifact":                     {},
+	"health":                       {},
+	"ce":                           {}, // Cost Explorer
+	"cur":                          {}, // Cost and Usage Report
 	"marketplacecommerceanalytics": {},
 }
 
@@ -179,14 +179,14 @@ type CustomResolverFunc func(region string, partition Partition) string
 // getCustomResolver returns a custom resolver for services with special patterns
 func getCustomResolver(service string) CustomResolverFunc {
 	customResolvers := map[string]CustomResolverFunc{
-		"s3": resolveS3,
-		"s3-control": resolveS3Control,
+		"s3":          resolveS3,
+		"s3-control":  resolveS3Control,
 		"s3-outposts": resolveS3Outposts,
-		"sts": resolveSTS,
-		"chime": resolveChime,
+		"sts":         resolveSTS,
+		"chime":       resolveChime,
 		"execute-api": resolveExecuteAPI,
-		"iot": resolveIoT,
-		"iotdata": resolveIoTData,
+		"iot":         resolveIoT,
+		"iotdata":     resolveIoTData,
 	}
 
 	return customResolvers[service]
@@ -262,15 +262,15 @@ func resolveIoTData(region string, partition Partition) string {
 // normalizeServiceName handles service name variations and aliases
 func normalizeServiceName(service string) string {
 	aliases := map[string]string{
-		"elasticloadbalancing": "elasticloadbalancing",
-		"elb":                  "elasticloadbalancing",
-		"elbv2":                "elasticloadbalancing",
-		"monitoring":           "monitoring",
-		"cloudwatch":           "monitoring",
-		"logs":                 "logs",
-		"cloudwatch-logs":      "logs",
-		"events":               "events",
-		"eventbridge":          "events",
+		"elasticloadbalancing":    "elasticloadbalancing",
+		"elb":                     "elasticloadbalancing",
+		"elbv2":                   "elasticloadbalancing",
+		"monitoring":              "monitoring",
+		"cloudwatch":              "monitoring",
+		"logs":                    "logs",
+		"cloudwatch-logs":         "logs",
+		"events":                  "events",
+		"eventbridge":             "events",
 		"application-autoscaling": "application-autoscaling",
 		"autoscaling":             "autoscaling",
 		"autoscaling-plans":       "autoscaling-plans",
@@ -298,7 +298,7 @@ func IsValidRegion(region string) bool {
 	// China regions: cn-north-1, cn-northwest-1
 	// GovCloud: us-gov-west-1, us-gov-east-1
 	// Local zones: us-east-1-bos-1a, etc.
-	
+
 	validPrefixes := []string{
 		"us-", "eu-", "ap-", "sa-", "ca-", "me-", "af-", "cn-",
 	}

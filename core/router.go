@@ -16,15 +16,15 @@ import (
 type contextKey string
 
 const (
-    OriginalPath contextKey = "originalPath"
+	OriginalPath contextKey = "originalPath"
 )
 
 // routeEntry is used to represent a mount point in the router
 type routeEntry struct {
-	tainted       bool
-	backend       logical.Backend
-	mountEntry    *MountEntry
-	l             sync.RWMutex
+	tainted    bool
+	backend    logical.Backend
+	mountEntry *MountEntry
+	l          sync.RWMutex
 }
 
 type Router struct {
@@ -32,14 +32,14 @@ type Router struct {
 	mountAccessorCache *radix.Tree // tree of mountAccesor -> mountEntry
 	mu                 sync.RWMutex
 
-	logger           logger.Logger
+	logger logger.Logger
 }
 
 func NewRouter(logger logger.Logger) *Router {
 	return &Router{
-		root:                   radix.New(),
-		mountAccessorCache:     radix.New(),
-		logger:                 logger,
+		root:               radix.New(),
+		mountAccessorCache: radix.New(),
+		logger:             logger,
 	}
 }
 
@@ -47,7 +47,7 @@ func (r *Router) Mount(mountPath string, backend logical.Backend, mountEntry *Mo
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	existing, exists := r.root.Get(mountPath);
+	existing, exists := r.root.Get(mountPath)
 
 	if exists && existing != nil {
 		return fmt.Errorf("path %s is already mounted", mountPath)
@@ -55,8 +55,8 @@ func (r *Router) Mount(mountPath string, backend logical.Backend, mountEntry *Mo
 
 	// Create a mount entry
 	re := &routeEntry{
-		backend:       backend,
-		mountEntry:    mountEntry,
+		backend:    backend,
+		mountEntry: mountEntry,
 	}
 
 	r.root.Insert(mountPath, re)
@@ -90,7 +90,7 @@ func (r *Router) Unmount(mountPath string) error {
 	r.mountAccessorCache.Delete(re.backend.GetAccessor())
 
 	r.logger.Info("backend unmounted", logger.String("mount_path", mountPath))
-	
+
 	return nil
 }
 
@@ -101,7 +101,7 @@ func (r *Router) MatchingBackend(ctx context.Context, mountPath string) logical.
 	// Find the longest prefix match in the radix tree
 	_, raw, found := r.root.LongestPrefix(mountPath)
 	if !found {
-		r.logger.Error("no route found for the provided path", 
+		r.logger.Error("no route found for the provided path",
 			logger.String("path", mountPath),
 		)
 		return nil
@@ -112,10 +112,10 @@ func (r *Router) MatchingBackend(ctx context.Context, mountPath string) logical.
 	defer re.l.RUnlock()
 
 	return re.backend
-} 
+}
 
 // MatchingMountByAccessor returns the backend by accessor lookup
-func (r *Router) MatchingMountByAccessor(mountAccessor string) *MountEntry  {
+func (r *Router) MatchingMountByAccessor(mountAccessor string) *MountEntry {
 	if mountAccessor == "" {
 		return nil
 	}
@@ -202,7 +202,7 @@ func (r *Router) Route(w http.ResponseWriter, req *http.Request) {
 	}
 	r.mu.RUnlock()
 	if !ok {
-		r.logger.Error("no route found", 
+		r.logger.Error("no route found",
 			logger.Err(fmt.Errorf("no handler for route %q. route entry not found", req.URL.Path)),
 			logger.String("url", req.URL.String()),
 			logger.String("method", req.Method),
@@ -215,26 +215,26 @@ func (r *Router) Route(w http.ResponseWriter, req *http.Request) {
 
 	// Filtered mounts will have a nil backend
 	if re.backend == nil {
-		r.logger.Error("no route found", 
+		r.logger.Error("no route found",
 			logger.Err(fmt.Errorf("no handler for route %q. route entry found, but backend is nil", req.URL.Path)),
 			logger.String("url", req.URL.String()),
 			logger.String("method", req.Method),
 			logger.String("request_id", middleware.GetReqID(req.Context())),
 		)
 		http.Error(w, "no route found for the provided path", http.StatusNotFound)
-		return 
+		return
 	}
 
 	// If the path or namespace is tainted, we reject any operation
 	if re.tainted {
-		r.logger.Error("no route found", 
+		r.logger.Error("no route found",
 			logger.Err(fmt.Errorf("no handler for route %q. route entry is tainted", req.URL.Path)),
 			logger.String("url", req.URL.String()),
 			logger.String("method", req.Method),
 			logger.String("request_id", middleware.GetReqID(req.Context())),
 		)
 		http.Error(w, "no route found for the provided path", http.StatusNotFound)
-		return 
+		return
 	}
 
 	mount = strings.TrimSuffix(mount, "/")
@@ -253,7 +253,7 @@ func (r *Router) Route(w http.ResponseWriter, req *http.Request) {
 	req = req.WithContext(ctx)
 
 	if err := re.backend.HandleRequest(w, req); err != nil {
-		r.logger.Error("fail to handle request", 
+		r.logger.Error("fail to handle request",
 			logger.String("url", req.URL.String()),
 			logger.String("method", req.Method),
 			logger.String("original_path", originalPath),
@@ -264,4 +264,3 @@ func (r *Router) Route(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 }
-

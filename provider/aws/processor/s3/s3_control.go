@@ -18,7 +18,7 @@ func NewS3ControlProcessor(proxyDomains []string, log logger.Logger) *S3ControlP
 	return &S3ControlProcessor{
 		BaseProcessor: processor.BaseProcessor{
 			ProcName:     "s3-control",
-			ProcPriority: 150, 
+			ProcPriority: 150,
 			ProxyDomains: proxyDomains,
 		},
 		log: log,
@@ -31,7 +31,7 @@ func (p *S3ControlProcessor) CanProcess(ctx *processor.ProcessorContext) bool {
 	if ctx.Service == "s3-control" {
 		return true
 	}
-	
+
 	// Check if host pattern matches account ID format
 	hostRewrite := p.parseHost(ctx)
 	// p.log.Debug("Host rewritten",
@@ -41,45 +41,45 @@ func (p *S3ControlProcessor) CanProcess(ctx *processor.ProcessorContext) bool {
 	if hostRewrite != nil && hostRewrite.Service == "s3-control" {
 		return true
 	}
-	
+
 	return false
 }
 
 // Process handles S3 Control request transformation
 func (p *S3ControlProcessor) Process(ctx *processor.ProcessorContext) (*processor.ProcessorResult, error) {
 	hostRewrite := p.parseHost(ctx)
-	
+
 	if hostRewrite == nil || hostRewrite.Prefix == "" {
 		return nil, fmt.Errorf("cannot extract account ID from host")
 	}
-	
+
 	accountID := hostRewrite.Prefix
-	
+
 	// Validate account ID format (12 digits)
 	if len(accountID) != 12 {
 		return nil, fmt.Errorf("invalid account ID format: %s", accountID)
 	}
-	
+
 	for _, ch := range accountID {
 		if ch < '0' || ch > '9' {
 			return nil, fmt.Errorf("invalid account ID (must be 12 digits): %s", accountID)
 		}
 	}
-	
+
 	result := &processor.ProcessorResult{
 		Service:  "s3-control", // Keep as s3-control for routing
 		Metadata: make(map[string]interface{}),
 	}
-	
+
 	// S3 Control endpoint: account-id.s3-control.region.amazonaws.com
 	result.TargetURL = fmt.Sprintf("https://%s.s3-control.%s.amazonaws.com",
 		accountID, ctx.Region)
 	result.TargetHost = fmt.Sprintf("%s.s3-control.%s.amazonaws.com",
 		accountID, ctx.Region)
-	
+
 	result.Metadata["account_id"] = accountID
 	result.Metadata["api_type"] = "control"
-	
+
 	// compute the AWS path relative to the provider path
 	actualPath := ctx.OriginalPath
 	if after, ok := strings.CutPrefix(ctx.OriginalPath, ctx.RelativePath); ok {
@@ -93,39 +93,39 @@ func (p *S3ControlProcessor) Process(ctx *processor.ProcessorContext) (*processo
 		actualPath = "/" + actualPath
 	}
 
-	result.TransformedPath  = actualPath
+	result.TransformedPath = actualPath
 
 	// p.log.Debug("S3 Control request",
 	// 	logger.String("target", result.TargetURL),
 	// 	logger.String("path", result.TransformedPath),
 	// 	logger.String("request_id", middleware.GetReqID(ctx.Ctx)),
 	// )
-	
+
 	return result, nil
 }
 
 // parseHost extracts account ID from the host
 func (p *S3ControlProcessor) parseHost(ctx *processor.ProcessorContext) *processor.HostRewrite {
 	host := ctx.Request.Host
-	
+
 	// Remove port if present
 	if idx := strings.Index(host, ":"); idx != -1 {
 		host = host[:idx]
 	}
-	
+
 	// Split host into parts
 	parts := strings.Split(host, ".")
-	
+
 	// Need at least 2 parts
 	if len(parts) < 2 {
 		return nil
 	}
-	
+
 	// Skip if already an AWS domain
 	if strings.Contains(host, ".amazonaws.com") {
 		return nil
 	}
-	
+
 	// Check if the base domain matches proxy domains
 	baseDomain := strings.Join(parts[len(parts)-2:], ".")
 	if !p.IsProxyDomain(baseDomain) {
@@ -150,7 +150,7 @@ func (p *S3ControlProcessor) parseHost(ctx *processor.ProcessorContext) *process
 			}
 		}
 	}
-	
+
 	return nil
 }
 

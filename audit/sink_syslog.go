@@ -29,20 +29,20 @@ func NewSyslogSink(config SyslogSinkConfig) (*SyslogSink, error) {
 	if config.Tag == "" {
 		config.Tag = "audit"
 	}
-	
+
 	if config.Facility == 0 {
 		config.Facility = syslog.LOG_LOCAL0
 	}
-	
+
 	if config.Severity == 0 {
 		config.Severity = syslog.LOG_INFO
 	}
-	
+
 	priority := config.Facility | config.Severity
-	
+
 	var writer *syslog.Writer
 	var err error
-	
+
 	if config.Network == "" {
 		// Local syslog
 		writer, err = syslog.New(priority, config.Tag)
@@ -50,11 +50,11 @@ func NewSyslogSink(config SyslogSinkConfig) (*SyslogSink, error) {
 		// Remote syslog
 		writer, err = syslog.Dial(config.Network, config.Address, priority, config.Tag)
 	}
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to syslog: %w", err)
 	}
-	
+
 	return &SyslogSink{
 		writer:   writer,
 		tag:      config.Tag,

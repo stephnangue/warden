@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/role"
 	"github.com/stephnangue/warden/target"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -94,7 +94,7 @@ func TestNewMysqlListener_WithProvidedListener(t *testing.T) {
 		addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3306},
 	}
 	testLogger := newTestLogger()
-	roles := &role.RoleRegistry{}
+	roles := &authorize.RoleRegistry{}
 	credSources := &cred.CredSourceRegistry{}
 	targets := &target.TargetRegistry{}
 
@@ -120,7 +120,7 @@ func TestNewMysqlListener_WithProvidedListener(t *testing.T) {
 
 func TestNewMysqlListener_WithProtocolAndAddress(t *testing.T) {
 	testLogger := newTestLogger()
-	roles := &role.RoleRegistry{}
+	roles := &authorize.RoleRegistry{}
 	credSources := &cred.CredSourceRegistry{}
 	targets := &target.TargetRegistry{}
 
@@ -138,14 +138,14 @@ func TestNewMysqlListener_WithProtocolAndAddress(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, listener)
 	assert.NotNil(t, listener.listener)
-	
+
 	// Clean up
 	listener.Stop()
 }
 
 func TestNewMysqlListener_WithProxyProtocol(t *testing.T) {
 	testLogger := newTestLogger()
-	roles := &role.RoleRegistry{}
+	roles := &authorize.RoleRegistry{}
 	credSources := &cred.CredSourceRegistry{}
 	targets := &target.TargetRegistry{}
 
@@ -164,14 +164,14 @@ func TestNewMysqlListener_WithProxyProtocol(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, listener)
 	assert.NotNil(t, listener.listener)
-	
+
 	// Clean up
 	listener.Stop()
 }
 
 func TestNewMysqlListener_InvalidAddress(t *testing.T) {
 	testLogger := newTestLogger()
-	roles := &role.RoleRegistry{}
+	roles := &authorize.RoleRegistry{}
 	credSources := &cred.CredSourceRegistry{}
 	targets := &target.TargetRegistry{}
 
@@ -223,7 +223,7 @@ func TestMysqlListener_Stop(t *testing.T) {
 func TestMysqlListener_Start_AcceptError(t *testing.T) {
 	mockListener := new(MockListener)
 	testLogger := newTestLogger()
-	
+
 	expectedErr := errors.New("accept error")
 	mockListener.On("Accept").Return(nil, expectedErr).Once()
 

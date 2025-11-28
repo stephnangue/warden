@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-
 func TestDevice(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "audit.log")
@@ -52,4 +51,3 @@ func TestDevice(t *testing.T) {
 		t.Error("Log file is empty after logging")
 	}
 }
-

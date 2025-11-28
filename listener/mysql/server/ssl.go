@@ -29,7 +29,6 @@ func NewServerTLSConfig(caPem, certPem, keyPem []byte, authType tls.ClientAuthTy
 		ClientAuth:   authType,
 		Certificates: []tls.Certificate{cert},
 		ClientCAs:    pool,
-		
 	}
 	return config
 }

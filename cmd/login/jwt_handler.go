@@ -18,7 +18,7 @@ func (h JWTHandler) Auth(ctx context.Context, c *api.Client, m map[string]string
 	token := m["token"]
 
 	var auth *jwt.JWTAuth
-	auth, err := jwt.New(role, 
+	auth, err := jwt.New(role,
 		jwt.WithToken(token),
 		jwt.WithMount(mount),
 	)
@@ -33,4 +33,3 @@ func (h JWTHandler) Auth(ctx context.Context, c *api.Client, m map[string]string
 
 	return result, nil
 }
-

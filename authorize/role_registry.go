@@ -1,13 +1,13 @@
-package role
+package authorize
 
 import "sync"
 
 type Role struct {
-	Name            string
-	Type            string // static_db, vault_db_lease
-	CredSourceName  string
-	CredConfig      map[string]string
-	TargetName      string
+	Name           string
+	Type           string // static_db, vault_db_lease
+	CredSourceName string
+	CredConfig     map[string]string
+	TargetName     string
 }
 
 type RoleRegistry struct {
@@ -36,4 +36,3 @@ func (r *RoleRegistry) GetRole(name string) (*Role, bool) {
 	}
 	return role, true
 }
-

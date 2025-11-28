@@ -7,20 +7,20 @@ import (
 	"fmt"
 
 	"github.com/go-mysql-org/go-mysql/client"
+	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/role"
 	"github.com/stephnangue/warden/target"
 )
 
 type StaticConnProvider struct {
-	fetcher            *cred.CredentialFetcher
-	conns              []*BackendConn
-	logger             logger.Logger
-	target             target.Target
+	fetcher *cred.CredentialFetcher
+	conns   []*BackendConn
+	logger  logger.Logger
+	target  target.Target
 }
 
-func NewStaticConnProvider(role *role.Role, 
+func NewStaticConnProvider(role *authorize.Role,
 	credSource *cred.CredSource,
 	target target.Target,
 	logger logger.Logger) (*StaticConnProvider, error) {
@@ -32,9 +32,9 @@ func NewStaticConnProvider(role *role.Role,
 
 	provider := &StaticConnProvider{
 		fetcher: fetcher,
-		conns: make([]*BackendConn, 0),
-		logger: logger,
-		target: target,
+		conns:   make([]*BackendConn, 0),
+		logger:  logger,
+		target:  target,
 	}
 
 	return provider, nil
@@ -80,7 +80,7 @@ func (s *StaticConnProvider) Stop() {
 	}
 }
 
-func(s *StaticConnProvider) fetchCredential(ctx context.Context) (*cred.DatabaseUserpass, bool, error) {
+func (s *StaticConnProvider) fetchCredential(ctx context.Context) (*cred.DatabaseUserpass, bool, error) {
 	credential, ok, err := s.fetcher.FetchCredential(ctx)
 	if err != nil {
 		return nil, ok, err
@@ -132,11 +132,9 @@ func (s *StaticConnProvider) createConn(ctx context.Context) (*BackendConn, erro
 	}
 
 	backend := &BackendConn{
-		Conn: conn,
+		Conn:     conn,
 		refCount: 0,
 	}
 
 	return backend, nil
 }
-
-

@@ -31,10 +31,10 @@ type TokenAccess interface {
 type StoreConfig struct {
 	// CacheMaxCost is the maximum cost of cache (in bytes, roughly)
 	CacheMaxCost int64
-	
+
 	// CacheNumCounters is the number of keys to track frequency
 	CacheNumCounters int64
-	
+
 	// EnableMetrics enables collection of operational metrics
 	EnableMetrics bool
 }
@@ -50,14 +50,14 @@ func DefaultConfig() *StoreConfig {
 
 // Metrics tracks operational statistics
 type Metrics struct {
-	mu                    sync.RWMutex
-	TokensGenerated       int64
-	TokensResolved        int64
-	TokensExpired         int64
-	OriginViolations      int64
-	DeadlineViolations    int64
-	CacheHits             int64
-	CacheMisses           int64
+	mu                 sync.RWMutex
+	TokensGenerated    int64
+	TokensResolved     int64
+	TokensExpired      int64
+	OriginViolations   int64
+	DeadlineViolations int64
+	CacheHits          int64
+	CacheMisses        int64
 }
 
 func (m *Metrics) IncrementTokensGenerated() {
@@ -106,23 +106,23 @@ func (m *Metrics) GetSnapshot() map[string]int64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return map[string]int64{
-		"tokens_generated":      m.TokensGenerated,
-		"tokens_resolved":       m.TokensResolved,
-		"tokens_expired":        m.TokensExpired,
-		"origin_violations":     m.OriginViolations,
-		"deadline_violations":   m.DeadlineViolations,
-		"cache_hits":            m.CacheHits,
-		"cache_misses":          m.CacheMisses,
+		"tokens_generated":    m.TokensGenerated,
+		"tokens_resolved":     m.TokensResolved,
+		"tokens_expired":      m.TokensExpired,
+		"origin_violations":   m.OriginViolations,
+		"deadline_violations": m.DeadlineViolations,
+		"cache_hits":          m.CacheHits,
+		"cache_misses":        m.CacheMisses,
 	}
 }
 
 type RobustStore struct {
-	mu           sync.RWMutex
-	cache        *ristretto.Cache[string, *AuthData]
-	config       *StoreConfig
-	logger       logger.Logger
-	metrics      *Metrics
-	closed       bool
+	mu      sync.RWMutex
+	cache   *ristretto.Cache[string, *AuthData]
+	config  *StoreConfig
+	logger  logger.Logger
+	metrics *Metrics
+	closed  bool
 }
 
 func NewRobustStore(log logger.Logger, config *StoreConfig) (*RobustStore, error) {
@@ -149,7 +149,7 @@ func NewRobustStore(log logger.Logger, config *StoreConfig) (*RobustStore, error
 
 	store.cache = cache
 
-	log.Info("token store initialized", 
+	log.Info("token store initialized",
 		logger.Bool("metrics_enabled", config.EnableMetrics))
 
 	return store, nil
@@ -203,8 +203,8 @@ func (s *RobustStore) GenerateToken(tokenType string, authData *AuthData) (*Toke
 
 // ResolveToken validates and resolves a token to its principal and role
 func (s *RobustStore) ResolveToken(ctx context.Context, tokenID string, reqContext map[string]string) (string, string, error) {
-	s.logger.Trace("resolving token", 
-		logger.String("token_id", tokenID), 
+	s.logger.Trace("resolving token",
+		logger.String("token_id", tokenID),
 		logger.String("request_id", middleware.GetReqID(ctx)),
 	)
 
@@ -218,8 +218,8 @@ func (s *RobustStore) ResolveToken(ctx context.Context, tokenID string, reqConte
 	// Get from cache (v2 API)
 	authData, found := s.cache.Get(tokenID)
 	if !found {
-		s.logger.Warn("token not found", 
-			logger.String("token_id", tokenID), 
+		s.logger.Warn("token not found",
+			logger.String("token_id", tokenID),
 			logger.String("request_id", middleware.GetReqID(ctx)),
 		)
 		if s.config.EnableMetrics {
@@ -234,7 +234,7 @@ func (s *RobustStore) ResolveToken(ctx context.Context, tokenID string, reqConte
 
 	token := authData.GetToken()
 	if token == nil {
-		s.logger.Warn("token is nil", 
+		s.logger.Warn("token is nil",
 			logger.String("token_id", tokenID),
 			logger.String("request_id", middleware.GetReqID(ctx)),
 		)
@@ -245,7 +245,7 @@ func (s *RobustStore) ResolveToken(ctx context.Context, tokenID string, reqConte
 
 	// Check auth deadline
 	if now.After(authData.AuthDeadline) && !token.HasBeenUsed() {
-		s.logger.Warn("auth deadline policy violated", 
+		s.logger.Warn("auth deadline policy violated",
 			logger.String("token_id", tokenID),
 			logger.Time("deadline", authData.AuthDeadline),
 			logger.String("request_id", middleware.GetReqID(ctx)),
@@ -260,7 +260,7 @@ func (s *RobustStore) ResolveToken(ctx context.Context, tokenID string, reqConte
 
 	// Check expiration
 	if now.After(authData.ExpireAt) {
-		s.logger.Warn("token expired", 
+		s.logger.Warn("token expired",
 			logger.String("token_id", tokenID),
 			logger.Time("expired_at", authData.ExpireAt),
 			logger.String("request_id", middleware.GetReqID(ctx)),
@@ -277,7 +277,7 @@ func (s *RobustStore) ResolveToken(ctx context.Context, tokenID string, reqConte
 	if clientIP, exists := reqContext["client_ip"]; exists {
 		if expectedIP, hasIP := authData.RequestContext["client_ip"]; hasIP {
 			if clientIP != expectedIP {
-				s.logger.Warn("same origin policy violated", 
+				s.logger.Warn("same origin policy violated",
 					logger.String("token_id", tokenID),
 					logger.String("expected_ip", expectedIP),
 					logger.String("actual_ip", clientIP),
@@ -328,7 +328,7 @@ func (s *RobustStore) generateAwsAccessKeysToken(authData *AuthData) (*Token, er
 
 	token := &Token{
 		Type: AWS_ACCESS_KEYS,
-		ID: accessKeyID,
+		ID:   accessKeyID,
 		Data: map[string]string{
 			"access_key_id":     accessKeyID,
 			"secret_access_key": secretAccessKey,
@@ -349,7 +349,7 @@ func (s *RobustStore) generateAwsAccessKeysToken(authData *AuthData) (*Token, er
 
 	s.cache.Wait()
 
-	s.logger.Debug("AWS access keys token created", 
+	s.logger.Debug("AWS access keys token created",
 		logger.String("token_id", accessKeyID),
 		logger.Time("expires_at", authData.ExpireAt))
 
@@ -363,7 +363,7 @@ func (s *RobustStore) generateUserPassToken(authData *AuthData) (*Token, error) 
 
 	token := &Token{
 		Type: USER_PASS,
-		ID: username,
+		ID:   username,
 		Data: map[string]string{
 			"username": username,
 			"password": password,

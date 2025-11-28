@@ -19,11 +19,11 @@ func NewJSONFormat(opts ...JSONFormatOption) *JSONFormat {
 	f := &JSONFormat{
 		omitFields: []string{},
 	}
-	
+
 	for _, opt := range opts {
 		opt(f)
 	}
-	
+
 	return f
 }
 
@@ -101,16 +101,16 @@ func (f *JSONFormat) FormatResponse(ctx context.Context, entry *LogEntry) ([]byt
 
 	// Remove omitted fields
 	f.omitFieldsFromEntry(entry)
-	
+
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if f.prefix != "" {
 		return append([]byte(f.prefix), data...), nil
 	}
-	
+
 	return data, nil
 }
 

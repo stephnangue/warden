@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/role"
 )
 
 type Fetcher interface {
@@ -15,12 +15,12 @@ type Fetcher interface {
 
 type CredentialFetcher struct {
 	fetcher    Fetcher
-	role       *role.Role
+	role       *authorize.Role
 	credSource *CredSource
 	logger     logger.Logger
 }
 
-func NewCredentialFetcher(role *role.Role, credSource *CredSource, logger logger.Logger) (*CredentialFetcher, error) {
+func NewCredentialFetcher(role *authorize.Role, credSource *CredSource, logger logger.Logger) (*CredentialFetcher, error) {
 
 	var fetcher Fetcher
 
@@ -38,15 +38,15 @@ func NewCredentialFetcher(role *role.Role, credSource *CredSource, logger logger
 	}
 
 	return &CredentialFetcher{
-		fetcher: fetcher,
-		role: role,
+		fetcher:    fetcher,
+		role:       role,
 		credSource: credSource,
-		logger: logger,
+		logger:     logger,
 	}, nil
 }
 
 func (f *CredentialFetcher) FetchCredential(ctx context.Context) (*Credential, bool, error) {
-	
+
 	cred, ok, err := f.fetcher.FetchCredential(ctx)
 
 	return cred, ok, err

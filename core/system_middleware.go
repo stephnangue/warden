@@ -39,14 +39,13 @@ func (s *SystemBackend) AuthenticationMiddleware(next http.Handler) http.Handler
 
 		tokenID := parts[1]
 
-		
 		// Use Chi's RealIP middleware result (should be set by router)
 		clientIP := r.Header.Get("X-Real-IP")
 		if clientIP == "" {
 			// Fallback if RealIP middleware wasn't applied
 			clientIP = r.RemoteAddr
 		}
-	
+
 		// Remove port if present
 		if host, _, err := net.SplitHostPort(clientIP); err == nil {
 			clientIP = host

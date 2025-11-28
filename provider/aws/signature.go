@@ -17,11 +17,11 @@ import (
 
 // resignRequest re-signs the request with valid AWS credentials
 func (p *AWSProvider) resignRequest(
-	ctx context.Context, 
-	r *http.Request, 
-	creds aws.Credentials, 
-	service, 
-	region string, 
+	ctx context.Context,
+	r *http.Request,
+	creds aws.Credentials,
+	service,
+	region string,
 	bodyBytes []byte) error {
 	// Compute payload hash
 	payloadHash := computePayloadHash(bodyBytes)
@@ -131,7 +131,7 @@ func (p *AWSProvider) verifyIncomingSignature(
 				break
 			}
 		}
-		
+
 		if !found && signedHeader != "host" {
 			p.logger.Warn("signed header not found in request",
 				logger.String("header", signedHeader),
