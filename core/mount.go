@@ -198,8 +198,6 @@ func (c *Core) mountInternal(ctx context.Context, entry *MountEntry, updateStora
 		return fmt.Errorf("nil backend of type %s returned from creation function", entry.Type)
 	}
 
-	c.setCoreBackend(entry, backend)
-
 	newTable := c.mounts.shallowClone()
 	newTable.Entries = append(newTable.Entries, entry)
 	if updateStorage {
@@ -241,14 +239,14 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry) (logica
 		}
 		f := factory.(auth.Factory)
 		backend, err = f.Create(
-			ctx, 
-			entry.Path, 
-			entry.Description, 
-			entry.Accessor, 
-			entry.Config, 
-			c.logger.WithSystem("auth"), 
-			c.tokenStore, 
-			c.roles, 
+			ctx,
+			entry.Path,
+			entry.Description,
+			entry.Accessor,
+			entry.Config,
+			c.logger.WithSystem("auth"),
+			c.tokenStore,
+			c.roles,
 			c.accessControl,
 			c.auditManager,
 		)
@@ -262,14 +260,14 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry) (logica
 		}
 		f := factory.(provider.Factory)
 		backend, err = f.Create(
-			ctx, 
-			entry.Path, 
-			entry.Description, 
-			entry.Accessor, 
-			entry.Config, 
-			c.logger.WithSystem("provider"), 
-			c.tokenStore, 
-			c.roles, 
+			ctx,
+			entry.Path,
+			entry.Description,
+			entry.Accessor,
+			entry.Config,
+			c.logger.WithSystem("provider"),
+			c.tokenStore,
+			c.roles,
 			c.credSources,
 			c.auditManager,
 		)
@@ -277,16 +275,11 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry) (logica
 			return nil, fmt.Errorf("failed to create provider: %w", err)
 		}
 	case mountClassSystem:
+		backend = NewSystemBackend(c, c.logger.WithSystem("system"))
 	}
 	return backend, nil
 }
 
-func (c *Core) setCoreBackend(entry *MountEntry, backend logical.Backend) {
-	switch entry.Type {
-	case mountClassSystem:
-		c.systemBackend = backend.(*SystemBackend)
-	}
-}
 
 // unmount is used to unmount a path.
 func (c *Core) unmount(ctx context.Context, path string) error {
@@ -423,6 +416,16 @@ func (c *Core) removeMountEntry(ctx context.Context, path string, updateStorage 
 
 	c.mounts = newTable
 	return nil
+}
+
+func (c *Core) LoadSystemBackend(ctx context.Context) error {
+	return c.mountInternal(ctx, &MountEntry{
+		Class:       mountClassSystem,
+		Type:        "system",
+		Path:        mountPathSystem, // "sys/"
+		Description: "System backend for management operations",
+		Accessor:    "system",
+	}, MountTableNoUpdateStorage)
 }
 
 func (c *Core) LoadMounts(ctx context.Context) error {

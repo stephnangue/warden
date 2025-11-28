@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	USER_PASS = "user_pass"
+	USER_PASS       = "user_pass"
 	AWS_ACCESS_KEYS = "aws_access_keys"
+	WARDEN_TOKEN    = "warden_token"
 )
 
 type Token struct {

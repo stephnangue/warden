@@ -300,9 +300,16 @@ func (p *AWSProvider) authenticate(r *http.Request, accessKeyId string) (aws.Cre
 	var secretAccessKey, principalId, roleName string
 	token := p.tokenAccess.GetToken(accessKeyId)
 	if token != nil {
-		var clientIP string
-		if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-			clientIP = ip
+		// Use Chi's RealIP middleware result (should be set by router)
+		clientIP := r.Header.Get("X-Real-IP")
+		if clientIP == "" {
+			// Fallback if RealIP middleware wasn't applied
+			clientIP = r.RemoteAddr
+		}
+	
+		// Remove port if present
+		if host, _, err := net.SplitHostPort(clientIP); err == nil {
+			clientIP = host
 		}
 		
 		// Here we check the credential vadidity, then we enforce the auth deadline policy,
