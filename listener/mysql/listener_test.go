@@ -202,7 +202,7 @@ func TestMysqlListener_Addr(t *testing.T) {
 
 	addr := listener.Addr()
 
-	assert.Equal(t, expectedAddr, addr)
+	assert.Equal(t, expectedAddr.String(), addr)
 }
 
 func TestMysqlListener_Stop(t *testing.T) {

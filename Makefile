@@ -1,4 +1,4 @@
-.PHONY: help build build-fast brd brd-fast build-no-cache up up-logs down logs logs-tail restart clean clean-all shell test query status rebuild rebuild-quick watch cache-info edit-config
+.PHONY: help build build-fast brd brd-fast build-no-cache up up-logs down logs logs-tail restart clean clean-all shell test test-unit test-integration query status rebuild rebuild-quick watch cache-info edit-config
 
 # Enable BuildKit for faster builds
 export DOCKER_BUILDKIT=1
@@ -13,12 +13,12 @@ help:
 	@echo "========================================"
 	@echo ""
 	@echo "Build Commands:"
-	@echo "  make build           - Build with cache (normal)"
-	@echo "  make build-fast      - Fast parallel build"
-	@echo "  make brd             - Build & redeploy warden (with logs)"
-	@echo "  make brd-fast        - Ultra-fast rebuild (code only)"
-	@echo "  make build-no-cache  - Build without cache"
-	@echo "  make rebuild-quick   - Quick rebuild (code changes only)"
+	@echo "  make build           - Run tests & build with cache"
+	@echo "  make build-fast      - Run tests & fast parallel build"
+	@echo "  make brd             - Run tests, build & redeploy (with logs)"
+	@echo "  make brd-fast        - Ultra-fast rebuild (code only, no tests)"
+	@echo "  make build-no-cache  - Run tests & build without cache"
+	@echo "  make rebuild-quick   - Quick rebuild (code changes only, no tests)"
 	@echo ""
 	@echo "Run Commands:"
 	@echo "  make up              - Start warden proxy"
@@ -34,6 +34,8 @@ help:
 	@echo "  make shell           - Shell into container"
 	@echo ""
 	@echo "Testing:"
+	@echo "  make test-unit       - Run Go unit tests"
+	@echo "  make test-integration - Run integration tests"
 	@echo "  make test            - Test proxy connection"
 	@echo "  make query           - Run sample query"
 	@echo ""
@@ -44,18 +46,30 @@ help:
 	@echo "  make edit-config     - Edit config and restart"
 	@echo ""
 
-# Normal build with cache
-build:
+# Run Go unit tests
+test-unit:
+	@echo "Running Go unit tests..."
+	@go test -v -race -coverprofile=coverage.out ./...
+	@echo "✓ All tests passed"
+
+# Run integration tests (if you have a separate integration test suite)
+test-integration:
+	@echo "Running integration tests..."
+	@go test -v -tags=integration ./...
+	@echo "✓ Integration tests passed"
+
+# Normal build with cache (runs tests first)
+build: test-unit
 	@echo "Building $(IMAGE_NAME) with cache..."
 	docker-compose build
 
-# Fast parallel build
-build-fast:
+# Fast parallel build (runs tests first)
+build-fast: test-unit
 	@echo "Building $(IMAGE_NAME) with parallel processing..."
 	docker-compose build --parallel
 
-# Build and redeploy warden only (fast rebuild)
-brd:
+# Build and redeploy warden only (runs tests first)
+brd: test-unit
 	@echo "Fast rebuilding and redeploying warden..."
 	@docker-compose build --progress=plain warden
 	@docker-compose up -d warden
@@ -80,8 +94,8 @@ dev-watch:
 		sleep 5; \
 	done
 
-# Build without cache (clean build)
-build-no-cache:
+# Build without cache (clean build, runs tests first)
+build-no-cache: test-unit
 	@echo "Building $(IMAGE_NAME) without cache..."
 	docker-compose build --no-cache --pull
 
@@ -181,7 +195,7 @@ stats:
 logs-errors:
 	docker-compose logs -f $(CONTAINER_NAME) | grep -i error
 
-# Complete setup (build + up)
+# Complete setup (build + up, includes tests)
 setup: build up
 	@echo ""
 	@echo "========================================"
@@ -189,11 +203,11 @@ setup: build up
 	@echo "Run 'make test' to verify"
 	@echo "========================================"
 
-# Development mode (build + up with logs)
+# Development mode (build + up with logs, includes tests)
 dev: build up-logs
 
-# Production build (optimized)
-prod-build:
+# Production build (optimized, runs tests first)
+prod-build: test-unit
 	@echo "Building for production..."
 	docker build \
 		--build-arg BUILDKIT_INLINE_CACHE=1 \

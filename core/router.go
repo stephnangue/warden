@@ -44,9 +44,10 @@ func NewRouter(logger logger.Logger) *Router {
 }
 
 func (r *Router) Mount(mountPath string, backend logical.Backend, mountEntry *MountEntry) error {
-	r.mu.RLock()
-	existing, exists := r.root.Get(mountPath); 
-	r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	existing, exists := r.root.Get(mountPath);
 
 	if exists && existing != nil {
 		return fmt.Errorf("path %s is already mounted", mountPath)

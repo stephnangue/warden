@@ -19,6 +19,136 @@ type LogEntry struct {
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 }
 
+// Clone creates a deep copy of the LogEntry to avoid data races
+func (e *LogEntry) Clone() *LogEntry {
+	if e == nil {
+		return nil
+	}
+
+	clone := &LogEntry{
+		Type:      e.Type,
+		Timestamp: e.Timestamp,
+		Error:     e.Error,
+	}
+
+	// Clone Auth
+	if e.Auth != nil {
+		clone.Auth = &Auth{
+			RoleName:    e.Auth.RoleName,
+			PrincipalID: e.Auth.PrincipalID,
+		}
+		if e.Auth.ClientToken != nil {
+			clone.Auth.ClientToken = &Token{
+				Type:        e.Auth.ClientToken.Type,
+				TokenID:     e.Auth.ClientToken.TokenID,
+				TokenTTL:    e.Auth.ClientToken.TokenTTL,
+				TokenIssuer: e.Auth.ClientToken.TokenIssuer,
+			}
+			if e.Auth.ClientToken.Data != nil {
+				clone.Auth.ClientToken.Data = make(map[string]string, len(e.Auth.ClientToken.Data))
+				for k, v := range e.Auth.ClientToken.Data {
+					clone.Auth.ClientToken.Data[k] = v
+				}
+			}
+		}
+		if e.Auth.Metadata != nil {
+			clone.Auth.Metadata = make(map[string]string, len(e.Auth.Metadata))
+			for k, v := range e.Auth.Metadata {
+				clone.Auth.Metadata[k] = v
+			}
+		}
+	}
+
+	// Clone Request
+	if e.Request != nil {
+		clone.Request = &Request{
+			ID:            e.Request.ID,
+			Method:        e.Request.Method,
+			Operation:     e.Request.Operation,
+			ClientIP:      e.Request.ClientIP,
+			Path:          e.Request.Path,
+			TargetUrl:     e.Request.TargetUrl,
+			MountType:     e.Request.MountType,
+			MountAccessor: e.Request.MountAccessor,
+			MountPath:     e.Request.MountPath,
+			MountClass:    e.Request.MountClass,
+		}
+		if e.Request.Data != nil {
+			clone.Request.Data = cloneMap(e.Request.Data)
+		}
+		if e.Request.Headers != nil {
+			clone.Request.Headers = cloneHeaders(e.Request.Headers)
+		}
+	}
+
+	// Clone Response
+	if e.Response != nil {
+		clone.Response = &Response{
+			StatusCode:    e.Response.StatusCode,
+			Message:       e.Response.Message,
+			MountType:     e.Response.MountType,
+			MountAccessor: e.Response.MountAccessor,
+			MountPath:     e.Response.MountPath,
+			MountClass:    e.Response.MountClass,
+		}
+		if e.Response.Data != nil {
+			clone.Response.Data = cloneMap(e.Response.Data)
+		}
+		if e.Response.Headers != nil {
+			clone.Response.Headers = cloneHeaders(e.Response.Headers)
+		}
+		if e.Response.Cred != nil {
+			clone.Response.Cred = &Cred{
+				Type:     e.Response.Cred.Type,
+				LeaseTTL: e.Response.Cred.LeaseTTL,
+				LeaseID:  e.Response.Cred.LeaseID,
+				TokenID:  e.Response.Cred.TokenID,
+				Origin:   e.Response.Cred.Origin,
+			}
+			if e.Response.Cred.Data != nil {
+				clone.Response.Cred.Data = make(map[string]string, len(e.Response.Cred.Data))
+				for k, v := range e.Response.Cred.Data {
+					clone.Response.Cred.Data[k] = v
+				}
+			}
+		}
+	}
+
+	// Clone Metadata
+	if e.Metadata != nil {
+		clone.Metadata = cloneMap(e.Metadata)
+	}
+
+	return clone
+}
+
+// Helper function to clone a map[string]interface{}
+func cloneMap(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	clone := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		clone[k] = v
+	}
+	return clone
+}
+
+// Helper function to clone headers
+func cloneHeaders(h map[string][]string) map[string][]string {
+	if h == nil {
+		return nil
+	}
+	clone := make(map[string][]string, len(h))
+	for k, v := range h {
+		if v != nil {
+			clone[k] = make([]string, len(v))
+			copy(clone[k], v)
+		}
+	}
+	return clone
+}
+
 // Auth contains authentication information
 type Auth struct {
 	ClientToken     *Token            `json:"client_token,omitempty"`
