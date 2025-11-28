@@ -14,7 +14,7 @@ type VaultClient interface {
 	CreateToken(ctx context.Context, namespace string, meta map[string]string, data map[string]any, policies []string) (map[string]any, error)
 	GetAuthMountAccessor(ctx context.Context, mountPath string) (string, error)
 	MountSecretEngine(ctx context.Context, namespace string, mountPath string, engineType string, description string, options map[string]string) error
-	CheckIfMountExists(namespace string, mountPath string) (bool, *MountInfo, error) 
+	CheckIfMountExists(namespace string, mountPath string) (bool, *MountInfo, error)
 	CreateTokenRole(ctx context.Context, roleName string, params map[string]interface{}) error
 	CreateNamespace(ctx context.Context, parent, child string, meta map[string]any) error
 	VaultAddress() string

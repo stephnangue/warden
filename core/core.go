@@ -15,7 +15,6 @@ import (
 	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/provider"
-	"github.com/stephnangue/warden/role"
 	"github.com/stephnangue/warden/storage"
 	"github.com/stephnangue/warden/target"
 )
@@ -26,54 +25,54 @@ var (
 )
 
 type Core struct {
-	storage        storage.Storage
-	storageMu      sync.RWMutex
+	storage   storage.Storage
+	storageMu sync.RWMutex
 
-	config         config.Config
+	config config.Config
 
-	logger         logger.Logger
+	logger logger.Logger
 
-	tokenStore     token.TokenStore
+	tokenStore token.TokenStore
 
-	accessControl  *authorize.AccessControl
+	accessControl *authorize.AccessControl
 
-	roles          *role.RoleRegistry
+	roles *authorize.RoleRegistry
 
-	credSources    *cred.CredSourceRegistry
+	credSources *cred.CredSourceRegistry
 
-	targets        *target.TargetRegistry
+	targets *target.TargetRegistry
 
-	auditDevices   map[string]audit.Factory
+	auditDevices map[string]audit.Factory
 
-	authMethods    map[string]auth.Factory
+	authMethods map[string]auth.Factory
 
-	providers      map[string]provider.Factory
+	providers map[string]provider.Factory
 
-	auditManager   audit.AuditManager
+	auditManager audit.AuditManager
 
-	audit          *MountTable
+	audit *MountTable
 
 	// auditLock is used to ensure that the audit table does not
 	// change underneath a calling function
-	auditLock      sync.RWMutex
+	auditLock sync.RWMutex
 
-	router         *Router
+	router *Router
 
-	mounts         *MountTable
+	mounts *MountTable
 
 	// mountsLock is used to ensure that the mounts table does not
 	// change underneath a calling function
-	mountsLock     locking.DeadlockRWMutex
+	mountsLock locking.DeadlockRWMutex
 }
 
 type CoreConfig struct {
-	RawConfig      *config.Config
-	AuditDevices   map[string]audit.Factory
-	AuthMethods    map[string]auth.Factory
-	Providers      map[string]provider.Factory
-	TokenStore     token.TokenStore
-	Storage        storage.Storage
-	Logger         logger.Logger
+	RawConfig    *config.Config
+	AuditDevices map[string]audit.Factory
+	AuthMethods  map[string]auth.Factory
+	Providers    map[string]provider.Factory
+	TokenStore   token.TokenStore
+	Storage      storage.Storage
+	Logger       logger.Logger
 }
 
 func (c *Core) Init(ctx context.Context) error {
@@ -121,14 +120,14 @@ func (c *Core) Shutdown() error {
 // CreateCore creates, initializes and configures a Warden node (core).
 func CreateCore(conf *CoreConfig) (*Core, error) {
 	c := &Core{
-		storage: conf.Storage,
-		config:  *conf.RawConfig,
-		logger:  conf.Logger,
-		tokenStore: conf.TokenStore,
+		storage:      conf.Storage,
+		config:       *conf.RawConfig,
+		logger:       conf.Logger,
+		tokenStore:   conf.TokenStore,
 		auditManager: audit.NewAuditManager(conf.Logger.WithSystem("audit")),
-		router: NewRouter(conf.Logger.WithSystem("router")),
-		mounts: NewMountTable(),
-		audit: NewMountTable(),
+		router:       NewRouter(conf.Logger.WithSystem("router")),
+		mounts:       NewMountTable(),
+		audit:        NewMountTable(),
 	}
 
 	// Provider backends
@@ -161,7 +160,7 @@ func (c *Core) configureAuditDevices(backends map[string]audit.Factory) {
 	c.auditDevices = audits
 }
 
-func (c *Core) Roles() *role.RoleRegistry{
+func (c *Core) Roles() *authorize.RoleRegistry {
 	return c.roles
 }
 
@@ -177,12 +176,12 @@ func (c *Core) LoadRoles(ctx context.Context) {
 	// load the roles from the storage
 	c.logger.Info("loading roles from storage")
 
-	roleRegistry := role.NewRoleRegistry()
-	roleRegistry.Register(role.Role{
-		Name:           "system_admin",
-		Type:           "system",
+	roleRegistry := authorize.NewRoleRegistry()
+	roleRegistry.Register(authorize.Role{
+		Name: "system_admin",
+		Type: "system",
 	})
-	roleRegistry.Register(role.Role{
+	roleRegistry.Register(authorize.Role{
 		Name:           "market_reader",
 		Type:           "static_database_userpass",
 		CredSourceName: "default",
@@ -193,28 +192,28 @@ func (c *Core) LoadRoles(ctx context.Context) {
 		},
 		TargetName: "mysql_backend",
 	})
-	roleRegistry.Register(role.Role{
+	roleRegistry.Register(authorize.Role{
 		Name:           "sales_admin",
 		Type:           "static_database_userpass",
 		CredSourceName: "vault_docker",
 		CredConfig: map[string]string{
-			"kv2_mount":     "kv_static_secret",
-			"secret_path":   "database/mysql/prod",
+			"kv2_mount":   "kv_static_secret",
+			"secret_path": "database/mysql/prod",
 		},
 		TargetName: "mysql_backend",
 	})
-	roleRegistry.Register(role.Role{
+	roleRegistry.Register(authorize.Role{
 		Name:           "ondemand_role",
 		Type:           "dynamic_database_userpass",
 		CredSourceName: "vault_docker",
 		CredConfig: map[string]string{
-			"database":          "myapp",
-			"database_mount":    "database",
-			"role_name":         "my-role",
+			"database":       "myapp",
+			"database_mount": "database",
+			"role_name":      "my-role",
 		},
 		TargetName: "mysql_backend",
 	})
-	roleRegistry.Register(role.Role{
+	roleRegistry.Register(authorize.Role{
 		Name:           "aws_dev_account_local",
 		Type:           "static_aws_access_keys",
 		CredSourceName: "default",
@@ -223,16 +222,16 @@ func (c *Core) LoadRoles(ctx context.Context) {
 			"secret_access_key": "database",
 		},
 	})
-	roleRegistry.Register(role.Role{
+	roleRegistry.Register(authorize.Role{
 		Name:           "aws_dev_account_vault",
 		Type:           "static_aws_access_keys",
 		CredSourceName: "vault_docker",
 		CredConfig: map[string]string{
-			"kv2_mount":     "kv_static_secret",
-			"secret_path":   "aws/prod",
+			"kv2_mount":   "kv_static_secret",
+			"secret_path": "aws/prod",
 		},
 	})
-	roleRegistry.Register(role.Role{
+	roleRegistry.Register(authorize.Role{
 		Name:           "aws_prod_account_vault",
 		Type:           "dynamic_aws_access_keys",
 		CredSourceName: "vault_docker",
@@ -246,8 +245,6 @@ func (c *Core) LoadRoles(ctx context.Context) {
 	})
 	c.roles = roleRegistry
 }
-
-
 
 func (c *Core) LoadCredSources(ctx context.Context) {
 	// load the cred sources from the storage
@@ -296,9 +293,9 @@ func (c *Core) LoadTargets(ctx context.Context) {
 	// load the targets from the storage
 	targets := target.NewTargetRegistry()
 	targets.Register(&target.MysqlTarget{
-		Name:     "mysql_backend",
-		Hostname: "mysql-server",
-		Port:     "3306",
+		Name:        "mysql_backend",
+		Hostname:    "mysql-server",
+		Port:        "3306",
 		MtlsEnabled: true,
 		CACert: `-----BEGIN CERTIFICATE-----
 MIIFizCCA3OgAwIBAgIUKV0KFYH8n+NMn4RIID/08RaE2hYwDQYJKoZIhvcNAQEL
@@ -333,7 +330,7 @@ rl3XB7qdvv6khQliu2+vKmkcjMdqeKGVuTtDByAL9opm+IP6Z9ldBHAANDJQjNJe
 cpliwKYo8WlwstvVBdrDzDbfbv4vzSeOpem3VvXRSQ==
 -----END CERTIFICATE-----
 `,
-	ClientCert: `-----BEGIN CERTIFICATE-----
+		ClientCert: `-----BEGIN CERTIFICATE-----
 MIIFlDCCA3ygAwIBAgIUfnupTqlwijm9GSB3zYBKYtokQ2gwDQYJKoZIhvcNAQEL
 BQAwVTELMAkGA1UEBhMCVVMxDjAMBgNVBAgMBVN0YXRlMQ0wCwYDVQQHDARDaXR5
 MRUwEwYDVQQKDAxPcmdhbml6YXRpb24xEDAOBgNVBAMMB1Jvb3QgQ0EwHhcNMjUx
@@ -366,7 +363,7 @@ ilKqT8ZCxnXeXce0SyBBtWB3C+XC8xZkdD5h2G84oqyIFAfBf7eeFOleVOnstCRA
 9FB8O35VocuRpL3S2+BoqyoNuDhJKZ3yoTrWNrZFggdY4J2FgV3v/w==
 -----END CERTIFICATE-----
 `,
-	ClientKey: `-----BEGIN PRIVATE KEY-----
+		ClientKey: `-----BEGIN PRIVATE KEY-----
 MIIJQwIBADANBgkqhkiG9w0BAQEFAASCCS0wggkpAgEAAoICAQC8bGNDBRZ3lJ3R
 LVzr9RhYLKZMhBoGFi7UmDGnRd3Px6asHTe96H9yTxFiO1JS1NiKM7WgiMC9+p4I
 2JzsNkeN8geYd5Tse7wkkniuf/tj8wKWnUb73s1ztSVfFTnWmHy8UHE6KWUUD0yI
@@ -422,8 +419,3 @@ cVs1CNZyx2Epxma3FYINYJdklZNKn5I=
 	})
 	c.targets = targets
 }
-
-
-
-
-

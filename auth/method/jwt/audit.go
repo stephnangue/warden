@@ -15,7 +15,7 @@ import (
 
 func (m *JWTAuthMethod) auditResponse(w http.ResponseWriter, r *http.Request, body *JWTLoginRequest, clientToken *audit.Token, token *token.Token, authData *token.AuthData, statusCode int, message string, errorMessage string) bool {
 	var auth *audit.Auth
-	if authData != nil &&  clientToken != nil {
+	if authData != nil && clientToken != nil {
 		auth = m.buildAuth(clientToken, authData.RoleName, authData.PrincipalID)
 	} else {
 		if authData == nil {
@@ -23,12 +23,12 @@ func (m *JWTAuthMethod) auditResponse(w http.ResponseWriter, r *http.Request, bo
 		}
 	}
 	entry := audit.LogEntry{
-		Type: string(audit.EntryTypeResponse),
+		Type:      string(audit.EntryTypeResponse),
 		Timestamp: time.Now(),
-		Auth: auth,
-		Request: m.buildRequest(r, body),
-		Response: m.buildResponse(w, r, token, statusCode, message),
-		Error: errorMessage,
+		Auth:      auth,
+		Request:   m.buildRequest(r, body),
+		Response:  m.buildResponse(w, r, token, statusCode, message),
+		Error:     errorMessage,
 	}
 	ok, err := m.auditAccess.LogResponse(r.Context(), &entry)
 	if err != nil {
@@ -52,17 +52,17 @@ func (m *JWTAuthMethod) buildRequest(r *http.Request, body *JWTLoginRequest) *au
 	maps.Copy(headersCopy, r.Header)
 
 	return &audit.Request{
-			ID: middleware.GetReqID(r.Context()),
-			Method: r.Method,
-			ClientIP: clientIP,
-			Path: r.Context().Value(logical.OriginalPath).(string),
-			Headers: headersCopy,
-			MountType: m.GetType(),
-			MountPath: m.mountPath,
-			MountAccessor: m.accessor,
-			MountClass: m.backendClass,
-			Data: data,
-		}
+		ID:            middleware.GetReqID(r.Context()),
+		Method:        r.Method,
+		ClientIP:      clientIP,
+		Path:          r.Context().Value(logical.OriginalPath).(string),
+		Headers:       headersCopy,
+		MountType:     m.GetType(),
+		MountPath:     m.mountPath,
+		MountAccessor: m.accessor,
+		MountClass:    m.backendClass,
+		Data:          data,
+	}
 }
 
 func (m *JWTAuthMethod) buildResponse(w http.ResponseWriter, r *http.Request, token *token.Token, statusCode int, message string) *audit.Response {
@@ -76,13 +76,13 @@ func (m *JWTAuthMethod) buildResponse(w http.ResponseWriter, r *http.Request, to
 	}
 
 	resp := audit.Response{
-		Data: data,
-		StatusCode: statusCode,
-		Message: message,
-		MountType: m.GetType(),
+		Data:          data,
+		StatusCode:    statusCode,
+		Message:       message,
+		MountType:     m.GetType(),
 		MountAccessor: m.accessor,
-		MountPath: m.mountPath,
-		MountClass: m.backendClass,
+		MountPath:     m.mountPath,
+		MountClass:    m.backendClass,
 	}
 
 	return &resp
@@ -91,9 +91,8 @@ func (m *JWTAuthMethod) buildResponse(w http.ResponseWriter, r *http.Request, to
 func (m *JWTAuthMethod) buildAuth(clientToken *audit.Token, roleName, principalID string) *audit.Auth {
 	auth := audit.Auth{
 		ClientToken: clientToken,
-		RoleName: roleName,
+		RoleName:    roleName,
 		PrincipalID: principalID,
 	}
 	return &auth
 }
-

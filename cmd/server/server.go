@@ -26,10 +26,10 @@ import (
 
 const (
 	// Subsystem names for logging
-	subsystemCore         = "core"
-	subsystemInit         = "init"
-	subsystemToken        = "token"
-	subsystemAPIListener  = "api-listener"
+	subsystemCore          = "core"
+	subsystemInit          = "init"
+	subsystemToken         = "token"
+	subsystemAPIListener   = "api-listener"
 	subsystemMySQLListener = "mysql-listener"
 
 	// Listener type names
@@ -43,7 +43,7 @@ var (
 	ServerCmd = &cobra.Command{
 		Use:   "server",
 		Short: "This command starts a Warden server that responds to API requests",
-		Long:  `
+		Long: `
 Usage: warden server [options]
 
   This command starts a Warden server that responds to API requests. By default,
@@ -53,10 +53,10 @@ Usage: warden server [options]
 
   For a full list of examples, please see the documentation.
   `,
-		RunE:  run,
+		RunE: run,
 	}
 
-	wg    sync.WaitGroup
+	wg sync.WaitGroup
 
 	cleanupGuard sync.Once
 
@@ -115,13 +115,13 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// create the core config
 	coreConfig := core.CoreConfig{
-		RawConfig: config,
+		RawConfig:    config,
 		AuditDevices: auditDevices,
-		AuthMethods: authMethods,
-		Providers: providers,
-		TokenStore: tokenStore,
-		Storage: storage,
-		Logger: logger,
+		AuthMethods:  authMethods,
+		Providers:    providers,
+		TokenStore:   tokenStore,
+		Storage:      storage,
+		Logger:       logger,
 	}
 
 	// create the core
@@ -203,29 +203,29 @@ func run(cmd *cobra.Command, args []string) error {
 
 	for !shutdownTriggered {
 		select {
-			case err := <-errChan:
-				// Aggregate listener errors
-				listenerErrsMu.Lock()
-				listenerErrs = append(listenerErrs, err)
-				failedCount := len(listenerErrs)
-				listenerErrsMu.Unlock()
+		case err := <-errChan:
+			// Aggregate listener errors
+			listenerErrsMu.Lock()
+			listenerErrs = append(listenerErrs, err)
+			failedCount := len(listenerErrs)
+			listenerErrsMu.Unlock()
 
-				initLogger.Error("Listener error occurred",
-					log.Err(err),
-					log.Int("failed_count", failedCount),
-					log.Int("total_listeners", totalListeners))
+			initLogger.Error("Listener error occurred",
+				log.Err(err),
+				log.Int("failed_count", failedCount),
+				log.Int("total_listeners", totalListeners))
 
-				// Only trigger shutdown if ALL listeners have failed
-				if failedCount >= totalListeners {
-					initLogger.Error("All listeners have failed, triggering shutdown",
-						log.Int("failed_count", failedCount))
-					shutdownTriggered = true
-					cancel()
-				}
-			case <-ctx.Done():
-				initLogger.Info("Warden shutdown triggered")
+			// Only trigger shutdown if ALL listeners have failed
+			if failedCount >= totalListeners {
+				initLogger.Error("All listeners have failed, triggering shutdown",
+					log.Int("failed_count", failedCount))
 				shutdownTriggered = true
 				cancel()
+			}
+		case <-ctx.Done():
+			initLogger.Info("Warden shutdown triggered")
+			shutdownTriggered = true
+			cancel()
 		}
 	}
 
@@ -276,15 +276,15 @@ func run(cmd *cobra.Command, args []string) error {
 
 func buildLogger(config *config.Config) log.Logger {
 	logConfig := log.Config{
-		Level: log.ParseLogLevel(config.LogLevel),
+		Level:     log.ParseLogLevel(config.LogLevel),
 		Subsystem: subsystemCore,
 		FileConfig: &log.FileConfig{
-			Filename: config.LogFile,
-			MaxSize: config.LogRotateMegabytes,
-			MaxAge: config.LogRotationPeriod,
+			Filename:   config.LogFile,
+			MaxSize:    config.LogRotateMegabytes,
+			MaxAge:     config.LogRotationPeriod,
 			MaxBackups: config.LogRotateMaxFiles,
 		},
-		Format: log.ParseOutPutFormat(config.LogFormat),
+		Format:  log.ParseOutPutFormat(config.LogFormat),
 		Outputs: []io.Writer{os.Stdout},
 	}
 
@@ -293,7 +293,7 @@ func buildLogger(config *config.Config) log.Logger {
 	return logger
 }
 
-func buildStorage(config *config.Config, logger log.Logger) (storage.Storage, error){
+func buildStorage(config *config.Config, logger log.Logger) (storage.Storage, error) {
 	logger.Info("crafting the storage")
 	var backend storage.Storage
 	if config.GetStorage() != nil {
@@ -323,13 +323,13 @@ func initListeners(core *core.Core, tokenAccess token.TokenStore, config *config
 		case listenerTypeAPI:
 			// construct api listerner
 			ln, err := api.NewApiListener(api.ApiListenerConfig{
-				Logger: logger.WithSystem(subsystemAPIListener),
-				Protocol: lnConfig.Protocol,
-				Address: lnConfig.Address,
-				TLSCertFile: lnConfig.TLSCertFile,
-				TLSKeyFile: lnConfig.TLSKeyFile,
+				Logger:          logger.WithSystem(subsystemAPIListener),
+				Protocol:        lnConfig.Protocol,
+				Address:         lnConfig.Address,
+				TLSCertFile:     lnConfig.TLSCertFile,
+				TLSKeyFile:      lnConfig.TLSKeyFile,
 				TLSClientCAFile: lnConfig.TLSClientCAFile,
-				TLSEnabled: lnConfig.TLSEnabled,
+				TLSEnabled:      lnConfig.TLSEnabled,
 			}, core)
 			if err != nil {
 				logger.Error("failed to create listener",
@@ -341,17 +341,17 @@ func initListeners(core *core.Core, tokenAccess token.TokenStore, config *config
 		case listenerTypeMySQL:
 			// construct mysql listerner
 			listenerConf := mysql.MysqlListenerConfig{
-				Protocol: lnConfig.Protocol,
-				Address: lnConfig.Address,
-				Roles:   core.Roles(),
-				CredSources: core.CredSources(),
-				Targets: core.Targets(),
-				Logger: logger.WithSystem(subsystemMySQLListener),
-				TLSCertFile: lnConfig.TLSCertFile,
-				TLSKeyFile: lnConfig.TLSKeyFile,
+				Protocol:        lnConfig.Protocol,
+				Address:         lnConfig.Address,
+				Roles:           core.Roles(),
+				CredSources:     core.CredSources(),
+				Targets:         core.Targets(),
+				Logger:          logger.WithSystem(subsystemMySQLListener),
+				TLSCertFile:     lnConfig.TLSCertFile,
+				TLSKeyFile:      lnConfig.TLSKeyFile,
 				TLSClientCAFile: lnConfig.TLSClientCAFile,
-				TLSEnabled: lnConfig.TLSEnabled,
-				TokenStore: tokenAccess,
+				TLSEnabled:      lnConfig.TLSEnabled,
+				TokenStore:      tokenAccess,
 			}
 
 			ln, err := mysql.NewMysqlListener(listenerConf)
@@ -367,5 +367,3 @@ func initListeners(core *core.Core, tokenAccess token.TokenStore, config *config
 
 	return lns, nil
 }
-
-

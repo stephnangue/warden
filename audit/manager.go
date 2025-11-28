@@ -22,7 +22,7 @@ type AuditManagerConfig struct {
 	// Set to false if you need strict ordering across all devices
 	Parallel bool
 
-	Logger   logger.Logger
+	Logger logger.Logger
 }
 
 // NewAuditManager creates a new audit manager
@@ -47,11 +47,11 @@ func NewAuditManagerWithConfig(config AuditManagerConfig) AuditManager {
 func (m *manager) RegisterDevice(name string, device Device) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if _, exists := m.devices[name]; exists {
 		return fmt.Errorf("device %q already registered", name)
 	}
-	
+
 	m.devices[name] = device
 	return nil
 }
@@ -60,17 +60,17 @@ func (m *manager) RegisterDevice(name string, device Device) error {
 func (m *manager) UnregisterDevice(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	device, exists := m.devices[name]
 	if !exists {
 		return fmt.Errorf("device %q not found", name)
 	}
-	
+
 	// Close the device
 	if err := device.Close(); err != nil {
 		return fmt.Errorf("failed to close device: %w", err)
 	}
-	
+
 	delete(m.devices, name)
 	return nil
 }
@@ -79,12 +79,12 @@ func (m *manager) UnregisterDevice(name string) error {
 func (m *manager) GetDevice(name string) (Device, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	device, exists := m.devices[name]
 	if !exists {
 		return nil, fmt.Errorf("device %q not found", name)
 	}
-	
+
 	return device, nil
 }
 
@@ -92,12 +92,12 @@ func (m *manager) GetDevice(name string) (Device, error) {
 func (m *manager) ListDevices() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	names := make([]string, 0, len(m.devices))
 	for name := range m.devices {
 		names = append(names, name)
 	}
-	
+
 	return names
 }
 
@@ -122,7 +122,7 @@ func (m *manager) logToDevices(ctx context.Context, entry *LogEntry, isRequest b
 		m.mu.RUnlock()
 		return false, nil
 	}
-	
+
 	devices := make([]Device, 0, len(m.devices))
 	parallel := m.parallel
 	for _, device := range m.devices {
@@ -131,11 +131,11 @@ func (m *manager) logToDevices(ctx context.Context, entry *LogEntry, isRequest b
 		}
 	}
 	m.mu.RUnlock()
-	
+
 	if len(devices) == 0 {
 		return false, nil
 	}
-	
+
 	// Single device optimization - no need for goroutines or channels
 	if len(devices) == 1 {
 		var err error
@@ -149,7 +149,7 @@ func (m *manager) logToDevices(ctx context.Context, entry *LogEntry, isRequest b
 		}
 		return true, nil
 	}
-	
+
 	// Multiple devices - use parallel or sequential based on configuration
 	if parallel {
 		return m.logParallel(ctx, devices, entry, isRequest)
@@ -165,9 +165,9 @@ func (m *manager) logParallel(ctx context.Context, devices []Device, entry *LogE
 		err     error
 		success bool
 	}
-	
+
 	results := make(chan result, len(devices))
-	
+
 	// Fan-out: log to all devices concurrently
 	for _, device := range devices {
 		go func(d Device) {
@@ -180,7 +180,7 @@ func (m *manager) logParallel(ctx context.Context, devices []Device, entry *LogE
 			results <- result{name: d.Name(), err: err, success: err == nil}
 		}(device)
 	}
-	
+
 	// Fan-in: collect all results
 	var errs []error
 	atLeastOneSuccess := false
@@ -192,7 +192,7 @@ func (m *manager) logParallel(ctx context.Context, devices []Device, entry *LogE
 			errs = append(errs, fmt.Errorf("device %q: %w", res.name, res.err))
 		}
 	}
-	
+
 	return atLeastOneSuccess, m.formatErrors(errs)
 }
 
@@ -201,7 +201,7 @@ func (m *manager) logParallel(ctx context.Context, devices []Device, entry *LogE
 func (m *manager) logSequential(ctx context.Context, devices []Device, entry *LogEntry, isRequest bool) (bool, error) {
 	var errs []error
 	atLeastOneSuccess := false
-	
+
 	for _, device := range devices {
 		var err error
 		if isRequest {
@@ -209,14 +209,14 @@ func (m *manager) logSequential(ctx context.Context, devices []Device, entry *Lo
 		} else {
 			err = device.LogResponse(ctx, entry)
 		}
-		
+
 		if err != nil {
 			errs = append(errs, fmt.Errorf("device %q: %w", device.Name(), err))
 		} else {
 			atLeastOneSuccess = true
 		}
 	}
-	
+
 	return atLeastOneSuccess, m.formatErrors(errs)
 }
 
@@ -225,32 +225,31 @@ func (m *manager) formatErrors(errs []error) error {
 	if len(errs) == 0 {
 		return nil
 	}
-	
+
 	// Return single error directly for clarity
 	if len(errs) == 1 {
 		return errs[0]
 	}
-	
+
 	// Multiple errors - return aggregated error
 	return fmt.Errorf("failed to log to %d device(s): %v", len(errs), errs)
 }
-
 
 // Close closes all devices
 func (m *manager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	var errs []error
 	for name, device := range m.devices {
 		if err := device.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("device %q: %w", name, err))
 		}
 	}
-	
+
 	if len(errs) > 0 {
 		return fmt.Errorf("failed to close %d device(s): %v", len(errs), errs)
 	}
-	
+
 	return nil
 }

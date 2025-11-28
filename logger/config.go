@@ -8,28 +8,28 @@ import (
 
 // Config holds the configuration for the logger
 type Config struct {
-	Level         LogLevel
-	Format        OutputFormat
-	Outputs       []io.Writer
-	Environment   string // "development" or "production"
-	Subsystem     string
-	FileConfig    *FileConfig
-	EnableCaller  bool // Include caller information
+	Level          LogLevel
+	Format         OutputFormat
+	Outputs        []io.Writer
+	Environment    string // "development" or "production"
+	Subsystem      string
+	FileConfig     *FileConfig
+	EnableCaller   bool // Include caller information
 	EnableSampling bool // Enable log sampling for high-throughput scenarios
-	CallerSkip    int  // Number of stack frames to skip when logging caller
+	CallerSkip     int  // Number of stack frames to skip when logging caller
 }
 
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Level:         InfoLevel,
-		Format:        DefaultFormat,
-		Outputs:       []io.Writer{os.Stdout},
-		Environment:   "development",
-		Subsystem:     "",
-		EnableCaller:  false,
+		Level:          InfoLevel,
+		Format:         DefaultFormat,
+		Outputs:        []io.Writer{os.Stdout},
+		Environment:    "development",
+		Subsystem:      "",
+		EnableCaller:   false,
 		EnableSampling: false,
-		CallerSkip:    0,
+		CallerSkip:     0,
 	}
 }
 

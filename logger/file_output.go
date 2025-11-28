@@ -19,4 +19,3 @@ func DefaultFileConfig(filename string) *FileConfig {
 		Compress:   true,
 	}
 }
-

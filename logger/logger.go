@@ -204,15 +204,15 @@ type Logger interface {
 
 	// System support
 	WithSystem(name string) Logger
-	
+
 	// Context support
 	WithFields(fields ...TypedField) Logger
-	
+
 	// Level checking
 	IsLevelEnabled(level LogLevel) bool
-	
+
 	// Performance methods
-	Flush() // Flush any buffered logs
+	Flush()       // Flush any buffered logs
 	Close() error // Close and cleanup resources
 }
 
@@ -234,7 +234,6 @@ type LoggerPool struct {
 	pool   sync.Pool
 	config *Config
 }
-
 
 // NewLoggerPool creates a new logger pool for high-throughput scenarios
 func NewLoggerPool(config *Config) *LoggerPool {

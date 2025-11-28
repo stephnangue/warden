@@ -24,17 +24,17 @@ type Conn struct {
 	warnings       uint16
 	salt           []byte // should be 8 + 12 for auth-plugin-data-part-1 and auth-plugin-data-part-2
 
-	credentialProvider  CredentialProvider
-	
+	credentialProvider CredentialProvider
+
 	user                string
 	password            string
 	cachingSha2FullAuth bool
 
-	database            string
+	database string
 
 	h Handler
 
-	authResolver        Resolver
+	authResolver Resolver
 
 	stmts  map[uint32]*Stmt
 	stmtID uint32
@@ -43,7 +43,7 @@ type Conn struct {
 }
 
 var (
-	baseConnID    uint32 = 10000
+	baseConnID uint32 = 10000
 )
 
 // NewConn: create connection with customized server settings
@@ -96,7 +96,7 @@ func (c *Conn) handshake() error {
 	// we fetch the principal_id and the role_name here
 	reqContext := make(map[string]string)
 	maps.Copy(reqContext, c.attributes)
-	
+
 	clientIP := c.Conn.RemoteAddr().String()
 	if host, _, err := net.SplitHostPort(clientIP); err == nil {
 		clientIP = host
@@ -107,18 +107,18 @@ func (c *Conn) handshake() error {
 	if !ok && err == nil {
 		var usingPasswd uint16 = mysql.ER_NO
 		err = mysql.NewDefaultError(mysql.ER_ACCESS_DENIED_ERROR, c.user,
-				c.RemoteAddr().String(), mysql.MySQLErrName[usingPasswd])
+			c.RemoteAddr().String(), mysql.MySQLErrName[usingPasswd])
 
-		_ = c.writeError(err)	
+		_ = c.writeError(err)
 		return errors.New("access denied")
 	}
 
 	if err != nil {
 		var usingPasswd uint16 = mysql.ER_NO
 		errMysql := mysql.NewDefaultError(mysql.ER_ACCESS_DENIED_ERROR, c.user,
-				c.RemoteAddr().String(), mysql.MySQLErrName[usingPasswd])
+			c.RemoteAddr().String(), mysql.MySQLErrName[usingPasswd])
 
-		_ = c.writeError(errMysql)	
+		_ = c.writeError(errMysql)
 		return err
 	}
 

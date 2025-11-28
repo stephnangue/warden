@@ -12,12 +12,12 @@ import (
 	"github.com/go-chi/chi"
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/auth/token"
+	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/aws/processor"
 	"github.com/stephnangue/warden/provider/aws/processor/s3"
-	"github.com/stephnangue/warden/role"
 )
 
 // HostRewrite contains information about a rewritten virtual-hosted URL
@@ -28,22 +28,22 @@ type HostRewrite struct {
 }
 
 type AWSProvider struct {
-	mountPath     string
-	description   string
-	logger        logger.Logger
-	accessor      string
-	providerType  string
-	backendClass  string
-	router        *chi.Mux
-	tokenAccess   token.TokenAccess
-	roles         *role.RoleRegistry
-	credSources   *cred.CredSourceRegistry
-	proxy         *httputil.ReverseProxy
-	signer        *v4.Signer
-	proxyDomains  []string
-	maxBodySize   int64
-	timeout       time.Duration
-	credsProvider *cred.CredentialProvider
+	mountPath         string
+	description       string
+	logger            logger.Logger
+	accessor          string
+	providerType      string
+	backendClass      string
+	router            *chi.Mux
+	tokenAccess       token.TokenAccess
+	roles             *authorize.RoleRegistry
+	credSources       *cred.CredSourceRegistry
+	proxy             *httputil.ReverseProxy
+	signer            *v4.Signer
+	proxyDomains      []string
+	maxBodySize       int64
+	timeout           time.Duration
+	credsProvider     *cred.CredentialProvider
 	processorRegistry *processor.ProcessorRegistry
 	auditAccess       audit.AuditAccess
 }
@@ -64,7 +64,7 @@ func (p *AWSProvider) GetAccessor() string {
 	return p.accessor
 }
 
-func (p *AWSProvider) Cleanup()  {
+func (p *AWSProvider) Cleanup() {
 	p.credsProvider.Stop()
 }
 
@@ -104,9 +104,9 @@ func (f *AWSProviderFactory) Create(
 	conf map[string]any,
 	log logger.Logger,
 	tokenAccess token.TokenAccess,
-	roles *role.RoleRegistry,
+	roles *authorize.RoleRegistry,
 	credSources *cred.CredSourceRegistry,
-	auditAccess  audit.AuditAccess,
+	auditAccess audit.AuditAccess,
 ) (logical.Backend, error) {
 
 	config := parseConfig(conf)
@@ -123,7 +123,7 @@ func (f *AWSProviderFactory) Create(
 		logger:        log.WithSubsystem(f.Type()).WithSubsystem(accessor),
 		providerType:  f.Type(),
 		backendClass:  f.Class(),
-		tokenAccess:    tokenAccess,
+		tokenAccess:   tokenAccess,
 		roles:         roles,
 		credSources:   credSources,
 		signer:        v4.NewSigner(),

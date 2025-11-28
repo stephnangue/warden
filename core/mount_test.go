@@ -15,7 +15,6 @@ import (
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider"
-	"github.com/stephnangue/warden/role"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,7 +32,7 @@ func createMockCore() *Core {
 		authMethods:   make(map[string]auth.Factory),
 		providers:     make(map[string]provider.Factory),
 		tokenStore:    &mockTokenStore{},
-		roles:         role.NewRoleRegistry(),
+		roles:         authorize.NewRoleRegistry(),
 		accessControl: &authorize.AccessControl{},
 		credSources:   cred.NewCredSourceRegistry(),
 		auditManager:  &mockAuditManager{},
@@ -52,7 +51,7 @@ type mockAuditManager struct {
 
 // mockAuthFactory implements auth.Factory for testing
 type mockAuthFactory struct {
-	createFunc func(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenStore token.TokenStore, roles *role.RoleRegistry, ac *authorize.AccessControl, am audit.AuditAccess) (logical.Backend, error)
+	createFunc func(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenStore token.TokenStore, roles *authorize.RoleRegistry, ac *authorize.AccessControl, am audit.AuditAccess) (logical.Backend, error)
 }
 
 func (f *mockAuthFactory) Type() string {
@@ -63,7 +62,7 @@ func (f *mockAuthFactory) Class() string {
 	return "auth"
 }
 
-func (f *mockAuthFactory) Create(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenStore token.TokenStore, roles *role.RoleRegistry, ac *authorize.AccessControl, am audit.AuditAccess) (logical.Backend, error) {
+func (f *mockAuthFactory) Create(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenStore token.TokenStore, roles *authorize.RoleRegistry, ac *authorize.AccessControl, am audit.AuditAccess) (logical.Backend, error) {
 	if f.createFunc != nil {
 		return f.createFunc(ctx, path, description, accessor, config, logger, tokenStore, roles, ac, am)
 	}
@@ -76,7 +75,7 @@ func (f *mockAuthFactory) Initialize(logger logger.Logger) error {
 
 // mockProviderFactory implements provider.Factory for testing
 type mockProviderFactory struct {
-	createFunc func(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenAccess token.TokenAccess, roles *role.RoleRegistry, credSources *cred.CredSourceRegistry, am audit.AuditAccess) (logical.Backend, error)
+	createFunc func(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenAccess token.TokenAccess, roles *authorize.RoleRegistry, credSources *cred.CredSourceRegistry, am audit.AuditAccess) (logical.Backend, error)
 }
 
 func (f *mockProviderFactory) Type() string {
@@ -87,7 +86,7 @@ func (f *mockProviderFactory) Class() string {
 	return "provider"
 }
 
-func (f *mockProviderFactory) Create(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenAccess token.TokenAccess, roles *role.RoleRegistry, credSources *cred.CredSourceRegistry, am audit.AuditAccess) (logical.Backend, error) {
+func (f *mockProviderFactory) Create(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenAccess token.TokenAccess, roles *authorize.RoleRegistry, credSources *cred.CredSourceRegistry, am audit.AuditAccess) (logical.Backend, error) {
 	if f.createFunc != nil {
 		return f.createFunc(ctx, path, description, accessor, config, logger, tokenAccess, roles, credSources, am)
 	}
@@ -480,7 +479,7 @@ func TestCore_mountInternal(t *testing.T) {
 	t.Run("backend creation returns nil", func(t *testing.T) {
 		core := createMockCore()
 		core.authMethods["nilbackend"] = &mockAuthFactory{
-			createFunc: func(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenStore token.TokenStore, roles *role.RoleRegistry, ac *authorize.AccessControl, am audit.AuditAccess) (logical.Backend, error) {
+			createFunc: func(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenStore token.TokenStore, roles *authorize.RoleRegistry, ac *authorize.AccessControl, am audit.AuditAccess) (logical.Backend, error) {
 				return nil, nil
 			},
 		}
@@ -499,7 +498,7 @@ func TestCore_mountInternal(t *testing.T) {
 	t.Run("backend creation returns error", func(t *testing.T) {
 		core := createMockCore()
 		core.authMethods["errorbackend"] = &mockAuthFactory{
-			createFunc: func(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenStore token.TokenStore, roles *role.RoleRegistry, ac *authorize.AccessControl, am audit.AuditAccess) (logical.Backend, error) {
+			createFunc: func(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenStore token.TokenStore, roles *authorize.RoleRegistry, ac *authorize.AccessControl, am audit.AuditAccess) (logical.Backend, error) {
 				return nil, fmt.Errorf("creation failed")
 			},
 		}
@@ -741,7 +740,7 @@ func TestCore_MountWithConfig(t *testing.T) {
 	t.Run("mount with custom config", func(t *testing.T) {
 		var receivedConfig map[string]any
 		core.authMethods["configauth"] = &mockAuthFactory{
-			createFunc: func(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenStore token.TokenStore, roles *role.RoleRegistry, ac *authorize.AccessControl, am audit.AuditAccess) (logical.Backend, error) {
+			createFunc: func(ctx context.Context, path, description, accessor string, config map[string]any, logger logger.Logger, tokenStore token.TokenStore, roles *authorize.RoleRegistry, ac *authorize.AccessControl, am audit.AuditAccess) (logical.Backend, error) {
 				receivedConfig = config
 				return newMockBackend(accessor), nil
 			},

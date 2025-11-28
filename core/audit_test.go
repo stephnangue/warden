@@ -20,7 +20,6 @@ import (
 	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/provider"
-	"github.com/stephnangue/warden/role"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -231,7 +230,7 @@ func createMockCoreForAudit() *Core {
 		providers:     make(map[string]provider.Factory),
 		auditDevices:  make(map[string]audit.Factory),
 		tokenStore:    &mockTokenStore{},
-		roles:         role.NewRoleRegistry(),
+		roles:         authorize.NewRoleRegistry(),
 		accessControl: &authorize.AccessControl{},
 		credSources:   cred.NewCredSourceRegistry(),
 		auditManager:  newMockAuditManagerFull(),
@@ -690,7 +689,6 @@ func TestDisableAudit(t *testing.T) {
 		assert.Nil(t, core.audit.Entries)
 	})
 }
-
 
 // TestNewAuditBackend tests the newAuditBackend method
 func TestNewAuditBackend(t *testing.T) {

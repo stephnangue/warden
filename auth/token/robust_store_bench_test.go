@@ -99,11 +99,11 @@ func BenchmarkResolveToken_CacheHit(b *testing.B) {
 	}
 
 	// Warm up cache
-	_, _, _ = store.ResolveToken(context.Background(),token.Data["username"], reqContext)
+	_, _, _ = store.ResolveToken(context.Background(), token.Data["username"], reqContext)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _, err := store.ResolveToken(context.Background(),token.Data["username"], reqContext)
+		_, _, err := store.ResolveToken(context.Background(), token.Data["username"], reqContext)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -142,7 +142,7 @@ func BenchmarkResolveToken_NoCache(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _, err := store.ResolveToken(context.Background(),token.Data["username"], reqContext)
+		_, _, err := store.ResolveToken(context.Background(), token.Data["username"], reqContext)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -161,10 +161,10 @@ func BenchmarkGetToken_WithCache(b *testing.B) {
 	defer store.Close()
 
 	authData := &AuthData{
-		PrincipalID:  "benchuser",
-		RoleName:     "admin",
-		AuthDeadline: time.Now().Add(5 * time.Minute),
-		ExpireAt:     time.Now().Add(1 * time.Hour),
+		PrincipalID:    "benchuser",
+		RoleName:       "admin",
+		AuthDeadline:   time.Now().Add(5 * time.Minute),
+		ExpireAt:       time.Now().Add(1 * time.Hour),
 		RequestContext: map[string]string{},
 	}
 
@@ -254,7 +254,7 @@ func BenchmarkConcurrentResolve(b *testing.B) {
 		i := 0
 		for pb.Next() {
 			tokenID := tokens[i%len(tokens)].Data["username"]
-			_, _, err := store.ResolveToken(context.Background(),tokenID, reqContext)
+			_, _, err := store.ResolveToken(context.Background(), tokenID, reqContext)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -296,7 +296,7 @@ func BenchmarkMemoryUsage(b *testing.B) {
 		reqContext := map[string]string{
 			"client_ip": "192.168.1.1",
 		}
-		_, _, err = store.ResolveToken(context.Background(),token.Data["username"], reqContext)
+		_, _, err = store.ResolveToken(context.Background(), token.Data["username"], reqContext)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -342,7 +342,7 @@ func BenchmarkHighLoad(b *testing.B) {
 		i := 0
 		for pb.Next() {
 			tokenID := tokens[i%len(tokens)].Data["username"]
-			_, _, _ = store.ResolveToken(context.Background(),tokenID, reqContext)
+			_, _, _ = store.ResolveToken(context.Background(), tokenID, reqContext)
 			i++
 		}
 	})
@@ -367,10 +367,10 @@ func BenchmarkStoreScaling(b *testing.B) {
 			tokens := make([]*Token, size)
 			for i := 0; i < size; i++ {
 				authData := &AuthData{
-					PrincipalID:  "user",
-					RoleName:     "scaling",
-					AuthDeadline: time.Now().Add(5 * time.Minute),
-					ExpireAt:     time.Now().Add(1 * time.Hour),
+					PrincipalID:    "user",
+					RoleName:       "scaling",
+					AuthDeadline:   time.Now().Add(5 * time.Minute),
+					ExpireAt:       time.Now().Add(1 * time.Hour),
 					RequestContext: map[string]string{},
 				}
 				token, err := store.GenerateToken(USER_PASS, authData)
@@ -385,7 +385,7 @@ func BenchmarkStoreScaling(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				tokenID := tokens[i%size].Data["username"]
-				_, _, _ = store.ResolveToken(context.Background(),tokenID, reqContext)
+				_, _, _ = store.ResolveToken(context.Background(), tokenID, reqContext)
 			}
 		})
 	}
