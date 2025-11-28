@@ -19,12 +19,11 @@ safe operations, and complete visibility.`,
 	}
 )
 
-
 func Execute() {
-  if err := wardenCmd.Execute(); err != nil {
-    fmt.Fprintln(os.Stderr, err)
-    os.Exit(1)
-  }
+	if err := wardenCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }
 
 func init() {

@@ -56,21 +56,21 @@ var proxyHeaders = []string{
 type contextKey string
 
 const (
-    ClientTokenKey contextKey = "clientToken"
-    AWSCredsKey contextKey = "awsCreds"
-    TokenKey contextKey = "token"
-    RoleNameKey contextKey = "roleName"
-    PrincipalIDKey contextKey = "principalID"
-    TargetURLKey contextKey = "targetURL"
-    ServiceKey contextKey = "service"
-    RegionKey contextKey = "region"
+	ClientTokenKey contextKey = "clientToken"
+	AWSCredsKey    contextKey = "awsCreds"
+	TokenKey       contextKey = "token"
+	RoleNameKey    contextKey = "roleName"
+	PrincipalIDKey contextKey = "principalID"
+	TargetURLKey   contextKey = "targetURL"
+	ServiceKey     contextKey = "service"
+	RegionKey      contextKey = "region"
 )
 
-func (p *AWSProvider) HandleRequest(w http.ResponseWriter, r *http.Request) error{
+func (p *AWSProvider) HandleRequest(w http.ResponseWriter, r *http.Request) error {
 
 	p.router.ServeHTTP(w, r)
 
-    return nil
+	return nil
 }
 
 func (p *AWSProvider) handleGateway(w http.ResponseWriter, r *http.Request) {
@@ -210,10 +210,10 @@ func (p *AWSProvider) processRequest(ctx context.Context, w http.ResponseWriter,
 	// Step 7: Find and execute the appropriate processor
 	proc := p.processorRegistry.FindProcessor(processorCtx)
 	if proc == nil {
-		p.auditResponse(nil, r, clientToken, &awsCreds, token, roleName, principalID, http.StatusUnauthorized, "Service not supported", "service not supported", "", 
+		p.auditResponse(nil, r, clientToken, &awsCreds, token, roleName, principalID, http.StatusUnauthorized, "Service not supported", "service not supported", "",
 			map[string]interface{}{
 				"service": service,
-				"region": region,
+				"region":  region,
 			},
 		)
 		http.Error(w, "Service not supported", http.StatusBadRequest)
@@ -223,10 +223,10 @@ func (p *AWSProvider) processRequest(ctx context.Context, w http.ResponseWriter,
 	// Step 8: Process the request
 	result, err := proc.Process(processorCtx)
 	if err != nil {
-		p.auditResponse(nil, r, clientToken, &awsCreds, token, roleName, principalID, http.StatusBadGateway, "Failed to process request", err.Error(), "", 
+		p.auditResponse(nil, r, clientToken, &awsCreds, token, roleName, principalID, http.StatusBadGateway, "Failed to process request", err.Error(), "",
 			map[string]interface{}{
 				"service": service,
-				"region": region,
+				"region":  region,
 			},
 		)
 		http.Error(w, "Failed to process request", http.StatusBadGateway)
@@ -239,7 +239,7 @@ func (p *AWSProvider) processRequest(ctx context.Context, w http.ResponseWriter,
 		p.auditResponse(nil, r, clientToken, &awsCreds, token, roleName, principalID, http.StatusInternalServerError, "Internal server error", err.Error(), "",
 			map[string]interface{}{
 				"service": service,
-				"region": region,
+				"region":  region,
 			},
 		)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -254,7 +254,7 @@ func (p *AWSProvider) processRequest(ctx context.Context, w http.ResponseWriter,
 	}
 
 	r.RequestURI = ""
-	
+
 	//Optionally clear RawPath to avoid encoding issues
 	if r.URL.Path != "" {
 		r.URL.RawPath = ""
@@ -274,7 +274,7 @@ func (p *AWSProvider) processRequest(ctx context.Context, w http.ResponseWriter,
 		p.auditResponse(nil, r, clientToken, &awsCreds, token, roleName, principalID, http.StatusInternalServerError, "Internal server error", err.Error(), r.URL.String(),
 			map[string]interface{}{
 				"service": service,
-				"region": region,
+				"region":  region,
 			},
 		)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -306,12 +306,12 @@ func (p *AWSProvider) authenticate(r *http.Request, accessKeyId string) (aws.Cre
 			// Fallback if RealIP middleware wasn't applied
 			clientIP = r.RemoteAddr
 		}
-	
+
 		// Remove port if present
 		if host, _, err := net.SplitHostPort(clientIP); err == nil {
 			clientIP = host
 		}
-		
+
 		// Here we check the credential vadidity, then we enforce the auth deadline policy,
 		// finally we enforce the same origin policy
 		var err error
@@ -319,7 +319,7 @@ func (p *AWSProvider) authenticate(r *http.Request, accessKeyId string) (aws.Cre
 			"client_ip": clientIP,
 		})
 		if err != nil {
-			p.logger.Warn("aws token resolution failed", 
+			p.logger.Warn("aws token resolution failed",
 				logger.Err(err),
 				logger.String("request_id", middleware.GetReqID(r.Context())),
 			)
@@ -329,7 +329,7 @@ func (p *AWSProvider) authenticate(r *http.Request, accessKeyId string) (aws.Cre
 		// Fetch the secretAccessKey from the token store
 		secretAccessKey = token.Data["secret_access_key"]
 	} else {
-		p.logger.Warn("no token found for the provided aws access_key_id", 
+		p.logger.Warn("no token found for the provided aws access_key_id",
 			logger.String("access_key_id", accessKeyId),
 			logger.String("request_id", middleware.GetReqID(r.Context())),
 		)
@@ -337,7 +337,7 @@ func (p *AWSProvider) authenticate(r *http.Request, accessKeyId string) (aws.Cre
 	}
 
 	return aws.Credentials{
-		AccessKeyID: accessKeyId,
+		AccessKeyID:     accessKeyId,
 		SecretAccessKey: secretAccessKey,
 	}, principalId, roleName, token, nil
 }
@@ -352,18 +352,18 @@ func (p *AWSProvider) getCredentials(ctx context.Context, accessKeyID, roleName 
 	case cred.AWS_ACCESS_KEYS:
 		if credential.LeaseTTL == 0 {
 			return aws.Credentials{
-				AccessKeyID: credential.Data["access_key_id"],
+				AccessKeyID:     credential.Data["access_key_id"],
 				SecretAccessKey: credential.Data["secret_access_key"],
-				Source: credential.Data["cred_source"],
+				Source:          credential.Data["cred_source"],
 			}, nil
 		} else {
 			return aws.Credentials{
-				AccessKeyID: credential.Data["access_key_id"],
+				AccessKeyID:     credential.Data["access_key_id"],
 				SecretAccessKey: credential.Data["secret_access_key"],
-				Source: credential.Data["cred_source"],
-				SessionToken: credential.Data["session_token"],
-				CanExpire: true,
-				Expires: time.Now().Add(credential.LeaseTTL),
+				Source:          credential.Data["cred_source"],
+				SessionToken:    credential.Data["session_token"],
+				CanExpire:       true,
+				Expires:         time.Now().Add(credential.LeaseTTL),
 			}, nil
 		}
 	default:
@@ -440,7 +440,7 @@ func (p *AWSProvider) restoreRequestBody(r *http.Request, bodyBytes []byte) {
 func (p *AWSProvider) cleanHeadersForSigning(r *http.Request) {
 	headers := r.Header
 	removedHeaders := []string{}
-	
+
 	// Remove standard hop-by-hop headers
 	for _, h := range hopByHopHeaders {
 		if headers.Get(h) != "" {
@@ -448,7 +448,7 @@ func (p *AWSProvider) cleanHeadersForSigning(r *http.Request) {
 			headers.Del(h)
 		}
 	}
-	
+
 	// Remove proxy-specific headers
 	for _, h := range proxyHeaders {
 		if headers.Get(h) != "" {
@@ -456,7 +456,7 @@ func (p *AWSProvider) cleanHeadersForSigning(r *http.Request) {
 			headers.Del(h)
 		}
 	}
-	
+
 	// Handle Connection header's listed headers
 	// If Connection header lists other headers, remove those too
 	if connectionHeaders := headers.Get("Connection"); connectionHeaders != "" {
@@ -468,7 +468,6 @@ func (p *AWSProvider) cleanHeadersForSigning(r *http.Request) {
 			}
 		}
 	}
-	
 
 	if len(removedHeaders) > 0 {
 		p.logger.Trace("headers removed before signing:",

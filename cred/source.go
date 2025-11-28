@@ -3,14 +3,14 @@ package cred
 import "sync"
 
 type CredSource struct {
-	Name        string
-	Type        string // local, vault, aws, azure, cgp
-	Config      map[string]string
+	Name   string
+	Type   string // local, vault, aws, azure, cgp
+	Config map[string]string
 }
 
 type CredSourceRegistry struct {
 	sources map[string]*CredSource
-	mu    sync.RWMutex
+	mu      sync.RWMutex
 }
 
 func NewCredSourceRegistry() *CredSourceRegistry {

@@ -7,7 +7,7 @@ import (
 
 type memoryStorage struct {
 	data map[string]map[string]any
-	mu sync.RWMutex
+	mu   sync.RWMutex
 }
 
 func NewMemoryStorage() Storage {
@@ -16,18 +16,18 @@ func NewMemoryStorage() Storage {
 	}
 }
 
-func(m *memoryStorage) Init(ctx context.Context) error {
+func (m *memoryStorage) Init(ctx context.Context) error {
 	return nil
 }
 
-func(m *memoryStorage) Stop() error {
+func (m *memoryStorage) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.data = make(map[string]map[string]any)
 	return nil
 }
 
-func(m *memoryStorage) Put(ctx context.Context, prefix string, key string, data map[string]any) error {
+func (m *memoryStorage) Put(ctx context.Context, prefix string, key string, data map[string]any) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -40,7 +40,7 @@ func(m *memoryStorage) Put(ctx context.Context, prefix string, key string, data 
 	return nil
 }
 
-func(m *memoryStorage) Get(ctx context.Context, prefix string, key string) (map[string]any, error) {
+func (m *memoryStorage) Get(ctx context.Context, prefix string, key string) (map[string]any, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -57,7 +57,7 @@ func(m *memoryStorage) Get(ctx context.Context, prefix string, key string) (map[
 	return data.(map[string]any), nil
 }
 
-func(m *memoryStorage) List(ctx context.Context, prefix string) ([]string, error) {
+func (m *memoryStorage) List(ctx context.Context, prefix string) ([]string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -73,7 +73,7 @@ func(m *memoryStorage) List(ctx context.Context, prefix string) ([]string, error
 	return keys, nil
 }
 
-func(m *memoryStorage) Delete(ctx context.Context, prefix string, key string) error {
+func (m *memoryStorage) Delete(ctx context.Context, prefix string, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -83,4 +83,3 @@ func(m *memoryStorage) Delete(ctx context.Context, prefix string, key string) er
 
 	return nil
 }
-

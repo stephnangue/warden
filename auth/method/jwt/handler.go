@@ -18,23 +18,23 @@ func (m *JWTAuthMethod) HandleRequest(w http.ResponseWriter, r *http.Request) er
 
 	m.router.ServeHTTP(w, r)
 
-    return nil
+	return nil
 }
 
 func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
-    if r.Body == nil {
+	if r.Body == nil {
 		m.auditResponse(w, r, nil, nil, nil, nil, http.StatusBadRequest, "No request body provided", "no request body provided")
-        http.Error(w, "No request body provided", http.StatusBadRequest)
-        return
-    }
+		http.Error(w, "No request body provided", http.StatusBadRequest)
+		return
+	}
 
 	var logRequest JWTLoginRequest
-    err := json.NewDecoder(r.Body).Decode(&logRequest)
-    if err != nil {
+	err := json.NewDecoder(r.Body).Decode(&logRequest)
+	if err != nil {
 		m.auditResponse(w, r, nil, nil, nil, nil, http.StatusBadRequest, "Bad request", err.Error())
-        http.Error(w, "Bad request", http.StatusBadRequest)
-        return
-    }
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
 
 	role, exist := m.roles.GetRole(logRequest.Role)
 	if !exist {
@@ -42,7 +42,7 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-    
+
 	// 1. Perform the authentication and fetch the principal
 	ctx := context.Background()
 	expected := jwt.Expected{
@@ -131,9 +131,9 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientToken := audit.Token{
-		Type: "bearer",
-		TokenID: tokenID,
-		TokenTTL: int64(tokenTTL),
+		Type:        "bearer",
+		TokenID:     tokenID,
+		TokenTTL:    int64(tokenTTL),
 		TokenIssuer: tokenIssuer,
 		Data: map[string]string{
 			"jwt": logRequest.JWT,
@@ -159,15 +159,15 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 		clientIP = host
 	}
 
-	// 3. Generate and return the token  
+	// 3. Generate and return the token
 	switch role.Type {
 	case "static_database_userpass", "dynamic_database_userpass":
 		now := time.Now()
 		authData := token.AuthData{
-			PrincipalID: principalID,
-			RoleName: role.Name,
+			PrincipalID:  principalID,
+			RoleName:     role.Name,
 			AuthDeadline: now.Add(m.config.AuthDeadline),
-			ExpireAt: now.Add(m.config.TokenTTL),
+			ExpireAt:     now.Add(m.config.TokenTTL),
 			RequestContext: map[string]string{
 				"client_ip": clientIP,
 			},
@@ -191,10 +191,10 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 	case "static_aws_access_keys", "dynamic_aws_access_keys":
 		now := time.Now()
 		authData := token.AuthData{
-			PrincipalID: principalID,
-			RoleName: role.Name,
+			PrincipalID:  principalID,
+			RoleName:     role.Name,
 			AuthDeadline: now.Add(m.config.AuthDeadline),
-			ExpireAt: now.Add(m.config.TokenTTL),
+			ExpireAt:     now.Add(m.config.TokenTTL),
 			RequestContext: map[string]string{
 				"client_ip": clientIP,
 			},
@@ -217,10 +217,10 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 	case "system":
 		now := time.Now()
 		authData := token.AuthData{
-			PrincipalID: principalID,
-			RoleName: role.Name,
+			PrincipalID:  principalID,
+			RoleName:     role.Name,
 			AuthDeadline: now.Add(m.config.AuthDeadline),
-			ExpireAt: now.Add(m.config.TokenTTL),
+			ExpireAt:     now.Add(m.config.TokenTTL),
 			RequestContext: map[string]string{
 				"client_ip": clientIP,
 			},

@@ -16,25 +16,25 @@ func TestManagerParallelVsSequential(t *testing.T) {
 	// Create multiple slow devices
 	numDevices := 5
 	devices := make([]Device, numDevices)
-	
+
 	for i := 0; i < numDevices; i++ {
 		tmpDir := t.TempDir()
 		logPath := filepath.Join(tmpDir, fmt.Sprintf("audit-%d.log", i))
-		
+
 		sink, err := NewFileSink(FileSinkConfig{
 			Path: logPath,
 		})
 		if err != nil {
 			t.Fatalf("Failed to create sink: %v", err)
 		}
-		
+
 		format := NewJSONFormat()
 		devices[i] = NewDevice(fmt.Sprintf("device-%d", i), format, sink, &DeviceConfig{
 			Name:    fmt.Sprintf("device-%d", i),
 			Enabled: true,
 		})
 	}
-	
+
 	entry := &LogEntry{
 		Timestamp: time.Now(),
 		Request: &Request{
@@ -44,9 +44,9 @@ func TestManagerParallelVsSequential(t *testing.T) {
 			ClientIP:  "192.168.1.100",
 		},
 	}
-	
+
 	ctx := context.Background()
-	
+
 	// Test parallel execution
 	t.Run("Parallel", func(t *testing.T) {
 		manager := NewAuditManager(logger.NewZerologLogger(logger.DefaultConfig())) // Default: parallel=true
@@ -55,7 +55,7 @@ func TestManagerParallelVsSequential(t *testing.T) {
 				t.Fatalf("Failed to register device: %v", err)
 			}
 		}
-		
+
 		start := time.Now()
 		continued, err := manager.LogRequest(ctx, entry)
 		if err != nil {
@@ -65,14 +65,14 @@ func TestManagerParallelVsSequential(t *testing.T) {
 			t.Error("Expected continue=true but got false")
 		}
 		parallelDuration := time.Since(start)
-		
+
 		t.Logf("Parallel execution took: %v", parallelDuration)
 	})
-	
+
 	// Test sequential execution
 	t.Run("Sequential", func(t *testing.T) {
 		manager := NewAuditManagerWithConfig(AuditManagerConfig{
-			Logger: logger.NewZerologLogger(logger.DefaultConfig()),
+			Logger:   logger.NewZerologLogger(logger.DefaultConfig()),
 			Parallel: false,
 		})
 		for i, device := range devices {
@@ -80,7 +80,7 @@ func TestManagerParallelVsSequential(t *testing.T) {
 				t.Fatalf("Failed to register device: %v", err)
 			}
 		}
-		
+
 		start := time.Now()
 		continued, err := manager.LogRequest(ctx, entry)
 		if err != nil {
@@ -90,7 +90,7 @@ func TestManagerParallelVsSequential(t *testing.T) {
 			t.Error("Expected continue=true but got false")
 		}
 		sequentialDuration := time.Since(start)
-		
+
 		t.Logf("Sequential execution took: %v", sequentialDuration)
 	})
 }
@@ -98,26 +98,26 @@ func TestManagerParallelVsSequential(t *testing.T) {
 func TestManagerSingleDeviceOptimization(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "audit.log")
-	
+
 	sink, err := NewFileSink(FileSinkConfig{
 		Path: logPath,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create sink: %v", err)
 	}
-	
+
 	format := NewJSONFormat()
 	device := NewDevice("single", format, sink, &DeviceConfig{
 		Name:    "single",
 		Enabled: true,
 	})
-	
+
 	manager := NewAuditManager(logger.NewZerologLogger(logger.DefaultConfig()))
 	if err := manager.RegisterDevice("single", device); err != nil {
 		t.Fatalf("Failed to register device: %v", err)
 	}
 	defer manager.Close()
-	
+
 	entry := &LogEntry{
 		Timestamp: time.Now(),
 		Request: &Request{
@@ -127,9 +127,9 @@ func TestManagerSingleDeviceOptimization(t *testing.T) {
 			ClientIP:  "192.168.1.100",
 		},
 	}
-	
+
 	ctx := context.Background()
-	
+
 	// Should use optimized single-device path
 	continued, err := manager.LogRequest(ctx, entry)
 	if err != nil {
@@ -138,13 +138,13 @@ func TestManagerSingleDeviceOptimization(t *testing.T) {
 	if !continued {
 		t.Error("Expected continue=true but got false")
 	}
-	
+
 	// Verify log was written
 	content, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Errorf("Failed to read log: %v", err)
 	}
-	
+
 	if len(content) == 0 {
 		t.Error("Log file is empty")
 	}
@@ -153,7 +153,7 @@ func TestManagerSingleDeviceOptimization(t *testing.T) {
 func TestManagerEmptyDevices(t *testing.T) {
 	manager := NewAuditManager(logger.NewZerologLogger(logger.DefaultConfig()))
 	defer manager.Close()
-	
+
 	entry := &LogEntry{
 		Timestamp: time.Now(),
 		Request: &Request{
@@ -163,9 +163,9 @@ func TestManagerEmptyDevices(t *testing.T) {
 			ClientIP:  "192.168.1.100",
 		},
 	}
-	
+
 	ctx := context.Background()
-	
+
 	// Should handle empty device list gracefully
 	continued, err := manager.LogRequest(ctx, entry)
 	if err != nil {
@@ -174,7 +174,7 @@ func TestManagerEmptyDevices(t *testing.T) {
 	if continued {
 		t.Error("Expected continue=false with no devices but got true")
 	}
-	
+
 	continued, err = manager.LogResponse(ctx, entry)
 	if err != nil {
 		t.Errorf("LogResponse with no devices should not error: %v", err)
@@ -187,26 +187,26 @@ func TestManagerEmptyDevices(t *testing.T) {
 func TestManagerDisabledDevices(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "audit.log")
-	
+
 	sink, err := NewFileSink(FileSinkConfig{
 		Path: logPath,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create sink: %v", err)
 	}
-	
+
 	format := NewJSONFormat()
 	device := NewDevice("disabled", format, sink, &DeviceConfig{
 		Name:    "disabled",
 		Enabled: false, // Disabled!
 	})
-	
+
 	manager := NewAuditManager(logger.NewZerologLogger(logger.DefaultConfig()))
 	if err := manager.RegisterDevice("disabled", device); err != nil {
 		t.Fatalf("Failed to register device: %v", err)
 	}
 	defer manager.Close()
-	
+
 	entry := &LogEntry{
 		Timestamp: time.Now(),
 		Request: &Request{
@@ -216,9 +216,9 @@ func TestManagerDisabledDevices(t *testing.T) {
 			ClientIP:  "192.168.1.100",
 		},
 	}
-	
+
 	ctx := context.Background()
-	
+
 	// Should skip disabled devices
 	continued, err := manager.LogRequest(ctx, entry)
 	if err != nil {
@@ -227,13 +227,13 @@ func TestManagerDisabledDevices(t *testing.T) {
 	if continued {
 		t.Error("Expected continue=false with disabled devices but got true")
 	}
-	
+
 	// Verify no log was written
 	content, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Errorf("Failed to read log: %v", err)
 	}
-	
+
 	if len(content) > 0 {
 		t.Error("Disabled device should not write logs")
 	}
@@ -243,7 +243,7 @@ func TestManagerErrorAggregation(t *testing.T) {
 	// Create manager with multiple devices, some will fail
 	manager := NewAuditManager(logger.NewZerologLogger(logger.DefaultConfig()))
 	defer manager.Close()
-	
+
 	// Device 1: will succeed
 	tmpDir1 := t.TempDir()
 	sink1, _ := NewFileSink(FileSinkConfig{
@@ -255,7 +255,7 @@ func TestManagerErrorAggregation(t *testing.T) {
 		Enabled: true,
 	})
 	manager.RegisterDevice("device1", device1)
-	
+
 	// Device 2: will fail (invalid path)
 	sink2, err := NewFileSink(FileSinkConfig{
 		Path: "/nonexistent/path/audit2.log",
@@ -268,7 +268,7 @@ func TestManagerErrorAggregation(t *testing.T) {
 		})
 		manager.RegisterDevice("device2", device2)
 	}
-	
+
 	entry := &LogEntry{
 		Timestamp: time.Now(),
 		Request: &Request{
@@ -278,9 +278,9 @@ func TestManagerErrorAggregation(t *testing.T) {
 			ClientIP:  "192.168.1.100",
 		},
 	}
-	
+
 	ctx := context.Background()
-	
+
 	// Should return error but device1 should have written, so continue should be true
 	continued, err := manager.LogRequest(ctx, entry)
 	if err != nil {
@@ -289,7 +289,7 @@ func TestManagerErrorAggregation(t *testing.T) {
 	if !continued {
 		t.Error("Expected continue=true since device1 succeeded, but got false")
 	}
-	
+
 	// Verify device1 wrote successfully
 	content, _ := os.ReadFile(filepath.Join(tmpDir1, "audit1.log"))
 	if len(content) == 0 {
@@ -301,7 +301,7 @@ func TestManagerPartialFailure(t *testing.T) {
 	// Test case where some devices succeed and some fail
 	manager := NewAuditManager(logger.NewZerologLogger(logger.DefaultConfig()))
 	defer manager.Close()
-	
+
 	// Device 1: succeeds
 	tmpDir1 := t.TempDir()
 	sink1, _ := NewFileSink(FileSinkConfig{
@@ -313,7 +313,7 @@ func TestManagerPartialFailure(t *testing.T) {
 		Enabled: true,
 	})
 	manager.RegisterDevice("device1", device1)
-	
+
 	entry := &LogEntry{
 		Timestamp: time.Now(),
 		Request: &Request{
@@ -323,9 +323,9 @@ func TestManagerPartialFailure(t *testing.T) {
 			ClientIP:  "192.168.1.100",
 		},
 	}
-	
+
 	ctx := context.Background()
-	
+
 	// With one device succeeding, continue should be true even if there are errors
 	continued, err := manager.LogRequest(ctx, entry)
 	if err != nil {
@@ -340,7 +340,7 @@ func TestManagerAllDevicesFail(t *testing.T) {
 	// Test case where all devices fail
 	manager := NewAuditManager(logger.NewZerologLogger(logger.DefaultConfig()))
 	defer manager.Close()
-	
+
 	// Device with invalid path that will fail
 	sink, err := NewFileSink(FileSinkConfig{
 		Path: "/nonexistent/path/audit.log",
@@ -352,7 +352,7 @@ func TestManagerAllDevicesFail(t *testing.T) {
 			Enabled: true,
 		})
 		manager.RegisterDevice("failing", device)
-		
+
 		entry := &LogEntry{
 			Timestamp: time.Now(),
 			Request: &Request{
@@ -362,9 +362,9 @@ func TestManagerAllDevicesFail(t *testing.T) {
 				ClientIP:  "192.168.1.100",
 			},
 		}
-		
+
 		ctx := context.Background()
-		
+
 		// All devices failed, continue should be false
 		continued, err := manager.LogRequest(ctx, entry)
 		if err == nil {
@@ -379,33 +379,33 @@ func TestManagerAllDevicesFail(t *testing.T) {
 func TestManagerConcurrentLogging(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "audit.log")
-	
+
 	sink, err := NewFileSink(FileSinkConfig{
 		Path: logPath,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create sink: %v", err)
 	}
-	
+
 	format := NewJSONFormat()
 	device := NewDevice("concurrent", format, sink, &DeviceConfig{
 		Name:    "concurrent",
 		Enabled: true,
 	})
-	
+
 	manager := NewAuditManager(logger.NewZerologLogger(logger.DefaultConfig()))
 	if err := manager.RegisterDevice("concurrent", device); err != nil {
 		t.Fatalf("Failed to register device: %v", err)
 	}
 	defer manager.Close()
-	
+
 	ctx := context.Background()
-	
+
 	// Concurrent logging from multiple goroutines
 	var wg sync.WaitGroup
 	numGoroutines := 10
 	entriesPerGoroutine := 100
-	
+
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
 		go func(id int) {
@@ -420,7 +420,7 @@ func TestManagerConcurrentLogging(t *testing.T) {
 						ClientIP:  "192.168.1.100",
 					},
 				}
-				
+
 				continued, err := manager.LogRequest(ctx, entry)
 				if err != nil {
 					t.Errorf("Concurrent LogRequest failed: %v", err)
@@ -431,15 +431,15 @@ func TestManagerConcurrentLogging(t *testing.T) {
 			}
 		}(i)
 	}
-	
+
 	wg.Wait()
-	
+
 	// Verify logs were written
 	content, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Errorf("Failed to read log: %v", err)
 	}
-	
+
 	if len(content) == 0 {
 		t.Error("No logs written during concurrent test")
 	}
@@ -448,7 +448,7 @@ func TestManagerConcurrentLogging(t *testing.T) {
 func BenchmarkManagerSingleDevice(b *testing.B) {
 	tmpDir := b.TempDir()
 	logPath := filepath.Join(tmpDir, "bench.log")
-	
+
 	sink, _ := NewFileSink(FileSinkConfig{
 		Path: logPath,
 	})
@@ -457,11 +457,11 @@ func BenchmarkManagerSingleDevice(b *testing.B) {
 		Name:    "bench",
 		Enabled: true,
 	})
-	
+
 	manager := NewAuditManager(logger.NewZerologLogger(logger.DefaultConfig()))
 	manager.RegisterDevice("bench", device)
 	defer manager.Close()
-	
+
 	entry := &LogEntry{
 		Timestamp: time.Now(),
 		Request: &Request{
@@ -471,10 +471,10 @@ func BenchmarkManagerSingleDevice(b *testing.B) {
 			ClientIP:  "192.168.1.100",
 		},
 	}
-	
+
 	ctx := context.Background()
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		manager.LogRequest(ctx, entry)
 	}
@@ -483,12 +483,12 @@ func BenchmarkManagerSingleDevice(b *testing.B) {
 func BenchmarkManagerMultiDeviceParallel(b *testing.B) {
 	manager := NewAuditManager(logger.NewZerologLogger(logger.DefaultConfig())) // parallel=true
 	defer manager.Close()
-	
+
 	numDevices := 5
 	for i := 0; i < numDevices; i++ {
 		tmpDir := b.TempDir()
 		logPath := filepath.Join(tmpDir, fmt.Sprintf("bench-%d.log", i))
-		
+
 		sink, _ := NewFileSink(FileSinkConfig{
 			Path: logPath,
 		})
@@ -499,7 +499,7 @@ func BenchmarkManagerMultiDeviceParallel(b *testing.B) {
 		})
 		manager.RegisterDevice(fmt.Sprintf("bench-%d", i), device)
 	}
-	
+
 	entry := &LogEntry{
 		Timestamp: time.Now(),
 		Request: &Request{
@@ -509,10 +509,10 @@ func BenchmarkManagerMultiDeviceParallel(b *testing.B) {
 			ClientIP:  "192.168.1.100",
 		},
 	}
-	
+
 	ctx := context.Background()
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		manager.LogRequest(ctx, entry)
 	}
@@ -520,16 +520,16 @@ func BenchmarkManagerMultiDeviceParallel(b *testing.B) {
 
 func BenchmarkManagerMultiDeviceSequential(b *testing.B) {
 	manager := NewAuditManagerWithConfig(AuditManagerConfig{
-		Logger: logger.NewZerologLogger(logger.DefaultConfig()),
+		Logger:   logger.NewZerologLogger(logger.DefaultConfig()),
 		Parallel: false,
 	})
 	defer manager.Close()
-	
+
 	numDevices := 5
 	for i := 0; i < numDevices; i++ {
 		tmpDir := b.TempDir()
 		logPath := filepath.Join(tmpDir, fmt.Sprintf("bench-%d.log", i))
-		
+
 		sink, _ := NewFileSink(FileSinkConfig{
 			Path: logPath,
 		})
@@ -540,7 +540,7 @@ func BenchmarkManagerMultiDeviceSequential(b *testing.B) {
 		})
 		manager.RegisterDevice(fmt.Sprintf("bench-%d", i), device)
 	}
-	
+
 	entry := &LogEntry{
 		Timestamp: time.Now(),
 		Request: &Request{
@@ -550,10 +550,10 @@ func BenchmarkManagerMultiDeviceSequential(b *testing.B) {
 			ClientIP:  "192.168.1.100",
 		},
 	}
-	
+
 	ctx := context.Background()
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		manager.LogRequest(ctx, entry)
 	}

@@ -4,7 +4,7 @@ import "sync"
 
 type TargetRegistry struct {
 	targets map[string]Target
-	mu    sync.RWMutex
+	mu      sync.RWMutex
 }
 
 func NewTargetRegistry() *TargetRegistry {
@@ -28,4 +28,3 @@ func (r *TargetRegistry) GetTarget(name string) (Target, bool) {
 	}
 	return target, true
 }
-

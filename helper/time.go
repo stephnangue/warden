@@ -7,7 +7,7 @@ import (
 
 func FormatTTL(ttlNano int64) string {
 	d := time.Duration(ttlNano) * time.Nanosecond
-	
+
 	if d.Hours() >= 1 {
 		return fmt.Sprintf("%.1fh", d.Hours())
 	}

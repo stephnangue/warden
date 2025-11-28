@@ -13,12 +13,12 @@ const (
 )
 
 type Token struct {
-	ID           string
-	Type         string
-	ExpireAt     time.Time
-	Data         map[string]string
-	mu           sync.RWMutex
-	used         bool
+	ID       string
+	Type     string
+	ExpireAt time.Time
+	Data     map[string]string
+	mu       sync.RWMutex
+	used     bool
 }
 
 func (t *Token) HasBeenUsed() bool {
@@ -34,12 +34,12 @@ func (t *Token) SetUsed() {
 }
 
 type AuthData struct {
-	PrincipalID         string
-	RoleName            string
-	AuthDeadline        time.Time
-	ExpireAt            time.Time
-	RequestContext      map[string]string
-	token               *Token
+	PrincipalID    string
+	RoleName       string
+	AuthDeadline   time.Time
+	ExpireAt       time.Time
+	RequestContext map[string]string
+	token          *Token
 }
 
 func (a *AuthData) SetToken(token *Token) {

@@ -25,7 +25,7 @@ func NewS3Processor(proxyDomains []string, log logger.Logger) *S3Processor {
 	return &S3Processor{
 		BaseProcessor: processor.BaseProcessor{
 			ProcName:     "s3",
-			ProcPriority: 100, 
+			ProcPriority: 100,
 			ProxyDomains: proxyDomains,
 		},
 		log: log,
@@ -54,7 +54,7 @@ func (p *S3Processor) CanProcess(ctx *processor.ProcessorContext) bool {
 		}
 		return true
 	}
-	
+
 	return false
 }
 
@@ -69,13 +69,13 @@ func (p *S3Processor) Process(ctx *processor.ProcessorContext) (*processor.Proce
 		Service:  "s3",
 		Metadata: make(map[string]interface{}),
 	}
-	
+
 	// Handle virtual-hosted-style URL
 	if hostRewrite != nil && hostRewrite.Prefix != "" {
 		// Virtual-hosted-style: bucket-name.s3.region.amazonaws.com
-		result.TargetURL = fmt.Sprintf("https://%s.s3.%s.amazonaws.com", 
+		result.TargetURL = fmt.Sprintf("https://%s.s3.%s.amazonaws.com",
 			hostRewrite.Prefix, ctx.Region)
-		result.TargetHost = fmt.Sprintf("%s.s3.%s.amazonaws.com", 
+		result.TargetHost = fmt.Sprintf("%s.s3.%s.amazonaws.com",
 			hostRewrite.Prefix, ctx.Region)
 		result.Metadata["bucket_name"] = hostRewrite.Prefix
 		result.Metadata["style"] = "virtual-hosted"
@@ -85,7 +85,7 @@ func (p *S3Processor) Process(ctx *processor.ProcessorContext) (*processor.Proce
 		result.TargetHost = fmt.Sprintf("s3.%s.amazonaws.com", ctx.Region)
 		result.Metadata["style"] = "path"
 	}
-	
+
 	// compute the AWS path relative to the provider path
 	actualPath := ctx.OriginalPath
 	if after, ok := strings.CutPrefix(ctx.OriginalPath, ctx.RelativePath); ok {
@@ -99,45 +99,45 @@ func (p *S3Processor) Process(ctx *processor.ProcessorContext) (*processor.Proce
 		actualPath = "/" + actualPath
 	}
 
-	result.TransformedPath  = actualPath
+	result.TransformedPath = actualPath
 
 	// p.log.Debug("S3 Standard request",
 	// 	logger.String("target", result.TargetURL),
 	// 	logger.String("path", result.TransformedPath),
 	// 	logger.String("request_id", middleware.GetReqID(ctx.Ctx)),
 	// )
-	
+
 	return result, nil
 }
 
 // parseHost extracts bucket information from the host
 func (p *S3Processor) parseHost(ctx *processor.ProcessorContext) *processor.HostRewrite {
 	host := ctx.Request.Host
-	
+
 	// Remove port if present
 	if idx := strings.Index(host, ":"); idx != -1 {
 		host = host[:idx]
 	}
-	
+
 	// Split host into parts
 	parts := strings.Split(host, ".")
-	
+
 	// Need at least 2 parts
 	if len(parts) < 2 {
 		return nil
 	}
-	
+
 	// Skip if already an AWS domain
 	if strings.Contains(host, ".amazonaws.com") {
 		return nil
 	}
-	
+
 	// Check if the base domain matches proxy domains
 	baseDomain := strings.Join(parts[len(parts)-2:], ".")
 	if !p.IsProxyDomain(baseDomain) {
 		return nil
 	}
-	
+
 	// Pattern 1: bucket.s3.proxy-domain (explicit S3)
 	if len(parts) >= 3 && parts[1] == "s3" {
 		return &processor.HostRewrite{
@@ -145,7 +145,7 @@ func (p *S3Processor) parseHost(ctx *processor.ProcessorContext) *processor.Host
 			Prefix:  parts[0],
 		}
 	}
-	
+
 	// Pattern 2: bucket.proxy-domain (implicit S3)
 	if len(parts) == 2 {
 		return &processor.HostRewrite{
@@ -171,7 +171,7 @@ func (p *S3Processor) parseHost(ctx *processor.ProcessorContext) *processor.Host
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -179,7 +179,7 @@ func (p *S3Processor) Metadata() *processor.ProcessorMetadata {
 	return &processor.ProcessorMetadata{
 		ServiceNames: []string{"s3"},
 		HostPatterns: []string{"*.s3.*"},
-		Priority:     100, 
+		Priority:     100,
 	}
 }
 

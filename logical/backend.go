@@ -11,9 +11,8 @@ type Backend interface {
 	Cleanup()
 }
 
-
 type ContextKey string
 
 const (
-    OriginalPath ContextKey = "originalPath"
+	OriginalPath ContextKey = "originalPath"
 )

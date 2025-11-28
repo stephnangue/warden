@@ -22,11 +22,11 @@ func (p *AWSProvider) auditResponse(res *http.Response, r *http.Request, clientT
 		data := make(map[string]string, len(clientToken.Data))
 		maps.Copy(data, clientToken.Data)
 		auth = p.buildAuth(&audit.Token{
-			Type: clientToken.Type,
-			TokenID: clientToken.TokenID,
-			TokenTTL: clientToken.TokenTTL,
+			Type:        clientToken.Type,
+			TokenID:     clientToken.TokenID,
+			TokenTTL:    clientToken.TokenTTL,
 			TokenIssuer: clientToken.TokenIssuer,
-			Data: data,
+			Data:        data,
 		}, roleName, principalID)
 	}
 
@@ -79,7 +79,7 @@ func (p *AWSProvider) buildRequest(r *http.Request, targetURL string) *audit.Req
 func (p *AWSProvider) buildResponse(res *http.Response, cred *audit.Cred, statusCode int, message string) *audit.Response {
 	// Read body for logging
 	bodyBytes, _ := io.ReadAll(res.Body)
-	
+
 	// Restore body
 	res.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
@@ -125,7 +125,7 @@ func (p *AWSProvider) buildCred(token *token.Token, awsCreds *aws.Credentials) *
 			LeaseTTL: int64(time.Until(awsCreds.Expires).Seconds()),
 			TokenID:  token.ID,
 			Origin:   awsCreds.Source,
-			Data:     map[string]string{
+			Data: map[string]string{
 				"access_key_id":     awsCreds.AccessKeyID,
 				"secret_access_key": awsCreds.SecretAccessKey,
 				"session_token":     awsCreds.SessionToken,
@@ -133,10 +133,10 @@ func (p *AWSProvider) buildCred(token *token.Token, awsCreds *aws.Credentials) *
 		}
 	} else {
 		return &audit.Cred{
-			Type:     credType,
-			TokenID:  token.ID,
-			Origin:   awsCreds.Source,
-			Data:     map[string]string{
+			Type:    credType,
+			TokenID: token.ID,
+			Origin:  awsCreds.Source,
+			Data: map[string]string{
 				"access_key_id":     awsCreds.AccessKeyID,
 				"secret_access_key": awsCreds.SecretAccessKey,
 			},

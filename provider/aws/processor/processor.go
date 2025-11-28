@@ -13,56 +13,56 @@ import (
 // ProcessorContext contains all the information needed by processors
 type ProcessorContext struct {
 	// Request information
-	Request       *http.Request
-	BodyBytes     []byte
-	OriginalPath  string
-	RelativePath  string
-	
+	Request      *http.Request
+	BodyBytes    []byte
+	OriginalPath string
+	RelativePath string
+
 	// Authentication
-	Credentials   aws.Credentials
-	AWSCreds      aws.Credentials
-	AccessKeyID   string
-	RoleName      string
-	PrincipalID   string
-	TokenTTL      time.Duration
-	
+	Credentials aws.Credentials
+	AWSCreds    aws.Credentials
+	AccessKeyID string
+	RoleName    string
+	PrincipalID string
+	TokenTTL    time.Duration
+
 	// AWS metadata
-	Service       string
-	Region        string
-	
+	Service string
+	Region  string
+
 	// Context
-	Ctx           context.Context
+	Ctx context.Context
 }
 
 // ProcessorResult contains the result of processing
 type ProcessorResult struct {
 	// Endpoint information
-	TargetURL     string
-	TargetHost    string
-	
+	TargetURL  string
+	TargetHost string
+
 	// Path transformation
 	TransformedPath string
-	
+
 	// Service override (if processor changes the service)
-	Service       string
-	
+	Service string
+
 	// Additional metadata
-	Metadata      map[string]any
+	Metadata map[string]any
 }
 
 // RequestProcessor defines the interface for request processors
 type RequestProcessor interface {
 	// Name returns the processor name for logging
 	Name() string
-	
+
 	// CanProcess determines if this processor can handle the request
 	// It examines the request, headers, host, etc. to make this determination
 	CanProcess(ctx *ProcessorContext) bool
-	
+
 	// Process handles the request transformation
 	// Returns the result or an error
 	Process(ctx *ProcessorContext) (*ProcessorResult, error)
-	
+
 	// Priority returns the processor priority (higher = checked first)
 	// This allows certain processors to take precedence
 	Priority() int
@@ -78,7 +78,7 @@ type RequestProcessor interface {
 type BaseProcessor struct {
 	ProcName     string
 	ProcPriority int
-	ProxyDomains  []string
+	ProxyDomains []string
 }
 
 func (bp *BaseProcessor) Name() string {
@@ -89,7 +89,7 @@ func (bp *BaseProcessor) Priority() int {
 	return bp.ProcPriority
 }
 
-func (bp *BaseProcessor)IsProxyDomain(domain string) bool {
+func (bp *BaseProcessor) IsProxyDomain(domain string) bool {
 	for _, proxyDomain := range bp.ProxyDomains {
 		if domain == proxyDomain || strings.HasSuffix(domain, "."+proxyDomain) {
 			return true
@@ -110,16 +110,16 @@ type HostRewrite struct {
 type ProcessorRegistry struct {
 	// Strategy 1: Direct service name lookup (O(1))
 	serviceMap map[string][]RequestProcessor
-	
+
 	// Strategy 2: Host pattern lookup (O(1))
 	hostPatternMap map[string][]RequestProcessor
-	
+
 	// Strategy 3: Priority-ordered fallback list (O(n) for edge cases)
 	fallbackProcessors []RequestProcessor
-	
+
 	// All processors for iteration
 	allProcessors []RequestProcessor
-	
+
 	// Stats for monitoring
 	stats ProcessorStats
 	mu    sync.RWMutex
@@ -138,13 +138,13 @@ type ProcessorStats struct {
 type ProcessorMetadata struct {
 	// Service names this processor handles (for direct lookup)
 	ServiceNames []string
-	
+
 	// Host patterns this processor handles (e.g., "*.s3-accesspoint.*")
 	HostPatterns []string
-	
+
 	// If true, this processor is only checked in fallback
 	FallbackOnly bool
-	
+
 	// Priority for ordering
 	Priority int
 }
@@ -166,22 +166,22 @@ func NewProcessorRegistry() *ProcessorRegistry {
 func (pr *ProcessorRegistry) Register(processor RequestProcessor) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
-	
+
 	pr.allProcessors = append(pr.allProcessors, processor)
-	
+
 	// Check if processor provides metadata
 	metadata := processor.Metadata()
-	if metadata != nil {	
+	if metadata != nil {
 		// Register by service name
 		for _, serviceName := range metadata.ServiceNames {
 			pr.serviceMap[serviceName] = append(pr.serviceMap[serviceName], processor)
 		}
-		
+
 		// Register by host pattern
 		for _, pattern := range metadata.HostPatterns {
 			pr.hostPatternMap[pattern] = append(pr.hostPatternMap[pattern], processor)
 		}
-		
+
 		// Register in fallback if needed
 		if metadata.FallbackOnly {
 			pr.fallbackProcessors = append(pr.fallbackProcessors, processor)
@@ -190,7 +190,7 @@ func (pr *ProcessorRegistry) Register(processor RequestProcessor) {
 		// No metadata - add to fallback
 		pr.fallbackProcessors = append(pr.fallbackProcessors, processor)
 	}
-	
+
 	// Sort fallback processors by priority
 	pr.sortProcessors()
 }
@@ -203,21 +203,21 @@ func (pr *ProcessorRegistry) FindProcessor(ctx *ProcessorContext) RequestProcess
 		pr.recordProcessorUse(processor.Name())
 		return processor
 	}
-	
+
 	// Strategy 2: Host pattern lookup (O(1))
 	if processor := pr.findByHostPattern(ctx); processor != nil {
 		pr.recordHit("host_pattern")
 		pr.recordProcessorUse(processor.Name())
 		return processor
 	}
-	
+
 	// Strategy 3: Fallback linear search (O(n))
 	if processor := pr.findByFallback(ctx); processor != nil {
 		pr.recordHit("fallback")
 		pr.recordProcessorUse(processor.Name())
 		return processor
 	}
-	
+
 	return nil
 }
 
@@ -226,18 +226,18 @@ func (pr *ProcessorRegistry) findByService(ctx *ProcessorContext) RequestProcess
 	pr.mu.RLock()
 	processors, exists := pr.serviceMap[ctx.Service]
 	pr.mu.RUnlock()
-	
+
 	if !exists {
 		return nil
 	}
-	
+
 	// Check processors registered for this service
 	for _, processor := range processors {
 		if processor.CanProcess(ctx) {
 			return processor
 		}
 	}
-	
+
 	return nil
 }
 
@@ -246,15 +246,15 @@ func (pr *ProcessorRegistry) findByHostPattern(ctx *ProcessorContext) RequestPro
 	if ctx.Request == nil {
 		return nil
 	}
-	
+
 	host := ctx.Request.Host
 	if idx := strings.Index(host, ":"); idx != -1 {
 		host = host[:idx]
 	}
-	
+
 	pr.mu.RLock()
 	defer pr.mu.RUnlock()
-	
+
 	// Try exact matches first
 	if processors, exists := pr.hostPatternMap[host]; exists {
 		for _, processor := range processors {
@@ -263,7 +263,7 @@ func (pr *ProcessorRegistry) findByHostPattern(ctx *ProcessorContext) RequestPro
 			}
 		}
 	}
-	
+
 	// Try pattern matches
 	for pattern, processors := range pr.hostPatternMap {
 		if matchHostPattern(host, pattern) {
@@ -274,7 +274,7 @@ func (pr *ProcessorRegistry) findByHostPattern(ctx *ProcessorContext) RequestPro
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -283,13 +283,13 @@ func (pr *ProcessorRegistry) findByFallback(ctx *ProcessorContext) RequestProces
 	pr.mu.RLock()
 	processors := pr.fallbackProcessors
 	pr.mu.RUnlock()
-	
+
 	for _, processor := range processors {
 		if processor.CanProcess(ctx) {
 			return processor
 		}
 	}
-	
+
 	return nil
 }
 
@@ -299,7 +299,7 @@ func matchHostPattern(host, pattern string) bool {
 	if pattern == "*" {
 		return true
 	}
-	
+
 	// Simple wildcard matching
 	if strings.Contains(pattern, "*") {
 		parts := strings.Split(pattern, "*")
@@ -316,7 +316,7 @@ func matchHostPattern(host, pattern string) bool {
 		}
 		return true
 	}
-	
+
 	return host == pattern
 }
 
@@ -330,7 +330,7 @@ func (pr *ProcessorRegistry) sortProcessors() {
 			}
 		}
 	}
-	
+
 	// Sort fallback processors
 	for i := 0; i < len(pr.fallbackProcessors)-1; i++ {
 		for j := i + 1; j < len(pr.fallbackProcessors); j++ {
@@ -345,7 +345,7 @@ func (pr *ProcessorRegistry) sortProcessors() {
 func (pr *ProcessorRegistry) recordHit(strategy string) {
 	pr.stats.mu.Lock()
 	defer pr.stats.mu.Unlock()
-	
+
 	switch strategy {
 	case "service_map":
 		pr.stats.ServiceMapHits++
@@ -367,9 +367,9 @@ func (pr *ProcessorRegistry) recordProcessorUse(name string) {
 func (pr *ProcessorRegistry) GetStats() map[string]interface{} {
 	pr.stats.mu.RLock()
 	defer pr.stats.mu.RUnlock()
-	
+
 	total := pr.stats.ServiceMapHits + pr.stats.HostPatternHits + pr.stats.FallbackHits
-	
+
 	return map[string]interface{}{
 		"total_requests":       total,
 		"service_map_hits":     pr.stats.ServiceMapHits,

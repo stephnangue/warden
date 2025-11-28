@@ -12,22 +12,22 @@ import (
 type Client struct {
 	*vaultapi.Client
 	tokenManager *TokenManager
-	logger logger.Logger
+	logger       logger.Logger
 }
 
 type Config struct {
-	Address   string
-	AuthMethod string
+	Address          string
+	AuthMethod       string
 	AppRoleMountPath string
-	RoleId	string
-	SecretId string
-	Namespace string
+	RoleId           string
+	SecretId         string
+	Namespace        string
 }
 
 func NewClientWithTokenManager(cfg Config, logger logger.Logger) (VaultClient, error) {
 	apiCfg := vaultapi.DefaultConfig()
 	apiCfg.Address = cfg.Address
-	
+
 	apiClient, err := vaultapi.NewClient(apiCfg)
 	if err != nil {
 		return nil, err
@@ -35,8 +35,8 @@ func NewClientWithTokenManager(cfg Config, logger logger.Logger) (VaultClient, e
 	apiClient.SetNamespace(cfg.Namespace)
 
 	appRoleConf := AppRoleConfig{
-		RoleID: cfg.RoleId,
-		SecretID: cfg.SecretId,
+		RoleID:    cfg.RoleId,
+		SecretID:  cfg.SecretId,
 		MountPath: cfg.AppRoleMountPath,
 		Namespace: cfg.Namespace,
 	}
@@ -45,9 +45,9 @@ func NewClientWithTokenManager(cfg Config, logger logger.Logger) (VaultClient, e
 	tokenManager := NewTokenManager(apiClient, &appRoleConf, tokenMgtLogger)
 
 	return &Client{
-		Client: apiClient,
+		Client:       apiClient,
 		tokenManager: tokenManager,
-		logger: logger,
+		logger:       logger,
 	}, nil
 }
 
@@ -85,9 +85,9 @@ func (c *Client) DeletePolicy(ctx context.Context, namespace string, policyName 
 func (c *Client) PutEgpPolicy(ctx context.Context, namespace string, policyName string, paths []string, policy string, enforcementLevel string) error {
 	path := fmt.Sprintf("sys/policies/egp/%s", policyName)
 	data := map[string]any{
-		"policy": policy,
+		"policy":            policy,
 		"enforcement_level": enforcementLevel,
-		"paths": paths,
+		"paths":             paths,
 	}
 	_, err := c.WithNamespace(namespace).Logical().WriteWithContext(ctx, path, data)
 	if err != nil {
@@ -103,28 +103,28 @@ func (c *Client) Health() (map[string]any, error) {
 	}
 	// Convert the HealthResponse to a map for easier JSON serialization
 	result := map[string]any{
-		"Initialized":    health.Initialized,
-		"Sealed":         health.Sealed,
-		"Standby":        health.Standby,
-		"PerformanceStandby": health.PerformanceStandby,
+		"Initialized":                health.Initialized,
+		"Sealed":                     health.Sealed,
+		"Standby":                    health.Standby,
+		"PerformanceStandby":         health.PerformanceStandby,
 		"ReplicationPerformanceMode": health.ReplicationPerformanceMode,
-		"ServerTimeUtc":   health.ServerTimeUTC,
-		"Version":         health.Version,
-		"ClusterName":     health.ClusterName,
-		"ClusterID":       health.ClusterID,
-		"Enterprise":      health.Enterprise,
+		"ServerTimeUtc":              health.ServerTimeUTC,
+		"Version":                    health.Version,
+		"ClusterName":                health.ClusterName,
+		"ClusterID":                  health.ClusterID,
+		"Enterprise":                 health.Enterprise,
 	}
 	return result, nil
 }
 
 func (c *Client) GetEntityId(ctx context.Context, name string) (string, error) {
-	entity, err := c.Logical().ReadWithContext(ctx, 
+	entity, err := c.Logical().ReadWithContext(ctx,
 		fmt.Sprintf("identity/entity/name/%s", name))
 	if err != nil {
-		return "",  err
+		return "", err
 	}
 	if entity == nil {
-		return "",  nil // Entity not found
+		return "", nil // Entity not found
 	}
 	return entity.Data["id"].(string), nil
 }
@@ -147,7 +147,7 @@ func (c *Client) PutEntity(ctx context.Context, name string, metadata map[string
 func (c *Client) PutEntityAlias(ctx context.Context, name string, entityId string, mountAccessor string) (string, error) {
 	aliasData := map[string]any{
 		"name":           name,
-		"canonical_id":  entityId,
+		"canonical_id":   entityId,
 		"mount_accessor": mountAccessor,
 	}
 	data, err := c.Logical().Write("identity/entity-alias", aliasData)
@@ -167,13 +167,13 @@ func (c *Client) RecycleEntity(ctx context.Context, name string, metadata map[st
 
 func (c *Client) CreateTokenWithRole(ctx context.Context, roleName string, meta map[string]string, data map[string]any, policies []string) (map[string]any, error) {
 	tokenData := map[string]any{
-		"entity_alias": data["entity_alias"],
-		"meta":         meta,
-		"policies":  policies,
-		"ttl":      data["ttl"],
-		"renewable": data["renewable"],
-		"type":     data["type"],
-		"num_uses": data["num_uses"],
+		"entity_alias":     data["entity_alias"],
+		"meta":             meta,
+		"policies":         policies,
+		"ttl":              data["ttl"],
+		"renewable":        data["renewable"],
+		"type":             data["type"],
+		"num_uses":         data["num_uses"],
 		"explicit_max_ttl": data["max_ttl"],
 	}
 	secret, err := c.Logical().WriteWithContext(ctx,
@@ -192,12 +192,12 @@ func (c *Client) CreateTokenWithRole(ctx context.Context, roleName string, meta 
 
 func (c *Client) CreateToken(ctx context.Context, namespace string, meta map[string]string, data map[string]any, policies []string) (map[string]any, error) {
 	tokenData := map[string]any{
-		"meta":     meta,
-		"policies": policies,
-		"ttl":      data["ttl"],
-		"renewable": data["renewable"],
-		"type":     data["type"],
-		"num_uses": data["num_uses"],
+		"meta":             meta,
+		"policies":         policies,
+		"ttl":              data["ttl"],
+		"renewable":        data["renewable"],
+		"type":             data["type"],
+		"num_uses":         data["num_uses"],
 		"explicit_max_ttl": data["max_ttl"],
 	}
 	secret, err := c.WithNamespace(namespace).Logical().WriteWithContext(ctx, "auth/token/create", tokenData)
@@ -236,7 +236,7 @@ func (c *Client) CreateTokenRole(ctx context.Context, roleName string, params ma
 
 func (c *Client) CreateNamespace(ctx context.Context, parent, child string, meta map[string]any) error {
 	path := fmt.Sprintf("sys/namespaces/%s", child)
-	
+
 	_, err := c.WithNamespace(parent).Logical().WriteWithContext(ctx, path, meta)
 	if err != nil {
 		return err
@@ -247,4 +247,3 @@ func (c *Client) CreateNamespace(ctx context.Context, parent, child string, meta
 func (c *Client) VaultAddress() string {
 	return c.Address()
 }
-

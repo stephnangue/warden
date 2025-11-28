@@ -13,39 +13,38 @@ import (
 	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
-	"github.com/stephnangue/warden/role"
 )
 
 // JWTAuthConfig represents JWT/OIDC authentication configuration
 type JWTAuthConfig struct {
-	Name               string            `json:"name"`
-	Type               string            `json:"type" default:"jwt"` // "jwt" or "oidc"
-	
+	Name string `json:"name"`
+	Type string `json:"type" default:"jwt"` // "jwt" or "oidc"
+
 	// OIDC Discovery
-	OIDCDiscoveryURL   string            `json:"oidc_discovery_url,omitempty"`
-	OIDCDiscoveryCA    string            `json:"oidc_discovery_ca_pem,omitempty"`
-	
+	OIDCDiscoveryURL string `json:"oidc_discovery_url,omitempty"`
+	OIDCDiscoveryCA  string `json:"oidc_discovery_ca_pem,omitempty"`
+
 	// JWT/JWKS
-	JWKSURL            string            `json:"jwks_url,omitempty"`
-	JWKSCA             string            `json:"jwks_ca_pem,omitempty"`
-	JWTValidationPubKeys []string        `json:"jwt_validation_pubkeys,omitempty"`
-	
+	JWKSURL              string   `json:"jwks_url,omitempty"`
+	JWKSCA               string   `json:"jwks_ca_pem,omitempty"`
+	JWTValidationPubKeys []string `json:"jwt_validation_pubkeys,omitempty"`
+
 	// Validation
-	BoundIssuer        string            `json:"bound_issuer,omitempty"`
-	BoundAudiences     []string          `json:"bound_audiences,omitempty"`
-	BoundSubject       string            `json:"bound_subject,omitempty"`
-	BoundClaims        map[string]any    `json:"bound_claims,omitempty"`
-	ClaimMappings      map[string]string `json:"claim_mappings,omitempty"`
-	UserClaim          string            `json:"user_claim,omitempty" default:"sub"`
-	GroupsClaim        string            `json:"groups_claim,omitempty" default:"groups"`
-	
+	BoundIssuer    string            `json:"bound_issuer,omitempty"`
+	BoundAudiences []string          `json:"bound_audiences,omitempty"`
+	BoundSubject   string            `json:"bound_subject,omitempty"`
+	BoundClaims    map[string]any    `json:"bound_claims,omitempty"`
+	ClaimMappings  map[string]string `json:"claim_mappings,omitempty"`
+	UserClaim      string            `json:"user_claim,omitempty" default:"sub"`
+	GroupsClaim    string            `json:"groups_claim,omitempty" default:"groups"`
+
 	// Token settings
-	TokenTTL           time.Duration     `json:"token_ttl" default:"1h"`
-	AuthDeadline       time.Duration     `json:"token_max_ttl" default:"10m"`
-	
+	TokenTTL     time.Duration `json:"token_ttl" default:"1h"`
+	AuthDeadline time.Duration `json:"token_max_ttl" default:"10m"`
+
 	// Internal
-	validator          *jwt.Validator    `json:"-"`
-	keySet             jwt.KeySet        `json:"-"`
+	validator *jwt.Validator `json:"-"`
+	keySet    jwt.KeySet     `json:"-"`
 }
 
 // JWTLoginRequest represents the login request
@@ -55,25 +54,25 @@ type JWTLoginRequest struct {
 }
 
 func (r *JWTLoginRequest) ToMap() map[string]interface{} {
-    return map[string]interface{}{
-        "jwt":  r.JWT,
-        "role": r.Role,
-    }
+	return map[string]interface{}{
+		"jwt":  r.JWT,
+		"role": r.Role,
+	}
 }
 
 type JWTAuthMethod struct {
-	mountPath          string
-	description        string
-	logger             logger.Logger
-	accessor           string
-	config             *JWTAuthConfig
-	authType           string
-	backendClass       string
-	router             *chi.Mux
-	tokenStore         token.TokenStore
-	roles              *role.RoleRegistry
-	accessControl      *authorize.AccessControl
-	auditAccess       audit.AuditAccess
+	mountPath     string
+	description   string
+	logger        logger.Logger
+	accessor      string
+	config        *JWTAuthConfig
+	authType      string
+	backendClass  string
+	router        *chi.Mux
+	tokenStore    token.TokenStore
+	roles         *authorize.RoleRegistry
+	accessControl *authorize.AccessControl
+	auditAccess   audit.AuditAccess
 }
 
 func (m *JWTAuthMethod) GetType() string {
@@ -98,7 +97,7 @@ func (m *JWTAuthMethod) Cleanup() {
 func (m *JWTAuthMethod) setupRouter() {
 	r := chi.NewRouter()
 
-	r.Use(middleware.RealIP) 
+	r.Use(middleware.RealIP)
 
 	r.Route("/", func(roles chi.Router) {
 		roles.Post("/login", m.handleLogin)
@@ -108,9 +107,8 @@ func (m *JWTAuthMethod) setupRouter() {
 	m.router = r
 }
 
-
-type JWTAuthMethodFactory struct{
-	logger             logger.Logger
+type JWTAuthMethodFactory struct {
+	logger logger.Logger
 }
 
 func (f *JWTAuthMethodFactory) Type() string {
@@ -128,17 +126,17 @@ func (f *JWTAuthMethodFactory) Initialize(log logger.Logger) error {
 }
 
 func (f *JWTAuthMethodFactory) Create(
-	ctx context.Context, 
-	mountPath string, 
-	description string, 
-	accessor string, 
-	conf map[string]any, 
-	logger logger.Logger, 
-	tokenStore token.TokenStore, 
-	roles *role.RoleRegistry, 
+	ctx context.Context,
+	mountPath string,
+	description string,
+	accessor string,
+	conf map[string]any,
+	logger logger.Logger,
+	tokenStore token.TokenStore,
+	roles *authorize.RoleRegistry,
 	accessControl *authorize.AccessControl,
 	auditAccess audit.AuditAccess,
-	) (logical.Backend, error) {
+) (logical.Backend, error) {
 	config, err := mapToJWTAuthConfig(conf)
 	if err != nil {
 		return nil, err
@@ -197,17 +195,17 @@ func (f *JWTAuthMethodFactory) Create(
 	config.validator = validator
 
 	method := &JWTAuthMethod{
-		mountPath: mountPath,
-		description: description,
-		accessor: accessor,
-		logger: logger.WithSubsystem(f.Type()).WithSubsystem(accessor),
-		config: config,
-		authType: f.Type(),
-		backendClass: f.Class(),
-		tokenStore: tokenStore,
-		roles: roles,
+		mountPath:     mountPath,
+		description:   description,
+		accessor:      accessor,
+		logger:        logger.WithSubsystem(f.Type()).WithSubsystem(accessor),
+		config:        config,
+		authType:      f.Type(),
+		backendClass:  f.Class(),
+		tokenStore:    tokenStore,
+		roles:         roles,
 		accessControl: accessControl,
-		auditAccess: auditAccess,
+		auditAccess:   auditAccess,
 	}
 
 	method.setupRouter()

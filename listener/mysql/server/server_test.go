@@ -58,10 +58,9 @@ func prepareServerConf() []*Server {
 	return servers
 }
 
-type MockAuthResolver struct {}
+type MockAuthResolver struct{}
 
-
-func(am *MockAuthResolver) Resolve(user string, reqContext map[string]string) (string, string, bool, error) {
+func (am *MockAuthResolver) Resolve(user string, reqContext map[string]string) (string, string, bool, error) {
 	return "test", "test", true, nil
 }
 

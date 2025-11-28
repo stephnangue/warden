@@ -25,13 +25,13 @@ func (h *HMACer) Salt(ctx context.Context, data string) (string, error) {
 	if data == "" {
 		return "", nil
 	}
-	
+
 	mac := hmac.New(sha256.New, h.key)
 	_, err := mac.Write([]byte(data))
 	if err != nil {
 		return "", fmt.Errorf("failed to compute HMAC: %w", err)
 	}
-	
+
 	// Return hex-encoded HMAC with "hmac-" prefix to indicate it's salted
 	return "hmac-sha256:" + hex.EncodeToString(mac.Sum(nil)), nil
 }

@@ -38,7 +38,6 @@ func TestFileSink(t *testing.T) {
 	}
 }
 
-
 func TestPathFiltering(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "audit.log")
@@ -105,11 +104,10 @@ func TestPathFiltering(t *testing.T) {
 	}
 }
 
-
 func contains(data []byte, substr string) bool {
-	return len(data) > 0 && len(substr) > 0 && 
-		len(data) >= len(substr) && 
-		string(data) != "" && 
+	return len(data) > 0 && len(substr) > 0 &&
+		len(data) >= len(substr) &&
+		string(data) != "" &&
 		findSubstring(string(data), substr)
 }
 

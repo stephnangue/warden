@@ -29,7 +29,7 @@ func NewDevice(name string, format Format, sink Sink, config *DeviceConfig) Devi
 			Enabled: true,
 		}
 	}
-	
+
 	d := &device{
 		name:    name,
 		format:  format,
@@ -38,10 +38,10 @@ func NewDevice(name string, format Format, sink Sink, config *DeviceConfig) Devi
 		config:  config,
 		filters: make([]FilterFunc, 0),
 	}
-	
+
 	// Setup path filters if configured
 	d.setupPathFilters()
-	
+
 	return d
 }
 
@@ -52,7 +52,7 @@ func (d *device) setupPathFilters() {
 			if entry.Request == nil {
 				return true
 			}
-			
+
 			for _, pattern := range d.config.ExcludePaths {
 				if matched, _ := filepath.Match(pattern, entry.Request.Path); matched {
 					return false
@@ -65,13 +65,13 @@ func (d *device) setupPathFilters() {
 			return true
 		})
 	}
-	
+
 	if len(d.config.IncludePaths) > 0 {
 		d.AddFilter(func(entry *LogEntry) bool {
 			if entry.Request == nil {
 				return false
 			}
-			
+
 			for _, pattern := range d.config.IncludePaths {
 				if matched, _ := filepath.Match(pattern, entry.Request.Path); matched {
 					return true
@@ -97,13 +97,13 @@ func (d *device) AddFilter(filter FilterFunc) {
 func (d *device) shouldLog(entry *LogEntry) bool {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	
+
 	for _, filter := range d.filters {
 		if !filter(entry) {
 			return false
 		}
 	}
-	
+
 	return true
 }
 
@@ -112,26 +112,26 @@ func (d *device) LogRequest(ctx context.Context, entry *LogEntry) error {
 	d.mu.RLock()
 	enabled := d.enabled
 	d.mu.RUnlock()
-	
+
 	if !enabled {
 		return nil
 	}
-	
+
 	if !d.shouldLog(entry) {
 		return nil
 	}
-	
+
 	// Format the entry
 	formatted, err := d.format.FormatRequest(ctx, entry)
 	if err != nil {
 		return fmt.Errorf("failed to format request: %w", err)
 	}
-	
+
 	// Write to sink
 	if err := d.sink.Write(ctx, formatted); err != nil {
 		return fmt.Errorf("failed to write to sink: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -169,10 +169,10 @@ func (d *device) LogTestRequest(ctx context.Context) error {
 		Type:      "test",
 		Timestamp: time.Now().UTC(),
 		Request: &Request{
-			ID:        "test-request-id",
-			Method:    "GET",
-			Path:      "/sys/audit/test",
-			ClientIP:  "127.0.0.1",
+			ID:       "test-request-id",
+			Method:   "GET",
+			Path:     "/sys/audit/test",
+			ClientIP: "127.0.0.1",
 		},
 	}
 

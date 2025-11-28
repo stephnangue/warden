@@ -10,7 +10,7 @@ var (
 	c *api.Client
 )
 
-// Construct the HTTP API client 
+// Construct the HTTP API client
 func Client() (*api.Client, error) {
 	// Read the test client if present
 	if c != nil {

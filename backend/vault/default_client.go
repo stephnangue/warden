@@ -53,7 +53,7 @@ func (c *DefaultClient) CreateTokenRole(ctx context.Context, roleName string, pa
 	return nil
 }
 
-func (c *DefaultClient) VaultAddress() string{
+func (c *DefaultClient) VaultAddress() string {
 	return ""
 }
 
@@ -63,6 +63,3 @@ func (c *DefaultClient) Start(ctx context.Context) error {
 
 func (c *DefaultClient) Stop() {
 }
-
-
-
