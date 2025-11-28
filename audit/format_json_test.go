@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -240,13 +241,19 @@ func TestJSONFormatWithConfigurableSalting(t *testing.T) {
 			)
 
 			// Format the entry (this triggers salting)
-			_, err := format.FormatRequest(context.Background(), tc.entry)
+			jsonData, err := format.FormatRequest(context.Background(), tc.entry)
 			if err != nil {
 				t.Fatalf("Failed to format request: %v", err)
 			}
 
-			// Run the check function
-			tc.checkFunc(t, tc.entry)
+			// Parse the JSON to get the modified entry
+			var formattedEntry LogEntry
+			if err := json.Unmarshal(jsonData, &formattedEntry); err != nil {
+				t.Fatalf("Failed to unmarshal JSON: %v", err)
+			}
+
+			// Run the check function on the formatted entry
+			tc.checkFunc(t, &formattedEntry)
 		})
 	}
 }
@@ -276,13 +283,19 @@ func TestJSONFormatSaltAllDataFields(t *testing.T) {
 		},
 	}
 
-	_, err := format.FormatRequest(context.Background(), entry)
+	jsonData, err := format.FormatRequest(context.Background(), entry)
 	if err != nil {
 		t.Fatalf("Failed to format request: %v", err)
 	}
 
-	// Check that all string fields were salted
-	if username, ok := entry.Request.Data["username"].(string); ok {
+	// Parse the JSON to get the formatted entry
+	var formattedEntry LogEntry
+	if err := json.Unmarshal(jsonData, &formattedEntry); err != nil {
+		t.Fatalf("Failed to unmarshal JSON: %v", err)
+	}
+
+	// Check that all string fields were salted in the formatted output
+	if username, ok := formattedEntry.Request.Data["username"].(string); ok {
 		if username == "user1" {
 			t.Error("Username was not salted")
 		}
@@ -291,7 +304,7 @@ func TestJSONFormatSaltAllDataFields(t *testing.T) {
 		}
 	}
 
-	if password, ok := entry.Request.Data["password"].(string); ok {
+	if password, ok := formattedEntry.Request.Data["password"].(string); ok {
 		if password == "secret-password" {
 			t.Error("Password was not salted")
 		}
@@ -300,7 +313,7 @@ func TestJSONFormatSaltAllDataFields(t *testing.T) {
 		}
 	}
 
-	if token, ok := entry.Request.Data["token"].(string); ok {
+	if token, ok := formattedEntry.Request.Data["token"].(string); ok {
 		if token == "secret-token" {
 			t.Error("Token was not salted")
 		}
@@ -310,7 +323,7 @@ func TestJSONFormatSaltAllDataFields(t *testing.T) {
 	}
 
 	// Number should remain unchanged
-	if number, ok := entry.Request.Data["number"].(int); ok {
+	if number, ok := formattedEntry.Request.Data["number"].(float64); ok { // JSON unmarshals numbers as float64
 		if number != 123 {
 			t.Error("Number field was modified")
 		}
@@ -342,9 +355,7 @@ func TestJSONFormatOmitFields(t *testing.T) {
 				},
 			},
 			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
-				if entry.Auth != nil {
-					t.Error("Auth was not omitted")
-				}
+				// Check JSON output, not the original entry (which is not modified due to cloning)
 				if !contains(data, "request") {
 					t.Error("Request should still be present")
 				}
@@ -368,14 +379,15 @@ func TestJSONFormatOmitFields(t *testing.T) {
 				},
 			},
 			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
-				if entry.Request == nil {
-					t.Fatal("Request should not be nil")
+				// Check JSON output, not the original entry (which is not modified due to cloning)
+				if !contains(data, "request") {
+					t.Error("Request should still be present")
 				}
-				if entry.Request.Data != nil {
-					t.Error("Request.Data was not omitted")
-				}
-				if entry.Request.Path != "/v1/test" {
+				if !contains(data, "/v1/test") {
 					t.Error("Request.Path should still be present")
+				}
+				if contains(data, "username") || contains(data, "password") {
+					t.Error("Request.Data should not be in JSON output")
 				}
 			},
 		},
@@ -394,14 +406,15 @@ func TestJSONFormatOmitFields(t *testing.T) {
 				},
 			},
 			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
-				if entry.Request == nil || entry.Request.Data == nil {
-					t.Fatal("Request or Data should not be nil")
+				// Check JSON output, not the original entry (which is not modified due to cloning)
+				if !contains(data, "username") {
+					t.Error("username field should still be present in JSON")
 				}
-				if _, exists := entry.Request.Data["password"]; exists {
-					t.Error("password field was not omitted")
+				if !contains(data, "user1") {
+					t.Error("username value should still be present in JSON")
 				}
-				if username, exists := entry.Request.Data["username"]; !exists || username != "user1" {
-					t.Error("username field should still be present")
+				if contains(data, "password") || contains(data, "secret") {
+					t.Error("password field should not be in JSON output")
 				}
 			},
 		},
@@ -422,14 +435,15 @@ func TestJSONFormatOmitFields(t *testing.T) {
 				},
 			},
 			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
-				if entry.Response == nil {
-					t.Fatal("Response should not be nil")
+				// Check JSON output, not the original entry (which is not modified due to cloning)
+				if !contains(data, "response") {
+					t.Error("Response should still be present in JSON")
 				}
-				if entry.Response.Cred != nil {
-					t.Error("Response.Cred was not omitted")
+				if !contains(data, "200") {
+					t.Error("Response.StatusCode should still be present in JSON")
 				}
-				if entry.Response.StatusCode != 200 {
-					t.Error("Response.StatusCode should still be present")
+				if contains(data, "token-456") || contains(data, "\"cred\"") {
+					t.Error("Response.Cred should not be in JSON output")
 				}
 			},
 		},
@@ -449,14 +463,15 @@ func TestJSONFormatOmitFields(t *testing.T) {
 				Metadata: map[string]interface{}{"meta": "data"},
 			},
 			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
-				if entry.Request.Data != nil {
-					t.Error("Request.Data was not omitted")
+				// Check JSON output, not the original entry (which is not modified due to cloning)
+				if contains(data, "\"key\"") || contains(data, "\"value\"") {
+					t.Error("Request.Data should not be in JSON output")
 				}
-				if entry.Response.Cred != nil {
-					t.Error("Response.Cred was not omitted")
+				if contains(data, "token-123") || contains(data, "\"cred\"") {
+					t.Error("Response.Cred should not be in JSON output")
 				}
-				if entry.Metadata != nil {
-					t.Error("Metadata was not omitted")
+				if contains(data, "\"metadata\"") || contains(data, "\"meta\"") {
+					t.Error("Metadata should not be in JSON output")
 				}
 			},
 		},

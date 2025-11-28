@@ -60,41 +60,45 @@ func WithSaltFields(fields []string) JSONFormatOption {
 
 // FormatRequest formats a request entry as JSON
 func (f *JSONFormat) FormatRequest(ctx context.Context, entry *LogEntry) ([]byte, error) {
+	// Clone the entry to avoid data races when logging to multiple devices in parallel
+	entry = entry.Clone()
 	entry.Type = string(EntryTypeRequest)
-	
+
 	// Salt sensitive data if function is provided
 	if f.saltFn != nil {
 		if err := f.saltEntry(ctx, entry); err != nil {
 			return nil, err
 		}
 	}
-	
+
 	// Remove omitted fields
 	f.omitFieldsFromEntry(entry)
-	
+
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if f.prefix != "" {
 		return append([]byte(f.prefix), data...), nil
 	}
-	
+
 	return data, nil
 }
 
 // FormatResponse formats a response entry as JSON
 func (f *JSONFormat) FormatResponse(ctx context.Context, entry *LogEntry) ([]byte, error) {
+	// Clone the entry to avoid data races when logging to multiple devices in parallel
+	entry = entry.Clone()
 	entry.Type = string(EntryTypeResponse)
-	
+
 	// Salt sensitive data if function is provided
 	if f.saltFn != nil {
 		if err := f.saltEntry(ctx, entry); err != nil {
 			return nil, err
 		}
 	}
-	
+
 	// Remove omitted fields
 	f.omitFieldsFromEntry(entry)
 	
