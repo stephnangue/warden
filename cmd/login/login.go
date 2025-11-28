@@ -17,7 +17,7 @@ var (
 	LoginCmd = &cobra.Command{
 		Use:   "login",
 		Short: "This command is used to authenticate to Warden server.",
-		Long:  `
+		Long: `
 Usage: warden login [options] [AUTH K=V...]
 
   Authenticates users or machines to Warden using the provided arguments. A
@@ -43,19 +43,18 @@ Usage: warden login [options] [AUTH K=V...]
 
       $ warden login --method=jwt --path=jwt-prod
 `,
-		RunE:  run,
+		RunE: run,
 	}
 
-	flagMethod  string
-	flagPath    string
-	flagRole    string
+	flagMethod string
+	flagPath   string
+	flagRole   string
 
-	flagToken   string
+	flagToken string
 
 	Handlers = map[string]LoginHandler{
 		"jwt": JWTHandler{},
 	}
-
 )
 
 // LoginHandler is the interface that any auth handlers must implement to enable
@@ -80,7 +79,7 @@ func run(cmd *cobra.Command, args []string) error {
 	authHandler, ok := Handlers[flagMethod]
 	if !ok {
 		return fmt.Errorf("unknown auth method: %s. Use 'warden auth list' to see the complete list of auth methods. Additionally, some "+
-				"auth methods are only available via the API.", flagMethod)
+			"auth methods are only available via the API.", flagMethod)
 	}
 
 	if flagRole == "" {
@@ -90,7 +89,7 @@ func run(cmd *cobra.Command, args []string) error {
 	config := make(map[string]string)
 	config["role"] = flagRole
 
-	if flagPath !=  "" {
+	if flagPath != "" {
 		config["mount"] = flagPath
 	}
 
@@ -156,7 +155,7 @@ func printResultTable(result *api.Resource) {
 	rd := tw.Rendition{Symbols: symbols}
 	rd.Settings.Lines.ShowHeaderLine = tw.Off
 
-	table := tablewriter.NewTable(os.Stdout, 
+	table := tablewriter.NewTable(os.Stdout,
 		tablewriter.WithRenderer(renderer.NewBlueprint(rd)),
 		tablewriter.WithConfig(cnf),
 	)
@@ -170,4 +169,3 @@ func printResultTable(result *api.Resource) {
 	table.Bulk(data)
 	table.Render()
 }
-

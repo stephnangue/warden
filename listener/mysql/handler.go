@@ -6,31 +6,31 @@ import (
 
 	mysqlClient "github.com/go-mysql-org/go-mysql/client"
 	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/role"
 	"github.com/stephnangue/warden/target"
 )
 
 type MysqlHandler struct {
-	principalID      string // the principal using this connection
-	roleName         string // the covenant role used by the principal
+	principalID string // the principal using this connection
+	roleName    string // the covenant role used by the principal
 
-	connProvider     ConnProvider
+	connProvider ConnProvider
 
-	roles            *role.RoleRegistry
-	credSources      *cred.CredSourceRegistry
-	targets          *target.TargetRegistry
+	roles       *authorize.RoleRegistry
+	credSources *cred.CredSourceRegistry
+	targets     *target.TargetRegistry
 
-	logger           logger.Logger
+	logger logger.Logger
 }
 
-func NewMysqlHandler(roles *role.RoleRegistry, credSources *cred.CredSourceRegistry, targets *target.TargetRegistry, logger logger.Logger) (*MysqlHandler, error) {
+func NewMysqlHandler(roles *authorize.RoleRegistry, credSources *cred.CredSourceRegistry, targets *target.TargetRegistry, logger logger.Logger) (*MysqlHandler, error) {
 	return &MysqlHandler{
-		roles: roles,
+		roles:       roles,
 		credSources: credSources,
-		targets: targets,
-		logger:  logger,
+		targets:     targets,
+		logger:      logger,
 	}, nil
 }
 
@@ -52,20 +52,20 @@ func (h *MysqlHandler) getBackendConn() (*BackendConn, error) {
 		}
 
 		switch role.Type {
-			case "static_database_userpass":
-				provider, err := NewStaticConnProvider(role, credSource, target, h.logger.WithSubsystem("conn.provider"))
-				if err != nil {
-					return nil, err
-				}
-				h.connProvider = provider
-			case "dynamic_database_userpass":
-				provider, err := NewDynamicConnProvider(role, credSource, target, h.logger.WithSubsystem("conn.provider"))
-				if err != nil {
-					return nil, err
-				}
-				h.connProvider = provider
-			default:
-				return nil, fmt.Errorf("no connection provider found for role type '%s'", role.Type)
+		case "static_database_userpass":
+			provider, err := NewStaticConnProvider(role, credSource, target, h.logger.WithSubsystem("conn.provider"))
+			if err != nil {
+				return nil, err
+			}
+			h.connProvider = provider
+		case "dynamic_database_userpass":
+			provider, err := NewDynamicConnProvider(role, credSource, target, h.logger.WithSubsystem("conn.provider"))
+			if err != nil {
+				return nil, err
+			}
+			h.connProvider = provider
+		default:
+			return nil, fmt.Errorf("no connection provider found for role type '%s'", role.Type)
 		}
 	}
 
@@ -75,13 +75,13 @@ func (h *MysqlHandler) getBackendConn() (*BackendConn, error) {
 // UseDB changes the current database
 func (h *MysqlHandler) UseDB(dbName string) error {
 	h.logger.Tracef("USE DB: %s", dbName)
-	
+
 	conn, err := h.getBackendConn()
 	defer conn.Release()
 	if err != nil {
 		return err
 	}
-	
+
 	_, err = conn.Execute(fmt.Sprintf("USE `%s`", dbName))
 
 	return err
@@ -111,7 +111,7 @@ func (h *MysqlHandler) HandleQuery(query string) (*mysql.Result, error) {
 // HandleFieldList handles a field list command
 func (h *MysqlHandler) HandleFieldList(table string, fieldWildcard string) ([]*mysql.Field, error) {
 	h.logger.Tracef("Field List: table=%s, wildcard=%s", table, fieldWildcard)
-	
+
 	conn, err := h.getBackendConn()
 	defer conn.Release()
 	if err != nil {
@@ -145,7 +145,7 @@ func (h *MysqlHandler) HandleFieldList(table string, fieldWildcard string) ([]*m
 // HandleStmtPrepare handles statement preparation
 func (h *MysqlHandler) HandleStmtPrepare(query string) (params int, columns int, context interface{}, err error) {
 	h.logger.Tracef("Prepare: %s", query)
-	
+
 	conn, err := h.getBackendConn()
 	defer conn.Release()
 	if err != nil {
@@ -164,7 +164,7 @@ func (h *MysqlHandler) HandleStmtPrepare(query string) (params int, columns int,
 // HandleStmtExecute handles prepared statement execution
 func (h *MysqlHandler) HandleStmtExecute(context interface{}, query string, args []interface{}) (*mysql.Result, error) {
 	h.logger.Tracef("Execute prepared: %s with %d args", query, len(args))
-	
+
 	stmt, ok := context.(*mysqlClient.Stmt)
 	if !ok {
 		return nil, fmt.Errorf("invalid statement context")
@@ -182,7 +182,7 @@ func (h *MysqlHandler) HandleStmtExecute(context interface{}, query string, args
 // HandleStmtClose handles prepared statement closing
 func (h *MysqlHandler) HandleStmtClose(context interface{}) error {
 	h.logger.Trace("Close prepared statement")
-	
+
 	stmt, ok := context.(*mysqlClient.Stmt)
 	if !ok {
 		return fmt.Errorf("invalid statement context")

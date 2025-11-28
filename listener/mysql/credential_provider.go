@@ -36,5 +36,3 @@ func (p *CredentialProvider) GetCredential(username string) (string, bool, error
 	}
 	return "", false, fmt.Errorf("permission denied")
 }
-
-

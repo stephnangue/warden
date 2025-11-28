@@ -5,16 +5,16 @@ import (
 	"errors"
 	"maps"
 
-	"github.com/stephnangue/warden/role"
+	"github.com/stephnangue/warden/authorize"
 )
 
 // LocalFetcher fetches credentials from the local credential source.
 // With the local credential source the credential is stored directly inside the role
 type LocalFetcher struct {
-	role *role.Role
+	role *authorize.Role
 }
 
-func NewLocalFetcher(role *role.Role) *LocalFetcher {
+func NewLocalFetcher(role *authorize.Role) *LocalFetcher {
 	return &LocalFetcher{
 		role: role,
 	}
@@ -32,6 +32,6 @@ func (f *LocalFetcher) FetchCredential(ctx context.Context) (*Credential, bool, 
 		}
 		maps.Copy(cred.Data, f.role.CredConfig)
 		return &cred, true, nil
-	} 
+	}
 	return nil, false, errors.New("unsupported role type")
 }

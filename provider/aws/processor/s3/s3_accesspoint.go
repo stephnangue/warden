@@ -19,7 +19,7 @@ func NewS3AccessPointProcessor(proxyDomains []string, log logger.Logger) *S3Acce
 	return &S3AccessPointProcessor{
 		BaseProcessor: processor.BaseProcessor{
 			ProcName:     "s3-accesspoint",
-			ProcPriority: 180, 
+			ProcPriority: 180,
 			ProxyDomains: proxyDomains,
 		},
 		log: log,
@@ -32,18 +32,18 @@ func (p *S3AccessPointProcessor) CanProcess(ctx *processor.ProcessorContext) boo
 	if ctx.Service != "s3" {
 		return false
 	}
-	
+
 	hostRewrite := p.parseHost(ctx)
 	if hostRewrite != nil && hostRewrite.Service == "s3-accesspoint" {
 		return true
 	}
-	
+
 	// Also check ARN format in path or header
 	// Access point ARNs: arn:aws:s3:region:account-id:accesspoint/access-point-name
 	// if strings.Contains(ctx.Request.URL.Path, "accesspoint") {
 	// 	return true
 	// }
-	
+
 	return false
 }
 
@@ -58,20 +58,20 @@ func (p *S3AccessPointProcessor) Process(ctx *processor.ProcessorContext) (*proc
 	if hostRewrite == nil || hostRewrite.Prefix == "" {
 		return nil, fmt.Errorf("cannot extract access point information from host")
 	}
-	
+
 	// Parse access point name and account ID
 	// Format: access-point-name-account-id or just access-point-name
 	accessPointInfo := p.parseAccessPointName(hostRewrite.Prefix)
-	
+
 	result := &processor.ProcessorResult{
 		Service:  "s3", // Access points use s3 service for signing
 		Metadata: make(map[string]interface{}),
 	}
-	
+
 	// Access point endpoint formats:
 	// 1. access-point-name-account-id.s3-accesspoint.region.amazonaws.com
 	// 2. For multi-region: mrap-alias.accesspoint.s3-global.amazonaws.com
-	
+
 	if accessPointInfo.IsMultiRegion {
 		result.TargetURL = fmt.Sprintf("https://%s.accesspoint.s3-global.amazonaws.com",
 			accessPointInfo.Name)
@@ -85,7 +85,7 @@ func (p *S3AccessPointProcessor) Process(ctx *processor.ProcessorContext) (*proc
 			hostRewrite.Prefix, ctx.Region)
 		result.Metadata["type"] = "single-region"
 	}
-	
+
 	result.Metadata["access_point_name"] = accessPointInfo.Name
 	if accessPointInfo.AccountID != "" {
 		result.Metadata["account_id"] = accessPointInfo.AccountID
@@ -104,7 +104,7 @@ func (p *S3AccessPointProcessor) Process(ctx *processor.ProcessorContext) (*proc
 		actualPath = "/" + actualPath
 	}
 
-	result.TransformedPath  = actualPath
+	result.TransformedPath = actualPath
 
 	// p.log.Debug("S3 Access Point request",
 	// 	logger.String("access_point", accessPointInfo.Name),
@@ -114,7 +114,7 @@ func (p *S3AccessPointProcessor) Process(ctx *processor.ProcessorContext) (*proc
 	// 	logger.String("path", result.TransformedPath),
 	// 	logger.String("request_id", middleware.GetReqID(ctx.Ctx)),
 	// )
-	
+
 	return result, nil
 }
 
@@ -128,14 +128,14 @@ type AccessPointInfo struct {
 // parseAccessPointName extracts access point name and account ID
 func (p *S3AccessPointProcessor) parseAccessPointName(prefix string) *AccessPointInfo {
 	info := &AccessPointInfo{}
-	
+
 	// Check for multi-region access point (starts with "mrap")
 	if strings.HasPrefix(prefix, "mrap-") {
 		info.Name = prefix
 		info.IsMultiRegion = true
 		return info
 	}
-	
+
 	// Single-region format: access-point-name-account-id
 	// Try to extract account ID from the end (12 digits)
 	parts := strings.Split(prefix, "-")
@@ -150,38 +150,38 @@ func (p *S3AccessPointProcessor) parseAccessPointName(prefix string) *AccessPoin
 	} else {
 		info.Name = prefix
 	}
-	
+
 	return info
 }
 
 // parseHost extracts access point information from the host
 func (p *S3AccessPointProcessor) parseHost(ctx *processor.ProcessorContext) *processor.HostRewrite {
 	host := ctx.Request.Host
-	
+
 	// Remove port if present
 	if idx := strings.Index(host, ":"); idx != -1 {
 		host = host[:idx]
 	}
-	
+
 	// Split host into parts
 	parts := strings.Split(host, ".")
-	
+
 	// Need at least 2 parts
 	if len(parts) < 2 {
 		return nil
 	}
-	
+
 	// Skip if already an AWS domain
 	if strings.Contains(host, ".amazonaws.com") {
 		return nil
 	}
-	
+
 	// Check if the base domain matches proxy domains
 	baseDomain := strings.Join(parts[len(parts)-2:], ".")
 	if !p.IsProxyDomain(baseDomain) {
 		return nil
 	}
-	
+
 	// Pattern 1: access-point.s3-accesspoint.proxy-domain
 	if len(parts) >= 3 && parts[1] == "s3-accesspoint" {
 		return &processor.HostRewrite{
@@ -189,7 +189,7 @@ func (p *S3AccessPointProcessor) parseHost(ctx *processor.ProcessorContext) *pro
 			Prefix:  parts[0],
 		}
 	}
-	
+
 	// Pattern 2: mrap-alias.accesspoint.proxy-domain (multi-region)
 	if len(parts) >= 3 && parts[1] == "accesspoint" {
 		return &processor.HostRewrite{
@@ -197,7 +197,7 @@ func (p *S3AccessPointProcessor) parseHost(ctx *processor.ProcessorContext) *pro
 			Prefix:  parts[0],
 		}
 	}
-	
+
 	// Pattern 3: Check if prefix contains "accesspoint" keyword
 	if len(parts) >= 2 && strings.Contains(parts[0], "accesspoint") {
 		return &processor.HostRewrite{
@@ -205,7 +205,7 @@ func (p *S3AccessPointProcessor) parseHost(ctx *processor.ProcessorContext) *pro
 			Prefix:  parts[0],
 		}
 	}
-	
+
 	return nil
 }
 

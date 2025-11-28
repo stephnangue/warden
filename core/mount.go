@@ -14,13 +14,12 @@ import (
 )
 
 const (
+	mountPathSystem = "sys/"
 
-	mountPathSystem    = "sys/"
-
-	mountClassSystem     = "system"
-	mountClassProvider   = "provider"
-	mountClassAuth       = "auth"
-	mountClassAudit      = "audit"
+	mountClassSystem   = "system"
+	mountClassProvider = "provider"
+	mountClassAuth     = "auth"
+	mountClassAudit    = "audit"
 
 	MountTableUpdateStorage   = true
 	MountTableNoUpdateStorage = false
@@ -74,7 +73,7 @@ func NewMountTable() *MountTable {
 // if modifying entries rather than modifying the table itself
 func (t *MountTable) shallowClone() *MountTable {
 	return &MountTable{
-		Entries:  slices.Clone(t.Entries),
+		Entries: slices.Clone(t.Entries),
 	}
 }
 
@@ -121,13 +120,13 @@ func (t *MountTable) find(ctx context.Context, predicate func(*MountEntry) bool)
 
 // MountEntry is used to represent a mount table entry
 type MountEntry struct {
-	Class                 string            `json:"class"`
-	Type                  string            `json:"type"`
-	Path                  string            `json:"path"` 
-	Description           string            `json:"description"` 
-	Accessor              string            `json:"accessor"`
-    Tainted               bool              `json:"tainted,omitempty"`    
-	Config                map[string]any    `json:"config"`                           
+	Class       string         `json:"class"`
+	Type        string         `json:"type"`
+	Path        string         `json:"path"`
+	Description string         `json:"description"`
+	Accessor    string         `json:"accessor"`
+	Tainted     bool           `json:"tainted,omitempty"`
+	Config      map[string]any `json:"config"`
 }
 
 // mount is used to mount a new backend to the mount table.
@@ -280,7 +279,6 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry) (logica
 	return backend, nil
 }
 
-
 // unmount is used to unmount a path.
 func (c *Core) unmount(ctx context.Context, path string) error {
 	// Ensure we end the path in a slash
@@ -314,7 +312,7 @@ func (c *Core) unmountInternal(ctx context.Context, path string, updateStorage b
 
 	// Mark the entry as tainted
 	if err := c.taintMountEntry(ctx, path, updateStorage); err != nil {
-		c.logger.Error("failed to taint mount entry for path being unmounted", 
+		c.logger.Error("failed to taint mount entry for path being unmounted",
 			logger.Err(err),
 			logger.String("path", path),
 		)
@@ -334,7 +332,7 @@ func (c *Core) unmountInternal(ctx context.Context, path string, updateStorage b
 
 	// Remove the mount table entry
 	if err := c.removeMountEntry(ctx, path, updateStorage); err != nil {
-		c.logger.Error("failed to remove mount entry for path being unmounted", 
+		c.logger.Error("failed to remove mount entry for path being unmounted",
 			logger.Err(err),
 			logger.String("path", path),
 		)
@@ -365,7 +363,7 @@ func (c *Core) taintMountEntry(ctx context.Context, mountPath string, updateStor
 	}
 
 	if entry == nil {
-		c.logger.Error("nil entry found tainting entry in mounts table", 
+		c.logger.Error("nil entry found tainting entry in mounts table",
 			logger.String("path", mountPath),
 		)
 		return fmt.Errorf("failed to taint entry in mounts table")
@@ -394,7 +392,7 @@ func (c *Core) removeMountEntry(ctx context.Context, path string, updateStorage 
 		return err
 	}
 	if entry == nil {
-		c.logger.Error("nil entry found tainting entry in mounts table", 
+		c.logger.Error("nil entry found tainting entry in mounts table",
 			logger.String("path", path),
 		)
 		return fmt.Errorf("failed to remove entry in mounts table")
@@ -430,12 +428,12 @@ func (c *Core) LoadSystemBackend(ctx context.Context) error {
 
 func (c *Core) LoadMounts(ctx context.Context) error {
 	err := c.mount(ctx, &MountEntry{
-		Class: "auth",
-		Type: "jwt",
-		Path: "jwt",
+		Class:       "auth",
+		Type:        "jwt",
+		Path:        "jwt",
 		Description: "test jwt auth method",
 		Config: map[string]any{
-			"type": "jwt",
+			"type":     "jwt",
 			"jwks_url": "http://hydra:4444/.well-known/jwks.json",
 		}})
 	if err != nil {
@@ -443,9 +441,9 @@ func (c *Core) LoadMounts(ctx context.Context) error {
 	}
 
 	err = c.mount(ctx, &MountEntry{
-		Class: "provider",
-		Type: "aws",
-		Path: "aws",
+		Class:       "provider",
+		Type:        "aws",
+		Path:        "aws",
 		Description: "aws cloud provider",
 		Config: map[string]any{
 			"proxy_domains": []string{"localhost", "warden"},
@@ -456,6 +454,3 @@ func (c *Core) LoadMounts(ctx context.Context) error {
 
 	return nil
 }
-
-
-

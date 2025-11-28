@@ -9,43 +9,42 @@ import (
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/client"
+	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/role"
 	"github.com/stephnangue/warden/target"
 )
 
 // DynamicConnProvider creates conns with the same TTL as the dynamic database lease it fetches from Vault.
 // At 80% of the TTL the conns are marked for deletion and then a new conn is created to replace the one marked for deletion or deleted
 // then, the conns marked for deletion are deleted when no query is using them
-//
 type DynamicConnProvider struct {
-	fetcher            *cred.CredentialFetcher
+	fetcher *cred.CredentialFetcher
 
-	mu                 sync.RWMutex
-	conns              []*BackendConn
+	mu    sync.RWMutex
+	conns []*BackendConn
 
-	logger             logger.Logger
+	logger logger.Logger
 
-	target             target.Target
+	target target.Target
 
 	// the conn provider uses stopChan to stop lifecycleRoutine
-	stopChan           chan struct{}
+	stopChan chan struct{}
 }
 
-func NewDynamicConnProvider(role *role.Role, credSource *cred.CredSource, target target.Target, logger logger.Logger) (*DynamicConnProvider, error) {
-	
+func NewDynamicConnProvider(role *authorize.Role, credSource *cred.CredSource, target target.Target, logger logger.Logger) (*DynamicConnProvider, error) {
+
 	fetcher, err := cred.NewCredentialFetcher(role, credSource, logger)
 	if err != nil {
 		return nil, err
 	}
 
 	store := &DynamicConnProvider{
-		fetcher: fetcher,
-		conns: make([]*BackendConn, 0),
+		fetcher:  fetcher,
+		conns:    make([]*BackendConn, 0),
 		stopChan: make(chan struct{}),
-		logger: logger,
-		target: target,
+		logger:   logger,
+		target:   target,
 	}
 
 	go store.lifecycleRoutine()
@@ -86,20 +85,20 @@ func (s *DynamicConnProvider) createConn(ctx context.Context) (*BackendConn, err
 		return nil, err
 	}
 
-    ttl, err := time.ParseDuration(cred.LeaseTTL + "s")
-    if err != nil {
-        return nil, err
-    }
+	ttl, err := time.ParseDuration(cred.LeaseTTL + "s")
+	if err != nil {
+		return nil, err
+	}
 
 	now := time.Now()
 	backend := &BackendConn{
-		Conn: conn,
+		Conn:      conn,
 		createdAt: now,
-		expiresAt: now.Add(ttl), // the new create conn has the same TTL as the database lease
-		markedAt: now.Add(ttl * 4 / 5), // mark for deletion at 80% of the TTL
-		deleteAt: now.Add(ttl * 4 / 5), // delete at 80% of the TTL
-		isMarked: false,
-		refCount: 0,
+		expiresAt: now.Add(ttl),         // the new create conn has the same TTL as the database lease
+		markedAt:  now.Add(ttl * 4 / 5), // mark for deletion at 80% of the TTL
+		deleteAt:  now.Add(ttl * 4 / 5), // delete at 80% of the TTL
+		isMarked:  false,
+		refCount:  0,
 	}
 
 	return backend, nil
@@ -117,7 +116,7 @@ func (s *DynamicConnProvider) GetConn(ctx context.Context) (*BackendConn, error)
 		if c.isMarked {
 			continue
 		}
-		
+
 		remainingTTL := time.Until(c.expiresAt)
 		if remainingTTL > maxTTL {
 			c.mu.Lock()
@@ -172,7 +171,7 @@ func (s *DynamicConnProvider) markAndCleanupAndReplace() {
 	now := time.Now()
 
 	for i, conn := range s.conns {
-		// mark conns that have reached their mark time 
+		// mark conns that have reached their mark time
 		// and collect them to create their replacement
 		if now.After(conn.markedAt) && !conn.isMarked {
 			conn.isMarked = true
@@ -199,8 +198,8 @@ func (s *DynamicConnProvider) markAndCleanupAndReplace() {
 	// delete inactive connection
 	for _, index := range connsIndexToDelete {
 		s.conns[index].Quit()
-		s.conns[index] = s.conns[len(s.conns) - 1]
-		s.conns = s.conns[:len(s.conns) - 1]
+		s.conns[index] = s.conns[len(s.conns)-1]
+		s.conns = s.conns[:len(s.conns)-1]
 		s.logger.Trace("obsolete connection deleted")
 	}
 
@@ -229,7 +228,7 @@ func (s *DynamicConnProvider) Stop() {
 	close(s.stopChan)
 }
 
-func(s *DynamicConnProvider) fetchCredential(ctx context.Context) (*cred.DatabaseUserpass, bool, error) {
+func (s *DynamicConnProvider) fetchCredential(ctx context.Context) (*cred.DatabaseUserpass, bool, error) {
 	credential, ok, err := s.fetcher.FetchCredential(ctx)
 	if err != nil {
 		return nil, ok, err
@@ -249,8 +248,3 @@ func(s *DynamicConnProvider) fetchCredential(ctx context.Context) (*cred.Databas
 		return nil, false, fmt.Errorf("unsupported database credential type : %s", credential.Type)
 	}
 }
-
-
-
-
-

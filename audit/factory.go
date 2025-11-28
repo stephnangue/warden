@@ -29,12 +29,12 @@ func (f *FileDeviceFactory) Initialize(log logger.Logger) error {
 }
 
 func (f *FileDeviceFactory) Create(
-	ctx context.Context, 
-	mountPath string, 
-	description string, 
-	accessor string, 
+	ctx context.Context,
+	mountPath string,
+	description string,
+	accessor string,
 	config map[string]any,
-	) (Device, error) {
+) (Device, error) {
 
 	conf, err := mapToFileDeviceConfig(config)
 	if err != nil {

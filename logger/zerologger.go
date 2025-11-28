@@ -49,12 +49,11 @@ func (f AnyField) apply(event *zerolog.Event) *zerolog.Event {
 	return event.Interface(f.Key, f.Value)
 }
 
-
 // ZerologLogger implements Logger using zerolog with performance optimizations
 type ZerologLogger struct {
-	logger    zerolog.Logger
-	config    *Config
-	subsystem string
+	logger     zerolog.Logger
+	config     *Config
+	subsystem  string
 	fileWriter *lumberjack.Logger
 }
 
@@ -157,7 +156,7 @@ func NewZerologLogger(config *Config) Logger {
 	if config.EnableCaller {
 		logger = logger.With().CallerWithSkipFrameCount(3 + config.CallerSkip).Logger()
 	}
-	
+
 	// Add subsystem if provided
 	if config.Subsystem != "" {
 		logger = logger.With().Str("module", config.Subsystem).Logger()
@@ -176,7 +175,7 @@ func (zl *ZerologLogger) logWithFields(level zerolog.Level, msg string, fields [
 	if zl.logger.GetLevel() > level {
 		return
 	}
-	
+
 	var event *zerolog.Event
 	switch level {
 	case zerolog.TraceLevel:
@@ -197,11 +196,11 @@ func (zl *ZerologLogger) logWithFields(level zerolog.Level, msg string, fields [
 		return
 	}
 
-    // Apply all fields at once if there are any
-    if len(fields) > 0 {
-        event.Fields(fieldsToMap(fields))
-    }
-	
+	// Apply all fields at once if there are any
+	if len(fields) > 0 {
+		event.Fields(fieldsToMap(fields))
+	}
+
 	event.Msg(msg)
 }
 
@@ -289,44 +288,44 @@ func (zl *ZerologLogger) WithSystem(name string) Logger {
 
 // fieldsToMap converts typed fields to a map[string]interface{}
 func fieldsToMap(fields []TypedField) map[string]interface{} {
-    result := make(map[string]interface{}, len(fields))
-    for _, field := range fields {
-        switch f := field.(type) {
-        case StringField:
-            result[f.Key] = f.Value
-        case IntField:
-            result[f.Key] = f.Value
-        case Int64Field:
-            result[f.Key] = f.Value
-        case Float64Field:
-            result[f.Key] = f.Value
-        case BoolField:
-            result[f.Key] = f.Value
-        case DurationField:
-            result[f.Key] = f.Value
-        case TimeField:
-            result[f.Key] = f.Value
-        case ErrorField:
-            result[f.Key] = f.Value
-        case AnyField:
-            result[f.Key] = f.Value
-        }
-    }
-    return result
+	result := make(map[string]interface{}, len(fields))
+	for _, field := range fields {
+		switch f := field.(type) {
+		case StringField:
+			result[f.Key] = f.Value
+		case IntField:
+			result[f.Key] = f.Value
+		case Int64Field:
+			result[f.Key] = f.Value
+		case Float64Field:
+			result[f.Key] = f.Value
+		case BoolField:
+			result[f.Key] = f.Value
+		case DurationField:
+			result[f.Key] = f.Value
+		case TimeField:
+			result[f.Key] = f.Value
+		case ErrorField:
+			result[f.Key] = f.Value
+		case AnyField:
+			result[f.Key] = f.Value
+		}
+	}
+	return result
 }
 
 // WithFields creates a new logger with additional fields
 func (zl *ZerologLogger) WithFields(fields ...TypedField) Logger {
-    if len(fields) == 0 {
-        return zl // Return original logger if no fields
-    }
+	if len(fields) == 0 {
+		return zl // Return original logger if no fields
+	}
 
-    // Convert typed fields to a map
-    fieldMap := fieldsToMap(fields)
-    
-    // Apply all fields to the context at once
-    ctx := zl.logger.With().Fields(fieldMap)
-	
+	// Convert typed fields to a map
+	fieldMap := fieldsToMap(fields)
+
+	// Apply all fields to the context at once
+	ctx := zl.logger.With().Fields(fieldMap)
+
 	return &ZerologLogger{
 		logger:     ctx.Logger(),
 		config:     zl.config,

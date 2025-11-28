@@ -140,7 +140,7 @@ func TestRobustStore_ResolveToken_ExpiredToken(t *testing.T) {
 		"client_ip": "192.168.1.100",
 	}
 
-	_, _, err = store.ResolveToken(context.Background(),token.Data["username"], reqContext)
+	_, _, err = store.ResolveToken(context.Background(), token.Data["username"], reqContext)
 	assert.ErrorIs(t, err, ErrTokenNotFound)
 }
 
@@ -169,7 +169,7 @@ func TestRobustStore_ResolveToken_AuthDeadlineViolated(t *testing.T) {
 		"client_ip": "10.1.1.1",
 	}
 
-	_, _, err = store.ResolveToken(context.Background(),token.Data["username"], reqContext)
+	_, _, err = store.ResolveToken(context.Background(), token.Data["username"], reqContext)
 	assert.ErrorIs(t, err, ErrAuthDeadlineViolated)
 }
 
@@ -199,7 +199,7 @@ func TestRobustStore_ResolveToken_OriginViolation(t *testing.T) {
 		"client_ip": "192.168.1.99", // Different IP
 	}
 
-	_, _, err = store.ResolveToken(context.Background(),token.Data["username"], reqContext)
+	_, _, err = store.ResolveToken(context.Background(), token.Data["username"], reqContext)
 	assert.ErrorIs(t, err, ErrOriginViolation)
 }
 
@@ -215,7 +215,7 @@ func TestRobustStore_ResolveToken_TokenNotFound(t *testing.T) {
 		"client_ip": "192.168.1.1",
 	}
 
-	_, _, err = store.ResolveToken(context.Background(),"nonexistent-token", reqContext)
+	_, _, err = store.ResolveToken(context.Background(), "nonexistent-token", reqContext)
 	assert.ErrorIs(t, err, ErrTokenNotFound)
 }
 
@@ -255,10 +255,10 @@ func TestRobustStore_CleanUpTokens(t *testing.T) {
 
 	// Create expired token (expires in 200ms)
 	authData1 := &AuthData{
-		PrincipalID:  "user444",
-		RoleName:     "temp",
-		AuthDeadline: time.Now().Add(5 * time.Minute),
-		ExpireAt:     time.Now().Add(200 * time.Millisecond),
+		PrincipalID:    "user444",
+		RoleName:       "temp",
+		AuthDeadline:   time.Now().Add(5 * time.Minute),
+		ExpireAt:       time.Now().Add(200 * time.Millisecond),
 		RequestContext: map[string]string{},
 	}
 	token1, err := store.GenerateToken(USER_PASS, authData1)
@@ -266,10 +266,10 @@ func TestRobustStore_CleanUpTokens(t *testing.T) {
 
 	// Create valid token
 	authData2 := &AuthData{
-		PrincipalID:  "user555",
-		RoleName:     "permanent",
-		AuthDeadline: time.Now().Add(5 * time.Minute),
-		ExpireAt:     time.Now().Add(1 * time.Hour),
+		PrincipalID:    "user555",
+		RoleName:       "permanent",
+		AuthDeadline:   time.Now().Add(5 * time.Minute),
+		ExpireAt:       time.Now().Add(1 * time.Hour),
 		RequestContext: map[string]string{},
 	}
 	token2, err := store.GenerateToken(USER_PASS, authData2)
@@ -280,7 +280,7 @@ func TestRobustStore_CleanUpTokens(t *testing.T) {
 
 	// Expired token should be gone (Ristretto TTL)
 	assert.Nil(t, store.GetToken(token1.Data["username"]))
-	
+
 	// Valid token should still exist
 	assert.NotNil(t, store.GetToken(token2.Data["username"]))
 }
@@ -312,7 +312,7 @@ func TestRobustStore_Metrics(t *testing.T) {
 	reqContext := map[string]string{
 		"client_ip": "192.168.1.200",
 	}
-	_, _, err = store.ResolveToken(context.Background(),token.Data["username"], reqContext)
+	_, _, err = store.ResolveToken(context.Background(), token.Data["username"], reqContext)
 	require.NoError(t, err)
 
 	// Check metrics
@@ -338,10 +338,10 @@ func TestRobustStore_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			authData := &AuthData{
-				PrincipalID:  "user" + string(rune(id)),
-				RoleName:     "concurrent",
-				AuthDeadline: time.Now().Add(5 * time.Minute),
-				ExpireAt:     time.Now().Add(1 * time.Hour),
+				PrincipalID:    "user" + string(rune(id)),
+				RoleName:       "concurrent",
+				AuthDeadline:   time.Now().Add(5 * time.Minute),
+				ExpireAt:       time.Now().Add(1 * time.Hour),
 				RequestContext: map[string]string{},
 			}
 			_, err := store.GenerateToken(USER_PASS, authData)
@@ -362,10 +362,10 @@ func TestRobustStore_Close(t *testing.T) {
 	require.NoError(t, err)
 
 	authData := &AuthData{
-		PrincipalID:  "user777",
-		RoleName:     "closing",
-		AuthDeadline: time.Now().Add(5 * time.Minute),
-		ExpireAt:     time.Now().Add(1 * time.Hour),
+		PrincipalID:    "user777",
+		RoleName:       "closing",
+		AuthDeadline:   time.Now().Add(5 * time.Minute),
+		ExpireAt:       time.Now().Add(1 * time.Hour),
 		RequestContext: map[string]string{},
 	}
 
@@ -381,7 +381,7 @@ func TestRobustStore_Close(t *testing.T) {
 	assert.ErrorIs(t, err, ErrStoreClosed)
 
 	reqContext := map[string]string{}
-	_, _, err = store.ResolveToken(context.Background(),token.Data["username"], reqContext)
+	_, _, err = store.ResolveToken(context.Background(), token.Data["username"], reqContext)
 	assert.ErrorIs(t, err, ErrStoreClosed)
 }
 
@@ -407,10 +407,10 @@ func TestRobustStore_UnsupportedTokenType(t *testing.T) {
 	defer store.Close()
 
 	authData := &AuthData{
-		PrincipalID:  "user888",
-		RoleName:     "test",
-		AuthDeadline: time.Now().Add(5 * time.Minute),
-		ExpireAt:     time.Now().Add(1 * time.Hour),
+		PrincipalID:    "user888",
+		RoleName:       "test",
+		AuthDeadline:   time.Now().Add(5 * time.Minute),
+		ExpireAt:       time.Now().Add(1 * time.Hour),
 		RequestContext: map[string]string{},
 	}
 
@@ -445,11 +445,11 @@ func TestRobustStore_CacheHitMiss(t *testing.T) {
 	}
 
 	// First resolve - cache miss
-	_, _, err = store.ResolveToken(context.Background(),token.Data["username"], reqContext)
+	_, _, err = store.ResolveToken(context.Background(), token.Data["username"], reqContext)
 	require.NoError(t, err)
 
 	// Second resolve - cache hit
-	_, _, err = store.ResolveToken(context.Background(),token.Data["username"], reqContext)
+	_, _, err = store.ResolveToken(context.Background(), token.Data["username"], reqContext)
 	require.NoError(t, err)
 
 	metrics := store.GetMetrics()

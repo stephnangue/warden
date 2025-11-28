@@ -33,7 +33,7 @@ func TestEndpointResolver(t *testing.T) {
 			region:   "cn-north-1",
 			expected: "https://iam.cn-north-1.amazonaws.com.cn",
 		},
-		
+
 		// Regional services
 		{
 			name:     "EC2 regional",
@@ -47,7 +47,7 @@ func TestEndpointResolver(t *testing.T) {
 			region:   "eu-west-1",
 			expected: "https://lambda.eu-west-1.amazonaws.com",
 		},
-		
+
 		// S3 special cases
 		{
 			name:     "S3 us-east-1",
@@ -67,7 +67,7 @@ func TestEndpointResolver(t *testing.T) {
 			region:   "cn-north-1",
 			expected: "https://s3.cn-north-1.amazonaws.com.cn",
 		},
-		
+
 		// GovCloud
 		{
 			name:     "EC2 GovCloud",
@@ -75,7 +75,7 @@ func TestEndpointResolver(t *testing.T) {
 			region:   "us-gov-west-1",
 			expected: "https://ec2.us-gov-west-1.amazonaws.com",
 		},
-		
+
 		// Errors
 		{
 			name:    "Empty service",
@@ -107,17 +107,17 @@ func TestEndpointResolver(t *testing.T) {
 
 func BenchmarkEndpointResolver(b *testing.B) {
 	resolver := NewEndpointResolver()
-	
+
 	b.Run("cached", func(b *testing.B) {
 		// First call to populate cache
 		resolver.ResolveEndpoint("ec2", "us-east-1")
-		
+
 		b.ResetTimer()
 		for b.Loop() {
 			resolver.ResolveEndpoint("ec2", "us-east-1")
 		}
 	})
-	
+
 	b.Run("uncached", func(b *testing.B) {
 		for b.Loop() {
 			resolver.ClearCache()

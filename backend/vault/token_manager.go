@@ -16,8 +16,8 @@ import (
 
 // AppRoleConfig holds AppRole authentication configuration
 type AppRoleConfig struct {
-	RoleID   string
-	SecretID string
+	RoleID    string
+	SecretID  string
 	MountPath string // defaults to "approle"
 	Namespace string
 }
@@ -44,11 +44,11 @@ func NewTokenManager(client *api.Client, appRole *AppRoleConfig, logger logger.L
 	}
 
 	return &TokenManager{
-		client:      client,
-		appRole:     appRole,
-		stopCh:      make(chan struct{}),
-		maxRetries:  5,
-		logger:      logger,
+		client:     client,
+		appRole:    appRole,
+		stopCh:     make(chan struct{}),
+		maxRetries: 5,
+		logger:     logger,
 	}
 }
 
@@ -58,9 +58,9 @@ func (tm *TokenManager) Start(ctx context.Context) error {
 	if err := tm.authenticateWithAppRole(ctx); err != nil {
 		return fmt.Errorf("failed to authenticate with AppRole: %w", err)
 	}
-	tm.logger.Info("successfully authenticated with AppRole", 
-		logger.String("mount_point", tm.appRole.MountPath), 
-		logger.String("vault_addr", tm.client.Address()), 
+	tm.logger.Info("successfully authenticated with AppRole",
+		logger.String("mount_point", tm.appRole.MountPath),
+		logger.String("vault_addr", tm.client.Address()),
 		logger.String("namespace", tm.appRole.Namespace))
 
 	// Get token info after authentication
@@ -243,9 +243,8 @@ func (tm *TokenManager) calculateNextRenewal() time.Duration {
 
 	// Add jitter to prevent thundering herd
 	jitter := time.Duration(float64(renewalInterval) * 0.1) // 10% jitter
-	randomFactor := rand.Float64()*2 - 1 // Random value between -1 and 1
+	randomFactor := rand.Float64()*2 - 1                    // Random value between -1 and 1
 	renewalInterval += time.Duration(float64(jitter) * randomFactor)
-
 
 	return renewalInterval
 }
@@ -278,7 +277,7 @@ func (tm *TokenManager) renewTokenWithBackoff(ctx context.Context) error {
 		}
 
 		// Success
-		tm.logger.Info("admin token renewed successfully", logger.Int("attemt_num", attempt+1) )
+		tm.logger.Info("admin token renewed successfully", logger.Int("attemt_num", attempt+1))
 		return nil
 	}
 

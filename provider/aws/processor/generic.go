@@ -10,8 +10,8 @@ import (
 // GenericAWSProcessor handles generic AWS service requests
 type GenericAWSProcessor struct {
 	BaseProcessor
-	resolver   *EndpointResolver
-	log logger.Logger
+	resolver *EndpointResolver
+	log      logger.Logger
 }
 
 // NewGenericAWSProcessor creates a new generic AWS processor
@@ -22,8 +22,8 @@ func NewGenericAWSProcessor(proxyDomains []string, log logger.Logger) *GenericAW
 			ProcPriority: 10, // Lowest priority - fallback processor
 			ProxyDomains: proxyDomains,
 		},
-		resolver:         NewEndpointResolver(),
-		log: log,
+		resolver: NewEndpointResolver(),
+		log:      log,
 	}
 }
 
@@ -39,16 +39,16 @@ func (p *GenericAWSProcessor) Process(ctx *ProcessorContext) (*ProcessorResult, 
 		Service:  ctx.Service,
 		Metadata: make(map[string]interface{}),
 	}
-	
+
 	// Try to resolve endpoint using the resolver
 	targetURL, err := p.resolver.ResolveEndpoint(ctx.Service, ctx.Region)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve endpoint for service %s in region %s: %w",
 			ctx.Service, ctx.Region, err)
 	}
-	
+
 	result.TargetURL = targetURL
-	
+
 	// Extract host from URL
 	if strings.HasPrefix(targetURL, "https://") {
 		result.TargetHost = strings.TrimPrefix(targetURL, "https://")
@@ -61,9 +61,9 @@ func (p *GenericAWSProcessor) Process(ctx *ProcessorContext) (*ProcessorResult, 
 			result.TargetHost = result.TargetHost[:idx]
 		}
 	}
-	
+
 	result.Metadata["resolved_via"] = "endpoint_resolver"
-	
+
 	// p.log.Debug("Generic AWS service request",
 	// 	logger.String("service", ctx.Service),
 	// 	logger.String("region", ctx.Region),
@@ -73,7 +73,7 @@ func (p *GenericAWSProcessor) Process(ctx *ProcessorContext) (*ProcessorResult, 
 	// 	logger.String("target", result.TargetURL),
 	// 	logger.String("request_id", middleware.GetReqID(ctx.Ctx)),
 	// )
-	
+
 	// compute the AWS path relative to the provider path
 	actualPath := ctx.OriginalPath
 	if after, ok := strings.CutPrefix(ctx.OriginalPath, ctx.RelativePath); ok {
@@ -87,7 +87,7 @@ func (p *GenericAWSProcessor) Process(ctx *ProcessorContext) (*ProcessorResult, 
 		actualPath = "/" + actualPath
 	}
 
-	result.TransformedPath  = actualPath
+	result.TransformedPath = actualPath
 
 	return result, nil
 }
@@ -99,4 +99,3 @@ func (p *GenericAWSProcessor) Metadata() *ProcessorMetadata {
 		Priority:     10,
 	}
 }
-

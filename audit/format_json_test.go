@@ -164,9 +164,9 @@ func TestJSONFormatWithConfigurableSalting(t *testing.T) {
 				Timestamp: time.Now(),
 				Response: &Response{
 					Cred: &Cred{
-						TokenID:  "cred-token-123",
-						LeaseID:  "lease-456",
-						Type:     "aws",
+						TokenID: "cred-token-123",
+						LeaseID: "lease-456",
+						Type:    "aws",
 					},
 					StatusCode: 200,
 				},
@@ -548,5 +548,3 @@ func TestJSONFormatNoSaltingWhenFieldsNotConfigured(t *testing.T) {
 		}
 	}
 }
-
-

@@ -9,7 +9,7 @@ type RoleAssignment struct {
 
 type AccessControl struct {
 	ra map[string][]*RoleAssignment
-	mu    sync.RWMutex
+	mu sync.RWMutex
 }
 
 func NewAccessControl() *AccessControl {
@@ -23,7 +23,7 @@ func (ac *AccessControl) AssignRole(principalID, roleName string) {
 	defer ac.mu.Unlock()
 	assignment := &RoleAssignment{
 		PrincipalID: principalID,
-		RoleName: roleName,
+		RoleName:    roleName,
 	}
 	var found bool
 	assignments := ac.ra[principalID]

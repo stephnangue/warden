@@ -6,20 +6,20 @@ import (
 	"time"
 
 	"github.com/hashicorp/vault/api"
+	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/role"
 )
 
 // VaultFetcher fetches credentials from Vault KV secret engine
 // or generates Vault dynamic secrets (database, aws, azure, gcp)
 type VaultFetcher struct {
-	vault *api.Client
+	vault      *api.Client
 	credSource *CredSource
-	role *role.Role
-	logger logger.Logger
+	role       *authorize.Role
+	logger     logger.Logger
 }
 
-func NewVaultFetcher(credSource *CredSource, role *role.Role, logger logger.Logger) (*VaultFetcher, error) {
+func NewVaultFetcher(credSource *CredSource, role *authorize.Role, logger logger.Logger) (*VaultFetcher, error) {
 	apiCfg := api.DefaultConfig()
 	apiCfg.Address = credSource.Config["vault_address"]
 
@@ -30,10 +30,10 @@ func NewVaultFetcher(credSource *CredSource, role *role.Role, logger logger.Logg
 	apiClient.SetNamespace(credSource.Config["vault_namespace"])
 
 	return &VaultFetcher{
-		vault: apiClient,
+		vault:      apiClient,
 		credSource: credSource,
-		role: role,
-		logger: logger,
+		role:       role,
+		logger:     logger,
 	}, nil
 }
 
@@ -43,41 +43,41 @@ func (f *VaultFetcher) GetSourceType() string {
 
 func (f *VaultFetcher) FetchCredential(ctx context.Context) (*Credential, bool, error) {
 	switch f.credSource.Config["auth_method"] {
-		case "approle":
-			err := f.loginViaApprole()
+	case "approle":
+		err := f.loginViaApprole()
+		if err != nil {
+			return nil, false, err
+		}
+		switch f.role.Type {
+		case "static_database_userpass":
+			cred, err := f.readStaticDBSecretFromVault(ctx)
 			if err != nil {
 				return nil, false, err
 			}
-			switch f.role.Type {
-				case "static_database_userpass":
-					cred, err := f.readStaticDBSecretFromVault(ctx)
-					if err != nil {
-						return nil, false, err
-					}
-					return cred, true, nil
-				case "dynamic_database_userpass":
-					cred, err := f.readDynamicDBSecretFromVault(ctx)
-					if err != nil {
-						return nil, false, err
-					}
-					return cred, true, nil
-				case "static_aws_access_keys":
-					cred, err := f.readStaticAwsSecretFromVault(ctx)
-					if err != nil {
-						return nil, false, err
-					}
-					return cred, true, nil
-				case "dynamic_aws_access_keys":
-					cred, err := f.readDynamicAwsSecretFromVault(ctx)
-					if err != nil {
-						return nil, false, err
-					}
-					return cred, true, nil
-				default:
-					return nil, false, fmt.Errorf("unsupported role type : %s", f.role.Type)
+			return cred, true, nil
+		case "dynamic_database_userpass":
+			cred, err := f.readDynamicDBSecretFromVault(ctx)
+			if err != nil {
+				return nil, false, err
 			}
+			return cred, true, nil
+		case "static_aws_access_keys":
+			cred, err := f.readStaticAwsSecretFromVault(ctx)
+			if err != nil {
+				return nil, false, err
+			}
+			return cred, true, nil
+		case "dynamic_aws_access_keys":
+			cred, err := f.readDynamicAwsSecretFromVault(ctx)
+			if err != nil {
+				return nil, false, err
+			}
+			return cred, true, nil
 		default:
-			return nil, false, fmt.Errorf("unsupported auth method : %s", f.credSource.Config["auth_method"])
+			return nil, false, fmt.Errorf("unsupported role type : %s", f.role.Type)
+		}
+	default:
+		return nil, false, fmt.Errorf("unsupported auth method : %s", f.credSource.Config["auth_method"])
 	}
 }
 
@@ -154,9 +154,9 @@ func (f *VaultFetcher) readStaticAwsSecretFromVault(ctx context.Context) (*Crede
 	cred := Credential{
 		Type: AWS_ACCESS_KEYS,
 		Data: map[string]string{
-			"access_key_id": accessKeyId,
+			"access_key_id":     accessKeyId,
 			"secret_access_key": secretAccessKey,
-			"cred_source": f.vault.Address(),
+			"cred_source":       f.vault.Address(),
 		},
 	}
 	return &cred, nil
@@ -172,34 +172,34 @@ func (f *VaultFetcher) readDynamicDBSecretFromVault(ctx context.Context) (*Crede
 	}
 
 	switch role.Data["credential_type"] {
-		case "password":
-			secret, err := f.vault.Logical().ReadWithContext(ctx, fmt.Sprintf("%s/creds/%s", f.role.CredConfig["database_mount"], f.role.CredConfig["role_name"]))
-			if err != nil {
-				return nil, err
-			}
-			if secret == nil || secret.Data == nil {
-				return nil, fmt.Errorf("no dynamic secret returned with role '%s' on mount '%s'", f.role.CredConfig["role_name"], f.role.CredConfig["database_mount"])
-			}
+	case "password":
+		secret, err := f.vault.Logical().ReadWithContext(ctx, fmt.Sprintf("%s/creds/%s", f.role.CredConfig["database_mount"], f.role.CredConfig["role_name"]))
+		if err != nil {
+			return nil, err
+		}
+		if secret == nil || secret.Data == nil {
+			return nil, fmt.Errorf("no dynamic secret returned with role '%s' on mount '%s'", f.role.CredConfig["role_name"], f.role.CredConfig["database_mount"])
+		}
 
-			database, exits := f.role.CredConfig["database"]
-			if !exits {
-				database = ""
-			}
+		database, exits := f.role.CredConfig["database"]
+		if !exits {
+			database = ""
+		}
 
-			cred := Credential{
-				Type: DATABASE_USERPASS,
-				LeaseTTL: time.Duration(secret.LeaseDuration) * time.Second,
-				LeaseID: secret.LeaseID,
-				Data: map[string]string{
-					"database": database,
-					"username": secret.Data["username"].(string),
-					"password": secret.Data["password"].(string),
-					"lease_ttl": fmt.Sprint(secret.LeaseDuration),
-				},
-			}
-			return &cred, nil
-		default:
-			return nil, fmt.Errorf("unsupported vault database credential type : %s", role.Data["credential_type"])
+		cred := Credential{
+			Type:     DATABASE_USERPASS,
+			LeaseTTL: time.Duration(secret.LeaseDuration) * time.Second,
+			LeaseID:  secret.LeaseID,
+			Data: map[string]string{
+				"database":  database,
+				"username":  secret.Data["username"].(string),
+				"password":  secret.Data["password"].(string),
+				"lease_ttl": fmt.Sprint(secret.LeaseDuration),
+			},
+		}
+		return &cred, nil
+	default:
+		return nil, fmt.Errorf("unsupported vault database credential type : %s", role.Data["credential_type"])
 	}
 }
 
@@ -213,18 +213,18 @@ func (f *VaultFetcher) readDynamicAwsSecretFromVault(ctx context.Context) (*Cred
 	}
 
 	switch role.Data["credential_type"] {
-		case "assumed_role":
-			path := fmt.Sprintf("%s/creds/%s", f.role.CredConfig["aws_mount"], f.role.CredConfig["role_name"])
-			data := make(map[string]interface{})
-			if f.role.CredConfig["role_name"] != "" {
-				data["role_arn"] = f.role.CredConfig["role_arn"]
-			}
-			if f.role.CredConfig["role_session_name"] != "" {
-				data["role_session_name"] = f.role.CredConfig["role_session_name"]
-			}
-			if f.role.CredConfig["ttl"] != "" {
-				data["ttl"] = f.role.CredConfig["ttl"]
-			}
+	case "assumed_role":
+		path := fmt.Sprintf("%s/creds/%s", f.role.CredConfig["aws_mount"], f.role.CredConfig["role_name"])
+		data := make(map[string]interface{})
+		if f.role.CredConfig["role_name"] != "" {
+			data["role_arn"] = f.role.CredConfig["role_arn"]
+		}
+		if f.role.CredConfig["role_session_name"] != "" {
+			data["role_session_name"] = f.role.CredConfig["role_session_name"]
+		}
+		if f.role.CredConfig["ttl"] != "" {
+			data["ttl"] = f.role.CredConfig["ttl"]
+		}
 		var secret *api.Secret
 		var err error
 
@@ -243,9 +243,9 @@ func (f *VaultFetcher) readDynamicAwsSecretFromVault(ctx context.Context) (*Cred
 		}
 
 		cred := Credential{
-			Type: AWS_ACCESS_KEYS,
+			Type:     AWS_ACCESS_KEYS,
 			LeaseTTL: time.Duration(secret.LeaseDuration) * time.Second,
-			LeaseID: secret.LeaseID,
+			LeaseID:  secret.LeaseID,
 			Data: map[string]string{
 				"cred_source": f.vault.Address(),
 			},
@@ -271,7 +271,7 @@ func (f *VaultFetcher) readDynamicAwsSecretFromVault(ctx context.Context) (*Cred
 
 		return &cred, nil
 
-		default:
-			return nil, fmt.Errorf("unsupported vault aws credential type : %s", role.Data["credential_type"])
+	default:
+		return nil, fmt.Errorf("unsupported vault aws credential type : %s", role.Data["credential_type"])
 	}
 }

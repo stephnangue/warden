@@ -31,31 +31,31 @@ func NewSocketSink(config SocketSinkConfig) (*SocketSink, error) {
 	if config.Network == "" {
 		config.Network = "tcp"
 	}
-	
+
 	if config.Address == "" {
 		return nil, fmt.Errorf("address is required")
 	}
-	
+
 	if config.ReconnectDelay == 0 {
 		config.ReconnectDelay = 5 * time.Second
 	}
-	
+
 	if config.WriteTimeout == 0 {
 		config.WriteTimeout = 10 * time.Second
 	}
-	
+
 	sink := &SocketSink{
 		network:        config.Network,
 		address:        config.Address,
 		reconnectDelay: config.ReconnectDelay,
 		writeTimeout:   config.WriteTimeout,
 	}
-	
+
 	// Initial connection
 	if err := sink.connect(); err != nil {
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
-	
+
 	return sink, nil
 }
 
@@ -65,7 +65,7 @@ func (s *SocketSink) connect() error {
 	if err != nil {
 		return err
 	}
-	
+
 	s.conn = conn
 	return nil
 }
@@ -76,7 +76,7 @@ func (s *SocketSink) reconnect() error {
 		s.conn.Close()
 		s.conn = nil
 	}
-	
+
 	return s.connect()
 }
 
@@ -84,19 +84,19 @@ func (s *SocketSink) reconnect() error {
 func (s *SocketSink) Write(ctx context.Context, entry []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	// Ensure we have a connection
 	if s.conn == nil {
 		if err := s.connect(); err != nil {
 			return fmt.Errorf("failed to connect: %w", err)
 		}
 	}
-	
+
 	// Set write deadline
 	if err := s.conn.SetWriteDeadline(time.Now().Add(s.writeTimeout)); err != nil {
 		return fmt.Errorf("failed to set write deadline: %w", err)
 	}
-	
+
 	// Write entry with newline
 	_, err := s.conn.Write(append(entry, '\n'))
 	if err != nil {
@@ -104,18 +104,18 @@ func (s *SocketSink) Write(ctx context.Context, entry []byte) error {
 		if reconnectErr := s.reconnect(); reconnectErr != nil {
 			return fmt.Errorf("write failed and reconnect failed: %v, %v", err, reconnectErr)
 		}
-		
+
 		// Retry write after reconnect
 		if err := s.conn.SetWriteDeadline(time.Now().Add(s.writeTimeout)); err != nil {
 			return fmt.Errorf("failed to set write deadline after reconnect: %w", err)
 		}
-		
+
 		_, err = s.conn.Write(append(entry, '\n'))
 		if err != nil {
 			return fmt.Errorf("write failed after reconnect: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -123,13 +123,13 @@ func (s *SocketSink) Write(ctx context.Context, entry []byte) error {
 func (s *SocketSink) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	if s.conn != nil {
 		err := s.conn.Close()
 		s.conn = nil
 		return err
 	}
-	
+
 	return nil
 }
 

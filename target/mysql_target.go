@@ -1,13 +1,13 @@
 package target
 
 type MysqlTarget struct {
-	Name            string
-	Hostname        string
-	Port      		string
-	MtlsEnabled     bool
-	CACert          string
-	ClientCert      string
-	ClientKey       string
+	Name        string
+	Hostname    string
+	Port        string
+	MtlsEnabled bool
+	CACert      string
+	ClientCert  string
+	ClientKey   string
 }
 
 func (t *MysqlTarget) GetName() string {
