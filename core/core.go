@@ -64,9 +64,6 @@ type Core struct {
 	// mountsLock is used to ensure that the mounts table does not
 	// change underneath a calling function
 	mountsLock     locking.DeadlockRWMutex
-
-	// systemBackend is the backend which is used to manage internal operations
-	systemBackend  *SystemBackend
 }
 
 type CoreConfig struct {
@@ -80,6 +77,11 @@ type CoreConfig struct {
 }
 
 func (c *Core) Init(ctx context.Context) error {
+
+	// Load system backend first
+	if err := c.LoadSystemBackend(ctx); err != nil {
+		return err
+	}
 
 	c.LoadRoles(ctx)
 
@@ -98,7 +100,7 @@ func (c *Core) Init(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	
+
 	return nil
 }
 
@@ -176,6 +178,10 @@ func (c *Core) LoadRoles(ctx context.Context) {
 	c.logger.Info("loading roles from storage")
 
 	roleRegistry := role.NewRoleRegistry()
+	roleRegistry.Register(role.Role{
+		Name:           "system_admin",
+		Type:           "system",
+	})
 	roleRegistry.Register(role.Role{
 		Name:           "market_reader",
 		Type:           "static_database_userpass",
@@ -278,6 +284,10 @@ func (c *Core) InitAccessControl(ctx context.Context) {
 	accessControl.AssignRole("service-client-1", "aws_dev_account_vault")
 	accessControl.AssignRole("service-client-1", "aws_prod_account_vault")
 	accessControl.AssignRole("service-client-2", "sales_admin")
+
+	// System admin role assignments
+	accessControl.AssignRole("service-client-1", "system_admin") // For testing
+	accessControl.AssignRole("admin-user", "system_admin")
 
 	c.accessControl = accessControl
 }

@@ -6,6 +6,7 @@
 *.dylib
 mysql-proxy
 covenant
+warden
 
 # Test binary
 *.test

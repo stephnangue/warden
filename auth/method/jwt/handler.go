@@ -147,8 +147,13 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientIP := r.RemoteAddr
-	
+	// Use Chi's RealIP middleware result (should be set by router)
+	clientIP := r.Header.Get("X-Real-IP")
+	if clientIP == "" {
+		// Fallback if RealIP middleware wasn't applied
+		clientIP = r.RemoteAddr
+	}
+
 	// Remove port if present
 	if host, _, err := net.SplitHostPort(clientIP); err == nil {
 		clientIP = host
@@ -209,6 +214,31 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		helper.JSONResponse(w, http.StatusOK, tokenValue.Data)
 		return
+	case "system":
+		now := time.Now()
+		authData := token.AuthData{
+			PrincipalID: principalID,
+			RoleName: role.Name,
+			AuthDeadline: now.Add(m.config.AuthDeadline),
+			ExpireAt: now.Add(m.config.TokenTTL),
+			RequestContext: map[string]string{
+				"client_ip": clientIP,
+			},
+		}
+		tokenValue, err := m.tokenStore.GenerateToken(token.WARDEN_TOKEN, &authData)
+
+		if err != nil {
+			m.logger.Error("Failed to generate token", logger.String("token_type", token.WARDEN_TOKEN), logger.Any("auth_data", authData))
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		ok := m.auditResponse(w, r, &logRequest, &clientToken, tokenValue, &authData, http.StatusOK, "OK", "")
+		if !ok {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		helper.JSONResponse(w, http.StatusOK, tokenValue.Data)
 	default:
 		m.logger.Warn("Unsupported role type", logger.String("role_type", role.Type))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)

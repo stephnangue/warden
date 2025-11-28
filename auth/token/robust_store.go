@@ -184,6 +184,8 @@ func (s *RobustStore) GenerateToken(tokenType string, authData *AuthData) (*Toke
 		token, err = s.generateUserPassToken(authData)
 	case AWS_ACCESS_KEYS:
 		token, err = s.generateAwsAccessKeysToken(authData)
+	case WARDEN_TOKEN:
+		token, err = s.generateWardenToken(authData)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedTokenType, tokenType)
 	}
@@ -382,8 +384,41 @@ func (s *RobustStore) generateUserPassToken(authData *AuthData) (*Token, error) 
 
 	s.cache.Wait()
 
-	s.logger.Debug("userpass token created", 
+	s.logger.Debug("userpass token created",
 		logger.String("token_id", username),
+		logger.Time("expires_at", authData.ExpireAt))
+
+	return token, nil
+}
+
+func (s *RobustStore) generateWardenToken(authData *AuthData) (*Token, error) {
+	// Generate a random token ID for bearer token authentication
+	tokenID := "cws." + helper.GenerateRandomString(32)
+
+	token := &Token{
+		Type: WARDEN_TOKEN,
+		ID:   tokenID,
+		Data: map[string]string{
+			"token": tokenID,
+		},
+		ExpireAt: authData.ExpireAt,
+	}
+	authData.SetToken(token)
+
+	// Store in cache with TTL
+	ttl := time.Until(authData.ExpireAt)
+	if ttl <= 0 {
+		return nil, errors.New("token already expired")
+	}
+
+	// Cost is roughly the size of the authData structure
+	cost := int64(200) // Approximate bytes for AuthData + Token
+	s.cache.SetWithTTL(tokenID, authData, cost, ttl)
+
+	s.cache.Wait()
+
+	s.logger.Debug("warden token created",
+		logger.String("token_id", tokenID),
 		logger.Time("expires_at", authData.ExpireAt))
 
 	return token, nil
