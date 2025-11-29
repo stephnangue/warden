@@ -77,6 +77,9 @@ func (p *AWSProvider) buildRequest(r *http.Request, targetURL string) *audit.Req
 }
 
 func (p *AWSProvider) buildResponse(res *http.Response, cred *audit.Cred, statusCode int, message string) *audit.Response {
+	if res == nil {
+		return nil
+	}
 	// Read body for logging
 	bodyBytes, _ := io.ReadAll(res.Body)
 
