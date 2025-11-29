@@ -202,9 +202,15 @@ func (s *RobustStore) GenerateToken(tokenType string, authData *AuthData) (*Toke
 }
 
 // ResolveToken validates and resolves a token to its principal and role
-func (s *RobustStore) ResolveToken(ctx context.Context, tokenID string, reqContext map[string]string) (string, string, error) {
+func (s *RobustStore) ResolveToken(ctx context.Context, tokenValue string, reqContext map[string]string) (string, string, error) {
+	// Detect token type from value format
+	tokenType := DetectTokenType(tokenValue)
+
+	// Compute hash-based ID for cache lookup
+	tokenID := ComputeTokenID(tokenType, tokenValue)
+
 	s.logger.Trace("resolving token",
-		logger.String("token_id", tokenID),
+		logger.String("token_id", tokenID),  // Safe to log (hash)
 		logger.String("request_id", middleware.GetReqID(ctx)),
 	)
 
@@ -215,11 +221,11 @@ func (s *RobustStore) ResolveToken(ctx context.Context, tokenID string, reqConte
 	}
 	s.mu.RUnlock()
 
-	// Get from cache (v2 API)
+	// Get from cache using computed hash
 	authData, found := s.cache.Get(tokenID)
 	if !found {
 		s.logger.Warn("token not found",
-			logger.String("token_id", tokenID),
+			logger.String("token_id", tokenID),  // Safe to log (hash)
 			logger.String("request_id", middleware.GetReqID(ctx)),
 		)
 		if s.config.EnableMetrics {
@@ -235,6 +241,25 @@ func (s *RobustStore) ResolveToken(ctx context.Context, tokenID string, reqConte
 	token := authData.GetToken()
 	if token == nil {
 		s.logger.Warn("token is nil",
+			logger.String("token_id", tokenID),
+			logger.String("request_id", middleware.GetReqID(ctx)),
+		)
+		return "", "", ErrTokenNotFound
+	}
+
+	// Verify the token value matches (defense in depth against hash collisions)
+	var expectedValue string
+	switch token.Type {
+	case WARDEN_TOKEN:
+		expectedValue = token.Data["token"]
+	case AWS_ACCESS_KEYS:
+		expectedValue = token.Data["access_key_id"]
+	case USER_PASS:
+		expectedValue = token.Data["username"]
+	}
+
+	if expectedValue != tokenValue {
+		s.logger.Error("token value mismatch - possible hash collision",
 			logger.String("token_id", tokenID),
 			logger.String("request_id", middleware.GetReqID(ctx)),
 		)
@@ -303,8 +328,14 @@ func (s *RobustStore) ResolveToken(ctx context.Context, tokenID string, reqConte
 	return authData.PrincipalID, authData.RoleName, nil
 }
 
-// GetToken retrieves a token by ID without validation
-func (s *RobustStore) GetToken(tokenID string) *Token {
+// GetToken retrieves a token by value without validation
+func (s *RobustStore) GetToken(tokenValue string) *Token {
+	// Detect token type from value format
+	tokenType := DetectTokenType(tokenValue)
+
+	// Compute hash-based ID for cache lookup
+	tokenID := ComputeTokenID(tokenType, tokenValue)
+
 	authData, found := s.cache.Get(tokenID)
 	if !found {
 		return nil
@@ -323,12 +354,34 @@ func (s *RobustStore) GetMetrics() map[string]int64 {
 
 // generateAwsAccessKeysToken creates an AWS-style access key token
 func (s *RobustStore) generateAwsAccessKeysToken(authData *AuthData) (*Token, error) {
-	accessKeyID := helper.GenerateAWSAccessKeyID()
-	secretAccessKey := helper.GenerateAWSSecretAccessKey()
+	ttl := time.Until(authData.ExpireAt)
+	if ttl <= 0 {
+		return nil, errors.New("token already expired")
+	}
 
-	token := &Token{
+	var token *Token
+	var tokenID string
+	var accessKeyID string
+	var secretAccessKey string
+
+	// Generate token with collision detection (infinite retry loop)
+	for {
+		accessKeyID = helper.GenerateAWSAccessKeyID()
+		secretAccessKey = helper.GenerateAWSSecretAccessKey()
+
+		tokenID = ComputeTokenID(AWS_ACCESS_KEYS, accessKeyID)
+
+		if _, found := s.cache.Get(tokenID); !found {
+			break
+		}
+
+		s.logger.Warn("token ID collision detected, regenerating",
+			logger.String("token_id", tokenID))
+	}
+
+	token = &Token{
 		Type: AWS_ACCESS_KEYS,
-		ID:   accessKeyID,
+		ID:   tokenID,
 		Data: map[string]string{
 			"access_key_id":     accessKeyID,
 			"secret_access_key": secretAccessKey,
@@ -337,20 +390,14 @@ func (s *RobustStore) generateAwsAccessKeysToken(authData *AuthData) (*Token, er
 	}
 	authData.SetToken(token)
 
-	// Store in cache with TTL (v2 API)
-	ttl := time.Until(authData.ExpireAt)
-	if ttl <= 0 {
-		return nil, errors.New("token already expired")
-	}
-
-	// Cost is roughly the size of the authData structure
+	// Store in cache with TTL using hash as key
 	cost := int64(200) // Approximate bytes for AuthData + Token
-	s.cache.SetWithTTL(accessKeyID, authData, cost, ttl)
+	s.cache.SetWithTTL(tokenID, authData, cost, ttl)
 
 	s.cache.Wait()
 
 	s.logger.Debug("AWS access keys token created",
-		logger.String("token_id", accessKeyID),
+		logger.String("token_id", tokenID), 
 		logger.Time("expires_at", authData.ExpireAt))
 
 	return token, nil
@@ -358,12 +405,34 @@ func (s *RobustStore) generateAwsAccessKeysToken(authData *AuthData) (*Token, er
 
 // generateUserPassToken creates a username/password token
 func (s *RobustStore) generateUserPassToken(authData *AuthData) (*Token, error) {
-	username := helper.GenerateRandomString(30)
-	password := helper.GenerateRandomString(40)
+	ttl := time.Until(authData.ExpireAt)
+	if ttl <= 0 {
+		return nil, errors.New("token already expired")
+	}
 
-	token := &Token{
+	var token *Token
+	var tokenID string
+	var username string
+	var password string
+
+	// Generate token with collision detection
+	for {
+		username = "usr-" + helper.GenerateRandomString(26)
+		password = helper.GenerateRandomString(40)
+
+		tokenID = ComputeTokenID(USER_PASS, username)
+
+		if _, found := s.cache.Get(tokenID); !found {
+			break
+		}
+
+		s.logger.Warn("token ID collision detected, regenerating",
+			logger.String("token_id", tokenID))
+	}
+
+	token = &Token{
 		Type: USER_PASS,
-		ID:   username,
+		ID:   tokenID,
 		Data: map[string]string{
 			"username": username,
 			"password": password,
@@ -372,46 +441,54 @@ func (s *RobustStore) generateUserPassToken(authData *AuthData) (*Token, error) 
 	}
 	authData.SetToken(token)
 
-	// Store in cache with TTL (v2 API)
-	ttl := time.Until(authData.ExpireAt)
-	if ttl <= 0 {
-		return nil, errors.New("token already expired")
-	}
-
-	// Cost is roughly the size of the authData structure
+	// Store in cache with TTL using hash as key
 	cost := int64(200) // Approximate bytes for AuthData + Token
-	s.cache.SetWithTTL(username, authData, cost, ttl)
+	s.cache.SetWithTTL(tokenID, authData, cost, ttl)
 
 	s.cache.Wait()
 
 	s.logger.Debug("userpass token created",
-		logger.String("token_id", username),
+		logger.String("token_id", tokenID), 
 		logger.Time("expires_at", authData.ExpireAt))
 
 	return token, nil
 }
 
 func (s *RobustStore) generateWardenToken(authData *AuthData) (*Token, error) {
-	// Generate a random token ID for bearer token authentication
-	tokenID := "cws." + helper.GenerateRandomString(32)
-
-	token := &Token{
-		Type: WARDEN_TOKEN,
-		ID:   tokenID,
-		Data: map[string]string{
-			"token": tokenID,
-		},
-		ExpireAt: authData.ExpireAt,
-	}
-	authData.SetToken(token)
-
-	// Store in cache with TTL
 	ttl := time.Until(authData.ExpireAt)
 	if ttl <= 0 {
 		return nil, errors.New("token already expired")
 	}
 
-	// Cost is roughly the size of the authData structure
+	var token *Token
+	var tokenID string
+	var tokenValue string
+
+	// Generate token with collision detection
+	for {
+		tokenValue = "cws." + helper.GenerateRandomString(64)
+
+		tokenID = ComputeTokenID(WARDEN_TOKEN, tokenValue)
+
+		if _, found := s.cache.Get(tokenID); !found {
+			break
+		}
+
+		s.logger.Warn("token ID collision detected, regenerating",
+			logger.String("token_id", tokenID))
+	}
+
+	token = &Token{
+		Type: WARDEN_TOKEN,
+		ID:   tokenID, 
+		Data: map[string]string{
+			"token": tokenValue, 
+		},
+		ExpireAt: authData.ExpireAt,
+	}
+	authData.SetToken(token)
+
+	// Store in cache with TTL using hash as key
 	cost := int64(200) // Approximate bytes for AuthData + Token
 	s.cache.SetWithTTL(tokenID, authData, cost, ttl)
 

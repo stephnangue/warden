@@ -165,10 +165,8 @@ github.com/spf13/cobra v1.10.1/go.mod h1:7SmJGaTHFVBY0jW4NXGluQoLvhqFQM+6XSKD+P4
 github.com/spf13/pflag v1.0.9/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
 github.com/spf13/pflag v1.0.10 h1:4EBh2KAYBwaONj6b2Ye1GiHfwjqyROoF4RwYO+vPwFk=
 github.com/spf13/pflag v1.0.10/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
-github.com/stephnangue/warden/api v0.0.0-20251126173353-7c20452911ca h1:MK/JB7MSnGP04o0KE24Ip+mXrR7tJTk+//7pKrdOHsM=
-github.com/stephnangue/warden/api v0.0.0-20251126173353-7c20452911ca/go.mod h1:qcQdDLBROehZ9Sl7MtyJZovgK/WCrNf0gVCfQpJv2wI=
-github.com/stephnangue/warden/api/auth/jwt v0.0.0-20251126173353-7c20452911ca h1:hJkUQnOrz0e5vkbR0Jkkdjw1V28/hK4AUybKc0qafkw=
-github.com/stephnangue/warden/api/auth/jwt v0.0.0-20251126173353-7c20452911ca/go.mod h1:rT4voslw1vWo8/9MlkI/YY0DnYRocGTv8qP3PwuFHTs=
+github.com/stephnangue/warden/api v0.0.0-20251128122017-2afa1ae782fc h1:sBTqsKLm5xIG7Vi2pnZ2zwmhIW9va2I6+Eq5IG+HYPc=
+github.com/stephnangue/warden/api v0.0.0-20251128122017-2afa1ae782fc/go.mod h1:qcQdDLBROehZ9Sl7MtyJZovgK/WCrNf0gVCfQpJv2wI=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.5.2 h1:xuMeJ0Sdp5ZMRXx/aWO6RZxdr3beISkG5/G/aIRr3pY=
 github.com/stretchr/objx v0.5.2/go.mod h1:FRsXN1f5AsAjCGJKqEizvkpNtU+EGNCLh3NxZ/8L+MA=

@@ -15,8 +15,6 @@ require (
 	github.com/pires/go-proxyproto v0.8.1
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.1
-	github.com/stephnangue/warden/api v0.0.0-20251126173353-7c20452911ca
-	github.com/stephnangue/warden/api/auth/jwt v0.0.0-20251126173353-7c20452911ca
 	github.com/stretchr/testify v1.11.1
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
@@ -40,6 +38,7 @@ require (
 	github.com/petermattis/goid v0.0.0-20250813065127-a731cc31b4fe // indirect
 	github.com/sasha-s/go-deadlock v0.3.6 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
+	github.com/stephnangue/warden/api v0.0.0-20251128122017-2afa1ae782fc // indirect
 	golang.org/x/oauth2 v0.33.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
