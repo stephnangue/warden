@@ -8,6 +8,7 @@ import (
 
 	ristretto "github.com/dgraph-io/ristretto/v2"
 	"github.com/go-chi/chi/middleware"
+	"github.com/stephnangue/warden/auth/token"
 	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/logger"
 	"golang.org/x/sync/singleflight"
@@ -52,7 +53,6 @@ func NewCredentialProvider(
 
 // onEvict is called when a credential is evicted from the cache
 func (cp *CredentialProvider) onEvict(item *ristretto.Item[*Credential]) {
-
 	cp.log.Debug("credential evicted from cache",
 		logger.String("token_id", item.Value.TokenID),
 		logger.String("reason", "ttl_expired_or_capacity"),
@@ -75,22 +75,25 @@ func (cp *CredentialProvider) onEvict(item *ristretto.Item[*Credential]) {
 // it determines how long the credential should be cached.
 // When the credential also has a ttl (dynamic credential), the cache duration is the minimum
 // value between the token_ttl and the 80% of the credential_ttl
-func (cp *CredentialProvider) GetCredentials(ctx context.Context, tokenId, roleName string, tokenTTL time.Duration) (*Credential, error) {
+func (cp *CredentialProvider) GetCredentials(ctx context.Context, tokenValue, roleName string, tokenTTL time.Duration) (*Credential, error) {
+
+	tokenID := token.ComputeTokenID(token.DetectTokenType(tokenValue), tokenValue)
+
 	// Check cache first
-	if cred, found := cp.cache.Get(tokenId); found {
+	if cred, found := cp.cache.Get(tokenID); found {
 		cp.log.Debug("using cached credentials",
-			logger.String("token_id", tokenId),
+			logger.String("token_id", tokenID),
 			logger.String("request_id", middleware.GetReqID(ctx)),
 		)
 		return cred, nil
 	}
 
 	// Use singleflight to ensure only one creation per tokenId
-	v, err, _ := cp.group.Do(tokenId, func() (interface{}, error) {
+	v, err, _ := cp.group.Do(tokenID, func() (interface{}, error) {
 		// Double-check cache in case another goroutine just added it
-		if cred, found := cp.cache.Get(tokenId); found {
+		if cred, found := cp.cache.Get(tokenID); found {
 			cp.log.Debug("using cached credentials",
-				logger.String("token_id", tokenId),
+				logger.String("token_id", tokenID),
 				logger.String("request_id", middleware.GetReqID(ctx)),
 			)
 			return cred, nil
@@ -98,7 +101,7 @@ func (cp *CredentialProvider) GetCredentials(ctx context.Context, tokenId, roleN
 
 		// Cache miss - fetch credentials
 		cp.log.Debug("cache miss, fetching credentials",
-			logger.String("token_id", tokenId),
+			logger.String("token_id", tokenID),
 			logger.String("request_id", middleware.GetReqID(ctx)),
 		)
 
@@ -106,19 +109,19 @@ func (cp *CredentialProvider) GetCredentials(ctx context.Context, tokenId, roleN
 		if err != nil {
 			return nil, err
 		}
-		cred.TokenID = tokenId
+		cred.TokenID = tokenID
 
 		cacheTtl := tokenTTL
 		if cred.LeaseTTL > 0 {
 			cacheTtl = min(tokenTTL, cred.LeaseTTL*4/5)
 		}
-		cp.cache.SetWithTTL(tokenId, cred, 1, cacheTtl)
+		cp.cache.SetWithTTL(tokenID, cred, 1, cacheTtl)
 
 		// Wait for value to be processed (Ristretto is async)
 		cp.cache.Wait()
 
 		cp.log.Debug("cached credentials",
-			logger.String("token_id", tokenId),
+			logger.String("token_id", tokenID),
 			logger.String("ttl", cacheTtl.String()),
 			logger.String("request_id", middleware.GetReqID(ctx)),
 		)

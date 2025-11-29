@@ -199,10 +199,10 @@ type Cred struct {
 // Token contains token information used by a principal to send a request to warden
 type Token struct {
 	Type        string            `json:"type"`
-	TokenID     string            `json:"token_id,omitempty"`
+	TokenID     string            `json:"token_id,omitempty"`     // Hash-based ID (safe to log)
 	TokenTTL    int64             `json:"token_ttl,omitempty"`
 	TokenIssuer string            `json:"token_issuer,omitempty"`
-	Data        map[string]string `json:"data,omitempty"`
+	Data        map[string]string `json:"data,omitempty"`          // Contains actual token values (should be salted via HMAC)
 }
 
 // EntryType defines the type of audit entry
