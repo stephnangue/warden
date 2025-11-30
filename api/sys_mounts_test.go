@@ -10,10 +10,10 @@ import (
 )
 
 func TestSys_ListMounts(t *testing.T) {
-	t.Run("successfully lists mounts", func(t *testing.T) {
+	t.Run("successfully lists providers", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/sys/mounts" {
-				t.Errorf("expected path /v1/sys/mounts, got %s", r.URL.Path)
+			if r.URL.Path != "/v1/sys/providers" {
+				t.Errorf("expected path /v1/sys/providers, got %s", r.URL.Path)
 			}
 			if r.Method != http.MethodGet {
 				t.Errorf("expected GET method, got %s", r.Method)
@@ -274,10 +274,10 @@ func TestSys_ListMountsWithContext(t *testing.T) {
 }
 
 func TestSys_Mount(t *testing.T) {
-	t.Run("successfully mounts secrets engine", func(t *testing.T) {
+	t.Run("successfully mounts providers", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/sys/mounts/database" {
-				t.Errorf("expected path /v1/sys/mounts/database, got %s", r.URL.Path)
+			if r.URL.Path != "/v1/sys/providers/database" {
+				t.Errorf("expected path /v1/sys/providers/database, got %s", r.URL.Path)
 			}
 			if r.Method != http.MethodPost {
 				t.Errorf("expected POST method, got %s", r.Method)
@@ -338,8 +338,8 @@ func TestSys_Mount(t *testing.T) {
 
 	t.Run("handles path with special characters", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/sys/mounts/my-secret-engine" {
-				t.Errorf("expected path /v1/sys/mounts/my-secret-engine, got %s", r.URL.Path)
+			if r.URL.Path != "/v1/sys/providers/my-secret-engine" {
+				t.Errorf("expected path /v1/sys/providers/my-secret-engine, got %s", r.URL.Path)
 			}
 			w.WriteHeader(http.StatusNoContent)
 		}))
@@ -474,8 +474,8 @@ func TestSys_MountWithContext(t *testing.T) {
 func TestSys_Unmount(t *testing.T) {
 	t.Run("successfully unmounts secrets engine", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/sys/mounts/database" {
-				t.Errorf("expected path /v1/sys/mounts/database, got %s", r.URL.Path)
+			if r.URL.Path != "/v1/sys/providers/database" {
+				t.Errorf("expected path /v1/sys/providers/database, got %s", r.URL.Path)
 			}
 			if r.Method != http.MethodDelete {
 				t.Errorf("expected DELETE method, got %s", r.Method)
@@ -523,8 +523,8 @@ func TestSys_Unmount(t *testing.T) {
 
 	t.Run("handles path with special characters", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/sys/mounts/my-secret-engine" {
-				t.Errorf("expected path /v1/sys/mounts/my-secret-engine, got %s", r.URL.Path)
+			if r.URL.Path != "/v1/sys/providers/my-secret-engine" {
+				t.Errorf("expected path /v1/sys/providers/my-secret-engine, got %s", r.URL.Path)
 			}
 			w.WriteHeader(http.StatusNoContent)
 		}))
@@ -641,8 +641,8 @@ func TestSys_UnmountWithContext(t *testing.T) {
 func TestSys_TuneMount(t *testing.T) {
 	t.Run("successfully tunes mount configuration", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/sys/mounts/database/tune" {
-				t.Errorf("expected path /v1/sys/mounts/database/tune, got %s", r.URL.Path)
+			if r.URL.Path != "/v1/sys/providers/database/tune" {
+				t.Errorf("expected path /v1/sys/providers/database/tune, got %s", r.URL.Path)
 			}
 			if r.Method != http.MethodPost {
 				t.Errorf("expected POST method, got %s", r.Method)
@@ -778,8 +778,8 @@ func TestSys_TuneMountWithContext(t *testing.T) {
 func TestSys_MountConfig(t *testing.T) {
 	t.Run("successfully retrieves mount configuration", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/sys/mounts/database/tune" {
-				t.Errorf("expected path /v1/sys/mounts/database/tune, got %s", r.URL.Path)
+			if r.URL.Path != "/v1/sys/providers/database/tune" {
+				t.Errorf("expected path /v1/sys/providers/database/tune, got %s", r.URL.Path)
 			}
 			if r.Method != http.MethodGet {
 				t.Errorf("expected GET method, got %s", r.Method)
@@ -964,8 +964,8 @@ func TestSys_MountConfigWithContext(t *testing.T) {
 func TestSys_MountInfo(t *testing.T) {
 	t.Run("successfully retrieves mount info", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/sys/mounts/database" {
-				t.Errorf("expected path /v1/sys/mounts/database, got %s", r.URL.Path)
+			if r.URL.Path != "/v1/sys/providers/database" {
+				t.Errorf("expected path /v1/sys/providers/database, got %s", r.URL.Path)
 			}
 			if r.Method != http.MethodGet {
 				t.Errorf("expected GET method, got %s", r.Method)
@@ -1153,7 +1153,7 @@ func TestSys_MountE2E(t *testing.T) {
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
-			case r.Method == http.MethodGet && r.URL.Path == "/v1/sys/mounts":
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/sys/providers":
 				// List mounts
 				if mounted {
 					w.WriteHeader(http.StatusOK)
@@ -1170,11 +1170,11 @@ func TestSys_MountE2E(t *testing.T) {
 					w.WriteHeader(http.StatusOK)
 					w.Write([]byte(`{"data": {}}`))
 				}
-			case r.Method == http.MethodPost && r.URL.Path == "/v1/sys/mounts/database":
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/sys/providers/database":
 				// Mount
 				mounted = true
 				w.WriteHeader(http.StatusNoContent)
-			case r.Method == http.MethodGet && r.URL.Path == "/v1/sys/mounts/database/tune":
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/sys/providers/database/tune":
 				// Get mount config
 				w.WriteHeader(http.StatusOK)
 				w.Write([]byte(fmt.Sprintf(`{
@@ -1183,12 +1183,12 @@ func TestSys_MountE2E(t *testing.T) {
 						"max_lease_ttl": %d
 					}
 				}`, defaultLeaseTTL, maxLeaseTTL)))
-			case r.Method == http.MethodPost && r.URL.Path == "/v1/sys/mounts/database/tune":
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/sys/providers/database/tune":
 				// Tune mount
 				defaultLeaseTTL = 7200
 				maxLeaseTTL = 14400
 				w.WriteHeader(http.StatusNoContent)
-			case r.Method == http.MethodGet && r.URL.Path == "/v1/sys/mounts/database":
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/sys/providers/database":
 				// Get mount info
 				w.WriteHeader(http.StatusOK)
 				w.Write([]byte(`{
@@ -1198,7 +1198,7 @@ func TestSys_MountE2E(t *testing.T) {
 						"accessor": "database_accessor_123"
 					}
 				}`))
-			case r.Method == http.MethodDelete && r.URL.Path == "/v1/sys/mounts/database":
+			case r.Method == http.MethodDelete && r.URL.Path == "/v1/sys/providers/database":
 				// Unmount
 				mounted = false
 				w.WriteHeader(http.StatusNoContent)

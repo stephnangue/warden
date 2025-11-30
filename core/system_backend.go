@@ -44,9 +44,6 @@ func NewSystemBackend(core *Core, log logger.Logger) *SystemBackend {
 		},
 	}
 
-	// Create HUMA API with Chi adapter
-	api := humachi.New(router, config)
-
 	// Create handlers
 	handlers := &SystemHandlers{
 		core:   core,
@@ -57,70 +54,74 @@ func NewSystemBackend(core *Core, log logger.Logger) *SystemBackend {
 		core:     core,
 		logger:   log,
 		router:   router,
-		api:      api,
+		api:      nil, // Will be set after middleware
 		handlers: handlers,
 	}
 
-	// Register Phase 1 operations (provider mounts)
-	backend.registerMountOperations()
+	// Apply authentication middleware to the base router
+	router.Use(backend.AuthenticationMiddleware)
+
+	// Create HUMA API with Chi adapter (after middleware is applied)
+	api := humachi.New(router, config)
+	backend.api = api
+
+	backend.registerProviderOperations()
 
 	return backend
 }
 
-// registerMountOperations registers all mount management endpoints
-func (s *SystemBackend) registerMountOperations() {
-	// Protected operations group (requires authentication)
-	s.router.Group(func(r chi.Router) {
-		// Apply authentication middleware
-		r.Use(s.AuthenticationMiddleware)
-
-		// POST /mounts/{path} - Mount provider (protected)
-		huma.Register(s.api, huma.Operation{
-			OperationID: "mount-provider",
-			Method:      http.MethodPost,
-			Path:        "/mounts/{path}",
-			Summary:     "Mount a provider",
-			Description: "Creates a new provider mount at the specified path. Requires system_admin role.",
-			Tags:        []string{"mounts"},
-			Security: []map[string][]string{
-				{"bearerAuth": {}},
-			},
-		}, s.handlers.MountProvider)
-
-		// DELETE /mounts/{path} - Unmount provider (protected)
-		huma.Register(s.api, huma.Operation{
-			OperationID: "unmount-provider",
-			Method:      http.MethodDelete,
-			Path:        "/mounts/{path}",
-			Summary:     "Unmount a provider",
-			Description: "Removes a provider mount from the specified path. Requires system_admin role.",
-			Tags:        []string{"mounts"},
-			Security: []map[string][]string{
-				{"bearerAuth": {}},
-			},
-		}, s.handlers.UnmountProvider)
-	})
-
-	// Public operations (no authentication required)
-
-	// GET /mounts/{path} - Get mount info (public)
+// registerProviderOperations registers all providers management endpoints
+func (s *SystemBackend) registerProviderOperations() {
+	// POST /providers/{path} - Enable provider
 	huma.Register(s.api, huma.Operation{
-		OperationID: "get-mount",
+		OperationID: "enable-provider",
+		Method:      http.MethodPost,
+		Path:        "/providers/{path}",
+		Summary:     "Enable a provider",
+		Description: "Creates a new provider at the specified path. Requires system_admin role.",
+		Tags:        []string{"providers"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.MountProvider)
+
+	// DELETE /providers/{path} - Disable provider
+	huma.Register(s.api, huma.Operation{
+		OperationID: "disable-provider",
+		Method:      http.MethodDelete,
+		Path:        "/providers/{path}",
+		Summary:     "Disable a provider",
+		Description: "Removes a provider from the specified path. Requires system_admin role.",
+		Tags:        []string{"providers"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.UnmountProvider)
+
+	// GET /providers/{path} - Get provider info
+	huma.Register(s.api, huma.Operation{
+		OperationID: "get-provider",
 		Method:      http.MethodGet,
-		Path:        "/mounts/{path}",
-		Summary:     "Get mount information",
-		Description: "Retrieves detailed information about a specific mount",
-		Tags:        []string{"mounts"},
+		Path:        "/providers/{path}",
+		Summary:     "Get provider information",
+		Description: "Retrieves detailed information about a specific provider",
+		Tags:        []string{"providers"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
 	}, s.handlers.GetMountInfo)
 
-	// GET /mounts - List mounts (public)
+	// GET /providers - List providers
 	huma.Register(s.api, huma.Operation{
-		OperationID: "list-mounts",
+		OperationID: "list-providers",
 		Method:      http.MethodGet,
-		Path:        "/mounts",
-		Summary:     "List all mounts",
-		Description: "Returns all mounted providers",
-		Tags:        []string{"mounts"},
+		Path:        "/providers",
+		Summary:     "List all providers",
+		Description: "Returns all enabled providers",
+		Tags:        []string{"providers"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
 	}, s.handlers.ListMounts)
 }
 
