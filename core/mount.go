@@ -258,6 +258,14 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry) (logica
 			return nil, fmt.Errorf("provider type not supported: %s", entry.Type)
 		}
 		f := factory.(provider.Factory)
+
+		// Validate configuration before creating the provider
+		if entry.Config != nil {
+			if err := f.ValidateConfig(entry.Config); err != nil {
+				return nil, fmt.Errorf("invalid configuration: %w", err)
+			}
+		}
+
 		backend, err = f.Create(
 			ctx,
 			entry.Path,
@@ -301,14 +309,81 @@ func (c *Core) unmount(ctx context.Context, path string) error {
 	return nil
 }
 
+// tuneMount updates the configuration of an existing mount
+func (c *Core) tuneMount(ctx context.Context, path string, config map[string]any) error {
+	// Ensure we end the path in a slash
+	if !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+
+	// Prevent protected paths from being tuned
+	for _, p := range protectedMounts {
+		if strings.HasPrefix(path, p) {
+			return fmt.Errorf("cannot tune %q", path)
+		}
+	}
+
+	c.mountsLock.Lock()
+	defer c.mountsLock.Unlock()
+
+	// Find the mount entry
+	entry, err := c.mounts.findByPath(ctx, path)
+	if err != nil {
+		return err
+	}
+	if entry == nil {
+		return errNoMatchingMount
+	}
+
+	// Validate configuration for provider mounts
+	if entry.Class == mountClassProvider {
+		factory := c.providers[entry.Type]
+		if factory == nil {
+			return fmt.Errorf("provider type %s not found", entry.Type)
+		}
+
+		// Merge existing config with new config for validation
+		mergedConfig := make(map[string]any)
+		for k, v := range entry.Config {
+			mergedConfig[k] = v
+		}
+		for k, v := range config {
+			mergedConfig[k] = v
+		}
+
+		// Validate the merged configuration
+		if err := factory.ValidateConfig(mergedConfig); err != nil {
+			return fmt.Errorf("invalid configuration: %w", err)
+		}
+	}
+
+	// Update the config
+	if entry.Config == nil {
+		entry.Config = make(map[string]any)
+	}
+	for key, value := range config {
+		entry.Config[key] = value
+	}
+
+	// Persist the updated mount table (commented out for now, consistent with other methods)
+	// if err := c.persistMounts(ctx, nil, c.mounts, &entry.Local, entry.UUID); err != nil {
+	// 	c.logger.Error("failed to persist mount configuration", "error", err)
+	// 	return fmt.Errorf("failed to persist mount configuration: %w", err)
+	// }
+
+	c.logger.Info("successfully tuned mount",
+		logger.String("path", path),
+	)
+
+	return nil
+}
+
 func (c *Core) unmountInternal(ctx context.Context, path string, updateStorage bool) error {
 	// Verify exact match of the route
 	match := c.router.MatchingMount(ctx, path)
 	if match == "" {
 		return errNoMatchingMount
 	}
-
-	backend := c.router.MatchingBackend(ctx, path)
 
 	// Mark the entry as tainted
 	if err := c.taintMountEntry(ctx, path, updateStorage); err != nil {
@@ -323,11 +398,6 @@ func (c *Core) unmountInternal(ctx context.Context, path string, updateStorage b
 	// are uncertain, right now.
 	if err := c.router.Taint(ctx, path); err != nil {
 		return err
-	}
-
-	if backend != nil {
-		// Call cleanup function if it exists
-		backend.Cleanup()
 	}
 
 	// Remove the mount table entry

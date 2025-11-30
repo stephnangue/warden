@@ -67,3 +67,6 @@ scripts/
 
 # Certificates (should be mounted)
 certs/
+
+# Terraform (not needed in container)
+terraform/

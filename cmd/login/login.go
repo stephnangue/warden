@@ -12,6 +12,8 @@ import (
 var (
 	LoginCmd = &cobra.Command{
 		Use:   "login",
+    	SilenceUsage:  true,
+		SilenceErrors: true,
 		Short: "This command is used to authenticate to Warden server.",
 		Long: `
 Usage: warden login [options] [AUTH K=V...]
@@ -64,22 +66,16 @@ func init() {
 	LoginCmd.Flags().StringVarP(&flagPath, "path", "p", "", "The path on which the method was enabled")
 	LoginCmd.Flags().StringVarP(&flagRole, "role", "r", "", "The role the assume after successful authentication")
 	LoginCmd.Flags().StringVarP(&flagToken, "token", "t", "", "The JWT to use with JWT auth method")
+	LoginCmd.MarkFlagRequired("method")
+	LoginCmd.MarkFlagRequired("role")
 }
 
 func run(cmd *cobra.Command, args []string) error {
-	if flagMethod == "" {
-		return fmt.Errorf("auth method is required. Use -m or --method flag")
-	}
-
 	// Get the handler function
 	authHandler, ok := Handlers[flagMethod]
 	if !ok {
 		return fmt.Errorf("unknown auth method: %s. Use 'warden auth list' to see the complete list of auth methods. Additionally, some "+
 			"auth methods are only available via the API.", flagMethod)
-	}
-
-	if flagRole == "" {
-		return fmt.Errorf("role name is required. Use -r or --role flag")
 	}
 
 	config := make(map[string]string)

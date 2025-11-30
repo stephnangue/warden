@@ -96,6 +96,86 @@ func (f *AWSProviderFactory) Initialize(log logger.Logger) error {
 	return nil
 }
 
+// ValidateConfig validates AWS provider-specific configuration
+func (f *AWSProviderFactory) ValidateConfig(config map[string]any) error {
+	allowedKeys := map[string]bool{
+		"proxy_domains": true,
+		"max_body_size": true,
+		"timeout":       true,
+	}
+
+	// Check for unknown keys
+	for key := range config {
+		if !allowedKeys[key] {
+			return fmt.Errorf("unknown configuration key: %s (allowed: proxy_domains, max_body_size, timeout)", key)
+		}
+	}
+
+	// Validate proxy_domains
+	if domains, ok := config["proxy_domains"]; ok {
+		switch v := domains.(type) {
+		case []interface{}:
+			if len(v) == 0 {
+				return fmt.Errorf("proxy_domains cannot be empty")
+			}
+			for i, d := range v {
+				if _, ok := d.(string); !ok {
+					return fmt.Errorf("proxy_domains[%d] must be a string", i)
+				}
+			}
+		case []string:
+			if len(v) == 0 {
+				return fmt.Errorf("proxy_domains cannot be empty")
+			}
+		default:
+			return fmt.Errorf("proxy_domains must be an array of strings")
+		}
+	}
+
+	// Validate max_body_size
+	if maxSize, ok := config["max_body_size"]; ok {
+		var size int64
+		switch v := maxSize.(type) {
+		case int:
+			size = int64(v)
+		case int64:
+			size = v
+		case float64:
+			size = int64(v)
+		default:
+			return fmt.Errorf("max_body_size must be an integer")
+		}
+		if size < 1 {
+			return fmt.Errorf("max_body_size must be greater than 0")
+		}
+		if size > 104857600 { // 100MB
+			return fmt.Errorf("max_body_size must not exceed 104857600 bytes (100MB)")
+		}
+	}
+
+	// Validate timeout
+	if timeout, ok := config["timeout"]; ok {
+		switch v := timeout.(type) {
+		case string:
+			if _, err := time.ParseDuration(v); err != nil {
+				return fmt.Errorf("invalid timeout format: %w (expected format: '30s', '5m', '1h')", err)
+			}
+		case int:
+			if v < 1 {
+				return fmt.Errorf("timeout must be greater than 0 seconds")
+			}
+		case float64:
+			if v < 1 {
+				return fmt.Errorf("timeout must be greater than 0 seconds")
+			}
+		default:
+			return fmt.Errorf("timeout must be a duration string (e.g., '30s') or integer (seconds)")
+		}
+	}
+
+	return nil
+}
+
 func (f *AWSProviderFactory) Create(
 	ctx context.Context,
 	mountPath string,

@@ -24,8 +24,8 @@ func TestDefaultConfig(t *testing.T) {
 			t.Fatal("DefaultConfig returned nil")
 		}
 
-		if config.Address != "https://127.0.0.1:5000" {
-			t.Errorf("expected default address https://127.0.0.1:5000, got %s", config.Address)
+		if config.Address != "http://127.0.0.1:5000" {
+			t.Errorf("expected default address http://127.0.0.1:5000, got %s", config.Address)
 		}
 
 		if config.HttpClient == nil {

@@ -123,6 +123,19 @@ func (s *SystemBackend) registerProviderOperations() {
 			{"bearerAuth": {}},
 		},
 	}, s.handlers.ListMounts)
+
+	// POST /providers/{path}/tune - Configure a provider
+	huma.Register(s.api, huma.Operation{
+		OperationID: "tune-provider",
+		Method:      http.MethodPost,
+		Path:        "/providers/{path}/tune",
+		Summary:     "Configure a provider",
+		Description: "Configure an existing provider enabled on the provided path",
+		Tags:        []string{"providers"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.TuneProvider)
 }
 
 // HandleRequest implements logical.Backend interface

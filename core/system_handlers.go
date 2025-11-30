@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -37,40 +38,49 @@ func (h *SystemHandlers) MountProvider(
 	ctx context.Context,
 	input *MountProviderInput,
 ) (*MountProviderOutput, error) {
+	// URL-decode the path (Chi doesn't decode path parameters automatically)
+	decodedPath, err := url.PathUnescape(input.Path)
+	if err != nil {
+		h.logger.Warn("path decode failed",
+			logger.Err(err),
+			logger.String("path", input.Path))
+		return nil, huma.Error400BadRequest(fmt.Sprintf("invalid path encoding: %v", err))
+	}
+
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
 		h.logger.Warn("operation unauthorized",
 			logger.Err(err),
-			logger.String("path", input.Path))
+			logger.String("path", decodedPath))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
 	}
 
 	// Custom validation
-	if err := ValidateMountPath(input.Path); err != nil {
+	if err := ValidateMountPath(decodedPath); err != nil {
 		h.logger.Warn("mount path validation failed",
 			logger.Err(err),
-			logger.String("path", input.Path))
+			logger.String("path", decodedPath))
 		return nil, huma.Error400BadRequest(err.Error())
 	}
 
 	h.logger.Info("mounting provider",
-		logger.String("path", input.Path),
-		logger.String("type", input.Type))
+		logger.String("path", decodedPath),
+		logger.String("type", input.Body.Type))
 
 	// Create mount entry
 	entry := &MountEntry{
 		Class:       mountClassProvider,
-		Type:        input.Type,
-		Path:        input.Path,
-		Description: input.Description,
-		Config:      input.Config,
+		Type:        input.Body.Type,
+		Path:        decodedPath,
+		Description: input.Body.Description,
+		Config:      input.Body.Config,
 	}
 
 	// Mount via Core (handles validation, locking, router updates)
 	if err := h.core.mount(ctx, entry); err != nil {
 		h.logger.Error("mount failed",
 			logger.Err(err),
-			logger.String("path", input.Path))
+			logger.String("path", decodedPath))
 		return nil, h.convertError(err)
 	}
 
@@ -78,7 +88,7 @@ func (h *SystemHandlers) MountProvider(
 	output := &MountProviderOutput{}
 	output.Body.Accessor = entry.Accessor
 	output.Body.Path = entry.Path
-	output.Body.Message = fmt.Sprintf("Successfully mounted %s provider at %s", input.Type, input.Path)
+	output.Body.Message = fmt.Sprintf("Successfully mounted %s provider at %s", input.Body.Type, decodedPath)
 
 	return output, nil
 }
@@ -187,6 +197,35 @@ func (h *SystemHandlers) ListMounts(
 	return output, nil
 }
 
+// TuneMount tunes an existing provider mount
+func (h *SystemHandlers) TuneProvider(
+	ctx context.Context,
+	input *TuneProviderInput,
+) (*TuneProviderOutput, error) {
+	// Authorization check
+	if err := h.checkSystemAdmin(ctx); err != nil {
+		h.logger.Warn("tune mount operation unauthorized",
+			logger.Err(err),
+			logger.String("path", input.Path))
+		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
+	}
+
+	h.logger.Info("tuning mount",
+		logger.String("path", input.Path))
+
+	// Tune via Core
+	if err := h.core.tuneMount(ctx, input.Path, input.Body.Config); err != nil {
+		h.logger.Error("tune mount failed",
+			logger.Err(err),
+			logger.String("path", input.Path))
+		return nil, h.convertError(err)
+	}
+
+	output := &TuneProviderOutput{}
+	output.Body.Message = fmt.Sprintf("Successfully tuned mount at %s", input.Path)
+	return output, nil
+}
+
 // convertError converts internal errors to HUMA errors with generic messages
 func (h *SystemHandlers) convertError(err error) error {
 	errMsg := err.Error()
@@ -194,13 +233,16 @@ func (h *SystemHandlers) convertError(err error) error {
 	// Log the detailed error internally
 	h.logger.Error("operation error", logger.Err(err))
 
-	// Return generic, security-conscious error messages
+	// Return error messages - validation errors should be descriptive, others generic for security
 	switch {
+	case strings.Contains(errMsg, "invalid configuration"):
+		// Validation errors should be shown to the user with details
+		return huma.Error400BadRequest(errMsg)
 	case strings.Contains(errMsg, "already in use"):
 		return huma.Error409Conflict("Mount path conflict")
 	case strings.Contains(errMsg, "no matching mount"):
 		return huma.Error404NotFound("Mount not found")
-	case strings.Contains(errMsg, "cannot mount"):
+	case strings.Contains(errMsg, "cannot mount"), strings.Contains(errMsg, "cannot tune"):
 		return huma.Error403Forbidden("Operation not permitted")
 	case strings.Contains(errMsg, "not supported"):
 		return huma.Error400BadRequest("Invalid mount type")
