@@ -39,7 +39,7 @@ func (h *SystemHandlers) MountProvider(
 ) (*MountProviderOutput, error) {
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
-		h.logger.Warn("mount operation unauthorized",
+		h.logger.Warn("operation unauthorized",
 			logger.Err(err),
 			logger.String("path", input.Path))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
@@ -116,6 +116,14 @@ func (h *SystemHandlers) GetMountInfo(
 	ctx context.Context,
 	input *GetMountInput,
 ) (*GetMountOutput, error) {
+	// Authorization check
+	if err := h.checkSystemAdmin(ctx); err != nil {
+		h.logger.Warn("get mount info operation unauthorized",
+			logger.Err(err),
+			logger.String("path", input.Path))
+		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
+	}
+
 	h.core.mountsLock.RLock()
 	defer h.core.mountsLock.RUnlock()
 
@@ -134,12 +142,10 @@ func (h *SystemHandlers) GetMountInfo(
 	}
 
 	output := &GetMountOutput{}
-	output.Body.Class = entry.Class
 	output.Body.Type = entry.Type
 	output.Body.Path = entry.Path
 	output.Body.Description = entry.Description
 	output.Body.Accessor = entry.Accessor
-	output.Body.Tainted = entry.Tainted
 	output.Body.Config = entry.Config
 
 	return output, nil
@@ -148,21 +154,27 @@ func (h *SystemHandlers) GetMountInfo(
 // ListMounts retrieves all mounts
 func (h *SystemHandlers) ListMounts(
 	ctx context.Context,
-	input *ListMountsInput,
+	input *struct{},
 ) (*ListMountsOutput, error) {
+	// Authorization check
+	if err := h.checkSystemAdmin(ctx); err != nil {
+		h.logger.Warn("list mounts operation unauthorized",
+			logger.Err(err))
+		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
+	}
+	
 	h.core.mountsLock.RLock()
 	defer h.core.mountsLock.RUnlock()
 
 	mounts := make(map[string]MountInfo)
 
 	for _, entry := range h.core.mounts.Entries {
-		// Filter by class if specified
-		if input.Class != "" && entry.Class != input.Class {
+		// Only returns entry of class provider
+		if entry.Class != "provider" {
 			continue
 		}
 
 		mounts[entry.Path] = MountInfo{
-			Class:       entry.Class,
 			Type:        entry.Type,
 			Description: entry.Description,
 			Accessor:    entry.Accessor,
