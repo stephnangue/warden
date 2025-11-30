@@ -17,7 +17,7 @@ func (c *Sys) ListMountsWithContext(ctx context.Context) (map[string]*MountOutpu
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodGet, "/v1/sys/mounts")
+	r := c.c.NewRequest(http.MethodGet, "/v1/sys/providers")
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {
@@ -50,7 +50,7 @@ func (c *Sys) MountWithContext(ctx context.Context, path string, mountInfo *Moun
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/mounts/%s", path))
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/providers/%s", path))
 	if err := r.SetJSONBody(mountInfo); err != nil {
 		return err
 	}
@@ -72,7 +72,7 @@ func (c *Sys) UnmountWithContext(ctx context.Context, path string) error {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/mounts/%s", path))
+	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/providers/%s", path))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err == nil {
@@ -89,7 +89,7 @@ func (c *Sys) TuneMountWithContext(ctx context.Context, path string, config map[
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/mounts/%s/tune", path))
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/providers/%s/tune", path))
 	if err := r.SetJSONBody(config); err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func (c *Sys) MountConfigWithContext(ctx context.Context, path string) (map[stri
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/mounts/%s/tune", path))
+	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/providers/%s/tune", path))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {
@@ -142,7 +142,7 @@ func (c *Sys) MountInfoWithContext(ctx context.Context, path string) (*MountOutp
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/mounts/%s", path))
+	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/providers/%s", path))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {

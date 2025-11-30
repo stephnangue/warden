@@ -3,14 +3,10 @@ package login
 import (
 	"context"
 	"fmt"
-	"os"
 
-	"github.com/olekukonko/tablewriter"
-	"github.com/olekukonko/tablewriter/renderer"
-	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/cobra"
 	"github.com/stephnangue/warden/api"
-	"github.com/stephnangue/warden/cmd/client"
+	"github.com/stephnangue/warden/cmd/helpers"
 )
 
 var (
@@ -104,7 +100,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create the client
-	c, err := client.Client()
+	c, err := helpers.Client()
 	if err != nil {
 		return err
 	}
@@ -128,44 +124,5 @@ func printResultTable(result *api.Resource) {
 		return
 	}
 
-	cnf := tablewriter.Config{
-		Header: tw.CellConfig{
-			Alignment: tw.CellAlignment{Global: tw.AlignLeft},
-		},
-		Row: tw.CellConfig{
-			Merging:   tw.CellMerging{Mode: tw.MergeHierarchical},
-			Alignment: tw.CellAlignment{Global: tw.AlignLeft},
-		},
-		Debug: false,
-	}
-
-	symbols := tw.NewSymbolCustom("Warden").
-		WithRow(" ").
-		WithColumn(" ").
-		WithTopLeft("").
-		WithTopMid(" ").
-		WithTopRight(" ").
-		WithMidLeft(" ").
-		WithCenter(" ").
-		WithMidRight(" ").
-		WithBottomLeft(" ").
-		WithBottomMid(" ").
-		WithBottomRight(" ")
-
-	rd := tw.Rendition{Symbols: symbols}
-	rd.Settings.Lines.ShowHeaderLine = tw.Off
-
-	table := tablewriter.NewTable(os.Stdout,
-		tablewriter.WithRenderer(renderer.NewBlueprint(rd)),
-		tablewriter.WithConfig(cnf),
-	)
-	table.Header("Key", "Value")
-
-	// Convert map to rows
-	var data [][]any
-	for key, value := range result.Data {
-		data = append(data, []any{key, value})
-	}
-	table.Bulk(data)
-	table.Render()
+	helpers.PrintMapAsTable(result.Data)
 }
