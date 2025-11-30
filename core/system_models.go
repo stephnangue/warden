@@ -2,10 +2,12 @@ package core
 
 // MountProviderInput represents the input for mounting a provider
 type MountProviderInput struct {
-	Path        string         `path:"path" minLength:"1" maxLength:"256" pattern:"^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$" doc:"Mount path (alphanumeric, underscore, hyphen, forward slash for nested paths)" example:"aws/production"`
-	Type        string         `json:"type" minLength:"1" maxLength:"50" pattern:"^[a-z0-9_]+$" doc:"Provider type (e.g., aws, gcp)" example:"aws"`
-	Description string         `json:"description" maxLength:"500" doc:"Human-readable description" example:"Production AWS provider"`
-	Config      map[string]any `json:"config" doc:"Provider-specific configuration (validated by provider factory)"`
+	Path string `path:"path" minLength:"1" maxLength:"256" doc:"Mount path (single segment: alphanumeric, underscore, hyphen only - slashes not allowed)" example:"aws-production"`
+	Body struct {
+		Type        string         `json:"type" minLength:"1" maxLength:"50" pattern:"^[a-z0-9_]+$" doc:"Provider type (e.g., aws, gcp)" example:"aws"`
+		Description string         `json:"description,omitempty" maxLength:"500" doc:"Human-readable description" example:"Production AWS provider"`
+		Config      map[string]any `json:"config,omitempty" doc:"Provider-specific configuration (validated by provider factory)"`
+	}
 }
 
 // MountProviderOutput represents the output after mounting a provider
@@ -19,7 +21,7 @@ type MountProviderOutput struct {
 
 // GetMountInput represents the input for getting mount information
 type GetMountInput struct {
-	Path string `path:"path" minLength:"1" maxLength:"256" pattern:"^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$" doc:"Mount path to query" example:"aws/production"`
+	Path string `path:"path" minLength:"1" maxLength:"256" doc:"Mount path to query" example:"aws-production"`
 }
 
 // GetMountOutput represents the output for mount information
@@ -35,7 +37,7 @@ type GetMountOutput struct {
 
 // UnmountProviderInput represents the input for unmounting a provider
 type UnmountProviderInput struct {
-	Path string `path:"path" minLength:"1" maxLength:"256" pattern:"^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$" doc:"Mount path to unmount" example:"aws/production"`
+	Path string `path:"path" minLength:"1" maxLength:"256" doc:"Mount path to unmount" example:"aws-production"`
 }
 
 // UnmountProviderOutput represents the output after unmounting
@@ -63,4 +65,19 @@ type MountInfo struct {
 	Description string         `json:"description" doc:"Description"`
 	Accessor    string         `json:"accessor" doc:"Unique accessor"`
 	Config      map[string]any `json:"config" doc:"Configuration"`
+}
+
+// TuneProviderInput represents the input for tuning a mount
+type TuneProviderInput struct {
+	Path string `path:"path" minLength:"1" maxLength:"256" doc:"Mount path to tune" example:"aws-production"`
+	Body struct {
+		Config map[string]any `json:"config,omitempty" doc:"Configuration parameters to update"`
+	}
+}
+
+// TuneProviderOutput represents the output after tuning a mount
+type TuneProviderOutput struct {
+	Body struct {
+		Message string `json:"message" doc:"Success message"`
+	}
 }

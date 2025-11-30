@@ -950,14 +950,22 @@ func (c *Client) withConfiguredTimeout(ctx context.Context) (context.Context, co
 
 // DefaultRetryPolicy is the default retry policy used by new Client objects.
 // It is the same as retryablehttp.DefaultRetryPolicy except that it also retries
-// 412 requests, which will be used later
+// 412 requests, and explicitly does NOT retry 4xx client errors (except 429)
 func DefaultRetryPolicy(ctx context.Context, resp *http.Response, err error) (bool, error) {
+	// Don't retry on client errors (4xx) except for specific cases
+	if resp != nil {
+		// Never retry validation errors and other client errors
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			// Only retry on 429 (rate limit) and 412 (precondition failed)
+			if resp.StatusCode == 429 || resp.StatusCode == 412 {
+				return true, nil
+			}
+			// Don't retry other 4xx errors (400, 401, 403, 404, 422, etc.)
+			return false, nil
+		}
+	}
+
+	// Use default policy for other cases (network errors, 5xx, etc.)
 	retry, err := retryablehttp.DefaultRetryPolicy(ctx, resp, err)
-	if err != nil || retry {
-		return retry, err
-	}
-	if resp != nil && resp.StatusCode == 412 {
-		return true, nil
-	}
-	return false, nil
+	return retry, err
 }

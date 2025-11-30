@@ -21,7 +21,8 @@ func TestSys_ListMounts(t *testing.T) {
 
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{
-				"data": {
+				"$schema": "http://localhost:5000/schemas/ListMountsOutput.json",
+				"mounts": {
 					"secret/": {
 						"type": "kv",
 						"description": "Key-Value secrets engine",
@@ -164,7 +165,7 @@ func TestSys_ListMounts(t *testing.T) {
 	t.Run("handles empty mounts list", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"data": {}}`))
+			w.Write([]byte(`{"mounts": {}}`))
 		}))
 		defer server.Close()
 
@@ -185,6 +186,30 @@ func TestSys_ListMounts(t *testing.T) {
 			t.Errorf("expected empty mounts map, got %d entries", len(mounts))
 		}
 	})
+
+	t.Run("returns error when mounts field is missing", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"$schema": "http://localhost:5000/schemas/ListMountsOutput.json"}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		_, err = client.Sys().ListMounts()
+		if err == nil {
+			t.Error("expected error when mounts field is missing")
+		}
+		if err.Error() != "mounts field not found in response" {
+			t.Errorf("expected 'mounts field not found in response' error, got: %v", err)
+		}
+	})
 }
 
 func TestSys_ListMountsWithContext(t *testing.T) {
@@ -192,7 +217,8 @@ func TestSys_ListMountsWithContext(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{
-				"data": {
+				"$schema": "http://localhost:5000/schemas/ListMountsOutput.json",
+				"mounts": {
 					"secret/": {
 						"type": "kv",
 						"description": "Key-Value secrets engine",
@@ -226,7 +252,7 @@ func TestSys_ListMountsWithContext(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(time.Second * 2)
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"data": {}}`))
+			w.Write([]byte(`{"mounts": {}}`))
 		}))
 		defer server.Close()
 
@@ -251,7 +277,7 @@ func TestSys_ListMountsWithContext(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(time.Millisecond * 500)
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"data": {}}`))
+			w.Write([]byte(`{"mounts": {}}`))
 		}))
 		defer server.Close()
 
@@ -1158,7 +1184,8 @@ func TestSys_MountE2E(t *testing.T) {
 				if mounted {
 					w.WriteHeader(http.StatusOK)
 					w.Write([]byte(`{
-						"data": {
+						"$schema": "http://localhost:5000/schemas/ListMountsOutput.json",
+						"mounts": {
 							"database/": {
 								"type": "database",
 								"description": "Database secrets engine",
@@ -1168,7 +1195,7 @@ func TestSys_MountE2E(t *testing.T) {
 					}`))
 				} else {
 					w.WriteHeader(http.StatusOK)
-					w.Write([]byte(`{"data": {}}`))
+					w.Write([]byte(`{"mounts": {}}`))
 				}
 			case r.Method == http.MethodPost && r.URL.Path == "/v1/sys/providers/database":
 				// Mount

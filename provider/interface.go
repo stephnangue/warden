@@ -25,4 +25,6 @@ type Factory interface {
 		credSources *cred.CredSourceRegistry,
 		auditAccess audit.AuditAccess) (logical.Backend, error)
 	Initialize(logger logger.Logger) error
+	// ValidateConfig validates provider-specific configuration
+	ValidateConfig(config map[string]any) error
 }

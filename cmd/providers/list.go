@@ -10,6 +10,8 @@ import (
 var (
 	ListCmd = &cobra.Command{
 		Use:   "list",
+    	SilenceUsage:  true,
+		SilenceErrors: true,
 		Short: "Lists the enabled providers on the Warden server",
 		Long: `
 Usage: warden providers list

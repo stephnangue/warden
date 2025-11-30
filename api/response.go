@@ -60,17 +60,28 @@ func (r *Response) Error() error {
 		respErr.RawError = true
 		respErr.Errors = []string{bodyBuf.String()}
 	} else {
-		// Store the decoded errors
-		respErr.Errors = resp.Errors
+		// Handle both legacy format (errors array) and Huma format (detail field)
+		if len(resp.Errors) > 0 {
+			respErr.Errors = resp.Errors
+		} else if resp.Detail != "" {
+			// Huma format - use detail as the error message
+			respErr.Errors = []string{resp.Detail}
+		} else {
+			// No recognizable error format, use raw body
+			respErr.RawError = true
+			respErr.Errors = []string{bodyBuf.String()}
+		}
 	}
 
 	return respErr
 }
 
 // ErrorResponse is the raw structure of errors when they're returned by the
-// HTTP API.
+// HTTP API. Supports both legacy format (Errors array) and Huma format (detail field).
 type ErrorResponse struct {
-	Errors []string
+	Errors []string `json:"errors,omitempty"`
+	Detail string   `json:"detail,omitempty"` // Huma error format
+	Title  string   `json:"title,omitempty"`  // Huma error format
 }
 
 // ResponseError is the error returned when Vault responds with an error or

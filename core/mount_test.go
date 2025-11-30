@@ -97,6 +97,10 @@ func (f *mockProviderFactory) Initialize(logger logger.Logger) error {
 	return nil
 }
 
+func (f *mockProviderFactory) ValidateConfig(config map[string]any) error {
+	return nil
+}
+
 func TestNewMountTable(t *testing.T) {
 	table := NewMountTable()
 
@@ -784,4 +788,266 @@ func TestMountConstants(t *testing.T) {
 	assert.Equal(t, "audit", mountClassAudit)
 	assert.True(t, MountTableUpdateStorage)
 	assert.False(t, MountTableNoUpdateStorage)
+}
+
+func TestCore_tuneMount(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("tune mount with trailing slash added", func(t *testing.T) {
+		core := createMockCore()
+		core.providers["testprovider"] = &mockProviderFactory{}
+
+		// First mount a provider
+		entry := &MountEntry{
+			Class:       mountClassProvider,
+			Type:        "testprovider",
+			Path:        "test/",
+			Description: "test mount",
+			Config:      map[string]any{"initial_key": "initial_value"},
+		}
+
+		err := core.mount(ctx, entry)
+		require.NoError(t, err)
+
+		// Now tune it without trailing slash
+		tuneConfig := map[string]any{
+			"new_key": "new_value",
+		}
+
+		err = core.tuneMount(ctx, "test", tuneConfig)
+		require.NoError(t, err)
+
+		// Verify the config was updated
+		found, err := core.mounts.findByPath(ctx, "test/")
+		require.NoError(t, err)
+		assert.NotNil(t, found)
+		assert.Equal(t, "initial_value", found.Config["initial_key"])
+		assert.Equal(t, "new_value", found.Config["new_key"])
+	})
+
+	t.Run("tune mount updates existing config", func(t *testing.T) {
+		core := createMockCore()
+		core.providers["testprovider"] = &mockProviderFactory{}
+
+		// Mount a provider with initial config
+		entry := &MountEntry{
+			Class:       mountClassProvider,
+			Type:        "testprovider",
+			Path:        "aws/",
+			Description: "test mount",
+			Config: map[string]any{
+				"ttl":     3600,
+				"max_ttl": 7200,
+			},
+		}
+
+		err := core.mount(ctx, entry)
+		require.NoError(t, err)
+
+		// Tune to update config
+		tuneConfig := map[string]any{
+			"ttl":        7200,
+			"proxy_urls": []string{"http://proxy1", "http://proxy2"},
+		}
+
+		err = core.tuneMount(ctx, "aws/", tuneConfig)
+		require.NoError(t, err)
+
+		// Verify the config was updated
+		found, err := core.mounts.findByPath(ctx, "aws/")
+		require.NoError(t, err)
+		assert.NotNil(t, found)
+		assert.Equal(t, 7200, found.Config["ttl"])           // Updated
+		assert.Equal(t, 7200, found.Config["max_ttl"])       // Unchanged
+		assert.NotNil(t, found.Config["proxy_urls"])         // Added
+	})
+
+	t.Run("tune mount with nil config initializes it", func(t *testing.T) {
+		core := createMockCore()
+		core.providers["testprovider"] = &mockProviderFactory{}
+
+		// Mount a provider without config
+		entry := &MountEntry{
+			Class:       mountClassProvider,
+			Type:        "testprovider",
+			Path:        "test/",
+			Description: "test mount",
+			Config:      nil,
+		}
+
+		err := core.mount(ctx, entry)
+		require.NoError(t, err)
+
+		// Tune to add config
+		tuneConfig := map[string]any{
+			"new_key": "new_value",
+		}
+
+		err = core.tuneMount(ctx, "test/", tuneConfig)
+		require.NoError(t, err)
+
+		// Verify config was created and updated
+		found, err := core.mounts.findByPath(ctx, "test/")
+		require.NoError(t, err)
+		assert.NotNil(t, found)
+		assert.NotNil(t, found.Config)
+		assert.Equal(t, "new_value", found.Config["new_key"])
+	})
+
+	t.Run("tune protected path sys fails", func(t *testing.T) {
+		core := createMockCore()
+
+		tuneConfig := map[string]any{
+			"key": "value",
+		}
+
+		err := core.tuneMount(ctx, "sys/test/", tuneConfig)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot tune")
+	})
+
+	t.Run("tune protected path auth fails", func(t *testing.T) {
+		core := createMockCore()
+
+		tuneConfig := map[string]any{
+			"key": "value",
+		}
+
+		err := core.tuneMount(ctx, "auth/test/", tuneConfig)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot tune")
+	})
+
+	t.Run("tune protected path audit fails", func(t *testing.T) {
+		core := createMockCore()
+
+		tuneConfig := map[string]any{
+			"key": "value",
+		}
+
+		err := core.tuneMount(ctx, "audit/test/", tuneConfig)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot tune")
+	})
+
+	t.Run("tune non-existent mount fails", func(t *testing.T) {
+		core := createMockCore()
+
+		tuneConfig := map[string]any{
+			"key": "value",
+		}
+
+		err := core.tuneMount(ctx, "nonexistent/", tuneConfig)
+		assert.Error(t, err)
+		assert.Equal(t, errNoMatchingMount, err)
+	})
+
+	t.Run("tune with empty config succeeds", func(t *testing.T) {
+		core := createMockCore()
+		core.providers["testprovider"] = &mockProviderFactory{}
+
+		// Mount a provider
+		entry := &MountEntry{
+			Class:       mountClassProvider,
+			Type:        "testprovider",
+			Path:        "test/",
+			Description: "test mount",
+			Config:      map[string]any{"initial": "value"},
+		}
+
+		err := core.mount(ctx, entry)
+		require.NoError(t, err)
+
+		// Tune with empty config
+		tuneConfig := map[string]any{}
+
+		err = core.tuneMount(ctx, "test/", tuneConfig)
+		require.NoError(t, err)
+
+		// Verify original config is unchanged
+		found, err := core.mounts.findByPath(ctx, "test/")
+		require.NoError(t, err)
+		assert.NotNil(t, found)
+		assert.Equal(t, "value", found.Config["initial"])
+	})
+
+	t.Run("tune mount multiple times", func(t *testing.T) {
+		core := createMockCore()
+		core.providers["testprovider"] = &mockProviderFactory{}
+
+		// Mount a provider
+		entry := &MountEntry{
+			Class:       mountClassProvider,
+			Type:        "testprovider",
+			Path:        "test/",
+			Description: "test mount",
+			Config:      map[string]any{"counter": 0},
+		}
+
+		err := core.mount(ctx, entry)
+		require.NoError(t, err)
+
+		// Tune multiple times
+		for i := 1; i <= 3; i++ {
+			tuneConfig := map[string]any{
+				"counter": i,
+				fmt.Sprintf("key_%d", i): fmt.Sprintf("value_%d", i),
+			}
+
+			err = core.tuneMount(ctx, "test/", tuneConfig)
+			require.NoError(t, err)
+		}
+
+		// Verify all updates were applied
+		found, err := core.mounts.findByPath(ctx, "test/")
+		require.NoError(t, err)
+		assert.NotNil(t, found)
+		assert.Equal(t, 3, found.Config["counter"])
+		assert.Equal(t, "value_1", found.Config["key_1"])
+		assert.Equal(t, "value_2", found.Config["key_2"])
+		assert.Equal(t, "value_3", found.Config["key_3"])
+	})
+
+	t.Run("tune mount concurrent access", func(t *testing.T) {
+		core := createMockCore()
+		core.providers["testprovider"] = &mockProviderFactory{}
+
+		// Mount a provider
+		entry := &MountEntry{
+			Class:       mountClassProvider,
+			Type:        "testprovider",
+			Path:        "test/",
+			Description: "test mount",
+			Config:      make(map[string]any),
+		}
+
+		err := core.mount(ctx, entry)
+		require.NoError(t, err)
+
+		// Tune concurrently
+		var wg sync.WaitGroup
+		numGoroutines := 10
+
+		for i := 0; i < numGoroutines; i++ {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				tuneConfig := map[string]any{
+					fmt.Sprintf("key_%d", id): fmt.Sprintf("value_%d", id),
+				}
+				err := core.tuneMount(ctx, "test/", tuneConfig)
+				assert.NoError(t, err)
+			}(i)
+		}
+
+		wg.Wait()
+
+		// Verify mount still exists and has config
+		found, err := core.mounts.findByPath(ctx, "test/")
+		require.NoError(t, err)
+		assert.NotNil(t, found)
+		assert.NotNil(t, found.Config)
+		// Should have at least some of the concurrent updates
+		assert.NotEmpty(t, found.Config)
+	})
 }

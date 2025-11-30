@@ -33,8 +33,15 @@ func (c *Sys) ListMountsWithContext(ctx context.Context) (map[string]*MountOutpu
 		return nil, errors.New("data from server response is empty")
 	}
 
+	// Extract the mounts field from the response data
+	// The Huma framework returns: {"mounts": {...}, "$schema": "..."}
+	mountsData, ok := resource.Data["mounts"]
+	if !ok {
+		return nil, errors.New("mounts field not found in response")
+	}
+
 	mounts := map[string]*MountOutput{}
-	err = mapstructure.Decode(resource.Data, &mounts)
+	err = mapstructure.Decode(mountsData, &mounts)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +97,12 @@ func (c *Sys) TuneMountWithContext(ctx context.Context, path string, config map[
 	defer cancelFunc()
 
 	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/providers/%s/tune", path))
-	if err := r.SetJSONBody(config); err != nil {
+
+	// Wrap config in the expected request body structure
+	body := map[string]any{
+		"config": config,
+	}
+	if err := r.SetJSONBody(body); err != nil {
 		return err
 	}
 
