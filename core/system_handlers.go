@@ -98,26 +98,35 @@ func (h *SystemHandlers) UnmountProvider(
 	ctx context.Context,
 	input *UnmountProviderInput,
 ) (*UnmountProviderOutput, error) {
+	// URL-decode the path
+	decodedPath, err := url.PathUnescape(input.Path)
+	if err != nil {
+		h.logger.Warn("path decode failed",
+			logger.Err(err),
+			logger.String("path", input.Path))
+		return nil, huma.Error400BadRequest(fmt.Sprintf("invalid path encoding: %v", err))
+	}
+
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
 		h.logger.Warn("unmount operation unauthorized",
 			logger.Err(err),
-			logger.String("path", input.Path))
+			logger.String("path", decodedPath))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
 	}
 
-	h.logger.Info("unmounting provider", logger.String("path", input.Path))
+	h.logger.Info("unmounting provider", logger.String("path", decodedPath))
 
 	// Unmount via Core
-	if err := h.core.unmount(ctx, input.Path); err != nil {
+	if err := h.core.unmount(ctx, decodedPath); err != nil {
 		h.logger.Error("unmount failed",
 			logger.Err(err),
-			logger.String("path", input.Path))
+			logger.String("path", decodedPath))
 		return nil, h.convertError(err)
 	}
 
 	output := &UnmountProviderOutput{}
-	output.Body.Message = fmt.Sprintf("Successfully unmounted %s", input.Path)
+	output.Body.Message = fmt.Sprintf("Successfully unmounted %s", decodedPath)
 	return output, nil
 }
 
@@ -126,11 +135,20 @@ func (h *SystemHandlers) GetMountInfo(
 	ctx context.Context,
 	input *GetMountInput,
 ) (*GetMountOutput, error) {
+	// URL-decode the path
+	decodedPath, err := url.PathUnescape(input.Path)
+	if err != nil {
+		h.logger.Warn("path decode failed",
+			logger.Err(err),
+			logger.String("path", input.Path))
+		return nil, huma.Error400BadRequest(fmt.Sprintf("invalid path encoding: %v", err))
+	}
+
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
 		h.logger.Warn("get mount info operation unauthorized",
 			logger.Err(err),
-			logger.String("path", input.Path))
+			logger.String("path", decodedPath))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
 	}
 
@@ -138,7 +156,7 @@ func (h *SystemHandlers) GetMountInfo(
 	defer h.core.mountsLock.RUnlock()
 
 	// Normalize path
-	path := input.Path
+	path := decodedPath
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
 	}
@@ -202,27 +220,36 @@ func (h *SystemHandlers) TuneProvider(
 	ctx context.Context,
 	input *TuneProviderInput,
 ) (*TuneProviderOutput, error) {
+	// URL-decode the path
+	decodedPath, err := url.PathUnescape(input.Path)
+	if err != nil {
+		h.logger.Warn("path decode failed",
+			logger.Err(err),
+			logger.String("path", input.Path))
+		return nil, huma.Error400BadRequest(fmt.Sprintf("invalid path encoding: %v", err))
+	}
+
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
 		h.logger.Warn("tune mount operation unauthorized",
 			logger.Err(err),
-			logger.String("path", input.Path))
+			logger.String("path", decodedPath))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
 	}
 
 	h.logger.Info("tuning mount",
-		logger.String("path", input.Path))
+		logger.String("path", decodedPath))
 
 	// Tune via Core
-	if err := h.core.tuneMount(ctx, input.Path, input.Body.Config); err != nil {
+	if err := h.core.tuneMount(ctx, decodedPath, input.Body.Config); err != nil {
 		h.logger.Error("tune mount failed",
 			logger.Err(err),
-			logger.String("path", input.Path))
+			logger.String("path", decodedPath))
 		return nil, h.convertError(err)
 	}
 
 	output := &TuneProviderOutput{}
-	output.Body.Message = fmt.Sprintf("Successfully tuned mount at %s", input.Path)
+	output.Body.Message = fmt.Sprintf("Successfully tuned mount at %s", decodedPath)
 	return output, nil
 }
 
@@ -239,9 +266,9 @@ func (h *SystemHandlers) convertError(err error) error {
 		// Validation errors should be shown to the user with details
 		return huma.Error400BadRequest(errMsg)
 	case strings.Contains(errMsg, "already in use"):
-		return huma.Error409Conflict("Mount path conflict")
+		return huma.Error409Conflict(errMsg)
 	case strings.Contains(errMsg, "no matching mount"):
-		return huma.Error404NotFound("Mount not found")
+		return huma.Error404NotFound(errMsg)
 	case strings.Contains(errMsg, "cannot mount"), strings.Contains(errMsg, "cannot tune"):
 		return huma.Error403Forbidden("Operation not permitted")
 	case strings.Contains(errMsg, "not supported"):
