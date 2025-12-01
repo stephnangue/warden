@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/go-viper/mapstructure/v2"
 )
@@ -57,7 +58,7 @@ func (c *Sys) MountWithContext(ctx context.Context, path string, mountInfo *Moun
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/providers/%s", path))
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/providers/%s", url.PathEscape(path)))
 	if err := r.SetJSONBody(mountInfo); err != nil {
 		return err
 	}
@@ -79,7 +80,7 @@ func (c *Sys) UnmountWithContext(ctx context.Context, path string) error {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/providers/%s", path))
+	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/providers/%s", url.PathEscape(path)))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err == nil {
@@ -96,7 +97,7 @@ func (c *Sys) TuneMountWithContext(ctx context.Context, path string, config map[
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/providers/%s/tune", path))
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/providers/%s/tune", url.PathEscape(path)))
 
 	// Wrap config in the expected request body structure
 	body := map[string]any{
@@ -121,7 +122,7 @@ func (c *Sys) MountConfigWithContext(ctx context.Context, path string) (map[stri
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/providers/%s/tune", path))
+	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/providers/%s/tune", url.PathEscape(path)))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {
@@ -154,7 +155,7 @@ func (c *Sys) MountInfoWithContext(ctx context.Context, path string) (*MountOutp
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/providers/%s", path))
+	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/providers/%s", url.PathEscape(path)))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {

@@ -428,7 +428,7 @@ func TestSystemHandlers_UnmountProvider_NotFound(t *testing.T) {
 	output, err := handlers.UnmountProvider(ctx, input)
 	assert.Error(t, err)
 	assert.Nil(t, output)
-	assert.Contains(t, err.Error(), "Mount not found")
+	assert.Contains(t, err.Error(), "no matching mount")
 }
 
 func TestSystemHandlers_GetMountInfo_Success(t *testing.T) {
@@ -696,13 +696,13 @@ func TestSystemHandlers_ConvertError(t *testing.T) {
 			name:           "already in use",
 			inputError:     &mountError{msg: "path already in use"},
 			expectedStatus: http.StatusConflict,
-			expectedText:   "Mount path conflict",
+			expectedText:   "already in use",
 		},
 		{
 			name:           "no matching mount",
 			inputError:     errNoMatchingMount,
 			expectedStatus: http.StatusNotFound,
-			expectedText:   "Mount not found",
+			expectedText:   "no matching mount",
 		},
 		{
 			name:           "cannot mount",
@@ -858,7 +858,7 @@ func TestSystemHandlers_TuneProvider_NotFound(t *testing.T) {
 	output, err := handlers.TuneProvider(ctx, input)
 	assert.Error(t, err)
 	assert.Nil(t, output)
-	assert.Contains(t, err.Error(), "Mount not found")
+	assert.Contains(t, err.Error(), "no matching mount")
 }
 
 func TestSystemHandlers_TuneProvider_ProtectedPath(t *testing.T) {

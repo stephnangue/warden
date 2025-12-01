@@ -10,11 +10,6 @@ func ValidateMountPath(path string) error {
 	// Strip trailing slash for validation (paths typically end with /)
 	path = strings.TrimSuffix(path, "/")
 
-	// Check for nested paths (containing slashes)
-	if strings.Contains(path, "/") {
-		return fmt.Errorf("nested paths are not supported - path must be a single segment")
-	}
-
 	// Validate path doesn't contain reserved patterns
 	reservedPaths := []string{"sys", "auth", "audit"}
 	for _, reserved := range reservedPaths {
