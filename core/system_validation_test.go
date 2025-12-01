@@ -29,16 +29,34 @@ func TestValidateMountPath(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name:        "invalid nested path with single slash",
+			name:        "valid nested path with single slash",
 			path:        "aws/prod",
-			expectError: true,
-			errorMsg:    "nested paths are not supported",
+			expectError: false,
 		},
 		{
-			name:        "invalid nested path with multiple slashes",
+			name:        "valid nested path with multiple slashes",
 			path:        "aws/prod/europe",
-			expectError: true,
-			errorMsg:    "nested paths are not supported",
+			expectError: false,
+		},
+		{
+			name:        "valid nested path with hyphens",
+			path:        "aws-prod/europe-west",
+			expectError: false,
+		},
+		{
+			name:        "valid nested path with underscores",
+			path:        "aws_prod/europe_west",
+			expectError: false,
+		},
+		{
+			name:        "valid nested path with mixed separators",
+			path:        "aws-prod/europe_west/zone1",
+			expectError: false,
+		},
+		{
+			name:        "valid deeply nested path",
+			path:        "cloud/providers/aws/regions/us-east-1/accounts/prod",
+			expectError: false,
 		},
 		{
 			name:        "invalid path starts with sys",
