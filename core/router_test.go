@@ -23,6 +23,7 @@ type mockBackend struct {
 	cleanupFunc func()
 	mu          sync.Mutex
 	requests    []string // track requests for testing
+	config      map[string]any
 }
 
 func newMockBackend(accessor string) *mockBackend {
@@ -62,6 +63,36 @@ func (m *mockBackend) GetDescription() string {
 
 func (m *mockBackend) GetAccessor() string {
 	return m.accessor
+}
+
+func (m *mockBackend) Setup(conf map[string]any) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Merge incoming config with existing config
+	if m.config == nil {
+		m.config = make(map[string]any)
+	}
+	for k, v := range conf {
+		m.config[k] = v
+	}
+	return nil
+}
+
+func (m *mockBackend) Config() map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.config == nil {
+		return map[string]any{}
+	}
+
+	// Return a copy
+	config := make(map[string]any)
+	for k, v := range m.config {
+		config[k] = v
+	}
+	return config
 }
 
 func (m *mockBackend) Cleanup() {

@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httputil"
 	"time"
@@ -46,6 +47,7 @@ type AWSProvider struct {
 	credsProvider     *cred.CredentialProvider
 	processorRegistry *processor.ProcessorRegistry
 	auditAccess       audit.AuditAccess
+	validationFunc    func(config map[string]any) error
 }
 
 func (p *AWSProvider) GetType() string {
@@ -66,6 +68,56 @@ func (p *AWSProvider) GetAccessor() string {
 
 func (p *AWSProvider) Cleanup() {
 	p.credsProvider.Stop()
+}
+
+func (p *AWSProvider) Config() map[string]any {
+	return map[string]any{
+		"proxy_domains": p.proxyDomains,
+		"max_body_size": p.maxBodySize,
+		"timeout":       p.timeout.String(),
+	}
+}
+
+func (p *AWSProvider) Setup(conf map[string]any) error {
+	// Build current configuration
+	currentConfig := map[string]interface{}{
+		"proxy_domains": p.proxyDomains,
+		"max_body_size": p.maxBodySize,
+		"timeout":       p.timeout,
+	}
+
+	// Merge incoming config with current config (incoming takes precedence)
+	mergedConfig := make(map[string]any)
+	maps.Copy(mergedConfig, currentConfig)
+	maps.Copy(mergedConfig, conf)
+
+	// Validate the merged configuration using the factory's validation function
+	if p.validationFunc != nil {
+		if err := p.validationFunc(mergedConfig); err != nil {
+			p.logger.Warn("config validation failed",
+				logger.Err(err),
+			)
+			return err
+		}
+	}
+
+	// Parse and apply the merged configuration
+	newConfig := parseConfig(mergedConfig)
+
+	// Update provider configuration
+	p.proxyDomains = newConfig.ProxyDomains
+	p.maxBodySize = newConfig.MaxBodySize
+	p.timeout = newConfig.Timeout
+
+	// Re-initialize processors with new proxy domains
+	p.initializeProcessors()
+
+	p.logger.Info("provider configuration updated",
+		logger.Any("proxy_domains", p.proxyDomains),
+		logger.Int64("max_body_size", p.maxBodySize),
+		logger.String("timeout", p.timeout.String()),
+	)
+	return nil
 }
 
 func (p *AWSProvider) setupRouter() {
@@ -114,19 +166,13 @@ func (f *AWSProviderFactory) ValidateConfig(config map[string]any) error {
 	// Validate proxy_domains
 	if domains, ok := config["proxy_domains"]; ok {
 		switch v := domains.(type) {
-		case []interface{}:
-			if len(v) == 0 {
-				return fmt.Errorf("proxy_domains cannot be empty")
-			}
+		case []any:
 			for i, d := range v {
 				if _, ok := d.(string); !ok {
 					return fmt.Errorf("proxy_domains[%d] must be a string", i)
 				}
 			}
 		case []string:
-			if len(v) == 0 {
-				return fmt.Errorf("proxy_domains cannot be empty")
-			}
 		default:
 			return fmt.Errorf("proxy_domains must be an array of strings")
 		}
@@ -145,7 +191,7 @@ func (f *AWSProviderFactory) ValidateConfig(config map[string]any) error {
 		default:
 			return fmt.Errorf("max_body_size must be an integer")
 		}
-		if size < 1 {
+		if size < 0 {
 			return fmt.Errorf("max_body_size must be greater than 0")
 		}
 		if size > 104857600 { // 100MB
@@ -161,11 +207,11 @@ func (f *AWSProviderFactory) ValidateConfig(config map[string]any) error {
 				return fmt.Errorf("invalid timeout format: %w (expected format: '30s', '5m', '1h')", err)
 			}
 		case int:
-			if v < 1 {
+			if v < 0 {
 				return fmt.Errorf("timeout must be greater than 0 seconds")
 			}
 		case float64:
-			if v < 1 {
+			if v < 0 {
 				return fmt.Errorf("timeout must be greater than 0 seconds")
 			}
 		default:
@@ -189,8 +235,6 @@ func (f *AWSProviderFactory) Create(
 	auditAccess audit.AuditAccess,
 ) (logical.Backend, error) {
 
-	config := parseConfig(conf)
-
 	credsProvider, err := cred.NewCredentialProvider(roles, credSources, log.WithSubsystem("aws").WithSubsystem("cred"))
 	if err != nil {
 		return nil, err
@@ -207,9 +251,6 @@ func (f *AWSProviderFactory) Create(
 		roles:         roles,
 		credSources:   credSources,
 		signer:        v4.NewSigner(),
-		proxyDomains:  config.ProxyDomains,
-		maxBodySize:   config.MaxBodySize,
-		timeout:       config.Timeout,
 		credsProvider: credsProvider,
 		auditAccess:   auditAccess,
 	}
@@ -260,7 +301,12 @@ func (f *AWSProviderFactory) Create(
 		},
 	}
 
-	provider.initializeProcessors()
+	provider.validationFunc = f.ValidateConfig
+
+	// err = provider.Setup(conf)
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	return provider, nil
 }

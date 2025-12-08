@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/url"
 	"strings"
 
@@ -10,40 +11,17 @@ import (
 	"github.com/stephnangue/warden/logger"
 )
 
-// SystemHandlers handles system backend operations
-type SystemHandlers struct {
-	core   *Core
-	logger logger.Logger
-}
-
-// checkSystemAdmin verifies the authenticated principal has system_admin role
-func (h *SystemHandlers) checkSystemAdmin(ctx context.Context) error {
-	principalID, ok := ctx.Value(SystemPrincipalIDKey).(string)
-	if !ok || principalID == "" {
-		return fmt.Errorf("principal not found in context")
-	}
-
-	if !h.core.accessControl.IsAllowed(principalID, "system_admin") {
-		h.logger.Warn("authorization failed: insufficient permissions",
-			logger.String("principal_id", principalID),
-			logger.String("required_role", "system_admin"))
-		return fmt.Errorf("insufficient permissions: system_admin role required")
-	}
-
-	return nil
-}
-
-// MountProvider creates a new provider mount
-func (h *SystemHandlers) MountProvider(
+// MountAuth creates a new auth method mount
+func (h *SystemHandlers) MountAuth(
 	ctx context.Context,
-	input *MountProviderInput,
-) (*MountProviderOutput, error) {
+	input *MountAuthInput,
+) (*MountAuthOutput, error) {
 	// URL-decode the path (Chi doesn't decode path parameters automatically)
 	decodedPath, err := url.PathUnescape(input.Path)
 	if err != nil {
 		h.logger.Warn("path decode failed",
 			logger.Err(err),
-			logger.String("path", input.Path))
+			logger.String("path", decodedPath))
 		return nil, huma.Error400BadRequest(fmt.Sprintf("invalid path encoding: %v", err))
 	}
 
@@ -63,13 +41,13 @@ func (h *SystemHandlers) MountProvider(
 		return nil, huma.Error400BadRequest(err.Error())
 	}
 
-	h.logger.Info("mounting provider",
+	h.logger.Info("mounting auth method",
 		logger.String("path", decodedPath),
 		logger.String("type", input.Body.Type))
 
 	// Create mount entry
 	entry := &MountEntry{
-		Class:       mountClassProvider,
+		Class:       mountClassAuth,
 		Type:        input.Body.Type,
 		Path:        decodedPath,
 		Description: input.Body.Description,
@@ -85,19 +63,19 @@ func (h *SystemHandlers) MountProvider(
 	}
 
 	// Return success
-	output := &MountProviderOutput{}
+	output := &MountAuthOutput{}
 	output.Body.Accessor = entry.Accessor
 	output.Body.Path = entry.Path
-	output.Body.Message = fmt.Sprintf("Successfully mounted %s provider at %s", input.Body.Type, decodedPath)
+	output.Body.Message = fmt.Sprintf("Successfully mounted %s auth method at %s", input.Body.Type, decodedPath)
 
 	return output, nil
 }
 
-// UnmountProvider removes a provider mount
-func (h *SystemHandlers) UnmountProvider(
+// UnmountAuth removes an auth method mount
+func (h *SystemHandlers) UnmountAuth(
 	ctx context.Context,
-	input *UnmountProviderInput,
-) (*UnmountProviderOutput, error) {
+	input *UnmountAuthInput,
+) (*UnmountAuthOutput, error) {
 	// URL-decode the path
 	decodedPath, err := url.PathUnescape(input.Path)
 	if err != nil {
@@ -115,7 +93,7 @@ func (h *SystemHandlers) UnmountProvider(
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
 	}
 
-	h.logger.Info("unmounting provider", logger.String("path", decodedPath))
+	h.logger.Info("unmounting auth method", logger.String("path", decodedPath))
 
 	// Unmount via Core
 	if err := h.core.unmount(ctx, decodedPath); err != nil {
@@ -125,15 +103,15 @@ func (h *SystemHandlers) UnmountProvider(
 		return nil, h.convertError(err)
 	}
 
-	output := &UnmountProviderOutput{}
+	output := &UnmountAuthOutput{}
 	output.Body.Message = fmt.Sprintf("Successfully unmounted %s", decodedPath)
 	return output, nil
 }
 
-// GetMountInfo retrieves mount information
-func (h *SystemHandlers) GetMountInfo(
+// GetAuthInfo retrieves auth method mount information
+func (h *SystemHandlers) GetAuthInfo(
 	ctx context.Context,
-	input *GetMountInput,
+	input *GetAuthInput,
 ) (*GetMountOutput, error) {
 	// URL-decode the path
 	decodedPath, err := url.PathUnescape(input.Path)
@@ -146,7 +124,7 @@ func (h *SystemHandlers) GetMountInfo(
 
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
-		h.logger.Warn("get mount info operation unauthorized",
+		h.logger.Warn("get auth info operation unauthorized",
 			logger.Err(err),
 			logger.String("path", decodedPath))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
@@ -166,7 +144,12 @@ func (h *SystemHandlers) GetMountInfo(
 		return nil, h.convertError(err)
 	}
 	if entry == nil {
-		return nil, huma.Error404NotFound("Mount not found")
+		return nil, huma.Error404NotFound("Auth method mount not found")
+	}
+
+	// Verify it's an auth mount
+	if entry.Class != mountClassAuth {
+		return nil, huma.Error404NotFound("Auth method mount not found")
 	}
 
 	output := &GetMountOutput{}
@@ -174,52 +157,74 @@ func (h *SystemHandlers) GetMountInfo(
 	output.Body.Path = entry.Path
 	output.Body.Description = entry.Description
 	output.Body.Accessor = entry.Accessor
-	output.Body.Config = entry.Config
+
+	// Deep copy config and redact sensitive fields
+	entry.configMu.RLock()
+	config := make(map[string]any)
+	maps.Copy(config, entry.Config)
+	entry.configMu.RUnlock()
+
+	// Redact sensitive keys
+	if _, exists := config["hmac_key"]; exists && config["hmac_key"] != "" {
+		config["hmac_key"] = "*************"
+	}
+	output.Body.Config = config
 
 	return output, nil
 }
 
-// ListMounts retrieves all mounts
-func (h *SystemHandlers) ListMounts(
+// ListAuths retrieves all auth method mounts
+func (h *SystemHandlers) ListAuths(
 	ctx context.Context,
 	input *struct{},
-) (*ListMountsOutput, error) {
+) (*ListAuthsOutput, error) {
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
-		h.logger.Warn("list mounts operation unauthorized",
+		h.logger.Warn("list auth methods operation unauthorized",
 			logger.Err(err))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
 	}
-	
+
 	h.core.mountsLock.RLock()
 	defer h.core.mountsLock.RUnlock()
 
-	mounts := make(map[string]MountInfo)
+	mounts := make(map[string]AuthInfo)
 
 	for _, entry := range h.core.mounts.Entries {
-		// Only returns entry of class provider
-		if entry.Class != "provider" {
+		// Only return entries of class auth
+		if entry.Class != mountClassAuth {
 			continue
 		}
 
-		mounts[entry.Path] = MountInfo{
+		// Deep copy config and redact sensitive fields
+		entry.configMu.RLock()
+		config := make(map[string]any)
+		maps.Copy(config, entry.Config)
+		entry.configMu.RUnlock()
+
+		// Redact sensitive keys
+		if _, exists := config["hmac_key"]; exists && config["hmac_key"] != "" {
+			config["hmac_key"] = "*************"
+		}
+
+		mounts[entry.Path] = AuthInfo{
 			Type:        entry.Type,
 			Description: entry.Description,
 			Accessor:    entry.Accessor,
-			Config:      entry.Config,
+			Config:      config,
 		}
 	}
 
-	output := &ListMountsOutput{}
+	output := &ListAuthsOutput{}
 	output.Body.Mounts = mounts
 	return output, nil
 }
 
-// TuneMount tunes an existing provider mount
-func (h *SystemHandlers) TuneProvider(
+// ConfigureAuth configure an existing auth method mount
+func (h *SystemHandlers) ConfigureAuth(
 	ctx context.Context,
-	input *TuneProviderInput,
-) (*TuneProviderOutput, error) {
+	input *TuneAuthInput,
+) (*TuneAuthOutput, error) {
 	// URL-decode the path
 	decodedPath, err := url.PathUnescape(input.Path)
 	if err != nil {
@@ -231,49 +236,24 @@ func (h *SystemHandlers) TuneProvider(
 
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
-		h.logger.Warn("tune mount operation unauthorized",
+		h.logger.Warn("tune auth method operation unauthorized",
 			logger.Err(err),
 			logger.String("path", decodedPath))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
 	}
 
-	h.logger.Info("tuning mount",
+	h.logger.Info("tuning auth method mount",
 		logger.String("path", decodedPath))
 
-	// Tune via Core
-	if err := h.core.tuneMount(ctx, decodedPath, input.Body.Config); err != nil {
-		h.logger.Error("tune mount failed",
+	// Configure via Core
+	if err := h.core.configureMount(ctx, decodedPath, input.Body); err != nil {
+		h.logger.Error("tune auth method mount failed",
 			logger.Err(err),
 			logger.String("path", decodedPath))
 		return nil, h.convertError(err)
 	}
 
-	output := &TuneProviderOutput{}
-	output.Body.Message = fmt.Sprintf("Successfully tuned mount at %s", decodedPath)
+	output := &TuneAuthOutput{}
+	output.Body.Message = fmt.Sprintf("Successfully tuned auth method mount at %s", decodedPath)
 	return output, nil
-}
-
-// convertError converts internal errors to HUMA errors with generic messages
-func (h *SystemHandlers) convertError(err error) error {
-	errMsg := err.Error()
-
-	// Log the detailed error internally
-	h.logger.Error("operation error", logger.Err(err))
-
-	// Return error messages - validation errors should be descriptive, others generic for security
-	switch {
-	case strings.Contains(errMsg, "invalid configuration"):
-		// Validation errors should be shown to the user with details
-		return huma.Error400BadRequest(errMsg)
-	case strings.Contains(errMsg, "already in use"):
-		return huma.Error409Conflict(errMsg)
-	case strings.Contains(errMsg, "no matching mount"):
-		return huma.Error404NotFound(errMsg)
-	case strings.Contains(errMsg, "cannot mount"), strings.Contains(errMsg, "cannot tune"):
-		return huma.Error403Forbidden("Operation not permitted")
-	case strings.Contains(errMsg, "not supported"):
-		return huma.Error400BadRequest("Invalid mount type")
-	default:
-		return huma.Error500InternalServerError("Internal server error")
-	}
 }

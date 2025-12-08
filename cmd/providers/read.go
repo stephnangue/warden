@@ -49,16 +49,16 @@ func runRead(cmd *cobra.Command, args []string) error {
 	// Display provider information
 	headers := []string{"Key", "Value"}
 	data := [][]any{
-		{"Path", readPath},
-		{"Type", mountInfo.Type},
-		{"Accessor", mountInfo.Accessor},
-		{"Description", mountInfo.Description},
+		{"path", readPath},
+		{"type", mountInfo.Type},
+		{"accessor", mountInfo.Accessor},
+		{"description", mountInfo.Description},
 	}
 
 	// Add config entries if present
 	if len(mountInfo.Config) > 0 {
 		for key, value := range mountInfo.Config {
-			data = append(data, []any{fmt.Sprintf("Config.%s", key), value})
+			data = append(data, []any{key, value})
 		}
 	}
 

@@ -117,12 +117,13 @@ func (m *Metrics) GetSnapshot() map[string]int64 {
 }
 
 type RobustStore struct {
-	mu      sync.RWMutex
-	cache   *ristretto.Cache[string, *AuthData]
-	config  *StoreConfig
-	logger  logger.Logger
-	metrics *Metrics
-	closed  bool
+	mu               sync.RWMutex
+	cache            *ristretto.Cache[string, *AuthData]
+	config           *StoreConfig
+	logger           logger.Logger
+	metrics          *Metrics
+	closed           bool
+	rootTokenManager *RootTokenManager
 }
 
 func NewRobustStore(log logger.Logger, config *StoreConfig) (*RobustStore, error) {
@@ -131,10 +132,11 @@ func NewRobustStore(log logger.Logger, config *StoreConfig) (*RobustStore, error
 	}
 
 	store := &RobustStore{
-		config:  config,
-		logger:  log,
-		metrics: &Metrics{},
-		closed:  false,
+		config:           config,
+		logger:           log,
+		metrics:          &Metrics{},
+		closed:           false,
+		rootTokenManager: NewRootTokenManager(),
 	}
 
 	cache, err := ristretto.NewCache(&ristretto.Config[string, *AuthData]{
@@ -268,8 +270,8 @@ func (s *RobustStore) ResolveToken(ctx context.Context, tokenValue string, reqCo
 
 	now := time.Now()
 
-	// Check auth deadline
-	if now.After(authData.AuthDeadline) && !token.HasBeenUsed() {
+	// Check auth deadline (skip if zero time = infinite)
+	if !authData.AuthDeadline.IsZero() && now.After(authData.AuthDeadline) && !token.HasBeenUsed() {
 		s.logger.Warn("auth deadline policy violated",
 			logger.String("token_id", tokenID),
 			logger.Time("deadline", authData.AuthDeadline),
@@ -283,8 +285,8 @@ func (s *RobustStore) ResolveToken(ctx context.Context, tokenValue string, reqCo
 		return "", "", ErrAuthDeadlineViolated
 	}
 
-	// Check expiration
-	if now.After(authData.ExpireAt) {
+	// Check expiration (skip if zero time = infinite)
+	if !authData.ExpireAt.IsZero() && now.After(authData.ExpireAt) {
 		s.logger.Warn("token expired",
 			logger.String("token_id", tokenID),
 			logger.Time("expired_at", authData.ExpireAt),
@@ -499,6 +501,96 @@ func (s *RobustStore) generateWardenToken(authData *AuthData) (*Token, error) {
 		logger.Time("expires_at", authData.ExpireAt))
 
 	return token, nil
+}
+
+// GenerateRootToken creates a new root token with infinite lifetime.
+// Only one root token can exist at a time; generating a new one revokes the old.
+func (s *RobustStore) GenerateRootToken() (string, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return "", ErrStoreClosed
+	}
+	s.mu.Unlock()
+
+	// Revoke existing root token if any
+	if s.rootTokenManager.HasRootToken() {
+		s.logger.Info("revoking existing root token before generating new one")
+		if err := s.RevokeRootToken(); err != nil {
+			s.logger.Warn("failed to revoke existing root token",
+				logger.Err(err))
+			// Continue anyway - we'll overwrite it
+		}
+	}
+
+	var tokenValue string
+	var tokenID string
+
+	// Generate token with collision detection (infinite retry loop)
+	for {
+		tokenValue = "cws." + helper.GenerateRandomString(64)
+		tokenID = ComputeTokenID(WARDEN_TOKEN, tokenValue)
+
+		if _, found := s.cache.Get(tokenID); !found {
+			break
+		}
+
+		s.logger.Warn("token ID collision detected during root token generation, regenerating",
+			logger.String("token_id", tokenID))
+	}
+
+	// Create AuthData with infinite TTL (zero time values)
+	authData := &AuthData{
+		PrincipalID:    "root",
+		RoleName:       "system_admin",
+		AuthDeadline:   time.Time{}, // Zero = no deadline
+		ExpireAt:       time.Time{}, // Zero = never expires
+		RequestContext: map[string]string{}, // No origin restrictions
+	}
+
+	token := &Token{
+		Type:     WARDEN_TOKEN,
+		ID:       tokenID,
+		Data:     map[string]string{"token": tokenValue},
+		ExpireAt: time.Time{}, // Never expires
+	}
+	authData.SetToken(token)
+
+	// Store with no TTL (permanent until revoked)
+	cost := int64(200)
+	s.cache.Set(tokenID, authData, cost)
+	s.cache.Wait()
+
+	// Track in root token manager
+	s.rootTokenManager.SetRootToken(tokenValue, tokenID)
+
+	if s.config.EnableMetrics {
+		s.metrics.IncrementTokensGenerated()
+	}
+
+	s.logger.Info("root token generated",
+		logger.String("token_id", tokenID),
+		logger.String("principal_id", "root"))
+
+	return tokenValue, nil
+}
+
+// RevokeRootToken revokes the current root token.
+func (s *RobustStore) RevokeRootToken() error {
+	tokenValue := s.rootTokenManager.GetCurrentRootToken()
+	if tokenValue == "" {
+		return errors.New("no root token to revoke")
+	}
+
+	tokenID := ComputeTokenID(WARDEN_TOKEN, tokenValue)
+	s.cache.Del(tokenID)
+
+	s.rootTokenManager.ClearRootToken()
+
+	s.logger.Info("root token revoked",
+		logger.String("token_id", tokenID))
+
+	return nil
 }
 
 // Close gracefully shuts down the token store

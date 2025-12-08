@@ -99,4 +99,13 @@ type TokenStore interface {
 	GetToken(tokenValue string) *Token
 	GetMetrics() map[string]int64
 	Close()
+
+	// GenerateRootToken creates a new root token with infinite lifetime.
+	// Returns the token value (cws.*) which should be displayed to the user.
+	// Only one root token can exist at a time; generating a new one revokes the old.
+	GenerateRootToken() (string, error)
+
+	// RevokeRootToken revokes the current root token.
+	// Returns an error if no root token exists.
+	RevokeRootToken() error
 }

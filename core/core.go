@@ -63,6 +63,10 @@ type Core struct {
 	// mountsLock is used to ensure that the mounts table does not
 	// change underneath a calling function
 	mountsLock locking.DeadlockRWMutex
+
+	// initialized tracks whether warden init has been called
+	initialized bool
+	initLock    sync.RWMutex
 }
 
 type CoreConfig struct {
@@ -172,6 +176,20 @@ func (c *Core) Targets() *target.TargetRegistry {
 	return c.targets
 }
 
+// IsInitialized returns whether warden init has been called
+func (c *Core) IsInitialized() bool {
+	c.initLock.RLock()
+	defer c.initLock.RUnlock()
+	return c.initialized
+}
+
+// MarkInitialized marks warden as initialized
+func (c *Core) MarkInitialized() {
+	c.initLock.Lock()
+	defer c.initLock.Unlock()
+	c.initialized = true
+}
+
 func (c *Core) LoadRoles(ctx context.Context) {
 	// load the roles from the storage
 	c.logger.Info("loading roles from storage")
@@ -275,6 +293,10 @@ func (c *Core) InitAccessControl(ctx context.Context) {
 	c.logger.Info("loading role assignments from storage")
 
 	accessControl := authorize.NewAccessControl()
+
+	// Root principal always has system_admin role
+	accessControl.AssignRole("root", "system_admin")
+
 	accessControl.AssignRole("service-client-1", "market_reader")
 	accessControl.AssignRole("service-client-1", "ondemand_role")
 	accessControl.AssignRole("service-client-1", "aws_dev_account_local")

@@ -15,6 +15,11 @@ import (
 )
 
 func (m *JWTAuthMethod) HandleRequest(w http.ResponseWriter, r *http.Request) error {
+	// Check if auth method has been configured
+	if m.config == nil  {
+		http.Error(w, "Auth method not configured", http.StatusServiceUnavailable)
+		return nil
+	}
 
 	m.router.ServeHTTP(w, r)
 
@@ -245,3 +250,6 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 }
+
+
+

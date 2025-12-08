@@ -30,9 +30,8 @@ func PrintTable(headers []string, data [][]any) {
 	}
 
 	symbols := tw.NewSymbolCustom("Warden").
-		WithRow(" ").
-		WithColumn(" ").
-		WithTopLeft("").
+		WithRow("-").
+		WithTopLeft(" ").
 		WithTopMid(" ").
 		WithTopRight(" ").
 		WithMidLeft(" ").
@@ -43,7 +42,9 @@ func PrintTable(headers []string, data [][]any) {
 		WithBottomRight(" ")
 
 	rd := tw.Rendition{Symbols: symbols}
-	rd.Settings.Lines.ShowHeaderLine = tw.Off
+	rd.Settings.Lines.ShowHeaderLine = tw.On
+	rd.Settings.Lines.ShowBottom = tw.Off
+	rd.Settings.Lines.ShowTop = tw.Off
 
 	table := tablewriter.NewTable(os.Stdout,
 		tablewriter.WithRenderer(renderer.NewBlueprint(rd)),
