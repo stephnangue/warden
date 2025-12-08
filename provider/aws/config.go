@@ -14,7 +14,9 @@ func parseConfig(conf map[string]any) ProviderConfig {
 		ProxyDomains: []string{"localhost"},
 	}
 	// Parse proxy_domains
-	if domains, ok := conf["proxy_domains"].([]interface{}); ok {
+	if domains, ok := conf["proxy_domains"].([]string); ok {
+		config.ProxyDomains = domains
+	} else if domains, ok := conf["proxy_domains"].([]any); ok {
 		config.ProxyDomains = make([]string, 0, len(domains))
 		for _, d := range domains {
 			if domain, ok := d.(string); ok {
@@ -25,9 +27,9 @@ func parseConfig(conf map[string]any) ProviderConfig {
 
 	// Parse max_body_size
 	maxBodySize := int64(10485760)
-	if maxSize, ok := conf["max_body_size"].(int64); ok {
+	if maxSize, ok := conf["max_body_size"].(int64); (ok && maxSize > 0) {
 		maxBodySize = maxSize
-	} else if maxSize, ok := conf["max_body_size"].(int); ok {
+	} else if maxSize, ok := conf["max_body_size"].(int); (ok && maxSize > 0) {
 		maxBodySize = int64(maxSize)
 	}
 	config.MaxBodySize = maxBodySize
@@ -40,6 +42,9 @@ func parseConfig(conf map[string]any) ProviderConfig {
 		if d, err := time.ParseDuration(timeout); err == nil {
 			timeOut = d
 		}
+	}
+	if timeOut.String() == "0s" {
+		timeOut = time.Duration(30 * time.Second)
 	}
 	config.Timeout = timeOut
 

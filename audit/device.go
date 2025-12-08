@@ -200,6 +200,34 @@ func (d *device) Name() string {
 	return d.name
 }
 
+func (m *device) Setup(conf map[string]any) error {
+	return  nil
+}
+
+func (d *device) Config() map[string]any {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if d.config == nil {
+		return map[string]any{}
+	}
+
+	return map[string]any{
+		"name":          d.config.Name,
+		"type":          d.config.Type,
+		"class":         d.config.Class,
+		"description":   d.config.Description,
+		"accessor":      d.config.Accessor,
+		"options":       d.config.Options,
+		"enabled":       d.enabled,
+		"format":        d.config.Format,
+		"prefix":        d.config.Prefix,
+		"hmac_key":      d.config.HMACKey,
+		"exclude_paths": d.config.ExcludePaths,
+		"include_paths": d.config.IncludePaths,
+	}
+}
+
 // Enabled returns whether the device is enabled
 func (d *device) Enabled() bool {
 	d.mu.RLock()

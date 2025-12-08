@@ -24,4 +24,5 @@ type Factory interface {
 		accessControl *authorize.AccessControl,
 		auditAccess audit.AuditAccess) (logical.Backend, error)
 	Initialize(logger logger.Logger) error
+	ValidateConfig(config map[string]any) error
 }
