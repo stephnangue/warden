@@ -112,6 +112,14 @@ func (d *mockAuditDevice) GetAccessor() string {
 func (d *mockAuditDevice) Cleanup() {
 }
 
+func (m *mockAuditDevice) Setup(conf map[string]any) error {
+	return  nil
+}
+
+func (m *mockAuditDevice) Config() map[string]any {
+	return map[string]any{}
+}
+
 // mockAuditFactory implements audit.Factory for testing
 type mockAuditFactory struct {
 	createFunc func(ctx context.Context, mountPath, description, accessor string, config map[string]any) (audit.Device, error)

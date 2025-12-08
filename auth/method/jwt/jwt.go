@@ -3,6 +3,8 @@ package jwt
 import (
 	"context"
 	"fmt"
+	"maps"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/middleware"
@@ -18,7 +20,7 @@ import (
 // JWTAuthConfig represents JWT/OIDC authentication configuration
 type JWTAuthConfig struct {
 	Name string `json:"name"`
-	Type string `json:"type" default:"jwt"` // "jwt" or "oidc"
+	Mode string `json:"mode" default:"jwt"` // "jwt" or "oidc"
 
 	// OIDC Discovery
 	OIDCDiscoveryURL string `json:"oidc_discovery_url,omitempty"`
@@ -40,7 +42,7 @@ type JWTAuthConfig struct {
 
 	// Token settings
 	TokenTTL     time.Duration `json:"token_ttl" default:"1h"`
-	AuthDeadline time.Duration `json:"token_max_ttl" default:"10m"`
+	AuthDeadline time.Duration `json:"auth_deadline" default:"10m"`
 
 	// Internal
 	validator *jwt.Validator `json:"-"`
@@ -73,6 +75,7 @@ type JWTAuthMethod struct {
 	roles         *authorize.RoleRegistry
 	accessControl *authorize.AccessControl
 	auditAccess   audit.AuditAccess
+	validateFunc  func(conf map[string]any) error
 }
 
 func (m *JWTAuthMethod) GetType() string {
@@ -94,14 +97,91 @@ func (m *JWTAuthMethod) GetAccessor() string {
 func (m *JWTAuthMethod) Cleanup() {
 }
 
+func (m *JWTAuthMethod) Config() map[string]any {
+	if m.config == nil {
+		return map[string]any{}
+	}
+
+	return map[string]any{
+		"name":                    m.config.Name,
+		"mode":                    m.config.Mode,
+		"oidc_discovery_url":      m.config.OIDCDiscoveryURL,
+		"oidc_discovery_ca_pem":   m.config.OIDCDiscoveryCA,
+		"jwks_url":                m.config.JWKSURL,
+		"jwks_ca_pem":             m.config.JWKSCA,
+		"jwt_validation_pubkeys":  m.config.JWTValidationPubKeys,
+		"bound_issuer":            m.config.BoundIssuer,
+		"bound_audiences":         m.config.BoundAudiences,
+		"bound_subject":           m.config.BoundSubject,
+		"bound_claims":            m.config.BoundClaims,
+		"claim_mappings":          m.config.ClaimMappings,
+		"user_claim":              m.config.UserClaim,
+		"groups_claim":            m.config.GroupsClaim,
+		"token_ttl":               m.config.TokenTTL.String(),
+		"auth_deadline":           m.config.AuthDeadline.String(),
+	}
+}
+
+func (m *JWTAuthMethod) Setup(conf map[string]any) error {
+	// Build current configuration as map
+	currentConfig := make(map[string]interface{})
+	if m.config != nil {
+		currentConfig["name"] = m.config.Name
+		currentConfig["mode"] = m.config.Mode
+		currentConfig["oidc_discovery_url"] = m.config.OIDCDiscoveryURL
+		currentConfig["oidc_discovery_ca_pem"] = m.config.OIDCDiscoveryCA
+		currentConfig["jwks_url"] = m.config.JWKSURL
+		currentConfig["jwks_ca_pem"] = m.config.JWKSCA
+		currentConfig["jwt_validation_pubkeys"] = m.config.JWTValidationPubKeys
+		currentConfig["bound_issuer"] = m.config.BoundIssuer
+		currentConfig["bound_audiences"] = m.config.BoundAudiences
+		currentConfig["bound_subject"] = m.config.BoundSubject
+		currentConfig["bound_claims"] = m.config.BoundClaims
+		currentConfig["claim_mappings"] = m.config.ClaimMappings
+		currentConfig["user_claim"] = m.config.UserClaim
+		currentConfig["groups_claim"] = m.config.GroupsClaim
+		currentConfig["token_ttl"] = m.config.TokenTTL
+		currentConfig["auth_deadline"] = m.config.AuthDeadline
+	}
+
+	// Merge incoming config with current config (incoming takes precedence)
+	maps.Copy(currentConfig, conf)
+
+	// Validate the merged configuration
+	if m.validateFunc != nil {
+		if err := m.validateFunc(currentConfig); err != nil {
+			m.logger.Warn("config validation failed", logger.Err(err))
+			return err
+		}
+	}
+
+	// Setup the new configuration
+	ctx := context.Background()
+	newConfig, err := setupConfig(ctx, currentConfig)
+	if err != nil {
+		m.logger.Error("failed to setup config", logger.Err(err))
+		return err
+	}
+
+	// Update the auth method configuration
+	m.config = newConfig
+
+	m.logger.Info("auth method configuration updated",
+		logger.String("mode", m.config.Mode),
+		logger.String("bound_issuer", m.config.BoundIssuer),
+		logger.String("user_claim", m.config.UserClaim),
+	)
+
+	return nil
+}
+
 func (m *JWTAuthMethod) setupRouter() {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RealIP)
 
 	r.Route("/", func(roles chi.Router) {
-		roles.Post("/login", m.handleLogin)
-		roles.Put("/login", m.handleLogin)
+		roles.HandleFunc("/login", m.handleLogin)
 	})
 
 	m.router = r
@@ -125,18 +205,107 @@ func (f *JWTAuthMethodFactory) Initialize(log logger.Logger) error {
 	return nil
 }
 
+func (f *JWTAuthMethodFactory) ValidateConfig(conf map[string]any) error {
+	config, err := mapToJWTAuthConfig(conf)
+	if err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	// Validate Mode
+	if config.Mode != "jwt" && config.Mode != "oidc" {
+		return fmt.Errorf("mode must be 'jwt' or 'oidc', got: %s", config.Mode)
+	}
+
+	// Mode-specific validation
+	switch config.Mode {
+	case "oidc":
+		if config.OIDCDiscoveryURL == "" {
+			return fmt.Errorf("oidc_discovery_url is required when type is 'oidc'")
+		}
+	case "jwt":
+		if config.JWKSURL == "" && len(config.JWTValidationPubKeys) == 0 {
+			return fmt.Errorf("either jwks_url or jwt_validation_pubkeys is required when type is 'jwt'")
+		}
+	}
+
+	// Validate UserClaim
+	if config.UserClaim == "" {
+		// This is OK, we'll use default "sub"
+	}
+
+	// Validate BoundAudiences format
+	for _, aud := range config.BoundAudiences {
+		if strings.TrimSpace(aud) == "" {
+			return fmt.Errorf("bound_audiences contains empty value")
+		}
+	}
+
+	// Validate BoundIssuer
+	if config.BoundIssuer != "" && strings.TrimSpace(config.BoundIssuer) == "" {
+		return fmt.Errorf("bound_issuer cannot be empty string")
+	}
+
+	// Validate BoundSubject
+	if config.BoundSubject != "" && strings.TrimSpace(config.BoundSubject) == "" {
+		return fmt.Errorf("bound_subject cannot be empty string")
+	}
+
+	// Validate TokenTTL
+	if config.TokenTTL < 0 {
+		return fmt.Errorf("token_ttl must be positive or zero")
+	}
+
+	// Validate AuthDeadline
+	if config.AuthDeadline < 0 {
+		return fmt.Errorf("auth_deadline must be positive or zero")
+	}
+
+	if(config.AuthDeadline > config.TokenTTL) {
+		return fmt.Errorf("auth_deadline must be less than token_ttl")
+	}
+
+	return nil
+}
+
 func (f *JWTAuthMethodFactory) Create(
 	ctx context.Context,
 	mountPath string,
 	description string,
 	accessor string,
 	conf map[string]any,
-	logger logger.Logger,
+	log logger.Logger,
 	tokenStore token.TokenStore,
 	roles *authorize.RoleRegistry,
 	accessControl *authorize.AccessControl,
 	auditAccess audit.AuditAccess,
 ) (logical.Backend, error) {
+
+	method := &JWTAuthMethod{
+		mountPath:     mountPath,
+		description:   description,
+		accessor:      accessor,
+		logger:        log.WithSubsystem(f.Type()).WithSubsystem(accessor),
+		authType:      f.Type(),
+		backendClass:  f.Class(),
+		tokenStore:    tokenStore,
+		roles:         roles,
+		accessControl: accessControl,
+		auditAccess:   auditAccess,
+	}
+
+	method.setupRouter()
+
+	method.validateFunc = f.ValidateConfig
+
+	// err := method.Setup(conf)
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	return method, nil
+}
+
+func setupConfig(ctx context.Context, conf map[string]any) (*JWTAuthConfig, error) {
 	config, err := mapToJWTAuthConfig(conf)
 	if err != nil {
 		return nil, err
@@ -149,14 +318,14 @@ func (f *JWTAuthMethodFactory) Create(
 		config.TokenTTL = 1 * time.Hour
 	}
 	if config.AuthDeadline == 0 {
-		config.AuthDeadline = 10 * time.Minute
+		config.AuthDeadline = config.TokenTTL
 	}
 	if config.UserClaim == "" {
 		config.UserClaim = "sub"
 	}
 
-	// Initialize KeySet based on type
-	switch config.Type {
+	// Initialize KeySet based on Mode
+	switch config.Mode {
 	case "oidc":
 		if config.OIDCDiscoveryURL == "" {
 			return nil, fmt.Errorf("oidc_discovery_url is required for OIDC type")
@@ -194,21 +363,7 @@ func (f *JWTAuthMethodFactory) Create(
 	}
 	config.validator = validator
 
-	method := &JWTAuthMethod{
-		mountPath:     mountPath,
-		description:   description,
-		accessor:      accessor,
-		logger:        logger.WithSubsystem(f.Type()).WithSubsystem(accessor),
-		config:        config,
-		authType:      f.Type(),
-		backendClass:  f.Class(),
-		tokenStore:    tokenStore,
-		roles:         roles,
-		accessControl: accessControl,
-		auditAccess:   auditAccess,
-	}
-
-	method.setupRouter()
-
-	return method, nil
+	return config, nil
 }
+
+

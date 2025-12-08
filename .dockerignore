@@ -46,6 +46,7 @@ docs/
 # Test files
 *_test.go
 testdata/
+test/
 coverage.out
 coverage.html
 

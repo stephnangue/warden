@@ -455,3 +455,294 @@ func TestRobustStore_CacheHitMiss(t *testing.T) {
 	metrics := store.GetMetrics()
 	assert.Greater(t, metrics["cache_hits"], int64(0))
 }
+
+// Root Token Tests
+
+func TestRobustStore_GenerateRootToken(t *testing.T) {
+	log := logger.NewZerologLogger(logger.DefaultConfig())
+	config := DefaultConfig()
+
+	store, err := NewRobustStore(log, config)
+	require.NoError(t, err)
+	defer store.Close()
+
+	// Generate root token
+	rootToken, err := store.GenerateRootToken()
+	require.NoError(t, err)
+	assert.NotEmpty(t, rootToken)
+	assert.Equal(t, 68, len(rootToken)) // "cws." (4) + 64 hex chars
+	assert.Contains(t, rootToken, "cws.")
+
+	// Verify token is stored in cache
+	token := store.GetToken(rootToken)
+	assert.NotNil(t, token)
+	assert.Equal(t, WARDEN_TOKEN, token.Type)
+	assert.Equal(t, rootToken, token.Data["token"])
+	assert.True(t, token.ExpireAt.IsZero()) // Never expires
+}
+
+func TestRobustStore_GenerateRootToken_Format(t *testing.T) {
+	log := logger.NewZerologLogger(logger.DefaultConfig())
+	config := DefaultConfig()
+
+	store, err := NewRobustStore(log, config)
+	require.NoError(t, err)
+	defer store.Close()
+
+	rootToken, err := store.GenerateRootToken()
+	require.NoError(t, err)
+
+	// Verify format
+	assert.True(t, len(rootToken) > 4)
+	assert.Equal(t, "cws.", rootToken[:4])
+
+	// Verify it's a valid hex string after prefix
+	tokenBody := rootToken[4:]
+	assert.Equal(t, 64, len(tokenBody))
+}
+
+func TestRobustStore_GenerateRootToken_ReplacesPrevious(t *testing.T) {
+	log := logger.NewZerologLogger(logger.DefaultConfig())
+	config := DefaultConfig()
+
+	store, err := NewRobustStore(log, config)
+	require.NoError(t, err)
+	defer store.Close()
+
+	// Generate first root token
+	rootToken1, err := store.GenerateRootToken()
+	require.NoError(t, err)
+	assert.NotEmpty(t, rootToken1)
+
+	// Verify first token is stored
+	token1 := store.GetToken(rootToken1)
+	assert.NotNil(t, token1)
+
+	// Generate second root token (should revoke first)
+	rootToken2, err := store.GenerateRootToken()
+	require.NoError(t, err)
+	assert.NotEmpty(t, rootToken2)
+	assert.NotEqual(t, rootToken1, rootToken2)
+
+	// First token should be revoked
+	token1After := store.GetToken(rootToken1)
+	assert.Nil(t, token1After)
+
+	// Second token should exist
+	token2 := store.GetToken(rootToken2)
+	assert.NotNil(t, token2)
+}
+
+func TestRobustStore_RevokeRootToken(t *testing.T) {
+	log := logger.NewZerologLogger(logger.DefaultConfig())
+	config := DefaultConfig()
+
+	store, err := NewRobustStore(log, config)
+	require.NoError(t, err)
+	defer store.Close()
+
+	// Generate root token
+	rootToken, err := store.GenerateRootToken()
+	require.NoError(t, err)
+
+	// Verify token exists
+	token := store.GetToken(rootToken)
+	assert.NotNil(t, token)
+
+	// Revoke root token
+	err = store.RevokeRootToken()
+	require.NoError(t, err)
+
+	// Token should be gone
+	tokenAfter := store.GetToken(rootToken)
+	assert.Nil(t, tokenAfter)
+}
+
+func TestRobustStore_RevokeRootToken_NoToken(t *testing.T) {
+	log := logger.NewZerologLogger(logger.DefaultConfig())
+	config := DefaultConfig()
+
+	store, err := NewRobustStore(log, config)
+	require.NoError(t, err)
+	defer store.Close()
+
+	// Try to revoke when no root token exists
+	err = store.RevokeRootToken()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no root token to revoke")
+}
+
+func TestRobustStore_RootToken_InfiniteTTL(t *testing.T) {
+	log := logger.NewZerologLogger(logger.DefaultConfig())
+	config := DefaultConfig()
+
+	store, err := NewRobustStore(log, config)
+	require.NoError(t, err)
+	defer store.Close()
+
+	// Generate root token
+	rootToken, err := store.GenerateRootToken()
+	require.NoError(t, err)
+
+	// Resolve token immediately
+	principalID, roleName, err := store.ResolveToken(context.Background(), rootToken, map[string]string{})
+	require.NoError(t, err)
+	assert.Equal(t, "root", principalID)
+	assert.Equal(t, "system_admin", roleName)
+
+	// Wait a bit and resolve again (should still work - infinite TTL)
+	time.Sleep(100 * time.Millisecond)
+	principalID2, roleName2, err := store.ResolveToken(context.Background(), rootToken, map[string]string{})
+	require.NoError(t, err)
+	assert.Equal(t, "root", principalID2)
+	assert.Equal(t, "system_admin", roleName2)
+}
+
+func TestRobustStore_RootToken_NoAuthDeadline(t *testing.T) {
+	log := logger.NewZerologLogger(logger.DefaultConfig())
+	config := DefaultConfig()
+
+	store, err := NewRobustStore(log, config)
+	require.NoError(t, err)
+	defer store.Close()
+
+	// Generate root token
+	rootToken, err := store.GenerateRootToken()
+	require.NoError(t, err)
+
+	// Wait longer than typical auth deadline
+	time.Sleep(200 * time.Millisecond)
+
+	// Should still resolve (no auth deadline)
+	principalID, roleName, err := store.ResolveToken(context.Background(), rootToken, map[string]string{})
+	require.NoError(t, err)
+	assert.Equal(t, "root", principalID)
+	assert.Equal(t, "system_admin", roleName)
+}
+
+func TestRobustStore_RootToken_NoOriginCheck(t *testing.T) {
+	log := logger.NewZerologLogger(logger.DefaultConfig())
+	config := DefaultConfig()
+
+	store, err := NewRobustStore(log, config)
+	require.NoError(t, err)
+	defer store.Close()
+
+	// Generate root token
+	rootToken, err := store.GenerateRootToken()
+	require.NoError(t, err)
+
+	// Resolve from first IP
+	reqContext1 := map[string]string{"client_ip": "192.168.1.1"}
+	principalID1, roleName1, err := store.ResolveToken(context.Background(), rootToken, reqContext1)
+	require.NoError(t, err)
+	assert.Equal(t, "root", principalID1)
+	assert.Equal(t, "system_admin", roleName1)
+
+	// Resolve from different IP (should work - no origin restrictions)
+	reqContext2 := map[string]string{"client_ip": "10.0.0.1"}
+	principalID2, roleName2, err := store.ResolveToken(context.Background(), rootToken, reqContext2)
+	require.NoError(t, err)
+	assert.Equal(t, "root", principalID2)
+	assert.Equal(t, "system_admin", roleName2)
+}
+
+func TestRobustStore_RootToken_ClosedStore(t *testing.T) {
+	log := logger.NewZerologLogger(logger.DefaultConfig())
+	config := DefaultConfig()
+
+	store, err := NewRobustStore(log, config)
+	require.NoError(t, err)
+
+	// Close the store
+	store.Close()
+
+	// Try to generate root token after closing
+	_, err = store.GenerateRootToken()
+	assert.ErrorIs(t, err, ErrStoreClosed)
+}
+
+func TestRobustStore_RootToken_Concurrent(t *testing.T) {
+	log := logger.NewZerologLogger(logger.DefaultConfig())
+	config := DefaultConfig()
+
+	store, err := NewRobustStore(log, config)
+	require.NoError(t, err)
+	defer store.Close()
+
+	// Generate initial root token
+	rootToken, err := store.GenerateRootToken()
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	numGoroutines := 10
+
+	// Concurrent resolutions of root token
+	wg.Add(numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			defer wg.Done()
+			principalID, roleName, err := store.ResolveToken(context.Background(), rootToken, map[string]string{})
+			assert.NoError(t, err)
+			assert.Equal(t, "root", principalID)
+			assert.Equal(t, "system_admin", roleName)
+		}()
+	}
+	wg.Wait()
+}
+
+func TestRootTokenManager_SetAndGet(t *testing.T) {
+	rtm := NewRootTokenManager()
+
+	tokenValue := "cws.test123"
+	tokenID := "wtkn_abc"
+
+	rtm.SetRootToken(tokenValue, tokenID)
+
+	assert.Equal(t, tokenValue, rtm.GetCurrentRootToken())
+	assert.Equal(t, tokenID, rtm.GetCurrentRootTokenID())
+	assert.True(t, rtm.HasRootToken())
+	assert.True(t, rtm.IsRootToken(tokenValue))
+	assert.False(t, rtm.IsRootToken("different-token"))
+}
+
+func TestRootTokenManager_Clear(t *testing.T) {
+	rtm := NewRootTokenManager()
+
+	rtm.SetRootToken("cws.test456", "wtkn_def")
+	assert.True(t, rtm.HasRootToken())
+
+	rtm.ClearRootToken()
+	assert.False(t, rtm.HasRootToken())
+	assert.Empty(t, rtm.GetCurrentRootToken())
+	assert.Empty(t, rtm.GetCurrentRootTokenID())
+}
+
+func TestRootTokenManager_Concurrent(t *testing.T) {
+	rtm := NewRootTokenManager()
+
+	var wg sync.WaitGroup
+	numGoroutines := 100
+
+	// Concurrent writes
+	wg.Add(numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			rtm.SetRootToken("cws.test", "wtkn_test")
+		}(i)
+	}
+	wg.Wait()
+
+	// Concurrent reads
+	wg.Add(numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			defer wg.Done()
+			_ = rtm.GetCurrentRootToken()
+			_ = rtm.HasRootToken()
+			_ = rtm.IsRootToken("cws.test")
+		}()
+	}
+	wg.Wait()
+}
