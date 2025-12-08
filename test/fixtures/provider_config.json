@@ -1,0 +1,5 @@
+{
+  "proxy_domains": ["localhost", "warden"],
+  "max_body_size": 10485760,
+  "timeout": "60s"
+}

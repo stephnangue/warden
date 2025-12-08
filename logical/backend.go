@@ -9,6 +9,8 @@ type Backend interface {
 	GetDescription() string
 	GetAccessor() string
 	Cleanup()
+	Setup(conf map[string]any) error
+	Config() map[string]any
 }
 
 type ContextKey string

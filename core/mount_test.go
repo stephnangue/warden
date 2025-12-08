@@ -66,10 +66,19 @@ func (f *mockAuthFactory) Create(ctx context.Context, path, description, accesso
 	if f.createFunc != nil {
 		return f.createFunc(ctx, path, description, accessor, config, logger, tokenStore, roles, ac, am)
 	}
-	return newMockBackend(accessor), nil
+	backend := newMockBackend(accessor)
+	// Initialize with the provided config
+	if config != nil {
+		backend.Setup(config)
+	}
+	return backend, nil
 }
 
 func (f *mockAuthFactory) Initialize(logger logger.Logger) error {
+	return nil
+}
+
+func (f *mockAuthFactory) ValidateConfig(config map[string]any) error {
 	return nil
 }
 
@@ -90,7 +99,12 @@ func (f *mockProviderFactory) Create(ctx context.Context, path, description, acc
 	if f.createFunc != nil {
 		return f.createFunc(ctx, path, description, accessor, config, logger, tokenAccess, roles, credSources, am)
 	}
-	return newMockBackend(accessor), nil
+	backend := newMockBackend(accessor)
+	// Initialize with the provided config
+	if config != nil {
+		backend.Setup(config)
+	}
+	return backend, nil
 }
 
 func (f *mockProviderFactory) Initialize(logger logger.Logger) error {
@@ -790,7 +804,7 @@ func TestMountConstants(t *testing.T) {
 	assert.False(t, MountTableNoUpdateStorage)
 }
 
-func TestCore_tuneMount(t *testing.T) {
+func TestCore_configureMount(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("tune mount with trailing slash added", func(t *testing.T) {
@@ -814,7 +828,7 @@ func TestCore_tuneMount(t *testing.T) {
 			"new_key": "new_value",
 		}
 
-		err = core.tuneMount(ctx, "test", tuneConfig)
+		err = core.configureMount(ctx, "test", tuneConfig)
 		require.NoError(t, err)
 
 		// Verify the config was updated
@@ -850,7 +864,7 @@ func TestCore_tuneMount(t *testing.T) {
 			"proxy_urls": []string{"http://proxy1", "http://proxy2"},
 		}
 
-		err = core.tuneMount(ctx, "aws/", tuneConfig)
+		err = core.configureMount(ctx, "aws/", tuneConfig)
 		require.NoError(t, err)
 
 		// Verify the config was updated
@@ -883,7 +897,7 @@ func TestCore_tuneMount(t *testing.T) {
 			"new_key": "new_value",
 		}
 
-		err = core.tuneMount(ctx, "test/", tuneConfig)
+		err = core.configureMount(ctx, "test/", tuneConfig)
 		require.NoError(t, err)
 
 		// Verify config was created and updated
@@ -901,7 +915,7 @@ func TestCore_tuneMount(t *testing.T) {
 			"key": "value",
 		}
 
-		err := core.tuneMount(ctx, "sys/test/", tuneConfig)
+		err := core.configureMount(ctx, "sys/test/", tuneConfig)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot tune")
 	})
@@ -913,7 +927,7 @@ func TestCore_tuneMount(t *testing.T) {
 			"key": "value",
 		}
 
-		err := core.tuneMount(ctx, "auth/test/", tuneConfig)
+		err := core.configureMount(ctx, "auth/test/", tuneConfig)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot tune")
 	})
@@ -925,7 +939,7 @@ func TestCore_tuneMount(t *testing.T) {
 			"key": "value",
 		}
 
-		err := core.tuneMount(ctx, "audit/test/", tuneConfig)
+		err := core.configureMount(ctx, "audit/test/", tuneConfig)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot tune")
 	})
@@ -937,7 +951,7 @@ func TestCore_tuneMount(t *testing.T) {
 			"key": "value",
 		}
 
-		err := core.tuneMount(ctx, "nonexistent/", tuneConfig)
+		err := core.configureMount(ctx, "nonexistent/", tuneConfig)
 		assert.Error(t, err)
 		assert.Equal(t, errNoMatchingMount, err)
 	})
@@ -961,7 +975,7 @@ func TestCore_tuneMount(t *testing.T) {
 		// Tune with empty config
 		tuneConfig := map[string]any{}
 
-		err = core.tuneMount(ctx, "test/", tuneConfig)
+		err = core.configureMount(ctx, "test/", tuneConfig)
 		require.NoError(t, err)
 
 		// Verify original config is unchanged
@@ -994,7 +1008,7 @@ func TestCore_tuneMount(t *testing.T) {
 				fmt.Sprintf("key_%d", i): fmt.Sprintf("value_%d", i),
 			}
 
-			err = core.tuneMount(ctx, "test/", tuneConfig)
+			err = core.configureMount(ctx, "test/", tuneConfig)
 			require.NoError(t, err)
 		}
 
@@ -1035,7 +1049,7 @@ func TestCore_tuneMount(t *testing.T) {
 				tuneConfig := map[string]any{
 					fmt.Sprintf("key_%d", id): fmt.Sprintf("value_%d", id),
 				}
-				err := core.tuneMount(ctx, "test/", tuneConfig)
+				err := core.configureMount(ctx, "test/", tuneConfig)
 				assert.NoError(t, err)
 			}(i)
 		}

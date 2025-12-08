@@ -2,7 +2,7 @@ package core
 
 // MountProviderInput represents the input for mounting a provider
 type MountProviderInput struct {
-	Path string `path:"path" minLength:"1" maxLength:"256" doc:"Mount path (single segment: alphanumeric, underscore, hyphen only - slashes not allowed)" example:"aws-production"`
+	Path string `path:"path" minLength:"1" maxLength:"256" doc:"The path to mount to" example:"aws-prod"`
 	Body struct {
 		Type        string         `json:"type" minLength:"1" maxLength:"50" pattern:"^[a-z0-9_]+$" doc:"Provider type (e.g., aws, gcp)" example:"aws"`
 		Description string         `json:"description,omitempty" maxLength:"500" doc:"Human-readable description" example:"Production AWS provider"`
@@ -21,7 +21,7 @@ type MountProviderOutput struct {
 
 // GetMountInput represents the input for getting mount information
 type GetMountInput struct {
-	Path string `path:"path" minLength:"1" maxLength:"256" doc:"Mount path to query" example:"aws-production"`
+	Path string `path:"path" minLength:"1" maxLength:"256" doc:"Path to query" example:"aws-production"`
 }
 
 // GetMountOutput represents the output for mount information
@@ -69,10 +69,8 @@ type MountInfo struct {
 
 // TuneProviderInput represents the input for tuning a mount
 type TuneProviderInput struct {
-	Path string `path:"path" minLength:"1" maxLength:"256" doc:"Mount path to tune" example:"aws-production"`
-	Body struct {
-		Config map[string]any `json:"config,omitempty" doc:"Configuration parameters to update"`
-	}
+	Path string         `path:"path" minLength:"1" maxLength:"256" doc:"Mount path to tune" example:"aws-production"`
+	Body map[string]any
 }
 
 // TuneProviderOutput represents the output after tuning a mount
@@ -81,3 +79,16 @@ type TuneProviderOutput struct {
 		Message string `json:"message" doc:"Success message"`
 	}
 }
+
+type (
+	MountAuthInput = MountProviderInput
+	MountAuthOutput = MountProviderOutput
+	GetAuthInput = GetMountInput
+	UnmountAuthInput = UnmountProviderInput
+	UnmountAuthOutput = UnmountProviderOutput
+	ListAuthsInput = ListMountsInput
+	ListAuthsOutput =  ListMountsOutput
+	AuthInfo = MountInfo
+	TuneAuthInput = TuneProviderInput
+	TuneAuthOutput = TuneProviderOutput
+)

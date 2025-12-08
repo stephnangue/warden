@@ -1,4 +1,4 @@
-.PHONY: help build build-fast brd brd-fast build-no-cache up up-logs down logs logs-tail restart clean clean-all shell test test-unit test-integration query status rebuild rebuild-quick watch cache-info edit-config
+.PHONY: help build build-fast brd brd-fast build-no-cache up up-logs down logs logs-tail restart clean clean-all shell test test-unit test-integration test-e2e test-e2e-init test-e2e-providers test-e2e-auth test-e2e-integration query status rebuild rebuild-quick watch cache-info edit-config
 
 # Enable BuildKit for faster builds
 export DOCKER_BUILDKIT=1
@@ -36,6 +36,11 @@ help:
 	@echo "Testing:"
 	@echo "  make test-unit       - Run Go unit tests"
 	@echo "  make test-integration - Run integration tests"
+	@echo "  make test-e2e        - Run end-to-end CLI tests (all)"
+	@echo "  make test-e2e-init   - Run init tests only"
+	@echo "  make test-e2e-providers - Run provider tests only"
+	@echo "  make test-e2e-auth   - Run auth tests only"
+	@echo "  make test-e2e-integration - Run integration tests only"
 	@echo "  make test            - Test proxy connection"
 	@echo "  make query           - Run sample query"
 	@echo ""
@@ -57,6 +62,45 @@ test-integration:
 	@echo "Running integration tests..."
 	@go test -v -tags=integration ./...
 	@echo "✓ Integration tests passed"
+
+# Run end-to-end CLI tests (all) - with shared server (faster)
+test-e2e:
+	@echo "Running end-to-end CLI tests (shared server)..."
+	@./test/e2e/run_all_shared.sh
+
+# Run end-to-end CLI tests (all) - each test with own server (slower)
+test-e2e-isolated:
+	@echo "Running end-to-end CLI tests (isolated)..."
+	@./test/e2e/run_all.sh
+
+# Run individual e2e test suites
+test-e2e-init:
+	@echo "Running initialization tests..."
+	@./test/e2e/test_init.sh
+
+test-e2e-providers:
+	@echo "Running provider lifecycle tests..."
+	@./test/e2e/test_providers.sh
+
+test-e2e-provider-config:
+	@echo "Running provider configuration tests..."
+	@./test/e2e/test_provider_config.sh
+
+test-e2e-auth:
+	@echo "Running auth lifecycle tests..."
+	@./test/e2e/test_auth.sh
+
+test-e2e-auth-config:
+	@echo "Running auth configuration tests..."
+	@./test/e2e/test_auth_config.sh
+
+test-e2e-write:
+	@echo "Running write command tests..."
+	@./test/e2e/test_write.sh
+
+test-e2e-integration:
+	@echo "Running integration workflow tests..."
+	@./test/e2e/test_integration.sh
 
 # Normal build with cache (runs tests first)
 build: test-unit

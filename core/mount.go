@@ -3,8 +3,10 @@ package core
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/hashicorp/go-uuid"
 	"github.com/stephnangue/warden/auth"
@@ -127,6 +129,7 @@ type MountEntry struct {
 	Accessor    string         `json:"accessor"`
 	Tainted     bool           `json:"tainted,omitempty"`
 	Config      map[string]any `json:"config"`
+	configMu    sync.RWMutex
 }
 
 // mount is used to mount a new backend to the mount table.
@@ -259,13 +262,6 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry) (logica
 		}
 		f := factory.(provider.Factory)
 
-		// Validate configuration before creating the provider
-		if entry.Config != nil {
-			if err := f.ValidateConfig(entry.Config); err != nil {
-				return nil, fmt.Errorf("invalid configuration: %w", err)
-			}
-		}
-
 		backend, err = f.Create(
 			ctx,
 			entry.Path,
@@ -284,6 +280,16 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry) (logica
 	case mountClassSystem:
 		backend = NewSystemBackend(c, c.logger.WithSystem("system"))
 	}
+
+	// Check if backend is nil (shouldn't happen in normal operation, but handle it for safety)
+	if backend == nil {
+		return nil, fmt.Errorf("nil backend returned for %s type %s", entry.Class, entry.Type)
+	}
+
+	entry.configMu.Lock()
+	defer entry.configMu.Unlock()
+	entry.Config = map[string]any{}
+	maps.Copy(entry.Config, backend.Config())
 	return backend, nil
 }
 
@@ -309,8 +315,8 @@ func (c *Core) unmount(ctx context.Context, path string) error {
 	return nil
 }
 
-// tuneMount updates the configuration of an existing mount
-func (c *Core) tuneMount(ctx context.Context, path string, config map[string]any) error {
+// configureMount updates the configuration of an existing mount
+func (c *Core) configureMount(ctx context.Context, path string, config map[string]any) error {
 	// Ensure we end the path in a slash
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
@@ -335,35 +341,41 @@ func (c *Core) tuneMount(ctx context.Context, path string, config map[string]any
 		return errNoMatchingMount
 	}
 
+	// Merge existing config with new config
+	mergedConfig := make(map[string]any)
+	maps.Copy(mergedConfig, entry.Config)
+	maps.Copy(mergedConfig, config)
+
 	// Validate configuration for provider mounts
-	if entry.Class == mountClassProvider {
+	var backend logical.Backend
+	switch entry.Class {
+	case mountClassProvider :
 		factory := c.providers[entry.Type]
 		if factory == nil {
 			return fmt.Errorf("provider type %s not found", entry.Type)
 		}
-
-		// Merge existing config with new config for validation
-		mergedConfig := make(map[string]any)
-		for k, v := range entry.Config {
-			mergedConfig[k] = v
-		}
-		for k, v := range config {
-			mergedConfig[k] = v
+	case mountClassAuth :
+		factory := c.authMethods[entry.Type]
+		if factory == nil {
+			return fmt.Errorf("auth method type %s not found", entry.Type)
 		}
 
-		// Validate the merged configuration
-		if err := factory.ValidateConfig(mergedConfig); err != nil {
-			return fmt.Errorf("invalid configuration: %w", err)
-		}
+	default :
+		return fmt.Errorf("unsupported mount class: %s", entry.Class)
 	}
 
-	// Update the config
-	if entry.Config == nil {
-		entry.Config = make(map[string]any)
+	backend = c.router.MatchingBackend(ctx, path)
+	if backend == nil {
+		return fmt.Errorf("backend not found for path %s", path)
 	}
-	for key, value := range config {
-		entry.Config[key] = value
+
+	if err := backend.Setup(mergedConfig); err != nil {
+		return fmt.Errorf("failed to setup backend with new config: %w", err)
 	}
+
+	entry.configMu.Lock()
+	entry.Config = backend.Config()
+	entry.configMu.Unlock()
 
 	// Persist the updated mount table (commented out for now, consistent with other methods)
 	// if err := c.persistMounts(ctx, nil, c.mounts, &entry.Local, entry.UUID); err != nil {
@@ -371,7 +383,7 @@ func (c *Core) tuneMount(ctx context.Context, path string, config map[string]any
 	// 	return fmt.Errorf("failed to persist mount configuration: %w", err)
 	// }
 
-	c.logger.Info("successfully tuned mount",
+	c.logger.Info("successfully configured mount",
 		logger.String("path", path),
 	)
 
@@ -497,30 +509,30 @@ func (c *Core) LoadSystemBackend(ctx context.Context) error {
 }
 
 func (c *Core) LoadMounts(ctx context.Context) error {
-	err := c.mount(ctx, &MountEntry{
-		Class:       "auth",
-		Type:        "jwt",
-		Path:        "jwt",
-		Description: "test jwt auth method",
-		Config: map[string]any{
-			"type":     "jwt",
-			"jwks_url": "http://hydra:4444/.well-known/jwks.json",
-		}})
-	if err != nil {
-		return err
-	}
+	// err := c.mount(ctx, &MountEntry{
+	// 	Class:       "auth",
+	// 	Type:        "jwt",
+	// 	Path:        "jwt",
+	// 	Description: "test jwt auth method",
+	// 	Config: map[string]any{
+	// 		"type":     "jwt",
+	// 		"jwks_url": "http://hydra:4444/.well-known/jwks.json",
+	// 	}})
+	// if err != nil {
+	// 	return err
+	// }
 
-	err = c.mount(ctx, &MountEntry{
-		Class:       "provider",
-		Type:        "aws",
-		Path:        "aws",
-		Description: "aws cloud provider",
-		Config: map[string]any{
-			"proxy_domains": []string{"localhost", "warden"},
-		}})
-	if err != nil {
-		return err
-	}
+	// err = c.mount(ctx, &MountEntry{
+	// 	Class:       "provider",
+	// 	Type:        "aws",
+	// 	Path:        "aws",
+	// 	Description: "aws cloud provider",
+	// 	Config: map[string]any{
+	// 		"proxy_domains": []string{"localhost", "warden"},
+	// 	}})
+	// if err != nil {
+	// 	return err
+	// }
 
 	return nil
 }
