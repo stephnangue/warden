@@ -19,9 +19,12 @@ import (
 	"github.com/stephnangue/warden/listener/api"
 	"github.com/stephnangue/warden/listener/mysql"
 	log "github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/physical"
+	fileStorage "github.com/stephnangue/warden/physical/file"
+	inmemStorage "github.com/stephnangue/warden/physical/inmem"
+	postgresqlStorage "github.com/stephnangue/warden/physical/postgres"
 	"github.com/stephnangue/warden/provider"
 	"github.com/stephnangue/warden/provider/aws"
-	"github.com/stephnangue/warden/storage"
 )
 
 const (
@@ -70,6 +73,13 @@ Usage: warden server [options]
 
 	authMethods = map[string]auth.Factory{
 		"jwt": &jwt.JWTAuthMethodFactory{},
+	}
+
+	storageBackends = map[string]physical.Factory{
+		"file":       fileStorage.NewFileBackend,
+		"inmem_ha":   inmemStorage.NewInmemHA,
+		"inmem":      inmemStorage.NewInmem,
+		"postgres": postgresqlStorage.NewPostgreSQLStorage,
 	}
 )
 
@@ -293,26 +303,26 @@ func buildLogger(config *config.Config) log.Logger {
 	return logger
 }
 
-func buildStorage(config *config.Config, logger log.Logger) (storage.Storage, error) {
-	logger.Info("crafting the storage")
-	var backend storage.Storage
-	if config.GetStorage() != nil {
-		switch config.GetStorage().Type {
-		default:
-			logger.Info("storage provided is not yet supported, defaulting to in-memory storage")
-			backend = storage.NewMemoryStorage()
-		}
-	} else {
-		logger.Info("storage not provided, defaulting to in-memory storage")
-		backend = storage.NewMemoryStorage()
+func buildStorage(config *config.Config, logger log.Logger) (physical.Storage, error) {
+	logger.Info("initializing the storage")
+	// Ensure that a storage is provided
+	if config.Storage == nil {
+		return nil, errors.New("a storage backend must be specified")
 	}
 
-	err := backend.Init(context.Background())
-	if err != nil {
-		return nil, err
+	factory, exists := storageBackends[config.Storage.Type]
+	if !exists {
+		return nil, fmt.Errorf("unknown storage type %s", config.Storage.Type)
 	}
-	logger.Info("storage successfully crafted")
-	return backend, nil
+
+	storage, err := factory(config.Storage.Config(), logger.WithSystem("storage." + config.Storage.Type))
+
+	if err != nil {
+		return nil, fmt.Errorf("error initializing storage of type %s: %w", config.Storage.Type, err)
+	}
+
+	logger.Info("storage successfully initialized")
+	return storage, nil
 }
 
 func initListeners(core *core.Core, tokenAccess token.TokenStore, config *config.Config, logger log.Logger) ([]listener.Listener, error) {
