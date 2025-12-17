@@ -14,8 +14,8 @@ import (
 	"github.com/stephnangue/warden/config"
 	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/physical"
 	"github.com/stephnangue/warden/provider"
-	"github.com/stephnangue/warden/storage"
 	"github.com/stephnangue/warden/target"
 )
 
@@ -25,8 +25,7 @@ var (
 )
 
 type Core struct {
-	storage   storage.Storage
-	storageMu sync.RWMutex
+	storage   physical.Storage
 
 	config config.Config
 
@@ -75,7 +74,7 @@ type CoreConfig struct {
 	AuthMethods  map[string]auth.Factory
 	Providers    map[string]provider.Factory
 	TokenStore   token.TokenStore
-	Storage      storage.Storage
+	Storage      physical.Storage
 	Logger       logger.Logger
 }
 
@@ -111,10 +110,6 @@ func (c *Core) Shutdown() error {
 	c.logger.Info("Shutting down the core")
 
 	c.tokenStore.Close()
-
-	c.storageMu.Lock()
-	defer c.storageMu.Unlock()
-	c.storage.Stop()
 
 	c.logger.Info("Core shutdown successfully")
 
