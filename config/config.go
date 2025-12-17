@@ -20,7 +20,7 @@ type Config struct {
 }
 
 type StorageBlock struct {
-	Type string `hcl:"type,label"` // "inmem", "file", or "raft"
+	Type string `hcl:"type,label"` // "inmem", "file", or "postgres"
 
 	// In-memory storage specific config
 	// (no additional config needed, but you could add cache size limits)
@@ -28,13 +28,56 @@ type StorageBlock struct {
 	// File storage specific config
 	Path string `hcl:"path,optional"` // File system path for file backend
 
-	// Raft storage specific config
-	RaftNodeID        string   `hcl:"node_id,optional"`
-	RaftAddress       string   `hcl:"address,optional"`        // This node's Raft address
-	RaftDataDir       string   `hcl:"data_dir,optional"`       // Directory for Raft data
-	RaftBootstrap     bool     `hcl:"bootstrap,optional"`      // Bootstrap a new cluster
-	RaftJoinAddresses []string `hcl:"retry_join,optional"`     // Other nodes to join
-	RaftMaxEntrySize  int      `hcl:"max_entry_size,optional"` // Max size of entries
+	// PostgreSQL storage specific config
+	ConnectionUrl        string   `hcl:"connection_url,optional"`
+	Table                string   `hcl:"table,optional"`                 // Table where data will be stored
+	MaxIdleConnections   int      `hcl:"max_idle_connections,optional"`  // The maximum number of connections in the idle connection pool
+	MaxParallel          string   `hcl:"max_parallel,optional"`          // The maximum number of concurrent requests to PostgreSQL
+	HAEnabled            string   `hcl:"ha_enabled,optional"`            
+	HATable              string   `hcl:"ha_table,optional"`              // The name of the table to use for storing High Availability information
+	SkipCreateTable      string   `hcl:"skip_create_table,optional"`
+	MaxConnectRetries    string   `hcl:"max_connect_retries,optional"`   // The maximum number of retries to perform when waiting for the database to be active
+}
+
+// Config returns the storage configuration as a map
+func (s *StorageBlock) Config() map[string]string {
+	config := make(map[string]string)
+
+	// Add type (always present)
+	config["type"] = s.Type
+
+	// Add file storage config if present
+	if s.Path != "" {
+		config["path"] = s.Path
+	}
+
+	// Add PostgreSQL config if present
+	if s.ConnectionUrl != "" {
+		config["connection_url"] = s.ConnectionUrl
+	}
+	if s.Table != "" {
+		config["table"] = s.Table
+	}
+	if s.MaxIdleConnections != 0 {
+		config["max_idle_connections"] = fmt.Sprintf("%d", s.MaxIdleConnections)
+	}
+	if s.MaxParallel != "" {
+		config["max_parallel"] = s.MaxParallel
+	}
+	if s.HAEnabled != "" {
+		config["ha_enabled"] = s.HAEnabled
+	}
+	if s.HATable != "" {
+		config["ha_table"] = s.HATable
+	}
+	if s.SkipCreateTable != "" {
+		config["skip_create_table"] = s.SkipCreateTable
+	}
+	if s.MaxConnectRetries != "" {
+		config["max_connect_retries"] = s.MaxConnectRetries
+	}
+
+	return config
 }
 
 type ListenerBlock struct {

@@ -7,7 +7,7 @@ import (
 	"github.com/stephnangue/warden/auth/token"
 	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/storage"
+	"github.com/stephnangue/warden/physical/inmem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,8 +15,8 @@ import (
 func TestSystemHandlers_Init(t *testing.T) {
 	// Setup
 	log := logger.NewZerologLogger(logger.DefaultConfig())
-	store := storage.NewMemoryStorage()
-	store.Init(context.Background())
+	store, err := inmem.NewInmem(nil, log)
+	require.NoError(t, err)
 
 	tokenStore, err := token.NewRobustStore(log, token.DefaultConfig())
 	require.NoError(t, err)
@@ -57,8 +57,8 @@ func TestSystemHandlers_Init(t *testing.T) {
 func TestSystemHandlers_Init_Multiple(t *testing.T) {
 	// Setup
 	log := logger.NewZerologLogger(logger.DefaultConfig())
-	store := storage.NewMemoryStorage()
-	store.Init(context.Background())
+	store, err := inmem.NewInmem(nil, log)
+	require.NoError(t, err)
 
 	tokenStore, err := token.NewRobustStore(log, token.DefaultConfig())
 	require.NoError(t, err)
@@ -103,8 +103,8 @@ func TestSystemHandlers_Init_Multiple(t *testing.T) {
 func TestSystemHandlers_RevokeRootToken(t *testing.T) {
 	// Setup
 	log := logger.NewZerologLogger(logger.DefaultConfig())
-	store := storage.NewMemoryStorage()
-	store.Init(context.Background())
+	store, err := inmem.NewInmem(nil, log)
+	require.NoError(t, err)
 
 	tokenStore, err := token.NewRobustStore(log, token.DefaultConfig())
 	require.NoError(t, err)
@@ -148,8 +148,8 @@ func TestSystemHandlers_RevokeRootToken(t *testing.T) {
 func TestSystemHandlers_RevokeRootToken_NonRootPrincipal(t *testing.T) {
 	// Setup
 	log := logger.NewZerologLogger(logger.DefaultConfig())
-	store := storage.NewMemoryStorage()
-	store.Init(context.Background())
+	store, err := inmem.NewInmem(nil, log)
+	require.NoError(t, err)
 
 	tokenStore, err := token.NewRobustStore(log, token.DefaultConfig())
 	require.NoError(t, err)
@@ -188,8 +188,8 @@ func TestSystemHandlers_RevokeRootToken_NonRootPrincipal(t *testing.T) {
 func TestSystemHandlers_RevokeRootToken_NoPrincipal(t *testing.T) {
 	// Setup
 	log := logger.NewZerologLogger(logger.DefaultConfig())
-	store := storage.NewMemoryStorage()
-	store.Init(context.Background())
+	store, err := inmem.NewInmem(nil, log)
+	require.NoError(t, err)
 
 	tokenStore, err := token.NewRobustStore(log, token.DefaultConfig())
 	require.NoError(t, err)
@@ -227,8 +227,8 @@ func TestSystemHandlers_RevokeRootToken_NoPrincipal(t *testing.T) {
 func TestSystemHandlers_RevokeRootToken_NoToken(t *testing.T) {
 	// Setup
 	log := logger.NewZerologLogger(logger.DefaultConfig())
-	store := storage.NewMemoryStorage()
-	store.Init(context.Background())
+	store, err := inmem.NewInmem(nil, log)
+	require.NoError(t, err)
 
 	tokenStore, err := token.NewRobustStore(log, token.DefaultConfig())
 	require.NoError(t, err)
@@ -262,8 +262,8 @@ func TestSystemHandlers_RevokeRootToken_NoToken(t *testing.T) {
 func TestSystemHandlers_Init_OnlyOnce(t *testing.T) {
 	// Setup
 	log := logger.NewZerologLogger(logger.DefaultConfig())
-	store := storage.NewMemoryStorage()
-	store.Init(context.Background())
+	store, err := inmem.NewInmem(nil, log)
+	require.NoError(t, err)
 
 	tokenStore, err := token.NewRobustStore(log, token.DefaultConfig())
 	require.NoError(t, err)
@@ -306,8 +306,8 @@ func TestSystemHandlers_Init_OnlyOnce(t *testing.T) {
 func TestCore_IsInitialized(t *testing.T) {
 	// Setup
 	log := logger.NewZerologLogger(logger.DefaultConfig())
-	store := storage.NewMemoryStorage()
-	store.Init(context.Background())
+	store, err := inmem.NewInmem(nil, log)
+	require.NoError(t, err)
 
 	core := &Core{
 		storage: store,
@@ -325,8 +325,8 @@ func TestCore_IsInitialized(t *testing.T) {
 func TestCore_MarkInitialized_Concurrent(t *testing.T) {
 	// Setup
 	log := logger.NewZerologLogger(logger.DefaultConfig())
-	store := storage.NewMemoryStorage()
-	store.Init(context.Background())
+	store, err := inmem.NewInmem(nil, log)
+	require.NoError(t, err)
 
 	core := &Core{
 		storage: store,
