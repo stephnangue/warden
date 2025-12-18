@@ -32,8 +32,8 @@ const (
 	subsystemCore          = "core"
 	subsystemInit          = "init"
 	subsystemToken         = "token"
-	subsystemAPIListener   = "api-listener"
-	subsystemMySQLListener = "mysql-listener"
+	subsystemAPIListener   = "listener.api"
+	subsystemMySQLListener = "listener.mysql"
 
 	// Listener type names
 	listenerTypeAPI   = "api"
