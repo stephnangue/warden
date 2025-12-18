@@ -66,6 +66,12 @@ type Core struct {
 	// initialized tracks whether warden init has been called
 	initialized bool
 	initLock    sync.RWMutex
+
+	// cachingDisabled indicates whether caches are disabled
+	cachingDisabled bool
+	// Cache stores the actual cache; we always have this but may bypass it if
+	// disabled
+	physicalCache physical.ToggleablePurgemonster
 }
 
 type CoreConfig struct {
@@ -76,6 +82,13 @@ type CoreConfig struct {
 	TokenStore   token.TokenStore
 	Storage      physical.Storage
 	Logger       logger.Logger
+	// Disables the LRU cache on the physical storage
+	DisableCache bool
+
+	// Custom cache size for the LRU cache on the physical storage, or zero for default
+	CacheSize int
+
+	DisableKeyEncodingChecks  bool
 }
 
 func (c *Core) Init(ctx context.Context) error {
@@ -116,6 +129,25 @@ func (c *Core) Shutdown() error {
 	return nil
 }
 
+func coreInit(c *Core, conf *CoreConfig) error {
+	phys := conf.Storage
+	// Wrap the physical storage in a cache layer if enabled
+	cacheLogger := c.logger.WithSystem("storage.cache")
+	c.storage = physical.NewCache(phys, conf.CacheSize, cacheLogger, nil)
+	c.physicalCache = c.storage.(physical.ToggleablePurgemonster)
+
+	// Wrap in encoding checks
+	if !conf.DisableKeyEncodingChecks {
+		c.storage = physical.NewStorageEncoding(c.storage)
+	}
+
+	// if c.StandbyReadsEnabled() {
+	// 	c.underlyingPhysical.(physical.CacheInvalidationBackend).HookInvalidate(c.Invalidate)
+	// }
+
+	return nil
+}
+
 // CreateCore creates, initializes and configures a Warden node (core).
 func CreateCore(conf *CoreConfig) (*Core, error) {
 	c := &Core{
@@ -127,6 +159,11 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 		router:       NewRouter(conf.Logger.WithSystem("router")),
 		mounts:       NewMountTable(),
 		audit:        NewMountTable(),
+	}
+
+	err := coreInit(c, conf)
+	if err != nil {
+		return nil, err
 	}
 
 	// Provider backends

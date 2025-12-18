@@ -16,6 +16,11 @@ import (
 )
 
 const (
+	// coreMountConfigPath is used to store the mount configuration.
+	// Mounts are protected within the Warden itself, which means they
+	// can only be viewed or modified after an unseal.
+	coreMountConfigPath = "core/mounts"
+
 	mountPathSystem = "sys/"
 
 	mountClassSystem   = "system"
