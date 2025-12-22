@@ -17,6 +17,26 @@ import (
 	"github.com/stephnangue/warden/logger"
 )
 
+// isAuditExempt checks if a request should be allowed even when no audit devices are configured.
+// Only bootstrap operations that must work before audit devices are set up are exempted.
+func isAuditExempt(req *http.Request) bool {
+	// Normalize path to handle both /sys/... and /v1/sys/... formats
+	normalizedPath := strings.TrimPrefix(req.URL.Path, "/v1")
+
+	// Only POST /sys/init is exempt - this is the bootstrap operation that happens
+	// before audit devices are loaded during post-unseal
+	if normalizedPath == "/sys/init" && req.Method == http.MethodPost {
+		return true
+	}
+
+	// Future: Add other bootstrap operations here as needed
+	// Examples:
+	// - GET /sys/health (health check before init)
+	// - GET /sys/seal-status (check status before init)
+
+	return false
+}
+
 func (c *Core) auditRequest(req *http.Request) bool {
 	// Read body for logging
 	bodyBytes, _ := io.ReadAll(req.Body)
@@ -54,23 +74,43 @@ func (c *Core) auditRequest(req *http.Request) bool {
 	ok, err := c.auditManager.LogRequest(req.Context(), &entry)
 	if err != nil {
 		c.logger.Error("failed to audit request", logger.Err(err), logger.String("request_id", middleware.GetReqID(req.Context())))
+		return false
 	}
-	return ok
+
+	// If no audit devices are configured, only allow audit-exempt bootstrap operations
+	if !ok {
+		if isAuditExempt(req) {
+			c.logger.Debug("audit-exempt bootstrap operation, proceeding without audit",
+				logger.String("path", req.URL.Path),
+				logger.String("method", req.Method),
+			)
+			return true
+		}
+
+		// Non-exempt requests require audit logging
+		c.logger.Warn("request blocked: no audit devices configured for non-exempt operation",
+			logger.String("path", req.URL.Path),
+			logger.String("method", req.Method),
+		)
+		return false
+	}
+
+	return true
 }
 
 func (c *Core) LoadAudits(ctx context.Context) error {
-	err := c.EnableAudit(ctx, &MountEntry{
-		Class:       "audit",
-		Type:        "file",
-		Path:        "file-device",
-		Description: "file audit device",
-		Config: map[string]any{
-			"file_path": "/logs/warden-audit.log",
-			"hmac_key":  "your-secret-key-here",
-		}}, false)
-	if err != nil {
-		return err
-	}
+	// err := c.EnableAudit(ctx, &MountEntry{
+	// 	Class:       "audit",
+	// 	Type:        "file",
+	// 	Path:        "file-device",
+	// 	Description: "file audit device",
+	// 	Config: map[string]any{
+	// 		"file_path": "/logs/warden-audit.log",
+	// 		"hmac_key":  "your-secret-key-here",
+	// 	}}, false)
+	// if err != nil {
+	// 	return err
+	// }
 
 	return nil
 }

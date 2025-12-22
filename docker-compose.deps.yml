@@ -1,0 +1,230 @@
+services:
+  # Vault Server
+  vault:
+    image: hashicorp/vault:latest
+    container_name: vault-server
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "root"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_ADDR: "http://0.0.0.0:8200"
+      VAULT_SKIP_VERIFY: "true"
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - vault-data:/vault/data
+      - vault-logs:/vault/logs
+      - ./certs/warden:/vault/certs
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "vault", "status", "-tls-skip-verify"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: >
+      server -dev
+      -dev-root-token-id="root"
+      -dev-listen-address=0.0.0.0:8200
+
+  # MySQL Backend Server
+  mysql-server:
+    image: mysql:8.0
+    container_name: mysql-server
+    ports:
+      - "3308:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: myapp
+      MYSQL_USER: vaultadmin
+      MYSQL_PASSWORD: vaultpassword
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./scripts:/docker-entrypoint-initdb.d
+      - ./certs/mysql:/etc/mysql/certs:ro
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --ssl-ca=/etc/mysql/certs/ca.pem
+      --ssl-cert=/etc/mysql/certs/server-cert.pem
+      --ssl-key=/etc/mysql/certs/server-key.pem
+      --require-secure-transport=ON
+
+  # PostgreSQL for Hydra
+  postgres-hydra:
+    image: postgres:15-alpine
+    container_name: postgres-hydra
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: hydra
+      POSTGRES_PASSWORD: hydrapassword
+      POSTGRES_DB: hydra
+    volumes:
+      - postgres-hydra-data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hydra"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Ory Hydra - OAuth2 and OpenID Connect Server
+  hydra-migrate:
+    image: oryd/hydra:v2.2
+    container_name: hydra-migrate
+    environment:
+      DSN: postgres://hydra:hydrapassword@postgres-hydra:5432/hydra?sslmode=disable
+    networks:
+      - app-network
+    depends_on:
+      postgres-hydra:
+        condition: service_healthy
+    command: migrate sql -e --yes
+
+  hydra:
+    image: oryd/hydra:v2.2
+    container_name: hydra
+    ports:
+      - "4444:4444"  # Public API
+      - "4445:4445"  # Admin API
+    environment:
+      SERVE_COOKIES_SAME_SITE_MODE: Lax
+      DSN: postgres://hydra:hydrapassword@postgres-hydra:5432/hydra?sslmode=disable
+      URLS_SELF_ISSUER: http://localhost:4444
+      URLS_CONSENT: http://localhost:3000/consent
+      URLS_LOGIN: http://localhost:3000/login
+      URLS_LOGOUT: http://localhost:3000/logout
+      SECRETS_SYSTEM: youReallyNeedToChangeThis
+      OIDC_SUBJECT_IDENTIFIERS_SUPPORTED_TYPES: public,pairwise
+      OIDC_SUBJECT_IDENTIFIERS_PAIRWISE_SALT: youReallyNeedToChangeThis
+      SERVE_PUBLIC_CORS_ENABLED: "true"
+      SERVE_PUBLIC_CORS_ALLOWED_ORIGINS: "*"
+      SERVE_ADMIN_CORS_ENABLED: "true"
+      SERVE_ADMIN_CORS_ALLOWED_ORIGINS: "*"
+      LOG_LEVEL: debug
+      # JWT Access Token Configuration
+      STRATEGIES_ACCESS_TOKEN: jwt
+      # Optional: Configure JWT lifespan (default is 1h)
+      TTL_ACCESS_TOKEN: 1h
+      TTL_REFRESH_TOKEN: 720h
+      TTL_ID_TOKEN: 1h
+    networks:
+      - app-network
+    depends_on:
+      hydra-migrate:
+        condition: service_completed_successfully
+      postgres-hydra:
+        condition: service_healthy
+    restart: unless-stopped
+    command: serve all --dev
+
+  # MySQL Client (for testing/debugging)
+  mysql-client:
+    image: mysql:8.0
+    container_name: mysql-client
+    environment:
+      MYSQL_HOST: mysql-client
+      MYSQL_PORT: 4000
+      MYSQL_USER: proxy
+      MYSQL_PASSWORD: proxy123
+    networks:
+      - app-network
+    command: tail -f /dev/null
+
+  # Vault Init Container (runs once to configure Vault)
+  vault-init:
+    image: hashicorp/vault:latest
+    container_name: vault-init
+    environment:
+      VAULT_ADDR: "http://vault:8200"
+      VAULT_TOKEN: "root"
+      VAULT_SKIP_VERIFY: "true"
+    networks:
+      - app-network
+    depends_on:
+      vault:
+        condition: service_healthy
+      mysql-server:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts
+      - ./certs/vault:/certs:ro
+    entrypoint: /bin/sh
+    command:
+      -c "
+      apk add --no-cache mysql-client netcat-openbsd &&
+      /scripts/init-vault.sh "
+
+  # Python test container for connection attributes
+  python-test:
+    image: python:3.11-slim
+    container_name: python-test
+    networks:
+      - app-network
+    depends_on:
+      mysql-server:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts
+      - ./certs/mysql:/certs:ro
+    working_dir: /scripts
+    environment:
+      MYSQL_HOST: mysql-server
+      MYSQL_PORT: 3306
+      MYSQL_USER: vaultadmin
+      MYSQL_PASSWORD: vaultpassword
+      MYSQL_DATABASE: myapp
+    command: >
+      sh -c "
+        pip install --quiet mysql-connector-python &&
+        echo 'Python test container ready!' &&
+        echo 'Run scripts with: docker exec -it python-test python /scripts/test_connection_attrs.py' &&
+        tail -f /dev/null
+      "
+
+  # Hydra client initialization (creates OAuth2 clients automatically)
+  hydra-client-init:
+    image: oryd/hydra:v2.2
+    container_name: hydra-client-init
+    environment:
+      HYDRA_ADMIN_URL: http://hydra:4445
+    networks:
+      - app-network
+    depends_on:
+      hydra:
+        condition: service_started
+    volumes:
+      - ./scripts:/scripts
+    entrypoint: /bin/sh
+    command: >
+     sh -c "
+      echo 'Waiting for Hydra to be ready...' &&
+      while ! wget -q --spider http://hydra:4445/health/ready 2>/dev/null; do
+        echo 'Waiting for Hydra Admin API...' &&
+        sleep 2
+      done &&
+      echo 'Hydra is ready! Creating OAuth2 clients...' &&
+      /scripts/create-clients.sh &&
+      echo 'OAuth2 clients created successfully!' &&
+      tail -f /dev/null
+      "
+
+networks:
+  app-network:
+    driver: bridge
+    name: warden-network
+
+volumes:
+  vault-data:
+  vault-logs:
+  mysql-data:
+  postgres-hydra-data:

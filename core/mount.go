@@ -541,3 +541,51 @@ func (c *Core) LoadMounts(ctx context.Context) error {
 
 	return nil
 }
+
+// unloadMounts is called on seal to tear down all mounted backends
+// This ensures a clean state when the core is sealed and prevents
+// duplicate mount errors when unsealing again
+func (c *Core) unloadMounts(ctx context.Context) error {
+	c.mountsLock.Lock()
+	defer c.mountsLock.Unlock()
+
+	// Get a snapshot of current mounts to iterate over
+	// We need to copy the paths because we'll be modifying the mount table
+	var mountPaths []string
+	for _, entry := range c.mounts.Entries {
+		mountPaths = append(mountPaths, entry.Path)
+	}
+
+	c.logger.Debug("unloading mounts", logger.Int("count", len(mountPaths)))
+
+	// Unmount each backend from the router
+	// We don't update storage here because we're sealing - the mount table
+	// in storage should remain intact for the next unseal
+	var unmountErrors []error
+	for _, path := range mountPaths {
+		c.logger.Debug("unmounting backend", logger.String("path", path))
+
+		// Unmount from router (this calls backend.Cleanup())
+		if err := c.router.Unmount(path); err != nil {
+			c.logger.Warn("failed to unmount backend from router",
+				logger.Err(err),
+				logger.String("path", path))
+			unmountErrors = append(unmountErrors, fmt.Errorf("failed to unmount %s: %w", path, err))
+			continue
+		}
+	}
+
+	// Clear the in-memory mount table
+	// This will be reloaded from storage on next unseal
+	c.mounts = NewMountTable()
+
+	if len(unmountErrors) > 0 {
+		c.logger.Warn("encountered errors while unloading mounts",
+			logger.Int("error_count", len(unmountErrors)))
+		// Return the first error for now
+		return unmountErrors[0]
+	}
+
+	c.logger.Debug("successfully unloaded all mounts")
+	return nil
+}

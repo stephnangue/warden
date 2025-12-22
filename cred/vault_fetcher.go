@@ -16,10 +16,10 @@ type VaultFetcher struct {
 	vault      *api.Client
 	credSource *CredSource
 	role       *authorize.Role
-	logger     logger.Logger
+	logger     *logger.GatedLogger
 }
 
-func NewVaultFetcher(credSource *CredSource, role *authorize.Role, logger logger.Logger) (*VaultFetcher, error) {
+func NewVaultFetcher(credSource *CredSource, role *authorize.Role, logger *logger.GatedLogger) (*VaultFetcher, error) {
 	apiCfg := api.DefaultConfig()
 	apiCfg.Address = credSource.Config["vault_address"]
 

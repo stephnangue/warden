@@ -1,4 +1,4 @@
-.PHONY: help build build-fast brd brd-fast build-no-cache up up-logs down logs logs-tail restart clean clean-all shell test test-unit test-integration test-e2e test-e2e-init test-e2e-providers test-e2e-auth test-e2e-integration query status rebuild rebuild-quick watch cache-info edit-config
+.PHONY: help build build-fast brd brd-fast build-no-cache up up-logs down logs logs-tail restart clean clean-all shell test test-unit test-integration query status rebuild rebuild-quick watch cache-info edit-config deps-up deps-down deps-logs
 
 # Enable BuildKit for faster builds
 export DOCKER_BUILDKIT=1
@@ -12,11 +12,16 @@ help:
 	@echo "Warden - Development"
 	@echo "========================================"
 	@echo ""
-	@echo "Build Commands:"
+	@echo "Local Development (Warden runs locally):"
+	@echo "  make deps-up         - Start dependencies (Vault, MySQL, Hydra, etc.)"
+	@echo "  make deps-down       - Stop dependencies"
+	@echo "  make deps-logs       - View dependency logs"
+	@echo "  make brd             - Build & run warden locally (with tests)"
+	@echo "  make brd-fast        - Build warden locally (no tests)"
+	@echo ""
+	@echo "Docker Build Commands:"
 	@echo "  make build           - Run tests & build with cache"
 	@echo "  make build-fast      - Run tests & fast parallel build"
-	@echo "  make brd             - Run tests, build & redeploy (with logs)"
-	@echo "  make brd-fast        - Ultra-fast rebuild (code only, no tests)"
 	@echo "  make build-no-cache  - Run tests & build without cache"
 	@echo "  make rebuild-quick   - Quick rebuild (code changes only, no tests)"
 	@echo ""
@@ -36,11 +41,6 @@ help:
 	@echo "Testing:"
 	@echo "  make test-unit       - Run Go unit tests"
 	@echo "  make test-integration - Run integration tests"
-	@echo "  make test-e2e        - Run end-to-end CLI tests (all)"
-	@echo "  make test-e2e-init   - Run init tests only"
-	@echo "  make test-e2e-providers - Run provider tests only"
-	@echo "  make test-e2e-auth   - Run auth tests only"
-	@echo "  make test-e2e-integration - Run integration tests only"
 	@echo "  make test            - Test proxy connection"
 	@echo "  make query           - Run sample query"
 	@echo ""
@@ -63,45 +63,6 @@ test-integration:
 	@go test -v -tags=integration ./...
 	@echo "✓ Integration tests passed"
 
-# Run end-to-end CLI tests (all) - with shared server (faster)
-test-e2e:
-	@echo "Running end-to-end CLI tests (shared server)..."
-	@./test/e2e/run_all_shared.sh
-
-# Run end-to-end CLI tests (all) - each test with own server (slower)
-test-e2e-isolated:
-	@echo "Running end-to-end CLI tests (isolated)..."
-	@./test/e2e/run_all.sh
-
-# Run individual e2e test suites
-test-e2e-init:
-	@echo "Running initialization tests..."
-	@./test/e2e/test_init.sh
-
-test-e2e-providers:
-	@echo "Running provider lifecycle tests..."
-	@./test/e2e/test_providers.sh
-
-test-e2e-provider-config:
-	@echo "Running provider configuration tests..."
-	@./test/e2e/test_provider_config.sh
-
-test-e2e-auth:
-	@echo "Running auth lifecycle tests..."
-	@./test/e2e/test_auth.sh
-
-test-e2e-auth-config:
-	@echo "Running auth configuration tests..."
-	@./test/e2e/test_auth_config.sh
-
-test-e2e-write:
-	@echo "Running write command tests..."
-	@./test/e2e/test_write.sh
-
-test-e2e-integration:
-	@echo "Running integration workflow tests..."
-	@./test/e2e/test_integration.sh
-
 # Normal build with cache (runs tests first)
 build: test-unit
 	@echo "Building $(IMAGE_NAME) with cache..."
@@ -112,20 +73,19 @@ build-fast: test-unit
 	@echo "Building $(IMAGE_NAME) with parallel processing..."
 	docker-compose build --parallel
 
-# Build and redeploy warden only (runs tests first)
+# Build and run warden locally (runs tests first)
 brd: test-unit
-	@echo "Fast rebuilding and redeploying warden..."
-	@docker-compose build --progress=plain warden
-	@docker-compose up -d warden
-	@echo "✓ Warden rebuilt and deployed"
-	@docker-compose logs -f $(CONTAINER_NAME)
+	@echo "Building warden locally..."
+	@go build -v -o warden .
+	@echo "✓ Warden built successfully"
+	@echo "Starting warden locally..."
+	@./warden server --config=./warden.local.hcl
 
 # Ultra-fast rebuild (code changes only - no logs)
 brd-fast:
 	@echo "⚡ Ultra-fast rebuild (code changes only)..."
-	@docker-compose build -q warden
-	@docker-compose up -d warden
-	@echo "✓ Done! Use 'make logs' to view output"
+	@go build -o warden .
+	@echo "✓ Done! Run './warden server --config=./warden.local.hcl' to start"
 
 # Live development mode with hot reload
 dev-watch:
@@ -260,4 +220,20 @@ prod-build: test-unit
 		-t $(IMAGE_NAME):$(shell date +%Y%m%d) \
 		.
 	@echo "✓ Production build complete"
+
+# Start only dependencies (for local warden development)
+deps-up:
+	@echo "Starting dependencies (Vault, MySQL, PostgreSQL, Hydra)..."
+	docker-compose -f docker-compose.deps.yml up -d
+	@echo "✓ Dependencies started"
+
+# Stop dependencies
+deps-down:
+	@echo "Stopping dependencies..."
+	docker-compose -f docker-compose.deps.yml down
+	@echo "✓ Dependencies stopped"
+
+# View dependency logs
+deps-logs:
+	docker-compose -f docker-compose.deps.yml logs -f
 

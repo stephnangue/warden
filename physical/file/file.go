@@ -12,13 +12,15 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/openbao/openbao/sdk/v2/helper/consts"
+	"github.com/openbao/openbao/sdk/v2/helper/jsonutil"
+	"github.com/openbao/openbao/sdk/v2/physical"
 	log "github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/physical"
 )
 
 // Verify FileBackend satisfies the correct interfaces
 var (
-	_ physical.Storage = (*FileBackend)(nil)
+	_ physical.Backend = (*FileBackend)(nil)
 )
 
 // FileBackend is a physical backend that stores data on disk
@@ -31,7 +33,7 @@ var (
 type FileBackend struct {
 	sync.RWMutex
 	path       string
-	logger     log.Logger
+	logger     *log.GatedLogger
 	permitPool *physical.PermitPool
 }
 
@@ -40,7 +42,7 @@ type fileEntry struct {
 }
 
 // NewFileBackend constructs a FileBackend using the given directory
-func NewFileBackend(conf map[string]string, logger log.Logger) (physical.Storage, error) {
+func NewFileBackend(conf map[string]string, logger *log.GatedLogger) (physical.Backend, error) {
 	path, ok := conf["path"]
 	if !ok {
 		return nil, errors.New("'path' must be set")
@@ -171,7 +173,7 @@ func (b *FileBackend) GetInternal(ctx context.Context, k string) (*physical.Entr
 	}
 
 	var entry fileEntry
-	if err := physical.DecodeJSONFromReader(f, &entry); err != nil {
+	if err := jsonutil.DecodeJSONFromReader(f, &entry); err != nil {
 		return nil, err
 	}
 
@@ -366,7 +368,7 @@ func (b *FileBackend) expandPath(k string) (string, string) {
 func (b *FileBackend) validatePath(path string) error {
 	switch {
 	case strings.Contains(path, ".."):
-		return physical.ErrPathContainsParentReferences
+		return consts.ErrPathContainsParentReferences
 	}
 
 	return nil

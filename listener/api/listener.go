@@ -14,13 +14,13 @@ import (
 )
 
 type ApiListener struct {
-	logger  logger.Logger
+	logger  *logger.GatedLogger
 	server  *http.Server
 	stopped atomic.Bool
 }
 
 type ApiListenerConfig struct {
-	Logger          logger.Logger
+	Logger          *logger.GatedLogger
 	Protocol        string
 	Address         string
 	TLSCertFile     string

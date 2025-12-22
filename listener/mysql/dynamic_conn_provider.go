@@ -24,7 +24,7 @@ type DynamicConnProvider struct {
 	mu    sync.RWMutex
 	conns []*BackendConn
 
-	logger logger.Logger
+	logger *logger.GatedLogger
 
 	target target.Target
 
@@ -32,7 +32,7 @@ type DynamicConnProvider struct {
 	stopChan chan struct{}
 }
 
-func NewDynamicConnProvider(role *authorize.Role, credSource *cred.CredSource, target target.Target, logger logger.Logger) (*DynamicConnProvider, error) {
+func NewDynamicConnProvider(role *authorize.Role, credSource *cred.CredSource, target target.Target, logger *logger.GatedLogger) (*DynamicConnProvider, error) {
 
 	fetcher, err := cred.NewCredentialFetcher(role, credSource, logger)
 	if err != nil {

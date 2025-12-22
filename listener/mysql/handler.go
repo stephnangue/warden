@@ -22,10 +22,10 @@ type MysqlHandler struct {
 	credSources *cred.CredSourceRegistry
 	targets     *target.TargetRegistry
 
-	logger logger.Logger
+	logger *logger.GatedLogger
 }
 
-func NewMysqlHandler(roles *authorize.RoleRegistry, credSources *cred.CredSourceRegistry, targets *target.TargetRegistry, logger logger.Logger) (*MysqlHandler, error) {
+func NewMysqlHandler(roles *authorize.RoleRegistry, credSources *cred.CredSourceRegistry, targets *target.TargetRegistry, logger *logger.GatedLogger) (*MysqlHandler, error) {
 	return &MysqlHandler{
 		roles:       roles,
 		credSources: credSources,
