@@ -1,6 +1,3 @@
-// Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
-
 package physical
 
 import (
@@ -10,6 +7,9 @@ import (
 
 	metrics "github.com/hashicorp/go-metrics/compat"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/openbao/openbao/sdk/v2/helper/locksutil"
+	"github.com/openbao/openbao/sdk/v2/helper/pathmanager"
+	"github.com/openbao/openbao/sdk/v2/physical"
 	log "github.com/stephnangue/warden/logger"
 )
 
@@ -19,7 +19,7 @@ const (
 
 	// TransactionCacheFactor is a multiple of cache size to reduce
 	// transactions by, to avoid high memory usage.
-	TransactionCacheFactor = DefaultParallelTransactions
+	TransactionCacheFactor = physical.DefaultParallelTransactions
 
 	// refreshCacheCtxKey is a ctx value that denotes the cache should be
 	// refreshed during a Get call.
@@ -54,23 +54,23 @@ func cacheRefreshFromContext(ctx context.Context) bool {
 // Vault are for policy objects so there is a large read reduction
 // by using a simple write-through cache.
 type Cache interface {
-	ToggleablePurgemonster
-	Storage
+	physical.ToggleablePurgemonster
+	physical.Backend
 }
 
 type TransactionalCache interface {
-	ToggleablePurgemonster
-	TransactionalStorage
+	physical.ToggleablePurgemonster
+	physical.TransactionalBackend
 }
 
 type cache struct {
-	backend         Storage
+	backend         physical.Backend
 	size            int
-	lru             *lru.TwoQueueCache[string, *Entry]
-	locks           []*LockEntry
-	logger          log.Logger
+	lru             *lru.TwoQueueCache[string, *physical.Entry]
+	locks           []*locksutil.LockEntry
+	logger          *log.GatedLogger
 	enabled         *uint32
-	cacheExceptions *PathManager
+	cacheExceptions *pathmanager.PathManager
 	metricSink      metrics.MetricSink
 }
 
@@ -91,37 +91,37 @@ type cacheTransaction struct {
 
 // Verify Cache satisfies the correct interfaces
 var (
-	_ ToggleablePurgemonster = &cache{}
-	_ Storage                = &cache{}
+	_ physical.ToggleablePurgemonster = &cache{}
+	_ physical.Backend                = &cache{}
 
-	_ ToggleablePurgemonster = &transactionalCache{}
-	_ TransactionalStorage   = &transactionalCache{}
+	_ physical.ToggleablePurgemonster = &transactionalCache{}
+	_ physical.TransactionalBackend   = &transactionalCache{}
 
-	_ Transaction = &cacheTransaction{}
+	_ physical.Transaction = &cacheTransaction{}
 )
 
 // NewCache returns a physical cache of the given size.
 // If no size is provided, the default size is used.
-func NewCache(b Storage, size int, logger log.Logger, metricSink metrics.MetricSink) Cache {
+func NewCache(b physical.Backend, size int, logger *log.GatedLogger, metricSink metrics.MetricSink) Cache {
 	logger.Debug("creating LRU cache", log.Int("size", size))
 
 	return newCache(b, size, logger, metricSink)
 }
 
-func newCache(b Storage, size int, logger log.Logger, metricSink metrics.MetricSink) Cache {
+func newCache(b physical.Backend, size int, logger *log.GatedLogger, metricSink metrics.MetricSink) Cache {
 	if size <= 0 {
 		size = DefaultCacheSize
 	}
 
-	pm := NewPathManager()
+	pm := pathmanager.New()
 	pm.AddPaths(cacheExceptionsPaths)
 
-	lruCache, _ := lru.New2Q[string, *Entry](size)
+	lruCache, _ := lru.New2Q[string, *physical.Entry](size)
 	c := &cache{
 		backend: b,
 		size:    size,
 		lru:     lruCache,
-		locks:   CreateLocks(),
+		locks:   locksutil.CreateLocks(),
 		logger:  logger,
 		// This fails safe.
 		enabled:         new(uint32),
@@ -129,7 +129,7 @@ func newCache(b Storage, size int, logger log.Logger, metricSink metrics.MetricS
 		metricSink:      metricSink,
 	}
 
-	if _, ok := b.(TransactionalStorage); ok {
+	if _, ok := b.(physical.TransactionalBackend); ok {
 		return &transactionalCache{
 			*c,
 		}
@@ -172,12 +172,12 @@ func (c *cache) Purge(ctx context.Context) {
 }
 
 // modifications to this function should also be applied to cacheTransaction.
-func (c *cache) Put(ctx context.Context, entry *Entry) error {
+func (c *cache) Put(ctx context.Context, entry *physical.Entry) error {
 	if entry != nil && !c.ShouldCache(entry.Key) {
 		return c.backend.Put(ctx, entry)
 	}
 
-	lock := LockForKey(c.locks, entry.Key)
+	lock := locksutil.LockForKey(c.locks, entry.Key)
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -185,7 +185,7 @@ func (c *cache) Put(ctx context.Context, entry *Entry) error {
 	if err == nil {
 		// While lower layers could modify entry, we want to ensure we don't
 		// open ourselves up to cache modification so clone the entry.
-		cacheEntry := &Entry{
+		cacheEntry := &physical.Entry{
 			Key:      entry.Key,
 		}
 		if entry.Value != nil {
@@ -197,17 +197,17 @@ func (c *cache) Put(ctx context.Context, entry *Entry) error {
 			copy(cacheEntry.ValueHash, entry.ValueHash)
 		}
 		c.lru.Add(entry.Key, cacheEntry)
-		c.metricSink.IncrCounter([]string{"cache", "write"}, 1)
+		//c.metricSink.IncrCounter([]string{"cache", "write"}, 1)
 	}
 	return err
 }
 
-func (c *cache) Get(ctx context.Context, key string) (*Entry, error) {
+func (c *cache) Get(ctx context.Context, key string) (*physical.Entry, error) {
 	if !c.ShouldCache(key) {
 		return c.backend.Get(ctx, key)
 	}
 
-	lock := LockForKey(c.locks, key)
+	lock := locksutil.LockForKey(c.locks, key)
 	lock.RLock()
 	defer lock.RUnlock()
 
@@ -217,12 +217,12 @@ func (c *cache) Get(ctx context.Context, key string) (*Entry, error) {
 			if raw == nil {
 				return nil, nil
 			}
-			c.metricSink.IncrCounter([]string{"cache", "hit"}, 1)
+			//c.metricSink.IncrCounter([]string{"cache", "hit"}, 1)
 			return raw, nil
 		}
 	}
 
-	c.metricSink.IncrCounter([]string{"cache", "miss"}, 1)
+	//c.metricSink.IncrCounter([]string{"cache", "miss"}, 1)
 	// Read from the underlying backend
 	ent, err := c.backend.Get(ctx, key)
 	if err != nil {
@@ -241,7 +241,7 @@ func (c *cache) Delete(ctx context.Context, key string) error {
 		return c.backend.Delete(ctx, key)
 	}
 
-	lock := LockForKey(c.locks, key)
+	lock := locksutil.LockForKey(c.locks, key)
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -264,7 +264,7 @@ func (c *cache) ListPage(ctx context.Context, prefix string, after string, limit
 	return c.backend.ListPage(ctx, prefix, after, limit)
 }
 
-func (c *cache) cloneWithStorage(b Storage) *cache {
+func (c *cache) cloneWithStorage(b physical.Backend) *cache {
 	// We construct a new cache here: this starts the transaction with a
 	// fresh, localized cache. This is globally sub-optimal (as it starts
 	// with an empty cache), but easiest to implement (as the transaction can
@@ -274,8 +274,8 @@ func (c *cache) cloneWithStorage(b Storage) *cache {
 	return cacheCopy
 }
 
-func (c *transactionalCache) BeginReadOnlyTx(ctx context.Context) (Transaction, error) {
-	txn, err := c.cache.backend.(TransactionalStorage).BeginReadOnlyTx(ctx)
+func (c *transactionalCache) BeginReadOnlyTx(ctx context.Context) (physical.Transaction, error) {
+	txn, err := c.cache.backend.(physical.TransactionalBackend).BeginReadOnlyTx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -291,8 +291,8 @@ func (c *transactionalCache) BeginReadOnlyTx(ctx context.Context) (Transaction, 
 	}, nil
 }
 
-func (c *transactionalCache) BeginTx(ctx context.Context) (Transaction, error) {
-	txn, err := c.backend.(TransactionalStorage).BeginTx(ctx)
+func (c *transactionalCache) BeginTx(ctx context.Context) (physical.Transaction, error) {
+	txn, err := c.backend.(physical.TransactionalBackend).BeginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -307,12 +307,12 @@ func (c *transactionalCache) BeginTx(ctx context.Context) (Transaction, error) {
 	}, nil
 }
 
-func (c *cacheTransaction) Put(ctx context.Context, entry *Entry) error {
+func (c *cacheTransaction) Put(ctx context.Context, entry *physical.Entry) error {
 	if entry != nil && !c.ShouldCache(entry.Key) {
 		return c.backend.Put(ctx, entry)
 	}
 
-	lock := LockForKey(c.locks, entry.Key)
+	lock := locksutil.LockForKey(c.locks, entry.Key)
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -320,7 +320,7 @@ func (c *cacheTransaction) Put(ctx context.Context, entry *Entry) error {
 	if err == nil {
 		// While lower layers could modify entry, we want to ensure we don't
 		// open ourselves up to cache modification so clone the entry.
-		cacheEntry := &Entry{
+		cacheEntry := &physical.Entry{
 			Key:      entry.Key,
 		}
 		if entry.Value != nil {
@@ -335,7 +335,7 @@ func (c *cacheTransaction) Put(ctx context.Context, entry *Entry) error {
 		c.modifiedLock.Lock()
 		c.modified[entry.Key] = struct{}{}
 		c.modifiedLock.Unlock()
-		c.metricSink.IncrCounter([]string{"cache", "write"}, 1)
+		//c.metricSink.IncrCounter([]string{"cache", "write"}, 1)
 	}
 	return err
 }
@@ -345,7 +345,7 @@ func (c *cacheTransaction) Delete(ctx context.Context, key string) error {
 		return c.backend.Delete(ctx, key)
 	}
 
-	lock := LockForKey(c.locks, key)
+	lock := locksutil.LockForKey(c.locks, key)
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -361,7 +361,7 @@ func (c *cacheTransaction) Delete(ctx context.Context, key string) error {
 }
 
 func (c *cacheTransaction) Commit(ctx context.Context) error {
-	if err := c.cache.backend.(Transaction).Commit(ctx); err != nil {
+	if err := c.cache.backend.(physical.Transaction).Commit(ctx); err != nil {
 		return err
 	}
 
@@ -375,7 +375,7 @@ func (c *cacheTransaction) Commit(ctx context.Context) error {
 	c.modifiedLock.Lock()
 	for key := range c.modified {
 		func() {
-			lock := LockForKey(c.parent.(*transactionalCache).locks, key)
+			lock := locksutil.LockForKey(c.parent.(*transactionalCache).locks, key)
 			lock.Lock()
 			defer lock.Unlock()
 
@@ -388,7 +388,7 @@ func (c *cacheTransaction) Commit(ctx context.Context) error {
 }
 
 func (c *cacheTransaction) Rollback(ctx context.Context) error {
-	if err := c.cache.backend.(Transaction).Rollback(ctx); err != nil {
+	if err := c.cache.backend.(physical.Transaction).Rollback(ctx); err != nil {
 		return err
 	}
 
@@ -401,7 +401,7 @@ func (c *cacheTransaction) Rollback(ctx context.Context) error {
 // Invalidate removes the value for key from the cache.
 // This will not affect transactions that have already been started.
 func (c *cache) Invalidate(ctx context.Context, key string) {
-	lock := LockForKey(c.locks, key)
+	lock := locksutil.LockForKey(c.locks, key)
 	lock.Lock()
 	defer lock.Unlock()
 

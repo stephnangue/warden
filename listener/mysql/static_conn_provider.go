@@ -16,14 +16,14 @@ import (
 type StaticConnProvider struct {
 	fetcher *cred.CredentialFetcher
 	conns   []*BackendConn
-	logger  logger.Logger
+	logger  *logger.GatedLogger
 	target  target.Target
 }
 
 func NewStaticConnProvider(role *authorize.Role,
 	credSource *cred.CredSource,
 	target target.Target,
-	logger logger.Logger) (*StaticConnProvider, error) {
+	logger *logger.GatedLogger) (*StaticConnProvider, error) {
 
 	fetcher, err := cred.NewCredentialFetcher(role, credSource, logger)
 	if err != nil {

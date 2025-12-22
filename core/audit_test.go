@@ -148,7 +148,7 @@ func (f *mockAuditFactory) Create(ctx context.Context, mountPath, description, a
 	return newMockAuditDevice(mountPath), nil
 }
 
-func (f *mockAuditFactory) Initialize(logger logger.Logger) error {
+func (f *mockAuditFactory) Initialize(logger *logger.GatedLogger) error {
 	return nil
 }
 
@@ -224,7 +224,7 @@ func (m *mockAuditManagerFull) Close() error {
 
 // createMockCoreForAudit creates a Core instance configured for audit testing
 func createMockCoreForAudit() *Core {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	router := NewRouter(log)
 
 	return &Core{

@@ -15,7 +15,7 @@ import (
 )
 
 func TestAuthenticationMiddleware_Success(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	tokenStore, _ := token.NewRobustStore(log, nil)
 	defer tokenStore.Close()
 
@@ -63,7 +63,7 @@ func TestAuthenticationMiddleware_Success(t *testing.T) {
 }
 
 func TestAuthenticationMiddleware_MissingToken(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	backend := &SystemBackend{
 		core:   &Core{logger: log},
 		logger: log,
@@ -84,7 +84,7 @@ func TestAuthenticationMiddleware_MissingToken(t *testing.T) {
 }
 
 func TestAuthenticationMiddleware_InvalidToken(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	tokenStore, _ := token.NewRobustStore(log, nil)
 	defer tokenStore.Close()
 
@@ -116,7 +116,7 @@ func TestAuthenticationMiddleware_InvalidToken(t *testing.T) {
 }
 
 func TestCheckSystemAdmin_Success(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	accessControl := authorize.NewAccessControl()
 	accessControl.AssignRole("admin-user", "system_admin")
 
@@ -140,7 +140,7 @@ func TestCheckSystemAdmin_Success(t *testing.T) {
 }
 
 func TestCheckSystemAdmin_Forbidden(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	accessControl := authorize.NewAccessControl()
 
 	core := &Core{

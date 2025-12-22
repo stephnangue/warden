@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/physical"
 )
 
 func TestInmemStorage_Basic(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -77,7 +77,7 @@ func TestInmemStorage_Basic(t *testing.T) {
 }
 
 func TestInmemStorage_List(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -141,7 +141,7 @@ func TestInmemStorage_List(t *testing.T) {
 }
 
 func TestInmemStorage_ContextCancellation(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -182,7 +182,7 @@ func TestInmemStorage_ContextCancellation(t *testing.T) {
 }
 
 func TestInmemStorage_FailureFlags(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewDirectInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -246,7 +246,7 @@ func TestInmemStorage_FailureFlags(t *testing.T) {
 }
 
 func TestInmemStorage_MaxValueSize(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := map[string]string{
 		"max_value_size": "100",
 	}
@@ -284,7 +284,7 @@ func TestInmemStorage_MaxValueSize(t *testing.T) {
 }
 
 func TestInmemStorage_Concurrency(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -328,13 +328,13 @@ func TestInmemStorage_Concurrency(t *testing.T) {
 }
 
 func TestTransactionalInmemStorage_BasicTransaction(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
 	}
 
-	txStorage, ok := storage.(physical.TransactionalStorage)
+	txStorage, ok := storage.(physical.TransactionalBackend)
 	if !ok {
 		t.Fatal("storage does not support transactions")
 	}
@@ -393,13 +393,13 @@ func TestTransactionalInmemStorage_BasicTransaction(t *testing.T) {
 }
 
 func TestTransactionalInmemStorage_Rollback(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
 	}
 
-	txStorage, ok := storage.(physical.TransactionalStorage)
+	txStorage, ok := storage.(physical.TransactionalBackend)
 	if !ok {
 		t.Fatal("storage does not support transactions")
 	}
@@ -446,13 +446,13 @@ func TestTransactionalInmemStorage_Rollback(t *testing.T) {
 }
 
 func TestTransactionalInmemStorage_ReadOnlyTransaction(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
 	}
 
-	txStorage, ok := storage.(physical.TransactionalStorage)
+	txStorage, ok := storage.(physical.TransactionalBackend)
 	if !ok {
 		t.Fatal("storage does not support transactions")
 	}
@@ -506,13 +506,13 @@ func TestTransactionalInmemStorage_ReadOnlyTransaction(t *testing.T) {
 }
 
 func TestTransactionalInmemStorage_ConflictDetection(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
 	}
 
-	txStorage, ok := storage.(physical.TransactionalStorage)
+	txStorage, ok := storage.(physical.TransactionalBackend)
 	if !ok {
 		t.Fatal("storage does not support transactions")
 	}
@@ -575,13 +575,13 @@ func TestTransactionalInmemStorage_ConflictDetection(t *testing.T) {
 }
 
 func TestTransactionalInmemStorage_DoubleCommit(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
 	}
 
-	txStorage, ok := storage.(physical.TransactionalStorage)
+	txStorage, ok := storage.(physical.TransactionalBackend)
 	if !ok {
 		t.Fatal("storage does not support transactions")
 	}
@@ -606,13 +606,13 @@ func TestTransactionalInmemStorage_DoubleCommit(t *testing.T) {
 }
 
 func TestTransactionalInmemStorage_AfterCommitOperations(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
 	}
 
-	txStorage, ok := storage.(physical.TransactionalStorage)
+	txStorage, ok := storage.(physical.TransactionalBackend)
 	if !ok {
 		t.Fatal("storage does not support transactions")
 	}
@@ -656,7 +656,7 @@ func TestTransactionalInmemStorage_AfterCommitOperations(t *testing.T) {
 }
 
 func TestTransactionalInmemStorage_DisabledTransactions(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := map[string]string{
 		"disable_transactions": "true",
 	}
@@ -666,7 +666,7 @@ func TestTransactionalInmemStorage_DisabledTransactions(t *testing.T) {
 	}
 
 	// Should not support transactions
-	_, ok := storage.(physical.TransactionalStorage)
+	_, ok := storage.(physical.TransactionalBackend)
 	if ok {
 		t.Error("storage should not support transactions when disabled")
 	}
@@ -683,7 +683,7 @@ func TestTransactionalInmemStorage_DisabledTransactions(t *testing.T) {
 }
 
 func TestInmemStorage_ListPagination(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewDirectInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -791,7 +791,7 @@ func TestInmemStorage_ListPagination(t *testing.T) {
 }
 
 func TestInmemStorage_ListPage_WithDirectories(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -839,7 +839,7 @@ func TestInmemStorage_ListPage_WithDirectories(t *testing.T) {
 }
 
 func TestInmemStorage_ListPage_EmptyPrefix(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -874,7 +874,7 @@ func TestInmemStorage_ListPage_EmptyPrefix(t *testing.T) {
 }
 
 func TestInmemStorage_ListPage_NonExistentPrefix(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -892,7 +892,7 @@ func TestInmemStorage_ListPage_NonExistentPrefix(t *testing.T) {
 }
 
 func TestInmemStorage_ListPage_CancelledContext(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -919,13 +919,13 @@ func TestInmemStorage_ListPage_CancelledContext(t *testing.T) {
 }
 
 func TestTransactionalInmemStorage_ListPage(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
 	}
 
-	txStorage, ok := storage.(physical.TransactionalStorage)
+	txStorage, ok := storage.(physical.TransactionalBackend)
 	if !ok {
 		t.Fatal("storage does not support transactions")
 	}
@@ -1023,13 +1023,13 @@ func TestOpName(t *testing.T) {
 }
 
 func TestTransactionalInmemStorage_DeleteInTransaction(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
 	}
 
-	txStorage, ok := storage.(physical.TransactionalStorage)
+	txStorage, ok := storage.(physical.TransactionalBackend)
 	if !ok {
 		t.Fatal("storage does not support transactions")
 	}
@@ -1090,7 +1090,7 @@ func TestTransactionalInmemStorage_DeleteInTransaction(t *testing.T) {
 }
 
 func TestInmemStorage_GetNonExistent(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -1108,7 +1108,7 @@ func TestInmemStorage_GetNonExistent(t *testing.T) {
 }
 
 func TestInmemStorage_DeleteNonExistent(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -1123,7 +1123,7 @@ func TestInmemStorage_DeleteNonExistent(t *testing.T) {
 }
 
 func TestInmemStorage_ListEmpty(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
@@ -1141,13 +1141,13 @@ func TestInmemStorage_ListEmpty(t *testing.T) {
 }
 
 func TestTransactionalInmemStorage_ConcurrentTransactions(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmem(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem storage: %v", err)
 	}
 
-	txStorage, ok := storage.(physical.TransactionalStorage)
+	txStorage, ok := storage.(physical.TransactionalBackend)
 	if !ok {
 		t.Fatal("storage does not support transactions")
 	}
@@ -1201,7 +1201,7 @@ func TestTransactionalInmemStorage_ConcurrentTransactions(t *testing.T) {
 }
 
 func TestInmemStorage_InvalidMaxValueSize(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := map[string]string{
 		"max_value_size": "invalid",
 	}

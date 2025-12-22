@@ -338,5 +338,5 @@ type Factory interface {
 		description string,
 		accessor string,
 		config map[string]any) (Device, error)
-	Initialize(logger logger.Logger) error
+	Initialize(logger *logger.GatedLogger) error
 }

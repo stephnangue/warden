@@ -11,7 +11,7 @@ import (
 )
 
 type FileDeviceFactory struct {
-	logger logger.Logger
+	logger *logger.GatedLogger
 }
 
 func (f *FileDeviceFactory) Type() string {
@@ -22,7 +22,7 @@ func (f *FileDeviceFactory) Class() string {
 	return "audit"
 }
 
-func (f *FileDeviceFactory) Initialize(log logger.Logger) error {
+func (f *FileDeviceFactory) Initialize(log *logger.GatedLogger) error {
 	f.logger = log.WithSubsystem(f.Type())
 
 	return nil

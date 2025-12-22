@@ -31,7 +31,7 @@ type HostRewrite struct {
 type AWSProvider struct {
 	mountPath         string
 	description       string
-	logger            logger.Logger
+	logger            *logger.GatedLogger
 	accessor          string
 	providerType      string
 	backendClass      string
@@ -131,7 +131,7 @@ func (p *AWSProvider) setupRouter() {
 }
 
 type AWSProviderFactory struct {
-	logger logger.Logger
+	logger *logger.GatedLogger
 }
 
 func (f *AWSProviderFactory) Type() string {
@@ -142,7 +142,7 @@ func (f *AWSProviderFactory) Class() string {
 	return "provider"
 }
 
-func (f *AWSProviderFactory) Initialize(log logger.Logger) error {
+func (f *AWSProviderFactory) Initialize(log *logger.GatedLogger) error {
 	f.logger = log.WithSubsystem(f.Type())
 
 	return nil
@@ -228,7 +228,7 @@ func (f *AWSProviderFactory) Create(
 	description string,
 	accessor string,
 	conf map[string]any,
-	log logger.Logger,
+	log *logger.GatedLogger,
 	tokenAccess token.TokenAccess,
 	roles *authorize.RoleRegistry,
 	credSources *cred.CredSourceRegistry,

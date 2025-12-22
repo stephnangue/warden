@@ -17,10 +17,10 @@ type CredentialFetcher struct {
 	fetcher    Fetcher
 	role       *authorize.Role
 	credSource *CredSource
-	logger     logger.Logger
+	logger     *logger.GatedLogger
 }
 
-func NewCredentialFetcher(role *authorize.Role, credSource *CredSource, logger logger.Logger) (*CredentialFetcher, error) {
+func NewCredentialFetcher(role *authorize.Role, credSource *CredSource, logger *logger.GatedLogger) (*CredentialFetcher, error) {
 
 	var fetcher Fetcher
 

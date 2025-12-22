@@ -5,29 +5,29 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/openbao/openbao/sdk/v2/physical"
 	log "github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/physical"
 )
 
 type InmemHAStorage struct {
-	physical.Storage
+	physical.Backend
 	locks  map[string]string
 	l      *sync.Mutex
 	cond   *sync.Cond
-	logger log.Logger
+	logger *log.GatedLogger
 
 	invalidators []physical.InvalidateFunc
 }
 
 // NewInmemHA constructs a new in-memory HA Storage. This is only for testing.
-func NewInmemHA(_ map[string]string, logger log.Logger) (physical.Storage, error) {
+func NewInmemHA(_ map[string]string, logger *log.GatedLogger) (physical.Backend, error) {
 	be, err := NewInmem(nil, logger)
 	if err != nil {
 		return nil, err
 	}
 
 	in := &InmemHAStorage{
-		Storage: be,
+		Backend: be,
 		locks:   make(map[string]string),
 		logger:  logger,
 		l:       new(sync.Mutex),
@@ -162,7 +162,7 @@ func (i *InmemHAStorage) invalidateAll(key string) {
 }
 
 func (i *InmemHAStorage) Put(ctx context.Context, entry *physical.Entry) error {
-	err := i.Storage.Put(ctx, entry)
+	err := i.Backend.Put(ctx, entry)
 	if err == nil {
 		i.invalidateAll(entry.Key)
 	}
@@ -171,7 +171,7 @@ func (i *InmemHAStorage) Put(ctx context.Context, entry *physical.Entry) error {
 }
 
 func (i *InmemHAStorage) Delete(ctx context.Context, key string) error {
-	err := i.Storage.Delete(ctx, key)
+	err := i.Backend.Delete(ctx, key)
 	if err == nil {
 		i.invalidateAll(key)
 	}

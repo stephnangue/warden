@@ -22,7 +22,7 @@ type Config struct {
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Level:          InfoLevel,
+		Level:          TraceLevel,
 		Format:         DefaultFormat,
 		Outputs:        []io.Writer{os.Stdout},
 		Environment:    "development",

@@ -15,7 +15,7 @@ import (
 // SystemBackend implements logical.Backend and provides system management operations
 type SystemBackend struct {
 	core     *Core
-	logger   logger.Logger
+	logger   *logger.GatedLogger
 	router   *chi.Mux
 	api      huma.API
 	handlers *SystemHandlers
@@ -24,7 +24,7 @@ type SystemBackend struct {
 // SystemHandlers handles system backend operations
 type SystemHandlers struct {
 	core   *Core
-	logger logger.Logger
+	logger *logger.GatedLogger
 }
 
 // checkSystemAdmin verifies the authenticated principal has system_admin role
@@ -45,7 +45,7 @@ func (h *SystemHandlers) checkSystemAdmin(ctx context.Context) error {
 }
 
 // NewSystemBackend creates a new system backend with HUMA integration
-func NewSystemBackend(core *Core, log logger.Logger) *SystemBackend {
+func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 	// Create Chi router
 	router := chi.NewRouter()
 

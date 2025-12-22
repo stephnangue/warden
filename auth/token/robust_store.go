@@ -120,13 +120,13 @@ type RobustStore struct {
 	mu               sync.RWMutex
 	cache            *ristretto.Cache[string, *AuthData]
 	config           *StoreConfig
-	logger           logger.Logger
+	logger           *logger.GatedLogger
 	metrics          *Metrics
 	closed           bool
 	rootTokenManager *RootTokenManager
 }
 
-func NewRobustStore(log logger.Logger, config *StoreConfig) (*RobustStore, error) {
+func NewRobustStore(log *logger.GatedLogger, config *StoreConfig) (*RobustStore, error) {
 	if config == nil {
 		config = DefaultConfig()
 	}

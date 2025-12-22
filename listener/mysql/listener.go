@@ -24,7 +24,7 @@ import (
 type MysqlListener struct {
 	// This is the main listener socket.
 	listener    net.Listener
-	logger      logger.Logger
+	logger      *logger.GatedLogger
 	server      *server.Server
 	roles       *authorize.RoleRegistry
 	credSources *cred.CredSourceRegistry
@@ -46,7 +46,7 @@ type MysqlListenerConfig struct {
 	CredSources *cred.CredSourceRegistry
 	Targets     *target.TargetRegistry
 
-	Logger logger.Logger
+	Logger      *logger.GatedLogger
 
 	TLSCertFile     string
 	TLSKeyFile      string
