@@ -15,7 +15,7 @@ import (
 )
 
 type CredentialProvider struct {
-	log         logger.Logger
+	log         *logger.GatedLogger
 	cache       *ristretto.Cache[string, *Credential] // key: tokenId -> value: Credential
 	fetchers    sync.Map                              // key: roleName -> value: *CredentialFetcher
 	roles       *authorize.RoleRegistry
@@ -27,7 +27,7 @@ type CredentialProvider struct {
 func NewCredentialProvider(
 	roles *authorize.RoleRegistry,
 	credSources *CredSourceRegistry,
-	logger logger.Logger) (*CredentialProvider, error) {
+	logger *logger.GatedLogger) (*CredentialProvider, error) {
 
 	cp := &CredentialProvider{
 		log:         logger,

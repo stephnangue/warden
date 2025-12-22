@@ -11,10 +11,10 @@ import (
 // S3ControlProcessor handles S3 Control API requests (account-level operations)
 type S3ControlProcessor struct {
 	processor.BaseProcessor
-	log logger.Logger
+	log *logger.GatedLogger
 }
 
-func NewS3ControlProcessor(proxyDomains []string, log logger.Logger) *S3ControlProcessor {
+func NewS3ControlProcessor(proxyDomains []string, log *logger.GatedLogger) *S3ControlProcessor {
 	return &S3ControlProcessor{
 		BaseProcessor: processor.BaseProcessor{
 			ProcName:     "s3-control",

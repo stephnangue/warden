@@ -17,11 +17,11 @@ var (
 // S3Processor handles standard S3 requests
 type S3Processor struct {
 	processor.BaseProcessor
-	log logger.Logger
+	log *logger.GatedLogger
 }
 
 // NewS3Processor creates a new S3 processor
-func NewS3Processor(proxyDomains []string, log logger.Logger) *S3Processor {
+func NewS3Processor(proxyDomains []string, log *logger.GatedLogger) *S3Processor {
 	return &S3Processor{
 		BaseProcessor: processor.BaseProcessor{
 			ProcName:     "s3",

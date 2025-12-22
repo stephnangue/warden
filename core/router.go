@@ -32,10 +32,10 @@ type Router struct {
 	mountAccessorCache *radix.Tree // tree of mountAccesor -> mountEntry
 	mu                 sync.RWMutex
 
-	logger logger.Logger
+	logger *logger.GatedLogger
 }
 
-func NewRouter(logger logger.Logger) *Router {
+func NewRouter(logger *logger.GatedLogger) *Router {
 	return &Router{
 		root:               radix.New(),
 		mountAccessorCache: radix.New(),

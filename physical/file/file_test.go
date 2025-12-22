@@ -8,8 +8,9 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/openbao/openbao/sdk/v2/helper/consts"
+	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/physical"
 )
 
 func TestFileBackend_NewFileBackend(t *testing.T) {
@@ -19,7 +20,7 @@ func TestFileBackend_NewFileBackend(t *testing.T) {
 			"path": tmpDir,
 		}
 
-		testLogger := logger.NewZerologLogger(logger.DefaultConfig())
+		testLogger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 		backend, err := NewFileBackend(conf, testLogger)
 
 		if err != nil {
@@ -32,7 +33,7 @@ func TestFileBackend_NewFileBackend(t *testing.T) {
 
 	t.Run("missing path configuration", func(t *testing.T) {
 		conf := map[string]string{}
-		testLogger := logger.NewZerologLogger(logger.DefaultConfig())
+		testLogger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 
 		_, err := NewFileBackend(conf, testLogger)
 
@@ -235,7 +236,7 @@ func TestFileBackend_ValidatePath(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("validatePath() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			if tt.wantErr && err != physical.ErrPathContainsParentReferences {
+			if tt.wantErr && err != consts.ErrPathContainsParentReferences {
 				t.Fatalf("expected ErrPathContainsParentReferences, got %v", err)
 			}
 		})
@@ -256,7 +257,7 @@ func TestFileBackend_Put_InvalidPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid path, got nil")
 	}
-	if err != physical.ErrPathContainsParentReferences {
+	if err != consts.ErrPathContainsParentReferences {
 		t.Fatalf("expected ErrPathContainsParentReferences, got %v", err)
 	}
 }
@@ -270,7 +271,7 @@ func TestFileBackend_Get_InvalidPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid path, got nil")
 	}
-	if err != physical.ErrPathContainsParentReferences {
+	if err != consts.ErrPathContainsParentReferences {
 		t.Fatalf("expected ErrPathContainsParentReferences, got %v", err)
 	}
 }
@@ -284,7 +285,7 @@ func TestFileBackend_Delete_InvalidPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid path, got nil")
 	}
-	if err != physical.ErrPathContainsParentReferences {
+	if err != consts.ErrPathContainsParentReferences {
 		t.Fatalf("expected ErrPathContainsParentReferences, got %v", err)
 	}
 }
@@ -298,7 +299,7 @@ func TestFileBackend_List_InvalidPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid path, got nil")
 	}
-	if err != physical.ErrPathContainsParentReferences {
+	if err != consts.ErrPathContainsParentReferences {
 		t.Fatalf("expected ErrPathContainsParentReferences, got %v", err)
 	}
 }
@@ -670,7 +671,7 @@ func TestFileBackend_ListPage_InvalidPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid path, got nil")
 	}
-	if err != physical.ErrPathContainsParentReferences {
+	if err != consts.ErrPathContainsParentReferences {
 		t.Fatalf("expected ErrPathContainsParentReferences, got %v", err)
 	}
 }
@@ -898,13 +899,13 @@ func TestFileBackend_EmptyValue(t *testing.T) {
 }
 
 // Helper function to set up a backend for testing
-func setupBackend(t *testing.T, path string) physical.Storage {
+func setupBackend(t *testing.T, path string) physical.Backend {
 	t.Helper()
 
 	conf := map[string]string{
 		"path": path,
 	}
-	testLogger := logger.NewZerologLogger(logger.DefaultConfig())
+	testLogger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 
 	backend, err := NewFileBackend(conf, testLogger)
 	if err != nil {

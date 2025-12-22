@@ -11,11 +11,11 @@ import (
 // S3AccessPointProcessor handles S3 Access Point requests
 type S3AccessPointProcessor struct {
 	processor.BaseProcessor
-	log logger.Logger
+	log *logger.GatedLogger
 }
 
 // NewS3AccessPointProcessor creates a new S3 Access Point processor
-func NewS3AccessPointProcessor(proxyDomains []string, log logger.Logger) *S3AccessPointProcessor {
+func NewS3AccessPointProcessor(proxyDomains []string, log *logger.GatedLogger) *S3AccessPointProcessor {
 	return &S3AccessPointProcessor{
 		BaseProcessor: processor.BaseProcessor{
 			ProcName:     "s3-accesspoint",

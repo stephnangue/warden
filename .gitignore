@@ -19,11 +19,16 @@ warden
 *.env
 !.env.example
 
+# Seal keys
+seal.key
+*.key
+
 # Vault data
 vault-data/
 vault-logs/
 vault-init/*.txt
 vault-init/approle-creds.txt
+tmp/
 
 # MySQL data
 mysql-data/

@@ -7,18 +7,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/physical"
 )
 
 func TestInmemHAStorage_Creation(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
 	}
 
-	haStorage, ok := storage.(physical.HAStorage)
+	haStorage, ok := storage.(physical.HABackend)
 	if !ok {
 		t.Fatal("storage does not implement HAStorage interface")
 	}
@@ -29,7 +29,7 @@ func TestInmemHAStorage_Creation(t *testing.T) {
 }
 
 func TestInmemHAStorage_BasicStorage(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
@@ -72,13 +72,13 @@ func TestInmemHAStorage_BasicStorage(t *testing.T) {
 }
 
 func TestInmemHAStorage_Lock(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
 	}
 
-	haStorage := storage.(physical.HAStorage)
+	haStorage := storage.(physical.HABackend)
 
 	// Create a lock
 	lock, err := haStorage.LockWith("test/lock", "node1")
@@ -144,13 +144,13 @@ func TestInmemHAStorage_Lock(t *testing.T) {
 }
 
 func TestInmemHAStorage_DoubleLock(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
 	}
 
-	haStorage := storage.(physical.HAStorage)
+	haStorage := storage.(physical.HABackend)
 
 	lock, err := haStorage.LockWith("test/double", "node1")
 	if err != nil {
@@ -177,13 +177,13 @@ func TestInmemHAStorage_DoubleLock(t *testing.T) {
 }
 
 func TestInmemHAStorage_DoubleUnlock(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
 	}
 
-	haStorage := storage.(physical.HAStorage)
+	haStorage := storage.(physical.HABackend)
 
 	lock, err := haStorage.LockWith("test/unlock", "node1")
 	if err != nil {
@@ -208,13 +208,13 @@ func TestInmemHAStorage_DoubleUnlock(t *testing.T) {
 }
 
 func TestInmemHAStorage_ConcurrentLocks(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
 	}
 
-	haStorage := storage.(physical.HAStorage)
+	haStorage := storage.(physical.HABackend)
 
 	// Create two locks for the same key
 	lock1, err := haStorage.LockWith("test/concurrent", "node1")
@@ -284,13 +284,13 @@ func TestInmemHAStorage_ConcurrentLocks(t *testing.T) {
 }
 
 func TestInmemHAStorage_LockInterrupt(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
 	}
 
-	haStorage := storage.(physical.HAStorage)
+	haStorage := storage.(physical.HABackend)
 
 	// Create and acquire first lock
 	lock1, err := haStorage.LockWith("test/interrupt", "node1")
@@ -345,13 +345,13 @@ func TestInmemHAStorage_LockInterrupt(t *testing.T) {
 }
 
 func TestInmemHAStorage_MultipleLocks(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
 	}
 
-	haStorage := storage.(physical.HAStorage)
+	haStorage := storage.(physical.HABackend)
 
 	// Create locks for different keys
 	lock1, err := haStorage.LockWith("test/lock1", "node1")
@@ -396,7 +396,7 @@ func TestInmemHAStorage_MultipleLocks(t *testing.T) {
 }
 
 func TestInmemHAStorage_LockMapSize(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
@@ -440,7 +440,7 @@ func TestInmemHAStorage_LockMapSize(t *testing.T) {
 }
 
 func TestInmemHAStorage_Invalidation(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
@@ -500,7 +500,7 @@ func TestInmemHAStorage_Invalidation(t *testing.T) {
 }
 
 func TestInmemHAStorage_MultipleInvalidationHooks(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
@@ -560,27 +560,27 @@ func TestInmemHAStorage_MultipleInvalidationHooks(t *testing.T) {
 }
 
 func TestInmemHAStorage_CacheInvalidationInterface(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
 	}
 
-	// Verify it implements CacheInvalidationStorage
-	_, ok := storage.(physical.CacheInvalidationStorage)
+	// Verify it implements CacheInvalidationBackend
+	_, ok := storage.(physical.CacheInvalidationBackend)
 	if !ok {
-		t.Error("InmemHAStorage should implement CacheInvalidationStorage interface")
+		t.Error("InmemHAStorage should implement CacheInvalidationBackend interface")
 	}
 }
 
 func TestInmemHAStorage_LockValue_Consistency(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
 	}
 
-	haStorage := storage.(physical.HAStorage)
+	haStorage := storage.(physical.HABackend)
 
 	lock1, _ := haStorage.LockWith("test/value", "node1")
 	lock2, _ := haStorage.LockWith("test/value", "node2")
@@ -613,13 +613,13 @@ func TestInmemHAStorage_StressTest(t *testing.T) {
 		t.Skip("skipping stress test in short mode")
 	}
 
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
-		t.Fatalf("failed to create inmem HA storage: %v", err)
+		t.Fatalf("failed to create inmem HA Backend: %v", err)
 	}
 
-	haStorage := storage.(physical.HAStorage)
+	haStorage := storage.(physical.HABackend)
 
 	var wg sync.WaitGroup
 	concurrency := 20
@@ -657,7 +657,7 @@ func TestInmemHAStorage_StressTest(t *testing.T) {
 }
 
 func TestInmemHAStorage_InvalidationRace(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
@@ -695,7 +695,7 @@ func TestInmemHAStorage_InvalidationRace(t *testing.T) {
 }
 
 func TestInmemHAStorage_ListPage(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
@@ -785,7 +785,7 @@ func TestInmemHAStorage_ListPage(t *testing.T) {
 }
 
 func TestInmemHAStorage_ListPage_WithDirectories(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
@@ -836,7 +836,7 @@ func TestInmemHAStorage_ListPage_WithDirectories(t *testing.T) {
 }
 
 func TestInmemHAStorage_ListPage_EmptyPrefix(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
@@ -871,7 +871,7 @@ func TestInmemHAStorage_ListPage_EmptyPrefix(t *testing.T) {
 }
 
 func TestInmemHAStorage_ListPage_NonExistentPrefix(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)
@@ -893,7 +893,7 @@ func TestInmemHAStorage_ListPage_NonExistentPrefix(t *testing.T) {
 }
 
 func TestInmemHAStorage_ListPage_CancelledContext(t *testing.T) {
-	logger := logger.NewZerologLogger(logger.DefaultConfig())
+	logger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	storage, err := NewInmemHA(nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create inmem HA storage: %v", err)

@@ -18,11 +18,11 @@ type Factory interface {
 		description string,
 		accessor string,
 		config map[string]any,
-		logger logger.Logger,
+		logger *logger.GatedLogger,
 		tokenStore token.TokenStore,
 		roles *authorize.RoleRegistry,
 		accessControl *authorize.AccessControl,
 		auditAccess audit.AuditAccess) (logical.Backend, error)
-	Initialize(logger logger.Logger) error
+	Initialize(logger *logger.GatedLogger) error
 	ValidateConfig(config map[string]any) error
 }

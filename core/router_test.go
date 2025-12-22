@@ -107,8 +107,8 @@ func (m *mockBackend) getRequests() []string {
 	return append([]string{}, m.requests...)
 }
 
-func createTestRouter() (*Router, logger.Logger) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+func createTestRouter() (*Router, *logger.GatedLogger) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	router := NewRouter(log)
 	return router, log
 }

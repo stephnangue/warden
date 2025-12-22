@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/stephnangue/warden/physical"
+	"github.com/openbao/openbao/sdk/v2/physical"
 )
 
 type PostgreSQLStorageTransaction struct {

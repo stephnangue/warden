@@ -18,6 +18,17 @@ import (
 
 func TestDefaultConfig(t *testing.T) {
 	t.Run("returns valid config with defaults", func(t *testing.T) {
+		// Save and clear environment variables that might affect the test
+		oldAddr := os.Getenv(EnvWardenAddress)
+		defer func() {
+			if oldAddr != "" {
+				os.Setenv(EnvWardenAddress, oldAddr)
+			} else {
+				os.Unsetenv(EnvWardenAddress)
+			}
+		}()
+		os.Unsetenv(EnvWardenAddress)
+
 		config := DefaultConfig()
 
 		if config == nil {
@@ -410,6 +421,17 @@ func TestClient_Address(t *testing.T) {
 }
 
 func TestClient_TokenMethods(t *testing.T) {
+	// Save and clear WARDEN_TOKEN environment variable
+	oldToken := os.Getenv(EnvWardenToken)
+	defer func() {
+		if oldToken != "" {
+			os.Setenv(EnvWardenToken, oldToken)
+		} else {
+			os.Unsetenv(EnvWardenToken)
+		}
+	}()
+	os.Unsetenv(EnvWardenToken)
+
 	client, err := NewClient(nil)
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
