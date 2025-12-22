@@ -17,8 +17,9 @@ import (
 )
 
 // Helper function to create a test logger
-func newTestLogger() logger.Logger {
-	return logger.NewZerologLogger(logger.DefaultConfig())
+func newTestLogger() *logger.GatedLogger {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	return log
 }
 
 // MockListener is a mock implementation of net.Listener
@@ -93,7 +94,7 @@ func TestNewMysqlListener_WithProvidedListener(t *testing.T) {
 	mockListener := &MockListener{
 		addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3306},
 	}
-	testLogger := newTestLogger()
+	testLogger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	roles := &authorize.RoleRegistry{}
 	credSources := &cred.CredSourceRegistry{}
 	targets := &target.TargetRegistry{}
@@ -119,7 +120,7 @@ func TestNewMysqlListener_WithProvidedListener(t *testing.T) {
 }
 
 func TestNewMysqlListener_WithProtocolAndAddress(t *testing.T) {
-	testLogger := newTestLogger()
+	testLogger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	roles := &authorize.RoleRegistry{}
 	credSources := &cred.CredSourceRegistry{}
 	targets := &target.TargetRegistry{}
@@ -144,7 +145,7 @@ func TestNewMysqlListener_WithProtocolAndAddress(t *testing.T) {
 }
 
 func TestNewMysqlListener_WithProxyProtocol(t *testing.T) {
-	testLogger := newTestLogger()
+	testLogger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	roles := &authorize.RoleRegistry{}
 	credSources := &cred.CredSourceRegistry{}
 	targets := &target.TargetRegistry{}
@@ -170,7 +171,7 @@ func TestNewMysqlListener_WithProxyProtocol(t *testing.T) {
 }
 
 func TestNewMysqlListener_InvalidAddress(t *testing.T) {
-	testLogger := newTestLogger()
+	testLogger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	roles := &authorize.RoleRegistry{}
 	credSources := &cred.CredSourceRegistry{}
 	targets := &target.TargetRegistry{}
@@ -193,7 +194,7 @@ func TestNewMysqlListener_InvalidAddress(t *testing.T) {
 func TestMysqlListener_Addr(t *testing.T) {
 	expectedAddr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3306}
 	mockListener := &MockListener{addr: expectedAddr}
-	testLogger := newTestLogger()
+	testLogger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 
 	listener := &MysqlListener{
 		listener: mockListener,
@@ -208,7 +209,7 @@ func TestMysqlListener_Addr(t *testing.T) {
 func TestMysqlListener_Stop(t *testing.T) {
 	mockListener := new(MockListener)
 	mockListener.On("Close").Return(nil)
-	testLogger := newTestLogger()
+	testLogger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 
 	listener := &MysqlListener{
 		listener: mockListener,
@@ -222,7 +223,7 @@ func TestMysqlListener_Stop(t *testing.T) {
 
 func TestMysqlListener_Start_AcceptError(t *testing.T) {
 	mockListener := new(MockListener)
-	testLogger := newTestLogger()
+	testLogger, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 
 	expectedErr := errors.New("accept error")
 	mockListener.On("Accept").Return(nil, expectedErr).Once()

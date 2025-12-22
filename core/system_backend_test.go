@@ -16,7 +16,7 @@ import (
 
 // Helper function to create a test core with all dependencies
 func createTestCore(t *testing.T) *Core {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	router := NewRouter(log)
 	tokenStore, err := token.NewRobustStore(log, nil)
 	require.NoError(t, err)
@@ -38,7 +38,7 @@ func createTestCore(t *testing.T) *Core {
 }
 
 func TestNewSystemBackend(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	core := createTestCore(t)
 
 	backend := NewSystemBackend(core, log)
@@ -52,7 +52,7 @@ func TestNewSystemBackend(t *testing.T) {
 }
 
 func TestSystemBackend_GetType(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	core := createTestCore(t)
 	backend := NewSystemBackend(core, log)
 
@@ -60,7 +60,7 @@ func TestSystemBackend_GetType(t *testing.T) {
 }
 
 func TestSystemBackend_GetClass(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	core := createTestCore(t)
 	backend := NewSystemBackend(core, log)
 
@@ -68,7 +68,7 @@ func TestSystemBackend_GetClass(t *testing.T) {
 }
 
 func TestSystemBackend_GetDescription(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	core := createTestCore(t)
 	backend := NewSystemBackend(core, log)
 
@@ -78,7 +78,7 @@ func TestSystemBackend_GetDescription(t *testing.T) {
 }
 
 func TestSystemBackend_GetAccessor(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	core := createTestCore(t)
 	backend := NewSystemBackend(core, log)
 
@@ -86,7 +86,7 @@ func TestSystemBackend_GetAccessor(t *testing.T) {
 }
 
 func TestSystemBackend_Cleanup(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	core := createTestCore(t)
 	backend := NewSystemBackend(core, log)
 

@@ -12,7 +12,7 @@ import (
 type manager struct {
 	mu       sync.RWMutex
 	devices  map[string]Device
-	log      logger.Logger
+	log      *logger.GatedLogger
 	parallel bool // Whether to log to devices in parallel
 }
 
@@ -22,11 +22,11 @@ type AuditManagerConfig struct {
 	// Set to false if you need strict ordering across all devices
 	Parallel bool
 
-	Logger logger.Logger
+	Logger *logger.GatedLogger
 }
 
 // NewAuditManager creates a new audit manager
-func NewAuditManager(log logger.Logger) AuditManager {
+func NewAuditManager(log *logger.GatedLogger) AuditManager {
 	return &manager{
 		devices:  make(map[string]Device),
 		log:      log,

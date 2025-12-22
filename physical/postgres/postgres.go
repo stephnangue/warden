@@ -14,9 +14,10 @@ import (
 	"github.com/hashicorp/go-secure-stdlib/parseutil"
 	"github.com/hashicorp/go-uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/openbao/openbao/sdk/v2/database/helper/dbutil"
+	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/stephnangue/warden/api"
 	log "github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/physical"
 )
 
 const (
@@ -35,12 +36,12 @@ const (
 
 // Verify PostgreSQLStorage satisfies the correct interfaces
 var (
-	_ physical.Storage              = (*PostgreSQLStorage)(nil)
-	_ physical.TransactionalStorage = (*PostgreSQLStorage)(nil)
+	_ physical.Backend              = (*PostgreSQLStorage)(nil)
+	_ physical.TransactionalBackend = (*PostgreSQLStorage)(nil)
 )
 
 var (
-	_ physical.HAStorage = (*PostgreSQLStorage)(nil)
+	_ physical.HABackend = (*PostgreSQLStorage)(nil)
 	_ physical.Lock      = (*PostgreSQLLock)(nil)
 )
 
@@ -65,7 +66,7 @@ type PostgreSQLStorage struct {
 	haCheckLockHeldQuery     string
 
 	haEnabled     bool
-	logger        log.Logger
+	logger        *log.GatedLogger
 	txnPermitPool *physical.PermitPool
 
 	fenceLock sync.RWMutex
@@ -93,7 +94,7 @@ type PostgreSQLLock struct {
 
 // NewPostgreSQLStorage constructs a PostgreSQL storage using the given
 // API client, server address, credentials, and database.
-func NewPostgreSQLStorage(conf map[string]string, logger log.Logger) (physical.Storage, error) {
+func NewPostgreSQLStorage(conf map[string]string, logger *log.GatedLogger) (physical.Backend, error) {
 	// Get the PostgreSQL credentials to perform read/write operations.
 	connURL := connectionURL(conf)
 
@@ -101,7 +102,7 @@ func NewPostgreSQLStorage(conf map[string]string, logger log.Logger) (physical.S
 	if !ok {
 		unquotedTable = "warden_kv_store"
 	}
-	quotedTable := physical.QuoteIdentifier(unquotedTable)
+	quotedTable := dbutil.QuoteIdentifier(unquotedTable)
 
 	maxParStr, ok := conf["max_parallel"]
 	var maxParInt int
@@ -185,7 +186,7 @@ func NewPostgreSQLStorage(conf map[string]string, logger log.Logger) (physical.S
 	if !ok {
 		unquotedHaTable = "warden_ha_locks"
 	}
-	quotedHaTable := physical.QuoteIdentifier(unquotedHaTable)
+	quotedHaTable := dbutil.QuoteIdentifier(unquotedHaTable)
 
 	// Setup the backend.
 	m := &PostgreSQLStorage{
@@ -275,7 +276,7 @@ func connectionURL(conf map[string]string) string {
 	return connURL
 }
 
-func doRetryConnect(logger log.Logger, connURL string, retries uint64) (*sql.DB, error) {
+func doRetryConnect(logger *log.GatedLogger, connURL string, retries uint64) (*sql.DB, error) {
 	db, err := sql.Open("pgx", connURL)
 	if err != nil {
 		return nil, err

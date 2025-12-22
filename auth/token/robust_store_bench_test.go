@@ -10,7 +10,7 @@ import (
 
 // BenchmarkGenerateToken_UserPass benchmarks token generation for user/pass
 func BenchmarkGenerateToken_UserPass(b *testing.B) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -40,7 +40,7 @@ func BenchmarkGenerateToken_UserPass(b *testing.B) {
 
 // BenchmarkGenerateToken_AWSKeys benchmarks AWS access key generation
 func BenchmarkGenerateToken_AWSKeys(b *testing.B) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -70,7 +70,7 @@ func BenchmarkGenerateToken_AWSKeys(b *testing.B) {
 
 // BenchmarkResolveToken_CacheHit benchmarks token resolution with cache hits
 func BenchmarkResolveToken_CacheHit(b *testing.B) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -112,7 +112,7 @@ func BenchmarkResolveToken_CacheHit(b *testing.B) {
 
 // BenchmarkResolveToken_NoCache benchmarks token resolution without cache
 func BenchmarkResolveToken_NoCache(b *testing.B) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -151,7 +151,7 @@ func BenchmarkResolveToken_NoCache(b *testing.B) {
 
 // BenchmarkGetToken_WithCache benchmarks token retrieval with cache
 func BenchmarkGetToken_WithCache(b *testing.B) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -186,7 +186,7 @@ func BenchmarkGetToken_WithCache(b *testing.B) {
 
 // BenchmarkConcurrentGenerate benchmarks concurrent token generation
 func BenchmarkConcurrentGenerate(b *testing.B) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -217,7 +217,7 @@ func BenchmarkConcurrentGenerate(b *testing.B) {
 
 // BenchmarkConcurrentResolve benchmarks concurrent token resolution
 func BenchmarkConcurrentResolve(b *testing.B) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -265,7 +265,7 @@ func BenchmarkConcurrentResolve(b *testing.B) {
 
 // BenchmarkMemoryUsage measures memory overhead
 func BenchmarkMemoryUsage(b *testing.B) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -305,7 +305,7 @@ func BenchmarkMemoryUsage(b *testing.B) {
 
 // BenchmarkHighLoad simulates high load scenario
 func BenchmarkHighLoad(b *testing.B) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -354,7 +354,7 @@ func BenchmarkStoreScaling(b *testing.B) {
 
 	for _, size := range sizes {
 		b.Run(string(rune(size)), func(b *testing.B) {
-			log := logger.NewZerologLogger(logger.DefaultConfig())
+			log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 			config := DefaultConfig()
 
 			store, err := NewRobustStore(log, config)

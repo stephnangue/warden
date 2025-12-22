@@ -65,7 +65,7 @@ func (r *JWTLoginRequest) ToMap() map[string]interface{} {
 type JWTAuthMethod struct {
 	mountPath     string
 	description   string
-	logger        logger.Logger
+	logger        *logger.GatedLogger
 	accessor      string
 	config        *JWTAuthConfig
 	authType      string
@@ -188,7 +188,7 @@ func (m *JWTAuthMethod) setupRouter() {
 }
 
 type JWTAuthMethodFactory struct {
-	logger logger.Logger
+	logger *logger.GatedLogger
 }
 
 func (f *JWTAuthMethodFactory) Type() string {
@@ -199,7 +199,7 @@ func (f *JWTAuthMethodFactory) Class() string {
 	return "auth"
 }
 
-func (f *JWTAuthMethodFactory) Initialize(log logger.Logger) error {
+func (f *JWTAuthMethodFactory) Initialize(log *logger.GatedLogger) error {
 	f.logger = log.WithSubsystem(f.Type())
 
 	return nil
@@ -273,7 +273,7 @@ func (f *JWTAuthMethodFactory) Create(
 	description string,
 	accessor string,
 	conf map[string]any,
-	log logger.Logger,
+	log *logger.GatedLogger,
 	tokenStore token.TokenStore,
 	roles *authorize.RoleRegistry,
 	accessControl *authorize.AccessControl,

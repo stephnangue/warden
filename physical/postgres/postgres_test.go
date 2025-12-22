@@ -9,8 +9,9 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/openbao/openbao/sdk/v2/database/helper/dbutil"
+	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/physical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,7 +21,7 @@ func createMockStorage(t *testing.T) (*PostgreSQLStorage, sqlmock.Sqlmock, func(
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	require.NoError(t, err)
 
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 
 	storage := &PostgreSQLStorage{
 		table:  `"test_table"`,
@@ -607,7 +608,7 @@ func TestPostgreSQLStorage_TransactionalInterface(t *testing.T) {
 	defer cleanup()
 
 	// Verify it implements TransactionalStorage
-	_, ok := interface{}(storage).(physical.TransactionalStorage)
+	_, ok := interface{}(storage).(physical.TransactionalBackend)
 	assert.True(t, ok, "PostgreSQLStorage should implement TransactionalStorage")
 }
 
@@ -615,8 +616,8 @@ func TestPostgreSQLStorage_HAEnabled(t *testing.T) {
 	storage, _, cleanup := createMockStorage(t)
 	defer cleanup()
 
-	// Verify HAStorage interface
-	haBackend, ok := interface{}(storage).(physical.HAStorage)
+	// Verify HABackend interface
+	haBackend, ok := interface{}(storage).(physical.HABackend)
 	require.True(t, ok)
 
 	assert.True(t, haBackend.HAEnabled())
@@ -626,7 +627,7 @@ func TestPostgreSQLStorage_LockWith(t *testing.T) {
 	storage, _, cleanup := createMockStorage(t)
 	defer cleanup()
 
-	haBackend, ok := interface{}(storage).(physical.HAStorage)
+	haBackend, ok := interface{}(storage).(physical.HABackend)
 	require.True(t, ok)
 
 	lock, err := haBackend.LockWith("test-key", "test-value")
@@ -644,7 +645,7 @@ func TestPostgreSQLStorage_LockValue_Held(t *testing.T) {
 	storage, mock, cleanup := createMockStorage(t)
 	defer cleanup()
 
-	haBackend, ok := interface{}(storage).(physical.HAStorage)
+	haBackend, ok := interface{}(storage).(physical.HABackend)
 	require.True(t, ok)
 
 	lock, err := haBackend.LockWith("test-lock", "node1")
@@ -671,7 +672,7 @@ func TestPostgreSQLStorage_LockValue_NotHeld(t *testing.T) {
 	storage, mock, cleanup := createMockStorage(t)
 	defer cleanup()
 
-	haBackend, ok := interface{}(storage).(physical.HAStorage)
+	haBackend, ok := interface{}(storage).(physical.HABackend)
 	require.True(t, ok)
 
 	lock, err := haBackend.LockWith("test-lock", "node1")
@@ -695,7 +696,7 @@ func TestPostgreSQLStorage_LockUnlock(t *testing.T) {
 	storage, mock, cleanup := createMockStorage(t)
 	defer cleanup()
 
-	haBackend, ok := interface{}(storage).(physical.HAStorage)
+	haBackend, ok := interface{}(storage).(physical.HABackend)
 	require.True(t, ok)
 
 	lock, err := haBackend.LockWith("test-lock", "node1")
@@ -721,7 +722,7 @@ func TestPostgreSQLStorage_IsActivelyHeld_True(t *testing.T) {
 
 	ctx := context.Background()
 
-	haBackend, ok := interface{}(storage).(physical.HAStorage)
+	haBackend, ok := interface{}(storage).(physical.HABackend)
 	require.True(t, ok)
 
 	lock, err := haBackend.LockWith("test-lock", "node1")
@@ -751,7 +752,7 @@ func TestPostgreSQLStorage_IsActivelyHeld_False(t *testing.T) {
 
 	ctx := context.Background()
 
-	haBackend, ok := interface{}(storage).(physical.HAStorage)
+	haBackend, ok := interface{}(storage).(physical.HABackend)
 	require.True(t, ok)
 
 	lock, err := haBackend.LockWith("test-lock", "node1")
@@ -800,7 +801,7 @@ func TestPostgreSQLStorage_QuoteIdentifier(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := physical.QuoteIdentifier(tt.input)
+			result := dbutil.QuoteIdentifier(tt.input)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -866,7 +867,7 @@ func TestPostgreSQLStorage_RegisterActiveNodeLock(t *testing.T) {
 	storage, _, cleanup := createMockStorage(t)
 	defer cleanup()
 
-	haBackend, ok := interface{}(storage).(physical.FencingHAStorage)
+	haBackend, ok := interface{}(storage).(physical.FencingHABackend)
 	require.True(t, ok)
 
 	lock, err := haBackend.LockWith("active-node", "node1")
@@ -902,7 +903,7 @@ func TestPostgreSQLStorage_RegisterActiveNodeLock_WrongType(t *testing.T) {
 	storage, _, cleanup := createMockStorage(t)
 	defer cleanup()
 
-	haBackend, ok := interface{}(storage).(physical.FencingHAStorage)
+	haBackend, ok := interface{}(storage).(physical.FencingHABackend)
 	require.True(t, ok)
 
 	// Try to register a wrong lock type
@@ -937,7 +938,7 @@ func TestPostgreSQLStorage_ValidateFence_Held(t *testing.T) {
 
 	ctx := context.Background()
 
-	haBackend, ok := interface{}(storage).(physical.FencingHAStorage)
+	haBackend, ok := interface{}(storage).(physical.FencingHABackend)
 	require.True(t, ok)
 
 	// Create and register a lock
@@ -975,7 +976,7 @@ func TestPostgreSQLStorage_ValidateFence_NotHeld(t *testing.T) {
 
 	ctx := context.Background()
 
-	haBackend, ok := interface{}(storage).(physical.FencingHAStorage)
+	haBackend, ok := interface{}(storage).(physical.FencingHABackend)
 	require.True(t, ok)
 
 	// Create and register a lock
@@ -1008,7 +1009,7 @@ func TestPostgreSQLStorage_ValidateFence_UnfencedWrite(t *testing.T) {
 	storage, mock, cleanup := createMockStorage(t)
 	defer cleanup()
 
-	haBackend, ok := interface{}(storage).(physical.FencingHAStorage)
+	haBackend, ok := interface{}(storage).(physical.FencingHABackend)
 	require.True(t, ok)
 
 	// Create and register a lock

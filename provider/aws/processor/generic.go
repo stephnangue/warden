@@ -11,11 +11,11 @@ import (
 type GenericAWSProcessor struct {
 	BaseProcessor
 	resolver *EndpointResolver
-	log      logger.Logger
+	log      *logger.GatedLogger
 }
 
 // NewGenericAWSProcessor creates a new generic AWS processor
-func NewGenericAWSProcessor(proxyDomains []string, log logger.Logger) *GenericAWSProcessor {
+func NewGenericAWSProcessor(proxyDomains []string, log *logger.GatedLogger) *GenericAWSProcessor {
 	return &GenericAWSProcessor{
 		BaseProcessor: BaseProcessor{
 			ProcName:     "generic-aws",

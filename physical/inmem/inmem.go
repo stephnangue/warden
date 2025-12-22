@@ -11,15 +11,15 @@ import (
 	"sync/atomic"
 
 	"github.com/armon/go-radix"
+	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/stephnangue/warden/api"
 	log "github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/physical"
 )
 
 // Verify interfaces are satisfied
 var (
-	_ physical.Storage   = (*InmemStorage)(nil)
-	_ physical.HAStorage = (*InmemHAStorage)(nil)
+	_ physical.Backend   = (*InmemStorage)(nil)
+	_ physical.HABackend = (*InmemHAStorage)(nil)
 	_ physical.Lock      = (*InmemLock)(nil)
 )
 
@@ -37,7 +37,7 @@ type InmemStorage struct {
 	sync.RWMutex
 	root         *radix.Tree
 	permitPool   *physical.PermitPool
-	logger       log.Logger
+	logger       *log.GatedLogger
 	failGet      *uint32
 	failPut      *uint32
 	failDelete   *uint32
@@ -46,7 +46,7 @@ type InmemStorage struct {
 	maxValueSize int
 }
 
-var _ physical.Storage = &InmemStorage{}
+var _ physical.Backend = &InmemStorage{}
 
 type TransactionalInmemStorage struct {
 	InmemStorage
@@ -54,7 +54,7 @@ type TransactionalInmemStorage struct {
 	txnPermitPool *physical.PermitPool
 }
 
-var _ physical.TransactionalStorage = &TransactionalInmemStorage{}
+var _ physical.TransactionalBackend = &TransactionalInmemStorage{}
 
 const (
 	PutInMemOp int = 1 << iota
@@ -121,7 +121,7 @@ type InmemStorageTransaction struct {
 
 var _ physical.Transaction = &InmemStorageTransaction{}
 
-func NewDirectInmem(conf map[string]string, logger log.Logger) (physical.Storage, error) {
+func NewDirectInmem(conf map[string]string, logger *log.GatedLogger) (physical.Backend, error) {
 	maxValueSize := 0
 	maxValueSizeStr, ok := conf["max_value_size"]
 	if ok {
@@ -146,7 +146,7 @@ func NewDirectInmem(conf map[string]string, logger log.Logger) (physical.Storage
 }
 
 // NewInmem constructs a new in-memory storage
-func NewInmem(conf map[string]string, logger log.Logger) (physical.Storage, error) {
+func NewInmem(conf map[string]string, logger *log.GatedLogger) (physical.Backend, error) {
 	b, err := NewDirectInmem(conf, logger)
 	if err != nil {
 		return nil, err

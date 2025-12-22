@@ -12,7 +12,7 @@ import (
 )
 
 func TestRobustStore_GenerateUserPassToken(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -39,7 +39,7 @@ func TestRobustStore_GenerateUserPassToken(t *testing.T) {
 }
 
 func TestRobustStore_GenerateAWSAccessKeysToken(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -65,7 +65,7 @@ func TestRobustStore_GenerateAWSAccessKeysToken(t *testing.T) {
 }
 
 func TestRobustStore_ResolveToken_Success(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -96,7 +96,7 @@ func TestRobustStore_ResolveToken_Success(t *testing.T) {
 }
 
 func TestRobustStore_ResolveToken_ExpiredToken(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -145,7 +145,7 @@ func TestRobustStore_ResolveToken_ExpiredToken(t *testing.T) {
 }
 
 func TestRobustStore_ResolveToken_AuthDeadlineViolated(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -174,7 +174,7 @@ func TestRobustStore_ResolveToken_AuthDeadlineViolated(t *testing.T) {
 }
 
 func TestRobustStore_ResolveToken_OriginViolation(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -204,7 +204,7 @@ func TestRobustStore_ResolveToken_OriginViolation(t *testing.T) {
 }
 
 func TestRobustStore_ResolveToken_TokenNotFound(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -220,7 +220,7 @@ func TestRobustStore_ResolveToken_TokenNotFound(t *testing.T) {
 }
 
 func TestRobustStore_GetToken(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -246,7 +246,7 @@ func TestRobustStore_GetToken(t *testing.T) {
 }
 
 func TestRobustStore_CleanUpTokens(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -286,7 +286,7 @@ func TestRobustStore_CleanUpTokens(t *testing.T) {
 }
 
 func TestRobustStore_Metrics(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 	config.EnableMetrics = true
 
@@ -322,7 +322,7 @@ func TestRobustStore_Metrics(t *testing.T) {
 }
 
 func TestRobustStore_ConcurrentAccess(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -355,7 +355,7 @@ func TestRobustStore_ConcurrentAccess(t *testing.T) {
 }
 
 func TestRobustStore_Close(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -386,7 +386,7 @@ func TestRobustStore_Close(t *testing.T) {
 }
 
 func TestRobustStore_NilAuthData(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -399,7 +399,7 @@ func TestRobustStore_NilAuthData(t *testing.T) {
 }
 
 func TestRobustStore_UnsupportedTokenType(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -419,7 +419,7 @@ func TestRobustStore_UnsupportedTokenType(t *testing.T) {
 }
 
 func TestRobustStore_CacheHitMiss(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 	config.EnableMetrics = true
 
@@ -459,7 +459,7 @@ func TestRobustStore_CacheHitMiss(t *testing.T) {
 // Root Token Tests
 
 func TestRobustStore_GenerateRootToken(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -482,7 +482,7 @@ func TestRobustStore_GenerateRootToken(t *testing.T) {
 }
 
 func TestRobustStore_GenerateRootToken_Format(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -502,7 +502,7 @@ func TestRobustStore_GenerateRootToken_Format(t *testing.T) {
 }
 
 func TestRobustStore_GenerateRootToken_ReplacesPrevious(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -534,7 +534,7 @@ func TestRobustStore_GenerateRootToken_ReplacesPrevious(t *testing.T) {
 }
 
 func TestRobustStore_RevokeRootToken(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -559,7 +559,7 @@ func TestRobustStore_RevokeRootToken(t *testing.T) {
 }
 
 func TestRobustStore_RevokeRootToken_NoToken(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -573,7 +573,7 @@ func TestRobustStore_RevokeRootToken_NoToken(t *testing.T) {
 }
 
 func TestRobustStore_RootToken_InfiniteTTL(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -599,7 +599,7 @@ func TestRobustStore_RootToken_InfiniteTTL(t *testing.T) {
 }
 
 func TestRobustStore_RootToken_NoAuthDeadline(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -621,7 +621,7 @@ func TestRobustStore_RootToken_NoAuthDeadline(t *testing.T) {
 }
 
 func TestRobustStore_RootToken_NoOriginCheck(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -648,7 +648,7 @@ func TestRobustStore_RootToken_NoOriginCheck(t *testing.T) {
 }
 
 func TestRobustStore_RootToken_ClosedStore(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
@@ -663,7 +663,7 @@ func TestRobustStore_RootToken_ClosedStore(t *testing.T) {
 }
 
 func TestRobustStore_RootToken_Concurrent(t *testing.T) {
-	log := logger.NewZerologLogger(logger.DefaultConfig())
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	config := DefaultConfig()
 
 	store, err := NewRobustStore(log, config)
