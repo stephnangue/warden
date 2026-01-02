@@ -9,9 +9,9 @@ import (
 
 	"github.com/hashicorp/cap/jwt"
 	"github.com/stephnangue/warden/audit"
-	"github.com/stephnangue/warden/auth/token"
 	"github.com/stephnangue/warden/helper"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 )
 
 func (m *JWTAuthMethod) HandleRequest(w http.ResponseWriter, r *http.Request) error {
@@ -168,7 +168,7 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 	switch role.Type {
 	case "static_database_userpass", "dynamic_database_userpass":
 		now := time.Now()
-		authData := token.AuthData{
+		authData := logical.AuthData{
 			PrincipalID:  principalID,
 			RoleName:     role.Name,
 			AuthDeadline: now.Add(m.config.AuthDeadline),
@@ -177,11 +177,11 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 				"client_ip": clientIP,
 			},
 		}
-		tokenValue, err := m.tokenStore.GenerateToken(token.USER_PASS, &authData)
+		tokenValue, err := m.tokenStore.GenerateToken(r.Context(), "user_pass", &authData)
 
 		if err != nil {
 			// error when creating token
-			m.logger.Error("Failed to generate token", logger.String("token_type", token.USER_PASS), logger.Any("auth_data", authData))
+			m.logger.Error("Failed to generate token", logger.String("token_type", "user_pass"), logger.Any("auth_data", authData))
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -195,7 +195,7 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	case "static_aws_access_keys", "dynamic_aws_access_keys":
 		now := time.Now()
-		authData := token.AuthData{
+		authData := logical.AuthData{
 			PrincipalID:  principalID,
 			RoleName:     role.Name,
 			AuthDeadline: now.Add(m.config.AuthDeadline),
@@ -204,10 +204,10 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 				"client_ip": clientIP,
 			},
 		}
-		tokenValue, err := m.tokenStore.GenerateToken(token.AWS_ACCESS_KEYS, &authData)
+		tokenValue, err := m.tokenStore.GenerateToken(r.Context(), "aws_access_keys", &authData)
 
 		if err != nil {
-			m.logger.Error("Failed to generate token", logger.String("token_type", token.AWS_ACCESS_KEYS), logger.Any("auth_data", authData))
+			m.logger.Error("Failed to generate token", logger.String("token_type", "aws_access_keys"), logger.Any("auth_data", authData))
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -221,7 +221,7 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	case "system":
 		now := time.Now()
-		authData := token.AuthData{
+		authData := logical.AuthData{
 			PrincipalID:  principalID,
 			RoleName:     role.Name,
 			AuthDeadline: now.Add(m.config.AuthDeadline),
@@ -230,10 +230,10 @@ func (m *JWTAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request) {
 				"client_ip": clientIP,
 			},
 		}
-		tokenValue, err := m.tokenStore.GenerateToken(token.WARDEN_TOKEN, &authData)
+		tokenValue, err := m.tokenStore.GenerateToken(r.Context(), "warden_token", &authData)
 
 		if err != nil {
-			m.logger.Error("Failed to generate token", logger.String("token_type", token.WARDEN_TOKEN), logger.Any("auth_data", authData))
+			m.logger.Error("Failed to generate token", logger.String("token_type", "warden_token"), logger.Any("auth_data", authData))
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}

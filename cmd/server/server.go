@@ -21,7 +21,6 @@ import (
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/auth"
 	"github.com/stephnangue/warden/auth/method/jwt"
-	"github.com/stephnangue/warden/auth/token"
 	"github.com/stephnangue/warden/config"
 	"github.com/stephnangue/warden/core"
 	wardenseal "github.com/stephnangue/warden/core/seal"
@@ -31,7 +30,6 @@ import (
 	"github.com/stephnangue/warden/listener/mysql"
 	log "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/physical"
-	fileStorage "github.com/stephnangue/warden/physical/file"
 	inmemStorage "github.com/stephnangue/warden/physical/inmem"
 	postgresqlStorage "github.com/stephnangue/warden/physical/postgres"
 	"github.com/stephnangue/warden/provider"
@@ -43,7 +41,6 @@ import (
 const (
 	// Subsystem names for logging
 	subsystemCore          = "core"
-	subsystemToken         = "token"
 	subsystemAPIListener   = "listener.api"
 	subsystemMySQLListener = "listener.mysql"
 
@@ -90,7 +87,6 @@ Usage: warden server [options]
 	}
 
 	storageBackends = map[string]physical.Factory{
-		"file":       fileStorage.NewFileBackend,
 		"inmem_ha":   inmemStorage.NewInmemHA,
 		"inmem":      inmemStorage.NewInmem,
 		"postgres":   postgresqlStorage.NewPostgreSQLStorage,
@@ -126,12 +122,6 @@ func run(cmd *cobra.Command, args []string) error {
 	storage, err := buildStorage(config, logger)
 	if err != nil {
 		return fmt.Errorf("failed to construct the storage: %w", err)
-	}
-
-	// craft the token store
-	tokenStore, err := token.NewRobustStore(logger.WithSystem(subsystemToken), token.DefaultConfig())
-	if err != nil {
-		return fmt.Errorf("failed to create the token store: %w", err)
 	}
 
 	infoKeys := make([]string, 0, 10)
@@ -196,7 +186,7 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create the secure random reader: %w", err)
 	}
 
-	coreConfig := createCoreConfig(logger, config, storage, barrierSeal, unwrapSeal, secureRandomReader, tokenStore)
+	coreConfig := createCoreConfig(logger, config, storage, barrierSeal, unwrapSeal, secureRandomReader)
 
 	newCore, newCoreError := core.NewCore(&coreConfig)
 	if newCoreError != nil {
@@ -220,7 +210,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	// init the listeners
-	lns, err := initListeners(newCore, tokenStore, config, logger, &infoKeys, &info)
+	lns, err := initListeners(newCore, config, logger, &infoKeys, &info)
 	if err != nil {
 		// Error already logged in initListeners
 		return err
@@ -413,7 +403,7 @@ func buildStorage(config *config.Config, logger *log.GatedLogger) (phy.Backend, 
 	return storage, nil
 }
 
-func initListeners(core *core.Core, tokenAccess token.TokenStore, config *config.Config, logger *log.GatedLogger, infoKeys *[]string, info *map[string]string) ([]listener.Listener, error) {
+func initListeners(core *core.Core, config *config.Config, logger *log.GatedLogger, infoKeys *[]string, info *map[string]string) ([]listener.Listener, error) {
 	lns := make([]listener.Listener, 0, len(config.Listeners))
 
 	for _, lnConfig := range config.Listeners {
@@ -446,7 +436,7 @@ func initListeners(core *core.Core, tokenAccess token.TokenStore, config *config
 				TLSKeyFile:      lnConfig.TLSKeyFile,
 				TLSClientCAFile: lnConfig.TLSClientCAFile,
 				TLSEnabled:      lnConfig.TLSEnabled,
-				TokenStore:      tokenAccess,
+				TokenStore:      core.GetTokenStore(),
 			}
 
 			ln, err := mysql.NewMysqlListener(listenerConf)
@@ -536,7 +526,7 @@ func setSeal(conf *config.Config, logger *log.GatedLogger, infoKeys *[]string, i
 	return barrierSeal, barrierWrapper, unwrapSeal, createdSeals, sealConfigError, nil
 }
 
-func createCoreConfig(logger *log.GatedLogger, conf *config.Config, backend phy.Backend, barrierSeal, unwrapSeal core.Seal, secureRandomReader io.Reader, tokenStore token.TokenStore,
+func createCoreConfig(logger *log.GatedLogger, conf *config.Config, backend phy.Backend, barrierSeal, unwrapSeal core.Seal, secureRandomReader io.Reader,
 ) core.CoreConfig {
 	coreConfig := &core.CoreConfig{
 		RawConfig:                      conf,
@@ -551,7 +541,6 @@ func createCoreConfig(logger *log.GatedLogger, conf *config.Config, backend phy.
 		AuthMethods:                    authMethods,
 		Logger:                         logger,
 		SecureRandomReader:             secureRandomReader,
-		TokenStore:                     tokenStore,
 	}
 	return *coreConfig
 }

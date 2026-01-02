@@ -14,7 +14,7 @@ var (
 		SilenceErrors: true,
 		Short: "Lists the enabled providers on the Warden server",
 		Long: `
-Usage: warden providers list
+Usage: warden provider list
 
   Lists the enabled providers on the Warden server. This command also
   outputs information about the enabled path including a
@@ -22,7 +22,7 @@ Usage: warden providers list
 
   List all enabled providers:
 
-      $ warden providers list
+      $ warden provider list
 `,
 		RunE: runList,
 	}

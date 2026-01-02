@@ -85,6 +85,7 @@ func (r *Request) toRetryableHTTP() (*retryablehttp.Request, error) {
 	req.URL.Host = r.URL.Host
 	req.Host = r.Host
 
+	// Set custom headers first
 	if r.Headers != nil {
 		for header, vals := range r.Headers {
 			for _, val := range vals {
@@ -93,6 +94,7 @@ func (r *Request) toRetryableHTTP() (*retryablehttp.Request, error) {
 		}
 	}
 
+	// Set authorization header (may override custom headers if provided)
 	if len(r.ClientToken) != 0 {
 		req.Header.Set("Authorization", "Bearer "+r.ClientToken)
 	}

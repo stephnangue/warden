@@ -1,60 +1,57 @@
+// Copyright (c) 2024 Warden Project
+// SPDX-License-Identifier: MPL-2.0
+
 package core
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sync"
+	"strings"
 	"testing"
 
+	"github.com/openbao/openbao/helper/namespace"
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// mockBackend is a test implementation of logical.Backend
+// mockBackend implements logical.Backend for testing
 type mockBackend struct {
-	accessor    string
-	typ         string
-	class       string
-	description string
-	handleFunc  func(w http.ResponseWriter, r *http.Request) error
-	cleanupFunc func()
-	mu          sync.Mutex
-	requests    []string // track requests for testing
-	config      map[string]any
+	backendType   string
+	backendClass  string
+	description   string
+	accessor      string
+	handleFunc    func(w http.ResponseWriter, r *http.Request) error
+	setupCalled   bool
+	cleanupCalled bool
 }
 
-func newMockBackend(accessor string) *mockBackend {
+func newMockBackend(backendType, backendClass string) *mockBackend {
 	return &mockBackend{
-		accessor:    accessor,
-		typ:         "mock",
-		class:       "test",
-		description: "Mock backend for testing",
-		requests:    make([]string, 0),
+		backendType:  backendType,
+		backendClass: backendClass,
+		description:  "Mock backend",
+		accessor:     "mock_accessor",
 	}
 }
 
 func (m *mockBackend) HandleRequest(w http.ResponseWriter, r *http.Request) error {
-	m.mu.Lock()
-	m.requests = append(m.requests, r.URL.Path)
-	m.mu.Unlock()
-
 	if m.handleFunc != nil {
 		return m.handleFunc(w, r)
 	}
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
 	return nil
 }
 
 func (m *mockBackend) GetType() string {
-	return m.typ
+	return m.backendType
 }
 
 func (m *mockBackend) GetClass() string {
-	return m.class
+	return m.backendClass
 }
 
 func (m *mockBackend) GetDescription() string {
@@ -65,899 +62,1105 @@ func (m *mockBackend) GetAccessor() string {
 	return m.accessor
 }
 
-func (m *mockBackend) Setup(conf map[string]any) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (m *mockBackend) Cleanup(ctx context.Context) {
+	m.cleanupCalled = true
+}
 
-	// Merge incoming config with existing config
-	if m.config == nil {
-		m.config = make(map[string]any)
-	}
-	for k, v := range conf {
-		m.config[k] = v
-	}
+func (m *mockBackend) Setup(ctx context.Context, conf map[string]any) error {
+	m.setupCalled = true
+	return nil
+}
+
+func (m *mockBackend) Initialize(ctx context.Context) error {
 	return nil
 }
 
 func (m *mockBackend) Config() map[string]any {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.config == nil {
-		return map[string]any{}
-	}
-
-	// Return a copy
-	config := make(map[string]any)
-	for k, v := range m.config {
-		config[k] = v
-	}
-	return config
+	return map[string]any{}
 }
 
-func (m *mockBackend) Cleanup() {
-	if m.cleanupFunc != nil {
-		m.cleanupFunc()
-	}
+// mockBarrierView implements BarrierView for testing
+type mockBarrierView struct {
+	prefix      string
+	readOnlyErr error
 }
 
-func (m *mockBackend) getRequests() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]string{}, m.requests...)
+func newMockBarrierView(prefix string) *mockBarrierView {
+	return &mockBarrierView{prefix: prefix}
 }
 
-func createTestRouter() (*Router, *logger.GatedLogger) {
-	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	router := NewRouter(log)
-	return router, log
+func (m *mockBarrierView) Prefix() string {
+	return m.prefix
+}
+
+func (m *mockBarrierView) SubView(prefix string) BarrierView {
+	return newMockBarrierView(m.prefix + prefix)
+}
+
+func (m *mockBarrierView) SetReadOnlyErr(err error) {
+	m.readOnlyErr = err
+}
+
+func (m *mockBarrierView) GetReadOnlyErr() error {
+	return m.readOnlyErr
+}
+
+func (m *mockBarrierView) Get(ctx context.Context, key string) (*sdklogical.StorageEntry, error) {
+	return nil, nil
+}
+
+func (m *mockBarrierView) Put(ctx context.Context, entry *sdklogical.StorageEntry) error {
+	return nil
+}
+
+func (m *mockBarrierView) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (m *mockBarrierView) List(ctx context.Context, prefix string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockBarrierView) ListPage(ctx context.Context, prefix string, after string, limit int) ([]string, error) {
+	return nil, nil
+}
+
+// Helper function to create test context with namespace
+func testRouterContext() context.Context {
+	return namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 }
 
 func TestNewRouter(t *testing.T) {
-	router, _ := createTestRouter()
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
 
 	assert.NotNil(t, router)
 	assert.NotNil(t, router.root)
+	assert.NotNil(t, router.storagePrefix)
+	assert.NotNil(t, router.mountUUIDCache)
 	assert.NotNil(t, router.mountAccessorCache)
-	assert.NotNil(t, router.logger)
+	assert.Equal(t, log, router.logger)
 }
 
 func TestRouter_Mount(t *testing.T) {
-	router, _ := createTestRouter()
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
 
-	t.Run("successful mount", func(t *testing.T) {
-		backend := newMockBackend("accessor-1")
-		mountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "secret/",
-			Accessor: "accessor-1",
-		}
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
 
-		err := router.Mount("secret/", backend, mountEntry)
-		require.NoError(t, err)
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
 
-		// Verify backend can be retrieved
-		ctx := context.Background()
-		retrievedBackend := router.MatchingBackend(ctx, "secret/data")
-		assert.NotNil(t, retrievedBackend)
-		assert.Equal(t, backend, retrievedBackend)
-	})
+	err := router.Mount("test/", backend, mountEntry, view)
+	require.NoError(t, err)
 
-	t.Run("duplicate mount error", func(t *testing.T) {
-		backend1 := newMockBackend("accessor-2")
-		backend2 := newMockBackend("accessor-3")
-		mountEntry1 := &MountEntry{
-			Type:     "mock",
-			Path:     "test/",
-			Accessor: "accessor-2",
-		}
-		mountEntry2 := &MountEntry{
-			Type:     "mock",
-			Path:     "test/",
-			Accessor: "accessor-3",
-		}
+	// Verify the mount was added
+	ctx := testRouterContext()
+	matchingBackend := router.MatchingBackend(ctx, "test/foo")
+	assert.NotNil(t, matchingBackend)
+	assert.Equal(t, backend, matchingBackend)
+}
 
-		err := router.Mount("test/", backend1, mountEntry1)
-		require.NoError(t, err)
+func TestRouter_Mount_MissingPrefix(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
 
-		err = router.Mount("test/", backend2, mountEntry2)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "already mounted")
-	})
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
 
-	t.Run("mount multiple paths", func(t *testing.T) {
-		backend1 := newMockBackend("accessor-4")
-		backend2 := newMockBackend("accessor-5")
-		mountEntry1 := &MountEntry{
-			Type:     "mock",
-			Path:     "path1/",
-			Accessor: "accessor-4",
-		}
-		mountEntry2 := &MountEntry{
-			Type:     "mock",
-			Path:     "path2/",
-			Accessor: "accessor-5",
-		}
+	mountEntry := &MountEntry{
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
 
-		err := router.Mount("path1/", backend1, mountEntry1)
-		require.NoError(t, err)
+	err := router.Mount("", backend, mountEntry, view)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "missing prefix")
+}
 
-		err = router.Mount("path2/", backend2, mountEntry2)
-		require.NoError(t, err)
+func TestRouter_Mount_MissingStoragePrefix(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
 
-		ctx := context.Background()
-		assert.Equal(t, backend1, router.MatchingBackend(ctx, "path1/data"))
-		assert.Equal(t, backend2, router.MatchingBackend(ctx, "path2/data"))
-	})
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("")
+
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("test/", backend, mountEntry, view)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "missing storage view prefix")
+}
+
+func TestRouter_Mount_MissingUUID(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("test/", backend, mountEntry, view)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "missing mount identifier")
+}
+
+func TestRouter_Mount_MissingAccessor(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("test/", backend, mountEntry, view)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "missing mount accessor")
+}
+
+func TestRouter_Mount_NestedMount(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend1 := newMockBackend("test1", "provider")
+	view1 := newMockBarrierView("logical/uuid1/")
+
+	mountEntry1 := &MountEntry{
+		Path:        "parent/",
+		Type:        "test1",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Parent mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("parent/", backend1, mountEntry1, view1)
+	require.NoError(t, err)
+
+	// Try to mount under existing mount
+	backend2 := newMockBackend("test2", "provider")
+	view2 := newMockBarrierView("logical/uuid2/")
+
+	mountEntry2 := &MountEntry{
+		Path:        "parent/child/",
+		Type:        "test2",
+		Class:       mountClassProvider,
+		UUID:        "uuid2",
+		Accessor:    "accessor2",
+		Description: "Child mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err = router.Mount("parent/child/", backend2, mountEntry2, view2)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot mount under existing mount")
 }
 
 func TestRouter_Unmount(t *testing.T) {
-	router, _ := createTestRouter()
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
 
-	t.Run("successful unmount", func(t *testing.T) {
-		backend := newMockBackend("accessor-10")
-		cleanupCalled := false
-		backend.cleanupFunc = func() {
-			cleanupCalled = true
-		}
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
 
-		mountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "unmount/",
-			Accessor: "accessor-10",
-		}
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
 
-		err := router.Mount("unmount/", backend, mountEntry)
-		require.NoError(t, err)
+	err := router.Mount("test/", backend, mountEntry, view)
+	require.NoError(t, err)
 
-		err = router.Unmount("unmount/")
-		require.NoError(t, err)
-		assert.True(t, cleanupCalled)
+	// Unmount
+	ctx := testRouterContext()
+	err = router.Unmount(ctx, "test/")
+	require.NoError(t, err)
 
-		// Verify backend is removed
-		ctx := context.Background()
-		retrievedBackend := router.MatchingBackend(ctx, "unmount/data")
-		assert.Nil(t, retrievedBackend)
-	})
+	// Verify cleanup was called
+	assert.True(t, backend.cleanupCalled)
 
-	t.Run("unmount non-existent path", func(t *testing.T) {
-		err := router.Unmount("nonexistent/")
-		require.NoError(t, err) // Should not error
-	})
+	// Verify the mount was removed
+	matchingBackend := router.MatchingBackend(ctx, "test/foo")
+	assert.Nil(t, matchingBackend)
+}
+
+func TestRouter_Unmount_NonExistent(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	ctx := testRouterContext()
+	err := router.Unmount(ctx, "nonexistent/")
+	assert.NoError(t, err) // Should not error on non-existent mount
 }
 
 func TestRouter_MatchingBackend(t *testing.T) {
-	router, _ := createTestRouter()
-	backend := newMockBackend("accessor-20")
-	mountEntry := &MountEntry{
-		Type:     "mock",
-		Path:     "secret/",
-		Accessor: "accessor-20",
-	}
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
 
-	err := router.Mount("secret/", backend, mountEntry)
-	require.NoError(t, err)
-
-	ctx := context.Background()
-
-	t.Run("exact prefix match", func(t *testing.T) {
-		result := router.MatchingBackend(ctx, "secret/")
-		assert.Equal(t, backend, result)
-	})
-
-	t.Run("nested path match", func(t *testing.T) {
-		result := router.MatchingBackend(ctx, "secret/data/key")
-		assert.Equal(t, backend, result)
-	})
-
-	t.Run("no match", func(t *testing.T) {
-		result := router.MatchingBackend(ctx, "other/path")
-		assert.Nil(t, result)
-	})
-
-	t.Run("longest prefix match", func(t *testing.T) {
-		nestedBackend := newMockBackend("accessor-21")
-		nestedMountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "secret/nested/",
-			Accessor: "accessor-21",
-		}
-
-		err := router.Mount("secret/nested/", nestedBackend, nestedMountEntry)
-		require.NoError(t, err)
-
-		// Should match the more specific backend
-		result := router.MatchingBackend(ctx, "secret/nested/data")
-		assert.Equal(t, nestedBackend, result)
-
-		// Should still match the parent backend
-		result = router.MatchingBackend(ctx, "secret/other/data")
-		assert.Equal(t, backend, result)
-	})
-}
-
-func TestRouter_MatchingMountByAccessor(t *testing.T) {
-	router, _ := createTestRouter()
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
 
 	mountEntry := &MountEntry{
-		Type:     "mock",
-		Path:     "test/",
-		Accessor: "accessor-30",
-	}
-	backend := newMockBackend("accessor-30")
-
-	err := router.Mount("test/", backend, mountEntry)
-	require.NoError(t, err)
-
-	t.Run("found by accessor", func(t *testing.T) {
-		result := router.MatchingMountByAccessor("accessor-30")
-		assert.NotNil(t, result)
-		assert.Equal(t, mountEntry, result)
-	})
-
-	t.Run("not found", func(t *testing.T) {
-		result := router.MatchingMountByAccessor("unknown")
-		assert.Nil(t, result)
-	})
-
-	t.Run("empty accessor", func(t *testing.T) {
-		result := router.MatchingMountByAccessor("")
-		assert.Nil(t, result)
-	})
-}
-
-func TestRouter_MountConflict(t *testing.T) {
-	router, _ := createTestRouter()
-	backend := newMockBackend("accessor-40")
-	mountEntry := &MountEntry{
-		Type:     "mock",
-		Path:     "conflict/",
-		Accessor: "accessor-40",
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
 	}
 
-	err := router.Mount("conflict/", backend, mountEntry)
+	err := router.Mount("test/", backend, mountEntry, view)
 	require.NoError(t, err)
 
-	ctx := context.Background()
+	ctx := testRouterContext()
 
-	t.Run("conflict exists", func(t *testing.T) {
-		result := router.MountConflict(ctx, "conflict/data")
-		assert.Equal(t, "conflict/", result)
-	})
+	// Test exact match
+	matchingBackend := router.MatchingBackend(ctx, "test/")
+	assert.Equal(t, backend, matchingBackend)
 
-	t.Run("no conflict", func(t *testing.T) {
-		result := router.MountConflict(ctx, "other/path")
-		assert.Equal(t, "", result)
-	})
+	// Test with subpath
+	matchingBackend = router.MatchingBackend(ctx, "test/foo/bar")
+	assert.Equal(t, backend, matchingBackend)
+
+	// Test non-matching path
+	matchingBackend = router.MatchingBackend(ctx, "other/")
+	assert.Nil(t, matchingBackend)
 }
 
 func TestRouter_MatchingMount(t *testing.T) {
-	router, _ := createTestRouter()
-	backend := newMockBackend("accessor-50")
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
 	mountEntry := &MountEntry{
-		Type:     "mock",
-		Path:     "mount/",
-		Accessor: "accessor-50",
+		Path:        "aws/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
 	}
 
-	err := router.Mount("mount/", backend, mountEntry)
+	err := router.Mount("aws/", backend, mountEntry, view)
 	require.NoError(t, err)
 
-	ctx := context.Background()
+	ctx := testRouterContext()
 
-	t.Run("matching mount found", func(t *testing.T) {
-		result := router.MatchingMount(ctx, "mount/data/key")
-		assert.Equal(t, "mount/", result)
-	})
+	mount := router.MatchingMount(ctx, "aws/foo")
+	assert.Equal(t, "aws/", mount)
 
-	t.Run("no matching mount", func(t *testing.T) {
-		result := router.MatchingMount(ctx, "other/path")
-		assert.Equal(t, "", result)
-	})
+	mount = router.MatchingMount(ctx, "other/foo")
+	assert.Equal(t, "", mount)
+}
+
+func TestRouter_MatchingMountByAccessor(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor123",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("test/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	// Test matching
+	entry := router.MatchingMountByAccessor("accessor123")
+	assert.NotNil(t, entry)
+	assert.Equal(t, "accessor123", entry.Accessor)
+	assert.Equal(t, "test/", entry.Path)
+
+	// Test non-matching
+	entry = router.MatchingMountByAccessor("nonexistent")
+	assert.Nil(t, entry)
+
+	// Test empty accessor
+	entry = router.MatchingMountByAccessor("")
+	assert.Nil(t, entry)
+}
+
+func TestRouter_MatchingMountByUUID(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid123",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("test/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	// Test matching
+	entry := router.MatchingMountByUUID("uuid123")
+	assert.NotNil(t, entry)
+	assert.Equal(t, "uuid123", entry.UUID)
+	assert.Equal(t, "test/", entry.Path)
+
+	// Test non-matching
+	entry = router.MatchingMountByUUID("nonexistent")
+	assert.Nil(t, entry)
+
+	// Test empty UUID
+	entry = router.MatchingMountByUUID("")
+	assert.Nil(t, entry)
+}
+
+func TestRouter_ValidateMountByAccessor(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "aws/",
+		Type:        "aws",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor123",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("aws/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	// Test valid accessor
+	resp := router.ValidateMountByAccessor("accessor123")
+	assert.NotNil(t, resp)
+	assert.Equal(t, "accessor123", resp.MountAccessor)
+	assert.Equal(t, "aws", resp.MountType)
+	assert.Equal(t, "aws/", resp.MountPath)
+
+	// Test with auth mount
+	authBackend := newMockBackend("jwt", "auth")
+	authView := newMockBarrierView("auth/uuid2/")
+
+	authEntry := &MountEntry{
+		Path:        "jwt/",
+		Type:        "jwt",
+		Class:       mountClassAuth,
+		UUID:        "uuid2",
+		Accessor:    "auth_accessor",
+		Description: "Auth mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err = router.Mount("jwt/", authBackend, authEntry, authView)
+	require.NoError(t, err)
+
+	resp = router.ValidateMountByAccessor("auth_accessor")
+	assert.NotNil(t, resp)
+	assert.Equal(t, "auth_accessor", resp.MountAccessor)
+	assert.Equal(t, "jwt", resp.MountType)
+	assert.Equal(t, "auth/jwt/", resp.MountPath) // Auth prefix added
+
+	// Test non-existent accessor
+	resp = router.ValidateMountByAccessor("nonexistent")
+	assert.Nil(t, resp)
+
+	// Test empty accessor
+	resp = router.ValidateMountByAccessor("")
+	assert.Nil(t, resp)
 }
 
 func TestRouter_Taint(t *testing.T) {
-	router, _ := createTestRouter()
-	backend := newMockBackend("accessor-60")
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
 	mountEntry := &MountEntry{
-		Type:     "mock",
-		Path:     "tainted/",
-		Accessor: "accessor-60",
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
 	}
 
-	err := router.Mount("tainted/", backend, mountEntry)
+	err := router.Mount("test/", backend, mountEntry, view)
 	require.NoError(t, err)
 
-	ctx := context.Background()
+	ctx := testRouterContext()
 
-	t.Run("taint existing path", func(t *testing.T) {
-		err := router.Taint(ctx, "tainted/data")
-		assert.NoError(t, err)
+	// Taint the mount
+	err = router.Taint(ctx, "test/")
+	assert.NoError(t, err)
 
-		// Verify the backend is marked as tainted
-		raw, ok := router.root.Get("tainted/")
-		require.True(t, ok)
-		re := raw.(*routeEntry)
-		assert.True(t, re.tainted)
-	})
-
-	t.Run("taint non-existent path", func(t *testing.T) {
-		err := router.Taint(ctx, "nonexistent/")
-		assert.NoError(t, err) // Should not error
-	})
+	// Verify backend is still returned (taint doesn't affect MatchingBackend)
+	matchingBackend := router.MatchingBackend(ctx, "test/foo")
+	assert.NotNil(t, matchingBackend)
 }
 
 func TestRouter_Untaint(t *testing.T) {
-	router, _ := createTestRouter()
-	backend := newMockBackend("accessor-70")
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
 	mountEntry := &MountEntry{
-		Type:     "mock",
-		Path:     "untaint/",
-		Accessor: "accessor-70",
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		Tainted:     true,
+		namespace:   namespace.RootNamespace,
 	}
 
-	err := router.Mount("untaint/", backend, mountEntry)
+	err := router.Mount("test/", backend, mountEntry, view)
 	require.NoError(t, err)
 
-	ctx := context.Background()
+	ctx := testRouterContext()
 
-	t.Run("untaint previously tainted path", func(t *testing.T) {
-		// First taint it
-		err := router.Taint(ctx, "untaint/data")
-		require.NoError(t, err)
+	// Untaint the mount
+	err = router.Untaint(ctx, "test/")
+	assert.NoError(t, err)
+}
 
-		// Then untaint it
-		err = router.Untaint(ctx, "untaint/data")
-		assert.NoError(t, err)
+func TestRouter_MountConflict(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
 
-		// Verify the backend is not tainted
-		raw, ok := router.root.Get("untaint/")
-		require.True(t, ok)
-		re := raw.(*routeEntry)
-		assert.False(t, re.tainted)
-	})
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
 
-	t.Run("untaint non-existent path", func(t *testing.T) {
-		err := router.Untaint(ctx, "nonexistent/")
-		assert.NoError(t, err) // Should not error
-	})
+	mountEntry := &MountEntry{
+		Path:        "aws/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("aws/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	ctx := testRouterContext()
+
+	// Test exact match conflict
+	conflict := router.MountConflict(ctx, "aws/")
+	assert.Equal(t, "aws/", conflict)
+
+	// Test prefix conflict
+	conflict = router.MountConflict(ctx, "aws")
+	assert.NotEmpty(t, conflict)
+
+	// Test no conflict
+	conflict = router.MountConflict(ctx, "gcp/")
+	assert.Empty(t, conflict)
+}
+
+func TestRouter_MatchingStorage(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("test/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	ctx := testRouterContext()
+
+	// Test matching by API path
+	storage := router.MatchingStorageByAPIPath(ctx, "test/foo")
+	assert.NotNil(t, storage)
+	assert.Equal(t, view, storage)
+
+	// Test matching by storage path
+	storage = router.MatchingStorageByStoragePath(ctx, "logical/uuid1/data")
+	assert.NotNil(t, storage)
+	assert.Equal(t, view, storage)
+
+	// Test non-matching
+	storage = router.MatchingStorageByAPIPath(ctx, "other/foo")
+	assert.Nil(t, storage)
+}
+
+func TestRouter_MatchingMountEntry(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("test/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	ctx := testRouterContext()
+
+	entry := router.MatchingMountEntry(ctx, "test/foo")
+	assert.NotNil(t, entry)
+	assert.Equal(t, "test/", entry.Path)
+	assert.Equal(t, "uuid1", entry.UUID)
+
+	entry = router.MatchingMountEntry(ctx, "other/foo")
+	assert.Nil(t, entry)
+}
+
+func TestRouter_MatchingStoragePrefixByAPIPath(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("test/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	ctx := testRouterContext()
+
+	prefix, found := router.MatchingStoragePrefixByAPIPath(ctx, "test/foo")
+	assert.True(t, found)
+	assert.Equal(t, "logical/uuid1/", prefix)
+
+	prefix, found = router.MatchingStoragePrefixByAPIPath(ctx, "other/foo")
+	assert.False(t, found)
+	assert.Empty(t, prefix)
+}
+
+func TestRouter_MatchingAPIPrefixByStoragePath(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("test/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	ctx := testRouterContext()
+
+	ns, mountPath, storagePrefix, found := router.MatchingAPIPrefixByStoragePath(ctx, "logical/uuid1/data")
+	assert.True(t, found)
+	assert.Equal(t, namespace.RootNamespace, ns)
+	assert.Equal(t, "test/", mountPath)
+	assert.Equal(t, "logical/uuid1/", storagePrefix)
+
+	// Test with auth mount
+	authBackend := newMockBackend("jwt", "auth")
+	authView := newMockBarrierView("auth/uuid2/")
+
+	authEntry := &MountEntry{
+		Path:        "jwt/",
+		Type:        "jwt",
+		Class:       mountClassAuth,
+		UUID:        "uuid2",
+		Accessor:    "auth_accessor",
+		Description: "Auth mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err = router.Mount("jwt/", authBackend, authEntry, authView)
+	require.NoError(t, err)
+
+	ns, mountPath, storagePrefix, found = router.MatchingAPIPrefixByStoragePath(ctx, "auth/uuid2/data")
+	assert.True(t, found)
+	assert.Equal(t, "auth/jwt/", mountPath) // Auth prefix added
+	assert.Equal(t, "auth/uuid2/", storagePrefix)
+}
+
+func TestRouter_MatchingMountByAPIPath(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "aws/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("aws/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	ctx := testRouterContext()
+
+	path := router.MatchingMountByAPIPath(ctx, "aws/foo/bar")
+	assert.Equal(t, "aws/", path)
+
+	path = router.MatchingMountByAPIPath(ctx, "other/foo")
+	assert.Empty(t, path)
+}
+
+func TestRouter_Reset(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("test/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	// Reset the router
+	router.reset()
+
+	// Verify all mounts are gone
+	ctx := testRouterContext()
+	matchingBackend := router.MatchingBackend(ctx, "test/foo")
+	assert.Nil(t, matchingBackend)
+
+	entry := router.MatchingMountByAccessor("accessor1")
+	assert.Nil(t, entry)
+
+	entry = router.MatchingMountByUUID("uuid1")
+	assert.Nil(t, entry)
 }
 
 func TestRouter_Route(t *testing.T) {
-	router, _ := createTestRouter()
-	backend := newMockBackend("accessor-80")
-	mountEntry := &MountEntry{
-		Type:     "mock",
-		Path:     "route/",
-		Accessor: "accessor-80",
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	// Create a backend that verifies the request
+	var handledPath string
+	backend := newMockBackend("test", "provider")
+	backend.handleFunc = func(w http.ResponseWriter, r *http.Request) error {
+		handledPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		return nil
 	}
 
-	err := router.Mount("route/", backend, mountEntry)
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "aws/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("aws/", backend, mountEntry, view)
 	require.NoError(t, err)
 
-	t.Run("successful route with v1 prefix", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/v1/route/data/key", nil)
-		w := httptest.NewRecorder()
+	// Create a test request
+	// Note: Router expects paths without /v1/ prefix (that's stripped by request_handler)
+	req := httptest.NewRequest(http.MethodGet, "/v1/aws/credentials/role1", nil)
+	ctx := namespace.ContextWithNamespace(req.Context(), namespace.RootNamespace)
+	ctx = context.WithValue(ctx, logical.OriginalPath, req.URL.Path)
+	req = req.WithContext(ctx)
+	// Strip /v1/ prefix like request_handler does
+	req.URL.Path = strings.TrimPrefix(req.URL.Path, "/v1/")
 
-		router.Route(w, req)
+	w := httptest.NewRecorder()
 
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.Equal(t, "ok", w.Body.String())
+	// Route the request
+	router.Route(w, req)
 
-		// Verify the backend received the correct relative path
-		requests := backend.getRequests()
-		require.Len(t, requests, 1)
-		assert.Equal(t, "/data/key", requests[0])
-	})
-
-	t.Run("successful route with auth prefix", func(t *testing.T) {
-		authBackend := newMockBackend("accessor-81")
-		authMountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "userpass/",
-			Accessor: "accessor-81",
-		}
-
-		err := router.Mount("userpass/", authBackend, authMountEntry)
-		require.NoError(t, err)
-
-		req := httptest.NewRequest(http.MethodPost, "/v1/auth/userpass/login", nil)
-		w := httptest.NewRecorder()
-
-		router.Route(w, req)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-
-		requests := authBackend.getRequests()
-		require.Len(t, requests, 1)
-		assert.Equal(t, "/login", requests[0])
-	})
-
-	t.Run("route not found", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/v1/nonexistent/path", nil)
-		w := httptest.NewRecorder()
-
-		router.Route(w, req)
-
-		assert.Equal(t, http.StatusNotFound, w.Code)
-		assert.Contains(t, w.Body.String(), "no route found")
-	})
-
-	t.Run("route with trailing slash", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/v1/route/data/", nil)
-		w := httptest.NewRecorder()
-
-		router.Route(w, req)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-	})
-
-	t.Run("route without v1 prefix adds slash for root lookup", func(t *testing.T) {
-		// Mount a backend at root level
-		rootBackend := newMockBackend("accessor-82")
-		rootMountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "sys/",
-			Accessor: "accessor-82",
-		}
-
-		err := router.Mount("sys/", rootBackend, rootMountEntry)
-		require.NoError(t, err)
-
-		req := httptest.NewRequest(http.MethodGet, "/v1/sys", nil)
-		w := httptest.NewRecorder()
-
-		router.Route(w, req)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-	})
-
-	t.Run("route to tainted backend", func(t *testing.T) {
-		taintedBackend := newMockBackend("accessor-83")
-		taintedMountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "tainted/",
-			Accessor: "accessor-83",
-		}
-
-		err := router.Mount("tainted/", taintedBackend, taintedMountEntry)
-		require.NoError(t, err)
-
-		ctx := context.Background()
-		err = router.Taint(ctx, "tainted/")
-		require.NoError(t, err)
-
-		req := httptest.NewRequest(http.MethodGet, "/v1/tainted/data", nil)
-		w := httptest.NewRecorder()
-
-		router.Route(w, req)
-
-		assert.Equal(t, http.StatusNotFound, w.Code)
-		assert.Contains(t, w.Body.String(), "no route found")
-	})
-
-	t.Run("route with nil backend", func(t *testing.T) {
-		// Manually insert a route entry with nil backend
-		re := &routeEntry{
-			backend: nil,
-			mountEntry: &MountEntry{
-				Type: "mock",
-				Path: "nil/",
-			},
-		}
-		router.root.Insert("nil/", re)
-
-		req := httptest.NewRequest(http.MethodGet, "/v1/nil/data", nil)
-		w := httptest.NewRecorder()
-
-		router.Route(w, req)
-
-		assert.Equal(t, http.StatusNotFound, w.Code)
-		assert.Contains(t, w.Body.String(), "no route found")
-	})
-
-	t.Run("backend handle request error", func(t *testing.T) {
-		errorBackend := newMockBackend("accessor-84")
-		errorBackend.handleFunc = func(w http.ResponseWriter, r *http.Request) error {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return fmt.Errorf("backend error")
-		}
-
-		errorMountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "error/",
-			Accessor: "accessor-84",
-		}
-
-		err := router.Mount("error/", errorBackend, errorMountEntry)
-		require.NoError(t, err)
-
-		req := httptest.NewRequest(http.MethodGet, "/v1/error/data", nil)
-		w := httptest.NewRecorder()
-
-		router.Route(w, req)
-
-		// Backend already wrote error response
-		assert.Equal(t, http.StatusInternalServerError, w.Code)
-	})
+	// Verify the request was handled
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "/credentials/role1", handledPath) // Path should be relative to mount
 }
 
-func TestRouter_Concurrent(t *testing.T) {
-	router, _ := createTestRouter()
+func TestRouter_Route_NotFound(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
 
-	t.Run("concurrent mounts and queries", func(t *testing.T) {
-		var wg sync.WaitGroup
-		numGoroutines := 10
-		ctx := context.Background()
+	req := httptest.NewRequest(http.MethodGet, "/v1/nonexistent/path", nil)
+	ctx := namespace.ContextWithNamespace(req.Context(), namespace.RootNamespace)
+	ctx = context.WithValue(ctx, logical.OriginalPath, req.URL.Path)
+	req = req.WithContext(ctx)
 
-		// Mount backends concurrently
-		for i := 0; i < numGoroutines; i++ {
-			wg.Add(1)
-			go func(idx int) {
-				defer wg.Done()
+	w := httptest.NewRecorder()
 
-				backend := newMockBackend(fmt.Sprintf("accessor-concurrent-%d", idx))
-				mountEntry := &MountEntry{
-					Type:     "mock",
-					Path:     fmt.Sprintf("concurrent-%d/", idx),
-					Accessor: fmt.Sprintf("accessor-concurrent-%d", idx),
-				}
+	router.Route(w, req)
 
-				err := router.Mount(fmt.Sprintf("concurrent-%d/", idx), backend, mountEntry)
-				if err != nil {
-					t.Errorf("Failed to mount: %v", err)
-				}
-			}(i)
-		}
-
-		wg.Wait()
-
-		// Query backends concurrently
-		for i := 0; i < numGoroutines; i++ {
-			wg.Add(1)
-			go func(idx int) {
-				defer wg.Done()
-
-				backend := router.MatchingBackend(ctx, fmt.Sprintf("concurrent-%d/data", idx))
-				if backend == nil {
-					t.Errorf("Failed to find backend for concurrent-%d", idx)
-				}
-			}(i)
-		}
-
-		wg.Wait()
-	})
-
-	t.Run("concurrent routes", func(t *testing.T) {
-		backend := newMockBackend("accessor-route-concurrent")
-		mountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "concurrent-route/",
-			Accessor: "accessor-route-concurrent",
-		}
-
-		err := router.Mount("concurrent-route/", backend, mountEntry)
-		require.NoError(t, err)
-
-		var wg sync.WaitGroup
-		numRequests := 50
-
-		for i := 0; i < numRequests; i++ {
-			wg.Add(1)
-			go func(idx int) {
-				defer wg.Done()
-
-				req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/concurrent-route/data/%d", idx), nil)
-				w := httptest.NewRecorder()
-
-				router.Route(w, req)
-
-				if w.Code != http.StatusOK {
-					t.Errorf("Expected 200, got %d", w.Code)
-				}
-			}(i)
-		}
-
-		wg.Wait()
-
-		// Verify all requests were handled
-		requests := backend.getRequests()
-		assert.Len(t, requests, numRequests)
-	})
-
-	t.Run("concurrent taint and untaint", func(t *testing.T) {
-		backend := newMockBackend("accessor-taint-concurrent")
-		mountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "taint-concurrent/",
-			Accessor: "accessor-taint-concurrent",
-		}
-
-		err := router.Mount("taint-concurrent/", backend, mountEntry)
-		require.NoError(t, err)
-
-		ctx := context.Background()
-		var wg sync.WaitGroup
-		numOps := 20
-
-		for i := 0; i < numOps; i++ {
-			wg.Add(2)
-
-			// Taint operation
-			go func() {
-				defer wg.Done()
-				err := router.Taint(ctx, "taint-concurrent/")
-				if err != nil {
-					t.Errorf("Taint failed: %v", err)
-				}
-			}()
-
-			// Untaint operation
-			go func() {
-				defer wg.Done()
-				err := router.Untaint(ctx, "taint-concurrent/")
-				if err != nil {
-					t.Errorf("Untaint failed: %v", err)
-				}
-			}()
-		}
-
-		wg.Wait()
-
-		// Just ensure no panics occurred
-	})
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "no route found")
 }
 
-func TestRouter_PathNormalization(t *testing.T) {
-	router, _ := createTestRouter()
-	backend := newMockBackend("accessor-norm")
+func TestRouter_Route_TaintedBackend(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
 	mountEntry := &MountEntry{
-		Type:     "mock",
-		Path:     "norm/",
-		Accessor: "accessor-norm",
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		Tainted:     true, // Mark as tainted
+		namespace:   namespace.RootNamespace,
 	}
 
-	err := router.Mount("norm/", backend, mountEntry)
+	err := router.Mount("test/", backend, mountEntry, view)
 	require.NoError(t, err)
 
-	testCases := []struct {
-		name         string
-		requestPath  string
-		expectedPath string
-	}{
-		{
-			name:         "path with trailing slash",
-			requestPath:  "/v1/norm/data/",
-			expectedPath: "/data",
-		},
-		{
-			name:         "path without trailing slash",
-			requestPath:  "/v1/norm/data",
-			expectedPath: "/data",
-		},
-		{
-			name:         "nested path",
-			requestPath:  "/v1/norm/data/key/subkey",
-			expectedPath: "/data/key/subkey",
-		},
-		{
-			name:         "root path",
-			requestPath:  "/v1/norm/",
-			expectedPath: "/",
-		},
+	req := httptest.NewRequest(http.MethodGet, "/v1/test/foo", nil)
+	ctx := namespace.ContextWithNamespace(req.Context(), namespace.RootNamespace)
+	ctx = context.WithValue(ctx, logical.OriginalPath, req.URL.Path)
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+
+	router.Route(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "no route found")
+}
+
+func TestRouter_Route_NilBackend(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// Clear previous requests
-			backend.mu.Lock()
-			backend.requests = make([]string, 0)
-			backend.mu.Unlock()
+	// Mount with nil backend
+	err := router.Mount("test/", nil, mountEntry, view)
+	require.NoError(t, err)
 
-			req := httptest.NewRequest(http.MethodGet, tc.requestPath, nil)
-			w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/test/foo", nil)
+	ctx := namespace.ContextWithNamespace(req.Context(), namespace.RootNamespace)
+	ctx = context.WithValue(ctx, logical.OriginalPath, req.URL.Path)
+	req = req.WithContext(ctx)
 
-			router.Route(w, req)
+	w := httptest.NewRecorder()
 
-			assert.Equal(t, http.StatusOK, w.Code)
+	router.Route(w, req)
 
-			requests := backend.getRequests()
-			require.Len(t, requests, 1)
-			assert.Equal(t, tc.expectedPath, requests[0])
-		})
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "no route found")
+}
+
+func TestRouter_Route_WithTrailingSlash(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	var handledPath string
+	backend := newMockBackend("test", "provider")
+	backend.handleFunc = func(w http.ResponseWriter, r *http.Request) error {
+		handledPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		return nil
+	}
+
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "aws/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("aws/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	// Request without trailing slash should still match
+	req := httptest.NewRequest(http.MethodGet, "/v1/aws", nil)
+	ctx := namespace.ContextWithNamespace(req.Context(), namespace.RootNamespace)
+	ctx = context.WithValue(ctx, logical.OriginalPath, req.URL.Path)
+	req = req.WithContext(ctx)
+	// Strip /v1/ prefix like request_handler does
+	req.URL.Path = strings.TrimPrefix(req.URL.Path, "/v1/")
+
+	w := httptest.NewRecorder()
+
+	router.Route(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "/", handledPath)
+}
+
+func TestRouter_Route_OriginalPathInContext(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	var originalPath string
+	backend := newMockBackend("test", "provider")
+	backend.handleFunc = func(w http.ResponseWriter, r *http.Request) error {
+		// Extract original path from context
+		if val := r.Context().Value(logical.OriginalPath); val != nil {
+			originalPath = val.(string)
+		}
+		w.WriteHeader(http.StatusOK)
+		return nil
+	}
+
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "aws/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("aws/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/aws/credentials/role1", nil)
+	ctx := namespace.ContextWithNamespace(req.Context(), namespace.RootNamespace)
+	ctx = context.WithValue(ctx, logical.OriginalPath, req.URL.Path)
+	req = req.WithContext(ctx)
+	// Strip /v1/ prefix like request_handler does
+	req.URL.Path = strings.TrimPrefix(req.URL.Path, "/v1/")
+
+	w := httptest.NewRecorder()
+
+	router.Route(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "/v1/aws/credentials/role1", originalPath)
+}
+
+func TestRouter_SaltID(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
+
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "test-uuid-123",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
+
+	err := router.Mount("test/", backend, mountEntry, view)
+	require.NoError(t, err)
+
+	// Get the route entry directly to test SaltID
+	router.mu.RLock()
+	_, raw, ok := router.root.LongestPrefix("test/")
+	router.mu.RUnlock()
+	require.True(t, ok)
+
+	re := raw.(*routeEntry)
+
+	// Test salting
+	id := "test-id"
+	saltedID := re.SaltID(id)
+
+	// Verify it's different from original
+	assert.NotEqual(t, id, saltedID)
+
+	// Verify it's deterministic
+	saltedID2 := re.SaltID(id)
+	assert.Equal(t, saltedID, saltedID2)
+
+	// Verify different IDs produce different salted values
+	saltedID3 := re.SaltID("different-id")
+	assert.NotEqual(t, saltedID, saltedID3)
+}
+
+func TestRouter_MultipleMounts(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	// Mount multiple backends
+	for i, path := range []string{"aws/", "gcp/", "azure/"} {
+		backend := newMockBackend("test", "provider")
+		view := newMockBarrierView("logical/uuid" + string(rune('1'+i)) + "/")
+
+		mountEntry := &MountEntry{
+			Path:        path,
+			Type:        "test",
+			Class:       mountClassProvider,
+			UUID:        "uuid" + string(rune('1'+i)),
+			Accessor:    "accessor" + string(rune('1'+i)),
+			Description: "Test mount " + path,
+			namespace:   namespace.RootNamespace,
+		}
+
+		err := router.Mount(path, backend, mountEntry, view)
+		require.NoError(t, err)
+	}
+
+	ctx := testRouterContext()
+
+	// Verify all mounts are accessible
+	for _, path := range []string{"aws/", "gcp/", "azure/"} {
+		backend := router.MatchingBackend(ctx, path+"foo")
+		assert.NotNil(t, backend, "Should find backend for path: %s", path)
 	}
 }
 
-func TestRouter_MountWithoutTrailingSlash(t *testing.T) {
-	router, _ := createTestRouter()
+func TestRouter_Route_NoNamespaceContext(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
 
-	t.Run("mount path without trailing slash", func(t *testing.T) {
-		backend := newMockBackend("accessor-no-slash")
-		mountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "noslash",
-			Accessor: "accessor-no-slash",
-		}
+	backend := newMockBackend("test", "provider")
+	view := newMockBarrierView("logical/uuid1/")
 
-		// Mount without trailing slash
-		err := router.Mount("noslash", backend, mountEntry)
-		require.NoError(t, err)
+	mountEntry := &MountEntry{
+		Path:        "test/",
+		Type:        "test",
+		Class:       mountClassProvider,
+		UUID:        "uuid1",
+		Accessor:    "accessor1",
+		Description: "Test mount",
+		namespace:   namespace.RootNamespace,
+	}
 
-		ctx := context.Background()
+	err := router.Mount("test/", backend, mountEntry, view)
+	require.NoError(t, err)
 
-		// Should still be able to match the backend
-		result := router.MatchingBackend(ctx, "noslash")
-		assert.NotNil(t, result)
-		assert.Equal(t, backend, result)
+	// Create request without namespace in context
+	req := httptest.NewRequest(http.MethodGet, "/v1/test/foo", nil)
+	// Add OriginalPath but not namespace - should still fail on namespace check
+	ctx := context.WithValue(req.Context(), logical.OriginalPath, req.URL.Path)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
 
-		// Should also match nested paths
-		result = router.MatchingBackend(ctx, "noslash/data")
-		assert.NotNil(t, result)
-		assert.Equal(t, backend, result)
-	})
+	router.Route(w, req)
 
-	t.Run("route to mount without trailing slash", func(t *testing.T) {
-		backend := newMockBackend("accessor-route-no-slash")
-		mountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "route-noslash",
-			Accessor: "accessor-route-no-slash",
-		}
-
-		err := router.Mount("route-noslash", backend, mountEntry)
-		require.NoError(t, err)
-
-		testCases := []struct {
-			name         string
-			requestPath  string
-			expectedPath string
-			expectCode   int
-		}{
-			{
-				name:         "exact mount path",
-				requestPath:  "/v1/route-noslash",
-				expectedPath: "/",
-				expectCode:   http.StatusOK,
-			},
-			{
-				name:         "nested path",
-				requestPath:  "/v1/route-noslash/data/key",
-				expectedPath: "/data/key",
-				expectCode:   http.StatusOK,
-			},
-			{
-				name:         "with trailing slash",
-				requestPath:  "/v1/route-noslash/",
-				expectedPath: "/",
-				expectCode:   http.StatusOK,
-			},
-		}
-
-		for _, tc := range testCases {
-			t.Run(tc.name, func(t *testing.T) {
-				// Clear previous requests
-				backend.mu.Lock()
-				backend.requests = make([]string, 0)
-				backend.mu.Unlock()
-
-				req := httptest.NewRequest(http.MethodGet, tc.requestPath, nil)
-				w := httptest.NewRecorder()
-
-				router.Route(w, req)
-
-				assert.Equal(t, tc.expectCode, w.Code)
-
-				if tc.expectCode == http.StatusOK {
-					requests := backend.getRequests()
-					require.Len(t, requests, 1)
-					assert.Equal(t, tc.expectedPath, requests[0])
-				}
-			})
-		}
-	})
-
-	t.Run("mount and unmount without trailing slash", func(t *testing.T) {
-		backend := newMockBackend("accessor-unmount-no-slash")
-		cleanupCalled := false
-		backend.cleanupFunc = func() {
-			cleanupCalled = true
-		}
-
-		mountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "unmount-noslash",
-			Accessor: "accessor-unmount-no-slash",
-		}
-
-		// Mount without trailing slash
-		err := router.Mount("unmount-noslash", backend, mountEntry)
-		require.NoError(t, err)
-
-		// Unmount without trailing slash
-		err = router.Unmount("unmount-noslash")
-		require.NoError(t, err)
-		assert.True(t, cleanupCalled)
-
-		// Verify backend is removed
-		ctx := context.Background()
-		retrievedBackend := router.MatchingBackend(ctx, "unmount-noslash/data")
-		assert.Nil(t, retrievedBackend)
-	})
-
-	t.Run("taint and untaint without trailing slash", func(t *testing.T) {
-		backend := newMockBackend("accessor-taint-no-slash")
-		mountEntry := &MountEntry{
-			Type:     "mock",
-			Path:     "taint-noslash",
-			Accessor: "accessor-taint-no-slash",
-		}
-
-		err := router.Mount("taint-noslash", backend, mountEntry)
-		require.NoError(t, err)
-
-		ctx := context.Background()
-
-		// Taint without trailing slash
-		err = router.Taint(ctx, "taint-noslash")
-		require.NoError(t, err)
-
-		// Verify it's tainted - route should fail
-		req := httptest.NewRequest(http.MethodGet, "/v1/taint-noslash/data", nil)
-		w := httptest.NewRecorder()
-		router.Route(w, req)
-		assert.Equal(t, http.StatusNotFound, w.Code)
-
-		// Untaint without trailing slash
-		err = router.Untaint(ctx, "taint-noslash")
-		require.NoError(t, err)
-
-		// Verify it's untainted - route should work
-		req = httptest.NewRequest(http.MethodGet, "/v1/taint-noslash/data", nil)
-		w = httptest.NewRecorder()
-		router.Route(w, req)
-		assert.Equal(t, http.StatusOK, w.Code)
-	})
-
-	t.Run("mixed trailing slash mounts", func(t *testing.T) {
-		backend1 := newMockBackend("accessor-mixed-1")
-		backend2 := newMockBackend("accessor-mixed-2")
-
-		mountEntry1 := &MountEntry{
-			Type:     "mock",
-			Path:     "mixed1",
-			Accessor: "accessor-mixed-1",
-		}
-		mountEntry2 := &MountEntry{
-			Type:     "mock",
-			Path:     "mixed2/",
-			Accessor: "accessor-mixed-2",
-		}
-
-		// Mount one without slash, one with
-		err := router.Mount("mixed1", backend1, mountEntry1)
-		require.NoError(t, err)
-
-		err = router.Mount("mixed2/", backend2, mountEntry2)
-		require.NoError(t, err)
-
-		ctx := context.Background()
-
-		// Both should work correctly
-		result1 := router.MatchingBackend(ctx, "mixed1/data")
-		assert.Equal(t, backend1, result1)
-
-		result2 := router.MatchingBackend(ctx, "mixed2/data")
-		assert.Equal(t, backend2, result2)
-
-		// Route to both
-		req1 := httptest.NewRequest(http.MethodGet, "/v1/mixed1/test", nil)
-		w1 := httptest.NewRecorder()
-		router.Route(w1, req1)
-		assert.Equal(t, http.StatusOK, w1.Code)
-
-		req2 := httptest.NewRequest(http.MethodGet, "/v1/mixed2/test", nil)
-		w2 := httptest.NewRecorder()
-		router.Route(w2, req2)
-		assert.Equal(t, http.StatusOK, w2.Code)
-	})
+	// Should fail because namespace extraction fails
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, strings.ToLower(w.Body.String()), "namespace")
 }

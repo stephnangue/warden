@@ -1,41 +1,12 @@
 package core
 
 import (
+	"context"
 	"testing"
 
-	"github.com/openbao/openbao/helper/locking"
-	"github.com/stephnangue/warden/auth"
-	"github.com/stephnangue/warden/auth/token"
-	"github.com/stephnangue/warden/authorize"
-	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/provider"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-// Helper function to create a test core with all dependencies
-func createTestCore(t *testing.T) *Core {
-	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	router := NewRouter(log)
-	tokenStore, err := token.NewRobustStore(log, nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { tokenStore.Close() })
-
-	return &Core{
-		logger:        log,
-		router:        router,
-		mounts:        NewMountTable(),
-		mountsLock:    locking.DeadlockRWMutex{},
-		authMethods:   make(map[string]auth.Factory),
-		providers:     make(map[string]provider.Factory),
-		tokenStore:    tokenStore,
-		roles:         authorize.NewRoleRegistry(),
-		accessControl: authorize.NewAccessControl(),
-		credSources:   cred.NewCredSourceRegistry(),
-		auditManager:  &mockAuditManager{},
-	}
-}
 
 func TestNewSystemBackend(t *testing.T) {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
@@ -91,9 +62,9 @@ func TestSystemBackend_Cleanup(t *testing.T) {
 	backend := NewSystemBackend(core, log)
 
 	// Should not panic
-	backend.Cleanup()
+	ctx := context.Background()
+	backend.Cleanup(ctx)
 }
-
 
 func TestValidateMountPath(t *testing.T) {
 	tests := []struct {

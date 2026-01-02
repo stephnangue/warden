@@ -13,11 +13,11 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/pires/go-proxyproto"
-	"github.com/stephnangue/warden/auth/token"
 	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/listener/mysql/server"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/target"
 )
 
@@ -30,7 +30,7 @@ type MysqlListener struct {
 	credSources *cred.CredSourceRegistry
 	targets     *target.TargetRegistry
 	wg          sync.WaitGroup
-	tokenStore  token.TokenAccess
+	tokenStore  logical.TokenAccess
 	stopped     atomic.Bool
 }
 
@@ -53,7 +53,7 @@ type MysqlListenerConfig struct {
 	TLSClientCAFile string
 	TLSEnabled      bool
 
-	TokenStore token.TokenAccess
+	TokenStore logical.TokenAccess
 }
 
 // NewMysqlListener creates new listener using provided config. There are

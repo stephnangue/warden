@@ -9,11 +9,10 @@ import (
 	"testing"
 
 	aeadwrapper "github.com/openbao/go-kms-wrapping/wrappers/aead/v2"
-	"github.com/stephnangue/warden/auth/token"
+	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/core/seal"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/physical/inmem"
-	"github.com/stephnangue/warden/audit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,10 +69,14 @@ func (d *testAuditDeviceForPreInit) GetAccessor() string {
 	return ""
 }
 
-func (d *testAuditDeviceForPreInit) Cleanup() {
+func (d *testAuditDeviceForPreInit) Cleanup(ctx context.Context) {
 }
 
-func (d *testAuditDeviceForPreInit) Setup(conf map[string]any) error {
+func (d *testAuditDeviceForPreInit) Setup(ctx context.Context, conf map[string]any) error {
+	return nil
+}
+
+func (d *testAuditDeviceForPreInit) Initialize(ctx context.Context) error {
 	return nil
 }
 
@@ -119,17 +122,12 @@ func createTestCoreForPreInit(t *testing.T) (*Core, *logger.GatedLogger) {
 	shamirWrapper := aeadwrapper.NewShamirWrapper()
 	testSeal := NewDefaultSeal(seal.NewAccess(shamirWrapper))
 
-	// Create token store
-	tokenStore, err := token.NewRobustStore(log, nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { tokenStore.Close() })
-
 	coreConfig := &CoreConfig{
 		Physical:     phys,
 		Seal:         testSeal,
-		TokenStore:   tokenStore,
 		Logger:       log,
 		AuditDevices: testAuditDevicesForPreInit(),
+		// TokenStore is now created internally in CreateCore
 	}
 
 	// Use NewCore which sets up barrier and other components

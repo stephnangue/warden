@@ -29,8 +29,8 @@ import (
 type PreInitHandler struct {
 	core    *Core
 	logger  *logger.GatedLogger
-	router  *chi.Mux      // Chi router for routing
-	api     huma.API      // HUMA API for automatic JSON handling
+	router  *chi.Mux // Chi router for routing
+	api     huma.API // HUMA API for automatic JSON handling
 	handler *SystemHandlers
 }
 
@@ -100,7 +100,7 @@ func (h *PreInitHandler) TryHandle(w http.ResponseWriter, r *http.Request) (bool
 
 	// Only handle paths starting with /sys/
 	if !strings.HasPrefix(path, "/sys/") {
-		return false, nil  // Not our responsibility
+		return false, nil // Not our responsibility
 	}
 
 	// Remove /sys/ prefix for routing within our Chi router
@@ -109,7 +109,7 @@ func (h *PreInitHandler) TryHandle(w http.ResponseWriter, r *http.Request) (bool
 
 	// Check if this is an init request
 	if relativePath != "/init" || r.Method != http.MethodPost {
-		return false, nil  // Not handled by pre-init
+		return false, nil // Not handled by pre-init
 	}
 
 	h.logger.Debug("pre-init handler intercepting /sys/init request",
@@ -127,5 +127,5 @@ func (h *PreInitHandler) TryHandle(w http.ResponseWriter, r *http.Request) (bool
 	// Restore original path
 	r.URL.Path = originalPath
 
-	return true, nil  // Request was handled
+	return true, nil // Request was handled
 }

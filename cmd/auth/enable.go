@@ -10,21 +10,20 @@ import (
 )
 
 var (
-	enableType         string
-	enablePath         string
-	enableDescription  string
+	enableType        string
+	enableDescription string
 
 	EnableCmd = &cobra.Command{
-		Use:   "enable",
-    	SilenceUsage:  true,
+		Use:           "enable [PATH]",
+		SilenceUsage:  true,
 		SilenceErrors: true,
-		Short: "This command enables an auth method.",
+		Short:         "This command enables an auth method.",
 		Long: `
-Usage: warden auth enable [options]
+Usage: warden auth enable [options] [PATH]
 
   Enables an auth method. By default, auth methods are enabled at the path
-  corresponding to their TYPE, but users can customize the path using the
-  --path option.
+  corresponding to their TYPE, but users can customize the path by providing
+  it as a positional argument.
 
   Once enabled, Warden will route all authentication requests which begin
   with the path to the auth method.
@@ -35,7 +34,7 @@ Usage: warden auth enable [options]
 
   Enable the OIDC auth method at oidc-prod/:
 
-      $ warden auth enable --type=oidc --path=oidc-prod
+      $ warden auth enable --type=oidc oidc-prod
 
   For a full list of auth methods and examples, please see the documentation.
 `,
@@ -45,7 +44,6 @@ Usage: warden auth enable [options]
 
 func init() {
 	EnableCmd.Flags().StringVar(&enableType, "type", "", "Type of the auth method (e.g., jwt, oidc, ldap) (required)")
-	EnableCmd.Flags().StringVar(&enablePath, "path", "", "Path where the auth method will be mounted (default: <type>/)")
 	EnableCmd.Flags().StringVar(&enableDescription, "description", "", "Human-friendly description of the auth method")
 	EnableCmd.MarkFlagRequired("type")
 }
@@ -57,9 +55,11 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Use type as default path if path is not specified
-	path := enablePath
-	if path == "" {
+	// Determine path from positional argument or use type as default
+	var path string
+	if len(args) > 0 {
+		path = args[0]
+	} else {
 		path = enableType + "/"
 	}
 

@@ -316,6 +316,9 @@ type AuditManager interface {
 	// Returns (continue, error) where continue is true if at least one device succeeded
 	LogResponse(ctx context.Context, entry *LogEntry) (bool, error)
 
+	// Unregister all registered audit devices
+	Reset(ctx context.Context) error
+
 	// Close closes all devices
 	Close() error
 }

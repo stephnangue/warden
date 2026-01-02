@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,9 +36,13 @@ const (
 	EnvWardenTLSServerName    = "WARDEN_TLS_SERVER_NAME"
 	EnvWardenMaxRetries       = "WARDEN_MAX_RETRIES"
 	EnvWardenToken            = "WARDEN_TOKEN"
+	EnvWardenNamespace        = "WARDEN_NAMESPACE"
 	EnvRateLimit              = "WARDEN_RATE_LIMIT"
 	EnvHTTPProxy              = "WARDEN_HTTP_PROXY"
 	EnvWardenProxyAddr        = "WARDEN_PROXY_ADDR"
+
+	// NamespaceHeaderName is the header name used to specify the namespace
+	NamespaceHeaderName = "X-Warden-Namespace"
 
 
 	TLSErrorString = "This error usually means that the server is running with TLS disabled\n" +
@@ -130,6 +135,10 @@ type Config struct {
 	Limiter *rate.Limiter
 
 	clientTLSConfig *tls.Config
+
+	// CloneHeaders ensures that the source client's headers are copied to
+	// its clone.
+	CloneHeaders bool
 }
 
 // TLSConfig contains the parameters needed to configure TLS on the HTTP client
@@ -480,6 +489,7 @@ type Client struct {
 	addr               *url.URL
 	config             *Config
 	token              string
+	headers            http.Header
 }
 
 // NewClient returns a new client for the given configuration.
@@ -531,11 +541,16 @@ func NewClient(c *Config) (*Client, error) {
 	client := &Client{
 		addr:    u,
 		config:  c,
+		headers: make(http.Header),
 	}
 
 	if token := ReadWardenVariable(EnvWardenToken); token != "" {
 		client.token = token
 	}
+
+	if ns := ReadWardenVariable(EnvWardenNamespace); ns != "" {
+		client.setNamespace(ns)
+	} 
 
 	return client, nil
 }
@@ -793,6 +808,161 @@ func (c *Client) ClearToken() {
 	c.token = ""
 }
 
+// SetCloneHeaders to allow headers to be copied whenever the client is cloned.
+func (c *Client) SetCloneHeaders(cloneHeaders bool) {
+	c.modifyLock.Lock()
+	defer c.modifyLock.Unlock()
+	c.config.modifyLock.Lock()
+	defer c.config.modifyLock.Unlock()
+
+	c.config.CloneHeaders = cloneHeaders
+}
+
+// CloneHeaders gets the configured CloneHeaders value.
+func (c *Client) CloneHeaders() bool {
+	c.modifyLock.RLock()
+	defer c.modifyLock.RUnlock()
+	c.config.modifyLock.RLock()
+	defer c.config.modifyLock.RUnlock()
+
+	return c.config.CloneHeaders
+}
+
+// Clone creates a new client with the same configuration. Note that the same
+// underlying http.Client is used; modifying the client from more than one
+// goroutine at once may not be safe, so modify the client as needed and then
+// clone. The headers are cloned based on the CloneHeaders property of the
+// source config
+//
+// Also, only the client's config is currently copied; this means items not in
+// the api.Config struct, such as policy override and wrapping function
+// behavior, must currently then be set as desired on the new client.
+func (c *Client) Clone() (*Client, error) {
+	return c.clone(c.config.CloneHeaders)
+}
+
+// CloneWithHeaders creates a new client similar to Clone, with the difference
+// being that the  headers are always cloned
+func (c *Client) CloneWithHeaders() (*Client, error) {
+	return c.clone(true)
+}
+
+// clone creates a new client, with the headers being cloned based on the
+// passed in cloneheaders boolean
+func (c *Client) clone(cloneHeaders bool) (*Client, error) {
+	c.modifyLock.RLock()
+	defer c.modifyLock.RUnlock()
+
+	config := c.config
+	config.modifyLock.RLock()
+	defer config.modifyLock.RUnlock()
+
+	newConfig := &Config{
+		Address:      config.Address,
+		HttpClient:   config.HttpClient,
+		MinRetryWait: config.MinRetryWait,
+		MaxRetryWait: config.MaxRetryWait,
+		MaxRetries:   config.MaxRetries,
+		Timeout:      config.Timeout,
+		Backoff:      config.Backoff,
+		CheckRetry:   config.CheckRetry,
+		Logger:       config.Logger,
+		Limiter:      config.Limiter,
+		SRVLookup:    config.SRVLookup,
+		CloneHeaders: config.CloneHeaders,
+	}
+	client, err := NewClient(newConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	if cloneHeaders {
+		client.SetHeaders(c.Headers().Clone())
+	}
+
+	return client, nil
+}
+
+// SetHeaders clears all previous headers and uses only the given
+// ones going forward.
+func (c *Client) SetHeaders(headers http.Header) {
+	c.modifyLock.Lock()
+	defer c.modifyLock.Unlock()
+	c.headers = headers
+}
+
+// Headers gets the current set of headers used for requests. This returns a
+// copy; to modify it call AddHeader or SetHeaders.
+func (c *Client) Headers() http.Header {
+	c.modifyLock.RLock()
+	defer c.modifyLock.RUnlock()
+
+	if c.headers == nil {
+		return nil
+	}
+
+	ret := make(http.Header)
+	for k, v := range c.headers {
+		ret[k] = slices.Clone(v)
+	}
+
+	return ret
+}
+
+
+// SetNamespace sets the namespace supplied either via the environment variable
+// or via the command line.
+func (c *Client) SetNamespace(namespace string) {
+	c.modifyLock.Lock()
+	defer c.modifyLock.Unlock()
+	c.setNamespace(namespace)
+}
+
+// setNamespace sets the namespace in the client headers. This method requires
+// that the caller hold the client's modifyLock.
+func (c *Client) setNamespace(namespace string) {
+	if c.headers == nil {
+		c.headers = make(http.Header)
+	}
+
+	c.headers.Set(NamespaceHeaderName, namespace)
+}
+
+// ClearNamespace removes the namespace header from the client if it exists.
+func (c *Client) ClearNamespace() {
+	c.modifyLock.Lock()
+	defer c.modifyLock.Unlock()
+	if c.headers != nil {
+		c.headers.Del(NamespaceHeaderName)
+	}
+}
+
+// Namespace returns the namespace currently set in this client. It will
+// return an empty string if there is no namespace set.
+func (c *Client) Namespace() string {
+	c.modifyLock.Lock()
+	defer c.modifyLock.Unlock()
+	if c.headers == nil {
+		return ""
+	}
+	return c.headers.Get(NamespaceHeaderName)
+}
+
+// WithNamespace makes a shallow copy of Client, modifies it to use
+// the given namespace, and returns it. Passing an empty string will
+// temporarily unset the namespace.
+func (c *Client) WithNamespace(namespace string) *Client {
+	c2 := *c
+	c2.modifyLock = sync.RWMutex{}
+	c2.headers = c.Headers()
+	if namespace == "" {
+		c2.ClearNamespace()
+	} else {
+		c2.SetNamespace(namespace)
+	}
+	return &c2
+}
+
 // SetBackoff sets the backoff function to be used for future requests.
 func (c *Client) SetBackoff(backoff retryablehttp.Backoff) {
 	c.modifyLock.RLock()
@@ -813,11 +983,12 @@ func (c *Client) SetLogger(logger retryablehttp.LeveledLogger) {
 }
 
 // NewRequest creates a new raw request object to query the Vault server
-// configured for this client. 
+// configured for this client.
 func (c *Client) NewRequest(method, requestPath string) *Request {
 	c.modifyLock.RLock()
 	addr := c.addr
 	token := c.token
+	headers := c.headers
 	c.modifyLock.RUnlock()
 
 	host := addr.Host
@@ -842,6 +1013,11 @@ func (c *Client) NewRequest(method, requestPath string) *Request {
 		Host:        addr.Host,
 		ClientToken: token,
 		Params:      make(map[string][]string),
+	}
+
+	// Copy client headers to the request
+	if headers != nil {
+		req.Headers = headers.Clone()
 	}
 
 	return req
@@ -870,6 +1046,14 @@ func (c *Client) rawRequestWithContext(ctx context.Context, r *Request) (*Respon
 	outputCurlString := c.config.OutputCurlString
 	logger := c.config.Logger
 	c.config.modifyLock.RUnlock()
+
+	// Ensure that the most current namespace setting is used at the time of the call
+	// e.g. calls using (*Client).WithNamespace
+	// Only override if client has a namespace set - this preserves request-level namespace
+	ns := c.headers.Get(NamespaceHeaderName)
+	if ns != "" {
+		r.Headers.Set(NamespaceHeaderName, ns)
+	}
 
 	c.modifyLock.RUnlock()
 

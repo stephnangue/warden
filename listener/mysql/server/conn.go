@@ -1,8 +1,8 @@
 package server
 
 import (
+	"context"
 	"errors"
-	"maps"
 	"net"
 	"sync/atomic"
 
@@ -94,16 +94,16 @@ func (c *Conn) handshake() error {
 	}
 
 	// we fetch the principal_id and the role_name here
-	reqContext := make(map[string]string)
-	maps.Copy(reqContext, c.attributes)
 
 	clientIP := c.Conn.RemoteAddr().String()
 	if host, _, err := net.SplitHostPort(clientIP); err == nil {
 		clientIP = host
 	}
-	reqContext["client_ip"] = clientIP
 
-	id, role, ok, err := c.authResolver.Resolve(c.user, reqContext)
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, "client_ip", clientIP)
+
+	id, role, ok, err := c.authResolver.Resolve(ctx, c.user)
 	if !ok && err == nil {
 		var usingPasswd uint16 = mysql.ER_NO
 		err = mysql.NewDefaultError(mysql.ER_ACCESS_DENIED_ERROR, c.user,

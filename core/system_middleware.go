@@ -2,10 +2,10 @@ package core
 
 import (
 	"context"
-	"net"
 	"net/http"
 	"strings"
 
+	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -51,26 +51,15 @@ func (s *SystemBackend) AuthenticationMiddleware(next http.Handler) http.Handler
 
 		tokenValue := parts[1]
 
-		// Use Chi's RealIP middleware result (should be set by router)
-		clientIP := r.Header.Get("X-Real-IP")
-		if clientIP == "" {
-			// Fallback if RealIP middleware wasn't applied
-			clientIP = r.RemoteAddr
+		ctx := r.Context()
+
+		// Store request ID in context
+		if reqID := middleware.GetReqID(ctx); reqID != "" {
+			ctx = context.WithValue(ctx, "request_id", reqID)
 		}
 
-		// Remove port if present
-		if host, _, err := net.SplitHostPort(clientIP); err == nil {
-			clientIP = host
-		}
-
-		// Resolve token using Core's TokenStore
-		principalID, roleName, err := s.core.tokenStore.ResolveToken(
-			r.Context(),
-			tokenValue,
-			map[string]string{
-				"client_ip": clientIP,
-			},
-		)
+		// Resolve token using Core's TokenStore (with namespace context)
+		principalID, roleName, err := s.core.tokenStore.ResolveToken(ctx, tokenValue)
 		if err != nil {
 			s.logger.Warn("token resolution failed",
 				logger.Err(err),
@@ -79,13 +68,9 @@ func (s *SystemBackend) AuthenticationMiddleware(next http.Handler) http.Handler
 			return
 		}
 
-		// Get token object for metadata
-		token := s.core.tokenStore.GetToken(tokenValue)
-
 		// Store authenticated data in context
-		ctx := context.WithValue(r.Context(), SystemPrincipalIDKey, principalID)
+		ctx = context.WithValue(ctx, SystemPrincipalIDKey, principalID)
 		ctx = context.WithValue(ctx, SystemRoleNameKey, roleName)
-		ctx = context.WithValue(ctx, SystemTokenKey, token)
 
 		// Continue with authenticated context
 		next.ServeHTTP(w, r.WithContext(ctx))
