@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/danielgtaylor/huma/v2/adapters/humachi"
-	"github.com/go-chi/chi/v5"
+	"github.com/danielgtaylor/huma/v2/adapters/humamux"
+	"github.com/gorilla/mux"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -16,7 +16,7 @@ import (
 type SystemBackend struct {
 	core     *Core
 	logger   *logger.GatedLogger
-	router   *chi.Mux
+	router   *mux.Router
 	api      huma.API
 	handlers *SystemHandlers
 }
@@ -46,8 +46,8 @@ func (h *SystemHandlers) checkSystemAdmin(ctx context.Context) error {
 
 // NewSystemBackend creates a new system backend with HUMA integration
 func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
-	// Create Chi router
-	router := chi.NewRouter()
+	// Create Gorilla Mux router
+	router := mux.NewRouter()
 
 	// Configure HUMA
 	config := huma.DefaultConfig("Warden System API", "1.0.0")
@@ -58,6 +58,7 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 	config.Tags = []*huma.Tag{
 		{Name: "mounts", Description: "Provider mount management"},
 		{Name: "auth", Description: "Auth method management"},
+		{Name: "namespaces", Description: "Namespace management"},
 	}
 
 	// Add security scheme for Bearer token authentication
@@ -87,25 +88,26 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 	// Apply authentication middleware (with exemptions for bootstrap endpoints)
 	router.Use(backend.AuthenticationMiddleware)
 
-	// Create HUMA API with Chi adapter
-	api := humachi.New(router, config)
+	// Create HUMA API with Gorilla Mux adapter
+	api := humamux.New(router, config)
 	backend.api = api
 
 	// Register all endpoints
 	backend.registerInitOperations()
 	backend.registerProviderOperations()
 	backend.registerAuthOperations()
+	backend.registerNamespaceOperations()
 
 	return backend
 }
 
 // registerProviderOperations registers all providers management endpoints
 func (s *SystemBackend) registerProviderOperations() {
-	// POST /providers/{path} - Enable provider
+	// POST /providers/{path...} - Enable provider
 	huma.Register(s.api, huma.Operation{
 		OperationID: "enable-provider",
 		Method:      http.MethodPost,
-		Path:        "/providers/{path}",
+		Path:        "/providers/{path:.+}",
 		Summary:     "Enable a provider",
 		Description: "Creates a new provider at the specified path. Requires system_admin role.",
 		Tags:        []string{"providers"},
@@ -114,11 +116,11 @@ func (s *SystemBackend) registerProviderOperations() {
 		},
 	}, s.handlers.MountProvider)
 
-	// DELETE /providers/{path} - Disable provider
+	// DELETE /providers/{path...} - Disable provider
 	huma.Register(s.api, huma.Operation{
 		OperationID: "disable-provider",
 		Method:      http.MethodDelete,
-		Path:        "/providers/{path}",
+		Path:        "/providers/{path:.+}",
 		Summary:     "Disable a provider",
 		Description: "Removes a provider from the specified path. Requires system_admin role.",
 		Tags:        []string{"providers"},
@@ -127,11 +129,11 @@ func (s *SystemBackend) registerProviderOperations() {
 		},
 	}, s.handlers.UnmountProvider)
 
-	// GET /providers/{path} - Get provider info
+	// GET /providers/{path...} - Get provider info
 	huma.Register(s.api, huma.Operation{
 		OperationID: "get-provider",
 		Method:      http.MethodGet,
-		Path:        "/providers/{path}",
+		Path:        "/providers/{path:.+}",
 		Summary:     "Get provider information",
 		Description: "Retrieves detailed information about a specific provider",
 		Tags:        []string{"providers"},
@@ -153,11 +155,11 @@ func (s *SystemBackend) registerProviderOperations() {
 		},
 	}, s.handlers.ListMounts)
 
-	// PUT /providers/{path}/config - Configure a provider
+	// PUT /providers/{path...}/config - Configure a provider
 	huma.Register(s.api, huma.Operation{
 		OperationID: "configure-provider",
 		Method:      http.MethodPut,
-		Path:        "/providers/{path}/config",
+		Path:        "/providers/{path:.+}/config",
 		Summary:     "Configure a provider",
 		Description: "Configure an existing provider enabled on the provided path",
 		Tags:        []string{"providers"},
@@ -169,39 +171,39 @@ func (s *SystemBackend) registerProviderOperations() {
 
 // registerAuthOperations registers all auth method management endpoints
 func (s *SystemBackend) registerAuthOperations() {
-	// POST /auth/{path} - Enable auth method
+	// POST /auth/{path...} - Enable auth method
 	huma.Register(s.api, huma.Operation{
 		OperationID: "enable-auth",
 		Method:      http.MethodPost,
-		Path:        "/auth/{path}",
+		Path:        "/auth/{path:.+}",
 		Summary:     "Enable an auth method",
-		Description: "Creates a new auth method at the specified path. Requires system_admin role.",
+		Description: "Creates a new auth method at the specified path. Supports nested paths. Requires system_admin role.",
 		Tags:        []string{"auth"},
 		Security: []map[string][]string{
 			{"bearerAuth": {}},
 		},
 	}, s.handlers.MountAuth)
 
-	// DELETE /auth/{path} - Disable auth method
+	// DELETE /auth/{path...} - Disable auth method
 	huma.Register(s.api, huma.Operation{
 		OperationID: "disable-auth",
 		Method:      http.MethodDelete,
-		Path:        "/auth/{path}",
+		Path:        "/auth/{path:.+}",
 		Summary:     "Disable an auth method",
-		Description: "Removes an auth method from the specified path. Requires system_admin role.",
+		Description: "Removes an auth method from the specified path. Supports nested paths. Requires system_admin role.",
 		Tags:        []string{"auth"},
 		Security: []map[string][]string{
 			{"bearerAuth": {}},
 		},
 	}, s.handlers.UnmountAuth)
 
-	// GET /auth/{path} - Get auth method info
+	// GET /auth/{path...} - Get auth method info
 	huma.Register(s.api, huma.Operation{
 		OperationID: "get-auth",
 		Method:      http.MethodGet,
-		Path:        "/auth/{path}",
+		Path:        "/auth/{path:.+}",
 		Summary:     "Get auth method information",
-		Description: "Retrieves detailed information about a specific auth method",
+		Description: "Retrieves detailed information about a specific auth method. Supports nested paths.",
 		Tags:        []string{"auth"},
 		Security: []map[string][]string{
 			{"bearerAuth": {}},
@@ -221,18 +223,87 @@ func (s *SystemBackend) registerAuthOperations() {
 		},
 	}, s.handlers.ListAuths)
 
-	// PUT /auth/{path}/config - Configure an auth method
+	// PUT /auth/{path...}/config - Configure an auth method
 	huma.Register(s.api, huma.Operation{
 		OperationID: "configure-auth",
 		Method:      http.MethodPut,
-		Path:        "/auth/{path}/config",
+		Path:        "/auth/{path:.+}/config",
 		Summary:     "Configure an auth method",
-		Description: "Configure an existing auth method enabled on the provided path",
+		Description: "Configure an existing auth method enabled on the provided path. Supports nested paths.",
 		Tags:        []string{"auth"},
 		Security: []map[string][]string{
 			{"bearerAuth": {}},
 		},
 	}, s.handlers.ConfigureAuth)
+}
+
+// registerNamespaceOperations registers all namespace management endpoints
+func (s *SystemBackend) registerNamespaceOperations() {
+	// POST /namespaces/{path:.+} - Create namespace
+	// {path:.+} is Gorilla Mux regex syntax - matches one or more chars including slashes
+	huma.Register(s.api, huma.Operation{
+		OperationID: "create-namespace",
+		Method:      http.MethodPost,
+		Path:        "/namespaces/{path:.+}",
+		Summary:     "Create a namespace",
+		Description: "Creates a new namespace at the specified path. Requires system_admin role.",
+		Tags:        []string{"namespaces"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.CreateNamespace)
+
+	// GET /namespaces/{path:.+} - Get namespace info
+	huma.Register(s.api, huma.Operation{
+		OperationID: "get-namespace",
+		Method:      http.MethodGet,
+		Path:        "/namespaces/{path:.+}",
+		Summary:     "Get namespace information",
+		Description: "Retrieves detailed information about a specific namespace",
+		Tags:        []string{"namespaces"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.GetNamespace)
+
+	// GET /namespaces - List namespaces
+	huma.Register(s.api, huma.Operation{
+		OperationID: "list-namespaces",
+		Method:      http.MethodGet,
+		Path:        "/namespaces",
+		Summary:     "List all namespaces",
+		Description: "Returns all namespaces. Use query parameters to filter results.",
+		Tags:        []string{"namespaces"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.ListNamespaces)
+
+	// PUT /namespaces/{path:.+} - Update namespace
+	huma.Register(s.api, huma.Operation{
+		OperationID: "update-namespace",
+		Method:      http.MethodPut,
+		Path:        "/namespaces/{path:.+}",
+		Summary:     "Update a namespace",
+		Description: "Updates metadata for an existing namespace. Requires system_admin role.",
+		Tags:        []string{"namespaces"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.UpdateNamespace)
+
+	// DELETE /namespaces/{path:.+} - Delete namespace
+	huma.Register(s.api, huma.Operation{
+		OperationID: "delete-namespace",
+		Method:      http.MethodDelete,
+		Path:        "/namespaces/{path:.+}",
+		Summary:     "Delete a namespace",
+		Description: "Removes a namespace. The namespace must not contain child namespaces. Requires system_admin role.",
+		Tags:        []string{"namespaces"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.DeleteNamespace)
 }
 
 // HandleRequest implements logical.Backend interface
@@ -262,13 +333,17 @@ func (s *SystemBackend) GetAccessor() string {
 }
 
 // Cleanup implements logical.Backend interface
-func (s *SystemBackend) Cleanup() {
+func (s *SystemBackend) Cleanup(ctx context.Context) {
 	// No cleanup needed
 }
 
 // Setup implements logical.Backend interface
-func (m *SystemBackend) Setup(conf map[string]any) error {
-	return  nil
+func (m *SystemBackend) Setup(ctx context.Context, conf map[string]any) error {
+	return nil
+}
+
+func (m *SystemBackend) Initialize(ctx context.Context) error {
+	return nil
 }
 
 // Config implements logical.Backend interface

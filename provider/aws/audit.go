@@ -11,12 +11,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/audit"
-	"github.com/stephnangue/warden/auth/token"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
 
-func (p *AWSProvider) auditResponse(res *http.Response, r *http.Request, clientToken *audit.Token, awsCreds *aws.Credentials, token *token.Token, roleName, principalID string, statusCode int, message string, errorMessage string, targetURL string, metadata map[string]interface{}) bool {
+func (p *AWSProvider) auditResponse(res *http.Response, r *http.Request, clientToken *audit.Token, awsCreds *aws.Credentials, token *logical.TokenEntry, roleName, principalID string, statusCode int, message string, errorMessage string, targetURL string, metadata map[string]interface{}) bool {
 	var auth *audit.Auth
 	if clientToken != nil {
 		data := make(map[string]string, len(clientToken.Data))
@@ -118,7 +117,7 @@ func (p *AWSProvider) buildAuth(clientToken *audit.Token, roleName, principalID 
 	return &auth
 }
 
-func (p *AWSProvider) buildCred(token *token.Token, awsCreds *aws.Credentials) *audit.Cred {
+func (p *AWSProvider) buildCred(token *logical.TokenEntry, awsCreds *aws.Credentials) *audit.Cred {
 	// Determine credential type
 	credType := string(token.Type)
 

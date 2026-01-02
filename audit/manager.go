@@ -88,6 +88,15 @@ func (m *manager) GetDevice(name string) (Device, error) {
 	return device, nil
 }
 
+func (m *manager) Reset(ctx context.Context) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	m.devices = make(map[string]Device)
+
+	return nil
+}
+
 // ListDevices returns all registered devices
 func (m *manager) ListDevices() []string {
 	m.mu.RLock()

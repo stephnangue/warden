@@ -9,34 +9,32 @@ import (
 )
 
 var (
-	tunePath   string
 	tuneConfig map[string]string
 
 	TuneCmd = &cobra.Command{
-		Use:   "tune",
-    	SilenceUsage:  true,
+		Use:           "tune PATH",
+		SilenceUsage:  true,
 		SilenceErrors: true,
-		Short: "Tune configuration parameters for an auth method",
+		Short:         "Tune configuration parameters for an auth method",
 		Long: `
-Usage: warden auth tune --path=PATH [--config key=value]...
+Usage: warden auth tune PATH [--config key=value]...
 
   Tune configuration parameters for an auth method at the given PATH.
   This allows updating auth method configuration without disabling and re-enabling.
 
   Update token TTL for JWT auth method:
 
-      $ warden auth tune --path=jwt/ --config default_lease_ttl=1h
+      $ warden auth tune jwt/ --config default_lease_ttl=1h
 
   For a full list of tunable parameters, please see the auth method documentation.
 `,
+		Args: cobra.ExactArgs(1),
 		RunE: runTune,
 	}
 )
 
 func init() {
-	TuneCmd.Flags().StringVar(&tunePath, "path", "", "Path of the auth method to tune (required)")
 	TuneCmd.Flags().StringToStringVar(&tuneConfig, "config", nil, "Configuration key-value pairs to update (can be specified multiple times)")
-	TuneCmd.MarkFlagRequired("path")
 }
 
 // isArrayConfig returns true if the given configuration key is known to be an array type
@@ -55,6 +53,8 @@ func runTune(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	path := args[0]
 
 	// Check if config is provided
 	if len(tuneConfig) == 0 {
@@ -80,11 +80,11 @@ func runTune(cmd *cobra.Command, args []string) error {
 	}
 
 	// Tune the auth method
-	err = c.Sys().TuneAuth(tunePath, config)
+	err = c.Sys().TuneAuth(path, config)
 	if err != nil {
-		return fmt.Errorf("error tuning auth method at path %s: %w", tunePath, err)
+		return fmt.Errorf("error tuning auth method at path %s: %w", path, err)
 	}
 
-	fmt.Printf("Success! Tuned auth method at: %s\n", tunePath)
+	fmt.Printf("Success! Tuned auth method at: %s\n", path)
 	return nil
 }

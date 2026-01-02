@@ -17,6 +17,17 @@ import (
 	"github.com/stephnangue/warden/logger"
 )
 
+const (
+	// coreAuditConfigPath is used to store the audit configuration.
+	// Audit configuration is protected within the Vault itself, which means it
+	// can only be viewed or modified after an unseal.
+	coreAuditConfigPath = "core/audit"
+
+	// auditBarrierPrefix is the prefix to the UUID used in the
+	// barrier view for the audit backends.
+	auditBarrierPrefix = "audit/"
+)
+
 // isAuditExempt checks if a request should be allowed even when no audit devices are configured.
 // Only bootstrap operations that must work before audit devices are set up are exempted.
 func isAuditExempt(req *http.Request) bool {
@@ -98,21 +109,28 @@ func (c *Core) auditRequest(req *http.Request) bool {
 	return true
 }
 
-func (c *Core) LoadAudits(ctx context.Context) error {
-	// err := c.EnableAudit(ctx, &MountEntry{
-	// 	Class:       "audit",
-	// 	Type:        "file",
-	// 	Path:        "file-device",
-	// 	Description: "file audit device",
-	// 	Config: map[string]any{
-	// 		"file_path": "/logs/warden-audit.log",
-	// 		"hmac_key":  "your-secret-key-here",
-	// 	}}, false)
-	// if err != nil {
-	// 	return err
-	// }
+func (c *Core) loadAudits(ctx context.Context) error {
+	err := c.EnableAudit(ctx, &MountEntry{
+		Class:       "audit",
+		Type:        "file",
+		Path:        "file-device",
+		Description: "file audit device",
+		Config: map[string]any{
+			"file_path": "warden-audit.log",
+			"hmac_key":  "your-secret-key-here",
+		}}, false)
+	if err != nil {
+		return err
+	}
 
 	return nil
+}
+
+func (c *Core) teardownAudits(ctx context.Context) error {
+	// Reset the audit mount table to empty instead of nil to avoid
+	// nil pointer dereference when loadAudits is called during next unseal
+	c.audit = NewMountTable()
+	return c.auditManager.Reset(ctx)
 }
 
 // EnableAudit is used to enable a new audit backend

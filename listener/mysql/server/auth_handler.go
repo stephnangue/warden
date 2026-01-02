@@ -1,6 +1,8 @@
 package server
 
+import "context"
+
 type Resolver interface {
 	// Resolve returns the principal_id and the role_name
-	Resolve(user string, reqContext map[string]string) (string, string, bool, error)
+	Resolve(ctx context.Context, user string) (string, string, bool, error)
 }

@@ -36,7 +36,6 @@ type InitResult struct {
 
 var initInProgress uint32
 
-
 // Initialized checks if the Warden is already initialized. This means that
 // the barrier has been created (with keyring and root key)
 // and the seal config written to storage,
@@ -59,7 +58,7 @@ func (c *Core) InitializedLocally(ctx context.Context) (bool, error) {
 	// Check the barrier first
 	init, err := c.barrier.Initialized(ctx)
 	if err != nil {
-		c.logger.Error("barrier init check failed", 
+		c.logger.Error("barrier init check failed",
 			logger.Err(err),
 		)
 		return false, err
@@ -102,7 +101,7 @@ func (c *Core) Initialize(ctx context.Context, initParams *InitParams) (*InitRes
 			// This ensures we can start using the node immediately.
 			if err := c.UnsealWithStoredKeys(ctx); err != nil {
 				// Discard this error; caller will need the root key to debug.
-				c.logger.Error("failed to automatically unseal after initialization with no recovery keys",logger.Err(err))
+				c.logger.Error("failed to automatically unseal after initialization with no recovery keys", logger.Err(err))
 				return results, nil
 			}
 		}
@@ -140,7 +139,7 @@ func (c *Core) initializeInternal(ctx context.Context, initParams *InitParams) (
 
 	// Check if the seal configuration is valid
 	if err := barrierConfig.Validate(); err != nil {
-		c.logger.Error("invalid seal configuration", 
+		c.logger.Error("invalid seal configuration",
 			logger.Err(err),
 		)
 		return nil, fmt.Errorf("invalid seal configuration: %w", err)
@@ -239,7 +238,7 @@ func (c *Core) initializeInternal(ctx context.Context, initParams *InitParams) (
 	barrierKey, barrierKeyShares, err := c.generateShares(barrierConfig)
 	if err != nil {
 		c.logger.Error("error generating shares",
-				logger.Err(err),
+			logger.Err(err),
 		)
 		return nil, err
 	}
@@ -264,12 +263,11 @@ func (c *Core) initializeInternal(ctx context.Context, initParams *InitParams) (
 		)
 		return nil, fmt.Errorf("failed to initialize barrier: %w", err)
 	}
-	c.logger.Info("security barrier initialized", 
+	c.logger.Info("security barrier initialized",
 		logger.Any("stored", barrierConfig.StoredShares),
 		logger.Any("shares", barrierConfig.SecretShares),
 		logger.Any("threshold", barrierConfig.SecretThreshold),
 	)
-
 
 	// Unseal the barrier
 	if err := c.barrier.Unseal(ctx, barrierKey); err != nil {
@@ -512,5 +510,3 @@ func (c *Core) UnsealWithStoredKeys(ctx context.Context) error {
 
 	return nil
 }
-
-

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/openbao/openbao/helper/namespace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,8 +25,8 @@ func TestSystemHandlers_MountProvider_Success(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -46,7 +47,7 @@ func TestSystemHandlers_MountProvider_Success(t *testing.T) {
 	assert.Contains(t, output.Body.Message, "Successfully mounted")
 
 	// Verify mount was created
-	found, err := core.mounts.findByPath(context.Background(), "test-provider/")
+	found, err := core.mounts.findByPath(testContext(), "test-provider/")
 	require.NoError(t, err)
 	assert.NotNil(t, found)
 	assert.Equal(t, "testprovider", found.Type)
@@ -97,8 +98,8 @@ func TestSystemHandlers_MountProvider_InvalidPath(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -132,8 +133,8 @@ func TestSystemHandlers_MountProvider_RejectsNestedPath(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -201,8 +202,8 @@ func TestSystemHandlers_MountProvider_SingleSegmentPath(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -223,7 +224,7 @@ func TestSystemHandlers_MountProvider_SingleSegmentPath(t *testing.T) {
 	assert.Contains(t, output.Body.Message, "Successfully mounted")
 
 	// Verify mount was created
-	found, err := core.mounts.findByPath(context.Background(), "aws-prod-europe/")
+	found, err := core.mounts.findByPath(testContext(), "aws-prod-europe/")
 	require.NoError(t, err)
 	assert.NotNil(t, found)
 	assert.Equal(t, "aws", found.Type)
@@ -241,7 +242,7 @@ func TestSystemHandlers_UnmountProvider_Success(t *testing.T) {
 		Path:        "test-provider/",
 		Description: "Test provider",
 	}
-	err := core.mount(context.Background(), entry)
+	err := core.mount(testContext(), entry)
 	require.NoError(t, err)
 
 	// Setup authorization
@@ -253,8 +254,8 @@ func TestSystemHandlers_UnmountProvider_Success(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -270,7 +271,7 @@ func TestSystemHandlers_UnmountProvider_Success(t *testing.T) {
 	assert.Contains(t, output.Body.Message, "Successfully unmounted")
 
 	// Verify mount was removed
-	found, err := core.mounts.findByPath(context.Background(), "test-provider/")
+	found, err := core.mounts.findByPath(testContext(), "test-provider/")
 	require.NoError(t, err)
 	assert.Nil(t, found)
 }
@@ -286,7 +287,7 @@ func TestSystemHandlers_UnmountProvider_Unauthorized(t *testing.T) {
 		Path:        "test-provider/",
 		Description: "Test provider",
 	}
-	err := core.mount(context.Background(), entry)
+	err := core.mount(testContext(), entry)
 	require.NoError(t, err)
 
 	// Setup authorization with insufficient permissions
@@ -327,8 +328,8 @@ func TestSystemHandlers_UnmountProvider_NotFound(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -356,7 +357,7 @@ func TestSystemHandlers_GetMountInfo_Success(t *testing.T) {
 		Description: "Test provider",
 		Config:      map[string]any{"key": "value"},
 	}
-	err := core.mount(context.Background(), entry)
+	err := core.mount(testContext(), entry)
 	require.NoError(t, err)
 
 	// Setup authorization
@@ -368,8 +369,8 @@ func TestSystemHandlers_GetMountInfo_Success(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -429,8 +430,8 @@ func TestSystemHandlers_GetMountInfo_NotFound(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -458,7 +459,7 @@ func TestSystemHandlers_ListMounts_Success(t *testing.T) {
 		Path:        "provider1/",
 		Description: "Provider 1",
 	}
-	err := core.mount(context.Background(), entry1)
+	err := core.mount(testContext(), entry1)
 	require.NoError(t, err)
 
 	entry2 := &MountEntry{
@@ -467,7 +468,7 @@ func TestSystemHandlers_ListMounts_Success(t *testing.T) {
 		Path:        "provider2/",
 		Description: "Provider 2",
 	}
-	err = core.mount(context.Background(), entry2)
+	err = core.mount(testContext(), entry2)
 	require.NoError(t, err)
 
 	// Setup authorization
@@ -479,13 +480,13 @@ func TestSystemHandlers_ListMounts_Success(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
 	// Call handler
-	output, err := handlers.ListMounts(ctx, &struct{}{})
+	output, err := handlers.ListMounts(ctx, &ListMountsInput{})
 	require.NoError(t, err)
 	assert.NotNil(t, output)
 	assert.Len(t, output.Body.Mounts, 2)
@@ -511,7 +512,7 @@ func TestSystemHandlers_ListMounts_Unauthorized(t *testing.T) {
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "market_reader")
 
 	// Call handler - should fail
-	output, err := handlers.ListMounts(ctx, &struct{}{})
+	output, err := handlers.ListMounts(ctx, &ListMountsInput{})
 	assert.Error(t, err)
 	assert.Nil(t, output)
 	assert.Contains(t, err.Error(), "Insufficient permissions")
@@ -530,7 +531,7 @@ func TestSystemHandlers_ListMounts_FiltersNonProviders(t *testing.T) {
 		Path:        "provider1/",
 		Description: "Provider 1",
 	}
-	err := core.mount(context.Background(), providerEntry)
+	err := core.mount(testContext(), providerEntry)
 	require.NoError(t, err)
 
 	authEntry := &MountEntry{
@@ -539,7 +540,7 @@ func TestSystemHandlers_ListMounts_FiltersNonProviders(t *testing.T) {
 		Path:        "auth1/",
 		Description: "Auth 1",
 	}
-	err = core.mount(context.Background(), authEntry)
+	err = core.mount(testContext(), authEntry)
 	require.NoError(t, err)
 
 	// Setup authorization
@@ -551,13 +552,13 @@ func TestSystemHandlers_ListMounts_FiltersNonProviders(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
 	// Call handler
-	output, err := handlers.ListMounts(ctx, &struct{}{})
+	output, err := handlers.ListMounts(ctx, &ListMountsInput{})
 	require.NoError(t, err)
 	assert.NotNil(t, output)
 
@@ -579,13 +580,13 @@ func TestSystemHandlers_ListMounts_EmptyResult(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
 	// Call handler
-	output, err := handlers.ListMounts(ctx, &struct{}{})
+	output, err := handlers.ListMounts(ctx, &ListMountsInput{})
 	require.NoError(t, err)
 	assert.NotNil(t, output)
 	assert.NotNil(t, output.Body.Mounts)
@@ -661,7 +662,7 @@ func TestSystemHandlers_TuneProvider_Success(t *testing.T) {
 			"region":      "us-west-1",
 		},
 	}
-	err := core.mount(context.Background(), entry)
+	err := core.mount(testContext(), entry)
 	require.NoError(t, err)
 
 	// Setup authorization
@@ -673,8 +674,8 @@ func TestSystemHandlers_TuneProvider_Success(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -683,7 +684,7 @@ func TestSystemHandlers_TuneProvider_Success(t *testing.T) {
 		Path: "test-provider",
 	}
 	input.Body = map[string]any{
-		"initial_ttl": 7200, // Update existing
+		"initial_ttl": 7200,  // Update existing
 		"max_ttl":     14400, // Add new
 	}
 
@@ -694,12 +695,12 @@ func TestSystemHandlers_TuneProvider_Success(t *testing.T) {
 	assert.Contains(t, output.Body.Message, "Successfully tuned mount")
 
 	// Verify config was updated
-	found, err := core.mounts.findByPath(context.Background(), "test-provider/")
+	found, err := core.mounts.findByPath(testContext(), "test-provider/")
 	require.NoError(t, err)
 	assert.NotNil(t, found)
-	assert.Equal(t, 7200, found.Config["initial_ttl"])     // Updated
-	assert.Equal(t, "us-west-1", found.Config["region"])   // Unchanged
-	assert.Equal(t, 14400, found.Config["max_ttl"])        // Added
+	assert.Equal(t, 7200, found.Config["initial_ttl"])   // Updated
+	assert.Equal(t, "us-west-1", found.Config["region"]) // Unchanged
+	assert.Equal(t, 14400, found.Config["max_ttl"])      // Added
 }
 
 func TestSystemHandlers_TuneProvider_Unauthorized(t *testing.T) {
@@ -714,7 +715,7 @@ func TestSystemHandlers_TuneProvider_Unauthorized(t *testing.T) {
 		Description: "Test provider",
 		Config:      map[string]any{"key": "value"},
 	}
-	err := core.mount(context.Background(), entry)
+	err := core.mount(testContext(), entry)
 	require.NoError(t, err)
 
 	// Setup authorization with insufficient permissions
@@ -756,8 +757,8 @@ func TestSystemHandlers_TuneProvider_NotFound(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -786,8 +787,8 @@ func TestSystemHandlers_TuneProvider_ProtectedPath(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -816,7 +817,7 @@ func TestSystemHandlers_TuneProvider_EmptyConfig(t *testing.T) {
 		Description: "Test provider",
 		Config:      map[string]any{"original": "value"},
 	}
-	err := core.mount(context.Background(), entry)
+	err := core.mount(testContext(), entry)
 	require.NoError(t, err)
 
 	// Setup authorization
@@ -828,8 +829,8 @@ func TestSystemHandlers_TuneProvider_EmptyConfig(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -846,7 +847,7 @@ func TestSystemHandlers_TuneProvider_EmptyConfig(t *testing.T) {
 	assert.Contains(t, output.Body.Message, "Successfully tuned mount")
 
 	// Verify original config is unchanged
-	found, err := core.mounts.findByPath(context.Background(), "test-provider/")
+	found, err := core.mounts.findByPath(testContext(), "test-provider/")
 	require.NoError(t, err)
 	assert.NotNil(t, found)
 	assert.Equal(t, "value", found.Config["original"])
@@ -864,7 +865,7 @@ func TestSystemHandlers_TuneProvider_NilConfig(t *testing.T) {
 		Description: "Test provider",
 		Config:      nil,
 	}
-	err := core.mount(context.Background(), entry)
+	err := core.mount(testContext(), entry)
 	require.NoError(t, err)
 
 	// Setup authorization
@@ -876,8 +877,8 @@ func TestSystemHandlers_TuneProvider_NilConfig(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -896,7 +897,7 @@ func TestSystemHandlers_TuneProvider_NilConfig(t *testing.T) {
 	assert.Contains(t, output.Body.Message, "Successfully tuned mount")
 
 	// Verify config was created and populated
-	found, err := core.mounts.findByPath(context.Background(), "test-provider/")
+	found, err := core.mounts.findByPath(testContext(), "test-provider/")
 	require.NoError(t, err)
 	assert.NotNil(t, found)
 	assert.NotNil(t, found.Config)
@@ -914,7 +915,7 @@ func TestSystemHandlers_TuneProvider_NoAuth(t *testing.T) {
 		Path:        "test-provider/",
 		Description: "Test provider",
 	}
-	err := core.mount(context.Background(), entry)
+	err := core.mount(testContext(), entry)
 	require.NoError(t, err)
 
 	// Create handlers
@@ -951,7 +952,7 @@ func TestSystemHandlers_TuneProvider_ComplexConfig(t *testing.T) {
 		Description: "Test provider",
 		Config:      map[string]any{},
 	}
-	err := core.mount(context.Background(), entry)
+	err := core.mount(testContext(), entry)
 	require.NoError(t, err)
 
 	// Setup authorization
@@ -963,8 +964,8 @@ func TestSystemHandlers_TuneProvider_ComplexConfig(t *testing.T) {
 		logger: core.logger,
 	}
 
-	// Create authenticated context
-	ctx := context.Background()
+	// Create authenticated context with namespace
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	ctx = context.WithValue(ctx, SystemPrincipalIDKey, "admin-user")
 	ctx = context.WithValue(ctx, SystemRoleNameKey, "system_admin")
 
@@ -988,7 +989,7 @@ func TestSystemHandlers_TuneProvider_ComplexConfig(t *testing.T) {
 	assert.Contains(t, output.Body.Message, "Successfully tuned mount")
 
 	// Verify complex config was stored
-	found, err := core.mounts.findByPath(context.Background(), "test-provider/")
+	found, err := core.mounts.findByPath(testContext(), "test-provider/")
 	require.NoError(t, err)
 	assert.NotNil(t, found)
 	assert.NotNil(t, found.Config["proxy_domains"])

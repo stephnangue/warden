@@ -10,7 +10,6 @@ import (
 
 	aeadwrapper "github.com/openbao/go-kms-wrapping/wrappers/aead/v2"
 	"github.com/stephnangue/warden/audit"
-	"github.com/stephnangue/warden/auth/token"
 	"github.com/stephnangue/warden/core/seal"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/physical/inmem"
@@ -70,10 +69,14 @@ func (d *testAuditDevice) GetAccessor() string {
 	return ""
 }
 
-func (d *testAuditDevice) Cleanup() {
+func (d *testAuditDevice) Cleanup(ctx context.Context) {
 }
 
-func (d *testAuditDevice) Setup(conf map[string]any) error {
+func (d *testAuditDevice) Setup(ctx context.Context, conf map[string]any) error {
+	return nil
+}
+
+func (d *testAuditDevice) Initialize(ctx context.Context) error {
 	return nil
 }
 
@@ -119,17 +122,12 @@ func createTestCoreForInit(t *testing.T) (*Core, *logger.GatedLogger) {
 	shamirWrapper := aeadwrapper.NewShamirWrapper()
 	testSeal := NewDefaultSeal(seal.NewAccess(shamirWrapper))
 
-	// Create token store
-	tokenStore, err := token.NewRobustStore(log, nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { tokenStore.Close() })
-
 	coreConfig := &CoreConfig{
 		Physical:     phys,
 		Seal:         testSeal,
-		TokenStore:   tokenStore,
 		Logger:       log,
 		AuditDevices: testAuditDevices(),
+		// TokenStore is now created internally in CreateCore
 	}
 
 	// Use NewCore which sets up barrier and other components
@@ -383,10 +381,9 @@ func TestSystemHandlers_RevokeRootToken(t *testing.T) {
 	assert.Equal(t, "Root token successfully revoked", output.Body.Message)
 
 	// Token should no longer be valid
-	_, _, err = core.tokenStore.ResolveToken(context.Background(), rootToken, map[string]string{})
+	_, _, err = core.tokenStore.ResolveToken(context.Background(), rootToken)
 	assert.Error(t, err)
 }
-
 
 func TestCore_Initialize_WithBarrier(t *testing.T) {
 	// Setup

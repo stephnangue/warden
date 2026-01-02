@@ -57,6 +57,26 @@ services:
       --ssl-key=/etc/mysql/certs/server-key.pem
       --require-secure-transport=ON
 
+  # PostgreSQL for Warden Backend
+  postgres-warden:
+    image: postgres:15-alpine
+    container_name: postgres-warden
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: warden
+      POSTGRES_PASSWORD: wardenpassword
+      POSTGRES_DB: warden
+    volumes:
+      - postgres-warden-data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warden"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # PostgreSQL for Hydra
   postgres-hydra:
     image: postgres:15-alpine
@@ -227,4 +247,5 @@ volumes:
   vault-data:
   vault-logs:
   mysql-data:
+  postgres-warden-data:
   postgres-hydra-data:

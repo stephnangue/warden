@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/errwrap"
+	"github.com/hashicorp/go-multierror"
 	wrapping "github.com/openbao/go-kms-wrapping/v2"
 	aeadwrapper "github.com/openbao/go-kms-wrapping/wrappers/aead/v2"
 	"github.com/openbao/openbao/helper/locking"
@@ -25,7 +26,6 @@ import (
 	"github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/auth"
-	"github.com/stephnangue/warden/auth/token"
 	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/config"
 	"github.com/stephnangue/warden/core/seal"
@@ -71,7 +71,7 @@ var (
 	// ErrHANotEnabled is returned if the operation only makes sense
 	// in an HA setting
 	ErrHANotEnabled = errors.New("Warden is not configured for highly-available mode")
-	
+
 	// errNoMatchingMount is returned if the mount is not found
 	errNoMatchingMount = errors.New("no matching mount")
 )
@@ -129,7 +129,6 @@ type migrationInformation struct {
 	unsealKey []byte
 }
 
-
 type Core struct {
 	// storageType is the storage type set in the storage configuration
 	storageType string
@@ -138,7 +137,7 @@ type Core struct {
 	ha physical.HABackend
 
 	// physical backend is the un-trusted backend with durable data
-	physical   physical.Backend
+	physical physical.Backend
 
 	// underlyingPhysical will always point to the underlying backend
 	// implementation. This is an un-trusted backend with durable data
@@ -172,7 +171,11 @@ type Core struct {
 
 	logger *logger.GatedLogger
 
-	tokenStore token.TokenStore
+	// tokenStore manages namespace-aware tokens with pluggable types
+	tokenStore *TokenStore
+
+	// namespace Store is used to manage namespaces
+	namespaceStore *NamespaceStore
 
 	accessControl *authorize.AccessControl
 
@@ -262,22 +265,27 @@ type Core struct {
 
 	// preInitHandler handles initialization requests before system backend is available
 	preInitHandler *PreInitHandler
+
+	// systemBackend is the backend which is used to manage internal operations
+	systemBackend *SystemBackend
 }
 
 type CoreConfig struct {
-	RawConfig    *config.Config
+	RawConfig *config.Config
 
 	AuditDevices map[string]audit.Factory
 
-	AuthMethods  map[string]auth.Factory
+	AuthMethods map[string]auth.Factory
 
-	Providers    map[string]provider.Factory
+	Providers map[string]provider.Factory
 
-	TokenStore   token.TokenStore
+	// TokenStore has been moved to core package and is created internally
+	// Deprecated: Remove this field, TokenStore is now created in NewCore
+	// TokenStore   token.TokenStore
 
-	Physical     physical.Backend
+	Physical physical.Backend
 
-	Logger       *logger.GatedLogger
+	Logger *logger.GatedLogger
 
 	StorageType string
 
@@ -300,7 +308,7 @@ type CoreConfig struct {
 	// Custom cache size for the LRU cache on the physical storage, or zero for default
 	CacheSize int
 
-	DisableKeyEncodingChecks  bool
+	DisableKeyEncodingChecks bool
 
 	// Set as the leader address for HA
 	RedirectAddr string
@@ -378,32 +386,30 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 
 	// Setup the core
 	c := &Core{
-		physical:             conf.Physical,
-		underlyingPhysical:   conf.Physical,
-		storageType:          conf.StorageType,
-		redirectAddr:         conf.RedirectAddr,
-		clusterAddr:          new(atomic.Value),
-		seal:                 conf.Seal,
-		stateLock:            stateLock,
-		rawConfig:            new(atomic.Value),
-		logger:       		  conf.Logger,
-		tokenStore:   		  conf.TokenStore,
-		auditManager: 		  audit.NewAuditManager(conf.Logger.WithSystem("audit")),
-		router:       		  NewRouter(conf.Logger.WithSystem("router")),
-		mounts:       		  NewMountTable(),
-		audit:        		  NewMountTable(),
-		sealed:               new(uint32),
-		standbyStopCh:        new(atomic.Value),
-		standbyRestartCh:     new(atomic.Value),
-		cachingDisabled:                conf.DisableCache,
-		shutdownDoneCh:                 new(atomic.Value),
-		keepHALockOnStepDown:           new(uint32),
-		activeContextCancelFunc:        new(atomic.Value),
-		secureRandomReader:             conf.SecureRandomReader,
-		keyRotateGracePeriod:           new(int64),
-		detectDeadlocks:                detectDeadlocks,
+		physical:                conf.Physical,
+		underlyingPhysical:      conf.Physical,
+		storageType:             conf.StorageType,
+		redirectAddr:            conf.RedirectAddr,
+		clusterAddr:             new(atomic.Value),
+		seal:                    conf.Seal,
+		stateLock:               stateLock,
+		rawConfig:               new(atomic.Value),
+		logger:                  conf.Logger,
+		auditManager:            audit.NewAuditManager(conf.Logger.WithSystem("audit")),
+		router:                  NewRouter(conf.Logger.WithSystem("router")),
+		mounts:                  NewMountTable(),
+		audit:                   NewMountTable(),
+		sealed:                  new(uint32),
+		standbyStopCh:           new(atomic.Value),
+		standbyRestartCh:        new(atomic.Value),
+		cachingDisabled:         conf.DisableCache,
+		shutdownDoneCh:          new(atomic.Value),
+		keepHALockOnStepDown:    new(uint32),
+		activeContextCancelFunc: new(atomic.Value),
+		secureRandomReader:      conf.SecureRandomReader,
+		keyRotateGracePeriod:    new(int64),
+		detectDeadlocks:         detectDeadlocks,
 	}
-
 
 	c.standby.Store(true)
 	c.standbyStopCh.Store(make(chan struct{}, 1))
@@ -417,7 +423,7 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 	// Initialize pre-init handler (handles /sys/init before system backend is mounted)
 	c.preInitHandler = NewPreInitHandler(c, c.logger.WithSystem("preinit"))
 
-		// Load seal information.
+	// Load seal information.
 	if c.seal == nil {
 		wrapper := aeadwrapper.NewShamirWrapper()
 		wrapper.SetConfig(context.Background())
@@ -466,6 +472,14 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 		return nil, fmt.Errorf("barrier setup failed: %w", err)
 	}
 
+	// Create TokenStore after barrier is initialized
+	// This ensures the barrier is available for storage view creation
+	tokenStore, err := NewTokenStore(c, DefaultTokenStoreConfig())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token store: %w", err)
+	}
+	c.tokenStore = tokenStore
+
 	if conf.HAPhysical != nil && conf.HAPhysical.HAEnabled() {
 		c.ha = conf.HAPhysical
 	}
@@ -485,6 +499,10 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 	}
 
 	return c, nil
+}
+
+func (c *Core) GetTokenStore() *TokenStore {
+	return c.tokenStore
 }
 
 func (c *Core) configureProvider(backends map[string]provider.Factory) {
@@ -783,6 +801,16 @@ cVs1CNZyx2Epxma3FYINYJdklZNKn5I=
 	c.targets = targets
 }
 
+// loadTokensFromStorage loads all persisted tokens from storage into the token store cache.
+// This is called during post-unseal to restore tokens after a restart.
+func (c *Core) loadTokensFromStorage(ctx context.Context) error {
+	if c.tokenStore == nil {
+		return fmt.Errorf("token store not initialized")
+	}
+
+	return c.tokenStore.LoadFromStorage(ctx)
+}
+
 // SetConfig sets core's config object to the newly provided config.
 func (c *Core) SetConfig(conf *config.Config) {
 	c.rawConfig.Store(conf)
@@ -920,7 +948,7 @@ func (c *Core) adjustForSealMigration(unwrapSeal Seal) error {
 		// and after migration.
 		c.adjustSealConfigDuringMigration(existBarrierSealConfig, existRecoverySealConfig)
 	}
-	c.logger.Warn("entering seal migration mode; Warden will not automatically unseal even if using an autoseal", 
+	c.logger.Warn("entering seal migration mode; Warden will not automatically unseal even if using an autoseal",
 		logger.Any("from_barrier_type", c.migrationInfo.seal.BarrierType()),
 		logger.Any("to_barrier_type", c.seal.BarrierType()),
 	)
@@ -1026,7 +1054,7 @@ func (c *Core) unsealInternal(ctx context.Context, rootKey []byte) error {
 	return nil
 }
 
-func (c *Core) Logger() *logger.GatedLogger{
+func (c *Core) Logger() *logger.GatedLogger {
 	return c.logger
 }
 
@@ -1095,7 +1123,7 @@ func (c *Core) postUnseal(ctx context.Context, ctxCancelFunc context.CancelFunc,
 	if v := api.ReadWardenVariable("WARDEN_POSTUNSEAL_FUNC_CONCURRENCY"); v != "" {
 		pv, err := strconv.Atoi(v)
 		if err != nil || pv < 1 {
-			c.logger.Warn("invalid value for WARDEN_POSTUNSEAL_FUNC_CONCURRENCY, must be a positive integer", 
+			c.logger.Warn("invalid value for WARDEN_POSTUNSEAL_FUNC_CONCURRENCY, must be a positive integer",
 				logger.Err(err),
 				logger.Any("value", pv),
 			)
@@ -1137,12 +1165,12 @@ func (c *Core) preSeal() error {
 	//defer metrics.MeasureSince([]string{"core", "pre_seal"}, time.Now())
 	c.logger.Info("pre-seal teardown starting")
 
-	// if seal, ok := c.seal.(*autoSeal); ok {
-	// 	seal.StopHealthCheck()
-	// }
-	// // Clear any pending funcs
-	// c.postUnsealFuncs = nil
-	// c.activeTime = time.Time{}
+	if seal, ok := c.seal.(*autoSeal); ok {
+		seal.StopHealthCheck()
+	}
+	// Clear any pending funcs
+	c.postUnsealFuncs = nil
+	c.activeTime = time.Time{}
 
 	// // Clear any rotation progress
 	// c.rootRotationConfig = nil
@@ -1152,7 +1180,7 @@ func (c *Core) preSeal() error {
 	// 	close(c.metricsCh)
 	// 	c.metricsCh = nil
 	// }
-	// var result error
+	var result error
 
 	// c.stopForwarding()
 	// c.stopRaftActiveNode()
@@ -1161,9 +1189,9 @@ func (c *Core) preSeal() error {
 	// if err := c.invalidations.Stop(); err != nil {
 	// 	result = multierror.Append(result, fmt.Errorf("error tearing down invalidations: %w", err))
 	// }
-	// if err := c.teardownAudits(); err != nil {
-	// 	result = multierror.Append(result, fmt.Errorf("error tearing down audits: %w", err))
-	// }
+	if err := c.teardownAudits(context.Background()); err != nil {
+		result = multierror.Append(result, fmt.Errorf("error tearing down audits: %w", err))
+	}
 	// if err := c.stopExpiration(); err != nil {
 	// 	result = multierror.Append(result, fmt.Errorf("error stopping expiration: %w", err))
 	// }
@@ -1183,9 +1211,10 @@ func (c *Core) preSeal() error {
 	// if err := c.teardownLoginMFA(); err != nil {
 	// 	result = multierror.Append(result, fmt.Errorf("error tearing down login MFA: %w", err))
 	// }
-	// if err := c.teardownNamespaceStore(); err != nil {
-	// 	result = multierror.Append(result, fmt.Errorf("error tearing down namespace store: %w", err))
-	// }
+	if err := c.teardownNamespaceStore(); err != nil {
+		result = multierror.Append(result, fmt.Errorf("error tearing down namespace store: %w", err))
+		return result
+	}
 
 	// if c.autoRotateCancel != nil {
 	// 	c.autoRotateCancel()
@@ -1197,18 +1226,17 @@ func (c *Core) preSeal() error {
 	// 	c.updateLockedUserEntriesCancel = nil
 	// }
 
-	// if seal, ok := c.seal.(*autoSeal); ok {
-	// 	seal.StopHealthCheck()
-	// }
+	// Unload tokens from cache (they remain in storage for next unseal)
+	if c.tokenStore != nil {
+		c.tokenStore.UnloadFromCache()
+	}
 
-	// c.physicalCache.SetEnabled(false)
-	// c.physicalCache.Purge(context.Background())
+	c.physicalCache.SetEnabled(false)
+	c.physicalCache.Purge(context.Background())
 
 	c.logger.Info("pre-seal teardown complete")
 	return nil
 }
-
-
 
 type UnsealStrategy interface {
 	unseal(context.Context, *logger.GatedLogger, *Core) error
@@ -1241,10 +1269,20 @@ func (s readonlyUnsealStrategy) unseal(ctx context.Context, logger *logger.Gated
 	return s.unsealShared(ctx, logger, c, true /* standby */)
 }
 
-func (readonlyUnsealStrategy) unsealShared(ctx context.Context, logger *logger.GatedLogger, c *Core, standby bool) error {
-	// Load system backend first
-	if err := c.LoadSystemBackend(ctx); err != nil {
+func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.GatedLogger, c *Core, standby bool) error {
+
+	if err := c.setupNamespaceStore(ctx); err != nil {
 		return err
+	}
+	if err := c.loadMounts(ctx); err != nil {
+		return err
+	}
+	if err := c.setupMounts(ctx); err != nil {
+		return err
+	}
+
+	if err := c.loadTokensFromStorage(ctx); err != nil {
+		c.logger.Warn("failed to load tokens from storage", logger.Err(err))
 	}
 
 	c.LoadRoles(ctx)
@@ -1255,17 +1293,10 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, logger *logger.G
 
 	c.LoadTargets(ctx)
 
-	err := c.LoadMounts(ctx)
-	if err != nil {
-		return err
-	}
-
-	err = c.LoadAudits(ctx)
+	err := c.loadAudits(ctx)
 	if err != nil {
 		return err
 	}
 
 	return nil
 }
-
-
