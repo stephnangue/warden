@@ -10,8 +10,9 @@ import (
 	"github.com/go-chi/chi/middleware"
 	"github.com/go-chi/chi/v5"
 	"github.com/hashicorp/cap/jwt"
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/audit"
-	"github.com/stephnangue/warden/auth/token"
+	"github.com/stephnangue/warden/auth"
 	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -71,11 +72,13 @@ type JWTAuthMethod struct {
 	authType      string
 	backendClass  string
 	router        *chi.Mux
-	tokenStore    token.TokenStore
+	tokenStore    auth.TokenStore
 	roles         *authorize.RoleRegistry
 	accessControl *authorize.AccessControl
 	auditAccess   audit.AuditAccess
 	validateFunc  func(conf map[string]any) error
+	storageView   sdklogical.Storage
+	cleanedUp     bool
 }
 
 func (m *JWTAuthMethod) GetType() string {
@@ -94,7 +97,20 @@ func (m *JWTAuthMethod) GetAccessor() string {
 	return m.accessor
 }
 
-func (m *JWTAuthMethod) Cleanup() {
+func (m *JWTAuthMethod) Cleanup(ctx context.Context) {
+	if m == nil || m.cleanedUp {
+		return
+	}
+
+	// Clear references to help garbage collection
+	m.config = nil
+	m.router = nil
+
+	m.cleanedUp = true
+}
+
+func (p *JWTAuthMethod) Initialize(ctx context.Context) error {
+	return nil
 }
 
 func (m *JWTAuthMethod) Config() map[string]any {
@@ -122,7 +138,7 @@ func (m *JWTAuthMethod) Config() map[string]any {
 	}
 }
 
-func (m *JWTAuthMethod) Setup(conf map[string]any) error {
+func (m *JWTAuthMethod) Setup(ctx context.Context, conf map[string]any) error {
 	// Build current configuration as map
 	currentConfig := make(map[string]interface{})
 	if m.config != nil {
@@ -156,7 +172,6 @@ func (m *JWTAuthMethod) Setup(conf map[string]any) error {
 	}
 
 	// Setup the new configuration
-	ctx := context.Background()
 	newConfig, err := setupConfig(ctx, currentConfig)
 	if err != nil {
 		m.logger.Error("failed to setup config", logger.Err(err))
@@ -165,12 +180,6 @@ func (m *JWTAuthMethod) Setup(conf map[string]any) error {
 
 	// Update the auth method configuration
 	m.config = newConfig
-
-	m.logger.Info("auth method configuration updated",
-		logger.String("mode", m.config.Mode),
-		logger.String("bound_issuer", m.config.BoundIssuer),
-		logger.String("user_claim", m.config.UserClaim),
-	)
 
 	return nil
 }
@@ -274,10 +283,11 @@ func (f *JWTAuthMethodFactory) Create(
 	accessor string,
 	conf map[string]any,
 	log *logger.GatedLogger,
-	tokenStore token.TokenStore,
+	tokenStore auth.TokenStore,
 	roles *authorize.RoleRegistry,
 	accessControl *authorize.AccessControl,
 	auditAccess audit.AuditAccess,
+	storageView sdklogical.Storage,
 ) (logical.Backend, error) {
 
 	method := &JWTAuthMethod{
@@ -291,6 +301,7 @@ func (f *JWTAuthMethodFactory) Create(
 		roles:         roles,
 		accessControl: accessControl,
 		auditAccess:   auditAccess,
+		storageView:   storageView,
 	}
 
 	method.setupRouter()

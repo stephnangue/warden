@@ -4,10 +4,10 @@ import "github.com/spf13/cobra"
 
 var (
 	ProvidersCmd = &cobra.Command{
-		Use:   "providers",
+		Use:   "provider",
 		Short: "This command groups subcommands for managing Warden's providers.",
 		Long: `
-Usage: warden providers <subcommand> [options]
+Usage: warden provider <subcommand> [options]
 
   This command groups subcommands for managing Warden's providers.
   Each provider behaves differently. Please see the documentation for
@@ -15,7 +15,7 @@ Usage: warden providers <subcommand> [options]
 
   List all enabled providers:
 
-      $ warden providers list
+      $ warden provider list
 
   Enable a new provider:
 
@@ -32,5 +32,4 @@ func init() {
 	ProvidersCmd.AddCommand(DisableCmd)
 	ProvidersCmd.AddCommand(ListCmd)
 	ProvidersCmd.AddCommand(ReadCmd)
-	ProvidersCmd.AddCommand(TuneCmd)
 }

@@ -1,6 +1,10 @@
 package aws
 
-import "time"
+import (
+	"encoding/json"
+	"strconv"
+	"time"
+)
 
 // ProviderConfig holds parsed configuration
 type ProviderConfig struct {
@@ -27,10 +31,22 @@ func parseConfig(conf map[string]any) ProviderConfig {
 
 	// Parse max_body_size
 	maxBodySize := int64(10485760)
-	if maxSize, ok := conf["max_body_size"].(int64); (ok && maxSize > 0) {
+	if maxSize, ok := conf["max_body_size"].(int64); ok && maxSize > 0 {
 		maxBodySize = maxSize
-	} else if maxSize, ok := conf["max_body_size"].(int); (ok && maxSize > 0) {
+	} else if maxSize, ok := conf["max_body_size"].(int); ok && maxSize > 0 {
 		maxBodySize = int64(maxSize)
+	} else if maxSize, ok := conf["max_body_size"].(float64); ok && maxSize > 0 {
+		maxBodySize = int64(maxSize)
+	} else if maxSize, ok := conf["max_body_size"].(json.Number); ok {
+		// Handle json.Number type (from JSON decoder with UseNumber)
+		if parsed, err := maxSize.Int64(); err == nil && parsed > 0 {
+			maxBodySize = parsed
+		}
+	} else if maxSize, ok := conf["max_body_size"].(string); ok {
+		// Handle string conversion (e.g., from JSON number stored as string)
+		if parsed, err := strconv.ParseInt(maxSize, 10, 64); err == nil && parsed > 0 {
+			maxBodySize = parsed
+		}
 	}
 	config.MaxBodySize = maxBodySize
 

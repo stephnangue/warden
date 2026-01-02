@@ -2,17 +2,19 @@ package aws
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httputil"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/go-chi/chi"
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/audit"
-	"github.com/stephnangue/warden/auth/token"
 	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
@@ -36,7 +38,7 @@ type AWSProvider struct {
 	providerType      string
 	backendClass      string
 	router            *chi.Mux
-	tokenAccess       token.TokenAccess
+	tokenAccess       logical.TokenAccess
 	roles             *authorize.RoleRegistry
 	credSources       *cred.CredSourceRegistry
 	proxy             *httputil.ReverseProxy
@@ -48,6 +50,8 @@ type AWSProvider struct {
 	processorRegistry *processor.ProcessorRegistry
 	auditAccess       audit.AuditAccess
 	validationFunc    func(config map[string]any) error
+	storageView       sdklogical.Storage
+	cleanedUp         bool
 }
 
 func (p *AWSProvider) GetType() string {
@@ -66,8 +70,26 @@ func (p *AWSProvider) GetAccessor() string {
 	return p.accessor
 }
 
-func (p *AWSProvider) Cleanup() {
-	p.credsProvider.Stop()
+func (p *AWSProvider) Cleanup(ctx context.Context) {
+	if p == nil || p.cleanedUp {
+		return
+	}
+
+	// Stop credential provider cache
+	if p.credsProvider != nil {
+		p.credsProvider.Stop()
+	}
+
+	// Clear references to help garbage collection
+	p.processorRegistry = nil
+	p.proxy = nil
+	p.router = nil
+
+	p.cleanedUp = true
+}
+
+func (p *AWSProvider) Initialize(ctx context.Context) error {
+	return nil
 }
 
 func (p *AWSProvider) Config() map[string]any {
@@ -78,7 +100,7 @@ func (p *AWSProvider) Config() map[string]any {
 	}
 }
 
-func (p *AWSProvider) Setup(conf map[string]any) error {
+func (p *AWSProvider) Setup(ctx context.Context, conf map[string]any) error {
 	// Build current configuration
 	currentConfig := map[string]interface{}{
 		"proxy_domains": p.proxyDomains,
@@ -112,11 +134,6 @@ func (p *AWSProvider) Setup(conf map[string]any) error {
 	// Re-initialize processors with new proxy domains
 	p.initializeProcessors()
 
-	p.logger.Info("provider configuration updated",
-		logger.Any("proxy_domains", p.proxyDomains),
-		logger.Int64("max_body_size", p.maxBodySize),
-		logger.String("timeout", p.timeout.String()),
-	)
 	return nil
 }
 
@@ -188,8 +205,22 @@ func (f *AWSProviderFactory) ValidateConfig(config map[string]any) error {
 			size = v
 		case float64:
 			size = int64(v)
+		case json.Number:
+			// Handle json.Number type (from JSON decoder with UseNumber)
+			parsed, err := v.Int64()
+			if err != nil {
+				return fmt.Errorf("max_body_size must be an integer, got json.Number that can't be parsed: %w", err)
+			}
+			size = parsed
+		case string:
+			// Handle string conversion (e.g., from JSON number stored as string)
+			parsed, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return fmt.Errorf("max_body_size must be an integer, got string that can't be parsed: %w", err)
+			}
+			size = parsed
 		default:
-			return fmt.Errorf("max_body_size must be an integer")
+			return fmt.Errorf("max_body_size must be an integer, got %T", maxSize)
 		}
 		if size < 0 {
 			return fmt.Errorf("max_body_size must be greater than 0")
@@ -229,10 +260,11 @@ func (f *AWSProviderFactory) Create(
 	accessor string,
 	conf map[string]any,
 	log *logger.GatedLogger,
-	tokenAccess token.TokenAccess,
+	tokenAccess logical.TokenAccess,
 	roles *authorize.RoleRegistry,
 	credSources *cred.CredSourceRegistry,
 	auditAccess audit.AuditAccess,
+	storageView sdklogical.Storage,
 ) (logical.Backend, error) {
 
 	credsProvider, err := cred.NewCredentialProvider(roles, credSources, log.WithSubsystem("aws").WithSubsystem("cred"))
@@ -253,6 +285,7 @@ func (f *AWSProviderFactory) Create(
 		signer:        v4.NewSigner(),
 		credsProvider: credsProvider,
 		auditAccess:   auditAccess,
+		storageView:   storageView,
 	}
 
 	provider.setupRouter()
@@ -269,7 +302,7 @@ func (f *AWSProviderFactory) Create(
 			// // Retrieve all stored values from context (with type assertions)
 			clientToken, _ := ctx.Value(ClientTokenKey).(*audit.Token)
 			awsCreds, _ := ctx.Value(AWSCredsKey).(aws.Credentials)
-			token, _ := ctx.Value(TokenKey).(*token.Token)
+			tokenEntry, _ := ctx.Value(TokenKey).(*logical.TokenEntry)
 			roleName, _ := ctx.Value(RoleNameKey).(string)
 			principalID, _ := ctx.Value(PrincipalIDKey).(string)
 			targetURL, _ := ctx.Value(TargetURLKey).(string)
@@ -291,7 +324,7 @@ func (f *AWSProviderFactory) Create(
 			}
 
 			// // Audit the response with all context information
-			ok := provider.auditResponse(resp, resp.Request, clientToken, &awsCreds, token, roleName, principalID,
+			ok := provider.auditResponse(resp, resp.Request, clientToken, &awsCreds, tokenEntry, roleName, principalID,
 				resp.StatusCode, message, "", targetURL, metadata)
 			if !ok {
 				return fmt.Errorf("failed to audit response")
@@ -302,11 +335,6 @@ func (f *AWSProviderFactory) Create(
 	}
 
 	provider.validationFunc = f.ValidateConfig
-
-	// err = provider.Setup(conf)
-	// if err != nil {
-	// 	return nil, err
-	// }
 
 	return provider, nil
 }

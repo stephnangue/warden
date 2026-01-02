@@ -8,30 +8,24 @@ import (
 )
 
 var (
-	readPath string
-
 	ReadCmd = &cobra.Command{
-		Use:   "read",
-    	SilenceUsage:  true,
+		Use:           "read PATH",
+		SilenceUsage:  true,
 		SilenceErrors: true,
-		Short: "Show information on an auth method",
+		Short:         "Show information on an auth method",
 		Long: `
-Usage: warden auth read --path=PATH
+Usage: warden auth read PATH
 
   Show information on an auth method enabled on the provided PATH.
 
   Read the auth method enabled at jwt/:
 
-      $ warden auth read --path=jwt/
+      $ warden auth read jwt/
 `,
+		Args: cobra.ExactArgs(1),
 		RunE: runRead,
 	}
 )
-
-func init() {
-	ReadCmd.Flags().StringVar(&readPath, "path", "", "Path of the auth method to read (required)")
-	ReadCmd.MarkFlagRequired("path")
-}
 
 func runRead(cmd *cobra.Command, args []string) error {
 	// Create the client
@@ -40,16 +34,18 @@ func runRead(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	path := args[0]
+
 	// Get auth method info for the specified path
-	authInfo, err := c.Sys().AuthInfo(readPath)
+	authInfo, err := c.Sys().AuthInfo(path)
 	if err != nil {
-		return fmt.Errorf("error reading auth method at path %s: %w", readPath, err)
+		return fmt.Errorf("error reading auth method at path %s: %w", path, err)
 	}
 
 	// Display auth method information
 	headers := []string{"Key", "Value"}
 	data := [][]any{
-		{"path", readPath},
+		{"path", path},
 		{"type", authInfo.Type},
 		{"accessor", authInfo.Accessor},
 		{"description", authInfo.Description},

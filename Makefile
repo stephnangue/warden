@@ -1,4 +1,4 @@
-.PHONY: help build build-fast brd brd-fast build-no-cache up up-logs down logs logs-tail restart clean clean-all shell test test-unit test-integration query status rebuild rebuild-quick watch cache-info edit-config deps-up deps-down deps-logs
+.PHONY: help build build-fast brd brd-fast build-no-cache up up-logs down logs logs-tail restart clean clean-all shell test test-unit test-integration query status rebuild rebuild-quick watch cache-info edit-config deps-up deps-down deps-logs reset-warden-db reset-warden-db-force warden-db-logs warden-db-shell
 
 # Enable BuildKit for faster builds
 export DOCKER_BUILDKIT=1
@@ -13,11 +13,17 @@ help:
 	@echo "========================================"
 	@echo ""
 	@echo "Local Development (Warden runs locally):"
-	@echo "  make deps-up         - Start dependencies (Vault, MySQL, Hydra, etc.)"
-	@echo "  make deps-down       - Stop dependencies"
-	@echo "  make deps-logs       - View dependency logs"
-	@echo "  make brd             - Build & run warden locally (with tests)"
-	@echo "  make brd-fast        - Build warden locally (no tests)"
+	@echo "  make deps-up              - Start dependencies (Vault, MySQL, Hydra, etc.)"
+	@echo "  make deps-down            - Stop dependencies"
+	@echo "  make deps-logs            - View dependency logs"
+	@echo "  make brd                  - Build & run warden locally (with tests)"
+	@echo "  make brd-fast             - Build warden locally (no tests)"
+	@echo ""
+	@echo "Database Management:"
+	@echo "  make reset-warden-db      - Reset Warden PostgreSQL (with confirmation)"
+	@echo "  make reset-warden-db-force - Reset Warden PostgreSQL (no confirmation)"
+	@echo "  make warden-db-logs       - View Warden PostgreSQL logs"
+	@echo "  make warden-db-shell      - Connect to Warden PostgreSQL"
 	@echo ""
 	@echo "Docker Build Commands:"
 	@echo "  make build           - Run tests & build with cache"
@@ -236,4 +242,43 @@ deps-down:
 # View dependency logs
 deps-logs:
 	docker-compose -f docker-compose.deps.yml logs -f
+
+# Reset Warden PostgreSQL database (removes all data)
+reset-warden-db:
+	@echo "⚠️  WARNING: This will delete all data in the Warden PostgreSQL database!"
+	@echo "Press Ctrl+C to cancel, or wait 5 seconds to continue..."
+	@sleep 5
+	@echo "Stopping and removing postgres-warden container..."
+	@docker-compose -f docker-compose.deps.yml stop postgres-warden
+	@docker-compose -f docker-compose.deps.yml rm -f postgres-warden
+	@echo "Removing postgres-warden-data volume..."
+	@docker volume rm warden_postgres-warden-data 2>/dev/null || echo "Volume not found or already removed"
+	@echo "Starting postgres-warden service..."
+	@docker-compose -f docker-compose.deps.yml up -d postgres-warden
+	@echo "Waiting for database to be ready..."
+	@sleep 5
+	@docker-compose -f docker-compose.deps.yml exec -T postgres-warden pg_isready -U warden && echo "✓ Database is ready" || echo "⚠️  Database may still be starting"
+	@echo "✓ Warden database reset complete!"
+
+# Reset Warden PostgreSQL database without confirmation (use with caution)
+reset-warden-db-force:
+	@echo "Stopping and removing postgres-warden container..."
+	@docker-compose -f docker-compose.deps.yml stop postgres-warden
+	@docker-compose -f docker-compose.deps.yml rm -f postgres-warden
+	@echo "Removing postgres-warden-data volume..."
+	@docker volume rm warden_postgres-warden-data 2>/dev/null || echo "Volume not found or already removed"
+	@echo "Starting postgres-warden service..."
+	@docker-compose -f docker-compose.deps.yml up -d postgres-warden
+	@echo "Waiting for database to be ready..."
+	@sleep 5
+	@docker-compose -f docker-compose.deps.yml exec -T postgres-warden pg_isready -U warden && echo "✓ Database is ready" || echo "⚠️  Database may still be starting"
+	@echo "✓ Warden database reset complete!"
+
+# View Warden PostgreSQL logs
+warden-db-logs:
+	@docker-compose -f docker-compose.deps.yml logs -f postgres-warden
+
+# Connect to Warden PostgreSQL database
+warden-db-shell:
+	@docker exec -it postgres-warden psql -U warden -d warden
 

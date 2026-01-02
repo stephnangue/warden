@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/middleware"
 	"github.com/openbao/openbao/helper/locking"
+	"github.com/openbao/openbao/helper/namespace"
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/auth"
 	"github.com/stephnangue/warden/authorize"
@@ -23,204 +24,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// mockAuditDevice implements audit.Device for testing
-type mockAuditDevice struct {
-	name             string
-	deviceType       string
-	deviceClass      string
-	description      string
-	accessor         string
-	enabled          bool
-	logRequestErr    error
-	logResponseErr   error
-	logRequestCalls  int
-	logResponseCalls int
-	lastEntry        *audit.LogEntry
-	mu               sync.Mutex
-}
-
-func newMockAuditDevice(name string) *mockAuditDevice {
-	return &mockAuditDevice{
-		name:        name,
-		deviceType:  "mock",
-		deviceClass: "audit",
-		enabled:     true,
-	}
-}
-
-func (d *mockAuditDevice) LogRequest(ctx context.Context, entry *audit.LogEntry) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.logRequestCalls++
-	d.lastEntry = entry
-	return d.logRequestErr
-}
-
-func (d *mockAuditDevice) LogResponse(ctx context.Context, entry *audit.LogEntry) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.logResponseCalls++
-	d.lastEntry = entry
-	return d.logResponseErr
-}
-
-func (d *mockAuditDevice) LogTestRequest(ctx context.Context) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.logRequestCalls++
-	return d.logRequestErr
-}
-
-func (d *mockAuditDevice) Close() error {
-	return nil
-}
-
-func (d *mockAuditDevice) Name() string {
-	return d.name
-}
-
-func (d *mockAuditDevice) Enabled() bool {
-	return d.enabled
-}
-
-func (d *mockAuditDevice) SetEnabled(enabled bool) {
-	d.enabled = enabled
-}
-
-// logical.Backend interface methods
-func (d *mockAuditDevice) HandleRequest(w http.ResponseWriter, r *http.Request) error {
-	return nil
-}
-
-func (d *mockAuditDevice) GetType() string {
-	return d.deviceType
-}
-
-func (d *mockAuditDevice) GetClass() string {
-	return d.deviceClass
-}
-
-func (d *mockAuditDevice) GetDescription() string {
-	return d.description
-}
-
-func (d *mockAuditDevice) GetAccessor() string {
-	return d.accessor
-}
-
-func (d *mockAuditDevice) Cleanup() {
-}
-
-func (m *mockAuditDevice) Setup(conf map[string]any) error {
-	return  nil
-}
-
-func (m *mockAuditDevice) Config() map[string]any {
-	return map[string]any{}
-}
-
-// mockAuditFactory implements audit.Factory for testing
-type mockAuditFactory struct {
-	createFunc func(ctx context.Context, mountPath, description, accessor string, config map[string]any) (audit.Device, error)
-	device     audit.Device
-	createErr  error
-}
-
-func (f *mockAuditFactory) Type() string {
-	return "mock"
-}
-
-func (f *mockAuditFactory) Class() string {
-	return "audit"
-}
-
-func (f *mockAuditFactory) Create(ctx context.Context, mountPath, description, accessor string, config map[string]any) (audit.Device, error) {
-	if f.createFunc != nil {
-		return f.createFunc(ctx, mountPath, description, accessor, config)
-	}
-	if f.createErr != nil {
-		return nil, f.createErr
-	}
-	if f.device != nil {
-		return f.device, nil
-	}
-	return newMockAuditDevice(mountPath), nil
-}
-
-func (f *mockAuditFactory) Initialize(logger *logger.GatedLogger) error {
-	return nil
-}
-
-// mockAuditManagerFull implements audit.AuditManager for testing with full functionality
-type mockAuditManagerFull struct {
-	devices           map[string]audit.Device
-	logRequestErr     error
-	logResponseErr    error
-	logRequestResult  bool
-	logResponseResult bool
-	mu                sync.RWMutex
-}
-
-func newMockAuditManagerFull() *mockAuditManagerFull {
-	return &mockAuditManagerFull{
-		devices:           make(map[string]audit.Device),
-		logRequestResult:  true,
-		logResponseResult: true,
-	}
-}
-
-func (m *mockAuditManagerFull) RegisterDevice(name string, device audit.Device) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, exists := m.devices[name]; exists {
-		return fmt.Errorf("device %q already registered", name)
-	}
-	m.devices[name] = device
-	return nil
-}
-
-func (m *mockAuditManagerFull) UnregisterDevice(name string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, exists := m.devices[name]; !exists {
-		return fmt.Errorf("device %q not found", name)
-	}
-	delete(m.devices, name)
-	return nil
-}
-
-func (m *mockAuditManagerFull) GetDevice(name string) (audit.Device, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	device, exists := m.devices[name]
-	if !exists {
-		return nil, fmt.Errorf("device %q not found", name)
-	}
-	return device, nil
-}
-
-func (m *mockAuditManagerFull) ListDevices() []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	names := make([]string, 0, len(m.devices))
-	for name := range m.devices {
-		names = append(names, name)
-	}
-	return names
-}
-
-func (m *mockAuditManagerFull) LogRequest(ctx context.Context, entry *audit.LogEntry) (bool, error) {
-	return m.logRequestResult, m.logRequestErr
-}
-
-func (m *mockAuditManagerFull) LogResponse(ctx context.Context, entry *audit.LogEntry) (bool, error) {
-	return m.logResponseResult, m.logResponseErr
-}
-
-func (m *mockAuditManagerFull) Close() error {
-	return nil
-}
 
 // createMockCoreForAudit creates a Core instance configured for audit testing
 func createMockCoreForAudit() *Core {
@@ -237,7 +40,7 @@ func createMockCoreForAudit() *Core {
 		authMethods:   make(map[string]auth.Factory),
 		providers:     make(map[string]provider.Factory),
 		auditDevices:  make(map[string]audit.Factory),
-		tokenStore:    &mockTokenStore{},
+		tokenStore:    nil, // Not needed for audit tests
 		roles:         authorize.NewRoleRegistry(),
 		accessControl: &authorize.AccessControl{},
 		credSources:   cred.NewCredSourceRegistry(),
@@ -336,7 +139,7 @@ func TestAuditRequest(t *testing.T) {
 
 // TestEnableAudit tests the EnableAudit method
 func TestEnableAudit(t *testing.T) {
-	ctx := context.Background()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	t.Run("enable audit with trailing slash added", func(t *testing.T) {
 		core := createMockCoreForAudit()
@@ -604,7 +407,7 @@ func TestEnableAudit(t *testing.T) {
 
 // TestDisableAudit tests the DisableAudit method
 func TestDisableAudit(t *testing.T) {
-	ctx := context.Background()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	t.Run("disable audit with trailing slash added", func(t *testing.T) {
 		core := createMockCoreForAudit()
@@ -612,10 +415,12 @@ func TestDisableAudit(t *testing.T) {
 
 		// First enable the audit
 		entry := &MountEntry{
-			Class:  mountClassAudit,
-			Type:   "mock",
-			Path:   "test/",
-			Config: map[string]any{"skip_test": "true"},
+			Class:       mountClassAudit,
+			Type:        "mock",
+			Path:        "test/",
+			Config:      map[string]any{"skip_test": "true"},
+			NamespaceID: namespace.RootNamespaceID,
+			namespace:   namespace.RootNamespace,
 		}
 		err := core.EnableAudit(ctx, entry, false)
 		require.NoError(t, err)
@@ -651,10 +456,12 @@ func TestDisableAudit(t *testing.T) {
 
 		// First enable the audit
 		entry := &MountEntry{
-			Class:  mountClassAudit,
-			Type:   "mock",
-			Path:   "test/",
-			Config: map[string]any{"skip_test": "true"},
+			Class:       mountClassAudit,
+			Type:        "mock",
+			Path:        "test/",
+			Config:      map[string]any{"skip_test": "true"},
+			NamespaceID: namespace.RootNamespaceID,
+			namespace:   namespace.RootNamespace,
 		}
 		err := core.EnableAudit(ctx, entry, false)
 		require.NoError(t, err)
@@ -680,10 +487,12 @@ func TestDisableAudit(t *testing.T) {
 
 		// First enable the audit
 		entry := &MountEntry{
-			Class:  mountClassAudit,
-			Type:   "mock",
-			Path:   "test/",
-			Config: map[string]any{"skip_test": "true"},
+			Class:       mountClassAudit,
+			Type:        "mock",
+			Path:        "test/",
+			Config:      map[string]any{"skip_test": "true"},
+			NamespaceID: namespace.RootNamespaceID,
+			namespace:   namespace.RootNamespace,
 		}
 		err := core.EnableAudit(ctx, entry, false)
 		require.NoError(t, err)
@@ -700,7 +509,7 @@ func TestDisableAudit(t *testing.T) {
 
 // TestNewAuditBackend tests the newAuditBackend method
 func TestNewAuditBackend(t *testing.T) {
-	ctx := context.Background()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	t.Run("create audit backend successfully", func(t *testing.T) {
 		core := createMockCoreForAudit()
@@ -716,6 +525,8 @@ func TestNewAuditBackend(t *testing.T) {
 			Description: "test device",
 			Accessor:    "accessor_123",
 			Config:      map[string]any{"key": "value"},
+			NamespaceID: namespace.RootNamespaceID,
+			namespace:   namespace.RootNamespace,
 		}
 
 		backend, err := core.newAuditBackend(ctx, entry)
@@ -746,9 +557,11 @@ func TestNewAuditBackend(t *testing.T) {
 		}
 
 		entry := &MountEntry{
-			Class: mountClassAudit,
-			Type:  "errortype",
-			Path:  "test/",
+			Class:       mountClassAudit,
+			Type:        "errortype",
+			Path:        "test/",
+			NamespaceID: namespace.RootNamespaceID,
+			namespace:   namespace.RootNamespace,
 		}
 
 		backend, err := core.newAuditBackend(ctx, entry)
@@ -761,9 +574,11 @@ func TestNewAuditBackend(t *testing.T) {
 		core := createMockCoreForAudit()
 
 		entry := &MountEntry{
-			Class: "other",
-			Type:  "mock",
-			Path:  "test/",
+			Class:       "other",
+			Type:        "mock",
+			Path:        "test/",
+			NamespaceID: namespace.RootNamespaceID,
+			namespace:   namespace.RootNamespace,
 		}
 
 		backend, err := core.newAuditBackend(ctx, entry)
@@ -774,7 +589,7 @@ func TestNewAuditBackend(t *testing.T) {
 
 // TestEnableDisableAudit_Concurrent tests concurrent enable/disable operations
 func TestEnableDisableAudit_Concurrent(t *testing.T) {
-	ctx := context.Background()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	core := createMockCoreForAudit()
 	core.auditDevices["mock"] = &mockAuditFactory{}
 
@@ -793,6 +608,8 @@ func TestEnableDisableAudit_Concurrent(t *testing.T) {
 				Path:        fmt.Sprintf("concurrent-%d/", idx),
 				Description: fmt.Sprintf("concurrent test %d", idx),
 				Config:      map[string]any{"skip_test": "true"},
+				NamespaceID: namespace.RootNamespaceID,
+				namespace:   namespace.RootNamespace,
 			}
 
 			err := core.EnableAudit(ctx, entry, false)

@@ -18,7 +18,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/audit"
-	"github.com/stephnangue/warden/auth/token"
 	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -296,7 +295,7 @@ func (p *AWSProvider) processRequest(ctx context.Context, w http.ResponseWriter,
 
 }
 
-func (p *AWSProvider) authenticate(r *http.Request, accessKeyId string) (aws.Credentials, string, string, *token.Token, error) {
+func (p *AWSProvider) authenticate(r *http.Request, accessKeyId string) (aws.Credentials, string, string, *logical.TokenEntry, error) {
 	var secretAccessKey, principalId, roleName string
 	token := p.tokenAccess.GetToken(accessKeyId)
 	if token != nil {
@@ -315,9 +314,7 @@ func (p *AWSProvider) authenticate(r *http.Request, accessKeyId string) (aws.Cre
 		// Here we check the credential vadidity, then we enforce the auth deadline policy,
 		// finally we enforce the same origin policy
 		var err error
-		principalId, roleName, err = p.tokenAccess.ResolveToken(r.Context(), accessKeyId, map[string]string{
-			"client_ip": clientIP,
-		})
+		principalId, roleName, err = p.tokenAccess.ResolveToken(r.Context(), accessKeyId)
 		if err != nil {
 			p.logger.Warn("aws token resolution failed",
 				logger.Err(err),

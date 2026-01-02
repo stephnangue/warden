@@ -3,14 +3,14 @@ package mysql
 import (
 	"fmt"
 
-	"github.com/stephnangue/warden/auth/token"
+	"github.com/stephnangue/warden/logical"
 )
 
 type CredentialProvider struct {
-	tokenStore token.TokenAccess
+	tokenStore logical.TokenAccess
 }
 
-func NewCredentialProvider(tokenStore token.TokenAccess) *CredentialProvider {
+func NewCredentialProvider(tokenStore logical.TokenAccess) *CredentialProvider {
 	return &CredentialProvider{
 		tokenStore: tokenStore,
 	}

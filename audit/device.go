@@ -200,7 +200,7 @@ func (d *device) Name() string {
 	return d.name
 }
 
-func (m *device) Setup(conf map[string]any) error {
+func (m *device) Setup(ctx context.Context, conf map[string]any) error {
 	return  nil
 }
 
@@ -262,5 +262,9 @@ func (d *device) HandleRequest(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (d *device) Cleanup() {
+func (d *device) Cleanup(ctx context.Context) {
+}
+
+func (d *device) Initialize(ctx context.Context) error {
+	return nil
 }

@@ -8,12 +8,11 @@ import (
 
 	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/audit"
-	"github.com/stephnangue/warden/auth/token"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
 
-func (m *JWTAuthMethod) auditResponse(w http.ResponseWriter, r *http.Request, body *JWTLoginRequest, clientToken *audit.Token, token *token.Token, authData *token.AuthData, statusCode int, message string, errorMessage string) bool {
+func (m *JWTAuthMethod) auditResponse(w http.ResponseWriter, r *http.Request, body *JWTLoginRequest, clientToken *audit.Token, token *logical.TokenEntry, authData *logical.AuthData, statusCode int, message string, errorMessage string) bool {
 	var auth *audit.Auth
 	if authData != nil && clientToken != nil {
 		auth = m.buildAuth(clientToken, authData.RoleName, authData.PrincipalID)
@@ -65,7 +64,7 @@ func (m *JWTAuthMethod) buildRequest(r *http.Request, body *JWTLoginRequest) *au
 	}
 }
 
-func (m *JWTAuthMethod) buildResponse(w http.ResponseWriter, r *http.Request, token *token.Token, statusCode int, message string) *audit.Response {
+func (m *JWTAuthMethod) buildResponse(w http.ResponseWriter, r *http.Request, token *logical.TokenEntry, statusCode int, message string) *audit.Response {
 	// convert map[string]string to map[string]interface{} for the audit response
 	var data map[string]interface{}
 	if token != nil && token.Data != nil {

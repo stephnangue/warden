@@ -8,30 +8,24 @@ import (
 )
 
 var (
-	readPath string
-
 	ReadCmd = &cobra.Command{
-		Use:   "read",
-    	SilenceUsage:  true,
+		Use:           "read PATH",
+		SilenceUsage:  true,
 		SilenceErrors: true,
-		Short: "Show information on a provider",
+		Short:         "Show information on a provider",
 		Long: `
-Usage: warden providers read --path=PATH
+Usage: warden provider read PATH
 
   Show information on a provider enabled on the provided PATH.
 
   Read the provider enabled at aws/:
 
-      $ warden providers read --path=aws/
+      $ warden provider read aws/
 `,
+		Args: cobra.ExactArgs(1),
 		RunE: runRead,
 	}
 )
-
-func init() {
-	ReadCmd.Flags().StringVar(&readPath, "path", "", "Path of the provider to read (required)")
-	ReadCmd.MarkFlagRequired("path")
-}
 
 func runRead(cmd *cobra.Command, args []string) error {
 	// Create the client
@@ -40,16 +34,18 @@ func runRead(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	path := args[0]
+
 	// Get mount info for the specified path
-	mountInfo, err := c.Sys().MountInfo(readPath)
+	mountInfo, err := c.Sys().MountInfo(path)
 	if err != nil {
-		return fmt.Errorf("error reading provider at path %s: %w", readPath, err)
+		return fmt.Errorf("error reading provider at path %s: %w", path, err)
 	}
 
 	// Display provider information
 	headers := []string{"Key", "Value"}
 	data := [][]any{
-		{"path", readPath},
+		{"path", path},
 		{"type", mountInfo.Type},
 		{"accessor", mountInfo.Accessor},
 		{"description", mountInfo.Description},

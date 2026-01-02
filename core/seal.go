@@ -173,7 +173,7 @@ func (d *defaultSeal) BarrierConfig(ctx context.Context) (*SealConfig, error) {
 		conf.Type = d.BarrierType().String()
 	case d.BarrierType().String():
 	default:
-		d.core.logger.Error("barrier seal type does not match expected type", 
+		d.core.logger.Error("barrier seal type does not match expected type",
 			logger.String("barrier_seal_type", conf.Type),
 			logger.Any("loaded_seal_type", d.BarrierType()),
 		)

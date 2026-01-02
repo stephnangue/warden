@@ -10,21 +10,20 @@ import (
 )
 
 var (
-	enableType         string
-	enablePath         string
-	enableDescription  string
+	enableType        string
+	enableDescription string
 
 	EnableCmd = &cobra.Command{
-		Use:   "enable",
-    	SilenceUsage:  true,
+		Use:           "enable [PATH]",
+		SilenceUsage:  true,
 		SilenceErrors: true,
-		Short: "This command enable a provider.",
+		Short:         "This command enable a provider.",
 		Long: `
-Usage: warden providers enable [options]
+Usage: warden provider enable [options] [PATH]
 
   Enables a provider. By default, providers are enabled at the path
-  corresponding to their TYPE, but users can customize the path using the
-  --path option.
+  corresponding to their TYPE, but users can customize the path by providing
+  it as a positional argument.
 
   Once enabled, Warden will route all requests which begin with the path to the
   provider.
@@ -35,7 +34,7 @@ Usage: warden providers enable [options]
 
   Enable the Azure provider at azure-prod/:
 
-      $ warden providers enable --type=azure --path=azure-prod
+      $ warden provider enable --type=azure azure-prod
 
   For a full list of providers and examples, please see the documentation.
 `,
@@ -45,7 +44,6 @@ Usage: warden providers enable [options]
 
 func init() {
 	EnableCmd.Flags().StringVar(&enableType, "type", "", "Type of the provider (e.g., aws, azure, gcp) (required)")
-	EnableCmd.Flags().StringVar(&enablePath, "path", "", "Path where the provider will be mounted (default: <type>/)")
 	EnableCmd.Flags().StringVar(&enableDescription, "description", "", "Human-friendly description of the provider")
 	EnableCmd.MarkFlagRequired("type")
 }
@@ -57,9 +55,11 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Use type as default path if path is not specified
-	path := enablePath
-	if path == "" {
+	// Determine path from positional argument or use type as default
+	var path string
+	if len(args) > 0 {
+		path = args[0]
+	} else {
 		path = enableType + "/"
 	}
 
