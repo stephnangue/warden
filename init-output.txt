@@ -1,0 +1,7 @@
+initialization failed: Error making API request.
+
+URL: POST http://127.0.0.1:5000/v1/sys/init
+Code: 500. Raw Message:
+
+Internal server error
+

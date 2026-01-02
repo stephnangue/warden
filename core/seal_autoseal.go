@@ -221,7 +221,7 @@ func (d *autoSeal) BarrierConfig(ctx context.Context) (*SealConfig, error) {
 
 	if conf.Type != d.BarrierType().String() {
 		d.logger.Error("barrier seal type does not match loaded type",
-			log.String("seal_type", sealType), 
+			log.String("seal_type", sealType),
 			log.Any("loaded_type", d.BarrierType()),
 		)
 		return nil, fmt.Errorf("barrier seal type of %q does not match loaded type of %q", conf.Type, d.BarrierType())
@@ -311,7 +311,7 @@ func (d *autoSeal) RecoveryConfig(ctx context.Context) (*SealConfig, error) {
 
 	if conf.Type != d.RecoveryType() {
 		d.logger.Error("recovery seal type does not match loaded type",
-			log.String("seal_type", sealType), 
+			log.String("seal_type", sealType),
 			log.Any("loaded_type", d.RecoveryType()),
 		)
 		return nil, fmt.Errorf("recovery seal type of %q does not match loaded type of %q", conf.Type, d.RecoveryType())

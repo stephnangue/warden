@@ -6,8 +6,8 @@ seal "static" {
   current_key = "file://./seal.key"
 }
 
-storage "file" {
-  path = "./tmp/storage"
+storage "postgres" {
+  connection_url = "postgres://warden:wardenpassword@localhost:5433/warden?sslmode=disable"
 }
 
 listener "mysql" {

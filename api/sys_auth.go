@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 
 	"github.com/go-viper/mapstructure/v2"
 )
@@ -58,7 +57,7 @@ func (c *Sys) EnableAuthWithContext(ctx context.Context, path string, authInfo *
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/auth/%s", url.PathEscape(path)))
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/auth/%s", path))
 	if err := r.SetJSONBody(authInfo); err != nil {
 		return err
 	}
@@ -80,7 +79,7 @@ func (c *Sys) DisableAuthWithContext(ctx context.Context, path string) error {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/auth/%s", url.PathEscape(path)))
+	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/auth/%s", path))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err == nil {
@@ -97,7 +96,7 @@ func (c *Sys) AuthInfoWithContext(ctx context.Context, path string) (*AuthMountO
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/auth/%s", url.PathEscape(path)))
+	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/auth/%s", path))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {
@@ -130,7 +129,7 @@ func (c *Sys) TuneAuthWithContext(ctx context.Context, path string, config map[s
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/auth/%s/tune", url.PathEscape(path)))
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/auth/%s/tune", path))
 
 	// Wrap config in the expected request body structure
 	body := map[string]any{

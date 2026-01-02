@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"database/sql"
 	"flag"
@@ -60,7 +61,7 @@ func prepareServerConf() []*Server {
 
 type MockAuthResolver struct{}
 
-func (am *MockAuthResolver) Resolve(user string, reqContext map[string]string) (string, string, bool, error) {
+func (am *MockAuthResolver) Resolve(ctx context.Context, user string) (string, string, bool, error) {
 	return "test", "test", true, nil
 }
 

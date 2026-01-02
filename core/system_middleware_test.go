@@ -7,22 +7,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stephnangue/warden/auth/token"
+	"github.com/openbao/openbao/helper/namespace"
 	"github.com/stephnangue/warden/authorize"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestAuthenticationMiddleware_Success(t *testing.T) {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	tokenStore, _ := token.NewRobustStore(log, nil)
-	defer tokenStore.Close()
-
-	core := &Core{
-		tokenStore: tokenStore,
-		logger:     log,
-	}
+	core := createTestCore(t)
 
 	backend := &SystemBackend{
 		core:   core,
@@ -30,7 +25,8 @@ func TestAuthenticationMiddleware_Success(t *testing.T) {
 	}
 
 	// Generate WARDEN_TOKEN
-	authData := &token.AuthData{
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	authData := &logical.AuthData{
 		PrincipalID:  "test-principal",
 		RoleName:     "system_admin",
 		AuthDeadline: time.Now().Add(10 * time.Minute),
@@ -39,7 +35,7 @@ func TestAuthenticationMiddleware_Success(t *testing.T) {
 			"client_ip": "127.0.0.1",
 		},
 	}
-	tok, err := tokenStore.GenerateToken(token.WARDEN_TOKEN, authData)
+	tok, err := core.tokenStore.GenerateToken(ctx, "warden_token", authData)
 	require.NoError(t, err)
 
 	// Test handler
@@ -53,8 +49,12 @@ func TestAuthenticationMiddleware_Success(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.Header.Set("Authorization", "Bearer "+tok.Data["token"])
-	req.Header.Set("X-Real-IP", "127.0.0.1") // Simulate Chi's RealIP middleware
-	req.RemoteAddr = "127.0.0.1:12345"
+
+	// Add namespace and client_ip to request context (normally done by ServeHTTP in request_handler.go)
+	reqCtx := namespace.ContextWithNamespace(req.Context(), namespace.RootNamespace)
+	reqCtx = context.WithValue(reqCtx, "client_ip", "127.0.0.1")
+	req = req.WithContext(reqCtx)
+
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -85,13 +85,7 @@ func TestAuthenticationMiddleware_MissingToken(t *testing.T) {
 
 func TestAuthenticationMiddleware_InvalidToken(t *testing.T) {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	tokenStore, _ := token.NewRobustStore(log, nil)
-	defer tokenStore.Close()
-
-	core := &Core{
-		tokenStore: tokenStore,
-		logger:     log,
-	}
+	core := createTestCore(t)
 
 	backend := &SystemBackend{
 		core:   core,
@@ -106,8 +100,12 @@ func TestAuthenticationMiddleware_InvalidToken(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.Header.Set("Authorization", "Bearer invalid-token")
-	req.Header.Set("X-Real-IP", "127.0.0.1") // Simulate Chi's RealIP middleware
-	req.RemoteAddr = "127.0.0.1:12345"
+
+	// Add namespace and client_ip to request context (normally done by ServeHTTP in request_handler.go)
+	reqCtx := namespace.ContextWithNamespace(req.Context(), namespace.RootNamespace)
+	reqCtx = context.WithValue(reqCtx, "client_ip", "127.0.0.1")
+	req = req.WithContext(reqCtx)
+
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)

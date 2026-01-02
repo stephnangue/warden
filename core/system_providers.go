@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"net/url"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/openbao/openbao/helper/namespace"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -16,40 +16,31 @@ func (h *SystemHandlers) MountProvider(
 	ctx context.Context,
 	input *MountProviderInput,
 ) (*MountProviderOutput, error) {
-	// URL-decode the path (Chi doesn't decode path parameters automatically)
-	decodedPath, err := url.PathUnescape(input.Path)
-	if err != nil {
-		h.logger.Warn("path decode failed",
-			logger.Err(err),
-			logger.String("path", decodedPath))
-		return nil, huma.Error400BadRequest(fmt.Sprintf("invalid path encoding: %v", err))
-	}
-
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
 		h.logger.Warn("operation unauthorized",
 			logger.Err(err),
-			logger.String("path", decodedPath))
+			logger.String("path", input.Path))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
 	}
 
 	// Custom validation
-	if err := ValidateMountPath(decodedPath); err != nil {
+	if err := ValidateMountPath(input.Path); err != nil {
 		h.logger.Warn("mount path validation failed",
 			logger.Err(err),
-			logger.String("path", decodedPath))
+			logger.String("path", input.Path))
 		return nil, huma.Error400BadRequest(err.Error())
 	}
 
 	h.logger.Info("mounting provider",
-		logger.String("path", decodedPath),
+		logger.String("path", input.Path),
 		logger.String("type", input.Body.Type))
 
 	// Create mount entry
 	entry := &MountEntry{
 		Class:       mountClassProvider,
 		Type:        input.Body.Type,
-		Path:        decodedPath,
+		Path:        input.Path,
 		Description: input.Body.Description,
 		Config:      input.Body.Config,
 	}
@@ -58,7 +49,7 @@ func (h *SystemHandlers) MountProvider(
 	if err := h.core.mount(ctx, entry); err != nil {
 		h.logger.Error("mount failed",
 			logger.Err(err),
-			logger.String("path", decodedPath))
+			logger.String("path", input.Path))
 		return nil, h.convertError(err)
 	}
 
@@ -66,7 +57,7 @@ func (h *SystemHandlers) MountProvider(
 	output := &MountProviderOutput{}
 	output.Body.Accessor = entry.Accessor
 	output.Body.Path = entry.Path
-	output.Body.Message = fmt.Sprintf("Successfully mounted %s provider at %s", input.Body.Type, decodedPath)
+	output.Body.Message = fmt.Sprintf("Successfully mounted %s provider at %s", input.Body.Type, input.Path)
 
 	return output, nil
 }
@@ -76,35 +67,27 @@ func (h *SystemHandlers) UnmountProvider(
 	ctx context.Context,
 	input *UnmountProviderInput,
 ) (*UnmountProviderOutput, error) {
-	// URL-decode the path
-	decodedPath, err := url.PathUnescape(input.Path)
-	if err != nil {
-		h.logger.Warn("path decode failed",
-			logger.Err(err),
-			logger.String("path", input.Path))
-		return nil, huma.Error400BadRequest(fmt.Sprintf("invalid path encoding: %v", err))
-	}
 
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
 		h.logger.Warn("unmount operation unauthorized",
 			logger.Err(err),
-			logger.String("path", decodedPath))
+			logger.String("path", input.Path))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
 	}
 
-	h.logger.Info("unmounting provider", logger.String("path", decodedPath))
+	h.logger.Info("unmounting provider", logger.String("path", input.Path))
 
 	// Unmount via Core
-	if err := h.core.unmount(ctx, decodedPath); err != nil {
+	if err := h.core.unmount(ctx, input.Path); err != nil {
 		h.logger.Error("unmount failed",
 			logger.Err(err),
-			logger.String("path", decodedPath))
+			logger.String("path", input.Path))
 		return nil, h.convertError(err)
 	}
 
 	output := &UnmountProviderOutput{}
-	output.Body.Message = fmt.Sprintf("Successfully unmounted %s", decodedPath)
+	output.Body.Message = fmt.Sprintf("Successfully unmounted %s", input.Path)
 	return output, nil
 }
 
@@ -113,20 +96,12 @@ func (h *SystemHandlers) GetMountInfo(
 	ctx context.Context,
 	input *GetMountInput,
 ) (*GetMountOutput, error) {
-	// URL-decode the path
-	decodedPath, err := url.PathUnescape(input.Path)
-	if err != nil {
-		h.logger.Warn("path decode failed",
-			logger.Err(err),
-			logger.String("path", input.Path))
-		return nil, huma.Error400BadRequest(fmt.Sprintf("invalid path encoding: %v", err))
-	}
 
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
 		h.logger.Warn("get mount info operation unauthorized",
 			logger.Err(err),
-			logger.String("path", decodedPath))
+			logger.String("path", input.Path))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
 	}
 
@@ -134,7 +109,7 @@ func (h *SystemHandlers) GetMountInfo(
 	defer h.core.mountsLock.RUnlock()
 
 	// Normalize path
-	path := decodedPath
+	path := input.Path
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
 	}
@@ -171,23 +146,29 @@ func (h *SystemHandlers) GetMountInfo(
 // ListMounts retrieves all mounts
 func (h *SystemHandlers) ListMounts(
 	ctx context.Context,
-	input *struct{},
+	input *ListMountsInput,
 ) (*ListMountsOutput, error) {
+
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
 		h.logger.Warn("list mounts operation unauthorized",
 			logger.Err(err))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
 	}
-	
+
 	h.core.mountsLock.RLock()
 	defer h.core.mountsLock.RUnlock()
 
 	mounts := make(map[string]MountInfo)
 
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, entry := range h.core.mounts.Entries {
-		// Only returns entry of class provider
-		if entry.Class != "provider" {
+		// Only returns entry of class provider in the specified namespace
+		if entry.Class != mountClassProvider || entry.NamespaceID != ns.ID {
 			continue
 		}
 
@@ -215,42 +196,30 @@ func (h *SystemHandlers) ListMounts(
 	return output, nil
 }
 
-
 // ConfigureProvider configures an existing provider mount
 func (h *SystemHandlers) ConfigureProvider(
 	ctx context.Context,
 	input *TuneProviderInput,
 ) (*TuneProviderOutput, error) {
-	// URL-decode the path
-	decodedPath, err := url.PathUnescape(input.Path)
-	if err != nil {
-		h.logger.Warn("path decode failed",
-			logger.Err(err),
-			logger.String("path", input.Path))
-		return nil, huma.Error400BadRequest(fmt.Sprintf("invalid path encoding: %v", err))
-	}
 
 	// Authorization check
 	if err := h.checkSystemAdmin(ctx); err != nil {
 		h.logger.Warn("tune mount operation unauthorized",
 			logger.Err(err),
-			logger.String("path", decodedPath))
+			logger.String("path", input.Path))
 		return nil, huma.Error403Forbidden("Insufficient permissions: system_admin role required")
 	}
 
-	h.logger.Info("tuning mount",
-		logger.String("path", decodedPath))
-
 	// Tune via Core
-	if err := h.core.configureMount(ctx, decodedPath, input.Body); err != nil {
-		h.logger.Error("tune mount failed",
+	if err := h.core.configureMount(ctx, input.Path, input.Body, true); err != nil {
+		h.logger.Error("failed to configure mount",
 			logger.Err(err),
-			logger.String("path", decodedPath))
+			logger.String("path", input.Path))
 		return nil, h.convertError(err)
 	}
 
 	output := &TuneProviderOutput{}
-	output.Body.Message = fmt.Sprintf("Successfully tuned mount at %s", decodedPath)
+	output.Body.Message = fmt.Sprintf("Successfully tuned mount at %s", input.Path)
 	return output, nil
 }
 
@@ -263,10 +232,11 @@ func (h *SystemHandlers) convertError(err error) error {
 
 	// Return error messages - validation errors should be descriptive, others generic for security
 	switch {
-	case strings.Contains(errMsg, "invalid configuration"), 
-	strings.Contains(errMsg, "failed to setup backend with new config"):
+	case strings.Contains(errMsg, "invalid configuration"),
+		strings.Contains(errMsg, "failed to setup backend with new config"):
 		return huma.Error400BadRequest(errMsg)
-	case strings.Contains(errMsg, "already in use"):
+	case strings.Contains(errMsg, "already in use"),
+		strings.Contains(errMsg, "already exists"):
 		return huma.Error409Conflict(errMsg)
 	case strings.Contains(errMsg, "no matching mount"):
 		return huma.Error404NotFound(errMsg)
@@ -274,7 +244,13 @@ func (h *SystemHandlers) convertError(err error) error {
 		return huma.Error403Forbidden("Operation not permitted")
 	case strings.Contains(errMsg, "not supported"):
 		return huma.Error400BadRequest("Invalid mount type")
+	case strings.Contains(errMsg, "can't insert namespace with missing parent"):
+		return huma.Error400BadRequest("can't create namespace with missing parent")
+	case strings.Contains(errMsg, "cannot delete namespace"):
+		return huma.Error400BadRequest(errMsg)
 	default:
-		return huma.Error500InternalServerError("Internal server error")
+		// Return the actual error message for better debugging
+		// TODO: In production, consider returning a generic message for security
+		return huma.Error500InternalServerError(errMsg)
 	}
 }

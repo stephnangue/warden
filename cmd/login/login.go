@@ -40,6 +40,10 @@ Usage: warden login [options] [AUTH K=V...]
   If a jwt auth method was enabled at "jwt-prod", authenticate like this:
 
       $ warden login --method=jwt --path=jwt-prod
+
+  Alternatively, you can provide the path as a positional argument:
+
+      $ warden login --method=jwt jwt-prod
 `,
 		RunE: run,
 	}
@@ -81,8 +85,14 @@ func run(cmd *cobra.Command, args []string) error {
 	config := make(map[string]string)
 	config["role"] = flagRole
 
-	if flagPath != "" {
-		config["mount"] = flagPath
+	// Support both --path flag and positional argument
+	path := flagPath
+	if path == "" && len(args) > 0 {
+		path = args[0]
+	}
+
+	if path != "" {
+		config["mount"] = path
 	}
 
 	switch flagMethod {
