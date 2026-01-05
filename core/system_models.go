@@ -187,3 +187,193 @@ type DeleteNamespaceOutput struct {
 		Message string `json:"message" doc:"Success message"`
 	}
 }
+
+// Credential Source Models
+
+// CreateCredentialSourceInput represents the input for creating a credential source
+type CreateCredentialSourceInput struct {
+	Name string `path:"name" minLength:"1" maxLength:"256" pattern:"^[a-zA-Z0-9_-]+$" doc:"Credential source name" example:"vault-prod"`
+	Body struct {
+		Type   string            `json:"type" minLength:"1" maxLength:"50" pattern:"^[a-z0-9_]+$" doc:"Source type (e.g., local, hashicorp_vault, aws_secret_manager)" example:"hashicorp_vault"`
+		Config map[string]string `json:"config,omitempty" doc:"Source-specific configuration (address, token, etc.)"`
+	}
+	WardenNamespace string `header:"X-Warden-Namespace"`
+}
+
+// CreateCredentialSourceOutput represents the output after creating a credential source
+type CreateCredentialSourceOutput struct {
+	Body struct {
+		Name    string            `json:"name" doc:"Credential source name"`
+		Type    string            `json:"type" doc:"Source type"`
+		Config  map[string]string `json:"config,omitempty" doc:"Source configuration"`
+		Message string            `json:"message" doc:"Success message"`
+	}
+}
+
+// GetCredentialSourceInput represents the input for getting a credential source
+type GetCredentialSourceInput struct {
+	Name            string `path:"name" minLength:"1" maxLength:"256" doc:"Credential source name" example:"vault-prod"`
+	WardenNamespace string `header:"X-Warden-Namespace"`
+}
+
+// GetCredentialSourceOutput represents the output for credential source information
+type GetCredentialSourceOutput struct {
+	Body struct {
+		Name   string            `json:"name" doc:"Credential source name"`
+		Type   string            `json:"type" doc:"Source type"`
+		Config map[string]string `json:"config,omitempty" doc:"Source configuration"`
+	}
+}
+
+// ListCredentialSourcesInput represents the input for listing credential sources
+type ListCredentialSourcesInput struct {
+	WardenNamespace string `header:"X-Warden-Namespace"`
+}
+
+// ListCredentialSourcesOutput represents the output for listing credential sources
+type ListCredentialSourcesOutput struct {
+	Body struct {
+		Sources []CredentialSourceInfo `json:"sources" doc:"List of credential sources"`
+	}
+}
+
+// CredentialSourceInfo represents credential source metadata
+type CredentialSourceInfo struct {
+	Name   string            `json:"name" doc:"Credential source name"`
+	Type   string            `json:"type" doc:"Source type"`
+	Config map[string]string `json:"config,omitempty" doc:"Source configuration"`
+}
+
+// UpdateCredentialSourceInput represents the input for updating a credential source
+type UpdateCredentialSourceInput struct {
+	Name string `path:"name" minLength:"1" maxLength:"256" doc:"Credential source name" example:"vault-prod"`
+	Body struct {
+		Config map[string]string `json:"config,omitempty" doc:"Updated configuration"`
+	}
+	WardenNamespace string `header:"X-Warden-Namespace"`
+}
+
+// UpdateCredentialSourceOutput represents the output after updating a credential source
+type UpdateCredentialSourceOutput struct {
+	Body struct {
+		Name    string `json:"name" doc:"Credential source name"`
+		Message string `json:"message" doc:"Success message"`
+	}
+}
+
+// DeleteCredentialSourceInput represents the input for deleting a credential source
+type DeleteCredentialSourceInput struct {
+	Name            string `path:"name" minLength:"1" maxLength:"256" doc:"Credential source name" example:"vault-prod"`
+	WardenNamespace string `header:"X-Warden-Namespace"`
+}
+
+// DeleteCredentialSourceOutput represents the output after deleting a credential source
+type DeleteCredentialSourceOutput struct {
+	Body struct {
+		Message string `json:"message" doc:"Success message"`
+	}
+}
+
+// Credential Spec Models
+
+// CreateCredentialSpecInput represents the input for creating a credential spec
+type CreateCredentialSpecInput struct {
+	Name string `path:"name" minLength:"1" maxLength:"256" pattern:"^[a-zA-Z0-9_-]+$" doc:"Credential spec name" example:"db-admin"`
+	Body struct {
+		Type         string            `json:"type" minLength:"1" maxLength:"50" pattern:"^[a-z0-9_]+$" doc:"Credential type (e.g., database_userpass, aws_access_keys)" example:"database_userpass"`
+		SourceName   string            `json:"source_name" minLength:"1" maxLength:"256" doc:"Reference to credential source" example:"vault-prod"`
+		SourceParams map[string]string `json:"source_params,omitempty" doc:"Type-specific parameters (path, role_name, etc.)"`
+		MinTTL       int64             `json:"min_ttl" minimum:"0" doc:"Minimum TTL in seconds for issued credentials" example:"300"`
+		MaxTTL       int64             `json:"max_ttl" minimum:"0" doc:"Maximum TTL in seconds for issued credentials" example:"3600"`
+		TargetName   string            `json:"target_name,omitempty" maxLength:"256" doc:"Target binding for audit/routing" example:"prod-db"`
+	}
+	WardenNamespace string `header:"X-Warden-Namespace"`
+}
+
+// CreateCredentialSpecOutput represents the output after creating a credential spec
+type CreateCredentialSpecOutput struct {
+	Body struct {
+		Name         string            `json:"name" doc:"Credential spec name"`
+		Type         string            `json:"type" doc:"Credential type"`
+		SourceName   string            `json:"source_name" doc:"Reference to credential source"`
+		SourceParams map[string]string `json:"source_params,omitempty" doc:"Type-specific parameters"`
+		MinTTL       int64             `json:"min_ttl" doc:"Minimum TTL in seconds"`
+		MaxTTL       int64             `json:"max_ttl" doc:"Maximum TTL in seconds"`
+		TargetName   string            `json:"target_name,omitempty" doc:"Target binding"`
+		Message      string            `json:"message" doc:"Success message"`
+	}
+}
+
+// GetCredentialSpecInput represents the input for getting a credential spec
+type GetCredentialSpecInput struct {
+	Name            string `path:"name" minLength:"1" maxLength:"256" doc:"Credential spec name" example:"db-admin"`
+	WardenNamespace string `header:"X-Warden-Namespace"`
+}
+
+// GetCredentialSpecOutput represents the output for credential spec information
+type GetCredentialSpecOutput struct {
+	Body struct {
+		Name         string            `json:"name" doc:"Credential spec name"`
+		Type         string            `json:"type" doc:"Credential type"`
+		SourceName   string            `json:"source_name" doc:"Reference to credential source"`
+		SourceParams map[string]string `json:"source_params,omitempty" doc:"Type-specific parameters"`
+		MinTTL       int64             `json:"min_ttl" doc:"Minimum TTL in seconds"`
+		MaxTTL       int64             `json:"max_ttl" doc:"Maximum TTL in seconds"`
+		TargetName   string            `json:"target_name,omitempty" doc:"Target binding"`
+	}
+}
+
+// ListCredentialSpecsInput represents the input for listing credential specs
+type ListCredentialSpecsInput struct {
+	WardenNamespace string `header:"X-Warden-Namespace"`
+}
+
+// ListCredentialSpecsOutput represents the output for listing credential specs
+type ListCredentialSpecsOutput struct {
+	Body struct {
+		Specs []CredentialSpecInfo `json:"specs" doc:"List of credential specs"`
+	}
+}
+
+// CredentialSpecInfo represents credential spec metadata
+type CredentialSpecInfo struct {
+	Name         string            `json:"name" doc:"Credential spec name"`
+	Type         string            `json:"type" doc:"Credential type"`
+	SourceName   string            `json:"source_name" doc:"Reference to credential source"`
+	SourceParams map[string]string `json:"source_params,omitempty" doc:"Type-specific parameters"`
+	MinTTL       int64             `json:"min_ttl" doc:"Minimum TTL in seconds"`
+	MaxTTL       int64             `json:"max_ttl" doc:"Maximum TTL in seconds"`
+	TargetName   string            `json:"target_name,omitempty" doc:"Target binding"`
+}
+
+// UpdateCredentialSpecInput represents the input for updating a credential spec
+type UpdateCredentialSpecInput struct {
+	Name string `path:"name" minLength:"1" maxLength:"256" doc:"Credential spec name" example:"db-admin"`
+	Body struct {
+		SourceParams map[string]string `json:"source_params,omitempty" doc:"Updated type-specific parameters"`
+		MinTTL       *int64            `json:"min_ttl,omitempty" minimum:"0" doc:"Updated minimum TTL in seconds"`
+		MaxTTL       *int64            `json:"max_ttl,omitempty" minimum:"0" doc:"Updated maximum TTL in seconds"`
+	}
+	WardenNamespace string `header:"X-Warden-Namespace"`
+}
+
+// UpdateCredentialSpecOutput represents the output after updating a credential spec
+type UpdateCredentialSpecOutput struct {
+	Body struct {
+		Name    string `json:"name" doc:"Credential spec name"`
+		Message string `json:"message" doc:"Success message"`
+	}
+}
+
+// DeleteCredentialSpecInput represents the input for deleting a credential spec
+type DeleteCredentialSpecInput struct {
+	Name            string `path:"name" minLength:"1" maxLength:"256" doc:"Credential spec name" example:"db-admin"`
+	WardenNamespace string `header:"X-Warden-Namespace"`
+}
+
+// DeleteCredentialSpecOutput represents the output after deleting a credential spec
+type DeleteCredentialSpecOutput struct {
+	Body struct {
+		Message string `json:"message" doc:"Success message"`
+	}
+}
