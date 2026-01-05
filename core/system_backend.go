@@ -59,6 +59,7 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 		{Name: "mounts", Description: "Provider mount management"},
 		{Name: "auth", Description: "Auth method management"},
 		{Name: "namespaces", Description: "Namespace management"},
+		{Name: "credentials", Description: "Credential management"},
 	}
 
 	// Add security scheme for Bearer token authentication
@@ -97,6 +98,7 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 	backend.registerProviderOperations()
 	backend.registerAuthOperations()
 	backend.registerNamespaceOperations()
+	backend.registerCredentialOperations()
 
 	return backend
 }
@@ -304,6 +306,143 @@ func (s *SystemBackend) registerNamespaceOperations() {
 			{"bearerAuth": {}},
 		},
 	}, s.handlers.DeleteNamespace)
+}
+
+// registerCredentialOperations registers all credential management endpoints
+func (s *SystemBackend) registerCredentialOperations() {
+	// Credential Sources
+
+	// POST /credential/sources/{name} - Create credential source
+	huma.Register(s.api, huma.Operation{
+		OperationID: "create-credential-source",
+		Method:      http.MethodPost,
+		Path:        "/credential/sources/{name}",
+		Summary:     "Create a credential source",
+		Description: "Creates a new credential source at the specified name. Requires system_admin role.",
+		Tags:        []string{"credentials"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.CreateCredentialSource)
+
+	// GET /credential/sources/{name} - Get credential source info
+	huma.Register(s.api, huma.Operation{
+		OperationID: "get-credential-source",
+		Method:      http.MethodGet,
+		Path:        "/credential/sources/{name}",
+		Summary:     "Get credential source information",
+		Description: "Retrieves detailed information about a specific credential source",
+		Tags:        []string{"credentials"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.GetCredentialSource)
+
+	// GET /credential/sources - List credential sources
+	huma.Register(s.api, huma.Operation{
+		OperationID: "list-credential-sources",
+		Method:      http.MethodGet,
+		Path:        "/credential/sources",
+		Summary:     "List all credential sources",
+		Description: "Returns all credential sources in the current namespace",
+		Tags:        []string{"credentials"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.ListCredentialSources)
+
+	// PUT /credential/sources/{name} - Update credential source
+	huma.Register(s.api, huma.Operation{
+		OperationID: "update-credential-source",
+		Method:      http.MethodPut,
+		Path:        "/credential/sources/{name}",
+		Summary:     "Update a credential source",
+		Description: "Updates an existing credential source. Requires system_admin role.",
+		Tags:        []string{"credentials"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.UpdateCredentialSource)
+
+	// DELETE /credential/sources/{name} - Delete credential source
+	huma.Register(s.api, huma.Operation{
+		OperationID: "delete-credential-source",
+		Method:      http.MethodDelete,
+		Path:        "/credential/sources/{name}",
+		Summary:     "Delete a credential source",
+		Description: "Removes a credential source. Cannot delete if still referenced by specs. Requires system_admin role.",
+		Tags:        []string{"credentials"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.DeleteCredentialSource)
+
+	// Credential Specs
+
+	// POST /credential/specs/{name} - Create credential spec
+	huma.Register(s.api, huma.Operation{
+		OperationID: "create-credential-spec",
+		Method:      http.MethodPost,
+		Path:        "/credential/specs/{name}",
+		Summary:     "Create a credential spec",
+		Description: "Creates a new credential specification at the specified name. Requires system_admin role.",
+		Tags:        []string{"credentials"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.CreateCredentialSpec)
+
+	// GET /credential/specs/{name} - Get credential spec info
+	huma.Register(s.api, huma.Operation{
+		OperationID: "get-credential-spec",
+		Method:      http.MethodGet,
+		Path:        "/credential/specs/{name}",
+		Summary:     "Get credential spec information",
+		Description: "Retrieves detailed information about a specific credential specification",
+		Tags:        []string{"credentials"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.GetCredentialSpec)
+
+	// GET /credential/specs - List credential specs
+	huma.Register(s.api, huma.Operation{
+		OperationID: "list-credential-specs",
+		Method:      http.MethodGet,
+		Path:        "/credential/specs",
+		Summary:     "List all credential specs",
+		Description: "Returns all credential specifications in the current namespace",
+		Tags:        []string{"credentials"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.ListCredentialSpecs)
+
+	// PUT /credential/specs/{name} - Update credential spec
+	huma.Register(s.api, huma.Operation{
+		OperationID: "update-credential-spec",
+		Method:      http.MethodPut,
+		Path:        "/credential/specs/{name}",
+		Summary:     "Update a credential spec",
+		Description: "Updates an existing credential specification. Requires system_admin role.",
+		Tags:        []string{"credentials"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.UpdateCredentialSpec)
+
+	// DELETE /credential/specs/{name} - Delete credential spec
+	huma.Register(s.api, huma.Operation{
+		OperationID: "delete-credential-spec",
+		Method:      http.MethodDelete,
+		Path:        "/credential/specs/{name}",
+		Summary:     "Delete a credential spec",
+		Description: "Removes a credential specification. Requires system_admin role.",
+		Tags:        []string{"credentials"},
+		Security: []map[string][]string{
+			{"bearerAuth": {}},
+		},
+	}, s.handlers.DeleteCredentialSpec)
 }
 
 // HandleRequest implements logical.Backend interface

@@ -1219,6 +1219,40 @@ func (s *TokenStore) deleteToken(entry *TokenEntry) error {
 		}
 	}
 
+	// Cleanup associated credential for this token
+	if err := s.cleanupCredentialForToken(ctx, entry); err != nil {
+		s.core.logger.Warn("failed to cleanup credential for deleted token",
+			logger.String("token_id", entry.ID),
+			logger.Err(err))
+		// Don't fail token deletion if credential cleanup fails
+	}
+
+	return nil
+}
+
+// cleanupCredentialForToken removes the credential associated with a token
+func (s *TokenStore) cleanupCredentialForToken(ctx context.Context, entry *TokenEntry) error {
+	// Get namespace from token
+	ns, err := s.core.namespaceStore.GetNamespace(ctx, entry.NamespaceID)
+	if err != nil {
+		return fmt.Errorf("failed to get namespace: %w", err)
+	}
+
+	// Create namespace context for credential manager lookup
+	nsCtx := namespace.ContextWithNamespace(ctx, ns)
+
+	// Get the global credential manager
+	manager, err := s.core.GetCredentialManager(nsCtx)
+	if err != nil {
+		// Manager not initialized, nothing to cleanup
+		return nil
+	}
+
+	// Revoke and delete credential using namespace ID from token
+	if err := manager.RevokeAndDeleteCredential(nsCtx, entry.NamespaceID, entry.ID); err != nil {
+		return fmt.Errorf("failed to cleanup credential: %w", err)
+	}
+
 	return nil
 }
 

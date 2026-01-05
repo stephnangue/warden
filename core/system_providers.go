@@ -232,6 +232,7 @@ func (h *SystemHandlers) convertError(err error) error {
 
 	// Return error messages - validation errors should be descriptive, others generic for security
 	switch {
+	// Mount/Provider validation errors
 	case strings.Contains(errMsg, "invalid configuration"),
 		strings.Contains(errMsg, "failed to setup backend with new config"):
 		return huma.Error400BadRequest(errMsg)
@@ -244,10 +245,44 @@ func (h *SystemHandlers) convertError(err error) error {
 		return huma.Error403Forbidden("Operation not permitted")
 	case strings.Contains(errMsg, "not supported"):
 		return huma.Error400BadRequest("Invalid mount type")
+
+	// Namespace errors
 	case strings.Contains(errMsg, "can't insert namespace with missing parent"):
 		return huma.Error400BadRequest("can't create namespace with missing parent")
 	case strings.Contains(errMsg, "cannot delete namespace"):
 		return huma.Error400BadRequest(errMsg)
+
+	// Credential validation errors (400)
+	case strings.Contains(errMsg, "spec name cannot be empty"),
+		strings.Contains(errMsg, "spec type cannot be empty"),
+		strings.Contains(errMsg, "spec source_name cannot be empty"),
+		strings.Contains(errMsg, "source name cannot be empty"),
+		strings.Contains(errMsg, "source type cannot be empty"),
+		strings.Contains(errMsg, "min_ttl cannot be greater than max_ttl"):
+		return huma.Error400BadRequest(errMsg)
+	case strings.Contains(errMsg, "unknown source type"):
+		return huma.Error400BadRequest(errMsg)
+	case strings.Contains(errMsg, "unknown credential type"):
+		return huma.Error400BadRequest(errMsg)
+	case strings.Contains(errMsg, "not found in namespace"):
+		return huma.Error400BadRequest(errMsg)
+
+	// Credential not found errors (404)
+	case strings.Contains(errMsg, "credential spec not found"),
+		strings.Contains(errMsg, "credential source not found"):
+		return huma.Error404NotFound(errMsg)
+
+	// Credential source in use (409)
+	case strings.Contains(errMsg, "credential source is referenced by specs"),
+		strings.Contains(errMsg, "still referenced by"):
+		return huma.Error409Conflict(errMsg)
+
+	// Config store state errors (503)
+	case strings.Contains(errMsg, "credential config store is closed"),
+		strings.Contains(errMsg, "credential config store not initialized"),
+		strings.Contains(errMsg, "credential manager not initialized"):
+		return huma.Error503ServiceUnavailable(errMsg)
+
 	default:
 		// Return the actual error message for better debugging
 		// TODO: In production, consider returning a generic message for security

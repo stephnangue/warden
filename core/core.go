@@ -30,6 +30,9 @@ import (
 	"github.com/stephnangue/warden/config"
 	"github.com/stephnangue/warden/core/seal"
 	"github.com/stephnangue/warden/cred"
+	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/drivers"
+	"github.com/stephnangue/warden/credential/types"
 	"github.com/stephnangue/warden/logger"
 	phy "github.com/stephnangue/warden/physical"
 	"github.com/stephnangue/warden/provider"
@@ -176,6 +179,20 @@ type Core struct {
 
 	// namespace Store is used to manage namespaces
 	namespaceStore *NamespaceStore
+
+	// credConfigStore manages credential specs and sources with namespace isolation
+	credConfigStore *CredentialConfigStore
+
+	// policy store is used to manage named CBP policies
+	policyStore *PolicyStore
+
+	// credentialManager is a global manager that handles credentials across all namespaces
+	// It uses namespace-aware cache keys and storage paths for isolation
+	credentialManager *credential.Manager
+
+	// Global registries shared across all namespaces
+	credentialTypeRegistry   *credential.TypeRegistry
+	credentialDriverRegistry *credential.DriverRegistry
 
 	accessControl *authorize.AccessControl
 
@@ -480,6 +497,25 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 	}
 	c.tokenStore = tokenStore
 
+	// Create CredentialConfigStore after barrier is initialized
+	credConfigStore, err := NewCredentialConfigStore(c, DefaultCredConfigStoreConfig())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create credential config store: %w", err)
+	}
+	c.credConfigStore = credConfigStore
+
+	// Initialize global credential type and driver registries
+	c.credentialTypeRegistry = credential.NewTypeRegistry()
+	c.credentialDriverRegistry = credential.NewDriverRegistry()
+
+	// Register builtin credential types and drivers
+	if err := types.RegisterBuiltinTypes(c.credentialTypeRegistry); err != nil {
+		return nil, fmt.Errorf("failed to register builtin credential types: %w", err)
+	}
+	if err := drivers.RegisterBuiltinDrivers(c.credentialDriverRegistry); err != nil {
+		return nil, fmt.Errorf("failed to register builtin credential drivers: %w", err)
+	}
+
 	if conf.HAPhysical != nil && conf.HAPhysical.HAEnabled() {
 		c.ha = conf.HAPhysical
 	}
@@ -533,6 +569,14 @@ func (c *Core) CredSources() *cred.CredSourceRegistry {
 
 func (c *Core) Targets() *target.TargetRegistry {
 	return c.targets
+}
+
+func (c *Core) CredentialTypeRegistry() *credential.TypeRegistry {
+	return c.credentialTypeRegistry
+}
+
+func (c *Core) CredentialDriverRegistry() *credential.DriverRegistry {
+	return c.credentialDriverRegistry
 }
 
 // IsInitialized returns whether warden init has been called
@@ -1231,6 +1275,16 @@ func (c *Core) preSeal() error {
 		c.tokenStore.UnloadFromCache()
 	}
 
+	// Unload credential configs from cache (they remain in storage for next unseal)
+	if err := c.teardownCredentialConfigStore(); err != nil {
+		c.logger.Warn("error tearing down credential config store", logger.Err(err))
+	}
+
+	// Stop all credential managers
+	if err := c.teardownCredentialManager(); err != nil {
+		c.logger.Warn("error tearing down credential managers", logger.Err(err))
+	}
+
 	c.physicalCache.SetEnabled(false)
 	c.physicalCache.Purge(context.Background())
 
@@ -1274,6 +1328,16 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 	if err := c.setupNamespaceStore(ctx); err != nil {
 		return err
 	}
+	if err := c.setupCredentialConfigStore(ctx); err != nil {
+		return err
+	}
+	if err := c.setupCredentialManager(ctx); err != nil {
+		return err
+	}
+
+	// Start background cleanup for expired credentials (every 5 minutes)
+	c.startCredentialBackgroundCleanup(ctx, 5*time.Minute)
+
 	if err := c.loadMounts(ctx); err != nil {
 		return err
 	}
