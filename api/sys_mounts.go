@@ -19,6 +19,8 @@ func (c *Sys) ListMountsWithContext(ctx context.Context) (map[string]*MountOutpu
 
 	r := c.c.NewRequest(http.MethodGet, "/v1/sys/providers")
 
+	r.Params.Set("list", "true")
+
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {
 		return nil, err

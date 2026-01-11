@@ -16,7 +16,7 @@ import (
 )
 
 // resignRequest re-signs the request with valid AWS credentials
-func (p *AWSProvider) resignRequest(
+func (b *awsBackend) resignRequest(
 	ctx context.Context,
 	r *http.Request,
 	creds aws.Credentials,
@@ -38,22 +38,22 @@ func (p *AWSProvider) resignRequest(
 	r.Header.Del("Authorization")
 
 	// Restore body for signing
-	p.restoreRequestBody(r, bodyBytes)
+	b.restoreRequestBody(r, bodyBytes)
 
 	// Sign the request
-	err := p.signer.SignHTTP(ctx, creds, r, payloadHash, service, region, signingTime)
+	err := b.signer.SignHTTP(ctx, creds, r, payloadHash, service, region, signingTime)
 	if err != nil {
 		return fmt.Errorf("failed to sign request: %w", err)
 	}
 
-	// p.logger.Trace("request re-signed successfully",
+	// b.logger.Trace("request re-signed successfully",
 	// 	logger.String("request_id", middleware.GetReqID(r.Context())),
 	// )
 	return nil
 }
 
 // verifyIncomingSignature verifies the AWS Signature V4 of the incoming request
-func (p *AWSProvider) verifyIncomingSignature(
+func (b *awsBackend) verifyIncomingSignature(
 	r *http.Request,
 	bodyBytes []byte,
 	creds aws.Credentials,
@@ -98,7 +98,7 @@ func (p *AWSProvider) verifyIncomingSignature(
 	// Clone the request for verification
 	testReq := r.Clone(r.Context())
 
-	// p.logger.Debug("Signature Verification Debug",
+	// b.logger.Debug("Signature Verification Debug",
 	// 	logger.String("method", testReq.Method),
 	// 	logger.String("url", testReq.URL.String()),
 	// 	logger.String("path", testReq.URL.Path),
@@ -133,7 +133,7 @@ func (p *AWSProvider) verifyIncomingSignature(
 		}
 
 		if !found && signedHeader != "host" {
-			p.logger.Warn("signed header not found in request",
+			b.logger.Warn("signed header not found in request",
 				logger.String("header", signedHeader),
 				logger.String("request_id", middleware.GetReqID(r.Context())),
 			)
@@ -152,14 +152,14 @@ func (p *AWSProvider) verifyIncomingSignature(
 
 	// NOW log the headers that will actually be used for signing
 	// for k, v := range testReq.Header {
-	// 	p.logger.Debug("Header BEFORE signing",
+	// 	b.logger.Debug("Header BEFORE signing",
 	// 		logger.String("key", k),
 	// 		logger.Any("values", v),
 	// 		logger.String("request_id", middleware.GetReqID(r.Context())),
 	// 	)
 	// }
 
-	// p.logger.Debug("Host/URL BEFORE signing",
+	// b.logger.Debug("Host/URL BEFORE signing",
 	// 	logger.String("r.Host", testReq.Host),
 	// 	logger.Any("r.URL", testReq.URL),
 	// 	logger.String("request_id", middleware.GetReqID(r.Context())),
@@ -175,7 +175,7 @@ func (p *AWSProvider) verifyIncomingSignature(
 	payloadHash := computePayloadHash(bodyBytes)
 
 	// clientHash := testReq.Header.Get("X-Amz-Content-Sha256")
-	// p.logger.Debug("Payload hash comparison",
+	// b.logger.Debug("Payload hash comparison",
 	// 	logger.String("clientHash", clientHash),
 	// 	logger.String("ourHash", payloadHash),
 	// 	logger.Int("bodyLength", len(bodyBytes)),
@@ -183,21 +183,21 @@ func (p *AWSProvider) verifyIncomingSignature(
 	// )
 
 	// Sign the test request with the retrieved credentials
-	err = p.signer.SignHTTP(r.Context(), creds, testReq, payloadHash, service, region, signingTime)
+	err = b.signer.SignHTTP(r.Context(), creds, testReq, payloadHash, service, region, signingTime)
 	if err != nil {
 		return false, fmt.Errorf("failed to sign request for signature verification: %w", err)
 	}
 
 	// DEBUG: Log headers AFTER signing to see what the signer added
 	// for k, v := range testReq.Header {
-	// 	p.logger.Debug("Header AFTER signing",
+	// 	b.logger.Debug("Header AFTER signing",
 	// 		logger.String("key", k),
 	// 		logger.Any("values", v),
 	// 		logger.String("request_id", middleware.GetReqID(r.Context())),
 	// 	)
 	// }
 
-	// p.logger.Debug("Host/URL AFTER signing",
+	// b.logger.Debug("Host/URL AFTER signing",
 	// 	logger.String("r.Host", testReq.Host),
 	// 	logger.Any("r.URL", testReq.URL),
 	// 	logger.String("request_id", middleware.GetReqID(r.Context())),
@@ -214,7 +214,7 @@ func (p *AWSProvider) verifyIncomingSignature(
 	// Compare signatures
 	match := providedSignature == calculatedSignature
 
-	// p.logger.Debug("Signature comparison",
+	// b.logger.Debug("Signature comparison",
 	// 	logger.String("provided", providedSignature),
 	// 	logger.String("calculated", calculatedSignature),
 	// 	logger.String("originalAuth", authHeader),
@@ -223,7 +223,7 @@ func (p *AWSProvider) verifyIncomingSignature(
 	// )
 
 	if !match {
-		p.logger.Warn("signature mismatch",
+		b.logger.Warn("signature mismatch",
 			logger.String("provided", providedSignature),
 			logger.String("calculated", calculatedSignature),
 			logger.String("request_id", middleware.GetReqID(r.Context())),

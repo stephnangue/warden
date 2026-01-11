@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/middleware"
-	"github.com/stephnangue/warden/core"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/provider/aws"
 )
@@ -21,7 +20,6 @@ type ApiListener struct {
 
 type ApiListenerConfig struct {
 	Logger          *logger.GatedLogger
-	Protocol        string
 	Address         string
 	TLSCertFile     string
 	TLSKeyFile      string
@@ -29,10 +27,9 @@ type ApiListenerConfig struct {
 	TLSEnabled      bool
 }
 
-func NewApiListener(cfg ApiListenerConfig, core *core.Core) (*ApiListener, error) {
+func NewApiListener(cfg ApiListenerConfig, httpHandler http.Handler) (*ApiListener, error) {
 
-	// Wrap the core with middlewares
-	var handler http.Handler = core
+	var handler http.Handler = httpHandler
 	handler = middleware.RealIP(handler)
 	handler = middleware.RequestID(handler)
 	handler = middleware.Recoverer(handler)

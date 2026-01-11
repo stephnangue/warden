@@ -19,6 +19,8 @@ func (c *Sys) ListAuditWithContext(ctx context.Context) (map[string]*Audit, erro
 
 	r := c.c.NewRequest(http.MethodGet, "/v1/sys/audit")
 
+	r.Params.Set("list", "true")
+
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {
 		return nil, err

@@ -10,20 +10,11 @@ storage "postgres" {
   connection_url = "postgres://warden:wardenpassword@localhost:5433/warden?sslmode=disable"
 }
 
-listener "mysql" {
-    protocol           = "tcp"
-    address            = "127.0.0.1:4000"
-    tls_cert_file      = "./certs/warden/warden-cert.pem"
-    tls_key_file       = "./certs/warden/warden-key.pem"
-    tls_client_ca_file = "./certs/warden/ca.pem"
-    tls_enabled        = true
-}
-
-listener "api" {
-    protocol           = "tcp"
+listener "tcp" {
     address            = "127.0.0.1:5000"
     tls_cert_file      = "./certs/warden/warden-cert.pem"
     tls_key_file       = "./certs/warden/warden-key.pem"
     tls_client_ca_file = "./certs/warden/ca.pem"
     tls_enabled        = true
 }
+

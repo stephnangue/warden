@@ -16,10 +16,8 @@ import (
 	"github.com/openbao/openbao/helper/namespace"
 	"github.com/openbao/openbao/sdk/v2/helper/jsonutil"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
-	"github.com/stephnangue/warden/auth"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
-	"github.com/stephnangue/warden/provider"
 )
 
 const (
@@ -421,7 +419,6 @@ func (c *Core) mountInternal(ctx context.Context, entry *MountEntry, updateStora
 
 // newLogicalBackend is used to create and configure a new logical backend by name.
 func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry, view sdklogical.Storage) (logical.Backend, error) {
-	var factory any
 	var backend logical.Backend
 	var err error
 
@@ -429,47 +426,32 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry, view sd
 
 	switch entry.Class {
 	case mountClassAuth:
-		factory = c.authMethods[entry.Type]
+		factory := c.authMethods[entry.Type]
 		if factory == nil {
 			return nil, fmt.Errorf("auth method type not supported: %s", entry.Type)
 		}
-		f := factory.(auth.Factory)
-		backend, err = f.Create(
-			ctx,
-			entry.Path,
-			entry.Description,
-			entry.Accessor,
-			entry.Config,
-			c.logger.WithSystem("auth"),
-			c.tokenStore,
-			c.roles,
-			c.accessControl,
-			c.auditManager,
-			view,
-		)
+		conf := &logical.BackendConfig{
+			StorageView: view,
+			Logger:      c.logger.WithSystem("auth"),
+			Config:      entry.Config,
+			BackendUUID: entry.BackendAwareUUID,
+		}
+		backend, err = factory(ctx, conf)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create auth method: %w", err)
 		}
 	case mountClassProvider:
-		factory = c.providers[entry.Type]
+		factory := c.providers[entry.Type]
 		if factory == nil {
 			return nil, fmt.Errorf("provider type not supported: %s", entry.Type)
 		}
-		f := factory.(provider.Factory)
-
-		backend, err = f.Create(
-			ctx,
-			entry.Path,
-			entry.Description,
-			entry.Accessor,
-			entry.Config,
-			c.logger.WithSystem("provider"),
-			c.tokenStore,
-			c.roles,
-			c.credSources,
-			c.auditManager,
-			view,
-		)
+		conf := &logical.BackendConfig{
+			StorageView: view,
+			Logger:      c.logger.WithSystem("provider"),
+			Config:      entry.Config,
+			BackendUUID: entry.BackendAwareUUID,
+		}
+		backend, err = factory(ctx, conf)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create provider: %w", err)
 		}
@@ -514,101 +496,6 @@ func (c *Core) unmount(ctx context.Context, path string) error {
 	if err := c.unmountInternal(ctx, path, MountTableUpdateStorage); err != nil {
 		return err
 	}
-
-	return nil
-}
-
-// configureMount updates the configuration of an existing mount
-func (c *Core) configureMount(ctx context.Context, path string, config map[string]any, updateStorage bool) error {
-	ns, err := namespace.FromContext(ctx)
-	if err != nil {
-		return err
-	}
-
-	revokeCtx := namespace.ContextWithNamespace(c.activeContext, ns)
-
-	// Ensure we end the path in a slash
-	if !strings.HasSuffix(path, "/") {
-		path += "/"
-	}
-
-	// Prevent protected paths from being tuned
-	for _, p := range protectedMounts {
-		if strings.HasPrefix(path, p) {
-			return fmt.Errorf("cannot tune %q", path)
-		}
-	}
-
-	c.mountsLock.Lock()
-	defer c.mountsLock.Unlock()
-
-	// Find the mount entry
-	entry, err := c.mounts.findByPath(ctx, path)
-	if err != nil {
-		return err
-	}
-	if entry == nil {
-		return errNoMatchingMount
-	}
-
-	// Merge existing config with new config
-	mergedConfig := make(map[string]any)
-	entry.configMu.RLock()
-	maps.Copy(mergedConfig, entry.Config)
-	entry.configMu.RUnlock()
-	maps.Copy(mergedConfig, config)
-
-	// Validate configuration for provider mounts
-	var backend logical.Backend
-	switch entry.Class {
-	case mountClassProvider:
-		factory := c.providers[entry.Type]
-		if factory == nil {
-			return fmt.Errorf("provider type %s not found", entry.Type)
-		}
-	case mountClassAuth:
-		factory := c.authMethods[entry.Type]
-		if factory == nil {
-			return fmt.Errorf("auth method type %s not found", entry.Type)
-		}
-
-	default:
-		return fmt.Errorf("unsupported mount class: %s", entry.Class)
-	}
-
-	mountPath := path
-	if entry.Class == mountClassAuth {
-		mountPath = authRoutePrefix + mountPath
-
-	}
-	backend = c.router.MatchingBackend(ctx, mountPath)
-	if backend == nil {
-
-		return fmt.Errorf("backend not found for path %s", path)
-	}
-
-	if err := backend.Setup(revokeCtx, mergedConfig); err != nil {
-		return fmt.Errorf("failed to configure backend with new config: %w", err)
-	}
-
-	entry.configMu.Lock()
-	entry.Config = backend.Config()
-	entry.configMu.Unlock()
-
-	if updateStorage {
-		if err := c.persistMounts(ctx, nil, c.mounts, entry.UUID); err != nil {
-			if sdklogical.ShouldForward(err) {
-				return err
-			}
-
-			c.logger.Error("failed to update mount table", logger.Err(err))
-			return sdklogical.CodedError(500, "failed to update mount table")
-		}
-	}
-
-	c.logger.Info("successfully configured mount",
-		logger.String("path", path),
-	)
 
 	return nil
 }
@@ -1128,14 +1015,6 @@ func (c *Core) setupMounts(ctx context.Context) error {
 			err := backend.Initialize(nsCtx)
 			if err != nil {
 				postUnsealLogger.Error("failed to initialize mount backend", logger.Err(err))
-			}
-
-			// we do not configure system backends
-			if localEntry.Class != mountClassSystem && localEntry.Class != mountClassNSSystem {
-				err = c.configureMount(nsCtx, localEntry.Path, localEntry.Config, false)
-				if err != nil {
-					postUnsealLogger.Error("failed to configure mount backend", logger.Err(err))
-				}
 			}
 		})
 
