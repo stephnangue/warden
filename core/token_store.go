@@ -14,6 +14,7 @@ import (
 	"github.com/openbao/openbao/helper/namespace"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 )
 
 // Token type constants for backward compatibility
@@ -407,16 +408,17 @@ func (s *TokenStore) generateWithCollisionDetection(
 		// Create token entry with namespace fields
 		entry := &TokenEntry{
 			Type:           meta.Name,
-			NamespaceID:    ns.UUID,
+			NamespaceID:    ns.ID,
 			NamespacePath:  ns.Path,
 			CreatedAt:      time.Now(),
-			CreatedByIP:    authData.RequestContext["client_ip"],
-			CreatedByReqID: authData.RequestContext["request_id"],
 			PrincipalID:    authData.PrincipalID,
 			RoleName:       authData.RoleName,
 			AuthDeadline:   authData.AuthDeadline,
 			ExpireAt:       authData.ExpireAt,
 			Data:           make(map[string]string),
+			Policies:       authData.Policies,
+			CredentialSpec: authData.CredentialSpec,
+			CreatedByIP:    authData.ClientIP,
 		}
 
 		// Generate accessor (Tier 2)
@@ -545,7 +547,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 	// Validate namespace binding with hierarchical access
 	// Tokens from a parent namespace can access all child namespaces
 	// Get the token's namespace to check if it's a parent of the request namespace
-	tokenNs, err := s.core.namespaceStore.GetNamespace(ctx, entry.NamespaceID)
+	tokenNs, err := s.core.namespaceStore.GetNamespaceByAccessor(ctx, entry.NamespaceID)
 	if err != nil || tokenNs == nil {
 		s.logger.Warn("token namespace not found",
 			logger.String("token_id", tokenID),
@@ -596,7 +598,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 	}
 
 	// Validate same-origin policy (IP binding)
-	if clientIP, ok := ctx.Value("client_ip").(string); ok && entry.CreatedByIP != "" {
+	if clientIP, ok := ctx.Value(logical.ClientIPKey).(string); ok && entry.CreatedByIP != "" {
 		if clientIP != entry.CreatedByIP {
 			if s.config.EnableMetrics {
 				s.metrics.IncrementOriginViolations()
@@ -614,54 +616,6 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 	}
 
 	return entry.PrincipalID, entry.RoleName, nil
-}
-
-// GetToken retrieves a token by its value (for backward compatibility)
-func (s *TokenStore) GetToken(tokenValue string) *TokenEntry {
-	// Detect token type
-	tokenType, err := s.registry.DetectType(tokenValue)
-	if err != nil {
-		return nil
-	}
-
-	// Compute token ID
-	lookupValue := tokenType.ExtractValue(tokenValue)
-	tokenID := tokenType.ComputeID(lookupValue)
-
-	// Lookup token in cache
-	entry, found := s.byID.Get(tokenID)
-	if !found {
-		// Cache miss: try loading from persistent storage
-		if s.config.EnableMetrics {
-			s.metrics.IncrementCacheMisses()
-		}
-
-		s.logger.Debug("token cache miss, loading from storage",
-			logger.String("token_id", tokenID))
-
-		loadedEntry, err := s.loadToken(tokenID)
-		if err != nil {
-			if err == ErrTokenNotFound {
-				return nil
-			}
-			s.logger.Warn("failed to load token from storage on cache miss",
-				logger.String("token_id", tokenID),
-				logger.String("error", err.Error()))
-			return nil
-		}
-
-		// Restore to cache with remaining TTL
-		entry = loadedEntry
-		if err := s.restoreTokenToCache(entry, "GetToken"); err != nil {
-			return nil
-		}
-	} else {
-		if s.config.EnableMetrics {
-			s.metrics.IncrementCacheHits()
-		}
-	}
-
-	return entry
 }
 
 // LookupByAccessor looks up a token by its accessor
@@ -832,18 +786,17 @@ func (s *TokenStore) GenerateRootToken() (string, error) {
 
 	// Create AuthData with infinite TTL (for root namespace)
 	authData := &AuthData{
-		PrincipalID:    "root",
-		RoleName:       "system_admin",
+		PrincipalID:    namespace.RootNamespaceUUID,
 		AuthDeadline:   time.Time{}, // No auth deadline
 		ExpireAt:       time.Time{}, // No expiration
-		NamespaceID:    namespace.RootNamespace.UUID,
-		NamespacePath:  namespace.RootNamespace.Path,
-		RequestContext: map[string]string{},
+		Policies:       []string{"root"},
 	}
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	// Generate token using standard mechanism
 	entry, err := s.generateWithCollisionDetection(
-		namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace),
+		namespace.ContextWithNamespace(ctx, namespace.RootNamespace),
 		tokenType,
 		authData,
 		namespace.RootNamespace,
@@ -1230,10 +1183,150 @@ func (s *TokenStore) deleteToken(entry *TokenEntry) error {
 	return nil
 }
 
+func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry, error) {
+	if c.Sealed() {
+		return nil, fmt.Errorf("the core is sealed")
+	}
+
+	// Many tests don't have a token store running
+	if c.tokenStore == nil {
+		return nil, nil
+	}
+
+	s := c.tokenStore
+
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return nil, ErrStoreClosed
+	}
+	s.mu.RUnlock()
+
+	// Extract namespace from context
+	ns, err := namespace.FromContext(ctx)
+	if err != nil || ns == nil {
+		return nil, errors.New("namespace not found in context")
+	}
+
+	// Detect token type
+	tokenType, err := s.registry.DetectType(tokenValue)
+	if err != nil {
+		return nil, fmt.Errorf("failed to detect token type: %w", err)
+	}
+
+	// Compute token ID
+	lookupValue := tokenType.ExtractValue(tokenValue)
+	tokenID := tokenType.ComputeID(lookupValue)
+
+	// Lookup token in cache
+	entry, found := s.byID.Get(tokenID)
+	if !found {
+		// Cache miss: try loading from persistent storage
+		if s.config.EnableMetrics {
+			s.metrics.IncrementCacheMisses()
+		}
+
+		s.logger.Debug("token cache miss, loading from storage",
+			logger.String("token_id", tokenID))
+
+		loadedEntry, err := s.loadToken(tokenID)
+		if err != nil {
+			if err == ErrTokenNotFound {
+				return nil, ErrTokenNotFound
+			}
+			s.logger.Warn("failed to load token from storage on cache miss",
+				logger.String("token_id", tokenID),
+				logger.String("error", err.Error()))
+			return nil, ErrTokenNotFound
+		}
+
+		// Restore to cache with remaining TTL
+		entry = loadedEntry
+		if err := s.restoreTokenToCache(entry, "LookupToken"); err != nil {
+			return nil, err
+		}
+	} else {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementCacheHits()
+		}
+	}
+
+	// Validate namespace binding with hierarchical access
+	// Tokens from a parent namespace can access all child namespaces
+	tokenNs, err := c.namespaceStore.GetNamespaceByAccessor(ctx, entry.NamespaceID)
+	if err != nil || tokenNs == nil {
+		s.logger.Warn("token namespace not found",
+			logger.String("token_id", tokenID),
+			logger.String("token_namespace_id", entry.NamespaceID))
+		return nil, ErrTokenNamespaceMismatch
+	}
+
+	// Check if token's namespace is a parent of (or same as) the request namespace
+	isValidNamespace := ns.UUID == tokenNs.UUID || ns.HasParent(tokenNs)
+	if !isValidNamespace {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementNamespaceMismatches()
+		}
+		s.logger.Warn("token namespace mismatch",
+			logger.String("token_id", tokenID),
+			logger.String("token_namespace", tokenNs.Path),
+			logger.String("request_namespace", ns.Path))
+		return nil, ErrTokenNamespaceMismatch
+	}
+
+	// Validate token value matches (defense against hash collisions)
+	lookupKey := tokenType.LookupKey()
+	expectedValue, ok := entry.Data[lookupKey]
+	if !ok || expectedValue != tokenValue {
+		s.logger.Error("token value mismatch - possible hash collision",
+			logger.String("token_id", tokenID),
+			logger.String("lookup_key", lookupKey))
+		return nil, ErrTokenNotFound
+	}
+
+	// Validate auth deadline
+	if !entry.AuthDeadline.IsZero() && time.Now().After(entry.AuthDeadline) {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementDeadlineViolations()
+		}
+		return nil, ErrAuthDeadlineViolated
+	}
+
+	// Validate expiration
+	if !entry.ExpireAt.IsZero() && time.Now().After(entry.ExpireAt) {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementTokensExpired()
+		}
+		return nil, ErrTokenExpired
+	}
+
+	// Validate same-origin policy (IP binding)
+	if clientIP, ok := ctx.Value(logical.ClientIPKey).(string); ok && entry.CreatedByIP != "" {
+		if clientIP != entry.CreatedByIP {
+			if s.config.EnableMetrics {
+				s.metrics.IncrementOriginViolations()
+			}
+			s.logger.Warn("same origin policy violation",
+				logger.String("token_id", tokenID),
+				logger.String("created_ip", entry.CreatedByIP),
+				logger.String("request_ip", clientIP))
+			return nil, ErrOriginViolation
+		}
+	}
+
+	if s.config.EnableMetrics {
+		s.metrics.IncrementTokensResolved()
+	}
+
+	// Return a copy to prevent external modification
+	entryCopy := *entry
+	return &entryCopy, nil
+}
+
 // cleanupCredentialForToken removes the credential associated with a token
 func (s *TokenStore) cleanupCredentialForToken(ctx context.Context, entry *TokenEntry) error {
 	// Get namespace from token
-	ns, err := s.core.namespaceStore.GetNamespace(ctx, entry.NamespaceID)
+	ns, err := s.core.namespaceStore.GetNamespaceByAccessor(ctx, entry.NamespaceID)
 	if err != nil {
 		return fmt.Errorf("failed to get namespace: %w", err)
 	}

@@ -373,8 +373,7 @@ func (s *StorageBlock) Config() map[string]string {
 }
 
 type ListenerBlock struct {
-	Name            string `hcl:"name,label"`
-	Protocol        string `hcl:"protocol"`
+	Type            string `hcl:"type,label"` // "tcp", "unix", etc.
 	Address         string `hcl:"address"`
 	TLSCertFile     string `hcl:"tls_cert_file,optional"`
 	TLSKeyFile      string `hcl:"tls_key_file,optional"`
@@ -393,22 +392,22 @@ func LoadConfig(configFile string) (*Config, error) {
 	return &config, nil
 }
 
-// GetListenerByName returns a listener by its name (label)
-func (c *Config) GetListenerByName(name string) (*ListenerBlock, error) {
+// GetListenerByType returns a listener by its type (label)
+func (c *Config) GetListenerByType(listenerType string) (*ListenerBlock, error) {
 	for _, listener := range c.Listeners {
-		if listener.Name == name {
+		if listener.Type == listenerType {
 			return &listener, nil
 		}
 	}
-	return nil, fmt.Errorf("listener '%s' not found", name)
+	return nil, fmt.Errorf("listener of type '%s' not found", listenerType)
 }
 
-// GetMySQLListener is a convenience method to get the MySQL listener
-func (c *Config) GetMySQLListener() (*ListenerBlock, error) {
-	return c.GetListenerByName("mysql")
+// GetTCPListener is a convenience method to get a TCP listener
+func (c *Config) GetTCPListener() (*ListenerBlock, error) {
+	return c.GetListenerByType("tcp")
 }
 
-// GetAuthListener is a convenience method to get the Api listener
-func (c *Config) GetApiListener() (*ListenerBlock, error) {
-	return c.GetListenerByName("api")
+// GetUnixListener is a convenience method to get a Unix socket listener
+func (c *Config) GetUnixListener() (*ListenerBlock, error) {
+	return c.GetListenerByType("unix")
 }

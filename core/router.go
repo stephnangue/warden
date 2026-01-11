@@ -3,12 +3,12 @@ package core
 import (
 	"context"
 	"fmt"
-	"net/http"
+	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/armon/go-radix"
-	"github.com/go-chi/chi/middleware"
 	"github.com/openbao/openbao/helper/namespace"
 	"github.com/openbao/openbao/sdk/v2/helper/salt"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
@@ -22,14 +22,33 @@ const (
 	OriginalPath contextKey = "originalPath"
 )
 
+// matches when '+' is next to a non-slash char
+var wcAdjacentNonSlashRegEx = regexp.MustCompile(`\+[^/]|[^/]\+`).MatchString
+
 // routeEntry is used to represent a mount point in the router
 type routeEntry struct {
-	tainted       bool
-	backend       logical.Backend
-	mountEntry    *MountEntry
-	storageView   sdklogical.Storage
-	storagePrefix string
-	l             sync.RWMutex
+	tainted        bool
+	backend        logical.Backend
+	mountEntry     *MountEntry
+	storageView    sdklogical.Storage
+	storagePrefix  string
+	rootPaths      atomic.Value
+	loginPaths     atomic.Value
+	streamingPaths atomic.Value // stores *radix.Tree for streaming paths
+	l              sync.RWMutex
+}
+
+type wildcardPath struct {
+	// this sits in the hot path of requests so we are micro-optimizing by
+	// storing pre-split slices of path segments
+	segments []string
+	isPrefix bool
+}
+
+// loginPathsEntry is used to hold the routeEntry loginPaths
+type loginPathsEntry struct {
+	paths         *radix.Tree
+	wildcardPaths []wildcardPath
 }
 
 type Router struct {
@@ -113,6 +132,15 @@ func (r *Router) Mount(prefix string, backend logical.Backend, mountEntry *Mount
 		return fmt.Errorf("cannot mount under existing mount %q", existing)
 	}
 
+	// Build the paths
+	paths := new(logical.Paths)
+	if backend != nil {
+		specialPaths := backend.SpecialPaths()
+		if specialPaths != nil {
+			paths = specialPaths
+		}
+	}
+
 	// Create a mount entry
 	re := &routeEntry{
 		tainted:       mountEntry.Tainted,
@@ -121,6 +149,14 @@ func (r *Router) Mount(prefix string, backend logical.Backend, mountEntry *Mount
 		storagePrefix: storageView.Prefix(),
 		storageView:   storageView,
 	}
+
+	re.rootPaths.Store(pathsToRadix(paths.Root))
+	loginPathsEntry, err := parseUnauthenticatedPaths(paths.Unauthenticated)
+	if err != nil {
+		return err
+	}
+	re.loginPaths.Store(loginPathsEntry)
+	re.streamingPaths.Store(pathsToRadix(paths.Stream))
 
 	switch {
 	case prefix == "":
@@ -501,93 +537,342 @@ func (r *Router) MatchingAPIPrefixByStoragePath(ctx context.Context, path string
 	return re.mountEntry.Namespace(), mountPath, re.storagePrefix, found
 }
 
-// Route is used to route a given request
-func (r *Router) Route(w http.ResponseWriter, req *http.Request) {
-	ns, err := namespace.FromContext(req.Context())
+func (r *Router) routeInternal(ctx context.Context, req *logical.Request) (*logical.Response, error) {
+	ns, err := namespace.FromContext(ctx)
 	if err != nil {
-		r.logger.Error("Fail to extract namespace from the request context", logger.Err(err))
-		http.Error(w, "Fail to extract namespace from the request context", http.StatusBadRequest)
-		return
+		return nil, err
 	}
 
-	requestPath := req.URL.Path
-	originalPath := req.Context().Value(logical.OriginalPath).(string)
-
+	// Find the mount point
 	r.mu.RLock()
-	mount, raw, ok := r.root.LongestPrefix(ns.Path + requestPath)
-	if !ok && !strings.HasSuffix(requestPath, "/") {
+	adjustedPath := req.Path
+	mount, raw, ok := r.root.LongestPrefix(ns.Path + adjustedPath)
+	if !ok && !strings.HasSuffix(adjustedPath, "/") {
 		// Re-check for a backend by appending a slash. This lets "foo" mean
 		// "foo/" at the root level which is almost always what we want.
-		requestPath += "/"
-		mount, raw, ok = r.root.LongestPrefix(ns.Path + requestPath)
+		adjustedPath += "/"
+		mount, raw, ok = r.root.LongestPrefix(ns.Path + adjustedPath)
 	}
 	r.mu.RUnlock()
-
 	if !ok {
-		r.logger.Error("no route found",
-			logger.Err(fmt.Errorf("no handler for route %q. route entry not found", originalPath)),
-			logger.String("namespace", ns.Path),
-			logger.String("url", req.URL.String()),
-			logger.String("method", req.Method),
-			logger.String("request_id", middleware.GetReqID(req.Context())),
-		)
-		http.Error(w, "no route found for the provided path", http.StatusNotFound)
-		return
+		return logical.ErrorResponse(logical.ErrNotFoundf("no handler for route %q. route entry not found.", req.Path)), sdklogical.ErrUnsupportedPath
+	}
+	req.Path = adjustedPath
+	re := raw.(*routeEntry)
+
+	re.l.RLock()
+	defer re.l.RUnlock()
+
+	if re.backend == nil {
+		return logical.ErrorResponse(logical.ErrNotFoundf("no handler for route %q. route entry found, but backend is nil.", req.Path)), sdklogical.ErrUnsupportedPath
+	}
+
+	// If the path or namespace is tainted, we reject any operation
+	if re.tainted || ns.Tainted {
+		return logical.ErrorResponse(logical.ErrForbiddenf("no handler for route %q on namespace %q. route entry or namespace is tainted.", req.Path, ns.Path)), sdklogical.ErrUnsupportedPath
+	}
+
+	// Adjust the path to exclude the routing prefix
+	// The mount includes the namespace prefix, so we need to trim using the full path
+	// ns1/ + sys/policies/test - ns1/sys/ = policies/test
+	req.Path = strings.TrimPrefix(ns.Path+req.Path, mount)
+	req.MountPoint = mount
+	req.MountType = re.mountEntry.Type
+	req.MountClass = re.mountEntry.Class
+	req.MountAccessor = re.mountEntry.Accessor
+
+	return re.backend.HandleRequest(ctx, req)
+
+}
+
+// Route is used to route a given request
+func (r *Router) Route(ctx context.Context, req *logical.Request) (*logical.Response, error) {
+	return r.routeInternal(ctx, req)
+}
+
+// RouteExistenceCheck is used to route a given existence check request
+func (r *Router) RouteExistenceCheck(ctx context.Context, req *logical.Request) (*logical.Response, bool, bool, error) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, false, false, err
+	}
+
+	// Find the mount point
+	r.mu.RLock()
+	adjustedPath := req.Path
+	mount, raw, ok := r.root.LongestPrefix(ns.Path + adjustedPath)
+	if !ok && !strings.HasSuffix(adjustedPath, "/") {
+		// Re-check for a backend by appending a slash
+		adjustedPath += "/"
+		mount, raw, ok = r.root.LongestPrefix(ns.Path + adjustedPath)
+	}
+	r.mu.RUnlock()
+	if !ok {
+		return nil, false, false, sdklogical.ErrUnsupportedPath
+	}
+
+	re := raw.(*routeEntry)
+	re.l.RLock()
+	defer re.l.RUnlock()
+
+	if re.backend == nil {
+		return nil, false, false, sdklogical.ErrUnsupportedPath
+	}
+
+	// If tainted, we reject any operation
+	if re.tainted || ns.Tainted {
+		return nil, false, false, sdklogical.ErrUnsupportedPath
+	}
+
+	// Adjust the path to exclude the routing prefix
+	origPath := req.Path
+	req.Path = strings.TrimPrefix(ns.Path+adjustedPath, mount)
+	req.MountPoint = mount
+	req.MountType = re.mountEntry.Type
+	req.MountClass = re.mountEntry.Class
+	req.MountAccessor = re.mountEntry.Accessor
+
+	// Perform the existence check
+	checkFound, exists, err := re.backend.HandleExistenceCheck(ctx, req)
+
+	// Restore the original path
+	req.Path = origPath
+
+	return nil, checkFound, exists, err
+}
+
+// LoginPath checks if the given path is used for logins
+// Matching Priority
+//  1. prefix
+//  2. exact
+//  3. wildcard
+func (r *Router) LoginPath(ctx context.Context, path string) bool {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return false
+	}
+
+	adjustedPath := ns.Path + path
+
+	r.mu.RLock()
+	mount, raw, ok := r.root.LongestPrefix(adjustedPath)
+	r.mu.RUnlock()
+	if !ok {
+		return false
+	}
+
+	re := raw.(*routeEntry)
+
+	re.l.RLock()
+	defer re.l.RUnlock()
+
+	// Trim to get remaining path
+	remain := strings.TrimPrefix(adjustedPath, mount)
+
+	// Check the loginPaths of this backend
+	pe := re.loginPaths.Load().(*loginPathsEntry)
+	match, raw, ok := pe.paths.LongestPrefix(remain)
+	if !ok && len(pe.wildcardPaths) == 0 {
+		// no match found
+		return false
+	}
+
+	if ok {
+		prefixMatch := raw.(bool)
+		if prefixMatch {
+			// Handle the prefix match case
+			return strings.HasPrefix(remain, match)
+		}
+		if match == remain {
+			// Handle the exact match case
+			return true
+		}
+	}
+
+	// check Login Paths containing wildcards
+	reqPathParts := strings.Split(remain, "/")
+	for _, w := range pe.wildcardPaths {
+		if pathMatchesWildcardPath(reqPathParts, w.segments, w.isPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// RootPath checks if the given path requires root privileges
+func (r *Router) RootPath(ctx context.Context, path string) bool {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return false
+	}
+
+	adjustedPath := ns.Path + path
+
+	r.mu.RLock()
+	mount, raw, ok := r.root.LongestPrefix(adjustedPath)
+	r.mu.RUnlock()
+	if !ok {
+		return false
 	}
 	re := raw.(*routeEntry)
 
 	re.l.RLock()
 	defer re.l.RUnlock()
 
-	// Filtered mounts will have a nil backend
-	if re.backend == nil {
-		r.logger.Error("no route found",
-			logger.Err(fmt.Errorf("no handler for route %q. route entry found, but backend is nil", originalPath)),
-			logger.String("namespace", ns.Path),
-			logger.String("url", req.URL.String()),
-			logger.String("method", req.Method),
-			logger.String("request_id", middleware.GetReqID(req.Context())),
-		)
-		http.Error(w, "no route found for the provided path", http.StatusNotFound)
-		return
+	// Trim to get remaining path
+	remain := strings.TrimPrefix(adjustedPath, mount)
+
+	// Check the rootPaths of this backend
+	rootPaths := re.rootPaths.Load().(*radix.Tree)
+	match, raw, ok := rootPaths.LongestPrefix(remain)
+	if !ok {
+		return false
+	}
+	prefixMatch := raw.(bool)
+
+	// Handle the prefix match case
+	if prefixMatch {
+		return strings.HasPrefix(remain, match)
 	}
 
-	// If the path or namespace is tainted, we reject any operation
-	if re.tainted || ns.Tainted {
-		r.logger.Error("no route found",
-			logger.Err(fmt.Errorf("no handler for route %q. entry or namespace is tainted", req.URL.Path)),
-			logger.String("namespace", ns.Path),
-			logger.String("url", req.URL.String()),
-			logger.String("method", req.Method),
-			logger.String("request_id", middleware.GetReqID(req.Context())),
-		)
-		http.Error(w, "no route found for the provided path", http.StatusNotFound)
-		return
+	// Handle the exact match case
+	return match == remain
+}
+
+// StreamingPath checks if the given path is a streaming path.
+// Streaming paths should not have their request body parsed.
+func (r *Router) StreamingPath(ctx context.Context, path string) bool {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return false
 	}
 
-	// Adjust the path to exclude the routing prefix
-	// The mount path includes the namespace prefix, so we need to trim using the full path
-	// ns1/ + sys/namespaces/test - ns1/sys/ = namepaces/test
-	relativePath := strings.TrimPrefix(ns.Path+requestPath, mount)
+	adjustedPath := ns.Path + path
 
-	// Ensure the path has a leading slash for the backend router
-	if !strings.HasPrefix(relativePath, "/") {
-		relativePath = "/" + relativePath
+	r.mu.RLock()
+	mount, raw, ok := r.root.LongestPrefix(adjustedPath)
+	r.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	re := raw.(*routeEntry)
+
+	re.l.RLock()
+	defer re.l.RUnlock()
+
+	// Trim to get remaining path
+	remain := strings.TrimPrefix(adjustedPath, mount)
+
+	// Check the streamingPaths of this backend
+	streamingPaths := re.streamingPaths.Load().(*radix.Tree)
+	match, raw, ok := streamingPaths.LongestPrefix(remain)
+	if !ok {
+		return false
+	}
+	prefixMatch := raw.(bool)
+
+	// Handle the prefix match case
+	if prefixMatch {
+		return strings.HasPrefix(remain, match)
 	}
 
-	// Set the request path to the path relative to the mount
-	req.URL.Path = relativePath
-	req.URL.RawPath = ""
+	// Handle the exact match case
+	return match == remain
+}
 
-	if err := re.backend.HandleRequest(w, req); err != nil {
-		r.logger.Error("fail to handle request",
-			logger.String("url", req.URL.String()),
-			logger.String("method", req.Method),
-			logger.String("original_path", originalPath),
-			logger.String("request_id", middleware.GetReqID(req.Context())),
-		)
-
-		// backend already wrote the error response
-		return
+// pathMatchesWildcardPath returns true if the path made up of the path slice
+// matches the given wildcard path slice
+func pathMatchesWildcardPath(path, wcPath []string, isPrefix bool) bool {
+	if len(wcPath) == 0 {
+		return false
 	}
+
+	if len(path) < len(wcPath) {
+		// check if the path coming in is shorter; if so it can't match
+		return false
+	}
+	if !isPrefix && len(wcPath) != len(path) {
+		// If it's not a prefix we expect the same number of segments
+		return false
+	}
+
+	for i, wcPathPart := range wcPath {
+		switch {
+		case wcPathPart == "+":
+		case wcPathPart == path[i]:
+		case isPrefix && i == len(wcPath)-1 && strings.HasPrefix(path[i], wcPathPart):
+		default:
+			// we encountered segments that did not match
+			return false
+		}
+	}
+	return true
+}
+
+// parseUnauthenticatedPaths converts a list of special paths to a
+// loginPathsEntry
+func parseUnauthenticatedPaths(paths []string) (*loginPathsEntry, error) {
+	var tempPaths []string
+	tempWildcardPaths := make([]wildcardPath, 0)
+	for _, path := range paths {
+		if ok, err := isValidUnauthenticatedPath(path); !ok {
+			return nil, err
+		}
+
+		if strings.Contains(path, "+") {
+			// Paths with wildcards are not stored in the radix tree because
+			// the radix tree does not handle wildcards in the middle of strings.
+			isPrefix := false
+			if path[len(path)-1] == '*' {
+				isPrefix = true
+				path = path[0 : len(path)-1]
+			}
+			// We are micro-optimizing by storing pre-split slices of path segments
+			wcPath := wildcardPath{segments: strings.Split(path, "/"), isPrefix: isPrefix}
+			tempWildcardPaths = append(tempWildcardPaths, wcPath)
+		} else {
+			// accumulate paths that do not contain wildcards
+			// to be stored in the radix tree
+			tempPaths = append(tempPaths, path)
+		}
+	}
+
+	return &loginPathsEntry{
+		paths:         pathsToRadix(tempPaths),
+		wildcardPaths: tempWildcardPaths,
+	}, nil
+}
+
+// pathsToRadix converts a list of special paths to a radix tree.
+func pathsToRadix(paths []string) *radix.Tree {
+	tree := radix.New()
+	for _, path := range paths {
+		// Check if this is a prefix or exact match
+		prefixMatch := len(path) >= 1 && path[len(path)-1] == '*'
+		if prefixMatch {
+			path = path[:len(path)-1]
+		}
+
+		tree.Insert(path, prefixMatch)
+	}
+
+	return tree
+}
+
+func wildcardError(path, msg string) error {
+	return fmt.Errorf("path %q: invalid use of wildcards %s", path, msg)
+}
+
+func isValidUnauthenticatedPath(path string) (bool, error) {
+	switch {
+	case strings.Count(path, "*") > 1:
+		return false, wildcardError(path, "(multiple '*' is forbidden)")
+	case strings.Contains(path, "+*"):
+		return false, wildcardError(path, "('+*' is forbidden)")
+	case strings.Contains(path, "*") && path[len(path)-1] != '*':
+		return false, wildcardError(path, "('*' is only allowed at the end of a path)")
+	case wcAdjacentNonSlashRegEx(path):
+		return false, wildcardError(path, "('+' is not allowed next to a non-slash)")
+	}
+	return true, nil
 }

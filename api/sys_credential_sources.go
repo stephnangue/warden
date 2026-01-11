@@ -150,6 +150,8 @@ func (c *Sys) ListCredentialSourcesWithContext(ctx context.Context) ([]*Credenti
 
 	r := c.c.NewRequest(http.MethodGet, "/v1/sys/credential/sources")
 
+	r.Params.Set("list", "true")
+
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {
 		return nil, err

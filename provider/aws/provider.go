@@ -4,19 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"net/http"
 	"net/http/httputil"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/go-chi/chi"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
-	"github.com/stephnangue/warden/audit"
-	"github.com/stephnangue/warden/authorize"
-	"github.com/stephnangue/warden/cred"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/aws/processor"
@@ -30,143 +26,168 @@ type HostRewrite struct {
 	Region  string // The region if extracted from hostname
 }
 
-type AWSProvider struct {
-	mountPath         string
-	description       string
+// awsBackend is the streaming backend for AWS provider operations
+type awsBackend struct {
+	*framework.StreamingBackend
 	logger            *logger.GatedLogger
-	accessor          string
-	providerType      string
-	backendClass      string
-	router            *chi.Mux
-	tokenAccess       logical.TokenAccess
-	roles             *authorize.RoleRegistry
-	credSources       *cred.CredSourceRegistry
 	proxy             *httputil.ReverseProxy
 	signer            *v4.Signer
 	proxyDomains      []string
 	maxBodySize       int64
 	timeout           time.Duration
-	credsProvider     *cred.CredentialProvider
 	processorRegistry *processor.ProcessorRegistry
-	auditAccess       audit.AuditAccess
-	validationFunc    func(config map[string]any) error
 	storageView       sdklogical.Storage
 	cleanedUp         bool
 }
 
-func (p *AWSProvider) GetType() string {
-	return p.providerType
+// extractToken extracts Access Key ID from AWS SigV4 Authorization header
+func extractToken(r *http.Request) string {
+	// Format: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20231215/...
+	authHeader := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authHeader, "AWS4-HMAC-SHA256") {
+		return ""
+	}
+	return extractAccessKeyID(authHeader)
 }
 
-func (p *AWSProvider) GetClass() string {
-	return p.backendClass
-}
-
-func (p *AWSProvider) GetDescription() string {
-	return p.description
-}
-
-func (p *AWSProvider) GetAccessor() string {
-	return p.accessor
-}
-
-func (p *AWSProvider) Cleanup(ctx context.Context) {
-	if p == nil || p.cleanedUp {
-		return
+// extractAccessKeyID extracts the Access Key ID from an AWS SigV4 Authorization header.
+// Format: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20231215/us-east-1/s3/aws4_request
+func extractAccessKeyID(authHeader string) string {
+	const prefix = "Credential="
+	idx := strings.Index(authHeader, prefix)
+	if idx == -1 {
+		return ""
 	}
 
-	// Stop credential provider cache
-	if p.credsProvider != nil {
-		p.credsProvider.Stop()
+	start := idx + len(prefix)
+	if start >= len(authHeader) {
+		return ""
 	}
 
-	// Clear references to help garbage collection
-	p.processorRegistry = nil
-	p.proxy = nil
-	p.router = nil
-
-	p.cleanedUp = true
-}
-
-func (p *AWSProvider) Initialize(ctx context.Context) error {
-	return nil
-}
-
-func (p *AWSProvider) Config() map[string]any {
-	return map[string]any{
-		"proxy_domains": p.proxyDomains,
-		"max_body_size": p.maxBodySize,
-		"timeout":       p.timeout.String(),
-	}
-}
-
-func (p *AWSProvider) Setup(ctx context.Context, conf map[string]any) error {
-	// Build current configuration
-	currentConfig := map[string]interface{}{
-		"proxy_domains": p.proxyDomains,
-		"max_body_size": p.maxBodySize,
-		"timeout":       p.timeout,
+	end := strings.IndexByte(authHeader[start:], '/')
+	if end == -1 {
+		return ""
 	}
 
-	// Merge incoming config with current config (incoming takes precedence)
-	mergedConfig := make(map[string]any)
-	maps.Copy(mergedConfig, currentConfig)
-	maps.Copy(mergedConfig, conf)
+	return authHeader[start : start+end]
+}
 
-	// Validate the merged configuration using the factory's validation function
-	if p.validationFunc != nil {
-		if err := p.validationFunc(mergedConfig); err != nil {
-			p.logger.Warn("config validation failed",
-				logger.Err(err),
-			)
-			return err
+// Factory creates a new AWS provider backend using the logical.Factory pattern
+func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
+	b := &awsBackend{
+		logger:      conf.Logger.WithSubsystem("aws"),
+		signer:      v4.NewSigner(),
+		storageView: conf.StorageView,
+	}
+
+	// Initialize proxy
+	b.proxy = &httputil.ReverseProxy{
+		Director:  func(req *http.Request) {},
+		Transport: sharedTransport,
+		ModifyResponse: func(resp *http.Response) error {
+			return nil
+		},
+	}
+
+	// Create the streaming backend with gateway path for streaming
+	b.StreamingBackend = &framework.StreamingBackend{
+		StreamingPaths: []*framework.StreamingPath{
+			{
+				Pattern: "gateway/.*",
+				Handler: b.handleGatewayStreaming,
+				HelpSynopsis: "AWS Gateway proxy",
+				HelpDescription: "Proxies requests to AWS services with signature verification",
+			},
+		},
+		Backend: &framework.Backend{
+			Help:           awsBackendHelp,
+			BackendType:    "aws",
+			BackendClass:   logical.ClassProvider,
+			TokenExtractor: extractToken,
+			Paths:          b.paths(),
+			PathsSpecial: &logical.Paths{
+				Stream: []string{
+					"gateway/.*",
+				},
+			},
+		},
+	}
+
+	// Apply configuration if provided
+	if len(conf.Config) > 0 {
+		if err := ValidateConfig(conf.Config); err != nil {
+			return nil, fmt.Errorf("invalid configuration: %w", err)
 		}
+		parsedConfig := parseConfig(conf.Config)
+		b.proxyDomains = parsedConfig.ProxyDomains
+		b.maxBodySize = parsedConfig.MaxBodySize
+		b.timeout = parsedConfig.Timeout
+		b.initializeProcessors()
 	}
 
-	// Parse and apply the merged configuration
-	newConfig := parseConfig(mergedConfig)
+	return b, nil
+}
 
-	// Update provider configuration
-	p.proxyDomains = newConfig.ProxyDomains
-	p.maxBodySize = newConfig.MaxBodySize
-	p.timeout = newConfig.Timeout
+// Initialize loads persisted config from storage
+func (b *awsBackend) Initialize(ctx context.Context) error {
+	if b.storageView == nil {
+		return nil
+	}
 
-	// Re-initialize processors with new proxy domains
-	p.initializeProcessors()
-
+	// Load persisted config from storage
+	entry, err := b.storageView.Get(ctx, "config")
+	if err != nil {
+		return fmt.Errorf("failed to read config from storage: %w", err)
+	}
+	if entry != nil {
+		var config struct {
+			ProxyDomains []string `json:"proxy_domains"`
+			MaxBodySize  int64    `json:"max_body_size"`
+			Timeout      string   `json:"timeout"`
+		}
+		if err := entry.DecodeJSON(&config); err != nil {
+			return fmt.Errorf("failed to decode config: %w", err)
+		}
+		b.proxyDomains = config.ProxyDomains
+		b.maxBodySize = config.MaxBodySize
+		if config.Timeout != "" {
+			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
+				b.timeout = timeout
+			}
+		}
+		b.initializeProcessors()
+	}
 	return nil
 }
 
-func (p *AWSProvider) setupRouter() {
-	r := chi.NewRouter()
-
-	r.Route("/", func(traffic chi.Router) {
-		traffic.HandleFunc("/gateway*", p.handleGateway)
-	})
-
-	p.router = r
+// paths returns the configuration paths for the AWS provider
+func (b *awsBackend) paths() []*framework.Path {
+	return []*framework.Path{
+		b.pathConfig(),
+	}
 }
 
-type AWSProviderFactory struct {
-	logger *logger.GatedLogger
-}
-
-func (f *AWSProviderFactory) Type() string {
-	return "aws"
-}
-
-func (f *AWSProviderFactory) Class() string {
-	return "provider"
-}
-
-func (f *AWSProviderFactory) Initialize(log *logger.GatedLogger) error {
-	f.logger = log.WithSubsystem(f.Type())
-
+// handleGatewayStreaming handles streaming gateway requests
+func (b *awsBackend) handleGatewayStreaming(ctx context.Context, req *logical.Request, fd *framework.FieldData) error {
+	// Delegate to the existing handleGateway which handles all the gateway logic
+	// req.ResponseWriter and req.HTTPRequest provide the HTTP access
+	// req.Credential contains the minted credentials for AWS signing
+	b.handleGateway(req.ResponseWriter, req.HTTPRequest)
 	return nil
+}
+
+func (b *awsBackend) initializeProcessors() {
+	b.processorRegistry = processor.NewProcessorRegistry()
+
+	// Register processors
+	b.processorRegistry.Register(s3.NewS3AccessPointProcessor(b.proxyDomains, b.logger))
+	b.processorRegistry.Register(s3.NewS3ControlProcessor(b.proxyDomains, b.logger))
+	b.processorRegistry.Register(s3.NewS3Processor(b.proxyDomains, b.logger))
+	b.processorRegistry.Register(processor.NewGenericAWSProcessor(b.proxyDomains, b.logger))
 }
 
 // ValidateConfig validates AWS provider-specific configuration
-func (f *AWSProviderFactory) ValidateConfig(config map[string]any) error {
+func ValidateConfig(config map[string]any) error {
 	allowedKeys := map[string]bool{
 		"proxy_domains": true,
 		"max_body_size": true,
@@ -206,14 +227,12 @@ func (f *AWSProviderFactory) ValidateConfig(config map[string]any) error {
 		case float64:
 			size = int64(v)
 		case json.Number:
-			// Handle json.Number type (from JSON decoder with UseNumber)
 			parsed, err := v.Int64()
 			if err != nil {
 				return fmt.Errorf("max_body_size must be an integer, got json.Number that can't be parsed: %w", err)
 			}
 			size = parsed
 		case string:
-			// Handle string conversion (e.g., from JSON number stored as string)
 			parsed, err := strconv.ParseInt(v, 10, 64)
 			if err != nil {
 				return fmt.Errorf("max_body_size must be an integer, got string that can't be parsed: %w", err)
@@ -253,98 +272,10 @@ func (f *AWSProviderFactory) ValidateConfig(config map[string]any) error {
 	return nil
 }
 
-func (f *AWSProviderFactory) Create(
-	ctx context.Context,
-	mountPath string,
-	description string,
-	accessor string,
-	conf map[string]any,
-	log *logger.GatedLogger,
-	tokenAccess logical.TokenAccess,
-	roles *authorize.RoleRegistry,
-	credSources *cred.CredSourceRegistry,
-	auditAccess audit.AuditAccess,
-	storageView sdklogical.Storage,
-) (logical.Backend, error) {
+const awsBackendHelp = `
+The AWS provider enables proxying requests to AWS services with automatic
+credential management and signature conversion.
 
-	credsProvider, err := cred.NewCredentialProvider(roles, credSources, log.WithSubsystem("aws").WithSubsystem("cred"))
-	if err != nil {
-		return nil, err
-	}
-
-	provider := &AWSProvider{
-		mountPath:     mountPath,
-		description:   description,
-		accessor:      accessor,
-		logger:        log.WithSubsystem(f.Type()).WithSubsystem(accessor),
-		providerType:  f.Type(),
-		backendClass:  f.Class(),
-		tokenAccess:   tokenAccess,
-		roles:         roles,
-		credSources:   credSources,
-		signer:        v4.NewSigner(),
-		credsProvider: credsProvider,
-		auditAccess:   auditAccess,
-		storageView:   storageView,
-	}
-
-	provider.setupRouter()
-
-	provider.proxy = &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-
-		},
-		Transport: sharedTransport,
-		ModifyResponse: func(resp *http.Response) error {
-			// Extract context information stored during request processing
-			ctx := resp.Request.Context()
-
-			// // Retrieve all stored values from context (with type assertions)
-			clientToken, _ := ctx.Value(ClientTokenKey).(*audit.Token)
-			awsCreds, _ := ctx.Value(AWSCredsKey).(aws.Credentials)
-			tokenEntry, _ := ctx.Value(TokenKey).(*logical.TokenEntry)
-			roleName, _ := ctx.Value(RoleNameKey).(string)
-			principalID, _ := ctx.Value(PrincipalIDKey).(string)
-			targetURL, _ := ctx.Value(TargetURLKey).(string)
-			service, _ := ctx.Value(ServiceKey).(string)
-			region, _ := ctx.Value(RegionKey).(string)
-
-			// Build metadata
-			metadata := map[string]interface{}{
-				"service": service,
-				"region":  region,
-			}
-
-			// Determine status message based on status code
-			var message string
-			if resp.StatusCode >= 400 {
-				message = "Request failed"
-			} else {
-				message = "Request successful"
-			}
-
-			// // Audit the response with all context information
-			ok := provider.auditResponse(resp, resp.Request, clientToken, &awsCreds, tokenEntry, roleName, principalID,
-				resp.StatusCode, message, "", targetURL, metadata)
-			if !ok {
-				return fmt.Errorf("failed to audit response")
-			}
-
-			return nil
-		},
-	}
-
-	provider.validationFunc = f.ValidateConfig
-
-	return provider, nil
-}
-
-func (p *AWSProvider) initializeProcessors() {
-	p.processorRegistry = processor.NewProcessorRegistry()
-
-	// Register processors
-	p.processorRegistry.Register(s3.NewS3AccessPointProcessor(p.proxyDomains, p.logger))
-	p.processorRegistry.Register(s3.NewS3ControlProcessor(p.proxyDomains, p.logger))
-	p.processorRegistry.Register(s3.NewS3Processor(p.proxyDomains, p.logger))
-	p.processorRegistry.Register(processor.NewGenericAWSProcessor(p.proxyDomains, p.logger))
-}
+Requests to the gateway/ path are proxied to AWS with the appropriate
+SigV4 signature applied.
+`

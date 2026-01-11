@@ -215,6 +215,8 @@ func (c *Sys) ListCredentialSpecsWithContext(ctx context.Context) ([]*Credential
 
 	r := c.c.NewRequest(http.MethodGet, "/v1/sys/credential/specs")
 
+	r.Params.Set("list", "true")
+
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {
 		return nil, err

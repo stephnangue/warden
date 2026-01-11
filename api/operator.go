@@ -221,3 +221,23 @@ func (c *Operator) DeleteWithDataWithContext(ctx context.Context, path string, d
 
 	return ParseResource(resp.Body)
 }
+
+// List attempts to list resources at the given path.
+// It sends a GET request with ?list=true query parameter.
+func (c *Operator) List(path string) (*Resource, error) {
+	return c.ListWithContext(context.Background(), path)
+}
+
+// ListWithContext attempts to list resources at the given path with context.
+func (c *Operator) ListWithContext(ctx context.Context, path string) (*Resource, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	r := c.c.NewRequest(http.MethodGet, "/v1/"+path)
+	r.Params = url.Values{
+		"list": []string{"true"},
+	}
+
+	resp, err := c.c.RawRequestWithContext(ctx, r)
+	return c.ParseRawResponseAndCloseBody(resp, err)
+}

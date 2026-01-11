@@ -20,6 +20,7 @@ import (
 	uuid "github.com/hashicorp/go-uuid"
 	"github.com/openbao/openbao/helper/namespace"
 	"github.com/openbao/openbao/sdk/v2/logical"
+	wlogical "github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -754,8 +755,24 @@ func (ns *NamespaceStore) ModifyNamespaceByPath(ctx context.Context, path string
 		entry.UnlockKey = unlockKey
 	}
 
+	// Compute the actual parent namespace based on the entry's path.
+	// This ensures the namespace is stored in the correct parent's namespace view.
+	// For example, "test/child/" should be stored in "test/"'s view, not root's view.
+	parentPath, _ := entry.ParentPath()
+	var parentNs *namespace.Namespace
+	if parentPath == "" {
+		parentNs = namespace.RootNamespace
+	} else {
+		parentNs = ns.namespacesByPath.Get(parentPath)
+		if parentNs == nil {
+			unlock()
+			return nil, wlogical.ErrBadRequestf("parent namespace %q not found", parentPath)
+		}
+	}
+	parentCtx := namespace.ContextWithNamespace(ctx, parentNs)
+
 	// setNamespaceLocked will unlock ns.lock
-	if err := ns.setNamespaceLocked(ctx, entry); err != nil {
+	if err := ns.setNamespaceLocked(parentCtx, entry); err != nil {
 
 		ns.logger.Error("set namespace failed",
 			logger.Err(err))
