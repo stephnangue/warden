@@ -493,6 +493,27 @@ func (ps *PolicyStore) switchedDeletePolicy(ctx context.Context, name string, po
 func (ps *PolicyStore) CBP(ctx context.Context, policyNames map[string][]string, additionalPolicies ...*Policy) (*CBP, error) {
 	var allPolicies []*Policy
 
+	// Fetch the named policies
+	for nsID, nsPolicyNames := range policyNames {
+		policyNS, err := ps.core.NamespaceByID(ctx, nsID)
+		if err != nil {
+			return nil, err
+		}
+		if policyNS == nil {
+			return nil, namespace.ErrNoNamespace
+		}
+		policyCtx := namespace.ContextWithNamespace(ctx, policyNS)
+		for _, nsPolicyName := range nsPolicyNames {
+			p, err := ps.GetPolicy(policyCtx, nsPolicyName, PolicyTypeCBP)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get policy: %w", err)
+			}
+			if p != nil {
+				allPolicies = append(allPolicies, p)
+			}
+		}
+	}
+
 	// Append any pre-fetched policies that were given
 	allPolicies = append(allPolicies, additionalPolicies...)
 

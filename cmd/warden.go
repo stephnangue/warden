@@ -54,6 +54,9 @@ func init() {
 	wardenCmd.AddCommand(namespaces.NamespacesCmd)
 	wardenCmd.AddCommand(cred.CredCmd)
 	wardenCmd.AddCommand(basic.WriteCmd)
+	wardenCmd.AddCommand(basic.ReadCmd)
+	wardenCmd.AddCommand(basic.ListCmd)
+	wardenCmd.AddCommand(basic.DeleteCmd)
 	wardenCmd.AddCommand(revoke.RevokeRootTokenCmd)
 }
 

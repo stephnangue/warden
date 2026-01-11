@@ -16,11 +16,8 @@ import (
 	"github.com/openbao/openbao/helper/locking"
 	"github.com/openbao/openbao/helper/namespace"
 	"github.com/stephnangue/warden/audit"
-	"github.com/stephnangue/warden/auth"
-	"github.com/stephnangue/warden/authorize"
-	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/provider"
+	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -37,13 +34,10 @@ func createMockCoreForAudit() *Core {
 		audit:         NewMountTable(),
 		mountsLock:    locking.DeadlockRWMutex{},
 		auditLock:     sync.RWMutex{},
-		authMethods:   make(map[string]auth.Factory),
-		providers:     make(map[string]provider.Factory),
+		authMethods:   make(map[string]logical.Factory),
+		providers:     make(map[string]logical.Factory),
 		auditDevices:  make(map[string]audit.Factory),
 		tokenStore:    nil, // Not needed for audit tests
-		roles:         authorize.NewRoleRegistry(),
-		accessControl: &authorize.AccessControl{},
-		credSources:   cred.NewCredSourceRegistry(),
 		auditManager:  newMockAuditManagerFull(),
 	}
 }

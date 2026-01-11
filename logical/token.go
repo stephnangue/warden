@@ -37,6 +37,12 @@ type TokenEntry struct {
 	// Usage Tracking
 	mu   sync.RWMutex
 	used bool // One-time use flag
+
+    //Policies attached to this token 
+    Policies       []string
+
+    // Credential spec for this token if any
+    CredentialSpec string
 }
 
 // MarkUsed marks the token as used (for one-time use tokens)
@@ -53,24 +59,11 @@ func (t *TokenEntry) IsUsed() bool {
 	return t.used
 }
 
-// AuthData contains the authentication data used to generate a token.
-type AuthData struct {
-	PrincipalID  string    // Principal identifier
-	RoleName     string    // Associated role
-	AuthDeadline time.Time // Auth validity deadline
-	ExpireAt     time.Time // Token expiration
-
-	// Namespace Context
-	NamespaceID   string // Namespace UUID
-	NamespacePath string // Namespace path
-
-	// Request Context - enhanced with more fields
-	RequestContext map[string]string // client_ip, user_agent, request_id, etc.
-}
-
-
-
 type TokenAccess interface {
 	ResolveToken(ctx context.Context, tokenValue string) (string, string, error)
 	GetToken(tokenValue string) *TokenEntry
 }
+
+type ContextClientIPKey string
+
+const ClientIPKey ContextClientIPKey = "client_ip"
