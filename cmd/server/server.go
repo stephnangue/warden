@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -19,20 +20,19 @@ import (
 	"github.com/spf13/cobra"
 	wardenapi "github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/audit"
-	"github.com/stephnangue/warden/auth"
 	"github.com/stephnangue/warden/auth/method/jwt"
 	"github.com/stephnangue/warden/config"
 	"github.com/stephnangue/warden/core"
 	wardenseal "github.com/stephnangue/warden/core/seal"
+	wardenhttp "github.com/stephnangue/warden/http"
 	"github.com/stephnangue/warden/internal/configutil"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/listener/api"
-	"github.com/stephnangue/warden/listener/mysql"
 	log "github.com/stephnangue/warden/logger"
+	wardenlogical "github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/physical"
 	inmemStorage "github.com/stephnangue/warden/physical/inmem"
 	postgresqlStorage "github.com/stephnangue/warden/physical/postgres"
-	"github.com/stephnangue/warden/provider"
 	"github.com/stephnangue/warden/provider/aws"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -40,13 +40,12 @@ import (
 
 const (
 	// Subsystem names for logging
-	subsystemCore          = "core"
-	subsystemAPIListener   = "listener.api"
-	subsystemMySQLListener = "listener.mysql"
+	subsystemCore        = "core"
+	subsystemListener = "listener"
 
 	// Listener type names
-	listenerTypeAPI   = "api"
-	listenerTypeMySQL = "mysql"
+	listenerTypeTCP  = "tcp"
+	listenerTypeUnix = "unix"
 )
 
 var (
@@ -78,12 +77,12 @@ Usage: warden server [options]
 		"file": &audit.FileDeviceFactory{},
 	}
 
-	providers = map[string]provider.Factory{
-		"aws": &aws.AWSProviderFactory{},
+	providers = map[string]wardenlogical.Factory{
+		"aws": aws.Factory,
 	}
 
-	authMethods = map[string]auth.Factory{
-		"jwt": &jwt.JWTAuthMethodFactory{},
+	authMethods = map[string]wardenlogical.Factory{
+		"jwt": jwt.Factory,
 	}
 
 	storageBackends = map[string]physical.Factory{
@@ -209,8 +208,14 @@ func run(cmd *cobra.Command, args []string) error {
 		infoKeys = append(infoKeys, "api address")
 	}
 
+	// Create HTTP handler from core
+	httpHandler := wardenhttp.Handler(&wardenhttp.HandlerProperties{
+		Core:   newCore,
+		Logger: logger,
+	})
+
 	// init the listeners
-	lns, err := initListeners(newCore, config, logger, &infoKeys, &info)
+	lns, err := initListeners(httpHandler, config, logger, &infoKeys, &info)
 	if err != nil {
 		// Error already logged in initListeners
 		return err
@@ -403,47 +408,27 @@ func buildStorage(config *config.Config, logger *log.GatedLogger) (phy.Backend, 
 	return storage, nil
 }
 
-func initListeners(core *core.Core, config *config.Config, logger *log.GatedLogger, infoKeys *[]string, info *map[string]string) ([]listener.Listener, error) {
+func initListeners(httpHandler http.Handler, config *config.Config, logger *log.GatedLogger, infoKeys *[]string, info *map[string]string) ([]listener.Listener, error) {
 	lns := make([]listener.Listener, 0, len(config.Listeners))
 
 	for _, lnConfig := range config.Listeners {
-		switch lnConfig.Name {
-		case listenerTypeAPI:
-			// construct api listerner
+		switch lnConfig.Type {
+		case listenerTypeTCP, listenerTypeUnix:
+			// construct api listener using shared HTTP handler
 			ln, err := api.NewApiListener(api.ApiListenerConfig{
-				Logger:          logger.WithSystem(subsystemAPIListener),
-				Protocol:        lnConfig.Protocol,
+				Logger:          logger.WithSystem(subsystemListener),
 				Address:         lnConfig.Address,
 				TLSCertFile:     lnConfig.TLSCertFile,
 				TLSKeyFile:      lnConfig.TLSKeyFile,
 				TLSClientCAFile: lnConfig.TLSClientCAFile,
 				TLSEnabled:      lnConfig.TLSEnabled,
-			}, core)
+			}, httpHandler)
 			if err != nil {
-				return nil, fmt.Errorf("error initializing listener of type %s: %s", listenerTypeAPI, err)
+				return nil, fmt.Errorf("error initializing listener of type %s: %s", lnConfig.Type, err)
 			}
 			lns = append(lns, ln)
-		case listenerTypeMySQL:
-			// construct mysql listerner
-			listenerConf := mysql.MysqlListenerConfig{
-				Protocol:        lnConfig.Protocol,
-				Address:         lnConfig.Address,
-				Roles:           core.Roles(),
-				CredSources:     core.CredSources(),
-				Targets:         core.Targets(),
-				Logger:          logger.WithSystem(subsystemMySQLListener),
-				TLSCertFile:     lnConfig.TLSCertFile,
-				TLSKeyFile:      lnConfig.TLSKeyFile,
-				TLSClientCAFile: lnConfig.TLSClientCAFile,
-				TLSEnabled:      lnConfig.TLSEnabled,
-				TokenStore:      core.GetTokenStore(),
-			}
-
-			ln, err := mysql.NewMysqlListener(listenerConf)
-			if err != nil {
-				return nil, fmt.Errorf("error initializing listener of type %s: %s", listenerTypeMySQL, err)
-			}
-			lns = append(lns, ln)
+		default:
+			return nil, fmt.Errorf("unknown listener type: %s", lnConfig.Type)
 		}
 	}
 

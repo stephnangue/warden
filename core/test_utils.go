@@ -13,15 +13,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/openbao/openbao/helper/locking"
 	"github.com/openbao/openbao/helper/namespace"
-	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/stephnangue/warden/audit"
-	"github.com/stephnangue/warden/auth"
-	"github.com/stephnangue/warden/authorize"
-	"github.com/stephnangue/warden/cred"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	phy "github.com/stephnangue/warden/physical"
 	"github.com/stephnangue/warden/physical/inmem"
-	"github.com/stephnangue/warden/provider"
 )
 
 // mockAuditDevice implements audit.Device for testing
@@ -89,8 +86,8 @@ func (d *mockAuditDevice) SetEnabled(enabled bool) {
 }
 
 // logical.Backend interface methods
-func (d *mockAuditDevice) HandleRequest(w http.ResponseWriter, r *http.Request) error {
-	return nil
+func (d *mockAuditDevice) HandleRequest(ctx context.Context, req *logical.Request) (*logical.Response, error) {
+	return nil, nil
 }
 
 func (d *mockAuditDevice) GetType() string {
@@ -112,7 +109,7 @@ func (d *mockAuditDevice) GetAccessor() string {
 func (d *mockAuditDevice) Cleanup(ctx context.Context) {
 }
 
-func (m *mockAuditDevice) Setup(ctx context.Context, conf map[string]any) error {
+func (m *mockAuditDevice) Setup(ctx context.Context, conf *logical.BackendConfig) error {
 	return nil
 }
 
@@ -122,6 +119,26 @@ func (m *mockAuditDevice) Initialize(ctx context.Context) error {
 
 func (m *mockAuditDevice) Config() map[string]any {
 	return map[string]any{}
+}
+
+func (m *mockAuditDevice) Type() string {
+	return m.deviceType
+}
+
+func (m *mockAuditDevice) Class() logical.BackendClass {
+	return logical.ClassUnknown
+}
+
+func (m *mockAuditDevice) HandleExistenceCheck(ctx context.Context, req *logical.Request) (bool, bool, error) {
+	return false, false, nil
+}
+
+func (m *mockAuditDevice) SpecialPaths() *logical.Paths {
+	return nil
+}
+
+func (m *mockAuditDevice) ExtractToken(r *http.Request) string {
+	return ""
 }
 
 // mockAuditFactory implements audit.Factory for testing
@@ -270,7 +287,7 @@ func (m *mockAuditManager) Reset(ctx context.Context) error {
 	return nil
 }
 
-// mockTokenStore implements the auth.TokenStore interface for testing
+// mockTokenStore implements token store methods for testing
 type mockTokenStore struct{}
 
 func (m *mockTokenStore) GenerateToken(ctx context.Context, tokenType string, authData *logical.AuthData) (*logical.TokenEntry, error) {
@@ -299,44 +316,6 @@ func (m *mockTokenStore) RevokeRootToken() error {
 	return nil
 }
 
-// mockAuthFactory implements auth.Factory for testing
-type mockAuthFactory struct{}
-
-func (f *mockAuthFactory) Type() string {
-	return "mock"
-}
-
-func (f *mockAuthFactory) Class() string {
-	return "auth"
-}
-
-func (f *mockAuthFactory) Create(ctx context.Context,
-	mountPath string,
-	description string,
-	accessor string,
-	config map[string]any,
-	log *logger.GatedLogger,
-	tokenStore auth.TokenStore,
-	roles *authorize.RoleRegistry,
-	accessControl *authorize.AccessControl,
-	auditAccess audit.AuditAccess,
-	storageView sdklogical.Storage) (logical.Backend, error) {
-	backend := newMockAuthMethod()
-	if err := backend.Setup(ctx, config); err != nil {
-		return nil, err
-	}
-	backend.setupRouter()
-	return backend, nil
-}
-
-func (f *mockAuthFactory) Initialize(logger *logger.GatedLogger) error {
-	return nil
-}
-
-func (f *mockAuthFactory) ValidateConfig(config map[string]any) error {
-	return nil
-}
-
 // mockAuthMethod implements logical.Backend for testing (used as auth method)
 type mockAuthMethod struct {
 	config map[string]any
@@ -344,10 +323,8 @@ type mockAuthMethod struct {
 	router *chi.Mux
 }
 
-func (m *mockAuthMethod) HandleRequest(w http.ResponseWriter, r *http.Request) error {
-	m.router.ServeHTTP(w, r)
-
-	return nil
+func (m *mockAuthMethod) HandleRequest(ctx context.Context, req *logical.Request) (*logical.Response, error) {
+	return nil, nil
 }
 
 func (p *mockAuthMethod) setupRouter() {
@@ -383,11 +360,13 @@ func (m *mockAuthMethod) GetAccessor() string {
 
 func (m *mockAuthMethod) Cleanup(ctx context.Context) {}
 
-func (m *mockAuthMethod) Setup(ctx context.Context, conf map[string]any) error {
+func (m *mockAuthMethod) Setup(ctx context.Context, conf *logical.BackendConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.config = make(map[string]any)
-	maps.Copy(m.config, conf)
+	if conf != nil && conf.Config != nil {
+		maps.Copy(m.config, conf.Config)
+	}
 	return nil
 }
 
@@ -403,46 +382,38 @@ func (m *mockAuthMethod) Config() map[string]any {
 	return config
 }
 
+func (m *mockAuthMethod) Type() string {
+	return "mock"
+}
+
+func (m *mockAuthMethod) Class() logical.BackendClass {
+	return logical.ClassAuth
+}
+
+func (m *mockAuthMethod) HandleExistenceCheck(ctx context.Context, req *logical.Request) (bool, bool, error) {
+	return false, false, nil
+}
+
+func (m *mockAuthMethod) SpecialPaths() *logical.Paths {
+	return nil
+}
+
+func (m *mockAuthMethod) ExtractToken(r *http.Request) string {
+	return ""
+}
+
 func newMockAuthMethod() *mockAuthMethod {
 	return &mockAuthMethod{}
 }
 
-// mockProviderFactory implements provider.Factory for testing
-type mockProviderFactory struct{}
-
-func (f *mockProviderFactory) Type() string {
-	return "mock"
-}
-
-func (f *mockProviderFactory) Class() string {
-	return "provider"
-}
-
-func (f *mockProviderFactory) Create(ctx context.Context,
-	mountPath string,
-	description string,
-	accessor string,
-	config map[string]any,
-	log *logger.GatedLogger,
-	tokenAccess logical.TokenAccess,
-	roles *authorize.RoleRegistry,
-	credSources *cred.CredSourceRegistry,
-	auditAccess audit.AuditAccess,
-	storageView sdklogical.Storage) (logical.Backend, error) {
+// MockProviderFactory is a logical.Factory for creating mock providers in tests
+func MockProviderFactory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
 	backend := newMockProvider()
-	if err := backend.Setup(ctx, config); err != nil {
+	if err := backend.Setup(ctx, conf); err != nil {
 		return nil, err
 	}
 	backend.setupRouter()
 	return backend, nil
-}
-
-func (f *mockProviderFactory) Initialize(logger *logger.GatedLogger) error {
-	return nil
-}
-
-func (f *mockProviderFactory) ValidateConfig(config map[string]any) error {
-	return nil
 }
 
 // mockProvider implements logical.Backend for testing (used as provider)
@@ -452,10 +423,8 @@ type mockProvider struct {
 	router *chi.Mux
 }
 
-func (m *mockProvider) HandleRequest(w http.ResponseWriter, r *http.Request) error {
-	m.router.ServeHTTP(w, r)
-
-	return nil
+func (m *mockProvider) HandleRequest(ctx context.Context, req *logical.Request) (*logical.Response, error) {
+	return nil, nil
 }
 
 func (p *mockProvider) setupRouter() {
@@ -491,11 +460,13 @@ func (m *mockProvider) GetAccessor() string {
 
 func (m *mockProvider) Cleanup(ctx context.Context) {}
 
-func (m *mockProvider) Setup(ctx context.Context, conf map[string]any) error {
+func (m *mockProvider) Setup(ctx context.Context, conf *logical.BackendConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.config = make(map[string]any)
-	maps.Copy(m.config, conf)
+	if conf != nil && conf.Config != nil {
+		maps.Copy(m.config, conf.Config)
+	}
 	return nil
 }
 
@@ -511,6 +482,26 @@ func (m *mockProvider) Config() map[string]any {
 	return config
 }
 
+func (m *mockProvider) Type() string {
+	return "mock"
+}
+
+func (m *mockProvider) Class() logical.BackendClass {
+	return logical.ClassProvider
+}
+
+func (m *mockProvider) HandleExistenceCheck(ctx context.Context, req *logical.Request) (bool, bool, error) {
+	return false, false, nil
+}
+
+func (m *mockProvider) SpecialPaths() *logical.Paths {
+	return nil
+}
+
+func (m *mockProvider) ExtractToken(r *http.Request) string {
+	return ""
+}
+
 func newMockProvider() *mockProvider {
 	return &mockProvider{}
 }
@@ -521,10 +512,14 @@ func createTestCore(t *testing.T) *Core {
 	router := NewRouter(log)
 
 	// Create in-memory physical backend
-	physical, _ := inmem.NewInmem(nil, nil)
+	physicalBackend, _ := inmem.NewInmem(nil, nil)
+
+	// Create physical cache wrapping the backend
+	cacheLogger := log.WithSystem("storage.cache")
+	physicalCache := phy.NewCache(physicalBackend, 0, cacheLogger, nil)
 
 	// Create and initialize barrier
-	barrier, _ := NewAESGCMBarrier(physical)
+	barrier, _ := NewAESGCMBarrier(physicalCache)
 	key, _ := barrier.GenerateKey(rand.Reader)
 	barrier.Initialize(context.Background(), key, nil, rand.Reader)
 	barrier.Unseal(context.Background(), key)
@@ -534,17 +529,16 @@ func createTestCore(t *testing.T) *Core {
 		router:        router,
 		mounts:        NewMountTable(),
 		mountsLock:    locking.DeadlockRWMutex{},
-		authMethods:   make(map[string]auth.Factory),
-		providers:     make(map[string]provider.Factory),
-		roles:         authorize.NewRoleRegistry(),
-		accessControl: authorize.NewAccessControl(),
-		credSources:   cred.NewCredSourceRegistry(),
+		authMethods:   make(map[string]logical.Factory),
+		providers:     make(map[string]logical.Factory),
 		auditManager:  &mockAuditManager{},
-		physical:      physical,
+		physical:      physicalCache,
+		physicalCache: physicalCache.(physical.ToggleablePurgemonster),
 		barrier:       barrier,
 		activeContext: context.Background(),
 		sealed:        new(uint32), // Initialize sealed flag (0 = unsealed)
 		standby:       atomic.Bool{},
+		stateLock:     &locking.SyncRWMutex{},
 	}
 
 	// Initialize namespace store
@@ -553,6 +547,15 @@ func createTestCore(t *testing.T) *Core {
 
 	// Initialize token store
 	core.tokenStore, _ = NewTokenStore(core, DefaultTokenStoreConfig())
+
+	// Initialize credential config store
+	credStorage := NewBarrierView(barrier, credentialConfigStorePath)
+	credConfig := DefaultCredConfigStoreConfig()
+	core.credConfigStore, _ = NewCredentialConfigStore(core, credConfig)
+	core.credConfigStore.storage = credStorage
+
+	// Initialize policy store
+	core.policyStore, _ = NewPolicyStore(ctx, core, log)
 
 	// Create and mount the system backend
 	requiredMounts, _ := core.requiredMountTable(ctx)

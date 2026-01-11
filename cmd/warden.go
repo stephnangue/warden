@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stephnangue/warden/cmd/auth"
 	"github.com/stephnangue/warden/cmd/basic"
+	"github.com/stephnangue/warden/cmd/cred"
 	"github.com/stephnangue/warden/cmd/login"
 	"github.com/stephnangue/warden/cmd/namespaces"
 	"github.com/stephnangue/warden/cmd/operator"
@@ -51,7 +52,11 @@ func init() {
 	wardenCmd.AddCommand(providers.ProvidersCmd)
 	wardenCmd.AddCommand(auth.AuthCmd)
 	wardenCmd.AddCommand(namespaces.NamespacesCmd)
+	wardenCmd.AddCommand(cred.CredCmd)
 	wardenCmd.AddCommand(basic.WriteCmd)
+	wardenCmd.AddCommand(basic.ReadCmd)
+	wardenCmd.AddCommand(basic.ListCmd)
+	wardenCmd.AddCommand(basic.DeleteCmd)
 	wardenCmd.AddCommand(revoke.RevokeRootTokenCmd)
 }
 

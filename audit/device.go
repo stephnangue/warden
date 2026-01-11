@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/stephnangue/warden/logical"
 )
 
 // device implements the Device interface
@@ -200,8 +202,8 @@ func (d *device) Name() string {
 	return d.name
 }
 
-func (m *device) Setup(ctx context.Context, conf map[string]any) error {
-	return  nil
+func (d *device) Setup(ctx context.Context, conf *logical.BackendConfig) error {
+	return nil
 }
 
 func (d *device) Config() map[string]any {
@@ -246,8 +248,16 @@ func (d *device) GetType() string {
 	return d.config.Type
 }
 
+func (d *device) Type() string {
+	return d.config.Type
+}
+
 func (d *device) GetClass() string {
 	return d.config.Class
+}
+
+func (d *device) Class() logical.BackendClass {
+	return logical.ClassUnknown
 }
 
 func (d *device) GetDescription() string {
@@ -258,13 +268,25 @@ func (d *device) GetAccessor() string {
 	return d.config.Accessor
 }
 
-func (d *device) HandleRequest(w http.ResponseWriter, r *http.Request) error {
-	return nil
+func (d *device) HandleRequest(ctx context.Context, req *logical.Request) (*logical.Response, error) {
+	return nil, nil
 }
 
 func (d *device) Cleanup(ctx context.Context) {
 }
 
 func (d *device) Initialize(ctx context.Context) error {
+	return nil
+}
+
+func (d *device) ExtractToken(r *http.Request) string {
+	return ""
+}
+
+func (d *device) HandleExistenceCheck(ctx context.Context, req *logical.Request) (checkFound bool, exists bool, err error) {
+	return false, false, nil
+}
+
+func (d *device) SpecialPaths() *logical.Paths {
 	return nil
 }
