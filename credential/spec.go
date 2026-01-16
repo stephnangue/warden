@@ -14,15 +14,12 @@ type CredSpec struct {
 	Type string // Credential type (e.g., "database_userpass", "aws_access_keys")
 
 	// Source configuration
-	SourceName   string            // Reference to CredSource
-	SourceParams map[string]string // Type-specific parameters (path, role_name, etc.)
+	Source string            // Reference to CredSource
+	Config map[string]string // Type-specific parameters (path, role_name, etc.)
 
 	// Constraints
 	MinTTL time.Duration // Minimum TTL for issued credentials
 	MaxTTL time.Duration // Maximum TTL for issued credentials
-
-	// Target binding (for audit/routing)
-	TargetName string
 }
 
 // CredSpecRegistry manages credential specifications with thread-safe operations

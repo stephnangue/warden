@@ -205,7 +205,6 @@ func TestHandleConfigRead_WithConfig(t *testing.T) {
 
 	b := backend.(*jwtAuthBackend)
 	b.config = &JWTAuthConfig{
-		Name:           "test-jwt",
 		Mode:           "jwt",
 		JWKSURL:        "https://example.com/.well-known/jwks.json",
 		BoundIssuer:    "https://issuer.example.com",
@@ -228,7 +227,6 @@ func TestHandleConfigRead_WithConfig(t *testing.T) {
 	require.NotNil(t, resp)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, "test-jwt", resp.Data["name"])
 	assert.Equal(t, "jwt", resp.Data["mode"])
 	assert.Equal(t, "https://example.com/.well-known/jwks.json", resp.Data["jwks_url"])
 	assert.Equal(t, "https://issuer.example.com", resp.Data["bound_issuer"])
@@ -251,7 +249,6 @@ func TestHandleConfigRead_OIDCMode(t *testing.T) {
 
 	b := backend.(*jwtAuthBackend)
 	b.config = &JWTAuthConfig{
-		Name:             "test-oidc",
 		Mode:             "oidc",
 		OIDCDiscoveryURL: "https://issuer.example.com/.well-known/openid-configuration",
 		UserClaim:        "sub",
@@ -350,8 +347,7 @@ func TestHandleConfigWrite_NoModeNoDiscoveryNoJWKS(t *testing.T) {
 	req := &logical.Request{}
 	d := &framework.FieldData{
 		Raw: map[string]any{
-			// Mode is not in the schema, so it can't be set via FieldData
-			// Without oidc_discovery_url or jwks_url, mode cannot be inferred
+			// Mode is required but not provided
 			"user_claim": "email",
 		},
 		Schema: b.pathConfig().Fields,
@@ -361,10 +357,10 @@ func TestHandleConfigWrite_NoModeNoDiscoveryNoJWKS(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// Should fail because mode cannot be inferred without discovery or jwks URL
+	// Should fail because mode is required
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.NotNil(t, resp.Err)
-	assert.Contains(t, resp.Err.Error(), "invalid mode")
+	assert.Contains(t, resp.Err.Error(), "mode is required")
 }
 
 // =============================================================================

@@ -23,7 +23,7 @@ type VaultDriverFactory struct{}
 
 // Type returns the driver type
 func (f *VaultDriverFactory) Type() string {
-	return "hashicorp_vault"
+	return credential.SourceTypeVault
 }
 
 // Create instantiates a new VaultDriver
@@ -48,7 +48,7 @@ func (f *VaultDriverFactory) Create(config map[string]string, logger *logger.Gat
 
 	// Authenticate if auth_method is provided
 	credSource := &credential.CredSource{
-		Type:   "hashicorp_vault",
+		Type:   credential.SourceTypeVault,
 		Config: config,
 	}
 
@@ -88,6 +88,11 @@ func (f *VaultDriverFactory) ValidateConfig(config map[string]string) error {
 	}
 
 	return nil
+}
+
+// SensitiveConfigFields returns the list of config keys that should be masked in output
+func (f *VaultDriverFactory) SensitiveConfigFields() []string {
+	return []string{"token", "secret_id"}
 }
 
 // authenticate performs Vault authentication
@@ -149,14 +154,14 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	switch spec.Type {
 	case credential.TypeDatabaseUserPass, "static_database_userpass", "dynamic_database_userpass":
 		// Determine if static or dynamic based on presence of database_mount
-		databaseMount := credential.GetString(spec.SourceParams, "database_mount", "")
+		databaseMount := credential.GetString(spec.Config, "database_mount", "")
 		if databaseMount != "" {
 			return d.fetchDynamicDatabaseCreds(ctx, spec)
 		}
 		return d.fetchStaticKVSecret(ctx, spec)
 	case credential.TypeAWSAccessKeys, "static_aws_access_keys", "dynamic_aws_access_keys":
 		// Determine if static or dynamic based on presence of aws_mount
-		awsMount := credential.GetString(spec.SourceParams, "aws_mount", "")
+		awsMount := credential.GetString(spec.Config, "aws_mount", "")
 		if awsMount != "" {
 			return d.fetchDynamicAWSCreds(ctx, spec)
 		}
@@ -168,8 +173,8 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 
 // fetchStaticKVSecret fetches static secrets from Vault KV v2
 func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
-	kv2Mount := credential.GetString(spec.SourceParams, "kv2_mount", "")
-	secretPath := credential.GetString(spec.SourceParams, "secret_path", "")
+	kv2Mount := credential.GetString(spec.Config, "kv2_mount", "")
+	secretPath := credential.GetString(spec.Config, "secret_path", "")
 
 	if kv2Mount == "" || secretPath == "" {
 		return nil, 0, "", fmt.Errorf("kv2_mount and secret_path are required for static KV credentials")
@@ -198,8 +203,8 @@ func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, spec *credential.
 
 // fetchDynamicDatabaseCreds fetches dynamic database credentials from Vault database engine
 func (d *VaultDriver) fetchDynamicDatabaseCreds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
-	dbMount := credential.GetString(spec.SourceParams, "database_mount", "")
-	roleName := credential.GetString(spec.SourceParams, "role_name", "")
+	dbMount := credential.GetString(spec.Config, "database_mount", "")
+	roleName := credential.GetString(spec.Config, "role_name", "")
 
 	if dbMount == "" || roleName == "" {
 		return nil, 0, "", fmt.Errorf("database_mount and role_name are required for dynamic database credentials")
@@ -223,7 +228,7 @@ func (d *VaultDriver) fetchDynamicDatabaseCreds(ctx context.Context, spec *crede
 	for k, v := range secret.Data {
 		rawData[k] = v
 	}
-	database := credential.GetString(spec.SourceParams, "database", "")
+	database := credential.GetString(spec.Config, "database", "")
 	if database != "" {
 		rawData["database"] = database
 	}
@@ -243,8 +248,8 @@ func (d *VaultDriver) fetchDynamicDatabaseCreds(ctx context.Context, spec *crede
 
 // fetchDynamicAWSCreds fetches dynamic AWS credentials from Vault AWS engine
 func (d *VaultDriver) fetchDynamicAWSCreds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
-	awsMount := credential.GetString(spec.SourceParams, "aws_mount", "")
-	roleName := credential.GetString(spec.SourceParams, "role_name", "")
+	awsMount := credential.GetString(spec.Config, "aws_mount", "")
+	roleName := credential.GetString(spec.Config, "role_name", "")
 
 	if awsMount == "" || roleName == "" {
 		return nil, 0, "", fmt.Errorf("aws_mount and role_name are required for dynamic AWS credentials")
@@ -255,15 +260,15 @@ func (d *VaultDriver) fetchDynamicAWSCreds(ctx context.Context, spec *credential
 	data := make(map[string]interface{})
 
 	// Add optional parameters
-	roleArn := credential.GetString(spec.SourceParams, "role_arn", "")
+	roleArn := credential.GetString(spec.Config, "role_arn", "")
 	if roleArn != "" {
 		data["role_arn"] = roleArn
 	}
-	roleSessionName := credential.GetString(spec.SourceParams, "role_session_name", "")
+	roleSessionName := credential.GetString(spec.Config, "role_session_name", "")
 	if roleSessionName != "" {
 		data["role_session_name"] = roleSessionName
 	}
-	ttl := credential.GetString(spec.SourceParams, "ttl", "")
+	ttl := credential.GetString(spec.Config, "ttl", "")
 	if ttl != "" {
 		// Parse and validate TTL against min/max bounds
 		parsedTTL, err := time.ParseDuration(ttl)

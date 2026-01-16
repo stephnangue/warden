@@ -13,17 +13,16 @@ import (
 
 // StoredCredSpec is the versioned storage format for credential specs
 type StoredCredSpec struct {
-	Version      int               `json:"version"`
-	NamespaceID  string            `json:"namespace_id"`
-	Name         string            `json:"name"`
-	Type         string            `json:"type"`
-	SourceName   string            `json:"source_name"`
-	SourceParams map[string]string `json:"source_params"`
-	MinTTL       string            `json:"min_ttl"` // Duration as string
-	MaxTTL       string            `json:"max_ttl"` // Duration as string
-	TargetName   string            `json:"target_name,omitempty"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at"`
+	Version     int               `json:"version"`
+	NamespaceID string            `json:"namespace_id"`
+	Name        string            `json:"name"`
+	Type        string            `json:"type"`
+	Source      string            `json:"source"`
+	Config      map[string]string `json:"config"`
+	MinTTL      string            `json:"min_ttl"` // Duration as string
+	MaxTTL      string            `json:"max_ttl"` // Duration as string
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
 }
 
 // StoredCredSource is the versioned storage format for credential sources
@@ -46,17 +45,16 @@ func (s *CredentialConfigStore) persistSpec(namespaceID string, spec *credential
 	now := time.Now()
 
 	stored := &StoredCredSpec{
-		Version:      1,
-		NamespaceID:  namespaceID,
-		Name:         spec.Name,
-		Type:         spec.Type,
-		SourceName:   spec.SourceName,
-		SourceParams: spec.SourceParams,
-		MinTTL:       spec.MinTTL.String(),
-		MaxTTL:       spec.MaxTTL.String(),
-		TargetName:   spec.TargetName,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		Version:     1,
+		NamespaceID: namespaceID,
+		Name:        spec.Name,
+		Type:        spec.Type,
+		Source:      spec.Source,
+		Config:      spec.Config,
+		MinTTL:      spec.MinTTL.String(),
+		MaxTTL:      spec.MaxTTL.String(),
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 
 	data, err := json.Marshal(stored)
@@ -98,13 +96,12 @@ func (s *CredentialConfigStore) loadSpec(namespaceID, name string) (*credential.
 	maxTTL, _ := time.ParseDuration(stored.MaxTTL)
 
 	spec := &credential.CredSpec{
-		Name:         stored.Name,
-		Type:         stored.Type,
-		SourceName:   stored.SourceName,
-		SourceParams: stored.SourceParams,
-		MinTTL:       minTTL,
-		MaxTTL:       maxTTL,
-		TargetName:   stored.TargetName,
+		Name:   stored.Name,
+		Type:   stored.Type,
+		Source: stored.Source,
+		Config: stored.Config,
+		MinTTL: minTTL,
+		MaxTTL: maxTTL,
 	}
 
 	return spec, nil

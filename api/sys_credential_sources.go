@@ -51,7 +51,7 @@ func (c *Sys) CreateCredentialSourceWithContext(ctx context.Context, name string
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/credential/sources/%s", name))
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/cred/sources/%s", name))
 
 	if input == nil {
 		return nil, errors.New("input cannot be nil")
@@ -105,7 +105,7 @@ func (c *Sys) GetCredentialSourceWithContext(ctx context.Context, name string) (
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/credential/sources/%s", name))
+	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/cred/sources/%s", name))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {
@@ -148,7 +148,7 @@ func (c *Sys) ListCredentialSourcesWithContext(ctx context.Context) ([]*Credenti
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodGet, "/v1/sys/credential/sources")
+	r := c.c.NewRequest(http.MethodGet, "/v1/sys/cred/sources")
 
 	r.Params.Set("list", "true")
 
@@ -208,7 +208,7 @@ func (c *Sys) UpdateCredentialSourceWithContext(ctx context.Context, name string
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodPut, fmt.Sprintf("/v1/sys/credential/sources/%s", name))
+	r := c.c.NewRequest(http.MethodPut, fmt.Sprintf("/v1/sys/cred/sources/%s", name))
 
 	if input == nil {
 		input = &UpdateCredentialSourceInput{}
@@ -253,7 +253,7 @@ func (c *Sys) DeleteCredentialSourceWithContext(ctx context.Context, name string
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/credential/sources/%s", name))
+	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/cred/sources/%s", name))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {

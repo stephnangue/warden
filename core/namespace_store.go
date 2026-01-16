@@ -8,7 +8,6 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"net/http"
 	"path"
 	"strings"
 	"sync"
@@ -328,7 +327,7 @@ func (ns *NamespaceStore) setNamespaceLocked(ctx context.Context, nsEntry *names
 	// Copy the entry before validating and potentially mutating it.
 	entry := nsEntry.Clone(true /* preserve unlock */)
 	if err := entry.Validate(); err != nil {
-		return logical.CodedError(http.StatusBadRequest, err.Error())
+		return wlogical.ErrBadRequest(err.Error())
 	}
 
 	// Validate that we have a parent namespace.
@@ -616,7 +615,7 @@ func (ns *NamespaceStore) undoCreateMounts(nsCtx context.Context, namespaceToDel
 		for _, me := range mountEntries {
 			err := ns.core.unmountInternal(nsCtx, me.Path, false)
 			if err != nil {
-				if errors.Is(err, errNoMatchingMount) {
+				if wlogical.IsNotFound(err) {
 					continue
 				}
 				ns.logger.Error(fmt.Sprintf("failed to unmount %q", me.Path),
@@ -719,7 +718,7 @@ func (ns *NamespaceStore) ModifyNamespaceByPath(ctx context.Context, path string
 
 	path = namespace.Canonicalize(parent.Path + path)
 	if path == "" {
-		return nil, logical.CodedError(http.StatusBadRequest, "refusing to modify root namespace")
+		return nil, wlogical.ErrBadRequest("refusing to modify root namespace")
 	}
 
 	unlock, err := ns.lockWithInvalidation(ctx, true)
@@ -968,7 +967,7 @@ func (ns *NamespaceStore) clearNamespaceResources(nsCtx context.Context, namespa
 	for _, me := range mountEntries {
 		err := ns.core.unmountInternal(nsCtx, me.Path, true)
 		if err != nil {
-			if errors.Is(err, errNoMatchingMount) {
+			if wlogical.IsNotFound(err) {
 				continue
 			}
 			ns.logger.Error(fmt.Sprintf("failed to unmount %q", me.Path),

@@ -21,7 +21,6 @@ import (
 //  1. Builds a logical request from the HTTP request
 //  2. Sends the logical request to core.HandleRequest for processing
 //  3. Writes the logical.Response back to the HTTP response
-//
 func handleLogical(c *core.Core, log *logger.GatedLogger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Build the logical request from the HTTP request

@@ -79,14 +79,13 @@ func init() {
 	})
 }
 
-
 func (c *Core) CheckToken(ctx context.Context, req *logical.Request, unauth bool) (*logical.Auth, *CBP, *logical.TokenEntry, error) {
 	var cbp *CBP
 	var te *logical.TokenEntry
 
 	// Even if unauth, if a token is provided, there's little reason not to
 	// gather as much info as possible for the audit log
-	if !unauth || (unauth && req.ClientToken != "" ) {
+	if !unauth || (unauth && req.ClientToken != "") {
 		var err error
 		cbp, te, err = c.fetchCBPAndTokenEntry(ctx, req)
 		// In the unauth case we don't want to fail the command, since it's
@@ -136,8 +135,8 @@ func (c *Core) CheckToken(ctx context.Context, req *logical.Request, unauth bool
 
 	// Create the auth response
 	auth := &logical.Auth{
-		ClientToken: req.ClientToken,
-		TokenAccessor:    req.ClientTokenAccessor,
+		ClientToken:   req.ClientToken,
+		TokenAccessor: req.ClientTokenAccessor,
 	}
 
 	if te != nil {
@@ -310,7 +309,6 @@ func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logica
 		req.HTTPRequest = req.HTTPRequest.WithContext(reqCtx)
 	}
 
-	// extract the clientToken if provided
 	matchingBackend := c.router.MatchingBackend(ctx, req.Path)
 	if matchingBackend == nil {
 		c.logger.Warn("no backend mounted at path",
@@ -320,8 +318,6 @@ func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logica
 		)
 		return logical.ErrorResponse(logical.ErrNotFoundf("no handler for path %q", req.Path)), nil
 	}
-	
-	req.ClientToken = matchingBackend.ExtractToken(req.HTTPRequest)
 
 	resp, err := c.handleCancelableRequest(ctx, req)
 	req.SetTokenEntry(nil)
@@ -488,16 +484,16 @@ func (c *Core) LoginCreateToken(ctx context.Context, resp *logical.Response) (*l
 	}
 
 	data := map[string]any{
-		"token_type": tokenValue.Type,
-		"expire_at": tokenValue.ExpireAt,
-		"bound_ip": tokenValue.CreatedByIP,
-		"token_id": tokenValue.ID,
+		"token_type":     tokenValue.Type,
+		"expire_at":      tokenValue.ExpireAt,
+		"bound_ip":       tokenValue.CreatedByIP,
+		"token_id":       tokenValue.ID,
 		"token_assessor": tokenValue.Accessor,
-		"auth_deadline": tokenValue.AuthDeadline,
-		"namespace": tokenValue.NamespacePath,
-		"role": tokenValue.RoleName,
-		"data": tokenValue.Data,
-		"policies": tokenValue.Policies,
+		"auth_deadline":  tokenValue.AuthDeadline,
+		"namespace":      tokenValue.NamespacePath,
+		"role":           tokenValue.RoleName,
+		"data":           tokenValue.Data,
+		"policies":       tokenValue.Policies,
 	}
 
 	maps.Copy(resp.Data, data)
@@ -525,8 +521,21 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		if err := c.parseRequestBody(req); err != nil {
 			return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil, err
 		}
+		req.ClientToken = extractToken(req.HTTPRequest)
 	} else {
 		req.Streamed = true
+		req.Operation = logical.StreamOperation
+
+		matchingBackend := c.router.MatchingBackend(ctx, req.Path)
+		if matchingBackend == nil {
+			c.logger.Warn("no backend mounted at path",
+				logger.String("full_req_path", req.HTTPRequest.URL.Path),
+				logger.String("relative_req_path", req.Path),
+			)
+			return logical.ErrorResponse(logical.ErrNotFoundf("no handler for path %q", req.Path)), nil, logical.ErrNotFoundf("no handler for path %q", req.Path)
+		}
+
+		req.ClientToken = matchingBackend.ExtractToken(req.HTTPRequest)
 	}
 
 	// Validate the token (non-login requests require authentication)
@@ -629,7 +638,6 @@ func (c *Core) PopulateTokenEntry(ctx context.Context, req *logical.Request) err
 	}
 	return nil
 }
-
 
 // isStreamingRequest checks if the request path is a streaming path
 func (c *Core) isStreamingRequest(ctx context.Context, path string) bool {
@@ -740,4 +748,16 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 	return nil
 }
 
-
+// It checks X-Warden-Token header first, then falls back to Authorization: Bearer.
+func extractToken(r *http.Request) string {
+	// Try X-Warden-Token header first
+	if token := r.Header.Get("X-Warden-Token"); token != "" {
+		return token
+	}
+	// Fall back to Authorization: Bearer
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
+		return authHeader[7:]
+	}
+	return ""
+}

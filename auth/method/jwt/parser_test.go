@@ -17,7 +17,6 @@ import (
 
 func TestMapToJWTAuthConfig_BasicJWTMode(t *testing.T) {
 	data := map[string]any{
-		"name":     "my-jwt-auth",
 		"mode":     "jwt",
 		"jwks_url": "https://example.com/.well-known/jwks.json",
 	}
@@ -25,14 +24,12 @@ func TestMapToJWTAuthConfig_BasicJWTMode(t *testing.T) {
 	config, err := mapToJWTAuthConfig(data)
 	require.NoError(t, err)
 
-	assert.Equal(t, "my-jwt-auth", config.Name)
 	assert.Equal(t, "jwt", config.Mode)
 	assert.Equal(t, "https://example.com/.well-known/jwks.json", config.JWKSURL)
 }
 
 func TestMapToJWTAuthConfig_BasicOIDCMode(t *testing.T) {
 	data := map[string]any{
-		"name":               "my-oidc-auth",
 		"mode":               "oidc",
 		"oidc_discovery_url": "https://issuer.example.com/.well-known/openid-configuration",
 	}
@@ -40,33 +37,8 @@ func TestMapToJWTAuthConfig_BasicOIDCMode(t *testing.T) {
 	config, err := mapToJWTAuthConfig(data)
 	require.NoError(t, err)
 
-	assert.Equal(t, "my-oidc-auth", config.Name)
 	assert.Equal(t, "oidc", config.Mode)
 	assert.Equal(t, "https://issuer.example.com/.well-known/openid-configuration", config.OIDCDiscoveryURL)
-}
-
-func TestMapToJWTAuthConfig_InferJWTMode(t *testing.T) {
-	data := map[string]any{
-		"jwks_url": "https://example.com/.well-known/jwks.json",
-	}
-
-	config, err := mapToJWTAuthConfig(data)
-	require.NoError(t, err)
-
-	// Mode should be inferred from jwks_url
-	assert.Equal(t, "jwt", config.Mode)
-}
-
-func TestMapToJWTAuthConfig_InferOIDCMode(t *testing.T) {
-	data := map[string]any{
-		"oidc_discovery_url": "https://issuer.example.com/.well-known/openid-configuration",
-	}
-
-	config, err := mapToJWTAuthConfig(data)
-	require.NoError(t, err)
-
-	// Mode should be inferred from oidc_discovery_url
-	assert.Equal(t, "oidc", config.Mode)
 }
 
 func TestMapToJWTAuthConfig_DefaultValues(t *testing.T) {
@@ -250,7 +222,6 @@ func TestMapToJWTAuthConfig_EmptyMap(t *testing.T) {
 
 func TestMapToJWTAuthConfig_AllFields(t *testing.T) {
 	data := map[string]any{
-		"name":                   "full-config",
 		"mode":                   "jwt",
 		"jwks_url":               "https://example.com/.well-known/jwks.json",
 		"jwks_ca_pem":            "cert-content",
@@ -268,7 +239,6 @@ func TestMapToJWTAuthConfig_AllFields(t *testing.T) {
 	config, err := mapToJWTAuthConfig(data)
 	require.NoError(t, err)
 
-	assert.Equal(t, "full-config", config.Name)
 	assert.Equal(t, "jwt", config.Mode)
 	assert.Equal(t, "https://example.com/.well-known/jwks.json", config.JWKSURL)
 	assert.Equal(t, "cert-content", config.JWKSCA)
@@ -347,49 +317,15 @@ func TestMapToJWTAuthConfig_InvalidJSON(t *testing.T) {
 // Mode Inference Tests
 // =============================================================================
 
-func TestMapToJWTAuthConfig_ModeInference(t *testing.T) {
-	tests := []struct {
-		name         string
-		data         map[string]any
-		expectedMode string
-	}{
-		{
-			name: "Infer JWT from jwks_url",
-			data: map[string]any{
-				"jwks_url": "https://example.com/jwks",
-			},
-			expectedMode: "jwt",
-		},
-		{
-			name: "Infer OIDC from oidc_discovery_url",
-			data: map[string]any{
-				"oidc_discovery_url": "https://example.com/.well-known/openid-configuration",
-			},
-			expectedMode: "oidc",
-		},
-		{
-			name: "Explicit mode overrides inference",
-			data: map[string]any{
-				"mode":     "oidc",
-				"jwks_url": "https://example.com/jwks",
-			},
-			expectedMode: "oidc",
-		},
-		{
-			name: "OIDC takes precedence when both present but no mode",
-			data: map[string]any{
-				"oidc_discovery_url": "https://example.com/.well-known/openid-configuration",
-				"jwks_url":           "https://example.com/jwks",
-			},
-			expectedMode: "oidc",
-		},
+func TestMapToJWTAuthConfig_ModeRequired(t *testing.T) {
+	// Mode is no longer inferred - it must be explicitly specified
+	// The validation happens in setupJWTConfig, not mapToJWTAuthConfig
+	data := map[string]any{
+		"mode":     "jwt",
+		"jwks_url": "https://example.com/jwks",
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			config, err := mapToJWTAuthConfig(tc.data)
-			require.NoError(t, err)
-			assert.Equal(t, tc.expectedMode, config.Mode)
-		})
-	}
+	config, err := mapToJWTAuthConfig(data)
+	require.NoError(t, err)
+	assert.Equal(t, "jwt", config.Mode)
 }

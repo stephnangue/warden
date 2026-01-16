@@ -28,6 +28,7 @@ const (
 	RootCapability   = "root"
 	PatchCapability  = "patch"
 	ScanCapability   = "scan"
+	StreamCapability = "stream"
 )
 
 const (
@@ -40,6 +41,7 @@ const (
 	SudoCapabilityInt
 	PatchCapabilityInt
 	ScanCapabilityInt
+	StreamCapabilityInt
 )
 
 type PolicyType uint32
@@ -68,6 +70,7 @@ var cap2Int = map[string]uint32{
 	SudoCapability:   SudoCapabilityInt,
 	PatchCapability:  PatchCapabilityInt,
 	ScanCapability:   ScanCapabilityInt,
+	StreamCapability: StreamCapabilityInt,
 }
 
 // Policy is used to represent the policy specified by an CBP configuration.
@@ -129,7 +132,6 @@ type CBPPermissions struct {
 	GrantingPoliciesMap    map[uint32][]sdklogical.PolicyInfo
 	ResponseKeysFilterPath string
 }
-
 
 func (p *CBPPermissions) Clone() (*CBPPermissions, error) {
 	ret := &CBPPermissions{
@@ -335,7 +337,7 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 				pc.Capabilities = []string{DenyCapability}
 				pc.Permissions.CapabilitiesBitmap = DenyCapabilityInt
 				goto PathFinished
-			case CreateCapability, ReadCapability, UpdateCapability, DeleteCapability, ListCapability, SudoCapability, PatchCapability, ScanCapability:
+			case CreateCapability, ReadCapability, UpdateCapability, DeleteCapability, ListCapability, SudoCapability, PatchCapability, ScanCapability, StreamCapability:
 				pc.Permissions.CapabilitiesBitmap |= cap2Int[cap]
 			default:
 				return fmt.Errorf("path %q: invalid capability %q", key, cap)

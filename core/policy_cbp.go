@@ -43,11 +43,11 @@ type PolicyCheckOpts struct {
 }
 
 type AuthzResults struct {
-	CBPResults      *CBPResults
-	Allowed         bool
-	RootPrivs       bool
-	DeniedError     bool
-	Error           *multierror.Error
+	CBPResults  *CBPResults
+	Allowed     bool
+	RootPrivs   bool
+	DeniedError bool
+	Error       *multierror.Error
 }
 
 type CBPResults struct {
@@ -291,6 +291,9 @@ func (a *CBP) Capabilities(ctx context.Context, path string) (pathCapabilities [
 	if capabilities&ScanCapabilityInt > 0 {
 		pathCapabilities = append(pathCapabilities, ScanCapability)
 	}
+	if capabilities&StreamCapabilityInt > 0 {
+		pathCapabilities = append(pathCapabilities, StreamCapability)
+	}
 
 	// If "deny" is explicitly set or if the path has no capabilities at all,
 	// set the path capabilities to "deny"
@@ -417,6 +420,9 @@ CHECK:
 	case logical.ScanOperation:
 		operationAllowed = capabilities&ScanCapabilityInt > 0
 		grantingPolicies = permissions.GrantingPoliciesMap[ScanCapabilityInt]
+	case logical.StreamOperation:
+		operationAllowed = capabilities&StreamCapabilityInt > 0
+		grantingPolicies = permissions.GrantingPoliciesMap[StreamCapabilityInt]
 
 	// These three re-use UpdateCapabilityInt since that's the most appropriate
 	// capability/operation mapping
@@ -758,7 +764,7 @@ SWCPATH:
 func (c *Core) performPolicyChecks(ctx context.Context, cbp *CBP, te *logical.TokenEntry, req *logical.Request, opts *PolicyCheckOpts) *AuthzResults {
 	ret := new(AuthzResults)
 
-	// First, perform normal CBP checks if requested. 
+	// First, perform normal CBP checks if requested.
 	if cbp != nil && !opts.Unauth {
 		ret.CBPResults = cbp.AllowOperation(ctx, req, false)
 		ret.RootPrivs = ret.CBPResults.RootPrivs

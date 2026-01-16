@@ -209,8 +209,10 @@ func (b *SystemBackend) handleNamespaceList(ctx context.Context, req *logical.Re
 	}
 
 	// Convert to response format
+	keys := make([]string, 0, len(namespaces))
 	namespaceInfos := make([]map[string]any, 0, len(namespaces))
 	for _, ns := range namespaces {
+		keys = append(keys, ns.Path)
 		namespaceInfos = append(namespaceInfos, map[string]any{
 			"path":            ns.Path,
 			"id":              ns.ID,
@@ -219,6 +221,7 @@ func (b *SystemBackend) handleNamespaceList(ctx context.Context, req *logical.Re
 	}
 
 	return b.respondSuccess(map[string]any{
+		"keys":       keys,
 		"namespaces": namespaceInfos,
 	}), nil
 }

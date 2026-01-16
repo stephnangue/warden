@@ -22,7 +22,7 @@ var (
 )
 
 func init() {
-	DeleteCmd.Flags().BoolVar(&deleteForce, "force", false, "Skip confirmation prompt")
+	DeleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Skip confirmation prompt")
 }
 
 func runDelete(cmd *cobra.Command, args []string) error {
