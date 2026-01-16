@@ -2,6 +2,7 @@ package spec
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/spf13/cobra"
 	"github.com/stephnangue/warden/cmd/helpers"
@@ -33,19 +34,21 @@ func runRead(cmd *cobra.Command, args []string) error {
 	data := [][]any{
 		{"Name", spec.Name},
 		{"Type", spec.Type},
-		{"Source", spec.SourceName},
+		{"Source", spec.Source},
 		{"Min TTL", spec.MinTTL},
 		{"Max TTL", spec.MaxTTL},
 	}
 
-	if spec.TargetName != "" {
-		data = append(data, []any{"Target", spec.TargetName})
-	}
-
-	if len(spec.SourceParams) > 0 {
-		data = append(data, []any{"Source Params", ""})
-		for key, value := range spec.SourceParams {
-			data = append(data, []any{fmt.Sprintf("  %s", key), value})
+	if len(spec.Config) > 0 {
+		data = append(data, []any{"Config", ""})
+		// Sort config keys for consistent output
+		keys := make([]string, 0, len(spec.Config))
+		for key := range spec.Config {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			data = append(data, []any{fmt.Sprintf("  %s", key), spec.Config[key]})
 		}
 	}
 

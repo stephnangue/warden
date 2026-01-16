@@ -32,5 +32,4 @@ func init() {
 	AuthCmd.AddCommand(DisableCmd)
 	AuthCmd.AddCommand(ListCmd)
 	AuthCmd.AddCommand(ReadCmd)
-	AuthCmd.AddCommand(TuneCmd)
 }

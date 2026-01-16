@@ -1,9 +1,11 @@
 package basic
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/stephnangue/warden/cmd/helpers"
@@ -16,21 +18,24 @@ var (
 		SilenceErrors: true,
 		Short:         "Delete data at a path",
 		Long: `
-Usage: warden delete PATH
+Usage: warden delete PATH [flags]
 
   Delete data at the given path. The path should be in the format
   "provider_mount/resource" or "auth/auth_mount/resource" or "sys/path/to/resource"
   and will be converted to the appropriate API path.
 
+  By default, this command will ask for confirmation before deleting.
+  Use the -f/--force flag to skip the confirmation prompt.
+
   Examples:
 
-    Delete a JWT auth role:
+    Delete a JWT auth role (with confirmation):
 
       $ warden delete auth/jwt/role/developer
 
-    Delete a provider:
+    Delete a provider (skip confirmation):
 
-      $ warden delete sys/providers/aws
+      $ warden delete sys/providers/aws -f
 
     Delete a namespace:
 
@@ -42,14 +47,33 @@ Usage: warden delete PATH
 
 	// Output format flag for delete
 	deleteOutputFormat string
+	// Force flag to skip confirmation
+	deleteForce bool
 )
 
 func init() {
-	DeleteCmd.Flags().StringVarP(&deleteOutputFormat, "format", "f", "table", "Output format: table, json")
+	DeleteCmd.Flags().StringVarP(&deleteOutputFormat, "format", "", "table", "Output format: table, json")
+	DeleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Skip confirmation prompt")
 }
 
 func runDelete(cmd *cobra.Command, args []string) error {
 	path := args[0]
+
+	// Ask for confirmation unless -y flag is used
+	if !deleteForce {
+		fmt.Printf("Are you sure you want to delete '%s'? (yes/no): ", path)
+		reader := bufio.NewReader(os.Stdin)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("failed to read confirmation: %w", err)
+		}
+
+		response = strings.TrimSpace(strings.ToLower(response))
+		if response != "yes" && response != "y" {
+			fmt.Println("Delete cancelled")
+			return nil
+		}
+	}
 
 	// Create the client
 	c, err := helpers.Client()

@@ -121,23 +121,21 @@ func (b *SystemBackend) handleProviderRead(ctx context.Context, req *logical.Req
 		return logical.ErrorResponse(logical.ErrNotFound("mount not found")), nil
 	}
 
-	// Deep copy config and redact sensitive fields
+	// Deep copy config
 	entry.configMu.RLock()
 	config := make(map[string]any)
 	maps.Copy(config, entry.Config)
 	entry.configMu.RUnlock()
 
-	// Redact sensitive keys
-	if _, exists := config["hmac_key"]; exists && config["hmac_key"] != "" {
-		config["hmac_key"] = "*************"
-	}
+	// Mask sensitive fields using schema-based approach
+	maskedConfig := b.maskMountConfig(ctx, entry, config)
 
 	return b.respondSuccess(map[string]any{
 		"type":        entry.Type,
 		"path":        entry.Path,
 		"description": entry.Description,
 		"accessor":    entry.Accessor,
-		"config":      config,
+		"config":      maskedConfig,
 	}), nil
 }
 
@@ -173,22 +171,20 @@ func (b *SystemBackend) handleProviderList(ctx context.Context, req *logical.Req
 			continue
 		}
 
-		// Deep copy config and redact sensitive fields
+		// Deep copy config
 		entry.configMu.RLock()
 		config := make(map[string]any)
 		maps.Copy(config, entry.Config)
 		entry.configMu.RUnlock()
 
-		// Redact sensitive keys
-		if _, exists := config["hmac_key"]; exists && config["hmac_key"] != "" {
-			config["hmac_key"] = "*************"
-		}
+		// Mask sensitive fields using schema-based approach
+		maskedConfig := b.maskMountConfig(ctx, entry, config)
 
 		mounts[entry.Path] = map[string]any{
 			"type":        entry.Type,
 			"description": entry.Description,
 			"accessor":    entry.Accessor,
-			"config":      config,
+			"config":      maskedConfig,
 		}
 	}
 

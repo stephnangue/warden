@@ -361,7 +361,8 @@ func TestRole_Defaults(t *testing.T) {
 
 	fieldData := &framework.FieldData{
 		Raw: map[string]any{
-			"name": "defaults-role",
+			"name":       "defaults-role",
+			"token_type": "warden_token", // Required field
 		},
 		Schema: map[string]*framework.FieldSchema{
 			"name":                {Type: framework.TypeString},
@@ -370,7 +371,7 @@ func TestRole_Defaults(t *testing.T) {
 			"token_policies":      {Type: framework.TypeCommaStringSlice},
 			"token_ttl":           {Type: framework.TypeDurationSecond, Default: 3600},
 			"token_auth_deadline": {Type: framework.TypeDurationSecond, Default: 3600},
-			"token_type":          {Type: framework.TypeString, Default: "service"},
+			"token_type":          {Type: framework.TypeString, Required: true},
 			"user_claim":          {Type: framework.TypeString, Default: "sub"},
 			"cred_spec_name":      {Type: framework.TypeString},
 		},

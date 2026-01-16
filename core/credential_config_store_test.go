@@ -83,7 +83,7 @@ func TestCredentialConfigStore_CreateSpec(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:       "test-spec",
 		Type:       "database_userpass",
-		SourceName: "test-source",
+		Source:"test-source",
 		MinTTL:     time.Hour,
 		MaxTTL:     24 * time.Hour,
 	}
@@ -113,8 +113,8 @@ func TestCredentialConfigStore_CreateSpec(t *testing.T) {
 	if retrieved.Type != spec.Type {
 		t.Errorf("expected type %s, got %s", spec.Type, retrieved.Type)
 	}
-	if retrieved.SourceName != spec.SourceName {
-		t.Errorf("expected source name %s, got %s", spec.SourceName, retrieved.SourceName)
+	if retrieved.Source != spec.Source {
+		t.Errorf("expected source name %s, got %s", spec.Source, retrieved.Source)
 	}
 }
 
@@ -134,7 +134,7 @@ func TestCredentialConfigStore_CreateSpecDuplicate(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:       "test-spec",
 		Type:       "database_userpass",
-		SourceName: "test-source",
+		Source:"test-source",
 	}
 
 	// Create first spec
@@ -147,7 +147,7 @@ func TestCredentialConfigStore_CreateSpecDuplicate(t *testing.T) {
 	spec2 := &credential.CredSpec{
 		Name:       "test-spec",
 		Type:       "aws_access_keys",
-		SourceName: "test-source", // Use same source
+		Source:"test-source", // Use same source
 	}
 
 	err = store.CreateSpec(ctx, spec2)
@@ -172,7 +172,7 @@ func TestCredentialConfigStore_UpdateSpec(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:       "test-spec",
 		Type:       "database_userpass",
-		SourceName: "test-source",
+		Source:"test-source",
 		MinTTL:     time.Hour,
 		MaxTTL:     24 * time.Hour,
 	}
@@ -220,7 +220,7 @@ func TestCredentialConfigStore_DeleteSpec(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:       "test-spec",
 		Type:       "database_userpass",
-		SourceName: "test-source",
+		Source:"test-source",
 	}
 
 	// Create spec
@@ -274,7 +274,7 @@ func TestCredentialConfigStore_ListSpecs(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name:       "spec-" + string(rune('0'+i)),
 			Type:       "database_userpass",
-			SourceName: "test-source",
+			Source:"test-source",
 		}
 		if err := store.CreateSpec(ctx, spec); err != nil {
 			t.Fatalf("failed to create spec %d: %v", i, err)
@@ -399,7 +399,7 @@ func TestCredentialConfigStore_CheckSourceReferences(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name:       "spec-" + string(rune('0'+i)),
 			Type:       "database_userpass",
-			SourceName: "test-source",
+			Source:"test-source",
 		}
 		if err := store.CreateSpec(ctx, spec); err != nil {
 			t.Fatalf("failed to create spec %d: %v", i, err)
@@ -410,7 +410,7 @@ func TestCredentialConfigStore_CheckSourceReferences(t *testing.T) {
 	otherSpec := &credential.CredSpec{
 		Name:       "other-spec",
 		Type:       "database_userpass",
-		SourceName: "other-source",
+		Source:"other-source",
 	}
 	if err := store.CreateSpec(ctx, otherSpec); err != nil {
 		t.Fatalf("failed to create other spec: %v", err)
@@ -428,8 +428,8 @@ func TestCredentialConfigStore_CheckSourceReferences(t *testing.T) {
 
 	// Verify reference names
 	for _, ref := range refs {
-		if ref.SourceName != "test-source" {
-			t.Errorf("expected source name test-source, got %s", ref.SourceName)
+		if ref.Source != "test-source" {
+			t.Errorf("expected source name test-source, got %s", ref.Source)
 		}
 	}
 }
@@ -474,7 +474,7 @@ func TestCredentialConfigStore_NamespaceIsolation(t *testing.T) {
 	spec1 := &credential.CredSpec{
 		Name:       "shared-name",
 		Type:       "database_userpass",
-		SourceName: "source1",
+		Source:"source1",
 	}
 	if err := store.CreateSpec(ctx1, spec1); err != nil {
 		t.Fatalf("failed to create spec in ns1: %v", err)
@@ -484,7 +484,7 @@ func TestCredentialConfigStore_NamespaceIsolation(t *testing.T) {
 	spec2 := &credential.CredSpec{
 		Name:       "shared-name",
 		Type:       "aws_access_keys",
-		SourceName: "source2",
+		Source:"source2",
 	}
 	if err := store.CreateSpec(ctx2, spec2); err != nil {
 		t.Fatalf("failed to create spec in ns2: %v", err)
@@ -526,7 +526,7 @@ func TestCredentialConfigStore_LoadFromStorage(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:       "test-spec",
 		Type:       "database_userpass",
-		SourceName: "test-source",
+		Source:"test-source",
 	}
 	if err := store.CreateSpec(ctx, spec); err != nil {
 		t.Fatalf("failed to create spec: %v", err)
@@ -587,7 +587,7 @@ func TestCredentialConfigStore_CacheEviction(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name:       "spec-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
 			Type:       "database_userpass",
-			SourceName: "test-source",
+			Source:"test-source",
 		}
 		if err := store.CreateSpec(ctx, spec); err != nil {
 			t.Fatalf("failed to create spec %d: %v", i, err)
@@ -697,6 +697,10 @@ func (f *testDriverFactory) ValidateConfig(config map[string]string) error {
 	return nil
 }
 
+func (f *testDriverFactory) SensitiveConfigFields() []string {
+	return []string{}
+}
+
 // testDriver is a minimal driver for testing
 type testDriver struct{}
 
@@ -766,7 +770,7 @@ func TestCredentialConfigStore_ValidateSpec_TypeValidation(t *testing.T) {
 			spec: &credential.CredSpec{
 				Name:       "valid-spec",
 				Type:       "test_cred_type",
-				SourceName: "test-source",
+				Source:"test-source",
 				MinTTL:     5 * time.Minute,
 				MaxTTL:     1 * time.Hour,
 			},
@@ -777,7 +781,7 @@ func TestCredentialConfigStore_ValidateSpec_TypeValidation(t *testing.T) {
 			spec: &credential.CredSpec{
 				Name:       "invalid-spec",
 				Type:       "nonexistent_type",
-				SourceName: "test-source",
+				Source:"test-source",
 				MinTTL:     5 * time.Minute,
 				MaxTTL:     1 * time.Hour,
 			},
@@ -789,7 +793,7 @@ func TestCredentialConfigStore_ValidateSpec_TypeValidation(t *testing.T) {
 			spec: &credential.CredSpec{
 				Name:       "empty-type-spec",
 				Type:       "",
-				SourceName: "test-source",
+				Source:"test-source",
 				MinTTL:     5 * time.Minute,
 				MaxTTL:     1 * time.Hour,
 			},
@@ -801,7 +805,7 @@ func TestCredentialConfigStore_ValidateSpec_TypeValidation(t *testing.T) {
 			spec: &credential.CredSpec{
 				Name:       "bad-source-spec",
 				Type:       "test_cred_type",
-				SourceName: "nonexistent-source",
+				Source:"nonexistent-source",
 				MinTTL:     5 * time.Minute,
 				MaxTTL:     1 * time.Hour,
 			},
@@ -843,7 +847,7 @@ func (t *testCredentialType) Metadata() credential.TypeMetadata {
 	}
 }
 
-func (t *testCredentialType) ValidateSourceParams(params map[string]string, sourceName string) error {
+func (t *testCredentialType) ValidateConfig(config map[string]string, sourceName string) error {
 	// No validation required for test type
 	return nil
 }
@@ -876,6 +880,10 @@ func (t *testCredentialType) Revoke(ctx context.Context, cred *credential.Creden
 
 func (t *testCredentialType) CanRotate() bool {
 	return false
+}
+
+func (t *testCredentialType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
+	return map[string]*credential.CredentialFieldSchema{}
 }
 
 // TestCredentialConfigStore_ValidateSource_ConfigValidation tests source config validation
@@ -957,6 +965,10 @@ func (f *validatingDriverFactory) ValidateConfig(config map[string]string) error
 	return nil
 }
 
+func (f *validatingDriverFactory) SensitiveConfigFields() []string {
+	return []string{}
+}
+
 // TestCredentialConfigStore_ValidateSpec_SourceParamsValidation tests source params validation
 func TestCredentialConfigStore_ValidateSpec_SourceParamsValidation(t *testing.T) {
 	store, ctx := setupTestCredentialConfigStore(t)
@@ -991,8 +1003,8 @@ func TestCredentialConfigStore_ValidateSpec_SourceParamsValidation(t *testing.T)
 			spec: &credential.CredSpec{
 				Name:       "valid-params-spec",
 				Type:       "validating_type",
-				SourceName: "test-source",
-				SourceParams: map[string]string{
+				Source:"test-source",
+				Config: map[string]string{
 					"required_field": "value",
 				},
 				MinTTL: 5 * time.Minute,
@@ -1003,15 +1015,15 @@ func TestCredentialConfigStore_ValidateSpec_SourceParamsValidation(t *testing.T)
 		{
 			name: "missing required params",
 			spec: &credential.CredSpec{
-				Name:         "missing-params-spec",
-				Type:         "validating_type",
-				SourceName:   "test-source",
-				SourceParams: map[string]string{},
-				MinTTL:       5 * time.Minute,
-				MaxTTL:       1 * time.Hour,
+				Name:   "missing-params-spec",
+				Type:   "validating_type",
+				Source: "test-source",
+				Config: map[string]string{},
+				MinTTL: 5 * time.Minute,
+				MaxTTL: 1 * time.Hour,
 			},
 			expectError: true,
-			errorMsg:    "invalid source params for type 'validating_type'",
+			errorMsg:    "invalid config for type 'validating_type'",
 		},
 	}
 
@@ -1046,8 +1058,8 @@ func (t *validatingCredentialType) Metadata() credential.TypeMetadata {
 	}
 }
 
-func (t *validatingCredentialType) ValidateSourceParams(params map[string]string, sourceName string) error {
-	if err := credential.ValidateRequired(params, "required_field"); err != nil {
+func (t *validatingCredentialType) ValidateConfig(config map[string]string, sourceName string) error {
+	if err := credential.ValidateRequired(config, "required_field"); err != nil {
 		return err
 	}
 	return nil
@@ -1080,6 +1092,10 @@ func (t *validatingCredentialType) Revoke(ctx context.Context, cred *credential.
 
 func (t *validatingCredentialType) CanRotate() bool {
 	return false
+}
+
+func (t *validatingCredentialType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
+	return map[string]*credential.CredentialFieldSchema{}
 }
 
 // TestCredentialConfigStore_BuiltinLocalSource tests the built-in local source
@@ -1178,8 +1194,8 @@ func TestCredentialConfigStore_BuiltinLocalSource(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name:       "test-local-spec",
 			Type:       "database_userpass",
-			SourceName: "local",
-			SourceParams: map[string]string{
+			Source:"local",
+			Config: map[string]string{
 				"kv2_mount":   "secret",
 				"secret_path": "db/creds",
 			},
@@ -1198,8 +1214,8 @@ func TestCredentialConfigStore_BuiltinLocalSource(t *testing.T) {
 			t.Fatalf("failed to get spec: %v", err)
 		}
 
-		if retrieved.SourceName != "local" {
-			t.Errorf("expected source name 'local', got '%s'", retrieved.SourceName)
+		if retrieved.Source != "local" {
+			t.Errorf("expected source name 'local', got '%s'", retrieved.Source)
 		}
 	})
 }

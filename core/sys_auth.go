@@ -12,6 +12,42 @@ import (
 	"github.com/stephnangue/warden/logger"
 )
 
+// maskMountConfigValue is the default mask used for sensitive mount config fields
+const maskMountConfigValue = "*************"
+
+// maskMountConfig masks sensitive fields in mount configuration based on the backend's
+// SensitiveFieldsProvider implementation
+func (b *SystemBackend) maskMountConfig(ctx context.Context, entry *MountEntry, config map[string]any) map[string]any {
+	if config == nil {
+		return nil
+	}
+
+	// Get backend and check for SensitiveFieldsProvider
+	var sensitiveFields []string
+	if backend := b.core.router.MatchingBackend(ctx, entry.Path); backend != nil {
+		if provider, ok := backend.(logical.SensitiveFieldsProvider); ok {
+			sensitiveFields = provider.SensitiveConfigFields()
+		}
+	}
+
+	// Build lookup for sensitive fields
+	sensitive := make(map[string]bool)
+	for _, f := range sensitiveFields {
+		sensitive[f] = true
+	}
+
+	// Mask sensitive values
+	masked := make(map[string]any, len(config))
+	for k, v := range config {
+		if sensitive[k] && v != nil && v != "" {
+			masked[k] = maskMountConfigValue
+		} else {
+			masked[k] = v
+		}
+	}
+	return masked
+}
+
 // pathAuth returns the paths for auth method operations
 func (b *SystemBackend) pathAuth() []*framework.Path {
 	return []*framework.Path{
@@ -126,23 +162,21 @@ func (b *SystemBackend) handleAuthRead(ctx context.Context, req *logical.Request
 		return logical.ErrorResponse(logical.ErrNotFound("auth method mount not found")), nil
 	}
 
-	// Deep copy config and redact sensitive fields
+	// Deep copy config
 	entry.configMu.RLock()
 	config := make(map[string]any)
 	maps.Copy(config, entry.Config)
 	entry.configMu.RUnlock()
 
-	// Redact sensitive keys
-	if _, exists := config["hmac_key"]; exists && config["hmac_key"] != "" {
-		config["hmac_key"] = "*************"
-	}
+	// Mask sensitive fields using schema-based approach
+	maskedConfig := b.maskMountConfig(ctx, entry, config)
 
 	return b.respondSuccess(map[string]any{
 		"type":        entry.Type,
 		"path":        entry.Path,
 		"description": entry.Description,
 		"accessor":    entry.Accessor,
-		"config":      config,
+		"config":      maskedConfig,
 	}), nil
 }
 
@@ -180,22 +214,20 @@ func (b *SystemBackend) handleAuthList(ctx context.Context, req *logical.Request
 			continue
 		}
 
-		// Deep copy config and redact sensitive fields
+		// Deep copy config
 		entry.configMu.RLock()
 		config := make(map[string]any)
 		maps.Copy(config, entry.Config)
 		entry.configMu.RUnlock()
 
-		// Redact sensitive keys
-		if _, exists := config["hmac_key"]; exists && config["hmac_key"] != "" {
-			config["hmac_key"] = "*************"
-		}
+		// Mask sensitive fields using schema-based approach
+		maskedConfig := b.maskMountConfig(ctx, entry, config)
 
 		mounts[entry.Path] = map[string]any{
 			"type":        entry.Type,
 			"description": entry.Description,
 			"accessor":    entry.Accessor,
-			"config":      config,
+			"config":      maskedConfig,
 		}
 	}
 

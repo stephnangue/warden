@@ -275,14 +275,14 @@ func (c *Core) mount(ctx context.Context, entry *MountEntry) error {
 	// Prevent protected paths from being mounted
 	for _, p := range protectedMounts {
 		if strings.HasPrefix(entry.Path, p) && entry.namespace == nil {
-			return sdklogical.CodedError(403, "cannot mount %q", entry.Path)
+			return logical.ErrForbiddenf("cannot mount %q", entry.Path)
 		}
 	}
 
 	// Do not allow more than one instance of a singleton mount
 	for _, p := range singletonMounts {
 		if entry.Type == p {
-			return sdklogical.CodedError(403, "mount type of %q is not mountable", entry.Type)
+			return logical.ErrForbiddenf("mount type of %q is not mountable", entry.Type)
 		}
 	}
 
@@ -315,7 +315,7 @@ func (c *Core) mountInternal(ctx context.Context, entry *MountEntry, updateStora
 			case strings.HasPrefix(ent.Path, entry.Path):
 				fallthrough
 			case strings.HasPrefix(entry.Path, ent.Path):
-				return sdklogical.CodedError(409, "path is already in use at %s", ent.Path)
+				return logical.ErrConflictf("path is already in use at %s", ent.Path)
 			}
 		}
 	}
@@ -326,7 +326,7 @@ func (c *Core) mountInternal(ctx context.Context, entry *MountEntry, updateStora
 	}
 	// Verify there are no conflicting mounts in the router
 	if match := c.router.MountConflict(ctx, mountPath); match != "" {
-		return sdklogical.CodedError(409, "existing mount at %s", match)
+		return logical.ErrConflictf("existing mount at %s", match)
 	}
 
 	// Generate a new UUID and view
@@ -388,7 +388,7 @@ func (c *Core) mountInternal(ctx context.Context, entry *MountEntry, updateStora
 			}
 
 			c.logger.Error("failed to update mount table", logger.Err(err))
-			return sdklogical.CodedError(500, "failed to update mount table")
+			return logical.ErrInternal("failed to update mount table")
 		}
 	}
 
@@ -431,10 +431,11 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry, view sd
 			return nil, fmt.Errorf("auth method type not supported: %s", entry.Type)
 		}
 		conf := &logical.BackendConfig{
-			StorageView: view,
-			Logger:      c.logger.WithSystem("auth"),
-			Config:      entry.Config,
-			BackendUUID: entry.BackendAwareUUID,
+			StorageView:     view,
+			Logger:          c.logger.WithSystem("auth"),
+			Config:          entry.Config,
+			BackendUUID:     entry.BackendAwareUUID,
+			ValidTokenTypes: c.tokenStore.ListTokenTypes(),
 		}
 		backend, err = factory(ctx, conf)
 		if err != nil {
@@ -517,7 +518,7 @@ func (c *Core) unmountInternal(ctx context.Context, path string, updateStorage b
 		// try auth match instead
 		path = authRoutePrefix + path
 		if !checkMatch(path) {
-			return errNoMatchingMount
+			return logical.ErrNotFoundf("no mount found at path %q", strings.TrimPrefix(path, authRoutePrefix))
 		}
 	}
 
@@ -604,7 +605,7 @@ func (c *Core) taintMountEntry(ctx context.Context, nsID, mountPath string, upda
 		// Update the mount table
 		if err := c.persistMounts(ctx, nil, c.mounts, entry.UUID); err != nil {
 			c.logger.Error("failed to taint entry in mounts table", logger.Err(err))
-			return sdklogical.CodedError(500, "failed to taint entry in mounts table")
+			return logical.ErrInternal("failed to taint entry in mounts table")
 		}
 	}
 
@@ -639,7 +640,7 @@ func (c *Core) removeMountEntry(ctx context.Context, path string, updateStorage 
 		// Update the mount table
 		if err := c.persistMounts(ctx, nil, newTable, entry.UUID); err != nil {
 			c.logger.Error("failed to remove entry from mounts table", logger.Err(err))
-			return sdklogical.CodedError(500, "failed to remove entry from mounts table")
+			return logical.ErrInternal("failed to remove entry from mounts table")
 		}
 	}
 

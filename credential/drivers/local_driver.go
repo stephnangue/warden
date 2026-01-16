@@ -19,7 +19,7 @@ type LocalDriverFactory struct{}
 
 // Type returns the driver type
 func (f *LocalDriverFactory) Type() string {
-	return "local"
+	return credential.SourceTypeLocal
 }
 
 // Create instantiates a new LocalDriver
@@ -35,13 +35,18 @@ func (f *LocalDriverFactory) ValidateConfig(config map[string]string) error {
 	return nil // No configuration needed for local driver
 }
 
+// SensitiveConfigFields returns the list of config keys that should be masked in output
+func (f *LocalDriverFactory) SensitiveConfigFields() []string {
+	return []string{} // Local driver has no sensitive config fields
+}
+
 // MintCredential retrieves static credential data from the spec's SourceParams
 func (d *LocalDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
 	// Local credentials are always static (no TTL, no lease)
 	rawData := make(map[string]interface{})
 
 	// Copy SourceParams to rawData as interface map
-	for key, value := range spec.SourceParams {
+	for key, value := range spec.Config {
 		rawData[key] = value
 	}
 
@@ -69,7 +74,7 @@ func (d *LocalDriver) Revoke(ctx context.Context, leaseID string) error {
 
 // Type returns the driver type
 func (d *LocalDriver) Type() string {
-	return "local"
+	return credential.SourceTypeLocal
 }
 
 // Cleanup releases resources (no-op for local driver)

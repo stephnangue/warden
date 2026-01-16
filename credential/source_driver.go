@@ -39,6 +39,9 @@ type SourceDriverFactory interface {
 	// ValidateConfig validates driver-specific configuration
 	// Config values are strings - use credential.Get* helpers to validate types
 	ValidateConfig(config map[string]string) error
+
+	// SensitiveConfigFields returns the list of config keys that should be masked in output
+	SensitiveConfigFields() []string
 }
 
 // SourceDriver defines the interface for credential source drivers

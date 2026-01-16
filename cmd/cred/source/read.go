@@ -2,6 +2,7 @@ package source
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/spf13/cobra"
 	"github.com/stephnangue/warden/cmd/helpers"
@@ -37,13 +38,17 @@ func runRead(cmd *cobra.Command, args []string) error {
 
 	if len(source.Config) > 0 {
 		data = append(data, []any{"Configuration", ""})
-		for key, value := range source.Config {
-			// Mask sensitive values
-			displayValue := value
-			if key == "token" || key == "password" || key == "secret" || key == "secret_id" {
-				displayValue = "***********"
-			}
-			data = append(data, []any{fmt.Sprintf("  %s", key), displayValue})
+
+		// Sort config keys alphabetically
+		keys := make([]string, 0, len(source.Config))
+		for key := range source.Config {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+
+		for _, key := range keys {
+			// Server already masks sensitive values
+			data = append(data, []any{fmt.Sprintf("  %s", key), source.Config[key]})
 		}
 	}
 

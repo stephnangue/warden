@@ -80,14 +80,14 @@ func (b *SystemBackend) pathCredentials() []*framework.Path {
 					Description: "The credential type",
 					Required:    true,
 				},
-				"source_name": {
+				"source": {
 					Type:        framework.TypeString,
 					Description: "The name of the credential source to use",
 					Required:    true,
 				},
-				"source_params": {
+				"config": {
 					Type:        framework.TypeMap,
-					Description: "Parameters to pass to the credential source",
+					Description: "Type-specific configuration parameters",
 				},
 				"min_ttl": {
 					Type:        framework.TypeInt,
@@ -98,10 +98,6 @@ func (b *SystemBackend) pathCredentials() []*framework.Path {
 					Type:        framework.TypeInt,
 					Description: "Maximum TTL in seconds",
 					Default:     0,
-				},
-				"target_name": {
-					Type:        framework.TypeString,
-					Description: "The target name for the credential",
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
@@ -156,6 +152,78 @@ func convertToStringMap(m map[string]any) map[string]string {
 	return result
 }
 
+// maskValue is the default mask used for sensitive fields
+const maskValue = "***********"
+
+// maskSourceConfig masks sensitive config fields based on the driver factory
+func (b *SystemBackend) maskSourceConfig(sourceType string, config map[string]string) map[string]string {
+	if config == nil {
+		return nil
+	}
+
+	// Get sensitive fields from driver factory
+	var sensitiveFields []string
+	if b.core.credentialDriverRegistry != nil {
+		if factory, err := b.core.credentialDriverRegistry.GetFactory(sourceType); err == nil {
+			sensitiveFields = factory.SensitiveConfigFields()
+		}
+	}
+
+	// Build sensitive fields lookup
+	sensitive := make(map[string]bool)
+	for _, f := range sensitiveFields {
+		sensitive[f] = true
+	}
+
+	// Mask sensitive values
+	masked := make(map[string]string, len(config))
+	for k, v := range config {
+		if sensitive[k] {
+			masked[k] = maskValue
+		} else {
+			masked[k] = v
+		}
+	}
+	return masked
+}
+
+// maskSpecConfig masks sensitive config fields based on the credential type
+func (b *SystemBackend) maskSpecConfig(specType string, config map[string]string) map[string]string {
+	if config == nil {
+		return nil
+	}
+
+	// Get sensitive fields from credential type
+	var sensitiveFields []string
+	if b.core.credentialTypeRegistry != nil {
+		if credType, err := b.core.credentialTypeRegistry.GetByName(specType); err == nil {
+			schemas := credType.FieldSchemas()
+			for fieldName, schema := range schemas {
+				if schema.Sensitive {
+					sensitiveFields = append(sensitiveFields, fieldName)
+				}
+			}
+		}
+	}
+
+	// Build sensitive fields lookup
+	sensitive := make(map[string]bool)
+	for _, f := range sensitiveFields {
+		sensitive[f] = true
+	}
+
+	// Mask sensitive values
+	masked := make(map[string]string, len(config))
+	for k, v := range config {
+		if sensitive[k] {
+			masked[k] = maskValue
+		} else {
+			masked[k] = v
+		}
+	}
+	return masked
+}
+
 // Credential Source Handlers
 
 // handleCredentialSourceCreate handles POST /sys/cred/sources/{name}
@@ -177,6 +245,10 @@ func (b *SystemBackend) handleCredentialSourceCreate(ctx context.Context, req *l
 
 	// Store via credential config store
 	if err := b.core.credConfigStore.CreateSource(ctx, source); err != nil {
+		// Check if it's a conflict error (source already exists)
+		if err == ErrSourceAlreadyExists {
+			return logical.ErrorResponse(logical.ErrConflict(err.Error())), nil
+		}
 		return logical.ErrorResponse(err), nil
 	}
 
@@ -198,10 +270,13 @@ func (b *SystemBackend) handleCredentialSourceRead(ctx context.Context, req *log
 		return logical.ErrorResponse(err), nil
 	}
 
+	// Mask sensitive config fields
+	maskedConfig := b.maskSourceConfig(source.Type, source.Config)
+
 	return b.respondSuccess(map[string]any{
 		"name":   source.Name,
 		"type":   source.Type,
-		"config": source.Config,
+		"config": maskedConfig,
 	}), nil
 }
 
@@ -213,23 +288,39 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 	b.logger.Info("updating credential source", logger.String("name", name))
 
 	// Get existing source
-	source, err := b.core.credConfigStore.GetSource(ctx, name)
+	existingSource, err := b.core.credConfigStore.GetSource(ctx, name)
 	if err != nil {
 		return logical.ErrorResponse(err), nil
 	}
 
-	// Update config if provided
-	if configAny != nil {
-		source.Config = convertToStringMap(configAny)
+	// Create a new source with merged config (don't modify the cached object)
+	mergedConfig := make(map[string]string, len(existingSource.Config))
+	for k, v := range existingSource.Config {
+		mergedConfig[k] = v
 	}
 
-	// Update via credential config store
-	if err := b.core.credConfigStore.UpdateSource(ctx, source); err != nil {
+	// Merge new config values
+	if configAny != nil {
+		newConfig := convertToStringMap(configAny)
+		for key, value := range newConfig {
+			mergedConfig[key] = value
+		}
+	}
+
+	// Create updated source for validation and persistence
+	updatedSource := &credential.CredSource{
+		Name:   existingSource.Name,
+		Type:   existingSource.Type,
+		Config: mergedConfig,
+	}
+
+	// Update via credential config store (validates and tests connection before persisting)
+	if err := b.core.credConfigStore.UpdateSource(ctx, updatedSource); err != nil {
 		return logical.ErrorResponse(err), nil
 	}
 
 	return b.respondSuccess(map[string]any{
-		"name":    source.Name,
+		"name":    updatedSource.Name,
 		"message": fmt.Sprintf("Successfully updated credential source %s", name),
 	}), nil
 }
@@ -273,13 +364,14 @@ func (b *SystemBackend) handleCredentialSourceList(ctx context.Context, req *log
 		return logical.ErrorResponse(err), nil
 	}
 
-	// Convert to output format
+	// Convert to output format with masked sensitive fields
 	sourceInfos := make([]map[string]any, 0, len(sources))
 	for _, source := range sources {
+		maskedConfig := b.maskSourceConfig(source.Type, source.Config)
 		sourceInfos = append(sourceInfos, map[string]any{
 			"name":   source.Name,
 			"type":   source.Type,
-			"config": source.Config,
+			"config": maskedConfig,
 		})
 	}
 
@@ -294,16 +386,15 @@ func (b *SystemBackend) handleCredentialSourceList(ctx context.Context, req *log
 func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
 	specType := d.Get("type").(string)
-	sourceName := d.Get("source_name").(string)
-	sourceParamsAny, _ := d.Get("source_params").(map[string]any)
+	source := d.Get("source").(string)
+	configAny, _ := d.Get("config").(map[string]any)
 	minTTL, _ := d.Get("min_ttl").(int)
 	maxTTL, _ := d.Get("max_ttl").(int)
-	targetName, _ := d.Get("target_name").(string)
 
 	b.logger.Info("creating credential spec",
 		logger.String("name", name),
 		logger.String("type", specType),
-		logger.String("source_name", sourceName))
+		logger.String("source", source))
 
 	// Validate TTLs
 	if minTTL < 0 || maxTTL < 0 {
@@ -315,29 +406,31 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 
 	// Create credential spec
 	spec := &credential.CredSpec{
-		Name:         name,
-		Type:         specType,
-		SourceName:   sourceName,
-		SourceParams: convertToStringMap(sourceParamsAny),
-		MinTTL:       time.Duration(minTTL) * time.Second,
-		MaxTTL:       time.Duration(maxTTL) * time.Second,
-		TargetName:   targetName,
+		Name:   name,
+		Type:   specType,
+		Source: source,
+		Config: convertToStringMap(configAny),
+		MinTTL: time.Duration(minTTL) * time.Second,
+		MaxTTL: time.Duration(maxTTL) * time.Second,
 	}
 
 	// Store via credential config store
 	if err := b.core.credConfigStore.CreateSpec(ctx, spec); err != nil {
+		// Check if it's a conflict error (spec already exists)
+		if err == ErrSpecAlreadyExists {
+			return logical.ErrorResponse(logical.ErrConflict(err.Error())), nil
+		}
 		return logical.ErrorResponse(err), nil
 	}
 
 	return b.respondCreated(map[string]any{
-		"name":          spec.Name,
-		"type":          spec.Type,
-		"source_name":   spec.SourceName,
-		"source_params": spec.SourceParams,
-		"min_ttl":       int64(spec.MinTTL.Seconds()),
-		"max_ttl":       int64(spec.MaxTTL.Seconds()),
-		"target_name":   spec.TargetName,
-		"message":       fmt.Sprintf("Successfully created credential spec %s", name),
+		"name":    spec.Name,
+		"type":    spec.Type,
+		"source":  spec.Source,
+		"config":  spec.Config,
+		"min_ttl": int64(spec.MinTTL.Seconds()),
+		"max_ttl": int64(spec.MaxTTL.Seconds()),
+		"message": fmt.Sprintf("Successfully created credential spec %s", name),
 	}), nil
 }
 
@@ -351,14 +444,16 @@ func (b *SystemBackend) handleCredentialSpecRead(ctx context.Context, req *logic
 		return logical.ErrorResponse(err), nil
 	}
 
+	// Mask sensitive config fields
+	maskedConfig := b.maskSpecConfig(spec.Type, spec.Config)
+
 	return b.respondSuccess(map[string]any{
-		"name":          spec.Name,
-		"type":          spec.Type,
-		"source_name":   spec.SourceName,
-		"source_params": spec.SourceParams,
-		"min_ttl":       int64(spec.MinTTL.Seconds()),
-		"max_ttl":       int64(spec.MaxTTL.Seconds()),
-		"target_name":   spec.TargetName,
+		"name":    spec.Name,
+		"type":    spec.Type,
+		"source":  spec.Source,
+		"config":  maskedConfig,
+		"min_ttl": int64(spec.MinTTL.Seconds()),
+		"max_ttl": int64(spec.MaxTTL.Seconds()),
 	}), nil
 }
 
@@ -374,9 +469,13 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		return logical.ErrorResponse(err), nil
 	}
 
-	// Update fields if provided
-	if sourceParamsAny, ok := d.GetOk("source_params"); ok {
-		spec.SourceParams = convertToStringMap(sourceParamsAny.(map[string]any))
+	// Update fields if provided - merge new config into existing config
+	if configAny, ok := d.GetOk("config"); ok {
+		newConfig := convertToStringMap(configAny.(map[string]any))
+		// Merge: update existing keys and add new ones
+		for k, v := range newConfig {
+			spec.Config[k] = v
+		}
 	}
 
 	if minTTL, ok := d.GetOk("min_ttl"); ok {
@@ -435,17 +534,17 @@ func (b *SystemBackend) handleCredentialSpecList(ctx context.Context, req *logic
 		return logical.ErrorResponse(err), nil
 	}
 
-	// Convert to output format
+	// Convert to output format with masked sensitive fields
 	specInfos := make([]map[string]any, 0, len(specs))
 	for _, spec := range specs {
+		maskedConfig := b.maskSpecConfig(spec.Type, spec.Config)
 		specInfos = append(specInfos, map[string]any{
-			"name":          spec.Name,
-			"type":          spec.Type,
-			"source_name":   spec.SourceName,
-			"source_params": spec.SourceParams,
-			"min_ttl":       int64(spec.MinTTL.Seconds()),
-			"max_ttl":       int64(spec.MaxTTL.Seconds()),
-			"target_name":   spec.TargetName,
+			"name":    spec.Name,
+			"type":    spec.Type,
+			"source":  spec.Source,
+			"config":  maskedConfig,
+			"min_ttl": int64(spec.MinTTL.Seconds()),
+			"max_ttl": int64(spec.MaxTTL.Seconds()),
 		})
 	}
 

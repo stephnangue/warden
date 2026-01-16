@@ -21,11 +21,55 @@ func (t *DatabaseUserPassCredType) Metadata() credential.TypeMetadata {
 	}
 }
 
-// ValidateSourceParams validates the SourceParams for a database credential spec
-func (t *DatabaseUserPassCredType) ValidateSourceParams(params map[string]string, sourceName string) error {
-	// Check if it's dynamic or static based on presence of database_mount
-	databaseMount := credential.GetString(params, "database_mount", "")
-	kv2Mount := credential.GetString(params, "kv2_mount", "")
+// ValidateConfig validates the Config for a database credential spec
+// sourceType determines the validation rules:
+// - "local": only username, password, and optional database are allowed
+// - "vault": requires database_mount/role_name (dynamic) or kv2_mount/secret_path (static KV)
+func (t *DatabaseUserPassCredType) ValidateConfig(config map[string]string, sourceType string) error {
+	switch sourceType {
+	case credential.SourceTypeLocal:
+		return t.validateLocalConfig(config)
+	case credential.SourceTypeVault:
+		return t.validateVaultConfig(config)
+	default:
+		return fmt.Errorf("unsupported source type '%s' for database credentials", sourceType)
+	}
+}
+
+// validateLocalConfig validates config for local source
+// Only username, password, and optional database are accepted
+func (t *DatabaseUserPassCredType) validateLocalConfig(config map[string]string) error {
+	// Define allowed fields
+	allowedFields := map[string]bool{
+		"username": true,
+		"password": true,
+		"database": true,
+	}
+
+	// Check for invalid fields first and provide helpful error
+	var invalidFields []string
+	for key := range config {
+		if !allowedFields[key] {
+			invalidFields = append(invalidFields, key)
+		}
+	}
+	if len(invalidFields) > 0 {
+		return fmt.Errorf("invalid config field(s) %v; expected: username, password (optional: database)", invalidFields)
+	}
+
+	// Validate required fields
+	if err := credential.ValidateRequired(config, "username", "password"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateVaultConfig validates config for Vault source
+// Requires either database_mount (dynamic) or kv2_mount (static KV)
+func (t *DatabaseUserPassCredType) validateVaultConfig(config map[string]string) error {
+	databaseMount := credential.GetString(config, "database_mount", "")
+	kv2Mount := credential.GetString(config, "kv2_mount", "")
 
 	// Must specify either database_mount (dynamic) or kv2_mount (static)
 	if databaseMount == "" && kv2Mount == "" {
@@ -39,14 +83,14 @@ func (t *DatabaseUserPassCredType) ValidateSourceParams(params map[string]string
 
 	// Dynamic database credentials validation
 	if databaseMount != "" {
-		if err := credential.ValidateRequired(params, "database_mount", "role_name"); err != nil {
+		if err := credential.ValidateRequired(config, "database_mount", "role_name"); err != nil {
 			return fmt.Errorf("dynamic database credentials require: %w", err)
 		}
 	}
 
 	// Static KV credentials validation
 	if kv2Mount != "" {
-		if err := credential.ValidateRequired(params, "kv2_mount", "secret_path"); err != nil {
+		if err := credential.ValidateRequired(config, "kv2_mount", "secret_path"); err != nil {
 			return fmt.Errorf("static KV credentials require: %w", err)
 		}
 	}
@@ -145,4 +189,26 @@ func (t *DatabaseUserPassCredType) Revoke(ctx context.Context, cred *credential.
 // CanRotate indicates if this type supports proactive rotation
 func (t *DatabaseUserPassCredType) CanRotate() bool {
 	return true // Database credentials support rotation
+}
+
+// FieldSchemas returns metadata about the credential's data fields
+func (t *DatabaseUserPassCredType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
+	return map[string]*credential.CredentialFieldSchema{
+		"username": {
+			Description: "Database username",
+			Sensitive:   false,
+		},
+		"password": {
+			Description: "Database password",
+			Sensitive:   true,
+		},
+		"database": {
+			Description: "Database name",
+			Sensitive:   false,
+		},
+		"lease_ttl": {
+			Description: "Lease time-to-live in seconds",
+			Sensitive:   false,
+		},
+	}
 }

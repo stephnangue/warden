@@ -46,7 +46,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		data = append(data, []any{
 			spec.Name,
 			spec.Type,
-			spec.SourceName,
+			spec.Source,
 			spec.MinTTL,
 			spec.MaxTTL,
 		})

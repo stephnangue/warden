@@ -41,7 +41,6 @@ services:
       MYSQL_PASSWORD: vaultpassword
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./scripts:/docker-entrypoint-initdb.d
       - ./certs/mysql:/etc/mysql/certs:ro
     networks:
       - app-network
@@ -225,18 +224,18 @@ services:
     volumes:
       - ./scripts:/scripts
     entrypoint: /bin/sh
-    command: >
-     sh -c "
-      echo 'Waiting for Hydra to be ready...' &&
-      while ! wget -q --spider http://hydra:4445/health/ready 2>/dev/null; do
-        echo 'Waiting for Hydra Admin API...' &&
-        sleep 2
-      done &&
-      echo 'Hydra is ready! Creating OAuth2 clients...' &&
-      /scripts/create-clients.sh &&
-      echo 'OAuth2 clients created successfully!' &&
-      tail -f /dev/null
-      "
+    command:
+      - -c
+      - |
+        echo 'Waiting for Hydra to be ready...'
+        while ! wget -q --spider http://hydra:4445/health/ready 2>/dev/null; do
+          echo 'Waiting for Hydra Admin API...'
+          sleep 2
+        done
+        echo 'Hydra is ready! Creating OAuth2 clients...'
+        /scripts/create-clients.sh
+        echo 'OAuth2 clients created successfully!'
+        tail -f /dev/null
 
 networks:
   app-network:

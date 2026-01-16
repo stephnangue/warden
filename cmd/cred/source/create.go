@@ -54,12 +54,8 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if len(output.Config) > 0 {
 		fmt.Println("  Configuration:")
 		for key, value := range output.Config {
-			// Mask sensitive values
-			displayValue := value
-			if key == "token" || key == "password" || key == "secret" {
-				displayValue = "***"
-			}
-			fmt.Printf("    %s: %s\n", key, displayValue)
+			// Server already masks sensitive values
+			fmt.Printf("    %s: %s\n", key, value)
 		}
 	}
 

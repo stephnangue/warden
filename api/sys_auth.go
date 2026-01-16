@@ -123,31 +123,6 @@ func (c *Sys) AuthInfoWithContext(ctx context.Context, path string) (*AuthMountO
 	return &result, err
 }
 
-func (c *Sys) TuneAuth(path string, config map[string]any) error {
-	return c.TuneAuthWithContext(context.Background(), path, config)
-}
-
-func (c *Sys) TuneAuthWithContext(ctx context.Context, path string, config map[string]any) error {
-	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
-	defer cancelFunc()
-
-	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/auth/%s/tune", path))
-
-	// Wrap config in the expected request body structure
-	body := map[string]any{
-		"config": config,
-	}
-	if err := r.SetJSONBody(body); err != nil {
-		return err
-	}
-
-	resp, err := c.c.rawRequestWithContext(ctx, r)
-	if err == nil {
-		defer resp.Body.Close()
-	}
-	return err
-}
-
 // Rather than duplicate, we can use modern Go's type aliasing
 type (
 	AuthMounthInput   = MountInput

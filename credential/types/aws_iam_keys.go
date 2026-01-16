@@ -22,11 +22,54 @@ func (t *AWSIAMAccessKeysCredType) Metadata() credential.TypeMetadata {
 	}
 }
 
-// ValidateSourceParams validates the SourceParams for an AWS credential spec
-func (t *AWSIAMAccessKeysCredType) ValidateSourceParams(params map[string]string, sourceName string) error {
-	// Check if it's dynamic or static based on presence of aws_mount
-	awsMount := credential.GetString(params, "aws_mount", "")
-	kv2Mount := credential.GetString(params, "kv2_mount", "")
+// ValidateConfig validates the Config for an AWS credential spec
+// sourceName determines the validation rules:
+// - "local": only access_key_id and secret_access_key are allowed
+// - "vault": requires aws_mount/role_name (dynamic) or kv2_mount/secret_path (static KV)
+func (t *AWSIAMAccessKeysCredType) ValidateConfig(config map[string]string, sourceType string) error {
+	switch sourceType {
+	case credential.SourceTypeLocal:
+		return t.validateLocalConfig(config)
+	case credential.SourceTypeVault:
+		return t.validateVaultConfig(config)
+	default:
+		return fmt.Errorf("unsupported source type '%s' for AWS credentials", sourceType)
+	}
+}
+
+// validateLocalConfig validates config for local source
+// Only access_key_id and secret_access_key are accepted
+func (t *AWSIAMAccessKeysCredType) validateLocalConfig(config map[string]string) error {
+	// Define allowed fields
+	allowedFields := map[string]bool{
+		"access_key_id":     true,
+		"secret_access_key": true,
+	}
+
+	// Check for invalid fields first and provide helpful error
+	var invalidFields []string
+	for key := range config {
+		if !allowedFields[key] {
+			invalidFields = append(invalidFields, key)
+		}
+	}
+	if len(invalidFields) > 0 {
+		return fmt.Errorf("invalid config field(s) %v; expected: access_key_id, secret_access_key", invalidFields)
+	}
+
+	// Validate required fields
+	if err := credential.ValidateRequired(config, "access_key_id", "secret_access_key"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateVaultConfig validates config for Vault source
+// Requires either aws_mount (dynamic) or kv2_mount (static KV)
+func (t *AWSIAMAccessKeysCredType) validateVaultConfig(config map[string]string) error {
+	awsMount := credential.GetString(config, "aws_mount", "")
+	kv2Mount := credential.GetString(config, "kv2_mount", "")
 
 	// Must specify either aws_mount (dynamic) or kv2_mount (static)
 	if awsMount == "" && kv2Mount == "" {
@@ -40,14 +83,14 @@ func (t *AWSIAMAccessKeysCredType) ValidateSourceParams(params map[string]string
 
 	// Dynamic AWS credentials validation
 	if awsMount != "" {
-		if err := credential.ValidateRequired(params, "aws_mount", "role_name"); err != nil {
+		if err := credential.ValidateRequired(config, "aws_mount", "role_name"); err != nil {
 			return fmt.Errorf("dynamic AWS credentials require: %w", err)
 		}
 	}
 
 	// Static KV credentials validation
 	if kv2Mount != "" {
-		if err := credential.ValidateRequired(params, "kv2_mount", "secret_path"); err != nil {
+		if err := credential.ValidateRequired(config, "kv2_mount", "secret_path"); err != nil {
 			return fmt.Errorf("static KV credentials require: %w", err)
 		}
 	}
@@ -78,12 +121,12 @@ func (t *AWSIAMAccessKeysCredType) Parse(rawData map[string]interface{}, leaseTT
 	}
 
 	cred := &credential.Credential{
-		Type:       credential.TypeAWSAccessKeys,
-		Category:   credential.CategoryCloudIAM,
-		LeaseTTL:   leaseTTL,
-		LeaseID:    leaseID,
-		IssuedAt:   time.Now(),
-		Revocable:  leaseTTL > 0, // STS temporary credentials are revocable
+		Type:      credential.TypeAWSAccessKeys,
+		Category:  credential.CategoryCloudIAM,
+		LeaseTTL:  leaseTTL,
+		LeaseID:   leaseID,
+		IssuedAt:  time.Now(),
+		Revocable: leaseTTL > 0, // STS temporary credentials are revocable
 		Data: map[string]string{
 			"access_key_id":     accessKeyID,
 			"secret_access_key": secretAccessKey,
@@ -167,4 +210,26 @@ func (t *AWSIAMAccessKeysCredType) Revoke(ctx context.Context, cred *credential.
 // CanRotate indicates if this type supports proactive rotation
 func (t *AWSIAMAccessKeysCredType) CanRotate() bool {
 	return true // AWS credentials support rotation
+}
+
+// FieldSchemas returns metadata about the credential's data fields
+func (t *AWSIAMAccessKeysCredType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
+	return map[string]*credential.CredentialFieldSchema{
+		"access_key_id": {
+			Description: "AWS access key ID",
+			Sensitive:   false,
+		},
+		"secret_access_key": {
+			Description: "AWS secret access key",
+			Sensitive:   true,
+		},
+		"session_token": {
+			Description: "AWS session token for temporary credentials",
+			Sensitive:   true,
+		},
+		"security_token": {
+			Description: "AWS security token (alternative to session_token)",
+			Sensitive:   true,
+		},
+	}
 }

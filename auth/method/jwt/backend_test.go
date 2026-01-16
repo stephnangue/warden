@@ -89,7 +89,6 @@ func TestFactory_SpecialPaths(t *testing.T) {
 
 func TestJWTAuthConfig_Defaults(t *testing.T) {
 	config := &JWTAuthConfig{}
-	assert.Empty(t, config.Name)
 	assert.Empty(t, config.Mode)
 	assert.Empty(t, config.JWKSURL)
 	assert.Empty(t, config.OIDCDiscoveryURL)
@@ -194,7 +193,62 @@ func TestSetupJWTConfig_JWTMissingJWKS(t *testing.T) {
 		"mode": "jwt",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "either jwks_url or jwt_validation_pubkeys is required")
+	assert.Contains(t, err.Error(), "jwks_url is required for JWT mode")
+}
+
+func TestSetupJWTConfig_MissingMode(t *testing.T) {
+	ctx := context.Background()
+	conf := &logical.BackendConfig{
+		Logger: testLogger(),
+	}
+
+	backend, err := Factory(ctx, conf)
+	require.NoError(t, err)
+
+	b := backend.(*jwtAuthBackend)
+	err = b.setupJWTConfig(ctx, map[string]any{
+		"jwks_url": "https://example.com/.well-known/jwks.json",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mode is required")
+}
+
+func TestSetupJWTConfig_JWTModeWithOIDCDiscoveryURL(t *testing.T) {
+	ctx := context.Background()
+	conf := &logical.BackendConfig{
+		Logger: testLogger(),
+	}
+
+	backend, err := Factory(ctx, conf)
+	require.NoError(t, err)
+
+	b := backend.(*jwtAuthBackend)
+	err = b.setupJWTConfig(ctx, map[string]any{
+		"mode":               "jwt",
+		"jwks_url":           "https://example.com/.well-known/jwks.json",
+		"oidc_discovery_url": "https://issuer.example.com/.well-known/openid-configuration",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "oidc_discovery_url cannot be used with JWT mode")
+}
+
+func TestSetupJWTConfig_OIDCModeWithJWKSURL(t *testing.T) {
+	ctx := context.Background()
+	conf := &logical.BackendConfig{
+		Logger: testLogger(),
+	}
+
+	backend, err := Factory(ctx, conf)
+	require.NoError(t, err)
+
+	b := backend.(*jwtAuthBackend)
+	err = b.setupJWTConfig(ctx, map[string]any{
+		"mode":               "oidc",
+		"oidc_discovery_url": "https://issuer.example.com/.well-known/openid-configuration",
+		"jwks_url":           "https://example.com/.well-known/jwks.json",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "jwks_url cannot be used with OIDC mode")
 }
 
 func TestSetupJWTConfig_StaticKeysNotImplemented(t *testing.T) {
@@ -213,6 +267,42 @@ func TestSetupJWTConfig_StaticKeysNotImplemented(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "static public keys not yet implemented")
+}
+
+func TestSetupJWTConfig_JWKSURLNotReachable(t *testing.T) {
+	ctx := context.Background()
+	conf := &logical.BackendConfig{
+		Logger: testLogger(),
+	}
+
+	backend, err := Factory(ctx, conf)
+	require.NoError(t, err)
+
+	b := backend.(*jwtAuthBackend)
+	err = b.setupJWTConfig(ctx, map[string]any{
+		"mode":     "jwt",
+		"jwks_url": "http://localhost:99999/.well-known/jwks.json",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "jwks_url is not reachable")
+}
+
+func TestSetupJWTConfig_OIDCDiscoveryURLNotReachable(t *testing.T) {
+	ctx := context.Background()
+	conf := &logical.BackendConfig{
+		Logger: testLogger(),
+	}
+
+	backend, err := Factory(ctx, conf)
+	require.NoError(t, err)
+
+	b := backend.(*jwtAuthBackend)
+	err = b.setupJWTConfig(ctx, map[string]any{
+		"mode":               "oidc",
+		"oidc_discovery_url": "http://localhost:99999/.well-known/openid-configuration",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "oidc_discovery_url is not reachable")
 }
 
 // =============================================================================

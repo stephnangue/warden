@@ -225,12 +225,12 @@ func TestBuildJWTMetadata_BasicClaims(t *testing.T) {
 		"email": "user@example.com",
 	}
 	config := &JWTAuthConfig{
-		Name: "my-jwt-auth",
+		Mode: "jwt",
 	}
 
 	metadata := buildJWTMetadata(claims, config)
 
-	assert.Equal(t, "my-jwt-auth", metadata["auth_method"])
+	assert.Equal(t, "jwt", metadata["auth_method"])
 	assert.Equal(t, "user123", metadata["subject"])
 	assert.Equal(t, "https://issuer.example.com", metadata["issuer"])
 	assert.Equal(t, "user@example.com", metadata["email"])
@@ -241,12 +241,12 @@ func TestBuildJWTMetadata_MissingClaims(t *testing.T) {
 		"sub": "user123",
 	}
 	config := &JWTAuthConfig{
-		Name: "my-jwt-auth",
+		Mode: "jwt",
 	}
 
 	metadata := buildJWTMetadata(claims, config)
 
-	assert.Equal(t, "my-jwt-auth", metadata["auth_method"])
+	assert.Equal(t, "jwt", metadata["auth_method"])
 	assert.Equal(t, "user123", metadata["subject"])
 	_, hasIssuer := metadata["issuer"]
 	assert.False(t, hasIssuer)
@@ -262,7 +262,7 @@ func TestBuildJWTMetadata_WithClaimMappings(t *testing.T) {
 		"employee_id":     "E12345",
 	}
 	config := &JWTAuthConfig{
-		Name: "my-jwt-auth",
+		Mode: "jwt",
 		ClaimMappings: map[string]string{
 			"preferred_name": "display_name",
 			"department":     "dept",
@@ -283,7 +283,7 @@ func TestBuildJWTMetadata_WithGroupsClaim(t *testing.T) {
 		"groups": []interface{}{"admin", "developers"},
 	}
 	config := &JWTAuthConfig{
-		Name:        "my-jwt-auth",
+		Mode:        "jwt",
 		GroupsClaim: "groups",
 	}
 
@@ -298,7 +298,7 @@ func TestBuildJWTMetadata_CustomGroupsClaim(t *testing.T) {
 		"roles": []interface{}{"role1", "role2"},
 	}
 	config := &JWTAuthConfig{
-		Name:        "my-jwt-auth",
+		Mode:        "jwt",
 		GroupsClaim: "roles",
 	}
 
@@ -313,7 +313,7 @@ func TestBuildJWTMetadata_EmptyGroupsClaim(t *testing.T) {
 		"groups": []interface{}{},
 	}
 	config := &JWTAuthConfig{
-		Name:        "my-jwt-auth",
+		Mode:        "jwt",
 		GroupsClaim: "groups",
 	}
 
@@ -328,7 +328,7 @@ func TestBuildJWTMetadata_MissingGroupsClaim(t *testing.T) {
 		"sub": "user123",
 	}
 	config := &JWTAuthConfig{
-		Name:        "my-jwt-auth",
+		Mode:        "jwt",
 		GroupsClaim: "groups",
 	}
 
@@ -346,7 +346,7 @@ func TestBuildJWTMetadata_EmptyConfig(t *testing.T) {
 
 	metadata := buildJWTMetadata(claims, config)
 
-	assert.Equal(t, "", metadata["auth_method"])
+	assert.Equal(t, "jwt", metadata["auth_method"])
 	assert.Equal(t, "user123", metadata["subject"])
 }
 

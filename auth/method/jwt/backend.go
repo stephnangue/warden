@@ -2,7 +2,10 @@ package jwt
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/hashicorp/cap/jwt"
@@ -15,8 +18,7 @@ import (
 
 // JWTAuthConfig represents JWT/OIDC authentication configuration
 type JWTAuthConfig struct {
-	Name string `json:"name"`
-	Mode string `json:"mode" default:"jwt"` // "jwt" or "oidc"
+	Mode string `json:"mode"` // "jwt" or "oidc" (required)
 
 	// OIDC Discovery
 	OIDCDiscoveryURL string `json:"oidc_discovery_url,omitempty"`
@@ -39,6 +41,7 @@ type JWTAuthConfig struct {
 	// Token settings
 	TokenTTL     time.Duration `json:"token_ttl" default:"1h"`
 	AuthDeadline time.Duration `json:"auth_deadline" default:"10m"`
+	TokenType    string        `json:"token_type,omitempty"`
 
 	// Internal
 	validator *jwt.Validator `json:"-"`
@@ -48,16 +51,18 @@ type JWTAuthConfig struct {
 // jwtAuthBackend is the framework-based JWT authentication backend
 type jwtAuthBackend struct {
 	*framework.Backend
-	config      *JWTAuthConfig
-	logger      *logger.GatedLogger
-	storageView sdklogical.Storage
+	config          *JWTAuthConfig
+	logger          *logger.GatedLogger
+	storageView     sdklogical.Storage
+	validTokenTypes []string
 }
 
 // Factory creates a new JWT auth backend using the logical.Factory pattern
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
 	b := &jwtAuthBackend{
-		logger:      conf.Logger,
-		storageView: conf.StorageView,
+		logger:          conf.Logger,
+		storageView:     conf.StorageView,
+		validTokenTypes: conf.ValidTokenTypes,
 	}
 
 	b.Backend = &framework.Backend{
@@ -112,11 +117,23 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 		config.UserClaim = "sub"
 	}
 
+	// Validate mode is specified
+	if config.Mode == "" {
+		return fmt.Errorf("mode is required: must be 'jwt' or 'oidc'")
+	}
+
 	// Initialize KeySet based on Mode
 	switch config.Mode {
 	case "oidc":
 		if config.OIDCDiscoveryURL == "" {
 			return fmt.Errorf("oidc_discovery_url is required for OIDC mode")
+		}
+		if config.JWKSURL != "" {
+			return fmt.Errorf("jwks_url cannot be used with OIDC mode; use oidc_discovery_url instead")
+		}
+		// Verify OIDC discovery URL is reachable before persisting config
+		if err := verifyOIDCDiscoveryURLReachable(ctx, config.OIDCDiscoveryURL, config.OIDCDiscoveryCA); err != nil {
+			return fmt.Errorf("oidc_discovery_url is not reachable: %v", err)
 		}
 		keySet, err = jwt.NewOIDCDiscoveryKeySet(ctx, config.OIDCDiscoveryURL, config.OIDCDiscoveryCA)
 		if err != nil {
@@ -124,7 +141,14 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 		}
 
 	case "jwt":
+		if config.OIDCDiscoveryURL != "" {
+			return fmt.Errorf("oidc_discovery_url cannot be used with JWT mode; use jwks_url instead")
+		}
 		if config.JWKSURL != "" {
+			// Verify JWKS URL is reachable before persisting config
+			if err := verifyJWKSURLReachable(ctx, config.JWKSURL, config.JWKSCA); err != nil {
+				return fmt.Errorf("jwks_url is not reachable: %v", err)
+			}
 			keySet, err = jwt.NewJSONWebKeySet(ctx, config.JWKSURL, config.JWKSCA)
 			if err != nil {
 				return fmt.Errorf("failed to create JWKS keyset: %v", err)
@@ -132,7 +156,7 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 		} else if len(config.JWTValidationPubKeys) > 0 {
 			return fmt.Errorf("static public keys not yet implemented, use jwks_url")
 		} else {
-			return fmt.Errorf("either jwks_url or jwt_validation_pubkeys is required for JWT mode")
+			return fmt.Errorf("jwks_url is required for JWT mode")
 		}
 
 	default:
@@ -173,5 +197,70 @@ func (b *jwtAuthBackend) Initialize(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// SensitiveConfigFields returns the list of config fields that should be masked in output
+func (b *jwtAuthBackend) SensitiveConfigFields() []string {
+	return []string{
+		"oidc_discovery_ca_pem",
+		"jwks_ca_pem",
+		"jwt_validation_pubkeys",
+	}
+}
+
+// allowedTokenTypeValues converts validTokenTypes to []interface{} for FieldSchema.AllowedValues
+func (b *jwtAuthBackend) allowedTokenTypeValues() []interface{} {
+	values := make([]interface{}, len(b.validTokenTypes))
+	for i, t := range b.validTokenTypes {
+		values[i] = t
+	}
+	return values
+}
+
+// verifyURLReachable checks that a URL is reachable and returns HTTP 200
+func verifyURLReachable(ctx context.Context, url string, caPEM string) error {
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	// Configure TLS if CA certificate is provided
+	if caPEM != "" {
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM([]byte(caPEM)) {
+			return fmt.Errorf("failed to parse CA certificate")
+		}
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs: caCertPool,
+			},
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// verifyJWKSURLReachable checks that the JWKS URL is reachable
+func verifyJWKSURLReachable(ctx context.Context, jwksURL string, caPEM string) error {
+	return verifyURLReachable(ctx, jwksURL, caPEM)
+}
+
+// verifyOIDCDiscoveryURLReachable checks that the OIDC discovery URL is reachable
+func verifyOIDCDiscoveryURLReachable(ctx context.Context, oidcDiscoveryURL string, caPEM string) error {
+	return verifyURLReachable(ctx, oidcDiscoveryURL, caPEM)
 }
 

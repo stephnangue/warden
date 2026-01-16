@@ -24,7 +24,7 @@ func validateBoundClaims(claims map[string]interface{}, boundClaims map[string]a
 // buildJWTMetadata extracts metadata from JWT claims
 func buildJWTMetadata(claims map[string]interface{}, config *JWTAuthConfig) map[string]string {
 	metadata := map[string]string{
-		"auth_method": config.Name,
+		"auth_method": "jwt",
 	}
 
 	// Add standard claims

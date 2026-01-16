@@ -117,6 +117,11 @@ func GetErrorCode(err error) int {
 	return http.StatusInternalServerError
 }
 
+// IsNotFound returns true if the error is a 404 Not Found CodedError.
+func IsNotFound(err error) bool {
+	return GetErrorCode(err) == http.StatusNotFound
+}
+
 // ErrorResponse creates a Response from a CodedError.
 func ErrorResponse(err error) *Response {
 	code := GetErrorCode(err)

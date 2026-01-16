@@ -88,7 +88,16 @@ type BackendConfig struct {
 
 	// BackendUUID is a unique identifier provided to this backend
 	BackendUUID string
+
+	// ValidTokenTypes is the list of valid token types that can be used by auth backends
+	ValidTokenTypes []string
 }
 
 // Factory is the factory function to create a logical backend.
 type Factory func(context.Context, *BackendConfig) (Backend, error)
+
+// SensitiveFieldsProvider can be implemented by backends to declare which config fields
+// contain sensitive data that should be masked in API responses.
+type SensitiveFieldsProvider interface {
+	SensitiveConfigFields() []string
+}

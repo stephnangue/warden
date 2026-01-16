@@ -12,16 +12,17 @@ type Operation string
 
 const (
 	// The operations below are called per path
-	CreateOperation         Operation = "create"
-	ReadOperation           Operation = "read"
-	UpdateOperation         Operation = "update"
-	PatchOperation          Operation = "patch"
-	DeleteOperation         Operation = "delete"
-	ListOperation           Operation = "list"
-	ScanOperation           Operation = "scan"
-	HelpOperation           Operation = "help"
-	ResolveRoleOperation    Operation = "resolve-role"
-	HeaderOperation         Operation = "header"
+	CreateOperation      Operation = "create"
+	ReadOperation        Operation = "read"
+	UpdateOperation      Operation = "update"
+	PatchOperation       Operation = "patch"
+	DeleteOperation      Operation = "delete"
+	ListOperation        Operation = "list"
+	ScanOperation        Operation = "scan"
+	StreamOperation      Operation = "stream"
+	HelpOperation        Operation = "help"
+	ResolveRoleOperation Operation = "resolve-role"
+	HeaderOperation      Operation = "header"
 
 	// The operations below are called globally, the path is less relevant.
 	RevokeOperation   Operation = "revoke"
@@ -67,23 +68,23 @@ type Request struct {
 	// request that generated this logical.Request object.
 	ResponseWriter http.ResponseWriter `json:"-"`
 
-    // Credential (for providers)
-    Credential     *credential.Credential
+	// Credential (for providers)
+	Credential *credential.Credential
 
-    // Authentication
-    ClientToken     string
+	// Authentication
+	ClientToken string
 	// ClientTokenAccessor is provided to the core so that the it can get
 	// logged as part of request audit logging.
-	ClientTokenAccessor string 
+	ClientTokenAccessor string
 
 	// logged as part of request audit logging.
-	ClientTokenID   string
+	ClientTokenID string
 
-    tokenEntry      *TokenEntry
+	tokenEntry *TokenEntry
 
-    // Request metadata
-    ClientIP       string
-    RequestID      string
+	// Request metadata
+	ClientIP  string
+	RequestID string
 
 	// Whether the request is unauthenticated, as in, had no client token
 	// attached. Useful in some situations where the client token is not made

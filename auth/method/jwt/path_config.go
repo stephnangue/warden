@@ -15,9 +15,14 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 	return &framework.Path{
 		Pattern: "config",
 		Fields: map[string]*framework.FieldSchema{
+			"mode": {
+				Type:        framework.TypeString,
+				Description: "Authentication mode: 'jwt' or 'oidc' (required)",
+				Required:    true,
+			},
 			"oidc_discovery_url": {
 				Type:        framework.TypeString,
-				Description: "OIDC Discovery URL (required for OIDC mode)",
+				Description: "OIDC Discovery URL (required for OIDC mode, mutually exclusive with jwks_url)",
 			},
 			"oidc_discovery_ca_pem": {
 				Type:        framework.TypeString,
@@ -25,7 +30,7 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			},
 			"jwks_url": {
 				Type:        framework.TypeString,
-				Description: "JWKS URL (required for JWT mode)",
+				Description: "JWKS URL (required for JWT mode, mutually exclusive with oidc_discovery_url)",
 			},
 			"jwks_ca_pem": {
 				Type:        framework.TypeString,
@@ -42,6 +47,18 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			"bound_subject": {
 				Type:        framework.TypeString,
 				Description: "Required subject for JWT validation",
+			},
+			"bound_claims": {
+				Type:        framework.TypeKVPairs,
+				Description: "Map of claims to required values for JWT validation",
+			},
+			"claim_mappings": {
+				Type:        framework.TypeKVPairs,
+				Description: "Map of claims to copy to token metadata",
+			},
+			"jwt_validation_pubkeys": {
+				Type:        framework.TypeCommaStringSlice,
+				Description: "List of PEM-encoded public keys for JWT validation (alternative to jwks_url)",
 			},
 			"user_claim": {
 				Type:        framework.TypeString,
@@ -60,6 +77,12 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			"auth_deadline": {
 				Type:        framework.TypeDurationSecond,
 				Description: "Auth deadline (default: 10m)",
+			},
+			"token_type": {
+				Type:          framework.TypeString,
+				Description:   "Default token type for roles that don't specify one (default: warden_token)",
+				Default:       "warden_token",
+				AllowedValues: b.allowedTokenTypeValues(),
 			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -89,17 +112,22 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"name":                   b.config.Name,
 			"mode":                   b.config.Mode,
 			"oidc_discovery_url":     b.config.OIDCDiscoveryURL,
+			"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
 			"jwks_url":               b.config.JWKSURL,
+			"jwks_ca_pem":            b.config.JWKSCA,
+			"jwt_validation_pubkeys": b.config.JWTValidationPubKeys,
 			"bound_issuer":           b.config.BoundIssuer,
 			"bound_audiences":        b.config.BoundAudiences,
 			"bound_subject":          b.config.BoundSubject,
+			"bound_claims":           b.config.BoundClaims,
+			"claim_mappings":         b.config.ClaimMappings,
 			"user_claim":             b.config.UserClaim,
 			"groups_claim":           b.config.GroupsClaim,
 			"token_ttl":              b.config.TokenTTL.String(),
 			"auth_deadline":          b.config.AuthDeadline.String(),
+			"token_type":             b.config.TokenType,
 		},
 	}, nil
 }
@@ -111,19 +139,22 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 
 	// Copy existing config if present
 	if b.config != nil {
-		conf["name"] = b.config.Name
 		conf["mode"] = b.config.Mode
 		conf["oidc_discovery_url"] = b.config.OIDCDiscoveryURL
 		conf["oidc_discovery_ca_pem"] = b.config.OIDCDiscoveryCA
 		conf["jwks_url"] = b.config.JWKSURL
 		conf["jwks_ca_pem"] = b.config.JWKSCA
+		conf["jwt_validation_pubkeys"] = b.config.JWTValidationPubKeys
 		conf["bound_issuer"] = b.config.BoundIssuer
 		conf["bound_audiences"] = b.config.BoundAudiences
 		conf["bound_subject"] = b.config.BoundSubject
+		conf["bound_claims"] = b.config.BoundClaims
+		conf["claim_mappings"] = b.config.ClaimMappings
 		conf["user_claim"] = b.config.UserClaim
 		conf["groups_claim"] = b.config.GroupsClaim
 		conf["token_ttl"] = b.config.TokenTTL
 		conf["auth_deadline"] = b.config.AuthDeadline
+		conf["token_type"] = b.config.TokenType
 	}
 
 	// Apply new values from request

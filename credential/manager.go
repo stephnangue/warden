@@ -194,15 +194,15 @@ func (m *Manager) issueCredential(ctx context.Context, specName string) (*Creden
 	}
 
 	// Step 2: Get credential source from config store
-	credSource, err := m.configStore.GetSource(ctx, spec.SourceName)
+	credSource, err := m.configStore.GetSource(ctx, spec.Source)
 	if err != nil {
-		return nil, fmt.Errorf("credential source '%s' not found: %w", spec.SourceName, err)
+		return nil, fmt.Errorf("credential source '%s' not found: %w", spec.Source, err)
 	}
 
 	// Step 3: Get or create source driver
-	driver, err := m.driverRegistry.CreateDriver(spec.SourceName, credSource)
+	driver, err := m.driverRegistry.CreateDriver(spec.Source, credSource)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create driver for source '%s': %w", spec.SourceName, err)
+		return nil, fmt.Errorf("failed to create driver for source '%s': %w", spec.Source, err)
 	}
 
 	// Step 4: Mint raw credential data using the driver

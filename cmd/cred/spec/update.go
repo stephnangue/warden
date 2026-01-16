@@ -10,9 +10,9 @@ import (
 )
 
 var (
-	updateSourceParams map[string]string
-	updateMinTTL       string
-	updateMaxTTL       string
+	updateConfig map[string]string
+	updateMinTTL string
+	updateMaxTTL string
 
 	UpdateCmd = &cobra.Command{
 		Use:           "update <name>",
@@ -25,7 +25,7 @@ var (
 )
 
 func init() {
-	UpdateCmd.Flags().StringToStringVar(&updateSourceParams, "params", nil, "Source parameters (key=value)")
+	UpdateCmd.Flags().StringToStringVar(&updateConfig, "config", nil, "Type-specific configuration (key=value)")
 	UpdateCmd.Flags().StringVar(&updateMinTTL, "min-ttl", "", "Minimum TTL")
 	UpdateCmd.Flags().StringVar(&updateMaxTTL, "max-ttl", "", "Maximum TTL")
 }
@@ -34,8 +34,8 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
 	// Require at least one update parameter
-	if len(updateSourceParams) == 0 && updateMinTTL == "" && updateMaxTTL == "" {
-		return fmt.Errorf("no update parameters provided. Use --params, --min-ttl, or --max-ttl")
+	if len(updateConfig) == 0 && updateMinTTL == "" && updateMaxTTL == "" {
+		return fmt.Errorf("no update parameters provided. Use --config, --min-ttl, or --max-ttl")
 	}
 
 	c, err := helpers.Client()
@@ -44,7 +44,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	input := &api.UpdateCredentialSpecInput{
-		SourceParams: updateSourceParams,
+		Config: updateConfig,
 	}
 
 	if updateMinTTL != "" {

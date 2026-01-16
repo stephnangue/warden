@@ -272,6 +272,12 @@ func ValidateConfig(config map[string]any) error {
 	return nil
 }
 
+// SensitiveConfigFields returns the list of config fields that should be masked in output
+func (b *awsBackend) SensitiveConfigFields() []string {
+	// AWS provider doesn't store credentials in config - uses credential minting from specs
+	return []string{}
+}
+
 const awsBackendHelp = `
 The AWS provider enables proxying requests to AWS services with automatic
 credential management and signature conversion.

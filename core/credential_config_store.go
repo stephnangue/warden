@@ -12,6 +12,7 @@ import (
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 )
 
 const (
@@ -210,9 +211,13 @@ func (s *CredentialConfigStore) CreateSpec(ctx context.Context, spec *credential
 		return err
 	}
 
-	// Check if spec already exists
+	// Check if spec already exists (check both cache and storage)
 	cacheKey := s.buildSpecCacheKey(ns.UUID, spec.Name)
 	if _, found := s.specsByID.Get(cacheKey); found {
+		return ErrSpecAlreadyExists
+	}
+	// Also check storage in case cache was evicted or server restarted
+	if _, err := s.loadSpec(ns.UUID, spec.Name); err == nil {
 		return ErrSpecAlreadyExists
 	}
 
@@ -399,9 +404,13 @@ func (s *CredentialConfigStore) CreateSource(ctx context.Context, source *creden
 		return err
 	}
 
-	// Check if source already exists
+	// Check if source already exists (check both cache and storage)
 	cacheKey := s.buildSourceCacheKey(ns.UUID, source.Name)
 	if _, found := s.sourcesByID.Get(cacheKey); found {
+		return ErrSourceAlreadyExists
+	}
+	// Also check storage in case cache was evicted or server restarted
+	if _, err := s.loadSource(ns.UUID, source.Name); err == nil {
 		return ErrSourceAlreadyExists
 	}
 
@@ -594,44 +603,45 @@ func (s *CredentialConfigStore) ListSources(ctx context.Context) ([]*credential.
 // ValidateSpec validates a spec before creation/update
 func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credential.CredSpec) error {
 	if spec.Name == "" {
-		return fmt.Errorf("spec name cannot be empty")
+		return logical.ErrBadRequest("spec name cannot be empty")
 	}
 
 	if spec.Type == "" {
-		return fmt.Errorf("spec type cannot be empty")
+		return logical.ErrBadRequest("spec type cannot be empty")
 	}
 
-	if spec.SourceName == "" {
-		return fmt.Errorf("spec source_name cannot be empty")
+	if spec.Source == "" {
+		return logical.ErrBadRequest("spec source cannot be empty")
 	}
 
-	// Verify source exists in same namespace
-	_, err := s.GetSource(ctx, spec.SourceName)
+	// Verify source exists in same namespace and get its type
+	source, err := s.GetSource(ctx, spec.Source)
 	if err != nil {
 		if errors.Is(err, ErrSourceNotFound) {
-			return fmt.Errorf("source '%s' not found in namespace", spec.SourceName)
+			return logical.ErrBadRequestf("source '%s' not found in namespace", spec.Source)
 		}
 		return fmt.Errorf("failed to validate source reference: %w", err)
 	}
 
 	// Validate TTL constraints
 	if spec.MinTTL > spec.MaxTTL && spec.MaxTTL != 0 {
-		return fmt.Errorf("min_ttl cannot be greater than max_ttl")
+		return logical.ErrBadRequest("min_ttl cannot be greater than max_ttl")
 	}
 
 	// Validate credential type exists
 	if s.core.credentialTypeRegistry != nil {
 		if !s.core.credentialTypeRegistry.HasType(spec.Type) {
-			return fmt.Errorf("unknown credential type: %s (available types: %v)",
+			return logical.ErrBadRequestf("unknown credential type: %s (available types: %v)",
 				spec.Type,
 				s.core.credentialTypeRegistry.ListTypes())
 		}
 
-		// Validate SourceParams using the credential type's validation
+		// Validate Config using the credential type's validation
+		// Pass the source type (not source name) to enable source-specific validation
 		credType, err := s.core.credentialTypeRegistry.GetByName(spec.Type)
 		if err == nil {
-			if err := credType.ValidateSourceParams(spec.SourceParams, spec.SourceName); err != nil {
-				return fmt.Errorf("invalid source params for type '%s': %w", spec.Type, err)
+			if err := credType.ValidateConfig(spec.Config, source.Type); err != nil {
+				return logical.ErrBadRequestf("invalid config for type '%s': %s", spec.Type, err.Error())
 			}
 		}
 	}
@@ -642,17 +652,17 @@ func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credenti
 // ValidateSource validates a source before creation/update
 func (s *CredentialConfigStore) ValidateSource(ctx context.Context, source *credential.CredSource) error {
 	if source.Name == "" {
-		return fmt.Errorf("source name cannot be empty")
+		return logical.ErrBadRequest("source name cannot be empty")
 	}
 
 	if source.Type == "" {
-		return fmt.Errorf("source type cannot be empty")
+		return logical.ErrBadRequest("source type cannot be empty")
 	}
 
 	// Validate driver factory exists
 	if s.core.credentialDriverRegistry != nil {
 		if !s.core.credentialDriverRegistry.HasFactory(source.Type) {
-			return fmt.Errorf("unknown source type: %s (available types: %v)",
+			return logical.ErrBadRequestf("unknown source type: %s (available types: %v)",
 				source.Type,
 				s.core.credentialDriverRegistry.ListFactories())
 		}
@@ -661,7 +671,18 @@ func (s *CredentialConfigStore) ValidateSource(ctx context.Context, source *cred
 		factory, err := s.core.credentialDriverRegistry.GetFactory(source.Type)
 		if err == nil {
 			if err := factory.ValidateConfig(source.Config); err != nil {
-				return fmt.Errorf("invalid config for source type '%s': %w", source.Type, err)
+				return logical.ErrBadRequestf("invalid config for source type '%s': %s", source.Type, err.Error())
+			}
+
+			// Test connection by creating a temporary driver instance
+			// This validates credentials and connectivity (e.g., Vault authentication)
+			driver, err := factory.Create(source.Config, s.logger)
+			if err != nil {
+				return logical.ErrBadRequestf("connection test failed for source type '%s': %s", source.Type, err.Error())
+			}
+			// Clean up the test driver
+			if driver != nil {
+				driver.Cleanup(ctx)
 			}
 		}
 	}
@@ -680,7 +701,7 @@ func (s *CredentialConfigStore) CheckSourceReferences(ctx context.Context, sourc
 	// Find specs that reference this source
 	var refs []*credential.CredSpec
 	for _, spec := range specs {
-		if spec.SourceName == sourceName {
+		if spec.Source == sourceName {
 			refs = append(refs, spec)
 		}
 	}

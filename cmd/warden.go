@@ -11,8 +11,8 @@ import (
 	"github.com/stephnangue/warden/cmd/login"
 	"github.com/stephnangue/warden/cmd/namespaces"
 	"github.com/stephnangue/warden/cmd/operator"
+	"github.com/stephnangue/warden/cmd/policies"
 	"github.com/stephnangue/warden/cmd/providers"
-	"github.com/stephnangue/warden/cmd/revoke"
 	"github.com/stephnangue/warden/cmd/server"
 )
 
@@ -52,12 +52,12 @@ func init() {
 	wardenCmd.AddCommand(providers.ProvidersCmd)
 	wardenCmd.AddCommand(auth.AuthCmd)
 	wardenCmd.AddCommand(namespaces.NamespacesCmd)
+	wardenCmd.AddCommand(policies.PoliciesCmd)
 	wardenCmd.AddCommand(cred.CredCmd)
 	wardenCmd.AddCommand(basic.WriteCmd)
 	wardenCmd.AddCommand(basic.ReadCmd)
 	wardenCmd.AddCommand(basic.ListCmd)
 	wardenCmd.AddCommand(basic.DeleteCmd)
-	wardenCmd.AddCommand(revoke.RevokeRootTokenCmd)
 }
 
 // Namespace returns the currently configured namespace from the flag

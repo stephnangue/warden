@@ -5,6 +5,15 @@ import (
 	"time"
 )
 
+// CredentialFieldSchema describes a field in credential data
+type CredentialFieldSchema struct {
+	// Description explains what this field contains
+	Description string
+
+	// Sensitive indicates the field should be masked in output
+	Sensitive bool
+}
+
 // TypeMetadata describes a credential type's characteristics
 type TypeMetadata struct {
 	// Name is the canonical type identifier (e.g., "database_userpass", "aws_access_keys")
@@ -26,11 +35,13 @@ type Type interface {
 	// Metadata returns the type's metadata
 	Metadata() TypeMetadata
 
-	// ValidateSourceParams validates the SourceParams for a CredSpec
+	// ValidateConfig validates the Config for a CredSpec
 	// This allows credential types to validate their configuration before creation
-	// sourceName parameter allows type-specific validation based on the driver type
-	// Returns an error if required params are missing or invalid
-	ValidateSourceParams(params map[string]string, sourceName string) error
+	// sourceType parameter enables source-specific validation rules:
+	// - "local": validates that config contains the credential values directly
+	// - "vault": validates that config contains Vault path/mount configuration
+	// Returns an error if required config values are missing or invalid
+	ValidateConfig(config map[string]string, sourceType string) error
 
 	// Parse converts raw credential data from source into structured Credential
 	// rawData contains the source-specific credential fields
@@ -47,4 +58,8 @@ type Type interface {
 
 	// CanRotate indicates if this type supports proactive rotation
 	CanRotate() bool
+
+	// FieldSchemas returns metadata about the credential's data fields
+	// Used for masking sensitive fields in responses
+	FieldSchemas() map[string]*CredentialFieldSchema
 }

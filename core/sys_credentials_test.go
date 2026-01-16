@@ -150,7 +150,7 @@ func TestSystemBackend_HandleCredentialSourceDelete_WithReferences(t *testing.T)
 	specRaw := map[string]interface{}{
 		"name":        "test-spec",
 		"type":        "database_userpass",
-		"source_name": "test-source",
+		"source": "test-source",
 	}
 
 	specReq := createTestRequest(logical.CreateOperation, "cred/specs/test-spec", specRaw)
@@ -220,10 +220,9 @@ func TestSystemBackend_HandleCredentialSpecCreate(t *testing.T) {
 	specRaw := map[string]interface{}{
 		"name":        "test-spec",
 		"type":        "database_userpass",
-		"source_name": "test-source",
+		"source": "test-source",
 		"min_ttl":     3600,
 		"max_ttl":     86400,
-		"target_name": "test-target",
 	}
 
 	specReq := createTestRequest(logical.CreateOperation, "cred/specs/test-spec", specRaw)
@@ -259,7 +258,7 @@ func TestSystemBackend_HandleCredentialSpecCreate_InvalidTTL(t *testing.T) {
 	specRaw := map[string]interface{}{
 		"name":        "test-spec",
 		"type":        "database_userpass",
-		"source_name": "test-source",
+		"source": "test-source",
 		"min_ttl":     86400, // Greater than max_ttl
 		"max_ttl":     3600,
 	}
@@ -291,7 +290,7 @@ func TestSystemBackend_HandleCredentialSpecRead(t *testing.T) {
 	specRaw := map[string]interface{}{
 		"name":        "test-spec",
 		"type":        "database_userpass",
-		"source_name": "test-source",
+		"source": "test-source",
 	}
 	specReq := createTestRequest(logical.CreateOperation, "cred/specs/test-spec", specRaw)
 	specFieldData := createFieldData(specSchema, specRaw)
@@ -324,7 +323,7 @@ func TestSystemBackend_HandleCredentialSpecUpdate(t *testing.T) {
 	specRaw := map[string]interface{}{
 		"name":        "test-spec",
 		"type":        "database_userpass",
-		"source_name": "test-source",
+		"source": "test-source",
 		"min_ttl":     3600,
 		"max_ttl":     86400,
 	}
@@ -366,7 +365,7 @@ func TestSystemBackend_HandleCredentialSpecDelete(t *testing.T) {
 	specRaw := map[string]interface{}{
 		"name":        "test-spec",
 		"type":        "database_userpass",
-		"source_name": "test-source",
+		"source": "test-source",
 	}
 	specReq := createTestRequest(logical.CreateOperation, "cred/specs/test-spec", specRaw)
 	specFieldData := createFieldData(specSchema, specRaw)
@@ -401,7 +400,7 @@ func TestSystemBackend_HandleCredentialSpecList(t *testing.T) {
 		specRaw := map[string]interface{}{
 			"name":        name,
 			"type":        "database_userpass",
-			"source_name": "test-source",
+			"source": "test-source",
 		}
 		specReq := createTestRequest(logical.CreateOperation, "cred/specs/"+name, specRaw)
 		specFieldData := createFieldData(specSchema, specRaw)

@@ -38,16 +38,7 @@ func mapToJWTAuthConfig(data map[string]any) (*JWTAuthConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal to JWTAuthConfig: %w", err)
 	}
 
-	// Set default values if not present or empty
-	if config.Mode == "" {
-		// Try to infer from the data - if mode is not set but we have OIDC config, assume oidc
-		if config.OIDCDiscoveryURL != "" {
-			config.Mode = "oidc"
-		} else if config.JWKSURL != "" || len(config.JWTValidationPubKeys) > 0 {
-			config.Mode = "jwt"
-		}
-		// If still empty, it will be caught by validation
-	}
+	// Mode validation is done in setupJWTConfig
 
 	if config.UserClaim == "" {
 		config.UserClaim = "sub"
@@ -59,6 +50,10 @@ func mapToJWTAuthConfig(data map[string]any) (*JWTAuthConfig, error) {
 
 	if config.AuthDeadline == 0 {
 		config.AuthDeadline = config.TokenTTL
+	}
+
+	if config.TokenType == "" {
+		config.TokenType = "warden_token"
 	}
 
 	return &config, nil

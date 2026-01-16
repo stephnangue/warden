@@ -96,8 +96,9 @@ func createTestBackendWithStorage(t *testing.T) (*jwtAuthBackend, context.Contex
 	storage := newInmemStorage()
 
 	conf := &logical.BackendConfig{
-		Logger:      testLoggerLogin(),
-		StorageView: storage,
+		Logger:          testLoggerLogin(),
+		StorageView:     storage,
+		ValidTokenTypes: []string{"service", "batch", "user_pass", "aws_access_keys", "warden_token"},
 	}
 
 	backend, err := Factory(ctx, conf)
