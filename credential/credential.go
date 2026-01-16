@@ -12,6 +12,12 @@ const (
 	TypeAWSAccessKeys    = "aws_access_keys"
 )
 
+// Source type constants
+const (
+	SourceTypeLocal = "local"
+	SourceTypeVault = "hashicorp_vault"
+)
+
 // Category constants for credential categorization
 const (
 	CategoryDatabase = "database"

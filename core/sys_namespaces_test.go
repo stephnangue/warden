@@ -166,6 +166,12 @@ func TestSystemBackend_HandleNamespaceList(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
+	// Check keys field
+	keys, ok := resp.Data["keys"].([]string)
+	require.True(t, ok)
+	assert.Len(t, keys, 3)
+
+	// Check namespaces field for detailed info
 	namespaces, ok := resp.Data["namespaces"].([]map[string]any)
 	require.True(t, ok)
 	assert.Len(t, namespaces, 3)

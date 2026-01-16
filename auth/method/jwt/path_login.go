@@ -113,6 +113,14 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 		}, nil
 	}
 
+	// Validate bound claims from role
+	if err := validateBoundClaims(claims, role.BoundClaims); err != nil {
+		return &logical.Response{
+			StatusCode: http.StatusUnauthorized,
+			Err:        fmt.Errorf("role bound claims validation failed: %w", err),
+		}, nil
+	}
+
 	// Extract principal identity - use role's user_claim or fallback to config
 	userClaim := role.UserClaim
 	if userClaim == "" {

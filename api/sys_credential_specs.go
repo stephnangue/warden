@@ -11,42 +11,39 @@ import (
 
 // CreateCredentialSpecInput represents the input for creating a credential spec
 type CreateCredentialSpecInput struct {
-	Type         string            `json:"type"`
-	SourceName   string            `json:"source_name"`
-	SourceParams map[string]string `json:"source_params,omitempty"`
-	MinTTL       time.Duration     `json:"min_ttl"`
-	MaxTTL       time.Duration     `json:"max_ttl"`
-	TargetName   string            `json:"target_name,omitempty"`
+	Type   string            `json:"type"`
+	Source string            `json:"source"`
+	Config map[string]string `json:"config,omitempty"`
+	MinTTL time.Duration     `json:"min_ttl"`
+	MaxTTL time.Duration     `json:"max_ttl"`
 }
 
 // CreateCredentialSpecOutput represents the output after creating a credential spec
 type CreateCredentialSpecOutput struct {
-	Name         string            `json:"name"`
-	Type         string            `json:"type"`
-	SourceName   string            `json:"source_name"`
-	SourceParams map[string]string `json:"source_params,omitempty"`
-	MinTTL       time.Duration     `json:"min_ttl"`
-	MaxTTL       time.Duration     `json:"max_ttl"`
-	TargetName   string            `json:"target_name,omitempty"`
-	Message      string            `json:"message"`
+	Name    string            `json:"name"`
+	Type    string            `json:"type"`
+	Source  string            `json:"source"`
+	Config  map[string]string `json:"config,omitempty"`
+	MinTTL  time.Duration     `json:"min_ttl"`
+	MaxTTL  time.Duration     `json:"max_ttl"`
+	Message string            `json:"message"`
 }
 
 // CredentialSpecInfo represents credential spec metadata
 type CredentialSpecInfo struct {
-	Name         string            `json:"name"`
-	Type         string            `json:"type"`
-	SourceName   string            `json:"source_name"`
-	SourceParams map[string]string `json:"source_params,omitempty"`
-	MinTTL       time.Duration     `json:"min_ttl"`
-	MaxTTL       time.Duration     `json:"max_ttl"`
-	TargetName   string            `json:"target_name,omitempty"`
+	Name   string            `json:"name"`
+	Type   string            `json:"type"`
+	Source string            `json:"source"`
+	Config map[string]string `json:"config,omitempty"`
+	MinTTL time.Duration     `json:"min_ttl"`
+	MaxTTL time.Duration     `json:"max_ttl"`
 }
 
 // UpdateCredentialSpecInput represents the input for updating a credential spec
 type UpdateCredentialSpecInput struct {
-	SourceParams map[string]string `json:"source_params,omitempty"`
-	MinTTL       *time.Duration    `json:"min_ttl,omitempty"`
-	MaxTTL       *time.Duration    `json:"max_ttl,omitempty"`
+	Config map[string]string `json:"config,omitempty"`
+	MinTTL *time.Duration    `json:"min_ttl,omitempty"`
+	MaxTTL *time.Duration    `json:"max_ttl,omitempty"`
 }
 
 // UpdateCredentialSpecOutput represents the output after updating a credential spec
@@ -65,7 +62,7 @@ func (c *Sys) CreateCredentialSpecWithContext(ctx context.Context, name string, 
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/credential/specs/%s", name))
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/cred/specs/%s", name))
 
 	if input == nil {
 		return nil, errors.New("input cannot be nil")
@@ -73,16 +70,13 @@ func (c *Sys) CreateCredentialSpecWithContext(ctx context.Context, name string, 
 
 	// Convert to API request format (durations to seconds)
 	reqBody := map[string]interface{}{
-		"type":        input.Type,
-		"source_name": input.SourceName,
-		"min_ttl":     int64(input.MinTTL.Seconds()),
-		"max_ttl":     int64(input.MaxTTL.Seconds()),
+		"type":    input.Type,
+		"source":  input.Source,
+		"min_ttl": int64(input.MinTTL.Seconds()),
+		"max_ttl": int64(input.MaxTTL.Seconds()),
 	}
-	if input.SourceParams != nil {
-		reqBody["source_params"] = input.SourceParams
-	}
-	if input.TargetName != "" {
-		reqBody["target_name"] = input.TargetName
+	if input.Config != nil {
+		reqBody["config"] = input.Config
 	}
 
 	if err := r.SetJSONBody(reqBody); err != nil {
@@ -110,17 +104,17 @@ func (c *Sys) CreateCredentialSpecWithContext(ctx context.Context, name string, 
 	if t, ok := resource.Data["type"].(string); ok {
 		output.Type = t
 	}
-	if src, ok := resource.Data["source_name"].(string); ok {
-		output.SourceName = src
+	if src, ok := resource.Data["source"].(string); ok {
+		output.Source = src
 	}
 	if msg, ok := resource.Data["message"].(string); ok {
 		output.Message = msg
 	}
-	if params, ok := resource.Data["source_params"].(map[string]interface{}); ok {
-		output.SourceParams = make(map[string]string)
+	if params, ok := resource.Data["config"].(map[string]interface{}); ok {
+		output.Config = make(map[string]string)
 		for k, v := range params {
 			if str, ok := v.(string); ok {
-				output.SourceParams[k] = str
+				output.Config[k] = str
 			}
 		}
 	}
@@ -134,9 +128,6 @@ func (c *Sys) CreateCredentialSpecWithContext(ctx context.Context, name string, 
 		if maxTTL, err := parseJSONNumber(maxTTLRaw); err == nil {
 			output.MaxTTL = time.Duration(maxTTL) * time.Second
 		}
-	}
-	if target, ok := resource.Data["target_name"].(string); ok {
-		output.TargetName = target
 	}
 
 	return output, nil
@@ -152,7 +143,7 @@ func (c *Sys) GetCredentialSpecWithContext(ctx context.Context, name string) (*C
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/credential/specs/%s", name))
+	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/cred/specs/%s", name))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {
@@ -175,14 +166,14 @@ func (c *Sys) GetCredentialSpecWithContext(ctx context.Context, name string) (*C
 	if t, ok := resource.Data["type"].(string); ok {
 		spec.Type = t
 	}
-	if src, ok := resource.Data["source_name"].(string); ok {
-		spec.SourceName = src
+	if src, ok := resource.Data["source"].(string); ok {
+		spec.Source = src
 	}
-	if params, ok := resource.Data["source_params"].(map[string]interface{}); ok {
-		spec.SourceParams = make(map[string]string)
+	if params, ok := resource.Data["config"].(map[string]interface{}); ok {
+		spec.Config = make(map[string]string)
 		for k, v := range params {
 			if str, ok := v.(string); ok {
-				spec.SourceParams[k] = str
+				spec.Config[k] = str
 			}
 		}
 	}
@@ -195,9 +186,6 @@ func (c *Sys) GetCredentialSpecWithContext(ctx context.Context, name string) (*C
 		if maxTTL, err := parseJSONNumber(maxTTLRaw); err == nil {
 			spec.MaxTTL = time.Duration(maxTTL) * time.Second
 		}
-	}
-	if target, ok := resource.Data["target_name"].(string); ok {
-		spec.TargetName = target
 	}
 
 	return spec, nil
@@ -213,7 +201,7 @@ func (c *Sys) ListCredentialSpecsWithContext(ctx context.Context) ([]*Credential
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodGet, "/v1/sys/credential/specs")
+	r := c.c.NewRequest(http.MethodGet, "/v1/sys/cred/specs")
 
 	r.Params.Set("list", "true")
 
@@ -250,14 +238,14 @@ func (c *Sys) ListCredentialSpecsWithContext(ctx context.Context) ([]*Credential
 		if t, ok := specMap["type"].(string); ok {
 			spec.Type = t
 		}
-		if src, ok := specMap["source_name"].(string); ok {
-			spec.SourceName = src
+		if src, ok := specMap["source"].(string); ok {
+			spec.Source = src
 		}
-		if params, ok := specMap["source_params"].(map[string]interface{}); ok {
-			spec.SourceParams = make(map[string]string)
+		if params, ok := specMap["config"].(map[string]interface{}); ok {
+			spec.Config = make(map[string]string)
 			for k, v := range params {
 				if str, ok := v.(string); ok {
-					spec.SourceParams[k] = str
+					spec.Config[k] = str
 				}
 			}
 		}
@@ -270,9 +258,6 @@ func (c *Sys) ListCredentialSpecsWithContext(ctx context.Context) ([]*Credential
 			if maxTTL, err := parseJSONNumber(maxTTLRaw); err == nil {
 				spec.MaxTTL = time.Duration(maxTTL) * time.Second
 			}
-		}
-		if target, ok := specMap["target_name"].(string); ok {
-			spec.TargetName = target
 		}
 
 		specs = append(specs, spec)
@@ -291,7 +276,7 @@ func (c *Sys) UpdateCredentialSpecWithContext(ctx context.Context, name string, 
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodPut, fmt.Sprintf("/v1/sys/credential/specs/%s", name))
+	r := c.c.NewRequest(http.MethodPut, fmt.Sprintf("/v1/sys/cred/specs/%s", name))
 
 	if input == nil {
 		input = &UpdateCredentialSpecInput{}
@@ -299,8 +284,8 @@ func (c *Sys) UpdateCredentialSpecWithContext(ctx context.Context, name string, 
 
 	// Convert to API request format (durations to seconds)
 	reqBody := make(map[string]interface{})
-	if input.SourceParams != nil {
-		reqBody["source_params"] = input.SourceParams
+	if input.Config != nil {
+		reqBody["config"] = input.Config
 	}
 	if input.MinTTL != nil {
 		reqBody["min_ttl"] = int64(input.MinTTL.Seconds())
@@ -348,7 +333,7 @@ func (c *Sys) DeleteCredentialSpecWithContext(ctx context.Context, name string) 
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
-	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/credential/specs/%s", name))
+	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/cred/specs/%s", name))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {

@@ -100,19 +100,33 @@ func printKeys(data map[string]any) {
 		return
 	}
 
+	// Check for nil keys
+	if keys == nil {
+		fmt.Println("No keys found")
+		return
+	}
+
 	// Handle both []string and []interface{} types
 	switch v := keys.(type) {
 	case []string:
+		if len(v) == 0 {
+			fmt.Println("No keys found")
+			return
+		}
 		fmt.Println("Keys")
 		for _, key := range v {
 			fmt.Printf("  %s\n", key)
 		}
 	case []interface{}:
+		if len(v) == 0 {
+			fmt.Println("No keys found")
+			return
+		}
 		fmt.Println("Keys")
 		for _, key := range v {
 			fmt.Printf("  %v\n", key)
 		}
 	default:
-		fmt.Printf("Keys: %v\n", keys)
+		fmt.Println("No keys found")
 	}
 }

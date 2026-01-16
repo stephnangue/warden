@@ -10,12 +10,11 @@ import (
 )
 
 var (
-	createType         string
-	createSourceName   string
-	createSourceParams map[string]string
-	createMinTTL       string
-	createMaxTTL       string
-	createTargetName   string
+	createType   string
+	createSource string
+	createConfig map[string]string
+	createMinTTL string
+	createMaxTTL string
 
 	CreateCmd = &cobra.Command{
 		Use:           "create <name>",
@@ -30,11 +29,10 @@ var (
 
 func init() {
 	CreateCmd.Flags().StringVar(&createType, "type", "", "Credential type (required)")
-	CreateCmd.Flags().StringVar(&createSourceName, "source", "", "Source name (required)")
-	CreateCmd.Flags().StringToStringVar(&createSourceParams, "params", nil, "Source parameters (key=value)")
+	CreateCmd.Flags().StringVar(&createSource, "source", "", "Source name (required)")
+	CreateCmd.Flags().StringToStringVar(&createConfig, "config", nil, "Type-specific configuration (key=value)")
 	CreateCmd.Flags().StringVar(&createMinTTL, "min-ttl", "1h", "Minimum TTL")
 	CreateCmd.Flags().StringVar(&createMaxTTL, "max-ttl", "24h", "Maximum TTL")
-	CreateCmd.Flags().StringVar(&createTargetName, "target", "", "Target name for routing")
 
 	CreateCmd.MarkFlagRequired("type")
 	CreateCmd.MarkFlagRequired("source")
@@ -60,12 +58,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	input := &api.CreateCredentialSpecInput{
-		Type:         createType,
-		SourceName:   createSourceName,
-		SourceParams: createSourceParams,
-		MinTTL:       minTTL,
-		MaxTTL:       maxTTL,
-		TargetName:   createTargetName,
+		Type:   createType,
+		Source: createSource,
+		Config: createConfig,
+		MinTTL: minTTL,
+		MaxTTL: maxTTL,
 	}
 
 	output, err := c.Sys().CreateCredentialSpec(name, input)
@@ -75,7 +72,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Success! Created credential spec: %s\n", output.Name)
 	fmt.Printf("  Type: %s\n", output.Type)
-	fmt.Printf("  Source: %s\n", output.SourceName)
+	fmt.Printf("  Source: %s\n", output.Source)
 	fmt.Printf("  Min TTL: %s\n", output.MinTTL)
 	fmt.Printf("  Max TTL: %s\n", output.MaxTTL)
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
@@ -31,6 +32,10 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Subject claim that must match for this role",
 			},
+			"bound_claims": {
+				Type:        framework.TypeMap,
+				Description: "Map of claims that must match for this role",
+			},
 			"token_policies": {
 				Type:        framework.TypeCommaStringSlice,
 				Description: "List of policies to assign to tokens",
@@ -46,9 +51,10 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 				Default:     3600,
 			},
 			"token_type": {
-				Type:        framework.TypeString,
-				Description: "Token type",
-				Required: true,
+				Type:          framework.TypeString,
+				Description:   "Token type",
+				Required:      true,
+				AllowedValues: b.allowedTokenTypeValues(),
 			},
 			"user_claim": {
 				Type:        framework.TypeString,
@@ -98,6 +104,11 @@ func (b *jwtAuthBackend) pathRoleList() *framework.Path {
 	}
 }
 
+// isValidTokenType checks if the given token type is valid
+func (b *jwtAuthBackend) isValidTokenType(tokenType string) bool {
+	return slices.Contains(b.validTokenTypes, tokenType)
+}
+
 // handleRoleCreate creates a new role
 func (b *jwtAuthBackend) handleRoleCreate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
@@ -117,6 +128,18 @@ func (b *jwtAuthBackend) handleRoleCreate(ctx context.Context, req *logical.Requ
 	// Set defaults
 	if role.UserClaim == "" {
 		role.UserClaim = "sub"
+	}
+	// Use config's token_type as default if not specified in role
+	if role.TokenType == "" && b.config != nil && b.config.TokenType != "" {
+		role.TokenType = b.config.TokenType
+	}
+
+	// Validate token type
+	if role.TokenType == "" {
+		return logical.ErrorResponse(logical.ErrBadRequestf("token_type is required; must be one of: %v", b.validTokenTypes)), nil
+	}
+	if !b.isValidTokenType(role.TokenType) {
+		return logical.ErrorResponse(logical.ErrBadRequestf("invalid token_type %q; must be one of: %v", role.TokenType, b.validTokenTypes)), nil
 	}
 	if role.TokenTTL == 0 {
 		role.TokenTTL = time.Hour
@@ -157,6 +180,7 @@ func (b *jwtAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reques
 			"name":                role.Name,
 			"bound_audiences":     role.BoundAudiences,
 			"bound_subject":       role.BoundSubject,
+			"bound_claims":        role.BoundClaims,
 			"token_policies":      role.TokenPolicies,
 			"token_ttl":           role.TokenTTL.String(),
 			"token_auth_deadline": role.TokenAuthDeadline.String(),
@@ -185,6 +209,10 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 		if role.UserClaim == "" {
 			role.UserClaim = "sub"
 		}
+		// Use config's token_type as default if not specified in role
+		if role.TokenType == "" && b.config != nil && b.config.TokenType != "" {
+			role.TokenType = b.config.TokenType
+		}
 		if role.TokenTTL == 0 {
 			role.TokenTTL = time.Hour
 		}
@@ -198,6 +226,9 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 		}
 		if v, ok := d.GetOk("bound_subject"); ok {
 			role.BoundSubject = v.(string)
+		}
+		if v, ok := d.GetOk("bound_claims"); ok {
+			role.BoundClaims = v.(map[string]any)
 		}
 		if v, ok := d.GetOk("token_policies"); ok {
 			role.TokenPolicies = v.([]string)
@@ -217,6 +248,14 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 		if v, ok := d.GetOk("cred_spec_name"); ok {
 			role.CredSpecName = v.(string)
 		}
+	}
+
+	// Validate token type
+	if role.TokenType == "" {
+		return logical.ErrorResponse(logical.ErrBadRequestf("token_type is required; must be one of: %v", b.validTokenTypes)), nil
+	}
+	if !b.isValidTokenType(role.TokenType) {
+		return logical.ErrorResponse(logical.ErrBadRequestf("invalid token_type %q; must be one of: %v", role.TokenType, b.validTokenTypes)), nil
 	}
 
 	// Persist role
@@ -283,6 +322,9 @@ func (b *jwtAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldD
 	if v, ok := d.GetOk("bound_subject"); ok {
 		role.BoundSubject = v.(string)
 	}
+	if v, ok := d.GetOk("bound_claims"); ok {
+		role.BoundClaims = v.(map[string]any)
+	}
 	if v, ok := d.GetOk("token_policies"); ok {
 		role.TokenPolicies = v.([]string)
 	}
@@ -329,6 +371,7 @@ func (b *jwtAuthBackend) getRole(ctx context.Context, name string) (*JWTRole, er
 		Name:              stored.Name,
 		BoundAudiences:    stored.BoundAudiences,
 		BoundSubject:      stored.BoundSubject,
+		BoundClaims:       stored.BoundClaims,
 		TokenPolicies:     stored.TokenPolicies,
 		TokenTTL:          tokenTTL,
 		TokenAuthDeadline: tokenAuthDeadline,
@@ -343,6 +386,7 @@ func (b *jwtAuthBackend) setRole(ctx context.Context, role *JWTRole) error {
 		Name:              role.Name,
 		BoundAudiences:    role.BoundAudiences,
 		BoundSubject:      role.BoundSubject,
+		BoundClaims:       role.BoundClaims,
 		TokenPolicies:     role.TokenPolicies,
 		TokenTTL:          role.TokenTTL.String(),
 		TokenAuthDeadline: role.TokenAuthDeadline.String(),

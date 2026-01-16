@@ -83,6 +83,8 @@ func operationFromHTTPMethod(r *http.Request) logical.Operation {
 		return logical.PatchOperation
 	case http.MethodDelete:
 		return logical.DeleteOperation
+	case "LIST":
+		return logical.ListOperation
 	default:
 		return logical.ReadOperation
 	}

@@ -11,11 +11,11 @@ func TestCredSpecRegistry_Register(t *testing.T) {
 	registry := NewCredSpecRegistry()
 
 	spec := &CredSpec{
-		Name:       "test-spec",
-		Type:       "database_userpass",
-		SourceName: "test-source",
-		MinTTL:     time.Hour,
-		MaxTTL:     24 * time.Hour,
+		Name:   "test-spec",
+		Type:   "database_userpass",
+		Source: "test-source",
+		MinTTL: time.Hour,
+		MaxTTL: 24 * time.Hour,
 	}
 
 	// Test successful registration
