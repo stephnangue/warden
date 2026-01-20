@@ -74,10 +74,16 @@ func (p *GenericAWSProcessor) Process(ctx *ProcessorContext) (*ProcessorResult, 
 	// 	logger.String("request_id", middleware.GetReqID(ctx.Ctx)),
 	// )
 
-	// compute the AWS path relative to the provider path
-	actualPath := ctx.OriginalPath
-	if after, ok := strings.CutPrefix(ctx.OriginalPath, ctx.RelativePath); ok {
+	// Compute the AWS path relative to the streaming path.
+	// req.Path is already relative to the mount (e.g., "gateway/ec2-multiple-sg/terraform.tfstate")
+	// We need to strip the "gateway" or "gateway/" prefix to get the actual AWS service path.
+	actualPath := ctx.LogicalRequest.Path
+
+	// Strip "gateway/" or "gateway" prefix
+	if after, ok := strings.CutPrefix(actualPath, "gateway/"); ok {
 		actualPath = after
+	} else if actualPath == "gateway" {
+		actualPath = ""
 	}
 
 	// Ensure path starts with / for AWS

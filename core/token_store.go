@@ -26,9 +26,9 @@ const (
 
 // Storage path constants for token store organization
 const (
-	tokenStorePath      = "core/token/"  // Base path for all token-related storage
-	tokenIDPrefix       = "id/"          // Prefix for token ID storage (full token data)
-	tokenAccessorPrefix = "accessor/"    // Prefix for accessor → ID mappings
+	tokenStorePath      = "core/token/" // Base path for all token-related storage
+	tokenIDPrefix       = "id/"         // Prefix for token ID storage (full token data)
+	tokenAccessorPrefix = "accessor/"   // Prefix for accessor → ID mappings
 )
 
 var (
@@ -581,20 +581,20 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		return "", "", ErrTokenNotFound
 	}
 
-	// Validate auth deadline
-	if !entry.AuthDeadline.IsZero() && time.Now().After(entry.AuthDeadline) {
-		if s.config.EnableMetrics {
-			s.metrics.IncrementDeadlineViolations()
-		}
-		return "", "", ErrAuthDeadlineViolated
-	}
-
 	// Validate expiration
 	if !entry.ExpireAt.IsZero() && time.Now().After(entry.ExpireAt) {
 		if s.config.EnableMetrics {
 			s.metrics.IncrementTokensExpired()
 		}
 		return "", "", ErrTokenExpired
+	}
+
+	// Validate auth deadline
+	if !entry.AuthDeadline.IsZero() && time.Now().After(entry.AuthDeadline) {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementDeadlineViolations()
+		}
+		return "", "", ErrAuthDeadlineViolated
 	}
 
 	// Validate same-origin policy (IP binding)
@@ -786,10 +786,10 @@ func (s *TokenStore) GenerateRootToken() (string, error) {
 
 	// Create AuthData with infinite TTL (for root namespace)
 	authData := &AuthData{
-		PrincipalID:    namespace.RootNamespaceUUID,
-		AuthDeadline:   time.Time{}, // No auth deadline
-		ExpireAt:       time.Time{}, // No expiration
-		Policies:       []string{"root"},
+		PrincipalID:  namespace.RootNamespaceUUID,
+		AuthDeadline: time.Time{}, // No auth deadline
+		ExpireAt:     time.Time{}, // No expiration
+		Policies:     []string{"root"},
 	}
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
@@ -1084,7 +1084,6 @@ func (s *TokenStore) loadAllTokensFromStorage(ctx context.Context) (int, error) 
 			logger.Int("failed", failedCount),
 			logger.Int("total_keys", len(tokenKeys)))
 	}
-
 
 	// Wait for all cache writes to complete
 	s.byID.Wait()

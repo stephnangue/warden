@@ -11,7 +11,7 @@ import (
 )
 
 // VaultDriver fetches credentials from HashiCorp Vault
-// Supports: KV v2, Database engine, AWS engine, Azure engine, GCP engine
+// Supports: KV, AWS engine, Azure engine, GCP engine
 type VaultDriver struct {
 	vault      *api.Client
 	credSource *credential.CredSource

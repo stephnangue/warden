@@ -1,37 +1,20 @@
 package processor
 
 import (
-	"context"
-	"net/http"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/stephnangue/warden/logical"
 )
 
 // ProcessorContext contains all the information needed by processors
 type ProcessorContext struct {
 	// Request information
-	Request      *http.Request
-	BodyBytes    []byte
-	OriginalPath string
-	RelativePath string
-
-	// Authentication
-	Credentials aws.Credentials
-	AWSCreds    aws.Credentials
-	AccessKeyID string
-	RoleName    string
-	PrincipalID string
-	TokenTTL    time.Duration
+	LogicalRequest *logical.Request
 
 	// AWS metadata
 	Service string
 	Region  string
-
-	// Context
-	Ctx context.Context
 }
 
 // ProcessorResult contains the result of processing
@@ -42,9 +25,18 @@ type ProcessorResult struct {
 
 	// Path transformation
 	TransformedPath string
+	// TransformedPathIsEncoded indicates the path is already URL-encoded
+	// and should be used as-is (set RawPath = TransformedPath)
+	TransformedPathIsEncoded bool
 
 	// Service override (if processor changes the service)
 	Service string
+
+	// SigningRegion overrides the region used for request signing.
+	// If empty, the original request region is used.
+	// This is needed for pseudo-regions like "aws-global" that must be
+	// converted to real regions (e.g., "us-east-1") for signing.
+	SigningRegion string
 
 	// Additional metadata
 	Metadata map[string]any
@@ -243,11 +235,11 @@ func (pr *ProcessorRegistry) findByService(ctx *ProcessorContext) RequestProcess
 
 // findByHostPattern does O(1) host pattern lookup
 func (pr *ProcessorRegistry) findByHostPattern(ctx *ProcessorContext) RequestProcessor {
-	if ctx.Request == nil {
+	if ctx.LogicalRequest.HTTPRequest == nil {
 		return nil
 	}
 
-	host := ctx.Request.Host
+	host := ctx.LogicalRequest.HTTPRequest.Host
 	if idx := strings.Index(host, ":"); idx != -1 {
 		host = host[:idx]
 	}
