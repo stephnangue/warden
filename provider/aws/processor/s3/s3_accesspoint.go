@@ -2,10 +2,20 @@ package s3
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/provider/aws/processor"
+)
+
+var (
+	// Regex to match S3 Access Point ARN in path
+	// Format: arn:aws:s3:region:account-id:accesspoint/access-point-name
+	accessPointARNRegex = regexp.MustCompile(`arn:aws:s3:([^:]*):(\d{12}):accesspoint/([^/]+)`)
+	// Regex to match Multi-Region Access Point ARN in path
+	// Format: arn:aws:s3::account-id:accesspoint/mrap-alias.mrap
+	mrapARNRegex = regexp.MustCompile(`arn:aws:s3::(\d{12}):accesspoint/([^/]+)`)
 )
 
 // S3AccessPointProcessor handles S3 Access Point requests
@@ -33,40 +43,120 @@ func (p *S3AccessPointProcessor) CanProcess(ctx *processor.ProcessorContext) boo
 		return false
 	}
 
+	// Skip S3 Control requests - they have x-amz-account-id header
+	// These should be handled by S3ControlProcessor even if the path contains an access point ARN
+	// (e.g., ListTagsForResource for an access point)
+	if ctx.LogicalRequest != nil && ctx.LogicalRequest.HTTPRequest != nil {
+		if ctx.LogicalRequest.HTTPRequest.Header.Get("x-amz-account-id") != "" {
+			return false
+		}
+	}
+
+	// Check host-based detection (virtual-hosted style)
 	hostRewrite := p.parseHost(ctx)
 	if hostRewrite != nil && hostRewrite.Service == "s3-accesspoint" {
 		return true
 	}
 
-	// Also check ARN format in path or header
-	// Access point ARNs: arn:aws:s3:region:account-id:accesspoint/access-point-name
-	// if strings.Contains(ctx.Request.URL.Path, "accesspoint") {
-	// 	return true
-	// }
+	// Check for Access Point ARN in path (for AWS_ENDPOINT_URL usage)
+	// When using AWS_ENDPOINT_URL with an Access Point ARN as bucket,
+	// the ARN is included in the path: /v1/aws/gateway/arn:aws:s3:region:account:accesspoint/name/key
+	path := ctx.LogicalRequest.HTTPRequest.URL.Path
+	if p.containsAccessPointARN(path) {
+		return true
+	}
 
+	return false
+}
+
+// containsAccessPointARN checks if the path contains an S3 Access Point or MRAP ARN
+func (p *S3AccessPointProcessor) containsAccessPointARN(path string) bool {
+	// Check for standard Access Point ARN
+	if accessPointARNRegex.MatchString(path) {
+		return true
+	}
+	// Check for Multi-Region Access Point ARN
+	if mrapARNRegex.MatchString(path) {
+		return true
+	}
 	return false
 }
 
 // Process handles S3 Access Point request transformation
 func (p *S3AccessPointProcessor) Process(ctx *processor.ProcessorContext) (*processor.ProcessorResult, error) {
-	hostRewrite := p.parseHost(ctx)
-	// p.log.Debug("Host rewritten",
-	// 	logger.Any("new_host", hostRewrite),
-	// 	logger.String("request_id", middleware.GetReqID(ctx.Ctx)),
-	// )
-
-	if hostRewrite == nil || hostRewrite.Prefix == "" {
-		return nil, fmt.Errorf("cannot extract access point information from host")
-	}
-
-	// Parse access point name and account ID
-	// Format: access-point-name-account-id or just access-point-name
-	accessPointInfo := p.parseAccessPointName(hostRewrite.Prefix)
-
 	result := &processor.ProcessorResult{
 		Service:  "s3", // Access points use s3 service for signing
 		Metadata: make(map[string]interface{}),
 	}
+
+	// Get the path for ARN detection
+	httpPath := ctx.LogicalRequest.HTTPRequest.URL.EscapedPath()
+
+	// Strip mount prefix to get the path after gateway
+	pathAfterGateway := httpPath
+	gatewayIdx := strings.Index(httpPath, "/gateway/")
+	if gatewayIdx != -1 {
+		pathAfterGateway = httpPath[gatewayIdx+len("/gateway"):]
+	} else if strings.HasSuffix(httpPath, "/gateway") {
+		pathAfterGateway = "/"
+	}
+
+	// Try to parse ARN from path first (for AWS_ENDPOINT_URL usage)
+	arnInfo := p.parseARNFromPath(pathAfterGateway)
+	if arnInfo != nil {
+		// ARN-based request: extract target URL and object key from ARN
+		if arnInfo.IsMultiRegion {
+			result.TargetURL = fmt.Sprintf("https://%s.accesspoint.s3-global.amazonaws.com",
+				arnInfo.Alias)
+			result.TargetHost = fmt.Sprintf("%s.accesspoint.s3-global.amazonaws.com",
+				arnInfo.Alias)
+			result.Metadata["type"] = "multi-region"
+		} else {
+			// Standard Access Point: {access-point-name}-{account-id}.s3-accesspoint.{region}.amazonaws.com
+			result.TargetURL = fmt.Sprintf("https://%s-%s.s3-accesspoint.%s.amazonaws.com",
+				arnInfo.Name, arnInfo.AccountID, arnInfo.Region)
+			result.TargetHost = fmt.Sprintf("%s-%s.s3-accesspoint.%s.amazonaws.com",
+				arnInfo.Name, arnInfo.AccountID, arnInfo.Region)
+			result.Metadata["type"] = "single-region"
+		}
+
+		result.Metadata["access_point_name"] = arnInfo.Name
+		result.Metadata["account_id"] = arnInfo.AccountID
+		if arnInfo.Region != "" {
+			result.Metadata["region"] = arnInfo.Region
+		}
+
+		// The object key is everything after the ARN in the path
+		result.TransformedPath = arnInfo.ObjectKey
+		if result.TransformedPath == "" {
+			result.TransformedPath = "/"
+		} else if !strings.HasPrefix(result.TransformedPath, "/") {
+			result.TransformedPath = "/" + result.TransformedPath
+		}
+		result.TransformedPathIsEncoded = true
+
+		if p.log != nil {
+			p.log.Debug("S3 Access Point ARN request",
+				logger.String("access_point", arnInfo.Name),
+				logger.String("account_id", arnInfo.AccountID),
+				logger.String("region", arnInfo.Region),
+				logger.Bool("multi_region", arnInfo.IsMultiRegion),
+				logger.String("target", result.TargetURL),
+				logger.String("object_key", result.TransformedPath),
+			)
+		}
+
+		return result, nil
+	}
+
+	// Fall back to host-based detection (virtual-hosted style)
+	hostRewrite := p.parseHost(ctx)
+	if hostRewrite == nil || hostRewrite.Prefix == "" {
+		return nil, fmt.Errorf("cannot extract access point information from host or path")
+	}
+
+	// Parse access point name and account ID from host prefix
+	accessPointInfo := p.parseAccessPointName(hostRewrite.Prefix)
 
 	// Access point endpoint formats:
 	// 1. access-point-name-account-id.s3-accesspoint.region.amazonaws.com
@@ -91,13 +181,8 @@ func (p *S3AccessPointProcessor) Process(ctx *processor.ProcessorContext) (*proc
 		result.Metadata["account_id"] = accessPointInfo.AccountID
 	}
 
-	// compute the AWS path relative to the provider path
-	actualPath := ctx.OriginalPath
-	if after, ok := strings.CutPrefix(ctx.OriginalPath, ctx.RelativePath); ok {
-		actualPath = after
-	}
-
-	// Ensure path starts with / for AWS
+	// Compute the object key path
+	actualPath := pathAfterGateway
 	if actualPath == "" {
 		actualPath = "/"
 	} else if !strings.HasPrefix(actualPath, "/") {
@@ -105,24 +190,102 @@ func (p *S3AccessPointProcessor) Process(ctx *processor.ProcessorContext) (*proc
 	}
 
 	result.TransformedPath = actualPath
+	result.TransformedPathIsEncoded = true
 
-	// p.log.Debug("S3 Access Point request",
-	// 	logger.String("access_point", accessPointInfo.Name),
-	// 	logger.String("account_id", accessPointInfo.AccountID),
-	// 	logger.Bool("multi_region", accessPointInfo.IsMultiRegion),
-	// 	logger.String("target", result.TargetURL),
-	// 	logger.String("path", result.TransformedPath),
-	// 	logger.String("request_id", middleware.GetReqID(ctx.Ctx)),
-	// )
+	if p.log != nil {
+		p.log.Debug("S3 Access Point host-based request",
+			logger.String("access_point", accessPointInfo.Name),
+			logger.String("account_id", accessPointInfo.AccountID),
+			logger.Bool("multi_region", accessPointInfo.IsMultiRegion),
+			logger.String("target", result.TargetURL),
+			logger.String("path", result.TransformedPath),
+		)
+	}
 
 	return result, nil
 }
 
-// AccessPointInfo contains parsed access point information
+// AccessPointInfo contains parsed access point information (from host)
 type AccessPointInfo struct {
 	Name          string
 	AccountID     string
 	IsMultiRegion bool
+}
+
+// ARNInfo contains parsed ARN information from path
+type ARNInfo struct {
+	Region        string
+	AccountID     string
+	Name          string
+	Alias         string // For MRAP
+	ObjectKey     string
+	IsMultiRegion bool
+}
+
+// parseARNFromPath extracts Access Point ARN components from the request path
+// Path format: /arn:aws:s3:region:account-id:accesspoint/access-point-name/object-key
+// or for MRAP: /arn:aws:s3::account-id:accesspoint/mrap-alias.mrap/object-key
+func (p *S3AccessPointProcessor) parseARNFromPath(path string) *ARNInfo {
+	// Remove leading slash if present
+	path = strings.TrimPrefix(path, "/")
+
+	// Try standard Access Point ARN first
+	// Format: arn:aws:s3:region:account-id:accesspoint/access-point-name
+	matches := accessPointARNRegex.FindStringSubmatch(path)
+	if len(matches) == 4 {
+		region := matches[1]
+		accountID := matches[2]
+		accessPointName := matches[3]
+
+		// Find where the ARN ends and the object key begins
+		// The ARN is: arn:aws:s3:region:account-id:accesspoint/access-point-name
+		arnPattern := fmt.Sprintf("arn:aws:s3:%s:%s:accesspoint/%s", region, accountID, accessPointName)
+		arnIdx := strings.Index(path, arnPattern)
+		objectKey := ""
+		if arnIdx != -1 {
+			remaining := path[arnIdx+len(arnPattern):]
+			if len(remaining) > 0 {
+				objectKey = remaining // Includes leading slash if present
+			}
+		}
+
+		return &ARNInfo{
+			Region:        region,
+			AccountID:     accountID,
+			Name:          accessPointName,
+			ObjectKey:     objectKey,
+			IsMultiRegion: false,
+		}
+	}
+
+	// Try Multi-Region Access Point ARN
+	// Format: arn:aws:s3::account-id:accesspoint/mrap-alias.mrap
+	matches = mrapARNRegex.FindStringSubmatch(path)
+	if len(matches) == 3 {
+		accountID := matches[1]
+		mrapAlias := matches[2]
+
+		// Find where the ARN ends and the object key begins
+		arnPattern := fmt.Sprintf("arn:aws:s3::%s:accesspoint/%s", accountID, mrapAlias)
+		arnIdx := strings.Index(path, arnPattern)
+		objectKey := ""
+		if arnIdx != -1 {
+			remaining := path[arnIdx+len(arnPattern):]
+			if len(remaining) > 0 {
+				objectKey = remaining
+			}
+		}
+
+		return &ARNInfo{
+			AccountID:     accountID,
+			Alias:         mrapAlias,
+			Name:          mrapAlias,
+			ObjectKey:     objectKey,
+			IsMultiRegion: true,
+		}
+	}
+
+	return nil
 }
 
 // parseAccessPointName extracts access point name and account ID
@@ -156,7 +319,7 @@ func (p *S3AccessPointProcessor) parseAccessPointName(prefix string) *AccessPoin
 
 // parseHost extracts access point information from the host
 func (p *S3AccessPointProcessor) parseHost(ctx *processor.ProcessorContext) *processor.HostRewrite {
-	host := ctx.Request.Host
+	host := ctx.LogicalRequest.HTTPRequest.Host
 
 	// Remove port if present
 	if idx := strings.Index(host, ":"); idx != -1 {
@@ -205,6 +368,14 @@ func (p *S3AccessPointProcessor) parseHost(ctx *processor.ProcessorContext) *pro
 			Prefix:  parts[0],
 		}
 	}
+
+	// NOTE: Pattern 4 (detecting {access-point-name}-{account-id}.proxy-domain) was removed
+	// because it incorrectly matched regular S3 bucket names that happen to end with
+	// a 12-digit account ID (e.g., "bucket-tutorial-us-east-1-905418489750").
+	//
+	// Access Point requests via AWS_ENDPOINT_URL are handled by containsAccessPointARN()
+	// in CanProcess() which checks for the ARN in the request path. The AWS SDK places
+	// the Access Point ARN in the path when using AWS_ENDPOINT_URL.
 
 	return nil
 }

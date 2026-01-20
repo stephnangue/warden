@@ -32,6 +32,16 @@ func (p *S3ControlProcessor) CanProcess(ctx *processor.ProcessorContext) bool {
 		return true
 	}
 
+	// S3 Control API requests are identified by the presence of the x-amz-account-id header
+	// This header is required for all S3 Control operations (ListTagsForResource, etc.)
+	// Note: AWS SDKs sign S3 Control requests with "s3" as the service, not "s3-control"
+	if ctx.LogicalRequest != nil && ctx.LogicalRequest.HTTPRequest != nil {
+		accountIDHeader := ctx.LogicalRequest.HTTPRequest.Header.Get("x-amz-account-id")
+		if accountIDHeader != "" && ctx.Service == "s3" {
+			return true
+		}
+	}
+
 	// Check if host pattern matches account ID format
 	hostRewrite := p.parseHost(ctx)
 	// p.log.Debug("Host rewritten",
@@ -47,13 +57,24 @@ func (p *S3ControlProcessor) CanProcess(ctx *processor.ProcessorContext) bool {
 
 // Process handles S3 Control request transformation
 func (p *S3ControlProcessor) Process(ctx *processor.ProcessorContext) (*processor.ProcessorResult, error) {
-	hostRewrite := p.parseHost(ctx)
+	var accountID string
 
-	if hostRewrite == nil || hostRewrite.Prefix == "" {
-		return nil, fmt.Errorf("cannot extract account ID from host")
+	// Try to get account ID from x-amz-account-id header first (required by S3 Control API)
+	if ctx.LogicalRequest.HTTPRequest != nil {
+		accountID = ctx.LogicalRequest.HTTPRequest.Header.Get("x-amz-account-id")
 	}
 
-	accountID := hostRewrite.Prefix
+	// Fall back to parsing from host if header not present
+	if accountID == "" {
+		hostRewrite := p.parseHost(ctx)
+		if hostRewrite != nil && hostRewrite.Prefix != "" {
+			accountID = hostRewrite.Prefix
+		}
+	}
+
+	if accountID == "" {
+		return nil, fmt.Errorf("cannot extract account ID from host or x-amz-account-id header")
+	}
 
 	// Validate account ID format (12 digits)
 	if len(accountID) != 12 {
@@ -80,10 +101,22 @@ func (p *S3ControlProcessor) Process(ctx *processor.ProcessorContext) (*processo
 	result.Metadata["account_id"] = accountID
 	result.Metadata["api_type"] = "control"
 
-	// compute the AWS path relative to the provider path
-	actualPath := ctx.OriginalPath
-	if after, ok := strings.CutPrefix(ctx.OriginalPath, ctx.RelativePath); ok {
-		actualPath = after
+	// Compute the AWS path relative to the streaming path.
+	// Use EscapedPath() to preserve URL encoding (e.g., for ARNs with colons).
+	// URL.Path is always decoded, but EscapedPath() returns RawPath if set,
+	// or a properly encoded version of Path.
+	httpPath := ctx.LogicalRequest.HTTPRequest.URL.EscapedPath()
+
+	// Strip mount prefix (e.g., "/v1/aws/gateway/") to get the actual AWS path
+	// The path format is: /v1/{mount}/gateway/{aws-path}
+	actualPath := httpPath
+
+	// Find and strip the gateway prefix
+	gatewayIdx := strings.Index(httpPath, "/gateway/")
+	if gatewayIdx != -1 {
+		actualPath = httpPath[gatewayIdx+len("/gateway"):]
+	} else if strings.HasSuffix(httpPath, "/gateway") {
+		actualPath = "/"
 	}
 
 	// Ensure path starts with / for AWS
@@ -94,6 +127,7 @@ func (p *S3ControlProcessor) Process(ctx *processor.ProcessorContext) (*processo
 	}
 
 	result.TransformedPath = actualPath
+	result.TransformedPathIsEncoded = true // Mark that path is already URL-encoded
 
 	// p.log.Debug("S3 Control request",
 	// 	logger.String("target", result.TargetURL),
@@ -106,7 +140,7 @@ func (p *S3ControlProcessor) Process(ctx *processor.ProcessorContext) (*processo
 
 // parseHost extracts account ID from the host
 func (p *S3ControlProcessor) parseHost(ctx *processor.ProcessorContext) *processor.HostRewrite {
-	host := ctx.Request.Host
+	host := ctx.LogicalRequest.HTTPRequest.Host
 
 	// Remove port if present
 	if idx := strings.Index(host, ":"); idx != -1 {

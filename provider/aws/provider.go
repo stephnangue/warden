@@ -32,6 +32,7 @@ type awsBackend struct {
 	logger            *logger.GatedLogger
 	proxy             *httputil.ReverseProxy
 	signer            *v4.Signer
+	s3Signer          *v4.Signer // Signer for S3/S3-Control with DisableURIPathEscaping
 	proxyDomains      []string
 	maxBodySize       int64
 	timeout           time.Duration
@@ -78,14 +79,31 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		logger:      conf.Logger.WithSubsystem("aws"),
 		signer:      v4.NewSigner(),
 		storageView: conf.StorageView,
+		// S3 and S3-Control services require DisableURIPathEscaping because
+		// AWS SDKs sign these requests without additional path escaping.
+		// Without this, paths with special characters (like ARNs with colons)
+		// will have signature mismatches due to double-encoding.
+		s3Signer: v4.NewSigner(func(o *v4.SignerOptions) {
+			o.DisableURIPathEscaping = true
+		}),
 	}
 
 	// Initialize proxy
+	// Note: Director is intentionally empty because we modify req.HTTPRequest directly
+	// in processRequest before calling ServeHTTP. The ReverseProxy will use the
+	// already-modified request URL, Host, and headers.
 	b.proxy = &httputil.ReverseProxy{
-		Director:  func(req *http.Request) {},
+		Director: func(req *http.Request) {
+			// Request is already prepared by processRequest - nothing to do here
+			// The URL, Host, and headers have been set before ServeHTTP is called
+		},
 		Transport: sharedTransport,
-		ModifyResponse: func(resp *http.Response) error {
-			return nil
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			b.logger.Error("proxy error",
+				logger.Err(err),
+				logger.String("target_url", r.URL.String()),
+			)
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		},
 	}
 
@@ -93,9 +111,15 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	b.StreamingBackend = &framework.StreamingBackend{
 		StreamingPaths: []*framework.StreamingPath{
 			{
-				Pattern: "gateway/.*",
-				Handler: b.handleGatewayStreaming,
-				HelpSynopsis: "AWS Gateway proxy",
+				Pattern:         "gateway",
+				Handler:         b.handleGatewayStreaming,
+				HelpSynopsis:    "AWS Gateway proxy",
+				HelpDescription: "Proxies requests to AWS services with signature verification",
+			},
+			{
+				Pattern:         "gateway/.*",
+				Handler:         b.handleGatewayStreaming,
+				HelpSynopsis:    "AWS Gateway proxy",
 				HelpDescription: "Proxies requests to AWS services with signature verification",
 			},
 		},
@@ -105,11 +129,6 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			BackendClass:   logical.ClassProvider,
 			TokenExtractor: extractToken,
 			Paths:          b.paths(),
-			PathsSpecial: &logical.Paths{
-				Stream: []string{
-					"gateway/.*",
-				},
-			},
 		},
 	}
 
@@ -169,10 +188,7 @@ func (b *awsBackend) paths() []*framework.Path {
 
 // handleGatewayStreaming handles streaming gateway requests
 func (b *awsBackend) handleGatewayStreaming(ctx context.Context, req *logical.Request, fd *framework.FieldData) error {
-	// Delegate to the existing handleGateway which handles all the gateway logic
-	// req.ResponseWriter and req.HTTPRequest provide the HTTP access
-	// req.Credential contains the minted credentials for AWS signing
-	b.handleGateway(req.ResponseWriter, req.HTTPRequest)
+	b.handleGateway(ctx, req)
 	return nil
 }
 

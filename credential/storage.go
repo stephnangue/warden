@@ -170,11 +170,8 @@ func (m *Manager) LoadFromStorage(ctx context.Context) error {
 			continue
 		}
 
-		for _, credPath := range credKeys {
-			// credPath is like "namespace-uuid/tokenID"
-			// Extract tokenID from path
-			parts := []rune(credPath)
-			tokenID := string(parts[len(nsPath):])
+		for _, tokenID := range credKeys {
+			// credKeys contains just the tokenID (leaf name), not the full path
 
 			cred, err := m.loadCredentialFromStorage(ctx, namespaceID, tokenID)
 			if err != nil {
@@ -379,11 +376,8 @@ func (m *Manager) cleanupExpiredCredentials(ctx context.Context) {
 			continue
 		}
 
-		for _, credPath := range credKeys {
-			// credPath is like "namespace-uuid/tokenID"
-			// Extract tokenID from path
-			parts := []rune(credPath)
-			tokenID := string(parts[len(nsPath):])
+		for _, tokenID := range credKeys {
+			// credKeys contains just the tokenID (leaf name), not the full path
 
 			cred, err := m.loadCredentialFromStorage(ctx, namespaceID, tokenID)
 			if err != nil {

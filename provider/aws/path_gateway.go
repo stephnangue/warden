@@ -7,8 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"maps"
-	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -17,7 +15,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/go-chi/chi/middleware"
-	"github.com/stephnangue/warden/audit"
+	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/aws/processor"
@@ -64,207 +62,171 @@ const (
 	RegionKey      contextKey = "region"
 )
 
-
-// func (b *awsBackend) HandleRequest(w http.ResponseWriter, r *http.Request) error {
-
-// 	p.router.ServeHTTP(w, r)
-
-// 	return nil
-// }
-
-func (b *awsBackend) handleGateway(w http.ResponseWriter, r *http.Request) {
-
-	//relativePath := "/v1/" + b.mountPath + "gateway"
-
-	relativePath := "/v1/" + "gateway"
-
-	originalPath := r.Context().Value("logical.OriginalPath").(string)
-
-	r.URL.Path = originalPath
-
-	ctx := r.Context()
-
+func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Apply timeout if configured
 	if b.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, b.timeout)
 		defer cancel()
-		r = r.WithContext(ctx)
+		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
 	}
 
 	// Set the URL scheme (lost during HTTP parsing)
-	if r.URL.Scheme == "" {
-		if r.TLS != nil {
-			r.URL.Scheme = "https"
+	if req.HTTPRequest.URL.Scheme == "" {
+		if req.HTTPRequest.TLS != nil {
+			req.HTTPRequest.URL.Scheme = "https"
 		} else {
-			r.URL.Scheme = "http"
+			req.HTTPRequest.URL.Scheme = "http"
 		}
 	}
 
 	// Also ensure the URL Host is set (required for signing)
-	if r.URL.Host == "" {
-		r.URL.Host = r.Host
+	if req.HTTPRequest.URL.Host == "" {
+		req.HTTPRequest.URL.Host = req.HTTPRequest.Host
 	}
 
 	// Process the request and prepare it for proxying
-	r, err := b.processRequest(ctx, w, r, relativePath)
+	r, err := b.processRequest(ctx, req)
 	if err != nil {
 		// Error already handled in processRequest
 		return
 	}
 
 	// Forward the request
-	b.proxy.ServeHTTP(w, r)
+	b.proxy.ServeHTTP(req.ResponseWriter, r)
 }
 
 // processRequest handles all request processing before proxying
-func (b *awsBackend) processRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, relativePath string) (*http.Request, error) {
+func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (*http.Request, error) {
 	// Step 1: Read and buffer request body (BEFORE any modifications)
-	// bodyBytes, err := b.readRequestBody(r)
-	bodyBytes, _ := b.readRequestBody(r)
-	// if err != nil {
-	// 	b.auditResponse(nil, r, nil, nil, nil, "", "", http.StatusBadRequest, "Failed to read request body", err.Error(), "", nil)
-	// 	http.Error(w, "Failed to read request body", http.StatusBadRequest)
-	// 	return nil, err
-	// }
+	bodyBytes, err := b.readRequestBody(req.HTTPRequest)
+	if err != nil {
+		http.Error(req.ResponseWriter, "Failed to read request body", http.StatusBadRequest)
+		return nil, err
+	}
 
 	// Step 2: Extract service, region, and credentials from Authorization header
-	service, region, accessKeyID, err := extractFromAuthHeader(r.Header.Get("Authorization"))
+	service, region, _, err := extractFromAuthHeader(req.HTTPRequest.Header.Get("Authorization"))
 	if err != nil {
-		// b.auditResponse(nil, r, nil, nil, nil, "", "", http.StatusUnauthorized, "Unauthorized", err.Error(), "", nil)
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
 		return nil, err
 	}
 
-	// Step 3: Check the credentials validity and enforce security policies (auth dealine and same origin)
-	creds, principalID, roleName, token, err := b.authenticate(r, accessKeyID)
+	// Step 3: Extract authentication data
+	creds, err := b.authenticate(req)
 	if err != nil {
-		// var clientToken *audit.Token
-		// if token != nil {
-		// 	data := make(map[string]string, len(token.Data))
-		// 	maps.Copy(data, token.Data)
-		// 	clientToken = &audit.Token{
-		// 		Type:        token.Type,
-		// 		TokenID:     token.ID,
-		// 		TokenTTL:    int64(time.Until(token.ExpireAt).Seconds()),
-		// 		TokenIssuer: "warden",
-		// 		Data:        data,
-		// 	}
-		// }
-		// b.auditResponse(nil, r, clientToken, nil, nil, roleName, principalID, http.StatusForbidden, "Permission denied", err.Error(), "", nil)
-		http.Error(w, "Permission denied", http.StatusForbidden)
+		http.Error(req.ResponseWriter, "Permission denied", http.StatusForbidden)
 		return nil, err
-	}
-
-	data := make(map[string]string, len(token.Data))
-	maps.Copy(data, token.Data)
-	clientToken := &audit.Token{
-		Type:        token.Type,
-		TokenID:     token.ID,
-		TokenTTL:    int64(time.Until(token.ExpireAt).Seconds()),
-		TokenIssuer: "warden",
-		Data:        data,
 	}
 
 	// Step 4: Verify incoming signature
-	//valid, err := b.verifyIncomingSignature(r, bodyBytes, creds, service, region)
-	_, err = b.verifyIncomingSignature(r, bodyBytes, creds, service, region)
-	// if err != nil {
-	// 	b.auditResponse(nil, r, clientToken, nil, token, roleName, principalID, http.StatusForbidden, "Signature verification failed", err.Error(), "", nil)
-	// 	http.Error(w, "Signature verification failed", http.StatusForbidden)
-	// 	return nil, err
-	// }
-	// if !valid {
-	// 	b.auditResponse(nil, r, clientToken, nil, token, roleName, principalID, http.StatusForbidden, "Signature does not match", "signature does not match", "", nil)
-	// 	http.Error(w, "Signature does not match", http.StatusForbidden)
-	// 	return nil, fmt.Errorf("signature mismatch")
-	// }
+	valid, err := b.verifyIncomingSignature(req.HTTPRequest, bodyBytes, creds, service, region)
+	if err != nil {
+		b.logger.Warn("Signature verification failed", logger.Err(err))
+		http.Error(req.ResponseWriter, "Signature verification failed", http.StatusForbidden)
+		return nil, err
+	}
+	if !valid {
+		b.logger.Warn("Signature does not match")
+		http.Error(req.ResponseWriter, "Signature does not match", http.StatusForbidden)
+		return nil, fmt.Errorf("signature mismatch")
+	}
 
-	b.logger.Trace("incoming signature verified successfully",
-		logger.String("access_key", accessKeyID),
-		logger.String("request_id", middleware.GetReqID(r.Context())),
-	)
+	// b.logger.Trace("incoming signature verified successfully",
+	// 	logger.String("access_key", accessKeyID),
+	// 	logger.String("request_id", req.RequestID),
+	// )
 
 	// Step 5: Get AWS credentials
-	awsCreds, err := b.getCredentials(ctx, accessKeyID, roleName, time.Until(token.ExpireAt))
-	// if err != nil {
-	// 	b.auditResponse(nil, r, clientToken, nil, token, roleName, principalID, http.StatusUnauthorized, "Unauthorized", err.Error(), "", nil)
-	// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
-	// 	return nil, err
-	// }
+	awsCreds, err := b.getCredentials(req)
+	if err != nil {
+		b.logger.Warn("Fail to extract aws credentials", logger.Err(err))
+		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
+		return nil, err
+	}
 
 	// Step 6: Create processor context
 	processorCtx := &processor.ProcessorContext{
-		Request:      r,
-		BodyBytes:    bodyBytes,
-		OriginalPath: r.Context().Value("logical.OriginalPath").(string),
-		RelativePath: relativePath,
-		Credentials:  creds,
-		AWSCreds:     awsCreds,
-		AccessKeyID:  accessKeyID,
-		RoleName:     roleName,
-		PrincipalID:  principalID,
-		TokenTTL:     time.Until(token.ExpireAt),
-		Service:      service,
-		Region:       region,
-		Ctx:          ctx,
+		LogicalRequest: req,
+		Service:        service,
+		Region:         region,
 	}
+
+	// Debug: Log incoming request details for Access Point troubleshooting
+	b.logger.Debug("Incoming request details",
+		logger.String("method", req.HTTPRequest.Method),
+		logger.String("host", req.HTTPRequest.Host),
+		logger.String("path", req.HTTPRequest.URL.Path),
+		logger.String("rawPath", req.HTTPRequest.URL.RawPath),
+		logger.String("escapedPath", req.HTTPRequest.URL.EscapedPath()),
+		logger.String("rawQuery", req.HTTPRequest.URL.RawQuery),
+		logger.String("service", service),
+		logger.String("region", region),
+		logger.String("request_id", req.RequestID),
+	)
 
 	// Step 7: Find and execute the appropriate processor
 	proc := b.processorRegistry.FindProcessor(processorCtx)
-	// if proc == nil {
-	// 	b.auditResponse(nil, r, clientToken, &awsCreds, token, roleName, principalID, http.StatusUnauthorized, "Service not supported", "service not supported", "",
-	// 		map[string]interface{}{
-	// 			"service": service,
-	// 			"region":  region,
-	// 		},
-	// 	)
-	// 	http.Error(w, "Service not supported", http.StatusBadRequest)
-	// 	return nil, fmt.Errorf("no processor found for service: %s", service)
-	// }
+	if proc == nil {
+		http.Error(req.ResponseWriter, "Service not supported", http.StatusBadRequest)
+		return nil, fmt.Errorf("no processor found for service: %s", service)
+	}
+
+	b.logger.Debug("Selected processor",
+		logger.String("processor", proc.Name()),
+		logger.String("request_id", req.RequestID),
+	)
 
 	// Step 8: Process the request
 	result, err := proc.Process(processorCtx)
-	// if err != nil {
-	// 	b.auditResponse(nil, r, clientToken, &awsCreds, token, roleName, principalID, http.StatusBadGateway, "Failed to process request", err.Error(), "",
-	// 		map[string]interface{}{
-	// 			"service": service,
-	// 			"region":  region,
-	// 		},
-	// 	)
-	// 	http.Error(w, "Failed to process request", http.StatusBadGateway)
-	// 	return nil, err
-	// }
+	if err != nil {
+		http.Error(req.ResponseWriter, "Failed to process request", http.StatusBadGateway)
+		return nil, err
+	}
+
+	b.logger.Debug("Processor result",
+		logger.String("processor", proc.Name()),
+		logger.String("targetURL", result.TargetURL),
+		logger.String("targetHost", result.TargetHost),
+		logger.String("transformedPath", result.TransformedPath),
+		logger.Bool("pathIsEncoded", result.TransformedPathIsEncoded),
+		logger.String("request_id", req.RequestID),
+	)
 
 	// Step 9: Apply the processor result to the request
 	target, err := url.Parse(result.TargetURL)
-	// if err != nil {
-	// 	b.auditResponse(nil, r, clientToken, &awsCreds, token, roleName, principalID, http.StatusInternalServerError, "Internal server error", err.Error(), "",
-	// 		map[string]interface{}{
-	// 			"service": service,
-	// 			"region":  region,
-	// 		},
-	// 	)
-	// 	http.Error(w, "Internal server error", http.StatusInternalServerError)
-	// 	return nil, err
-	// }
+	if err != nil {
+		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+		return nil, err
+	}
 
-	r.URL.Scheme = target.Scheme
-	r.URL.Host = target.Host
-	r.Host = result.TargetHost
+	req.HTTPRequest.URL.Scheme = target.Scheme
+	req.HTTPRequest.URL.Host = target.Host
+	req.HTTPRequest.Host = result.TargetHost
 	if result.TransformedPath != "" {
-		r.URL.Path = result.TransformedPath
+		if result.TransformedPathIsEncoded {
+			// Path is already URL-encoded, set RawPath to preserve encoding
+			// and decode it for Path (Go requires Path to be decoded)
+			req.HTTPRequest.URL.RawPath = result.TransformedPath
+			// Decode the path for URL.Path
+			if decodedPath, err := url.PathUnescape(result.TransformedPath); err == nil {
+				req.HTTPRequest.URL.Path = decodedPath
+			} else {
+				req.HTTPRequest.URL.Path = result.TransformedPath
+			}
+		} else {
+			// Path is not encoded, let Go handle encoding
+			req.HTTPRequest.URL.Path = result.TransformedPath
+			req.HTTPRequest.URL.RawPath = ""
+		}
 	}
 
-	r.RequestURI = ""
-
-	//Optionally clear RawPath to avoid encoding issues
-	if r.URL.Path != "" {
-		r.URL.RawPath = ""
-	}
+	// Clear RequestURI - Go's http.Client requires it to be empty for outgoing requests.
+	// It will use URL.Path, URL.RawPath, and URL.RawQuery instead.
+	req.HTTPRequest.RequestURI = ""
 
 	// Clean up headers before re-signing
-	b.cleanHeadersForSigning(r)
+	b.cleanHeadersForSigning(req.HTTPRequest)
 
 	// Step 10: Determine signing service (may differ from routing service)
 	signingService := result.Service
@@ -272,106 +234,53 @@ func (b *awsBackend) processRequest(ctx context.Context, w http.ResponseWriter, 
 		service = "s3" // S3 Control uses s3 for signing
 	}
 
+	// Step 10.5: Determine signing region (may differ from request region)
+	// This handles pseudo-regions like "aws-global" that must be converted
+	// to real regions (e.g., "us-east-1") for signing.
+	signingRegion := region
+	if result.SigningRegion != "" {
+		signingRegion = result.SigningRegion
+	}
+
 	// Step 11: Re-sign the request with valid credentials
-	if err := b.resignRequest(ctx, r, awsCreds, service, region, bodyBytes); err != nil {
-		// b.auditResponse(nil, r, clientToken, &awsCreds, token, roleName, principalID, http.StatusInternalServerError, "Internal server error", err.Error(), r.URL.String(),
-		// 	map[string]interface{}{
-		// 		"service": service,
-		// 		"region":  region,
-		// 	},
-		// )
-		// http.Error(w, "Internal server error", http.StatusInternalServerError)
-		// return nil, err
+	if err := b.resignRequest(ctx, req.HTTPRequest, awsCreds, service, signingRegion, bodyBytes); err != nil {
+		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+		return nil, err
 	}
 
-	// Store context information for response auditing in ModifyResponse
-	ctx = context.WithValue(ctx, ClientTokenKey, clientToken)
-	ctx = context.WithValue(ctx, TokenKey, token)
-	ctx = context.WithValue(ctx, RoleNameKey, roleName)
-	ctx = context.WithValue(ctx, PrincipalIDKey, principalID)
-	ctx = context.WithValue(ctx, ServiceKey, service)
-	ctx = context.WithValue(ctx, RegionKey, region)
-	ctx = context.WithValue(ctx, AWSCredsKey, awsCreds)
-	ctx = context.WithValue(ctx, TargetURLKey, result.TargetURL)
-	r = r.WithContext(ctx)
-
-	return r, nil
+	return req.HTTPRequest, nil
 
 }
 
-func (b *awsBackend) authenticate(r *http.Request, accessKeyId string) (aws.Credentials, string, string, *logical.TokenEntry, error) {
-	var secretAccessKey, principalId, roleName string
-	// token := p.tokenAccess.GetToken(accessKeyId)
-	token := &logical.TokenEntry{}
-	if token != nil {
-		// Use Chi's RealIP middleware result (should be set by router)
-		clientIP := r.Header.Get("X-Real-IP")
-		if clientIP == "" {
-			// Fallback if RealIP middleware wasn't applied
-			clientIP = r.RemoteAddr
-		}
-
-		// Remove port if present
-		if host, _, err := net.SplitHostPort(clientIP); err == nil {
-			clientIP = host
-		}
-
-		// Here we check the credential vadidity, then we enforce the auth deadline policy,
-		// finally we enforce the same origin policy
-		var err error
-		//principalId, roleName, err = p.tokenAccess.ResolveToken(r.Context(), accessKeyId)
-		if err != nil {
-			b.logger.Warn("aws token resolution failed",
-				logger.Err(err),
-				logger.String("request_id", middleware.GetReqID(r.Context())),
-			)
-			return aws.Credentials{}, "", "", nil, fmt.Errorf("permission denied")
-		}
-
-		// Fetch the secretAccessKey from the token store
-		secretAccessKey = token.Data["secret_access_key"]
-	} else {
-		b.logger.Warn("no token found for the provided aws access_key_id",
-			logger.String("access_key_id", accessKeyId),
-			logger.String("request_id", middleware.GetReqID(r.Context())),
-		)
-		return aws.Credentials{}, "", "", nil, fmt.Errorf("permission denied")
-	}
-
+func (b *awsBackend) authenticate(req *logical.Request) (aws.Credentials, error) {
 	return aws.Credentials{
-		AccessKeyID:     accessKeyId,
-		SecretAccessKey: secretAccessKey,
-	}, principalId, roleName, token, nil
+		AccessKeyID:     req.TokenEntry().Data["access_key_id"],
+		SecretAccessKey: req.TokenEntry().Data["secret_access_key"],
+	}, nil
 }
 
-// getCredentials retrieves AWS credentials for the given access key and role name
-func (b *awsBackend) getCredentials(ctx context.Context, accessKeyID, roleName string, ttl time.Duration) (aws.Credentials, error) {
-	// credential, err := p.credsProvider.GetCredentials(ctx, accessKeyID, roleName, ttl)
-	// if err != nil {
-	// 	return aws.Credentials{}, err
-	// }
-	// switch credential.Type {
-	// case cred.AWS_ACCESS_KEYS:
-	// 	if credential.LeaseTTL == 0 {
-	// 		return aws.Credentials{
-	// 			AccessKeyID:     credential.Data["access_key_id"],
-	// 			SecretAccessKey: credential.Data["secret_access_key"],
-	// 			Source:          credential.Data["cred_source"],
-	// 		}, nil
-	// 	} else {
-	// 		return aws.Credentials{
-	// 			AccessKeyID:     credential.Data["access_key_id"],
-	// 			SecretAccessKey: credential.Data["secret_access_key"],
-	// 			Source:          credential.Data["cred_source"],
-	// 			SessionToken:    credential.Data["session_token"],
-	// 			CanExpire:       true,
-	// 			Expires:         time.Now().Add(credential.LeaseTTL),
-	// 		}, nil
-	// 	}
-	// default:
-	// 	return aws.Credentials{}, fmt.Errorf("unsupported aws credential type : %s", credential.Type)
-	// }
-	return aws.Credentials{}, nil
+func (b *awsBackend) getCredentials(req *logical.Request) (aws.Credentials, error) {
+	switch req.Credential.Type {
+	case credential.TypeAWSAccessKeys:
+		if req.Credential.LeaseTTL == 0 {
+			return aws.Credentials{
+				AccessKeyID:     req.Credential.Data["access_key_id"],
+				SecretAccessKey: req.Credential.Data["secret_access_key"],
+				Source:          req.Credential.Data["cred_source"],
+			}, nil
+		} else {
+			return aws.Credentials{
+				AccessKeyID:     req.Credential.Data["access_key_id"],
+				SecretAccessKey: req.Credential.Data["secret_access_key"],
+				Source:          req.Credential.Data["cred_source"],
+				SessionToken:    req.Credential.Data["session_token"],
+				CanExpire:       true,
+				Expires:         time.Now().Add(req.Credential.LeaseTTL),
+			}, nil
+		}
+	default:
+		return aws.Credentials{}, fmt.Errorf("unsupported aws credential type : %s", req.Credential.Type)
+	}
 }
 
 // extractFromAuthHeader parses service, region, and access key from Authorization header
@@ -479,4 +388,3 @@ func (b *awsBackend) cleanHeadersForSigning(r *http.Request) {
 		)
 	}
 }
-
