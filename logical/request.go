@@ -34,7 +34,6 @@ const (
 // being made to Warden. It is used to abstract the details of the higher level
 // request protocol from the handlers.
 type Request struct {
-
 	// Operation is the requested operation type
 	Operation Operation `json:"operation" structs:"operation" mapstructure:"operation"`
 

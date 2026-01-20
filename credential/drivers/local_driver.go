@@ -9,7 +9,6 @@ import (
 )
 
 // LocalDriver fetches static credentials stored directly in the credential spec
-// This is based on the existing LocalFetcher logic from cred/local_fetcher.go
 type LocalDriver struct {
 	logger *logger.GatedLogger
 }

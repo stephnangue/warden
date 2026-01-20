@@ -303,12 +303,6 @@ func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logica
 		}
 	}(activeCtx, ctx)
 
-	// Update the HTTP request with the new context if present
-	if req.HTTPRequest != nil {
-		reqCtx := namespace.ContextWithNamespace(req.HTTPRequest.Context(), ns)
-		req.HTTPRequest = req.HTTPRequest.WithContext(reqCtx)
-	}
-
 	matchingBackend := c.router.MatchingBackend(ctx, req.Path)
 	if matchingBackend == nil {
 		c.logger.Warn("no backend mounted at path",
@@ -536,6 +530,14 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		}
 
 		req.ClientToken = matchingBackend.ExtractToken(req.HTTPRequest)
+
+		// if matchingBackend supports transparency and req.ClientToken is not empty
+
+		// performImplicitAuth(ctx, matchingBackend, req)
+
+		// te, err = c.LookupToken(ctx, req.ClientToken)
+		// if te != nil then req.SetTokenEntry(te)
+		// else c.handleLoginRequest(ctx, req)
 	}
 
 	// Validate the token (non-login requests require authentication)
@@ -707,7 +709,7 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 		return fmt.Errorf("cannot mint credential since token entry is nil")
 	}
 	if te.CredentialSpec == "" {
-		c.logger.Debug("no credential spec for token, skipping credential minting",
+		c.logger.Debug("no credential spec for token",
 			logger.String("token_id", te.ID),
 		)
 		return fmt.Errorf("cannot mint credential since no credential spec is bound to the token")

@@ -85,6 +85,11 @@ path "sys/policy/*" {
   capabilities = ["read", "list"]
 }
 EOF
+./warden policy write aws-streaming - <<EOF
+path "aws/gateway*" {
+  capabilities = ["stream"]
+}
+EOF
 ./warden policy list
 ./warden policy read auth-admin
 ./warden policy delete auth-admin -f
@@ -154,6 +159,24 @@ EOF
     user_claim=sub \
     bound_claims='{"iss":"http://localhost:4444"}' \
     token_ttl=1h
+./warden write auth/jwt/role/aws-streamer \
+    token_type=aws_access_keys \
+    token_policies="aws-streaming" \
+    user_claim=sub \
+    cred_spec_name=aws_local \
+    token_ttl=1h
+./warden write auth/jwt/role/aws-kv \
+    token_type=aws_access_keys \
+    token_policies="aws-streaming" \
+    user_claim=sub \
+    cred_spec_name=aws_static \
+    token_ttl=1h
+./warden write auth/jwt/role/aws-dynamic \
+    token_type=aws_access_keys \
+    token_policies="aws-streaming" \
+    user_claim=sub \
+    cred_spec_name=aws_dynamic \
+    token_ttl=1h
 ./warden list auth/jwt/role
 ./warden read auth/jwt/role/admin
 ./warden read auth/jwt/role/reader
@@ -178,4 +201,77 @@ export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H 'Content-Type: application/x-www-form-urlencoded' \
   -d 'grant_type=client_credentials&client_id=service-client-1&client_secret=service-secret-1-change-this&scope=api:read api:write' \
   | jq -r '.access_token')
-./warden login --method=jwt --token=$JWT --role=admin
+LOGIN_OUTPUT=$(./warden login --method=jwt --token=$JWT --role=aws-kv)
+export AWS_ACCESS_KEY_ID=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*access_key_id=\([^,]*\).*/\1/')
+export AWS_SECRET_ACCESS_KEY=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*secret_access_key=\([^ |]*\).*/\1/')
+export AWS_ENDPOINT_URL=http://localhost:5000/v1/aws/gateway
+
+# test in chid namespace
+
+./warden namespace create PROD
+./warden namespace create SEC -n PROD
+./warden -n PROD/SEC policy write aws-streaming - <<EOF
+path "aws/gateway*" {
+  capabilities = ["stream"]
+}
+EOF
+./warden -n PROD/SEC cred source create vault \
+  --type hashicorp_vault \
+  --config vault_address=http://127.0.0.1:8200 \
+  --config auth_method=approle \
+  --config role_id=c0ae884e-b55e-1736-3710-bb1d88d76182 \
+  --config secret_id=e0b8f9b8-6b32-5478-9a73-196e50734c2f \
+  --config approle_mount=warden_approle
+
+./warden -n PROD/SEC cred spec create aws_local \
+  --type aws_access_keys \
+  --source local \
+  --config access_key_id=test \
+  --config secret_access_key=test
+./warden -n PROD/SEC cred spec create aws_static \
+  --type aws_access_keys \
+  --source vault \
+  --config kv2_mount=kv_static_secret \
+  --config secret_path=aws/prod
+./warden -n PROD/SEC cred spec create aws_dynamic \
+  --type aws_access_keys \
+  --source vault \
+  --config aws_mount=aws \
+  --config role_name=terraform \
+  --config ttl=900s \
+  --config role_session_name=warden \
+  --config role_arn=arn:aws:iam::905418489750:role/terraform-role-warden \
+  --min-ttl 600s \
+  --max-ttl 8h
+
+./warden -n PROD/SEC auth enable --type=jwt --description="jwt test auth method"
+./warden -n PROD/SEC write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+
+./warden -n PROD/SEC write auth/jwt/role/aws-streamer \
+    token_type=aws_access_keys \
+    token_policies="aws-streaming" \
+    user_claim=sub \
+    cred_spec_name=aws_local \
+    token_ttl=1h
+./warden -n PROD/SEC write auth/jwt/role/aws-kv \
+    token_type=aws_access_keys \
+    token_policies="aws-streaming" \
+    user_claim=sub \
+    cred_spec_name=aws_static \
+    token_ttl=1h
+
+./warden -n PROD/SEC provider enable --type=aws --description="aws provider"
+./warden -n PROD/SEC write aws/config proxy_domains="localhost,warden"
+
+export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials&client_id=service-client-1&client_secret=service-secret-1-change-this&scope=api:read api:write' \
+  | jq -r '.access_token')
+LOGIN_OUTPUT=$(./warden -n PROD/SEC login --method=jwt --token=$JWT --role=aws-kv)
+export AWS_ACCESS_KEY_ID=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*access_key_id=\([^,]*\).*/\1/')
+export AWS_SECRET_ACCESS_KEY=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*secret_access_key=\([^ |]*\).*/\1/')
+export AWS_ENDPOINT_URL=http://localhost:5000/v1/PROD/SEC/aws/gateway
+
+
+
+

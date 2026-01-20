@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/logger"
 )
@@ -41,7 +42,9 @@ func (b *awsBackend) resignRequest(
 	b.restoreRequestBody(r, bodyBytes)
 
 	// Sign the request
-	err := b.signer.SignHTTP(ctx, creds, r, payloadHash, service, region, signingTime)
+	// Use the appropriate signer based on service (S3/S3-Control need DisableURIPathEscaping)
+	signer := b.getSigner(service)
+	err := signer.SignHTTP(ctx, creds, r, payloadHash, service, region, signingTime)
 	if err != nil {
 		return fmt.Errorf("failed to sign request: %w", err)
 	}
@@ -50,6 +53,15 @@ func (b *awsBackend) resignRequest(
 	// 	logger.String("request_id", middleware.GetReqID(r.Context())),
 	// )
 	return nil
+}
+
+// getSigner returns the appropriate signer for the service.
+// S3 and S3-Control services require DisableURIPathEscaping.
+func (b *awsBackend) getSigner(service string) *v4.Signer {
+	if service == "s3" || service == "s3-control" {
+		return b.s3Signer
+	}
+	return b.signer
 }
 
 // verifyIncomingSignature verifies the AWS Signature V4 of the incoming request
@@ -98,15 +110,20 @@ func (b *awsBackend) verifyIncomingSignature(
 	// Clone the request for verification
 	testReq := r.Clone(r.Context())
 
-	// b.logger.Debug("Signature Verification Debug",
-	// 	logger.String("method", testReq.Method),
-	// 	logger.String("url", testReq.URL.String()),
-	// 	logger.String("path", testReq.URL.Path),
-	// 	logger.String("rawQuery", testReq.URL.RawQuery),
-	// 	logger.String("signingTime", signingTime.Format(time.RFC3339)),
-	// 	logger.Any("signedHeaders", signedHeadersList),
-	// 	logger.String("request_id", middleware.GetReqID(r.Context())),
-	// )
+	b.logger.Debug("Signature Verification Debug",
+		logger.String("method", testReq.Method),
+		logger.String("url", testReq.URL.String()),
+		logger.String("host", testReq.Host),
+		logger.String("path", testReq.URL.Path),
+		logger.String("rawPath", testReq.URL.RawPath),
+		logger.String("escapedPath", testReq.URL.EscapedPath()),
+		logger.String("rawQuery", testReq.URL.RawQuery),
+		logger.String("signingTime", signingTime.Format(time.RFC3339)),
+		logger.String("service", service),
+		logger.String("region", region),
+		logger.Any("signedHeaders", signedHeadersList),
+		logger.String("request_id", middleware.GetReqID(r.Context())),
+	)
 
 	// Remove ALL headers that were NOT signed by the client
 	// This ensures we only include the headers the client signed
@@ -183,7 +200,9 @@ func (b *awsBackend) verifyIncomingSignature(
 	// )
 
 	// Sign the test request with the retrieved credentials
-	err = b.signer.SignHTTP(r.Context(), creds, testReq, payloadHash, service, region, signingTime)
+	// Use the appropriate signer based on service (S3/S3-Control need DisableURIPathEscaping)
+	signer := b.getSigner(service)
+	err = signer.SignHTTP(r.Context(), creds, testReq, payloadHash, service, region, signingTime)
 	if err != nil {
 		return false, fmt.Errorf("failed to sign request for signature verification: %w", err)
 	}
@@ -214,13 +233,13 @@ func (b *awsBackend) verifyIncomingSignature(
 	// Compare signatures
 	match := providedSignature == calculatedSignature
 
-	// b.logger.Debug("Signature comparison",
-	// 	logger.String("provided", providedSignature),
-	// 	logger.String("calculated", calculatedSignature),
-	// 	logger.String("originalAuth", authHeader),
-	// 	logger.String("calculatedAuth", calculatedAuth),
-	//     logger.String("request_id", middleware.GetReqID(r.Context())),
-	// )
+	b.logger.Debug("Signature comparison",
+		logger.String("provided", providedSignature),
+		logger.String("calculated", calculatedSignature),
+		logger.String("originalAuth", authHeader),
+		logger.String("calculatedAuth", calculatedAuth),
+		logger.String("request_id", middleware.GetReqID(r.Context())),
+	)
 
 	if !match {
 		b.logger.Warn("signature mismatch",
