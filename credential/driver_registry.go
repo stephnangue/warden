@@ -1,15 +1,18 @@
 package credential
 
 import (
+	"context"
 	"fmt"
 	"sync"
+
+	"github.com/openbao/openbao/helper/namespace"
 )
 
 // DriverRegistry manages driver factories and instances
 type DriverRegistry struct {
 	mu        sync.RWMutex
 	factories map[string]SourceDriverFactory // type -> factory
-	instances map[string]SourceDriver        // source_name -> driver instance
+	instances map[string]SourceDriver        // {namespace}:{source_name} -> driver instance
 }
 
 // NewDriverRegistry creates a new driver registry
@@ -36,40 +39,65 @@ func (r *DriverRegistry) RegisterFactory(factory SourceDriverFactory) error {
 	return nil
 }
 
+// qualifiedKey builds a namespace-qualified key for driver instance lookup
+// Format: {namespace_id}:{source_name}
+func (r *DriverRegistry) qualifiedKey(ctx context.Context, sourceName string) (string, error) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get namespace from context: %w", err)
+	}
+	return fmt.Sprintf("%s:%s", ns.ID, sourceName), nil
+}
+
 // CreateDriver creates a driver instance for the given source
-func (r *DriverRegistry) CreateDriver(sourceName string, source *CredSource) (SourceDriver, error) {
+// The driver is stored with a namespace-qualified key to prevent collisions
+// between sources with the same name in different namespaces.
+// Returns the driver and a boolean indicating if a new driver was created (true)
+// or an existing driver was returned (false).
+func (r *DriverRegistry) CreateDriver(ctx context.Context, sourceName string, source *CredSource) (SourceDriver, bool, error) {
+	qualifiedName, err := r.qualifiedKey(ctx, sourceName)
+	if err != nil {
+		return nil, false, err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// Check if instance already exists
-	if driver, exists := r.instances[sourceName]; exists {
-		return driver, nil
+	if driver, exists := r.instances[qualifiedName]; exists {
+		return driver, false, nil
 	}
 
 	// Get factory for source type
 	factory, exists := r.factories[source.Type]
 	if !exists {
-		return nil, fmt.Errorf("%w: %s", ErrDriverNotFound, source.Type)
+		return nil, false, fmt.Errorf("%w: %s", ErrDriverNotFound, source.Type)
 	}
 
 	// Create driver instance
 	driver, err := factory.Create(source.Config, nil) // logger will be passed when integrated
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %v", ErrDriverCreationFailed, source.Type, err)
+		return nil, false, fmt.Errorf("%w: %s: %v", ErrDriverCreationFailed, source.Type, err)
 	}
 
-	// Store instance
-	r.instances[sourceName] = driver
+	// Store instance with namespace-qualified key
+	r.instances[qualifiedName] = driver
 
-	return driver, nil
+	return driver, true, nil
 }
 
 // GetDriver retrieves a driver instance by source name
-func (r *DriverRegistry) GetDriver(sourceName string) (SourceDriver, bool) {
+// Uses namespace from context to build qualified key
+func (r *DriverRegistry) GetDriver(ctx context.Context, sourceName string) (SourceDriver, bool) {
+	qualifiedName, err := r.qualifiedKey(ctx, sourceName)
+	if err != nil {
+		return nil, false
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	driver, exists := r.instances[sourceName]
+	driver, exists := r.instances[qualifiedName]
 	return driver, exists
 }
 

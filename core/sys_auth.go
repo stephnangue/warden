@@ -112,6 +112,11 @@ func (b *SystemBackend) handleAuthCreate(ctx context.Context, req *logical.Reque
 	description, _ := d.Get("description").(string)
 	config, _ := d.Get("config").(map[string]any)
 
+	// Validate mount path (same validation as providers)
+	if err := ValidateMountPath(path); err != nil {
+		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
+	}
+
 	b.logger.Info("mounting auth method",
 		logger.String("path", path),
 		logger.String("type", authType))

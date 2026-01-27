@@ -406,7 +406,7 @@ func TestTokenStore_LookupByAccessor(t *testing.T) {
 	require.NoError(t, err)
 
 	// Lookup by accessor
-	lookedUpEntry, err := core.tokenStore.LookupByAccessor(entry.Accessor)
+	lookedUpEntry, err := core.tokenStore.LookupByAccessor(ctx, entry.Accessor)
 	require.NoError(t, err)
 	require.NotNil(t, lookedUpEntry)
 
@@ -420,7 +420,9 @@ func TestTokenStore_LookupByAccessor_NotFound(t *testing.T) {
 	core := createTestCore(t)
 	defer core.tokenStore.Close()
 
-	_, err := core.tokenStore.LookupByAccessor("nonexistent_accessor")
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	_, err := core.tokenStore.LookupByAccessor(ctx, "nonexistent_accessor")
 	require.Error(t, err)
 	assert.Equal(t, ErrAccessorNotFound, err)
 }
@@ -448,7 +450,7 @@ func TestTokenStore_RevokeByAccessor(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify token is no longer accessible
-	_, err = core.tokenStore.LookupByAccessor(entry.Accessor)
+	_, err = core.tokenStore.LookupByAccessor(ctx, entry.Accessor)
 	require.Error(t, err)
 }
 
@@ -756,4 +758,284 @@ func TestTokenStore_LoadFromStorage(t *testing.T) {
 	principalID, _, err := core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.NoError(t, err)
 	assert.Equal(t, "test-user", principalID)
+}
+
+// ============================================================================
+// Token Revocation Tests (for ExpirationManager integration)
+// ============================================================================
+
+// TestTokenStore_RevokeByExpiration tests token revocation by ID
+func TestTokenStore_RevokeByExpiration(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	authData := &AuthData{
+		PrincipalID:  "test-user",
+		RoleName:     "test-role",
+		AuthDeadline: time.Now().Add(1 * time.Hour),
+		ExpireAt:     time.Now().Add(24 * time.Hour),
+	}
+
+	// Generate token
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeUserPass, authData)
+	require.NoError(t, err)
+
+	// Verify token is accessible
+	tokenValue := entry.Data["username"]
+	_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+	require.NoError(t, err)
+
+	// Revoke by expiration (simulates ExpirationManager callback)
+	err = core.tokenStore.RevokeByExpiration(entry.ID)
+	require.NoError(t, err)
+
+	// Token should no longer be accessible
+	_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+	require.Error(t, err)
+	assert.Equal(t, ErrTokenNotFound, err)
+}
+
+// TestTokenStore_RevokeByExpiration_NotFound tests revocation of non-existent token
+func TestTokenStore_RevokeByExpiration_NotFound(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	// Revoking a non-existent token should not error
+	err := core.tokenStore.RevokeByExpiration("nonexistent-token-id")
+	require.NoError(t, err)
+}
+
+// TestTokenStore_RevokeByExpiration_CleansAccessor tests that revocation cleans up accessor index
+func TestTokenStore_RevokeByExpiration_CleansAccessor(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	authData := &AuthData{
+		PrincipalID:  "test-user",
+		RoleName:     "test-role",
+		AuthDeadline: time.Now().Add(1 * time.Hour),
+		ExpireAt:     time.Now().Add(24 * time.Hour),
+	}
+
+	// Generate token
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeUserPass, authData)
+	require.NoError(t, err)
+
+	// Verify accessor lookup works
+	lookedUp, err := core.tokenStore.LookupByAccessor(ctx, entry.Accessor)
+	require.NoError(t, err)
+	assert.Equal(t, entry.ID, lookedUp.ID)
+
+	// Revoke by expiration
+	err = core.tokenStore.RevokeByExpiration(entry.ID)
+	require.NoError(t, err)
+
+	// Accessor should no longer work
+	_, err = core.tokenStore.LookupByAccessor(ctx, entry.Accessor)
+	require.Error(t, err)
+	assert.Equal(t, ErrAccessorNotFound, err)
+}
+
+// TestTokenStore_RevokeByExpiration_CleansStorage tests that revocation cleans up persistent storage
+func TestTokenStore_RevokeByExpiration_CleansStorage(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	authData := &AuthData{
+		PrincipalID:  "test-user",
+		RoleName:     "test-role",
+		AuthDeadline: time.Now().Add(1 * time.Hour),
+		ExpireAt:     time.Now().Add(24 * time.Hour),
+	}
+
+	// Generate token
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeUserPass, authData)
+	require.NoError(t, err)
+	tokenValue := entry.Data["username"]
+
+	// Revoke by expiration
+	err = core.tokenStore.RevokeByExpiration(entry.ID)
+	require.NoError(t, err)
+
+	// Unload cache to force storage lookup
+	core.tokenStore.UnloadFromCache()
+
+	// Token should not be found even from storage
+	_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+	require.Error(t, err)
+}
+
+// TestTokenStore_RevokeByExpiration_MultipleTimes tests idempotency of revocation
+func TestTokenStore_RevokeByExpiration_MultipleTimes(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	authData := &AuthData{
+		PrincipalID:  "test-user",
+		RoleName:     "test-role",
+		AuthDeadline: time.Now().Add(1 * time.Hour),
+		ExpireAt:     time.Now().Add(24 * time.Hour),
+	}
+
+	// Generate token
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeUserPass, authData)
+	require.NoError(t, err)
+
+	// Revoke multiple times - should be idempotent
+	for i := 0; i < 3; i++ {
+		err = core.tokenStore.RevokeByExpiration(entry.ID)
+		require.NoError(t, err, "revocation attempt %d should succeed", i+1)
+	}
+}
+
+// TestTokenStore_ExpirationManagerRevoker tests the revoker callback format for ExpirationManager
+func TestTokenStore_ExpirationManagerRevoker(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	authData := &AuthData{
+		PrincipalID:  "test-user",
+		RoleName:     "test-role",
+		AuthDeadline: time.Now().Add(1 * time.Hour),
+		ExpireAt:     time.Now().Add(24 * time.Hour),
+	}
+
+	// Generate token
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeUserPass, authData)
+	require.NoError(t, err)
+
+	// Create expiration entry as ExpirationManager would
+	expEntry := &ExpirationEntry{
+		ID:        entry.ID,
+		EntryType: ExpirationTypeToken,
+		ExpiresAt: entry.ExpireAt,
+		IssuedAt:  entry.CreatedAt,
+		Namespace: entry.NamespaceID,
+	}
+
+	// Simulate what ExpirationManager does - call the revoker function
+	revokerFn := func(ctx context.Context, e *ExpirationEntry) error {
+		return core.tokenStore.RevokeByExpiration(e.ID)
+	}
+
+	err = revokerFn(ctx, expEntry)
+	require.NoError(t, err)
+
+	// Verify token is gone
+	tokenValue := entry.Data["username"]
+	_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+	require.Error(t, err)
+}
+
+// TestTokenStore_RevokeByExpiration_JWTToken tests revocation of JWT tokens
+func TestTokenStore_RevokeByExpiration_JWTToken(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	// Create a JWT role token
+	authData := &AuthData{
+		PrincipalID:  "jwt-user",
+		RoleName:     "jwt-role",
+		AuthDeadline: time.Now().Add(1 * time.Hour),
+		ExpireAt:     time.Now().Add(24 * time.Hour),
+	}
+
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+	require.NoError(t, err)
+	require.NotNil(t, entry)
+	assert.Equal(t, TypeJWTRole, entry.Type)
+
+	// Revoke by expiration
+	err = core.tokenStore.RevokeByExpiration(entry.ID)
+	require.NoError(t, err)
+
+	// Token should no longer be in cache
+	_, found := core.tokenStore.byID.Get(entry.ID)
+	assert.False(t, found, "JWT token should be removed from cache after revocation")
+}
+
+// TestTokenStore_RevokeByExpiration_ConcurrentRevocation tests concurrent revocation safety
+func TestTokenStore_RevokeByExpiration_ConcurrentRevocation(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	// Generate multiple tokens
+	const numTokens = 10
+	entries := make([]*TokenEntry, numTokens)
+
+	for i := 0; i < numTokens; i++ {
+		authData := &AuthData{
+			PrincipalID:  "test-user",
+			RoleName:     "test-role",
+			AuthDeadline: time.Now().Add(1 * time.Hour),
+			ExpireAt:     time.Now().Add(24 * time.Hour),
+		}
+
+		entry, err := core.tokenStore.GenerateToken(ctx, TypeUserPass, authData)
+		require.NoError(t, err)
+		entries[i] = entry
+	}
+
+	// Concurrently revoke all tokens
+	done := make(chan error, numTokens)
+	for _, entry := range entries {
+		go func(tokenID string) {
+			done <- core.tokenStore.RevokeByExpiration(tokenID)
+		}(entry.ID)
+	}
+
+	// Wait for all revocations to complete
+	for i := 0; i < numTokens; i++ {
+		err := <-done
+		assert.NoError(t, err)
+	}
+
+	// Verify all tokens are revoked
+	for _, entry := range entries {
+		tokenValue := entry.Data["username"]
+		_, _, err := core.tokenStore.ResolveToken(ctx, tokenValue)
+		assert.Error(t, err, "token %s should be revoked", entry.ID)
+	}
+}
+
+// TestTokenStore_RevokeByExpiration_WithRootToken tests that root token revocation works correctly
+func TestTokenStore_RevokeByExpiration_WithRootToken(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	// Generate root token
+	rootToken, err := core.tokenStore.GenerateRootToken()
+	require.NoError(t, err)
+	require.NotEmpty(t, rootToken)
+
+	// Get root token ID
+	rootTokenID := core.tokenStore.rootTokenManager.GetCurrentRootTokenID()
+	require.NotEmpty(t, rootTokenID)
+
+	// Revoke by expiration
+	err = core.tokenStore.RevokeByExpiration(rootTokenID)
+	require.NoError(t, err)
+
+	// Root token manager should still think it has a root token
+	// (RevokeByExpiration doesn't clear the rootTokenManager state - that's expected)
+	// The token is gone from cache/storage but manager state is separate
+	// This is because ExpirationManager doesn't know about root token semantics
+
+	// Verify token is no longer in cache
+	_, found := core.tokenStore.byID.Get(rootTokenID)
+	assert.False(t, found, "root token should be removed from cache after revocation")
 }

@@ -10,6 +10,7 @@ import (
 const (
 	TypeDatabaseUserPass = "database_userpass"
 	TypeAWSAccessKeys    = "aws_access_keys"
+	TypeVaultToken       = "vault_token"
 )
 
 // Source type constants
@@ -30,13 +31,19 @@ const (
 
 // Credential represents a credential with enhanced metadata
 type Credential struct {
+	// Identity
+	// CredentialID is the unique identifier for this credential instance.
+	// Always a UUID, generated when the credential is minted.
+	// This is separate from LeaseID which is the source's revocation handle.
+	CredentialID string // UUID - unique identifier for this credential instance
+
 	// Type information
 	Type     string // Credential type name (e.g., "database_userpass", "aws_access_keys")
 	Category string // Category for routing/organization
 
 	// Lifecycle
 	LeaseTTL time.Duration // TTL for dynamic credentials (0 for static)
-	LeaseID  string        // Lease ID for revocation (empty for static)
+	LeaseID  string        // Lease ID for revocation at source (empty for static)
 	TokenID  string        // Session token this credential is bound to
 	IssuedAt time.Time     // When the credential was issued
 
@@ -44,7 +51,8 @@ type Credential struct {
 	Data map[string]string // Type-specific credential data
 
 	// Metadata
-	SourceType string // Which driver issued this credential
+	SourceName string // Name of the credential source (for driver lookup during revocation)
+	SourceType string // Type of the driver that issued this credential
 	Revocable  bool   // Whether this credential can be revoked
 	SpecName   string // Which spec created this credential (for tracking/audit)
 }

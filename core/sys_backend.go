@@ -88,11 +88,24 @@ func ValidateMountPath(path string) error {
 	// Strip trailing slash for validation (paths typically end with /)
 	path = strings.TrimSuffix(path, "/")
 
-	// Validate path doesn't contain reserved patterns
+	// Validate path doesn't contain reserved system patterns
 	reservedPaths := []string{"sys", "auth", "audit"}
 	for _, reserved := range reservedPaths {
 		if strings.HasPrefix(path, reserved) {
 			return fmt.Errorf("path cannot start with reserved prefix: %s", reserved)
+		}
+	}
+
+	// Validate path doesn't contain transparent mode reserved words
+	// These paths are used for loginless/JWT-based authentication: role/{role}/gateway/...
+	// We check for path segments to avoid false positives (e.g., "myrole" should be allowed)
+	transparentReservedWords := []string{"role", "gateway"}
+	pathSegments := strings.Split(path, "/")
+	for _, segment := range pathSegments {
+		for _, reserved := range transparentReservedWords {
+			if segment == reserved {
+				return fmt.Errorf("path cannot contain reserved transparent mode segment: %s", reserved)
+			}
 		}
 	}
 

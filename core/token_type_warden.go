@@ -34,11 +34,6 @@ func (t *WardenTokenType) Generate(authData *AuthData, entry *TokenEntry) (map[s
 	}, nil
 }
 
-func (t *WardenTokenType) ExtractValue(tokenValue string) string {
-	// For Warden tokens, the full value is the lookup value
-	return tokenValue
-}
-
 func (t *WardenTokenType) ValidateValue(tokenValue string) bool {
 	return strings.HasPrefix(tokenValue, "cws.") && len(tokenValue) == 68
 }

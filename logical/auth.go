@@ -52,11 +52,12 @@ type Auth struct {
 
 // AuthData contains the authentication data used to generate a token.
 type AuthData struct {
-	PrincipalID  string    // Principal identifier
-	RoleName     string    // Associated role
-	AuthDeadline time.Time // Auth validity deadline
-	ExpireAt     time.Time // Token expiration
+	PrincipalID    string    // Principal identifier
+	RoleName       string    // Associated role
+	AuthDeadline   time.Time // Auth validity deadline
+	ExpireAt       time.Time // Token expiration
 	CredentialSpec string
-	Policies []string
-	ClientIP string
+	Policies       []string
+	ClientIP       string
+	TokenValue     string // External token value (e.g., JWT for transparent mode)
 }

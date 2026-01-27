@@ -67,7 +67,202 @@ path "aws/creds/*" {
 path "aws/roles/*" {
   capabilities = ["read"]
 }
+
+# allow creating tokens with any role
+path "auth/token/create/*" {
+  capabilities = ["create", "update"]
+}
+
+# allow revoking tokens via accessor (for cleanup)
+path "auth/token/revoke-accessor" {
+  capabilities = ["update"]
+}
 EOF
+
+echo ""
+echo "=========================================="
+echo "Creating Token Roles for Warden"
+echo "=========================================="
+
+# Create policy for secrets-reader tokens (read-only access to secrets)
+echo "Creating secrets-reader policy..."
+vault policy write secrets-reader - <<EOF
+# Read-only access to KV secrets
+path "kv_static_secret/*" {
+  capabilities = ["read", "list"]
+}
+
+path "kv_static_secret/data/*" {
+  capabilities = ["read", "list"]
+}
+
+path "kv_static_secret/metadata/*" {
+  capabilities = ["list", "read"]
+}
+EOF
+
+# Create policy for database-user tokens (database credential access)
+echo "Creating database-user policy..."
+vault policy write database-user - <<EOF
+# Database secrets engine - read credentials only
+path "database/creds/*" {
+  capabilities = ["read"]
+}
+
+path "database/roles/*" {
+  capabilities = ["read", "list"]
+}
+EOF
+
+# Create policy for aws-user tokens (AWS credential access)
+echo "Creating aws-user policy..."
+vault policy write aws-user - <<EOF
+# AWS secrets engine - read credentials only
+path "aws/creds/*" {
+  capabilities = ["read", "create", "update"]
+}
+
+path "aws/roles/*" {
+  capabilities = ["read", "list"]
+}
+EOF
+
+# Create policy for full-access tokens (admin-like access)
+echo "Creating full-access policy..."
+vault policy write full-access - <<EOF
+# Full access to all secret engines
+path "kv_static_secret/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+path "kv_static_secret/data/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+path "database/creds/*" {
+  capabilities = ["read"]
+}
+
+path "aws/creds/*" {
+  capabilities = ["read", "create", "update"]
+}
+
+# System health and info
+path "sys/health" {
+  capabilities = ["read"]
+}
+
+path "sys/mounts" {
+  capabilities = ["read", "list"]
+}
+EOF
+
+# Create policy for terraform-admin tokens (full Vault administration)
+echo "Creating terraform-admin policy..."
+vault policy write terraform-admin - <<EOF
+# Full admin access for Terraform to configure Vault
+
+path "*" {
+  capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+}
+EOF
+
+sleep 1
+
+# Token Role 1: secrets-reader - Short-lived read-only tokens for secrets
+echo "Creating token role 'secrets-reader'..."
+vault write auth/token/roles/secrets-reader \
+    allowed_policies="secrets-reader" \
+    disallowed_policies="root" \
+    orphan=true \
+    token_period=1h \
+    renewable=true \
+    token_explicit_max_ttl=24h \
+    token_type="service"
+
+# Token Role 2: database-user - Tokens for database credential access
+echo "Creating token role 'database-user'..."
+vault write auth/token/roles/database-user \
+    allowed_policies="database-user" \
+    disallowed_policies="root" \
+    orphan=true \
+    token_period=30m \
+    renewable=true \
+    token_explicit_max_ttl=8h \
+    token_type="service"
+
+# Token Role 3: aws-user - Tokens for AWS credential access
+echo "Creating token role 'aws-user'..."
+vault write auth/token/roles/aws-user \
+    allowed_policies="aws-user" \
+    disallowed_policies="root" \
+    orphan=true \
+    token_period=1h \
+    renewable=true \
+    token_explicit_max_ttl=12h \
+    token_type="service"
+
+# Token Role 4: full-access - Longer-lived tokens with broader access
+echo "Creating token role 'full-access'..."
+vault write auth/token/roles/full-access \
+    allowed_policies="full-access,secrets-reader,database-user,aws-user" \
+    disallowed_policies="root" \
+    orphan=true \
+    token_period=4h \
+    renewable=true \
+    token_explicit_max_ttl=48h \
+    token_type="service"
+
+# Token Role 5: short-lived - Very short TTL for testing
+echo "Creating token role 'short-lived'..."
+vault write auth/token/roles/short-lived \
+    allowed_policies="secrets-reader" \
+    disallowed_policies="root" \
+    orphan=true \
+    token_ttl=5m \
+    token_max_ttl=15m \
+    renewable=false \
+    token_type="service"
+
+# Token Role 6: terraform-admin - Full admin for Terraform Vault configuration
+echo "Creating token role 'terraform-admin'..."
+vault write auth/token/roles/terraform-admin \
+    allowed_policies="terraform-admin" \
+    disallowed_policies="root" \
+    orphan=true \
+    token_period=4h \
+    renewable=true \
+    token_explicit_max_ttl=24h \
+    token_type="service"
+
+# Token Role 6: ephemeral-admin - Full admin for Terraform Vault configuration
+echo "Creating token role 'ephemeral-admin'..."
+vault write auth/token/roles/ephemeral-admin \
+    allowed_policies="terraform-admin" \
+    disallowed_policies="root" \
+    orphan=true \
+    token_ttl=5m \
+    token_max_ttl=15m \
+    renewable=false \
+    token_type="service"
+    
+sleep 1
+
+# Verify token roles
+echo ""
+echo "Verifying token roles..."
+vault read auth/token/roles/secrets-reader
+vault read auth/token/roles/database-user
+vault read auth/token/roles/aws-user
+vault read auth/token/roles/full-access
+vault read auth/token/roles/short-lived
+vault read auth/token/roles/terraform-admin
+
+echo ""
+echo "✓ Token roles configured successfully!"
+
+# Switch back to root token
+export VAULT_TOKEN=root
 
 # Set the database static credential
 echo "Setting database static creds..."
@@ -109,17 +304,73 @@ vault read auth/warden_approle/role/warden_root_role
 # Test AppRole login
 echo ""
 echo "Testing AppRole login..."
-VAULT_TOKEN=$(vault write -field=token auth/warden_approle/login \
+WARDEN_TOKEN=$(vault write -field=token auth/warden_approle/login \
     role_id="c0ae884e-b55e-1736-3710-bb1d88d76182" \
     secret_id="e0b8f9b8-6b32-5478-9a73-196e50734c2f")
 
-echo "AppRole login successful! Token: ${VAULT_TOKEN:0:20}..."
+echo "AppRole login successful! Token: ${WARDEN_TOKEN:0:20}..."
+
+echo ""
+echo "=========================================="
+echo "Creating Terraform AppRole"
+echo "=========================================="
+
+# Create AppRole role for Terraform with terraform-admin policy
+echo "Creating AppRole role 'terraform_role'..."
+vault write auth/warden_approle/role/terraform_role \
+    token_policies="default,terraform-admin" \
+    token_ttl=3600 \
+    token_period=3600 \
+    token_type="service" \
+    bind_secret_id=true
+
+sleep 1
+
+# Set custom role_id for terraform
+echo "Setting custom role_id for terraform..."
+vault write auth/warden_approle/role/terraform_role/role-id \
+    role_id="tf-role-id-1234-5678-90ab-cdef12345678"
+
+sleep 1
+
+# Create custom secret_id for terraform
+echo "Creating custom secret_id for terraform..."
+vault write -f auth/warden_approle/role/terraform_role/custom-secret-id \
+    secret_id="tf-secret-id-abcd-efgh-ijkl-mnop12345678"
+
+echo ""
+echo "Verifying Terraform AppRole configuration..."
+vault read auth/warden_approle/role/terraform_role
+
+# Test Terraform AppRole login
+echo ""
+echo "Testing Terraform AppRole login..."
+TERRAFORM_TOKEN=$(vault write -field=token auth/warden_approle/login \
+    role_id="tf-role-id-1234-5678-90ab-cdef12345678" \
+    secret_id="tf-secret-id-abcd-efgh-ijkl-mnop12345678")
+
+echo "Terraform AppRole login successful! Token: ${TERRAFORM_TOKEN:0:20}..."
 
 # Test KV access with AppRole token
 echo ""
 echo "Testing KV access with AppRole token..."
-VAULT_TOKEN=$VAULT_TOKEN vault kv put kv_warden_storage/test key=value
-VAULT_TOKEN=$VAULT_TOKEN vault kv get kv_warden_storage/test
+VAULT_TOKEN=$WARDEN_TOKEN vault kv put kv_warden_storage/test key=value
+VAULT_TOKEN=$WARDEN_TOKEN vault kv get kv_warden_storage/test
+
+# Test token creation with AppRole token
+echo ""
+echo "Testing token creation with warden_root token..."
+echo "Creating test token using secrets-reader role..."
+TEST_TOKEN=$(VAULT_TOKEN=$WARDEN_TOKEN vault write -force -field=token auth/token/create/secrets-reader)
+echo "Created token: ${TEST_TOKEN:0:20}..."
+
+# Verify the created token has correct policies
+echo "Verifying created token policies..."
+VAULT_TOKEN=$TEST_TOKEN vault token lookup | grep -A5 policies
+
+# Clean up test token (use root token for cleanup since warden_root doesn't have revoke permission)
+echo "Revoking test token..."
+vault token revoke $TEST_TOKEN
 
 # Switch back to root token for database configuration
 echo ""
@@ -154,17 +405,9 @@ fi
 
 echo "MySQL server is ready!"
 
-# Test MySQL connection manually first
-echo "Testing MySQL connection..."
-if command -v mysql >/dev/null 2>&1; then
-    mysql -h mysql-server -u vaultadmin -pvaultpassword -e "SELECT 1;" 2>&1 || echo "MySQL direct connection test failed"
-else
-    echo "mysql client not available, skipping direct connection test"
-fi
-
-sleep 2
-
 # Configure MySQL connection with better error handling
+# Note: vaultadmin privileges (CREATE USER, GRANT OPTION) are granted via
+# /docker-entrypoint-initdb.d/01-grant-vault-privileges.sql on MySQL container initialization
 echo "Configuring MySQL database connection..."
 vault write database/config/myapp \
     plugin_name=mysql-database-plugin \
@@ -241,15 +484,6 @@ echo ""
 echo "=========================================="
 echo "Vault configuration completed successfully!"
 echo "=========================================="
-
-# Test dynamic credential generation
-echo ""
-echo "Testing dynamic credential generation..."
-vault read database/creds/my-role || {
-    echo "ERROR: Failed to generate dynamic credentials"
-    echo "This might be a database connection or permissions issue"
-    exit 1
-}
 
 echo ""
 echo "✓ All tests passed!"

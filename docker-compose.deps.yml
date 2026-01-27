@@ -133,7 +133,7 @@ services:
       # JWT Access Token Configuration
       STRATEGIES_ACCESS_TOKEN: jwt
       # Optional: Configure JWT lifespan (default is 1h)
-      TTL_ACCESS_TOKEN: 1h
+      TTL_ACCESS_TOKEN: 15m
       TTL_REFRESH_TOKEN: 720h
       TTL_ID_TOKEN: 1h
     networks:

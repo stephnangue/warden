@@ -3,6 +3,8 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -467,6 +469,7 @@ func (c *Core) LoginCreateToken(ctx context.Context, resp *logical.Response) (*l
 		CredentialSpec: auth.CredentialSpec,
 		Policies:       auth.Policies,
 		ClientIP:       auth.ClientIP,
+		TokenValue:     auth.ClientToken,
 	}
 
 	tokenValue, err := c.tokenStore.GenerateToken(ctx, auth.TokenType, &authData)
@@ -508,10 +511,13 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		req.MountType = entry.Type
 		req.MountClass = entry.Class
 		req.MountAccessor = entry.Accessor
+		req.MountPoint = entry.Path
 	}
 
 	// Parse request body before CheckToken since req.Data may be used during policy evaluation
-	if !c.isStreamingRequest(ctx, req.Path) {
+	isStreaming := c.isStreamingRequest(ctx, req.Path)
+
+	if !isStreaming {
 		if err := c.parseRequestBody(req); err != nil {
 			return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil, err
 		}
@@ -531,48 +537,70 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 
 		req.ClientToken = matchingBackend.ExtractToken(req.HTTPRequest)
 
-		// if matchingBackend supports transparency and req.ClientToken is not empty
+		// Check for unauthenticated paths on streaming backends
+		if req.ClientToken == "" {
+			if tmp, ok := matchingBackend.(logical.TransparentModeProvider); ok {
+				relativePath := req.Path
+				if req.MountPoint != "" {
+					relativePath = strings.TrimPrefix(req.Path, req.MountPoint)
+				}
+				if tmp.IsUnauthenticatedPath(relativePath) {
+					req.StreamUnauthenticated = true
+					c.logger.Trace("unauthenticated streaming request",
+						logger.String("path", req.Path),
+					)
+				}
+			}
+		}
 
-		// performImplicitAuth(ctx, matchingBackend, req)
+		// Check for transparent mode and perform implicit auth if needed
+		// Skip if already marked as unauthenticated (handled above)
+		if !req.StreamUnauthenticated {
+			if isTransparent, role := c.isTransparentRequest(req, matchingBackend); isTransparent {
+				if err := c.handleTransparentAuth(ctx, req, matchingBackend, role); err != nil {
+					c.logger.Warn("implicit authentication failed",
+						logger.Err(err),
+						logger.String("path", req.Path),
+						logger.String("operation", string(req.Operation)),
+						logger.String("request_id", req.RequestID),
+					)
 
-		// te, err = c.LookupToken(ctx, req.ClientToken)
-		// if te != nil then req.SetTokenEntry(te)
-		// else c.handleLoginRequest(ctx, req)
+					return logical.ErrorResponse(logical.ErrUnauthorized(err.Error())), nil, nil
+				}
+			}
+		}
 	}
 
+	var auth *logical.Auth
+	var te *logical.TokenEntry
+
 	// Validate the token (non-login requests require authentication)
-	auth, _, te, ctErr := c.CheckToken(ctx, req, false)
-	if ctErr != nil {
-		c.logger.Warn("error when checking token", logger.Err(ctErr))
-		switch {
-		case ctErr == ErrInternalError,
-			errwrap.Contains(ctErr, ErrInternalError.Error()),
-			ctErr == sdklogical.ErrPermissionDenied,
-			errwrap.Contains(ctErr, sdklogical.ErrPermissionDenied.Error()):
-			switch ctErr.(type) {
-			case *multierror.Error:
-				retErr = ctErr
+	// Skip for unauthenticated streaming paths
+	if !req.StreamUnauthenticated {
+		var ctErr error
+		auth, _, te, ctErr = c.CheckToken(ctx, req, false)
+		if ctErr != nil {
+			c.logger.Warn("error when checking token", logger.Err(ctErr))
+			switch {
+			case ctErr == ErrInternalError,
+				errwrap.Contains(ctErr, ErrInternalError.Error()),
+				ctErr == sdklogical.ErrPermissionDenied,
+				errwrap.Contains(ctErr, sdklogical.ErrPermissionDenied.Error()):
+				switch ctErr.(type) {
+				case *multierror.Error:
+					retErr = ctErr
+				default:
+					retErr = multierror.Append(retErr, ctErr)
+				}
 			default:
-				retErr = multierror.Append(retErr, ctErr)
+				retErr = multierror.Append(retErr, sdklogical.ErrInvalidRequest)
 			}
-		default:
-			retErr = multierror.Append(retErr, sdklogical.ErrInvalidRequest)
-		}
 
-		// logInput := &logical.LogInput{
-		// 	Auth:               auth,
-		// 	Request:            req,
-		// 	OuterErr:           ctErr,
-		// 	NonHMACReqDataKeys: nonHMACReqDataKeys,
-		// }
-		// if err := c.auditBroker.LogRequest(ctx, logInput, c.auditedHeaders); err != nil {
-		// 	c.logger.Error("failed to audit request", "path", req.Path, "error", err)
-		// }
-
-		if errwrap.Contains(retErr, ErrInternalError.Error()) {
-			return nil, auth, retErr
+			if errwrap.Contains(retErr, ErrInternalError.Error()) {
+				return nil, auth, retErr
+			}
+			return logical.ErrorResponse(ctErr), auth, retErr
 		}
-		return logical.ErrorResponse(ctErr), auth, retErr
 	}
 
 	// // Create an audit trail of the request
@@ -587,8 +615,8 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 	// 	return nil, auth, retErr
 	// }
 
-	// For streaming requests, mint credentials and mark as streamed
-	if req.Streamed {
+	// For streaming requests, mint credentials (unless StreamUnauthenticated)
+	if req.Streamed && !req.StreamUnauthenticated {
 		if err := c.mintCredentialForRequest(ctx, req, te); err != nil {
 			c.logger.Error("failed to mint credential for streaming request",
 				logger.Err(err),
@@ -733,6 +761,7 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 	}
 
 	// Issue credential using the credential manager
+	// Credentials are cache-only (not persisted) - ExpirationEntry handles lease revocation
 	cred, err := c.credentialManager.IssueCredential(ctx, te.ID, te.CredentialSpec, tokenTTL)
 	if err != nil {
 		return fmt.Errorf("failed to issue credential: %w", err)
@@ -740,12 +769,6 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 
 	// Inject credential into request
 	req.Credential = cred
-
-	c.logger.Debug("credential minted for streaming request",
-		logger.String("token_id", te.ID),
-		logger.String("spec", te.CredentialSpec),
-		logger.String("cred_type", cred.Type),
-	)
 
 	return nil
 }
@@ -762,4 +785,149 @@ func extractToken(r *http.Request) string {
 		return authHeader[7:]
 	}
 	return ""
+}
+
+// isTransparentRequest checks if this is a transparent mode request.
+// Returns true and the role name if the backend supports transparent mode,
+// transparent mode is enabled, and the path is a gateway path.
+// The role may be empty if no role is in the URL and no default role is configured.
+func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backend) (bool, string) {
+	// Check if backend supports transparent mode
+	tmp, ok := backend.(logical.TransparentModeProvider)
+	if !ok {
+		return false, ""
+	}
+
+	// Check if transparent mode is enabled
+	if !tmp.IsTransparentMode() {
+		return false, ""
+	}
+
+	// Get the path relative to the mount point for pattern matching
+	// req.Path at this point still includes the mount prefix (e.g., "vault-auto/role/terraform/gateway/...")
+	// The transparent pattern expects paths relative to the mount (e.g., "role/terraform/gateway/...")
+	relativePath := req.Path
+	if req.MountPoint != "" {
+		relativePath = strings.TrimPrefix(req.Path, req.MountPoint)
+	}
+
+	// Check if this is a gateway path (transparent mode applies to gateway requests)
+	// Gateway paths are: "gateway", "gateway/...", "role/X/gateway", "role/X/gateway/..."
+	if !strings.HasPrefix(relativePath, "gateway") && !strings.Contains(relativePath, "/gateway") {
+		return false, ""
+	}
+
+	// Extract role from path (may return default role or empty string)
+	role := tmp.GetTransparentRole(relativePath)
+	return true, role
+}
+
+// handleTransparentAuth performs implicit authentication for transparent mode requests.
+// It first tries to lookup the token (which may be a JWT) using the existing token store.
+// If not found, it performs implicit auth via the configured auto-auth path.
+// Uses singleflight to prevent duplicate token creation when concurrent requests
+// arrive with the same JWT+role combination.
+//
+// IMPORTANT: The role is validated when reusing cached tokens. A token created for
+// JWT+Role1 cannot be reused for JWT+Role2, as they may have different policies.
+func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, backend logical.Backend, role string) error {
+	// Mark request as transparent mode - credentials will be cache-only
+	req.Transparent = true
+
+	tmp := backend.(logical.TransparentModeProvider)
+	autoAuthPath := tmp.GetAutoAuthPath()
+	clientToken := req.ClientToken
+
+	// Unauthenticated paths are handled earlier in handleNonLoginRequest
+	// (before we even enter handleTransparentAuth), so if we get here with
+	// no token, it's an error.
+	if clientToken == "" {
+		return fmt.Errorf("no token provided for transparent mode request")
+	}
+
+	// Check if role is available (either from URL or default_role config)
+	if role == "" {
+		return fmt.Errorf("transparent mode requires a role: use /role/{role}/gateway/... path or configure default_role")
+	}
+
+	// Transparent mode only supports JWT tokens
+	if !strings.HasPrefix(clientToken, "eyJ") {
+		return fmt.Errorf("transparent mode requires a JWT token (expected eyJ prefix)")
+	}
+
+	// Step 1: Try to lookup the token using JWT+role for proper ID computation
+	te, err := c.LookupJWTTokenWithRole(ctx, clientToken, role)
+	if err == nil && te != nil {
+		// Token found with correct role
+		req.SetTokenEntry(te)
+		return nil
+	}
+
+	// Step 2: Token not found - perform implicit auth with singleflight
+	// Use hash of JWT+role as the key to:
+	// 1. Reduce memory overhead (JWTs can be 1-2KB+)
+	// 2. Avoid storing sensitive JWT in singleflight map keys
+	// 3. Ensure fast fixed-size key comparison
+	jwtHash := sha256.Sum256([]byte(clientToken + ":" + role))
+	singleflightKey := hex.EncodeToString(jwtHash[:])
+
+	// Use singleflight to ensure only one implicit auth per JWT+role combination
+	// This prevents duplicate token creation when concurrent requests arrive
+	result, err, shared := c.transparentAuthGroup.Do(singleflightKey, func() (interface{}, error) {
+		// Double-check: another goroutine may have just created the token for this role
+		checkTE, lookupErr := c.LookupJWTTokenWithRole(ctx, clientToken, role)
+		if lookupErr == nil && checkTE != nil {
+			return checkTE, nil
+		}
+
+		// Build login request to the auto-auth path (e.g., auth/jwt/login)
+		loginPath := strings.TrimSuffix(autoAuthPath, "/") + "/login"
+		loginReq := &logical.Request{
+			Operation:   logical.UpdateOperation,
+			Path:        loginPath,
+			HTTPRequest: req.HTTPRequest,
+			Data: map[string]any{
+				"jwt":  clientToken,
+				"role": role,
+			},
+			ClientIP:  req.ClientIP,
+			RequestID: req.RequestID,
+		}
+
+		// Perform the login request
+		loginResp, _, loginErr := c.handleLoginRequest(ctx, loginReq)
+		if loginErr != nil {
+			return nil, loginErr
+		}
+
+		// Check for authentication errors (e.g., expired JWT, invalid token)
+		if loginResp != nil && loginResp.Err != nil {
+			return nil, loginResp.Err
+		}
+
+		if loginResp == nil || loginResp.Auth == nil {
+			return nil, fmt.Errorf("implicit auth returned no auth data")
+		}
+
+		// Lookup the newly created token using JWT+role
+		// The token was created with the JWT as its lookup value, so we can find it directly
+		newTE, lookupErr := c.LookupJWTTokenWithRole(ctx, clientToken, role)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("failed to lookup created token: %w", lookupErr)
+		}
+
+		return newTE, nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	te = result.(*TokenEntry)
+	_ = shared // suppress unused variable warning
+
+	// Set the token entry on the request
+	req.SetTokenEntry(te)
+
+	return nil
 }

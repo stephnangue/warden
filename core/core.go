@@ -33,6 +33,7 @@ import (
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	phy "github.com/stephnangue/warden/physical"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -190,6 +191,10 @@ type Core struct {
 	credentialTypeRegistry   *credential.TypeRegistry
 	credentialDriverRegistry *credential.DriverRegistry
 
+	// expirationManager provides active TTL enforcement for tokens and credentials
+	// Uses timer-based expiration instead of relying on lazy cache eviction
+	expirationManager *ExpirationManager
+
 	auditDevices map[string]audit.Factory
 
 	authMethods map[string]logical.Factory
@@ -270,6 +275,10 @@ type Core struct {
 
 	// systemBackend is the backend which is used to manage internal operations
 	systemBackend *SystemBackend
+
+	// transparentAuthGroup ensures only one implicit auth per JWT to prevent
+	// duplicate token creation when concurrent requests arrive with the same JWT
+	transparentAuthGroup singleflight.Group
 }
 
 type CoreConfig struct {
@@ -324,6 +333,11 @@ type CoreConfig struct {
 
 func (c *Core) Shutdown() error {
 	c.logger.Info("Shutting down the core")
+
+	// Stop expiration manager first to prevent new expirations during shutdown
+	if c.expirationManager != nil {
+		c.expirationManager.Stop()
+	}
 
 	c.tokenStore.Close()
 
@@ -563,7 +577,6 @@ func (c *Core) MarkInitialized() {
 	c.initialized = true
 }
 
-
 // loadTokensFromStorage loads all persisted tokens from storage into the token store cache.
 // This is called during post-unseal to restore tokens after a restart.
 func (c *Core) loadTokensFromStorage(ctx context.Context) error {
@@ -572,6 +585,68 @@ func (c *Core) loadTokensFromStorage(ctx context.Context) error {
 	}
 
 	return c.tokenStore.LoadFromStorage(ctx)
+}
+
+// setupExpirationManager creates and initializes the expiration manager for timer-based TTL enforcement.
+// This provides guaranteed expiration of tokens and credentials regardless of cache activity.
+func (c *Core) setupExpirationManager(ctx context.Context) error {
+	c.logger.Info("setting up expiration manager")
+
+	// Create storage view for expiration data
+	expirationStorage := NewBarrierView(c.barrier, expirationStoragePath)
+
+	// Create expiration manager with Core reference for namespace lookup and revocation
+	c.expirationManager = NewExpirationManager(
+		c,
+		c.logger.WithSubsystem("expiration"),
+		expirationStorage,
+	)
+
+	// Restore persisted expiration entries from storage
+	if err := c.expirationManager.Restore(ctx); err != nil {
+		c.logger.Warn("failed to restore expiration entries", logger.Err(err))
+		// Don't fail startup for restoration errors
+	}
+
+	c.logger.Info("expiration manager setup complete")
+
+	return nil
+}
+
+// revokeTokenByExpiration is called by the expiration manager when a token expires
+func (c *Core) revokeTokenByExpiration(ctx context.Context, entry *ExpirationEntry) error {
+	if c.tokenStore == nil {
+		return fmt.Errorf("token store not initialized")
+	}
+
+	// Delegate to token store which handles cache and storage cleanup
+	return c.tokenStore.RevokeByExpiration(entry.ID)
+}
+
+// revokeCredentialByExpiration is called by the expiration manager when a credential expires.
+// This handles both cache-only (transparent mode) and persisted credentials.
+// The credential manager compares CredentialID to decide whether to delete from cache.
+func (c *Core) revokeCredentialByExpiration(ctx context.Context, entry *ExpirationEntry) error {
+	if c.credentialManager == nil {
+		return fmt.Errorf("credential manager not initialized")
+	}
+	// Delegate to credential manager which handles both revocation and cache cleanup
+	// entry.ID is the CredentialID (UUID), entry.CacheKey is for cache lookup
+	return c.credentialManager.RevokeByExpiration(ctx, entry.ID, entry.CacheKey, entry.LeaseID, entry.SourceName, entry.Revocable)
+}
+
+// stopExpirationManager stops the expiration manager during seal
+func (c *Core) stopExpirationManager() error {
+	if c.expirationManager != nil {
+		c.expirationManager.Stop()
+		c.expirationManager = nil
+	}
+	return nil
+}
+
+// GetExpirationManager returns the expiration manager (for subsystem integration)
+func (c *Core) GetExpirationManager() *ExpirationManager {
+	return c.expirationManager
 }
 
 // SetConfig sets core's config object to the newly provided config.
@@ -984,9 +1059,9 @@ func (c *Core) preSeal() error {
 	if err := c.teardownAudits(context.Background()); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error tearing down audits: %w", err))
 	}
-	// if err := c.stopExpiration(); err != nil {
-	// 	result = multierror.Append(result, fmt.Errorf("error stopping expiration: %w", err))
-	// }
+	if err := c.stopExpirationManager(); err != nil {
+		result = multierror.Append(result, fmt.Errorf("error stopping expiration manager: %w", err))
+	}
 	// if err := c.teardownCredentials(context.Background()); err != nil {
 	// 	result = multierror.Append(result, fmt.Errorf("error tearing down credentials: %w", err))
 	// }
@@ -1050,7 +1125,7 @@ type standardUnsealStrategy struct {
 }
 
 func (s standardUnsealStrategy) unseal(ctx context.Context, logger *logger.GatedLogger, c *Core) error {
-	c.logger.Debug("standard unseal starting")
+	c.logger.Trace("standard unseal starting")
 
 	c.activeTime = time.Now().UTC()
 
@@ -1067,7 +1142,7 @@ func (s standardUnsealStrategy) unseal(ctx context.Context, logger *logger.Gated
 type readonlyUnsealStrategy struct{}
 
 func (s readonlyUnsealStrategy) unseal(ctx context.Context, logger *logger.GatedLogger, c *Core) error {
-	c.logger.Debug("read-only unseal starting")
+	c.logger.Trace("read-only unseal starting")
 	return s.unsealShared(ctx, logger, c, true /* standby */)
 }
 
@@ -1086,8 +1161,15 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 		return err
 	}
 
-	// Start background cleanup for expired credentials (every 5 minutes)
-	c.startCredentialBackgroundCleanup(ctx, 5*time.Minute)
+	// Setup expiration manager for timer-based token/credential expiration
+	// Note: ExpirationManager handles all background cleanup (no separate cleanup goroutine)
+	if err := c.setupExpirationManager(ctx); err != nil {
+		return err
+	}
+
+	// Wire up credential manager to expiration manager for timer-based TTL enforcement
+	// This allows credential manager to register newly issued credentials for expiration
+	c.credentialManager.SetExpirationRegistrar(c.expirationManager)
 
 	if err := c.loadMounts(ctx); err != nil {
 		return err

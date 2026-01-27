@@ -101,7 +101,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	if err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
-			Err:        fmt.Errorf("invalid jwt token: %w", err),
+			Err:        err,
 		}, nil
 	}
 
@@ -109,7 +109,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	if err := validateBoundClaims(claims, b.config.BoundClaims); err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
-			Err:        fmt.Errorf("bound claims validation failed: %w", err),
+			Err:        err,
 		}, nil
 	}
 
@@ -117,7 +117,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	if err := validateBoundClaims(claims, role.BoundClaims); err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
-			Err:        fmt.Errorf("role bound claims validation failed: %w", err),
+			Err:        err,
 		}, nil
 	}
 
@@ -160,13 +160,20 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	}
 
 	jwtExpiration := time.Unix(expTimestamp, 0)
-	tokenTTL := time.Until(jwtExpiration)
+	jwtTTL := time.Until(jwtExpiration)
 
-	if tokenTTL <= 0 {
+	if jwtTTL <= 0 {
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
 			Err:        fmt.Errorf("jwt has expired"),
 		}, nil
+	}
+
+	// Calculate effective TTL: min(role.TokenTTL, jwtTTL)
+	// The token should never outlive the JWT's actual expiration
+	effectiveTTL := jwtTTL
+	if role.TokenTTL > 0 && role.TokenTTL < jwtTTL {
+		effectiveTTL = role.TokenTTL
 	}
 
 	// Return auth response using role configuration
@@ -179,8 +186,9 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 			CredentialSpec: role.CredSpecName,
 			TokenType:      role.TokenType,
 			AuthDeadline:   role.TokenAuthDeadline,
-			TokenTTL:       role.TokenTTL,
+			TokenTTL:       effectiveTTL,
 			ClientIP:       req.ClientIP,
+			ClientToken:    jwtToken, // Pass JWT for token types that need the original value
 		},
 		Data: map[string]any{
 			"principal_id": principalID,
