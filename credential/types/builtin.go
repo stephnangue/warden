@@ -14,5 +14,10 @@ func RegisterBuiltinTypes(registry *credential.TypeRegistry) error {
 		return err
 	}
 
+	// Register Vault token type
+	if err := registry.Register(&VaultTokenCredType{}); err != nil {
+		return err
+	}
+
 	return nil
 }

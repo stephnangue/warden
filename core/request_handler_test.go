@@ -3,11 +3,15 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/openbao/openbao/helper/namespace"
 	"github.com/stephnangue/warden/logical"
@@ -595,4 +599,352 @@ func TestRestrictedSysAPIs_AllowedPaths(t *testing.T) {
 				"path %s should be allowed", path)
 		})
 	}
+}
+
+// mockTransparentModeProvider implements both logical.Backend and logical.TransparentModeProvider
+type mockTransparentModeProvider struct {
+	mockProvider
+	transparentMode bool
+	autoAuthPath    string
+	defaultRole     string
+}
+
+func (m *mockTransparentModeProvider) IsTransparentMode() bool {
+	return m.transparentMode
+}
+
+func (m *mockTransparentModeProvider) GetAutoAuthPath() string {
+	return m.autoAuthPath
+}
+
+func (m *mockTransparentModeProvider) GetTransparentRole(path string) string {
+	// Simple pattern matching for testing: role/{role}/gateway...
+	if strings.HasPrefix(path, "role/") {
+		parts := strings.Split(path, "/")
+		if len(parts) >= 3 && parts[2] == "gateway" {
+			return parts[1]
+		}
+	}
+	return m.defaultRole
+}
+
+func (m *mockTransparentModeProvider) IsUnauthenticatedPath(path string) bool {
+	// Default to requiring auth for tests
+	return false
+}
+
+func (m *mockTransparentModeProvider) SpecialPaths() *logical.Paths {
+	return &logical.Paths{
+		Stream: []string{
+			"gateway/*",
+			"role/*/gateway/*",
+		},
+	}
+}
+
+// TestIsTransparentRequest tests the isTransparentRequest function
+func TestIsTransparentRequest(t *testing.T) {
+	core := createTestCore(t)
+
+	t.Run("returns false for non-TransparentModeProvider backend", func(t *testing.T) {
+		backend := &mockProvider{}
+		req := &logical.Request{Path: "role/terraform/gateway/v1/secret"}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.False(t, isTransparent)
+		assert.Empty(t, role)
+	})
+
+	t.Run("returns false when transparent mode is disabled", func(t *testing.T) {
+		backend := &mockTransparentModeProvider{
+			transparentMode: false,
+			autoAuthPath:    "auth/jwt/",
+			defaultRole:     "default",
+		}
+		req := &logical.Request{Path: "role/terraform/gateway/v1/secret"}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.False(t, isTransparent)
+		assert.Empty(t, role)
+	})
+
+	t.Run("returns false when path does not match transparent pattern", func(t *testing.T) {
+		backend := &mockTransparentModeProvider{
+			transparentMode: true,
+			autoAuthPath:    "auth/jwt/",
+			defaultRole:     "", // No default role
+		}
+		req := &logical.Request{Path: "config"}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.False(t, isTransparent)
+		assert.Empty(t, role)
+	})
+
+	t.Run("returns true with role for matching path", func(t *testing.T) {
+		backend := &mockTransparentModeProvider{
+			transparentMode: true,
+			autoAuthPath:    "auth/jwt/",
+		}
+		req := &logical.Request{Path: "role/terraform/gateway/v1/secret/data/foo"}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "terraform", role)
+	})
+
+	t.Run("returns true with default role when path does not match but default is set", func(t *testing.T) {
+		backend := &mockTransparentModeProvider{
+			transparentMode: true,
+			autoAuthPath:    "auth/jwt/",
+			defaultRole:     "default-role",
+		}
+		req := &logical.Request{Path: "gateway/v1/secret"}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "default-role", role)
+	})
+}
+
+// TestHandleTransparentAuth tests the handleTransparentAuth function
+func TestHandleTransparentAuth(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	t.Run("returns error when no token provided", func(t *testing.T) {
+		backend := &mockTransparentModeProvider{
+			transparentMode: true,
+			autoAuthPath:    "auth/jwt/",
+		}
+		req := &logical.Request{
+			ClientToken: "",
+		}
+
+		err := core.handleTransparentAuth(ctx, req, backend, "terraform")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no token provided")
+	})
+
+	t.Run("returns error for non-JWT token", func(t *testing.T) {
+		backend := &mockTransparentModeProvider{
+			transparentMode: true,
+			autoAuthPath:    "auth/jwt/",
+		}
+		req := &logical.Request{
+			ClientToken: "cws.not-a-jwt-token",
+		}
+
+		err := core.handleTransparentAuth(ctx, req, backend, "terraform")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "transparent mode requires a JWT token")
+	})
+
+	t.Run("uses existing JWT token when found in cache", func(t *testing.T) {
+		// Create a JWT token using GenerateToken with the jwt_role type
+		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXVzZXIifQ.test-sig"
+
+		authData := &AuthData{
+			TokenValue:     sampleJWT,
+			RoleName:       "terraform",
+			PrincipalID:    "test-user",
+			AuthDeadline:   time.Now().Add(1 * time.Hour),
+			ExpireAt:       time.Now().Add(24 * time.Hour),
+			Policies:       []string{"default"},
+			CredentialSpec: "test-spec",
+		}
+		te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+		require.NoError(t, err)
+		require.NotNil(t, te)
+
+		backend := &mockTransparentModeProvider{
+			transparentMode: true,
+			autoAuthPath:    "auth/jwt/",
+		}
+		req := &logical.Request{
+			ClientToken: sampleJWT,
+		}
+
+		err = core.handleTransparentAuth(ctx, req, backend, "terraform")
+		require.NoError(t, err)
+		assert.NotNil(t, req.TokenEntry())
+		assert.Equal(t, te.ID, req.TokenEntry().ID)
+	})
+
+	t.Run("returns error when implicit auth fails - auth backend not mounted", func(t *testing.T) {
+		backend := &mockTransparentModeProvider{
+			transparentMode: true,
+			autoAuthPath:    "auth/jwt/",
+		}
+		// Use a JWT that won't be found in the token store
+		req := &logical.Request{
+			ClientToken: "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
+			HTTPRequest: httptest.NewRequest(http.MethodPost, "/v1/vault/role/terraform/gateway", nil),
+		}
+
+		err := core.handleTransparentAuth(ctx, req, backend, "terraform")
+		// Should fail because the auth backend is not mounted
+		require.Error(t, err)
+	})
+}
+
+// TestHandleTransparentAuth_Singleflight tests that concurrent requests with the same JWT token
+// all resolve to the same cached token entry
+func TestHandleTransparentAuth_Singleflight(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	// Create a JWT token using GenerateToken
+	sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzaW5nbGVmbGlnaHQtdXNlciJ9.test-sig"
+
+	authData := &AuthData{
+		TokenValue:     sampleJWT,
+		RoleName:       "terraform",
+		PrincipalID:    "test-user-singleflight",
+		AuthDeadline:   time.Now().Add(1 * time.Hour),
+		ExpireAt:       time.Now().Add(24 * time.Hour),
+		Policies:       []string{"default"},
+		CredentialSpec: "test-spec",
+	}
+	te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+	require.NoError(t, err)
+	require.NotNil(t, te)
+
+	backend := &mockTransparentModeProvider{
+		transparentMode: true,
+		autoAuthPath:    "auth/jwt/",
+	}
+
+	// Simulate multiple concurrent requests with the same JWT token
+	const numGoroutines = 10
+	var wg sync.WaitGroup
+	results := make(chan *TokenEntry, numGoroutines)
+	errors := make(chan error, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := &logical.Request{
+				ClientToken: sampleJWT,
+			}
+			err := core.handleTransparentAuth(ctx, req, backend, "terraform")
+			if err != nil {
+				errors <- err
+				return
+			}
+			results <- req.TokenEntry()
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+	close(errors)
+
+	// Check no errors occurred
+	for err := range errors {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	// All requests should get the same token (verified by ID and accessor)
+	var firstTE *TokenEntry
+	resultCount := 0
+	for result := range results {
+		resultCount++
+		if firstTE == nil {
+			firstTE = result
+		} else {
+			// Check same ID - proves all requests resolved to the same token
+			assert.Equal(t, firstTE.ID, result.ID, "all requests should get the same token ID")
+			assert.Equal(t, firstTE.Accessor, result.Accessor, "all requests should get the same token accessor")
+		}
+	}
+
+	// Verify we got results from all goroutines
+	assert.Equal(t, numGoroutines, resultCount, "should have received results from all goroutines")
+}
+
+// TestHandleTransparentAuth_JWTDifferentRoles tests that the same JWT with different roles
+// produces different tokens, preventing JWT+Role1 from being reused for JWT+Role2
+func TestHandleTransparentAuth_JWTDifferentRoles(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	// Sample JWT for testing (format is valid but signature is not verified in tests)
+	sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature"
+
+	t.Run("same JWT with different roles should produce different token IDs", func(t *testing.T) {
+		jwtType := &JWTRoleTokenType{}
+
+		// Create token for JWT + Role1
+		entry1 := &TokenEntry{
+			Data: map[string]string{},
+		}
+		authData1 := &AuthData{
+			TokenValue:   sampleJWT,
+			RoleName:     "role1",
+			PrincipalID:  "test-user",
+			ExpireAt:     time.Now().Add(1 * time.Hour),
+			AuthDeadline: time.Now().Add(1 * time.Hour),
+			Policies:     []string{"policy1"},
+		}
+		_, err := jwtType.Generate(authData1, entry1)
+		require.NoError(t, err)
+		id1 := jwtType.ComputeID(entry1.Data["jwt"])
+
+		// Create token for JWT + Role2
+		entry2 := &TokenEntry{
+			Data: map[string]string{},
+		}
+		authData2 := &AuthData{
+			TokenValue:   sampleJWT,
+			RoleName:     "role2",
+			PrincipalID:  "test-user",
+			ExpireAt:     time.Now().Add(1 * time.Hour),
+			AuthDeadline: time.Now().Add(1 * time.Hour),
+			Policies:     []string{"policy2"},
+		}
+		_, err = jwtType.Generate(authData2, entry2)
+		require.NoError(t, err)
+		id2 := jwtType.ComputeID(entry2.Data["jwt"])
+
+		// The token IDs should be different
+		assert.NotEqual(t, id1, id2, "Same JWT with different roles should have different token IDs")
+	})
+
+	t.Run("LookupJWTTokenWithRole returns error for non-existent token", func(t *testing.T) {
+		sampleJWT2 := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.test"
+
+		// Looking up a token that doesn't exist should return an error
+		_, err := core.LookupJWTTokenWithRole(ctx, sampleJWT2, "terraform")
+		assert.Error(t, err, "Looking up non-existent JWT token should return error")
+
+		// Looking up with different role should also fail
+		_, err = core.LookupJWTTokenWithRole(ctx, sampleJWT2, "different-role")
+		assert.Error(t, err, "Looking up with different role should not find the token")
+	})
+
+	t.Run("ComputeData and ComputeID match token creation ID", func(t *testing.T) {
+		jwtType := &JWTRoleTokenType{}
+
+		// Simulate token creation: Generate stores hash of JWT+role in entry.Data["jwt"]
+		entry := &TokenEntry{
+			Data: map[string]string{},
+		}
+		authData := &AuthData{TokenValue: sampleJWT, RoleName: "terraform"}
+		jwtType.Generate(authData, entry)
+
+		// Verify the stored value is a hash of JWT+role (not raw value)
+		expectedHash := sha256.Sum256([]byte(sampleJWT + ":terraform"))
+		assert.Equal(t, hex.EncodeToString(expectedHash[:]), entry.Data["jwt"])
+
+		// Token ID is computed from the stored hash
+		tokenID := jwtType.ComputeID(entry.Data["jwt"])
+
+		// Lookup: hash first, then compute ID - should match
+		lookupHash := jwtType.ComputeData(sampleJWT, "terraform")
+		lookupID := jwtType.ComputeID(lookupHash)
+
+		assert.Equal(t, tokenID, lookupID, "Token creation and lookup should produce same ID")
+	})
 }

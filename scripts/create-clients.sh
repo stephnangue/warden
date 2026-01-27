@@ -2,11 +2,11 @@
 
 set -e
 
-echo "Creating Client 1: service-client-1"
+echo "Creating Client 1: agent"
 wget --post-data='{
-  "client_id": "service-client-1",
-  "client_name": "Service Client 1",
-  "client_secret": "service-secret-1-change-this",
+  "client_id": "agent",
+  "client_name": "Agent",
+  "client_secret": "test@agent",
   "grant_types": ["client_credentials"],
   "response_types": [],
   "scope": "api:read api:write",
@@ -17,11 +17,41 @@ wget --post-data='{
   http://hydra:4445/admin/clients
 
 echo ""
-echo "Creating Client 2: service-client-2"
+echo "Creating Client 2: gilab-job"
 wget --post-data='{
-  "client_id": "service-client-2",
-  "client_name": "Service Client 2",
-  "client_secret": "service-secret-2-change-this",
+  "client_id": "gilab-job",
+  "client_name": "gilab-job",
+  "client_secret": "test@gilab-job",
+  "grant_types": ["client_credentials"],
+  "response_types": [],
+  "scope": "api:read api:write",
+  "token_endpoint_auth_method": "client_secret_post"
+}' \
+  --header="Content-Type: application/json" \
+  -O- \
+  http://hydra:4445/admin/clients
+
+echo ""
+echo "Creating Client 3: kube-pod"
+wget --post-data='{
+  "client_id": "kube-pod",
+  "client_name": "kube-pod",
+  "client_secret": "test@kube-pod",
+  "grant_types": ["client_credentials"],
+  "response_types": [],
+  "scope": "api:read api:write",
+  "token_endpoint_auth_method": "client_secret_post"
+}' \
+  --header="Content-Type: application/json" \
+  -O- \
+  http://hydra:4445/admin/clients
+
+echo ""
+echo "Creating Client 4: admin"
+wget --post-data='{
+  "client_id": "admin",
+  "client_name": "admin",
+  "client_secret": "pass@admin",
   "grant_types": ["client_credentials"],
   "response_types": [],
   "scope": "api:admin api:read",

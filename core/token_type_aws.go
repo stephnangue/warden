@@ -37,11 +37,6 @@ func (t *AWSAccessKeysTokenType) Generate(authData *AuthData, entry *TokenEntry)
 	}, nil
 }
 
-func (t *AWSAccessKeysTokenType) ExtractValue(tokenValue string) string {
-	// For AWS, the access key ID is the lookup value
-	return tokenValue
-}
-
 func (t *AWSAccessKeysTokenType) ValidateValue(tokenValue string) bool {
 	return strings.HasPrefix(tokenValue, "AKIA") && len(tokenValue) == 20
 }

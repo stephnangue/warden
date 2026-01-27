@@ -65,6 +65,16 @@ func ErrConflictf(format string, args ...any) *CodedError {
 	return &CodedError{Status: http.StatusConflict, Message: fmt.Sprintf(format, args...)}
 }
 
+// ErrUnauthorized creates a 401 Unauthorized error.
+func ErrUnauthorized(message string) *CodedError {
+	return &CodedError{Status: http.StatusUnauthorized, Message: message}
+}
+
+// ErrUnauthorizedf creates a formatted 401 Unauthorized error.
+func ErrUnauthorizedf(format string, args ...any) *CodedError {
+	return &CodedError{Status: http.StatusUnauthorized, Message: fmt.Sprintf(format, args...)}
+}
+
 // ErrForbidden creates a 403 Forbidden error.
 func ErrForbidden(message string) *CodedError {
 	return &CodedError{Status: http.StatusForbidden, Message: message}

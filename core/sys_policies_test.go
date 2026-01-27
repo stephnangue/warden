@@ -336,6 +336,22 @@ func TestValidateMountPath(t *testing.T) {
 		{"-invalid", true},      // Starts with hyphen
 		{"_invalid", true},      // Starts with underscore
 		{"valid-path/", false},  // Trailing slash is OK
+
+		// Transparent mode reserved words
+		{"role", true},             // Reserved segment
+		{"role/admin", true},       // Path containing reserved segment
+		{"my/role/path", true},     // Reserved segment in middle
+		{"gateway", true},          // Reserved segment
+		{"gateway/api", true},      // Path containing reserved segment
+		{"my/gateway/path", true},  // Reserved segment in middle
+
+		// Similar names that should be allowed
+		{"myrole", false},          // Not a segment match
+		{"rolename", false},        // Not a segment match
+		{"mygateway", false},       // Not a segment match
+		{"gatewayname", false},     // Not a segment match
+		{"my-role-path", false},    // Hyphen prevents segment match
+		{"my-gateway-path", false}, // Hyphen prevents segment match
 	}
 
 	for _, tc := range testCases {

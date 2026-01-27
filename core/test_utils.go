@@ -14,11 +14,11 @@ import (
 	"github.com/openbao/openbao/helper/locking"
 	"github.com/openbao/openbao/helper/namespace"
 	"github.com/openbao/openbao/sdk/v2/physical"
+	"github.com/openbao/openbao/sdk/v2/physical/inmem"
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	phy "github.com/stephnangue/warden/physical"
-	"github.com/stephnangue/warden/physical/inmem"
 )
 
 // mockAuditDevice implements audit.Device for testing

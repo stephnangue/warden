@@ -94,6 +94,17 @@ type Request struct {
 	// write directly to ResponseWriter rather than returning a Response.
 	// Set by core routing when the path matches a streaming path.
 	Streamed bool `json:"-"`
+
+	// Transparent indicates this request came through transparent mode
+	// (JWT-based implicit authentication). Credentials for transparent
+	// requests are cache-only, not persisted to storage.
+	Transparent bool `json:"-"`
+
+	// StreamUnauthenticated indicates this streaming request is accessing
+	// an unauthenticated path (e.g., PKI certificate PEM files for Vault provider)
+	// and should be allowed without a token. This works regardless of whether
+	// transparent mode is enabled.
+	StreamUnauthenticated bool `json:"-"`
 }
 
 func (r *Request) TokenEntry() *TokenEntry {

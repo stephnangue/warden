@@ -34,10 +34,6 @@ type TokenType interface {
 	// 3. Return the client-facing values (e.g., {"username": "...", "password": "..."})
 	Generate(authData *AuthData, entry *TokenEntry) (map[string]string, error)
 
-	// ExtractValue extracts the lookup value from a token for resolution
-	// E.g., for AWS it's the access key ID, for user_pass it's username
-	ExtractValue(tokenValue string) string
-
 	// ValidateValue checks if a token value matches the expected format
 	ValidateValue(tokenValue string) bool
 

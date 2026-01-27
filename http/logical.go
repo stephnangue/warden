@@ -29,10 +29,6 @@ func handleLogical(c *core.Core, log *logger.GatedLogger) http.Handler {
 		// Send the logical request to the core for processing
 		resp, err := c.HandleRequest(r.Context(), req)
 		if err != nil {
-			log.Error("failed to handle request",
-				logger.Err(err),
-				logger.String("path", req.Path),
-				logger.String("operation", string(req.Operation)))
 			statusCode := errorToStatusCode(err)
 			respondError(w, statusCode, err.Error())
 			return
