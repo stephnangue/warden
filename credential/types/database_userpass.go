@@ -116,12 +116,12 @@ func (t *DatabaseUserPassCredType) Parse(rawData map[string]interface{}, leaseTT
 	database, _ := rawData["database"].(string)
 
 	cred := &credential.Credential{
-		Type:       credential.TypeDatabaseUserPass,
-		Category:   credential.CategoryDatabase,
-		LeaseTTL:   leaseTTL,
-		LeaseID:    leaseID,
-		IssuedAt:   time.Now(),
-		Revocable:  leaseTTL > 0, // Dynamic credentials are revocable
+		Type:      credential.TypeDatabaseUserPass,
+		Category:  credential.CategoryDatabase,
+		LeaseTTL:  leaseTTL,
+		LeaseID:   leaseID,
+		IssuedAt:  time.Now(),
+		Revocable: leaseTTL > 0, // Dynamic credentials are revocable
 		Data: map[string]string{
 			"username": username,
 			"password": password,

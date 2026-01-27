@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	ristretto "github.com/dgraph-io/ristretto/v2"
 	"github.com/openbao/openbao/helper/namespace"
@@ -17,9 +16,9 @@ import (
 
 const (
 	credentialConfigStorePath = "core/credconfig/" // Base path
-	credSpecPrefix            = "specs/"            // CredSpec storage prefix
-	credSourcePrefix          = "sources/"          // CredSource storage prefix
-	builtinLocalSourceName    = "local"             // Virtual local source name
+	credSpecPrefix            = "specs/"           // CredSpec storage prefix
+	credSourcePrefix          = "sources/"         // CredSource storage prefix
+	builtinLocalSourceName    = "local"            // Virtual local source name
 )
 
 var (
@@ -42,7 +41,7 @@ type CredentialConfigStoreConfig struct {
 func DefaultCredConfigStoreConfig() *CredentialConfigStoreConfig {
 	return &CredentialConfigStoreConfig{
 		CacheMaxCost:     50 << 20, // 50 MB
-		CacheNumCounters: 1e6,       // 1 million
+		CacheNumCounters: 1e6,      // 1 million
 	}
 }
 
@@ -71,7 +70,7 @@ func NewCredentialConfigStore(c *Core, config *CredentialConfigStoreConfig) (*Cr
 
 	s := &CredentialConfigStore{
 		core:   c,
-		logger: c.logger.WithSystem("credential-config-store"),
+		logger: c.logger.WithSystem("credential.config-store"),
 		config: config,
 	}
 
@@ -736,24 +735,16 @@ func (c *Core) teardownCredentialConfigStore() error {
 // setupCredentialManager creates and initializes the global credential manager
 // This is called during unseal after setupCredentialConfigStore
 func (c *Core) setupCredentialManager(ctx context.Context) error {
-	// Create storage view for credentials
-	credStorage := NewBarrierView(c.barrier, credential.StoragePath)
-
 	// Create global Manager with CredentialConfigStore as ConfigStoreAccessor
+	// Note: Credentials are cache-only (not persisted) - ExpirationEntry handles lease revocation
 	manager, err := credential.NewManager(
 		c.credentialTypeRegistry,
 		c.credentialDriverRegistry,
-		credStorage,
 		c.credConfigStore, // Implements ConfigStoreAccessor interface
-		c.logger.WithSystem("credential-manager"),
+		c.logger.WithSystem("credential.manager"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create credential manager: %w", err)
-	}
-
-	// Load persisted credentials from storage across all namespaces
-	if err := manager.LoadFromStorage(ctx); err != nil {
-		return fmt.Errorf("failed to load credentials from storage: %w", err)
 	}
 
 	c.credentialManager = manager
@@ -784,11 +775,4 @@ func (c *Core) GetCredentialManager(ctx context.Context) (*credential.Manager, e
 	return c.credentialManager, nil
 }
 
-// startCredentialBackgroundCleanup starts background cleanup for the global credential manager
-func (c *Core) startCredentialBackgroundCleanup(ctx context.Context, interval time.Duration) {
-	if c.credentialManager != nil {
-		c.credentialManager.StartBackgroundCleanup(ctx, interval)
-		c.logger.Debug("started credential background cleanup",
-			logger.String("interval", interval.String()))
-	}
-}
+// Note: Background cleanup is now handled by the ExpirationManager

@@ -37,11 +37,6 @@ func (t *UserPassTokenType) Generate(authData *AuthData, entry *TokenEntry) (map
 	}, nil
 }
 
-func (t *UserPassTokenType) ExtractValue(tokenValue string) string {
-	// For user_pass, the username is the lookup value
-	return tokenValue
-}
-
 func (t *UserPassTokenType) ValidateValue(tokenValue string) bool {
 	return strings.HasPrefix(tokenValue, "usr-") && len(tokenValue) == 30
 }

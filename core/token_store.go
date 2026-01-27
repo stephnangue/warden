@@ -17,11 +17,11 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// Token type constants for backward compatibility
 const (
 	TypeUserPass      = "user_pass"
 	TypeAWSAccessKeys = "aws_access_keys"
 	TypeWardenToken   = "warden_token"
+	TypeJWTRole       = "jwt_role"
 )
 
 // Storage path constants for token store organization
@@ -202,7 +202,6 @@ func NewTokenStore(core *Core, config *TokenStoreConfig) (*TokenStore, error) {
 		NumCounters: config.CacheNumCounters,
 		MaxCost:     config.CacheMaxCost,
 		BufferItems: 64,
-		OnEvict:     store.onEvictID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize ID cache: %w", err)
@@ -295,6 +294,7 @@ func (s *TokenStore) registerBuiltinTypes() error {
 		&UserPassTokenType{},
 		&AWSAccessKeysTokenType{},
 		&WardenTokenType{},
+		&JWTRoleTokenType{},
 	}
 
 	for _, tokenType := range builtinTypes {
@@ -304,51 +304,6 @@ func (s *TokenStore) registerBuiltinTypes() error {
 	}
 
 	return nil
-}
-
-// onEvictID is called when a token is evicted from the ID cache
-// Asynchronously cleans up the accessor index and persistent storage if the token expired
-func (s *TokenStore) onEvictID(item *ristretto.Item[*TokenEntry]) {
-	entry := item.Value
-
-	// Check if eviction is due to expiration (not capacity)
-	// Ristretto evicts due to TTL expiration or capacity pressure
-	isExpired := !entry.ExpireAt.IsZero() && time.Now().After(entry.ExpireAt)
-
-	s.logger.Debug("token evicted from cache",
-		logger.String("token_id", entry.ID),
-		logger.String("accessor", entry.Accessor),
-		logger.Bool("expired", isExpired))
-
-	// Only delete from storage if token actually expired
-	// If evicted due to capacity, keep in storage for cache miss recovery
-	if isExpired {
-		// Asynchronously clean up accessor cache and persistent storage
-		go func() {
-			// Delete from accessor cache
-			s.byAccessor.Del(entry.Accessor)
-
-			// Delete from persistent storage
-			if err := s.deleteToken(entry); err != nil {
-				s.logger.Warn("failed to delete expired token from storage",
-					logger.String("token_id", entry.ID),
-					logger.String("accessor", entry.Accessor),
-					logger.String("error", err.Error()))
-			} else {
-				s.logger.Debug("expired token cleaned up from storage",
-					logger.String("token_id", entry.ID),
-					logger.String("accessor", entry.Accessor))
-			}
-		}()
-	} else {
-		// Token evicted due to capacity, not expiration
-		// Keep in storage but remove from accessor cache to free memory
-		s.byAccessor.Del(entry.Accessor)
-
-		s.logger.Debug("token evicted from cache (capacity), kept in storage",
-			logger.String("token_id", entry.ID),
-			logger.String("accessor", entry.Accessor))
-	}
 }
 
 // GenerateToken creates a new namespace-aware token
@@ -430,57 +385,74 @@ func (s *TokenStore) generateWithCollisionDetection(
 			return nil, fmt.Errorf("failed to generate token: %w", err)
 		}
 
-		// Extract lookup value and compute ID using the deterministic lookup key
+		// Compute ID using the deterministic lookup key
 		lookupKey := tokenType.LookupKey()
-		lookupValue := tokenType.ExtractValue(clientData[lookupKey])
-		entry.ID = tokenType.ComputeID(lookupValue)
+		entry.ID = tokenType.ComputeID(clientData[lookupKey])
 
-		// Check for collision
-		if _, found := s.byID.Get(entry.ID); !found {
-			// No collision, store the token in all three tiers
-
-			// Tier 1: Store in primary cache (byID)
-			cost := int64(200)
-			if authData.ExpireAt.IsZero() {
-				// No expiration
-				s.byID.Set(entry.ID, entry, cost)
-			} else {
-				s.byID.SetWithTTL(entry.ID, entry, cost, ttl)
+		// Check for existing token with same ID
+		if existingEntry, found := s.byID.Get(entry.ID); found {
+			// For JWT tokens, the ID is deterministic (based on jwt:role hash).
+			// Finding an existing token means this JWT+role already has a valid token.
+			// Return the existing token instead of treating it as a collision.
+			if meta.Name == TypeJWTRole {
+				return existingEntry, nil
 			}
 
-			// Tier 2: Store accessor mapping
-			s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, ttl)
-
-			// Wait for all cache writes to complete
-			s.byID.Wait()
-			s.byAccessor.Wait()
-
-			// Persist to storage backend (write-through)
-			if err := s.persistToken(entry); err != nil {
-				s.logger.Error("failed to persist token to storage",
-					logger.String("token_id", entry.ID),
-					logger.String("error", err.Error()))
-				// Don't fail the operation, token is in cache
-			}
-
-			s.logger.Debug("token created",
+			// For other token types, this is a true collision - retry with new random values
+			s.logger.Warn("token ID collision detected, regenerating",
 				logger.String("token_id", entry.ID),
-				logger.String("accessor", entry.Accessor),
 				logger.String("type", meta.Name),
-				logger.String("namespace", ns.Path),
-				logger.Time("expires_at", authData.ExpireAt))
+				logger.Int("attempt", i+1))
 
-			return entry, nil
+			if i == maxRetries-1 {
+				return nil, errors.New("failed to generate unique token after retries")
+			}
+			continue
 		}
 
-		s.logger.Warn("token ID collision detected, regenerating",
+		// No existing token, store the new one in all three tiers
+
+		// Tier 1: Store in primary cache (byID)
+		// Note: No TTL on cache - ExpirationManager handles all expiration
+		// This prevents race between cache eviction and expiration timer
+		cost := int64(200)
+		s.byID.Set(entry.ID, entry, cost)
+
+		// Tier 2: Store accessor mapping (no TTL - ExpirationManager handles expiration)
+		s.byAccessor.Set(entry.Accessor, entry.ID, 10)
+
+		// Wait for all cache writes to complete
+		s.byID.Wait()
+		s.byAccessor.Wait()
+
+		// Persist to storage backend (write-through)
+		if err := s.persistToken(entry); err != nil {
+			s.logger.Error("failed to persist token to storage",
+				logger.String("token_id", entry.ID),
+				logger.String("error", err.Error()))
+			// Don't fail the operation, token is in cache
+		}
+
+		// Register token with expiration manager for timer-based TTL enforcement
+		// JWT role tokens are cache-only, so don't persist their expiration entries
+		if expMgr := s.core.GetExpirationManager(); expMgr != nil && ttl > 0 {
+			persist := entry.Type != TypeJWTRole
+			if err := expMgr.RegisterToken(ctx, entry.ID, ttl, persist); err != nil {
+				s.logger.Warn("failed to register token with expiration manager",
+					logger.String("token_id", entry.ID),
+					logger.Err(err))
+				// Don't fail - token is still valid, just relies on cache eviction
+			}
+		}
+
+		s.logger.Trace("token created",
 			logger.String("token_id", entry.ID),
+			logger.String("accessor", entry.Accessor),
 			logger.String("type", meta.Name),
-			logger.Int("attempt", i+1))
+			logger.String("namespace", ns.Path),
+			logger.Time("expires_at", authData.ExpireAt))
 
-		if i == maxRetries-1 {
-			return nil, errors.New("failed to generate unique token after retries")
-		}
+		return entry, nil
 	}
 
 	return nil, errors.New("failed to generate unique token")
@@ -508,8 +480,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 	}
 
 	// Compute token ID
-	lookupValue := tokenType.ExtractValue(tokenValue)
-	tokenID := tokenType.ComputeID(lookupValue)
+	tokenID := tokenType.ComputeID(tokenValue)
 
 	// Lookup token in cache
 	entry, found := s.byID.Get(tokenID)
@@ -535,7 +506,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 
 		// Restore to cache with remaining TTL
 		entry = loadedEntry
-		if err := s.restoreTokenToCache(entry, "ResolveToken"); err != nil {
+		if err := s.restoreTokenToCache(ctx, entry, "ResolveToken"); err != nil {
 			return "", "", err
 		}
 	} else {
@@ -619,7 +590,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 }
 
 // LookupByAccessor looks up a token by its accessor
-func (s *TokenStore) LookupByAccessor(accessor string) (*TokenEntry, error) {
+func (s *TokenStore) LookupByAccessor(ctx context.Context, accessor string) (*TokenEntry, error) {
 	s.mu.RLock()
 	if s.closed {
 		s.mu.RUnlock()
@@ -651,7 +622,7 @@ func (s *TokenStore) LookupByAccessor(accessor string) (*TokenEntry, error) {
 
 		// Restore to cache with remaining TTL
 		entry := loadedEntry
-		if err := s.restoreTokenToCache(entry, "LookupByAccessor"); err != nil {
+		if err := s.restoreTokenToCache(ctx, entry, "LookupByAccessor"); err != nil {
 			return nil, err
 		}
 
@@ -678,7 +649,7 @@ func (s *TokenStore) LookupByAccessor(accessor string) (*TokenEntry, error) {
 
 		// Restore to cache with remaining TTL
 		entry = loadedEntry
-		if err := s.restoreTokenToCache(entry, "LookupByAccessor-orphaned"); err != nil {
+		if err := s.restoreTokenToCache(ctx, entry, "LookupByAccessor-orphaned"); err != nil {
 			// Token expired, clean up accessor
 			s.byAccessor.Del(accessor)
 			return nil, err
@@ -704,7 +675,7 @@ func (s *TokenStore) RevokeByAccessor(ctx context.Context, accessor string) erro
 	s.mu.RUnlock()
 
 	// Lookup token entry first to get salt for storage deletion
-	entry, err := s.LookupByAccessor(accessor)
+	entry, err := s.LookupByAccessor(ctx, accessor)
 	if err != nil {
 		return err
 	}
@@ -747,6 +718,37 @@ func (s *TokenStore) Close() {
 	s.closed = true
 
 	s.logger.Info("token store closed")
+}
+
+// RevokeByExpiration revokes a token by its ID, removing it from caches and storage.
+// This is called by the expiration manager when a token expires.
+func (s *TokenStore) RevokeByExpiration(tokenID string) error {
+	// Lookup the token entry to get accessor for cleanup
+	te, found := s.byID.Get(tokenID)
+	if !found {
+		// Token already gone (perhaps deleted manually), nothing to do
+		s.logger.Debug("token not found during expiration revocation",
+			logger.String("token_id", tokenID))
+		return nil
+	}
+
+	// Delete from caches
+	s.byID.Del(tokenID)
+	s.byAccessor.Del(te.Accessor)
+
+	// Delete from persistent storage
+	if err := s.deleteToken(te); err != nil {
+		s.logger.Warn("failed to delete expired token from storage",
+			logger.String("token_id", tokenID),
+			logger.Err(err))
+		// Don't fail the revocation for storage errors
+	}
+
+	s.logger.Trace("token expired",
+		logger.String("token_id", tokenID),
+		logger.String("accessor", te.Accessor))
+
+	return nil
 }
 
 // RegisterTokenType registers a new token type (for extensibility)
@@ -867,6 +869,11 @@ func (s *TokenStore) RevokeRootToken() error {
 // Uses a transaction to ensure atomicity: both token and accessor are stored together
 // or neither is stored if any operation fails
 func (s *TokenStore) persistToken(entry *TokenEntry) error {
+	// Skip persistence for jwt_role tokens - they are cache-only
+	if entry.Type == TypeJWTRole {
+		return nil
+	}
+
 	if s.storage == nil {
 		return errors.New("storage backend not initialized")
 	}
@@ -968,38 +975,61 @@ func (s *TokenStore) loadToken(tokenID string) (*TokenEntry, error) {
 
 // restoreTokenToCache restores a loaded token to both cache tiers with appropriate TTL
 // Returns the entry if successfully restored, or an error if the token is expired
-func (s *TokenStore) restoreTokenToCache(entry *TokenEntry, context string) error {
+func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry, caller string) error {
 	cost := int64(200)
 
+	// Check if token is already expired
 	if !entry.ExpireAt.IsZero() {
 		ttl := time.Until(entry.ExpireAt)
-		if ttl > 0 {
-			s.byID.SetWithTTL(entry.ID, entry, cost, ttl)
-			s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, ttl)
-			s.byID.Wait()
-			s.byAccessor.Wait()
-
-			s.logger.Debug("token restored to cache from storage",
-				logger.String("context", context),
-				logger.String("token_id", entry.ID),
-				logger.Duration("remaining_ttl", ttl))
-			return nil
-		} else {
+		if ttl <= 0 {
 			// Token expired while in storage
 			s.logger.Debug("token expired in storage, not restoring to cache",
-				logger.String("context", context),
+				logger.String("caller", caller),
 				logger.String("token_id", entry.ID))
 			return ErrTokenExpired
 		}
-	} else {
-		// No expiration
+
+		// Store in cache without TTL - ExpirationManager handles all expiration
+		// This prevents race between cache eviction and expiration timer
 		s.byID.Set(entry.ID, entry, cost)
 		s.byAccessor.Set(entry.Accessor, entry.ID, 10)
 		s.byID.Wait()
 		s.byAccessor.Wait()
 
+		// Register with expiration manager for timer-based TTL enforcement
+		// Tokens restored from storage are always persisted (JWT role tokens are not stored)
+		if expMgr := s.core.GetExpirationManager(); expMgr != nil {
+			if err := expMgr.RegisterToken(ctx, entry.ID, ttl, true); err != nil {
+				s.logger.Warn("failed to register restored token with expiration manager",
+					logger.String("token_id", entry.ID),
+					logger.Err(err))
+			}
+		}
+
+		s.logger.Debug("token restored to cache from storage",
+			logger.String("caller", caller),
+			logger.String("token_id", entry.ID),
+			logger.Duration("remaining_ttl", ttl))
+		return nil
+	} else {
+		// No expiration (non-expiring token)
+		s.byID.Set(entry.ID, entry, cost)
+		s.byAccessor.Set(entry.Accessor, entry.ID, 10)
+		s.byID.Wait()
+		s.byAccessor.Wait()
+
+		// Register non-expiring token with expiration manager (TTL=0)
+		// Tokens restored from storage are always persisted (JWT role tokens are not stored)
+		if expMgr := s.core.GetExpirationManager(); expMgr != nil {
+			if err := expMgr.RegisterToken(ctx, entry.ID, 0, true); err != nil {
+				s.logger.Warn("failed to register restored non-expiring token with expiration manager",
+					logger.String("token_id", entry.ID),
+					logger.Err(err))
+			}
+		}
+
 		s.logger.Debug("token restored to cache from storage (no expiration)",
-			logger.String("context", context),
+			logger.String("caller", caller),
 			logger.String("token_id", entry.ID))
 		return nil
 	}
@@ -1037,34 +1067,20 @@ func (s *TokenStore) loadAllTokensFromStorage(ctx context.Context) (int, error) 
 			continue
 		}
 
-		// Check if token has expired
+		// Skip expired tokens - ExpirationManager will handle cleanup
 		if !entry.ExpireAt.IsZero() && time.Now().After(entry.ExpireAt) {
 			s.logger.Debug("skipping expired token during initialization",
 				logger.String("token_id", entry.ID),
 				logger.Time("expired_at", entry.ExpireAt))
 			expiredCount++
-
-			// Delete expired token from storage asynchronously
-			go func(e *TokenEntry) {
-				if err := s.deleteToken(e); err != nil {
-					s.logger.Warn("failed to delete expired token during initialization",
-						logger.String("token_id", e.ID),
-						logger.String("error", err.Error()))
-				}
-			}(entry)
 			continue
 		}
 
-		// Restore to cache with remaining TTL
+		// Restore to cache without TTL - ExpirationManager handles all expiration
+		// This prevents race between cache eviction and expiration timer
 		cost := int64(200)
-		if !entry.ExpireAt.IsZero() {
-			ttl := time.Until(entry.ExpireAt)
-			s.byID.SetWithTTL(entry.ID, entry, cost, ttl)
-			s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, ttl)
-		} else {
-			s.byID.Set(entry.ID, entry, cost)
-			s.byAccessor.Set(entry.Accessor, entry.ID, 10)
-		}
+		s.byID.Set(entry.ID, entry, cost)
+		s.byAccessor.Set(entry.Accessor, entry.ID, 10)
 
 		// Check if this is the root token
 		if entry.Type == TypeWardenToken && entry.PrincipalID == "root" {
@@ -1080,7 +1096,7 @@ func (s *TokenStore) loadAllTokensFromStorage(ctx context.Context) (int, error) 
 	if loadedCount > 0 || expiredCount > 0 || failedCount > 0 {
 		s.logger.Info("token loading summary",
 			logger.Int("loaded", loadedCount),
-			logger.Int("expired", expiredCount),
+			logger.Int("expired_skipped", expiredCount),
 			logger.Int("failed", failedCount),
 			logger.Int("total_keys", len(tokenKeys)))
 	}
@@ -1119,6 +1135,11 @@ func (s *TokenStore) loadTokenByAccessor(accessor string) (*TokenEntry, error) {
 // Uses a transaction to ensure atomicity: both token and accessor are deleted together
 // or neither is deleted if any operation fails
 func (s *TokenStore) deleteToken(entry *TokenEntry) error {
+	// Skip storage operations for jwt_role tokens - they are cache-only
+	if entry.Type == TypeJWTRole {
+		return nil
+	}
+
 	if s.storage == nil {
 		return errors.New("storage backend not initialized")
 	}
@@ -1171,14 +1192,6 @@ func (s *TokenStore) deleteToken(entry *TokenEntry) error {
 		}
 	}
 
-	// Cleanup associated credential for this token
-	if err := s.cleanupCredentialForToken(ctx, entry); err != nil {
-		s.core.logger.Warn("failed to cleanup credential for deleted token",
-			logger.String("token_id", entry.ID),
-			logger.Err(err))
-		// Don't fail token deletion if credential cleanup fails
-	}
-
 	return nil
 }
 
@@ -1214,8 +1227,7 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	}
 
 	// Compute token ID
-	lookupValue := tokenType.ExtractValue(tokenValue)
-	tokenID := tokenType.ComputeID(lookupValue)
+	tokenID := tokenType.ComputeID(tokenValue)
 
 	// Lookup token in cache
 	entry, found := s.byID.Get(tokenID)
@@ -1241,7 +1253,7 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 
 		// Restore to cache with remaining TTL
 		entry = loadedEntry
-		if err := s.restoreTokenToCache(entry, "LookupToken"); err != nil {
+		if err := s.restoreTokenToCache(ctx, entry, "LookupToken"); err != nil {
 			return nil, err
 		}
 	} else {
@@ -1322,30 +1334,131 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	return &entryCopy, nil
 }
 
-// cleanupCredentialForToken removes the credential associated with a token
-func (s *TokenStore) cleanupCredentialForToken(ctx context.Context, entry *TokenEntry) error {
-	// Get namespace from token
-	ns, err := s.core.namespaceStore.GetNamespaceByAccessor(ctx, entry.NamespaceID)
-	if err != nil {
-		return fmt.Errorf("failed to get namespace: %w", err)
+// LookupJWTTokenWithRole looks up a JWT token using both the JWT and role.
+// This is used for transparent mode where the same JWT with different roles
+// should produce different tokens. The composite "jwt:role" value is used
+// for ID computation and validation.
+func (c *Core) LookupJWTTokenWithRole(ctx context.Context, jwt string, role string) (*TokenEntry, error) {
+	if c.Sealed() {
+		return nil, fmt.Errorf("the core is sealed")
 	}
 
-	// Create namespace context for credential manager lookup
-	nsCtx := namespace.ContextWithNamespace(ctx, ns)
-
-	// Get the global credential manager
-	manager, err := s.core.GetCredentialManager(nsCtx)
-	if err != nil {
-		// Manager not initialized, nothing to cleanup
-		return nil
+	if c.tokenStore == nil {
+		return nil, nil
 	}
 
-	// Revoke and delete credential using namespace ID from token
-	if err := manager.RevokeAndDeleteCredential(nsCtx, entry.NamespaceID, entry.ID); err != nil {
-		return fmt.Errorf("failed to cleanup credential: %w", err)
+	s := c.tokenStore
+
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return nil, ErrStoreClosed
+	}
+	s.mu.RUnlock()
+
+	// Extract namespace from context
+	ns, err := namespace.FromContext(ctx)
+	if err != nil || ns == nil {
+		return nil, errors.New("namespace not found in context")
 	}
 
-	return nil
+	// Get JWT token type
+	jwtType := &JWTRoleTokenType{}
+
+	// Compute hash of "jwt:role" - this matches what's stored in entry.Data["jwt"]
+	jwtHash := jwtType.ComputeData(jwt, role)
+	// Token ID is computed from the hash
+	tokenID := jwtType.ComputeID(jwtHash)
+
+	// Lookup token in cache only - JWT tokens are not persisted to storage
+	// On cache miss, the caller should perform implicit auth to create a new token
+	entry, found := s.byID.Get(tokenID)
+	if !found {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementCacheMisses()
+		}
+		return nil, ErrTokenNotFound
+	}
+
+	if s.config.EnableMetrics {
+		s.metrics.IncrementCacheHits()
+	}
+
+	// Validate namespace binding
+	tokenNs, err := c.namespaceStore.GetNamespaceByAccessor(ctx, entry.NamespaceID)
+	if err != nil || tokenNs == nil {
+		s.logger.Warn("JWT token namespace not found",
+			logger.String("token_id", tokenID),
+			logger.String("token_namespace_id", entry.NamespaceID))
+		return nil, ErrTokenNamespaceMismatch
+	}
+
+	isValidNamespace := ns.UUID == tokenNs.UUID || ns.HasParent(tokenNs)
+	if !isValidNamespace {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementNamespaceMismatches()
+		}
+		s.logger.Warn("JWT token namespace mismatch",
+			logger.String("token_id", tokenID),
+			logger.String("token_namespace", tokenNs.Path),
+			logger.String("request_namespace", ns.Path))
+		return nil, ErrTokenNamespaceMismatch
+	}
+
+	// Validate token value matches (comparing hashes, not raw JWT)
+	// entry.Data["jwt"] stores the SHA-256 hash of the composite "jwt:role" value
+	lookupKey := jwtType.LookupKey()
+	expectedHash, ok := entry.Data[lookupKey]
+	if !ok {
+		s.logger.Error("JWT token lookup key not found",
+			logger.String("token_id", tokenID),
+			logger.String("lookup_key", lookupKey))
+		return nil, ErrTokenNotFound
+	}
+	// Compare stored hash with computed hash
+	if expectedHash != jwtHash {
+		s.logger.Error("JWT token value mismatch",
+			logger.String("token_id", tokenID),
+			logger.String("lookup_key", lookupKey))
+		return nil, ErrTokenNotFound
+	}
+
+	// Validate auth deadline
+	if !entry.AuthDeadline.IsZero() && time.Now().After(entry.AuthDeadline) {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementDeadlineViolations()
+		}
+		return nil, ErrAuthDeadlineViolated
+	}
+
+	// Validate expiration
+	if !entry.ExpireAt.IsZero() && time.Now().After(entry.ExpireAt) {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementTokensExpired()
+		}
+		return nil, ErrTokenExpired
+	}
+
+	// Validate same-origin policy
+	if clientIP, ok := ctx.Value(logical.ClientIPKey).(string); ok && entry.CreatedByIP != "" {
+		if clientIP != entry.CreatedByIP {
+			if s.config.EnableMetrics {
+				s.metrics.IncrementOriginViolations()
+			}
+			s.logger.Warn("JWT token same origin policy violation",
+				logger.String("token_id", tokenID),
+				logger.String("created_ip", entry.CreatedByIP),
+				logger.String("request_ip", clientIP))
+			return nil, ErrOriginViolation
+		}
+	}
+
+	if s.config.EnableMetrics {
+		s.metrics.IncrementTokensResolved()
+	}
+
+	entryCopy := *entry
+	return &entryCopy, nil
 }
 
 // Helper functions

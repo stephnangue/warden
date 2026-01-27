@@ -12,7 +12,7 @@ import (
 
 	"github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/openbao/openbao/sdk/v2/physical"
-	"github.com/stephnangue/warden/physical/inmem"
+	"github.com/openbao/openbao/sdk/v2/physical/inmem"
 	"github.com/stretchr/testify/require"
 )
 

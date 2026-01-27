@@ -1,9 +1,9 @@
 package physical
 
 import (
+	log "github.com/hashicorp/go-hclog"
 	"github.com/openbao/openbao/sdk/v2/physical"
-	"github.com/stephnangue/warden/logger"
 )
 
 // Factory is the factory function to create a storage.
-type Factory func(config map[string]string, log *logger.GatedLogger) (physical.Backend, error)
+type Factory func(config map[string]string, logger log.Logger) (physical.Backend, error)

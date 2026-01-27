@@ -12,9 +12,57 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/armon/go-radix"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/logical"
 )
+
+// DefaultTransparentRolePattern is the default pattern for extracting role from transparent paths.
+// Matches: role/{role}/gateway... and extracts the role name.
+var DefaultTransparentRolePattern = regexp.MustCompile(`^role/([^/]+)/gateway`)
+
+// DefaultPathRewriter rewrites transparent paths to standard paths.
+// Converts: role/X/gateway/... -> gateway/...
+func DefaultPathRewriter(path string) string {
+	return DefaultTransparentRolePattern.ReplaceAllString(path, "gateway")
+}
+
+// TransparentConfig holds declarative transparent mode configuration.
+// Providers can set this to enable transparent mode without implementing
+// the TransparentModeProvider interface manually.
+type TransparentConfig struct {
+	// Enabled indicates if transparent mode is available for this backend
+	Enabled bool
+
+	// AutoAuthPath is the auth mount path for implicit authentication (e.g., "auth/jwt/")
+	AutoAuthPath string
+
+	// DefaultRole is the role to use when not specified in URL path
+	DefaultRole string
+
+	// RolePattern is the regex pattern to extract role from path (optional)
+	// If nil, uses DefaultTransparentRolePattern: `^role/([^/]+)/gateway`
+	// First capture group is used as the role name
+	RolePattern *regexp.Regexp
+
+	// PathRewriter converts transparent paths to standard paths (optional)
+	// If nil, uses DefaultPathRewriter: role/X/gateway/... -> gateway/...
+	PathRewriter func(path string) string
+}
+
+// unauthPathsEntry holds parsed unauthenticated paths for efficient matching
+type unauthPathsEntry struct {
+	// paths is a radix tree for exact and prefix matches
+	paths *radix.Tree
+	// wildcardPaths holds patterns with + segment wildcards
+	wildcardPaths []wildcardPath
+}
+
+// wildcardPath represents a path pattern with + segment wildcards
+type wildcardPath struct {
+	segments []string
+	isPrefix bool
+}
 
 // StreamingOperationFunc handles streaming operations with raw HTTP access.
 // It receives the context, the full logical.Request (which includes ResponseWriter,
@@ -48,12 +96,26 @@ type StreamingBackend struct {
 	// StreamingPaths are paths that handle streaming operations (e.g., gateway/*)
 	StreamingPaths []*StreamingPath
 
+	// TransparentConfig holds the transparent mode configuration (optional)
+	// When set, StreamingBackend implements logical.TransparentModeProvider
+	TransparentConfig *TransparentConfig
+
+	// UnauthenticatedPaths are paths that can be accessed without authentication.
+	// These are hardcoded by the provider for read-only endpoints that some clients
+	// access without sending tokens (e.g., PKI certificate PEM files).
+	// Supports: exact match, prefix match (*), segment wildcard (+)
+	UnauthenticatedPaths []string
+
 	// Backend is the embedded standard framework backend for non-streaming paths
 	*Backend
 
 	// Internal state
 	streamingPathsRe []*regexp.Regexp
 	streamingOnce    sync.Once
+
+	// unauthPaths holds the parsed unauthenticated paths (radix tree + wildcards)
+	unauthPaths     *unauthPathsEntry
+	unauthPathsOnce sync.Once
 }
 
 // Ensure StreamingBackend implements logical.Backend
@@ -181,14 +243,32 @@ func (b *StreamingBackend) SpecialPaths() *logical.Paths {
 	streamPaths := make([]string, 0, len(b.StreamingPaths))
 	for _, sp := range b.StreamingPaths {
 		// Convert regex pattern to glob-style pattern for router
-		// e.g., "gateway/.*" -> "gateway/*"
+		// The router uses radix tree with literal prefix matching, so we need to:
+		// - Convert ".*" suffix to "*" for prefix matching
+		// - Handle patterns with [^/]+ by using prefix before wildcard
+		// - Remove regex anchors
+		//
+		// NOTE: The radix tree doesn't support wildcards in the middle of paths.
+		// For patterns like "role/[^/]+/gateway", we use "role/*" as a prefix match
+		// to identify streaming requests. The actual pattern matching happens in
+		// HandleRequest using the compiled regex patterns.
 		pattern := sp.Pattern
-		if strings.HasSuffix(pattern, ".*") {
-			pattern = strings.TrimSuffix(pattern, ".*") + "*"
-		}
+
 		// Remove regex anchors if present
 		pattern = strings.TrimPrefix(pattern, "^")
 		pattern = strings.TrimSuffix(pattern, "$")
+
+		// Handle patterns with [^/]+ (wildcard segment)
+		// Use the prefix before the wildcard as a prefix match
+		// e.g., "role/[^/]+/gateway" -> "role/*"
+		if idx := strings.Index(pattern, "[^/]+"); idx >= 0 {
+			pattern = pattern[:idx] + "*"
+		} else if strings.HasSuffix(pattern, ".*") {
+			// Convert .* suffix to * for prefix matching
+			// e.g., "gateway/.*" -> "gateway/*"
+			pattern = strings.TrimSuffix(pattern, ".*") + "*"
+		}
+
 		streamPaths = append(streamPaths, pattern)
 	}
 
@@ -258,4 +338,162 @@ func (b *StreamingBackend) ExtractToken(r *http.Request) string {
 		return b.Backend.ExtractToken(r)
 	}
 	return ""
+}
+
+// TransparentModeProvider interface implementation
+
+// IsTransparentMode returns whether transparent mode is enabled for this backend
+func (b *StreamingBackend) IsTransparentMode() bool {
+	return b.TransparentConfig != nil && b.TransparentConfig.Enabled
+}
+
+// GetAutoAuthPath returns the auth mount path for implicit authentication
+func (b *StreamingBackend) GetAutoAuthPath() string {
+	if b.TransparentConfig == nil {
+		return ""
+	}
+	return b.TransparentConfig.AutoAuthPath
+}
+
+// GetTransparentRole extracts the role name from the request path
+func (b *StreamingBackend) GetTransparentRole(path string) string {
+	if b.TransparentConfig == nil {
+		return ""
+	}
+
+	// Use custom pattern or default
+	pattern := b.TransparentConfig.RolePattern
+	if pattern == nil {
+		pattern = DefaultTransparentRolePattern
+	}
+
+	matches := pattern.FindStringSubmatch(path)
+	if len(matches) > 1 {
+		return matches[1] // First capture group is the role
+	}
+	return b.TransparentConfig.DefaultRole
+}
+
+// RewriteTransparentPath rewrites a transparent path to standard path
+func (b *StreamingBackend) RewriteTransparentPath(path string) string {
+	if b.TransparentConfig == nil {
+		return path
+	}
+
+	rewriter := b.TransparentConfig.PathRewriter
+	if rewriter == nil {
+		rewriter = DefaultPathRewriter
+	}
+	return rewriter(path)
+}
+
+// SetTransparentConfig updates the transparent mode configuration at runtime
+func (b *StreamingBackend) SetTransparentConfig(config *TransparentConfig) {
+	b.TransparentConfig = config
+	// Reset unauthPaths so it gets re-initialized with new config
+	b.unauthPathsOnce = sync.Once{}
+	b.unauthPaths = nil
+}
+
+// initUnauthPaths parses UnauthenticatedPaths into radix tree + wildcard slice
+func (b *StreamingBackend) initUnauthPaths() {
+	if len(b.UnauthenticatedPaths) == 0 {
+		b.unauthPaths = &unauthPathsEntry{
+			paths: radix.New(),
+		}
+		return
+	}
+
+	tree := radix.New()
+	var wildcards []wildcardPath
+
+	for _, path := range b.UnauthenticatedPaths {
+		if strings.Contains(path, "+") {
+			// Paths with wildcards stored separately
+			isPrefix := strings.HasSuffix(path, "*")
+			if isPrefix {
+				path = path[:len(path)-1]
+			}
+			wildcards = append(wildcards, wildcardPath{
+				segments: strings.Split(path, "/"),
+				isPrefix: isPrefix,
+			})
+		} else {
+			// Paths without wildcards go in radix tree
+			// Value indicates if it's a prefix match
+			isPrefix := strings.HasSuffix(path, "*")
+			if isPrefix {
+				path = path[:len(path)-1]
+			}
+			tree.Insert(path, isPrefix)
+		}
+	}
+
+	b.unauthPaths = &unauthPathsEntry{
+		paths:         tree,
+		wildcardPaths: wildcards,
+	}
+}
+
+// IsUnauthenticatedPath checks if the path matches an unauthenticated pattern.
+// Uses radix tree for O(log n) lookup with wildcard fallback.
+func (b *StreamingBackend) IsUnauthenticatedPath(path string) bool {
+	b.unauthPathsOnce.Do(b.initUnauthPaths)
+
+	if b.unauthPaths == nil {
+		return false
+	}
+
+	// Normalize path: remove role/X/gateway prefix to get the actual Vault path
+	// Input: "role/provisionner/gateway/v1/pki/issuer/abc/pem"
+	// Output: "v1/pki/issuer/abc/pem"
+	if idx := strings.Index(path, "/gateway/"); idx >= 0 {
+		path = path[idx+9:] // len("/gateway/") = 9
+	} else {
+		path = strings.TrimPrefix(path, "gateway/")
+		path = strings.TrimPrefix(path, "gateway")
+	}
+	path = strings.TrimPrefix(path, "/")
+
+	// Check radix tree (exact and prefix matches)
+	match, raw, ok := b.unauthPaths.paths.LongestPrefix(path)
+	if ok {
+		isPrefix := raw.(bool)
+		if isPrefix {
+			return strings.HasPrefix(path, match)
+		}
+		if match == path {
+			return true
+		}
+	}
+
+	// Check wildcard patterns
+	pathParts := strings.Split(path, "/")
+	for _, w := range b.unauthPaths.wildcardPaths {
+		if matchWildcardSegments(pathParts, w.segments, w.isPrefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchWildcardSegments checks if path segments match a wildcard pattern
+func matchWildcardSegments(pathParts, patternParts []string, isPrefix bool) bool {
+	if !isPrefix && len(pathParts) != len(patternParts) {
+		return false
+	}
+	if isPrefix && len(pathParts) < len(patternParts) {
+		return false
+	}
+
+	for i, patternPart := range patternParts {
+		if patternPart == "+" {
+			continue // + matches any single segment
+		}
+		if pathParts[i] != patternPart {
+			return false
+		}
+	}
+	return true
 }

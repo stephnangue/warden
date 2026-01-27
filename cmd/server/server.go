@@ -15,8 +15,10 @@ import (
 	"github.com/hashicorp/errwrap"
 	wrapping "github.com/openbao/go-kms-wrapping/v2"
 	aeadwrapper "github.com/openbao/go-kms-wrapping/wrappers/aead/v2"
+	physPostgresql "github.com/openbao/openbao/physical/postgresql"
 	"github.com/openbao/openbao/sdk/v2/logical"
 	phy "github.com/openbao/openbao/sdk/v2/physical"
+	physInmem "github.com/openbao/openbao/sdk/v2/physical/inmem"
 	"github.com/spf13/cobra"
 	wardenapi "github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/audit"
@@ -31,16 +33,15 @@ import (
 	log "github.com/stephnangue/warden/logger"
 	wardenlogical "github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/physical"
-	inmemStorage "github.com/stephnangue/warden/physical/inmem"
-	postgresqlStorage "github.com/stephnangue/warden/physical/postgres"
 	"github.com/stephnangue/warden/provider/aws"
+	"github.com/stephnangue/warden/provider/vault"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
 
 const (
 	// Subsystem names for logging
-	subsystemCore        = "core"
+	subsystemCore     = "core"
 	subsystemListener = "listener"
 
 	// Listener type names
@@ -78,7 +79,8 @@ Usage: warden server [options]
 	}
 
 	providers = map[string]wardenlogical.Factory{
-		"aws": aws.Factory,
+		"aws":   aws.Factory,
+		"vault": vault.Factory,
 	}
 
 	authMethods = map[string]wardenlogical.Factory{
@@ -86,9 +88,9 @@ Usage: warden server [options]
 	}
 
 	storageBackends = map[string]physical.Factory{
-		"inmem_ha":   inmemStorage.NewInmemHA,
-		"inmem":      inmemStorage.NewInmem,
-		"postgres":   postgresqlStorage.NewPostgreSQLStorage,
+		"inmem_ha": physInmem.NewInmemHA,
+		"inmem":    physInmem.NewInmem,
+		"postgres": physPostgresql.NewPostgreSQLBackend,
 	}
 )
 
@@ -192,7 +194,7 @@ func run(cmd *cobra.Command, args []string) error {
 		if core.IsFatalError(newCoreError) {
 			return fmt.Errorf("error initializing core: %w", newCoreError)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "A non-fatal error occurred during initialization. Please check the logs for more information: %v\n", err )
+		fmt.Fprintf(cmd.OutOrStdout(), "A non-fatal error occurred during initialization. Please check the logs for more information: %v\n", err)
 	}
 
 	// Compile server information for output later
@@ -247,7 +249,7 @@ func run(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "\n==> Warden server configuration:\n\n")
 
 	titleCaser := cases.Title(language.English, cases.NoLower)
-	
+
 	for _, k := range infoKeys {
 		fmt.Fprintf(cmd.OutOrStdout(), "%24s: %s\n", titleCaser.String(k), info[k])
 	}
@@ -399,7 +401,9 @@ func buildStorage(config *config.Config, logger *log.GatedLogger) (phy.Backend, 
 		return nil, fmt.Errorf("unknown storage type %s", config.Storage.Type)
 	}
 
-	storage, err := factory(config.Storage.Config(), logger.WithSystem("storage." + config.Storage.Type))
+	hclogLogger := log.NewHCLogAdapter(logger.WithSubsystem("storage." + config.Storage.Type))
+
+	storage, err := factory(config.Storage.Config(), hclogLogger)
 
 	if err != nil {
 		return nil, fmt.Errorf("error initializing storage of type %s: %w", config.Storage.Type, err)
@@ -514,18 +518,18 @@ func setSeal(conf *config.Config, logger *log.GatedLogger, infoKeys *[]string, i
 func createCoreConfig(logger *log.GatedLogger, conf *config.Config, backend phy.Backend, barrierSeal, unwrapSeal core.Seal, secureRandomReader io.Reader,
 ) core.CoreConfig {
 	coreConfig := &core.CoreConfig{
-		RawConfig:                      conf,
-		Physical:                       backend,
-		RedirectAddr:                   conf.Storage.RedirectAddr,
-		StorageType:                    conf.Storage.Type,
-		HAPhysical:                     nil,
-		Seal:                           barrierSeal,
-		UnwrapSeal:                     unwrapSeal,
-		AuditDevices:                   auditDevices,
-		Providers:                      providers,
-		AuthMethods:                    authMethods,
-		Logger:                         logger,
-		SecureRandomReader:             secureRandomReader,
+		RawConfig:          conf,
+		Physical:           backend,
+		RedirectAddr:       conf.Storage.RedirectAddr,
+		StorageType:        conf.Storage.Type,
+		HAPhysical:         nil,
+		Seal:               barrierSeal,
+		UnwrapSeal:         unwrapSeal,
+		AuditDevices:       auditDevices,
+		Providers:          providers,
+		AuthMethods:        authMethods,
+		Logger:             logger,
+		SecureRandomReader: secureRandomReader,
 	}
 	return *coreConfig
 }
@@ -538,12 +542,12 @@ func runUnseal(cmdContext context.Context, c *core.Core, ctx context.Context) {
 		}
 
 		if core.IsFatalError(err) {
-			c.Logger().Error("error unsealing core", 
+			c.Logger().Error("error unsealing core",
 				log.Err(err),
 			)
 			return
 		}
-		c.Logger().Warn("failed to unseal core", 
+		c.Logger().Warn("failed to unseal core",
 			log.Err(err),
 		)
 
@@ -556,9 +560,3 @@ func runUnseal(cmdContext context.Context, c *core.Core, ctx context.Context) {
 		}
 	}
 }
-
-
-
-
-
-

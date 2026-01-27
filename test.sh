@@ -272,6 +272,205 @@ export AWS_ACCESS_KEY_ID=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*acces
 export AWS_SECRET_ACCESS_KEY=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*secret_access_key=\([^ |]*\).*/\1/')
 export AWS_ENDPOINT_URL=http://localhost:5000/v1/PROD/SEC/aws/gateway
 
+# test vault streaming
+
+./warden -n PROD/SEC policy write vault-streaming - <<EOF
+path "+/gateway*" {
+  capabilities = ["stream"]
+}
+path "+/role/+/gateway*" {
+  capabilities = ["stream"]
+}
+EOF
+
+./warden -n PROD/SEC cred spec create vault_reader \
+  --type vault_token \
+  --source vault \
+  --config token_role=reader \
+  --min-ttl 600s \
+  --max-ttl 2h
+
+./warden -n PROD/SEC write auth/jwt/role/vault-reader \
+    token_type=warden_token \
+    token_policies="vault-streaming" \
+    user_claim=sub \
+    cred_spec_name=vault_reader \
+    token_ttl=1h
+
+./warden -n PROD/SEC cred spec create full_access \
+  --type vault_token \
+  --source vault \
+  --config token_role=full-access \
+  --min-ttl 600s \
+  --max-ttl 2h
+
+./warden -n PROD/SEC write auth/jwt/role/full-access \
+    token_type=warden_token \
+    token_policies="vault-streaming" \
+    user_claim=sub \
+    cred_spec_name=full_access \
+    token_ttl=1h
+
+./warden -n PROD/SEC cred spec create terraform \
+  --type vault_token \
+  --source vault \
+  --config token_role=terraform-admin \
+  --min-ttl 600s \
+  --max-ttl 2h
+
+./warden -n PROD/SEC write auth/jwt/role/terraform \
+    token_type=warden_token \
+    token_policies="vault-streaming" \
+    user_claim=sub \
+    cred_spec_name=ephemeral \
+    token_ttl=1h
+
+  ./warden -n PROD/SEC provider enable --type=vault --description="vault provider"
+  ./warden -n PROD/SEC write vault/config vault_address="http://127.0.0.1:8200" tls_skip_verify=true
+
+export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
+  | jq -r '.access_token')
+LOGIN_OUTPUT=$(./warden -n PROD/SEC login --method=jwt --token=$JWT --role=terraform)
+export VAULT_TOKEN=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*token=\([^ ]*\).*/\1/')
+export VAULT_ADDR=http://localhost:5000/v1/PROD/SEC/vault/gateway
+
+# test vault streaming in transparent mode
+
+./warden -n PROD/SEC provider enable --type=vault --description="vault provider with transparent auth" vault-auto 
+./warden -n PROD/SEC write vault-auto/config vault_address="http://127.0.0.1:8200" transparent_mode=true auto_auth_path=auth/jwt tls_skip_verify=true default_role=ephemeral
+
+./warden -n PROD/SEC cred spec create provisionner \
+  --type vault_token \
+  --source vault \
+  --config token_role=terraform-admin \
+  --config ttl=15m \
+  --min-ttl 600s \
+  --max-ttl 1h
+
+./warden -n PROD/SEC write auth/jwt/role/provisionner \
+    token_type=jwt_role \
+    token_policies="vault-streaming" \
+    user_claim=sub \
+    cred_spec_name=provisionner \
+    token_ttl=1h
+
+export VAULT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
+  | jq -r '.access_token')
+export VAULT_ADDR=http://localhost:5000/v1/PROD/SEC/vault-auto/role/provisionner/gateway
 
 
+./warden -n PROD/SEC cred spec create ephemeral \
+  --type vault_token \
+  --source vault \
+  --config token_role=ephemeral-admin \
+  --config ttl=20m \
+  --min-ttl 600s \
+  --max-ttl 1h
 
+./warden -n PROD/SEC write auth/jwt/role/ephemeral \
+    token_type=jwt_role \
+    token_policies="vault-streaming" \
+    user_claim=sub \
+    cred_spec_name=ephemeral
+
+export VAULT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
+  | jq -r '.access_token')
+export VAULT_ADDR=http://localhost:5000/v1/PROD/SEC/vault-auto/role/ephemeral/gateway
+
+export VAULT_ADDR=http://localhost:5000/v1/PROD/SEC/vault-auto/gateway
+
+export VAULT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials&client_id=gilab-job&client_secret=test@gilab-job&scope=api:read api:write' \
+  | jq -r '.access_token')
+export VAULT_ADDR=http://localhost:5000/v1/PROD/SEC/vault-auto/role/ephemeral/gateway
+
+./warden namespace create DEV -n PROD
+
+./warden -n PROD/DEV policy write streaming - <<EOF
+path "+/gateway*" {
+  capabilities = ["stream"]
+}
+path "+/role/+/gateway*" {
+  capabilities = ["stream"]
+}
+EOF
+
+./warden -n PROD/DEV auth enable --type=jwt --description="jwt test auth method"
+./warden -n PROD/DEV write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+
+./warden -n PROD/DEV cred source create vault \
+  --type hashicorp_vault \
+  --config vault_address=http://127.0.0.1:8200 \
+  --config auth_method=approle \
+  --config role_id=tf-role-id-1234-5678-90ab-cdef12345678 \
+  --config secret_id=tf-secret-id-abcd-efgh-ijkl-mnop12345678 \
+  --config approle_mount=warden_approle
+
+./warden -n PROD/DEV cred spec create provisionner \
+  --type vault_token \
+  --source vault \
+  --config token_role=terraform-admin \
+  --config ttl=15m \
+  --min-ttl 600s \
+  --max-ttl 1h
+
+./warden -n PROD/DEV write auth/jwt/role/provisionner \
+    token_type=jwt_role \
+    token_policies="streaming" \
+    user_claim=sub \
+    cred_spec_name=provisionner \
+    token_ttl=1h
+
+./warden -n PROD/DEV provider enable --type=vault --description="vault provider with transparent auth" vault-auto 
+./warden -n PROD/DEV write vault-auto/config vault_address="http://127.0.0.1:8200" transparent_mode=true auto_auth_path=auth/jwt tls_skip_verify=true default_role=provisioner
+
+export VAULT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
+  | jq -r '.access_token')
+export VAULT_ADDR=http://localhost:5000/v1/PROD/DEV/vault-auto/role/provisionner/gateway
+
+
+./warden -n PROD/DEV cred spec create aws_local \
+  --type aws_access_keys \
+  --source local \
+  --config access_key_id=AKIA5FTZFX6LC3IQNGPV \
+  --config secret_access_key=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
+
+./warden -n PROD/DEV cred spec create aws_static \
+  --type aws_access_keys \
+  --source vault \
+  --config kv2_mount=kv_static_secret \
+  --config secret_path=aws/prod
+
+./warden -n PROD/DEV write auth/jwt/role/aws-streamer \
+    token_type=aws_access_keys \
+    token_policies="streaming" \
+    user_claim=sub \
+    cred_spec_name=aws_local \
+    token_ttl=1h
+./warden -n PROD/DEV write auth/jwt/role/aws-kv \
+    token_type=aws_access_keys \
+    token_policies="streaming" \
+    user_claim=sub \
+    cred_spec_name=aws_static \
+    token_ttl=1h
+
+./warden -n PROD/DEV provider enable --type=aws --description="aws provider"
+./warden -n PROD/DEV write aws/config proxy_domains="localhost,warden"
+
+export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
+  | jq -r '.access_token')
+LOGIN_OUTPUT=$(./warden -n PROD/DEV login --method=jwt --token=$JWT --role=aws-streamer)
+export AWS_ACCESS_KEY_ID=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*access_key_id=\([^,]*\).*/\1/')
+export AWS_SECRET_ACCESS_KEY=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*secret_access_key=\([^ |]*\).*/\1/')
+export AWS_ENDPOINT_URL=http://localhost:5000/v1/PROD/DEV/aws/gateway

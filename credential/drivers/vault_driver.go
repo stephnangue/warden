@@ -3,6 +3,7 @@ package drivers
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/vault/api"
@@ -13,9 +14,11 @@ import (
 // VaultDriver fetches credentials from HashiCorp Vault
 // Supports: KV, AWS engine, Azure engine, GCP engine
 type VaultDriver struct {
-	vault      *api.Client
-	credSource *credential.CredSource
-	logger     *logger.GatedLogger
+	vault         *api.Client
+	credSource    *credential.CredSource
+	logger        *logger.GatedLogger
+	tokenExpireAt time.Time  // Tracks when the current token expires
+	authMu        sync.Mutex // Protects tokenExpireAt and authentication
 }
 
 // VaultDriverFactory creates VaultDriver instances
@@ -95,12 +98,22 @@ func (f *VaultDriverFactory) SensitiveConfigFields() []string {
 	return []string{"token", "secret_id"}
 }
 
-// authenticate performs Vault authentication
+// authenticate performs Vault authentication only if needed (thread-safe)
 func (d *VaultDriver) authenticate(ctx context.Context) error {
 	authMethod := credential.GetString(d.credSource.Config, "auth_method", "")
 
 	switch authMethod {
 	case "approle":
+		d.authMu.Lock()
+		defer d.authMu.Unlock()
+
+		// Check if token is still valid (not expired and actually works)
+		if time.Now().Add(30 * time.Second).Before(d.tokenExpireAt) {
+			// Token not expired, but verify it's still valid with Vault
+			if d.isTokenValid(ctx) {
+				return nil
+			}
+		}
 		return d.loginViaApprole(ctx)
 	case "":
 		// No auth method, assume token is already set
@@ -108,6 +121,13 @@ func (d *VaultDriver) authenticate(ctx context.Context) error {
 	default:
 		return fmt.Errorf("unsupported auth method: %s", authMethod)
 	}
+}
+
+// isTokenValid checks if the current token is still valid with Vault
+func (d *VaultDriver) isTokenValid(ctx context.Context) bool {
+	// Use token lookup-self as a lightweight validation
+	_, err := d.vault.Auth().Token().LookupSelfWithContext(ctx)
+	return err == nil
 }
 
 // loginViaApprole authenticates to Vault using AppRole
@@ -134,9 +154,18 @@ func (d *VaultDriver) loginViaApprole(ctx context.Context) error {
 
 	d.vault.SetToken(secret.Auth.ClientToken)
 
+	// Track token expiration time
+	if secret.Auth.LeaseDuration > 0 {
+		d.tokenExpireAt = time.Now().Add(time.Duration(secret.Auth.LeaseDuration) * time.Second)
+	} else {
+		// If no lease duration, assume 1 hour default
+		d.tokenExpireAt = time.Now().Add(1 * time.Hour)
+	}
+
 	if d.logger != nil {
 		d.logger.Debug("authenticated to Vault via AppRole",
 			logger.String("approle_mount", approleMount),
+			logger.String("token_expires_at", d.tokenExpireAt.Format(time.RFC3339)),
 		)
 	}
 
@@ -152,20 +181,22 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 
 	// Route based on credential type
 	switch spec.Type {
-	case credential.TypeDatabaseUserPass, "static_database_userpass", "dynamic_database_userpass":
+	case credential.TypeDatabaseUserPass:
 		// Determine if static or dynamic based on presence of database_mount
 		databaseMount := credential.GetString(spec.Config, "database_mount", "")
 		if databaseMount != "" {
 			return d.fetchDynamicDatabaseCreds(ctx, spec)
 		}
 		return d.fetchStaticKVSecret(ctx, spec)
-	case credential.TypeAWSAccessKeys, "static_aws_access_keys", "dynamic_aws_access_keys":
+	case credential.TypeAWSAccessKeys:
 		// Determine if static or dynamic based on presence of aws_mount
 		awsMount := credential.GetString(spec.Config, "aws_mount", "")
 		if awsMount != "" {
 			return d.fetchDynamicAWSCreds(ctx, spec)
 		}
 		return d.fetchStaticKVSecret(ctx, spec)
+	case credential.TypeVaultToken:
+		return d.fetchDynamicVaultToken(ctx, spec)
 	default:
 		return nil, 0, "", fmt.Errorf("unsupported credential type for Vault: %s", spec.Type)
 	}
@@ -340,7 +371,101 @@ func (d *VaultDriver) fetchDynamicAWSCreds(ctx context.Context, spec *credential
 	return rawData, leaseTTL, secret.LeaseID, nil
 }
 
-// Revoke revokes a Vault lease
+// fetchDynamicVaultToken generates a Vault token via auth/token/create/{role}
+func (d *VaultDriver) fetchDynamicVaultToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	tokenRole := credential.GetString(spec.Config, "token_role", "")
+
+	if tokenRole == "" {
+		return nil, 0, "", fmt.Errorf("token_role is required for dynamic Vault token generation")
+	}
+
+	// Build request path
+	path := fmt.Sprintf("auth/token/create/%s", tokenRole)
+
+	// Build request data with optional parameters
+	data := make(map[string]interface{})
+
+	// Add optional TTL
+	ttl := credential.GetString(spec.Config, "ttl", "")
+	if ttl != "" {
+		parsedTTL, err := time.ParseDuration(ttl)
+		if err != nil {
+			return nil, 0, "", fmt.Errorf("invalid ttl format '%s': %w", ttl, err)
+		}
+
+		// Clamp TTL to min/max bounds if they are set
+		if spec.MinTTL > 0 && parsedTTL < spec.MinTTL {
+			parsedTTL = spec.MinTTL
+			if d.logger != nil {
+				d.logger.Debug("TTL adjusted to minimum",
+					logger.String("requested", ttl),
+					logger.String("adjusted", parsedTTL.String()),
+				)
+			}
+		}
+		if spec.MaxTTL > 0 && parsedTTL > spec.MaxTTL {
+			parsedTTL = spec.MaxTTL
+			if d.logger != nil {
+				d.logger.Debug("TTL adjusted to maximum",
+					logger.String("requested", ttl),
+					logger.String("adjusted", parsedTTL.String()),
+				)
+			}
+		}
+
+		data["ttl"] = parsedTTL.String()
+	}
+
+	// Add optional display name
+	displayName := credential.GetString(spec.Config, "display_name", "")
+	if displayName != "" {
+		data["display_name"] = displayName
+	}
+
+	// Add optional metadata
+	meta := credential.GetString(spec.Config, "meta", "")
+	if meta != "" {
+		data["meta"] = meta
+	}
+
+	// Create the token
+	secret, err := d.vault.Logical().WriteWithContext(ctx, path, data)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("failed to create Vault token: %w", err)
+	}
+
+	if secret == nil || secret.Auth == nil {
+		return nil, 0, "", fmt.Errorf("no token returned for role '%s'", tokenRole)
+	}
+
+	// Extract token TTL from auth response
+	leaseTTL := time.Duration(secret.Auth.LeaseDuration) * time.Second
+
+	// Build raw data with token
+	rawData := map[string]interface{}{
+		"token":        secret.Auth.ClientToken,
+		"client_token": secret.Auth.ClientToken, // Alternative field name
+		"accessor":     secret.Auth.Accessor,
+		"policies":     secret.Auth.Policies,
+		"renewable":    secret.Auth.Renewable,
+	}
+
+	if d.logger != nil {
+		d.logger.Debug("generated dynamic Vault token",
+			logger.String("spec", spec.Name),
+			logger.String("token_role", tokenRole),
+			logger.String("accessor", secret.Auth.Accessor),
+			logger.String("lease_ttl", leaseTTL.String()),
+			logger.Bool("renewable", secret.Auth.Renewable),
+		)
+	}
+
+	// Vault tokens don't have a lease ID in the traditional sense
+	// The token itself is the credential; revocation is done via token/revoke
+	return rawData, leaseTTL, secret.Auth.Accessor, nil
+}
+
+// Revoke revokes a Vault lease or token accessor
 func (d *VaultDriver) Revoke(ctx context.Context, leaseID string) error {
 	if leaseID == "" {
 		return nil // Nothing to revoke
@@ -350,6 +475,24 @@ func (d *VaultDriver) Revoke(ctx context.Context, leaseID string) error {
 		return fmt.Errorf("authentication failed before revocation: %w", err)
 	}
 
+	// Check if this is a token accessor (Vault tokens use accessor for revocation)
+	// Token accessors are typically shorter and don't contain slashes like lease IDs
+	if !containsSlash(leaseID) {
+		// Try to revoke as token accessor
+		err := d.vault.Auth().Token().RevokeAccessorWithContext(ctx, leaseID)
+		if err != nil {
+			return fmt.Errorf("failed to revoke token accessor %s: %w", leaseID, err)
+		}
+
+		if d.logger != nil {
+			d.logger.Debug("revoked Vault token via accessor",
+				logger.String("accessor", leaseID),
+			)
+		}
+		return nil
+	}
+
+	// Revoke as standard lease
 	err := d.vault.Sys().RevokeWithContext(ctx, leaseID)
 	if err != nil {
 		return fmt.Errorf("failed to revoke lease %s: %w", leaseID, err)
@@ -362,6 +505,16 @@ func (d *VaultDriver) Revoke(ctx context.Context, leaseID string) error {
 	}
 
 	return nil
+}
+
+// containsSlash checks if a string contains a forward slash
+func containsSlash(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '/' {
+			return true
+		}
+	}
+	return false
 }
 
 // Type returns the driver type
