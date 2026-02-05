@@ -48,7 +48,7 @@ EOF
 
 # Configure Vault as credential source
 ./warden -n PROD/SEC cred source create vault \
-  --type hashicorp_vault \
+  --type hvault \
   --config vault_address=http://127.0.0.1:8200 \
   --config auth_method=approle \
   --config role_id=c0ae884e-b55e-1736-3710-bb1d88d76182 \
@@ -65,12 +65,14 @@ EOF
 ./warden -n PROD/SEC cred spec create aws_static \
   --type aws_access_keys \
   --source vault \
+  --config mint_method=kv2_static \
   --config kv2_mount=kv_static_secret \
   --config secret_path=aws/prod
 
 ./warden -n PROD/SEC cred spec create aws_dynamic \
   --type aws_access_keys \
   --source vault \
+  --config mint_method=dynamic_aws \
   --config aws_mount=aws \
   --config role_name=terraform \
   --config ttl=900s \

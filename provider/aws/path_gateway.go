@@ -153,7 +153,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	}
 
 	// Debug: Log incoming request details for Access Point troubleshooting
-	b.logger.Debug("Incoming request details",
+	b.logger.Trace("Incoming request details",
 		logger.String("method", req.HTTPRequest.Method),
 		logger.String("host", req.HTTPRequest.Host),
 		logger.String("path", req.HTTPRequest.URL.Path),
@@ -172,7 +172,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		return nil, fmt.Errorf("no processor found for service: %s", service)
 	}
 
-	b.logger.Debug("Selected processor",
+	b.logger.Trace("Selected processor",
 		logger.String("processor", proc.Name()),
 		logger.String("request_id", req.RequestID),
 	)
@@ -184,7 +184,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		return nil, err
 	}
 
-	b.logger.Debug("Processor result",
+	b.logger.Trace("Processor result",
 		logger.String("processor", proc.Name()),
 		logger.String("targetURL", result.TargetURL),
 		logger.String("targetHost", result.TargetHost),

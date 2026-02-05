@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/errwrap"
@@ -271,8 +273,8 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	// start the servers (HTTP and Database)
-	// Use context from cobra command which respects signal interrupts
-	ctx, cancel := context.WithCancel(cmd.Context())
+	// Use signal.NotifyContext to cancel on SIGINT/SIGTERM for graceful shutdown
+	ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	// Channel to collect all listener errors

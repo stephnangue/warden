@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/openbao/openbao/helper/namespace"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
@@ -31,6 +32,11 @@ func (b *SystemBackend) pathCredentials() []*framework.Path {
 				"config": {
 					Type:        framework.TypeMap,
 					Description: "Source-specific configuration",
+				},
+				"rotation_period": {
+					Type:        framework.TypeDurationSecond,
+					Description: "Rotation period in seconds for credential source rotation",
+					Required:    true,
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
@@ -231,16 +237,14 @@ func (b *SystemBackend) handleCredentialSourceCreate(ctx context.Context, req *l
 	name := d.Get("name").(string)
 	sourceType := d.Get("type").(string)
 	configAny, _ := d.Get("config").(map[string]any)
-
-	b.logger.Info("creating credential source",
-		logger.String("name", name),
-		logger.String("type", sourceType))
+	rotationPeriodSec, _ := d.Get("rotation_period").(int)
 
 	// Create credential source
 	source := &credential.CredSource{
-		Name:   name,
-		Type:   sourceType,
-		Config: convertToStringMap(configAny),
+		Name:           name,
+		Type:           sourceType,
+		Config:         convertToStringMap(configAny),
+		RotationPeriod: time.Duration(rotationPeriodSec) * time.Second,
 	}
 
 	// Store via credential config store
@@ -252,11 +256,16 @@ func (b *SystemBackend) handleCredentialSourceCreate(ctx context.Context, req *l
 		return logical.ErrorResponse(err), nil
 	}
 
+	b.logger.Info("credential source created",
+		logger.String("name", name),
+		logger.String("type", sourceType))
+
 	return b.respondCreated(map[string]any{
-		"name":    source.Name,
-		"type":    source.Type,
-		"config":  source.Config,
-		"message": fmt.Sprintf("Successfully created credential source %s", name),
+		"name":            source.Name,
+		"type":            source.Type,
+		"config":          source.Config,
+		"rotation_period": int64(source.RotationPeriod.Seconds()),
+		"message":         fmt.Sprintf("Successfully created credential source %s", name),
 	}), nil
 }
 
@@ -273,11 +282,29 @@ func (b *SystemBackend) handleCredentialSourceRead(ctx context.Context, req *log
 	// Mask sensitive config fields
 	maskedConfig := b.maskSourceConfig(source.Type, source.Config)
 
-	return b.respondSuccess(map[string]any{
-		"name":   source.Name,
-		"type":   source.Type,
-		"config": maskedConfig,
-	}), nil
+	data := map[string]any{
+		"name":            source.Name,
+		"type":            source.Type,
+		"config":          maskedConfig,
+		"rotation_period": int64(source.RotationPeriod.Seconds()),
+	}
+
+	// Include rotation schedule info if available
+	if b.core.rotationManager != nil {
+		ns, err := namespace.FromContext(ctx)
+		if err == nil && ns != nil {
+			if entry := b.core.rotationManager.GetEntry(ns.UUID, name); entry != nil {
+				if !entry.NextRotation.IsZero() {
+					data["next_rotation"] = entry.NextRotation.Format(time.RFC3339)
+				}
+				if !entry.LastRotation.IsZero() {
+					data["last_rotation"] = entry.LastRotation.Format(time.RFC3339)
+				}
+			}
+		}
+	}
+
+	return b.respondSuccess(data), nil
 }
 
 // handleCredentialSourceUpdate handles PUT /sys/cred/sources/{name}
@@ -369,9 +396,10 @@ func (b *SystemBackend) handleCredentialSourceList(ctx context.Context, req *log
 	for _, source := range sources {
 		maskedConfig := b.maskSourceConfig(source.Type, source.Config)
 		sourceInfos = append(sourceInfos, map[string]any{
-			"name":   source.Name,
-			"type":   source.Type,
-			"config": maskedConfig,
+			"name":            source.Name,
+			"type":            source.Type,
+			"config":          maskedConfig,
+			"rotation_period": int64(source.RotationPeriod.Seconds()),
 		})
 	}
 

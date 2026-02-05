@@ -7,27 +7,46 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 // CreateCredentialSourceInput represents the input for creating a credential source
 type CreateCredentialSourceInput struct {
-	Type   string            `json:"type"`
-	Config map[string]string `json:"config,omitempty"`
+	Type           string            `json:"-"`
+	Config         map[string]string `json:"-"`
+	RotationPeriod time.Duration     `json:"-"`
+}
+
+// MarshalJSON sends rotation_period as seconds to match TypeDurationSecond on the server.
+func (i CreateCredentialSourceInput) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Type           string            `json:"type"`
+		Config         map[string]string `json:"config,omitempty"`
+		RotationPeriod int64             `json:"rotation_period,omitempty"`
+	}{
+		Type:           i.Type,
+		Config:         i.Config,
+		RotationPeriod: int64(i.RotationPeriod.Seconds()),
+	})
 }
 
 // CreateCredentialSourceOutput represents the output after creating a credential source
 type CreateCredentialSourceOutput struct {
-	Name    string            `json:"name"`
-	Type    string            `json:"type"`
-	Config  map[string]string `json:"config,omitempty"`
-	Message string            `json:"message"`
+	Name           string            `json:"name"`
+	Type           string            `json:"type"`
+	Config         map[string]string `json:"config,omitempty"`
+	RotationPeriod time.Duration     `json:"rotation_period,omitempty"`
+	Message        string            `json:"message"`
 }
 
 // CredentialSourceInfo represents credential source metadata
 type CredentialSourceInfo struct {
-	Name   string            `json:"name"`
-	Type   string            `json:"type"`
-	Config map[string]string `json:"config,omitempty"`
+	Name           string            `json:"name"`
+	Type           string            `json:"type"`
+	Config         map[string]string `json:"config,omitempty"`
+	RotationPeriod time.Duration     `json:"rotation_period,omitempty"`
+	NextRotation   string            `json:"next_rotation,omitempty"`
+	LastRotation   string            `json:"last_rotation,omitempty"`
 }
 
 // UpdateCredentialSourceInput represents the input for updating a credential source
@@ -91,6 +110,9 @@ func (c *Sys) CreateCredentialSourceWithContext(ctx context.Context, name string
 			output.Config[k] = configValueToString(v)
 		}
 	}
+	if rp, ok := resource.Data["rotation_period"]; ok {
+		output.RotationPeriod = parseDurationFromSeconds(rp)
+	}
 
 	return output, nil
 }
@@ -133,6 +155,15 @@ func (c *Sys) GetCredentialSourceWithContext(ctx context.Context, name string) (
 		for k, v := range config {
 			source.Config[k] = configValueToString(v)
 		}
+	}
+	if rp, ok := resource.Data["rotation_period"]; ok {
+		source.RotationPeriod = parseDurationFromSeconds(rp)
+	}
+	if nr, ok := resource.Data["next_rotation"].(string); ok {
+		source.NextRotation = nr
+	}
+	if lr, ok := resource.Data["last_rotation"].(string); ok {
+		source.LastRotation = lr
 	}
 
 	return source, nil
@@ -190,6 +221,9 @@ func (c *Sys) ListCredentialSourcesWithContext(ctx context.Context) ([]*Credenti
 			for k, v := range config {
 				source.Config[k] = configValueToString(v)
 			}
+		}
+		if rp, ok := sourceMap["rotation_period"]; ok {
+			source.RotationPeriod = parseDurationFromSeconds(rp)
 		}
 
 		sources = append(sources, source)
@@ -262,6 +296,24 @@ func (c *Sys) DeleteCredentialSourceWithContext(ctx context.Context, name string
 	defer resp.Body.Close()
 
 	return nil
+}
+
+// parseDurationFromSeconds parses a time.Duration from a JSON value representing seconds.
+// The server sends duration as seconds (int64) via TypeDurationSecond.
+func parseDurationFromSeconds(v any) time.Duration {
+	switch val := v.(type) {
+	case float64:
+		return time.Duration(int64(val)) * time.Second
+	case json.Number:
+		if n, err := val.Int64(); err == nil {
+			return time.Duration(n) * time.Second
+		}
+	case string:
+		if d, err := time.ParseDuration(val); err == nil {
+			return d
+		}
+	}
+	return 0
 }
 
 // configValueToString converts various types from JSON to string representation

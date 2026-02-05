@@ -29,19 +29,38 @@ func TestVaultTokenCredType_ValidateConfig_VaultSource(t *testing.T) {
 		errMsg     string
 	}{
 		{
-			name: "valid token_role config",
+			name: "valid vault_token config",
 			config: map[string]string{
-				"token_role": "my-role",
+				"mint_method": "vault_token",
+				"token_role":  "my-role",
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    false,
 		},
 		{
-			name:       "missing token_role",
+			name:       "missing mint_method",
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "'token_role' is required for dynamic Vault token generation",
+			errMsg:     "'mint_method' is required",
+		},
+		{
+			name: "missing token_role",
+			config: map[string]string{
+				"mint_method": "vault_token",
+			},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "token_role",
+		},
+		{
+			name: "unsupported mint_method",
+			config: map[string]string{
+				"mint_method": "invalid",
+			},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "unsupported mint_method",
 		},
 		{
 			name: "unsupported source type",

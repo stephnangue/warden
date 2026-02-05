@@ -106,7 +106,7 @@ resource "aws_s3control_access_grant" "example" {
   
   grantee {
     grantee_type       = "IAM"
-    grantee_identifier = data.aws_caller_identity.current.arn
+    grantee_identifier = aws_iam_role.access_grants.arn
   }
 
   tags = {

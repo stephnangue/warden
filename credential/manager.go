@@ -69,8 +69,8 @@ func NewManager(
 
 	// Create Ristretto cache
 	cache, err := ristretto.NewCache(&ristretto.Config[string, *Credential]{
-		NumCounters: 100000,
-		MaxCost:     1_000_000,
+		NumCounters: 5_000_000,
+		MaxCost:     50 << 20, // 50 MB
 		BufferItems: 64,
 	})
 
@@ -129,14 +129,7 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 		cred.TokenID = tokenID
 		cred.SpecName = specName
 
-		// Calculate cache TTL: min(tokenTTL, 80% of credential lease TTL)
-		cacheTTL := tokenTTL
-		if cred.LeaseTTL > 0 {
-			cacheTTL = min(tokenTTL, cred.LeaseTTL*4/5)
-		}
-
-		// Cache the credential
-		m.cache.SetWithTTL(cacheKey, cred, 1, cacheTTL)
+		m.cache.Set(cacheKey, cred, 1)
 
 		// Wait for value to be processed (Ristretto is async)
 		m.cache.Wait()
@@ -148,7 +141,7 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 				ctx,               // Context with namespace
 				cred.CredentialID, // Unique ID for this credential instance (UUID)
 				cacheKey,          // Cache key for cache lookup/deletion
-				cacheTTL,
+				tokenTTL,
 				cred.LeaseID,
 				cred.SourceName,
 				cred.SourceType,
@@ -162,15 +155,6 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 				// Don't fail - credential is still valid, just relies on cache eviction
 			}
 		}
-
-		// m.log.Debug("issued credential",
-		// 	logger.String("namespace", ns.ID),
-		// 	logger.String("credential_id", cred.CredentialID),
-		// 	logger.String("token_id", tokenID),
-		// 	logger.String("spec", specName),
-		// 	logger.String("type", cred.Type),
-		// 	logger.String("cache_ttl", cacheTTL.String()),
-		// )
 
 		return cred, nil
 	})
@@ -191,7 +175,7 @@ func (m *Manager) issueCredential(ctx context.Context, specName string) (*Creden
 	}
 
 	// Step 2: Get or create source driver
-	driver, err := m.getOrCreateDriver(ctx, spec.Source)
+	driver, err := m.GetOrCreateDriver(ctx, spec.Source)
 	if err != nil {
 		return nil, err
 	}
@@ -250,12 +234,8 @@ func (m *Manager) Stop() {
 //   - revocable: Whether the credential can be revoked at source
 func (m *Manager) RevokeByExpiration(ctx context.Context, credentialID, cacheKey, leaseID, sourceName string, revocable bool) error {
 
-	// Step 1: Revoke the lease at the source if revocable
-	if err := m.revokeLeaseAtSource(ctx, revocable, leaseID, sourceName); err != nil {
-		return err
-	}
-
-	// Step 2: Only delete from cache if this credential is still the active one
+	// Step 1: Delete from cache first to prevent serving a revoked credential
+	// Only delete if this credential is still the active one
 	// A newer credential with a different CredentialID may have replaced it
 	cached, found := m.cache.Get(cacheKey)
 	switch {
@@ -271,7 +251,12 @@ func (m *Manager) RevokeByExpiration(ctx context.Context, credentialID, cacheKey
 		m.cache.Del(cacheKey)
 	}
 
-	m.log.Trace("credential expired",
+	// Step 2: Revoke the lease at the source if revocable
+	if err := m.revokeLeaseAtSource(ctx, revocable, leaseID, sourceName); err != nil {
+		return err
+	}
+
+	m.log.Debug("credential expired",
 		logger.String("credential_id", credentialID),
 		logger.String("lease_id", leaseID))
 
@@ -286,7 +271,7 @@ func (m *Manager) revokeLeaseAtSource(ctx context.Context, revocable bool, lease
 	}
 
 	// Get or create driver - it may not exist after server restart
-	driver, err := m.getOrCreateDriver(ctx, sourceName)
+	driver, err := m.GetOrCreateDriver(ctx, sourceName)
 	if err != nil {
 		m.log.Warn("failed to get driver for credential revocation",
 			logger.String("source_name", sourceName),
@@ -304,9 +289,9 @@ func (m *Manager) revokeLeaseAtSource(ctx context.Context, revocable bool, lease
 	return nil
 }
 
-// getOrCreateDriver retrieves an existing driver or creates one if it doesn't exist.
+// GetOrCreateDriver retrieves an existing driver or creates one if it doesn't exist.
 // This is needed during revocation after server restart when drivers aren't cached yet.
-func (m *Manager) getOrCreateDriver(ctx context.Context, sourceName string) (SourceDriver, error) {
+func (m *Manager) GetOrCreateDriver(ctx context.Context, sourceName string) (SourceDriver, error) {
 	// First try to get existing driver
 	if driver, ok := m.driverRegistry.GetDriver(ctx, sourceName); ok {
 		return driver, nil
@@ -326,7 +311,7 @@ func (m *Manager) getOrCreateDriver(ctx context.Context, sourceName string) (Sou
 	// Only log when a new driver was actually created (not when returning existing)
 	if created {
 		ns, _ := namespace.FromContext(ctx)
-		m.log.Trace("credential source driver created",
+		m.log.Debug("credential source driver created",
 			logger.String("namespace", ns.ID),
 			logger.String("source_name", sourceName),
 			logger.String("source_type", credSource.Type))

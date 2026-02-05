@@ -65,3 +65,56 @@ type SourceDriver interface {
 	// Cleanup releases resources
 	Cleanup(ctx context.Context) error
 }
+
+// Rotatable is an optional interface for drivers that support credential rotation.
+// Credential sources can implement this to allow periodic rotation of their
+// authentication credentials (e.g., Vault AppRole secret_id, AWS IAM keys).
+//
+// The rotation is split into three phases to ensure disruption-free rotation:
+//  1. PrepareRotation: Generate new credentials (old still valid)
+//  2. CommitRotation: Activate new credentials in driver (after persist)
+//  3. CleanupRotation: Destroy old credentials (best-effort)
+//
+// This design ensures new credentials are persisted BEFORE old ones are destroyed,
+// preventing loss of access if a crash occurs during rotation.
+type Rotatable interface {
+	// SupportsRotation returns true if this driver instance can rotate its credentials.
+	// This depends on the driver configuration - for example, Vault AppRole with
+	// role_name supports rotation, but token auth may not.
+	SupportsRotation() bool
+
+	// PrepareRotation generates new credentials WITHOUT destroying old ones.
+	// Both old and new credentials remain valid during the overlap period.
+	//
+	// Returns:
+	//   - newConfig: updated config map with new credentials (will be persisted)
+	//   - cleanupConfig: driver-specific config needed to destroy old credentials
+	//     Examples:
+	//       - Vault AppRole: {"secret_id_accessor": "old-accessor-uuid"}
+	//       - AWS IAM: {"access_key_id": "old-key-id"}
+	//   - error: if new credential generation fails
+	//
+	// IMPORTANT: This method must NOT modify driver internal state or destroy old credentials.
+	PrepareRotation(ctx context.Context) (newConfig map[string]string, cleanupConfig map[string]string, err error)
+
+	// CommitRotation activates new credentials in the driver's internal state.
+	// Called AFTER the new config has been persisted to storage.
+	//
+	// The driver should:
+	//   1. Update its internal config with newConfig
+	//   2. Re-authenticate using the new credentials
+	//
+	// Returns error if activation fails (e.g., re-authentication fails).
+	CommitRotation(ctx context.Context, newConfig map[string]string) error
+
+	// CleanupRotation destroys old credentials using the cleanupConfig from PrepareRotation.
+	// Called AFTER CommitRotation succeeds and new credentials are active.
+	//
+	// Returns error if cleanup fails. The RotationManager will:
+	//   1. Retry cleanup with exponential backoff (up to 3 immediate attempts)
+	//   2. If all retries fail, persist cleanupConfig to storage
+	//   3. Retry persisted cleanups daily (max 7 days, then abandon)
+	//
+	// The cleanupConfig format is driver-specific.
+	CleanupRotation(ctx context.Context, cleanupConfig map[string]string) error
+}

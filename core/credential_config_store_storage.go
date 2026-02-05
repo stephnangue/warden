@@ -27,13 +27,14 @@ type StoredCredSpec struct {
 
 // StoredCredSource is the versioned storage format for credential sources
 type StoredCredSource struct {
-	Version     int               `json:"version"`
-	NamespaceID string            `json:"namespace_id"`
-	Name        string            `json:"name"`
-	Type        string            `json:"type"`
-	Config      map[string]string `json:"config"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	Version        int               `json:"version"`
+	NamespaceID    string            `json:"namespace_id"`
+	Name           string            `json:"name"`
+	Type           string            `json:"type"`
+	Config         map[string]string `json:"config"`
+	RotationPeriod string            `json:"rotation_period"` // Duration as string
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
 // ============================================================================
@@ -156,13 +157,14 @@ func (s *CredentialConfigStore) persistSource(namespaceID string, source *creden
 	now := time.Now()
 
 	stored := &StoredCredSource{
-		Version:     1,
-		NamespaceID: namespaceID,
-		Name:        source.Name,
-		Type:        source.Type,
-		Config:      source.Config,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		Version:        1,
+		NamespaceID:    namespaceID,
+		Name:           source.Name,
+		Type:           source.Type,
+		Config:         source.Config,
+		RotationPeriod: source.RotationPeriod.String(),
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 
 	data, err := json.Marshal(stored)
@@ -200,10 +202,13 @@ func (s *CredentialConfigStore) loadSource(namespaceID, name string) (*credentia
 		return nil, fmt.Errorf("failed to unmarshal source: %w", err)
 	}
 
+	rotationPeriod, _ := time.ParseDuration(stored.RotationPeriod)
+
 	source := &credential.CredSource{
-		Name:   stored.Name,
-		Type:   stored.Type,
-		Config: stored.Config,
+		Name:           stored.Name,
+		Type:           stored.Type,
+		Config:         stored.Config,
+		RotationPeriod: rotationPeriod,
 	}
 
 	return source, nil

@@ -92,6 +92,8 @@ resource "aws_s3_bucket_notification" "sns" {
     topic_arn = aws_sns_topic.s3_notifications.arn
     events    = ["s3:ObjectRemoved:*"]
   }
+
+  depends_on = [aws_sns_topic_policy.s3_notifications]
 }
 
 ################################################################################
@@ -156,6 +158,8 @@ resource "aws_s3_bucket_notification" "sqs" {
     queue_arn = aws_sqs_queue.s3_notifications.arn
     events    = ["s3:ObjectCreated:Post", "s3:ObjectCreated:Copy"]
   }
+
+  depends_on = [aws_sqs_queue_policy.s3_notifications]
 }
 
 ################################################################################

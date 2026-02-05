@@ -166,7 +166,6 @@ type TokenStore struct {
 	// Tier 2: Secondary index (accessor-based lookup)
 	byAccessor *ristretto.Cache[string, string] // Accessor → ID
 
-	// Persistent storage backend (uses salt in storage paths for distribution)
 	storage BarrierView // For write-through to disk
 
 	// Root token management
@@ -399,7 +398,7 @@ func (s *TokenStore) generateWithCollisionDetection(
 			}
 
 			// For other token types, this is a true collision - retry with new random values
-			s.logger.Warn("token ID collision detected, regenerating",
+			s.logger.Error("token ID collision detected, regenerating",
 				logger.String("token_id", entry.ID),
 				logger.String("type", meta.Name),
 				logger.Int("attempt", i+1))

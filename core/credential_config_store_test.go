@@ -610,7 +610,7 @@ func TestCredentialConfigStore_ValidateSource_DriverValidation(t *testing.T) {
 	store, ctx := setupTestCredentialConfigStore(t)
 
 	// Initialize driver registry with built-in drivers
-	store.core.credentialDriverRegistry = credential.NewDriverRegistry()
+	store.core.credentialDriverRegistry = credential.NewDriverRegistry(nil)
 
 	// Register a test factory
 	testFactory := &testDriverFactory{driverType: "test_driver"}
@@ -891,7 +891,7 @@ func TestCredentialConfigStore_ValidateSource_ConfigValidation(t *testing.T) {
 	store, ctx := setupTestCredentialConfigStore(t)
 
 	// Initialize driver registry
-	store.core.credentialDriverRegistry = credential.NewDriverRegistry()
+	store.core.credentialDriverRegistry = credential.NewDriverRegistry(nil)
 
 	// Register a factory that validates config
 	validatingFactory := &validatingDriverFactory{}

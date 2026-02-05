@@ -1,9 +1,0 @@
-{
-  "mode": "jwt",
-  "jwks_url": "https://example.com/.well-known/jwks.json",
-  "bound_issuer": "https://example.com",
-  "bound_audiences": ["warden", "api"],
-  "user_claim": "sub",
-  "token_ttl": "1h",
-  "auth_deadline": "10m"
-}

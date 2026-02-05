@@ -86,6 +86,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "lifecycle" {
   rule {
     id     = "archive-old-objects"
     status = "Enabled"
+    filter {}
 
     transition {
       days          = 30
@@ -105,6 +106,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "lifecycle" {
   rule {
     id     = "delete-old-versions"
     status = "Enabled"
+    filter {}
 
     noncurrent_version_transition {
       noncurrent_days = 30

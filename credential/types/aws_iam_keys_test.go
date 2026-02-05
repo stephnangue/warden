@@ -100,17 +100,19 @@ func TestAWSIAMAccessKeysCredType_ValidateConfig_VaultSource(t *testing.T) {
 		errMsg     string
 	}{
 		{
-			name: "valid dynamic config with aws_mount",
+			name: "valid dynamic_aws config",
 			config: map[string]string{
-				"aws_mount": "aws",
-				"role_name": "my-role",
+				"mint_method": "dynamic_aws",
+				"aws_mount":   "aws",
+				"role_name":   "my-role",
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    false,
 		},
 		{
-			name: "valid static KV config",
+			name: "valid kv2_static config",
 			config: map[string]string{
+				"mint_method": "kv2_static",
 				"kv2_mount":   "secret",
 				"secret_path": "aws-creds/myapp",
 			},
@@ -118,39 +120,40 @@ func TestAWSIAMAccessKeysCredType_ValidateConfig_VaultSource(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "missing both aws_mount and kv2_mount",
+			name:       "missing mint_method",
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "either 'aws_mount' (for dynamic credentials) or 'kv2_mount' (for static credentials) must be specified",
+			errMsg:     "'mint_method' is required",
 		},
 		{
-			name: "both aws_mount and kv2_mount specified",
+			name: "unsupported mint_method",
 			config: map[string]string{
-				"aws_mount": "aws",
-				"kv2_mount": "secret",
+				"mint_method": "invalid",
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "cannot specify both 'aws_mount' and 'kv2_mount'",
+			errMsg:     "unsupported mint_method",
 		},
 		{
-			name: "aws_mount without role_name",
+			name: "dynamic_aws without role_name",
 			config: map[string]string{
-				"aws_mount": "aws",
+				"mint_method": "dynamic_aws",
+				"aws_mount":   "aws",
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "dynamic AWS credentials require",
+			errMsg:     "role_name",
 		},
 		{
-			name: "kv2_mount without secret_path",
+			name: "kv2_static without secret_path",
 			config: map[string]string{
-				"kv2_mount": "secret",
+				"mint_method": "kv2_static",
+				"kv2_mount":   "secret",
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "static KV credentials require",
+			errMsg:     "secret_path",
 		},
 		{
 			name: "unsupported source type",

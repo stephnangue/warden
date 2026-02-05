@@ -1,6 +1,8 @@
 log_format  = "standard"
 log_level   = "trace"
 
+min_cred_source_rotation_period = "5m"
+
 seal "static" {
   current_key_id = "20251221-1"
   current_key = "file://./seal.key"

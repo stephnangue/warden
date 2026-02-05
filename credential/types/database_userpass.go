@@ -66,36 +66,21 @@ func (t *DatabaseUserPassCredType) validateLocalConfig(config map[string]string)
 }
 
 // validateVaultConfig validates config for Vault source
-// Requires either database_mount (dynamic) or kv2_mount (static KV)
+// Requires mint_method to route to the correct minting strategy
 func (t *DatabaseUserPassCredType) validateVaultConfig(config map[string]string) error {
-	databaseMount := credential.GetString(config, "database_mount", "")
-	kv2Mount := credential.GetString(config, "kv2_mount", "")
-
-	// Must specify either database_mount (dynamic) or kv2_mount (static)
-	if databaseMount == "" && kv2Mount == "" {
-		return fmt.Errorf("either 'database_mount' (for dynamic credentials) or 'kv2_mount' (for static credentials) must be specified")
+	mintMethod := credential.GetString(config, "mint_method", "")
+	if mintMethod == "" {
+		return fmt.Errorf("'mint_method' is required for vault source (use 'kv2_static' or 'dynamic_database')")
 	}
 
-	// Can't specify both
-	if databaseMount != "" && kv2Mount != "" {
-		return fmt.Errorf("cannot specify both 'database_mount' and 'kv2_mount' - choose dynamic or static")
+	switch mintMethod {
+	case "kv2_static":
+		return credential.ValidateRequired(config, "mint_method", "kv2_mount", "secret_path")
+	case "dynamic_database":
+		return credential.ValidateRequired(config, "mint_method", "database_mount", "role_name")
+	default:
+		return fmt.Errorf("unsupported mint_method '%s' for database_userpass with vault source; use 'kv2_static' or 'dynamic_database'", mintMethod)
 	}
-
-	// Dynamic database credentials validation
-	if databaseMount != "" {
-		if err := credential.ValidateRequired(config, "database_mount", "role_name"); err != nil {
-			return fmt.Errorf("dynamic database credentials require: %w", err)
-		}
-	}
-
-	// Static KV credentials validation
-	if kv2Mount != "" {
-		if err := credential.ValidateRequired(config, "kv2_mount", "secret_path"); err != nil {
-			return fmt.Errorf("static KV credentials require: %w", err)
-		}
-	}
-
-	return nil
 }
 
 // Parse converts raw credential data from source into structured Credential

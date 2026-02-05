@@ -9,7 +9,6 @@ import (
 
 	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/provider/aws"
 )
 
 type ApiListener struct {
@@ -99,8 +98,6 @@ func (l *ApiListener) Stop() error {
 		l.logger.Error("error when shutting down the http server", logger.Err(err))
 		return err
 	}
-
-	aws.ShutdownHTTPTransport()
 
 	l.logger.Info("HTTP server stopped gracefully")
 	return nil

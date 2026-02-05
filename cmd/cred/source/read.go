@@ -36,6 +36,16 @@ func runRead(cmd *cobra.Command, args []string) error {
 		{"Type", source.Type},
 	}
 
+	if source.RotationPeriod > 0 {
+		data = append(data, []any{"Rotation Period", source.RotationPeriod.String()})
+	}
+	if source.NextRotation != "" {
+		data = append(data, []any{"Next Rotation", source.NextRotation})
+	}
+	if source.LastRotation != "" {
+		data = append(data, []any{"Last Rotation", source.LastRotation})
+	}
+
 	if len(source.Config) > 0 {
 		data = append(data, []any{"Configuration", ""})
 
