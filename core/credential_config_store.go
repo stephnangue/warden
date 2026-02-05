@@ -58,6 +58,9 @@ type CredentialConfigStore struct {
 	specsByID   *ristretto.Cache[string, *credential.CredSpec]   // {ns-uuid}:spec:{name}
 	sourcesByID *ristretto.Cache[string, *credential.CredSource] // {ns-uuid}:source:{name}
 
+	// Rotation manager for periodic credential source rotation
+	rotationManager *RotationManager
+
 	mu     sync.RWMutex
 	closed bool
 }
@@ -229,7 +232,7 @@ func (s *CredentialConfigStore) CreateSpec(ctx context.Context, spec *credential
 	s.specsByID.Set(cacheKey, spec, 1)
 	s.specsByID.Wait()
 
-	s.logger.Debug("created credential spec",
+	s.logger.Info("created credential spec",
 		logger.String("namespace", ns.UUID),
 		logger.String("spec_name", spec.Name),
 		logger.String("type", spec.Type),
@@ -306,7 +309,7 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 	s.specsByID.Set(cacheKey, spec, 1)
 	s.specsByID.Wait()
 
-	s.logger.Debug("updated credential spec",
+	s.logger.Info("updated credential spec",
 		logger.String("namespace", ns.UUID),
 		logger.String("spec_name", spec.Name),
 	)
@@ -337,7 +340,7 @@ func (s *CredentialConfigStore) DeleteSpec(ctx context.Context, name string) err
 	cacheKey := s.buildSpecCacheKey(ns.UUID, name)
 	s.specsByID.Del(cacheKey)
 
-	s.logger.Debug("deleted credential spec",
+	s.logger.Info("deleted credential spec",
 		logger.String("namespace", ns.UUID),
 		logger.String("spec_name", name),
 	)
@@ -422,7 +425,25 @@ func (s *CredentialConfigStore) CreateSource(ctx context.Context, source *creden
 	s.sourcesByID.Set(cacheKey, source, 1)
 	s.sourcesByID.Wait()
 
-	s.logger.Debug("created credential source",
+	// Register with rotation manager if RotationPeriod is configured
+	if source.RotationPeriod > 0 {
+		if s.rotationManager != nil {
+			if err := s.rotationManager.RegisterSource(ctx, source.Name, source.Type, source.RotationPeriod); err != nil {
+				s.logger.Warn("failed to register source for rotation",
+					logger.String("source_name", source.Name),
+					logger.Err(err),
+				)
+				// Don't fail source creation for rotation registration errors
+			} else {
+				s.logger.Info("registered source for rotation",
+					logger.String("source_name", source.Name),
+					logger.String("rotation_period", source.RotationPeriod.String()),
+				)
+			}
+		}
+	}
+
+	s.logger.Info("created credential source",
 		logger.String("namespace", ns.UUID),
 		logger.String("source_name", source.Name),
 		logger.String("type", source.Type),
@@ -470,8 +491,16 @@ func (s *CredentialConfigStore) GetSource(ctx context.Context, name string) (*cr
 	return source, nil
 }
 
+// UpdateSourceOptions controls UpdateSource behavior
+type UpdateSourceOptions struct {
+	// SkipConnectionTest skips the credential connectivity check during validation.
+	// Used by the rotation manager where new credentials are known-good but may
+	// not yet be propagated at the provider (e.g., AWS IAM key propagation delay).
+	SkipConnectionTest bool
+}
+
 // UpdateSource updates an existing source
-func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *credential.CredSource) error {
+func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *credential.CredSource, opts ...UpdateSourceOptions) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -490,7 +519,11 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	}
 
 	// Validate source
-	if err := s.ValidateSource(ctx, source); err != nil {
+	var skipConnectionTest bool
+	if len(opts) > 0 {
+		skipConnectionTest = opts[0].SkipConnectionTest
+	}
+	if err := s.validateSource(ctx, source, skipConnectionTest); err != nil {
 		return err
 	}
 
@@ -509,7 +542,7 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	s.sourcesByID.Set(cacheKey, source, 1)
 	s.sourcesByID.Wait()
 
-	s.logger.Debug("updated credential source",
+	s.logger.Info("updated credential source",
 		logger.String("namespace", ns.UUID),
 		logger.String("source_name", source.Name),
 	)
@@ -545,6 +578,15 @@ func (s *CredentialConfigStore) DeleteSource(ctx context.Context, name string) e
 		return ErrSourceInUse
 	}
 
+	// Unregister from rotation manager first (if registered)
+	if s.rotationManager != nil {
+		if err := s.rotationManager.UnregisterSource(ctx, name); err != nil {
+			s.logger.Debug("source was not registered for rotation (or already unregistered)",
+				logger.String("source_name", name),
+			)
+		}
+	}
+
 	// Delete from storage
 	if err := s.deleteSource(ns.UUID, name); err != nil {
 		return err
@@ -554,7 +596,7 @@ func (s *CredentialConfigStore) DeleteSource(ctx context.Context, name string) e
 	cacheKey := s.buildSourceCacheKey(ns.UUID, name)
 	s.sourcesByID.Del(cacheKey)
 
-	s.logger.Debug("deleted credential source",
+	s.logger.Info("deleted credential source",
 		logger.String("namespace", ns.UUID),
 		logger.String("source_name", name),
 	)
@@ -650,12 +692,37 @@ func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credenti
 
 // ValidateSource validates a source before creation/update
 func (s *CredentialConfigStore) ValidateSource(ctx context.Context, source *credential.CredSource) error {
+	return s.validateSource(ctx, source, false)
+}
+
+// validateSource validates a source with optional connection test skip.
+// skipConnectionTest is used during rotation where credentials are known-good
+// but may not yet be propagated at the provider (e.g., AWS IAM key propagation delay).
+func (s *CredentialConfigStore) validateSource(ctx context.Context, source *credential.CredSource, skipConnectionTest bool) error {
 	if source.Name == "" {
 		return logical.ErrBadRequest("source name cannot be empty")
 	}
 
 	if source.Type == "" {
 		return logical.ErrBadRequest("source type cannot be empty")
+	}
+
+	// Validate rotation_period is set for source types that require it
+	if source.Type == credential.SourceTypeVault && source.RotationPeriod <= 0 {
+		return logical.ErrBadRequest("rotation_period is required for hvault credential sources")
+	}
+
+	// Validate rotation_period is within configured bounds
+	if source.RotationPeriod > 0 {
+		minPeriod, maxPeriod := s.core.CredSourceRotationPeriodBounds()
+		if source.RotationPeriod < minPeriod {
+			return logical.ErrBadRequestf("rotation_period %s is below the minimum allowed %s (configured via min_cred_source_rotation_period)",
+				source.RotationPeriod, minPeriod)
+		}
+		if source.RotationPeriod > maxPeriod {
+			return logical.ErrBadRequestf("rotation_period %s exceeds the maximum allowed %s (configured via max_cred_source_rotation_period)",
+				source.RotationPeriod, maxPeriod)
+		}
 	}
 
 	// Validate driver factory exists
@@ -675,13 +742,16 @@ func (s *CredentialConfigStore) ValidateSource(ctx context.Context, source *cred
 
 			// Test connection by creating a temporary driver instance
 			// This validates credentials and connectivity (e.g., Vault authentication)
-			driver, err := factory.Create(source.Config, s.logger)
-			if err != nil {
-				return logical.ErrBadRequestf("connection test failed for source type '%s': %s", source.Type, err.Error())
-			}
-			// Clean up the test driver
-			if driver != nil {
-				driver.Cleanup(ctx)
+			// Skipped during rotation where new credentials may not yet be propagated
+			if !skipConnectionTest {
+				driver, err := factory.Create(source.Config, s.logger)
+				if err != nil {
+					return logical.ErrBadRequestf("connection test failed for source type '%s': %s", source.Type, err.Error())
+				}
+				// Clean up the test driver
+				if driver != nil {
+					driver.Cleanup(ctx)
+				}
 			}
 		}
 	}
@@ -776,3 +846,11 @@ func (c *Core) GetCredentialManager(ctx context.Context) (*credential.Manager, e
 }
 
 // Note: Background cleanup is now handled by the ExpirationManager
+
+// SetRotationManager sets the rotation manager for the credential config store.
+// This is called during unseal after both the rotation manager and config store are initialized.
+func (s *CredentialConfigStore) SetRotationManager(rm *RotationManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rotationManager = rm
+}

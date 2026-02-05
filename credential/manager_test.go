@@ -205,7 +205,7 @@ func createTestManager(t *testing.T) (*Manager, *mockConfigStore, *mockSourceDri
 
 	// Create registries
 	typeRegistry := NewTypeRegistry()
-	driverRegistry := NewDriverRegistry()
+	driverRegistry := NewDriverRegistry(nil)
 	configStore := newMockConfigStore()
 
 	// Register mock credential type
@@ -240,7 +240,7 @@ func createNamespaceContext() context.Context {
 func TestNewManager(t *testing.T) {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	typeRegistry := NewTypeRegistry()
-	driverRegistry := NewDriverRegistry()
+	driverRegistry := NewDriverRegistry(nil)
 	configStore := newMockConfigStore()
 
 	manager, err := NewManager(typeRegistry, driverRegistry, configStore, log)

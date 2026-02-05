@@ -32,6 +32,8 @@ func (t *AWSIAMAccessKeysCredType) ValidateConfig(config map[string]string, sour
 		return t.validateLocalConfig(config)
 	case credential.SourceTypeVault:
 		return t.validateVaultConfig(config)
+	case credential.SourceTypeAWS:
+		return t.validateAWSConfig(config)
 	default:
 		return fmt.Errorf("unsupported source type '%s' for AWS credentials", sourceType)
 	}
@@ -66,36 +68,39 @@ func (t *AWSIAMAccessKeysCredType) validateLocalConfig(config map[string]string)
 }
 
 // validateVaultConfig validates config for Vault source
-// Requires either aws_mount (dynamic) or kv2_mount (static KV)
+// Requires mint_method to route to the correct minting strategy
 func (t *AWSIAMAccessKeysCredType) validateVaultConfig(config map[string]string) error {
-	awsMount := credential.GetString(config, "aws_mount", "")
-	kv2Mount := credential.GetString(config, "kv2_mount", "")
-
-	// Must specify either aws_mount (dynamic) or kv2_mount (static)
-	if awsMount == "" && kv2Mount == "" {
-		return fmt.Errorf("either 'aws_mount' (for dynamic credentials) or 'kv2_mount' (for static credentials) must be specified")
+	mintMethod := credential.GetString(config, "mint_method", "")
+	if mintMethod == "" {
+		return fmt.Errorf("'mint_method' is required for vault source (use 'kv2_static' or 'dynamic_aws')")
 	}
 
-	// Can't specify both
-	if awsMount != "" && kv2Mount != "" {
-		return fmt.Errorf("cannot specify both 'aws_mount' and 'kv2_mount' - choose dynamic or static")
+	switch mintMethod {
+	case "kv2_static":
+		return credential.ValidateRequired(config, "mint_method", "kv2_mount", "secret_path")
+	case "dynamic_aws":
+		return credential.ValidateRequired(config, "mint_method", "aws_mount", "role_name")
+	default:
+		return fmt.Errorf("unsupported mint_method '%s' for aws_access_keys with vault source; use 'kv2_static' or 'dynamic_aws'", mintMethod)
+	}
+}
+
+// validateAWSConfig validates config for AWS source
+// Requires mint_method to route between STS AssumeRole and Secrets Manager
+func (t *AWSIAMAccessKeysCredType) validateAWSConfig(config map[string]string) error {
+	mintMethod := credential.GetString(config, "mint_method", "")
+	if mintMethod == "" {
+		return fmt.Errorf("'mint_method' is required for aws source (use 'sts_assume_role' or 'secrets_manager')")
 	}
 
-	// Dynamic AWS credentials validation
-	if awsMount != "" {
-		if err := credential.ValidateRequired(config, "aws_mount", "role_name"); err != nil {
-			return fmt.Errorf("dynamic AWS credentials require: %w", err)
-		}
+	switch mintMethod {
+	case "sts_assume_role":
+		return credential.ValidateRequired(config, "mint_method", "role_arn")
+	case "secrets_manager":
+		return credential.ValidateRequired(config, "mint_method", "secret_id")
+	default:
+		return fmt.Errorf("unsupported mint_method '%s'; use 'sts_assume_role' or 'secrets_manager'", mintMethod)
 	}
-
-	// Static KV credentials validation
-	if kv2Mount != "" {
-		if err := credential.ValidateRequired(config, "kv2_mount", "secret_path"); err != nil {
-			return fmt.Errorf("static KV credentials require: %w", err)
-		}
-	}
-
-	return nil
 }
 
 // Parse converts raw credential data from source into structured Credential

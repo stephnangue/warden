@@ -49,6 +49,14 @@ const (
 	// forwardToActive to trigger forwarding if a perf standby encounters
 	// an SSC Token that it does not have the WAL state for.
 	ForwardSSCTokenToActive = "new_token"
+
+	// DefaultMinCredSourceRotationPeriod is the minimum allowed rotation period
+	// for credential sources when not explicitly configured (1 day).
+	DefaultMinCredSourceRotationPeriod = 24 * time.Hour
+
+	// DefaultMaxCredSourceRotationPeriod is the maximum allowed rotation period
+	// for credential sources when not explicitly configured (30 days).
+	DefaultMaxCredSourceRotationPeriod = 720 * time.Hour
 )
 
 var (
@@ -195,6 +203,15 @@ type Core struct {
 	// Uses timer-based expiration instead of relying on lazy cache eviction
 	expirationManager *ExpirationManager
 
+	// rotationManager handles periodic rotation of credential source secrets
+	// (e.g., Vault AppRole secret_id rotation)
+	rotationManager *RotationManager
+
+	// shutdownHooks are process-level cleanup functions registered by backends
+	// (e.g., transport shutdown). Keyed by name for idempotency.
+	shutdownHooks   map[string]func()
+	shutdownHooksMu sync.Mutex
+
 	auditDevices map[string]audit.Factory
 
 	authMethods map[string]logical.Factory
@@ -334,12 +351,11 @@ type CoreConfig struct {
 func (c *Core) Shutdown() error {
 	c.logger.Info("Shutting down the core")
 
-	// Stop expiration manager first to prevent new expirations during shutdown
-	if c.expirationManager != nil {
-		c.expirationManager.Stop()
+	// Seal the core, which triggers the full preSeal teardown sequence
+	if err := c.Seal(); err != nil {
+		c.logger.Error("error during seal on shutdown", logger.Err(err))
+		return err
 	}
-
-	c.tokenStore.Close()
 
 	c.logger.Info("Core shutdown successfully")
 
@@ -502,7 +518,7 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 
 	// Initialize global credential type and driver registries
 	c.credentialTypeRegistry = credential.NewTypeRegistry()
-	c.credentialDriverRegistry = credential.NewDriverRegistry()
+	c.credentialDriverRegistry = credential.NewDriverRegistry(c.logger.WithSystem("credential.driver"))
 
 	// Register builtin credential types and drivers
 	if err := types.RegisterBuiltinTypes(c.credentialTypeRegistry); err != nil {
@@ -649,9 +665,98 @@ func (c *Core) GetExpirationManager() *ExpirationManager {
 	return c.expirationManager
 }
 
+// setupRotationManager creates and initializes the rotation manager for periodic
+// credential source secret rotation (e.g., Vault AppRole secret_id).
+func (c *Core) setupRotationManager(ctx context.Context) error {
+	c.logger.Info("setting up rotation manager")
+
+	// Create storage view for rotation data
+	rotationStorage := NewBarrierView(c.barrier, rotationStoragePath)
+
+	// Create rotation manager with Core reference for credential config access
+	c.rotationManager = NewRotationManager(
+		c,
+		c.logger.WithSubsystem("rotation"),
+		rotationStorage,
+	)
+
+	// Restore persisted rotation entries from storage
+	if err := c.rotationManager.Restore(ctx); err != nil {
+		c.logger.Warn("failed to restore rotation entries", logger.Err(err))
+		// Don't fail startup for restoration errors
+	}
+
+	c.logger.Info("rotation manager setup complete")
+
+	return nil
+}
+
+// stopRotationManager stops the rotation manager during seal
+func (c *Core) stopRotationManager() error {
+	if c.rotationManager != nil {
+		c.rotationManager.Stop()
+		c.rotationManager = nil
+	}
+	return nil
+}
+
+// GetRotationManager returns the rotation manager (for subsystem integration)
+func (c *Core) GetRotationManager() *RotationManager {
+	return c.rotationManager
+}
+
+// RegisterShutdownHook registers a named shutdown hook to run during preSeal.
+// The key ensures idempotency — the same key overwrites the previous hook.
+func (c *Core) RegisterShutdownHook(key string, fn func()) {
+	c.shutdownHooksMu.Lock()
+	defer c.shutdownHooksMu.Unlock()
+	if c.shutdownHooks == nil {
+		c.shutdownHooks = make(map[string]func())
+	}
+	c.shutdownHooks[key] = fn
+}
+
+// runShutdownHooks runs all registered shutdown hooks and clears the registry.
+func (c *Core) runShutdownHooks() {
+	c.shutdownHooksMu.Lock()
+	hooks := c.shutdownHooks
+	c.shutdownHooks = nil
+	c.shutdownHooksMu.Unlock()
+
+	for key, fn := range hooks {
+		c.logger.Debug("running shutdown hook", logger.String("key", key))
+		fn()
+	}
+}
+
 // SetConfig sets core's config object to the newly provided config.
 func (c *Core) SetConfig(conf *config.Config) {
 	c.rawConfig.Store(conf)
+}
+
+// CredSourceRotationPeriodBounds returns the configured min and max rotation
+// period bounds for credential sources. Falls back to defaults if not set.
+func (c *Core) CredSourceRotationPeriodBounds() (min, max time.Duration) {
+	min = DefaultMinCredSourceRotationPeriod
+	max = DefaultMaxCredSourceRotationPeriod
+
+	conf, ok := c.rawConfig.Load().(*config.Config)
+	if !ok || conf == nil {
+		return
+	}
+
+	if conf.MinCredSourceRotationPeriod != "" {
+		if parsed, err := time.ParseDuration(conf.MinCredSourceRotationPeriod); err == nil {
+			min = parsed
+		}
+	}
+	if conf.MaxCredSourceRotationPeriod != "" {
+		if parsed, err := time.ParseDuration(conf.MaxCredSourceRotationPeriod); err == nil {
+			max = parsed
+		}
+	}
+
+	return
 }
 
 func (c *Core) PhysicalSealConfigs(ctx context.Context) (*SealConfig, *SealConfig, error) {
@@ -1062,36 +1167,27 @@ func (c *Core) preSeal() error {
 	if err := c.stopExpirationManager(); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error stopping expiration manager: %w", err))
 	}
-	// if err := c.teardownCredentials(context.Background()); err != nil {
-	// 	result = multierror.Append(result, fmt.Errorf("error tearing down credentials: %w", err))
-	// }
+	if err := c.stopRotationManager(); err != nil {
+		result = multierror.Append(result, fmt.Errorf("error stopping rotation manager: %w", err))
+	}
+
 	if err := c.teardownPolicyStore(); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error tearing down policy store: %w", err))
 	}
-	// if err := c.stopRollback(); err != nil {
-	// 	result = multierror.Append(result, fmt.Errorf("error stopping rollback: %w", err))
-	// }
+
 	if err := c.unloadMounts(context.Background()); err != nil {
 		c.logger.Error("error unloading mounts", logger.Err(err))
 		return fmt.Errorf("error unloading mounts: %w", err)
 	}
-	// if err := c.teardownLoginMFA(); err != nil {
-	// 	result = multierror.Append(result, fmt.Errorf("error tearing down login MFA: %w", err))
-	// }
+
+	// Run process-level shutdown hooks (e.g., transport cleanup) after all
+	// mounts are unloaded so no in-flight requests use the resources.
+	c.runShutdownHooks()
+
 	if err := c.teardownNamespaceStore(); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error tearing down namespace store: %w", err))
 		return result
 	}
-
-	// if c.autoRotateCancel != nil {
-	// 	c.autoRotateCancel()
-	// 	c.autoRotateCancel = nil
-	// }
-
-	// if c.updateLockedUserEntriesCancel != nil {
-	// 	c.updateLockedUserEntriesCancel()
-	// 	c.updateLockedUserEntriesCancel = nil
-	// }
 
 	// Unload tokens from cache (they remain in storage for next unseal)
 	if c.tokenStore != nil {
@@ -1125,7 +1221,7 @@ type standardUnsealStrategy struct {
 }
 
 func (s standardUnsealStrategy) unseal(ctx context.Context, logger *logger.GatedLogger, c *Core) error {
-	c.logger.Trace("standard unseal starting")
+	c.logger.Debug("standard unseal starting")
 
 	c.activeTime = time.Now().UTC()
 
@@ -1142,7 +1238,7 @@ func (s standardUnsealStrategy) unseal(ctx context.Context, logger *logger.Gated
 type readonlyUnsealStrategy struct{}
 
 func (s readonlyUnsealStrategy) unseal(ctx context.Context, logger *logger.GatedLogger, c *Core) error {
-	c.logger.Trace("read-only unseal starting")
+	c.logger.Debug("read-only unseal starting")
 	return s.unsealShared(ctx, logger, c, true /* standby */)
 }
 
@@ -1170,6 +1266,15 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 	// Wire up credential manager to expiration manager for timer-based TTL enforcement
 	// This allows credential manager to register newly issued credentials for expiration
 	c.credentialManager.SetExpirationRegistrar(c.expirationManager)
+
+	// Setup rotation manager for periodic credential source secret rotation
+	// (e.g., Vault AppRole secret_id rotation)
+	if err := c.setupRotationManager(ctx); err != nil {
+		return err
+	}
+
+	// Wire up credential config store to rotation manager for source rotation registration
+	c.credConfigStore.SetRotationManager(c.rotationManager)
 
 	if err := c.loadMounts(ctx); err != nil {
 		return err

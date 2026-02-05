@@ -24,7 +24,7 @@ func (f *LocalDriverFactory) Type() string {
 // Create instantiates a new LocalDriver
 func (f *LocalDriverFactory) Create(config map[string]string, logger *logger.GatedLogger) (credential.SourceDriver, error) {
 	return &LocalDriver{
-		logger: logger,
+		logger: logger.WithSubsystem(credential.SourceTypeLocal),
 	}, nil
 }
 

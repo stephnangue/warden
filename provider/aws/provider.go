@@ -38,7 +38,6 @@ type awsBackend struct {
 	timeout           time.Duration
 	processorRegistry *processor.ProcessorRegistry
 	storageView       sdklogical.Storage
-	cleanedUp         bool
 }
 
 // extractToken extracts Access Key ID from AWS SigV4 Authorization header
@@ -130,6 +129,11 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			TokenExtractor: extractToken,
 			Paths:          b.paths(),
 		},
+	}
+
+	// Register transport shutdown hook for process-level cleanup
+	if conf.RegisterShutdownHook != nil {
+		conf.RegisterShutdownHook("aws-transport", ShutdownHTTPTransport)
 	}
 
 	// Apply configuration if provided

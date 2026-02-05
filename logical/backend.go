@@ -91,6 +91,12 @@ type BackendConfig struct {
 
 	// ValidTokenTypes is the list of valid token types that can be used by auth backends
 	ValidTokenTypes []string
+
+	// RegisterShutdownHook registers a function to be called during application
+	// shutdown (preSeal). The key ensures idempotency — registering the same key
+	// multiple times only keeps one hook. Use this for process-level cleanup like
+	// shared transport shutdown that must not run on individual unmount.
+	RegisterShutdownHook func(key string, fn func())
 }
 
 // Factory is the factory function to create a logical backend.

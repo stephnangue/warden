@@ -431,11 +431,12 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry, view sd
 			return nil, fmt.Errorf("auth method type not supported: %s", entry.Type)
 		}
 		conf := &logical.BackendConfig{
-			StorageView:     view,
-			Logger:          c.logger.WithSystem("auth"),
-			Config:          entry.Config,
-			BackendUUID:     entry.BackendAwareUUID,
-			ValidTokenTypes: c.tokenStore.ListTokenTypes(),
+			StorageView:          view,
+			Logger:               c.logger.WithSystem("auth"),
+			Config:               entry.Config,
+			BackendUUID:          entry.BackendAwareUUID,
+			ValidTokenTypes:      c.tokenStore.ListTokenTypes(),
+			RegisterShutdownHook: c.RegisterShutdownHook,
 		}
 		backend, err = factory(ctx, conf)
 		if err != nil {
@@ -447,10 +448,11 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry, view sd
 			return nil, fmt.Errorf("provider type not supported: %s", entry.Type)
 		}
 		conf := &logical.BackendConfig{
-			StorageView: view,
-			Logger:      c.logger.WithSystem("provider"),
-			Config:      entry.Config,
-			BackendUUID: entry.BackendAwareUUID,
+			StorageView:          view,
+			Logger:               c.logger.WithSystem("provider"),
+			Config:               entry.Config,
+			BackendUUID:          entry.BackendAwareUUID,
+			RegisterShutdownHook: c.RegisterShutdownHook,
 		}
 		backend, err = factory(ctx, conf)
 		if err != nil {

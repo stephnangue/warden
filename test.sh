@@ -97,12 +97,12 @@ EOF
 # test credential source management
 
 ./warden cred source create vault \
-  --type hashicorp_vault \
+  --type hvault \
   --config vault_address=http://127.0.0.1:8200 \
   --config auth_method=approle \
   --config role_id=c0ae884e-b55e-1736-3710-bb1d88d76182 \
   --config secret_id=e0b8f9b8-6b32-5478-9a73-196e50734c2f \
-  --config approle_mount=warden_approle
+  --config approle_mount=warden_approle 
 ./warden cred source list
 ./warden cred source read vault
 ./warden cred source update vault --config secret_id=e0b8f9b8-6b32-5478-9a73-196e50734c2f
@@ -118,11 +118,13 @@ EOF
 ./warden cred spec create aws_static \
   --type aws_access_keys \
   --source vault \
+  --config mint_method=kv2_static \
   --config kv2_mount=kv_static_secret \
   --config secret_path=aws/prod
 ./warden cred spec create aws_dynamic \
   --type aws_access_keys \
   --source vault \
+  --config mint_method=dynamic_aws \
   --config aws_mount=aws \
   --config role_name=terraform \
   --config ttl=900s \
@@ -216,7 +218,7 @@ path "aws/gateway*" {
 }
 EOF
 ./warden -n PROD/SEC cred source create vault \
-  --type hashicorp_vault \
+  --type hvault \
   --config vault_address=http://127.0.0.1:8200 \
   --config auth_method=approle \
   --config role_id=c0ae884e-b55e-1736-3710-bb1d88d76182 \
@@ -231,11 +233,13 @@ EOF
 ./warden -n PROD/SEC cred spec create aws_static \
   --type aws_access_keys \
   --source vault \
+  --config mint_method=kv2_static \
   --config kv2_mount=kv_static_secret \
   --config secret_path=aws/prod
 ./warden -n PROD/SEC cred spec create aws_dynamic \
   --type aws_access_keys \
   --source vault \
+  --config mint_method=dynamic_aws \
   --config aws_mount=aws \
   --config role_name=terraform \
   --config ttl=900s \
@@ -286,6 +290,7 @@ EOF
 ./warden -n PROD/SEC cred spec create vault_reader \
   --type vault_token \
   --source vault \
+  --config mint_method=vault_token \
   --config token_role=reader \
   --min-ttl 600s \
   --max-ttl 2h
@@ -300,6 +305,7 @@ EOF
 ./warden -n PROD/SEC cred spec create full_access \
   --type vault_token \
   --source vault \
+  --config mint_method=vault_token \
   --config token_role=full-access \
   --min-ttl 600s \
   --max-ttl 2h
@@ -314,6 +320,7 @@ EOF
 ./warden -n PROD/SEC cred spec create terraform \
   --type vault_token \
   --source vault \
+  --config mint_method=vault_token \
   --config token_role=terraform-admin \
   --min-ttl 600s \
   --max-ttl 2h
@@ -344,6 +351,7 @@ export VAULT_ADDR=http://localhost:5000/v1/PROD/SEC/vault/gateway
 ./warden -n PROD/SEC cred spec create provisionner \
   --type vault_token \
   --source vault \
+  --config mint_method=vault_token \
   --config token_role=terraform-admin \
   --config ttl=15m \
   --min-ttl 600s \
@@ -366,6 +374,7 @@ export VAULT_ADDR=http://localhost:5000/v1/PROD/SEC/vault-auto/role/provisionner
 ./warden -n PROD/SEC cred spec create ephemeral \
   --type vault_token \
   --source vault \
+  --config mint_method=vault_token \
   --config token_role=ephemeral-admin \
   --config ttl=20m \
   --min-ttl 600s \
@@ -406,7 +415,7 @@ EOF
 ./warden -n PROD/DEV write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
 
 ./warden -n PROD/DEV cred source create vault \
-  --type hashicorp_vault \
+  --type hvault \
   --config vault_address=http://127.0.0.1:8200 \
   --config auth_method=approle \
   --config role_id=tf-role-id-1234-5678-90ab-cdef12345678 \
@@ -416,6 +425,7 @@ EOF
 ./warden -n PROD/DEV cred spec create provisionner \
   --type vault_token \
   --source vault \
+  --config mint_method=vault_token \
   --config token_role=terraform-admin \
   --config ttl=15m \
   --min-ttl 600s \
@@ -447,6 +457,7 @@ export VAULT_ADDR=http://localhost:5000/v1/PROD/DEV/vault-auto/role/provisionner
 ./warden -n PROD/DEV cred spec create aws_static \
   --type aws_access_keys \
   --source vault \
+  --config mint_method=kv2_static \
   --config kv2_mount=kv_static_secret \
   --config secret_path=aws/prod
 
@@ -471,6 +482,65 @@ export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
   | jq -r '.access_token')
 LOGIN_OUTPUT=$(./warden -n PROD/DEV login --method=jwt --token=$JWT --role=aws-streamer)
+export AWS_ACCESS_KEY_ID=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*access_key_id=\([^,]*\).*/\1/')
+export AWS_SECRET_ACCESS_KEY=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*secret_access_key=\([^ |]*\).*/\1/')
+export AWS_ENDPOINT_URL=http://localhost:5000/v1/PROD/DEV/aws/gateway
+
+./warden -n PROD/DEV cred source create vault-dev \
+  --type hvault \
+  --config vault_address=http://127.0.0.1:8200 \
+  --config auth_method=approle \
+  --config role_id=cde5a2cd-9bb7-a75f-5d24-c524c3a0fe8e \
+  --config secret_id=9fb4e44b-5005-0265-3414-0b4d1c2caf93 \
+  --config secret_id_accessor=a2567bff-1b18-1086-732d-1d262a9bd6ee \
+  --config approle_mount=warden_approle \
+  --config role_name=source_role \
+  --rotation-period 5m
+
+./warden -n PROD/DEV cred spec create operator \
+  --type vault_token \
+  --source vault-dev \
+  --config mint_method=vault_token \
+  --config token_role=terraform-admin \
+  --config ttl=15m \
+  --min-ttl 600s \
+  --max-ttl 1h
+
+./warden -n PROD/DEV cred spec create performer \
+  --type aws_access_keys \
+  --source my-aws-source \
+  --config mint_method=sts_assume_role \
+  --config role_arn=arn:aws:iam::905418489750:role/devops-warden-role \
+  --config ttl=15m \
+  --min-ttl 600s \
+  --max-ttl 1h
+
+./warden -n PROD/DEV write auth/jwt/role/operator \
+    token_type=jwt_role \
+    token_policies="streaming" \
+    user_claim=sub \
+    cred_spec_name=operator \
+    token_ttl=1h
+
+export VAULT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
+  | jq -r '.access_token')
+export VAULT_ADDR=http://localhost:5000/v1/PROD/DEV/vault-auto/role/operator/gateway
+
+
+./warden -n PROD/DEV write auth/jwt/role/performer \
+    token_type=aws_access_keys \
+    token_policies="streaming" \
+    user_claim=sub \
+    cred_spec_name=performer \
+    token_ttl=30m
+
+export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
+  | jq -r '.access_token')
+LOGIN_OUTPUT=$(./warden -n PROD/DEV login --method=jwt --token=$JWT --role=performer)
 export AWS_ACCESS_KEY_ID=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*access_key_id=\([^,]*\).*/\1/')
 export AWS_SECRET_ACCESS_KEY=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*secret_access_key=\([^ |]*\).*/\1/')
 export AWS_ENDPOINT_URL=http://localhost:5000/v1/PROD/DEV/aws/gateway

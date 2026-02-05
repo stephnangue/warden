@@ -2,6 +2,7 @@ package source
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stephnangue/warden/api"
@@ -9,8 +10,9 @@ import (
 )
 
 var (
-	createType   string
-	createConfig map[string]string
+	createType           string
+	createConfig         map[string]string
+	createRotationPeriod string
 
 	CreateCmd = &cobra.Command{
 		Use:           "create <name>",
@@ -26,8 +28,10 @@ var (
 func init() {
 	CreateCmd.Flags().StringVar(&createType, "type", "", "Source type (required)")
 	CreateCmd.Flags().StringToStringVar(&createConfig, "config", nil, "Source configuration (key=value)")
+	CreateCmd.Flags().StringVar(&createRotationPeriod, "rotation-period", "", "Rotation period for credential source (e.g., 24h, 30m) (required)")
 
 	CreateCmd.MarkFlagRequired("type")
+	CreateCmd.MarkFlagRequired("rotation-period")
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
@@ -43,6 +47,14 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		Config: createConfig,
 	}
 
+	if createRotationPeriod != "" {
+		period, err := time.ParseDuration(createRotationPeriod)
+		if err != nil {
+			return fmt.Errorf("invalid rotation-period format: %w", err)
+		}
+		input.RotationPeriod = period
+	}
+
 	output, err := c.Sys().CreateCredentialSource(name, input)
 	if err != nil {
 		return fmt.Errorf("error creating credential source: %w", err)
@@ -50,6 +62,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Success! Created credential source: %s\n", output.Name)
 	fmt.Printf("  Type: %s\n", output.Type)
+	if output.RotationPeriod > 0 {
+		fmt.Printf("  Rotation Period: %s\n", output.RotationPeriod)
+	}
 
 	if len(output.Config) > 0 {
 		fmt.Println("  Configuration:")
