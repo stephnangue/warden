@@ -254,7 +254,7 @@ func (m *ExpirationManager) register(entry *ExpirationEntry, ttl time.Duration, 
 		pi := &pendingInfo{entry: entry}
 		m.nonexpiring.Store(key, pi)
 		atomic.AddInt64(&m.nonexpiringCount, 1)
-		m.log.Trace("registered nonexpiring entry",
+		m.log.Debug("registered nonexpiring entry",
 			logger.String("type", string(entry.EntryType)),
 			logger.String("id", entry.ID))
 		return nil
@@ -281,7 +281,7 @@ func (m *ExpirationManager) register(entry *ExpirationEntry, ttl time.Duration, 
 		atomic.AddInt64(&m.pendingCount, -1)
 		m.decrementPendingTypeCount(existingPI.entry.EntryType)
 
-		m.log.Warn("replaced existing expiration entry",
+		m.log.Info("replaced existing expiration entry",
 			logger.String("type", string(entry.EntryType)),
 			logger.String("id", entry.ID))
 	}
@@ -290,7 +290,7 @@ func (m *ExpirationManager) register(entry *ExpirationEntry, ttl time.Duration, 
 	atomic.AddInt64(&m.pendingCount, 1)
 	m.incrementPendingTypeCount(entry.EntryType)
 
-	m.log.Trace("registered for expiration",
+	m.log.Debug("registered for expiration",
 		logger.String("type", string(entry.EntryType)),
 		logger.String("id", entry.ID),
 		logger.Duration("ttl", ttl),
@@ -427,7 +427,7 @@ func (m *ExpirationManager) revokeEntry(entry *ExpirationEntry) error {
 				return err
 			}
 		default:
-			m.log.Warn("unknown entry type for revocation",
+			m.log.Error("unknown entry type for revocation",
 				logger.String("type", string(entry.EntryType)))
 		}
 	}
@@ -464,7 +464,7 @@ func (m *ExpirationManager) revokeEntry(entry *ExpirationEntry) error {
 func (m *ExpirationManager) handleRevocationFailure(key string, entry *ExpirationEntry, pi *pendingInfo, err error) {
 	attempts := atomic.AddInt32(&pi.revokeAttempts, 1)
 
-	m.log.Warn("revocation failed",
+	m.log.Error("revocation failed",
 		logger.String("type", string(entry.EntryType)),
 		logger.String("id", entry.ID),
 		logger.Int("attempt", int(attempts)),
@@ -487,7 +487,7 @@ func (m *ExpirationManager) handleRevocationFailure(key string, entry *Expiratio
 		m.onExpire(key, pi)
 	})
 
-	m.log.Trace("scheduled retry",
+	m.log.Debug("scheduled retry",
 		logger.String("id", entry.ID),
 		logger.Duration("backoff", backoff))
 }
@@ -556,7 +556,7 @@ func (m *ExpirationManager) attemptIrrevocableRetry() {
 		// Attempt revocation
 		if err := m.revokeEntry(entry); err != nil {
 			failed++
-			m.log.Trace("irrevocable retry failed",
+			m.log.Warn("irrevocable retry failed",
 				logger.String("id", entry.ID),
 				logger.Err(err))
 

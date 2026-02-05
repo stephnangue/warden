@@ -23,7 +23,7 @@ func (t *VaultTokenCredType) Metadata() credential.TypeMetadata {
 
 // ValidateConfig validates the Config for a Vault token credential spec
 // sourceType determines the validation rules:
-// - "hashicorp_vault": requires auth configuration to generate tokens
+// - "hvault": requires auth configuration to generate tokens
 func (t *VaultTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
 	switch sourceType {
 	case credential.SourceTypeVault:
@@ -33,15 +33,20 @@ func (t *VaultTokenCredType) ValidateConfig(config map[string]string, sourceType
 	}
 }
 
-// Validate config to provide as Cred Spec Config
-// Requires token_role for dynamic token generation via auth/token/create/{role}
+// validateVaultConfig validates config for Vault source
+// Requires mint_method to route to the correct minting strategy
 func (t *VaultTokenCredType) validateVaultConfig(config map[string]string) error {
-	// Only token_role is supported for dynamic token generation
-	tokenRole := credential.GetString(config, "token_role", "")
-	if tokenRole == "" {
-		return fmt.Errorf("'token_role' is required for dynamic Vault token generation")
+	mintMethod := credential.GetString(config, "mint_method", "")
+	if mintMethod == "" {
+		return fmt.Errorf("'mint_method' is required for vault source (use 'vault_token')")
 	}
-	return nil
+
+	switch mintMethod {
+	case "vault_token":
+		return credential.ValidateRequired(config, "mint_method", "token_role")
+	default:
+		return fmt.Errorf("unsupported mint_method '%s' for vault_token type; use 'vault_token'", mintMethod)
+	}
 }
 
 // Parse converts raw credential data from source into structured Credential

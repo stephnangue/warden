@@ -14,5 +14,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register AWS driver factory
+	if err := registry.RegisterFactory(&AWSDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }

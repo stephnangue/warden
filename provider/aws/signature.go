@@ -110,7 +110,7 @@ func (b *awsBackend) verifyIncomingSignature(
 	// Clone the request for verification
 	testReq := r.Clone(r.Context())
 
-	b.logger.Debug("Signature Verification Debug",
+	b.logger.Trace("Signature Verification Debug",
 		logger.String("method", testReq.Method),
 		logger.String("url", testReq.URL.String()),
 		logger.String("host", testReq.Host),
@@ -233,7 +233,7 @@ func (b *awsBackend) verifyIncomingSignature(
 	// Compare signatures
 	match := providedSignature == calculatedSignature
 
-	b.logger.Debug("Signature comparison",
+	b.logger.Trace("Signature comparison",
 		logger.String("provided", providedSignature),
 		logger.String("calculated", calculatedSignature),
 		logger.String("originalAuth", authHeader),

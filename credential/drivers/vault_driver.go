@@ -58,13 +58,29 @@ func (f *VaultDriverFactory) Create(config map[string]string, logger *logger.Gat
 	driver := &VaultDriver{
 		vault:      apiClient,
 		credSource: credSource,
-		logger:     logger,
+		logger:     logger.WithSubsystem(credential.SourceTypeVault),
 	}
 
 	// Perform initial authentication
 	if authMethod != "" {
 		if err := driver.authenticate(context.Background()); err != nil {
 			return nil, fmt.Errorf("Vault authentication failed: %w", err)
+		}
+	}
+
+	// Verify the AppRole role exists in Vault
+	if authMethod == "approle" {
+		roleName := credential.GetString(config, "role_name", "")
+		approleMount := credential.GetString(config, "approle_mount", "")
+		if roleName != "" && approleMount != "" {
+			rolePath := fmt.Sprintf("auth/%s/role/%s", approleMount, roleName)
+			secret, err := apiClient.Logical().ReadWithContext(context.Background(), rolePath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to verify AppRole role '%s': %w", roleName, err)
+			}
+			if secret == nil || secret.Data == nil {
+				return nil, fmt.Errorf("AppRole role '%s' does not exist at path '%s'", roleName, rolePath)
+			}
 		}
 	}
 
@@ -85,7 +101,7 @@ func (f *VaultDriverFactory) ValidateConfig(config map[string]string) error {
 
 	if authMethod == "approle" {
 		// Validate required approle fields
-		if err := credential.ValidateRequired(config, "role_id", "secret_id", "approle_mount"); err != nil {
+		if err := credential.ValidateRequired(config, "role_id", "secret_id", "approle_mount", "role_name"); err != nil {
 			return err
 		}
 	}
@@ -95,7 +111,7 @@ func (f *VaultDriverFactory) ValidateConfig(config map[string]string) error {
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
 func (f *VaultDriverFactory) SensitiveConfigFields() []string {
-	return []string{"token", "secret_id"}
+	return []string{"token", "secret_id", "secret_id_accessor"}
 }
 
 // authenticate performs Vault authentication only if needed (thread-safe)
@@ -163,7 +179,7 @@ func (d *VaultDriver) loginViaApprole(ctx context.Context) error {
 	}
 
 	if d.logger != nil {
-		d.logger.Debug("authenticated to Vault via AppRole",
+		d.logger.Trace("authenticated to Vault via AppRole",
 			logger.String("approle_mount", approleMount),
 			logger.String("token_expires_at", d.tokenExpireAt.Format(time.RFC3339)),
 		)
@@ -172,33 +188,26 @@ func (d *VaultDriver) loginViaApprole(ctx context.Context) error {
 	return nil
 }
 
-// MintCredential mints credential using Hashicorp Vault based on credential spec type
+// MintCredential mints credential using Hashicorp Vault based on mint_method
 func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
 	// Re-authenticate if needed
 	if err := d.authenticate(ctx); err != nil {
 		return nil, 0, "", fmt.Errorf("authentication failed: %w", err)
 	}
 
-	// Route based on credential type
-	switch spec.Type {
-	case credential.TypeDatabaseUserPass:
-		// Determine if static or dynamic based on presence of database_mount
-		databaseMount := credential.GetString(spec.Config, "database_mount", "")
-		if databaseMount != "" {
-			return d.fetchDynamicDatabaseCreds(ctx, spec)
-		}
+	mintMethod := credential.GetString(spec.Config, "mint_method", "")
+
+	switch mintMethod {
+	case "kv2_static":
 		return d.fetchStaticKVSecret(ctx, spec)
-	case credential.TypeAWSAccessKeys:
-		// Determine if static or dynamic based on presence of aws_mount
-		awsMount := credential.GetString(spec.Config, "aws_mount", "")
-		if awsMount != "" {
-			return d.fetchDynamicAWSCreds(ctx, spec)
-		}
-		return d.fetchStaticKVSecret(ctx, spec)
-	case credential.TypeVaultToken:
+	case "dynamic_database":
+		return d.fetchDynamicDatabaseCreds(ctx, spec)
+	case "dynamic_aws":
+		return d.fetchDynamicAWSCreds(ctx, spec)
+	case "vault_token":
 		return d.fetchDynamicVaultToken(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported credential type for Vault: %s", spec.Type)
+		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; use 'kv2_static', 'dynamic_database', 'dynamic_aws', or 'vault_token'", mintMethod)
 	}
 }
 
@@ -221,7 +230,7 @@ func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, spec *credential.
 	}
 
 	if d.logger != nil {
-		d.logger.Debug("fetched static secret from Vault KV",
+		d.logger.Trace("fetched static secret from Vault KV",
 			logger.String("spec", spec.Name),
 			logger.String("mount", kv2Mount),
 			logger.String("path", secretPath),
@@ -265,7 +274,7 @@ func (d *VaultDriver) fetchDynamicDatabaseCreds(ctx context.Context, spec *crede
 	}
 
 	if d.logger != nil {
-		d.logger.Debug("generated dynamic database credentials from Vault",
+		d.logger.Trace("generated dynamic database credentials from Vault",
 			logger.String("spec", spec.Name),
 			logger.String("mount", dbMount),
 			logger.String("vault_role", roleName),
@@ -525,5 +534,150 @@ func (d *VaultDriver) Type() string {
 // Cleanup releases resources
 func (d *VaultDriver) Cleanup(ctx context.Context) error {
 	// Vault client doesn't need explicit cleanup
+	return nil
+}
+
+// SupportsRotation returns true if this driver instance can rotate its credentials.
+// Currently only AppRole authentication supports rotation.
+func (d *VaultDriver) SupportsRotation() bool {
+	authMethod := credential.GetString(d.credSource.Config, "auth_method", "")
+	if authMethod != "approle" {
+		return false
+	}
+
+	// AppRole rotation requires role_name to generate new secret_id
+	roleName := credential.GetString(d.credSource.Config, "role_name", "")
+	return roleName != ""
+}
+
+// PrepareRotation generates a new AppRole secret_id WITHOUT destroying the old one.
+// Both old and new secret_ids remain valid during the overlap period.
+func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, map[string]string, error) {
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+
+	authMethod := credential.GetString(d.credSource.Config, "auth_method", "")
+	if authMethod != "approle" {
+		return nil, nil, fmt.Errorf("rotation only supported for approle auth method, got: %s", authMethod)
+	}
+
+	approleMount := credential.GetString(d.credSource.Config, "approle_mount", "")
+	roleName := credential.GetString(d.credSource.Config, "role_name", "")
+	oldAccessor := credential.GetString(d.credSource.Config, "secret_id_accessor", "")
+
+	if roleName == "" {
+		return nil, nil, fmt.Errorf("role_name is required for AppRole rotation")
+	}
+
+	// Generate new secret_id (old one still valid - no disruption)
+	generatePath := fmt.Sprintf("auth/%s/role/%s/secret-id", approleMount, roleName)
+	secret, err := d.vault.Logical().WriteWithContext(ctx, generatePath, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate new secret_id: %w", err)
+	}
+
+	if secret == nil || secret.Data == nil {
+		return nil, nil, fmt.Errorf("no data returned when generating new secret_id")
+	}
+
+	newSecretID, ok := secret.Data["secret_id"].(string)
+	if !ok || newSecretID == "" {
+		return nil, nil, fmt.Errorf("secret_id not found in response")
+	}
+
+	newAccessor, ok := secret.Data["secret_id_accessor"].(string)
+	if !ok || newAccessor == "" {
+		return nil, nil, fmt.Errorf("secret_id_accessor not found in response")
+	}
+
+	// Build new config (both old and new are valid at this point)
+	newConfig := make(map[string]string)
+	for k, v := range d.credSource.Config {
+		newConfig[k] = v
+	}
+	newConfig["secret_id"] = newSecretID
+	newConfig["secret_id_accessor"] = newAccessor
+
+	// Build cleanup config with data needed to destroy old credentials
+	cleanupConfig := map[string]string{
+		"secret_id_accessor": oldAccessor,
+		"approle_mount":      approleMount,
+		"role_name":          roleName,
+	}
+
+	if d.logger != nil {
+		d.logger.Debug("prepared new secret_id for rotation",
+			logger.String("role_name", roleName),
+			logger.String("new_accessor", newAccessor[:8]+"..."),
+		)
+	}
+
+	return newConfig, cleanupConfig, nil
+}
+
+// CommitRotation activates the new credentials in driver state.
+//
+// Thread-safety: authMu protects credSource.Config writes and loginViaApprole reads.
+// The rotated fields (secret_id, secret_id_accessor) are ONLY read inside loginViaApprole
+// which always runs under authMu. Other config fields (vault_address, database_mount, etc.)
+// are never modified by rotation, so concurrent reads by MintCredential are safe.
+func (d *VaultDriver) CommitRotation(ctx context.Context, newConfig map[string]string) error {
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+
+	// Update internal state (safe: rotated fields only read under authMu)
+	d.credSource.Config = newConfig
+
+	// Re-authenticate with new credentials
+	if err := d.loginViaApprole(ctx); err != nil {
+		return fmt.Errorf("failed to authenticate with new secret_id: %w", err)
+	}
+
+	roleName := credential.GetString(newConfig, "role_name", "")
+	newAccessor := credential.GetString(newConfig, "secret_id_accessor", "")
+
+	if d.logger != nil {
+		d.logger.Info("committed rotated AppRole secret_id",
+			logger.String("role_name", roleName),
+			logger.String("new_accessor", newAccessor[:8]+"..."),
+		)
+	}
+
+	return nil
+}
+
+// CleanupRotation destroys the old secret_id using the accessor from cleanupConfig.
+// Returns error if cleanup fails (will be retried by RotationManager).
+func (d *VaultDriver) CleanupRotation(ctx context.Context, cleanupConfig map[string]string) error {
+	oldAccessor := cleanupConfig["secret_id_accessor"]
+	if oldAccessor == "" {
+		return nil // No old accessor to clean up
+	}
+
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+
+	approleMount := cleanupConfig["approle_mount"]
+	roleName := cleanupConfig["role_name"]
+
+	destroyPath := fmt.Sprintf("auth/%s/role/%s/secret-id-accessor/destroy", approleMount, roleName)
+	_, err := d.vault.Logical().WriteWithContext(ctx, destroyPath, map[string]interface{}{
+		"secret_id_accessor": oldAccessor,
+	})
+	if err != nil {
+		if d.logger != nil {
+			d.logger.Warn("failed to destroy old secret_id during cleanup",
+				logger.Err(err),
+				logger.String("accessor", oldAccessor[:8]+"..."),
+			)
+		}
+		return fmt.Errorf("failed to destroy old secret_id: %w", err)
+	}
+
+	if d.logger != nil {
+		d.logger.Debug("destroyed old secret_id",
+			logger.String("accessor", oldAccessor[:8]+"..."),
+		)
+	}
 	return nil
 }

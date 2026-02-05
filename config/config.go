@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/hashicorp/hcl/v2/hclsimple"
 )
@@ -21,6 +22,11 @@ type Config struct {
 
 	// Whether read requests are disabled on standby nodes.
 	DisableStandbyReads bool `hcl:"disable_standby_reads,optional"`
+
+	// Rotation period bounds for credential sources.
+	// Values must be valid Go duration strings (e.g., "24h", "720h").
+	MinCredSourceRotationPeriod string `hcl:"min_cred_source_rotation_period,optional"`
+	MaxCredSourceRotationPeriod string `hcl:"max_cred_source_rotation_period,optional"`
 }
 
 type KMS struct {
@@ -389,6 +395,31 @@ func LoadConfig(configFile string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Validate rotation period bounds if set
+	var minDur, maxDur time.Duration
+	if config.MinCredSourceRotationPeriod != "" {
+		minDur, err = time.ParseDuration(config.MinCredSourceRotationPeriod)
+		if err != nil {
+			return nil, fmt.Errorf("invalid min_cred_source_rotation_period %q: %w", config.MinCredSourceRotationPeriod, err)
+		}
+		if minDur <= 0 {
+			return nil, fmt.Errorf("min_cred_source_rotation_period must be positive, got %s", minDur)
+		}
+	}
+	if config.MaxCredSourceRotationPeriod != "" {
+		maxDur, err = time.ParseDuration(config.MaxCredSourceRotationPeriod)
+		if err != nil {
+			return nil, fmt.Errorf("invalid max_cred_source_rotation_period %q: %w", config.MaxCredSourceRotationPeriod, err)
+		}
+		if maxDur <= 0 {
+			return nil, fmt.Errorf("max_cred_source_rotation_period must be positive, got %s", maxDur)
+		}
+	}
+	if minDur > 0 && maxDur > 0 && minDur > maxDur {
+		return nil, fmt.Errorf("min_cred_source_rotation_period (%s) must be <= max_cred_source_rotation_period (%s)", minDur, maxDur)
+	}
+
 	return &config, nil
 }
 

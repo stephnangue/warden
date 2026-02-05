@@ -70,7 +70,7 @@ func TestExpirationManager_RegisterCredential(t *testing.T) {
 		5*time.Minute,
 		"lease-abc",
 		"vault-source",
-		"hashicorp_vault",
+		"hvault",
 		"db-spec",
 		true,
 	)
@@ -300,7 +300,7 @@ func TestExpirationManager_UniqueCredentialIDs(t *testing.T) {
 		10*time.Minute,
 		"lease-1",
 		"vault-source",
-		"hashicorp_vault",
+		"hvault",
 		"db-spec",
 		true,
 	)
@@ -316,7 +316,7 @@ func TestExpirationManager_UniqueCredentialIDs(t *testing.T) {
 		10*time.Minute,
 		"lease-2",
 		"vault-source",
-		"hashicorp_vault",
+		"hvault",
 		"db-spec",
 		true,
 	)
@@ -342,7 +342,7 @@ func TestExpirationManager_CredentialEntryHasCacheKey(t *testing.T) {
 		10*time.Minute,   // Long TTL so it stays in pending
 		"lease-abc",
 		"vault-source",
-		"hashicorp_vault",
+		"hvault",
 		"db-spec",
 		true,
 	)
@@ -360,7 +360,7 @@ func TestExpirationManager_CredentialEntryHasCacheKey(t *testing.T) {
 	assert.Equal(t, "ns-1:token-456", entry.CacheKey, "CacheKey should be stored for cache operations")
 	assert.Equal(t, "lease-abc", entry.LeaseID, "LeaseID should be stored for source revocation")
 	assert.Equal(t, "vault-source", entry.SourceName)
-	assert.Equal(t, "hashicorp_vault", entry.SourceType)
+	assert.Equal(t, "hvault", entry.SourceType)
 	assert.Equal(t, "db-spec", entry.SpecName)
 	assert.True(t, entry.Revocable)
 }

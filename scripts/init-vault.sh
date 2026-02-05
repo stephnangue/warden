@@ -68,6 +68,11 @@ path "aws/roles/*" {
   capabilities = ["read"]
 }
 
+# AppRole role read access (for verifying roles and rotation)
+path "auth/warden_approle/role/*" {
+  capabilities = ["read", "create", "update"]
+}
+
 # allow creating tokens with any role
 path "auth/token/create/*" {
   capabilities = ["create", "update"]

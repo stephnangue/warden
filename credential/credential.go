@@ -16,7 +16,8 @@ const (
 // Source type constants
 const (
 	SourceTypeLocal = "local"
-	SourceTypeVault = "hashicorp_vault"
+	SourceTypeVault = "hvault"
+	SourceTypeAWS   = "aws"
 )
 
 // Category constants for credential categorization
@@ -88,9 +89,10 @@ func (c *Credential) ShouldRotate(threshold float64) bool {
 }
 
 type CredSource struct {
-	Name   string
-	Type   string // local, hashicorp_vault, aws_secret_manager, aws_iam, azure_key_vault, cgp_secret_manager
-	Config map[string]string
+	Name           string
+	Type           string            // local, hvault, aws, azure_key_vault, gcp_secret_manager
+	Config         map[string]string
+	RotationPeriod time.Duration     // 0 means no rotation
 }
 
 type CredSourceRegistry struct {

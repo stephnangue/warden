@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/logger"
 )
 
 // DriverRegistry manages driver factories and instances
@@ -13,13 +14,15 @@ type DriverRegistry struct {
 	mu        sync.RWMutex
 	factories map[string]SourceDriverFactory // type -> factory
 	instances map[string]SourceDriver        // {namespace}:{source_name} -> driver instance
+	log       *logger.GatedLogger
 }
 
 // NewDriverRegistry creates a new driver registry
-func NewDriverRegistry() *DriverRegistry {
+func NewDriverRegistry(log *logger.GatedLogger) *DriverRegistry {
 	return &DriverRegistry{
 		factories: make(map[string]SourceDriverFactory),
 		instances: make(map[string]SourceDriver),
+		log:       log,
 	}
 }
 
@@ -75,7 +78,7 @@ func (r *DriverRegistry) CreateDriver(ctx context.Context, sourceName string, so
 	}
 
 	// Create driver instance
-	driver, err := factory.Create(source.Config, nil) // logger will be passed when integrated
+	driver, err := factory.Create(source.Config, r.log)
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: %s: %v", ErrDriverCreationFailed, source.Type, err)
 	}

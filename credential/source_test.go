@@ -62,7 +62,7 @@ func TestCredSourceRegistry_RegisterDuplicate(t *testing.T) {
 
 	source2 := CredSource{
 		Name: "test-source",
-		Type: "hashicorp_vault",
+		Type: "hvault",
 	}
 
 	// Register first source
@@ -144,7 +144,7 @@ func TestCredSourceRegistry_List(t *testing.T) {
 
 	// Add sources
 	source1 := CredSource{Name: "source1", Type: "local"}
-	source2 := CredSource{Name: "source2", Type: "hashicorp_vault"}
+	source2 := CredSource{Name: "source2", Type: "hvault"}
 	source3 := CredSource{Name: "source3", Type: "aws_secret_manager"}
 
 	registry.Register(source1)
@@ -222,7 +222,7 @@ func TestCredSourceRegistry_Count(t *testing.T) {
 	}
 
 	registry.Register(CredSource{Name: "source1", Type: "local"})
-	registry.Register(CredSource{Name: "source2", Type: "hashicorp_vault"})
+	registry.Register(CredSource{Name: "source2", Type: "hvault"})
 
 	if registry.Count() != 2 {
 		t.Errorf("expected count 2, got %d", registry.Count())

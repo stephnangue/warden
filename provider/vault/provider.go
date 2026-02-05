@@ -53,7 +53,6 @@ type vaultBackend struct {
 	timeout       time.Duration
 	tlsSkipVerify bool
 	storageView   sdklogical.Storage
-	cleanedUp     bool
 
 	// Transparent mode fields
 	transparentMode bool   // Enable transparent mode for implicit JWT authentication
@@ -139,6 +138,11 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			TokenExtractor: extractToken,
 			Paths:          b.paths(),
 		},
+	}
+
+	// Register transport shutdown hook for process-level cleanup
+	if conf.RegisterShutdownHook != nil {
+		conf.RegisterShutdownHook("vault-transport", ShutdownHTTPTransport)
 	}
 
 	// Apply configuration if provided
