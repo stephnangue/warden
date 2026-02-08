@@ -38,8 +38,6 @@ type Auth struct {
 
 	RoleName     string
 
-	AuthDeadline time.Duration
-
 	TokenTTL     time.Duration
 
 	NamespaceID   string // Namespace UUID
@@ -54,7 +52,6 @@ type Auth struct {
 type AuthData struct {
 	PrincipalID    string    // Principal identifier
 	RoleName       string    // Associated role
-	AuthDeadline   time.Time // Auth validity deadline
 	ExpireAt       time.Time // Token expiration
 	CredentialSpec string
 	Policies       []string

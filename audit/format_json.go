@@ -138,7 +138,7 @@ func (f *JSONFormat) saltEntry(ctx context.Context, entry *LogEntry) error {
 }
 
 // saltFieldByPath salts a field identified by a dot-separated path
-// Examples: "auth.client_token.token_id", "request.data.password", "response.auth.client_token.token_id"
+// Examples: "auth.token_id", "request.data.password", "response.credential.data"
 func (f *JSONFormat) saltFieldByPath(ctx context.Context, entry *LogEntry, fieldPath string) error {
 	parts := strings.Split(fieldPath, ".")
 	if len(parts) == 0 {
@@ -164,14 +164,22 @@ func (f *JSONFormat) saltAuthField(ctx context.Context, auth *Auth, parts []stri
 	}
 
 	switch parts[0] {
-	case "client_token":
-		if auth.ClientToken == nil {
-			return nil
+	case "token_id":
+		if auth.TokenID != "" {
+			salted, err := f.saltFn(ctx, auth.TokenID)
+			if err != nil {
+				return err
+			}
+			auth.TokenID = salted
 		}
-		if len(parts) == 1 {
-			return nil
+	case "token_accessor":
+		if auth.TokenAccessor != "" {
+			salted, err := f.saltFn(ctx, auth.TokenAccessor)
+			if err != nil {
+				return err
+			}
+			auth.TokenAccessor = salted
 		}
-		return f.saltTokenField(ctx, auth.ClientToken, parts[1:])
 	case "principal_id":
 		if auth.PrincipalID != "" {
 			salted, err := f.saltFn(ctx, auth.PrincipalID)
@@ -180,76 +188,39 @@ func (f *JSONFormat) saltAuthField(ctx context.Context, auth *Auth, parts []stri
 			}
 			auth.PrincipalID = salted
 		}
-	case "metadata":
-		if auth.Metadata == nil {
-			return nil
+	case "created_by_ip":
+		if auth.CreatedByIP != "" {
+			salted, err := f.saltFn(ctx, auth.CreatedByIP)
+			if err != nil {
+				return err
+			}
+			auth.CreatedByIP = salted
 		}
-		// If parts length is 1, salt all values in the metadata map
-		if len(parts) == 1 {
-			for key, value := range auth.Metadata {
-				if value != "" {
-					salted, err := f.saltFn(ctx, value)
-					if err != nil {
-						return err
-					}
-					auth.Metadata[key] = salted
-				}
-			}
-		} else if len(parts) >= 2 {
-			// Salt specific key
-			key := parts[1]
-			if value, ok := auth.Metadata[key]; ok && value != "" {
-				salted, err := f.saltFn(ctx, value)
-				if err != nil {
-					return err
-				}
-				auth.Metadata[key] = salted
-			}
+	case "policy_results":
+		if auth.PolicyResults != nil && len(parts) > 1 {
+			return f.saltPolicyResultsField(ctx, auth.PolicyResults, parts[1:])
 		}
 	}
 
 	return nil
 }
 
-// saltTokenField salts a field within the Token structure
-func (f *JSONFormat) saltTokenField(ctx context.Context, token *Token, parts []string) error {
-	if token == nil || len(parts) == 0 {
+// saltPolicyResultsField salts a field within the PolicyResults structure
+func (f *JSONFormat) saltPolicyResultsField(ctx context.Context, pr *PolicyResults, parts []string) error {
+	if pr == nil || len(parts) == 0 {
 		return nil
 	}
 
 	switch parts[0] {
-	case "token_id":
-		if token.TokenID != "" {
-			salted, err := f.saltFn(ctx, token.TokenID)
-			if err != nil {
-				return err
-			}
-			token.TokenID = salted
-		}
-	case "data":
-		if token.Data == nil {
-			return nil
-		}
-		// If parts length is 1, salt all values in the data map
-		if len(parts) == 1 {
-			for key, value := range token.Data {
-				if value != "" {
-					salted, err := f.saltFn(ctx, value)
-					if err != nil {
-						return err
-					}
-					token.Data[key] = salted
-				}
-			}
-		} else if len(parts) >= 2 {
-			// Salt specific key
-			key := parts[1]
-			if value, ok := token.Data[key]; ok && value != "" {
-				salted, err := f.saltFn(ctx, value)
+	case "granting_policies":
+		// Salt all policy names
+		for i, policy := range pr.GrantingPolicies {
+			if policy != "" {
+				salted, err := f.saltFn(ctx, policy)
 				if err != nil {
 					return err
 				}
-				token.Data[key] = salted
+				pr.GrantingPolicies[i] = salted
 			}
 		}
 	}
@@ -300,6 +271,38 @@ func (f *JSONFormat) saltRequestField(ctx context.Context, request *Request, par
 			}
 			request.ClientIP = salted
 		}
+	case "headers":
+		if request.Headers == nil {
+			return nil
+		}
+		// If parts length is 1, salt all header values
+		if len(parts) == 1 {
+			for key, values := range request.Headers {
+				for i, value := range values {
+					if value != "" {
+						salted, err := f.saltFn(ctx, value)
+						if err != nil {
+							return err
+						}
+						request.Headers[key][i] = salted
+					}
+				}
+			}
+		} else if len(parts) >= 2 {
+			// Salt specific header
+			key := parts[1]
+			if values, ok := request.Headers[key]; ok {
+				for i, value := range values {
+					if value != "" {
+						salted, err := f.saltFn(ctx, value)
+						if err != nil {
+							return err
+						}
+						request.Headers[key][i] = salted
+					}
+				}
+			}
+		}
 	}
 
 	return nil
@@ -312,8 +315,10 @@ func (f *JSONFormat) saltResponseField(ctx context.Context, response *Response, 
 	}
 
 	switch parts[0] {
-	case "cred":
-		return f.saltCredField(ctx, response.Cred, parts[1:])
+	case "credential":
+		return f.saltCredentialField(ctx, response.Credential, parts[1:])
+	case "auth_result":
+		return f.saltAuthResultField(ctx, response.AuthResult, parts[1:])
 	case "data":
 		if response.Data == nil {
 			return nil
@@ -342,25 +347,57 @@ func (f *JSONFormat) saltResponseField(ctx context.Context, response *Response, 
 				}
 			}
 		}
+	case "headers":
+		if response.Headers == nil {
+			return nil
+		}
+		// If parts length is 1, salt all header values
+		if len(parts) == 1 {
+			for key, values := range response.Headers {
+				for i, value := range values {
+					if value != "" {
+						salted, err := f.saltFn(ctx, value)
+						if err != nil {
+							return err
+						}
+						response.Headers[key][i] = salted
+					}
+				}
+			}
+		} else if len(parts) >= 2 {
+			// Salt specific header
+			key := parts[1]
+			if values, ok := response.Headers[key]; ok {
+				for i, value := range values {
+					if value != "" {
+						salted, err := f.saltFn(ctx, value)
+						if err != nil {
+							return err
+						}
+						response.Headers[key][i] = salted
+					}
+				}
+			}
+		}
 	}
 
 	return nil
 }
 
-// saltCredField salts a field within the Cred structure
-func (f *JSONFormat) saltCredField(ctx context.Context, cred *Cred, parts []string) error {
+// saltCredentialField salts a field within the Credential structure
+func (f *JSONFormat) saltCredentialField(ctx context.Context, cred *Credential, parts []string) error {
 	if cred == nil || len(parts) == 0 {
 		return nil
 	}
 
 	switch parts[0] {
-	case "token_id":
-		if cred.TokenID != "" {
-			salted, err := f.saltFn(ctx, cred.TokenID)
+	case "credential_id":
+		if cred.CredentialID != "" {
+			salted, err := f.saltFn(ctx, cred.CredentialID)
 			if err != nil {
 				return err
 			}
-			cred.TokenID = salted
+			cred.CredentialID = salted
 		}
 	case "lease_id":
 		if cred.LeaseID != "" {
@@ -370,11 +407,19 @@ func (f *JSONFormat) saltCredField(ctx context.Context, cred *Cred, parts []stri
 			}
 			cred.LeaseID = salted
 		}
+	case "token_id":
+		if cred.TokenID != "" {
+			salted, err := f.saltFn(ctx, cred.TokenID)
+			if err != nil {
+				return err
+			}
+			cred.TokenID = salted
+		}
 	case "data":
 		if cred.Data == nil {
 			return nil
 		}
-		// If parts length is 1, salt all values in the data map
+		// If parts length is 1, salt all values in the data map (contains sensitive credential values)
 		if len(parts) == 1 {
 			for key, value := range cred.Data {
 				if value != "" {
@@ -401,6 +446,34 @@ func (f *JSONFormat) saltCredField(ctx context.Context, cred *Cred, parts []stri
 	return nil
 }
 
+// saltAuthResultField salts a field within the AuthResult structure
+func (f *JSONFormat) saltAuthResultField(ctx context.Context, authResult *AuthResult, parts []string) error {
+	if authResult == nil || len(parts) == 0 {
+		return nil
+	}
+
+	switch parts[0] {
+	case "principal_id":
+		if authResult.PrincipalID != "" {
+			salted, err := f.saltFn(ctx, authResult.PrincipalID)
+			if err != nil {
+				return err
+			}
+			authResult.PrincipalID = salted
+		}
+	case "credential_spec":
+		if authResult.CredentialSpec != "" {
+			salted, err := f.saltFn(ctx, authResult.CredentialSpec)
+			if err != nil {
+				return err
+			}
+			authResult.CredentialSpec = salted
+		}
+	}
+
+	return nil
+}
+
 // omitFieldsFromEntry removes fields from entry based on configuration
 func (f *JSONFormat) omitFieldsFromEntry(entry *LogEntry) {
 	for _, fieldPath := range f.omitFields {
@@ -409,7 +482,7 @@ func (f *JSONFormat) omitFieldsFromEntry(entry *LogEntry) {
 }
 
 // omitFieldByPath omits a field identified by a dot-separated path
-// Examples: "auth", "request.data", "response.auth.client_token", "metadata"
+// Examples: "auth", "request.data", "response.credential"
 func (f *JSONFormat) omitFieldByPath(entry *LogEntry, fieldPath string) {
 	parts := strings.Split(fieldPath, ".")
 	if len(parts) == 0 {
@@ -435,13 +508,6 @@ func (f *JSONFormat) omitFieldByPath(entry *LogEntry, fieldPath string) {
 		} else if entry.Response != nil {
 			f.omitResponseField(entry.Response, parts[1:])
 		}
-	case "metadata":
-		if len(parts) == 1 {
-			entry.Metadata = nil
-		} else if len(parts) >= 2 && entry.Metadata != nil {
-			// Omit specific key in metadata
-			delete(entry.Metadata, parts[1])
-		}
 	case "error":
 		entry.Error = ""
 	}
@@ -454,46 +520,46 @@ func (f *JSONFormat) omitAuthField(auth *Auth, parts []string) {
 	}
 
 	switch parts[0] {
-	case "client_token":
-		if len(parts) == 1 {
-			auth.ClientToken = nil
-		} else if auth.ClientToken != nil {
-			f.omitTokenField(auth.ClientToken, parts[1:])
-		}
+	case "token_id":
+		auth.TokenID = ""
+	case "token_accessor":
+		auth.TokenAccessor = ""
+	case "token_type":
+		auth.TokenType = ""
 	case "principal_id":
 		auth.PrincipalID = ""
 	case "role_name":
 		auth.RoleName = ""
-	case "metadata":
+	case "policies":
+		auth.Policies = nil
+	case "policy_results":
 		if len(parts) == 1 {
-			auth.Metadata = nil
-		} else if len(parts) >= 2 && auth.Metadata != nil {
-			delete(auth.Metadata, parts[1])
+			auth.PolicyResults = nil
+		} else if auth.PolicyResults != nil {
+			f.omitPolicyResultsField(auth.PolicyResults, parts[1:])
 		}
+	case "token_ttl":
+		auth.TokenTTL = 0
+	case "expires_at":
+		auth.ExpiresAt = 0
+	case "namespace_id":
+		auth.NamespaceID = ""
+	case "namespace_path":
+		auth.NamespacePath = ""
+	case "created_by_ip":
+		auth.CreatedByIP = ""
 	}
 }
 
-// omitTokenField omits a field within the Token structure
-func (f *JSONFormat) omitTokenField(token *Token, parts []string) {
-	if token == nil || len(parts) == 0 {
+// omitPolicyResultsField omits a field within the PolicyResults structure
+func (f *JSONFormat) omitPolicyResultsField(pr *PolicyResults, parts []string) {
+	if pr == nil || len(parts) == 0 {
 		return
 	}
 
 	switch parts[0] {
-	case "token_id":
-		token.TokenID = ""
-	case "type":
-		token.Type = ""
-	case "token_ttl":
-		token.TokenTTL = 0
-	case "token_issuer":
-		token.TokenIssuer = ""
-	case "data":
-		if len(parts) == 1 {
-			token.Data = nil
-		} else if len(parts) >= 2 && token.Data != nil {
-			delete(token.Data, parts[1])
-		}
+	case "granting_policies":
+		pr.GrantingPolicies = nil
 	}
 }
 
@@ -506,36 +572,42 @@ func (f *JSONFormat) omitRequestField(request *Request, parts []string) {
 	switch parts[0] {
 	case "id":
 		request.ID = ""
-	case "method":
-		request.Method = ""
 	case "operation":
 		request.Operation = ""
-	case "client_ip":
-		request.ClientIP = ""
 	case "path":
 		request.Path = ""
-	case "target_url":
-		request.TargetUrl = ""
-	case "data":
-		if len(parts) == 1 {
-			request.Data = nil
-		} else if len(parts) >= 2 && request.Data != nil {
-			delete(request.Data, parts[1])
-		}
+	case "mount_point":
+		request.MountPoint = ""
+	case "mount_type":
+		request.MountType = ""
+	case "mount_class":
+		request.MountClass = ""
+	case "method":
+		request.Method = ""
+	case "client_ip":
+		request.ClientIP = ""
 	case "headers":
 		if len(parts) == 1 {
 			request.Headers = nil
 		} else if len(parts) >= 2 && request.Headers != nil {
 			delete(request.Headers, parts[1])
 		}
-	case "mount_type":
-		request.MountType = ""
-	case "mount_accessor":
-		request.MountAccessor = ""
-	case "mount_path":
-		request.MountPath = ""
-	case "mount_class":
-		request.MountClass = ""
+	case "data":
+		if len(parts) == 1 {
+			request.Data = nil
+		} else if len(parts) >= 2 && request.Data != nil {
+			delete(request.Data, parts[1])
+		}
+	case "namespace_id":
+		request.NamespaceID = ""
+	case "namespace_path":
+		request.NamespacePath = ""
+	case "unauthenticated":
+		request.Unauthenticated = false
+	case "streamed":
+		request.Streamed = false
+	case "transparent":
+		request.Transparent = false
 	}
 }
 
@@ -546,61 +618,95 @@ func (f *JSONFormat) omitResponseField(response *Response, parts []string) {
 	}
 
 	switch parts[0] {
-	case "cred":
-		if len(parts) == 1 {
-			response.Cred = nil
-		} else {
-			f.omitCredField(response.Cred, parts[1:])
-		}
 	case "status_code":
 		response.StatusCode = 0
-	case "message":
-		response.Message = ""
-	case "data":
-		if len(parts) == 1 {
-			response.Data = nil
-		} else if len(parts) >= 2 && response.Data != nil {
-			delete(response.Data, parts[1])
-		}
 	case "headers":
 		if len(parts) == 1 {
 			response.Headers = nil
 		} else if len(parts) >= 2 && response.Headers != nil {
 			delete(response.Headers, parts[1])
 		}
-	case "mount_type":
-		response.MountType = ""
-	case "mount_accessor":
-		response.MountAccessor = ""
-	case "mount_path":
-		response.MountPath = ""
+	case "data":
+		if len(parts) == 1 {
+			response.Data = nil
+		} else if len(parts) >= 2 && response.Data != nil {
+			delete(response.Data, parts[1])
+		}
 	case "mount_class":
 		response.MountClass = ""
+	case "streamed":
+		response.Streamed = false
+	case "warnings":
+		response.Warnings = nil
+	case "credential":
+		if len(parts) == 1 {
+			response.Credential = nil
+		} else {
+			f.omitCredentialField(response.Credential, parts[1:])
+		}
+	case "auth_result":
+		if len(parts) == 1 {
+			response.AuthResult = nil
+		} else {
+			f.omitAuthResultField(response.AuthResult, parts[1:])
+		}
 	}
 }
 
-// omitCredField omits a field within the Cred structure
-func (f *JSONFormat) omitCredField(cred *Cred, parts []string) {
+// omitCredentialField omits a field within the Credential structure
+func (f *JSONFormat) omitCredentialField(cred *Credential, parts []string) {
 	if cred == nil || len(parts) == 0 {
 		return
 	}
 
 	switch parts[0] {
+	case "credential_id":
+		cred.CredentialID = ""
 	case "type":
 		cred.Type = ""
+	case "category":
+		cred.Category = ""
 	case "lease_ttl":
 		cred.LeaseTTL = 0
 	case "lease_id":
 		cred.LeaseID = ""
 	case "token_id":
 		cred.TokenID = ""
-	case "origin":
-		cred.Origin = ""
+	case "source_name":
+		cred.SourceName = ""
+	case "source_type":
+		cred.SourceType = ""
+	case "spec_name":
+		cred.SpecName = ""
+	case "revocable":
+		cred.Revocable = false
 	case "data":
 		if len(parts) == 1 {
 			cred.Data = nil
 		} else if len(parts) >= 2 && cred.Data != nil {
 			delete(cred.Data, parts[1])
 		}
+	}
+}
+
+// omitAuthResultField omits a field within the AuthResult structure
+func (f *JSONFormat) omitAuthResultField(authResult *AuthResult, parts []string) {
+	if authResult == nil || len(parts) == 0 {
+		return
+	}
+
+	switch parts[0] {
+	case "token_type":
+		authResult.TokenType = ""
+	case "principal_id":
+		authResult.PrincipalID = ""
+	case "role_name":
+		authResult.RoleName = ""
+	case "policies":
+		authResult.Policies = nil
+	case "token_ttl":
+		authResult.TokenTTL = 0
+	case "credential_spec":
+		authResult.CredentialSpec = ""
 	}
 }

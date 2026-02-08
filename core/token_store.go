@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -38,9 +39,6 @@ var (
 	// ErrTokenNotFound is returned when a token cannot be found
 	ErrTokenNotFound = errors.New("token not found")
 
-	// ErrAuthDeadlineViolated is returned when auth deadline has passed
-	ErrAuthDeadlineViolated = errors.New("authentication deadline violated")
-
 	// ErrTokenExpired is returned when token has expired
 	ErrTokenExpired = errors.New("token has expired")
 
@@ -57,6 +55,18 @@ var (
 	ErrAccessorNotFound = errors.New("accessor not found")
 )
 
+// IPBindingPolicy controls how IP binding is enforced for tokens
+type IPBindingPolicy string
+
+const (
+	// IPBindingDisabled disables IP binding checks entirely
+	IPBindingDisabled IPBindingPolicy = "disabled"
+	// IPBindingOptional checks IP only if both creation IP and request IP are present (default)
+	IPBindingOptional IPBindingPolicy = "optional"
+	// IPBindingRequired rejects tokens that don't have IP binding or requests without client IP
+	IPBindingRequired IPBindingPolicy = "required"
+)
+
 // TokenStoreConfig holds configuration for the token store
 type TokenStoreConfig struct {
 	// CacheMaxCost is the maximum cost of cache (in bytes, roughly)
@@ -67,14 +77,27 @@ type TokenStoreConfig struct {
 
 	// EnableMetrics enables collection of operational metrics
 	EnableMetrics bool
+
+	// IPBindingPolicy controls how IP binding is enforced
+	// "disabled" - no IP binding checks
+	// "optional" - check only if both IPs present (default)
+	// "required" - reject tokens without IP binding or requests without client IP
+	IPBindingPolicy IPBindingPolicy
+
+	// CacheMinRetention is the minimum time to retain tokens in cache
+	// regardless of cost-based eviction. This prevents high token volume
+	// from evicting valid tokens prematurely. Defaults to 5 minutes.
+	CacheMinRetention time.Duration
 }
 
 // DefaultTokenStoreConfig returns a production-ready default configuration
 func DefaultTokenStoreConfig() *TokenStoreConfig {
 	return &TokenStoreConfig{
-		CacheMaxCost:     100 << 20, // 100 MB
-		CacheNumCounters: 1e7,       // 10 million
-		EnableMetrics:    true,
+		CacheMaxCost:      100 << 20, // 100 MB
+		CacheNumCounters:  1e7,       // 10 million
+		EnableMetrics:     true,
+		IPBindingPolicy:   IPBindingOptional,
+		CacheMinRetention: 5 * time.Minute,
 	}
 }
 
@@ -85,7 +108,6 @@ type TokenMetrics struct {
 	TokensResolved      int64
 	TokensExpired       int64
 	OriginViolations    int64
-	DeadlineViolations  int64
 	NamespaceMismatches int64
 	CacheHits           int64
 	CacheMisses         int64
@@ -115,12 +137,6 @@ func (m *TokenMetrics) IncrementOriginViolations() {
 	m.OriginViolations++
 }
 
-func (m *TokenMetrics) IncrementDeadlineViolations() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.DeadlineViolations++
-}
-
 func (m *TokenMetrics) IncrementNamespaceMismatches() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -147,7 +163,6 @@ func (m *TokenMetrics) GetSnapshot() map[string]int64 {
 		"tokens_resolved":      m.TokensResolved,
 		"tokens_expired":       m.TokensExpired,
 		"origin_violations":    m.OriginViolations,
-		"deadline_violations":  m.DeadlineViolations,
 		"namespace_mismatches": m.NamespaceMismatches,
 		"cache_hits":           m.CacheHits,
 		"cache_misses":         m.CacheMisses,
@@ -367,7 +382,6 @@ func (s *TokenStore) generateWithCollisionDetection(
 			CreatedAt:      time.Now(),
 			PrincipalID:    authData.PrincipalID,
 			RoleName:       authData.RoleName,
-			AuthDeadline:   authData.AuthDeadline,
 			ExpireAt:       authData.ExpireAt,
 			Data:           make(map[string]string),
 			Policies:       authData.Policies,
@@ -376,7 +390,11 @@ func (s *TokenStore) generateWithCollisionDetection(
 		}
 
 		// Generate accessor (Tier 2)
-		entry.Accessor = generateAccessor()
+		accessor, err := generateAccessor()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate accessor: %w", err)
+		}
+		entry.Accessor = accessor
 
 		// Let the token type generate its values
 		clientData, err := tokenType.Generate(authData, entry)
@@ -411,14 +429,15 @@ func (s *TokenStore) generateWithCollisionDetection(
 
 		// No existing token, store the new one in all three tiers
 
-		// Tier 1: Store in primary cache (byID)
-		// Note: No TTL on cache - ExpirationManager handles all expiration
-		// This prevents race between cache eviction and expiration timer
+		// Tier 1: Store in primary cache (byID) with TTL
+		// TTL is computed as max(remaining token lifetime, minimum retention)
+		// This prevents high token volume from evicting valid tokens prematurely
 		cost := int64(200)
-		s.byID.Set(entry.ID, entry, cost)
+		cacheTTL := s.computeCacheTTL(entry)
+		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
 
-		// Tier 2: Store accessor mapping (no TTL - ExpirationManager handles expiration)
-		s.byAccessor.Set(entry.Accessor, entry.ID, 10)
+		// Tier 2: Store accessor mapping with same TTL
+		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
 
 		// Wait for all cache writes to complete
 		s.byID.Wait()
@@ -542,9 +561,10 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 
 	// Validate token value matches (defense against hash collisions)
 	// Use the token type's LookupKey to get the correct value deterministically
+	// Use constant-time comparison to prevent timing attacks
 	lookupKey := tokenType.LookupKey()
 	expectedValue, ok := entry.Data[lookupKey]
-	if !ok || expectedValue != tokenValue {
+	if !ok || subtle.ConstantTimeCompare([]byte(expectedValue), []byte(tokenValue)) != 1 {
 		s.logger.Error("token value mismatch - possible hash collision",
 			logger.String("token_id", tokenID),
 			logger.String("lookup_key", lookupKey))
@@ -559,26 +579,9 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		return "", "", ErrTokenExpired
 	}
 
-	// Validate auth deadline
-	if !entry.AuthDeadline.IsZero() && time.Now().After(entry.AuthDeadline) {
-		if s.config.EnableMetrics {
-			s.metrics.IncrementDeadlineViolations()
-		}
-		return "", "", ErrAuthDeadlineViolated
-	}
-
 	// Validate same-origin policy (IP binding)
-	if clientIP, ok := ctx.Value(logical.ClientIPKey).(string); ok && entry.CreatedByIP != "" {
-		if clientIP != entry.CreatedByIP {
-			if s.config.EnableMetrics {
-				s.metrics.IncrementOriginViolations()
-			}
-			s.logger.Warn("same origin policy violation",
-				logger.String("token_id", tokenID),
-				logger.String("created_ip", entry.CreatedByIP),
-				logger.String("request_ip", clientIP))
-			return "", "", ErrOriginViolation
-		}
+	if err := s.validateIPBinding(ctx, tokenID, entry); err != nil {
+		return "", "", err
 	}
 
 	if s.config.EnableMetrics {
@@ -787,10 +790,9 @@ func (s *TokenStore) GenerateRootToken() (string, error) {
 
 	// Create AuthData with infinite TTL (for root namespace)
 	authData := &AuthData{
-		PrincipalID:  namespace.RootNamespaceUUID,
-		AuthDeadline: time.Time{}, // No auth deadline
-		ExpireAt:     time.Time{}, // No expiration
-		Policies:     []string{"root"},
+		PrincipalID: namespace.RootNamespaceUUID,
+		ExpireAt:    time.Time{}, // No expiration
+		Policies:    []string{"root"},
 	}
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
@@ -988,10 +990,10 @@ func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry,
 			return ErrTokenExpired
 		}
 
-		// Store in cache without TTL - ExpirationManager handles all expiration
-		// This prevents race between cache eviction and expiration timer
-		s.byID.Set(entry.ID, entry, cost)
-		s.byAccessor.Set(entry.Accessor, entry.ID, 10)
+		// Store in cache with TTL computed from remaining lifetime and minimum retention
+		cacheTTL := s.computeCacheTTL(entry)
+		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
+		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
 		s.byID.Wait()
 		s.byAccessor.Wait()
 
@@ -1011,9 +1013,10 @@ func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry,
 			logger.Duration("remaining_ttl", ttl))
 		return nil
 	} else {
-		// No expiration (non-expiring token)
-		s.byID.Set(entry.ID, entry, cost)
-		s.byAccessor.Set(entry.Accessor, entry.ID, 10)
+		// No expiration (non-expiring token) - use minimum retention for cache TTL
+		cacheTTL := s.computeCacheTTL(entry)
+		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
+		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
 		s.byID.Wait()
 		s.byAccessor.Wait()
 
@@ -1075,11 +1078,11 @@ func (s *TokenStore) loadAllTokensFromStorage(ctx context.Context) (int, error) 
 			continue
 		}
 
-		// Restore to cache without TTL - ExpirationManager handles all expiration
-		// This prevents race between cache eviction and expiration timer
+		// Restore to cache with TTL computed from remaining lifetime and minimum retention
 		cost := int64(200)
-		s.byID.Set(entry.ID, entry, cost)
-		s.byAccessor.Set(entry.Accessor, entry.ID, 10)
+		cacheTTL := s.computeCacheTTL(entry)
+		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
+		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
 
 		// Check if this is the root token
 		if entry.Type == TypeWardenToken && entry.PrincipalID == "root" {
@@ -1285,21 +1288,14 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	}
 
 	// Validate token value matches (defense against hash collisions)
+	// Use constant-time comparison to prevent timing attacks
 	lookupKey := tokenType.LookupKey()
 	expectedValue, ok := entry.Data[lookupKey]
-	if !ok || expectedValue != tokenValue {
+	if !ok || subtle.ConstantTimeCompare([]byte(expectedValue), []byte(tokenValue)) != 1 {
 		s.logger.Error("token value mismatch - possible hash collision",
 			logger.String("token_id", tokenID),
 			logger.String("lookup_key", lookupKey))
 		return nil, ErrTokenNotFound
-	}
-
-	// Validate auth deadline
-	if !entry.AuthDeadline.IsZero() && time.Now().After(entry.AuthDeadline) {
-		if s.config.EnableMetrics {
-			s.metrics.IncrementDeadlineViolations()
-		}
-		return nil, ErrAuthDeadlineViolated
 	}
 
 	// Validate expiration
@@ -1311,17 +1307,8 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	}
 
 	// Validate same-origin policy (IP binding)
-	if clientIP, ok := ctx.Value(logical.ClientIPKey).(string); ok && entry.CreatedByIP != "" {
-		if clientIP != entry.CreatedByIP {
-			if s.config.EnableMetrics {
-				s.metrics.IncrementOriginViolations()
-			}
-			s.logger.Warn("same origin policy violation",
-				logger.String("token_id", tokenID),
-				logger.String("created_ip", entry.CreatedByIP),
-				logger.String("request_ip", clientIP))
-			return nil, ErrOriginViolation
-		}
+	if err := s.validateIPBinding(ctx, tokenID, entry); err != nil {
+		return nil, err
 	}
 
 	if s.config.EnableMetrics {
@@ -1414,20 +1401,13 @@ func (c *Core) LookupJWTTokenWithRole(ctx context.Context, jwt string, role stri
 			logger.String("lookup_key", lookupKey))
 		return nil, ErrTokenNotFound
 	}
-	// Compare stored hash with computed hash
-	if expectedHash != jwtHash {
+	// Compare stored hash with computed hash using constant-time comparison
+	// to prevent timing attacks
+	if subtle.ConstantTimeCompare([]byte(expectedHash), []byte(jwtHash)) != 1 {
 		s.logger.Error("JWT token value mismatch",
 			logger.String("token_id", tokenID),
 			logger.String("lookup_key", lookupKey))
 		return nil, ErrTokenNotFound
-	}
-
-	// Validate auth deadline
-	if !entry.AuthDeadline.IsZero() && time.Now().After(entry.AuthDeadline) {
-		if s.config.EnableMetrics {
-			s.metrics.IncrementDeadlineViolations()
-		}
-		return nil, ErrAuthDeadlineViolated
 	}
 
 	// Validate expiration
@@ -1438,18 +1418,9 @@ func (c *Core) LookupJWTTokenWithRole(ctx context.Context, jwt string, role stri
 		return nil, ErrTokenExpired
 	}
 
-	// Validate same-origin policy
-	if clientIP, ok := ctx.Value(logical.ClientIPKey).(string); ok && entry.CreatedByIP != "" {
-		if clientIP != entry.CreatedByIP {
-			if s.config.EnableMetrics {
-				s.metrics.IncrementOriginViolations()
-			}
-			s.logger.Warn("JWT token same origin policy violation",
-				logger.String("token_id", tokenID),
-				logger.String("created_ip", entry.CreatedByIP),
-				logger.String("request_ip", clientIP))
-			return nil, ErrOriginViolation
-		}
+	// Validate same-origin policy (IP binding)
+	if err := s.validateIPBinding(ctx, tokenID, entry); err != nil {
+		return nil, err
 	}
 
 	if s.config.EnableMetrics {
@@ -1462,15 +1433,15 @@ func (c *Core) LookupJWTTokenWithRole(ctx context.Context, jwt string, role stri
 
 // Helper functions
 
-// generateAccessor generates a cryptographically secure accessor
-func generateAccessor() string {
+// generateAccessor generates a cryptographically secure accessor.
+// Returns an error if secure random generation fails - never falls back to weak entropy.
+func generateAccessor() (string, error) {
 	// Generate 24 random bytes (will be 32 characters in base64)
 	bytes := make([]byte, 24)
 	if _, err := rand.Read(bytes); err != nil {
-		// Fallback to timestamp-based (should never happen)
-		return fmt.Sprintf("acc_%d", time.Now().UnixNano())
+		return "", fmt.Errorf("failed to generate secure accessor: %w", err)
 	}
-	return base64.RawURLEncoding.EncodeToString(bytes)
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
 // encodeTokenEntry serializes a TokenEntry to JSON
@@ -1491,4 +1462,90 @@ func decodeTokenEntry(data []byte) (*TokenEntry, error) {
 		return nil, err
 	}
 	return &entry, nil
+}
+
+// validateIPBinding checks IP binding based on the configured policy.
+// Returns nil if validation passes, or ErrOriginViolation if it fails.
+func (s *TokenStore) validateIPBinding(ctx context.Context, tokenID string, entry *TokenEntry) error {
+	policy := s.config.IPBindingPolicy
+
+	// Disabled: skip all IP binding checks
+	if policy == IPBindingDisabled {
+		return nil
+	}
+
+	clientIP, hasClientIP := ctx.Value(logical.ClientIPKey).(string)
+	hasCreationIP := entry.CreatedByIP != ""
+
+	switch policy {
+	case IPBindingRequired:
+		// Required: both creation IP and request IP must be present and match
+		if !hasCreationIP {
+			if s.config.EnableMetrics {
+				s.metrics.IncrementOriginViolations()
+			}
+			s.logger.Warn("IP binding required but token has no creation IP",
+				logger.String("token_id", tokenID))
+			return ErrOriginViolation
+		}
+		if !hasClientIP || clientIP == "" {
+			if s.config.EnableMetrics {
+				s.metrics.IncrementOriginViolations()
+			}
+			s.logger.Warn("IP binding required but request has no client IP",
+				logger.String("token_id", tokenID))
+			return ErrOriginViolation
+		}
+		if clientIP != entry.CreatedByIP {
+			if s.config.EnableMetrics {
+				s.metrics.IncrementOriginViolations()
+			}
+			s.logger.Warn("same origin policy violation",
+				logger.String("token_id", tokenID),
+				logger.String("created_ip", entry.CreatedByIP),
+				logger.String("request_ip", clientIP))
+			return ErrOriginViolation
+		}
+
+	case IPBindingOptional:
+		fallthrough
+	default:
+		// Optional: only check if both IPs are present
+		if hasClientIP && hasCreationIP {
+			if clientIP != entry.CreatedByIP {
+				if s.config.EnableMetrics {
+					s.metrics.IncrementOriginViolations()
+				}
+				s.logger.Warn("same origin policy violation",
+					logger.String("token_id", tokenID),
+					logger.String("created_ip", entry.CreatedByIP),
+					logger.String("request_ip", clientIP))
+				return ErrOriginViolation
+			}
+		}
+	}
+
+	return nil
+}
+
+// computeCacheTTL calculates the cache TTL for a token entry.
+// Uses the maximum of remaining token lifetime and minimum retention period.
+func (s *TokenStore) computeCacheTTL(entry *TokenEntry) time.Duration {
+	minRetention := s.config.CacheMinRetention
+
+	// For non-expiring tokens, use minimum retention
+	if entry.ExpireAt.IsZero() {
+		return minRetention
+	}
+
+	remaining := time.Until(entry.ExpireAt)
+	if remaining <= 0 {
+		return 0 // Token expired
+	}
+
+	// Use the maximum of remaining time and minimum retention
+	if remaining > minRetention {
+		return remaining
+	}
+	return minRetention
 }

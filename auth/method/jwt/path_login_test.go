@@ -352,13 +352,11 @@ func TestPathLogin_FieldDescriptions(t *testing.T) {
 
 func TestJWTAuthConfig_LoginDefaults(t *testing.T) {
 	config := &JWTAuthConfig{
-		TokenTTL:     1 * time.Hour,
-		AuthDeadline: 10 * time.Minute,
-		UserClaim:    "sub",
+		TokenTTL:  1 * time.Hour,
+		UserClaim: "sub",
 	}
 
 	assert.Equal(t, 1*time.Hour, config.TokenTTL)
-	assert.Equal(t, 10*time.Minute, config.AuthDeadline)
 	assert.Equal(t, "sub", config.UserClaim)
 }
 
@@ -384,18 +382,16 @@ func TestJWTAuthConfig_BoundValidation(t *testing.T) {
 
 func TestAuth_ResponseFields(t *testing.T) {
 	auth := &logical.Auth{
-		PrincipalID:  "user@example.com",
-		RoleName:     "admin",
-		Policies:     []string{"default", "admin"},
-		AuthDeadline: 10 * time.Minute,
-		TokenTTL:     1 * time.Hour,
-		ClientIP:     "192.168.1.1",
+		PrincipalID: "user@example.com",
+		RoleName:    "admin",
+		Policies:    []string{"default", "admin"},
+		TokenTTL:    1 * time.Hour,
+		ClientIP:    "192.168.1.1",
 	}
 
 	assert.Equal(t, "user@example.com", auth.PrincipalID)
 	assert.Equal(t, "admin", auth.RoleName)
 	assert.Equal(t, []string{"default", "admin"}, auth.Policies)
-	assert.Equal(t, 10*time.Minute, auth.AuthDeadline)
 	assert.Equal(t, 1*time.Hour, auth.TokenTTL)
 	assert.Equal(t, "192.168.1.1", auth.ClientIP)
 }

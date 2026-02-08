@@ -38,7 +38,7 @@ Usage: warden write PATH [DATA]
 
   Write configuration using key=value format:
 
-      $ warden write aws/config auth_deadline=30s token_ttl=1h proxy_domains='["localhost","warden"]'
+      $ warden write aws/config token_ttl=1h proxy_domains='["localhost","warden"]'
 `,
 		Args: cobra.MinimumNArgs(1),
 		RunE: runWrite,
