@@ -185,7 +185,6 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 			Policies:       role.TokenPolicies,
 			CredentialSpec: role.CredSpecName,
 			TokenType:      role.TokenType,
-			AuthDeadline:   role.TokenAuthDeadline,
 			TokenTTL:       effectiveTTL,
 			ClientIP:       req.ClientIP,
 			ClientToken:    jwtToken, // Pass JWT for token types that need the original value

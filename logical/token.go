@@ -26,7 +26,6 @@ type TokenEntry struct {
 	// Authorization
 	PrincipalID  string // Associated principal
 	RoleName     string // Associated role
-	AuthDeadline time.Time // Auth validity deadline
 
 	// Lifecycle
 	ExpireAt time.Time // Expiration time

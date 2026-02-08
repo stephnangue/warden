@@ -1,18 +1,13 @@
 package core
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/go-chi/chi/middleware"
 	"github.com/openbao/openbao/helper/locking"
 	"github.com/openbao/openbao/helper/namespace"
 	"github.com/stephnangue/warden/audit"
@@ -40,95 +35,6 @@ func createMockCoreForAudit() *Core {
 		tokenStore:    nil, // Not needed for audit tests
 		auditManager:  newMockAuditManagerFull(),
 	}
-}
-
-// TestAuditRequest tests the auditRequest method
-func TestAuditRequest(t *testing.T) {
-	t.Run("audit request with body", func(t *testing.T) {
-		core := createMockCoreForAudit()
-		mockManager := core.auditManager.(*mockAuditManagerFull)
-		mockManager.logRequestResult = true
-
-		body := `{"key": "value"}`
-		req := httptest.NewRequest(http.MethodPost, "/v1/test/path", strings.NewReader(body))
-		req.RemoteAddr = "192.168.1.100:12345"
-		req.Header.Set("Content-Type", "application/json")
-
-		// Add request ID to context
-		ctx := context.WithValue(req.Context(), middleware.RequestIDKey, "test-request-id")
-		req = req.WithContext(ctx)
-
-		ok := core.auditRequest(req)
-		assert.True(t, ok)
-
-		// Verify body is still readable after audit
-		bodyBytes, err := io.ReadAll(req.Body)
-		require.NoError(t, err)
-		assert.Equal(t, body, string(bodyBytes))
-	})
-
-	t.Run("audit request without body", func(t *testing.T) {
-		core := createMockCoreForAudit()
-		mockManager := core.auditManager.(*mockAuditManagerFull)
-		mockManager.logRequestResult = true
-
-		req := httptest.NewRequest(http.MethodGet, "/v1/test/path", nil)
-		req.RemoteAddr = "10.0.0.1:8080"
-
-		ok := core.auditRequest(req)
-		assert.True(t, ok)
-	})
-
-	t.Run("audit request with error", func(t *testing.T) {
-		core := createMockCoreForAudit()
-		mockManager := core.auditManager.(*mockAuditManagerFull)
-		mockManager.logRequestResult = false
-		mockManager.logRequestErr = errors.New("audit failed")
-
-		req := httptest.NewRequest(http.MethodGet, "/v1/test/path", nil)
-		req.RemoteAddr = "127.0.0.1:3000"
-
-		ok := core.auditRequest(req)
-		assert.False(t, ok)
-	})
-
-	t.Run("audit request with IPv6 address", func(t *testing.T) {
-		core := createMockCoreForAudit()
-		mockManager := core.auditManager.(*mockAuditManagerFull)
-		mockManager.logRequestResult = true
-
-		req := httptest.NewRequest(http.MethodGet, "/v1/test/path", nil)
-		req.RemoteAddr = "[::1]:8080"
-
-		ok := core.auditRequest(req)
-		assert.True(t, ok)
-	})
-
-	t.Run("audit request with invalid remote addr", func(t *testing.T) {
-		core := createMockCoreForAudit()
-		mockManager := core.auditManager.(*mockAuditManagerFull)
-		mockManager.logRequestResult = true
-
-		req := httptest.NewRequest(http.MethodGet, "/v1/test/path", nil)
-		req.RemoteAddr = "invalid-addr" // No port, SplitHostPort will fail
-
-		ok := core.auditRequest(req)
-		assert.True(t, ok)
-	})
-
-	t.Run("audit request copies headers", func(t *testing.T) {
-		core := createMockCoreForAudit()
-		mockManager := core.auditManager.(*mockAuditManagerFull)
-		mockManager.logRequestResult = true
-
-		req := httptest.NewRequest(http.MethodPost, "/v1/test/path", bytes.NewReader([]byte("test")))
-		req.RemoteAddr = "192.168.1.1:8080"
-		req.Header.Set("Authorization", "Bearer token123")
-		req.Header.Set("X-Custom-Header", "custom-value")
-
-		ok := core.auditRequest(req)
-		assert.True(t, ok)
-	})
 }
 
 // TestEnableAudit tests the EnableAudit method

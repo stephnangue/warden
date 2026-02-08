@@ -200,6 +200,9 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		return nil, err
 	}
 
+	// Set upstream URL for audit logging
+	req.UpstreamURL = result.TargetURL
+
 	req.HTTPRequest.URL.Scheme = target.Scheme
 	req.HTTPRequest.URL.Host = target.Host
 	req.HTTPRequest.Host = result.TargetHost

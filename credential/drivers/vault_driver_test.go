@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stretchr/testify/assert"
@@ -503,4 +504,110 @@ func TestVaultDriver_CleanupRotation_EmptyAccessor(t *testing.T) {
 	// Missing key should also be a no-op
 	err = driver.CleanupRotation(nil, map[string]string{})
 	assert.NoError(t, err)
+}
+
+func TestVaultDriver_FetchDynamicAWSCreds_TTLBelowMinimum(t *testing.T) {
+	driver := &VaultDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeVault,
+			Config: map[string]string{
+				"vault_address": "http://127.0.0.1:8200",
+			},
+		},
+	}
+
+	spec := &credential.CredSpec{
+		Name:   "test-aws-min-ttl",
+		Type:   credential.TypeAWSAccessKeys,
+		MinTTL: 2 * time.Hour,
+		Config: map[string]string{
+			"mint_method": "dynamic_aws",
+			"aws_mount":   "aws",
+			"role_name":   "test-role",
+			"ttl":         "30m", // Below MinTTL of 2h
+		},
+	}
+
+	_, _, _, err := driver.MintCredential(nil, spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "below minimum")
+}
+
+func TestVaultDriver_FetchDynamicAWSCreds_TTLExceedsMaximum(t *testing.T) {
+	driver := &VaultDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeVault,
+			Config: map[string]string{
+				"vault_address": "http://127.0.0.1:8200",
+			},
+		},
+	}
+
+	spec := &credential.CredSpec{
+		Name:   "test-aws-max-ttl",
+		Type:   credential.TypeAWSAccessKeys,
+		MaxTTL: 1 * time.Hour,
+		Config: map[string]string{
+			"mint_method": "dynamic_aws",
+			"aws_mount":   "aws",
+			"role_name":   "test-role",
+			"ttl":         "4h", // Above MaxTTL of 1h
+		},
+	}
+
+	_, _, _, err := driver.MintCredential(nil, spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum")
+}
+
+func TestVaultDriver_FetchDynamicVaultToken_TTLBelowMinimum(t *testing.T) {
+	driver := &VaultDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeVault,
+			Config: map[string]string{
+				"vault_address": "http://127.0.0.1:8200",
+			},
+		},
+	}
+
+	spec := &credential.CredSpec{
+		Name:   "test-token-min-ttl",
+		Type:   credential.TypeVaultToken,
+		MinTTL: 2 * time.Hour,
+		Config: map[string]string{
+			"mint_method": "vault_token",
+			"token_role":  "test-role",
+			"ttl":         "30m", // Below MinTTL of 2h
+		},
+	}
+
+	_, _, _, err := driver.MintCredential(nil, spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "below minimum")
+}
+
+func TestVaultDriver_FetchDynamicVaultToken_TTLExceedsMaximum(t *testing.T) {
+	driver := &VaultDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeVault,
+			Config: map[string]string{
+				"vault_address": "http://127.0.0.1:8200",
+			},
+		},
+	}
+
+	spec := &credential.CredSpec{
+		Name:   "test-token-max-ttl",
+		Type:   credential.TypeVaultToken,
+		MaxTTL: 1 * time.Hour,
+		Config: map[string]string{
+			"mint_method": "vault_token",
+			"token_role":  "test-role",
+			"ttl":         "4h", // Above MaxTTL of 1h
+		},
+	}
+
+	_, _, _, err := driver.MintCredential(nil, spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum")
 }

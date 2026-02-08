@@ -194,7 +194,6 @@ func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request) 
 			// Authentication/authorization failures should return permission denied
 			if errors.Is(err, ErrTokenNamespaceMismatch) ||
 				errors.Is(err, ErrTokenNotFound) ||
-				errors.Is(err, ErrAuthDeadlineViolated) ||
 				errors.Is(err, ErrTokenExpired) ||
 				errors.Is(err, ErrOriginViolation) {
 				c.logger.Warn("token lookup failed", logger.Err(err))
@@ -329,24 +328,45 @@ func (c *Core) handleCancelableRequest(ctx context.Context, req *logical.Request
 		return nil, err
 	}
 
-	//var auth *logical.Auth
+	var auth *logical.Auth
+	var te *logical.TokenEntry
+
 	if c.isLoginRequest(ctx, req) {
-		resp, _, err = c.handleLoginRequest(ctx, req)
+		resp, auth, err = c.handleLoginRequest(ctx, req)
+		te = req.TokenEntry()
 	} else {
-		resp, _, err = c.handleNonLoginRequest(ctx, req)
+		resp, auth, err = c.handleNonLoginRequest(ctx, req)
+		te = req.TokenEntry()
+	}
+
+	if resp != nil && resp.Streamed {
+		if srw, ok := req.ResponseWriter.(*logical.StatusRecordingWriter); ok {
+			resp.StatusCode = srw.StatusCode()
+		}
 	}
 
 	// Create an audit trail of the response
-	// logInput := &logical.LogInput{
-	// 	Auth:                auth,
-	// 	Request:             req,
-	// 	Response:            auditResp,
-	// 	OuterErr:            err,
-	// }
-	// if auditErr := c.auditBroker.LogResponse(ctx, logInput, c.auditedHeaders); auditErr != nil {
-	// 	c.logger.Error("failed to audit response", "request_path", req.Path, "error", auditErr)
-	// 	return nil, ErrInternalError
-	// }
+	auditEntry := c.buildResponseAuditEntry(ctx, req, resp, auth, te, err)
+	if auditOK, auditErr := c.auditManager.LogResponse(ctx, auditEntry); auditErr != nil {
+		c.logger.Error("failed to audit response",
+			logger.String("path", req.Path),
+			logger.Err(auditErr),
+		)
+		// For non-streaming requests, audit failure = request failure
+		if !req.Streamed {
+			return nil, ErrInternalError
+		}
+	} else if !auditOK && !req.Streamed && !req.StreamUnauthenticated {
+		// For non-streaming requests, block if no audit devices are configured.
+		// Streaming requests are allowed through even without auditing because:
+		// 1. The connection may already be established with data flowing
+		// 2. Abruptly terminating would be more disruptive than missing audit
+		// 3. The audit failure is still logged for operator awareness
+		c.logger.Warn("response blocked: no audit devices configured",
+			logger.String("path", req.Path),
+		)
+		return nil, ErrInternalError
+	}
 
 	return resp, err
 }
@@ -392,39 +412,55 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request) (re
 			errType = sdklogical.ErrInvalidRequest
 		}
 
-		// logInput := &logical.LogInput{
-		// 	Auth:               auth,
-		// 	Request:            req,
-		// 	OuterErr:           ctErr,
-		// 	NonHMACReqDataKeys: nonHMACReqDataKeys,
-		// }
-		// if err := c.auditBroker.LogRequest(ctx, logInput, c.auditedHeaders); err != nil {
-		// 	c.logger.Error("failed to audit request", "path", req.Path, "error", err)
-		// 	return nil, nil, ErrInternalError
-		// }
+		// Audit the failed request
+		auditEntry := c.buildRequestAuditEntry(ctx, req, auth, nil, ctErr)
+		if _, auditErr := c.auditManager.LogRequest(ctx, auditEntry); auditErr != nil {
+			c.logger.Error("failed to audit login request error",
+				logger.String("path", req.Path),
+				logger.Err(auditErr),
+			)
+		}
 
 		if errType != nil {
 			retErr = multierror.Append(retErr, errType)
 		}
+
+		// Build the error response for audit logging
+		var resp *logical.Response
+		if ctErr == ErrInternalError {
+			resp = nil
+		} else {
+			resp = logical.ErrorResponse(logical.ErrInternal(ctErr.Error()))
+		}
+
+		// Audit the failed response - ensures complete request/response pair in audit log
+		respAuditEntry := c.buildResponseAuditEntry(ctx, req, resp, auth, nil, ctErr)
+		if _, auditErr := c.auditManager.LogResponse(ctx, respAuditEntry); auditErr != nil {
+			c.logger.Error("failed to audit login failure response",
+				logger.String("path", req.Path),
+				logger.Err(auditErr),
+			)
+		}
+
 		if ctErr == ErrInternalError {
 			return nil, auth, retErr
 		}
-		return logical.ErrorResponse(logical.ErrInternal(ctErr.Error())), auth, retErr
+		return resp, auth, retErr
 	}
 
-	switch req.Path {
-	default:
-		// Create an audit trail of the request. Attach auth if it was returned,
-		// e.g. if a token was provided.
-		// logInput := &logical.LogInput{
-		// 	Auth:               auth,
-		// 	Request:            req,
-		// 	NonHMACReqDataKeys: nonHMACReqDataKeys,
-		// }
-		// if err := c.auditBroker.LogRequest(ctx, logInput, c.auditedHeaders); err != nil {
-		// 	c.logger.Error("failed to audit request", "path", req.Path, "error", err)
-		// 	return nil, nil, ErrInternalError
-		// }
+	// Create an audit trail of the request
+	auditEntry := c.buildRequestAuditEntry(ctx, req, auth, nil, nil)
+	if auditOK, auditErr := c.auditManager.LogRequest(ctx, auditEntry); auditErr != nil {
+		c.logger.Error("failed to audit login request",
+			logger.String("path", req.Path),
+			logger.Err(auditErr),
+		)
+		return nil, nil, ErrInternalError
+	} else if !auditOK {
+		c.logger.Warn("login request blocked: no audit devices configured",
+			logger.String("path", req.Path),
+		)
+		return nil, nil, ErrInternalError
 	}
 
 	// Route the request
@@ -464,7 +500,6 @@ func (c *Core) LoginCreateToken(ctx context.Context, resp *logical.Response) (*l
 	authData := logical.AuthData{
 		PrincipalID:    auth.PrincipalID,
 		RoleName:       auth.RoleName,
-		AuthDeadline:   now.Add(auth.AuthDeadline),
 		ExpireAt:       now.Add(auth.TokenTTL),
 		CredentialSpec: auth.CredentialSpec,
 		Policies:       auth.Policies,
@@ -486,7 +521,6 @@ func (c *Core) LoginCreateToken(ctx context.Context, resp *logical.Response) (*l
 		"bound_ip":       tokenValue.CreatedByIP,
 		"token_id":       tokenValue.ID,
 		"token_assessor": tokenValue.Accessor,
-		"auth_deadline":  tokenValue.AuthDeadline,
 		"namespace":      tokenValue.NamespacePath,
 		"role":           tokenValue.RoleName,
 		"data":           tokenValue.Data,
@@ -525,6 +559,15 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 	} else {
 		req.Streamed = true
 		req.Operation = logical.StreamOperation
+
+		// Set AuditPath for consistent audit logging between request and response entries.
+		// For streaming requests, this is the path relative to the mount point
+		// (e.g., "role/operator/gateway/v1/...") before routing transforms req.Path.
+		if req.MountPoint != "" {
+			req.AuditPath = strings.TrimPrefix(req.Path, req.MountPoint)
+		} else {
+			req.AuditPath = req.Path
+		}
 
 		matchingBackend := c.router.MatchingBackend(ctx, req.Path)
 		if matchingBackend == nil {
@@ -596,24 +639,61 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 				retErr = multierror.Append(retErr, sdklogical.ErrInvalidRequest)
 			}
 
+			// Audit the failed request even for internal errors
+			auditEntry := c.buildRequestAuditEntry(ctx, req, auth, te, ctErr)
+			if _, auditErr := c.auditManager.LogRequest(ctx, auditEntry); auditErr != nil {
+				c.logger.Error("failed to audit token check failure",
+					logger.String("path", req.Path),
+					logger.Err(auditErr),
+				)
+			}
+
+			// Build the error response
+			var resp *logical.Response
+			if errwrap.Contains(retErr, ErrInternalError.Error()) {
+				resp = nil
+			} else {
+				resp = logical.ErrorResponse(ctErr)
+			}
+
+			// Audit the failed response
+			respAuditEntry := c.buildResponseAuditEntry(ctx, req, resp, auth, te, ctErr)
+			if _, auditErr := c.auditManager.LogResponse(ctx, respAuditEntry); auditErr != nil {
+				c.logger.Error("failed to audit token check failure response",
+					logger.String("path", req.Path),
+					logger.Err(auditErr),
+				)
+			}
+
 			if errwrap.Contains(retErr, ErrInternalError.Error()) {
 				return nil, auth, retErr
 			}
-			return logical.ErrorResponse(ctErr), auth, retErr
+			return resp, auth, retErr
 		}
 	}
 
-	// // Create an audit trail of the request
-	// logInput := &logical.LogInput{
-	// 	Auth:               auth,
-	// 	Request:            req,
-	// 	NonHMACReqDataKeys: nonHMACReqDataKeys,
-	// }
-	// if err := c.auditBroker.LogRequest(ctx, logInput, c.auditedHeaders); err != nil {
-	// 	c.logger.Error("failed to audit request", "path", req.Path, "error", err)
-	// 	retErr = multierror.Append(retErr, ErrInternalError)
-	// 	return nil, auth, retErr
-	// }
+	// Create an audit trail of the request.
+	// Skip for unauthenticated streaming paths (e.g., public PKI certificates) because:
+	// 1. No authentication context exists - no token, principal, or policies to audit
+	// 2. These paths are explicitly marked as public by the backend
+	// 3. High-volume public requests would create audit log noise without security value
+	if !req.StreamUnauthenticated {
+		auditEntry := c.buildRequestAuditEntry(ctx, req, auth, te, nil)
+		if auditOK, auditErr := c.auditManager.LogRequest(ctx, auditEntry); auditErr != nil {
+			c.logger.Error("failed to audit request",
+				logger.String("path", req.Path),
+				logger.Err(auditErr),
+			)
+			retErr = multierror.Append(retErr, ErrInternalError)
+			return nil, auth, retErr
+		} else if !auditOK {
+			c.logger.Warn("request blocked: no audit devices configured",
+				logger.String("path", req.Path),
+			)
+			retErr = multierror.Append(retErr, ErrInternalError)
+			return nil, auth, retErr
+		}
+	}
 
 	// For streaming requests, mint credentials (unless StreamUnauthenticated)
 	if req.Streamed && !req.StreamUnauthenticated {
@@ -746,6 +826,15 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 	// Skip if credential manager not initialized
 	if c.credentialManager == nil {
 		return fmt.Errorf("credential manager not initialized")
+	}
+
+	// Validate credential spec exists before attempting to issue
+	if !c.credentialManager.SpecExists(ctx, te.CredentialSpec) {
+		c.logger.Warn("credential spec not found or disabled",
+			logger.String("token_id", te.ID),
+			logger.String("spec_name", te.CredentialSpec),
+		)
+		return fmt.Errorf("credential spec %q not found or disabled", te.CredentialSpec)
 	}
 
 	// Calculate token TTL for cache duration

@@ -74,10 +74,6 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 				Type:        framework.TypeDurationSecond,
 				Description: "Token TTL (default: 1h)",
 			},
-			"auth_deadline": {
-				Type:        framework.TypeDurationSecond,
-				Description: "Auth deadline (default: 10m)",
-			},
 			"token_type": {
 				Type:          framework.TypeString,
 				Description:   "Default token type for roles that don't specify one (default: warden_token)",
@@ -123,11 +119,10 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 			"bound_subject":          b.config.BoundSubject,
 			"bound_claims":           b.config.BoundClaims,
 			"claim_mappings":         b.config.ClaimMappings,
-			"user_claim":             b.config.UserClaim,
-			"groups_claim":           b.config.GroupsClaim,
-			"token_ttl":              b.config.TokenTTL.String(),
-			"auth_deadline":          b.config.AuthDeadline.String(),
-			"token_type":             b.config.TokenType,
+			"user_claim":   b.config.UserClaim,
+			"groups_claim": b.config.GroupsClaim,
+			"token_ttl":    b.config.TokenTTL.String(),
+			"token_type":   b.config.TokenType,
 		},
 	}, nil
 }
@@ -153,7 +148,6 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		conf["user_claim"] = b.config.UserClaim
 		conf["groups_claim"] = b.config.GroupsClaim
 		conf["token_ttl"] = b.config.TokenTTL
-		conf["auth_deadline"] = b.config.AuthDeadline
 		conf["token_type"] = b.config.TokenType
 	}
 
