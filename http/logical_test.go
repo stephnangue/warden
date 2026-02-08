@@ -195,7 +195,10 @@ func TestBuildLogicalRequest_BasicGET(t *testing.T) {
 	assert.Equal(t, "secret/data/mykey", logicalReq.Path)
 	assert.Equal(t, "192.168.1.1", logicalReq.ClientIP)
 	assert.Equal(t, req, logicalReq.HTTPRequest)
-	assert.Equal(t, w, logicalReq.ResponseWriter)
+	// ResponseWriter is wrapped in StatusRecordingWriter for status code capture
+	srw, ok := logicalReq.ResponseWriter.(*logical.StatusRecordingWriter)
+	assert.True(t, ok, "ResponseWriter should be wrapped in StatusRecordingWriter")
+	assert.Equal(t, w, srw.Unwrap())
 }
 
 func TestBuildLogicalRequest_POST(t *testing.T) {

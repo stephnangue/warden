@@ -45,11 +45,6 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 				Description: "Token TTL",
 				Default:     3600,
 			},
-			"token_auth_deadline": {
-				Type:        framework.TypeDurationSecond,
-				Description: "Token auth deadline",
-				Default:     3600,
-			},
 			"token_type": {
 				Type:          framework.TypeString,
 				Description:   "Token type",
@@ -144,9 +139,6 @@ func (b *jwtAuthBackend) handleRoleCreate(ctx context.Context, req *logical.Requ
 	if role.TokenTTL == 0 {
 		role.TokenTTL = time.Hour
 	}
-	if role.TokenAuthDeadline == 0 {
-		role.TokenAuthDeadline = role.TokenTTL
-	}
 
 	// Persist role
 	if err := b.setRole(ctx, role); err != nil {
@@ -177,16 +169,15 @@ func (b *jwtAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reques
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"name":                role.Name,
-			"bound_audiences":     role.BoundAudiences,
-			"bound_subject":       role.BoundSubject,
-			"bound_claims":        role.BoundClaims,
-			"token_policies":      role.TokenPolicies,
-			"token_ttl":           role.TokenTTL.String(),
-			"token_auth_deadline": role.TokenAuthDeadline.String(),
-			"token_type":          role.TokenType,
-			"user_claim":          role.UserClaim,
-			"cred_spec_name":      role.CredSpecName,
+			"name":           role.Name,
+			"bound_audiences": role.BoundAudiences,
+			"bound_subject":  role.BoundSubject,
+			"bound_claims":   role.BoundClaims,
+			"token_policies": role.TokenPolicies,
+			"token_ttl":      role.TokenTTL.String(),
+			"token_type":     role.TokenType,
+			"user_claim":     role.UserClaim,
+			"cred_spec_name": role.CredSpecName,
 		},
 	}, nil
 }
@@ -216,9 +207,6 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 		if role.TokenTTL == 0 {
 			role.TokenTTL = time.Hour
 		}
-		if role.TokenAuthDeadline == 0 {
-			role.TokenAuthDeadline = role.TokenTTL
-		}
 	} else {
 		// Update existing role - only update fields that are provided
 		if v, ok := d.GetOk("bound_audiences"); ok {
@@ -235,9 +223,6 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 		}
 		if v, ok := d.GetOk("token_ttl"); ok {
 			role.TokenTTL = time.Duration(v.(int)) * time.Second
-		}
-		if v, ok := d.GetOk("token_auth_deadline"); ok {
-			role.TokenAuthDeadline = time.Duration(v.(int)) * time.Second
 		}
 		if v, ok := d.GetOk("token_type"); ok {
 			role.TokenType = v.(string)
@@ -331,9 +316,6 @@ func (b *jwtAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldD
 	if v, ok := d.GetOk("token_ttl"); ok {
 		role.TokenTTL = time.Duration(v.(int)) * time.Second
 	}
-	if v, ok := d.GetOk("token_auth_deadline"); ok {
-		role.TokenAuthDeadline = time.Duration(v.(int)) * time.Second
-	}
 	if v, ok := d.GetOk("token_type"); ok {
 		role.TokenType = v.(string)
 	}
@@ -365,34 +347,31 @@ func (b *jwtAuthBackend) getRole(ctx context.Context, name string) (*JWTRole, er
 
 	// Convert stored format to runtime format
 	tokenTTL, _ := time.ParseDuration(stored.TokenTTL)
-	tokenAuthDeadline, _ := time.ParseDuration(stored.TokenAuthDeadline)
 
 	return &JWTRole{
-		Name:              stored.Name,
-		BoundAudiences:    stored.BoundAudiences,
-		BoundSubject:      stored.BoundSubject,
-		BoundClaims:       stored.BoundClaims,
-		TokenPolicies:     stored.TokenPolicies,
-		TokenTTL:          tokenTTL,
-		TokenAuthDeadline: tokenAuthDeadline,
-		TokenType:         stored.TokenType,
-		UserClaim:         stored.UserClaim,
-		CredSpecName:      stored.CredSpecName,
+		Name:           stored.Name,
+		BoundAudiences: stored.BoundAudiences,
+		BoundSubject:   stored.BoundSubject,
+		BoundClaims:    stored.BoundClaims,
+		TokenPolicies:  stored.TokenPolicies,
+		TokenTTL:       tokenTTL,
+		TokenType:      stored.TokenType,
+		UserClaim:      stored.UserClaim,
+		CredSpecName:   stored.CredSpecName,
 	}, nil
 }
 
 func (b *jwtAuthBackend) setRole(ctx context.Context, role *JWTRole) error {
 	stored := StoredRole{
-		Name:              role.Name,
-		BoundAudiences:    role.BoundAudiences,
-		BoundSubject:      role.BoundSubject,
-		BoundClaims:       role.BoundClaims,
-		TokenPolicies:     role.TokenPolicies,
-		TokenTTL:          role.TokenTTL.String(),
-		TokenAuthDeadline: role.TokenAuthDeadline.String(),
-		TokenType:         role.TokenType,
-		UserClaim:         role.UserClaim,
-		CredSpecName:      role.CredSpecName,
+		Name:           role.Name,
+		BoundAudiences: role.BoundAudiences,
+		BoundSubject:   role.BoundSubject,
+		BoundClaims:    role.BoundClaims,
+		TokenPolicies:  role.TokenPolicies,
+		TokenTTL:       role.TokenTTL.String(),
+		TokenType:      role.TokenType,
+		UserClaim:      role.UserClaim,
+		CredSpecName:   role.CredSpecName,
 	}
 
 	entry, err := sdklogical.StorageEntryJSON(rolePrefix+role.Name, stored)

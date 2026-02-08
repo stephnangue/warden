@@ -27,6 +27,11 @@ type Config struct {
 	// Values must be valid Go duration strings (e.g., "24h", "720h").
 	MinCredSourceRotationPeriod string `hcl:"min_cred_source_rotation_period,optional"`
 	MaxCredSourceRotationPeriod string `hcl:"max_cred_source_rotation_period,optional"`
+
+	// IPBindingPolicy controls how IP binding is enforced for tokens.
+	// Valid values: "disabled", "optional", "required"
+	// Defaults to "optional" if not specified.
+	IPBindingPolicy string `hcl:"ip_binding_policy,optional"`
 }
 
 type KMS struct {
@@ -418,6 +423,16 @@ func LoadConfig(configFile string) (*Config, error) {
 	}
 	if minDur > 0 && maxDur > 0 && minDur > maxDur {
 		return nil, fmt.Errorf("min_cred_source_rotation_period (%s) must be <= max_cred_source_rotation_period (%s)", minDur, maxDur)
+	}
+
+	// Validate ip_binding_policy if set
+	if config.IPBindingPolicy != "" {
+		switch config.IPBindingPolicy {
+		case "disabled", "optional", "required":
+			// valid
+		default:
+			return nil, fmt.Errorf("invalid ip_binding_policy %q: must be one of: disabled, optional, required", config.IPBindingPolicy)
+		}
 	}
 
 	return &config, nil

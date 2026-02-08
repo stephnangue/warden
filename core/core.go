@@ -503,7 +503,12 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 
 	// Create TokenStore after barrier is initialized
 	// This ensures the barrier is available for storage view creation
-	tokenStore, err := NewTokenStore(c, DefaultTokenStoreConfig())
+	tokenStoreConfig := DefaultTokenStoreConfig()
+	// Apply ip_binding_policy from config if set
+	if rawConf, ok := c.rawConfig.Load().(*config.Config); ok && rawConf != nil && rawConf.IPBindingPolicy != "" {
+		tokenStoreConfig.IPBindingPolicy = IPBindingPolicy(rawConf.IPBindingPolicy)
+	}
+	tokenStore, err := NewTokenStore(c, tokenStoreConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token store: %w", err)
 	}

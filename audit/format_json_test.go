@@ -30,7 +30,7 @@ func TestJSONFormat(t *testing.T) {
 	}
 
 	// Check that it contains expected fields
-	if !contains(data, "request") {
+	if !containsBytes(data, "request") {
 		t.Error("Missing 'request' in formatted output")
 	}
 }
@@ -43,25 +43,23 @@ func TestJSONFormatWithConfigurableSalting(t *testing.T) {
 		checkFunc  func(*testing.T, *LogEntry)
 	}{
 		{
-			name:       "salt auth token",
-			saltFields: []string{"auth.client_token.token_id"},
+			name:       "salt auth token_id",
+			saltFields: []string{"auth.token_id"},
 			entry: &LogEntry{
 				Timestamp: time.Now(),
 				Auth: &Auth{
-					ClientToken: &Token{
-						TokenID: "secret-token-123",
-						Type:    "service",
-					},
+					TokenID:   "secret-token-123",
+					TokenType: "service",
 				},
 			},
 			checkFunc: func(t *testing.T, entry *LogEntry) {
-				if entry.Auth == nil || entry.Auth.ClientToken == nil {
-					t.Fatal("Auth or ClientToken is nil")
+				if entry.Auth == nil {
+					t.Fatal("Auth is nil")
 				}
-				if entry.Auth.ClientToken.TokenID == "secret-token-123" {
+				if entry.Auth.TokenID == "secret-token-123" {
 					t.Error("Token ID was not salted")
 				}
-				if !contains([]byte(entry.Auth.ClientToken.TokenID), "hmac-sha256:") {
+				if !containsBytes([]byte(entry.Auth.TokenID), "hmac-sha256:") {
 					t.Error("Token ID doesn't have HMAC prefix")
 				}
 			},
@@ -91,7 +89,7 @@ func TestJSONFormatWithConfigurableSalting(t *testing.T) {
 				if password == "secret-password" {
 					t.Error("Password was not salted")
 				}
-				if !contains([]byte(password), "hmac-sha256:") {
+				if !containsBytes([]byte(password), "hmac-sha256:") {
 					t.Error("Password doesn't have HMAC prefix")
 				}
 				// Username should not be salted
@@ -104,14 +102,12 @@ func TestJSONFormatWithConfigurableSalting(t *testing.T) {
 		},
 		{
 			name:       "salt multiple fields",
-			saltFields: []string{"auth.client_token.token_id", "request.data.password", "request.data.secret"},
+			saltFields: []string{"auth.token_id", "request.data.password", "request.data.secret"},
 			entry: &LogEntry{
 				Timestamp: time.Now(),
 				Auth: &Auth{
-					ClientToken: &Token{
-						TokenID: "token-abc",
-						Type:    "service",
-					},
+					TokenID:   "token-abc",
+					TokenType: "service",
 				},
 				Request: &Request{
 					ID:   "req-456",
@@ -125,10 +121,10 @@ func TestJSONFormatWithConfigurableSalting(t *testing.T) {
 			},
 			checkFunc: func(t *testing.T, entry *LogEntry) {
 				// Check token is salted
-				if entry.Auth == nil || entry.Auth.ClientToken == nil {
-					t.Fatal("Auth or ClientToken is nil")
+				if entry.Auth == nil {
+					t.Fatal("Auth is nil")
 				}
-				if entry.Auth.ClientToken.TokenID == "token-abc" {
+				if entry.Auth.TokenID == "token-abc" {
 					t.Error("Token was not salted")
 				}
 
@@ -158,28 +154,65 @@ func TestJSONFormatWithConfigurableSalting(t *testing.T) {
 			},
 		},
 		{
-			name:       "salt response cred token",
-			saltFields: []string{"response.cred.token_id", "response.cred.lease_id"},
+			name:       "salt response credential fields",
+			saltFields: []string{"response.credential.token_id", "response.credential.lease_id"},
 			entry: &LogEntry{
 				Timestamp: time.Now(),
 				Response: &Response{
-					Cred: &Cred{
-						TokenID: "cred-token-123",
-						LeaseID: "lease-456",
-						Type:    "aws",
+					Credential: &Credential{
+						TokenID:      "cred-token-123",
+						LeaseID:      "lease-456",
+						CredentialID: "cred-id-789",
+						Type:         "aws_access_keys",
 					},
 					StatusCode: 200,
 				},
 			},
 			checkFunc: func(t *testing.T, entry *LogEntry) {
-				if entry.Response == nil || entry.Response.Cred == nil {
-					t.Fatal("Response or Cred is nil")
+				if entry.Response == nil || entry.Response.Credential == nil {
+					t.Fatal("Response or Credential is nil")
 				}
-				if entry.Response.Cred.TokenID == "cred-token-123" {
-					t.Error("Cred token was not salted")
+				if entry.Response.Credential.TokenID == "cred-token-123" {
+					t.Error("Credential token was not salted")
 				}
-				if entry.Response.Cred.LeaseID == "lease-456" {
+				if entry.Response.Credential.LeaseID == "lease-456" {
 					t.Error("Lease ID was not salted")
+				}
+			},
+		},
+		{
+			name:       "salt credential data",
+			saltFields: []string{"response.credential.data"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response: &Response{
+					Credential: &Credential{
+						CredentialID: "cred-id-123",
+						Type:         "aws_access_keys",
+						Data: map[string]string{
+							"access_key": "AKIAEXAMPLE123",
+							"secret_key": "secret-key-value",
+						},
+					},
+					StatusCode: 200,
+				},
+			},
+			checkFunc: func(t *testing.T, entry *LogEntry) {
+				if entry.Response == nil || entry.Response.Credential == nil || entry.Response.Credential.Data == nil {
+					t.Fatal("Response, Credential, or Data is nil")
+				}
+				if entry.Response.Credential.Data["access_key"] == "AKIAEXAMPLE123" {
+					t.Error("Access key was not salted")
+				}
+				if entry.Response.Credential.Data["secret_key"] == "secret-key-value" {
+					t.Error("Secret key was not salted")
+				}
+				// Both should have HMAC prefix
+				if !containsBytes([]byte(entry.Response.Credential.Data["access_key"]), "hmac-sha256:") {
+					t.Error("Access key doesn't have HMAC prefix")
+				}
+				if !containsBytes([]byte(entry.Response.Credential.Data["secret_key"]), "hmac-sha256:") {
+					t.Error("Secret key doesn't have HMAC prefix")
 				}
 			},
 		},
@@ -299,7 +332,7 @@ func TestJSONFormatSaltAllDataFields(t *testing.T) {
 		if username == "user1" {
 			t.Error("Username was not salted")
 		}
-		if !contains([]byte(username), "hmac-sha256:") {
+		if !containsBytes([]byte(username), "hmac-sha256:") {
 			t.Error("Username doesn't have HMAC prefix")
 		}
 	}
@@ -308,7 +341,7 @@ func TestJSONFormatSaltAllDataFields(t *testing.T) {
 		if password == "secret-password" {
 			t.Error("Password was not salted")
 		}
-		if !contains([]byte(password), "hmac-sha256:") {
+		if !containsBytes([]byte(password), "hmac-sha256:") {
 			t.Error("Password doesn't have HMAC prefix")
 		}
 	}
@@ -317,7 +350,7 @@ func TestJSONFormatSaltAllDataFields(t *testing.T) {
 		if token == "secret-token" {
 			t.Error("Token was not salted")
 		}
-		if !contains([]byte(token), "hmac-sha256:") {
+		if !containsBytes([]byte(token), "hmac-sha256:") {
 			t.Error("Token doesn't have HMAC prefix")
 		}
 	}
@@ -343,10 +376,8 @@ func TestJSONFormatOmitFields(t *testing.T) {
 			entry: &LogEntry{
 				Timestamp: time.Now(),
 				Auth: &Auth{
-					ClientToken: &Token{
-						TokenID: "token-123",
-						Type:    "service",
-					},
+					TokenID:     "token-123",
+					TokenType:   "service",
 					PrincipalID: "user@example.com",
 				},
 				Request: &Request{
@@ -356,10 +387,10 @@ func TestJSONFormatOmitFields(t *testing.T) {
 			},
 			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
 				// Check JSON output, not the original entry (which is not modified due to cloning)
-				if !contains(data, "request") {
+				if !containsBytes(data, "request") {
 					t.Error("Request should still be present")
 				}
-				if contains(data, "auth") {
+				if containsBytes(data, "auth") {
 					t.Error("Auth should not be in JSON output")
 				}
 			},
@@ -380,13 +411,13 @@ func TestJSONFormatOmitFields(t *testing.T) {
 			},
 			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
 				// Check JSON output, not the original entry (which is not modified due to cloning)
-				if !contains(data, "request") {
+				if !containsBytes(data, "request") {
 					t.Error("Request should still be present")
 				}
-				if !contains(data, "/v1/test") {
+				if !containsBytes(data, "/v1/test") {
 					t.Error("Request.Path should still be present")
 				}
-				if contains(data, "username") || contains(data, "password") {
+				if containsBytes(data, "username") || containsBytes(data, "password") {
 					t.Error("Request.Data should not be in JSON output")
 				}
 			},
@@ -407,27 +438,28 @@ func TestJSONFormatOmitFields(t *testing.T) {
 			},
 			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
 				// Check JSON output, not the original entry (which is not modified due to cloning)
-				if !contains(data, "username") {
+				if !containsBytes(data, "username") {
 					t.Error("username field should still be present in JSON")
 				}
-				if !contains(data, "user1") {
+				if !containsBytes(data, "user1") {
 					t.Error("username value should still be present in JSON")
 				}
-				if contains(data, "password") || contains(data, "secret") {
+				if containsBytes(data, "password") || containsBytes(data, "secret") {
 					t.Error("password field should not be in JSON output")
 				}
 			},
 		},
 		{
-			name:       "omit response.cred",
-			omitFields: []string{"response.cred"},
+			name:       "omit response.credential",
+			omitFields: []string{"response.credential"},
 			entry: &LogEntry{
 				Timestamp: time.Now(),
 				Response: &Response{
 					StatusCode: 200,
-					Cred: &Cred{
-						TokenID: "token-456",
-						Type:    "aws",
+					Credential: &Credential{
+						TokenID:      "token-456",
+						CredentialID: "cred-id-123",
+						Type:         "aws_access_keys",
 					},
 					Data: map[string]interface{}{
 						"result": "success",
@@ -436,20 +468,20 @@ func TestJSONFormatOmitFields(t *testing.T) {
 			},
 			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
 				// Check JSON output, not the original entry (which is not modified due to cloning)
-				if !contains(data, "response") {
+				if !containsBytes(data, "response") {
 					t.Error("Response should still be present in JSON")
 				}
-				if !contains(data, "200") {
+				if !containsBytes(data, "200") {
 					t.Error("Response.StatusCode should still be present in JSON")
 				}
-				if contains(data, "token-456") || contains(data, "\"cred\"") {
-					t.Error("Response.Cred should not be in JSON output")
+				if containsBytes(data, "token-456") || containsBytes(data, "\"credential\"") {
+					t.Error("Response.Credential should not be in JSON output")
 				}
 			},
 		},
 		{
 			name:       "omit multiple fields",
-			omitFields: []string{"request.data", "response.cred", "metadata"},
+			omitFields: []string{"request.data", "response.credential"},
 			entry: &LogEntry{
 				Timestamp: time.Now(),
 				Request: &Request{
@@ -458,20 +490,16 @@ func TestJSONFormatOmitFields(t *testing.T) {
 				},
 				Response: &Response{
 					StatusCode: 200,
-					Cred:       &Cred{Type: "aws", TokenID: "token-123"},
+					Credential: &Credential{Type: "aws_access_keys", TokenID: "token-123"},
 				},
-				Metadata: map[string]interface{}{"meta": "data"},
 			},
 			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
 				// Check JSON output, not the original entry (which is not modified due to cloning)
-				if contains(data, "\"key\"") || contains(data, "\"value\"") {
+				if containsBytes(data, "\"key\"") || containsBytes(data, "\"value\"") {
 					t.Error("Request.Data should not be in JSON output")
 				}
-				if contains(data, "token-123") || contains(data, "\"cred\"") {
-					t.Error("Response.Cred should not be in JSON output")
-				}
-				if contains(data, "\"metadata\"") || contains(data, "\"meta\"") {
-					t.Error("Metadata should not be in JSON output")
+				if containsBytes(data, "token-123") || containsBytes(data, "\"credential\"") {
+					t.Error("Response.Credential should not be in JSON output")
 				}
 			},
 		},
@@ -507,10 +535,8 @@ func TestJSONFormatNoSaltingWhenFieldsNotConfigured(t *testing.T) {
 	entry := &LogEntry{
 		Timestamp: time.Now(),
 		Auth: &Auth{
-			ClientToken: &Token{
-				TokenID: "token-123",
-				Type:    "service",
-			},
+			TokenID:   "token-123",
+			TokenType: "service",
 		},
 		Request: &Request{
 			ID:   "req-123",
@@ -529,7 +555,7 @@ func TestJSONFormatNoSaltingWhenFieldsNotConfigured(t *testing.T) {
 	}
 
 	// Check that nothing was salted when no salt fields are configured
-	if entry.Auth.ClientToken.TokenID != "token-123" {
+	if entry.Auth.TokenID != "token-123" {
 		t.Error("Token was modified when it should not be")
 	}
 	if password, ok := entry.Request.Data["password"].(string); ok {
@@ -547,4 +573,17 @@ func TestJSONFormatNoSaltingWhenFieldsNotConfigured(t *testing.T) {
 			t.Error("Other field was modified when it should not be")
 		}
 	}
+}
+
+func containsBytes(data []byte, substr string) bool {
+	return len(data) > 0 && len(substr) > 0 && (string(data) == substr || len(data) >= len(substr) && containsSubstring(string(data), substr))
+}
+
+func containsSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

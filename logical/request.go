@@ -105,6 +105,16 @@ type Request struct {
 	// and should be allowed without a token. This works regardless of whether
 	// transparent mode is enabled.
 	StreamUnauthenticated bool `json:"-"`
+
+	// AuditPath is the normalized path used for audit logging. For streaming requests,
+	// this is the path relative to the mount point (e.g., "role/operator/gateway/v1/...")
+	// without the mount prefix. This field is set once before routing and remains
+	// unchanged, ensuring consistent path logging between request and response audit entries.
+	AuditPath string `json:"-"`
+
+	// UpstreamURL is the target URL for proxied streaming requests (for audit logging).
+	// Set by streaming handlers before forwarding the request to the upstream service.
+	UpstreamURL string `json:"-"`
 }
 
 func (r *Request) TokenEntry() *TokenEntry {

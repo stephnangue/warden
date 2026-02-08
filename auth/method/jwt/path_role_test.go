@@ -29,7 +29,6 @@ func TestPathRole_Create(t *testing.T) {
 			"bound_subject":       "test-subject",
 			"token_policies":      []string{"policy1", "policy2"},
 			"token_ttl":           3600,
-			"token_auth_deadline": 1800,
 			"token_type":          "service",
 			"user_claim":          "email",
 			"cred_spec_name":      "aws-dev",
@@ -40,7 +39,6 @@ func TestPathRole_Create(t *testing.T) {
 			"bound_subject":       {Type: framework.TypeString},
 			"token_policies":      {Type: framework.TypeCommaStringSlice},
 			"token_ttl":           {Type: framework.TypeDurationSecond, Default: 3600},
-			"token_auth_deadline": {Type: framework.TypeDurationSecond, Default: 3600},
 			"token_type":          {Type: framework.TypeString, Default: "service"},
 			"user_claim":          {Type: framework.TypeString, Default: "sub"},
 			"cred_spec_name":      {Type: framework.TypeString},
@@ -60,7 +58,6 @@ func TestPathRole_Create(t *testing.T) {
 	assert.Equal(t, "test-subject", role.BoundSubject)
 	assert.Equal(t, []string{"policy1", "policy2"}, role.TokenPolicies)
 	assert.Equal(t, time.Hour, role.TokenTTL)
-	assert.Equal(t, 30*time.Minute, role.TokenAuthDeadline)
 	assert.Equal(t, "service", role.TokenType)
 	assert.Equal(t, "email", role.UserClaim)
 	assert.Equal(t, "aws-dev", role.CredSpecName)
@@ -89,7 +86,6 @@ func TestPathRole_CreateDuplicate(t *testing.T) {
 			"bound_subject":       {Type: framework.TypeString},
 			"token_policies":      {Type: framework.TypeCommaStringSlice},
 			"token_ttl":           {Type: framework.TypeDurationSecond, Default: 3600},
-			"token_auth_deadline": {Type: framework.TypeDurationSecond, Default: 3600},
 			"token_type":          {Type: framework.TypeString, Default: "service"},
 			"user_claim":          {Type: framework.TypeString, Default: "sub"},
 			"cred_spec_name":      {Type: framework.TypeString},
@@ -111,7 +107,6 @@ func TestPathRole_Read(t *testing.T) {
 		BoundSubject:      "sub1",
 		TokenPolicies:     []string{"policy1"},
 		TokenTTL:          2 * time.Hour,
-		TokenAuthDeadline: time.Hour,
 		TokenType:         "batch",
 		UserClaim:         "preferred_username",
 		CredSpecName:      "aws-prod",
@@ -164,7 +159,6 @@ func TestPathRole_Update(t *testing.T) {
 		BoundAudiences:    []string{"aud1"},
 		TokenPolicies:     []string{"policy1"},
 		TokenTTL:          time.Hour,
-		TokenAuthDeadline: 30 * time.Minute,
 		TokenType:         "service",
 		UserClaim:         "sub",
 	}
@@ -185,7 +179,6 @@ func TestPathRole_Update(t *testing.T) {
 			"bound_subject":       {Type: framework.TypeString},
 			"token_policies":      {Type: framework.TypeCommaStringSlice},
 			"token_ttl":           {Type: framework.TypeDurationSecond},
-			"token_auth_deadline": {Type: framework.TypeDurationSecond},
 			"token_type":          {Type: framework.TypeString},
 			"user_claim":          {Type: framework.TypeString},
 			"cred_spec_name":      {Type: framework.TypeString},
@@ -330,7 +323,6 @@ func TestRole_StorageRoundTrip(t *testing.T) {
 		BoundSubject:      "test-subject",
 		TokenPolicies:     []string{"policy1", "policy2"},
 		TokenTTL:          2*time.Hour + 30*time.Minute,
-		TokenAuthDeadline: time.Hour + 15*time.Minute,
 		TokenType:         "batch",
 		UserClaim:         "preferred_username",
 		CredSpecName:      "aws-test-spec",
@@ -350,7 +342,6 @@ func TestRole_StorageRoundTrip(t *testing.T) {
 	assert.Equal(t, original.BoundSubject, retrieved.BoundSubject)
 	assert.Equal(t, original.TokenPolicies, retrieved.TokenPolicies)
 	assert.Equal(t, original.TokenTTL, retrieved.TokenTTL)
-	assert.Equal(t, original.TokenAuthDeadline, retrieved.TokenAuthDeadline)
 	assert.Equal(t, original.TokenType, retrieved.TokenType)
 	assert.Equal(t, original.UserClaim, retrieved.UserClaim)
 	assert.Equal(t, original.CredSpecName, retrieved.CredSpecName)
@@ -370,7 +361,6 @@ func TestRole_Defaults(t *testing.T) {
 			"bound_subject":       {Type: framework.TypeString},
 			"token_policies":      {Type: framework.TypeCommaStringSlice},
 			"token_ttl":           {Type: framework.TypeDurationSecond, Default: 3600},
-			"token_auth_deadline": {Type: framework.TypeDurationSecond, Default: 3600},
 			"token_type":          {Type: framework.TypeString, Required: true},
 			"user_claim":          {Type: framework.TypeString, Default: "sub"},
 			"cred_spec_name":      {Type: framework.TypeString},
@@ -386,7 +376,6 @@ func TestRole_Defaults(t *testing.T) {
 	// Verify defaults were applied
 	assert.Equal(t, "sub", role.UserClaim)
 	assert.Equal(t, time.Hour, role.TokenTTL)
-	assert.Equal(t, time.Hour, role.TokenAuthDeadline)
 }
 
 // =============================================================================
@@ -407,7 +396,7 @@ func TestPathRole_Fields(t *testing.T) {
 	// Check all expected fields exist
 	expectedFields := []string{
 		"name", "bound_audiences", "bound_subject", "token_policies",
-		"token_ttl", "token_auth_deadline", "token_type", "user_claim", "cred_spec_name",
+		"token_ttl", "token_type", "user_claim", "cred_spec_name",
 	}
 
 	for _, field := range expectedFields {

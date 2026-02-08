@@ -12,3 +12,10 @@ listener "tcp" {
     tls_client_ca_file = "/certs/ca.pem"
     tls_enabled        = true
 }
+
+# IP binding policy controls how client IP validation is enforced for tokens.
+# Options:
+#   - "disabled": No IP binding checks
+#   - "optional": Check only if both creation and request IPs are present (default)
+#   - "required": Reject tokens without IP binding or requests without client IP
+# ip_binding_policy = "optional"

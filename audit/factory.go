@@ -70,6 +70,7 @@ func (f *FileDeviceFactory) Create(
 		Sink:        fileSink,
 		BufferSize:  conf.BufferSize,
 		FlushPeriod: conf.FlushPeriod,
+		Logger:      f.logger,
 	})
 	if err != nil {
 		return nil, err

@@ -36,6 +36,8 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 			Root: []string{
 				"auth/*",
 				"cred/*",
+				"audit/*",
+				"audit-hash/*",
 			},
 		},
 		Paths:        b.paths(),
@@ -62,6 +64,10 @@ func (b *SystemBackend) paths() []*framework.Path {
 
 	// Policy paths
 	paths = append(paths, b.pathPolicies()...)
+
+	// Audit paths
+	paths = append(paths, b.pathAudit()...)
+	paths = append(paths, b.pathAuditHash()...)
 
 	return paths
 }

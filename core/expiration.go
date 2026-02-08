@@ -84,6 +84,10 @@ type pendingInfo struct {
 	revokeAttempts int32 // atomic counter
 }
 
+// IrrevocableCallback is called when an entry becomes irrevocable after exhausting retry attempts.
+// This can be used to trigger external alerting systems.
+type IrrevocableCallback func(entry *ExpirationEntry)
+
 // ExpirationManager provides active TTL enforcement for tokens and credentials.
 // Features:
 // - Individual timer per entry for exact TTL enforcement
@@ -115,6 +119,9 @@ type ExpirationManager struct {
 	irrevocableTokenCount      int64
 	irrevocableCredentialCount int64
 
+	// Metrics (atomic) - irrevocable event counter for alerting
+	irrevocableEventsTotal int64
+
 	// Lifecycle
 	quitCtx    context.Context
 	quitCancel context.CancelFunc
@@ -124,6 +131,9 @@ type ExpirationManager struct {
 
 	// Channel for testing - signals when a revocation completes
 	revocationDoneCh chan struct{}
+
+	// Callback for external alerting when entries become irrevocable
+	onIrrevocable IrrevocableCallback
 }
 
 // NewExpirationManager creates a new global expiration manager.
@@ -507,6 +517,9 @@ func (m *ExpirationManager) markIrrevocable(key string, entry *ExpirationEntry, 
 	atomic.AddInt64(&m.irrevocableCount, 1)
 	m.incrementIrrevocableTypeCount(entry.EntryType)
 
+	// Increment total irrevocable events counter for alerting/metrics
+	atomic.AddInt64(&m.irrevocableEventsTotal, 1)
+
 	// Persist irrevocable entry
 	if m.storage != nil {
 		m.persistIrrevocableEntry(entry)
@@ -519,6 +532,21 @@ func (m *ExpirationManager) markIrrevocable(key string, entry *ExpirationEntry, 
 		logger.String("type", string(entry.EntryType)),
 		logger.String("id", entry.ID),
 		logger.String("error", entry.RevokeErr))
+
+	// Invoke callback for external alerting if configured
+	if m.onIrrevocable != nil {
+		// Run callback in separate goroutine to avoid blocking the expiration flow
+		go func(e *ExpirationEntry) {
+			defer func() {
+				if r := recover(); r != nil {
+					m.log.Error("irrevocable callback panicked",
+						logger.String("id", e.ID),
+						logger.Any("panic", r))
+				}
+			}()
+			m.onIrrevocable(e)
+		}(entry)
+	}
 }
 
 // ============================================================================
@@ -787,6 +815,17 @@ func (m *ExpirationManager) GetIrrevocableTokenCount() int64 {
 // GetIrrevocableCredentialCount returns the number of irrevocable credential entries
 func (m *ExpirationManager) GetIrrevocableCredentialCount() int64 {
 	return atomic.LoadInt64(&m.irrevocableCredentialCount)
+}
+
+// GetIrrevocableEventsTotal returns the total count of irrevocable events since startup
+func (m *ExpirationManager) GetIrrevocableEventsTotal() int64 {
+	return atomic.LoadInt64(&m.irrevocableEventsTotal)
+}
+
+// SetIrrevocableCallback sets the callback function for irrevocable entry alerts.
+// The callback is invoked when an entry becomes irrevocable after exhausting retry attempts.
+func (m *ExpirationManager) SetIrrevocableCallback(cb IrrevocableCallback) {
+	m.onIrrevocable = cb
 }
 
 // ============================================================================

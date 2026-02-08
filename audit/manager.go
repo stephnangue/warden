@@ -8,6 +8,12 @@ import (
 	"github.com/stephnangue/warden/logger"
 )
 
+const (
+	// MaxParallelDevices limits the number of concurrent goroutines for parallel logging
+	// to prevent resource exhaustion with many audit devices
+	MaxParallelDevices = 32
+)
+
 // manager implements the Manager interface
 type manager struct {
 	mu       sync.RWMutex
@@ -89,8 +95,8 @@ func (m *manager) GetDevice(name string) (Device, error) {
 }
 
 func (m *manager) Reset(ctx context.Context) error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	m.devices = make(map[string]Device)
 
@@ -166,7 +172,7 @@ func (m *manager) logToDevices(ctx context.Context, entry *LogEntry, isRequest b
 	return m.logSequential(ctx, devices, entry, isRequest)
 }
 
-// logParallel logs to all devices concurrently
+// logParallel logs to all devices concurrently with bounded parallelism
 // Returns (continue, error) where continue is true if at least one device succeeded
 func (m *manager) logParallel(ctx context.Context, devices []Device, entry *LogEntry, isRequest bool) (bool, error) {
 	type result struct {
@@ -177,9 +183,19 @@ func (m *manager) logParallel(ctx context.Context, devices []Device, entry *LogE
 
 	results := make(chan result, len(devices))
 
-	// Fan-out: log to all devices concurrently
+	// Use a semaphore to limit concurrent goroutines
+	semaphore := make(chan struct{}, MaxParallelDevices)
+
+	var wg sync.WaitGroup
 	for _, device := range devices {
+		wg.Add(1)
 		go func(d Device) {
+			defer wg.Done()
+
+			// Acquire semaphore slot
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
 			var err error
 			if isRequest {
 				err = d.LogRequest(ctx, entry)
@@ -190,11 +206,16 @@ func (m *manager) logParallel(ctx context.Context, devices []Device, entry *LogE
 		}(device)
 	}
 
+	// Close results channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
 	// Fan-in: collect all results
 	var errs []error
 	atLeastOneSuccess := false
-	for i := 0; i < len(devices); i++ {
-		res := <-results
+	for res := range results {
 		if res.success {
 			atLeastOneSuccess = true
 		} else {

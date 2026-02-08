@@ -12,6 +12,9 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// DefaultIssuanceTimeout is the default timeout for credential issuance operations
+const DefaultIssuanceTimeout = 30 * time.Second
+
 // Manager manages credential issuance with caching and type safety for all namespaces
 // The manager is global and handles credentials across all namespaces using namespace-aware cache keys
 type Manager struct {
@@ -27,6 +30,10 @@ type Manager struct {
 	// Optional expiration registrar for timer-based TTL enforcement
 	// When set, newly issued credentials are registered for expiration
 	expirationRegistrar ExpirationRegistrar
+
+	// IssuanceTimeout is the maximum time allowed for credential issuance
+	// If not set, defaults to DefaultIssuanceTimeout (30 seconds)
+	issuanceTimeout time.Duration
 }
 
 // ConfigStoreAccessor defines the interface for accessing credential configuration
@@ -61,10 +68,11 @@ func NewManager(
 	logger *logger.GatedLogger,
 ) (*Manager, error) {
 	m := &Manager{
-		log:            logger,
-		typeRegistry:   typeRegistry,
-		driverRegistry: driverRegistry,
-		configStore:    configStore,
+		log:             logger,
+		typeRegistry:    typeRegistry,
+		driverRegistry:  driverRegistry,
+		configStore:     configStore,
+		issuanceTimeout: DefaultIssuanceTimeout,
 	}
 
 	// Create Ristretto cache
@@ -95,6 +103,10 @@ func NewManager(
 //
 // Returns the issued credential or an error
 func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName string, tokenTTL time.Duration) (*Credential, error) {
+	// Apply issuance timeout to prevent slow drivers from blocking indefinitely
+	ctx, cancel := context.WithTimeout(ctx, m.issuanceTimeout)
+	defer cancel()
+
 	// Extract namespace from context
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
@@ -160,6 +172,8 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 	})
 
 	if err != nil {
+		// Don't cache errors - allow next request to retry
+		m.group.Forget(cacheKey)
 		return nil, err
 	}
 
@@ -214,6 +228,15 @@ func (m *Manager) issueCredential(ctx context.Context, specName string) (*Creden
 // This is called after manager creation since the expiration manager may be created later.
 func (m *Manager) SetExpirationRegistrar(registrar ExpirationRegistrar) {
 	m.expirationRegistrar = registrar
+}
+
+// SetIssuanceTimeout sets the maximum time allowed for credential issuance.
+// If timeout is <= 0, it resets to DefaultIssuanceTimeout.
+func (m *Manager) SetIssuanceTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = DefaultIssuanceTimeout
+	}
+	m.issuanceTimeout = timeout
 }
 
 // Stop gracefully shuts down the manager
@@ -287,6 +310,16 @@ func (m *Manager) revokeLeaseAtSource(ctx context.Context, revocable bool, lease
 	}
 
 	return nil
+}
+
+// SpecExists checks if a credential spec exists and is valid.
+// Returns true if the spec exists and can be retrieved without error.
+func (m *Manager) SpecExists(ctx context.Context, specName string) bool {
+	if m.configStore == nil {
+		return false
+	}
+	spec, err := m.configStore.GetSpec(ctx, specName)
+	return err == nil && spec != nil
 }
 
 // GetOrCreateDriver retrieves an existing driver or creates one if it doesn't exist.

@@ -51,12 +51,16 @@ func buildLogicalRequest(w http.ResponseWriter, r *http.Request) *logical.Reques
 	// Extract client IP
 	clientIP := extractClientIP(r)
 
+	// Wrap ResponseWriter to capture status code for streaming requests.
+	// This enables accurate audit logging of the real HTTP status code.
+	srw := logical.NewStatusRecordingWriter(w)
+
 	// Build the logical request
 	return &logical.Request{
 		Operation:      op,
 		Path:           path,
 		HTTPRequest:    r,
-		ResponseWriter: w,
+		ResponseWriter: srw,
 		ClientIP:       clientIP,
 		RequestID:      middleware.GetReqID(r.Context()),
 	}

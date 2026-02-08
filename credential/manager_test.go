@@ -547,3 +547,153 @@ func TestManager_Stop(t *testing.T) {
 	// Should not panic
 	manager.Stop()
 }
+
+func TestManager_IssueCredential_Timeout(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+
+	// Set a very short timeout
+	manager.SetIssuanceTimeout(50 * time.Millisecond)
+
+	configStore.AddSource(&CredSource{
+		Name:   "test-source",
+		Type:   SourceTypeLocal,
+		Config: map[string]string{},
+	})
+	configStore.AddSpec(&CredSpec{
+		Name:   "test-spec",
+		Type:   TypeDatabaseUserPass,
+		Source: "test-source",
+		Config: map[string]string{},
+	})
+
+	// Configure driver to block longer than timeout
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+		select {
+		case <-ctx.Done():
+			return nil, 0, "", ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+			return map[string]interface{}{
+				"username": "test-user",
+				"password": "test-pass",
+			}, time.Hour, "lease-123", nil
+		}
+	}
+
+	ctx := createNamespaceContext()
+
+	_, err := manager.IssueCredential(ctx, "token-timeout", "test-spec", time.Hour)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context deadline exceeded")
+}
+
+func TestManager_IssueCredential_ErrorNotCached(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+
+	configStore.AddSource(&CredSource{
+		Name:   "test-source",
+		Type:   SourceTypeLocal,
+		Config: map[string]string{},
+	})
+	configStore.AddSpec(&CredSpec{
+		Name:   "test-spec",
+		Type:   TypeDatabaseUserPass,
+		Source: "test-source",
+		Config: map[string]string{},
+	})
+
+	ctx := createNamespaceContext()
+	tokenID := "token-error-retry"
+
+	// First call fails
+	callCount := 0
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+		callCount++
+		if callCount == 1 {
+			return nil, 0, "", errors.New("transient error")
+		}
+		return map[string]interface{}{
+			"username": "test-user",
+			"password": "test-pass",
+		}, time.Hour, "lease-123", nil
+	}
+
+	// First request should fail
+	_, err := manager.IssueCredential(ctx, tokenID, "test-spec", time.Hour)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "transient error")
+
+	// Second request should succeed (error not cached)
+	cred, err := manager.IssueCredential(ctx, tokenID, "test-spec", time.Hour)
+	require.NoError(t, err)
+	require.NotNil(t, cred)
+
+	// Driver should have been called twice (error not cached, retry worked)
+	assert.Equal(t, 2, callCount)
+}
+
+func TestManager_SetIssuanceTimeout(t *testing.T) {
+	manager, _, _ := createTestManager(t)
+	defer manager.Stop()
+
+	// Default timeout should be set
+	assert.Equal(t, DefaultIssuanceTimeout, manager.issuanceTimeout)
+
+	// Set custom timeout
+	manager.SetIssuanceTimeout(10 * time.Second)
+	assert.Equal(t, 10*time.Second, manager.issuanceTimeout)
+
+	// Setting zero resets to default
+	manager.SetIssuanceTimeout(0)
+	assert.Equal(t, DefaultIssuanceTimeout, manager.issuanceTimeout)
+
+	// Setting negative resets to default
+	manager.SetIssuanceTimeout(-5 * time.Second)
+	assert.Equal(t, DefaultIssuanceTimeout, manager.issuanceTimeout)
+}
+
+// ============================================================================
+// Security Fix Tests - SpecExists
+// ============================================================================
+
+func TestManager_SpecExists(t *testing.T) {
+	manager, configStore, _ := createTestManager(t)
+	defer manager.Stop()
+
+	ctx := createNamespaceContext()
+
+	t.Run("spec exists", func(t *testing.T) {
+		configStore.AddSpec(&CredSpec{
+			Name:   "existing-spec",
+			Type:   TypeDatabaseUserPass,
+			Source: "test-source",
+			Config: map[string]string{},
+		})
+
+		exists := manager.SpecExists(ctx, "existing-spec")
+		assert.True(t, exists, "should return true for existing spec")
+	})
+
+	t.Run("spec does not exist", func(t *testing.T) {
+		exists := manager.SpecExists(ctx, "nonexistent-spec")
+		assert.False(t, exists, "should return false for nonexistent spec")
+	})
+
+	t.Run("nil config store", func(t *testing.T) {
+		// Create manager with nil config store
+		log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+		typeRegistry := NewTypeRegistry()
+		driverRegistry := NewDriverRegistry(nil)
+
+		managerWithNilStore, err := NewManager(typeRegistry, driverRegistry, nil, log)
+		require.NoError(t, err)
+		defer managerWithNilStore.Stop()
+
+		// configStore is nil, so set it to nil explicitly for this test
+		managerWithNilStore.configStore = nil
+
+		exists := managerWithNilStore.SpecExists(ctx, "any-spec")
+		assert.False(t, exists, "should return false when config store is nil")
+	})
+}

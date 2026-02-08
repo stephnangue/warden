@@ -53,7 +53,6 @@ func TestMapToJWTAuthConfig_DefaultValues(t *testing.T) {
 	// Check default values
 	assert.Equal(t, "sub", config.UserClaim)
 	assert.Equal(t, 1*time.Hour, config.TokenTTL)
-	assert.Equal(t, 1*time.Hour, config.AuthDeadline) // Defaults to TokenTTL
 }
 
 func TestMapToJWTAuthConfig_CustomTokenTTL(t *testing.T) {
@@ -67,19 +66,6 @@ func TestMapToJWTAuthConfig_CustomTokenTTL(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 2*time.Hour, config.TokenTTL)
-}
-
-func TestMapToJWTAuthConfig_CustomAuthDeadline(t *testing.T) {
-	data := map[string]any{
-		"mode":          "jwt",
-		"jwks_url":      "https://example.com/.well-known/jwks.json",
-		"auth_deadline": "30m",
-	}
-
-	config, err := mapToJWTAuthConfig(data)
-	require.NoError(t, err)
-
-	assert.Equal(t, 30*time.Minute, config.AuthDeadline)
 }
 
 func TestMapToJWTAuthConfig_CustomUserClaim(t *testing.T) {
@@ -233,7 +219,6 @@ func TestMapToJWTAuthConfig_AllFields(t *testing.T) {
 		"user_claim":             "email",
 		"groups_claim":           "roles",
 		"token_ttl":              "4h",
-		"auth_deadline":          "1h",
 	}
 
 	config, err := mapToJWTAuthConfig(data)
@@ -250,7 +235,6 @@ func TestMapToJWTAuthConfig_AllFields(t *testing.T) {
 	assert.Equal(t, "email", config.UserClaim)
 	assert.Equal(t, "roles", config.GroupsClaim)
 	assert.Equal(t, 4*time.Hour, config.TokenTTL)
-	assert.Equal(t, 1*time.Hour, config.AuthDeadline)
 }
 
 // =============================================================================

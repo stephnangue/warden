@@ -10,14 +10,154 @@ import (
 
 // LogEntry represents a single audit log entry
 type LogEntry struct {
-	Type      string                 `json:"type"`
-	Timestamp time.Time              `json:"timestamp"`
-	Auth      *Auth                  `json:"auth,omitempty"`
-	Request   *Request               `json:"request,omitempty"`
-	Response  *Response              `json:"response,omitempty"`
-	Error     string                 `json:"error,omitempty"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Type      string    `json:"type"`      // "request" or "response"
+	Timestamp time.Time `json:"timestamp"`
+
+	// Request information (always present)
+	Request *Request `json:"request"`
+
+	// Response information (only for response entries)
+	Response *Response `json:"response,omitempty"`
+
+	// Authentication context
+	Auth *Auth `json:"auth,omitempty"`
+
+	// Error from the operation (if any)
+	Error string `json:"error,omitempty"`
 }
+
+// Request contains audit information about the request
+type Request struct {
+	// Identifiers
+	ID        string `json:"id"`        // Request ID
+	Operation string `json:"operation"` // create, read, update, delete, list, stream
+
+	// Path information
+	Path       string `json:"path"`                   // Full request path
+	MountPoint string `json:"mount_point,omitempty"`  // Mount point prefix
+	MountType  string `json:"mount_type,omitempty"`   // Backend type (vault, aws, jwt)
+	MountClass string `json:"mount_class,omitempty"`  // provider, auth, system, audit
+
+	// HTTP details
+	Method   string              `json:"method"`           // GET, POST, PUT, DELETE
+	ClientIP string              `json:"client_ip"`
+	Headers  map[string][]string `json:"headers,omitempty"`
+	Data     map[string]any      `json:"data,omitempty"`
+
+	// Namespace context
+	NamespaceID   string `json:"namespace_id,omitempty"`
+	NamespacePath string `json:"namespace_path,omitempty"`
+
+	// Flags
+	Unauthenticated bool `json:"unauthenticated,omitempty"`
+	Streamed        bool `json:"streamed,omitempty"`
+	Transparent     bool `json:"transparent,omitempty"`
+}
+
+// Response contains audit information about the response
+type Response struct {
+	// HTTP response
+	StatusCode    int                 `json:"status_code"`
+	StatusMessage string              `json:"status_message,omitempty"`
+	Headers       map[string][]string `json:"headers,omitempty"`
+	Data          map[string]any      `json:"data,omitempty"`
+
+	// Mount context (from response)
+	MountClass string `json:"mount_class,omitempty"`
+
+	// Flags
+	Streamed bool `json:"streamed,omitempty"`
+
+	// Warnings
+	Warnings []string `json:"warnings,omitempty"`
+
+	// Credential issued (if any) - for provider requests
+	Credential *Credential `json:"credential,omitempty"`
+
+	// Auth result (for login responses)
+	AuthResult *AuthResult `json:"auth_result,omitempty"`
+
+	// UpstreamURL is the target URL for proxied streaming requests
+	UpstreamURL string `json:"upstream_url,omitempty"`
+}
+
+// Auth contains authentication context for the request
+type Auth struct {
+	// Token information (hash-based ID, safe to log)
+	TokenID       string `json:"token_id,omitempty"`
+	TokenAccessor string `json:"token_accessor,omitempty"`
+	TokenType     string `json:"token_type,omitempty"`
+
+	// Principal/Identity
+	PrincipalID string `json:"principal_id,omitempty"`
+	RoleName    string `json:"role_name,omitempty"`
+
+	// Policies
+	Policies      []string       `json:"policies,omitempty"`
+	PolicyResults *PolicyResults `json:"policy_results,omitempty"`
+
+	// Token lifecycle
+	TokenTTL  int64 `json:"token_ttl,omitempty"`  // Seconds remaining
+	ExpiresAt int64 `json:"expires_at,omitempty"` // Unix timestamp
+
+	// Namespace binding
+	NamespaceID   string `json:"namespace_id,omitempty"`
+	NamespacePath string `json:"namespace_path,omitempty"`
+
+	// Creation context
+	CreatedByIP string `json:"created_by_ip,omitempty"`
+}
+
+// PolicyResults captures which policies granted access
+type PolicyResults struct {
+	Allowed          bool     `json:"allowed"`
+	GrantingPolicies []string `json:"granting_policies,omitempty"`
+}
+
+// AuthResult contains authentication result from login operations
+type AuthResult struct {
+	TokenType      string   `json:"token_type"`
+	PrincipalID    string   `json:"principal_id"`
+	RoleName       string   `json:"role_name"`
+	Policies       []string `json:"policies"`
+	TokenTTL       int64    `json:"token_ttl"` // Seconds
+	CredentialSpec string   `json:"credential_spec,omitempty"`
+}
+
+// Credential contains audit information about a credential that was issued
+type Credential struct {
+	// Identity
+	CredentialID string `json:"credential_id"` // UUID
+
+	// Type information
+	Type     string `json:"type"`               // database_userpass, aws_access_keys, vault_token
+	Category string `json:"category,omitempty"` // database, cloud_iam, oauth, etc.
+
+	// Lifecycle
+	LeaseTTL int64  `json:"lease_ttl,omitempty"` // Seconds (0 for static)
+	LeaseID  string `json:"lease_id,omitempty"`  // For revocation tracking
+	TokenID  string `json:"token_id"`            // Session token this is bound to
+
+	// Source information
+	SourceName string `json:"source_name,omitempty"`
+	SourceType string `json:"source_type,omitempty"` // local, hvault, aws
+	SpecName   string `json:"spec_name,omitempty"`   // Which spec created this
+
+	// Flags
+	Revocable bool `json:"revocable"`
+
+	// Credential data (sensitive - will be HMAC salted by the format layer)
+	// Contains the actual credential values like access_key, secret_key, password, etc.
+	Data map[string]string `json:"data,omitempty"`
+}
+
+// EntryType defines the type of audit entry
+type EntryType string
+
+const (
+	EntryTypeRequest  EntryType = "request"
+	EntryTypeResponse EntryType = "response"
+)
 
 // Clone creates a deep copy of the LogEntry to avoid data races
 func (e *LogEntry) Clone() *LogEntry {
@@ -31,53 +171,28 @@ func (e *LogEntry) Clone() *LogEntry {
 		Error:     e.Error,
 	}
 
-	// Clone Auth
-	if e.Auth != nil {
-		clone.Auth = &Auth{
-			RoleName:    e.Auth.RoleName,
-			PrincipalID: e.Auth.PrincipalID,
-		}
-		if e.Auth.ClientToken != nil {
-			clone.Auth.ClientToken = &Token{
-				Type:        e.Auth.ClientToken.Type,
-				TokenID:     e.Auth.ClientToken.TokenID,
-				TokenTTL:    e.Auth.ClientToken.TokenTTL,
-				TokenIssuer: e.Auth.ClientToken.TokenIssuer,
-			}
-			if e.Auth.ClientToken.Data != nil {
-				clone.Auth.ClientToken.Data = make(map[string]string, len(e.Auth.ClientToken.Data))
-				for k, v := range e.Auth.ClientToken.Data {
-					clone.Auth.ClientToken.Data[k] = v
-				}
-			}
-		}
-		if e.Auth.Metadata != nil {
-			clone.Auth.Metadata = make(map[string]string, len(e.Auth.Metadata))
-			for k, v := range e.Auth.Metadata {
-				clone.Auth.Metadata[k] = v
-			}
-		}
-	}
-
 	// Clone Request
 	if e.Request != nil {
 		clone.Request = &Request{
-			ID:            e.Request.ID,
-			Method:        e.Request.Method,
-			Operation:     e.Request.Operation,
-			ClientIP:      e.Request.ClientIP,
-			Path:          e.Request.Path,
-			TargetUrl:     e.Request.TargetUrl,
-			MountType:     e.Request.MountType,
-			MountAccessor: e.Request.MountAccessor,
-			MountPath:     e.Request.MountPath,
-			MountClass:    e.Request.MountClass,
-		}
-		if e.Request.Data != nil {
-			clone.Request.Data = cloneMap(e.Request.Data)
+			ID:              e.Request.ID,
+			Operation:       e.Request.Operation,
+			Path:            e.Request.Path,
+			MountPoint:      e.Request.MountPoint,
+			MountType:       e.Request.MountType,
+			MountClass:      e.Request.MountClass,
+			Method:          e.Request.Method,
+			ClientIP:        e.Request.ClientIP,
+			NamespaceID:     e.Request.NamespaceID,
+			NamespacePath:   e.Request.NamespacePath,
+			Unauthenticated: e.Request.Unauthenticated,
+			Streamed:        e.Request.Streamed,
+			Transparent:     e.Request.Transparent,
 		}
 		if e.Request.Headers != nil {
 			clone.Request.Headers = cloneHeaders(e.Request.Headers)
+		}
+		if e.Request.Data != nil {
+			clone.Request.Data = cloneMapAny(e.Request.Data)
 		}
 	}
 
@@ -85,56 +200,132 @@ func (e *LogEntry) Clone() *LogEntry {
 	if e.Response != nil {
 		clone.Response = &Response{
 			StatusCode:    e.Response.StatusCode,
-			Message:       e.Response.Message,
-			MountType:     e.Response.MountType,
-			MountAccessor: e.Response.MountAccessor,
-			MountPath:     e.Response.MountPath,
+			StatusMessage: e.Response.StatusMessage,
 			MountClass:    e.Response.MountClass,
-		}
-		if e.Response.Data != nil {
-			clone.Response.Data = cloneMap(e.Response.Data)
+			Streamed:      e.Response.Streamed,
+			UpstreamURL:   e.Response.UpstreamURL,
 		}
 		if e.Response.Headers != nil {
 			clone.Response.Headers = cloneHeaders(e.Response.Headers)
 		}
-		if e.Response.Cred != nil {
-			clone.Response.Cred = &Cred{
-				Type:     e.Response.Cred.Type,
-				LeaseTTL: e.Response.Cred.LeaseTTL,
-				LeaseID:  e.Response.Cred.LeaseID,
-				TokenID:  e.Response.Cred.TokenID,
-				Origin:   e.Response.Cred.Origin,
+		if e.Response.Data != nil {
+			clone.Response.Data = cloneMapAny(e.Response.Data)
+		}
+		if e.Response.Warnings != nil {
+			clone.Response.Warnings = make([]string, len(e.Response.Warnings))
+			copy(clone.Response.Warnings, e.Response.Warnings)
+		}
+		if e.Response.Credential != nil {
+			clone.Response.Credential = &Credential{
+				CredentialID: e.Response.Credential.CredentialID,
+				Type:         e.Response.Credential.Type,
+				Category:     e.Response.Credential.Category,
+				LeaseTTL:     e.Response.Credential.LeaseTTL,
+				LeaseID:      e.Response.Credential.LeaseID,
+				TokenID:      e.Response.Credential.TokenID,
+				SourceName:   e.Response.Credential.SourceName,
+				SourceType:   e.Response.Credential.SourceType,
+				SpecName:     e.Response.Credential.SpecName,
+				Revocable:    e.Response.Credential.Revocable,
 			}
-			if e.Response.Cred.Data != nil {
-				clone.Response.Cred.Data = make(map[string]string, len(e.Response.Cred.Data))
-				for k, v := range e.Response.Cred.Data {
-					clone.Response.Cred.Data[k] = v
+			if e.Response.Credential.Data != nil {
+				clone.Response.Credential.Data = make(map[string]string, len(e.Response.Credential.Data))
+				for k, v := range e.Response.Credential.Data {
+					clone.Response.Credential.Data[k] = v
 				}
+			}
+		}
+		if e.Response.AuthResult != nil {
+			clone.Response.AuthResult = &AuthResult{
+				TokenType:      e.Response.AuthResult.TokenType,
+				PrincipalID:    e.Response.AuthResult.PrincipalID,
+				RoleName:       e.Response.AuthResult.RoleName,
+				TokenTTL:       e.Response.AuthResult.TokenTTL,
+				CredentialSpec: e.Response.AuthResult.CredentialSpec,
+			}
+			if e.Response.AuthResult.Policies != nil {
+				clone.Response.AuthResult.Policies = make([]string, len(e.Response.AuthResult.Policies))
+				copy(clone.Response.AuthResult.Policies, e.Response.AuthResult.Policies)
 			}
 		}
 	}
 
-	// Clone Metadata
-	if e.Metadata != nil {
-		clone.Metadata = cloneMap(e.Metadata)
+	// Clone Auth
+	if e.Auth != nil {
+		clone.Auth = &Auth{
+			TokenID:       e.Auth.TokenID,
+			TokenAccessor: e.Auth.TokenAccessor,
+			TokenType:     e.Auth.TokenType,
+			PrincipalID:   e.Auth.PrincipalID,
+			RoleName:      e.Auth.RoleName,
+			TokenTTL:      e.Auth.TokenTTL,
+			ExpiresAt:     e.Auth.ExpiresAt,
+			NamespaceID:   e.Auth.NamespaceID,
+			NamespacePath: e.Auth.NamespacePath,
+			CreatedByIP:   e.Auth.CreatedByIP,
+		}
+		if e.Auth.Policies != nil {
+			clone.Auth.Policies = make([]string, len(e.Auth.Policies))
+			copy(clone.Auth.Policies, e.Auth.Policies)
+		}
+		if e.Auth.PolicyResults != nil {
+			clone.Auth.PolicyResults = &PolicyResults{
+				Allowed: e.Auth.PolicyResults.Allowed,
+			}
+			if e.Auth.PolicyResults.GrantingPolicies != nil {
+				clone.Auth.PolicyResults.GrantingPolicies = make([]string, len(e.Auth.PolicyResults.GrantingPolicies))
+				copy(clone.Auth.PolicyResults.GrantingPolicies, e.Auth.PolicyResults.GrantingPolicies)
+			}
+		}
 	}
 
 	return clone
 }
 
-// Helper function to clone a map[string]interface{}
-func cloneMap(m map[string]interface{}) map[string]interface{} {
+// cloneMapAny creates a deep copy of a map[string]any, recursively cloning
+// nested maps and slices to prevent data races when logging to multiple devices.
+func cloneMapAny(m map[string]any) map[string]any {
 	if m == nil {
 		return nil
 	}
-	clone := make(map[string]interface{}, len(m))
+	clone := make(map[string]any, len(m))
 	for k, v := range m {
-		clone[k] = v
+		clone[k] = cloneValue(v)
 	}
 	return clone
 }
 
-// Helper function to clone headers
+// cloneValue recursively clones a value, handling maps, slices, and primitives.
+func cloneValue(v any) any {
+	if v == nil {
+		return nil
+	}
+	switch val := v.(type) {
+	case map[string]any:
+		return cloneMapAny(val)
+	case map[string]string:
+		clone := make(map[string]string, len(val))
+		for k, v := range val {
+			clone[k] = v
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(val))
+		for i, item := range val {
+			clone[i] = cloneValue(item)
+		}
+		return clone
+	case []string:
+		clone := make([]string, len(val))
+		copy(clone, val)
+		return clone
+	default:
+		// Primitives (string, int, bool, etc.) are safe to share
+		return v
+	}
+}
+
+// cloneHeaders creates a copy of HTTP headers
 func cloneHeaders(h map[string][]string) map[string][]string {
 	if h == nil {
 		return nil
@@ -148,70 +339,6 @@ func cloneHeaders(h map[string][]string) map[string][]string {
 	}
 	return clone
 }
-
-// Auth contains authentication information
-type Auth struct {
-	ClientToken *Token            `json:"client_token,omitempty"`
-	RoleName    string            `json:"role_name,omitempty"`
-	PrincipalID string            `json:"principal_id,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
-}
-
-// Request contains request information
-type Request struct {
-	ID            string                 `json:"id"`
-	Method        string                 `json:"method"`
-	Operation     string                 `json:"operation"`
-	ClientIP      string                 `json:"client_ip"`
-	Path          string                 `json:"path"`
-	Data          map[string]interface{} `json:"data,omitempty"`
-	TargetUrl     string                 `json:"target_url,omitempty"`
-	Headers       map[string][]string    `json:"headers,omitempty"`
-	MountType     string                 `json:"mount_type,omitempty"`
-	MountAccessor string                 `json:"mount_accessor,omitempty"`
-	MountPath     string                 `json:"mount_path,omitempty"`
-	MountClass    string                 `json:"mount_class,omitempty"`
-}
-
-// Response contains response information
-type Response struct {
-	Data          map[string]interface{} `json:"data,omitempty"`
-	Cred          *Cred                  `json:"cred,omitempty"`
-	StatusCode    int                    `json:"status_code,omitempty"`
-	Message       string                 `json:"message,omitempty"`
-	MountType     string                 `json:"mount_type,omitempty"`
-	MountAccessor string                 `json:"mount_accessor,omitempty"`
-	MountPath     string                 `json:"mount_path,omitempty"`
-	MountClass    string                 `json:"mount_class,omitempty"`
-	Headers       map[string][]string    `json:"headers,omitempty"`
-}
-
-// Cred contains credential information used by warden to send a request to a provider
-type Cred struct {
-	Type     string            `json:"type"`
-	LeaseTTL int64             `json:"lease_ttl,omitempty"`
-	LeaseID  string            `json:"lease_id,omitempty"`
-	TokenID  string            `json:"token_id,omitempty"`
-	Origin   string            `json:"origin,omitempty"`
-	Data     map[string]string `json:"data,omitempty"`
-}
-
-// Token contains token information used by a principal to send a request to warden
-type Token struct {
-	Type        string            `json:"type"`
-	TokenID     string            `json:"token_id,omitempty"`     // Hash-based ID (safe to log)
-	TokenTTL    int64             `json:"token_ttl,omitempty"`
-	TokenIssuer string            `json:"token_issuer,omitempty"`
-	Data        map[string]string `json:"data,omitempty"`          // Contains actual token values (should be salted via HMAC)
-}
-
-// EntryType defines the type of audit entry
-type EntryType string
-
-const (
-	EntryTypeRequest  EntryType = "request"
-	EntryTypeResponse EntryType = "response"
-)
 
 // Format defines the serialization format for audit logs
 type Format interface {

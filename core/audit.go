@@ -1,20 +1,19 @@
 package core
 
 import (
-	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
-	"maps"
-	"net"
-	"net/http"
 	"strings"
-	"time"
 
-	"github.com/go-chi/chi/middleware"
+	"github.com/openbao/openbao/helper/namespace"
+	"github.com/openbao/openbao/sdk/v2/helper/jsonutil"
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 )
 
 const (
@@ -28,101 +27,156 @@ const (
 	auditBarrierPrefix = "audit/"
 )
 
-// isAuditExempt checks if a request should be allowed even when no audit devices are configured.
-// Only bootstrap operations that must work before audit devices are set up are exempted.
-func isAuditExempt(req *http.Request) bool {
-	// Normalize path to handle both /sys/... and /v1/sys/... formats
-	normalizedPath := strings.TrimPrefix(req.URL.Path, "/v1")
-
-	// Only POST /sys/init is exempt - this is the bootstrap operation that happens
-	// before audit devices are loaded during post-unseal
-	if normalizedPath == "/sys/init" && req.Method == http.MethodPost {
-		return true
+// generateAuditHMACSalt generates a cryptographically secure random salt for HMAC operations.
+// Returns a 32-byte hex-encoded string.
+func generateAuditHMACSalt() (string, error) {
+	salt := make([]byte, 32)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("failed to generate HMAC salt: %w", err)
 	}
-
-	// Future: Add other bootstrap operations here as needed
-	// Examples:
-	// - GET /sys/health (health check before init)
-	// - GET /sys/seal-status (check status before init)
-
-	return false
+	return hex.EncodeToString(salt), nil
 }
 
-func (c *Core) auditRequest(req *http.Request) bool {
-	// Read body for logging
-	bodyBytes, _ := io.ReadAll(req.Body)
+// loadAudits is invoked as part of postUnseal to load the audit table from storage
+func (c *Core) loadAudits(ctx context.Context) error {
+	c.auditLock.Lock()
+	defer c.auditLock.Unlock()
 
-	// Restore body for next handlers
-	req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	// Try to load audit table from storage
+	raw, err := c.barrier.Get(ctx, coreAuditConfigPath)
+	if err != nil {
+		return fmt.Errorf("failed to read audit table: %w", err)
+	}
 
-	var data map[string]interface{}
-	if len(bodyBytes) > 0 {
-		data = map[string]interface{}{
-			"body": string(bodyBytes),
+	c.audit = NewMountTable()
+
+	if raw != nil {
+		// Decode the stored audit table
+		if err := jsonutil.DecodeJSON(raw.Value, c.audit); err != nil {
+			c.logger.Error("failed to decode audit table", logger.Err(err))
+			return fmt.Errorf("failed to decode audit table: %w", err)
 		}
+
+		c.logger.Info("loaded audit table from storage", logger.Int("count", len(c.audit.Entries)))
+
+		// Re-create and register all audit backends
+		for _, entry := range c.audit.Entries {
+			// Audit devices are only supported in the root namespace
+			entry.NamespaceID = namespace.RootNamespaceID
+			entry.namespace = namespace.RootNamespace
+
+			backend, err := c.newAuditBackend(ctx, entry)
+			if err != nil {
+				c.logger.Error("failed to create audit backend during load",
+					logger.String("path", entry.Path),
+					logger.String("type", entry.Type),
+					logger.Err(err),
+				)
+				return fmt.Errorf("failed to create audit backend %s: %w", entry.Path, err)
+			}
+
+			if backend != nil {
+				c.auditManager.RegisterDevice(entry.Path, backend)
+				c.logger.Info("registered audit device",
+					logger.String("path", entry.Path),
+					logger.String("type", entry.Type),
+				)
+			}
+		}
+
+		return nil
 	}
 
-	headersCopy := make(http.Header, len(req.Header))
-	maps.Copy(headersCopy, req.Header)
-	clientIP := req.RemoteAddr
-	// Remove port if present
-	if host, _, err := net.SplitHostPort(clientIP); err == nil {
-		clientIP = host
+	// No stored audit table - create default file audit device
+	c.logger.Info("no audit table in storage; creating default audit device")
+
+	// Generate a secure HMAC salt for the default device
+	salt, err := generateAuditHMACSalt()
+	if err != nil {
+		return fmt.Errorf("failed to generate HMAC salt for default audit device: %w", err)
 	}
-	entry := audit.LogEntry{
-		Type:      string(audit.EntryTypeRequest),
-		Timestamp: time.Now(),
-		Request: &audit.Request{
-			ID:       middleware.GetReqID(req.Context()),
-			Method:   req.Method,
-			ClientIP: clientIP,
-			Path:     req.URL.Path,
-			Headers:  headersCopy,
-			Data:     data,
+
+	defaultEntry := &MountEntry{
+		Class:       mountClassAudit,
+		Type:        "file",
+		Path:        "file/",
+		Description: "default file audit device",
+		Config: map[string]any{
+			"file_path": "warden-audit.log",
+			"hmac_key":  salt,
 		},
 	}
 
-	ok, err := c.auditManager.LogRequest(req.Context(), &entry)
+	// Audit devices are only supported in the root namespace
+	defaultEntry.NamespaceID = namespace.RootNamespaceID
+	defaultEntry.namespace = namespace.RootNamespace
+
+	// Generate accessor
+	accessor, err := c.generateMountAccessor("audit_file")
 	if err != nil {
-		c.logger.Error("failed to audit request", logger.Err(err), logger.String("request_id", middleware.GetReqID(req.Context())))
-		return false
+		return fmt.Errorf("failed to generate accessor for default audit device: %w", err)
+	}
+	defaultEntry.Accessor = accessor
+
+	// Create the backend
+	backend, err := c.newAuditBackend(ctx, defaultEntry)
+	if err != nil {
+		return fmt.Errorf("failed to create default audit backend: %w", err)
+	}
+	if backend == nil {
+		return errors.New("nil backend returned for default audit device")
 	}
 
-	// If no audit devices are configured, only allow audit-exempt bootstrap operations
-	if !ok {
-		if isAuditExempt(req) {
-			c.logger.Debug("audit-exempt bootstrap operation, proceeding without audit",
-				logger.String("path", req.URL.Path),
-				logger.String("method", req.Method),
-			)
-			return true
-		}
-
-		// Non-exempt requests require audit logging
-		c.logger.Warn("request blocked: no audit devices configured for non-exempt operation",
-			logger.String("path", req.URL.Path),
-			logger.String("method", req.Method),
-		)
-		return false
+	// Test the device
+	if err := backend.LogTestRequest(ctx); err != nil {
+		c.logger.Error("default audit backend failed test", logger.Err(err))
+		return fmt.Errorf("default audit device failed test: %w", err)
 	}
 
-	return true
+	// Add to table and register
+	c.audit.Entries = append(c.audit.Entries, defaultEntry)
+	c.auditManager.RegisterDevice(defaultEntry.Path, backend)
+
+	// Persist the new table
+	if err := c.persistAuditsLocked(ctx); err != nil {
+		return fmt.Errorf("failed to persist default audit table: %w", err)
+	}
+
+	c.logger.Info("created and persisted default audit device",
+		logger.String("path", defaultEntry.Path),
+		logger.String("type", defaultEntry.Type),
+	)
+
+	return nil
 }
 
-func (c *Core) loadAudits(ctx context.Context) error {
-	err := c.EnableAudit(ctx, &MountEntry{
-		Class:       "audit",
-		Type:        "file",
-		Path:        "file-device",
-		Description: "file audit device",
-		Config: map[string]any{
-			"file_path": "warden-audit.log",
-			"hmac_key":  "your-secret-key-here",
-		}}, false)
+// persistAudits saves the audit table to storage
+func (c *Core) persistAudits(ctx context.Context) error {
+	c.auditLock.Lock()
+	defer c.auditLock.Unlock()
+	return c.persistAuditsLocked(ctx)
+}
+
+// persistAuditsLocked saves the audit table to storage (caller must hold auditLock)
+func (c *Core) persistAuditsLocked(ctx context.Context) error {
+	// Encode the audit table
+	encoded, err := jsonutil.EncodeJSON(c.audit)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to encode audit table: %w", err)
 	}
 
+	// Create storage entry
+	entry := &sdklogical.StorageEntry{
+		Key:   coreAuditConfigPath,
+		Value: encoded,
+	}
+
+	// Write to storage
+	if err := c.barrier.Put(ctx, entry); err != nil {
+		return fmt.Errorf("failed to persist audit table: %w", err)
+	}
+
+	c.logger.Debug("persisted audit table", logger.Int("count", len(c.audit.Entries)))
 	return nil
 }
 
@@ -142,8 +196,12 @@ func (c *Core) EnableAudit(ctx context.Context, entry *MountEntry, updateStorage
 
 	// Ensure there is a name
 	if entry.Path == "/" {
-		return errors.New("backend path must be specified")
+		return logical.ErrBadRequest("backend path must be specified")
 	}
+
+	// Audit devices are only supported in the root namespace
+	entry.NamespaceID = namespace.RootNamespaceID
+	entry.namespace = namespace.RootNamespace
 
 	// Update the audit table
 	c.auditLock.Lock()
@@ -157,7 +215,7 @@ func (c *Core) EnableAudit(ctx context.Context, entry *MountEntry, updateStorage
 		case strings.HasPrefix(ent.Path, entry.Path):
 			fallthrough
 		case strings.HasPrefix(entry.Path, ent.Path):
-			return errors.New("path already in use")
+			return logical.ErrBadRequest("path already in use")
 		}
 	}
 
@@ -195,11 +253,14 @@ func (c *Core) EnableAudit(ctx context.Context, entry *MountEntry, updateStorage
 
 	newTable := c.audit.shallowClone()
 	newTable.Entries = append(newTable.Entries, entry)
-	if updateStorage {
-
-	}
-
 	c.audit = newTable
+
+	if updateStorage {
+		if err := c.persistAuditsLocked(ctx); err != nil {
+			c.logger.Error("failed to persist audit table after enable", logger.Err(err))
+			return fmt.Errorf("failed to persist audit table: %w", err)
+		}
+	}
 
 	// Register the backend
 	c.auditManager.RegisterDevice(entry.Path, backend)
@@ -221,7 +282,7 @@ func (c *Core) newAuditBackend(ctx context.Context, entry *MountEntry) (audit.De
 	case mountClassAudit:
 		factory := c.auditDevices[entry.Type]
 		if factory == nil {
-			return nil, fmt.Errorf("audit device type not supported: %s", entry.Type)
+			return nil, logical.ErrBadRequest(fmt.Sprintf("audit device type not supported: %s", entry.Type))
 		}
 		backend, err = factory.Create(
 			ctx,
@@ -246,7 +307,7 @@ func (c *Core) DisableAudit(ctx context.Context, path string, updateStorage bool
 
 	// Ensure there is a name
 	if path == "/" {
-		return false, errors.New("backend path must be specified")
+		return false, logical.ErrBadRequest("backend path must be specified")
 	}
 
 	// Remove the entry from the mount table
@@ -261,7 +322,7 @@ func (c *Core) DisableAudit(ctx context.Context, path string, updateStorage bool
 
 	// Ensure there was a match
 	if entry == nil {
-		return false, errors.New("no matching backend")
+		return false, logical.ErrNotFound("no matching backend")
 	}
 
 	// When unmounting all entries the JSON code will load back up from storage
@@ -270,14 +331,14 @@ func (c *Core) DisableAudit(ctx context.Context, path string, updateStorage bool
 		newTable.Entries = nil
 	}
 
-	if updateStorage {
-		// Update the audit table
-		// if err := c.persistAudit(ctx, newTable, entry.Local); err != nil {
-		// 	return true, errors.New("failed to update audit table")
-		// }
-	}
-
 	c.audit = newTable
+
+	if updateStorage {
+		if err := c.persistAuditsLocked(ctx); err != nil {
+			c.logger.Error("failed to persist audit table after disable", logger.Err(err))
+			return true, fmt.Errorf("failed to persist audit table: %w", err)
+		}
+	}
 
 	// Unmount the backend
 	c.auditManager.UnregisterDevice(path)

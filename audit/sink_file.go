@@ -159,23 +159,28 @@ func (s *FileSink) rotate() error {
 	s.currentSize = 0
 	s.lastRotate = time.Now()
 
-	// Clean up old backups
+	// Clean up old backups asynchronously but with proper synchronization.
+	// We capture the path and maxBackups values to avoid racing with future rotations.
 	if s.maxBackups > 0 {
-		go s.cleanupBackups()
+		path := s.path
+		maxBackups := s.maxBackups
+		go cleanupBackupsAsync(path, maxBackups)
 	}
 
 	return nil
 }
 
-// cleanupBackups removes old backup files
-func (s *FileSink) cleanupBackups() {
-	pattern := s.path + ".*"
+// cleanupBackupsAsync removes old backup files.
+// This is a standalone function that takes the path and maxBackups as parameters
+// to avoid any race conditions with the FileSink state.
+func cleanupBackupsAsync(path string, maxBackups int) {
+	pattern := path + ".*"
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return
 	}
 
-	if len(matches) <= s.maxBackups {
+	if len(matches) <= maxBackups {
 		return
 	}
 
@@ -197,17 +202,18 @@ func (s *FileSink) cleanupBackups() {
 		})
 	}
 
-	// Sort oldest first
+	// Sort oldest first (files[i] should be before files[j] if files[i] is older)
 	for i := 0; i < len(files)-1; i++ {
 		for j := i + 1; j < len(files); j++ {
 			if files[i].modTime.After(files[j].modTime) {
+				// files[i] is newer than files[j], swap to put older first
 				files[i], files[j] = files[j], files[i]
 			}
 		}
 	}
 
 	// Remove oldest files
-	toRemove := len(files) - s.maxBackups
+	toRemove := len(files) - maxBackups
 	for i := 0; i < toRemove; i++ {
 		os.Remove(files[i].path)
 	}

@@ -222,24 +222,12 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.C
 		return nil, 0, "", fmt.Errorf("invalid ttl '%s': %w", ttlStr, err)
 	}
 
-	// Clamp TTL to spec bounds
+	// Validate TTL against spec bounds
 	if spec.MinTTL > 0 && ttl < spec.MinTTL {
-		ttl = spec.MinTTL
-		if d.logger != nil {
-			d.logger.Debug("TTL adjusted to minimum",
-				logger.String("requested", ttlStr),
-				logger.String("adjusted", ttl.String()),
-			)
-		}
+		return nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", ttl, spec.MinTTL)
 	}
 	if spec.MaxTTL > 0 && ttl > spec.MaxTTL {
-		ttl = spec.MaxTTL
-		if d.logger != nil {
-			d.logger.Debug("TTL adjusted to maximum",
-				logger.String("requested", ttlStr),
-				logger.String("adjusted", ttl.String()),
-			)
-		}
+		return nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", ttl, spec.MaxTTL)
 	}
 
 	input := &sts.AssumeRoleInput{
@@ -262,6 +250,11 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.C
 
 	creds := result.Credentials
 	leaseTTL := time.Until(*creds.Expiration)
+
+	// Validate lease TTL is positive (guards against clock skew or cached responses)
+	if leaseTTL <= 0 {
+		return nil, 0, "", fmt.Errorf("STS credentials already expired or have invalid expiration time")
+	}
 
 	// Synthetic lease ID for tracking (STS creds can't be revoked)
 	leaseID := fmt.Sprintf("sts:%s", *creds.AccessKeyId)
@@ -436,29 +429,51 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 
 	newKey := result.AccessKey
 
-	// Wait for the new credentials to propagate at AWS (eventual consistency).
-	// Poll GetCallerIdentity with the new keys until AWS recognizes them.
+	// Wait for the new credentials to fully propagate at AWS (eventual consistency).
+	// AWS IAM has two levels of consistency:
+	// 1. STS recognition (GetCallerIdentity works) - usually fast
+	// 2. IAM permission propagation (can perform IAM operations) - can take longer
+	// We must verify BOTH before considering the key ready, otherwise operations
+	// like MintCredential or CleanupRotation may fail after CommitRotation.
 	newCreds := credentials.NewStaticCredentialsProvider(*newKey.AccessKeyId, *newKey.SecretAccessKey, "")
-	newSTS := sts.NewFromConfig(aws.Config{
+	newCfg := aws.Config{
 		Region:      d.region,
 		Credentials: newCreds,
-	})
+	}
+	newSTS := sts.NewFromConfig(newCfg)
+	newIAM := iam.NewFromConfig(newCfg)
+
 	propagated := false
 	for attempt := 0; attempt < 30; attempt++ {
-		time.Sleep(2 * time.Second)
-		if _, err := newSTS.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err == nil {
-			propagated = true
-			break
+		time.Sleep(4 * time.Second)
+
+		// Check 1: STS recognizes the new credentials
+		if _, err := newSTS.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
+			if d.logger != nil {
+				d.logger.Trace("waiting for new IAM key to propagate (STS)",
+					logger.String("new_key_id", (*newKey.AccessKeyId)[:8]+"..."),
+					logger.Int("attempt", attempt+1),
+				)
+			}
+			continue
 		}
-		if d.logger != nil {
-			d.logger.Trace("waiting for new IAM key to propagate",
-				logger.String("new_key_id", (*newKey.AccessKeyId)[:8]+"..."),
-				logger.Int("attempt", attempt+1),
-			)
+
+		// Check 2: IAM permissions are active (can list own keys)
+		if _, err := newIAM.ListAccessKeys(ctx, &iam.ListAccessKeysInput{}); err != nil {
+			if d.logger != nil {
+				d.logger.Trace("waiting for new IAM key to propagate (IAM)",
+					logger.String("new_key_id", (*newKey.AccessKeyId)[:8]+"..."),
+					logger.Int("attempt", attempt+1),
+				)
+			}
+			continue
 		}
+
+		propagated = true
+		break
 	}
 	if !propagated {
-		return nil, nil, fmt.Errorf("new IAM access key %s did not propagate within 30s", (*newKey.AccessKeyId)[:8]+"...")
+		return nil, nil, fmt.Errorf("new IAM access key %s did not fully propagate within 120s", (*newKey.AccessKeyId)[:8]+"...")
 	}
 
 	// Build new config (copy all, replace key fields)

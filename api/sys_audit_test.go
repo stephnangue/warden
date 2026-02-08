@@ -773,3 +773,327 @@ func TestAuditTypeAliases(t *testing.T) {
 		}
 	})
 }
+
+func TestSys_AuditInfo(t *testing.T) {
+	t.Run("successfully reads audit device info", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/sys/audit/file" {
+				t.Errorf("expected path /v1/sys/audit/file, got %s", r.URL.Path)
+			}
+			if r.Method != http.MethodGet {
+				t.Errorf("expected GET method, got %s", r.Method)
+			}
+
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{
+				"data": {
+					"type": "file",
+					"path": "file/",
+					"description": "File audit backend",
+					"accessor": "file_accessor_123",
+					"config": {
+						"file_path": "/var/log/audit.log",
+						"hmac_key": "***"
+					}
+				}
+			}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		audit, err := client.Sys().AuditInfo("file")
+		if err != nil {
+			t.Fatalf("AuditInfo failed: %v", err)
+		}
+
+		if audit == nil {
+			t.Fatal("expected audit info, got nil")
+		}
+
+		if audit.Type != "file" {
+			t.Errorf("expected type file, got %s", audit.Type)
+		}
+
+		if audit.Accessor != "file_accessor_123" {
+			t.Errorf("expected accessor file_accessor_123, got %s", audit.Accessor)
+		}
+
+		if audit.Config["hmac_key"] != "***" {
+			t.Errorf("expected hmac_key to be masked, got %v", audit.Config["hmac_key"])
+		}
+	})
+
+	t.Run("returns error for non-existent audit device", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"errors": ["audit device not found"]}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+		config.MaxRetries = 0
+
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		_, err = client.Sys().AuditInfo("nonexistent")
+		if err == nil {
+			t.Error("expected error for non-existent audit device")
+		}
+	})
+
+	t.Run("returns error for empty response data", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		_, err = client.Sys().AuditInfo("file")
+		if err == nil {
+			t.Error("expected error for empty data")
+		}
+	})
+}
+
+func TestSys_AuditInfoWithContext(t *testing.T) {
+	t.Run("successfully reads audit device info with context", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{
+				"data": {
+					"type": "file",
+					"path": "file/",
+					"description": "File audit backend",
+					"accessor": "file_accessor_123"
+				}
+			}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		ctx := context.Background()
+		audit, err := client.Sys().AuditInfoWithContext(ctx, "file")
+		if err != nil {
+			t.Fatalf("AuditInfoWithContext failed: %v", err)
+		}
+
+		if audit.Type != "file" {
+			t.Errorf("expected type file, got %s", audit.Type)
+		}
+	})
+
+	t.Run("respects context cancellation", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(time.Second * 2)
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"data": {}}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*100)
+		defer cancel()
+
+		_, err = client.Sys().AuditInfoWithContext(ctx, "file")
+		if err == nil {
+			t.Error("expected error due to context timeout")
+		}
+	})
+}
+
+func TestSys_AuditHash(t *testing.T) {
+	t.Run("successfully computes audit hash", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/sys/audit-hash/file" {
+				t.Errorf("expected path /v1/sys/audit-hash/file, got %s", r.URL.Path)
+			}
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST method, got %s", r.Method)
+			}
+
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{
+				"data": {
+					"hash": "hmac-sha256:abc123def456"
+				}
+			}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		result, err := client.Sys().AuditHash("file", "sensitive-value")
+		if err != nil {
+			t.Fatalf("AuditHash failed: %v", err)
+		}
+
+		if result == nil {
+			t.Fatal("expected result, got nil")
+		}
+
+		if result.Hash != "hmac-sha256:abc123def456" {
+			t.Errorf("expected hash hmac-sha256:abc123def456, got %s", result.Hash)
+		}
+	})
+
+	t.Run("returns error for non-existent audit device", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"errors": ["audit device not found"]}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+		config.MaxRetries = 0
+
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		_, err = client.Sys().AuditHash("nonexistent", "value")
+		if err == nil {
+			t.Error("expected error for non-existent audit device")
+		}
+	})
+
+	t.Run("returns error for empty input", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"errors": ["input is required"]}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+		config.MaxRetries = 0
+
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		_, err = client.Sys().AuditHash("file", "")
+		if err == nil {
+			t.Error("expected error for empty input")
+		}
+	})
+
+	t.Run("returns error for empty response data", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		_, err = client.Sys().AuditHash("file", "value")
+		if err == nil {
+			t.Error("expected error for empty data")
+		}
+	})
+}
+
+func TestSys_AuditHashWithContext(t *testing.T) {
+	t.Run("successfully computes audit hash with context", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{
+				"data": {
+					"hash": "hmac-sha256:abc123"
+				}
+			}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		ctx := context.Background()
+		result, err := client.Sys().AuditHashWithContext(ctx, "file", "value")
+		if err != nil {
+			t.Fatalf("AuditHashWithContext failed: %v", err)
+		}
+
+		if result.Hash != "hmac-sha256:abc123" {
+			t.Errorf("expected hash hmac-sha256:abc123, got %s", result.Hash)
+		}
+	})
+
+	t.Run("respects context cancellation", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(time.Second * 2)
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"data": {}}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*100)
+		defer cancel()
+
+		_, err = client.Sys().AuditHashWithContext(ctx, "file", "value")
+		if err == nil {
+			t.Error("expected error due to context timeout")
+		}
+	})
+}

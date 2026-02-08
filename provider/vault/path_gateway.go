@@ -83,6 +83,9 @@ func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	// Clean headers and inject Vault token (if present)
 	b.prepareHeaders(r, vaultToken)
 
+	// Set upstream URL for audit logging
+	req.UpstreamURL = targetURL
+
 	// Forward the request (body streams through without buffering)
 	b.proxy.ServeHTTP(req.ResponseWriter, r)
 }

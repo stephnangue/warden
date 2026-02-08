@@ -748,7 +748,6 @@ func TestHandleTransparentAuth(t *testing.T) {
 			TokenValue:     sampleJWT,
 			RoleName:       "terraform",
 			PrincipalID:    "test-user",
-			AuthDeadline:   time.Now().Add(1 * time.Hour),
 			ExpireAt:       time.Now().Add(24 * time.Hour),
 			Policies:       []string{"default"},
 			CredentialSpec: "test-spec",
@@ -801,7 +800,6 @@ func TestHandleTransparentAuth_Singleflight(t *testing.T) {
 		TokenValue:     sampleJWT,
 		RoleName:       "terraform",
 		PrincipalID:    "test-user-singleflight",
-		AuthDeadline:   time.Now().Add(1 * time.Hour),
 		ExpireAt:       time.Now().Add(24 * time.Hour),
 		Policies:       []string{"default"},
 		CredentialSpec: "test-spec",
@@ -881,12 +879,11 @@ func TestHandleTransparentAuth_JWTDifferentRoles(t *testing.T) {
 			Data: map[string]string{},
 		}
 		authData1 := &AuthData{
-			TokenValue:   sampleJWT,
-			RoleName:     "role1",
-			PrincipalID:  "test-user",
-			ExpireAt:     time.Now().Add(1 * time.Hour),
-			AuthDeadline: time.Now().Add(1 * time.Hour),
-			Policies:     []string{"policy1"},
+			TokenValue:  sampleJWT,
+			RoleName:    "role1",
+			PrincipalID: "test-user",
+			ExpireAt:    time.Now().Add(1 * time.Hour),
+			Policies:    []string{"policy1"},
 		}
 		_, err := jwtType.Generate(authData1, entry1)
 		require.NoError(t, err)
@@ -897,12 +894,11 @@ func TestHandleTransparentAuth_JWTDifferentRoles(t *testing.T) {
 			Data: map[string]string{},
 		}
 		authData2 := &AuthData{
-			TokenValue:   sampleJWT,
-			RoleName:     "role2",
-			PrincipalID:  "test-user",
-			ExpireAt:     time.Now().Add(1 * time.Hour),
-			AuthDeadline: time.Now().Add(1 * time.Hour),
-			Policies:     []string{"policy2"},
+			TokenValue:  sampleJWT,
+			RoleName:    "role2",
+			PrincipalID: "test-user",
+			ExpireAt:    time.Now().Add(1 * time.Hour),
+			Policies:    []string{"policy2"},
 		}
 		_, err = jwtType.Generate(authData2, entry2)
 		require.NoError(t, err)

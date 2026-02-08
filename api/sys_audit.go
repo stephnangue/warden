@@ -85,9 +85,87 @@ func (c *Sys) DisableAuditWithContext(ctx context.Context, path string) error {
 	return err
 }
 
+func (c *Sys) AuditInfo(path string) (*Audit, error) {
+	return c.AuditInfoWithContext(context.Background(), path)
+}
+
+func (c *Sys) AuditInfoWithContext(ctx context.Context, path string) (*Audit, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/audit/%s", path))
+
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	resource, err := ParseResource(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resource == nil || resource.Data == nil {
+		return nil, errors.New("data from server response is empty")
+	}
+
+	var result Audit
+	err = mapstructure.Decode(resource.Data, &result)
+	if err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// AuditHashInput is the input for the AuditHash method
+type AuditHashInput struct {
+	Input string `json:"input"`
+}
+
+// AuditHashOutput is the output from the AuditHash method
+type AuditHashOutput struct {
+	Hash string `json:"hash"`
+}
+
+func (c *Sys) AuditHash(path string, input string) (*AuditHashOutput, error) {
+	return c.AuditHashWithContext(context.Background(), path, input)
+}
+
+func (c *Sys) AuditHashWithContext(ctx context.Context, path string, input string) (*AuditHashOutput, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/audit-hash/%s", path))
+	if err := r.SetJSONBody(&AuditHashInput{Input: input}); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	resource, err := ParseResource(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resource == nil || resource.Data == nil {
+		return nil, errors.New("data from server response is empty")
+	}
+
+	var result AuditHashOutput
+	err = mapstructure.Decode(resource.Data, &result)
+	if err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
 
 // Rather than duplicate, we can use modern Go's type aliasing
 type (
-	AuditInput   = MountInput
-	Audit        = MountOutput
+	AuditInput = MountInput
+	Audit      = MountOutput
 )

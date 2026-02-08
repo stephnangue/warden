@@ -263,6 +263,11 @@ func (d *VaultDriver) fetchDynamicDatabaseCreds(ctx context.Context, spec *crede
 
 	leaseTTL := time.Duration(secret.LeaseDuration) * time.Second
 
+	// Validate lease TTL is positive
+	if leaseTTL <= 0 {
+		return nil, 0, "", fmt.Errorf("Vault returned invalid lease duration for database credentials on mount '%s'", dbMount)
+	}
+
 	// Add optional database name if provided in config
 	rawData := make(map[string]interface{})
 	for k, v := range secret.Data {
@@ -316,24 +321,12 @@ func (d *VaultDriver) fetchDynamicAWSCreds(ctx context.Context, spec *credential
 			return nil, 0, "", fmt.Errorf("invalid ttl format '%s': %w", ttl, err)
 		}
 
-		// Clamp TTL to min/max bounds if they are set
+		// Validate TTL against spec bounds
 		if spec.MinTTL > 0 && parsedTTL < spec.MinTTL {
-			parsedTTL = spec.MinTTL
-			if d.logger != nil {
-				d.logger.Debug("TTL adjusted to minimum",
-					logger.String("requested", ttl),
-					logger.String("adjusted", parsedTTL.String()),
-				)
-			}
+			return nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", parsedTTL, spec.MinTTL)
 		}
 		if spec.MaxTTL > 0 && parsedTTL > spec.MaxTTL {
-			parsedTTL = spec.MaxTTL
-			if d.logger != nil {
-				d.logger.Debug("TTL adjusted to maximum",
-					logger.String("requested", ttl),
-					logger.String("adjusted", parsedTTL.String()),
-				)
-			}
+			return nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", parsedTTL, spec.MaxTTL)
 		}
 
 		data["ttl"] = parsedTTL.String()
@@ -359,6 +352,11 @@ func (d *VaultDriver) fetchDynamicAWSCreds(ctx context.Context, spec *credential
 	}
 
 	leaseTTL := time.Duration(secret.LeaseDuration) * time.Second
+
+	// Validate lease TTL is positive
+	if leaseTTL <= 0 {
+		return nil, 0, "", fmt.Errorf("Vault returned invalid lease duration for AWS credentials on mount '%s'", awsMount)
+	}
 
 	// Add credential source
 	rawData := make(map[string]interface{})
@@ -402,24 +400,12 @@ func (d *VaultDriver) fetchDynamicVaultToken(ctx context.Context, spec *credenti
 			return nil, 0, "", fmt.Errorf("invalid ttl format '%s': %w", ttl, err)
 		}
 
-		// Clamp TTL to min/max bounds if they are set
+		// Validate TTL against spec bounds
 		if spec.MinTTL > 0 && parsedTTL < spec.MinTTL {
-			parsedTTL = spec.MinTTL
-			if d.logger != nil {
-				d.logger.Debug("TTL adjusted to minimum",
-					logger.String("requested", ttl),
-					logger.String("adjusted", parsedTTL.String()),
-				)
-			}
+			return nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", parsedTTL, spec.MinTTL)
 		}
 		if spec.MaxTTL > 0 && parsedTTL > spec.MaxTTL {
-			parsedTTL = spec.MaxTTL
-			if d.logger != nil {
-				d.logger.Debug("TTL adjusted to maximum",
-					logger.String("requested", ttl),
-					logger.String("adjusted", parsedTTL.String()),
-				)
-			}
+			return nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", parsedTTL, spec.MaxTTL)
 		}
 
 		data["ttl"] = parsedTTL.String()
@@ -449,6 +435,11 @@ func (d *VaultDriver) fetchDynamicVaultToken(ctx context.Context, spec *credenti
 
 	// Extract token TTL from auth response
 	leaseTTL := time.Duration(secret.Auth.LeaseDuration) * time.Second
+
+	// Validate lease TTL is positive
+	if leaseTTL <= 0 {
+		return nil, 0, "", fmt.Errorf("Vault returned invalid lease duration for token role '%s'", tokenRole)
+	}
 
 	// Build raw data with token
 	rawData := map[string]interface{}{

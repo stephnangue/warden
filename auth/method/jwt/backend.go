@@ -39,9 +39,8 @@ type JWTAuthConfig struct {
 	GroupsClaim    string            `json:"groups_claim,omitempty" default:"groups"`
 
 	// Token settings
-	TokenTTL     time.Duration `json:"token_ttl" default:"1h"`
-	AuthDeadline time.Duration `json:"auth_deadline" default:"10m"`
-	TokenType    string        `json:"token_type,omitempty"`
+	TokenTTL  time.Duration `json:"token_ttl" default:"1h"`
+	TokenType string        `json:"token_type,omitempty"`
 
 	// Internal
 	validator *jwt.Validator `json:"-"`
@@ -109,9 +108,6 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 	// Set defaults
 	if config.TokenTTL == 0 {
 		config.TokenTTL = 1 * time.Hour
-	}
-	if config.AuthDeadline == 0 {
-		config.AuthDeadline = config.TokenTTL
 	}
 	if config.UserClaim == "" {
 		config.UserClaim = "sub"

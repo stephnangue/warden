@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stretchr/testify/assert"
@@ -255,4 +256,66 @@ func TestAWSDriver_MintCredential_InvalidMethod(t *testing.T) {
 	_, _, _, err := driver.MintCredential(nil, spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method")
+}
+
+func TestAWSDriver_MintCredential_TTLBelowMinimum(t *testing.T) {
+	driver := &AWSDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeAWS,
+			Config: map[string]string{
+				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+				"secret_access_key": "secret",
+				"region":            "us-east-1",
+			},
+		},
+		region: "us-east-1",
+	}
+	driver.buildClients(driver.baseCreds)
+	driver.baseCredsVerified = true
+
+	spec := &credential.CredSpec{
+		Name:   "test-spec",
+		Type:   credential.TypeAWSAccessKeys,
+		MinTTL: 2 * time.Hour,
+		Config: map[string]string{
+			"mint_method": "sts_assume_role",
+			"role_arn":    "arn:aws:iam::123456789012:role/test-role",
+			"ttl":         "30m", // Below MinTTL of 2h
+		},
+	}
+
+	_, _, _, err := driver.MintCredential(nil, spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "below minimum")
+}
+
+func TestAWSDriver_MintCredential_TTLExceedsMaximum(t *testing.T) {
+	driver := &AWSDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeAWS,
+			Config: map[string]string{
+				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+				"secret_access_key": "secret",
+				"region":            "us-east-1",
+			},
+		},
+		region: "us-east-1",
+	}
+	driver.buildClients(driver.baseCreds)
+	driver.baseCredsVerified = true
+
+	spec := &credential.CredSpec{
+		Name:   "test-spec",
+		Type:   credential.TypeAWSAccessKeys,
+		MaxTTL: 1 * time.Hour,
+		Config: map[string]string{
+			"mint_method": "sts_assume_role",
+			"role_arn":    "arn:aws:iam::123456789012:role/test-role",
+			"ttl":         "4h", // Above MaxTTL of 1h
+		},
+	}
+
+	_, _, _, err := driver.MintCredential(nil, spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum")
 }

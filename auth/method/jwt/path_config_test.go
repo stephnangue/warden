@@ -75,7 +75,6 @@ func TestPathConfig_Fields(t *testing.T) {
 		"user_claim",
 		"groups_claim",
 		"token_ttl",
-		"auth_deadline",
 	}
 
 	for _, field := range expectedFields {
@@ -110,7 +109,6 @@ func TestPathConfig_FieldTypes(t *testing.T) {
 		{"user_claim", framework.TypeString},
 		{"groups_claim", framework.TypeString},
 		{"token_ttl", framework.TypeDurationSecond},
-		{"auth_deadline", framework.TypeDurationSecond},
 	}
 
 	for _, tc := range tests {
@@ -213,7 +211,6 @@ func TestHandleConfigRead_WithConfig(t *testing.T) {
 		UserClaim:      "email",
 		GroupsClaim:    "roles",
 		TokenTTL:       2 * time.Hour,
-		AuthDeadline:   30 * time.Minute,
 	}
 
 	req := &logical.Request{}
@@ -235,7 +232,6 @@ func TestHandleConfigRead_WithConfig(t *testing.T) {
 	assert.Equal(t, "email", resp.Data["user_claim"])
 	assert.Equal(t, "roles", resp.Data["groups_claim"])
 	assert.Equal(t, "2h0m0s", resp.Data["token_ttl"])
-	assert.Equal(t, "30m0s", resp.Data["auth_deadline"])
 }
 
 func TestHandleConfigRead_OIDCMode(t *testing.T) {
@@ -254,7 +250,6 @@ func TestHandleConfigRead_OIDCMode(t *testing.T) {
 		UserClaim:        "sub",
 		GroupsClaim:      "groups",
 		TokenTTL:         1 * time.Hour,
-		AuthDeadline:     10 * time.Minute,
 	}
 
 	req := &logical.Request{}

@@ -418,3 +418,118 @@ func BenchmarkExpirationManager_Unregister(b *testing.B) {
 		m.Unregister(ExpirationTypeToken, id)
 	}
 }
+
+// ============================================================================
+// Security Fix Tests - Irrevocable Callback and Metrics
+// ============================================================================
+
+func TestExpirationManager_IrrevocableCallback(t *testing.T) {
+	m := createTestExpirationManager(t)
+	defer m.Stop()
+
+	// Track callback invocations
+	var callbackInvoked bool
+	var callbackEntry *ExpirationEntry
+	var callbackMu sync.Mutex
+	callbackDone := make(chan struct{})
+
+	m.SetIrrevocableCallback(func(entry *ExpirationEntry) {
+		callbackMu.Lock()
+		callbackInvoked = true
+		callbackEntry = entry
+		callbackMu.Unlock()
+		close(callbackDone)
+	})
+
+	// Create an entry and mark it irrevocable directly
+	entry := &ExpirationEntry{
+		ID:        "test-irrevocable",
+		EntryType: ExpirationTypeToken,
+		Namespace: "root",
+	}
+
+	// Store in pending first (markIrrevocable moves from pending)
+	key := buildKey(ExpirationTypeToken, "test-irrevocable")
+	m.pending.Store(key, &pendingInfo{entry: entry})
+	m.pendingCount = 1
+	m.pendingTokenCount = 1
+
+	// Mark as irrevocable
+	m.markIrrevocable(key, entry, errors.New("test error"))
+
+	// Wait for callback with timeout
+	select {
+	case <-callbackDone:
+		// Callback was invoked
+	case <-time.After(1 * time.Second):
+		t.Fatal("callback was not invoked within timeout")
+	}
+
+	callbackMu.Lock()
+	assert.True(t, callbackInvoked, "callback should have been invoked")
+	assert.NotNil(t, callbackEntry, "callback should receive the entry")
+	assert.Equal(t, "test-irrevocable", callbackEntry.ID)
+	callbackMu.Unlock()
+}
+
+func TestExpirationManager_IrrevocableEventsTotal(t *testing.T) {
+	m := createTestExpirationManager(t)
+	defer m.Stop()
+
+	// Initial count should be zero
+	assert.Equal(t, int64(0), m.GetIrrevocableEventsTotal())
+
+	// Create entries and mark them irrevocable
+	for i := 0; i < 3; i++ {
+		entry := &ExpirationEntry{
+			ID:        "test-" + string(rune('a'+i)),
+			EntryType: ExpirationTypeToken,
+			Namespace: "root",
+		}
+		key := buildKey(ExpirationTypeToken, entry.ID)
+		m.pending.Store(key, &pendingInfo{entry: entry})
+		m.pendingCount++
+		m.pendingTokenCount++
+		m.markIrrevocable(key, entry, errors.New("test error"))
+	}
+
+	// Counter should reflect all events
+	assert.Equal(t, int64(3), m.GetIrrevocableEventsTotal())
+}
+
+func TestExpirationManager_CallbackPanicRecovery(t *testing.T) {
+	m := createTestExpirationManager(t)
+	defer m.Stop()
+
+	panicDone := make(chan struct{})
+
+	// Set a callback that panics
+	m.SetIrrevocableCallback(func(entry *ExpirationEntry) {
+		defer close(panicDone)
+		panic("intentional test panic")
+	})
+
+	entry := &ExpirationEntry{
+		ID:        "test-panic",
+		EntryType: ExpirationTypeToken,
+		Namespace: "root",
+	}
+	key := buildKey(ExpirationTypeToken, "test-panic")
+	m.pending.Store(key, &pendingInfo{entry: entry})
+	m.pendingCount = 1
+	m.pendingTokenCount = 1
+
+	// This should not panic the main goroutine
+	m.markIrrevocable(key, entry, errors.New("test error"))
+
+	// Wait for panic to be caught
+	select {
+	case <-panicDone:
+		// Panic was caught and recovered
+	case <-time.After(1 * time.Second):
+		t.Fatal("callback panic was not handled within timeout")
+	}
+
+	// Entry should still be marked irrevocable
+	assert.Equal(t, int64(1), m.GetIrrevocableCount())
+}

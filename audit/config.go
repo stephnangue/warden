@@ -34,11 +34,23 @@ type FileDeviceConfig struct {
 	SkipTest bool `json:"skip_test" default:"false"`
 }
 
+// Configuration validation limits
+const (
+	MinBufferSize   = 1
+	MaxBufferSize   = 100000
+	MinFlushPeriod  = 100 * time.Millisecond
+	MaxFlushPeriod  = 1 * time.Hour
+	MinRotateSize   = 0 // 0 means no size-based rotation
+	MaxRotateSize   = 100 * 1024 * 1024 * 1024 // 100GB
+	MinMaxBackups   = 1
+	MaxMaxBackups   = 1000
+)
+
 func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
 	// Set defaults first
 	config := FileDeviceConfig{
 		Path:        "warden_audit.log",
-		RotateSize:  1048576000, // 1000MB
+		RotateSize:  104857600, // 100MB (more reasonable default)
 		RotateDaily: true,
 		MaxBackups:  5,
 		Enabled:     true,
@@ -47,10 +59,7 @@ func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
 		FlushPeriod: 5 * time.Second,
 		Mode:        "0600",
 		SaltFields: []string{
-			"response.data.secret_access_key",
-			"auth.client_token.data",
-			"response.auth.client_token.data",
-			"response.cred.data",
+			"response.credential.data", // HMAC salt all credential values (access_key, secret_key, password, etc.)
 		},
 		OmitFields: []string{
 			"request.data",
@@ -71,5 +80,54 @@ func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal to FileDeviceConfig: %w", err)
 	}
 
+	// Validate configuration
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+
 	return &config, nil
+}
+
+// Validate checks the configuration for invalid values
+func (c *FileDeviceConfig) Validate() error {
+	// Validate file path is provided
+	if c.Path == "" {
+		return fmt.Errorf("file_path is required")
+	}
+
+	// Validate buffer size
+	if c.BufferSize < MinBufferSize || c.BufferSize > MaxBufferSize {
+		return fmt.Errorf("buffer_size must be between %d and %d, got %d", MinBufferSize, MaxBufferSize, c.BufferSize)
+	}
+
+	// Validate flush period
+	if c.FlushPeriod < MinFlushPeriod || c.FlushPeriod > MaxFlushPeriod {
+		return fmt.Errorf("flush_period must be between %v and %v, got %v", MinFlushPeriod, MaxFlushPeriod, c.FlushPeriod)
+	}
+
+	// Validate rotate size
+	if c.RotateSize < MinRotateSize || c.RotateSize > MaxRotateSize {
+		return fmt.Errorf("rotate_size must be between %d and %d, got %d", MinRotateSize, MaxRotateSize, c.RotateSize)
+	}
+
+	// Validate max backups
+	if c.MaxBackups < MinMaxBackups || c.MaxBackups > MaxMaxBackups {
+		return fmt.Errorf("max_backups must be between %d and %d, got %d", MinMaxBackups, MaxMaxBackups, c.MaxBackups)
+	}
+
+	// Validate file mode format (must be valid octal)
+	if c.Mode != "" {
+		for _, ch := range c.Mode {
+			if ch < '0' || ch > '7' {
+				return fmt.Errorf("file_mode must be a valid octal string (e.g., '0600'), got '%s'", c.Mode)
+			}
+		}
+	}
+
+	// Validate format
+	if c.Format != "json" {
+		return fmt.Errorf("only 'json' format is supported, got '%s'", c.Format)
+	}
+
+	return nil
 }

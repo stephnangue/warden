@@ -20,13 +20,6 @@ func mapToJWTAuthConfig(data map[string]any) (*JWTAuthConfig, error) {
 		}
 	}
 
-	// Handle auth_deadline duration conversion
-	if deadline, ok := dataCopy["auth_deadline"].(string); ok {
-		if d, err := time.ParseDuration(deadline); err == nil {
-			dataCopy["auth_deadline"] = d
-		}
-	}
-
 	jsonData, err := json.Marshal(dataCopy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal map: %w", err)
@@ -46,10 +39,6 @@ func mapToJWTAuthConfig(data map[string]any) (*JWTAuthConfig, error) {
 
 	if config.TokenTTL == 0 {
 		config.TokenTTL = 1 * time.Hour
-	}
-
-	if config.AuthDeadline == 0 {
-		config.AuthDeadline = config.TokenTTL
 	}
 
 	if config.TokenType == "" {
