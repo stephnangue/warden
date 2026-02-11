@@ -70,20 +70,21 @@ type SourceDriver interface {
 // Credential sources can implement this to allow periodic rotation of their
 // authentication credentials (e.g., Vault AppRole secret_id, AWS IAM keys).
 //
-// The rotation is split into three phases to ensure disruption-free rotation:
-//  1. PrepareRotation: Generate new credentials (old still valid)
-//  2. CommitRotation: Activate new credentials in driver (after persist)
-//  3. CleanupRotation: Destroy old credentials (best-effort)
+// Rotation uses scheduled credential activation:
+//  1. PrepareRotation: Generate new credentials and schedule activation
+//  2. [wait activateAfter duration for credential propagation]
+//  3. CommitRotation: Activate new credentials in driver (after persist)
+//  4. CleanupRotation: Destroy old credentials (best-effort)
 //
-// This design ensures new credentials are persisted BEFORE old ones are destroyed,
-// preventing loss of access if a crash occurs during rotation.
+// Drivers with eventual consistency (AWS, Azure) return a positive activateAfter
+// to allow propagation. Drivers with immediate consistency (Vault) return 0.
 type Rotatable interface {
 	// SupportsRotation returns true if this driver instance can rotate its credentials.
 	// This depends on the driver configuration - for example, Vault AppRole with
 	// role_name supports rotation, but token auth may not.
 	SupportsRotation() bool
 
-	// PrepareRotation generates new credentials WITHOUT destroying old ones.
+	// PrepareRotation generates new credentials and schedules their activation.
 	// Both old and new credentials remain valid during the overlap period.
 	//
 	// Returns:
@@ -92,13 +93,17 @@ type Rotatable interface {
 	//     Examples:
 	//       - Vault AppRole: {"secret_id_accessor": "old-accessor-uuid"}
 	//       - AWS IAM: {"access_key_id": "old-key-id"}
+	//   - activateAfter: how long to wait before activating (0 = activate immediately).
+	//     Drivers with eventual consistency (AWS, Azure) return a positive duration
+	//     to allow propagation. Drivers with immediate consistency (Vault) return 0.
 	//   - error: if new credential generation fails
 	//
 	// IMPORTANT: This method must NOT modify driver internal state or destroy old credentials.
-	PrepareRotation(ctx context.Context) (newConfig map[string]string, cleanupConfig map[string]string, err error)
+	PrepareRotation(ctx context.Context) (newConfig map[string]string, cleanupConfig map[string]string, activateAfter time.Duration, err error)
 
 	// CommitRotation activates new credentials in the driver's internal state.
-	// Called AFTER the new config has been persisted to storage.
+	// Called AFTER the new config has been persisted to storage and the
+	// activateAfter delay has elapsed.
 	//
 	// The driver should:
 	//   1. Update its internal config with newConfig
@@ -117,4 +122,51 @@ type Rotatable interface {
 	//
 	// The cleanupConfig format is driver-specific.
 	CleanupRotation(ctx context.Context, cleanupConfig map[string]string) error
+}
+
+// SpecRotatable is an optional interface for drivers that can rotate credentials
+// stored in credential specs. This is used when specs contain embedded credentials
+// that need periodic rotation (e.g., Azure pre-provisioned service principal credentials).
+//
+// The source driver uses its own permissions to rotate the spec's credentials.
+// For example, an Azure source with Application.ReadWrite.All permission can rotate
+// the client_secret of a workload SP stored in a spec.
+//
+// The rotation follows the same scheduled activation pattern as Rotatable:
+//  1. PrepareSpecRotation: Generate new credentials and schedule activation
+//  2. [wait activateAfter duration for credential propagation]
+//  3. CommitSpecRotation: Signal activation (spec config already updated)
+//  4. CleanupSpecRotation: Destroy old credentials (best-effort)
+type SpecRotatable interface {
+	// SupportsSpecRotation returns true if this driver can rotate credentials in specs.
+	// This typically requires the source to have elevated permissions (e.g., Graph API
+	// Application.ReadWrite.All for Azure) to manage credentials on other applications.
+	SupportsSpecRotation() bool
+
+	// PrepareSpecRotation generates new credentials for the spec and schedules activation.
+	// Both old and new credentials remain valid during the overlap period.
+	//
+	// Returns:
+	//   - newConfig: updated spec config map with new credentials (will replace spec.Config)
+	//   - cleanupConfig: data needed to destroy old credentials later
+	//   - activateAfter: how long to wait before activating (0 = activate immediately)
+	//   - error: if new credential generation fails
+	//
+	// IMPORTANT: This method must NOT destroy old credentials - both must remain valid.
+	PrepareSpecRotation(ctx context.Context, spec *CredSpec) (newConfig map[string]string, cleanupConfig map[string]string, activateAfter time.Duration, err error)
+
+	// CommitSpecRotation is called AFTER the spec config has been updated in storage
+	// and the activateAfter delay has elapsed.
+	// The driver can perform any post-update actions (e.g., clearing caches).
+	//
+	// Parameters:
+	//   - spec: the spec being rotated (with original config, not yet updated)
+	//   - newConfig: the new config that was persisted
+	CommitSpecRotation(ctx context.Context, spec *CredSpec, newConfig map[string]string) error
+
+	// CleanupSpecRotation destroys old credentials using the cleanupConfig from PrepareSpecRotation.
+	// Called AFTER CommitSpecRotation succeeds and new credentials are active.
+	//
+	// Returns error if cleanup fails. The RotationManager will retry with backoff.
+	CleanupSpecRotation(ctx context.Context, cleanupConfig map[string]string) error
 }

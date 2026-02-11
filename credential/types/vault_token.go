@@ -109,9 +109,15 @@ func (t *VaultTokenCredType) Revoke(ctx context.Context, cred *credential.Creden
 	return nil
 }
 
-// CanRotate indicates if this type supports proactive rotation
-func (t *VaultTokenCredType) CanRotate() bool {
-	return true // Vault tokens can be rotated
+// RequiresSpecRotation returns false — Vault token specs don't embed
+// rotatable credentials; the source driver handles token rotation.
+func (t *VaultTokenCredType) RequiresSpecRotation() bool {
+	return false
+}
+
+// SensitiveConfigFields returns spec config keys that should be masked in output
+func (t *VaultTokenCredType) SensitiveConfigFields() []string {
+	return nil
 }
 
 // FieldSchemas returns metadata about the credential's data fields

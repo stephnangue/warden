@@ -10,11 +10,12 @@ import (
 )
 
 var (
-	createType   string
-	createSource string
-	createConfig map[string]string
-	createMinTTL string
-	createMaxTTL string
+	createType           string
+	createSource         string
+	createConfig         map[string]string
+	createMinTTL         string
+	createMaxTTL         string
+	createRotationPeriod string
 
 	CreateCmd = &cobra.Command{
 		Use:           "create <name>",
@@ -33,6 +34,7 @@ func init() {
 	CreateCmd.Flags().StringToStringVar(&createConfig, "config", nil, "Type-specific configuration (key=value)")
 	CreateCmd.Flags().StringVar(&createMinTTL, "min-ttl", "1h", "Minimum TTL")
 	CreateCmd.Flags().StringVar(&createMaxTTL, "max-ttl", "24h", "Maximum TTL")
+	CreateCmd.Flags().StringVar(&createRotationPeriod, "rotation-period", "", "Rotation period for credentials stored in the spec (e.g., '24h', '7d'). Empty means no rotation")
 
 	CreateCmd.MarkFlagRequired("type")
 	CreateCmd.MarkFlagRequired("source")
@@ -65,6 +67,15 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		MaxTTL: maxTTL,
 	}
 
+	// Parse rotation period if provided
+	if createRotationPeriod != "" {
+		rotationPeriod, err := time.ParseDuration(createRotationPeriod)
+		if err != nil {
+			return fmt.Errorf("invalid rotation-period: %w", err)
+		}
+		input.RotationPeriod = rotationPeriod
+	}
+
 	output, err := c.Sys().CreateCredentialSpec(name, input)
 	if err != nil {
 		return fmt.Errorf("error creating credential spec: %w", err)
@@ -75,6 +86,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Source: %s\n", output.Source)
 	fmt.Printf("  Min TTL: %s\n", output.MinTTL)
 	fmt.Printf("  Max TTL: %s\n", output.MaxTTL)
+	if output.RotationPeriod > 0 {
+		fmt.Printf("  Rotation Period: %s\n", output.RotationPeriod)
+	}
 
 	return nil
 }

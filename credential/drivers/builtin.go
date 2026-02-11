@@ -19,5 +19,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register Azure driver factory
+	if err := registry.RegisterFactory(&AzureDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }

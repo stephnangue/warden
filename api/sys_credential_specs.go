@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,39 +10,43 @@ import (
 
 // CreateCredentialSpecInput represents the input for creating a credential spec
 type CreateCredentialSpecInput struct {
-	Type   string            `json:"type"`
-	Source string            `json:"source"`
-	Config map[string]string `json:"config,omitempty"`
-	MinTTL time.Duration     `json:"min_ttl"`
-	MaxTTL time.Duration     `json:"max_ttl"`
+	Type           string            `json:"type"`
+	Source         string            `json:"source"`
+	Config         map[string]string `json:"config,omitempty"`
+	MinTTL         time.Duration     `json:"min_ttl"`
+	MaxTTL         time.Duration     `json:"max_ttl"`
+	RotationPeriod time.Duration     `json:"rotation_period,omitempty"` // 0 means no rotation
 }
 
 // CreateCredentialSpecOutput represents the output after creating a credential spec
 type CreateCredentialSpecOutput struct {
-	Name    string            `json:"name"`
-	Type    string            `json:"type"`
-	Source  string            `json:"source"`
-	Config  map[string]string `json:"config,omitempty"`
-	MinTTL  time.Duration     `json:"min_ttl"`
-	MaxTTL  time.Duration     `json:"max_ttl"`
-	Message string            `json:"message"`
+	Name           string            `json:"name"`
+	Type           string            `json:"type"`
+	Source         string            `json:"source"`
+	Config         map[string]string `json:"config,omitempty"`
+	MinTTL         time.Duration     `json:"min_ttl"`
+	MaxTTL         time.Duration     `json:"max_ttl"`
+	RotationPeriod time.Duration     `json:"rotation_period,omitempty"`
+	Message        string            `json:"message"`
 }
 
 // CredentialSpecInfo represents credential spec metadata
 type CredentialSpecInfo struct {
-	Name   string            `json:"name"`
-	Type   string            `json:"type"`
-	Source string            `json:"source"`
-	Config map[string]string `json:"config,omitempty"`
-	MinTTL time.Duration     `json:"min_ttl"`
-	MaxTTL time.Duration     `json:"max_ttl"`
+	Name           string            `json:"name"`
+	Type           string            `json:"type"`
+	Source         string            `json:"source"`
+	Config         map[string]string `json:"config,omitempty"`
+	MinTTL         time.Duration     `json:"min_ttl"`
+	MaxTTL         time.Duration     `json:"max_ttl"`
+	RotationPeriod time.Duration     `json:"rotation_period,omitempty"`
 }
 
 // UpdateCredentialSpecInput represents the input for updating a credential spec
 type UpdateCredentialSpecInput struct {
-	Config map[string]string `json:"config,omitempty"`
-	MinTTL *time.Duration    `json:"min_ttl,omitempty"`
-	MaxTTL *time.Duration    `json:"max_ttl,omitempty"`
+	Config         map[string]string `json:"config,omitempty"`
+	MinTTL         *time.Duration    `json:"min_ttl,omitempty"`
+	MaxTTL         *time.Duration    `json:"max_ttl,omitempty"`
+	RotationPeriod *time.Duration    `json:"rotation_period,omitempty"` // nil means no change, 0 disables rotation
 }
 
 // UpdateCredentialSpecOutput represents the output after updating a credential spec
@@ -78,6 +81,9 @@ func (c *Sys) CreateCredentialSpecWithContext(ctx context.Context, name string, 
 	if input.Config != nil {
 		reqBody["config"] = input.Config
 	}
+	if input.RotationPeriod > 0 {
+		reqBody["rotation_period"] = int64(input.RotationPeriod.Seconds())
+	}
 
 	if err := r.SetJSONBody(reqBody); err != nil {
 		return nil, err
@@ -110,24 +116,17 @@ func (c *Sys) CreateCredentialSpecWithContext(ctx context.Context, name string, 
 	if msg, ok := resource.Data["message"].(string); ok {
 		output.Message = msg
 	}
-	if params, ok := resource.Data["config"].(map[string]interface{}); ok {
-		output.Config = make(map[string]string)
-		for k, v := range params {
-			if str, ok := v.(string); ok {
-				output.Config[k] = str
-			}
-		}
+	if cfg := parseConfigMap(resource.Data["config"]); cfg != nil {
+		output.Config = cfg
 	}
-	// Parse TTL values - JSON numbers come as json.Number due to UseNumber()
-	if minTTLRaw := resource.Data["min_ttl"]; minTTLRaw != nil {
-		if minTTL, err := parseJSONNumber(minTTLRaw); err == nil {
-			output.MinTTL = time.Duration(minTTL) * time.Second
-		}
+	if v, ok := resource.Data["min_ttl"]; ok {
+		output.MinTTL = parseDurationFromSeconds(v)
 	}
-	if maxTTLRaw := resource.Data["max_ttl"]; maxTTLRaw != nil {
-		if maxTTL, err := parseJSONNumber(maxTTLRaw); err == nil {
-			output.MaxTTL = time.Duration(maxTTL) * time.Second
-		}
+	if v, ok := resource.Data["max_ttl"]; ok {
+		output.MaxTTL = parseDurationFromSeconds(v)
+	}
+	if v, ok := resource.Data["rotation_period"]; ok {
+		output.RotationPeriod = parseDurationFromSeconds(v)
 	}
 
 	return output, nil
@@ -169,23 +168,17 @@ func (c *Sys) GetCredentialSpecWithContext(ctx context.Context, name string) (*C
 	if src, ok := resource.Data["source"].(string); ok {
 		spec.Source = src
 	}
-	if params, ok := resource.Data["config"].(map[string]interface{}); ok {
-		spec.Config = make(map[string]string)
-		for k, v := range params {
-			if str, ok := v.(string); ok {
-				spec.Config[k] = str
-			}
-		}
+	if cfg := parseConfigMap(resource.Data["config"]); cfg != nil {
+		spec.Config = cfg
 	}
-	if minTTLRaw := resource.Data["min_ttl"]; minTTLRaw != nil {
-		if minTTL, err := parseJSONNumber(minTTLRaw); err == nil {
-			spec.MinTTL = time.Duration(minTTL) * time.Second
-		}
+	if v, ok := resource.Data["min_ttl"]; ok {
+		spec.MinTTL = parseDurationFromSeconds(v)
 	}
-	if maxTTLRaw := resource.Data["max_ttl"]; maxTTLRaw != nil {
-		if maxTTL, err := parseJSONNumber(maxTTLRaw); err == nil {
-			spec.MaxTTL = time.Duration(maxTTL) * time.Second
-		}
+	if v, ok := resource.Data["max_ttl"]; ok {
+		spec.MaxTTL = parseDurationFromSeconds(v)
+	}
+	if v, ok := resource.Data["rotation_period"]; ok {
+		spec.RotationPeriod = parseDurationFromSeconds(v)
 	}
 
 	return spec, nil
@@ -241,23 +234,17 @@ func (c *Sys) ListCredentialSpecsWithContext(ctx context.Context) ([]*Credential
 		if src, ok := specMap["source"].(string); ok {
 			spec.Source = src
 		}
-		if params, ok := specMap["config"].(map[string]interface{}); ok {
-			spec.Config = make(map[string]string)
-			for k, v := range params {
-				if str, ok := v.(string); ok {
-					spec.Config[k] = str
-				}
-			}
+		if cfg := parseConfigMap(specMap["config"]); cfg != nil {
+			spec.Config = cfg
 		}
-		if minTTLRaw := specMap["min_ttl"]; minTTLRaw != nil {
-			if minTTL, err := parseJSONNumber(minTTLRaw); err == nil {
-				spec.MinTTL = time.Duration(minTTL) * time.Second
-			}
+		if v, ok := specMap["min_ttl"]; ok {
+			spec.MinTTL = parseDurationFromSeconds(v)
 		}
-		if maxTTLRaw := specMap["max_ttl"]; maxTTLRaw != nil {
-			if maxTTL, err := parseJSONNumber(maxTTLRaw); err == nil {
-				spec.MaxTTL = time.Duration(maxTTL) * time.Second
-			}
+		if v, ok := specMap["max_ttl"]; ok {
+			spec.MaxTTL = parseDurationFromSeconds(v)
+		}
+		if v, ok := specMap["rotation_period"]; ok {
+			spec.RotationPeriod = parseDurationFromSeconds(v)
 		}
 
 		specs = append(specs, spec)
@@ -292,6 +279,9 @@ func (c *Sys) UpdateCredentialSpecWithContext(ctx context.Context, name string, 
 	}
 	if input.MaxTTL != nil {
 		reqBody["max_ttl"] = int64(input.MaxTTL.Seconds())
+	}
+	if input.RotationPeriod != nil {
+		reqBody["rotation_period"] = int64(input.RotationPeriod.Seconds())
 	}
 
 	if err := r.SetJSONBody(reqBody); err != nil {
@@ -342,18 +332,4 @@ func (c *Sys) DeleteCredentialSpecWithContext(ctx context.Context, name string) 
 	defer resp.Body.Close()
 
 	return nil
-}
-
-// parseJSONNumber handles both json.Number and float64 types from Resource parser
-func parseJSONNumber(v interface{}) (int64, error) {
-	switch num := v.(type) {
-	case json.Number:
-		return num.Int64()
-	case float64:
-		return int64(num), nil
-	case int64:
-		return num, nil
-	default:
-		return 0, fmt.Errorf("unexpected type %T", v)
-	}
 }

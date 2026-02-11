@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+// Default values
+const (
+	DefaultMaxBodySize = int64(10485760) // 10MB
+	DefaultTimeout     = 30 * time.Second
+)
+
 // ProviderConfig holds parsed configuration
 type ProviderConfig struct {
 	ProxyDomains []string
@@ -30,7 +36,7 @@ func parseConfig(conf map[string]any) ProviderConfig {
 	}
 
 	// Parse max_body_size
-	maxBodySize := int64(10485760)
+	maxBodySize := DefaultMaxBodySize
 	if maxSize, ok := conf["max_body_size"].(int64); ok && maxSize > 0 {
 		maxBodySize = maxSize
 	} else if maxSize, ok := conf["max_body_size"].(int); ok && maxSize > 0 {
@@ -51,7 +57,7 @@ func parseConfig(conf map[string]any) ProviderConfig {
 	config.MaxBodySize = maxBodySize
 
 	// Parse timeout
-	timeOut := time.Duration(30 * time.Second)
+	timeOut := DefaultTimeout
 	if timeout, ok := conf["timeout"].(int); ok {
 		timeOut = time.Duration(timeout) * time.Second
 	} else if timeout, ok := conf["timeout"].(string); ok {
@@ -59,8 +65,8 @@ func parseConfig(conf map[string]any) ProviderConfig {
 			timeOut = d
 		}
 	}
-	if timeOut.String() == "0s" {
-		timeOut = time.Duration(30 * time.Second)
+	if timeOut == 0 {
+		timeOut = DefaultTimeout
 	}
 	config.Timeout = timeOut
 

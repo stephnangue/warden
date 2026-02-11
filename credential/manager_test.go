@@ -183,9 +183,11 @@ func (t *mockCredentialType) Revoke(ctx context.Context, cred *Credential, drive
 	return nil
 }
 
-func (t *mockCredentialType) CanRotate() bool {
-	return true
+func (t *mockCredentialType) RequiresSpecRotation() bool {
+	return false
 }
+
+func (t *mockCredentialType) SensitiveConfigFields() []string { return nil }
 
 func (t *mockCredentialType) FieldSchemas() map[string]*CredentialFieldSchema {
 	return map[string]*CredentialFieldSchema{

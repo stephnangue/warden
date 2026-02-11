@@ -15,8 +15,10 @@ import (
 // Headers to remove before proxying
 var headersToRemove = []string{
 	// Security headers (will be replaced with real values)
+	"Authorization",   // Remove Warden auth token to prevent leakage
 	"X-Vault-Token",   // Will be replaced with real Vault token
 	"X-Vault-Request", // Internal Vault header
+	"X-Warden-Token",  // Warden-specific auth header
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",
@@ -51,6 +53,13 @@ func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) 
 		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
 	}
 
+	// Enforce max body size
+	maxBody := b.maxBodySize
+	if maxBody <= 0 {
+		maxBody = DefaultMaxBodySize
+	}
+	req.HTTPRequest.Body = http.MaxBytesReader(req.ResponseWriter, req.HTTPRequest.Body, maxBody)
+
 	// Get Vault token from credential.
 	// For StreamUnauthenticated requests (e.g., PKI /ca/pem, /issuer/+/pem endpoints),
 	// vaultToken remains empty and the request is forwarded without authentication.
@@ -76,7 +85,13 @@ func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) 
 
 	// Prepare request for proxying
 	r := req.HTTPRequest
-	r.URL, _ = url.Parse(targetURL)
+	parsedURL, err := url.Parse(targetURL)
+	if err != nil {
+		b.logger.Error("Failed to parse target URL", logger.Err(err))
+		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	r.URL = parsedURL
 	r.Host = r.URL.Host
 	r.RequestURI = "" // Required for outgoing requests
 

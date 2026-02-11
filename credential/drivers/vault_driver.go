@@ -3,6 +3,8 @@ package drivers
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,6 +12,10 @@ import (
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logger"
 )
+
+// Compile-time interface assertions
+var _ credential.SourceDriver = (*VaultDriver)(nil)
+var _ credential.Rotatable = (*VaultDriver)(nil)
 
 // VaultDriver fetches credentials from HashiCorp Vault
 // Supports: KV, AWS engine, Azure engine, GCP engine
@@ -90,7 +96,13 @@ func (f *VaultDriverFactory) Create(config map[string]string, logger *logger.Gat
 // ValidateConfig validates Vault driver configuration
 func (f *VaultDriverFactory) ValidateConfig(config map[string]string) error {
 	// Validate required fields
-	if _, err := credential.GetStringRequired(config, "vault_address"); err != nil {
+	addr, err := credential.GetStringRequired(config, "vault_address")
+	if err != nil {
+		return err
+	}
+
+	// Validate vault_address format
+	if err := validateVaultAddress(addr); err != nil {
 		return err
 	}
 
@@ -104,6 +116,24 @@ func (f *VaultDriverFactory) ValidateConfig(config map[string]string) error {
 		if err := credential.ValidateRequired(config, "role_id", "secret_id", "approle_mount", "role_name"); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+// validateVaultAddress validates that the vault_address is a well-formed URL
+func validateVaultAddress(addr string) error {
+	parsed, err := url.Parse(addr)
+	if err != nil {
+		return fmt.Errorf("invalid vault_address: %w", err)
+	}
+
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return fmt.Errorf("vault_address must use http:// or https:// scheme, got: %s", parsed.Scheme)
+	}
+
+	if parsed.Host == "" {
+		return fmt.Errorf("vault_address must include a host")
 	}
 
 	return nil
@@ -509,17 +539,12 @@ func (d *VaultDriver) Revoke(ctx context.Context, leaseID string) error {
 
 // containsSlash checks if a string contains a forward slash
 func containsSlash(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '/' {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(s, "/")
 }
 
 // Type returns the driver type
 func (d *VaultDriver) Type() string {
-	return "vault"
+	return credential.SourceTypeVault
 }
 
 // Cleanup releases resources
@@ -543,13 +568,14 @@ func (d *VaultDriver) SupportsRotation() bool {
 
 // PrepareRotation generates a new AppRole secret_id WITHOUT destroying the old one.
 // Both old and new secret_ids remain valid during the overlap period.
-func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, map[string]string, error) {
+// Returns activateAfter=0 since Vault has immediate consistency.
+func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, map[string]string, time.Duration, error) {
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
 	authMethod := credential.GetString(d.credSource.Config, "auth_method", "")
 	if authMethod != "approle" {
-		return nil, nil, fmt.Errorf("rotation only supported for approle auth method, got: %s", authMethod)
+		return nil, nil, 0, fmt.Errorf("rotation only supported for approle auth method, got: %s", authMethod)
 	}
 
 	approleMount := credential.GetString(d.credSource.Config, "approle_mount", "")
@@ -557,28 +583,28 @@ func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 	oldAccessor := credential.GetString(d.credSource.Config, "secret_id_accessor", "")
 
 	if roleName == "" {
-		return nil, nil, fmt.Errorf("role_name is required for AppRole rotation")
+		return nil, nil, 0, fmt.Errorf("role_name is required for AppRole rotation")
 	}
 
 	// Generate new secret_id (old one still valid - no disruption)
 	generatePath := fmt.Sprintf("auth/%s/role/%s/secret-id", approleMount, roleName)
 	secret, err := d.vault.Logical().WriteWithContext(ctx, generatePath, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate new secret_id: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to generate new secret_id: %w", err)
 	}
 
 	if secret == nil || secret.Data == nil {
-		return nil, nil, fmt.Errorf("no data returned when generating new secret_id")
+		return nil, nil, 0, fmt.Errorf("no data returned when generating new secret_id")
 	}
 
 	newSecretID, ok := secret.Data["secret_id"].(string)
 	if !ok || newSecretID == "" {
-		return nil, nil, fmt.Errorf("secret_id not found in response")
+		return nil, nil, 0, fmt.Errorf("secret_id not found in response")
 	}
 
 	newAccessor, ok := secret.Data["secret_id_accessor"].(string)
 	if !ok || newAccessor == "" {
-		return nil, nil, fmt.Errorf("secret_id_accessor not found in response")
+		return nil, nil, 0, fmt.Errorf("secret_id_accessor not found in response")
 	}
 
 	// Build new config (both old and new are valid at this point)
@@ -599,11 +625,12 @@ func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 	if d.logger != nil {
 		d.logger.Debug("prepared new secret_id for rotation",
 			logger.String("role_name", roleName),
-			logger.String("new_accessor", newAccessor[:8]+"..."),
+			logger.String("new_accessor", truncateID(newAccessor, 8)),
 		)
 	}
 
-	return newConfig, cleanupConfig, nil
+	// Vault has immediate consistency — no propagation delay needed
+	return newConfig, cleanupConfig, 0, nil
 }
 
 // CommitRotation activates the new credentials in driver state.
@@ -628,9 +655,9 @@ func (d *VaultDriver) CommitRotation(ctx context.Context, newConfig map[string]s
 	newAccessor := credential.GetString(newConfig, "secret_id_accessor", "")
 
 	if d.logger != nil {
-		d.logger.Info("committed rotated AppRole secret_id",
+		d.logger.Debug("committed rotated AppRole secret_id",
 			logger.String("role_name", roleName),
-			logger.String("new_accessor", newAccessor[:8]+"..."),
+			logger.String("new_accessor", truncateID(newAccessor, 8)),
 		)
 	}
 
@@ -659,7 +686,7 @@ func (d *VaultDriver) CleanupRotation(ctx context.Context, cleanupConfig map[str
 		if d.logger != nil {
 			d.logger.Warn("failed to destroy old secret_id during cleanup",
 				logger.Err(err),
-				logger.String("accessor", oldAccessor[:8]+"..."),
+				logger.String("accessor", truncateID(oldAccessor, 8)),
 			)
 		}
 		return fmt.Errorf("failed to destroy old secret_id: %w", err)
@@ -667,7 +694,7 @@ func (d *VaultDriver) CleanupRotation(ctx context.Context, cleanupConfig map[str
 
 	if d.logger != nil {
 		d.logger.Debug("destroyed old secret_id",
-			logger.String("accessor", oldAccessor[:8]+"..."),
+			logger.String("accessor", truncateID(oldAccessor, 8)),
 		)
 	}
 	return nil

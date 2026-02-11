@@ -3,10 +3,10 @@ package aws
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -80,7 +80,6 @@ func (b *awsBackend) verifyIncomingSignature(
 	providedSignature := signMatches[1]
 
 	// Extract the signed headers list from the Authorization header
-	signedHeadersRegex := regexp.MustCompile(`SignedHeaders=([^,]+)`)
 	signedHeadersMatches := signedHeadersRegex.FindStringSubmatch(authHeader)
 	if len(signedHeadersMatches) != 2 {
 		return false, fmt.Errorf("signed headers not found in authorization header")
@@ -230,8 +229,8 @@ func (b *awsBackend) verifyIncomingSignature(
 	}
 	calculatedSignature := calculatedMatches[1]
 
-	// Compare signatures
-	match := providedSignature == calculatedSignature
+	// Compare signatures using constant-time comparison to prevent timing attacks
+	match := subtle.ConstantTimeCompare([]byte(providedSignature), []byte(calculatedSignature)) == 1
 
 	b.logger.Trace("Signature comparison",
 		logger.String("provided", providedSignature),

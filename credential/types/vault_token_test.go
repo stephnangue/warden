@@ -234,9 +234,9 @@ func TestVaultTokenCredType_Validate(t *testing.T) {
 	}
 }
 
-func TestVaultTokenCredType_CanRotate(t *testing.T) {
+func TestVaultTokenCredType_RequiresSpecRotation(t *testing.T) {
 	ct := &VaultTokenCredType{}
-	assert.True(t, ct.CanRotate())
+	assert.False(t, ct.RequiresSpecRotation())
 }
 
 func TestVaultTokenCredType_FieldSchemas(t *testing.T) {
