@@ -28,6 +28,11 @@ type Config struct {
 	MinCredSourceRotationPeriod string `hcl:"min_cred_source_rotation_period,optional"`
 	MaxCredSourceRotationPeriod string `hcl:"max_cred_source_rotation_period,optional"`
 
+	// Rotation period bounds for credential specs that embed rotatable credentials.
+	// Values must be valid Go duration strings (e.g., "1h", "720h").
+	MinCredSpecRotationPeriod string `hcl:"min_cred_spec_rotation_period,optional"`
+	MaxCredSpecRotationPeriod string `hcl:"max_cred_spec_rotation_period,optional"`
+
 	// IPBindingPolicy controls how IP binding is enforced for tokens.
 	// Valid values: "disabled", "optional", "required"
 	// Defaults to "optional" if not specified.
@@ -423,6 +428,30 @@ func LoadConfig(configFile string) (*Config, error) {
 	}
 	if minDur > 0 && maxDur > 0 && minDur > maxDur {
 		return nil, fmt.Errorf("min_cred_source_rotation_period (%s) must be <= max_cred_source_rotation_period (%s)", minDur, maxDur)
+	}
+
+	// Validate spec rotation period bounds if set
+	var minSpecDur, maxSpecDur time.Duration
+	if config.MinCredSpecRotationPeriod != "" {
+		minSpecDur, err = time.ParseDuration(config.MinCredSpecRotationPeriod)
+		if err != nil {
+			return nil, fmt.Errorf("invalid min_cred_spec_rotation_period %q: %w", config.MinCredSpecRotationPeriod, err)
+		}
+		if minSpecDur <= 0 {
+			return nil, fmt.Errorf("min_cred_spec_rotation_period must be positive, got %s", minSpecDur)
+		}
+	}
+	if config.MaxCredSpecRotationPeriod != "" {
+		maxSpecDur, err = time.ParseDuration(config.MaxCredSpecRotationPeriod)
+		if err != nil {
+			return nil, fmt.Errorf("invalid max_cred_spec_rotation_period %q: %w", config.MaxCredSpecRotationPeriod, err)
+		}
+		if maxSpecDur <= 0 {
+			return nil, fmt.Errorf("max_cred_spec_rotation_period must be positive, got %s", maxSpecDur)
+		}
+	}
+	if minSpecDur > 0 && maxSpecDur > 0 && minSpecDur > maxSpecDur {
+		return nil, fmt.Errorf("min_cred_spec_rotation_period (%s) must be <= max_cred_spec_rotation_period (%s)", minSpecDur, maxSpecDur)
 	}
 
 	// Validate ip_binding_policy if set

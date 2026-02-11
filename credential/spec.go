@@ -20,6 +20,9 @@ type CredSpec struct {
 	// Constraints
 	MinTTL time.Duration // Minimum TTL for issued credentials
 	MaxTTL time.Duration // Maximum TTL for issued credentials
+
+	// Rotation
+	RotationPeriod time.Duration // Period for rotating credentials stored in the spec (0 means no rotation)
 }
 
 // CredSpecRegistry manages credential specifications with thread-safe operations

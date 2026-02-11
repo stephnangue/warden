@@ -13,11 +13,22 @@ func mapToJWTAuthConfig(data map[string]any) (*JWTAuthConfig, error) {
 		dataCopy[k] = v
 	}
 
-	// Handle token_ttl duration conversion
-	if ttl, ok := dataCopy["token_ttl"].(string); ok {
+	// Handle token_ttl duration conversion from various source types:
+	// - string: from storage if format changes, or manual config maps
+	// - int: from framework's TypeDurationSecond (via d.GetOk)
+	// - float64: from JSON decode when loading from storage
+	// - time.Duration: from existing config copy in handleConfigWrite
+	switch ttl := dataCopy["token_ttl"].(type) {
+	case string:
 		if d, err := time.ParseDuration(ttl); err == nil {
 			dataCopy["token_ttl"] = d
 		}
+	case int:
+		dataCopy["token_ttl"] = time.Duration(ttl) * time.Second
+	case float64:
+		dataCopy["token_ttl"] = time.Duration(int64(ttl)) * time.Second
+	case time.Duration:
+		// Already a duration, keep as-is
 	}
 
 	jsonData, err := json.Marshal(dataCopy)

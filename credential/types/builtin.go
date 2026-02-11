@@ -19,5 +19,10 @@ func RegisterBuiltinTypes(registry *credential.TypeRegistry) error {
 		return err
 	}
 
+	// Register Azure Bearer token type
+	if err := registry.Register(&AzureBearerTokenCredType{}); err != nil {
+		return err
+	}
+
 	return nil
 }

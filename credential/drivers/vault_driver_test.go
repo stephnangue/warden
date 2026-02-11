@@ -144,7 +144,7 @@ func TestVaultDriver_Type(t *testing.T) {
 			Config: map[string]string{},
 		},
 	}
-	assert.Equal(t, "vault", driver.Type())
+	assert.Equal(t, credential.SourceTypeVault, driver.Type())
 }
 
 func TestVaultDriver_Cleanup(t *testing.T) {
@@ -464,7 +464,7 @@ func TestVaultDriver_PrepareRotation_NonApprole(t *testing.T) {
 		},
 	}
 
-	_, _, err := driver.PrepareRotation(nil)
+	_, _, _, err := driver.PrepareRotation(nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rotation only supported for approle")
 }
@@ -480,7 +480,7 @@ func TestVaultDriver_PrepareRotation_MissingRoleName(t *testing.T) {
 		},
 	}
 
-	_, _, err := driver.PrepareRotation(nil)
+	_, _, _, err := driver.PrepareRotation(nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "role_name is required")
 }

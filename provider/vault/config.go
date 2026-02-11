@@ -2,6 +2,8 @@ package vault
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/url"
 	"strconv"
 	"time"
 )
@@ -86,4 +88,26 @@ func parseConfig(conf map[string]any) ProviderConfig {
 	}
 
 	return config
+}
+
+// validateVaultAddress validates that the vault_address is a well-formed URL
+func validateVaultAddress(addr string) error {
+	if addr == "" {
+		return fmt.Errorf("vault_address is required")
+	}
+
+	parsed, err := url.Parse(addr)
+	if err != nil {
+		return fmt.Errorf("invalid vault_address: %w", err)
+	}
+
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return fmt.Errorf("vault_address must use http:// or https:// scheme, got: %s", parsed.Scheme)
+	}
+
+	if parsed.Host == "" {
+		return fmt.Errorf("vault_address must include a host")
+	}
+
+	return nil
 }

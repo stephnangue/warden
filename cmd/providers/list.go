@@ -2,6 +2,7 @@ package providers
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/spf13/cobra"
 	"github.com/stephnangue/warden/cmd/helpers"
@@ -50,7 +51,15 @@ func runList(cmd *cobra.Command, args []string) error {
 	headers := []string{"Path", "Type", "Accessor", "Description"}
 	var data [][]any
 
-	for path, mount := range mounts {
+	// Sort paths for consistent output
+	paths := make([]string, 0, len(mounts))
+	for path := range mounts {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	for _, path := range paths {
+		mount := mounts[path]
 		data = append(data, []any{
 			path,
 			mount.Type,

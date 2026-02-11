@@ -297,7 +297,7 @@ func TestSys_EnableAuth(t *testing.T) {
 			t.Fatalf("NewClient failed: %v", err)
 		}
 
-		authInput := &AuthMounthInput{
+		authInput := &AuthMountInput{
 			Type:        "userpass",
 			Description: "Test userpass auth backend",
 			Config: map[string]any{
@@ -328,7 +328,7 @@ func TestSys_EnableAuth(t *testing.T) {
 			t.Fatalf("NewClient failed: %v", err)
 		}
 
-		authInput := &AuthMounthInput{
+		authInput := &AuthMountInput{
 			Type: "invalid",
 		}
 
@@ -355,7 +355,7 @@ func TestSys_EnableAuth(t *testing.T) {
 			t.Fatalf("NewClient failed: %v", err)
 		}
 
-		authInput := &AuthMounthInput{
+		authInput := &AuthMountInput{
 			Type: "userpass",
 		}
 
@@ -379,7 +379,7 @@ func TestSys_EnableAuth(t *testing.T) {
 			t.Fatalf("NewClient failed: %v", err)
 		}
 
-		authInput := &AuthMounthInput{
+		authInput := &AuthMountInput{
 			Type:        "ldap",
 			Description: "LDAP auth backend",
 			Config: map[string]any{
@@ -414,7 +414,7 @@ func TestSys_EnableAuthWithContext(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		authInput := &AuthMounthInput{
+		authInput := &AuthMountInput{
 			Type: "userpass",
 		}
 
@@ -442,7 +442,7 @@ func TestSys_EnableAuthWithContext(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*100)
 		defer cancel()
 
-		authInput := &AuthMounthInput{
+		authInput := &AuthMountInput{
 			Type: "userpass",
 		}
 
@@ -699,7 +699,7 @@ func TestSys_AuthE2E(t *testing.T) {
 		}
 
 		// Enable an auth backend
-		authInput := &AuthMounthInput{
+		authInput := &AuthMountInput{
 			Type:        "userpass",
 			Description: "Username and password authentication",
 		}
@@ -942,12 +942,12 @@ func TestSys_AuthInfoWithContext(t *testing.T) {
 }
 
 func TestAuthTypeAliases(t *testing.T) {
-	t.Run("AuthMounthInput is alias of MountInput", func(t *testing.T) {
-		var authInput AuthMounthInput
+	t.Run("AuthMountInput is alias of MountInput", func(t *testing.T) {
+		var authInput AuthMountInput
 		var mountInput MountInput
 
 		// Should have the same fields
-		authInput = AuthMounthInput{
+		authInput = AuthMountInput{
 			Type:        "userpass",
 			Description: "Test",
 			Config:      map[string]any{"key": "value"},
@@ -960,7 +960,7 @@ func TestAuthTypeAliases(t *testing.T) {
 		}
 
 		// Since they're aliases, they should be assignable
-		authInput = AuthMounthInput(mountInput)
+		authInput = AuthMountInput(mountInput)
 		if authInput.Type != "userpass" {
 			t.Error("type alias assignment failed")
 		}

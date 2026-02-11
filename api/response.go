@@ -65,7 +65,11 @@ func (r *Response) Error() error {
 			respErr.Errors = resp.Errors
 		} else if resp.Detail != "" {
 			// Huma format - use detail as the error message
-			respErr.Errors = []string{resp.Detail}
+			msg := resp.Detail
+			if resp.Title != "" {
+				msg = resp.Title + ": " + resp.Detail
+			}
+			respErr.Errors = []string{msg}
 		} else {
 			// No recognizable error format, use raw body
 			respErr.RawError = true
@@ -84,8 +88,8 @@ type ErrorResponse struct {
 	Title  string   `json:"title,omitempty"`  // Huma error format
 }
 
-// ResponseError is the error returned when Vault responds with an error or
-// non-success HTTP status code. If a request to Vault fails because of a
+// ResponseError is the error returned when Warden responds with an error or
+// non-success HTTP status code. If a request to Warden fails because of a
 // network error a different error message will be returned. ResponseError gives
 // access to the underlying errors and status code.
 type ResponseError struct {
@@ -98,12 +102,12 @@ type ResponseError struct {
 	// StatusCode is the HTTP status code.
 	StatusCode int
 
-	// RawError marks that the underlying error messages returned by Vault were
+	// RawError marks that the underlying error messages returned by Warden were
 	// not parsable. The Errors slice will contain the raw response body as the
 	// first and only error string if this value is set to true.
 	RawError bool
 
-	// Errors are the underlying errors returned by Vault.
+	// Errors are the underlying errors returned by Warden.
 	Errors []string
 }
 

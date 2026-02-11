@@ -232,6 +232,24 @@ func (s *CredentialConfigStore) CreateSpec(ctx context.Context, spec *credential
 	s.specsByID.Set(cacheKey, spec, 1)
 	s.specsByID.Wait()
 
+	// Register with rotation manager if RotationPeriod is configured
+	if spec.RotationPeriod > 0 {
+		if s.rotationManager != nil {
+			if err := s.rotationManager.RegisterSpec(ctx, spec.Name, spec.Source, spec.RotationPeriod); err != nil {
+				s.logger.Warn("failed to register spec for rotation",
+					logger.String("spec_name", spec.Name),
+					logger.Err(err),
+				)
+				// Don't fail spec creation for rotation registration errors
+			} else {
+				s.logger.Debug("registered spec for rotation",
+					logger.String("spec_name", spec.Name),
+					logger.String("rotation_period", spec.RotationPeriod.String()),
+				)
+			}
+		}
+	}
+
 	s.logger.Info("created credential spec",
 		logger.String("namespace", ns.UUID),
 		logger.String("spec_name", spec.Name),
@@ -309,7 +327,7 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 	s.specsByID.Set(cacheKey, spec, 1)
 	s.specsByID.Wait()
 
-	s.logger.Info("updated credential spec",
+	s.logger.Debug("updated credential spec",
 		logger.String("namespace", ns.UUID),
 		logger.String("spec_name", spec.Name),
 	)
@@ -329,6 +347,15 @@ func (s *CredentialConfigStore) DeleteSpec(ctx context.Context, name string) err
 	ns, err := s.getNamespaceFromContext(ctx)
 	if err != nil {
 		return err
+	}
+
+	// Unregister from rotation manager first (if registered)
+	if s.rotationManager != nil {
+		if err := s.rotationManager.UnregisterSpec(ctx, name); err != nil {
+			s.logger.Debug("spec was not registered for rotation (or already unregistered)",
+				logger.String("spec_name", name),
+			)
+		}
 	}
 
 	// Delete from storage
@@ -435,7 +462,7 @@ func (s *CredentialConfigStore) CreateSource(ctx context.Context, source *creden
 				)
 				// Don't fail source creation for rotation registration errors
 			} else {
-				s.logger.Info("registered source for rotation",
+				s.logger.Debug("registered source for rotation",
 					logger.String("source_name", source.Name),
 					logger.String("rotation_period", source.RotationPeriod.String()),
 				)
@@ -443,7 +470,7 @@ func (s *CredentialConfigStore) CreateSource(ctx context.Context, source *creden
 		}
 	}
 
-	s.logger.Info("created credential source",
+	s.logger.Debug("created credential source",
 		logger.String("namespace", ns.UUID),
 		logger.String("source_name", source.Name),
 		logger.String("type", source.Type),
@@ -542,7 +569,7 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	s.sourcesByID.Set(cacheKey, source, 1)
 	s.sourcesByID.Wait()
 
-	s.logger.Info("updated credential source",
+	s.logger.Debug("updated credential source",
 		logger.String("namespace", ns.UUID),
 		logger.String("source_name", source.Name),
 	)
@@ -684,6 +711,24 @@ func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credenti
 			if err := credType.ValidateConfig(spec.Config, source.Type); err != nil {
 				return logical.ErrBadRequestf("invalid config for type '%s': %s", spec.Type, err.Error())
 			}
+
+			// Enforce rotation_period for types that embed rotatable credentials
+			if credType.RequiresSpecRotation() && spec.RotationPeriod <= 0 {
+				return logical.ErrBadRequestf("rotation_period is required for credential type '%s' which embeds rotatable credentials", spec.Type)
+			}
+		}
+	}
+
+	// Validate spec rotation_period is within configured bounds
+	if spec.RotationPeriod > 0 {
+		minPeriod, maxPeriod := s.core.CredSpecRotationPeriodBounds()
+		if spec.RotationPeriod < minPeriod {
+			return logical.ErrBadRequestf("rotation_period %s is below the minimum allowed %s (configured via min_cred_spec_rotation_period)",
+				spec.RotationPeriod, minPeriod)
+		}
+		if spec.RotationPeriod > maxPeriod {
+			return logical.ErrBadRequestf("rotation_period %s exceeds the maximum allowed %s (configured via max_cred_spec_rotation_period)",
+				spec.RotationPeriod, maxPeriod)
 		}
 	}
 

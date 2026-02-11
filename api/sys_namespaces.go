@@ -94,13 +94,8 @@ func (c *Sys) CreateNamespaceWithContext(ctx context.Context, path string, input
 	if msg, ok := resource.Data["message"].(string); ok {
 		output.Message = msg
 	}
-	if metadata, ok := resource.Data["custom_metadata"].(map[string]interface{}); ok {
-		output.CustomMetadata = make(map[string]string)
-		for k, v := range metadata {
-			if str, ok := v.(string); ok {
-				output.CustomMetadata[k] = str
-			}
-		}
+	if cm := parseConfigMap(resource.Data["custom_metadata"]); cm != nil {
+		output.CustomMetadata = cm
 	}
 
 	return output, nil
@@ -139,7 +134,7 @@ func (c *Sys) GetNamespaceWithContext(ctx context.Context, path string) (*GetNam
 	if p, ok := resource.Data["path"].(string); ok {
 		output.Path = p
 	}
-	if l, ok := resource.Data["lcoked"].(bool); ok {
+	if l, ok := resource.Data["locked"].(bool); ok {
 		output.Locked = l
 	}
 	if t, ok := resource.Data["tainted"].(bool); ok {
@@ -148,13 +143,8 @@ func (c *Sys) GetNamespaceWithContext(ctx context.Context, path string) (*GetNam
 	if uuid, ok := resource.Data["uuid"].(string); ok {
 		output.Uuid = uuid
 	}
-	if metadata, ok := resource.Data["custom_metadata"].(map[string]interface{}); ok {
-		output.CustomMetadata = make(map[string]string)
-		for k, v := range metadata {
-			if str, ok := v.(string); ok {
-				output.CustomMetadata[k] = str
-			}
-		}
+	if cm := parseConfigMap(resource.Data["custom_metadata"]); cm != nil {
+		output.CustomMetadata = cm
 	}
 
 	return output, nil
@@ -213,13 +203,8 @@ func (c *Sys) ListNamespacesWithContext(ctx context.Context, recursive bool, inc
 		if path, ok := nsMap["path"].(string); ok {
 			ns.Path = path
 		}
-		if metadata, ok := nsMap["custom_metadata"].(map[string]interface{}); ok {
-			ns.CustomMetadata = make(map[string]string)
-			for k, v := range metadata {
-				if str, ok := v.(string); ok {
-					ns.CustomMetadata[k] = str
-				}
-			}
+		if cm := parseConfigMap(nsMap["custom_metadata"]); cm != nil {
+			ns.CustomMetadata = cm
 		}
 
 		namespaces = append(namespaces, ns)
@@ -272,13 +257,8 @@ func (c *Sys) UpdateNamespaceWithContext(ctx context.Context, path string, input
 	if msg, ok := resource.Data["message"].(string); ok {
 		output.Message = msg
 	}
-	if metadata, ok := resource.Data["custom_metadata"].(map[string]interface{}); ok {
-		output.CustomMetadata = make(map[string]string)
-		for k, v := range metadata {
-			if str, ok := v.(string); ok {
-				output.CustomMetadata[k] = str
-			}
-		}
+	if cm := parseConfigMap(resource.Data["custom_metadata"]); cm != nil {
+		output.CustomMetadata = cm
 	}
 
 	return output, nil

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 )
 
@@ -104,11 +103,8 @@ func (c *Sys) CreateCredentialSourceWithContext(ctx context.Context, name string
 	if msg, ok := resource.Data["message"].(string); ok {
 		output.Message = msg
 	}
-	if config, ok := resource.Data["config"].(map[string]any); ok {
-		output.Config = make(map[string]string)
-		for k, v := range config {
-			output.Config[k] = configValueToString(v)
-		}
+	if cfg := parseConfigMap(resource.Data["config"]); cfg != nil {
+		output.Config = cfg
 	}
 	if rp, ok := resource.Data["rotation_period"]; ok {
 		output.RotationPeriod = parseDurationFromSeconds(rp)
@@ -150,11 +146,8 @@ func (c *Sys) GetCredentialSourceWithContext(ctx context.Context, name string) (
 	if t, ok := resource.Data["type"].(string); ok {
 		source.Type = t
 	}
-	if config, ok := resource.Data["config"].(map[string]any); ok {
-		source.Config = make(map[string]string)
-		for k, v := range config {
-			source.Config[k] = configValueToString(v)
-		}
+	if cfg := parseConfigMap(resource.Data["config"]); cfg != nil {
+		source.Config = cfg
 	}
 	if rp, ok := resource.Data["rotation_period"]; ok {
 		source.RotationPeriod = parseDurationFromSeconds(rp)
@@ -216,11 +209,8 @@ func (c *Sys) ListCredentialSourcesWithContext(ctx context.Context) ([]*Credenti
 		if t, ok := sourceMap["type"].(string); ok {
 			source.Type = t
 		}
-		if config, ok := sourceMap["config"].(map[string]any); ok {
-			source.Config = make(map[string]string)
-			for k, v := range config {
-				source.Config[k] = configValueToString(v)
-			}
+		if cfg := parseConfigMap(sourceMap["config"]); cfg != nil {
+			source.Config = cfg
 		}
 		if rp, ok := sourceMap["rotation_period"]; ok {
 			source.RotationPeriod = parseDurationFromSeconds(rp)
@@ -296,52 +286,4 @@ func (c *Sys) DeleteCredentialSourceWithContext(ctx context.Context, name string
 	defer resp.Body.Close()
 
 	return nil
-}
-
-// parseDurationFromSeconds parses a time.Duration from a JSON value representing seconds.
-// The server sends duration as seconds (int64) via TypeDurationSecond.
-func parseDurationFromSeconds(v any) time.Duration {
-	switch val := v.(type) {
-	case float64:
-		return time.Duration(int64(val)) * time.Second
-	case json.Number:
-		if n, err := val.Int64(); err == nil {
-			return time.Duration(n) * time.Second
-		}
-	case string:
-		if d, err := time.ParseDuration(val); err == nil {
-			return d
-		}
-	}
-	return 0
-}
-
-// configValueToString converts various types from JSON to string representation
-// This ensures all config values remain as strings even if the server returns typed values
-func configValueToString(v any) string {
-	if v == nil {
-		return ""
-	}
-
-	switch val := v.(type) {
-	case string:
-		return val
-	case json.Number:
-		return val.String()
-	case bool:
-		return strconv.FormatBool(val)
-	case float64:
-		// Check if it's an integer value
-		if val == float64(int64(val)) {
-			return strconv.FormatInt(int64(val), 10)
-		}
-		return strconv.FormatFloat(val, 'f', -1, 64)
-	case int, int8, int16, int32, int64:
-		return fmt.Sprintf("%d", val)
-	case uint, uint8, uint16, uint32, uint64:
-		return fmt.Sprintf("%d", val)
-	default:
-		// Fall back to fmt.Sprint for other types
-		return fmt.Sprint(val)
-	}
 }

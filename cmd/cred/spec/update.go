@@ -10,9 +10,10 @@ import (
 )
 
 var (
-	updateConfig map[string]string
-	updateMinTTL string
-	updateMaxTTL string
+	updateConfig         map[string]string
+	updateMinTTL         string
+	updateMaxTTL         string
+	updateRotationPeriod string
 
 	UpdateCmd = &cobra.Command{
 		Use:           "update <name>",
@@ -28,14 +29,15 @@ func init() {
 	UpdateCmd.Flags().StringToStringVar(&updateConfig, "config", nil, "Type-specific configuration (key=value)")
 	UpdateCmd.Flags().StringVar(&updateMinTTL, "min-ttl", "", "Minimum TTL")
 	UpdateCmd.Flags().StringVar(&updateMaxTTL, "max-ttl", "", "Maximum TTL")
+	UpdateCmd.Flags().StringVar(&updateRotationPeriod, "rotation-period", "", "Rotation period for credentials stored in the spec (e.g., '24h', '7d'). Use '0' to disable rotation")
 }
 
 func runUpdate(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
 	// Require at least one update parameter
-	if len(updateConfig) == 0 && updateMinTTL == "" && updateMaxTTL == "" {
-		return fmt.Errorf("no update parameters provided. Use --config, --min-ttl, or --max-ttl")
+	if len(updateConfig) == 0 && updateMinTTL == "" && updateMaxTTL == "" && updateRotationPeriod == "" {
+		return fmt.Errorf("no update parameters provided. Use --config, --min-ttl, --max-ttl, or --rotation-period")
 	}
 
 	c, err := helpers.Client()
@@ -61,6 +63,14 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("invalid max-ttl: %w", err)
 		}
 		input.MaxTTL = &maxTTL
+	}
+
+	if updateRotationPeriod != "" {
+		rotationPeriod, err := time.ParseDuration(updateRotationPeriod)
+		if err != nil {
+			return fmt.Errorf("invalid rotation-period: %w", err)
+		}
+		input.RotationPeriod = &rotationPeriod
 	}
 
 	output, err := c.Sys().UpdateCredentialSpec(name, input)

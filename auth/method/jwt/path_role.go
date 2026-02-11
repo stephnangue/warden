@@ -346,7 +346,10 @@ func (b *jwtAuthBackend) getRole(ctx context.Context, name string) (*JWTRole, er
 	}
 
 	// Convert stored format to runtime format
-	tokenTTL, _ := time.ParseDuration(stored.TokenTTL)
+	tokenTTL, err := time.ParseDuration(stored.TokenTTL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid stored token_ttl %q for role %q: %w", stored.TokenTTL, name, err)
+	}
 
 	return &JWTRole{
 		Name:           stored.Name,

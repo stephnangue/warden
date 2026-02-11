@@ -57,6 +57,14 @@ const (
 	// DefaultMaxCredSourceRotationPeriod is the maximum allowed rotation period
 	// for credential sources when not explicitly configured (30 days).
 	DefaultMaxCredSourceRotationPeriod = 720 * time.Hour
+
+	// DefaultMinCredSpecRotationPeriod is the minimum allowed rotation period
+	// for credential specs that embed rotatable credentials (1 hour).
+	DefaultMinCredSpecRotationPeriod = 1 * time.Hour
+
+	// DefaultMaxCredSpecRotationPeriod is the maximum allowed rotation period
+	// for credential specs that embed rotatable credentials (30 days).
+	DefaultMaxCredSpecRotationPeriod = 720 * time.Hour
 )
 
 var (
@@ -684,6 +692,7 @@ func (c *Core) setupRotationManager(ctx context.Context) error {
 		c.logger.WithSubsystem("rotation"),
 		rotationStorage,
 	)
+	c.rotationManager.Start()
 
 	// Restore persisted rotation entries from storage
 	if err := c.rotationManager.Restore(ctx); err != nil {
@@ -757,6 +766,31 @@ func (c *Core) CredSourceRotationPeriodBounds() (min, max time.Duration) {
 	}
 	if conf.MaxCredSourceRotationPeriod != "" {
 		if parsed, err := time.ParseDuration(conf.MaxCredSourceRotationPeriod); err == nil {
+			max = parsed
+		}
+	}
+
+	return
+}
+
+// CredSpecRotationPeriodBounds returns the configured min and max rotation
+// period bounds for credential specs. Falls back to defaults if not set.
+func (c *Core) CredSpecRotationPeriodBounds() (min, max time.Duration) {
+	min = DefaultMinCredSpecRotationPeriod
+	max = DefaultMaxCredSpecRotationPeriod
+
+	conf, ok := c.rawConfig.Load().(*config.Config)
+	if !ok || conf == nil {
+		return
+	}
+
+	if conf.MinCredSpecRotationPeriod != "" {
+		if parsed, err := time.ParseDuration(conf.MinCredSpecRotationPeriod); err == nil {
+			min = parsed
+		}
+	}
+	if conf.MaxCredSpecRotationPeriod != "" {
+		if parsed, err := time.ParseDuration(conf.MaxCredSpecRotationPeriod); err == nil {
 			max = parsed
 		}
 	}

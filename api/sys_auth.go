@@ -51,11 +51,11 @@ func (c *Sys) ListAuthWithContext(ctx context.Context) (map[string]*AuthMountOut
 	return mounts, nil
 }
 
-func (c *Sys) EnableAuth(path string, authInfo *AuthMounthInput) error {
+func (c *Sys) EnableAuth(path string, authInfo *AuthMountInput) error {
 	return c.EnableAuthWithContext(context.Background(), path, authInfo)
 }
 
-func (c *Sys) EnableAuthWithContext(ctx context.Context, path string, authInfo *AuthMounthInput) error {
+func (c *Sys) EnableAuthWithContext(ctx context.Context, path string, authInfo *AuthMountInput) error {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
@@ -84,7 +84,7 @@ func (c *Sys) DisableAuthWithContext(ctx context.Context, path string) error {
 	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/auth/%s", path))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
-	if err == nil {
+	if resp != nil {
 		defer resp.Body.Close()
 	}
 	return err
@@ -125,6 +125,6 @@ func (c *Sys) AuthInfoWithContext(ctx context.Context, path string) (*AuthMountO
 
 // Rather than duplicate, we can use modern Go's type aliasing
 type (
-	AuthMounthInput   = MountInput
+	AuthMountInput   = MountInput
 	AuthMountOutput   = MountOutput
 )

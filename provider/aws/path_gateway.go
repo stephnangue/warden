@@ -22,8 +22,9 @@ import (
 )
 
 var (
-	authRegex = regexp.MustCompile(`AWS4-HMAC-SHA256 Credential=([^/]+)/([^/]+)/([^/]+)/([^/]+)/aws4_request`)
-	signRegex = regexp.MustCompile(`Signature=([a-f0-9]+)`)
+	authRegex          = regexp.MustCompile(`AWS4-HMAC-SHA256 Credential=([^/]+)/([^/]+)/([^/]+)/([^/]+)/aws4_request`)
+	signRegex          = regexp.MustCompile(`Signature=([a-f0-9]+)`)
+	signedHeadersRegex = regexp.MustCompile(`SignedHeaders=([^,]+)`)
 )
 
 // Hop-by-hop headers that should not be included in signatures

@@ -13,16 +13,17 @@ import (
 
 // StoredCredSpec is the versioned storage format for credential specs
 type StoredCredSpec struct {
-	Version     int               `json:"version"`
-	NamespaceID string            `json:"namespace_id"`
-	Name        string            `json:"name"`
-	Type        string            `json:"type"`
-	Source      string            `json:"source"`
-	Config      map[string]string `json:"config"`
-	MinTTL      string            `json:"min_ttl"` // Duration as string
-	MaxTTL      string            `json:"max_ttl"` // Duration as string
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	Version        int               `json:"version"`
+	NamespaceID    string            `json:"namespace_id"`
+	Name           string            `json:"name"`
+	Type           string            `json:"type"`
+	Source         string            `json:"source"`
+	Config         map[string]string `json:"config"`
+	MinTTL         string            `json:"min_ttl"`         // Duration as string
+	MaxTTL         string            `json:"max_ttl"`         // Duration as string
+	RotationPeriod string            `json:"rotation_period"` // Duration as string
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
 // StoredCredSource is the versioned storage format for credential sources
@@ -44,18 +45,29 @@ type StoredCredSource struct {
 // persistSpec writes a credential spec to storage
 func (s *CredentialConfigStore) persistSpec(namespaceID string, spec *credential.CredSpec) error {
 	now := time.Now()
+	createdAt := now
+
+	// Preserve original CreatedAt on updates
+	path := fmt.Sprintf("%s%s/%s", credSpecPrefix, namespaceID, spec.Name)
+	if existing, err := s.storage.Get(context.Background(), path); err == nil && existing != nil {
+		var prev StoredCredSpec
+		if err := json.Unmarshal(existing.Value, &prev); err == nil && !prev.CreatedAt.IsZero() {
+			createdAt = prev.CreatedAt
+		}
+	}
 
 	stored := &StoredCredSpec{
-		Version:     1,
-		NamespaceID: namespaceID,
-		Name:        spec.Name,
-		Type:        spec.Type,
-		Source:      spec.Source,
-		Config:      spec.Config,
-		MinTTL:      spec.MinTTL.String(),
-		MaxTTL:      spec.MaxTTL.String(),
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		Version:        1,
+		NamespaceID:    namespaceID,
+		Name:           spec.Name,
+		Type:           spec.Type,
+		Source:         spec.Source,
+		Config:         spec.Config,
+		MinTTL:         spec.MinTTL.String(),
+		MaxTTL:         spec.MaxTTL.String(),
+		RotationPeriod: spec.RotationPeriod.String(),
+		CreatedAt:      createdAt,
+		UpdatedAt:      now,
 	}
 
 	data, err := json.Marshal(stored)
@@ -63,7 +75,6 @@ func (s *CredentialConfigStore) persistSpec(namespaceID string, spec *credential
 		return fmt.Errorf("failed to marshal spec: %w", err)
 	}
 
-	path := fmt.Sprintf("%s%s/%s", credSpecPrefix, namespaceID, spec.Name)
 	entry := &sdklogical.StorageEntry{
 		Key:   path,
 		Value: data,
@@ -95,14 +106,16 @@ func (s *CredentialConfigStore) loadSpec(namespaceID, name string) (*credential.
 
 	minTTL, _ := time.ParseDuration(stored.MinTTL)
 	maxTTL, _ := time.ParseDuration(stored.MaxTTL)
+	rotationPeriod, _ := time.ParseDuration(stored.RotationPeriod)
 
 	spec := &credential.CredSpec{
-		Name:   stored.Name,
-		Type:   stored.Type,
-		Source: stored.Source,
-		Config: stored.Config,
-		MinTTL: minTTL,
-		MaxTTL: maxTTL,
+		Name:           stored.Name,
+		Type:           stored.Type,
+		Source:         stored.Source,
+		Config:         stored.Config,
+		MinTTL:         minTTL,
+		MaxTTL:         maxTTL,
+		RotationPeriod: rotationPeriod,
 	}
 
 	return spec, nil
@@ -155,6 +168,16 @@ func (s *CredentialConfigStore) loadAllSpecs(namespaceID string) ([]*credential.
 // persistSource writes a credential source to storage
 func (s *CredentialConfigStore) persistSource(namespaceID string, source *credential.CredSource) error {
 	now := time.Now()
+	createdAt := now
+
+	// Preserve original CreatedAt on updates
+	path := fmt.Sprintf("%s%s/%s", credSourcePrefix, namespaceID, source.Name)
+	if existing, err := s.storage.Get(context.Background(), path); err == nil && existing != nil {
+		var prev StoredCredSource
+		if err := json.Unmarshal(existing.Value, &prev); err == nil && !prev.CreatedAt.IsZero() {
+			createdAt = prev.CreatedAt
+		}
+	}
 
 	stored := &StoredCredSource{
 		Version:        1,
@@ -163,7 +186,7 @@ func (s *CredentialConfigStore) persistSource(namespaceID string, source *creden
 		Type:           source.Type,
 		Config:         source.Config,
 		RotationPeriod: source.RotationPeriod.String(),
-		CreatedAt:      now,
+		CreatedAt:      createdAt,
 		UpdatedAt:      now,
 	}
 
@@ -172,7 +195,6 @@ func (s *CredentialConfigStore) persistSource(namespaceID string, source *creden
 		return fmt.Errorf("failed to marshal source: %w", err)
 	}
 
-	path := fmt.Sprintf("%s%s/%s", credSourcePrefix, namespaceID, source.Name)
 	entry := &sdklogical.StorageEntry{
 		Key:   path,
 		Value: data,

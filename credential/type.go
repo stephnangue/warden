@@ -29,8 +29,19 @@ type TypeMetadata struct {
 	DefaultTTL time.Duration
 }
 
-// Type defines the interface for pluggable credential types
-// This mirrors the TokenType pattern in core/token_type.go
+// Type defines the interface for pluggable credential types.
+//
+// A Type has two responsibilities:
+//
+//  1. Spec config validation — ValidateConfig defines which config fields a
+//     credential spec requires, RequiresSpecRotation indicates whether those
+//     fields contain embedded credentials that must be rotated, and
+//     SensitiveConfigFields lists the config keys that should be masked in
+//     API responses.
+//
+//  2. Credential output — Parse converts raw source data into a Credential,
+//     Validate checks it is well-formed, FieldSchemas describes the output
+//     fields (including sensitivity), and Revoke releases the credential.
 type Type interface {
 	// Metadata returns the type's metadata
 	Metadata() TypeMetadata
@@ -56,8 +67,13 @@ type Type interface {
 	// Returns nil if revocation is not supported or succeeds
 	Revoke(ctx context.Context, cred *Credential, driver SourceDriver) error
 
-	// CanRotate indicates if this type supports proactive rotation
-	CanRotate() bool
+	// RequiresSpecRotation indicates if this type embeds credentials in the spec
+	// config that must be rotated. When true, rotation_period is mandatory.
+	RequiresSpecRotation() bool
+
+	// SensitiveConfigFields returns the list of spec config keys that should be
+	// masked in output (e.g., "client_secret", "secret_id").
+	SensitiveConfigFields() []string
 
 	// FieldSchemas returns metadata about the credential's data fields
 	// Used for masking sensitive fields in responses

@@ -878,9 +878,11 @@ func (t *testCredentialType) Revoke(ctx context.Context, cred *credential.Creden
 	return nil
 }
 
-func (t *testCredentialType) CanRotate() bool {
+func (t *testCredentialType) RequiresSpecRotation() bool {
 	return false
 }
+
+func (t *testCredentialType) SensitiveConfigFields() []string { return nil }
 
 func (t *testCredentialType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
 	return map[string]*credential.CredentialFieldSchema{}
@@ -1090,9 +1092,11 @@ func (t *validatingCredentialType) Revoke(ctx context.Context, cred *credential.
 	return nil
 }
 
-func (t *validatingCredentialType) CanRotate() bool {
+func (t *validatingCredentialType) RequiresSpecRotation() bool {
 	return false
 }
+
+func (t *validatingCredentialType) SensitiveConfigFields() []string { return nil }
 
 func (t *validatingCredentialType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
 	return map[string]*credential.CredentialFieldSchema{}

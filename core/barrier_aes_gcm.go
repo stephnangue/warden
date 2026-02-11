@@ -391,7 +391,6 @@ func (b *AESGCMBarrier) ReloadKeyring(ctx context.Context) error {
 
 	// Reset enc. counters, this may be a leadership change
 	b.totalLocalEncryptions.Store(0)
-	b.totalLocalEncryptions.Store(0)
 	b.UnaccountedEncryptions.Store(0)
 	b.RemoteEncryptions.Store(0)
 

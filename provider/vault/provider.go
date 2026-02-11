@@ -159,6 +159,14 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		}
 	}
 
+	// Ensure defaults are set regardless of config presence
+	if b.maxBodySize <= 0 {
+		b.maxBodySize = DefaultMaxBodySize
+	}
+	if b.timeout <= 0 {
+		b.timeout = DefaultTimeout
+	}
+
 	return b, nil
 }
 

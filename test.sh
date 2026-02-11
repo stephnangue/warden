@@ -536,11 +536,3 @@ export VAULT_ADDR=http://localhost:5000/v1/PROD/DEV/vault-auto/role/operator/gat
     cred_spec_name=performer \
     token_ttl=30m
 
-export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
-  | jq -r '.access_token')
-LOGIN_OUTPUT=$(./warden -n PROD/DEV login --method=jwt --token=$JWT --role=performer)
-export AWS_ACCESS_KEY_ID=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*access_key_id=\([^,]*\).*/\1/')
-export AWS_SECRET_ACCESS_KEY=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*secret_access_key=\([^ |]*\).*/\1/')
-export AWS_ENDPOINT_URL=http://localhost:5000/v1/PROD/DEV/aws/gateway

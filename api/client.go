@@ -1070,7 +1070,7 @@ func (c *Client) rawRequestWithContext(ctx context.Context, r *Request) (*Respon
 	}
 
 	if outputCurlString {
-		LastOutputStringError = &OutputStringError{
+		ose := &OutputStringError{
 			Request:       req,
 			TLSSkipVerify: c.config.HttpClient.Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify,
 			ClientCert:    c.config.curlClientCert,
@@ -1078,7 +1078,7 @@ func (c *Client) rawRequestWithContext(ctx context.Context, r *Request) (*Respon
 			ClientCACert:  c.config.curlCACert,
 			ClientCAPath:  c.config.curlCAPath,
 		}
-		return nil, LastOutputStringError
+		return nil, ose
 	}
 
 	req.Request = req.Request.WithContext(ctx)

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"reflect"
 	"strings"
 )
 
@@ -46,7 +45,7 @@ func ParseResource(r io.Reader) (*Resource, error) {
 	}
 
 	// If the resource is null, add raw data to resource data if present
-	if reflect.DeepEqual(resource, Resource{}) {
+	if resource.Data == nil {
 		data := make(map[string]interface{})
 		dec := json.NewDecoder(&teebuf)
 		dec.UseNumber()

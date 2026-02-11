@@ -171,9 +171,15 @@ func (t *DatabaseUserPassCredType) Revoke(ctx context.Context, cred *credential.
 	return nil
 }
 
-// CanRotate indicates if this type supports proactive rotation
-func (t *DatabaseUserPassCredType) CanRotate() bool {
-	return true // Database credentials support rotation
+// RequiresSpecRotation returns false — database userpass specs don't embed
+// rotatable credentials; credentials are fetched from the source.
+func (t *DatabaseUserPassCredType) RequiresSpecRotation() bool {
+	return false
+}
+
+// SensitiveConfigFields returns spec config keys that should be masked in output
+func (t *DatabaseUserPassCredType) SensitiveConfigFields() []string {
+	return nil
 }
 
 // FieldSchemas returns metadata about the credential's data fields

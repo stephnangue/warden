@@ -303,7 +303,7 @@ func (m *ExpirationManager) register(entry *ExpirationEntry, ttl time.Duration, 
 	m.log.Debug("registered for expiration",
 		logger.String("type", string(entry.EntryType)),
 		logger.String("id", entry.ID),
-		logger.Duration("ttl", ttl),
+		logger.String("ttl", ttl.String()),
 		logger.Time("expires_at", entry.ExpiresAt))
 
 	return nil
@@ -499,7 +499,7 @@ func (m *ExpirationManager) handleRevocationFailure(key string, entry *Expiratio
 
 	m.log.Debug("scheduled retry",
 		logger.String("id", entry.ID),
-		logger.Duration("backoff", backoff))
+		logger.String("backoff", backoff.String()))
 }
 
 // markIrrevocable moves an entry to the irrevocable tier

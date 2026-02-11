@@ -702,7 +702,7 @@ func (c *Core) loadMounts(ctx context.Context) error {
 		return nil
 	}
 
-	return fmt.Errorf("failed to create a read transation on the barrier")
+	return fmt.Errorf("failed to create a read transaction on the barrier")
 }
 
 // this function reads the mount table.
@@ -1238,7 +1238,7 @@ func (c *Core) persistMounts(ctx context.Context, barrier sdklogical.Storage, ta
 			return size, nil
 		}
 	} else {
-		return fmt.Errorf("failed to create storage transation")
+		return fmt.Errorf("failed to create storage transaction")
 	}
 
 	_, err := writeTable(mounts, coreMountConfigPath)

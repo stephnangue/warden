@@ -69,7 +69,7 @@ func runEnable(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build auth mount input
-	authInput := &api.AuthMounthInput{
+	authInput := &api.AuthMountInput{
 		Type:        enableType,
 		Description: enableDescription,
 	}

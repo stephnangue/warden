@@ -39,6 +39,13 @@ func runRead(cmd *cobra.Command, args []string) error {
 		{"Max TTL", spec.MaxTTL},
 	}
 
+	// Add rotation period if configured
+	if spec.RotationPeriod > 0 {
+		data = append(data, []any{"Rotation Period", spec.RotationPeriod})
+	} else {
+		data = append(data, []any{"Rotation Period", "disabled"})
+	}
+
 	if len(spec.Config) > 0 {
 		data = append(data, []any{"Config", ""})
 		// Sort config keys for consistent output

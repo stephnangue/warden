@@ -47,8 +47,6 @@ func newTransport() *http.Transport {
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
-			// Enable TCP keepalive to detect dead connections
-			DualStack: true, // Support both IPv4 and IPv6
 		}).DialContext,
 
 		// Timeout settings to prevent hanging requests

@@ -36,6 +36,7 @@ import (
 	wardenlogical "github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/physical"
 	"github.com/stephnangue/warden/provider/aws"
+	"github.com/stephnangue/warden/provider/azure"
 	"github.com/stephnangue/warden/provider/vault"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -82,6 +83,7 @@ Usage: warden server [options]
 
 	providers = map[string]wardenlogical.Factory{
 		"aws":   aws.Factory,
+		"azure": azure.Factory,
 		"vault": vault.Factory,
 	}
 
@@ -196,7 +198,7 @@ func run(cmd *cobra.Command, args []string) error {
 		if core.IsFatalError(newCoreError) {
 			return fmt.Errorf("error initializing core: %w", newCoreError)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "A non-fatal error occurred during initialization. Please check the logs for more information: %v\n", err)
+		fmt.Fprintf(cmd.OutOrStdout(), "A non-fatal error occurred during initialization. Please check the logs for more information: %v\n", newCoreError)
 	}
 
 	// Compile server information for output later

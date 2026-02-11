@@ -44,6 +44,9 @@ func (b *jwtAuthBackend) pathLogin() *framework.Path {
 
 // handleLogin handles the login operation
 func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.configMu.RLock()
+	defer b.configMu.RUnlock()
+
 	// Get JWT token
 	jwtToken := d.Get("jwt").(string)
 	if jwtToken == "" {

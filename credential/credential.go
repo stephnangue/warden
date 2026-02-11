@@ -11,6 +11,7 @@ const (
 	TypeDatabaseUserPass = "database_userpass"
 	TypeAWSAccessKeys    = "aws_access_keys"
 	TypeVaultToken       = "vault_token"
+	TypeAzureBearerToken = "azure_bearer_token"
 )
 
 // Source type constants
@@ -18,6 +19,7 @@ const (
 	SourceTypeLocal = "local"
 	SourceTypeVault = "hvault"
 	SourceTypeAWS   = "aws"
+	SourceTypeAzure = "azure"
 )
 
 // Category constants for credential categorization

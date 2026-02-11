@@ -105,6 +105,11 @@ func (b *SystemBackend) pathCredentials() []*framework.Path {
 					Description: "Maximum TTL in seconds",
 					Default:     0,
 				},
+				"rotation_period": {
+					Type:        framework.TypeDurationSecond,
+					Description: "Rotation period for credentials stored in the spec (0 means no rotation)",
+					Default:     0,
+				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
 				logical.CreateOperation: &framework.PathOperation{
@@ -199,16 +204,11 @@ func (b *SystemBackend) maskSpecConfig(specType string, config map[string]string
 		return nil
 	}
 
-	// Get sensitive fields from credential type
+	// Get sensitive config fields from credential type
 	var sensitiveFields []string
 	if b.core.credentialTypeRegistry != nil {
 		if credType, err := b.core.credentialTypeRegistry.GetByName(specType); err == nil {
-			schemas := credType.FieldSchemas()
-			for fieldName, schema := range schemas {
-				if schema.Sensitive {
-					sensitiveFields = append(sensitiveFields, fieldName)
-				}
-			}
+			sensitiveFields = credType.SensitiveConfigFields()
 		}
 	}
 
@@ -294,11 +294,11 @@ func (b *SystemBackend) handleCredentialSourceRead(ctx context.Context, req *log
 		ns, err := namespace.FromContext(ctx)
 		if err == nil && ns != nil {
 			if entry := b.core.rotationManager.GetEntry(ns.UUID, name); entry != nil {
-				if !entry.NextRotation.IsZero() {
-					data["next_rotation"] = entry.NextRotation.Format(time.RFC3339)
+				if nextAction := entry.GetNextAction(); !nextAction.IsZero() {
+					data["next_rotation"] = nextAction.Format(time.RFC3339)
 				}
-				if !entry.LastRotation.IsZero() {
-					data["last_rotation"] = entry.LastRotation.Format(time.RFC3339)
+				if lastRotation := entry.GetLastRotation(); !lastRotation.IsZero() {
+					data["last_rotation"] = lastRotation.Format(time.RFC3339)
 				}
 			}
 		}
@@ -418,6 +418,7 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 	configAny, _ := d.Get("config").(map[string]any)
 	minTTL, _ := d.Get("min_ttl").(int)
 	maxTTL, _ := d.Get("max_ttl").(int)
+	rotationPeriod, _ := d.Get("rotation_period").(int)
 
 	b.logger.Info("creating credential spec",
 		logger.String("name", name),
@@ -434,12 +435,13 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 
 	// Create credential spec
 	spec := &credential.CredSpec{
-		Name:   name,
-		Type:   specType,
-		Source: source,
-		Config: convertToStringMap(configAny),
-		MinTTL: time.Duration(minTTL) * time.Second,
-		MaxTTL: time.Duration(maxTTL) * time.Second,
+		Name:           name,
+		Type:           specType,
+		Source:         source,
+		Config:         convertToStringMap(configAny),
+		MinTTL:         time.Duration(minTTL) * time.Second,
+		MaxTTL:         time.Duration(maxTTL) * time.Second,
+		RotationPeriod: time.Duration(rotationPeriod) * time.Second,
 	}
 
 	// Store via credential config store
@@ -452,13 +454,14 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 	}
 
 	return b.respondCreated(map[string]any{
-		"name":    spec.Name,
-		"type":    spec.Type,
-		"source":  spec.Source,
-		"config":  spec.Config,
-		"min_ttl": int64(spec.MinTTL.Seconds()),
-		"max_ttl": int64(spec.MaxTTL.Seconds()),
-		"message": fmt.Sprintf("Successfully created credential spec %s", name),
+		"name":            spec.Name,
+		"type":            spec.Type,
+		"source":          spec.Source,
+		"config":          spec.Config,
+		"min_ttl":         int64(spec.MinTTL.Seconds()),
+		"max_ttl":         int64(spec.MaxTTL.Seconds()),
+		"rotation_period": int64(spec.RotationPeriod.Seconds()),
+		"message":         fmt.Sprintf("Successfully created credential spec %s", name),
 	}), nil
 }
 
@@ -476,12 +479,13 @@ func (b *SystemBackend) handleCredentialSpecRead(ctx context.Context, req *logic
 	maskedConfig := b.maskSpecConfig(spec.Type, spec.Config)
 
 	return b.respondSuccess(map[string]any{
-		"name":    spec.Name,
-		"type":    spec.Type,
-		"source":  spec.Source,
-		"config":  maskedConfig,
-		"min_ttl": int64(spec.MinTTL.Seconds()),
-		"max_ttl": int64(spec.MaxTTL.Seconds()),
+		"name":            spec.Name,
+		"type":            spec.Type,
+		"source":          spec.Source,
+		"config":          maskedConfig,
+		"min_ttl":         int64(spec.MinTTL.Seconds()),
+		"max_ttl":         int64(spec.MaxTTL.Seconds()),
+		"rotation_period": int64(spec.RotationPeriod.Seconds()),
 	}), nil
 }
 
@@ -497,13 +501,29 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		return logical.ErrorResponse(err), nil
 	}
 
-	// Update fields if provided - merge new config into existing config
+	// Create a new spec with merged config (don't modify the cached object)
+	mergedConfig := make(map[string]string, len(spec.Config))
+	for k, v := range spec.Config {
+		mergedConfig[k] = v
+	}
+
+	// Merge new config values
 	if configAny, ok := d.GetOk("config"); ok {
 		newConfig := convertToStringMap(configAny.(map[string]any))
-		// Merge: update existing keys and add new ones
 		for k, v := range newConfig {
-			spec.Config[k] = v
+			mergedConfig[k] = v
 		}
+	}
+
+	// Create updated spec for validation and persistence
+	updatedSpec := &credential.CredSpec{
+		Name:           spec.Name,
+		Type:           spec.Type,
+		Source:         spec.Source,
+		Config:         mergedConfig,
+		MinTTL:         spec.MinTTL,
+		MaxTTL:         spec.MaxTTL,
+		RotationPeriod: spec.RotationPeriod,
 	}
 
 	if minTTL, ok := d.GetOk("min_ttl"); ok {
@@ -511,7 +531,7 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		if ttl < 0 {
 			return logical.ErrorResponse(logical.ErrBadRequest("min_ttl must be non-negative")), nil
 		}
-		spec.MinTTL = time.Duration(ttl) * time.Second
+		updatedSpec.MinTTL = time.Duration(ttl) * time.Second
 	}
 
 	if maxTTL, ok := d.GetOk("max_ttl"); ok {
@@ -519,21 +539,26 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		if ttl < 0 {
 			return logical.ErrorResponse(logical.ErrBadRequest("max_ttl must be non-negative")), nil
 		}
-		spec.MaxTTL = time.Duration(ttl) * time.Second
+		updatedSpec.MaxTTL = time.Duration(ttl) * time.Second
+	}
+
+	// Update rotation period if provided (0 disables rotation)
+	if rotationPeriod, ok := d.GetOk("rotation_period"); ok {
+		updatedSpec.RotationPeriod = time.Duration(rotationPeriod.(int)) * time.Second
 	}
 
 	// Validate TTLs
-	if spec.MinTTL > spec.MaxTTL && spec.MaxTTL != 0 {
+	if updatedSpec.MinTTL > updatedSpec.MaxTTL && updatedSpec.MaxTTL != 0 {
 		return logical.ErrorResponse(logical.ErrBadRequest("min_ttl cannot be greater than max_ttl")), nil
 	}
 
 	// Update via credential config store
-	if err := b.core.credConfigStore.UpdateSpec(ctx, spec); err != nil {
+	if err := b.core.credConfigStore.UpdateSpec(ctx, updatedSpec); err != nil {
 		return logical.ErrorResponse(err), nil
 	}
 
 	return b.respondSuccess(map[string]any{
-		"name":    spec.Name,
+		"name":    updatedSpec.Name,
 		"message": fmt.Sprintf("Successfully updated credential spec %s", name),
 	}), nil
 }
@@ -567,12 +592,13 @@ func (b *SystemBackend) handleCredentialSpecList(ctx context.Context, req *logic
 	for _, spec := range specs {
 		maskedConfig := b.maskSpecConfig(spec.Type, spec.Config)
 		specInfos = append(specInfos, map[string]any{
-			"name":    spec.Name,
-			"type":    spec.Type,
-			"source":  spec.Source,
-			"config":  maskedConfig,
-			"min_ttl": int64(spec.MinTTL.Seconds()),
-			"max_ttl": int64(spec.MaxTTL.Seconds()),
+			"name":            spec.Name,
+			"type":            spec.Type,
+			"source":          spec.Source,
+			"config":          maskedConfig,
+			"min_ttl":         int64(spec.MinTTL.Seconds()),
+			"max_ttl":         int64(spec.MaxTTL.Seconds()),
+			"rotation_period": int64(spec.RotationPeriod.Seconds()),
 		})
 	}
 
