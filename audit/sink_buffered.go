@@ -183,7 +183,7 @@ func (bs *BufferedSink) Close() error {
 		if bs.logger != nil {
 			bs.logger.Warn("timeout waiting for periodic flush goroutine to stop",
 				logger.String("sink", bs.sink.Name()),
-				logger.Duration("timeout", bs.closeTimeout),
+				logger.String("timeout", bs.closeTimeout.String()),
 			)
 		}
 	}

@@ -212,9 +212,15 @@ func (t *AWSIAMAccessKeysCredType) Revoke(ctx context.Context, cred *credential.
 	return nil
 }
 
-// CanRotate indicates if this type supports proactive rotation
-func (t *AWSIAMAccessKeysCredType) CanRotate() bool {
-	return true // AWS credentials support rotation
+// RequiresSpecRotation returns false — AWS IAM access key specs don't embed
+// rotatable credentials; the source driver handles key rotation.
+func (t *AWSIAMAccessKeysCredType) RequiresSpecRotation() bool {
+	return false
+}
+
+// SensitiveConfigFields returns spec config keys that should be masked in output
+func (t *AWSIAMAccessKeysCredType) SensitiveConfigFields() []string {
+	return nil
 }
 
 // FieldSchemas returns metadata about the credential's data fields

@@ -85,7 +85,14 @@ func (b *vaultBackend) handleConfigRead(ctx context.Context, req *logical.Reques
 func (b *vaultBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	// Apply values from request - framework already handles type conversion
 	if val, ok := d.GetOk("vault_address"); ok {
-		b.vaultAddress = val.(string)
+		addr := val.(string)
+		if err := validateVaultAddress(addr); err != nil {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        logical.ErrBadRequest(err.Error()),
+			}, nil
+		}
+		b.vaultAddress = addr
 	}
 
 	// For max_body_size: use provided value, or apply default if not yet set

@@ -22,7 +22,7 @@ func (b *awsBackend) pathConfig() *framework.Path {
 			"max_body_size": {
 				Type:        framework.TypeInt,
 				Description: "Maximum request body size in bytes (default: 10MB, max: 100MB)",
-				Default:     10485760, // 10MB
+				Default:     DefaultMaxBodySize,
 			},
 			"timeout": {
 				Type:        framework.TypeDurationSecond,

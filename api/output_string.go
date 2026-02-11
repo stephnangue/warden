@@ -1,7 +1,6 @@
 package api
 
 import (
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,8 +11,6 @@ import (
 const (
 	ErrOutputStringRequest = "output a string, please"
 )
-
-var LastOutputStringError *OutputStringError
 
 type OutputStringError struct {
 	*retryablehttp.Request
@@ -52,37 +49,43 @@ func (d *OutputStringError) buildCurlString() (string, error) {
 		return "", err
 	}
 
-	// Build cURL string
-	finalCurlString := "curl "
+	var b strings.Builder
+	b.WriteString("curl ")
+
 	if d.TLSSkipVerify {
-		finalCurlString += "--insecure "
+		b.WriteString("--insecure ")
 	}
 	if d.Method != http.MethodGet {
-		finalCurlString = fmt.Sprintf("%s-X %s ", finalCurlString, d.Method)
+		b.WriteString("-X ")
+		b.WriteString(d.Method)
+		b.WriteByte(' ')
 	}
 	if d.ClientCACert != "" {
-		clientCACert := strings.ReplaceAll(d.ClientCACert, "'", "'\"'\"'")
-		finalCurlString = fmt.Sprintf("%s--cacert '%s' ", finalCurlString, clientCACert)
+		b.WriteString("--cacert '")
+		b.WriteString(strings.ReplaceAll(d.ClientCACert, "'", "'\"'\"'"))
+		b.WriteString("' ")
 	}
 	if d.ClientCAPath != "" {
-		clientCAPath := strings.ReplaceAll(d.ClientCAPath, "'", "'\"'\"'")
-		finalCurlString = fmt.Sprintf("%s--capath '%s' ", finalCurlString, clientCAPath)
+		b.WriteString("--capath '")
+		b.WriteString(strings.ReplaceAll(d.ClientCAPath, "'", "'\"'\"'"))
+		b.WriteString("' ")
 	}
 	if d.ClientCert != "" {
-		clientCert := strings.ReplaceAll(d.ClientCert, "'", "'\"'\"'")
-		finalCurlString = fmt.Sprintf("%s--cert '%s' ", finalCurlString, clientCert)
+		b.WriteString("--cert '")
+		b.WriteString(strings.ReplaceAll(d.ClientCert, "'", "'\"'\"'"))
+		b.WriteString("' ")
 	}
 	if d.ClientKey != "" {
-		clientKey := strings.ReplaceAll(d.ClientKey, "'", "'\"'\"'")
-		finalCurlString = fmt.Sprintf("%s--key '%s' ", finalCurlString, clientKey)
+		b.WriteString("--key '")
+		b.WriteString(strings.ReplaceAll(d.ClientKey, "'", "'\"'\"'"))
+		b.WriteString("' ")
 	}
-
 	if len(body) > 0 {
-		// We need to escape single quotes since that's what we're using to
-		// quote the body
-		escapedBody := strings.ReplaceAll(string(body), "'", "'\"'\"'")
-		finalCurlString = fmt.Sprintf("%s-d '%s' ", finalCurlString, escapedBody)
+		b.WriteString("-d '")
+		b.WriteString(strings.ReplaceAll(string(body), "'", "'\"'\"'"))
+		b.WriteString("' ")
 	}
+	b.WriteString(strconv.Quote(d.URL.String()))
 
-	return fmt.Sprintf("%s%s", finalCurlString, strconv.Quote(d.URL.String())), nil
+	return b.String(), nil
 }

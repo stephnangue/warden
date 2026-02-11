@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/spf13/cobra"
 	"github.com/stephnangue/warden/cmd/helpers"
@@ -50,7 +51,15 @@ func runList(cmd *cobra.Command, args []string) error {
 	headers := []string{"Path", "Type", "Accessor", "Description"}
 	var data [][]any
 
-	for path, auth := range auths {
+	// Sort paths for consistent output
+	paths := make([]string, 0, len(auths))
+	for path := range auths {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	for _, path := range paths {
+		auth := auths[path]
 		data = append(data, []any{
 			path,
 			auth.Type,

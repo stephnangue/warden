@@ -39,16 +39,21 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	headers := []string{"Name", "Type", "Source", "Min TTL", "Max TTL"}
+	headers := []string{"Name", "Type", "Source", "Min TTL", "Max TTL", "Rotation Period"}
 	data := make([][]any, 0, len(specs))
 
 	for _, spec := range specs {
+		rotationPeriod := any("disabled")
+		if spec.RotationPeriod > 0 {
+			rotationPeriod = spec.RotationPeriod
+		}
 		data = append(data, []any{
 			spec.Name,
 			spec.Type,
 			spec.Source,
 			spec.MinTTL,
 			spec.MaxTTL,
+			rotationPeriod,
 		})
 	}
 

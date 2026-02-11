@@ -1010,7 +1010,7 @@ func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry,
 		s.logger.Debug("token restored to cache from storage",
 			logger.String("caller", caller),
 			logger.String("token_id", entry.ID),
-			logger.Duration("remaining_ttl", ttl))
+			logger.String("remaining_ttl", ttl.String()))
 		return nil
 	} else {
 		// No expiration (non-expiring token) - use minimum retention for cache TTL

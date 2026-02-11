@@ -470,9 +470,9 @@ func TestAWSIAMAccessKeysCredType_Validate(t *testing.T) {
 	}
 }
 
-func TestAWSIAMAccessKeysCredType_CanRotate(t *testing.T) {
+func TestAWSIAMAccessKeysCredType_RequiresSpecRotation(t *testing.T) {
 	ct := &AWSIAMAccessKeysCredType{}
-	assert.True(t, ct.CanRotate())
+	assert.False(t, ct.RequiresSpecRotation())
 }
 
 func TestAWSIAMAccessKeysCredType_FieldSchemas(t *testing.T) {

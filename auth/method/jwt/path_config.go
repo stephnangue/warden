@@ -98,6 +98,9 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 
 // handleConfigRead handles reading the configuration
 func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.configMu.RLock()
+	defer b.configMu.RUnlock()
+
 	if b.config == nil {
 		return &logical.Response{
 			StatusCode: http.StatusOK,

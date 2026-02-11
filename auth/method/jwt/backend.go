@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/cap/jwt"
@@ -51,6 +52,7 @@ type JWTAuthConfig struct {
 type jwtAuthBackend struct {
 	*framework.Backend
 	config          *JWTAuthConfig
+	configMu        sync.RWMutex
 	logger          *logger.GatedLogger
 	storageView     sdklogical.Storage
 	validTokenTypes []string
@@ -168,7 +170,9 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 	}
 	config.validator = validator
 
+	b.configMu.Lock()
 	b.config = config
+	b.configMu.Unlock()
 	return nil
 }
 

@@ -78,8 +78,7 @@ func (c *Sys) DisableAuditWithContext(ctx context.Context, path string) error {
 	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/audit/%s", path))
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
-
-	if err == nil {
+	if resp != nil {
 		defer resp.Body.Close()
 	}
 	return err

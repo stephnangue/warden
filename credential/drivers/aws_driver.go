@@ -17,6 +17,15 @@ import (
 	"github.com/stephnangue/warden/logger"
 )
 
+// DefaultAWSActivationDelay is the default wait period for AWS IAM key propagation.
+// AWS IAM has eventual consistency across regions; new access keys may take several
+// minutes before they are recognized by all AWS services (STS, IAM, etc.).
+const DefaultAWSActivationDelay = 5 * time.Minute
+
+// Compile-time interface assertions
+var _ credential.SourceDriver = (*AWSDriver)(nil)
+var _ credential.Rotatable = (*AWSDriver)(nil)
+
 // AWSDriver fetches credentials from AWS (STS AssumeRole, Secrets Manager)
 type AWSDriver struct {
 	credSource *credential.CredSource
@@ -383,7 +392,8 @@ func (d *AWSDriver) SupportsRotation() bool {
 
 // PrepareRotation creates a new IAM access key without destroying the old one.
 // Both old and new keys remain valid during the overlap period.
-func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map[string]string, error) {
+// Returns activateAfter to allow time for AWS IAM eventual consistency propagation.
+func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map[string]string, time.Duration, error) {
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
@@ -400,21 +410,21 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 	// previously failed rotation), delete the orphaned key before creating a new one.
 	listResult, err := iamClient.ListAccessKeys(ctx, &iam.ListAccessKeysInput{})
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to list IAM access keys: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to list IAM access keys: %w", err)
 	}
 	if len(listResult.AccessKeyMetadata) >= 2 {
 		for _, key := range listResult.AccessKeyMetadata {
 			if *key.AccessKeyId != oldAccessKeyID {
 				if d.logger != nil {
 					d.logger.Warn("deleting orphaned IAM access key from previous failed rotation",
-						logger.String("orphaned_key_id", (*key.AccessKeyId)[:8]+"..."),
+						logger.String("orphaned_key_id", truncateID(*key.AccessKeyId, 8)),
 					)
 				}
 				_, err := iamClient.DeleteAccessKey(ctx, &iam.DeleteAccessKeyInput{
 					AccessKeyId: key.AccessKeyId,
 				})
 				if err != nil {
-					return nil, nil, fmt.Errorf("failed to delete orphaned IAM access key: %w", err)
+					return nil, nil, 0, fmt.Errorf("failed to delete orphaned IAM access key: %w", err)
 				}
 				break
 			}
@@ -424,57 +434,10 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 	// Create new access key
 	result, err := iamClient.CreateAccessKey(ctx, &iam.CreateAccessKeyInput{})
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create new IAM access key: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to create new IAM access key: %w", err)
 	}
 
 	newKey := result.AccessKey
-
-	// Wait for the new credentials to fully propagate at AWS (eventual consistency).
-	// AWS IAM has two levels of consistency:
-	// 1. STS recognition (GetCallerIdentity works) - usually fast
-	// 2. IAM permission propagation (can perform IAM operations) - can take longer
-	// We must verify BOTH before considering the key ready, otherwise operations
-	// like MintCredential or CleanupRotation may fail after CommitRotation.
-	newCreds := credentials.NewStaticCredentialsProvider(*newKey.AccessKeyId, *newKey.SecretAccessKey, "")
-	newCfg := aws.Config{
-		Region:      d.region,
-		Credentials: newCreds,
-	}
-	newSTS := sts.NewFromConfig(newCfg)
-	newIAM := iam.NewFromConfig(newCfg)
-
-	propagated := false
-	for attempt := 0; attempt < 30; attempt++ {
-		time.Sleep(4 * time.Second)
-
-		// Check 1: STS recognizes the new credentials
-		if _, err := newSTS.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
-			if d.logger != nil {
-				d.logger.Trace("waiting for new IAM key to propagate (STS)",
-					logger.String("new_key_id", (*newKey.AccessKeyId)[:8]+"..."),
-					logger.Int("attempt", attempt+1),
-				)
-			}
-			continue
-		}
-
-		// Check 2: IAM permissions are active (can list own keys)
-		if _, err := newIAM.ListAccessKeys(ctx, &iam.ListAccessKeysInput{}); err != nil {
-			if d.logger != nil {
-				d.logger.Trace("waiting for new IAM key to propagate (IAM)",
-					logger.String("new_key_id", (*newKey.AccessKeyId)[:8]+"..."),
-					logger.Int("attempt", attempt+1),
-				)
-			}
-			continue
-		}
-
-		propagated = true
-		break
-	}
-	if !propagated {
-		return nil, nil, fmt.Errorf("new IAM access key %s did not fully propagate within 120s", (*newKey.AccessKeyId)[:8]+"...")
-	}
 
 	// Build new config (copy all, replace key fields)
 	newConfig := make(map[string]string)
@@ -489,13 +452,18 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 		"access_key_id": oldAccessKeyID,
 	}
 
+	// Return activateAfter to let the rotation manager schedule activation
+	// after AWS IAM eventual consistency has propagated the new key.
+	activateAfter := credential.GetDuration(d.credSource.Config, "activation_delay", DefaultAWSActivationDelay)
+
 	if d.logger != nil {
 		d.logger.Debug("prepared new IAM access key for rotation",
-			logger.String("new_key_id", (*newKey.AccessKeyId)[:8]+"..."),
+			logger.String("new_key_id", truncateID(*newKey.AccessKeyId, 8)),
+			logger.String("activate_after", activateAfter.String()),
 		)
 	}
 
-	return newConfig, cleanupConfig, nil
+	return newConfig, cleanupConfig, activateAfter, nil
 }
 
 // CommitRotation activates the new IAM keys in driver state.
@@ -512,9 +480,10 @@ func (d *AWSDriver) CommitRotation(ctx context.Context, newConfig map[string]str
 	newSecretAccessKey := credential.GetString(newConfig, "secret_access_key", "")
 	d.baseCreds = credentials.NewStaticCredentialsProvider(newAccessKeyID, newSecretAccessKey, "")
 
-	// Invalidate elevated session to force re-authentication with new keys
+	// Invalidate elevated session and base-creds flag to force full re-authentication
 	d.elevatedCreds = nil
 	d.elevatedExpiry = time.Time{}
+	d.baseCredsVerified = false
 
 	// Re-authenticate (we already hold authMu, so use locked variant)
 	if err := d.authenticateLocked(ctx); err != nil {
@@ -522,8 +491,8 @@ func (d *AWSDriver) CommitRotation(ctx context.Context, newConfig map[string]str
 	}
 
 	if d.logger != nil {
-		d.logger.Info("committed rotated IAM access key",
-			logger.String("new_key_id", newAccessKeyID[:8]+"..."),
+		d.logger.Debug("committed rotated IAM access key",
+			logger.String("new_key_id", truncateID(newAccessKeyID, 8)),
 		)
 	}
 
@@ -541,7 +510,9 @@ func (d *AWSDriver) CleanupRotation(ctx context.Context, cleanupConfig map[strin
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
-	// Use current (new) base credentials to delete the old key
+	// Use base credentials (not elevated) for IAM operations on the user's own keys,
+	// matching PrepareRotation. Elevated/assumed-role creds operate as the role
+	// principal and cannot delete the IAM user's access keys.
 	baseCfg := aws.Config{
 		Region:      d.region,
 		Credentials: d.baseCreds,
@@ -555,15 +526,15 @@ func (d *AWSDriver) CleanupRotation(ctx context.Context, cleanupConfig map[strin
 		if d.logger != nil {
 			d.logger.Warn("failed to delete old IAM access key during cleanup",
 				logger.Err(err),
-				logger.String("key_id", oldAccessKeyID[:8]+"..."),
+				logger.String("key_id", truncateID(oldAccessKeyID, 8)),
 			)
 		}
-		return fmt.Errorf("failed to delete old IAM access key %s: %w", oldAccessKeyID[:8]+"...", err)
+		return fmt.Errorf("failed to delete old IAM access key %s: %w", truncateID(oldAccessKeyID, 8), err)
 	}
 
 	if d.logger != nil {
 		d.logger.Debug("destroyed old IAM access key",
-			logger.String("key_id", oldAccessKeyID[:8]+"..."),
+			logger.String("key_id", truncateID(oldAccessKeyID, 8)),
 		)
 	}
 	return nil

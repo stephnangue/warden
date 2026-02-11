@@ -24,6 +24,12 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
+const (
+	// maxRequestBodySize is the maximum allowed size for JSON request bodies on sys/ API paths.
+	// This prevents unbounded memory allocation from malicious large payloads.
+	maxRequestBodySize = 32 << 20 // 32MB
+)
+
 var (
 	// restrictedSysAPIs is the set of `sys/` APIs available only in the root namespace.
 	restrictedSysAPIs = pathmanager.New()
@@ -795,11 +801,15 @@ func (c *Core) parseJSONBody(req *logical.Request) error {
 		return nil // Not JSON, skip
 	}
 
-	body, err := io.ReadAll(req.HTTPRequest.Body)
+	body, err := io.ReadAll(io.LimitReader(req.HTTPRequest.Body, maxRequestBodySize+1))
 	if err != nil {
 		return fmt.Errorf("failed to read request body: %w", err)
 	}
 	req.HTTPRequest.Body.Close()
+
+	if int64(len(body)) > maxRequestBodySize {
+		return fmt.Errorf("request body exceeds maximum size of %d bytes", maxRequestBodySize)
+	}
 
 	// Restore body for potential re-reading (audit, streaming, etc.)
 	req.HTTPRequest.Body = io.NopCloser(bytes.NewReader(body))
@@ -1009,6 +1019,8 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 	})
 
 	if err != nil {
+		// Don't cache errors - allow next request to retry
+		c.transparentAuthGroup.Forget(singleflightKey)
 		return err
 	}
 
