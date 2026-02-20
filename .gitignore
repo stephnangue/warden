@@ -63,3 +63,5 @@ temp/
 *.tfstate
 *.tfstate.*
 .terraform.lock.hcl
+
+test.sh
