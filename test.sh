@@ -439,13 +439,6 @@ export VAULT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
   | jq -r '.access_token')
 export VAULT_ADDR=http://localhost:8400/v1/PROD/DEV/vault-auto/role/provisionner/gateway
 
-
-./warden -n PROD/DEV cred spec create aws_local \
-  --type aws_access_keys \
-  --source local \
-  --config access_key_id=AKIA5FTZFX6LC3IQNGPV \
-  --config secret_access_key=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
-
 ./warden -n PROD/DEV cred spec create aws_static \
   --type aws_access_keys \
   --source vault \
