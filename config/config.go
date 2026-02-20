@@ -18,7 +18,7 @@ type Config struct {
 
 	Listeners []ListenerBlock `hcl:"listener,block"`
 	Storage   *StorageBlock   `hcl:"storage,block"`
-	Seals     []KMS `hcl:"seal,block"`
+	Seals     []KMS           `hcl:"seal,block"`
 
 	// Whether read requests are disabled on standby nodes.
 	DisableStandbyReads bool `hcl:"disable_standby_reads,optional"`
@@ -40,83 +40,83 @@ type Config struct {
 }
 
 type KMS struct {
-	Type string `hcl:"type,label"`
+	Type       string   `hcl:"type,label"`
 	UnusedKeys []string `hcl:"unused_keys,optional"`
 	// Purpose can be used to allow a string-based specification of what this
 	// KMS is designated for, in situations where we want to allow more than
 	// one KMS to be specified
-	Purpose []string `hcl:"purpose,optional"`
-	Disabled string `hcl:"disabled,optional"`
+	Purpose  []string `hcl:"purpose,optional"`
+	Disabled string   `hcl:"disabled,optional"`
 
 	// config for static seal
-	CurrentKeyID string `hcl:"current_key_id,optional"`
-	CurrentKey string `hcl:"current_key,optional"`
+	CurrentKeyID  string `hcl:"current_key_id,optional"`
+	CurrentKey    string `hcl:"current_key,optional"`
 	PreviousKeyID string `hcl:"previous_key_id,optional"`
-	PreviousKey string `hcl:"previous_key,optional"`
+	PreviousKey   string `hcl:"previous_key,optional"`
 
 	// config for transit seal
-	Address string `hcl:"address,optional"`
-	Token string `hcl:"token,optional"`
-	KeyName string `hcl:"key_name,optional"`
-	MountPath string `hcl:"mount_path,optional"`
-	Namespace string `hcl:"namespace,optional"`
+	Address        string `hcl:"address,optional"`
+	Token          string `hcl:"token,optional"`
+	KeyName        string `hcl:"key_name,optional"`
+	MountPath      string `hcl:"mount_path,optional"`
+	Namespace      string `hcl:"namespace,optional"`
 	DisableRenewal string `hcl:"disable_renewal,optional"`
-	TlsCaCert string `hcl:"tls_ca_cert,optional"`
-	TlsClientCert string `hcl:"tls_client_cert,optional"`
-	TlsClientKey string `hcl:"tls_client_key,optional"`
-	TlsServerName string `hcl:"tls_server_name,optional"`
-	TlsSkipVerify string `hcl:"tls_skip_verify,optional"`
+	TlsCaCert      string `hcl:"tls_ca_cert,optional"`
+	TlsClientCert  string `hcl:"tls_client_cert,optional"`
+	TlsClientKey   string `hcl:"tls_client_key,optional"`
+	TlsServerName  string `hcl:"tls_server_name,optional"`
+	TlsSkipVerify  string `hcl:"tls_skip_verify,optional"`
 
 	// config for pkcs11 seal
-	Lib string `hcl:"lib,optional"`
-	Slot string `hcl:"slot,optional"`
-	TokenLabel string `hcl:"token_label,optional"`
-	Pin string `hcl:"pin,optional"`
-	KeyLabel string `hcl:"key_label,optional"`
-	KeyID string `hcl:"key_id,optional"`
-	Mechanism string `hcl:"mechanism,optional"`
-	DisableSoftwareEncryption bool `hcl:"disable_software_encryption,optional"`
+	Lib                       string `hcl:"lib,optional"`
+	Slot                      string `hcl:"slot,optional"`
+	TokenLabel                string `hcl:"token_label,optional"`
+	Pin                       string `hcl:"pin,optional"`
+	KeyLabel                  string `hcl:"key_label,optional"`
+	KeyID                     string `hcl:"key_id,optional"`
+	Mechanism                 string `hcl:"mechanism,optional"`
+	DisableSoftwareEncryption bool   `hcl:"disable_software_encryption,optional"`
 
 	// config for ocikms seal
-	CryptoEndpoint string `hcl:"crypto_endpoint,optional"`
+	CryptoEndpoint     string `hcl:"crypto_endpoint,optional"`
 	ManagementEndpoint string `hcl:"management_endpoint,optional"`
-	AuthTypeApiKey bool `hcl:"auth_type_api_key,optional"`
-	OciKeyID string `hcl:"key_id,optional"`
+	AuthTypeApiKey     bool   `hcl:"auth_type_api_key,optional"`
+	OciKeyID           string `hcl:"key_id,optional"`
 
 	// config for kmip seal
-	KmsKeyId string `hcl:"kms_key_id,optional"`
-	Endpoint string `hcl:"endpoint,optional"`
-	ClientCert string `hcl:"client_cert,optional"`
-	ClientKey string `hcl:"client_key,optional"`
-	CaCert string `hcl:"ca_cert,optional"`
-	ServerName string `hcl:"server_name,optional"`
-	Timeout int `hcl:"timeout,optional"`
-	EncryptAlg string `hcl:"encrypt_alg,optional"`
+	KmsKeyId    string `hcl:"kms_key_id,optional"`
+	Endpoint    string `hcl:"endpoint,optional"`
+	ClientCert  string `hcl:"client_cert,optional"`
+	ClientKey   string `hcl:"client_key,optional"`
+	CaCert      string `hcl:"ca_cert,optional"`
+	ServerName  string `hcl:"server_name,optional"`
+	Timeout     int    `hcl:"timeout,optional"`
+	EncryptAlg  string `hcl:"encrypt_alg,optional"`
 	Tls2Ciphers string `hcl:"tls12_ciphers,optional"`
 
 	// config for gcpkms seal
 	Credentials string `hcl:"credentials,optional"`
-	Project string `hcl:"project,optional"`
-	Region string `hcl:"region,optional"`
-	KeyRing string `hcl:"key_ring,optional"`
-	CryptoKey string `hcl:"crypto_key,optional"`
+	Project     string `hcl:"project,optional"`
+	Region      string `hcl:"region,optional"`
+	KeyRing     string `hcl:"key_ring,optional"`
+	CryptoKey   string `hcl:"crypto_key,optional"`
 
 	// config for azurekeyvault seal
-	TenantID string `hcl:"tenant_id,optional"`
-	ClientID string `hcl:"client_id,optional"`
+	TenantID     string `hcl:"tenant_id,optional"`
+	ClientID     string `hcl:"client_id,optional"`
 	ClientSecret string `hcl:"client_secret,optional"`
-	Env string `hcl:"environment,optional"`
-	VaultName string `hcl:"vault_name,optional"`
+	Env          string `hcl:"environment,optional"`
+	VaultName    string `hcl:"vault_name,optional"`
 	AzureKeyName string `hcl:"key_name,optional"`
-	Resource int `hcl:"resource,optional"`
+	Resource     int    `hcl:"resource,optional"`
 
 	// config for awskms seal
-	AwsRegion string `hcl:"region,optional"`
-	AccessKey string `hcl:"access_key,optional"`
+	AwsRegion    string `hcl:"region,optional"`
+	AccessKey    string `hcl:"access_key,optional"`
 	SessionToken string `hcl:"session_token,optional"`
-	SecretKey string `hcl:"secret_key,optional"`
-	KmsKeyID string `hcl:"kms_key_id,optional"`
-	AWSEndpoint string `hcl:"endpoint,optional"`
+	SecretKey    string `hcl:"secret_key,optional"`
+	KmsKeyID     string `hcl:"kms_key_id,optional"`
+	AWSEndpoint  string `hcl:"endpoint,optional"`
 }
 
 // Config returns the KMS configuration as a map
@@ -320,7 +320,7 @@ func (k *KMS) Config() map[string]string {
 }
 
 func (k *KMS) IsDisabled() bool {
-	return k.Disabled != "" && k.Disabled != "true" 
+	return k.Disabled != "" && k.Disabled != "true"
 }
 
 type StorageBlock struct {
@@ -328,7 +328,7 @@ type StorageBlock struct {
 
 	RedirectAddr      string `hcl:"redirect_addr,optional"`
 	ClusterAddr       string `hcl:"cluster_addr,optional"`
-	DisableClustering bool `hcl:"diable_clustering,optional"`
+	DisableClustering bool   `hcl:"diable_clustering,optional"`
 
 	// In-memory storage specific config
 	// (no additional config needed, but you could add cache size limits)
@@ -337,14 +337,14 @@ type StorageBlock struct {
 	Path string `hcl:"path,optional"` // File system path for file backend
 
 	// PostgreSQL storage specific config
-	ConnectionUrl        string   `hcl:"connection_url,optional"`
-	Table                string   `hcl:"table,optional"`                 // Table where data will be stored
-	MaxIdleConnections   int      `hcl:"max_idle_connections,optional"`  // The maximum number of connections in the idle connection pool
-	MaxParallel          string   `hcl:"max_parallel,optional"`          // The maximum number of concurrent requests to PostgreSQL
-	HAEnabled            string   `hcl:"ha_enabled,optional"`            
-	HATable              string   `hcl:"ha_table,optional"`              // The name of the table to use for storing High Availability information
-	SkipCreateTable      string   `hcl:"skip_create_table,optional"`
-	MaxConnectRetries    string   `hcl:"max_connect_retries,optional"`   // The maximum number of retries to perform when waiting for the database to be active
+	ConnectionUrl      string `hcl:"connection_url,optional"`
+	Table              string `hcl:"table,optional"`                // Table where data will be stored
+	MaxIdleConnections int    `hcl:"max_idle_connections,optional"` // The maximum number of connections in the idle connection pool
+	MaxParallel        string `hcl:"max_parallel,optional"`         // The maximum number of concurrent requests to PostgreSQL
+	HAEnabled          string `hcl:"ha_enabled,optional"`
+	HATable            string `hcl:"ha_table,optional"` // The name of the table to use for storing High Availability information
+	SkipCreateTable    string `hcl:"skip_create_table,optional"`
+	MaxConnectRetries  string `hcl:"max_connect_retries,optional"` // The maximum number of retries to perform when waiting for the database to be active
 }
 
 // Config returns the storage configuration as a map
@@ -465,6 +465,24 @@ func LoadConfig(configFile string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// DevConfig returns a default configuration suitable for dev mode.
+// It uses in-memory storage and a TCP listener on 127.0.0.1:8400.
+func DevConfig() *Config {
+	return &Config{
+		LogLevel: "trace",
+		Storage: &StorageBlock{
+			Type: "inmem",
+		},
+		Listeners: []ListenerBlock{
+			{
+				Type:    "tcp",
+				Address: "127.0.0.1:8400",
+			},
+		},
+		IPBindingPolicy: "disabled",
+	}
 }
 
 // GetListenerByType returns a listener by its type (label)

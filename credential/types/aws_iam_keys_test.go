@@ -133,7 +133,7 @@ func TestAWSIAMAccessKeysCredType_ValidateConfig_VaultSource(t *testing.T) {
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "unsupported mint_method",
+			errMsg:     "must be one of:",
 		},
 		{
 			name: "dynamic_aws without role_name",
@@ -162,7 +162,7 @@ func TestAWSIAMAccessKeysCredType_ValidateConfig_VaultSource(t *testing.T) {
 			},
 			sourceType: "unknown",
 			wantErr:    true,
-			errMsg:     "unsupported source type",
+			errMsg:     "require a local, vault, or aws source",
 		},
 	}
 

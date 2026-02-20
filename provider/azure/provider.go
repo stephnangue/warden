@@ -5,31 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httputil"
 	"strconv"
 	"strings"
 	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
 
 // azureBackend is the streaming backend for Azure provider operations
 type azureBackend struct {
 	*framework.StreamingBackend
-	logger      *logger.GatedLogger
-	proxy       *httputil.ReverseProxy
-	allowedHosts []string // Allowed Azure hosts for proxying
-	maxBodySize  int64
-	timeout      time.Duration
-	storageView  sdklogical.Storage
-
-	// Transparent mode fields
-	transparentMode bool   // Enable transparent mode for implicit JWT authentication
-	autoAuthPath    string // Path to JWT auth mount (e.g., "auth/jwt/")
-	defaultRole     string // Default role when not specified in URL
 }
 
 // extractToken extracts Warden token from Authorization Bearer header or X-Warden-Token header
@@ -50,25 +37,7 @@ func extractToken(r *http.Request) string {
 
 // Factory creates a new Azure provider backend using the logical.Factory pattern
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
-	b := &azureBackend{
-		logger:      conf.Logger.WithSubsystem("azure"),
-		storageView: conf.StorageView,
-	}
-
-	// Initialize reverse proxy
-	b.proxy = &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			// Request is already prepared by handleGateway - nothing to do here
-		},
-		Transport: sharedTransport,
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			b.logger.Error("proxy error",
-				logger.Err(err),
-				logger.String("target_url", r.URL.String()),
-			)
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		},
-	}
+	b := &azureBackend{}
 
 	// Create the streaming backend with gateway path for streaming
 	b.StreamingBackend = &framework.StreamingBackend{
@@ -113,15 +82,21 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		},
 	}
 
+	// Set common fields
+	b.Logger = conf.Logger.WithSubsystem("azure")
+	b.StorageView = conf.StorageView
+
+	// Initialize reverse proxy with Azure transport
+	b.StreamingBackend.InitProxy(sharedTransport)
+
 	// Register transport shutdown hook for process-level cleanup
 	if conf.RegisterShutdownHook != nil {
 		conf.RegisterShutdownHook("azure-transport", ShutdownHTTPTransport)
 	}
 
 	// Set defaults
-	b.allowedHosts = DefaultAllowedHosts
-	b.maxBodySize = DefaultMaxBodySize
-	b.timeout = DefaultTimeout
+	b.MaxBodySize = framework.DefaultMaxBodySize
+	b.Timeout = framework.DefaultTimeout
 
 	// Apply configuration if provided
 	if len(conf.Config) > 0 {
@@ -129,18 +104,13 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			return nil, fmt.Errorf("invalid configuration: %w", err)
 		}
 		parsedConfig := parseConfig(conf.Config)
-		b.allowedHosts = parsedConfig.AllowedHosts
-		b.maxBodySize = parsedConfig.MaxBodySize
-		b.timeout = parsedConfig.Timeout
-		b.transparentMode = parsedConfig.TransparentMode
-		b.autoAuthPath = parsedConfig.AutoAuthPath
-		b.defaultRole = parsedConfig.DefaultRole
+		b.MaxBodySize = parsedConfig.MaxBodySize
+		b.Timeout = parsedConfig.Timeout
 
-		// Sync transparent config with framework
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-			Enabled:      b.transparentMode,
-			AutoAuthPath: b.autoAuthPath,
-			DefaultRole:  b.defaultRole,
+			Enabled:      parsedConfig.TransparentMode,
+			AutoAuthPath: parsedConfig.AutoAuthPath,
+			DefaultRole:  parsedConfig.DefaultRole,
 		})
 	}
 
@@ -149,62 +119,56 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 
 // Initialize loads persisted config from storage
 func (b *azureBackend) Initialize(ctx context.Context) error {
-	if b.storageView == nil {
+	if b.StorageView == nil {
 		return nil
 	}
 
 	// Load persisted config from storage
-	entry, err := b.storageView.Get(ctx, "config")
+	entry, err := b.StorageView.Get(ctx, "config")
 	if err != nil {
 		return fmt.Errorf("failed to read config from storage: %w", err)
 	}
 	if entry != nil {
 		var config struct {
-			AllowedHosts    []string `json:"allowed_hosts"`
-			MaxBodySize     int64    `json:"max_body_size"`
-			Timeout         string   `json:"timeout"`
-			TransparentMode bool     `json:"transparent_mode"`
-			AutoAuthPath    string   `json:"auto_auth_path"`
-			DefaultRole     string   `json:"default_role"`
+			MaxBodySize     int64  `json:"max_body_size"`
+			Timeout         string `json:"timeout"`
+			TransparentMode bool   `json:"transparent_mode"`
+			AutoAuthPath    string `json:"auto_auth_path"`
+			DefaultRole     string `json:"default_role"`
 		}
 		if err := entry.DecodeJSON(&config); err != nil {
 			return fmt.Errorf("failed to decode config: %w", err)
 		}
-		b.allowedHosts = config.AllowedHosts
-		b.maxBodySize = config.MaxBodySize
-		b.transparentMode = config.TransparentMode
-		b.autoAuthPath = config.AutoAuthPath
-		b.defaultRole = config.DefaultRole
+		b.MaxBodySize = config.MaxBodySize
 		if config.Timeout != "" {
 			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
-				b.timeout = timeout
+				b.Timeout = timeout
 			}
 		}
 
-		// Sync transparent config with framework
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-			Enabled:      b.transparentMode,
-			AutoAuthPath: b.autoAuthPath,
-			DefaultRole:  b.defaultRole,
+			Enabled:      config.TransparentMode,
+			AutoAuthPath: config.AutoAuthPath,
+			DefaultRole:  config.DefaultRole,
 		})
 	} else {
 		// No persisted config — persist the defaults so a newly enabled
 		// Azure provider is immediately configured and readable.
+		tc := b.TransparentConfig
 		defaultEntry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"allowed_hosts":    b.allowedHosts,
-			"max_body_size":    b.maxBodySize,
-			"timeout":          b.timeout.String(),
-			"transparent_mode": b.transparentMode,
-			"auto_auth_path":   b.autoAuthPath,
-			"default_role":     b.defaultRole,
+			"max_body_size":    b.MaxBodySize,
+			"timeout":          b.Timeout.String(),
+			"transparent_mode": tc.Enabled,
+			"auto_auth_path":   tc.AutoAuthPath,
+			"default_role":     tc.DefaultRole,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create default config entry: %w", err)
 		}
-		if err := b.storageView.Put(ctx, defaultEntry); err != nil {
+		if err := b.StorageView.Put(ctx, defaultEntry); err != nil {
 			return fmt.Errorf("failed to persist default config: %w", err)
 		}
-		b.logger.Info("persisted default configuration for new Azure provider")
+		b.Logger.Info("persisted default configuration for new Azure provider")
 	}
 	return nil
 }
@@ -248,7 +212,6 @@ func (b *azureBackend) handleTransparentGatewayStreaming(ctx context.Context, re
 // ValidateConfig validates Azure provider-specific configuration
 func ValidateConfig(config map[string]any) error {
 	allowedKeys := map[string]bool{
-		"allowed_hosts":    true,
 		"max_body_size":    true,
 		"timeout":          true,
 		"transparent_mode": true,
@@ -259,22 +222,7 @@ func ValidateConfig(config map[string]any) error {
 	// Check for unknown keys
 	for key := range config {
 		if !allowedKeys[key] {
-			return fmt.Errorf("unknown configuration key: %s (allowed: allowed_hosts, max_body_size, timeout, transparent_mode, auto_auth_path, default_role)", key)
-		}
-	}
-
-	// Validate allowed_hosts
-	if hosts, ok := config["allowed_hosts"]; ok {
-		switch v := hosts.(type) {
-		case []any:
-			for i, h := range v {
-				if _, ok := h.(string); !ok {
-					return fmt.Errorf("allowed_hosts[%d] must be a string", i)
-				}
-			}
-		case []string:
-		default:
-			return fmt.Errorf("allowed_hosts must be an array of strings")
+			return fmt.Errorf("unknown configuration key: %s (allowed: max_body_size, timeout, transparent_mode, auto_auth_path, default_role)", key)
 		}
 	}
 
@@ -368,23 +316,42 @@ const azureBackendHelp = `
 The Azure provider enables proxying requests to Azure services with automatic
 credential management and Bearer token injection.
 
-Requests to the gateway/ path are proxied to Azure with the appropriate
-Bearer token injected into the Authorization header.
+Clients authenticate to Warden with a session token (via X-Warden-Token or
+Authorization: Bearer header). The provider obtains an Azure AD Bearer token
+from the credential manager — minted by exchanging the spec's pre-provisioned
+service principal credentials — and injects it into the proxied request's
+Authorization header. This allows Warden to broker Azure access without
+exposing SP credentials to clients.
 
 The gateway path format is:
   /azure/gateway/{azure-host}/{path}
+
+The {azure-host} segment determines which Azure endpoint receives the request.
+Any Azure service hostname is accepted; the provider proxies to it over HTTPS.
 
 Examples:
   /azure/gateway/management.azure.com/subscriptions?api-version=2022-12-01
   /azure/gateway/myvault.vault.azure.net/secrets/mysecret?api-version=7.4
   /azure/gateway/mystorage.blob.core.windows.net/container/blob
+  /azure/gateway/graph.microsoft.com/v1.0/me
 
-Transparent mode allows implicit JWT authentication via role-based paths:
+Transparent mode allows implicit JWT authentication via role-based paths,
+eliminating the need for clients to perform an explicit Warden login:
   /azure/role/{role}/gateway/{azure-host}/{path}
 
-Supported Azure services:
+The core extracts the role from the URL, performs implicit JWT auth against
+the configured auth mount, and issues a short-lived token for the request.
+
+Supported Azure services (non-exhaustive):
 - Azure Resource Manager (management.azure.com)
 - Azure Key Vault (*.vault.azure.net)
 - Azure Storage (*.blob.core.windows.net, *.queue.core.windows.net, etc.)
 - Microsoft Graph (graph.microsoft.com)
+
+Configuration:
+- max_body_size: Maximum request body size (default: 10MB, max: 100MB)
+- timeout: Request timeout duration (e.g., '30s', '5m')
+- transparent_mode: Enable implicit JWT authentication (default: false)
+- auto_auth_path: JWT auth mount path for transparent mode (e.g., 'auth/jwt/')
+- default_role: Fallback role when not specified in the URL path
 `

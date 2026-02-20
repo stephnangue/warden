@@ -298,6 +298,12 @@ func (c *Core) mountInternal(ctx context.Context, entry *MountEntry, updateStora
 	c.mountsLock.Lock()
 	defer c.mountsLock.Unlock()
 
+	return c.mountInternalLocked(ctx, entry, updateStorage)
+}
+
+// mountInternalLocked is the lock-free implementation of mountInternal.
+// The caller must hold c.mountsLock.
+func (c *Core) mountInternalLocked(ctx context.Context, entry *MountEntry, updateStorage bool) error {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
 		return err

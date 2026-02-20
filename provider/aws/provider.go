@@ -5,15 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httputil"
 	"strconv"
 	"strings"
 	"time"
 
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/aws/processor"
 	"github.com/stephnangue/warden/provider/aws/processor/s3"
@@ -29,15 +26,10 @@ type HostRewrite struct {
 // awsBackend is the streaming backend for AWS provider operations
 type awsBackend struct {
 	*framework.StreamingBackend
-	logger            *logger.GatedLogger
-	proxy             *httputil.ReverseProxy
 	signer            *v4.Signer
 	s3Signer          *v4.Signer // Signer for S3/S3-Control with DisableURIPathEscaping
 	proxyDomains      []string
-	maxBodySize       int64
-	timeout           time.Duration
 	processorRegistry *processor.ProcessorRegistry
-	storageView       sdklogical.Storage
 }
 
 // extractToken extracts Access Key ID from AWS SigV4 Authorization header
@@ -75,9 +67,7 @@ func extractAccessKeyID(authHeader string) string {
 // Factory creates a new AWS provider backend using the logical.Factory pattern
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
 	b := &awsBackend{
-		logger:      conf.Logger.WithSubsystem("aws"),
-		signer:      v4.NewSigner(),
-		storageView: conf.StorageView,
+		signer: v4.NewSigner(),
 		// S3 and S3-Control services require DisableURIPathEscaping because
 		// AWS SDKs sign these requests without additional path escaping.
 		// Without this, paths with special characters (like ARNs with colons)
@@ -85,25 +75,6 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		s3Signer: v4.NewSigner(func(o *v4.SignerOptions) {
 			o.DisableURIPathEscaping = true
 		}),
-	}
-
-	// Initialize proxy
-	// Note: Director is intentionally empty because we modify req.HTTPRequest directly
-	// in processRequest before calling ServeHTTP. The ReverseProxy will use the
-	// already-modified request URL, Host, and headers.
-	b.proxy = &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			// Request is already prepared by processRequest - nothing to do here
-			// The URL, Host, and headers have been set before ServeHTTP is called
-		},
-		Transport: sharedTransport,
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			b.logger.Error("proxy error",
-				logger.Err(err),
-				logger.String("target_url", r.URL.String()),
-			)
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		},
 	}
 
 	// Create the streaming backend with gateway path for streaming
@@ -131,6 +102,13 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		},
 	}
 
+	// Set common fields
+	b.Logger = conf.Logger.WithSubsystem("aws")
+	b.StorageView = conf.StorageView
+
+	// Initialize reverse proxy with AWS transport
+	b.StreamingBackend.InitProxy(sharedTransport)
+
 	// Register transport shutdown hook for process-level cleanup
 	if conf.RegisterShutdownHook != nil {
 		conf.RegisterShutdownHook("aws-transport", ShutdownHTTPTransport)
@@ -143,17 +121,17 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		}
 		parsedConfig := parseConfig(conf.Config)
 		b.proxyDomains = parsedConfig.ProxyDomains
-		b.maxBodySize = parsedConfig.MaxBodySize
-		b.timeout = parsedConfig.Timeout
+		b.MaxBodySize = parsedConfig.MaxBodySize
+		b.Timeout = parsedConfig.Timeout
 		b.initializeProcessors()
 	}
 
 	// Ensure defaults are set even when no config is provided
-	if b.maxBodySize <= 0 {
-		b.maxBodySize = DefaultMaxBodySize
+	if b.MaxBodySize <= 0 {
+		b.MaxBodySize = framework.DefaultMaxBodySize
 	}
-	if b.timeout <= 0 {
-		b.timeout = DefaultTimeout
+	if b.Timeout <= 0 {
+		b.Timeout = framework.DefaultTimeout
 	}
 
 	return b, nil
@@ -161,12 +139,12 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 
 // Initialize loads persisted config from storage
 func (b *awsBackend) Initialize(ctx context.Context) error {
-	if b.storageView == nil {
+	if b.StorageView == nil {
 		return nil
 	}
 
 	// Load persisted config from storage
-	entry, err := b.storageView.Get(ctx, "config")
+	entry, err := b.StorageView.Get(ctx, "config")
 	if err != nil {
 		return fmt.Errorf("failed to read config from storage: %w", err)
 	}
@@ -180,10 +158,10 @@ func (b *awsBackend) Initialize(ctx context.Context) error {
 			return fmt.Errorf("failed to decode config: %w", err)
 		}
 		b.proxyDomains = config.ProxyDomains
-		b.maxBodySize = config.MaxBodySize
+		b.MaxBodySize = config.MaxBodySize
 		if config.Timeout != "" {
 			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
-				b.timeout = timeout
+				b.Timeout = timeout
 			}
 		}
 		b.initializeProcessors()
@@ -208,10 +186,10 @@ func (b *awsBackend) initializeProcessors() {
 	b.processorRegistry = processor.NewProcessorRegistry()
 
 	// Register processors
-	b.processorRegistry.Register(s3.NewS3AccessPointProcessor(b.proxyDomains, b.logger))
-	b.processorRegistry.Register(s3.NewS3ControlProcessor(b.proxyDomains, b.logger))
-	b.processorRegistry.Register(s3.NewS3Processor(b.proxyDomains, b.logger))
-	b.processorRegistry.Register(processor.NewGenericAWSProcessor(b.proxyDomains, b.logger))
+	b.processorRegistry.Register(s3.NewS3AccessPointProcessor(b.proxyDomains, b.Logger))
+	b.processorRegistry.Register(s3.NewS3ControlProcessor(b.proxyDomains, b.Logger))
+	b.processorRegistry.Register(s3.NewS3Processor(b.proxyDomains, b.Logger))
+	b.processorRegistry.Register(processor.NewGenericAWSProcessor(b.proxyDomains, b.Logger))
 }
 
 // ValidateConfig validates AWS provider-specific configuration
@@ -308,8 +286,29 @@ func (b *awsBackend) SensitiveConfigFields() []string {
 
 const awsBackendHelp = `
 The AWS provider enables proxying requests to AWS services with automatic
-credential management and signature conversion.
+credential management and SigV4 signature conversion.
 
-Requests to the gateway/ path are proxied to AWS with the appropriate
-SigV4 signature applied.
+Clients sign requests with their Warden-issued AWS access keys. The provider
+verifies the incoming signature, re-signs the request with real AWS credentials
+from the credential manager, and proxies it to the target AWS service. This
+allows Warden to broker access without exposing real AWS credentials to clients.
+
+The gateway path format is:
+  /aws/gateway
+
+Clients set the Host header or URL to the target AWS endpoint; the provider
+reads the service and region from the SigV4 Authorization header.
+
+Examples:
+  PUT /aws/gateway  (Host: my-bucket.s3.us-east-1.amazonaws.com)
+  POST /aws/gateway (Host: dynamodb.us-east-1.amazonaws.com)
+  GET /aws/gateway  (Host: sts.amazonaws.com)
+
+Service-specific processors handle URL rewriting for virtual-hosted S3 buckets,
+S3-Control ARN paths, and other services that require special treatment.
+
+Configuration:
+- proxy_domains: Allowlist of permitted AWS service domains
+- max_body_size: Maximum request body size (default: 10MB, max: 100MB)
+- timeout: Request timeout duration (e.g., '30s', '5m')
 `

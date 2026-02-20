@@ -150,6 +150,10 @@ func (t *mockCredentialType) Metadata() TypeMetadata {
 	}
 }
 
+func (t *mockCredentialType) ConfigSchema() []*FieldValidator {
+	return nil // No schema required for mock
+}
+
 func (t *mockCredentialType) ValidateConfig(config map[string]string, sourceType string) error {
 	return nil
 }
@@ -211,7 +215,7 @@ func createTestManager(t *testing.T) (*Manager, *mockConfigStore, *mockSourceDri
 	configStore := newMockConfigStore()
 
 	// Register mock credential type
-	mockType := newMockCredentialType(TypeDatabaseUserPass, CategoryDatabase)
+	mockType := newMockCredentialType(TypeVaultToken, CategoryAPI)
 	err := typeRegistry.Register(mockType)
 	require.NoError(t, err)
 
@@ -267,7 +271,7 @@ func TestManager_IssueCredential_Success(t *testing.T) {
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
-		Type:   TypeDatabaseUserPass,
+		Type:   TypeVaultToken,
 		Source: "test-source",
 		Config: map[string]string{},
 	})
@@ -280,8 +284,8 @@ func TestManager_IssueCredential_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cred)
 
-	assert.Equal(t, TypeDatabaseUserPass, cred.Type)
-	assert.Equal(t, CategoryDatabase, cred.Category)
+	assert.Equal(t, TypeVaultToken, cred.Type)
+	assert.Equal(t, CategoryAPI, cred.Category)
 	assert.Equal(t, tokenID, cred.TokenID)
 	assert.Equal(t, "test-spec", cred.SpecName)
 	assert.Equal(t, "test-user", cred.Data["username"])
@@ -300,7 +304,7 @@ func TestManager_IssueCredential_CacheHit(t *testing.T) {
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
-		Type:   TypeDatabaseUserPass,
+		Type:   TypeVaultToken,
 		Source: "test-source",
 		Config: map[string]string{},
 	})
@@ -343,7 +347,7 @@ func TestManager_IssueCredential_SourceNotFound(t *testing.T) {
 	// Add spec without corresponding source
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
-		Type:   TypeDatabaseUserPass,
+		Type:   TypeVaultToken,
 		Source: "nonexistent-source",
 		Config: map[string]string{},
 	})
@@ -367,7 +371,7 @@ func TestManager_IssueCredential_NoNamespace(t *testing.T) {
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
-		Type:   TypeDatabaseUserPass,
+		Type:   TypeVaultToken,
 		Source: "test-source",
 		Config: map[string]string{},
 	})
@@ -391,7 +395,7 @@ func TestManager_RevokeByExpiration_Success(t *testing.T) {
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
-		Type:   TypeDatabaseUserPass,
+		Type:   TypeVaultToken,
 		Source: "test-source",
 		Config: map[string]string{},
 	})
@@ -402,13 +406,8 @@ func TestManager_RevokeByExpiration_Success(t *testing.T) {
 	cred, err := manager.IssueCredential(ctx, "token-revoke", "test-spec", time.Hour)
 	require.NoError(t, err)
 
-	// Create the driver instance so GetDriver will find it (with namespace context)
-	_, _, err = manager.driverRegistry.CreateDriver(ctx, "test-source", &CredSource{
-		Name:   "test-source",
-		Type:   SourceTypeLocal,
-		Config: map[string]string{},
-	})
-	require.NoError(t, err)
+	// Driver is automatically created during IssueCredential, no need to manually create it
+	// The GetOrCreateDriver call in RevokeByExpiration will find it
 
 	// Revoke by expiration
 	credentialID := cred.CredentialID
@@ -501,7 +500,7 @@ func TestManager_IssueCredential_Concurrent(t *testing.T) {
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
-		Type:   TypeDatabaseUserPass,
+		Type:   TypeVaultToken,
 		Source: "test-source",
 		Config: map[string]string{},
 	})
@@ -564,7 +563,7 @@ func TestManager_IssueCredential_Timeout(t *testing.T) {
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
-		Type:   TypeDatabaseUserPass,
+		Type:   TypeVaultToken,
 		Source: "test-source",
 		Config: map[string]string{},
 	})
@@ -600,7 +599,7 @@ func TestManager_IssueCredential_ErrorNotCached(t *testing.T) {
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
-		Type:   TypeDatabaseUserPass,
+		Type:   TypeVaultToken,
 		Source: "test-source",
 		Config: map[string]string{},
 	})
@@ -668,7 +667,7 @@ func TestManager_SpecExists(t *testing.T) {
 	t.Run("spec exists", func(t *testing.T) {
 		configStore.AddSpec(&CredSpec{
 			Name:   "existing-spec",
-			Type:   TypeDatabaseUserPass,
+			Type:   TypeVaultToken,
 			Source: "test-source",
 			Config: map[string]string{},
 		})
@@ -692,9 +691,7 @@ func TestManager_SpecExists(t *testing.T) {
 		require.NoError(t, err)
 		defer managerWithNilStore.Stop()
 
-		// configStore is nil, so set it to nil explicitly for this test
-		managerWithNilStore.configStore = nil
-
+		// configStore is nil (passed to NewManager), so SpecResolver will handle nil gracefully
 		exists := managerWithNilStore.SpecExists(ctx, "any-spec")
 		assert.False(t, exists, "should return false when config store is nil")
 	})

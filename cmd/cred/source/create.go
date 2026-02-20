@@ -42,9 +42,14 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	resolvedConfig, err := helpers.ResolveFileRefs(createConfig)
+	if err != nil {
+		return err
+	}
+
 	input := &api.CreateCredentialSourceInput{
 		Type:   createType,
-		Config: createConfig,
+		Config: resolvedConfig,
 	}
 
 	if createRotationPeriod != "" {

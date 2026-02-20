@@ -533,3 +533,54 @@ func TestExpirationManager_CallbackPanicRecovery(t *testing.T) {
 	// Entry should still be marked irrevocable
 	assert.Equal(t, int64(1), m.GetIrrevocableCount())
 }
+
+func TestExpirationManager_UnregisterByNamespace(t *testing.T) {
+	m := createTestExpirationManager(t)
+	defer m.Stop()
+
+	ctx1 := createTestNamespaceContext("ns-1")
+	ctx2 := createTestNamespaceContext("ns-2")
+
+	// Register tokens and credentials in both namespaces
+	require.NoError(t, m.RegisterToken(ctx1, "token-1a", 10*time.Minute, false))
+	require.NoError(t, m.RegisterToken(ctx1, "token-1b", 10*time.Minute, false))
+	require.NoError(t, m.RegisterCredential(ctx1, "cred-1a", "ns-1:tok", 5*time.Minute, "lease-1", "src", "vault", "spec", true))
+	require.NoError(t, m.RegisterToken(ctx2, "token-2a", 10*time.Minute, false))
+
+	assert.Equal(t, int64(4), m.GetPendingCount())
+
+	// Unregister all entries for ns-1
+	m.UnregisterByNamespace("ns-1")
+
+	// ns-1 entries should be gone
+	assert.Equal(t, int64(1), m.GetPendingCount())
+	assert.Equal(t, int64(1), m.GetPendingTokenCount())
+	assert.Equal(t, int64(0), m.GetPendingCredentialCount())
+}
+
+func TestExpirationManager_UnregisterByNamespace_NonExpiring(t *testing.T) {
+	m := createTestExpirationManager(t)
+	defer m.Stop()
+
+	ctx1 := createTestNamespaceContext("ns-1")
+	ctx2 := createTestNamespaceContext("ns-2")
+
+	// Register non-expiring tokens (TTL=0)
+	require.NoError(t, m.RegisterToken(ctx1, "token-noexp-1", 0, false))
+	require.NoError(t, m.RegisterToken(ctx2, "token-noexp-2", 0, false))
+
+	assert.Equal(t, int64(2), m.GetNonexpiringCount())
+
+	m.UnregisterByNamespace("ns-1")
+
+	assert.Equal(t, int64(1), m.GetNonexpiringCount())
+}
+
+func TestExpirationManager_UnregisterByNamespace_Empty(t *testing.T) {
+	m := createTestExpirationManager(t)
+	defer m.Stop()
+
+	// Should not panic on empty namespace
+	m.UnregisterByNamespace("nonexistent")
+	assert.Equal(t, int64(0), m.GetPendingCount())
+}

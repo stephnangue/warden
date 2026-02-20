@@ -32,30 +32,60 @@ Every credential issuance, every API call, every action is logged with full iden
 ### Prerequisites
 
 - Go 1.25.1 or later
-- Docker and Docker Compose
 - Make
 
-### Quick Start
+### Quick Start (Dev Mode)
 
-1. **Clone the repository**:
+Dev mode runs Warden entirely in-memory with automatic initialization and unsealing. No external dependencies required — perfect for exploring and testing.
+
+1. **Clone and build**:
 ```bash
 git clone https://github.com/stephnangue/warden.git
 cd warden
+go build -o warden ./cmd
 ```
 
-2. **Start dependencies** (Vault, PostgreSQL, etc.):
+2. **Start Warden in dev mode**:
 ```bash
-make deps-up
+./warden server --dev
 ```
 
-3. **Build and run Warden**:
+You can also set a custom root token:
 ```bash
-make brd
+./warden server --dev --dev-root-token=my-root-token
+```
+
+3. **In another terminal, configure the client**:
+```bash
+export WARDEN_ADDR="http://127.0.0.1:8400"
+export WARDEN_TOKEN="<root-token-from-output>"
 ```
 
 4. **Explore available commands**:
 ```bash
 ./warden --help
+```
+
+> **Warning**: Dev mode stores all data in-memory. Everything is lost on restart. Do not use dev mode in production.
+
+### Production Setup
+
+For production, Warden requires a configuration file and external dependencies (PostgreSQL for storage, OpenBao for seal).
+
+1. **Start dependencies** (OpenBao, PostgreSQL, etc.):
+```bash
+make deps-up
+```
+
+2. **Build and run with a config file**:
+```bash
+make brd
+```
+
+Or manually:
+```bash
+go build -o warden ./cmd
+./warden server --config=./warden.local.hcl
 ```
 
 ### Configuration
@@ -64,7 +94,7 @@ Warden uses HCL configuration files. See `warden.local.hcl` for a development ex
 
 - **Storage backend**: PostgreSQL or in-memory
 - **Listener**: TCP or Unix socket with optional TLS
-- **Providers**: Cloud providers (AWS)
+- **Providers**: Cloud and SaaS providers (AWS, Azure, Vault, GitHub, GCP, GitLab)
 - **Auth methods**: JWT/OIDC for workload authentication
 
 ## Contribute to Warden
@@ -233,51 +263,3 @@ git commit -m "Add support for Azure provider
 ```bash
 git push origin feature/your-feature-name
 ```
-
-### Make Commands Reference
-
-Run `make help` for all available commands:
-
-#### Local Development
-| Command | Description |
-|---------|-------------|
-| `make deps-up` | Start dependencies (Vault, PostgreSQL, etc.) |
-| `make deps-down` | Stop dependencies |
-| `make deps-logs` | View dependency logs |
-| `make brd` | Build and run (with tests) |
-| `make brd-fast` | Build and run (no tests) |
-| `make dev-watch` | Hot reload development |
-
-#### Docker Commands
-| Command | Description |
-|---------|-------------|
-| `make build` | Build with cache |
-| `make build-fast` | Parallel build |
-| `make build-no-cache` | Clean build |
-| `make up` | Start Warden |
-| `make down` | Stop Warden |
-| `make restart` | Restart Warden |
-
-#### Testing
-| Command | Description |
-|---------|-------------|
-| `make test-unit` | Run unit tests |
-| `make test-integration` | Run integration tests |
-
-#### Database
-| Command | Description |
-|---------|-------------|
-| `make warden-db-shell` | PostgreSQL shell |
-| `make warden-db-logs` | Database logs |
-| `make reset-warden-db` | Reset database |
-
-#### Maintenance
-| Command | Description |
-|---------|-------------|
-| `make clean` | Clean containers and volumes |
-| `make clean-all` | Deep clean (including cache) |
-| `make status` | Show container status |
-
-## License
-
-[Add license information]

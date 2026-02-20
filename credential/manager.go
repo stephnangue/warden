@@ -15,17 +15,36 @@ import (
 // DefaultIssuanceTimeout is the default timeout for credential issuance operations
 const DefaultIssuanceTimeout = 30 * time.Second
 
-// Manager manages credential issuance with caching and type safety for all namespaces
-// The manager is global and handles credentials across all namespaces using namespace-aware cache keys
+// Manager manages credential issuance with caching and type safety for all namespaces.
+// It is the central coordinator between the credential subsystems: when a gateway request
+// needs credentials, the core calls IssueCredential which orchestrates the full pipeline:
+//
+//  1. Look up the CredSpec (via SpecResolver) to determine type, source, and parameters
+//  2. Resolve or lazily create the SourceDriver (via DriverCoordinator) for the referenced CredSource
+//  3. Call driver.MintCredential to obtain raw credential data from the external backend
+//  4. Parse and validate the raw data (via CredentialParser) through the registered credential Type handler
+//  5. Cache the result keyed by {namespace-uuid}:{tokenID} using Ristretto
+//  6. Optionally register the credential with an ExpirationRegistrar for timer-based revocation
+//
+// The manager is global (one per Warden process) and uses namespace-aware cache keys so
+// credentials from different namespaces never collide. Concurrent requests for the same
+// cache key are coalesced via singleflight to avoid redundant minting calls.
+//
+// Architecture: The Manager delegates to focused components for better testability:
+//   - SpecResolver: Handles spec lookup from config store
+//   - DriverCoordinator: Handles driver lifecycle (get/create/close)
+//   - MintingService: Handles credential minting with automatic cleanup
+//   - CredentialParser: Handles credential parsing and validation
 type Manager struct {
-	log            *logger.GatedLogger
-	cache          *ristretto.Cache[string, *Credential] // key: {namespace-uuid}:{tokenID} -> value: Credential
-	typeRegistry   *TypeRegistry
-	driverRegistry *DriverRegistry
-	group          singleflight.Group
+	log   *logger.GatedLogger
+	cache *ristretto.Cache[string, *Credential] // key: {namespace-uuid}:{tokenID} -> value: Credential
+	group singleflight.Group
 
-	// Configuration store accessor (provides specs and sources)
-	configStore ConfigStoreAccessor
+	// Focused components (extracted from Manager for better testability)
+	specResolver      *SpecResolver
+	driverCoordinator *DriverCoordinator
+	mintingService    *MintingService
+	credentialParser  *CredentialParser
 
 	// Optional expiration registrar for timer-based TTL enforcement
 	// When set, newly issued credentials are registered for expiration
@@ -67,12 +86,19 @@ func NewManager(
 	configStore ConfigStoreAccessor,
 	logger *logger.GatedLogger,
 ) (*Manager, error) {
+	// Create focused components for better testability
+	specResolver := NewSpecResolver(configStore, logger.WithSubsystem("spec-resolver"))
+	driverCoordinator := NewDriverCoordinator(driverRegistry, configStore, logger.WithSubsystem("driver-coordinator"))
+	mintingService := NewMintingService(logger.WithSubsystem("minting-service"))
+	credentialParser := NewCredentialParser(typeRegistry, logger.WithSubsystem("credential-parser"))
+
 	m := &Manager{
-		log:             logger,
-		typeRegistry:    typeRegistry,
-		driverRegistry:  driverRegistry,
-		configStore:     configStore,
-		issuanceTimeout: DefaultIssuanceTimeout,
+		log:               logger,
+		specResolver:      specResolver,
+		driverCoordinator: driverCoordinator,
+		mintingService:    mintingService,
+		credentialParser:  credentialParser,
+		issuanceTimeout:   DefaultIssuanceTimeout,
 	}
 
 	// Create Ristretto cache
@@ -182,43 +208,30 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 
 // issueCredential performs the actual credential issuance from the source
 func (m *Manager) issueCredential(ctx context.Context, specName string) (*Credential, error) {
-	// Step 1: Lookup credential spec from config store
-	spec, err := m.configStore.GetSpec(ctx, specName)
-	if err != nil {
-		return nil, fmt.Errorf("credential spec '%s' not found: %w", specName, err)
-	}
-
-	// Step 2: Get or create source driver
-	driver, err := m.GetOrCreateDriver(ctx, spec.Source)
+	// Step 1: Resolve credential spec using SpecResolver
+	spec, err := m.specResolver.ResolveSpec(ctx, specName)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 3: Mint raw credential data using the driver
-	rawData, leaseTTL, leaseID, err := driver.MintCredential(ctx, spec)
+	// Step 2: Get or create source driver using DriverCoordinator
+	driver, err := m.driverCoordinator.GetOrCreateDriver(ctx, spec.Source)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch credential: %w", err)
+		return nil, err
 	}
 
-	// Step 4: Get credential type handler
-	credType, err := m.typeRegistry.GetByName(spec.Type)
+	// Step 3: Mint credential with automatic cleanup, then parse and validate
+	// MintingService handles orphaned lease cleanup if parsing/validation fails
+	var cred *Credential
+	err = m.mintingService.MintWithCleanup(ctx, driver, spec, func(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
+		// Parse and validate the minted credential
+		var parseErr error
+		cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, leaseTTL, leaseID, driver)
+		return parseErr
+	})
+
 	if err != nil {
-		return nil, fmt.Errorf("credential type '%s' not found: %w", spec.Type, err)
-	}
-
-	// Step 5: Parse raw data into structured credential
-	cred, err := credType.Parse(rawData, leaseTTL, leaseID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse credential: %w", err)
-	}
-
-	// Step 6: Set source information
-	cred.SourceName = spec.Source
-	cred.SourceType = driver.Type()
-
-	// Step 7: Validate credential
-	if err := credType.Validate(cred); err != nil {
-		return nil, fmt.Errorf("credential validation failed: %w", err)
+		return nil, err
 	}
 
 	return cred, nil
@@ -294,7 +307,8 @@ func (m *Manager) revokeLeaseAtSource(ctx context.Context, revocable bool, lease
 	}
 
 	// Get or create driver - it may not exist after server restart
-	driver, err := m.GetOrCreateDriver(ctx, sourceName)
+	// Delegate to DriverCoordinator for lifecycle management
+	driver, err := m.driverCoordinator.GetOrCreateDriver(ctx, sourceName)
 	if err != nil {
 		m.log.Warn("failed to get driver for credential revocation",
 			logger.String("source_name", sourceName),
@@ -315,40 +329,26 @@ func (m *Manager) revokeLeaseAtSource(ctx context.Context, revocable bool, lease
 // SpecExists checks if a credential spec exists and is valid.
 // Returns true if the spec exists and can be retrieved without error.
 func (m *Manager) SpecExists(ctx context.Context, specName string) bool {
-	if m.configStore == nil {
-		return false
-	}
-	spec, err := m.configStore.GetSpec(ctx, specName)
-	return err == nil && spec != nil
+	return m.specResolver.SpecExists(ctx, specName)
 }
 
 // GetOrCreateDriver retrieves an existing driver or creates one if it doesn't exist.
 // This is needed during revocation after server restart when drivers aren't cached yet.
+// Delegates to DriverCoordinator for lifecycle management.
 func (m *Manager) GetOrCreateDriver(ctx context.Context, sourceName string) (SourceDriver, error) {
-	// First try to get existing driver
-	if driver, ok := m.driverRegistry.GetDriver(ctx, sourceName); ok {
-		return driver, nil
-	}
+	return m.driverCoordinator.GetOrCreateDriver(ctx, sourceName)
+}
 
-	// Driver doesn't exist, fetch source config and create it
-	credSource, err := m.configStore.GetSource(ctx, sourceName)
-	if err != nil {
-		return nil, fmt.Errorf("source '%s' not found: %w", sourceName, err)
-	}
+// CloseDriver closes and removes a driver instance by source name.
+// This should be called when a source is deleted or updated to prevent resource leaks.
+// Delegates to DriverCoordinator for lifecycle management.
+func (m *Manager) CloseDriver(ctx context.Context, sourceName string) error {
+	return m.driverCoordinator.CloseDriver(ctx, sourceName)
+}
 
-	driver, created, err := m.driverRegistry.CreateDriver(ctx, sourceName, credSource)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create driver for source '%s': %w", sourceName, err)
-	}
-
-	// Only log when a new driver was actually created (not when returning existing)
-	if created {
-		ns, _ := namespace.FromContext(ctx)
-		m.log.Debug("credential source driver created",
-			logger.String("namespace", ns.ID),
-			logger.String("source_name", sourceName),
-			logger.String("source_type", credSource.Type))
-	}
-
-	return driver, nil
+// CloseAllDriversForNamespace closes and removes all driver instances for a given namespace.
+// This should be called when a namespace is deleted to prevent resource leaks.
+// Delegates to DriverCoordinator for lifecycle management.
+func (m *Manager) CloseAllDriversForNamespace(ctx context.Context) (int, error) {
+	return m.driverCoordinator.CloseAllForNamespace(ctx)
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/framework"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -33,8 +34,8 @@ func TestParseConfig(t *testing.T) {
 			config: map[string]any{},
 			expected: ProviderConfig{
 				VaultAddress:  "",
-				MaxBodySize:   DefaultMaxBodySize,
-				Timeout:       DefaultTimeout,
+				MaxBodySize:   framework.DefaultMaxBodySize,
+				Timeout:       framework.DefaultTimeout,
 				TLSSkipVerify: false,
 			},
 		},
@@ -46,7 +47,7 @@ func TestParseConfig(t *testing.T) {
 			},
 			expected: ProviderConfig{
 				VaultAddress:  "https://vault.example.com:8200",
-				MaxBodySize:   DefaultMaxBodySize,
+				MaxBodySize:   framework.DefaultMaxBodySize,
 				Timeout:       45 * time.Second,
 				TLSSkipVerify: false,
 			},
@@ -60,7 +61,7 @@ func TestParseConfig(t *testing.T) {
 			expected: ProviderConfig{
 				VaultAddress:  "https://vault.example.com:8200",
 				MaxBodySize:   1000000,
-				Timeout:       DefaultTimeout,
+				Timeout:       framework.DefaultTimeout,
 				TLSSkipVerify: false,
 			},
 		},
@@ -72,8 +73,8 @@ func TestParseConfig(t *testing.T) {
 			},
 			expected: ProviderConfig{
 				VaultAddress:  "https://vault.example.com:8200",
-				MaxBodySize:   DefaultMaxBodySize,
-				Timeout:       DefaultTimeout,
+				MaxBodySize:   framework.DefaultMaxBodySize,
+				Timeout:       framework.DefaultTimeout,
 				TLSSkipVerify: true,
 			},
 		},
@@ -86,8 +87,8 @@ func TestParseConfig(t *testing.T) {
 			},
 			expected: ProviderConfig{
 				VaultAddress:  "https://vault.example.com:8200",
-				MaxBodySize:   DefaultMaxBodySize,
-				Timeout:       DefaultTimeout,
+				MaxBodySize:   framework.DefaultMaxBodySize,
+				Timeout:       framework.DefaultTimeout,
 				TLSSkipVerify: false,
 			},
 		},
@@ -99,8 +100,8 @@ func TestParseConfig(t *testing.T) {
 			},
 			expected: ProviderConfig{
 				VaultAddress:  "https://vault.example.com:8200",
-				MaxBodySize:   DefaultMaxBodySize,
-				Timeout:       DefaultTimeout,
+				MaxBodySize:   framework.DefaultMaxBodySize,
+				Timeout:       framework.DefaultTimeout,
 				TLSSkipVerify: false,
 			},
 		},
@@ -113,7 +114,7 @@ func TestParseConfig(t *testing.T) {
 			expected: ProviderConfig{
 				VaultAddress:  "https://vault.example.com:8200",
 				MaxBodySize:   10485760,
-				Timeout:       DefaultTimeout,
+				Timeout:       framework.DefaultTimeout,
 				TLSSkipVerify: false,
 			},
 		},

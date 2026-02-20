@@ -33,8 +33,9 @@ var (
 
 // CredentialConfigStoreConfig holds configuration for the credential config store
 type CredentialConfigStoreConfig struct {
-	CacheMaxCost     int64 // Maximum cache cost in bytes (default: 50 MB)
-	CacheNumCounters int64 // Number of counters for Ristretto (default: 1 million)
+	CacheMaxCost         int64 // Maximum cache cost in bytes (default: 50 MB)
+	CacheNumCounters     int64 // Number of counters for Ristretto (default: 1 million)
+	SkipSpecVerification bool  // Skip SpecVerifier validation (for testing only)
 }
 
 // DefaultCredConfigStoreConfig returns the default configuration
@@ -560,6 +561,15 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 		return ErrSourceNotFound
 	}
 
+	// Close old driver instance since config has changed
+	// This ensures the driver will be recreated with the new config on next use
+	if err := s.core.credentialManager.CloseDriver(ctx, source.Name); err != nil {
+		s.logger.Warn("failed to close driver during source update",
+			logger.String("source_name", source.Name),
+			logger.Err(err))
+		// Continue with update even if driver cleanup fails
+	}
+
 	// Persist to storage
 	if err := s.persistSource(ns.UUID, source); err != nil {
 		return fmt.Errorf("failed to persist source: %w", err)
@@ -614,6 +624,17 @@ func (s *CredentialConfigStore) DeleteSource(ctx context.Context, name string) e
 		}
 	}
 
+	// Close driver instance to prevent resource leaks
+	// This releases any connections, HTTP clients, or other resources held by the driver
+	if s.core.credentialManager != nil {
+		if err := s.core.credentialManager.CloseDriver(ctx, name); err != nil {
+			s.logger.Warn("failed to close driver during source deletion",
+				logger.String("source_name", name),
+				logger.Err(err))
+			// Continue with deletion even if driver cleanup fails
+		}
+	}
+
 	// Delete from storage
 	if err := s.deleteSource(ns.UUID, name); err != nil {
 		return err
@@ -662,6 +683,79 @@ func (s *CredentialConfigStore) ListSources(ctx context.Context) ([]*credential.
 	sources = append([]*credential.CredSource{s.getBuiltinLocalSource()}, sources...)
 
 	return sources, nil
+}
+
+// ============================================================================
+// Namespace Cleanup
+// ============================================================================
+
+// ClearNamespace deletes all credential specs and sources for the namespace in context.
+// Specs are deleted first (to clear references), then sources.
+// Rotation unregistration is handled for each entry.
+// This is called during namespace deletion.
+func (s *CredentialConfigStore) ClearNamespace(ctx context.Context) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.closed {
+		return ErrConfigStoreClosed
+	}
+
+	ns, err := s.getNamespaceFromContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Delete all specs first (removes references to sources)
+	specs, err := s.loadAllSpecs(ns.UUID)
+	if err != nil {
+		return fmt.Errorf("failed to list specs for namespace cleanup: %w", err)
+	}
+
+	for _, spec := range specs {
+		if s.rotationManager != nil {
+			s.rotationManager.UnregisterSpec(ctx, spec.Name)
+		}
+
+		if err := s.deleteSpec(ns.UUID, spec.Name); err != nil {
+			return fmt.Errorf("failed to delete spec %s during namespace cleanup: %w", spec.Name, err)
+		}
+
+		cacheKey := s.buildSpecCacheKey(ns.UUID, spec.Name)
+		s.specsByID.Del(cacheKey)
+	}
+
+	// Delete all sources (no reference check needed since specs are already deleted)
+	sources, err := s.loadAllSources(ns.UUID)
+	if err != nil {
+		return fmt.Errorf("failed to list sources for namespace cleanup: %w", err)
+	}
+
+	for _, source := range sources {
+		if s.isBuiltinSource(source.Name) {
+			continue
+		}
+
+		if s.rotationManager != nil {
+			s.rotationManager.UnregisterSource(ctx, source.Name)
+		}
+
+		if err := s.deleteSource(ns.UUID, source.Name); err != nil {
+			return fmt.Errorf("failed to delete source %s during namespace cleanup: %w", source.Name, err)
+		}
+
+		cacheKey := s.buildSourceCacheKey(ns.UUID, source.Name)
+		s.sourcesByID.Del(cacheKey)
+	}
+
+	if len(specs) > 0 || len(sources) > 0 {
+		s.logger.Info("cleared credential configs for namespace",
+			logger.String("namespace", ns.UUID),
+			logger.Int("specs_deleted", len(specs)),
+			logger.Int("sources_deleted", len(sources)))
+	}
+
+	return nil
 }
 
 // ============================================================================
@@ -715,6 +809,41 @@ func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credenti
 			// Enforce rotation_period for types that embed rotatable credentials
 			if credType.RequiresSpecRotation() && spec.RotationPeriod <= 0 {
 				return logical.ErrBadRequestf("rotation_period is required for credential type '%s' which embeds rotatable credentials", spec.Type)
+			}
+		}
+	}
+
+	// Test credential minting if driver registry is available.
+	// This catches invalid auth credentials early (e.g., wrong GitHub app_id,
+	// expired PAT, invalid private key) rather than failing at gateway time.
+	// Follows the same pattern as validateSource which creates a temp driver
+	// to test source connections at creation time.
+	// Skipped for local sources where MintCredential just echoes config values.
+	// Skip credential verification in test mode (when SkipSpecVerification is true)
+	if !s.config.SkipSpecVerification && s.core.credentialDriverRegistry != nil && source.Type != credential.SourceTypeLocal {
+		factory, err := s.core.credentialDriverRegistry.GetFactory(source.Type)
+		if err == nil {
+			driver, err := factory.Create(source.Config, s.logger)
+			if err == nil {
+				defer driver.Cleanup(ctx)
+				testSpec := &credential.CredSpec{
+					Name:   "_validation",
+					Type:   spec.Type,
+					Source: spec.Source,
+					Config: spec.Config,
+				}
+				if _, _, _, err := driver.MintCredential(ctx, testSpec); err != nil {
+					return logical.ErrBadRequestf("credential test failed for spec type '%s': %s", spec.Type, err.Error())
+				}
+
+				// Run additional verification if the driver supports it.
+				// This catches cases where MintCredential doesn't call the upstream
+				// API (e.g., GitHub PAT mode just returns the token).
+				if verifier, ok := driver.(credential.SpecVerifier); ok {
+					if err := verifier.VerifySpec(ctx, testSpec); err != nil {
+						return logical.ErrBadRequestf("credential verification failed for spec type '%s': %s", spec.Type, err.Error())
+					}
+				}
 			}
 		}
 	}

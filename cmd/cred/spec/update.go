@@ -45,8 +45,13 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	resolvedConfig, err := helpers.ResolveFileRefs(updateConfig)
+	if err != nil {
+		return err
+	}
+
 	input := &api.UpdateCredentialSpecInput{
-		Config: updateConfig,
+		Config: resolvedConfig,
 	}
 
 	if updateMinTTL != "" {

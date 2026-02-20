@@ -190,6 +190,11 @@ func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request) 
 		return nil, nil, ErrInternalError
 	}
 
+	// Inject client IP into context so validateIPBinding can read it
+	if req.ClientIP != "" {
+		ctx = context.WithValue(ctx, logical.ClientIPKey, req.ClientIP)
+	}
+
 	// Resolve the token policy
 	var te *logical.TokenEntry
 	switch req.TokenEntry() {
@@ -270,8 +275,13 @@ func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logica
 		nsHeader = req.HTTPRequest.Header.Get("X-Warden-Namespace")
 	}
 
-	// Sanitize the request path
-	requestPath := strings.TrimSuffix(req.Path, "/")
+	// Sanitize the request path.
+	// Preserve trailing slash for help operations so mount-root help works
+	// (e.g., "azure/" needs the slash to match mount key "azure/" in the router).
+	requestPath := req.Path
+	if req.Operation != logical.HelpOperation {
+		requestPath = strings.TrimSuffix(req.Path, "/")
+	}
 
 	// Resolve namespace from header and request path
 	// /v1/ns1/sys/namespaces/test1 -> ns1/ and sys/namespaces/test1
@@ -310,6 +320,15 @@ func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logica
 		}
 	}(activeCtx, ctx)
 
+	// For help operations, mount-root paths (e.g., "azure") may arrive without
+	// a trailing slash because path.Join in the API client strips them.
+	// Use the silent MatchingMount to probe with a trailing slash first,
+	// so MatchingBackend doesn't log a spurious error on the initial miss.
+	if req.Operation == logical.HelpOperation && !strings.HasSuffix(req.Path, "/") {
+		if c.router.MatchingMount(ctx, req.Path) == "" && c.router.MatchingMount(ctx, req.Path+"/") != "" {
+			req.Path = req.Path + "/"
+		}
+	}
 	matchingBackend := c.router.MatchingBackend(ctx, req.Path)
 	if matchingBackend == nil {
 		c.logger.Warn("no backend mounted at path",
@@ -554,8 +573,9 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		req.MountPoint = entry.Path
 	}
 
-	// Parse request body before CheckToken since req.Data may be used during policy evaluation
-	isStreaming := c.isStreamingRequest(ctx, req.Path)
+	// Parse request body before CheckToken since req.Data may be used during policy evaluation.
+	// Help requests are never streaming - they should return help text, not proxy upstream.
+	isStreaming := c.isStreamingRequest(ctx, req.Path) && req.Operation != logical.HelpOperation
 
 	if !isStreaming {
 		if err := c.parseRequestBody(req); err != nil {
@@ -564,7 +584,6 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		req.ClientToken = extractToken(req.HTTPRequest)
 	} else {
 		req.Streamed = true
-		req.Operation = logical.StreamOperation
 
 		// Set AuditPath for consistent audit logging between request and response entries.
 		// For streaming requests, this is the path relative to the mount point
@@ -745,6 +764,11 @@ func (c *Core) PopulateTokenEntry(ctx context.Context, req *logical.Request) err
 	}
 
 	token := req.ClientToken
+
+	// Inject client IP into context so validateIPBinding can read it
+	if req.ClientIP != "" {
+		ctx = context.WithValue(ctx, logical.ClientIPKey, req.ClientIP)
+	}
 
 	te, err := c.LookupToken(ctx, token)
 	if err == nil && te != nil {
