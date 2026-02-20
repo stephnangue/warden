@@ -6,7 +6,7 @@ storage "postgres" {
 }
 
 listener "tcp" {
-    address            = ":5000"
+    address            = ":8400"
     tls_cert_file      = "/certs/warden-cert.pem"
     tls_key_file       = "/certs/warden-key.pem"
     tls_client_ca_file = "/certs/ca.pem"

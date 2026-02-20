@@ -45,15 +45,15 @@ type azureCredentialInfo struct {
 
 func (b *azureBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Apply timeout if configured
-	if b.timeout > 0 {
+	if b.Timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, b.timeout)
+		ctx, cancel = context.WithTimeout(ctx, b.Timeout)
 		defer cancel()
 		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
 	}
 
 	// Enforce max body size
-	maxBody := b.maxBodySize
+	maxBody := b.MaxBodySize
 	if maxBody <= 0 {
 		maxBody = maxGatewayBodySize
 	}
@@ -62,17 +62,8 @@ func (b *azureBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	// Parse target Azure host and path from the gateway path
 	azureHost, azurePath, err := b.parseGatewayPath(req.HTTPRequest.URL.Path)
 	if err != nil {
-		b.logger.Warn("Failed to parse gateway path", logger.Err(err))
+		b.Logger.Warn("Failed to parse gateway path", logger.Err(err))
 		http.Error(req.ResponseWriter, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Validate the Azure host is allowed
-	if !b.isHostAllowed(azureHost) {
-		b.logger.Warn("Azure host not allowed",
-			logger.String("host", azureHost),
-		)
-		http.Error(req.ResponseWriter, "Host not allowed", http.StatusForbidden)
 		return
 	}
 
@@ -81,7 +72,7 @@ func (b *azureBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	if !req.StreamUnauthenticated {
 		credInfo, err = b.getAzureCredentialInfo(req)
 		if err != nil {
-			b.logger.Warn("Failed to get Azure credentials", logger.Err(err))
+			b.Logger.Warn("Failed to get Azure credentials", logger.Err(err))
 			http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -94,7 +85,7 @@ func (b *azureBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	r := req.HTTPRequest
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
-		b.logger.Error("Failed to parse target URL", logger.Err(err))
+		b.Logger.Error("Failed to parse target URL", logger.Err(err))
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -105,10 +96,7 @@ func (b *azureBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	// Clean headers and inject Azure Bearer token (if applicable)
 	b.prepareHeaders(r, credInfo.bearerToken)
 
-	// Set upstream URL for audit logging
-	req.UpstreamURL = b.buildTargetURL(azureHost, azurePath, req.HTTPRequest.URL.RawQuery)
-
-	b.logger.Trace("Proxying Azure request",
+	b.Logger.Trace("Proxying Azure request",
 		logger.String("host", azureHost),
 		logger.String("path", azurePath),
 		logger.String("method", r.Method),
@@ -116,7 +104,7 @@ func (b *azureBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	)
 
 	// Forward the request (body streams through without buffering)
-	b.proxy.ServeHTTP(req.ResponseWriter, r)
+	b.Proxy.ServeHTTP(req.ResponseWriter, r)
 }
 
 // parseGatewayPath extracts Azure host and path from the gateway path
@@ -153,26 +141,6 @@ func (b *azureBackend) parseGatewayPath(path string) (host string, azurePath str
 	}
 
 	return host, azurePath, nil
-}
-
-// isHostAllowed checks if the Azure host is in the allowed list
-func (b *azureBackend) isHostAllowed(host string) bool {
-	allowedHosts := b.allowedHosts
-	if len(allowedHosts) == 0 {
-		allowedHosts = DefaultAllowedHosts
-	}
-
-	for _, allowed := range allowedHosts {
-		// Exact match
-		if host == allowed {
-			return true
-		}
-		// Wildcard suffix match (e.g., ".vault.azure.net" matches "myvault.vault.azure.net")
-		if strings.HasPrefix(allowed, ".") && strings.HasSuffix(host, allowed) {
-			return true
-		}
-	}
-	return false
 }
 
 // getAzureCredentialInfo extracts Azure credential info from the request credential

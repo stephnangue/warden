@@ -59,10 +59,15 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid max-ttl: %w", err)
 	}
 
+	resolvedConfig, err := helpers.ResolveFileRefs(createConfig)
+	if err != nil {
+		return err
+	}
+
 	input := &api.CreateCredentialSpecInput{
 		Type:   createType,
 		Source: createSource,
-		Config: createConfig,
+		Config: resolvedConfig,
 		MinTTL: minTTL,
 		MaxTTL: maxTTL,
 	}

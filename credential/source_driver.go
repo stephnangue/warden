@@ -44,7 +44,19 @@ type SourceDriverFactory interface {
 	SensitiveConfigFields() []string
 }
 
-// SourceDriver defines the interface for credential source drivers
+// SourceDriver defines the interface for credential source drivers.
+// Each driver encapsulates the logic for communicating with a specific credential
+// backend (e.g., Vault, AWS IAM/STS, Azure AD, GCP IAM) to mint short-lived
+// credentials on behalf of authenticated clients.
+//
+// The core credential manager calls MintCredential with a CredSpec when a streaming
+// request needs credentials. The driver reads spec.Config to decide which API call
+// to make (e.g., STS AssumeRole, OAuth2 token exchange, service account impersonation)
+// and returns raw credential data that the credential type's Parse method structures
+// into a Credential object.
+//
+// Drivers may optionally implement Rotatable (to rotate their own source credentials)
+// and/or SpecRotatable (to rotate credentials embedded in specs).
 type SourceDriver interface {
 	// MintCredential retrieves or mint raw credential data from the source
 	// Takes a CredSpec as input
@@ -64,6 +76,20 @@ type SourceDriver interface {
 
 	// Cleanup releases resources
 	Cleanup(ctx context.Context) error
+}
+
+// SpecVerifier is an optional interface for drivers that can verify spec credentials
+// at creation time. This is called during ValidateSpec to catch invalid credentials
+// early (e.g., wrong GitHub PAT, invalid app_id) rather than failing at gateway time.
+//
+// Unlike MintCredential, VerifySpec is only called during spec creation/update —
+// not on every login or gateway request. Drivers can make lightweight API calls
+// here that would be too expensive for the hot path.
+type SpecVerifier interface {
+	// VerifySpec validates that the spec's credentials are functional by making
+	// a lightweight API call to the upstream provider.
+	// Returns nil if verification succeeds or is not applicable for this spec config.
+	VerifySpec(ctx context.Context, spec *CredSpec) error
 }
 
 // Rotatable is an optional interface for drivers that support credential rotation.

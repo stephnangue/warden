@@ -22,7 +22,7 @@ terraform {
 
 # Configure Vault provider
 # When testing through Warden, set VAULT_ADDR to Warden's gateway endpoint
-# e.g., VAULT_ADDR=http://localhost:5000/v1/vault/gateway
+# e.g., VAULT_ADDR=http://localhost:8400/v1/vault/gateway
 provider "vault" {
   # Skip child token creation - use the token directly
   skip_child_token = true

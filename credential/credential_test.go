@@ -188,7 +188,7 @@ func TestCredential_ShouldRotate(t *testing.T) {
 func TestCredential_Metadata(t *testing.T) {
 	now := time.Now()
 	cred := &Credential{
-		Type:       TypeDatabaseUserPass,
+		Type:       TypeVaultToken,
 		Category:   CategoryDatabase,
 		LeaseTTL:   time.Hour,
 		LeaseID:    "lease-123",
@@ -204,8 +204,8 @@ func TestCredential_Metadata(t *testing.T) {
 	}
 
 	// Verify all fields
-	if cred.Type != TypeDatabaseUserPass {
-		t.Errorf("expected type %s, got %s", TypeDatabaseUserPass, cred.Type)
+	if cred.Type != TypeVaultToken {
+		t.Errorf("expected type %s, got %s", TypeVaultToken, cred.Type)
 	}
 	if cred.Category != CategoryDatabase {
 		t.Errorf("expected category %s, got %s", CategoryDatabase, cred.Category)
@@ -264,7 +264,7 @@ func TestCredential_Categories(t *testing.T) {
 // TestCredential_Types tests type constants
 func TestCredential_Types(t *testing.T) {
 	types := []string{
-		TypeDatabaseUserPass,
+		TypeVaultToken,
 		TypeAWSAccessKeys,
 	}
 

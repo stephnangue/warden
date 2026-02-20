@@ -138,7 +138,7 @@ services:
     container_name: warden
     ports:
       - "4000:4000"
-      - "5000:5000"
+      - "8400:8400"
     environment:
       TLS_CERT_FILE: "/certs/warden-cert.pem"
       TLS_KEY_FILE: "/certs/warden-key.pem"

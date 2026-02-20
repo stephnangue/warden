@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -493,12 +494,25 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 
 	// Detect token type
 	tokenType, err := s.registry.DetectType(tokenValue)
+	var tokenID string
 	if err != nil {
-		return "", "", fmt.Errorf("failed to detect token type: %w", err)
+		// Fallback for dev-mode custom tokens without standard prefix.
+		// Compute what the ID would be if this were a Warden token.
+		wt := &WardenTokenType{}
+		candidateID := wt.ComputeID(tokenValue)
+		if _, found := s.byID.Get(candidateID); found {
+			tokenType = wt
+			tokenID = candidateID
+		} else if loaded, loadErr := s.loadToken(candidateID); loadErr == nil && loaded != nil {
+			tokenType = wt
+			tokenID = candidateID
+			_ = s.restoreTokenToCache(ctx, loaded, "ResolveToken-devFallback")
+		} else {
+			return "", "", fmt.Errorf("failed to detect token type: %w", err)
+		}
+	} else {
+		tokenID = tokenType.ComputeID(tokenValue)
 	}
-
-	// Compute token ID
-	tokenID := tokenType.ComputeID(tokenValue)
 
 	// Lookup token in cache
 	entry, found := s.byID.Get(tokenID)
@@ -753,6 +767,65 @@ func (s *TokenStore) RevokeByExpiration(tokenID string) error {
 	return nil
 }
 
+// RevokeByNamespace removes all tokens belonging to the given namespace.
+// namespaceID is the namespace accessor (ns.ID), matching entry.NamespaceID.
+// This is called during namespace deletion to remove all auth tokens for the namespace.
+func (s *TokenStore) RevokeByNamespace(namespaceID string) error {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return ErrStoreClosed
+	}
+	s.mu.RUnlock()
+
+	if s.storage == nil {
+		return nil
+	}
+
+	// List all token IDs from storage
+	tokenKeys, err := s.storage.List(context.Background(), tokenIDPrefix)
+	if err != nil {
+		return fmt.Errorf("failed to list tokens: %w", err)
+	}
+
+	var removed int
+	for _, tokenID := range tokenKeys {
+		if tokenID == "" {
+			continue
+		}
+
+		entry, err := s.loadToken(tokenID)
+		if err != nil {
+			continue
+		}
+
+		if entry.NamespaceID != namespaceID {
+			continue
+		}
+
+		// Delete from caches
+		s.byID.Del(entry.ID)
+		s.byAccessor.Del(entry.Accessor)
+
+		// Delete from storage
+		if err := s.deleteToken(entry); err != nil {
+			s.logger.Warn("failed to delete token during namespace cleanup",
+				logger.String("token_id", entry.ID),
+				logger.Err(err))
+		}
+
+		removed++
+	}
+
+	if removed > 0 {
+		s.logger.Info("revoked all tokens for namespace",
+			logger.String("namespace", namespaceID),
+			logger.Int("removed", removed))
+	}
+
+	return nil
+}
+
 // RegisterTokenType registers a new token type (for extensibility)
 func (s *TokenStore) RegisterTokenType(tokenType TokenType) error {
 	return s.registry.Register(tokenType)
@@ -862,6 +935,79 @@ func (s *TokenStore) RevokeRootToken() error {
 
 	s.logger.Info("root token revoked",
 		logger.String("token_id", tokenID))
+
+	return nil
+}
+
+// ReplaceRootTokenValue replaces the current root token value with a custom one.
+// This is used in dev mode to support --dev-root-token with arbitrary strings.
+func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrStoreClosed
+	}
+	s.mu.Unlock()
+
+	if !s.rootTokenManager.HasRootToken() {
+		return errors.New("no root token exists to replace")
+	}
+
+	// Get the old root token entry
+	oldTokenID := s.rootTokenManager.GetCurrentRootTokenID()
+	oldEntry, found := s.byID.Get(oldTokenID)
+	if !found {
+		var err error
+		oldEntry, err = s.loadToken(oldTokenID)
+		if err != nil {
+			return fmt.Errorf("root token entry not found: %w", err)
+		}
+	}
+
+	// Create new entry with custom token value (copy all fields from old entry)
+	newEntry := &TokenEntry{
+		Type:           oldEntry.Type,
+		NamespaceID:    oldEntry.NamespaceID,
+		NamespacePath:  oldEntry.NamespacePath,
+		CreatedAt:      oldEntry.CreatedAt,
+		PrincipalID:    oldEntry.PrincipalID,
+		RoleName:       oldEntry.RoleName,
+		ExpireAt:       oldEntry.ExpireAt,
+		Accessor:       oldEntry.Accessor,
+		Policies:       oldEntry.Policies,
+		CredentialSpec: oldEntry.CredentialSpec,
+		CreatedByIP:    oldEntry.CreatedByIP,
+		Data:           map[string]string{"token": customToken},
+	}
+
+	// Compute new ID from custom token value
+	wardenType := &WardenTokenType{}
+	newEntry.ID = wardenType.ComputeID(customToken)
+
+	// Remove old entry from cache
+	s.byID.Del(oldTokenID)
+
+	// Store new entry in cache (no TTL for root token)
+	s.byID.SetWithTTL(newEntry.ID, newEntry, 200, 0)
+	s.byAccessor.SetWithTTL(newEntry.Accessor, newEntry.ID, 10, 0)
+	s.byID.Wait()
+	s.byAccessor.Wait()
+
+	// Persist new entry and delete old one from storage
+	if err := s.persistToken(newEntry); err != nil {
+		s.logger.Error("failed to persist custom root token",
+			logger.String("error", err.Error()))
+	}
+	if err := s.deleteToken(oldEntry); err != nil {
+		s.logger.Error("failed to delete old root token from storage",
+			logger.String("error", err.Error()))
+	}
+
+	// Update root token manager
+	s.rootTokenManager.SetRootToken(customToken, newEntry.ID)
+
+	s.logger.Info("root token replaced with custom value",
+		logger.String("new_token_id", newEntry.ID))
 
 	return nil
 }
@@ -1464,6 +1610,22 @@ func decodeTokenEntry(data []byte) (*TokenEntry, error) {
 	return &entry, nil
 }
 
+// isLoopback returns true if the IP is a loopback address (127.0.0.1 or ::1).
+func isLoopback(ip string) bool {
+	parsed := net.ParseIP(ip)
+	return parsed != nil && parsed.IsLoopback()
+}
+
+// ipsMatch returns true if two IPs are equal, treating all loopback addresses
+// (127.0.0.1 and ::1) as equivalent so that localhost vs 127.0.0.1 doesn't
+// cause spurious origin violations.
+func ipsMatch(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return isLoopback(a) && isLoopback(b)
+}
+
 // validateIPBinding checks IP binding based on the configured policy.
 // Returns nil if validation passes, or ErrOriginViolation if it fails.
 func (s *TokenStore) validateIPBinding(ctx context.Context, tokenID string, entry *TokenEntry) error {
@@ -1496,7 +1658,7 @@ func (s *TokenStore) validateIPBinding(ctx context.Context, tokenID string, entr
 				logger.String("token_id", tokenID))
 			return ErrOriginViolation
 		}
-		if clientIP != entry.CreatedByIP {
+		if !ipsMatch(clientIP, entry.CreatedByIP) {
 			if s.config.EnableMetrics {
 				s.metrics.IncrementOriginViolations()
 			}
@@ -1512,7 +1674,7 @@ func (s *TokenStore) validateIPBinding(ctx context.Context, tokenID string, entr
 	default:
 		// Optional: only check if both IPs are present
 		if hasClientIP && hasCreationIP {
-			if clientIP != entry.CreatedByIP {
+			if !ipsMatch(clientIP, entry.CreatedByIP) {
 				if s.config.EnableMetrics {
 					s.metrics.IncrementOriginViolations()
 				}
@@ -1533,9 +1695,9 @@ func (s *TokenStore) validateIPBinding(ctx context.Context, tokenID string, entr
 func (s *TokenStore) computeCacheTTL(entry *TokenEntry) time.Duration {
 	minRetention := s.config.CacheMinRetention
 
-	// For non-expiring tokens, use minimum retention
+	// For non-expiring tokens (e.g., root token), cache indefinitely (TTL=0)
 	if entry.ExpireAt.IsZero() {
-		return minRetention
+		return 0
 	}
 
 	remaining := time.Until(entry.ExpireAt)

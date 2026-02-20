@@ -56,20 +56,40 @@ func (f *AWSDriverFactory) Type() string {
 	return credential.SourceTypeAWS
 }
 
-// ValidateConfig validates AWS driver configuration
+// ValidateConfig validates AWS driver configuration using declarative schema
 func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
-	if err := credential.ValidateRequired(config, "access_key_id", "secret_access_key", "region"); err != nil {
-		return err
-	}
+	return credential.ValidateSchema(config,
+		credential.StringField("access_key_id").
+			Required().
+			Describe("AWS IAM access key ID for the source").
+			Example("AKIAIOSFODNN7EXAMPLE"),
 
-	// Validate session_duration if provided
-	if sd := credential.GetString(config, "session_duration", ""); sd != "" {
-		if _, err := time.ParseDuration(sd); err != nil {
-			return fmt.Errorf("invalid session_duration '%s': %w", sd, err)
-		}
-	}
+		credential.StringField("secret_access_key").
+			Required().
+			Describe("AWS IAM secret access key for the source").
+			Example("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
 
-	return nil
+		credential.StringField("region").
+			Required().
+			Describe("AWS region for API calls").
+			Example("us-east-1"),
+
+		credential.StringField("assume_role_arn").
+			Describe("Optional IAM role ARN to assume for elevated permissions").
+			Example("arn:aws:iam::123456789012:role/WardenSourceRole"),
+
+		credential.StringField("session_name").
+			Describe("Session name for AssumeRole operations").
+			Example("warden-source-session"),
+
+		credential.DurationField("session_duration").
+			Describe("Duration for AssumeRole sessions").
+			Example("1h"),
+
+		credential.StringField("external_id").
+			Describe("Optional external ID for AssumeRole operations").
+			Example("unique-external-id"),
+	)
 }
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output

@@ -24,5 +24,20 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register GCP driver factory
+	if err := registry.RegisterFactory(&GCPDriverFactory{}); err != nil {
+		return err
+	}
+
+	// Register GitLab driver factory
+	if err := registry.RegisterFactory(&GitLabDriverFactory{}); err != nil {
+		return err
+	}
+
+	// Register GitHub driver factory
+	if err := registry.RegisterFactory(&GitHubDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }

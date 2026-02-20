@@ -1160,13 +1160,13 @@ func TestComputeCacheTTL(t *testing.T) {
 	minRetention := core.tokenStore.config.CacheMinRetention
 	assert.Equal(t, 5*time.Minute, minRetention, "default min retention should be 5 minutes")
 
-	t.Run("non-expiring token uses min retention", func(t *testing.T) {
+	t.Run("non-expiring token cached indefinitely", func(t *testing.T) {
 		entry := &TokenEntry{
 			ID:       "test-1",
 			ExpireAt: time.Time{}, // zero time = no expiration
 		}
 		ttl := core.tokenStore.computeCacheTTL(entry)
-		assert.Equal(t, minRetention, ttl)
+		assert.Equal(t, time.Duration(0), ttl, "non-expiring tokens should have TTL=0 (no eviction)")
 	})
 
 	t.Run("expired token returns zero", func(t *testing.T) {
@@ -1196,6 +1196,69 @@ func TestComputeCacheTTL(t *testing.T) {
 		ttl := core.tokenStore.computeCacheTTL(entry)
 		assert.Equal(t, minRetention, ttl, "should use min retention when remaining time is less")
 	})
+}
+
+// TestTokenStore_RevokeByNamespace tests revoking all tokens for a namespace
+func TestTokenStore_RevokeByNamespace(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	// Create two namespace contexts
+	ns1 := &namespace.Namespace{ID: "ns-1", Path: "ns1/", UUID: "ns1-uuid"}
+	ns2 := &namespace.Namespace{ID: "ns-2", Path: "ns2/", UUID: "ns2-uuid"}
+	ctx1 := namespace.ContextWithNamespace(context.Background(), ns1)
+	ctx2 := namespace.ContextWithNamespace(context.Background(), ns2)
+
+	// Generate tokens in ns1
+	for i := 0; i < 3; i++ {
+		authData := &AuthData{
+			PrincipalID: "user",
+			RoleName:    "role",
+			ExpireAt:    time.Now().Add(1 * time.Hour),
+			Policies:    []string{"default"},
+		}
+		_, err := core.tokenStore.GenerateToken(ctx1, TypeUserPass, authData)
+		require.NoError(t, err)
+	}
+
+	// Generate token in ns2
+	authData := &AuthData{
+		PrincipalID: "user",
+		RoleName:    "role",
+		ExpireAt:    time.Now().Add(1 * time.Hour),
+		Policies:    []string{"default"},
+	}
+	ns2Entry, err := core.tokenStore.GenerateToken(ctx2, TypeUserPass, authData)
+	require.NoError(t, err)
+
+	// Revoke all ns1 tokens
+	err = core.tokenStore.RevokeByNamespace("ns-1")
+	require.NoError(t, err)
+
+	// ns2 token should still exist
+	te, found := core.tokenStore.byID.Get(ns2Entry.ID)
+	assert.True(t, found, "ns2 token should still be in cache")
+	assert.Equal(t, "ns-2", te.NamespaceID)
+
+	// Verify ns1 tokens are gone from storage
+	keys, err := core.tokenStore.storage.List(context.Background(), tokenIDPrefix)
+	require.NoError(t, err)
+	for _, key := range keys {
+		entry, err := core.tokenStore.loadToken(key)
+		if err != nil {
+			continue
+		}
+		assert.NotEqual(t, "ns-1", entry.NamespaceID, "no ns1 tokens should remain in storage")
+	}
+}
+
+// TestTokenStore_RevokeByNamespace_Empty tests revoking tokens for empty namespace
+func TestTokenStore_RevokeByNamespace_Empty(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	err := core.tokenStore.RevokeByNamespace("nonexistent")
+	require.NoError(t, err)
 }
 
 // TestDefaultTokenStoreConfig tests the default configuration values

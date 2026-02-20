@@ -23,6 +23,17 @@ import (
 //  3. Writes the logical.Response back to the HTTP response
 func handleLogical(c *core.Core, log *logger.GatedLogger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reject unsupported HTTP methods
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions,
+			http.MethodPost, http.MethodPut, http.MethodPatch,
+			http.MethodDelete, "LIST":
+			// allowed
+		default:
+			respondError(w, http.StatusMethodNotAllowed, "method "+r.Method+" not allowed")
+			return
+		}
+
 		// Build the logical request from the HTTP request
 		req := buildLogicalRequest(w, r)
 
@@ -69,9 +80,14 @@ func buildLogicalRequest(w http.ResponseWriter, r *http.Request) *logical.Reques
 // operationFromHTTPMethod maps HTTP methods to logical operations.
 func operationFromHTTPMethod(r *http.Request) logical.Operation {
 	switch r.Method {
-	case http.MethodGet:
-		// Check for LIST operation via query parameter or header
-		if r.URL.Query().Get("list") == "true" || r.Header.Get("X-Warden-Request") == "LIST" {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		// HEAD and OPTIONS are read-like operations (metadata, CORS preflight).
+		// Check for HELP operation via query parameter (namespaced to avoid upstream conflicts).
+		if r.URL.Query().Get("warden-help") == "1" || r.URL.Query().Get("warden-help") == "true" {
+			return logical.HelpOperation
+		}
+		// Check for LIST operation via query parameter or header.
+		if r.URL.Query().Get("warden-list") == "true" || r.Header.Get("X-Warden-Request") == "LIST" {
 			return logical.ListOperation
 		}
 		return logical.ReadOperation

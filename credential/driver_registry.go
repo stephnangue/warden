@@ -137,3 +137,89 @@ func (r *DriverRegistry) GetFactory(driverType string) (SourceDriverFactory, err
 
 	return factory, nil
 }
+
+// CloseDriver closes and removes a driver instance by source name.
+// This should be called when a source is deleted or updated to prevent resource leaks.
+// Returns an error if the driver's Cleanup() method fails.
+func (r *DriverRegistry) CloseDriver(ctx context.Context, sourceName string) error {
+	qualifiedName, err := r.qualifiedKey(ctx, sourceName)
+	if err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	driver, exists := r.instances[qualifiedName]
+	if !exists {
+		// Driver doesn't exist - nothing to clean up
+		return nil
+	}
+
+	// Call driver's cleanup method
+	if err := driver.Cleanup(ctx); err != nil {
+		r.log.Warn("driver cleanup failed",
+			logger.String("source_name", sourceName),
+			logger.Err(err))
+		// Continue to remove from registry even if cleanup fails
+	}
+
+	// Remove from registry
+	delete(r.instances, qualifiedName)
+
+	r.log.Debug("driver closed and removed",
+		logger.String("source_name", sourceName),
+		logger.String("qualified_key", qualifiedName))
+
+	return nil
+}
+
+// CloseAllForNamespace closes and removes all driver instances for a given namespace.
+// This should be called when a namespace is deleted to prevent resource leaks.
+// Returns the number of drivers closed and any errors encountered.
+func (r *DriverRegistry) CloseAllForNamespace(ctx context.Context) (int, error) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get namespace from context: %w", err)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Find all drivers for this namespace
+	prefix := ns.ID + ":"
+	var toClose []string
+	for key := range r.instances {
+		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
+			toClose = append(toClose, key)
+		}
+	}
+
+	if len(toClose) == 0 {
+		return 0, nil
+	}
+
+	// Close each driver and collect errors
+	closed := 0
+	var lastErr error
+
+	for _, key := range toClose {
+		driver := r.instances[key]
+		if err := driver.Cleanup(ctx); err != nil {
+			r.log.Warn("driver cleanup failed during namespace cleanup",
+				logger.String("qualified_key", key),
+				logger.Err(err))
+			lastErr = err
+			// Continue to remove even if cleanup fails
+		}
+
+		delete(r.instances, key)
+		closed++
+	}
+
+	r.log.Debug("drivers closed for namespace",
+		logger.String("namespace_id", ns.ID),
+		logger.Int("count", closed))
+
+	return closed, lastErr
+}

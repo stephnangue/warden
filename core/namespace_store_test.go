@@ -6,8 +6,11 @@ package core
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -816,7 +819,7 @@ func TestNamespaceStore_ParentMustExist(t *testing.T) {
 		return ns, nil
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "parent namespace")
+	assert.Contains(t, err.Error(), "missing parent")
 }
 
 // TestNamespaceStore_TaintedNamespace tests that tainted namespaces cannot be modified
@@ -842,4 +845,134 @@ func TestNamespaceStore_TaintedNamespace(t *testing.T) {
 	// Should fail because namespace is tainted
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tainted")
+}
+
+// TestNamespaceStore_ClearNamespaceResources tests that clearNamespaceResources
+// properly cleans up all namespace-scoped resources.
+func TestNamespaceStore_ClearNamespaceResources(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	// Manually create a namespace entry to avoid the mountsLock deadlock
+	// in createMounts (pre-existing issue with recursive lock acquisition).
+	childNs := &namespace.Namespace{
+		ID:   "cleanup-ns",
+		UUID: "cleanup-ns-uuid",
+		Path: "cleanup-test/",
+	}
+
+	nsCtx := namespace.ContextWithNamespace(context.Background(), childNs)
+
+	// --- Set up expiration manager and rotation manager ---
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	core.expirationManager = NewExpirationManager(core, log, nil)
+	defer core.expirationManager.Stop()
+
+	core.rotationManager = NewRotationManager(core, log.WithSubsystem("rotation"), nil)
+	core.rotationManager.Start()
+	defer core.rotationManager.Stop()
+
+	core.credConfigStore.rotationManager = core.rotationManager
+
+	// --- Populate resources in the child namespace ---
+
+	// Create tokens
+	for i := 0; i < 3; i++ {
+		authData := &AuthData{
+			PrincipalID: "user",
+			RoleName:    "role",
+			ExpireAt:    time.Now().Add(1 * time.Hour),
+			Policies:    []string{"default"},
+		}
+		_, err := core.tokenStore.GenerateToken(nsCtx, TypeUserPass, authData)
+		require.NoError(t, err)
+	}
+
+	// Create credential source and spec
+	require.NoError(t, core.credConfigStore.CreateSource(nsCtx, &credential.CredSource{
+		Name: "test-src",
+		Type: "local",
+	}))
+	require.NoError(t, core.credConfigStore.CreateSpec(nsCtx, &credential.CredSpec{
+		Name:   "test-spec",
+		Type:   "github_token",
+		Source: "test-src",
+		MinTTL: 1 * time.Minute,
+		MaxTTL: 1 * time.Hour,
+		Config: map[string]string{
+			"token": "test-token",
+		},
+	}))
+
+	// Register rotation entry
+	require.NoError(t, core.rotationManager.RegisterSource(nsCtx, "test-src", "local", 1*time.Hour))
+
+	// Register expiration entries
+	require.NoError(t, core.expirationManager.RegisterToken(nsCtx, "exp-token-1", 10*time.Minute, false))
+
+	// --- Verify resources exist ---
+	specs, err := core.credConfigStore.ListSpecs(nsCtx)
+	require.NoError(t, err)
+	assert.Len(t, specs, 1)
+
+	sources, err := core.credConfigStore.ListSources(nsCtx)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, len(sources), 2) // test-src + built-in local
+
+	assert.True(t, core.expirationManager.GetPendingCount() > 0)
+
+	// --- Clear namespace resources ---
+	err = core.namespaceStore.clearNamespaceResources(nsCtx, childNs)
+	require.NoError(t, err)
+
+	// --- Verify all resources are cleaned ---
+
+	// Tokens should be gone
+	keys, err := core.tokenStore.storage.List(context.Background(), tokenIDPrefix)
+	require.NoError(t, err)
+	for _, key := range keys {
+		entry, loadErr := core.tokenStore.loadToken(key)
+		if loadErr != nil {
+			continue
+		}
+		assert.NotEqual(t, childNs.ID, entry.NamespaceID,
+			"no tokens for deleted namespace should remain")
+	}
+
+	// Credential specs should be gone
+	specs, err = core.credConfigStore.ListSpecs(nsCtx)
+	require.NoError(t, err)
+	assert.Len(t, specs, 0)
+
+	// User credential sources should be gone (only built-in local remains)
+	sources, err = core.credConfigStore.ListSources(nsCtx)
+	require.NoError(t, err)
+	assert.Len(t, sources, 1)
+	assert.Equal(t, "local", sources[0].Name)
+
+	// Rotation entries should be gone
+	_, loaded := core.rotationManager.entries.Load(
+		buildRotationKey(childNs.UUID, "test-src"))
+	assert.False(t, loaded, "rotation entry should be cleaned")
+}
+
+// TestNamespaceStore_ClearNamespaceResources_NilManagers tests that clearNamespaceResources
+// handles nil managers gracefully.
+func TestNamespaceStore_ClearNamespaceResources_NilManagers(t *testing.T) {
+	core := createTestCore(t)
+
+	childNs := &namespace.Namespace{
+		ID:   "nil-mgr-ns",
+		UUID: "nil-mgr-ns-uuid",
+		Path: "nil-mgr-test/",
+	}
+	nsCtx := namespace.ContextWithNamespace(context.Background(), childNs)
+
+	// Ensure managers are nil (they are by default in createTestCore)
+	assert.Nil(t, core.rotationManager)
+	assert.Nil(t, core.expirationManager)
+
+	// clearNamespaceResources should not panic with nil managers
+	err := core.namespaceStore.clearNamespaceResources(nsCtx, childNs)
+	require.NoError(t, err)
 }

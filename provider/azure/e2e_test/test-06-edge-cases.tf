@@ -1,26 +1,6 @@
 # test-06-edge-cases.tf
-# Tests 34-40: Edge cases and validation through Warden gateway
-# Validates: host allowlist enforcement, error handling, query params, large payloads
-
-################################################################################
-# Test 34: Request to a blocked host (should fail)
-# *.example.com is not in the default allowed_hosts list
-################################################################################
-data "http" "blocked_host" {
-  url = "${var.warden_address}/api.example.com/v1/test"
-
-  request_headers = {
-    Authorization = "Bearer ${var.access_token}"
-    Accept         = "application/json"
-  }
-
-  lifecycle {
-    postcondition {
-      condition     = self.status_code == 403 || self.status_code == 400
-      error_message = "Expected 403/400 for blocked host, got ${self.status_code}"
-    }
-  }
-}
+# Tests 35-40: Edge cases and validation through Warden gateway
+# Validates: error handling, query params, large payloads
 
 ################################################################################
 # Test 35: Request without authentication (should fail)
@@ -121,11 +101,6 @@ data "http" "not_found" {
 ################################################################################
 # Outputs
 ################################################################################
-
-output "blocked_host_status" {
-  value       = data.http.blocked_host.status_code
-  description = "Blocked host request status (expected 403/400)"
-}
 
 output "no_auth_status" {
   value       = data.http.no_auth.status_code

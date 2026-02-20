@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -481,6 +482,54 @@ func (m *RotationManager) UnregisterSpec(ctx context.Context, specName string) e
 
 		m.log.Debug("unregistered spec from rotation",
 			logger.String("spec", specName))
+	}
+
+	return nil
+}
+
+// UnregisterByNamespace removes all rotation entries for the given namespace UUID.
+// This is called during namespace deletion to stop all rotation jobs for the namespace.
+// It also deletes any pending cleanup entries from storage.
+func (m *RotationManager) UnregisterByNamespace(namespaceID string) error {
+	prefix := namespaceID + ":"
+	var removed int
+
+	m.entries.Range(func(key, value any) bool {
+		keyStr := key.(string)
+		if !strings.HasPrefix(keyStr, prefix) {
+			return true
+		}
+
+		entry := value.(*RotationEntry)
+		m.entries.Delete(key)
+		atomic.AddInt64(&m.entryCount, -1)
+		if entry.State == StateFailed {
+			atomic.AddInt64(&m.failedCount, -1)
+		}
+
+		if m.storage != nil {
+			m.deleteEntry(entry)
+		}
+
+		removed++
+		return true
+	})
+
+	// Delete cleanup entries from storage (entire namespace directory)
+	if m.storage != nil {
+		cleanupPath := rotationCleanupPath + namespaceID + "/"
+		entries, err := m.storage.List(context.Background(), cleanupPath)
+		if err == nil {
+			for _, entryName := range entries {
+				m.storage.Delete(context.Background(), cleanupPath+entryName)
+			}
+		}
+	}
+
+	if removed > 0 {
+		m.log.Info("unregistered all rotation entries for namespace",
+			logger.String("namespace", namespaceID),
+			logger.Int("removed", removed))
 	}
 
 	return nil

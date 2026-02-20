@@ -42,7 +42,7 @@ This directory contains Terraform-based end-to-end tests for the Warden AWS prov
 # Create policy for AWS streaming
 ./warden -n PROD/SEC policy write aws-streaming - <<EOF
 path "aws/gateway*" {
-  capabilities = ["stream"]
+  capabilities = ["read", "create", "update", "delete", "patch"]
 }
 EOF
 
@@ -120,7 +120,7 @@ export AWS_ACCESS_KEY_ID=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*acces
 export AWS_SECRET_ACCESS_KEY=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*secret_access_key=\([^ |]*\).*/\1/')
 
 # Point AWS SDK to Warden proxy
-export AWS_ENDPOINT_URL=http://localhost:5000/v1/PROD/SEC/aws/gateway
+export AWS_ENDPOINT_URL=http://localhost:8400/v1/PROD/SEC/aws/gateway
 ```
 
 ## Running Tests
