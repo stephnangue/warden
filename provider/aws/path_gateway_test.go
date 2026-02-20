@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -255,7 +256,9 @@ func TestAwsBackend_ReadRequestBody(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b := &awsBackend{
-				maxBodySize: tt.maxBodySize,
+				StreamingBackend: &framework.StreamingBackend{
+					MaxBodySize: tt.maxBodySize,
+				},
 			}
 
 			req := httptest.NewRequest(http.MethodPost, "/test", bytes.NewBufferString(tt.body))
@@ -281,7 +284,9 @@ func TestAwsBackend_ReadRequestBody(t *testing.T) {
 
 func TestAwsBackend_ReadRequestBody_NilBody(t *testing.T) {
 	b := &awsBackend{
-		maxBodySize: 1024,
+		StreamingBackend: &framework.StreamingBackend{
+			MaxBodySize: 1024,
+		},
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
@@ -350,7 +355,9 @@ func TestAwsBackend_RestoreRequestBody(t *testing.T) {
 
 func TestAwsBackend_CleanHeadersForSigning(t *testing.T) {
 	b := &awsBackend{
-		logger: createTestLogger(),
+		StreamingBackend: &framework.StreamingBackend{
+			Logger: createTestLogger(),
+		},
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/test", nil)
@@ -410,7 +417,9 @@ func TestAwsBackend_CleanHeadersForSigning_ConnectionListed(t *testing.T) {
 	// so Connection-listed headers won't be removed. This test verifies
 	// the current behavior: only hop-by-hop and proxy headers are removed.
 	b := &awsBackend{
-		logger: createTestLogger(),
+		StreamingBackend: &framework.StreamingBackend{
+			Logger: createTestLogger(),
+		},
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/test", nil)
@@ -468,7 +477,7 @@ func BenchmarkParseAWSDate(b *testing.B) {
 }
 
 func BenchmarkCleanHeadersForSigning(b *testing.B) {
-	backend := &awsBackend{logger: createTestLogger()}
+	backend := &awsBackend{StreamingBackend: &framework.StreamingBackend{Logger: createTestLogger()}}
 
 	b.ResetTimer()
 	for b.Loop() {

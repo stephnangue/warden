@@ -93,28 +93,56 @@ func (f *VaultDriverFactory) Create(config map[string]string, logger *logger.Gat
 	return driver, nil
 }
 
-// ValidateConfig validates Vault driver configuration
+// ValidateConfig validates Vault driver configuration using declarative schema
 func (f *VaultDriverFactory) ValidateConfig(config map[string]string) error {
-	// Validate required fields
-	addr, err := credential.GetStringRequired(config, "vault_address")
-	if err != nil {
+	// Validate vault_address with custom URL validation
+	if err := credential.ValidateSchema(config,
+		credential.StringField("vault_address").
+			Required().
+			Custom(validateVaultAddress).
+			Describe("Vault server address").
+			Example("https://vault.example.com"),
+	); err != nil {
 		return err
 	}
 
-	// Validate vault_address format
-	if err := validateVaultAddress(addr); err != nil {
-		return err
-	}
-
+	// Validate auth_method if provided
 	authMethod := credential.GetString(config, "auth_method", "")
-	if authMethod != "" && authMethod != "approle" {
-		return fmt.Errorf("unsupported auth_method: %s (only 'approle' is currently supported)", authMethod)
-	}
-
-	if authMethod == "approle" {
-		// Validate required approle fields
-		if err := credential.ValidateRequired(config, "role_id", "secret_id", "approle_mount", "role_name"); err != nil {
+	if authMethod != "" {
+		if err := credential.ValidateSchema(config,
+			credential.StringField("auth_method").
+				OneOf("approle").
+				Describe("Authentication method (only 'approle' supported)").
+				Example("approle"),
+		); err != nil {
 			return err
+		}
+
+		// If using approle, validate required fields
+		if authMethod == "approle" {
+			if err := credential.ValidateSchema(config,
+				credential.StringField("role_id").
+					Required().
+					Describe("AppRole role ID").
+					Example("role-id-uuid"),
+
+				credential.StringField("secret_id").
+					Required().
+					Describe("AppRole secret ID").
+					Example("secret-id-uuid"),
+
+				credential.StringField("approle_mount").
+					Required().
+					Describe("AppRole auth mount path").
+					Example("approle"),
+
+				credential.StringField("role_name").
+					Required().
+					Describe("AppRole role name for rotation").
+					Example("warden-source-role"),
+			); err != nil {
+				return err
+			}
 		}
 	}
 

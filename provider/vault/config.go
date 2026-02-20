@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/stephnangue/warden/framework"
 )
 
 // ProviderConfig holds parsed configuration for the Vault provider
@@ -16,17 +18,11 @@ type ProviderConfig struct {
 	TLSSkipVerify bool
 }
 
-// Default values
-const (
-	DefaultMaxBodySize = int64(10485760) // 10MB
-	DefaultTimeout     = 30 * time.Second
-)
-
 // parseConfig parses configuration from mount config (map[string]any from JSON)
 func parseConfig(conf map[string]any) ProviderConfig {
 	config := ProviderConfig{
-		MaxBodySize: DefaultMaxBodySize,
-		Timeout:     DefaultTimeout,
+		MaxBodySize: framework.DefaultMaxBodySize,
+		Timeout:     framework.DefaultTimeout,
 	}
 
 	if addr, ok := conf["vault_address"].(string); ok {

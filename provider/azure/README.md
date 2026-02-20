@@ -1,27 +1,43 @@
-# Azure Provider for Warden
+# Azure Provider
 
-The Azure provider enables secure proxying of Azure API requests with automatic Bearer token injection. It acts as a gateway between your applications and Azure services, managing Azure AD credentials and injecting authentication tokens into outgoing requests.
+The Azure provider enables proxied access to Azure APIs through Warden. It manages Azure AD credentials, supports Bearer token minting and Key Vault secret fetching, and handles automated credential rotation via the Microsoft Graph API.
+
+## Table of Contents
+
+- [Prerequisites](#prerequisites)
+- [Step 1: Mount the Azure Provider](#step-1-mount-the-azure-provider)
+- [Step 2: Create a Credential Source](#step-2-create-a-credential-source)
+- [Step 3: Configure the Provider](#step-3-configure-the-provider)
+- [Step 4: Create a Credential Spec](#step-4-create-a-credential-spec)
+- [Step 5: Create a Policy](#step-5-create-a-policy)
+- [Step 6: Configure JWT Auth and Create a Role](#step-6-configure-jwt-auth-and-create-a-role)
+- [Step 7: Make Requests Through the Gateway](#step-7-make-requests-through-the-gateway)
+- [Supported Azure Services](#supported-azure-services)
+- [Credential Rotation](#credential-rotation)
+- [Configuration Reference](#configuration-reference)
+- [Troubleshooting](#troubleshooting)
 
 ## Prerequisites
 
-### 1. Azure AD App Registration (Service Principal)
+- A running Warden server
+- The Warden CLI installed and configured
+- An Azure AD **App Registration** (service principal) with a client secret
 
-You need at least one Azure AD App Registration to serve as the **source credential** (the identity Warden uses to acquire tokens).
+```bash
+export WARDEN_ADDR="http://127.0.0.1:8400"
+export WARDEN_TOKEN="<your-token>"
+```
 
-1. Go to **Azure Portal** > **Azure Active Directory** > **App registrations** > **New registration**
-2. Name the application (e.g., `warden-source`)
-3. Set the supported account type (typically "Single tenant")
-4. Click **Register**
-5. Note down the following values:
+### Creating an Azure AD App Registration
+
+1. Go to **Azure Portal** > **Azure Active Directory** > **App registrations** > **New registration**.
+2. Name the application (e.g., `warden-source`) and set the account type (typically "Single tenant").
+3. Click **Register** and note the following values:
    - **Application (client) ID** — used as `client_id`
    - **Directory (tenant) ID** — used as `tenant_id`
+4. Go to **Certificates & secrets** > **New client secret**, set a description and expiry, then copy the **Value** — used as `client_secret`.
 
-6. Create a client secret:
-   - Go to **Certificates & secrets** > **New client secret**
-   - Set a description and expiry
-   - Click **Add** and copy the **Value** — used as `client_secret`
-
-### 2. Azure Roles & Permissions
+### Azure Roles & Permissions
 
 Assign Azure RBAC roles to your service principal depending on which Azure services you need to access:
 
@@ -40,237 +56,214 @@ az role assignment create \
   --scope "/subscriptions/<subscription_id>"
 ```
 
-### 3. Microsoft Graph API Permissions (Optional — Required for Rotation)
+### Microsoft Graph API Permissions (Optional — Required for Rotation)
 
 If you want Warden to automatically rotate service principal credentials, the source service principal needs Microsoft Graph API permissions:
 
-1. Go to **App registrations** > your app > **API permissions** > **Add a permission**
-2. Select **Microsoft Graph** > **Application permissions**
-3. Add `Application.ReadWrite.All`
-4. Click **Grant admin consent** for your tenant
+1. Go to **App registrations** > your app > **API permissions** > **Add a permission**.
+2. Select **Microsoft Graph** > **Application permissions**.
+3. Add `Application.ReadWrite.All`.
+4. Click **Grant admin consent** for your tenant.
 
 > **Note:** Without Graph API permissions, credential rotation will be unavailable but all other features (token minting, proxying, Key Vault secret fetching) will work normally.
 
-### 4. Workload Service Principals (Optional)
+### Network Access
 
-For issuing tokens scoped to specific workloads, create additional App Registrations (one per workload). Each workload SP needs:
+Warden needs network access to the following Azure endpoints:
+- `login.microsoftonline.com` (Azure AD authentication)
+- `management.azure.com` (Azure Resource Manager)
+- `graph.microsoft.com` (Microsoft Graph, required for rotation)
+- Any additional Azure service endpoints you plan to proxy
 
-- Its own `client_id` and `client_secret`
-- Appropriate Azure RBAC roles for the resources it accesses
+## Step 1: Mount the Azure Provider
 
-### 5. Warden Server
+Enable the Azure provider at a path of your choice:
 
-- A running Warden server instance
-- Network access from Warden to the following Azure endpoints:
-  - `login.microsoftonline.com` (Azure AD authentication)
-  - `management.azure.com` (Azure Resource Manager)
-  - `graph.microsoft.com` (Microsoft Graph, required for rotation)
-  - Any additional Azure service endpoints you plan to proxy
-
-## Configuration
-
-### Provider Configuration Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `allowed_hosts` | list(string) | See below | Azure hostnames allowed for proxying (supports wildcard prefixes) |
-| `max_body_size` | int | `10485760` (10MB) | Maximum request body size in bytes (0–100MB) |
-| `timeout` | duration | `"30s"` | Request timeout (e.g., `"30s"`, `"5m"`) |
-| `transparent_mode` | bool | `false` | Enable implicit JWT-based authentication |
-| `auto_auth_path` | string | `""` | JWT auth mount path (required when `transparent_mode` is enabled) |
-| `default_role` | string | `""` | Default role for transparent mode |
-
-### Default Allowed Hosts
-
-```
-management.azure.com
-graph.microsoft.com
-*.vault.azure.net
-*.blob.core.windows.net
-*.queue.core.windows.net
-*.table.core.windows.net
-*.file.core.windows.net
-*.dfs.core.windows.net
+```bash
+warden provider enable --type=azure
 ```
 
-> Wildcard entries (e.g., `*.vault.azure.net`) match any subdomain such as `myvault.vault.azure.net`.
+To mount at a custom path:
 
-### Example Provider Configuration
+```bash
+warden provider enable --type=azure azure-prod
+```
 
-```hcl
-provider "azure" {
-  path = "azure"
-  config = {
-    allowed_hosts    = [".vault.azure.net", "management.azure.com"]
-    max_body_size    = 10485760
-    timeout          = "30s"
-    transparent_mode = false
-  }
+Verify the provider is enabled:
+
+```bash
+warden provider list
+```
+
+## Step 2: Create a Credential Source
+
+The credential source holds the Azure AD service principal credentials used to authenticate with Azure.
+
+```bash
+warden cred source create azure-src \
+  --type=azure \
+  --rotation-period=720h \
+  --config=tenant_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  --config=client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  --config=client_secret=your-client-secret \
+  --config=subscription_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+Verify the source was created:
+
+```bash
+warden cred source read azure-src
+```
+
+## Step 3: Configure the Provider
+
+Configure the provider with transparent mode enabled. This allows clients to authenticate with their JWT directly — no explicit Warden login required:
+
+```bash
+warden write azure/config <<EOF
+{
+  "transparent_mode": true,
+  "auto_auth_path": "auth/jwt/",
+  "timeout": "30s",
+  "max_body_size": 10485760
 }
+EOF
 ```
 
-## Setting Up Credentials
-
-### Step 1: Register a Credential Source
-
-Create a credential source using the Azure driver. This tells Warden how to authenticate with Azure AD.
+Verify the configuration:
 
 ```bash
-curl -X POST http://localhost:8200/v1/sys/credentials/sources \
-  -H "X-Warden-Token: <your-token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "azure-source",
-    "type": "azure",
-    "config": {
-      "tenant_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-      "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-      "client_secret": "your-client-secret",
-      "subscription_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-    }
-  }'
+warden read azure/config
 ```
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `tenant_id` | Yes | Azure AD Tenant ID (UUID format) |
-| `client_id` | Yes | Service Principal Application (Client) ID |
-| `client_secret` | Yes | Service Principal client secret |
-| `subscription_id` | No | Azure Subscription ID |
+## Step 4: Create a Credential Spec
 
-### Step 2: Create a Credential Spec
+Create a credential spec that references the credential source. The spec defines how Warden mints Azure credentials and gets associated with tokens at login time.
 
-A credential spec defines how Warden mints credentials for a particular workload.
+### Option A: Bearer Token (Recommended)
 
-#### Option A: Bearer Token (default)
-
-Mints an Azure AD Bearer token using the client credentials flow.
+Mints an Azure AD Bearer token using the client credentials flow:
 
 ```bash
-curl -X POST http://localhost:8200/v1/sys/credentials/specs \
-  -H "X-Warden-Token: <your-token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-azure-token",
-    "source": "azure-source",
-    "cred_type": "azure_bearer_token",
-    "config": {
-      "mint_method": "bearer_token",
-      "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-      "client_secret": "workload-sp-client-secret",
-      "resource_uri": "https://management.azure.com/"
-    }
-  }'
+warden cred spec create azure-ops \
+  --type azure_bearer_token \
+  --source azure-src \
+  --config auth_method=bearer_token \
+  --config client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  --config client_secret=workload-sp-client-secret \
+  --config resource_uri=https://management.azure.com/
 ```
 
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `mint_method` | No | `bearer_token` | Set to `bearer_token` |
-| `client_id` | Yes | — | Workload SP Application ID |
-| `client_secret` | Yes | — | Workload SP client secret |
-| `tenant_id` | No | Source tenant | Override tenant ID |
-| `resource_uri` | No | `https://management.azure.com/` | Token scope (e.g., `https://vault.azure.net/`) |
+### Option B: Key Vault Secret
 
-#### Option B: Key Vault Secret
-
-Fetches a secret directly from Azure Key Vault.
+Fetches a secret directly from Azure Key Vault:
 
 ```bash
-curl -X POST http://localhost:8200/v1/sys/credentials/specs \
-  -H "X-Warden-Token: <your-token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-kv-secret",
-    "source": "azure-source",
-    "cred_type": "azure_bearer_token",
-    "config": {
-      "mint_method": "key_vault_secret",
-      "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-      "client_secret": "workload-sp-client-secret",
-      "vault_name": "my-key-vault",
-      "secret_name": "my-secret"
-    }
-  }'
+warden cred spec create azure-kv \
+  --type azure_bearer_token \
+  --source azure-src \
+  --config auth_method=key_vault_secret \
+  --config client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  --config client_secret=workload-sp-client-secret \
+  --config vault_name=my-key-vault \
+  --config secret_name=my-secret
 ```
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `mint_method` | Yes | Set to `key_vault_secret` |
-| `client_id` | Yes | SP with access to the Key Vault |
-| `client_secret` | Yes | SP client secret |
-| `vault_name` | Yes | Name of the Azure Key Vault |
-| `secret_name` | Yes | Name of the secret to retrieve |
-| `secret_version` | No | Specific version (defaults to latest) |
-| `tenant_id` | No | Override tenant ID |
-
-## Using the Gateway
-
-### Request Flow
-
-1. Client sends a request to the Warden gateway endpoint with an authentication token
-2. Warden validates the token and retrieves the associated Azure credential
-3. Warden verifies the target Azure host is in the allowed list
-4. Warden injects the Bearer token into the `Authorization` header
-5. Warden strips sensitive and hop-by-hop headers
-6. Request is forwarded to the Azure service over HTTPS
-7. Response is returned to the client
-
-### Gateway URL Format
-
-```
-https://<warden-host>/v1/azure/gateway/<azure-host>/<path>
-```
-
-### Examples
-
-**List Azure Subscriptions (Resource Manager):**
+Verify:
 
 ```bash
-curl https://localhost:8200/v1/azure/gateway/management.azure.com/subscriptions?api-version=2022-12-01 \
-  -H "X-Warden-Token: <your-token>"
+warden cred spec read azure-ops
 ```
 
-**Get a Key Vault Secret:**
+## Step 5: Create a Policy
+
+Create a policy that grants access to the Azure provider gateway:
 
 ```bash
-curl https://localhost:8200/v1/azure/gateway/myvault.vault.azure.net/secrets/my-secret?api-version=7.4 \
-  -H "X-Warden-Token: <your-token>"
+warden policy write azure-access - <<EOF
+path "azure/role/+/gateway*" {
+  capabilities = ["create", "read", "update", "delete"]
+}
+EOF
 ```
 
-**List Storage Blobs:**
+Verify:
 
 ```bash
-curl https://localhost:8200/v1/azure/gateway/mystorage.blob.core.windows.net/mycontainer?restype=container&comp=list \
-  -H "X-Warden-Token: <your-token>"
+warden policy read azure-access
 ```
 
-**Query Microsoft Graph:**
+## Step 6: Configure JWT Auth and Create a Role
+
+Set up a JWT auth method and create a role that binds the credential spec and policy. With transparent mode, clients authenticate directly with their JWT — no separate login step is needed.
 
 ```bash
-curl https://localhost:8200/v1/azure/gateway/graph.microsoft.com/v1.0/users \
-  -H "X-Warden-Token: <your-token>"
+# Enable JWT auth if not already enabled
+warden auth enable --type=jwt
+
+# Configure JWT (e.g., with JWKS URL)
+warden write auth/jwt/config mode=jwt jwks_url=https://your-idp/.well-known/jwks.json
+
+# Create a role that binds the credential spec and policy
+warden write auth/jwt/role/azure-user \
+    token_type=jwt_role \
+    token_policies="azure-access" \
+    user_claim=sub \
+    cred_spec_name=azure-ops \
+    token_ttl=1h
 ```
 
-### Authentication
+## Step 7: Make Requests Through the Gateway
 
-The gateway accepts authentication tokens via two headers (in priority order):
+With transparent mode, requests use role-based paths. Warden performs implicit JWT authentication and injects the Azure Bearer token automatically.
 
-1. **`X-Warden-Token`** header (recommended)
-2. **`Authorization: Bearer`** header
+The URL pattern is: `/v1/azure/role/{role}/gateway/{azure-host}/{path}`
 
-### Transparent Mode
+The first path segment after `gateway/` is the Azure API host, and the rest is the API path.
 
-When `transparent_mode` is enabled, the gateway uses implicit JWT-based authentication. Requests are routed through role-based paths:
-
-```
-https://<warden-host>/v1/azure/role/<role-name>/gateway/<azure-host>/<path>
+Export AZURE_ENDPOINT as environment variable:
+```bash
+export AZURE_ENDPOINT="${WARDEN_ADDR}/v1/azure/role/azure-user/gateway"
 ```
 
-This mode requires `auto_auth_path` to be configured and pointing to a valid JWT auth mount.
+### List Azure Subscriptions
+
+```bash
+curl "${AZURE_ENDPOINT}/management.azure.com/subscriptions?api-version=2022-12-01" \
+  -H "Authorization: Bearer ${JWT_TOKEN}"
+```
+
+### Get a Key Vault Secret
+
+```bash
+curl "${AZURE_ENDPOINT}/myvault.vault.azure.net/secrets/my-secret?api-version=7.4" \
+  -H "Authorization: Bearer ${JWT_TOKEN}"
+```
+
+### List Storage Blobs
+
+```bash
+curl "${AZURE_ENDPOINT}/mystorage.blob.core.windows.net/mycontainer?restype=container&comp=list" \
+  -H "Authorization: Bearer ${JWT_TOKEN}"
+```
+
+### Query Microsoft Graph
+
+```bash
+curl "${AZURE_ENDPOINT}/graph.microsoft.com/v1.0/users" \
+  -H "Authorization: Bearer ${JWT_TOKEN}"
+```
+
+### List Resource Groups
+
+```bash
+curl "${AZURE_ENDPOINT}/management.azure.com/subscriptions/<subscription-id>/resourcegroups?api-version=2021-04-01" \
+  -H "Authorization: Bearer ${JWT_TOKEN}"
+```
 
 ## Supported Azure Services
 
-The provider proxies requests to any Azure service whose hostname is in the allowed hosts list. Default supported services include:
+The provider proxies requests to any Azure service reachable over HTTPS. The target host is extracted from the gateway path. Common services include:
 
 | Service | Hostname | Description |
 |---------|----------|-------------|
@@ -283,14 +276,12 @@ The provider proxies requests to any Azure service whose hostname is in the allo
 | Azure File Storage | `*.file.core.windows.net` | Managed file shares |
 | Azure Data Lake Storage | `*.dfs.core.windows.net` | Big data analytics storage |
 
-Additional hosts can be added via the `allowed_hosts` configuration.
-
 ## Credential Rotation
 
 Warden supports automatic rotation of Azure service principal credentials via the Microsoft Graph API. Rotation follows a three-phase process:
 
 1. **Prepare** — A new `client_secret` is created on the service principal via `addPassword`
-2. **Commit** — The new credentials are activated and the token cache is cleared
+2. **Activate** — The new credentials are activated and the token cache is cleared
 3. **Cleanup** — The old `client_secret` is removed via `removePassword`
 
 ### Requirements for Rotation
@@ -307,13 +298,50 @@ Warden supports automatic rotation of Azure service principal credentials via th
 
 > **Note:** Azure AD Bearer tokens are not directly revocable — they expire naturally (typically after 1 hour). Rotation applies to the underlying service principal secrets.
 
+## Configuration Reference
+
+### Provider Config
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
+| `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
+| `transparent_mode` | bool | `false` | Enable implicit JWT authentication |
+| `auto_auth_path` | string | — | JWT auth mount path (required when `transparent_mode` is true) |
+| `default_role` | string | — | Fallback role when not specified in URL |
+
+### Credential Source Config
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `tenant_id` | string | Yes | Azure AD Tenant ID (UUID format) |
+| `client_id` | string | Yes | Service Principal Application (Client) ID |
+| `client_secret` | string | Yes | Service Principal client secret |
+| `subscription_id` | string | No | Azure Subscription ID |
+
+### Credential Spec Config (Bearer Token)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | No | Must be `bearer_token` (default) |
+| `client_id` | string | Yes | Workload SP Application ID |
+| `client_secret` | string | Yes | Workload SP client secret |
+| `tenant_id` | string | No | Override tenant ID (defaults to source tenant) |
+| `resource_uri` | string | No | Token scope (default: `https://management.azure.com/`) |
+
+### Credential Spec Config (Key Vault Secret)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | Yes | Must be `key_vault_secret` |
+| `client_id` | string | Yes | SP with access to the Key Vault |
+| `client_secret` | string | Yes | SP client secret |
+| `vault_name` | string | Yes | Name of the Azure Key Vault |
+| `secret_name` | string | Yes | Name of the secret to retrieve |
+| `secret_version` | string | No | Specific version (defaults to latest) |
+| `tenant_id` | string | No | Override tenant ID |
+
 ## Troubleshooting
-
-### "host not allowed" errors
-
-The target Azure hostname is not in the `allowed_hosts` list. Either:
-- Add the hostname to `allowed_hosts` via the config API
-- Use a wildcard entry (e.g., `.vault.azure.net` matches `myvault.vault.azure.net`)
 
 ### "credential not found" or "invalid credential type" errors
 
@@ -343,18 +371,3 @@ The target Azure hostname is not in the `allowed_hosts` list. Either:
 1. Confirm the source SP has `Application.ReadWrite.All` permission
 2. Verify admin consent has been granted
 3. Check Warden logs for Graph API errors
-
-### Debug Logging
-
-Enable trace-level logging to see detailed request processing:
-
-```hcl
-log_level = "trace"
-```
-
-This will show:
-- Incoming request details
-- Token extraction and injection
-- Host validation
-- Target URL construction
-- Proxy forwarding operations

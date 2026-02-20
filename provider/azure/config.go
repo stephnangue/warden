@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"strconv"
 	"time"
+
+	"github.com/stephnangue/warden/framework"
 )
 
 // ProviderConfig holds parsed configuration for the Azure provider
 type ProviderConfig struct {
-	AllowedHosts    []string
 	MaxBodySize     int64
 	Timeout         time.Duration
 	TransparentMode bool
@@ -16,50 +17,11 @@ type ProviderConfig struct {
 	DefaultRole     string
 }
 
-// Default values
-const (
-	DefaultMaxBodySize = int64(10485760) // 10MB
-	DefaultTimeout     = 30 * time.Second
-)
-
-// DefaultAllowedHosts are the standard Azure endpoints that are allowed by default
-var DefaultAllowedHosts = []string{
-	"management.azure.com",
-	"graph.microsoft.com",
-	".vault.azure.net",
-	".blob.core.windows.net",
-	".queue.core.windows.net",
-	".table.core.windows.net",
-	".file.core.windows.net",
-	".dfs.core.windows.net",
-}
-
 // parseConfig parses configuration from mount config (map[string]any from JSON)
 func parseConfig(conf map[string]any) ProviderConfig {
 	config := ProviderConfig{
-		AllowedHosts: DefaultAllowedHosts,
-		MaxBodySize:  DefaultMaxBodySize,
-		Timeout:      DefaultTimeout,
-	}
-
-	// Parse allowed_hosts - handle various JSON array types
-	if hosts, ok := conf["allowed_hosts"]; ok {
-		switch v := hosts.(type) {
-		case []string:
-			if len(v) > 0 {
-				config.AllowedHosts = v
-			}
-		case []any:
-			parsed := make([]string, 0, len(v))
-			for _, h := range v {
-				if s, ok := h.(string); ok {
-					parsed = append(parsed, s)
-				}
-			}
-			if len(parsed) > 0 {
-				config.AllowedHosts = parsed
-			}
-		}
+		MaxBodySize: framework.DefaultMaxBodySize,
+		Timeout:     framework.DefaultTimeout,
 	}
 
 	// Parse max_body_size - handle various JSON number types

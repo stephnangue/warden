@@ -37,6 +37,9 @@ import (
 	"github.com/stephnangue/warden/physical"
 	"github.com/stephnangue/warden/provider/aws"
 	"github.com/stephnangue/warden/provider/azure"
+	"github.com/stephnangue/warden/provider/gcp"
+	"github.com/stephnangue/warden/provider/github"
+	"github.com/stephnangue/warden/provider/gitlab"
 	"github.com/stephnangue/warden/provider/vault"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -55,7 +58,8 @@ const (
 var (
 	configPath string
 
-	flagDevAutoSeal bool
+	flagDev          bool
+	flagDevRootToken string
 
 	ServerCmd = &cobra.Command{
 		Use:   "server",
@@ -82,9 +86,12 @@ Usage: warden server [options]
 	}
 
 	providers = map[string]wardenlogical.Factory{
-		"aws":   aws.Factory,
-		"azure": azure.Factory,
-		"vault": vault.Factory,
+		"aws":    aws.Factory,
+		"azure":  azure.Factory,
+		"gcp":    gcp.Factory,
+		"github": github.Factory,
+		"gitlab": gitlab.Factory,
+		"vault":  vault.Factory,
 	}
 
 	authMethods = map[string]wardenlogical.Factory{
@@ -100,48 +107,59 @@ Usage: warden server [options]
 
 func init() {
 	ServerCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to configuration file (e.g., path/to/warden.hcl)")
-	ServerCmd.Flags().BoolVar(&flagDevAutoSeal, "dev-auto-seal", false, "Use autoseal in dev mode")
+	ServerCmd.Flags().BoolVar(&flagDev, "dev", false, "Enable dev mode: inmem storage, auto-init, auto-unseal")
+	ServerCmd.Flags().StringVar(&flagDevRootToken, "dev-root-token", "", "Custom root token for dev mode (any string)")
 }
 
 func run(cmd *cobra.Command, args []string) error {
-	// Validate config path is provided
-	if configPath == "" {
-		return fmt.Errorf("config file path is required. Use -c or --config flag")
+	// Validate flag combinations
+	if flagDevRootToken != "" && !flagDev {
+		return fmt.Errorf("--dev-root-token can only be used with --dev")
+	}
+	if flagDev && configPath != "" {
+		return fmt.Errorf("--config cannot be used with --dev (dev mode always uses inmem storage)")
 	}
 
-	// Check if config file exists
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return fmt.Errorf("config file not found: %s", configPath)
-	}
-
-	// Load configuration
-	config, err := config.LoadConfig(configPath)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+	// Load configuration: dev mode builds defaults, otherwise requires config file
+	var conf *config.Config
+	if flagDev {
+		conf = config.DevConfig()
+	} else {
+		if configPath == "" {
+			return fmt.Errorf("config file path is required. Use -c or --config flag")
+		}
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			return fmt.Errorf("config file not found: %s", configPath)
+		}
+		var err error
+		conf, err = config.LoadConfig(configPath)
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
 	}
 
 	// construct the logger with gate closed during initialization
-	logger := buildGatedLogger(config)
+	logger := buildGatedLogger(conf)
 
 	// craft the storage
-	storage, err := buildStorage(config, logger)
+	storage, err := buildStorage(conf, logger)
 	if err != nil {
 		return fmt.Errorf("failed to construct the storage: %w", err)
 	}
 
 	infoKeys := make([]string, 0, 10)
 	info := make(map[string]string)
-	info["log level"] = config.LogLevel
+	info["log level"] = conf.LogLevel
 	infoKeys = append(infoKeys, "log level")
-	info["log file"] = config.LogFile
+	info["log file"] = conf.LogFile
 	infoKeys = append(infoKeys, "log file")
-	info["log format"] = config.LogFormat
+	info["log format"] = conf.LogFormat
 	infoKeys = append(infoKeys, "log format")
-	info["log rotate max files"] = fmt.Sprintf("%d", config.LogRotateMaxFiles)
+	info["log rotate max files"] = fmt.Sprintf("%d", conf.LogRotateMaxFiles)
 	infoKeys = append(infoKeys, "log rotate max files")
-	info["log rotate max size"] = fmt.Sprintf("%d", config.LogRotateMegabytes)
+	info["log rotate max size"] = fmt.Sprintf("%d", conf.LogRotateMegabytes)
 	infoKeys = append(infoKeys, "log rotate max size")
-	info["log rotation period"] = fmt.Sprintf("%d", config.LogRotationPeriod)
+	info["log rotation period"] = fmt.Sprintf("%d", conf.LogRotationPeriod)
 	infoKeys = append(infoKeys, "log rotation period")
 
 	// returns a slice of env vars formatted as "key=value"
@@ -158,7 +176,7 @@ func run(cmd *cobra.Command, args []string) error {
 	info[key] = strings.Join(envVarKeys, ", ")
 	infoKeys = append(infoKeys, key)
 
-	barrierSeal, barrierWrapper, unwrapSeal, seals, sealConfigError, err := setSeal(config, logger, &infoKeys, info)
+	barrierSeal, barrierWrapper, unwrapSeal, seals, sealConfigError, err := setSeal(conf, logger, &infoKeys, info)
 	// Check error here
 	if err != nil {
 		return fmt.Errorf("failed to set seal: %w", err)
@@ -191,7 +209,7 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create the secure random reader: %w", err)
 	}
 
-	coreConfig := createCoreConfig(logger, config, storage, barrierSeal, unwrapSeal, secureRandomReader)
+	coreConfig := createCoreConfig(logger, conf, storage, barrierSeal, unwrapSeal, secureRandomReader)
 
 	newCore, newCoreError := core.NewCore(&coreConfig)
 	if newCoreError != nil {
@@ -201,8 +219,18 @@ func run(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "A non-fatal error occurred during initialization. Please check the logs for more information: %v\n", newCoreError)
 	}
 
+	// Dev mode: auto-initialize and auto-unseal
+	var devInitResult *core.InitResult
+	if flagDev {
+		var err error
+		devInitResult, err = devModeInit(newCore, flagDevRootToken)
+		if err != nil {
+			return fmt.Errorf("dev mode initialization failed: %w", err)
+		}
+	}
+
 	// Compile server information for output later
-	info["storage"] = config.Storage.Type
+	info["storage"] = conf.Storage.Type
 	infoKeys = append(infoKeys, "storage")
 
 	if coreConfig.ClusterAddr != "" {
@@ -221,7 +249,7 @@ func run(cmd *cobra.Command, args []string) error {
 	})
 
 	// init the listeners
-	lns, err := initListeners(httpHandler, config, logger, &infoKeys, &info)
+	lns, err := initListeners(httpHandler, conf, logger, &infoKeys, &info)
 	if err != nil {
 		// Error already logged in initListeners
 		return err
@@ -262,7 +290,10 @@ func run(cmd *cobra.Command, args []string) error {
 	// OpenBao cluster with multiple servers is configured with auto-unseal but is
 	// uninitialized. Once one server initializes the storage backend, this
 	// goroutine will pick up the unseal keys and unseal this instance.
-	go runUnseal(cmd.Context(), newCore, context.Background())
+	// Skip in dev mode since devModeInit already unsealed the core.
+	if !flagDev {
+		go runUnseal(cmd.Context(), newCore, context.Background())
+	}
 
 	if sealConfigError != nil {
 		init, err := newCore.InitializedLocally(context.Background())
@@ -292,6 +323,11 @@ func run(cmd *cobra.Command, args []string) error {
 				errChan <- err
 			}
 		})
+	}
+
+	// Print dev mode banner before opening the log gate
+	if flagDev && devInitResult != nil {
+		printDevBanner(cmd.OutOrStdout(), devInitResult)
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "\n==> Warden server started! Log data will stream in below:\n")
@@ -452,7 +488,7 @@ func setSeal(conf *config.Config, logger *log.GatedLogger, infoKeys *[]string, i
 	var sealConfigError error
 	var wrapper wrapping.Wrapper
 	var barrierWrapper wrapping.Wrapper
-	if flagDevAutoSeal {
+	if flagDev {
 		var err error
 		access, _ := core.NewTestSeal(nil)
 		barrierSeal, err = core.NewAutoSeal(access)

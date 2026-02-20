@@ -49,7 +49,7 @@ func (b *awsBackend) resignRequest(
 		return fmt.Errorf("failed to sign request: %w", err)
 	}
 
-	// b.logger.Trace("request re-signed successfully",
+	// b.Logger.Trace("request re-signed successfully",
 	// 	logger.String("request_id", middleware.GetReqID(r.Context())),
 	// )
 	return nil
@@ -109,7 +109,7 @@ func (b *awsBackend) verifyIncomingSignature(
 	// Clone the request for verification
 	testReq := r.Clone(r.Context())
 
-	b.logger.Trace("Signature Verification Debug",
+	b.Logger.Trace("Signature Verification Debug",
 		logger.String("method", testReq.Method),
 		logger.String("url", testReq.URL.String()),
 		logger.String("host", testReq.Host),
@@ -149,7 +149,7 @@ func (b *awsBackend) verifyIncomingSignature(
 		}
 
 		if !found && signedHeader != "host" {
-			b.logger.Warn("signed header not found in request",
+			b.Logger.Warn("signed header not found in request",
 				logger.String("header", signedHeader),
 				logger.String("request_id", middleware.GetReqID(r.Context())),
 			)
@@ -168,14 +168,14 @@ func (b *awsBackend) verifyIncomingSignature(
 
 	// NOW log the headers that will actually be used for signing
 	// for k, v := range testReq.Header {
-	// 	b.logger.Debug("Header BEFORE signing",
+	// 	b.Logger.Debug("Header BEFORE signing",
 	// 		logger.String("key", k),
 	// 		logger.Any("values", v),
 	// 		logger.String("request_id", middleware.GetReqID(r.Context())),
 	// 	)
 	// }
 
-	// b.logger.Debug("Host/URL BEFORE signing",
+	// b.Logger.Debug("Host/URL BEFORE signing",
 	// 	logger.String("r.Host", testReq.Host),
 	// 	logger.Any("r.URL", testReq.URL),
 	// 	logger.String("request_id", middleware.GetReqID(r.Context())),
@@ -191,7 +191,7 @@ func (b *awsBackend) verifyIncomingSignature(
 	payloadHash := computePayloadHash(bodyBytes)
 
 	// clientHash := testReq.Header.Get("X-Amz-Content-Sha256")
-	// b.logger.Debug("Payload hash comparison",
+	// b.Logger.Debug("Payload hash comparison",
 	// 	logger.String("clientHash", clientHash),
 	// 	logger.String("ourHash", payloadHash),
 	// 	logger.Int("bodyLength", len(bodyBytes)),
@@ -208,14 +208,14 @@ func (b *awsBackend) verifyIncomingSignature(
 
 	// DEBUG: Log headers AFTER signing to see what the signer added
 	// for k, v := range testReq.Header {
-	// 	b.logger.Debug("Header AFTER signing",
+	// 	b.Logger.Debug("Header AFTER signing",
 	// 		logger.String("key", k),
 	// 		logger.Any("values", v),
 	// 		logger.String("request_id", middleware.GetReqID(r.Context())),
 	// 	)
 	// }
 
-	// b.logger.Debug("Host/URL AFTER signing",
+	// b.Logger.Debug("Host/URL AFTER signing",
 	// 	logger.String("r.Host", testReq.Host),
 	// 	logger.Any("r.URL", testReq.URL),
 	// 	logger.String("request_id", middleware.GetReqID(r.Context())),
@@ -232,7 +232,7 @@ func (b *awsBackend) verifyIncomingSignature(
 	// Compare signatures using constant-time comparison to prevent timing attacks
 	match := subtle.ConstantTimeCompare([]byte(providedSignature), []byte(calculatedSignature)) == 1
 
-	b.logger.Trace("Signature comparison",
+	b.Logger.Trace("Signature comparison",
 		logger.String("provided", providedSignature),
 		logger.String("calculated", calculatedSignature),
 		logger.String("originalAuth", authHeader),
@@ -241,7 +241,7 @@ func (b *awsBackend) verifyIncomingSignature(
 	)
 
 	if !match {
-		b.logger.Warn("signature mismatch",
+		b.Logger.Warn("signature mismatch",
 			logger.String("provided", providedSignature),
 			logger.String("calculated", calculatedSignature),
 			logger.String("request_id", middleware.GetReqID(r.Context())),

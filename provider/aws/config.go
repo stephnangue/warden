@@ -4,12 +4,8 @@ import (
 	"encoding/json"
 	"strconv"
 	"time"
-)
 
-// Default values
-const (
-	DefaultMaxBodySize = int64(10485760) // 10MB
-	DefaultTimeout     = 30 * time.Second
+	"github.com/stephnangue/warden/framework"
 )
 
 // ProviderConfig holds parsed configuration
@@ -36,7 +32,7 @@ func parseConfig(conf map[string]any) ProviderConfig {
 	}
 
 	// Parse max_body_size
-	maxBodySize := DefaultMaxBodySize
+	maxBodySize := framework.DefaultMaxBodySize
 	if maxSize, ok := conf["max_body_size"].(int64); ok && maxSize > 0 {
 		maxBodySize = maxSize
 	} else if maxSize, ok := conf["max_body_size"].(int); ok && maxSize > 0 {
@@ -57,7 +53,7 @@ func parseConfig(conf map[string]any) ProviderConfig {
 	config.MaxBodySize = maxBodySize
 
 	// Parse timeout
-	timeOut := DefaultTimeout
+	timeOut := framework.DefaultTimeout
 	if timeout, ok := conf["timeout"].(int); ok {
 		timeOut = time.Duration(timeout) * time.Second
 	} else if timeout, ok := conf["timeout"].(string); ok {
@@ -66,7 +62,7 @@ func parseConfig(conf map[string]any) ProviderConfig {
 		}
 	}
 	if timeOut == 0 {
-		timeOut = DefaultTimeout
+		timeOut = framework.DefaultTimeout
 	}
 	config.Timeout = timeOut
 

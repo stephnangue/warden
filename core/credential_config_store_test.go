@@ -10,6 +10,8 @@ import (
 	"github.com/openbao/openbao/sdk/v2/physical/inmem"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // setupTestCredentialConfigStore creates a test credential config store with in-memory storage
@@ -82,7 +84,7 @@ func TestCredentialConfigStore_CreateSpec(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name:       "test-spec",
-		Type:       "database_userpass",
+		Type:       "vault_token",
 		Source:"test-source",
 		MinTTL:     time.Hour,
 		MaxTTL:     24 * time.Hour,
@@ -133,7 +135,7 @@ func TestCredentialConfigStore_CreateSpecDuplicate(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name:       "test-spec",
-		Type:       "database_userpass",
+		Type:       "vault_token",
 		Source:"test-source",
 	}
 
@@ -171,7 +173,7 @@ func TestCredentialConfigStore_UpdateSpec(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name:       "test-spec",
-		Type:       "database_userpass",
+		Type:       "vault_token",
 		Source:"test-source",
 		MinTTL:     time.Hour,
 		MaxTTL:     24 * time.Hour,
@@ -219,7 +221,7 @@ func TestCredentialConfigStore_DeleteSpec(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name:       "test-spec",
-		Type:       "database_userpass",
+		Type:       "vault_token",
 		Source:"test-source",
 	}
 
@@ -273,7 +275,7 @@ func TestCredentialConfigStore_ListSpecs(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		spec := &credential.CredSpec{
 			Name:       "spec-" + string(rune('0'+i)),
-			Type:       "database_userpass",
+			Type:       "vault_token",
 			Source:"test-source",
 		}
 		if err := store.CreateSpec(ctx, spec); err != nil {
@@ -398,7 +400,7 @@ func TestCredentialConfigStore_CheckSourceReferences(t *testing.T) {
 	for i := 1; i <= 2; i++ {
 		spec := &credential.CredSpec{
 			Name:       "spec-" + string(rune('0'+i)),
-			Type:       "database_userpass",
+			Type:       "vault_token",
 			Source:"test-source",
 		}
 		if err := store.CreateSpec(ctx, spec); err != nil {
@@ -409,7 +411,7 @@ func TestCredentialConfigStore_CheckSourceReferences(t *testing.T) {
 	// Create spec NOT referencing the source
 	otherSpec := &credential.CredSpec{
 		Name:       "other-spec",
-		Type:       "database_userpass",
+		Type:       "vault_token",
 		Source:"other-source",
 	}
 	if err := store.CreateSpec(ctx, otherSpec); err != nil {
@@ -473,7 +475,7 @@ func TestCredentialConfigStore_NamespaceIsolation(t *testing.T) {
 	// Create spec in namespace 1
 	spec1 := &credential.CredSpec{
 		Name:       "shared-name",
-		Type:       "database_userpass",
+		Type:       "vault_token",
 		Source:"source1",
 	}
 	if err := store.CreateSpec(ctx1, spec1); err != nil {
@@ -495,7 +497,7 @@ func TestCredentialConfigStore_NamespaceIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get spec from ns1: %v", err)
 	}
-	if retrieved1.Type != "database_userpass" {
+	if retrieved1.Type != "vault_token" {
 		t.Errorf("expected type database_userpass in ns1, got %s", retrieved1.Type)
 	}
 
@@ -525,7 +527,7 @@ func TestCredentialConfigStore_LoadFromStorage(t *testing.T) {
 	// Create spec
 	spec := &credential.CredSpec{
 		Name:       "test-spec",
-		Type:       "database_userpass",
+		Type:       "vault_token",
 		Source:"test-source",
 	}
 	if err := store.CreateSpec(ctx, spec); err != nil {
@@ -586,7 +588,7 @@ func TestCredentialConfigStore_CacheEviction(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		spec := &credential.CredSpec{
 			Name:       "spec-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
-			Type:       "database_userpass",
+			Type:       "vault_token",
 			Source:"test-source",
 		}
 		if err := store.CreateSpec(ctx, spec); err != nil {
@@ -847,6 +849,10 @@ func (t *testCredentialType) Metadata() credential.TypeMetadata {
 	}
 }
 
+func (t *testCredentialType) ConfigSchema() []*credential.FieldValidator {
+	return nil // No schema required for test type
+}
+
 func (t *testCredentialType) ValidateConfig(config map[string]string, sourceName string) error {
 	// No validation required for test type
 	return nil
@@ -1060,6 +1066,10 @@ func (t *validatingCredentialType) Metadata() credential.TypeMetadata {
 	}
 }
 
+func (t *validatingCredentialType) ConfigSchema() []*credential.FieldValidator {
+	return nil // No schema required for test type
+}
+
 func (t *validatingCredentialType) ValidateConfig(config map[string]string, sourceName string) error {
 	if err := credential.ValidateRequired(config, "required_field"); err != nil {
 		return err
@@ -1197,7 +1207,7 @@ func TestCredentialConfigStore_BuiltinLocalSource(t *testing.T) {
 	t.Run("Can create spec using built-in local source", func(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name:       "test-local-spec",
-			Type:       "database_userpass",
+			Type:       "vault_token",
 			Source:"local",
 			Config: map[string]string{
 				"kv2_mount":   "secret",
@@ -1222,4 +1232,101 @@ func TestCredentialConfigStore_BuiltinLocalSource(t *testing.T) {
 			t.Errorf("expected source name 'local', got '%s'", retrieved.Source)
 		}
 	})
+}
+
+// TestCredentialConfigStore_ClearNamespace tests clearing all specs and sources for a namespace
+func TestCredentialConfigStore_ClearNamespace(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	// Create sources
+	for _, name := range []string{"src-a", "src-b"} {
+		err := store.CreateSource(ctx, &credential.CredSource{
+			Name: name,
+			Type: "local",
+		})
+		require.NoError(t, err)
+	}
+
+	// Create specs referencing the sources
+	for _, name := range []string{"spec-a", "spec-b"} {
+		err := store.CreateSpec(ctx, &credential.CredSpec{
+			Name:   name,
+			Type:   "user_pass",
+			Source: "src-a",
+			MinTTL: 1 * time.Minute,
+			MaxTTL: 1 * time.Hour,
+		})
+		require.NoError(t, err)
+	}
+
+	// Verify resources exist
+	specs, err := store.ListSpecs(ctx)
+	require.NoError(t, err)
+	assert.Len(t, specs, 2)
+
+	sources, err := store.ListSources(ctx)
+	require.NoError(t, err)
+	// ListSources includes the built-in "local" source
+	assert.GreaterOrEqual(t, len(sources), 3)
+
+	// Clear namespace
+	err = store.ClearNamespace(ctx)
+	require.NoError(t, err)
+
+	// Verify specs are gone
+	specs, err = store.ListSpecs(ctx)
+	require.NoError(t, err)
+	assert.Len(t, specs, 0)
+
+	// Verify user sources are gone (built-in "local" is virtual, not in storage)
+	sources, err = store.ListSources(ctx)
+	require.NoError(t, err)
+	// Only the built-in local source should remain
+	assert.Len(t, sources, 1)
+	assert.Equal(t, "local", sources[0].Name)
+}
+
+// TestCredentialConfigStore_ClearNamespace_Empty tests clearing an empty namespace
+func TestCredentialConfigStore_ClearNamespace_Empty(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	err := store.ClearNamespace(ctx)
+	require.NoError(t, err)
+}
+
+// TestCredentialConfigStore_ClearNamespace_Isolation tests that clearing one namespace
+// doesn't affect another
+func TestCredentialConfigStore_ClearNamespace_Isolation(t *testing.T) {
+	store, _ := setupTestCredentialConfigStore(t)
+
+	// Create two namespace contexts
+	ns1 := &namespace.Namespace{ID: "ns1", Path: "ns1/", UUID: "ns1-uuid"}
+	ns2 := &namespace.Namespace{ID: "ns2", Path: "ns2/", UUID: "ns2-uuid"}
+	ctx1 := namespace.ContextWithNamespace(context.Background(), ns1)
+	ctx2 := namespace.ContextWithNamespace(context.Background(), ns2)
+
+	// Create source and spec in ns1
+	require.NoError(t, store.CreateSource(ctx1, &credential.CredSource{Name: "src", Type: "local"}))
+	require.NoError(t, store.CreateSpec(ctx1, &credential.CredSpec{
+		Name: "spec", Type: "user_pass", Source: "src", MinTTL: time.Minute, MaxTTL: time.Hour,
+	}))
+
+	// Create source and spec in ns2
+	require.NoError(t, store.CreateSource(ctx2, &credential.CredSource{Name: "src", Type: "local"}))
+	require.NoError(t, store.CreateSpec(ctx2, &credential.CredSpec{
+		Name: "spec", Type: "user_pass", Source: "src", MinTTL: time.Minute, MaxTTL: time.Hour,
+	}))
+
+	// Clear ns1
+	require.NoError(t, store.ClearNamespace(ctx1))
+
+	// ns1 should be empty
+	specs1, err := store.ListSpecs(ctx1)
+	require.NoError(t, err)
+	assert.Len(t, specs1, 0)
+
+	// ns2 should still have its resources
+	specs2, err := store.ListSpecs(ctx2)
+	require.NoError(t, err)
+	assert.Len(t, specs2, 1)
 }

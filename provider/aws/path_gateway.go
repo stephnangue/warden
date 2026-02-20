@@ -65,9 +65,9 @@ const (
 
 func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Apply timeout if configured
-	if b.timeout > 0 {
+	if b.Timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, b.timeout)
+		ctx, cancel = context.WithTimeout(ctx, b.Timeout)
 		defer cancel()
 		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
 	}
@@ -94,7 +94,7 @@ func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	}
 
 	// Forward the request
-	b.proxy.ServeHTTP(req.ResponseWriter, r)
+	b.Proxy.ServeHTTP(req.ResponseWriter, r)
 }
 
 // processRequest handles all request processing before proxying
@@ -123,17 +123,17 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// Step 4: Verify incoming signature
 	valid, err := b.verifyIncomingSignature(req.HTTPRequest, bodyBytes, creds, service, region)
 	if err != nil {
-		b.logger.Warn("Signature verification failed", logger.Err(err))
+		b.Logger.Warn("Signature verification failed", logger.Err(err))
 		http.Error(req.ResponseWriter, "Signature verification failed", http.StatusForbidden)
 		return nil, err
 	}
 	if !valid {
-		b.logger.Warn("Signature does not match")
+		b.Logger.Warn("Signature does not match")
 		http.Error(req.ResponseWriter, "Signature does not match", http.StatusForbidden)
 		return nil, fmt.Errorf("signature mismatch")
 	}
 
-	// b.logger.Trace("incoming signature verified successfully",
+	// b.Logger.Trace("incoming signature verified successfully",
 	// 	logger.String("access_key", accessKeyID),
 	// 	logger.String("request_id", req.RequestID),
 	// )
@@ -141,7 +141,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// Step 5: Get AWS credentials
 	awsCreds, err := b.getCredentials(req)
 	if err != nil {
-		b.logger.Warn("Fail to extract aws credentials", logger.Err(err))
+		b.Logger.Warn("Fail to extract aws credentials", logger.Err(err))
 		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
 		return nil, err
 	}
@@ -154,7 +154,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	}
 
 	// Debug: Log incoming request details for Access Point troubleshooting
-	b.logger.Trace("Incoming request details",
+	b.Logger.Trace("Incoming request details",
 		logger.String("method", req.HTTPRequest.Method),
 		logger.String("host", req.HTTPRequest.Host),
 		logger.String("path", req.HTTPRequest.URL.Path),
@@ -173,7 +173,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		return nil, fmt.Errorf("no processor found for service: %s", service)
 	}
 
-	b.logger.Trace("Selected processor",
+	b.Logger.Trace("Selected processor",
 		logger.String("processor", proc.Name()),
 		logger.String("request_id", req.RequestID),
 	)
@@ -185,7 +185,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		return nil, err
 	}
 
-	b.logger.Trace("Processor result",
+	b.Logger.Trace("Processor result",
 		logger.String("processor", proc.Name()),
 		logger.String("targetURL", result.TargetURL),
 		logger.String("targetHost", result.TargetHost),
@@ -200,9 +200,6 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
 		return nil, err
 	}
-
-	// Set upstream URL for audit logging
-	req.UpstreamURL = result.TargetURL
 
 	req.HTTPRequest.URL.Scheme = target.Scheme
 	req.HTTPRequest.URL.Host = target.Host
@@ -325,8 +322,8 @@ func (b *awsBackend) readRequestBody(r *http.Request) ([]byte, error) {
 
 	// Limit body size if configured
 	reader := io.Reader(r.Body)
-	if b.maxBodySize > 0 {
-		reader = io.LimitReader(r.Body, b.maxBodySize)
+	if b.MaxBodySize > 0 {
+		reader = io.LimitReader(r.Body, b.MaxBodySize)
 	}
 
 	bodyBytes, err := io.ReadAll(reader)
@@ -336,8 +333,8 @@ func (b *awsBackend) readRequestBody(r *http.Request) ([]byte, error) {
 	r.Body.Close()
 
 	// Check if we hit the size limit
-	if b.maxBodySize > 0 && int64(len(bodyBytes)) >= b.maxBodySize {
-		return nil, fmt.Errorf("request body exceeds maximum size of %d bytes", b.maxBodySize)
+	if b.MaxBodySize > 0 && int64(len(bodyBytes)) >= b.MaxBodySize {
+		return nil, fmt.Errorf("request body exceeds maximum size of %d bytes", b.MaxBodySize)
 	}
 
 	return bodyBytes, nil
@@ -386,7 +383,7 @@ func (b *awsBackend) cleanHeadersForSigning(r *http.Request) {
 	}
 
 	if len(removedHeaders) > 0 {
-		b.logger.Trace("headers removed before signing:",
+		b.Logger.Trace("headers removed before signing:",
 			logger.Any("removed_headers", removedHeaders),
 			logger.String("request_id", middleware.GetReqID(r.Context())),
 		)

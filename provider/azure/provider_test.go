@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/framework"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -81,65 +82,6 @@ func TestParseGatewayPath(t *testing.T) {
 				assert.Equal(t, tt.wantHost, host)
 				assert.Equal(t, tt.wantPath, azurePath)
 			}
-		})
-	}
-}
-
-func TestIsHostAllowed(t *testing.T) {
-	tests := []struct {
-		name         string
-		allowedHosts []string
-		host         string
-		want         bool
-	}{
-		{
-			name:         "exact match",
-			allowedHosts: []string{"management.azure.com"},
-			host:         "management.azure.com",
-			want:         true,
-		},
-		{
-			name:         "wildcard suffix match",
-			allowedHosts: []string{".vault.azure.net"},
-			host:         "myvault.vault.azure.net",
-			want:         true,
-		},
-		{
-			name:         "wildcard storage match",
-			allowedHosts: []string{".blob.core.windows.net"},
-			host:         "mystorage.blob.core.windows.net",
-			want:         true,
-		},
-		{
-			name:         "disallowed host",
-			allowedHosts: []string{"management.azure.com"},
-			host:         "evil.example.com",
-			want:         false,
-		},
-		{
-			name:         "empty allowed hosts uses defaults",
-			allowedHosts: nil,
-			host:         "management.azure.com",
-			want:         true,
-		},
-		{
-			name:         "default wildcard match",
-			allowedHosts: nil,
-			host:         "myvault.vault.azure.net",
-			want:         true,
-		},
-		{
-			name:         "partial suffix no match",
-			allowedHosts: []string{".vault.azure.net"},
-			host:         "vault.azure.net",
-			want:         false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			b := &azureBackend{allowedHosts: tt.allowedHosts}
-			assert.Equal(t, tt.want, b.isHostAllowed(tt.host))
 		})
 	}
 }
@@ -235,22 +177,19 @@ func TestPrepareHeaders(t *testing.T) {
 func TestParseConfig(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
 		config := parseConfig(map[string]any{})
-		assert.Equal(t, DefaultAllowedHosts, config.AllowedHosts)
-		assert.Equal(t, DefaultMaxBodySize, config.MaxBodySize)
-		assert.Equal(t, DefaultTimeout, config.Timeout)
+		assert.Equal(t, framework.DefaultMaxBodySize, config.MaxBodySize)
+		assert.Equal(t, framework.DefaultTimeout, config.Timeout)
 		assert.False(t, config.TransparentMode)
 	})
 
 	t.Run("custom values", func(t *testing.T) {
 		config := parseConfig(map[string]any{
-			"allowed_hosts":    []any{"custom.azure.com"},
 			"max_body_size":    float64(5242880),
 			"timeout":          "60s",
 			"transparent_mode": true,
 			"auto_auth_path":   "auth/jwt/",
 			"default_role":     "my-role",
 		})
-		assert.Equal(t, []string{"custom.azure.com"}, config.AllowedHosts)
 		assert.Equal(t, int64(5242880), config.MaxBodySize)
 		assert.Equal(t, 60*time.Second, config.Timeout)
 		assert.True(t, config.TransparentMode)
@@ -283,17 +222,6 @@ func TestValidateConfig(t *testing.T) {
 			config:  map[string]any{"unknown_key": "value"},
 			wantErr: true,
 			errMsg:  "unknown configuration key",
-		},
-		{
-			name:    "valid allowed_hosts",
-			config:  map[string]any{"allowed_hosts": []any{"management.azure.com"}},
-			wantErr: false,
-		},
-		{
-			name:    "invalid allowed_hosts type",
-			config:  map[string]any{"allowed_hosts": "not-an-array"},
-			wantErr: true,
-			errMsg:  "allowed_hosts must be an array",
 		},
 		{
 			name:    "negative max_body_size",

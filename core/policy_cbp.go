@@ -291,9 +291,6 @@ func (a *CBP) Capabilities(ctx context.Context, path string) (pathCapabilities [
 	if capabilities&ScanCapabilityInt > 0 {
 		pathCapabilities = append(pathCapabilities, ScanCapability)
 	}
-	if capabilities&StreamCapabilityInt > 0 {
-		pathCapabilities = append(pathCapabilities, StreamCapability)
-	}
 
 	// If "deny" is explicitly set or if the path has no capabilities at all,
 	// set the path capabilities to "deny"
@@ -420,10 +417,6 @@ CHECK:
 	case logical.ScanOperation:
 		operationAllowed = capabilities&ScanCapabilityInt > 0
 		grantingPolicies = permissions.GrantingPoliciesMap[ScanCapabilityInt]
-	case logical.StreamOperation:
-		operationAllowed = capabilities&StreamCapabilityInt > 0
-		grantingPolicies = permissions.GrantingPoliciesMap[StreamCapabilityInt]
-
 	// These three re-use UpdateCapabilityInt since that's the most appropriate
 	// capability/operation mapping
 	case logical.RevokeOperation, logical.RenewOperation, logical.RollbackOperation:

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -40,23 +41,23 @@ var headersToRemove = []string{
 func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Check if Vault address is configured
 	if b.vaultAddress == "" {
-		b.logger.Error("vault_address not configured")
+		b.Logger.Error("vault_address not configured")
 		http.Error(req.ResponseWriter, "Vault provider not configured", http.StatusServiceUnavailable)
 		return
 	}
 
 	// Apply timeout if configured
-	if b.timeout > 0 {
+	if b.Timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, b.timeout)
+		ctx, cancel = context.WithTimeout(ctx, b.Timeout)
 		defer cancel()
 		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
 	}
 
 	// Enforce max body size
-	maxBody := b.maxBodySize
+	maxBody := b.MaxBodySize
 	if maxBody <= 0 {
-		maxBody = DefaultMaxBodySize
+		maxBody = framework.DefaultMaxBodySize
 	}
 	req.HTTPRequest.Body = http.MaxBytesReader(req.ResponseWriter, req.HTTPRequest.Body, maxBody)
 
@@ -69,7 +70,7 @@ func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) 
 		var err error
 		vaultToken, err = b.getVaultToken(req)
 		if err != nil {
-			b.logger.Warn("Failed to get Vault token", logger.Err(err))
+			b.Logger.Warn("Failed to get Vault token", logger.Err(err))
 			http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -78,7 +79,7 @@ func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	// Build target URL
 	targetURL, err := b.buildTargetURL(req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
 	if err != nil {
-		b.logger.Error("Failed to build target URL", logger.Err(err))
+		b.Logger.Error("Failed to build target URL", logger.Err(err))
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -87,7 +88,7 @@ func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	r := req.HTTPRequest
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
-		b.logger.Error("Failed to parse target URL", logger.Err(err))
+		b.Logger.Error("Failed to parse target URL", logger.Err(err))
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -98,11 +99,8 @@ func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	// Clean headers and inject Vault token (if present)
 	b.prepareHeaders(r, vaultToken)
 
-	// Set upstream URL for audit logging
-	req.UpstreamURL = targetURL
-
 	// Forward the request (body streams through without buffering)
-	b.proxy.ServeHTTP(req.ResponseWriter, r)
+	b.Proxy.ServeHTTP(req.ResponseWriter, r)
 }
 
 // getVaultToken extracts the Vault token from the credential

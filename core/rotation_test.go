@@ -280,6 +280,57 @@ func TestRotationManager_NamespaceIsolation(t *testing.T) {
 	assert.True(t, loaded2, "source in ns2 should still be registered")
 }
 
+func TestRotationManager_UnregisterByNamespace(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	rm := NewRotationManager(nil, log.WithSubsystem("rotation"), nil)
+	rm.Start()
+	defer rm.Stop()
+
+	ns1 := &namespace.Namespace{UUID: "ns-uuid-1", ID: "ns1", Path: "ns1/"}
+	ns2 := &namespace.Namespace{UUID: "ns-uuid-2", ID: "ns2", Path: "ns2/"}
+
+	ctx1 := namespace.ContextWithNamespace(context.Background(), ns1)
+	ctx2 := namespace.ContextWithNamespace(context.Background(), ns2)
+
+	// Register sources and specs in both namespaces
+	require.NoError(t, rm.RegisterSource(ctx1, "source-a", "vault", 1*time.Hour))
+	require.NoError(t, rm.RegisterSource(ctx1, "source-b", "aws", 2*time.Hour))
+	require.NoError(t, rm.RegisterSpec(ctx1, "spec-a", "source-a", 30*time.Minute))
+	require.NoError(t, rm.RegisterSource(ctx2, "source-a", "vault", 1*time.Hour))
+
+	assert.Equal(t, int64(4), atomic.LoadInt64(&rm.entryCount))
+
+	// Unregister all entries for ns1
+	err := rm.UnregisterByNamespace(ns1.UUID)
+	require.NoError(t, err)
+
+	// ns1 entries should be gone
+	_, loaded := rm.entries.Load(buildRotationKey(ns1.UUID, "source-a"))
+	assert.False(t, loaded, "ns1 source-a should be gone")
+	_, loaded = rm.entries.Load(buildRotationKey(ns1.UUID, "source-b"))
+	assert.False(t, loaded, "ns1 source-b should be gone")
+	_, loaded = rm.entries.Load(buildSpecKey(ns1.UUID, "spec-a"))
+	assert.False(t, loaded, "ns1 spec-a should be gone")
+
+	// ns2 entries should remain
+	_, loaded = rm.entries.Load(buildRotationKey(ns2.UUID, "source-a"))
+	assert.True(t, loaded, "ns2 source-a should still be registered")
+
+	assert.Equal(t, int64(1), atomic.LoadInt64(&rm.entryCount))
+}
+
+func TestRotationManager_UnregisterByNamespace_Empty(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	rm := NewRotationManager(nil, log.WithSubsystem("rotation"), nil)
+	rm.Start()
+	defer rm.Stop()
+
+	// Should not error on empty namespace
+	err := rm.UnregisterByNamespace("nonexistent-uuid")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), atomic.LoadInt64(&rm.entryCount))
+}
+
 func TestBuildRotationKey(t *testing.T) {
 	tests := []struct {
 		namespace  string
@@ -507,14 +558,14 @@ func createTestRotationManager(t *testing.T, driver *mockRotatableDriver) (*Rota
 	core := createTestCore(t)
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	// Set up credential manager with mock driver factory
-	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	driverRegistry := credential.NewDriverRegistry(log)
-	err := driverRegistry.RegisterFactory(&mockDriverFactory{driver: driver})
+	// Register mock driver factory in the core's existing driver registry
+	// (createTestCore already initializes the registry with builtin drivers)
+	err := core.credentialDriverRegistry.RegisterFactory(&mockDriverFactory{driver: driver})
 	require.NoError(t, err)
 
-	typeRegistry := credential.NewTypeRegistry()
-	credManager, err := credential.NewManager(typeRegistry, driverRegistry, core.credConfigStore, log)
+	// Re-setup credential manager to use the updated registry with mock driver
+	log := core.logger
+	credManager, err := credential.NewManager(core.credentialTypeRegistry, core.credentialDriverRegistry, core.credConfigStore, log)
 	require.NoError(t, err)
 	core.credentialManager = credManager
 

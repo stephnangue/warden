@@ -19,7 +19,7 @@ const (
 	DeleteOperation      Operation = "delete"
 	ListOperation        Operation = "list"
 	ScanOperation        Operation = "scan"
-	StreamOperation      Operation = "stream"
+
 	HelpOperation        Operation = "help"
 	ResolveRoleOperation Operation = "resolve-role"
 	HeaderOperation      Operation = "header"

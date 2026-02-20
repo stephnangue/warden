@@ -16,14 +16,10 @@ func (b *azureBackend) pathConfig() *framework.Path {
 	return &framework.Path{
 		Pattern: "config",
 		Fields: map[string]*framework.FieldSchema{
-			"allowed_hosts": {
-				Type:        framework.TypeCommaStringSlice,
-				Description: "List of allowed Azure hosts/domains to proxy requests to. Supports wildcards (e.g., '.vault.azure.net'). If not set, defaults to standard Azure endpoints.",
-			},
 			"max_body_size": {
 				Type:        framework.TypeInt64,
 				Description: "Maximum request body size in bytes (default: 10MB, max: 100MB)",
-				Default:     DefaultMaxBodySize,
+				Default:     framework.DefaultMaxBodySize,
 			},
 			"timeout": {
 				Type:        framework.TypeDurationSecond,
@@ -55,86 +51,76 @@ func (b *azureBackend) pathConfig() *framework.Path {
 			},
 		},
 		HelpSynopsis:    "Configure Azure provider",
-		HelpDescription: "This endpoint configures the Azure provider settings including allowed hosts, body size limits, timeouts, and transparent mode.",
+		HelpDescription: "This endpoint configures the Azure provider settings including body size limits, timeouts, and transparent mode.",
 	}
 }
 
 // handleConfigRead handles reading the Azure provider configuration
 func (b *azureBackend) handleConfigRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	tc := b.TransparentConfig
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"allowed_hosts":    b.allowedHosts,
-			"max_body_size":    b.maxBodySize,
-			"timeout":          b.timeout.String(),
-			"transparent_mode": b.transparentMode,
-			"auto_auth_path":   b.autoAuthPath,
-			"default_role":     b.defaultRole,
+			"max_body_size":    b.MaxBodySize,
+			"timeout":          b.Timeout.String(),
+			"transparent_mode": tc.Enabled,
+			"auto_auth_path":   tc.AutoAuthPath,
+			"default_role":     tc.DefaultRole,
 		},
 	}, nil
 }
 
 // handleConfigWrite handles writing the Azure provider configuration
 func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	// Apply values from request - framework already handles type conversion
-	if val, ok := d.GetOk("allowed_hosts"); ok {
-		b.allowedHosts = val.([]string)
-	} else if len(b.allowedHosts) == 0 {
-		b.allowedHosts = DefaultAllowedHosts
-	}
-
 	// For max_body_size: use provided value, or apply default if not yet set
 	if val, ok := d.GetOk("max_body_size"); ok {
-		b.maxBodySize = val.(int64)
-	} else if b.maxBodySize == 0 {
-		b.maxBodySize = DefaultMaxBodySize
+		b.MaxBodySize = val.(int64)
+	} else if b.MaxBodySize == 0 {
+		b.MaxBodySize = framework.DefaultMaxBodySize
 	}
 
 	// For timeout: use provided value, or apply default if not yet set
 	if val, ok := d.GetOk("timeout"); ok {
 		// TypeDurationSecond returns int (seconds)
-		b.timeout = time.Duration(val.(int)) * time.Second
-	} else if b.timeout == 0 {
-		b.timeout = DefaultTimeout
+		b.Timeout = time.Duration(val.(int)) * time.Second
+	} else if b.Timeout == 0 {
+		b.Timeout = framework.DefaultTimeout
 	}
 
-	// Transparent mode settings
+	// Transparent mode settings — build new config from current values + overrides
+	tc := &framework.TransparentConfig{
+		Enabled:      b.TransparentConfig.Enabled,
+		AutoAuthPath: b.TransparentConfig.AutoAuthPath,
+		DefaultRole:  b.TransparentConfig.DefaultRole,
+	}
 	if val, ok := d.GetOk("transparent_mode"); ok {
-		b.transparentMode = val.(bool)
+		tc.Enabled = val.(bool)
 	}
-
 	if val, ok := d.GetOk("auto_auth_path"); ok {
-		b.autoAuthPath = val.(string)
+		tc.AutoAuthPath = val.(string)
 	}
-
 	if val, ok := d.GetOk("default_role"); ok {
-		b.defaultRole = val.(string)
+		tc.DefaultRole = val.(string)
 	}
 
 	// Validate: if transparent_mode enabled, auto_auth_path required
-	if b.transparentMode && b.autoAuthPath == "" {
+	if tc.Enabled && tc.AutoAuthPath == "" {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        logical.ErrBadRequest("auto_auth_path is required when transparent_mode is enabled"),
 		}, nil
 	}
 
-	// Sync transparent config with framework
-	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-		Enabled:      b.transparentMode,
-		AutoAuthPath: b.autoAuthPath,
-		DefaultRole:  b.defaultRole,
-	})
+	b.StreamingBackend.SetTransparentConfig(tc)
 
 	// Persist config to storage
-	if b.storageView != nil {
+	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"allowed_hosts":    b.allowedHosts,
-			"max_body_size":    b.maxBodySize,
-			"timeout":          b.timeout.String(),
-			"transparent_mode": b.transparentMode,
-			"auto_auth_path":   b.autoAuthPath,
-			"default_role":     b.defaultRole,
+			"max_body_size":    b.MaxBodySize,
+			"timeout":          b.Timeout.String(),
+			"transparent_mode": tc.Enabled,
+			"auto_auth_path":   tc.AutoAuthPath,
+			"default_role":     tc.DefaultRole,
 		})
 		if err != nil {
 			return &logical.Response{
@@ -142,7 +128,7 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 				Err:        err,
 			}, nil
 		}
-		if err := b.storageView.Put(ctx, entry); err != nil {
+		if err := b.StorageView.Put(ctx, entry); err != nil {
 			return &logical.Response{
 				StatusCode: http.StatusInternalServerError,
 				Err:        err,

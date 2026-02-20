@@ -162,7 +162,7 @@ func (c *Sys) ListNamespacesWithContext(ctx context.Context, recursive bool, inc
 
 	r := c.c.NewRequest(http.MethodGet, "/v1/sys/namespaces")
 
-	r.Params.Set("list", "true")
+	r.Params.Set("warden-list", "true")
 	if recursive {
 		r.Params.Set("recursive", "true")
 	}

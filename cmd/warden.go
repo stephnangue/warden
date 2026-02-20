@@ -60,6 +60,7 @@ func init() {
 	wardenCmd.AddCommand(basic.ReadCmd)
 	wardenCmd.AddCommand(basic.ListCmd)
 	wardenCmd.AddCommand(basic.DeleteCmd)
+	wardenCmd.AddCommand(basic.PathHelpCmd)
 }
 
 // Namespace returns the currently configured namespace from the flag

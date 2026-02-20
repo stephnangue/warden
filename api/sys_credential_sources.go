@@ -174,7 +174,7 @@ func (c *Sys) ListCredentialSourcesWithContext(ctx context.Context) ([]*Credenti
 
 	r := c.c.NewRequest(http.MethodGet, "/v1/sys/cred/sources")
 
-	r.Params.Set("list", "true")
+	r.Params.Set("warden-list", "true")
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {

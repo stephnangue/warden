@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -9,6 +10,31 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// createHVaultSource is a helper that creates an hvault source for testing vault_token specs
+func createHVaultSource(t *testing.T, backend *SystemBackend, ctx context.Context, name string) {
+	t.Helper()
+	sourceSchema := backend.pathCredentials()[0].Fields
+	sourceRaw := map[string]interface{}{
+		"name":            name,
+		"type":            "hvault",
+		"rotation_period": 86400, // 24 hours
+		"config": map[string]interface{}{
+			"vault_address": "http://localhost:8200",
+		},
+	}
+	sourceReq := createTestRequest(logical.CreateOperation, "cred/sources/"+name, sourceRaw)
+	sourceFieldData := createFieldData(sourceSchema, sourceRaw)
+	resp, err := backend.handleCredentialSourceCreate(ctx, sourceReq, sourceFieldData)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	if resp.Err != nil {
+		t.Fatalf("Source creation failed: %v", resp.Err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("Source creation returned status %d (expected 201), data: %+v", resp.StatusCode, resp.Data)
+	}
+}
 
 func TestSystemBackend_PathCredentials(t *testing.T) {
 	backend, _, _ := setupTestSystemBackend(t)
@@ -132,34 +158,42 @@ func TestSystemBackend_HandleCredentialSourceDelete(t *testing.T) {
 func TestSystemBackend_HandleCredentialSourceDelete_WithReferences(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
-	// Create a source
-	sourceSchema := backend.pathCredentials()[0].Fields
-	sourceRaw := map[string]interface{}{
-		"name": "test-source",
-		"type": "local",
-	}
-
-	req := createTestRequest(logical.CreateOperation, "cred/sources/test-source", sourceRaw)
-	fieldData := createFieldData(sourceSchema, sourceRaw)
-
-	_, err := backend.handleCredentialSourceCreate(ctx, req, fieldData)
-	require.NoError(t, err)
+	// Create hvault source (required for vault_token type)
+	createHVaultSource(t, backend, ctx, "test-source")
 
 	// Create a spec that references the source
 	specSchema := backend.pathCredentials()[2].Fields
 	specRaw := map[string]interface{}{
-		"name":        "test-spec",
-		"type":        "database_userpass",
+		"name":   "test-spec",
+		"type":   "vault_token",
 		"source": "test-source",
+		"config": map[string]interface{}{
+			"mint_method": "vault_token",
+			"token_role":  "test-role",
+		},
 	}
 
 	specReq := createTestRequest(logical.CreateOperation, "cred/specs/test-spec", specRaw)
 	specFieldData := createFieldData(specSchema, specRaw)
 
-	_, err = backend.handleCredentialSpecCreate(ctx, specReq, specFieldData)
+	specResp, err := backend.handleCredentialSpecCreate(ctx, specReq, specFieldData)
 	require.NoError(t, err)
+	require.NotNil(t, specResp)
+	if specResp.Err != nil {
+		t.Fatalf("Spec creation failed: %v", specResp.Err)
+	}
+	if specResp.StatusCode != http.StatusCreated {
+		t.Fatalf("Spec creation returned status %d, expected 201", specResp.StatusCode)
+	}
 
 	// Try to delete the source - should fail
+	sourceSchema := backend.pathCredentials()[0].Fields
+	sourceRaw := map[string]interface{}{
+		"name": "test-source",
+	}
+	req := createTestRequest(logical.DeleteOperation, "cred/sources/test-source", sourceRaw)
+	fieldData := createFieldData(sourceSchema, sourceRaw)
+
 	resp, err := backend.handleCredentialSourceDelete(ctx, req, fieldData)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -203,26 +237,21 @@ func TestSystemBackend_HandleCredentialSourceList(t *testing.T) {
 func TestSystemBackend_HandleCredentialSpecCreate(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
-	// First create a source
-	sourceSchema := backend.pathCredentials()[0].Fields
-	sourceRaw := map[string]interface{}{
-		"name": "test-source",
-		"type": "local",
-	}
-	sourceReq := createTestRequest(logical.CreateOperation, "cred/sources/test-source", sourceRaw)
-	sourceFieldData := createFieldData(sourceSchema, sourceRaw)
-
-	_, err := backend.handleCredentialSourceCreate(ctx, sourceReq, sourceFieldData)
-	require.NoError(t, err)
+	// Create hvault source (required for vault_token type)
+	createHVaultSource(t, backend, ctx, "test-source")
 
 	// Now create a spec
 	specSchema := backend.pathCredentials()[2].Fields
 	specRaw := map[string]interface{}{
-		"name":        "test-spec",
-		"type":        "database_userpass",
-		"source": "test-source",
-		"min_ttl":     3600,
-		"max_ttl":     86400,
+		"name":    "test-spec",
+		"type":    "vault_token",
+		"source":  "test-source",
+		"min_ttl": 3600,
+		"max_ttl": 86400,
+		"config": map[string]interface{}{
+			"mint_method": "vault_token",
+			"token_role":  "test-role",
+		},
 	}
 
 	specReq := createTestRequest(logical.CreateOperation, "cred/specs/test-spec", specRaw)
@@ -231,9 +260,12 @@ func TestSystemBackend_HandleCredentialSpecCreate(t *testing.T) {
 	resp, err := backend.handleCredentialSpecCreate(ctx, specReq, specFieldData)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
+	if resp.StatusCode != http.StatusCreated {
+		t.Logf("Spec creation failed - status: %d, err: %v, data: %+v", resp.StatusCode, resp.Err, resp.Data)
+	}
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 	assert.Equal(t, "test-spec", resp.Data["name"])
-	assert.Equal(t, "database_userpass", resp.Data["type"])
+	assert.Equal(t, "vault_token", resp.Data["type"])
 	assert.Equal(t, int64(3600), resp.Data["min_ttl"])
 	assert.Equal(t, int64(86400), resp.Data["max_ttl"])
 }
@@ -242,25 +274,21 @@ func TestSystemBackend_HandleCredentialSpecCreate_InvalidTTL(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
 	// First create a source
-	sourceSchema := backend.pathCredentials()[0].Fields
-	sourceRaw := map[string]interface{}{
-		"name": "test-source",
-		"type": "local",
-	}
-	sourceReq := createTestRequest(logical.CreateOperation, "cred/sources/test-source", sourceRaw)
-	sourceFieldData := createFieldData(sourceSchema, sourceRaw)
-
-	_, err := backend.handleCredentialSourceCreate(ctx, sourceReq, sourceFieldData)
-	require.NoError(t, err)
+	// Create hvault source (required for vault_token type)
+	createHVaultSource(t, backend, ctx, "test-source")
 
 	// Create spec with invalid TTL (min > max)
 	specSchema := backend.pathCredentials()[2].Fields
 	specRaw := map[string]interface{}{
-		"name":        "test-spec",
-		"type":        "database_userpass",
-		"source": "test-source",
-		"min_ttl":     86400, // Greater than max_ttl
-		"max_ttl":     3600,
+		"name":    "test-spec",
+		"type":    "vault_token",
+		"source":  "test-source",
+		"min_ttl": 86400, // Greater than max_ttl
+		"max_ttl": 3600,
+		"config": map[string]interface{}{
+			"mint_method": "vault_token",
+			"token_role":  "test-role",
+		},
 	}
 
 	specReq := createTestRequest(logical.CreateOperation, "cred/specs/test-spec", specRaw)
@@ -275,32 +303,38 @@ func TestSystemBackend_HandleCredentialSpecCreate_InvalidTTL(t *testing.T) {
 func TestSystemBackend_HandleCredentialSpecRead(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
-	// Create source and spec
-	sourceSchema := backend.pathCredentials()[0].Fields
-	sourceRaw := map[string]interface{}{
-		"name": "test-source",
-		"type": "local",
-	}
-	sourceReq := createTestRequest(logical.CreateOperation, "cred/sources/test-source", sourceRaw)
-	sourceFieldData := createFieldData(sourceSchema, sourceRaw)
-	_, err := backend.handleCredentialSourceCreate(ctx, sourceReq, sourceFieldData)
-	require.NoError(t, err)
+	// Create hvault source (required for vault_token type)
+	createHVaultSource(t, backend, ctx, "test-source")
 
 	specSchema := backend.pathCredentials()[2].Fields
 	specRaw := map[string]interface{}{
-		"name":        "test-spec",
-		"type":        "database_userpass",
+		"name":   "test-spec",
+		"type":   "vault_token",
 		"source": "test-source",
+		"config": map[string]interface{}{
+			"mint_method": "vault_token",
+			"token_role":  "test-role",
+		},
 	}
 	specReq := createTestRequest(logical.CreateOperation, "cred/specs/test-spec", specRaw)
 	specFieldData := createFieldData(specSchema, specRaw)
-	_, err = backend.handleCredentialSpecCreate(ctx, specReq, specFieldData)
+	createResp, err := backend.handleCredentialSpecCreate(ctx, specReq, specFieldData)
 	require.NoError(t, err)
+	require.NotNil(t, createResp)
+	if createResp.Err != nil {
+		t.Fatalf("Spec creation failed: %v", createResp.Err)
+	}
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("Spec creation returned status %d (expected 201)", createResp.StatusCode)
+	}
 
 	// Read spec
 	resp, err := backend.handleCredentialSpecRead(ctx, specReq, specFieldData)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Logf("Spec read failed - status: %d, err: %v, data: %+v", resp.StatusCode, resp.Err, resp.Data)
+	}
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "test-spec", resp.Data["name"])
 }
@@ -308,28 +342,24 @@ func TestSystemBackend_HandleCredentialSpecRead(t *testing.T) {
 func TestSystemBackend_HandleCredentialSpecUpdate(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
-	// Create source and spec
-	sourceSchema := backend.pathCredentials()[0].Fields
-	sourceRaw := map[string]interface{}{
-		"name": "test-source",
-		"type": "local",
-	}
-	sourceReq := createTestRequest(logical.CreateOperation, "cred/sources/test-source", sourceRaw)
-	sourceFieldData := createFieldData(sourceSchema, sourceRaw)
-	_, err := backend.handleCredentialSourceCreate(ctx, sourceReq, sourceFieldData)
-	require.NoError(t, err)
+	// Create hvault source (required for vault_token type)
+	createHVaultSource(t, backend, ctx, "test-source")
 
 	specSchema := backend.pathCredentials()[2].Fields
 	specRaw := map[string]interface{}{
-		"name":        "test-spec",
-		"type":        "database_userpass",
-		"source": "test-source",
-		"min_ttl":     3600,
-		"max_ttl":     86400,
+		"name":    "test-spec",
+		"type":    "vault_token",
+		"source":  "test-source",
+		"min_ttl": 3600,
+		"max_ttl": 86400,
+		"config": map[string]interface{}{
+			"mint_method": "vault_token",
+			"token_role":  "test-role",
+		},
 	}
 	specReq := createTestRequest(logical.CreateOperation, "cred/specs/test-spec", specRaw)
 	specFieldData := createFieldData(specSchema, specRaw)
-	_, err = backend.handleCredentialSpecCreate(ctx, specReq, specFieldData)
+	_, err := backend.handleCredentialSpecCreate(ctx, specReq, specFieldData)
 	require.NoError(t, err)
 
 	// Update spec
@@ -363,9 +393,13 @@ func TestSystemBackend_HandleCredentialSpecDelete(t *testing.T) {
 
 	specSchema := backend.pathCredentials()[2].Fields
 	specRaw := map[string]interface{}{
-		"name":        "test-spec",
-		"type":        "database_userpass",
+		"name":   "test-spec",
+		"type":   "vault_token",
 		"source": "test-source",
+		"config": map[string]interface{}{
+			"mint_method": "vault_token",
+			"token_role":  "test-role",
+		},
 	}
 	specReq := createTestRequest(logical.CreateOperation, "cred/specs/test-spec", specRaw)
 	specFieldData := createFieldData(specSchema, specRaw)
@@ -383,24 +417,20 @@ func TestSystemBackend_HandleCredentialSpecDelete(t *testing.T) {
 func TestSystemBackend_HandleCredentialSpecList(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
-	// Create source
-	sourceSchema := backend.pathCredentials()[0].Fields
-	sourceRaw := map[string]interface{}{
-		"name": "test-source",
-		"type": "local",
-	}
-	sourceReq := createTestRequest(logical.CreateOperation, "cred/sources/test-source", sourceRaw)
-	sourceFieldData := createFieldData(sourceSchema, sourceRaw)
-	_, err := backend.handleCredentialSourceCreate(ctx, sourceReq, sourceFieldData)
-	require.NoError(t, err)
+	// Create hvault source (required for vault_token type)
+	createHVaultSource(t, backend, ctx, "test-source")
 
 	// Create multiple specs
 	specSchema := backend.pathCredentials()[2].Fields
 	for _, name := range []string{"spec1", "spec2", "spec3"} {
 		specRaw := map[string]interface{}{
-			"name":        name,
-			"type":        "database_userpass",
+			"name":   name,
+			"type":   "vault_token",
 			"source": "test-source",
+			"config": map[string]interface{}{
+				"mint_method": "vault_token",
+				"token_role":  "test-role",
+			},
 		}
 		specReq := createTestRequest(logical.CreateOperation, "cred/specs/"+name, specRaw)
 		specFieldData := createFieldData(specSchema, specRaw)

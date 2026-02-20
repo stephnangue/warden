@@ -72,7 +72,7 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 				"auth_method":   "userpass",
 			},
 			wantErr: true,
-			errMsg:  "unsupported auth_method",
+			errMsg:  "must be one of",
 		},
 		{
 			name: "approle missing role_id",
@@ -293,7 +293,7 @@ func TestVaultDriver_MintCredential_DatabaseRouting(t *testing.T) {
 	// kv2_static without kv2_mount should fail on missing fields
 	spec := &credential.CredSpec{
 		Name: "test-db",
-		Type: credential.TypeDatabaseUserPass,
+		Type: credential.TypeVaultToken,
 		Config: map[string]string{
 			"mint_method": "kv2_static",
 		},
@@ -305,7 +305,7 @@ func TestVaultDriver_MintCredential_DatabaseRouting(t *testing.T) {
 	// dynamic_database without role_name should fail on missing fields
 	spec2 := &credential.CredSpec{
 		Name: "test-db-dynamic",
-		Type: credential.TypeDatabaseUserPass,
+		Type: credential.TypeVaultToken,
 		Config: map[string]string{
 			"mint_method":    "dynamic_database",
 			"database_mount": "database",

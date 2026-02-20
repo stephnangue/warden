@@ -16,6 +16,9 @@ import (
 	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/openbao/openbao/sdk/v2/physical/inmem"
 	"github.com/stephnangue/warden/audit"
+	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/drivers"
+	"github.com/stephnangue/warden/credential/types"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	phy "github.com/stephnangue/warden/physical"
@@ -539,6 +542,7 @@ func createTestCore(t *testing.T) *Core {
 		sealed:        new(uint32), // Initialize sealed flag (0 = unsealed)
 		standby:       atomic.Bool{},
 		stateLock:     &locking.SyncRWMutex{},
+		rawConfig:     new(atomic.Value),
 	}
 
 	// Initialize namespace store
@@ -551,8 +555,20 @@ func createTestCore(t *testing.T) *Core {
 	// Initialize credential config store
 	credStorage := NewBarrierView(barrier, credentialConfigStorePath)
 	credConfig := DefaultCredConfigStoreConfig()
+	credConfig.SkipSpecVerification = true // Skip verification in tests (no real Vault/AWS/etc servers)
 	core.credConfigStore, _ = NewCredentialConfigStore(core, credConfig)
 	core.credConfigStore.storage = credStorage
+
+	// Initialize global credential type and driver registries
+	core.credentialTypeRegistry = credential.NewTypeRegistry()
+	core.credentialDriverRegistry = credential.NewDriverRegistry(log.WithSystem("credential.driver"))
+
+	// Register builtin credential types and drivers
+	_ = types.RegisterBuiltinTypes(core.credentialTypeRegistry)
+	_ = drivers.RegisterBuiltinDrivers(core.credentialDriverRegistry)
+
+	// Initialize credential manager (required for source/spec operations)
+	_ = core.setupCredentialManager(ctx)
 
 	// Initialize policy store
 	core.policyStore, _ = NewPolicyStore(ctx, core, log)

@@ -27,8 +27,7 @@ const (
 	SudoCapability   = "sudo"
 	RootCapability   = "root"
 	PatchCapability  = "patch"
-	ScanCapability   = "scan"
-	StreamCapability = "stream"
+	ScanCapability = "scan"
 )
 
 const (
@@ -41,7 +40,6 @@ const (
 	SudoCapabilityInt
 	PatchCapabilityInt
 	ScanCapabilityInt
-	StreamCapabilityInt
 )
 
 type PolicyType uint32
@@ -69,8 +67,7 @@ var cap2Int = map[string]uint32{
 	ListCapability:   ListCapabilityInt,
 	SudoCapability:   SudoCapabilityInt,
 	PatchCapability:  PatchCapabilityInt,
-	ScanCapability:   ScanCapabilityInt,
-	StreamCapability: StreamCapabilityInt,
+	ScanCapability: ScanCapabilityInt,
 }
 
 // Policy is used to represent the policy specified by an CBP configuration.
@@ -337,7 +334,7 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 				pc.Capabilities = []string{DenyCapability}
 				pc.Permissions.CapabilitiesBitmap = DenyCapabilityInt
 				goto PathFinished
-			case CreateCapability, ReadCapability, UpdateCapability, DeleteCapability, ListCapability, SudoCapability, PatchCapability, ScanCapability, StreamCapability:
+			case CreateCapability, ReadCapability, UpdateCapability, DeleteCapability, ListCapability, SudoCapability, PatchCapability, ScanCapability:
 				pc.Permissions.CapabilitiesBitmap |= cap2Int[cap]
 			default:
 				return fmt.Errorf("path %q: invalid capability %q", key, cap)

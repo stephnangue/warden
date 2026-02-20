@@ -22,7 +22,7 @@ func (b *awsBackend) pathConfig() *framework.Path {
 			"max_body_size": {
 				Type:        framework.TypeInt,
 				Description: "Maximum request body size in bytes (default: 10MB, max: 100MB)",
-				Default:     DefaultMaxBodySize,
+				Default:     framework.DefaultMaxBodySize,
 			},
 			"timeout": {
 				Type:        framework.TypeDurationSecond,
@@ -51,8 +51,8 @@ func (b *awsBackend) handleConfigRead(ctx context.Context, req *logical.Request,
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
 			"proxy_domains": b.proxyDomains,
-			"max_body_size": b.maxBodySize,
-			"timeout":       b.timeout.String(),
+			"max_body_size": b.MaxBodySize,
+			"timeout":       b.Timeout.String(),
 		},
 	}, nil
 }
@@ -84,18 +84,18 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	// Apply configuration
 	parsedConfig := parseConfig(conf)
 	b.proxyDomains = parsedConfig.ProxyDomains
-	b.maxBodySize = parsedConfig.MaxBodySize
-	b.timeout = parsedConfig.Timeout
+	b.MaxBodySize = parsedConfig.MaxBodySize
+	b.Timeout = parsedConfig.Timeout
 
 	// Reinitialize processors with new config
 	b.initializeProcessors()
 
 	// Persist config to storage
-	if b.storageView != nil {
+	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
 			"proxy_domains": b.proxyDomains,
-			"max_body_size": b.maxBodySize,
-			"timeout":       b.timeout.String(),
+			"max_body_size": b.MaxBodySize,
+			"timeout":       b.Timeout.String(),
 		})
 		if err != nil {
 			return &logical.Response{
@@ -103,7 +103,7 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 				Err:        err,
 			}, nil
 		}
-		if err := b.storageView.Put(ctx, entry); err != nil {
+		if err := b.StorageView.Put(ctx, entry); err != nil {
 			return &logical.Response{
 				StatusCode: http.StatusInternalServerError,
 				Err:        err,

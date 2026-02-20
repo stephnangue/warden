@@ -72,7 +72,7 @@ func (b *SystemBackend) pathAudit() []*framework.Path {
 		{
 			Pattern: "audit/?$",
 			Fields: map[string]*framework.FieldSchema{
-				"list": {
+				"warden-list": {
 					Type:        framework.TypeBool,
 					Description: "If true, list all audit devices",
 				},
@@ -84,11 +84,11 @@ func (b *SystemBackend) pathAudit() []*framework.Path {
 				},
 				logical.ReadOperation: &framework.PathOperation{
 					Callback: b.handleAuditListOrRead,
-					Summary:  "List all audit devices (with list=true query param)",
+					Summary:  "List all audit devices (with warden-list=true query param)",
 				},
 			},
 			HelpSynopsis:    "List audit devices",
-			HelpDescription: "List all enabled audit devices. Use list=true query parameter for GET requests.",
+			HelpDescription: "List all enabled audit devices. Use warden-list=true query parameter for GET requests.",
 		},
 	}
 }
@@ -272,18 +272,18 @@ func (b *SystemBackend) handleAuditList(ctx context.Context, req *logical.Reques
 	return b.respondSuccess(audits), nil
 }
 
-// handleAuditListOrRead handles GET /sys/audit with list=true query parameter
+// handleAuditListOrRead handles GET /sys/audit with warden-list=true query parameter
 // This allows the API client to use a GET request with query params to list audit devices
 func (b *SystemBackend) handleAuditListOrRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	// Check if list=true was provided - if so, delegate to list handler
-	if listParam, ok := d.GetOk("list"); ok {
+	// Check if warden-list=true was provided - if so, delegate to list handler
+	if listParam, ok := d.GetOk("warden-list"); ok {
 		if listBool, isBool := listParam.(bool); isBool && listBool {
 			return b.handleAuditList(ctx, req, d)
 		}
 	}
 
-	// If list parameter is not true, return an error since we need a path for read
-	return logical.ErrorResponse(logical.ErrBadRequest("use list=true to list audit devices, or specify a path")), nil
+	// If warden-list parameter is not true, return an error since we need a path for read
+	return logical.ErrorResponse(logical.ErrBadRequest("use warden-list=true to list audit devices, or specify a path")), nil
 }
 
 // handleAuditHash handles POST /sys/audit-hash/{path}

@@ -7,14 +7,25 @@ package framework
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/http/httputil"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/armon/go-radix"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+)
+
+// Default values for common provider fields
+const (
+	DefaultMaxBodySize = int64(10485760) // 10MB
+	DefaultTimeout     = 30 * time.Second
 )
 
 // DefaultTransparentRolePattern is the default pattern for extracting role from transparent paths.
@@ -109,6 +120,22 @@ type StreamingBackend struct {
 	// Backend is the embedded standard framework backend for non-streaming paths
 	*Backend
 
+	// MaxBodySize is the maximum request body size in bytes.
+	MaxBodySize int64
+
+	// Timeout is the request timeout duration.
+	Timeout time.Duration
+
+	// Proxy is the shared reverse proxy for streaming requests.
+	// Initialized via InitProxy with a provider-specific transport.
+	Proxy *httputil.ReverseProxy
+
+	// Logger is the provider's scoped logger (set via conf.Logger.WithSubsystem).
+	Logger *logger.GatedLogger
+
+	// StorageView is the provider's storage backend for persisting configuration.
+	StorageView sdklogical.Storage
+
 	// Internal state
 	streamingPathsRe []*regexp.Regexp
 	streamingOnce    sync.Once
@@ -171,6 +198,20 @@ func (b *StreamingBackend) routeStreaming(path string) (*StreamingPath, map[stri
 // If req.Streamed is true (set by core routing), it handles streaming directly.
 // Otherwise, it falls back to the embedded Backend's HandleRequest.
 func (b *StreamingBackend) HandleRequest(ctx context.Context, req *logical.Request) (*logical.Response, error) {
+	// Handle help operation for both streaming and regular paths.
+	// Help requests are never streamed (core skips streaming flow for HelpOperation).
+	if req.Operation == logical.HelpOperation {
+		if req.Path == "" {
+			return b.handleRootHelpWithStreaming(req)
+		}
+		// Check if path matches a streaming path
+		streamingPath, _ := b.routeStreaming(req.Path)
+		if streamingPath != nil {
+			return streamingPathHelp(req, streamingPath)
+		}
+		// Fall through to Backend for regular path help
+	}
+
 	// Handle streaming requests (req.Streamed is set by core when path matches streaming paths)
 	if req.Streamed && req.HTTPRequest != nil && req.ResponseWriter != nil {
 		streamingPath, captures := b.routeStreaming(req.Path)
@@ -193,6 +234,100 @@ func (b *StreamingBackend) HandleRequest(ctx context.Context, req *logical.Reque
 	}
 
 	return nil, sdklogical.ErrUnsupportedPath
+}
+
+// streamingPathHelp generates help text for a streaming path.
+func streamingPathHelp(req *logical.Request, sp *StreamingPath) (*logical.Response, error) {
+	var tplData pathTemplateData
+	tplData.Request = req.Path
+	tplData.RoutePattern = sp.Pattern
+	tplData.Synopsis = strings.TrimSpace(sp.HelpSynopsis)
+	if tplData.Synopsis == "" {
+		tplData.Synopsis = "<no synopsis>"
+	}
+	tplData.Description = strings.TrimSpace(sp.HelpDescription)
+	if tplData.Description == "" {
+		tplData.Description = "<no description>"
+	}
+
+	// Build field help from streaming path fields
+	fieldKeys := make([]string, 0, len(sp.Fields))
+	for k := range sp.Fields {
+		fieldKeys = append(fieldKeys, k)
+	}
+	sort.Strings(fieldKeys)
+
+	tplData.Fields = make([]pathTemplateFieldData, len(fieldKeys))
+	for i, k := range fieldKeys {
+		schema := sp.Fields[k]
+		description := strings.TrimSpace(schema.Description)
+		if description == "" {
+			description = "<no description>"
+		}
+		tplData.Fields[i] = pathTemplateFieldData{
+			Key:         k,
+			Type:        schema.Type.String(),
+			Description: description,
+			Deprecated:  schema.Deprecated,
+		}
+	}
+
+	help, err := executeTemplate(pathHelpTemplate, &tplData)
+	if err != nil {
+		return nil, fmt.Errorf("error executing template: %w", err)
+	}
+
+	return &logical.Response{
+		Data: map[string]interface{}{
+			"help": help,
+		},
+	}, nil
+}
+
+// handleRootHelpWithStreaming generates root help that includes both regular and streaming paths.
+func (b *StreamingBackend) handleRootHelpWithStreaming(req *logical.Request) (*logical.Response, error) {
+	b.once.Do(b.init)
+	b.streamingOnce.Do(b.initStreaming)
+
+	// Collect regular paths
+	pathsMap := make(map[string]string)
+	allPaths := make([]string, 0)
+	for i, p := range b.pathsRe {
+		route := p.String()
+		allPaths = append(allPaths, route)
+		pathsMap[route] = strings.TrimSpace(b.Paths[i].HelpSynopsis)
+	}
+
+	// Collect streaming paths
+	for _, sp := range b.StreamingPaths {
+		pattern := sp.Pattern
+		allPaths = append(allPaths, pattern)
+		pathsMap[pattern] = strings.TrimSpace(sp.HelpSynopsis)
+	}
+
+	sort.Strings(allPaths)
+
+	pathData := make([]rootHelpTemplatePath, 0, len(allPaths))
+	for _, route := range allPaths {
+		pathData = append(pathData, rootHelpTemplatePath{
+			Path: route,
+			Help: pathsMap[route],
+		})
+	}
+
+	help, err := executeTemplate(rootHelpTemplate, &rootHelpTemplateData{
+		Help:  strings.TrimSpace(b.Help),
+		Paths: pathData,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &logical.Response{
+		Data: map[string]interface{}{
+			"help": help,
+		},
+	}, nil
 }
 
 // handleStreaming executes the streaming path handler
@@ -220,7 +355,16 @@ func (b *StreamingBackend) handleStreaming(ctx context.Context, req *logical.Req
 	}
 
 	// Execute the streaming handler with the full logical.Request
-	return path.Handler(ctx, req, fd)
+	err := path.Handler(ctx, req, fd)
+
+	// Auto-capture upstream URL for audit logging.
+	// All providers rewrite req.HTTPRequest.URL to the upstream target before proxying,
+	// so we can reliably derive it here as a safety net.
+	if req.UpstreamURL == "" && req.HTTPRequest != nil && req.HTTPRequest.URL != nil {
+		req.UpstreamURL = req.HTTPRequest.URL.String()
+	}
+
+	return err
 }
 
 // HandleExistenceCheck delegates to the embedded Backend
@@ -393,6 +537,24 @@ func (b *StreamingBackend) SetTransparentConfig(config *TransparentConfig) {
 	// Reset unauthPaths so it gets re-initialized with new config
 	b.unauthPathsOnce = sync.Once{}
 	b.unauthPaths = nil
+}
+
+// InitProxy creates a standard reverse proxy with the given transport.
+// The proxy uses an empty Director (providers prepare requests before ServeHTTP)
+// and a standard error handler that logs and returns 502.
+// Logger must be set on the StreamingBackend before calling this method.
+func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
+	b.Proxy = &httputil.ReverseProxy{
+		Director: func(req *http.Request) {},
+		Transport: transport,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			b.Logger.Error("proxy error",
+				logger.Err(err),
+				logger.String("target_url", r.URL.String()),
+			)
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		},
+	}
 }
 
 // initUnauthPaths parses UnauthenticatedPaths into radix tree + wildcard slice

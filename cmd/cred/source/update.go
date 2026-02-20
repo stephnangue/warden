@@ -34,8 +34,13 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	resolvedConfig, err := helpers.ResolveFileRefs(updateConfig)
+	if err != nil {
+		return err
+	}
+
 	input := &api.UpdateCredentialSourceInput{
-		Config: updateConfig,
+		Config: resolvedConfig,
 	}
 
 	output, err := c.Sys().UpdateCredentialSource(name, input)

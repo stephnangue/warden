@@ -21,7 +21,7 @@ func TestSys_ListMounts(t *testing.T) {
 
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{
-				"$schema": "http://localhost:5000/schemas/ListMountsOutput.json",
+				"$schema": "http://localhost:8400/schemas/ListMountsOutput.json",
 				"mounts": {
 					"secret/": {
 						"type": "kv",
@@ -190,7 +190,7 @@ func TestSys_ListMounts(t *testing.T) {
 	t.Run("returns error when mounts field is missing", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"$schema": "http://localhost:5000/schemas/ListMountsOutput.json"}`))
+			w.Write([]byte(`{"$schema": "http://localhost:8400/schemas/ListMountsOutput.json"}`))
 		}))
 		defer server.Close()
 
@@ -217,7 +217,7 @@ func TestSys_ListMountsWithContext(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{
-				"$schema": "http://localhost:5000/schemas/ListMountsOutput.json",
+				"$schema": "http://localhost:8400/schemas/ListMountsOutput.json",
 				"mounts": {
 					"secret/": {
 						"type": "kv",
@@ -1184,7 +1184,7 @@ func TestSys_MountE2E(t *testing.T) {
 				if mounted {
 					w.WriteHeader(http.StatusOK)
 					w.Write([]byte(`{
-						"$schema": "http://localhost:5000/schemas/ListMountsOutput.json",
+						"$schema": "http://localhost:8400/schemas/ListMountsOutput.json",
 						"mounts": {
 							"database/": {
 								"type": "database",

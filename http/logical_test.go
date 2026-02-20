@@ -24,7 +24,7 @@ func TestOperationFromHTTPMethod_GET(t *testing.T) {
 }
 
 func TestOperationFromHTTPMethod_GET_WithListQueryParam(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/v1/secret/data?list=true", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/secret/data?warden-list=true", nil)
 	op := operationFromHTTPMethod(req)
 	assert.Equal(t, logical.ListOperation, op)
 }
@@ -37,7 +37,7 @@ func TestOperationFromHTTPMethod_GET_WithListHeader(t *testing.T) {
 }
 
 func TestOperationFromHTTPMethod_GET_WithListQueryFalse(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/v1/secret/data?list=false", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/secret/data?warden-list=false", nil)
 	op := operationFromHTTPMethod(req)
 	assert.Equal(t, logical.ReadOperation, op)
 }
@@ -82,14 +82,14 @@ func TestOperationFromHTTPMethod_UnknownMethod(t *testing.T) {
 func TestOperationFromHTTPMethod_HEAD(t *testing.T) {
 	req := httptest.NewRequest(http.MethodHead, "/v1/secret/data", nil)
 	op := operationFromHTTPMethod(req)
-	// HEAD defaults to ReadOperation
+	// HEAD maps to ReadOperation (read-like, same as GET without body)
 	assert.Equal(t, logical.ReadOperation, op)
 }
 
 func TestOperationFromHTTPMethod_OPTIONS(t *testing.T) {
 	req := httptest.NewRequest(http.MethodOptions, "/v1/secret/data", nil)
 	op := operationFromHTTPMethod(req)
-	// OPTIONS defaults to ReadOperation
+	// OPTIONS maps to ReadOperation (read-like, CORS preflight / metadata)
 	assert.Equal(t, logical.ReadOperation, op)
 }
 
@@ -214,7 +214,7 @@ func TestBuildLogicalRequest_POST(t *testing.T) {
 }
 
 func TestBuildLogicalRequest_LIST(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/v1/secret/data?list=true", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/secret/data?warden-list=true", nil)
 	req.RemoteAddr = "10.0.0.1:5000"
 	w := httptest.NewRecorder()
 
@@ -409,16 +409,20 @@ func TestOperationFromHTTPMethod_TableDriven(t *testing.T) {
 		expected   logical.Operation
 	}{
 		{"GET returns Read", http.MethodGet, "", "", logical.ReadOperation},
-		{"GET with list=true returns List", http.MethodGet, "list=true", "", logical.ListOperation},
+		{"GET with warden-list=true returns List", http.MethodGet, "warden-list=true", "", logical.ListOperation},
 		{"GET with X-Warden-Request LIST returns List", http.MethodGet, "", "LIST", logical.ListOperation},
+		{"GET with warden-help=1 returns Help", http.MethodGet, "warden-help=1", "", logical.HelpOperation},
+		{"GET with warden-help=true returns Help", http.MethodGet, "warden-help=true", "", logical.HelpOperation},
+		{"GET with warden-help=false returns Read", http.MethodGet, "warden-help=false", "", logical.ReadOperation},
+		{"GET with warden-help=0 returns Read", http.MethodGet, "warden-help=0", "", logical.ReadOperation},
+		{"Help takes priority over list", http.MethodGet, "warden-help=1&warden-list=true", "", logical.HelpOperation},
 		{"POST returns Create", http.MethodPost, "", "", logical.CreateOperation},
 		{"PUT returns Update", http.MethodPut, "", "", logical.UpdateOperation},
 		{"PATCH returns Patch", http.MethodPatch, "", "", logical.PatchOperation},
 		{"DELETE returns Delete", http.MethodDelete, "", "", logical.DeleteOperation},
 		{"LIST method returns List", "LIST", "", "", logical.ListOperation},
-		{"HEAD defaults to Read", http.MethodHead, "", "", logical.ReadOperation},
-		{"CONNECT defaults to Read", http.MethodConnect, "", "", logical.ReadOperation},
-		{"TRACE defaults to Read", http.MethodTrace, "", "", logical.ReadOperation},
+		{"HEAD maps to Read", http.MethodHead, "", "", logical.ReadOperation},
+		{"OPTIONS maps to Read", http.MethodOptions, "", "", logical.ReadOperation},
 	}
 
 	for _, tc := range tests {
@@ -494,6 +498,36 @@ func TestBuildLogicalRequest_PathStripping(t *testing.T) {
 			logicalReq := buildLogicalRequest(w, req)
 
 			assert.Equal(t, tc.expectedPath, logicalReq.Path)
+		})
+	}
+}
+
+// =============================================================================
+// Unsupported Method Rejection Tests
+// =============================================================================
+
+func TestHandleLogical_RejectsUnsupportedMethods(t *testing.T) {
+	// handleLogical rejects unsupported methods before accessing core,
+	// so we can pass nil core for these tests.
+	handler := handleLogical(nil, nil)
+
+	unsupportedMethods := []string{
+		http.MethodConnect,
+		http.MethodTrace,
+		"PURGE",
+		"PROPFIND",
+		"CUSTOM",
+	}
+
+	for _, method := range unsupportedMethods {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, "/v1/test", nil)
+			w := httptest.NewRecorder()
+
+			handler.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+			assert.Contains(t, w.Body.String(), "not allowed")
 		})
 	}
 }

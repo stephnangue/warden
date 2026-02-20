@@ -225,15 +225,30 @@ func (f *AzureDriverFactory) Type() string {
 	return credential.SourceTypeAzure
 }
 
-// ValidateConfig validates Azure driver configuration
+// ValidateConfig validates Azure driver configuration using declarative schema
 func (f *AzureDriverFactory) ValidateConfig(config map[string]string) error {
-	if err := credential.ValidateRequired(config, "tenant_id", "client_id", "client_secret", "secret_id"); err != nil {
-		return err
-	}
-	if err := validateTenantID(config["tenant_id"]); err != nil {
-		return err
-	}
-	return nil
+	return credential.ValidateSchema(config,
+		credential.StringField("tenant_id").
+			Required().
+			Custom(validateTenantID).
+			Describe("Azure AD tenant ID (UUID)").
+			Example("00000000-0000-0000-0000-000000000000"),
+
+		credential.StringField("client_id").
+			Required().
+			Describe("Azure AD application (client) ID").
+			Example("11111111-1111-1111-1111-111111111111"),
+
+		credential.StringField("client_secret").
+			Required().
+			Describe("Azure AD application client secret").
+			Example("secret-value"),
+
+		credential.StringField("secret_id").
+			Required().
+			Describe("Secret ID for the client secret (for rotation tracking)").
+			Example("secret-id-uuid"),
+	)
 }
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output

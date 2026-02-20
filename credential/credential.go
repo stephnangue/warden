@@ -8,18 +8,23 @@ import (
 
 // Credential type constants
 const (
-	TypeDatabaseUserPass = "database_userpass"
-	TypeAWSAccessKeys    = "aws_access_keys"
-	TypeVaultToken       = "vault_token"
-	TypeAzureBearerToken = "azure_bearer_token"
+	TypeAWSAccessKeys     = "aws_access_keys"
+	TypeVaultToken        = "vault_token"
+	TypeAzureBearerToken  = "azure_bearer_token"
+	TypeGCPAccessToken    = "gcp_access_token"
+	TypeGitLabAccessToken = "gitlab_access_token"
+	TypeGitHubToken       = "github_token"
 )
 
 // Source type constants
 const (
-	SourceTypeLocal = "local"
-	SourceTypeVault = "hvault"
-	SourceTypeAWS   = "aws"
-	SourceTypeAzure = "azure"
+	SourceTypeLocal  = "local"
+	SourceTypeVault  = "hvault"
+	SourceTypeAWS    = "aws"
+	SourceTypeAzure  = "azure"
+	SourceTypeGCP    = "gcp"
+	SourceTypeGitLab  = "gitlab"
+	SourceTypeGitHub  = "github"
 )
 
 // Category constants for credential categorization
@@ -32,7 +37,18 @@ const (
 	CategoryAPI      = "api"
 )
 
-// Credential represents a credential with enhanced metadata
+// Credential represents a minted credential instance returned to gateway requests.
+// It is the output of the Manager.IssueCredential pipeline: a SourceDriver produces
+// raw data, a credential Type parses it, and the result is stored here with full
+// lifecycle metadata.
+//
+// Provider gateway handlers read Data to inject authentication into proxied requests
+// (e.g., Data["access_token"] for Azure/GCP Bearer injection, Data["access_key_id"]
+// and Data["secret_access_key"] for AWS SigV4 re-signing).
+//
+// Each instance is bound to a session token (TokenID) and cached in the Manager.
+// Dynamic credentials (LeaseTTL > 0) are tracked by the expiration manager for
+// automatic revocation when the token expires.
 type Credential struct {
 	// Identity
 	// CredentialID is the unique identifier for this credential instance.
@@ -41,7 +57,7 @@ type Credential struct {
 	CredentialID string // UUID - unique identifier for this credential instance
 
 	// Type information
-	Type     string // Credential type name (e.g., "database_userpass", "aws_access_keys")
+	Type     string // Credential type name (e.g., "aws_access_keys", "vault_token")
 	Category string // Category for routing/organization
 
 	// Lifecycle

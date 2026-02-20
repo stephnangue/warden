@@ -36,7 +36,7 @@ terraform {
 variable "warden_address" {
   type        = string
   description = "Warden gateway base URL"
-  default     = "http://localhost:5000/v1/PROD/DEV/azure/role/azure-ops/gateway"
+  default     = "http://localhost:8400/v1/PROD/DEV/azure/role/azure-ops/gateway"
 }
 
 variable "access_token" {

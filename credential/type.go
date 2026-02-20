@@ -16,7 +16,7 @@ type CredentialFieldSchema struct {
 
 // TypeMetadata describes a credential type's characteristics
 type TypeMetadata struct {
-	// Name is the canonical type identifier (e.g., "database_userpass", "aws_access_keys")
+	// Name is the canonical type identifier (e.g., "aws_access_keys", "vault_token")
 	Name string
 
 	// Category for organization (e.g., "database", "cloud_iam", "oauth")
@@ -33,11 +33,11 @@ type TypeMetadata struct {
 //
 // A Type has two responsibilities:
 //
-//  1. Spec config validation — ValidateConfig defines which config fields a
-//     credential spec requires, RequiresSpecRotation indicates whether those
-//     fields contain embedded credentials that must be rotated, and
-//     SensitiveConfigFields lists the config keys that should be masked in
-//     API responses.
+//  1. Spec config validation — ConfigSchema defines the declarative schema for
+//     spec configuration fields, ValidateConfig validates those fields and checks
+//     source compatibility, RequiresSpecRotation indicates whether the config
+//     contains embedded credentials that must be rotated, and SensitiveConfigFields
+//     lists the config keys that should be masked in API responses.
 //
 //  2. Credential output — Parse converts raw source data into a Credential,
 //     Validate checks it is well-formed, FieldSchemas describes the output
@@ -45,6 +45,17 @@ type TypeMetadata struct {
 type Type interface {
 	// Metadata returns the type's metadata
 	Metadata() TypeMetadata
+
+	// ConfigSchema returns the declarative schema for CredSpec.Config validation.
+	// This defines which config fields are valid, their types, constraints, and documentation.
+	// Returns nil if the type doesn't require any config fields.
+	//
+	// Example:
+	//   []*FieldValidator{
+	//     StringField("token_role").Required().Describe("Vault token role"),
+	//     DurationField("ttl").Describe("Token TTL"),
+	//   }
+	ConfigSchema() []*FieldValidator
 
 	// ValidateConfig validates the Config for a CredSpec
 	// This allows credential types to validate their configuration before creation

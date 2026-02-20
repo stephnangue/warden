@@ -92,7 +92,15 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			},
 		},
 		HelpSynopsis:    "Configure JWT authentication",
-		HelpDescription: "This endpoint configures JWT/OIDC authentication settings.",
+		HelpDescription: `This endpoint configures the JWT/OIDC authentication method.
+
+Set 'mode' to 'jwt' with a 'jwks_url' or 'jwt_validation_pubkeys' for static
+key validation, or to 'oidc' with an 'oidc_discovery_url' for auto-discovered
+key rotation.
+
+Use 'bound_issuer', 'bound_audiences', 'bound_subject', and 'bound_claims'
+to constrain which tokens are accepted. Use 'claim_mappings' to copy JWT
+claims into token metadata for use in policies.`,
 	}
 }
 
@@ -195,7 +203,23 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 }
 
 const jwtAuthHelp = `
-The JWT auth backend authenticates users using JSON Web Tokens.
+The JWT auth method authenticates users by validating JSON Web Tokens
+signed by a trusted identity provider.
 
-It supports both JWT mode (with JWKS URL) and OIDC mode (with OIDC Discovery).
+Two modes are supported:
+
+  jwt   - Validates tokens using a JWKS endpoint or static public keys.
+          Suitable for service-to-service auth and CI/CD pipelines.
+
+  oidc  - Validates tokens using OIDC Discovery (/.well-known/openid-configuration).
+          Suitable for SSO with providers like Okta, Auth0, or Azure AD.
+
+Tokens are validated against configurable bound claims (issuer, audience,
+subject, custom claims). The user_claim field (default: sub) determines the
+authenticated principal identity.
+
+Configuration:
+  POST /auth/{mount}/config   - Configure mode, key source, and claim bindings
+  GET  /auth/{mount}/config   - Read current configuration
+  POST /auth/{mount}/role/:name - Create roles with per-role claim constraints
 `

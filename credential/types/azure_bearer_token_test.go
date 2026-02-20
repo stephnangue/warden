@@ -10,7 +10,7 @@ import (
 )
 
 func TestAzureBearerTokenCredType_Metadata(t *testing.T) {
-	credType := &AzureBearerTokenCredType{}
+	credType := NewAzureBearerTokenCredType()
 	metadata := credType.Metadata()
 
 	assert.Equal(t, credential.TypeAzureBearerToken, metadata.Name)
@@ -20,7 +20,7 @@ func TestAzureBearerTokenCredType_Metadata(t *testing.T) {
 }
 
 func TestAzureBearerTokenCredType_ValidateConfig(t *testing.T) {
-	credType := &AzureBearerTokenCredType{}
+	credType := NewAzureBearerTokenCredType()
 
 	tests := []struct {
 		name       string
@@ -93,7 +93,7 @@ func TestAzureBearerTokenCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: credential.SourceTypeAzure,
 			wantErr:    true,
-			errMsg:     "unsupported mint_method",
+			errMsg:     "must be one of: bearer_token",
 		},
 		{
 			name: "unsupported source type",
@@ -104,7 +104,7 @@ func TestAzureBearerTokenCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "unsupported source type",
+			errMsg:     "require an azure source",
 		},
 	}
 
@@ -122,7 +122,7 @@ func TestAzureBearerTokenCredType_ValidateConfig(t *testing.T) {
 }
 
 func TestAzureBearerTokenCredType_Parse(t *testing.T) {
-	credType := &AzureBearerTokenCredType{}
+	credType := NewAzureBearerTokenCredType()
 
 	tests := []struct {
 		name     string
@@ -193,7 +193,7 @@ func TestAzureBearerTokenCredType_Parse(t *testing.T) {
 }
 
 func TestAzureBearerTokenCredType_Validate(t *testing.T) {
-	credType := &AzureBearerTokenCredType{}
+	credType := NewAzureBearerTokenCredType()
 
 	tests := []struct {
 		name    string
@@ -258,7 +258,7 @@ func TestAzureBearerTokenCredType_Validate(t *testing.T) {
 }
 
 func TestAzureBearerTokenCredType_Revoke(t *testing.T) {
-	credType := &AzureBearerTokenCredType{}
+	credType := NewAzureBearerTokenCredType()
 
 	cred := &credential.Credential{
 		Type:    credential.TypeAzureBearerToken,
@@ -274,12 +274,12 @@ func TestAzureBearerTokenCredType_Revoke(t *testing.T) {
 }
 
 func TestAzureBearerTokenCredType_RequiresSpecRotation(t *testing.T) {
-	credType := &AzureBearerTokenCredType{}
+	credType := NewAzureBearerTokenCredType()
 	assert.True(t, credType.RequiresSpecRotation())
 }
 
 func TestAzureBearerTokenCredType_FieldSchemas(t *testing.T) {
-	credType := &AzureBearerTokenCredType{}
+	credType := NewAzureBearerTokenCredType()
 	schemas := credType.FieldSchemas()
 
 	// access_token should be sensitive

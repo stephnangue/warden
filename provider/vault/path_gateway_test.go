@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -399,9 +400,11 @@ func TestHandleGateway_StreamUnauthenticated(t *testing.T) {
 	// Create the backend
 	b := &vaultBackend{
 		vaultAddress: mockVault.URL,
-		logger:       createTestLogger(),
-		proxy: &httputil.ReverseProxy{
-			Director: func(req *http.Request) {},
+		StreamingBackend: &framework.StreamingBackend{
+			Logger: createTestLogger(),
+			Proxy: &httputil.ReverseProxy{
+				Director: func(req *http.Request) {},
+			},
 		},
 	}
 

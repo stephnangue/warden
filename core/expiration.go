@@ -346,6 +346,76 @@ func (m *ExpirationManager) Unregister(entryType ExpirationType, id string) {
 	}
 }
 
+// UnregisterByNamespace removes all expiration entries for the given namespace.
+// namespaceID is the namespace accessor (ns.ID), matching the entry.Namespace field.
+// This is called during namespace deletion to stop all TTL enforcement for the namespace.
+func (m *ExpirationManager) UnregisterByNamespace(namespaceID string) {
+	var removedPending, removedNonexpiring, removedIrrevocable int
+
+	// Clear pending entries (stop timers, delete from storage)
+	m.pending.Range(func(key, value any) bool {
+		pi := value.(*pendingInfo)
+		if pi.entry.Namespace != namespaceID {
+			return true
+		}
+
+		pi.timer.Stop()
+		m.pending.Delete(key)
+		atomic.AddInt64(&m.pendingCount, -1)
+		m.decrementPendingTypeCount(pi.entry.EntryType)
+
+		if m.storage != nil {
+			m.deletePersistedEntry(pi.entry)
+		}
+
+		removedPending++
+		return true
+	})
+
+	// Clear nonexpiring entries
+	m.nonexpiring.Range(func(key, value any) bool {
+		pi := value.(*pendingInfo)
+		if pi.entry.Namespace != namespaceID {
+			return true
+		}
+
+		m.nonexpiring.Delete(key)
+		atomic.AddInt64(&m.nonexpiringCount, -1)
+
+		removedNonexpiring++
+		return true
+	})
+
+	// Clear irrevocable entries (delete from storage)
+	m.irrevocable.Range(func(key, value any) bool {
+		entry := value.(*ExpirationEntry)
+		if entry.Namespace != namespaceID {
+			return true
+		}
+
+		m.irrevocable.Delete(key)
+		atomic.AddInt64(&m.irrevocableCount, -1)
+		m.decrementIrrevocableTypeCount(entry.EntryType)
+
+		if m.storage != nil {
+			path := expirationIrrevocablePath + string(entry.EntryType) + "/" + entry.ID
+			m.storage.Delete(context.Background(), path)
+		}
+
+		removedIrrevocable++
+		return true
+	})
+
+	total := removedPending + removedNonexpiring + removedIrrevocable
+	if total > 0 {
+		m.log.Info("unregistered all expiration entries for namespace",
+			logger.String("namespace", namespaceID),
+			logger.Int("pending", removedPending),
+			logger.Int("nonexpiring", removedNonexpiring),
+			logger.Int("irrevocable", removedIrrevocable))
+	}
+}
+
 // ============================================================================
 // Persistence Methods
 // ============================================================================

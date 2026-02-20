@@ -130,7 +130,7 @@ type Credential struct {
 	CredentialID string `json:"credential_id"` // UUID
 
 	// Type information
-	Type     string `json:"type"`               // database_userpass, aws_access_keys, vault_token
+	Type     string `json:"type"`               // aws_access_keys, vault_token, github_token
 	Category string `json:"category,omitempty"` // database, cloud_iam, oauth, etc.
 
 	// Lifecycle

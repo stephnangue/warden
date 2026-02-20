@@ -9,7 +9,7 @@ import (
 )
 
 func TestVaultTokenCredType_Metadata(t *testing.T) {
-	ct := &VaultTokenCredType{}
+	ct := NewVaultTokenCredType()
 	metadata := ct.Metadata()
 
 	assert.Equal(t, credential.TypeVaultToken, metadata.Name)
@@ -19,7 +19,7 @@ func TestVaultTokenCredType_Metadata(t *testing.T) {
 }
 
 func TestVaultTokenCredType_ValidateConfig_VaultSource(t *testing.T) {
-	ct := &VaultTokenCredType{}
+	ct := NewVaultTokenCredType()
 
 	tests := []struct {
 		name       string
@@ -60,7 +60,7 @@ func TestVaultTokenCredType_ValidateConfig_VaultSource(t *testing.T) {
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "unsupported mint_method",
+			errMsg:     "must be one of: vault_token",
 		},
 		{
 			name: "unsupported source type",
@@ -69,7 +69,7 @@ func TestVaultTokenCredType_ValidateConfig_VaultSource(t *testing.T) {
 			},
 			sourceType: "unknown",
 			wantErr:    true,
-			errMsg:     "unsupported source type",
+			errMsg:     "require a vault source",
 		},
 	}
 
@@ -89,7 +89,7 @@ func TestVaultTokenCredType_ValidateConfig_VaultSource(t *testing.T) {
 }
 
 func TestVaultTokenCredType_Parse(t *testing.T) {
-	ct := &VaultTokenCredType{}
+	ct := NewVaultTokenCredType()
 
 	tests := []struct {
 		name     string
@@ -168,7 +168,7 @@ func TestVaultTokenCredType_Parse(t *testing.T) {
 }
 
 func TestVaultTokenCredType_Validate(t *testing.T) {
-	ct := &VaultTokenCredType{}
+	ct := NewVaultTokenCredType()
 
 	tests := []struct {
 		name    string
@@ -235,12 +235,12 @@ func TestVaultTokenCredType_Validate(t *testing.T) {
 }
 
 func TestVaultTokenCredType_RequiresSpecRotation(t *testing.T) {
-	ct := &VaultTokenCredType{}
+	ct := NewVaultTokenCredType()
 	assert.False(t, ct.RequiresSpecRotation())
 }
 
 func TestVaultTokenCredType_FieldSchemas(t *testing.T) {
-	ct := &VaultTokenCredType{}
+	ct := NewVaultTokenCredType()
 	schemas := ct.FieldSchemas()
 
 	assert.Contains(t, schemas, "token")

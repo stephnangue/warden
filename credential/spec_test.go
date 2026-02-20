@@ -12,7 +12,7 @@ func TestCredSpecRegistry_Register(t *testing.T) {
 
 	spec := &CredSpec{
 		Name:   "test-spec",
-		Type:   "database_userpass",
+		Type:   "vault_token",
 		Source: "test-source",
 		MinTTL: time.Hour,
 		MaxTTL: 24 * time.Hour,
@@ -50,7 +50,7 @@ func TestCredSpecRegistry_RegisterEmptyName(t *testing.T) {
 
 	spec := &CredSpec{
 		Name: "",
-		Type: "database_userpass",
+		Type: "vault_token",
 	}
 
 	err := registry.Register(spec)
@@ -65,7 +65,7 @@ func TestCredSpecRegistry_RegisterDuplicate(t *testing.T) {
 
 	spec1 := &CredSpec{
 		Name: "test-spec",
-		Type: "database_userpass",
+		Type: "vault_token",
 	}
 
 	spec2 := &CredSpec{
@@ -87,7 +87,7 @@ func TestCredSpecRegistry_RegisterDuplicate(t *testing.T) {
 
 	// Verify original spec is still there
 	retrieved, _ := registry.Get("test-spec")
-	if retrieved.Type != "database_userpass" {
+	if retrieved.Type != "vault_token" {
 		t.Errorf("expected original spec type, got %s", retrieved.Type)
 	}
 }
@@ -98,7 +98,7 @@ func TestCredSpecRegistry_Get(t *testing.T) {
 
 	spec := &CredSpec{
 		Name: "test-spec",
-		Type: "database_userpass",
+		Type: "vault_token",
 	}
 
 	registry.Register(spec)
@@ -130,9 +130,9 @@ func TestCredSpecRegistry_List(t *testing.T) {
 	}
 
 	// Add specs
-	spec1 := &CredSpec{Name: "spec1", Type: "database_userpass"}
+	spec1 := &CredSpec{Name: "spec1", Type: "vault_token"}
 	spec2 := &CredSpec{Name: "spec2", Type: "aws_access_keys"}
-	spec3 := &CredSpec{Name: "spec3", Type: "database_userpass"}
+	spec3 := &CredSpec{Name: "spec3", Type: "vault_token"}
 
 	registry.Register(spec1)
 	registry.Register(spec2)
@@ -160,7 +160,7 @@ func TestCredSpecRegistry_List(t *testing.T) {
 func TestCredSpecRegistry_Delete(t *testing.T) {
 	registry := NewCredSpecRegistry()
 
-	spec := &CredSpec{Name: "test-spec", Type: "database_userpass"}
+	spec := &CredSpec{Name: "test-spec", Type: "vault_token"}
 	registry.Register(spec)
 
 	// Delete existing spec
@@ -186,7 +186,7 @@ func TestCredSpecRegistry_Delete(t *testing.T) {
 func TestCredSpecRegistry_Exists(t *testing.T) {
 	registry := NewCredSpecRegistry()
 
-	spec := &CredSpec{Name: "test-spec", Type: "database_userpass"}
+	spec := &CredSpec{Name: "test-spec", Type: "vault_token"}
 	registry.Register(spec)
 
 	// Test existing spec
@@ -208,7 +208,7 @@ func TestCredSpecRegistry_Count(t *testing.T) {
 		t.Errorf("expected count 0, got %d", registry.Count())
 	}
 
-	registry.Register(&CredSpec{Name: "spec1", Type: "database_userpass"})
+	registry.Register(&CredSpec{Name: "spec1", Type: "vault_token"})
 	registry.Register(&CredSpec{Name: "spec2", Type: "aws_access_keys"})
 
 	if registry.Count() != 2 {
@@ -234,7 +234,7 @@ func TestCredSpecRegistry_Concurrent(t *testing.T) {
 			defer wg.Done()
 			spec := &CredSpec{
 				Name: string(rune('a' + idx%26)) + string(rune('0' + idx/26)),
-				Type: "database_userpass",
+				Type: "vault_token",
 			}
 			registry.Register(spec)
 		}(i)
