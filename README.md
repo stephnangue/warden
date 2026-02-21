@@ -100,7 +100,9 @@ Warden doesn't just log who received credentials — it logs what they did with 
 
 ### Fine-Grained Policy Enforcement
 
-Warden uses Vault ACL syntax to enforce policies that go beyond what providers natively support. Restrict an agent to read-only access on specific GitHub repos. Limit a pipeline to specific AWS services. Enforce controls that GitHub PATs and AWS IAM can't express on their own.
+Warden constrains what a workload can do by controlling which APIs it can reach and which operations it can perform — at the HTTP path and method level. This is a layer of granularity that providers don't natively offer.
+
+A GitHub fine-grained PAT with `contents: read` lets the holder read *every file* in a repo. Warden can restrict an agent to `src/` while blocking `.github/workflows/` and `.env` — something GitHub simply cannot express. A GitLab `read_repository` token can clone, list branches, and compare commits. Warden can limit it to file reads only. For AWS, Warden adds defense-in-depth: destructive operations can be blocked at the gateway regardless of what the underlying IAM role permits.
 
 ### Zero Client Modification
 
@@ -109,6 +111,20 @@ Point your SDK, CLI, or tool at Warden's endpoint instead of the provider's. No 
 ### Identity-Based Access
 
 Every request is tied to a verified identity via JWT. Whether it's a CI/CD pipeline, an AI agent, a Terraform run, or a Kubernetes pod, Warden knows exactly who is making each API call and applies policies accordingly.
+
+### Unified Identity Across Providers
+
+Every cloud and SaaS provider has its own identity system — AWS IAM, Azure Entra ID, GCP IAM, GitHub Apps, GitLab tokens. Multi-cloud means multi-identity: different auth flows, different credential formats, different rotation strategies per provider. Warden collapses all of that into a single JWT. Your workloads authenticate once, with one identity, and Warden translates to each provider's native auth on the fly. One identity plane, regardless of how many providers sit behind it.
+
+```
+                                  ┌─── AWS (SigV4)
+                                  │
+  Workload ── JWT ──▶  Warden  ───┼─── Azure (Bearer + Entra ID)
+                                  │
+                                  ├─── GCP (Bearer + SA key)
+                                  │
+                                  └─── GitHub (Installation token)
+```
 
 ## Use Cases
 
@@ -126,6 +142,10 @@ No more AWS credentials on the machine running `terraform apply`. Terraform poin
 
 Pipelines store credentials as CI secrets — each one a potential leak, each one painful to rotate. With Warden, pipelines authenticate with their workload identity (Kubernetes SA, OIDC token) and access cloud and SaaS APIs through the gateway. No secrets to distribute, no credentials to rotate.
 
+### Multi-Cloud / Multi-Provider
+
+An AI agent that reads from GitHub, writes to S3, and deploys to Azure needs three different credential types, three different auth flows, three different rotation strategies. Without Warden, each integration is its own identity problem. With Warden, the agent gets one JWT and one endpoint pattern. It doesn't matter whether the target is AWS, Azure, or GitHub — the auth flow is identical. Add a new provider and existing workloads gain access without changing a single line of code. The identity complexity is Warden's problem, not the application's.
+
 ## How It Compares
 
 |  | **Warden** | **Vault** | **Aembit** | **IAM Roles** |
@@ -135,21 +155,23 @@ Pipelines store credentials as CI secrets — each one a potential leak, each on
 | Policy enforcement | HTTP path + method level | Credential scope level | Workload-to-service level | IAM policy level |
 | Client modification | Change base URL | Integrate SDK / API call | Deploy sidecar agents | Per-cloud configuration |
 | Deployment | Single gateway | Server cluster | SaaS + edge agents | Per-cloud setup |
-| Open source | Yes (Apache 2.0) | Yes (BSL) | No | N/A |
+| Open source | Yes (MPL-2.0) | Yes (BSL) | No | N/A |
 | Multi-provider | 6 today, 100+ planned | Per-engine configuration | Per-provider integration | Single cloud only |
+| Identity model | Single JWT for all providers | Per-engine auth config | Per-provider identity mapping | Per-cloud IAM |
 
 Warden complements Vault — Vault manages credential lifecycle, Warden adds runtime visibility and policy enforcement. Warden can use Vault as a credential source for AWS.
 
 ## Architecture
 
-Warden is a reverse proxy written in Go. Each provider is registered as an endpoint with its own credential source, authentication flow, and policy rules.
+Warden is a reverse proxy written in Go. Each provider is registered as a streaming backend with its own credential source driver, authentication flow, and policy rules.
 
 **Key design decisions:**
 
-- **Stateless request handling** — Warden scales horizontally. Credential cache is local (Ristretto); no shared state between instances.
-- **Vault ACL syntax for policies** — Familiar to anyone in the HashiCorp ecosystem. Policies are evaluated per-request against the HTTP path and method.
-- **Seal/unseal model** — Like Vault, Warden protects secrets at rest using a seal mechanism. Supports dev mode (in-memory) and production mode (OpenBao seal, PostgreSQL storage).
-- **Provider as interface** — Each provider implements a standard interface for credential injection and request forwarding. Bearer-token providers are configuration; request-signing providers (AWS SigV4) are deeper integrations.
+- **Inline proxy over credential vending** — Vault hands credentials to the caller. Warden sits in the request path, injecting credentials on the fly. This costs latency and infrastructure, but is what makes per-request audit and per-request policy enforcement possible.
+- **IP-bound sessions** — Sessions are tied to the caller's IP. A stolen session token is useless from a different machine.
+- **Two-stage credential rotation** — Rotation is split into PREPARE (mint new credentials while old ones remain valid) and ACTIVATE (commit new credentials, destroy old ones). For eventually-consistent providers like AWS and Azure, Warden defers activation by a configurable propagation delay, eliminating the polling loops that cloud SDKs typically require.
+- **Seal/unseal model** — Like Vault, Warden protects secrets at rest using envelope encryption. Supports dev mode (in-memory) and production mode with multiple seal types (Shamir, Transit, AWS KMS, GCP KMS, Azure Key Vault, OCI KMS, PKCS11, KMIP) and PostgreSQL storage.
+- **Namespace isolation** — Every credential source, policy, and mount point is scoped to a namespace with hard boundaries. Policies cannot leak across namespaces.
 
 ## Getting Started
 
@@ -192,7 +214,7 @@ Once Warden is running, follow a provider guide to configure your first endpoint
 
 ### Production Setup
 
-Production mode requires a configuration file and external dependencies (PostgreSQL for storage, OpenBao for seal).
+Production mode requires a configuration file and external dependencies (PostgreSQL for storage, and a seal that suits your need).
 
 ```bash
 # Start dependencies (OpenBao, PostgreSQL)
@@ -215,12 +237,17 @@ Warden uses HCL configuration files. See `warden.local.hcl` for a full example c
 
 ## Roadmap
 
-- [ ] Structured audit log export (OpenTelemetry, SIEM integration)
-- [ ] Helm chart for Kubernetes deployment
-- [ ] Docker Compose quick start with pre-configured providers
-- [ ] Datadog, Snowflake, Terraform Cloud, Cloudflare, Stripe providers
-- [ ] Web UI for audit trail exploration
-- [ ] MCP server integration for AI agent frameworks
+**Auth** — Kubernetes, SPIFFE, TLS certificates, cloud machine identities (AWS IAM, Azure MI, GCP SA), OIDC, LDAP, SAML
+
+**Providers** — Enterprise cloud (Oracle, IBM, Alibaba), specialized cloud (DigitalOcean, Hetzner, OVH), government cloud (GovCloud, Azure Gov), AI/GPU cloud (CoreWeave, Lambda, RunPod), DevOps SaaS (Terraform Cloud, Datadog, Cloudflare), data SaaS (Snowflake, Databricks, MongoDB Atlas), AI SaaS (OpenAI, Anthropic, Cohere), productivity SaaS (Slack, Jira, Notion)
+
+**Observability** — Structured audit log export (OpenTelemetry, SIEM), new audit device types, Prometheus metrics, distributed tracing
+
+**Security** — Rate limiting per identity, mTLS to upstream providers, audit log tamper detection
+
+**Operations** — Active/standby HA, Helm chart, Docker Compose quick start, Terraform module
+
+**Developer experience** — Web UI, Swagger/OpenAPI spec, MCP server for AI agent frameworks, SDKs (Go, Python, TypeScript)
 
 ## Contributing
 
@@ -237,4 +264,4 @@ make test-unit        # Run unit tests with race detection
 
 ## License
 
-[Apache 2.0](LICENSE)
+[MPL-2.0](LICENSE)
