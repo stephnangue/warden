@@ -169,35 +169,35 @@ With transparent mode, requests use role-based paths. Warden performs implicit J
 
 The URL pattern is: `/v1/github/role/{role}/gateway/{github-api-path}`
 
-Export GITHUB_ENPOINT as environment variable:
+Export GITHUB_ENDPOINT as environment variable:
 ```bash
-export GITHUB_ENPOINT="${WARDEN_ADDR}/v1/github/role/github-user/gateway"
+export GITHUB_ENDPOINT="${WARDEN_ADDR}/v1/github/role/github-user/gateway"
 ```
 ### List Repositories
 
 ```bash
-curl "${GITHUB_ENPOINT}/user/repos" \
+curl "${GITHUB_ENDPOINT}/user/repos" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
 ### Get a Specific Repository
 
 ```bash
-curl "${GITHUB_ENPOINT}/repos/owner/repo-name" \
+curl "${GITHUB_ENDPOINT}/repos/owner/repo-name" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
 ### List Pull Requests
 
 ```bash
-curl "${GITHUB_ENPOINT}/repos/owner/repo-name/pulls?state=open" \
+curl "${GITHUB_ENDPOINT}/repos/owner/repo-name/pulls?state=open" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
 ### Create an Issue
 
 ```bash
-curl -X POST "${GITHUB_ENPOINT}/repos/owner/repo-name/issues" \
+curl -X POST "${GITHUB_ENDPOINT}/repos/owner/repo-name/issues" \
   -H "Authorization: Bearer ${JWT_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
@@ -209,7 +209,7 @@ curl -X POST "${GITHUB_ENPOINT}/repos/owner/repo-name/issues" \
 ### List Organization Members
 
 ```bash
-curl "${GITHUB_ENPOINT}/orgs/my-org/members" \
+curl "${GITHUB_ENDPOINT}/orgs/my-org/members" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
