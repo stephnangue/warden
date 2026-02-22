@@ -254,6 +254,19 @@ curl "${GCP_ENDPOINT}/iam.googleapis.com/v1/projects/my-project/serviceAccounts"
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
+## Cleanup
+
+To stop Warden and the identity provider:
+
+```bash
+# Stop Warden (Ctrl+C in the terminal where it's running)
+
+# Stop and remove the identity provider containers
+docker compose -f docker-compose.quickstart.yml down -v
+```
+
+Since Warden dev mode uses in-memory storage, all configuration is lost when the server stops.
+
 ## Mint Methods
 
 | Method | Description | Token Lifetime | Use Case |

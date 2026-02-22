@@ -275,6 +275,19 @@ curl "${GITLAB_ENDPOINT}/api/v4/projects/123/repository/branches" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
+## Cleanup
+
+To stop Warden and the identity provider:
+
+```bash
+# Stop Warden (Ctrl+C in the terminal where it's running)
+
+# Stop and remove the identity provider containers
+docker compose -f docker-compose.quickstart.yml down -v
+```
+
+Since Warden dev mode uses in-memory storage, all configuration is lost when the server stops.
+
 ## Minting Project and Group Access Tokens
 
 Warden mints short-lived, scoped access tokens for GitLab projects and groups through credential specs (configured in Step 4).
