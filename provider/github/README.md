@@ -6,12 +6,13 @@ The GitHub provider enables proxied access to the GitHub REST API through Warden
 
 - [Prerequisites](#prerequisites)
 - [Step 1: Mount the GitHub Provider](#step-1-mount-the-github-provider)
-- [Step 2: Create a Credential Source](#step-2-create-a-credential-source)
-- [Step 3: Configure the Provider](#step-3-configure-the-provider)
+- [Step 2: Configure the Provider](#step-2-configure-the-provider)
+- [Step 3: Create a Credential Source](#step-3-create-a-credential-source)
 - [Step 4: Create a Credential Spec](#step-4-create-a-credential-spec)
 - [Step 5: Create a Policy](#step-5-create-a-policy)
 - [Step 6: Configure JWT Auth and Create a Role](#step-6-configure-jwt-auth-and-create-a-role)
-- [Step 7: Make Requests Through the Gateway](#step-7-make-requests-through-the-gateway)
+- [Step 7: Get a JWT](#step-7-get-a-jwt)
+- [Step 8: Make Requests Through the Gateway](#step-8-make-requests-through-the-gateway)
 - [Authentication Methods](#authentication-methods)
 - [Configuration Reference](#configuration-reference)
 - [GitHub Enterprise Server](#github-enterprise-server)
@@ -23,6 +24,14 @@ The GitHub provider enables proxied access to the GitHub REST API through Warden
 - One of the following:
   - **GitHub App** with a private key and installation ID, OR
   - **Personal Access Token** (classic or fine-grained)
+
+> **New to Warden?** Download the binary from the [latest release](https://github.com/stephnangue/warden/releases/latest), then start the identity provider and Warden in dev mode:
+> ```bash
+> curl -fsSL -o docker-compose.quickstart.yml \
+>   https://raw.githubusercontent.com/stephnangue/warden/main/docker-compose.quickstart.yml
+> docker compose -f docker-compose.quickstart.yml up -d
+> ./warden server --dev
+> ```
 
 ```bash
 export WARDEN_ADDR="http://127.0.0.1:8400"
@@ -49,24 +58,7 @@ Verify the provider is enabled:
 warden provider list
 ```
 
-## Step 2: Create a Credential Source
-
-The credential source holds only connection info. Auth credentials (PAT, App private key) are stored on the credential spec (Step 4).
-
-```bash
-warden cred source create github-src \
-  --type=github \
-  --rotation-period=0 \
-  --config=github_url=https://api.github.com
-```
-
-Verify the source was created:
-
-```bash
-warden cred source read github-src
-```
-
-## Step 3: Configure the Provider
+## Step 2: Configure the Provider
 
 Configure the provider with transparent mode enabled. This allows clients to authenticate with their JWT directly — no explicit Warden login required:
 
@@ -86,6 +78,23 @@ Verify the configuration:
 
 ```bash
 warden read github/config
+```
+
+## Step 3: Create a Credential Source
+
+The credential source holds only connection info. Auth credentials (PAT, App private key) are stored on the credential spec (Step 4).
+
+```bash
+warden cred source create github-src \
+  --type=github \
+  --rotation-period=0 \
+  --config=github_url=https://api.github.com
+```
+
+Verify the source was created:
+
+```bash
+warden cred source read github-src
 ```
 
 ## Step 4: Create a Credential Spec
@@ -151,8 +160,8 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 # Enable JWT auth if not already enabled
 warden auth enable --type=jwt
 
-# Configure JWT (e.g., with JWKS URL)
-warden write auth/jwt/config mode=jwt jwks_url=https://your-idp/.well-known/jwks.json
+# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
+warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role that binds the credential spec and policy
 warden write auth/jwt/role/github-user \
@@ -163,7 +172,18 @@ warden write auth/jwt/role/github-user \
     token_ttl=1h
 ```
 
-## Step 7: Make Requests Through the Gateway
+## Step 7: Get a JWT
+
+Get a JWT from Hydra using one of the quickstart clients:
+
+```bash
+export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
+  | jq -r '.access_token')
+```
+
+## Step 8: Make Requests Through the Gateway
 
 With transparent mode, requests use role-based paths. Warden performs implicit JWT authentication and injects the GitHub token automatically.
 
