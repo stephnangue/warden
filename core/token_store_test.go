@@ -1261,6 +1261,78 @@ func TestTokenStore_RevokeByNamespace_Empty(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestTokenStore_LookupToken_CustomDevRootToken tests that LookupToken works with
+// a custom dev root token that does not have a standard prefix (e.g., "my-dev-token"
+// instead of "cws.xxx"). This is the dev-mode fallback path.
+func TestTokenStore_LookupToken_CustomDevRootToken(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	// Generate a standard root token (has "cws." prefix)
+	_, err := core.tokenStore.GenerateRootToken()
+	require.NoError(t, err)
+
+	// Replace with a custom token that has no known prefix
+	customToken := "my-dev-token"
+	err = core.tokenStore.ReplaceRootTokenValue(customToken)
+	require.NoError(t, err)
+
+	// LookupToken should succeed via the dev-mode fallback
+	entry, err := core.LookupToken(ctx, customToken)
+	require.NoError(t, err)
+	require.NotNil(t, entry)
+
+	assert.Equal(t, TypeWardenToken, entry.Type)
+	assert.Equal(t, []string{"root"}, entry.Policies)
+	assert.Equal(t, customToken, entry.Data["token"])
+}
+
+// TestTokenStore_LookupToken_CustomDevRootToken_NotInCache tests the fallback
+// when the custom dev token is not in cache but exists in storage.
+func TestTokenStore_LookupToken_CustomDevRootToken_NotInCache(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	// Generate and replace with custom token
+	_, err := core.tokenStore.GenerateRootToken()
+	require.NoError(t, err)
+
+	customToken := "my-storage-only-token"
+	err = core.tokenStore.ReplaceRootTokenValue(customToken)
+	require.NoError(t, err)
+
+	// Evict from cache to force the storage fallback path
+	wt := &WardenTokenType{}
+	tokenID := wt.ComputeID(customToken)
+	core.tokenStore.byID.Del(tokenID)
+	core.tokenStore.byID.Wait()
+
+	// LookupToken should still succeed by loading from storage
+	entry, err := core.LookupToken(ctx, customToken)
+	require.NoError(t, err)
+	require.NotNil(t, entry)
+
+	assert.Equal(t, customToken, entry.Data["token"])
+}
+
+// TestTokenStore_LookupToken_CustomDevRootToken_NonExistent tests that a completely
+// unknown token without a standard prefix still returns an error.
+func TestTokenStore_LookupToken_CustomDevRootToken_NonExistent(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	// A custom-format token that was never created should fail
+	_, err := core.LookupToken(ctx, "totally-bogus-token")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to detect token type")
+}
+
 // TestDefaultTokenStoreConfig tests the default configuration values
 func TestDefaultTokenStoreConfig(t *testing.T) {
 	config := DefaultTokenStoreConfig()
