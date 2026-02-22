@@ -1370,12 +1370,25 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 
 	// Detect token type
 	tokenType, err := s.registry.DetectType(tokenValue)
+	var tokenID string
 	if err != nil {
-		return nil, fmt.Errorf("failed to detect token type: %w", err)
+		// Fallback for dev-mode custom tokens without standard prefix.
+		// Compute what the ID would be if this were a Warden token.
+		wt := &WardenTokenType{}
+		candidateID := wt.ComputeID(tokenValue)
+		if _, found := s.byID.Get(candidateID); found {
+			tokenType = wt
+			tokenID = candidateID
+		} else if loaded, loadErr := s.loadToken(candidateID); loadErr == nil && loaded != nil {
+			tokenType = wt
+			tokenID = candidateID
+			_ = s.restoreTokenToCache(ctx, loaded, "LookupToken-devFallback")
+		} else {
+			return nil, fmt.Errorf("failed to detect token type: %w", err)
+		}
+	} else {
+		tokenID = tokenType.ComputeID(tokenValue)
 	}
-
-	// Compute token ID
-	tokenID := tokenType.ComputeID(tokenValue)
 
 	// Lookup token in cache
 	entry, found := s.byID.Get(tokenID)
