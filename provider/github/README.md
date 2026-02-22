@@ -193,28 +193,35 @@ Export GITHUB_ENDPOINT as environment variable:
 ```bash
 export GITHUB_ENDPOINT="${WARDEN_ADDR}/v1/github/role/github-user/gateway"
 ```
-### List Repositories
+
+> **Note:** The available GitHub API endpoints depend on your auth method. GitHub App installation tokens and Personal Access Tokens have different scopes — see the examples below.
+
+### GitHub App Examples
+
+GitHub App installation tokens are scoped to the repositories where the app is installed. Use `/installation/` and `/repos/` endpoints.
+
+#### List Repositories the App Is Installed On
 
 ```bash
-curl "${GITHUB_ENDPOINT}/user/repos" \
+curl "${GITHUB_ENDPOINT}/installation/repositories" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
-### Get a Specific Repository
+#### Get a Specific Repository
 
 ```bash
 curl "${GITHUB_ENDPOINT}/repos/owner/repo-name" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
-### List Pull Requests
+#### List Pull Requests
 
 ```bash
 curl "${GITHUB_ENDPOINT}/repos/owner/repo-name/pulls?state=open" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
-### Create an Issue
+#### Create an Issue
 
 ```bash
 curl -X POST "${GITHUB_ENDPOINT}/repos/owner/repo-name/issues" \
@@ -226,10 +233,42 @@ curl -X POST "${GITHUB_ENDPOINT}/repos/owner/repo-name/issues" \
   }'
 ```
 
-### List Organization Members
+#### List Organization Members
 
 ```bash
 curl "${GITHUB_ENDPOINT}/orgs/my-org/members" \
+  -H "Authorization: Bearer ${JWT_TOKEN}"
+```
+
+### Personal Access Token (PAT) Examples
+
+PATs are scoped to the authenticated user. Use `/user/` endpoints in addition to `/repos/`.
+
+#### List Repositories for the Authenticated User
+
+```bash
+curl "${GITHUB_ENDPOINT}/user/repos" \
+  -H "Authorization: Bearer ${JWT_TOKEN}"
+```
+
+#### Get the Authenticated User's Profile
+
+```bash
+curl "${GITHUB_ENDPOINT}/user" \
+  -H "Authorization: Bearer ${JWT_TOKEN}"
+```
+
+#### Get a Specific Repository
+
+```bash
+curl "${GITHUB_ENDPOINT}/repos/owner/repo-name" \
+  -H "Authorization: Bearer ${JWT_TOKEN}"
+```
+
+#### List Pull Requests
+
+```bash
+curl "${GITHUB_ENDPOINT}/repos/owner/repo-name/pulls?state=open" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
