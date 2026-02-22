@@ -4,7 +4,24 @@ import (
 	"bytes"
 	"sync"
 	"testing"
+
+	wrapping "github.com/openbao/go-kms-wrapping/v2"
 )
+
+// copyEnvelopeInfo returns a deep copy of an EnvelopeInfo.
+// EnvelopeDecrypt in go-kms-wrapping v2.7.0 mutates the input's Iv slice
+// via append, so concurrent callers must each use their own copy.
+func copyEnvelopeInfo(src *wrapping.EnvelopeInfo) *wrapping.EnvelopeInfo {
+	dst := &wrapping.EnvelopeInfo{
+		Ciphertext: make([]byte, len(src.Ciphertext)),
+		Key:        make([]byte, len(src.Key)),
+		Iv:         make([]byte, len(src.Iv)),
+	}
+	copy(dst.Ciphertext, src.Ciphertext)
+	copy(dst.Key, src.Key)
+	copy(dst.Iv, src.Iv)
+	return dst
+}
 
 func TestNewEnvelope(t *testing.T) {
 	t.Run("creates new envelope", func(t *testing.T) {
@@ -376,12 +393,15 @@ func TestEnvelope_ConcurrentAccess(t *testing.T) {
 		errors := make(chan error, 100)
 
 		// Perform concurrent decrypts
+		// Each goroutine gets its own copy because EnvelopeDecrypt
+		// mutates the input's Iv slice via append (go-kms-wrapping v2.7.0).
 		for i := 0; i < 100; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 
-				decrypted, err := env.Decrypt(envelopeInfo, aad)
+				info := copyEnvelopeInfo(envelopeInfo)
+				decrypted, err := env.Decrypt(info, aad)
 				if err != nil {
 					errors <- err
 					return
