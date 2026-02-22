@@ -1,0 +1,133 @@
+# Warden Quick Start — Identity Provider (Ory Hydra)
+#
+# This file starts an OAuth2 server with pre-configured clients so you can
+# generate JWTs and try Warden immediately. No other files needed.
+#
+# Usage:
+#   docker compose -f docker-compose.quickstart.yml up -d
+#   # Wait ~15s for initialization, then check logs:
+#   docker compose -f docker-compose.quickstart.yml logs hydra-client-init
+#
+# Clean up:
+#   docker compose -f docker-compose.quickstart.yml down -v
+
+services:
+  postgres-hydra:
+    image: postgres:15-alpine
+    container_name: quickstart-postgres
+    environment:
+      POSTGRES_USER: hydra
+      POSTGRES_PASSWORD: hydrapassword
+      POSTGRES_DB: hydra
+    volumes:
+      - postgres-hydra-data:/var/lib/postgresql/data
+    networks:
+      - warden-quickstart
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hydra"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  hydra-migrate:
+    image: oryd/hydra:v2.2
+    container_name: quickstart-hydra-migrate
+    environment:
+      DSN: postgres://hydra:hydrapassword@postgres-hydra:5432/hydra?sslmode=disable
+    networks:
+      - warden-quickstart
+    depends_on:
+      postgres-hydra:
+        condition: service_healthy
+    command: migrate sql -e --yes
+
+  hydra:
+    image: oryd/hydra:v2.2
+    container_name: quickstart-hydra
+    ports:
+      - "4444:4444"
+      - "4445:4445"
+    environment:
+      DSN: postgres://hydra:hydrapassword@postgres-hydra:5432/hydra?sslmode=disable
+      URLS_SELF_ISSUER: http://localhost:4444
+      URLS_CONSENT: http://localhost:3000/consent
+      URLS_LOGIN: http://localhost:3000/login
+      URLS_LOGOUT: http://localhost:3000/logout
+      SECRETS_SYSTEM: quickstart-secret-change-in-production
+      OIDC_SUBJECT_IDENTIFIERS_SUPPORTED_TYPES: public,pairwise
+      OIDC_SUBJECT_IDENTIFIERS_PAIRWISE_SALT: quickstart-salt-change-in-production
+      SERVE_PUBLIC_CORS_ENABLED: "true"
+      SERVE_PUBLIC_CORS_ALLOWED_ORIGINS: "*"
+      STRATEGIES_ACCESS_TOKEN: jwt
+      TTL_ACCESS_TOKEN: 1h
+      TTL_REFRESH_TOKEN: 720h
+      TTL_ID_TOKEN: 1h
+      LOG_LEVEL: warn
+    networks:
+      - warden-quickstart
+    depends_on:
+      hydra-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    command: serve all --dev
+
+  hydra-client-init:
+    image: oryd/hydra:v2.2
+    container_name: quickstart-hydra-init
+    networks:
+      - warden-quickstart
+    depends_on:
+      hydra:
+        condition: service_started
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo 'Waiting for Hydra to be ready...'
+        while ! wget -q --spider http://hydra:4445/health/ready 2>/dev/null; do
+          sleep 2
+        done
+
+        echo 'Creating OAuth2 clients...'
+        echo ''
+
+        wget -q -O- --post-data='{"client_id":"my-agent","client_name":"My Agent","client_secret":"agent-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+          --header='Content-Type: application/json' \
+          http://hydra:4445/admin/clients > /dev/null 2>&1 && echo '  [OK] my-agent' || echo '  [SKIP] my-agent (already exists?)'
+
+        wget -q -O- --post-data='{"client_id":"my-pipeline","client_name":"My Pipeline","client_secret":"pipeline-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+          --header='Content-Type: application/json' \
+          http://hydra:4445/admin/clients > /dev/null 2>&1 && echo '  [OK] my-pipeline' || echo '  [SKIP] my-pipeline (already exists?)'
+
+        wget -q -O- --post-data='{"client_id":"my-admin","client_name":"My Admin","client_secret":"admin-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+          --header='Content-Type: application/json' \
+          http://hydra:4445/admin/clients > /dev/null 2>&1 && echo '  [OK] my-admin' || echo '  [SKIP] my-admin (already exists?)'
+
+        echo ''
+        echo '========================================================='
+        echo '  Hydra is ready! OAuth2 clients created.'
+        echo '========================================================='
+        echo ''
+        echo 'Pre-configured clients:'
+        echo '  my-agent     / agent-secret       (AI agent, automation)'
+        echo '  my-pipeline  / pipeline-secret     (CI/CD pipeline)'
+        echo '  my-admin     / admin-secret        (Admin, operator)'
+        echo ''
+        echo 'Get a JWT:'
+        echo ''
+        echo '  curl -s -X POST http://localhost:4444/oauth2/token \'
+        echo '    -H "Content-Type: application/x-www-form-urlencoded" \'
+        echo '    -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write"'
+        echo ''
+        echo 'Start Warden in dev mode:'
+        echo ''
+        echo '  ./warden server --dev'
+        echo ''
+        echo '========================================================='
+
+networks:
+  warden-quickstart:
+    driver: bridge
+
+volumes:
+  postgres-hydra-data:

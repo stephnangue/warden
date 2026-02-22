@@ -7,12 +7,13 @@ The Vault provider enables proxied access to HashiCorp Vault (or OpenBao) throug
 - [Prerequisites](#prerequisites)
 - [Step 1: Create an AppRole in Vault](#step-1-create-an-approle-in-vault)
 - [Step 2: Mount the Vault Provider](#step-2-mount-the-vault-provider)
-- [Step 3: Create a Credential Source](#step-3-create-a-credential-source)
-- [Step 4: Configure the Provider](#step-4-configure-the-provider)
+- [Step 3: Configure the Provider](#step-3-configure-the-provider)
+- [Step 4: Create a Credential Source](#step-4-create-a-credential-source)
 - [Step 5: Create Credential Specs](#step-5-create-credential-specs)
 - [Step 6: Create a Policy](#step-6-create-a-policy)
 - [Step 7: Configure JWT Auth and Create a Role](#step-7-configure-jwt-auth-and-create-a-role)
-- [Step 8: Make Requests Through the Gateway](#step-8-make-requests-through-the-gateway)
+- [Step 8: Get a JWT](#step-8-get-a-jwt)
+- [Step 9: Make Requests Through the Gateway](#step-9-make-requests-through-the-gateway)
 - [Architecture Overview](#architecture-overview)
 - [Mint Methods](#mint-methods)
 - [Transparent Mode](#transparent-mode)
@@ -25,6 +26,14 @@ The Vault provider enables proxied access to HashiCorp Vault (or OpenBao) throug
 - The Warden CLI installed and configured
 - HashiCorp Vault running and unsealed
 - Vault CLI (for initial AppRole setup)
+
+> **New to Warden?** Download the binary from the [latest release](https://github.com/stephnangue/warden/releases/latest), then start the identity provider and Warden in dev mode:
+> ```bash
+> curl -fsSL -o docker-compose.quickstart.yml \
+>   https://raw.githubusercontent.com/stephnangue/warden/main/docker-compose.quickstart.yml
+> docker compose -f docker-compose.quickstart.yml up -d
+> ./warden server --dev
+> ```
 
 ```bash
 export WARDEN_ADDR="http://127.0.0.1:8400"
@@ -111,27 +120,47 @@ Save the `role_id`, `secret_id`, and `secret_id_accessor` from the output.
 Enable the Vault provider at a path of your choice:
 
 ```bash
-warden -n PROD/SEC provider enable --type=vault
+warden provider enable --type=vault
 ```
 
 To mount at a custom path:
 
 ```bash
-warden -n PROD/SEC provider enable --type=vault vault-prod
+warden provider enable --type=vault vault-prod
 ```
 
 Verify the provider is enabled:
 
 ```bash
-warden -n PROD/SEC provider list
+warden provider list
 ```
 
-## Step 3: Create a Credential Source
+## Step 3: Configure the Provider
+
+Configure the provider with the Vault server address:
+
+```bash
+warden write vault/config <<EOF
+{
+  "vault_address": "http://127.0.0.1:8200",
+  "timeout": "30s",
+  "max_body_size": 10485760
+}
+EOF
+```
+
+Verify:
+
+```bash
+warden read vault/config
+```
+
+## Step 4: Create a Credential Source
 
 The credential source tells Warden how to authenticate to Vault using the AppRole created in Step 1.
 
 ```bash
-warden -n PROD/SEC cred source create vault-prod \
+warden cred source create vault-prod \
   --type hvault \
   --rotation-period 24h \
   --config vault_address=http://127.0.0.1:8200 \
@@ -146,7 +175,7 @@ warden -n PROD/SEC cred source create vault-prod \
 For Vault Enterprise/HCP Vault with namespaces or OpenBao, add `vault_namespace` to scope all Warden API calls (AppRole auth, credential minting) to that namespace:
 
 ```bash
-warden -n PROD/SEC cred source create vault-prod \
+warden cred source create vault-prod \
   --type hvault \
   --rotation-period 24h \
   --config vault_address=https://vault.example.com:8200 \
@@ -166,27 +195,7 @@ Set to `0` to disable rotation (not recommended for production).
 Verify:
 
 ```bash
-warden -n PROD/SEC cred source read vault-prod
-```
-
-## Step 4: Configure the Provider
-
-Configure the provider with the Vault server address:
-
-```bash
-warden -n PROD/SEC write vault/config <<EOF
-{
-  "vault_address": "http://127.0.0.1:8200",
-  "timeout": "30s",
-  "max_body_size": 10485760
-}
-EOF
-```
-
-Verify:
-
-```bash
-warden -n PROD/SEC read vault/config
+warden cred source read vault-prod
 ```
 
 ## Step 5: Create a Credential Spec
@@ -195,7 +204,7 @@ The Vault provider gateway requires a credential spec of type `vault_token`. War
 
 ```bash
 # Read-only Vault token
-warden -n PROD/SEC cred spec create vault-reader \
+warden cred spec create vault-reader \
   --type vault_token \
   --source vault-prod \
   --config mint_method=vault_token \
@@ -204,7 +213,7 @@ warden -n PROD/SEC cred spec create vault-reader \
   --max-ttl 2h
 
 # Admin Vault token with custom TTL
-warden -n PROD/SEC cred spec create vault-admin \
+warden cred spec create vault-admin \
   --type vault_token \
   --source vault-prod \
   --config mint_method=vault_token \
@@ -221,7 +230,7 @@ warden -n PROD/SEC cred spec create vault-admin \
 Create a policy that grants access to the Vault provider gateway:
 
 ```bash
-warden -n PROD/SEC policy write vault-access - <<EOF
+warden policy write vault-access - <<EOF
 path "vault/gateway*" {
   capabilities = ["read", "create", "update", "delete"]
 }
@@ -231,7 +240,7 @@ EOF
 For transparent mode, also grant access to role-based paths:
 
 ```bash
-warden -n PROD/SEC policy write vault-access - <<EOF
+warden policy write vault-access - <<EOF
 path "vault/gateway*" {
   capabilities = ["read", "create", "update", "delete"]
 }
@@ -244,7 +253,7 @@ EOF
 Verify:
 
 ```bash
-warden -n PROD/SEC policy read vault-access
+warden policy read vault-access
 ```
 
 ## Step 7: Configure JWT Auth and Create a Role
@@ -253,13 +262,13 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden -n PROD/SEC auth enable --type=jwt
+warden auth enable --type=jwt
 
-# Configure JWT (e.g., with JWKS URL)
-warden -n PROD/SEC write auth/jwt/config mode=jwt jwks_url=https://your-idp/.well-known/jwks.json
+# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
+warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role that binds the credential spec and policy
-warden -n PROD/SEC write auth/jwt/role/vault-user \
+warden write auth/jwt/role/vault-user \
     token_type=vault_token \
     token_policies="vault-access" \
     user_claim=sub \
@@ -267,7 +276,18 @@ warden -n PROD/SEC write auth/jwt/role/vault-user \
     token_ttl=1h
 ```
 
-## Step 8: Make Requests Through the Gateway
+## Step 8: Get a JWT
+
+Get a JWT from Hydra using one of the quickstart clients:
+
+```bash
+export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
+  | jq -r '.access_token')
+```
+
+## Step 9: Make Requests Through the Gateway
 
 There are two ways to use the gateway: **explicit login** (standard mode) and **transparent mode** (implicit JWT auth). Both proxy requests to Vault with automatic token injection.
 
@@ -276,7 +296,7 @@ There are two ways to use the gateway: **explicit login** (standard mode) and **
 Login to Warden to get a session token, then use that token for gateway requests:
 
 ```bash
-LOGIN_OUTPUT=$(warden -n PROD/SEC login --method=jwt --token=$JWT --role=vault-user)
+LOGIN_OUTPUT=$(warden login --method=jwt --token=$JWT --role=vault-user)
 
 export WARDEN_SESSION_TOKEN=$(echo "$LOGIN_OUTPUT" | grep "| token" | awk '{print $NF}')
 ```
@@ -284,7 +304,7 @@ export WARDEN_SESSION_TOKEN=$(echo "$LOGIN_OUTPUT" | grep "| token" | awk '{prin
 Point the Vault CLI or SDK at the Warden gateway endpoint:
 
 ```bash
-export VAULT_ADDR=http://localhost:8400/v1/PROD/SEC/vault/gateway
+export VAULT_ADDR=http://localhost:8400/v1/vault/gateway
 export VAULT_TOKEN=$WARDEN_SESSION_TOKEN
 ```
 
@@ -311,7 +331,7 @@ With transparent mode enabled (see [Transparent Mode](#transparent-mode)), clien
 First, enable transparent mode on the provider (one-time setup):
 
 ```bash
-warden -n PROD/SEC write vault/config <<EOF
+warden write vault/config <<EOF
 {
   "vault_address": "http://127.0.0.1:8200",
   "transparent_mode": true,
@@ -321,10 +341,10 @@ warden -n PROD/SEC write vault/config <<EOF
 EOF
 ```
 
-The URL pattern includes the role name: `/v1/PROD/SEC/vault/role/{role}/gateway/{vault-api-path}`
+The URL pattern includes the role name: `/v1/vault/role/{role}/gateway/{vault-api-path}`
 
 ```bash
-export VAULT_ADDR=http://localhost:8400/v1/PROD/SEC/vault/role/vault-user/gateway
+export VAULT_ADDR=http://localhost:8400/v1/vault/role/vault-user/gateway
 export VAULT_TOKEN=$JWT
 ```
 
@@ -344,7 +364,7 @@ vault write pki/issue/my-role common_name=example.com
 Or use `curl` directly:
 
 ```bash
-VAULT_ENDPOINT="${WARDEN_ADDR}/v1/PROD/SEC/vault/role/vault-user/gateway"
+VAULT_ENDPOINT="${WARDEN_ADDR}/v1/vault/role/vault-user/gateway"
 
 # Read a secret
 curl "${VAULT_ENDPOINT}/secret/data/myapp" \
@@ -461,7 +481,7 @@ Transparent mode allows clients to authenticate implicitly with their JWT — no
 ### Enable Transparent Mode
 
 ```bash
-warden -n PROD/SEC write vault/config <<EOF
+warden write vault/config <<EOF
 {
   "vault_address": "http://127.0.0.1:8200",
   "transparent_mode": true,
@@ -474,13 +494,13 @@ EOF
 ### URL Pattern
 
 ```
-/v1/PROD/SEC/vault/role/{role}/gateway/{vault-api-path}
+/v1/vault/role/{role}/gateway/{vault-api-path}
 ```
 
 ### Example Requests
 
 ```bash
-VAULT_ENDPOINT="${WARDEN_ADDR}/v1/PROD/SEC/vault/role/vault-user/gateway"
+VAULT_ENDPOINT="${WARDEN_ADDR}/v1/vault/role/vault-user/gateway"
 
 # Read a secret
 curl "${VAULT_ENDPOINT}/secret/data/myapp" \
@@ -578,7 +598,7 @@ Certain read-only PKI endpoints are forwarded without authentication, matching V
 The `vault_address` has not been set. Configure the provider:
 
 ```bash
-warden -n PROD/SEC write vault/config vault_address=https://vault.example.com:8200
+warden write vault/config vault_address=https://vault.example.com:8200
 ```
 
 ### "Unauthorized" on gateway requests
@@ -598,7 +618,7 @@ warden -n PROD/SEC write vault/config vault_address=https://vault.example.com:82
 For development with self-signed certificates:
 
 ```bash
-warden -n PROD/SEC write vault/config vault_address=https://vault.local:8200 tls_skip_verify=true
+warden write vault/config vault_address=https://vault.local:8200 tls_skip_verify=true
 ```
 
 Do not use `tls_skip_verify` in production. Instead, ensure the Vault TLS certificate is signed by a trusted CA.
