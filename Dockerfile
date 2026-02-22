@@ -34,7 +34,7 @@ WORKDIR /app
 # Copy only the binary from builder
 COPY --from=builder --chown=nonroot:nonroot /app/warden ./warden
 
-EXPOSE 4000 5000
+EXPOSE 8400
 
 USER nonroot:nonroot
 
