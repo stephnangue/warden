@@ -1,6 +1,6 @@
 # Vault Provider
 
-The Vault provider enables proxied access to HashiCorp Vault (or OpenBao) through Warden. It intercepts client requests, injects a real Vault token obtained from the credential manager, and forwards the request to the target Vault instance. This allows Warden to broker Vault access without distributing long-lived Vault tokens to clients.
+The Vault provider enables proxied access to HashiCorp Vault (or OpenBao) through Warden. It intercepts client requests, injects a short-lived Vault token minted from a credential spec, and forwards the request to the target Vault instance. This allows Warden to broker Vault access without distributing long-lived credentials to clients.
 
 ## Table of Contents
 
