@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-FROM golang:1.25.1-alpine AS builder
+FROM golang:1.26.0-alpine AS builder
 
 # Install build dependencies in a single layer
 RUN apk add --no-cache git gcc musl-dev
