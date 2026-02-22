@@ -63,6 +63,12 @@ func init() {
 	wardenCmd.AddCommand(basic.PathHelpCmd)
 }
 
+// SetVersion sets the version string on the root command.
+// Called from main with the value injected via ldflags.
+func SetVersion(v string) {
+	wardenCmd.Version = v
+}
+
 // Namespace returns the currently configured namespace from the flag
 func Namespace() string {
 	return flagNamespace
