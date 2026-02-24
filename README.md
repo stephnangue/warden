@@ -31,6 +31,70 @@ Warden eliminates credential exposure by sitting in the request path between you
 
 The roadmap targets 100+ cloud and SaaS providers.
 
+## Why Warden?
+
+### Zero Credential Exposure
+
+Workloads never see or store credentials. Warden intercepts requests, injects short-lived credentials on the fly, and forwards them to providers. No secrets in environment variables, no keys in config files, no credential leaks.
+
+### Request-Level Audit Trail
+
+Warden doesn't just log who received credentials — it logs what they did with them. Every API call produces a structured audit entry capturing identity, policy result, credential used, request details, and response status.
+
+```
+# Vault:   "agent-X was granted AWS credentials at 14:32"
+# Warden:  "agent-X (role: azure-ops) called PUT .../resourcegroups/my-rg → 201, using
+#           credential: azure-source/azure-cred-spec (ttl: 3599s)"
+```
+
+### Fine-Grained Policy Enforcement
+
+Warden constrains what a workload can do by controlling which APIs it can reach and which operations it can perform — at the HTTP path and method level. This is a layer of granularity that providers don't natively offer.
+
+A GitHub fine-grained PAT with `contents: read` lets the holder read *every file* in a repo. Warden can restrict an agent to `src/` while blocking `.github/workflows/` and `.env` — something GitHub simply cannot express. A GitLab `read_repository` token can clone, list branches, and compare commits. Warden can limit it to file reads only. For AWS, Warden adds defense-in-depth: destructive operations can be blocked at the gateway regardless of what the underlying IAM role permits.
+
+### Zero Client Modification
+
+Point your SDK, CLI, or tool at Warden's endpoint instead of the provider's. No code changes, no special libraries, no proxy configuration. If your tool supports a custom endpoint URL, it works with Warden.
+
+### Identity-Based Access
+
+Every request is tied to a verified identity via JWT. Whether it's a CI/CD pipeline, an AI agent, a Terraform run, or a Kubernetes pod, Warden knows exactly who is making each API call and applies policies accordingly.
+
+### Unified Identity Across Providers
+
+Every cloud and SaaS provider has its own identity system — AWS IAM, Azure Entra ID, GCP IAM, GitHub Apps, GitLab tokens. Multi-cloud means multi-identity: different auth flows, different credential formats, different rotation strategies per provider. Warden collapses all of that into a single JWT. Your workloads authenticate once, with one identity, and Warden translates to each provider's native auth on the fly. One identity plane, regardless of how many providers sit behind it.
+
+```
+                                  ┌─── AWS (SigV4)
+                                  │
+  Workload ── JWT ──▶  Warden  ───┼─── Azure (Bearer + Entra ID)
+                                  │
+                                  ├─── GCP (Bearer + SA key)
+                                  │
+                                  └─── GitHub (Installation token)
+```
+
+## Use Cases
+
+### AI Agents
+
+AI agents are autonomous, use broad permissions, and operate opaquely. Without Warden, you give agents long-lived credentials and hope for the best. With Warden, agents authenticate with a scoped JWT and you get a full audit trail of every API call — every file read, every PR created, every cloud resource touched.
+
+> *Marc Brooker, AWS Principal Engineer, [argues](https://brooker.co.za/blog/2026/01/12/agent-box.html) that agent safety requires a deterministic gateway outside the agent that enforces policy on every tool call. Warden is that gateway.*
+
+### Terraform / Infrastructure as Code
+
+No more AWS credentials on the machine running `terraform apply`. Terraform points at Warden, authenticates with a JWT, and Warden signs requests with just-in-time credentials scoped to the pipeline's identity. Full audit trail of every API call Terraform makes.
+
+### CI/CD Pipelines
+
+Pipelines store credentials as CI secrets — each one a potential leak, each one painful to rotate. With Warden, pipelines authenticate with their workload identity (Kubernetes SA, OIDC token) and access cloud and SaaS APIs through the gateway. No secrets to distribute, no credentials to rotate.
+
+### Multi-Cloud / Multi-Provider
+
+An AI agent that reads from GitHub, writes to S3, and deploys to Azure needs three different credential types, three different auth flows, three different rotation strategies. Without Warden, each integration is its own identity problem. With Warden, the agent gets one JWT and one endpoint pattern. It doesn't matter whether the target is AWS, Azure, or GitHub — the auth flow is identical. Add a new provider and existing workloads gain access without changing a single line of code. The identity complexity is Warden's problem, not the application's.
+
 ## Authentication Modes
 
 Warden supports two modes for how callers interact with the gateway. The availability of each mode depends on the provider.
@@ -82,77 +146,13 @@ Explicit mode is **required for AWS** (SigV4 request signing means Warden must h
 | **GitLab** | ✅ | ✅ |
 | **Vault / OpenBao** | ✅ | ✅ |
 
-## Why Warden?
-
-### Zero Credential Exposure
-
-Workloads never see or store credentials. Warden intercepts requests, injects short-lived credentials on the fly, and forwards them to providers. No secrets in environment variables, no keys in config files, no credential leaks.
-
-### Request-Level Audit Trail
-
-Warden doesn't just log who received credentials — it logs what they did with them. Every API call is recorded with the caller's identity, the target service, the HTTP method and path, and a timestamp.
-
-```
-# What Vault logs:          "agent-X was granted AWS credentials at 14:32"
-# What Warden logs:         "agent-X called GET /repos/acme/frontend/contents/src/auth.ts at 14:32:07"
-#                           "agent-X called POST /repos/acme/frontend/pulls/42/reviews at 14:32:09"
-```
-
-### Fine-Grained Policy Enforcement
-
-Warden constrains what a workload can do by controlling which APIs it can reach and which operations it can perform — at the HTTP path and method level. This is a layer of granularity that providers don't natively offer.
-
-A GitHub fine-grained PAT with `contents: read` lets the holder read *every file* in a repo. Warden can restrict an agent to `src/` while blocking `.github/workflows/` and `.env` — something GitHub simply cannot express. A GitLab `read_repository` token can clone, list branches, and compare commits. Warden can limit it to file reads only. For AWS, Warden adds defense-in-depth: destructive operations can be blocked at the gateway regardless of what the underlying IAM role permits.
-
-### Zero Client Modification
-
-Point your SDK, CLI, or tool at Warden's endpoint instead of the provider's. No code changes, no special libraries, no proxy configuration. If your tool supports a custom endpoint URL, it works with Warden.
-
-### Identity-Based Access
-
-Every request is tied to a verified identity via JWT. Whether it's a CI/CD pipeline, an AI agent, a Terraform run, or a Kubernetes pod, Warden knows exactly who is making each API call and applies policies accordingly.
-
-### Unified Identity Across Providers
-
-Every cloud and SaaS provider has its own identity system — AWS IAM, Azure Entra ID, GCP IAM, GitHub Apps, GitLab tokens. Multi-cloud means multi-identity: different auth flows, different credential formats, different rotation strategies per provider. Warden collapses all of that into a single JWT. Your workloads authenticate once, with one identity, and Warden translates to each provider's native auth on the fly. One identity plane, regardless of how many providers sit behind it.
-
-```
-                                  ┌─── AWS (SigV4)
-                                  │
-  Workload ── JWT ──▶  Warden  ───┼─── Azure (Bearer + Entra ID)
-                                  │
-                                  ├─── GCP (Bearer + SA key)
-                                  │
-                                  └─── GitHub (Installation token)
-```
-
-## Use Cases
-
-### AI Agents
-
-AI agents are autonomous, use broad permissions, and operate opaquely. Without Warden, you give agents long-lived credentials and hope for the best. With Warden, agents authenticate with a scoped JWT and you get a full audit trail of every API call — every file read, every PR created, every cloud resource touched.
-
-> *Marc Brooker, AWS Principal Engineer, [argues](https://brooker.co.za/blog/2026/01/12/agent-box.html) that agent safety requires a deterministic gateway outside the agent that enforces policy on every tool call. Warden is that gateway.*
-
-### Terraform / Infrastructure as Code
-
-No more AWS credentials on the machine running `terraform apply`. Terraform points at Warden, authenticates with a JWT, and Warden signs requests with just-in-time credentials scoped to the pipeline's identity. Full audit trail of every API call Terraform makes.
-
-### CI/CD Pipelines
-
-Pipelines store credentials as CI secrets — each one a potential leak, each one painful to rotate. With Warden, pipelines authenticate with their workload identity (Kubernetes SA, OIDC token) and access cloud and SaaS APIs through the gateway. No secrets to distribute, no credentials to rotate.
-
-### Multi-Cloud / Multi-Provider
-
-An AI agent that reads from GitHub, writes to S3, and deploys to Azure needs three different credential types, three different auth flows, three different rotation strategies. Without Warden, each integration is its own identity problem. With Warden, the agent gets one JWT and one endpoint pattern. It doesn't matter whether the target is AWS, Azure, or GitHub — the auth flow is identical. Add a new provider and existing workloads gain access without changing a single line of code. The identity complexity is Warden's problem, not the application's.
-
 ## How It Compares
 
 |  | **Warden** | **Vault** | **Aembit** | **IAM Roles** |
 |---|---|---|---|---|
 | Credential isolation | Credentials never leave Warden | App receives and holds credentials | Credentials pass through edge component | App assumes role directly |
 | Audit granularity | Every API request logged | Credential issuance logged | Access grant logged | CloudTrail only |
-| Policy enforcement | HTTP path + method level | Credential scope level | Workload-to-service level | IAM policy level |
+| Policy enforcement | HTTP path + method level + credential scope level | Credential scope level | Workload-to-service level | IAM policy level |
 | Client modification | Change base URL | Integrate SDK / API call | Deploy sidecar agents | Per-cloud configuration |
 | Deployment | Single gateway | Server cluster | SaaS + edge agents | Per-cloud setup |
 | Open source | Yes (MPL-2.0) | Yes (BSL) | No | N/A |
