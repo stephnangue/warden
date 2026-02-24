@@ -45,7 +45,7 @@ export WARDEN_TOKEN="<your-token>"
 
 ## Step 1: Create the IAM User
 
-Create a dedicated IAM user for Warden. This user holds long-lived access keys that Warden rotates automatically.
+Create a dedicated IAM user for Warden, called Warden root user. This user holds long-lived access keys that Warden rotates automatically.
 
 ```bash
 aws iam create-user --user-name warden-cred-source-root
@@ -56,11 +56,11 @@ Save the `AccessKeyId` and `SecretAccessKey` from the output.
 
 ## Step 2: Attach IAM Policies
 
-The user needs two policies:
+The Warden root user needs two policies:
 
 ### SelfManageAccessKeys
 
-Allows the user to rotate its own access keys. Warden uses this during credential rotation to create new keys and delete old ones.
+Allows the root user to rotate its own access keys. Warden uses this during credential rotation to create new keys and delete old ones.
 
 ```bash
 aws iam put-user-policy \
@@ -84,7 +84,7 @@ aws iam put-user-policy \
 
 ### AssumeRoles
 
-Allows the user to assume roles that grant actual permissions. Scope the `Resource` to match your role naming conventions.
+Allows the root user to assume roles that grant actual permissions. Scope the `Resource` to match your role naming conventions.
 
 ```bash
 aws iam put-user-policy \
@@ -172,14 +172,14 @@ warden read aws/config
 
 ## Step 6: Create a Credential Source
 
-The credential source tells Warden how to authenticate to AWS and where the base credentials live.
+The credential source tells Warden how to authenticate to AWS and where the base credentials live. Use `AccessKeyId` and `SecretAccessKey` you saved in Step 1 to create the cred source.
 
 ```bash
 warden cred source create my-aws-source \
   --type aws \
   --rotation-period 24h \
-  --config access_key_id=AKIA... \
-  --config secret_access_key=... \
+  --config access_key_id=<AccessKeyId> \
+  --config secret_access_key=<SecretAccessKey> \
   --config region=us-east-1
 ```
 
@@ -194,8 +194,6 @@ warden cred source read my-aws-source
 ## Step 7: Create Credential Specs
 
 A credential spec defines what temporary credentials Warden mints for consumers. Multiple specs can share the same source, each assuming a different role with different permissions and TTLs.
-
-### STS AssumeRole (Recommended)
 
 ```bash
 # Spec for developers — read-only access, short TTL
@@ -231,31 +229,9 @@ warden cred spec create operator \
 
 Each spec points to a different `role_arn`, so the IAM user's `AssumeRoles` policy must allow assuming all of them (the `devops-*` wildcard in Step 2 covers this).
 
-### Secrets Manager
-
-The `secrets_manager` mint method fetches credentials from AWS Secrets Manager. The base IAM user doesn't have Secrets Manager permissions, so the **source** needs `assume_role_arn` to assume a role that does:
-
-```bash
-# Source with elevated permissions for Secrets Manager
-warden cred source create my-aws-source-sm \
-  --type aws \
-  --rotation-period 720h \
-  --config access_key_id=AKIA... \
-  --config secret_access_key=... \
-  --config region=us-east-1 \
-  --config assume_role_arn=arn:aws:iam::<ACCOUNT_ID>:role/internal-secrets-manager-access
-
-# Spec that fetches a secret
-warden cred spec create db-creds \
-  --type aws_access_keys \
-  --source my-aws-source-sm \
-  --config mint_method=secrets_manager \
-  --config secret_id=prod/database/credentials
-```
-
 ## Step 8: Create a Policy
 
-Create a policy that grants access to the AWS provider gateway:
+Create a policy that grants access to the AWS provider gateway. Note that this policy is intentionally coarse-grained for simplicity, but it can be made much more fine-grained to restrict access to specific paths or capabilities as needed:
 
 ```bash
 warden policy write aws-access - <<EOF
@@ -542,6 +518,18 @@ The provider includes specialized processors for:
 | MRAP data operations (PutObject, GetObject) | No | Uses SigV4A, bypasses proxy |
 
 **Workaround**: Use the underlying regional buckets directly instead of the MRAP ARN.
+
+### S3 Directory Buckets (Express One Zone)
+
+**S3 Directory Buckets are not currently supported.** Directory buckets (names ending in `--<zone-id>--x-s3`) use a session-based authentication mechanism: the SDK calls `CreateSession` to obtain 5-minute scoped credentials, then signs data plane requests with those credentials using the `x-amz-s3session-token` header. Warden does not yet implement this session flow.
+
+### S3 Table Buckets
+
+**S3 Table Buckets are not currently supported.** S3 Tables is a separate service (`s3tables.<region>.amazonaws.com`) with its own signing name (`s3tables`). Warden does not yet have a processor for this service.
+
+### S3 Vector Buckets
+
+**S3 Vector Buckets are not currently supported.** S3 Vectors is a separate service (`s3vectors.<region>.api.aws`) with its own signing name (`s3vectors`). Warden does not yet have a processor for this service.
 
 ### Standard (Single-Region) Access Points
 

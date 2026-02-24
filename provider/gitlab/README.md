@@ -163,12 +163,12 @@ warden cred spec read gitlab-project-token
 
 ## Step 5: Create a Policy
 
-Create a policy that grants access to the GitLab provider gateway:
+Create a policy that grants access to the GitLab provider gateway. Note that this policy is intentionally coarse-grained for simplicity, but it can be made much more fine-grained to restrict access to specific paths or capabilities as needed:
 
 ```bash
 warden policy write gitlab-access - <<EOF
 path "gitlab/role/+/gateway*" {
-  capabilities = ["create", "read", "update", "delete"]
+  capabilities = ["create", "read", "update", "delete", "patch"]
 }
 EOF
 ```
