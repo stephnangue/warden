@@ -175,29 +175,42 @@ Warden is a reverse proxy written in Go. Each provider is registered as a stream
 
 ## Getting Started
 
-### Prerequisites
-
-- Go 1.25.1 or later
-- Make
-
 ### Quick Start (Dev Mode)
 
 Dev mode runs Warden entirely in-memory with automatic initialization and unsealing. No external dependencies — perfect for exploring and testing.
 
-```bash
-# Clone and build
-git clone https://github.com/stephnangue/warden.git
-cd warden
-go build -o warden ./cmd
+**1. Download the latest release:**
 
-# Start Warden in dev mode
+```bash
+# macOS (Apple Silicon)
+curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_arm64.tar.gz | tar xz
+
+# macOS (Intel)
+curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_amd64.tar.gz | tar xz
+
+# Linux (x86_64)
+curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_amd64.tar.gz | tar xz
+
+# Linux (ARM64)
+curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_arm64.tar.gz | tar xz
+```
+
+**2. Start the server:**
+
+```bash
+# Using the binary
 ./warden server --dev
 
-# In another terminal
+# Or using Docker
+docker run --rm -p 8400:8400 ghcr.io/stephnangue/warden:latest server --dev
+```
+
+**3. In another terminal, use the Warden client:**
+
+```bash
 export WARDEN_ADDR="http://127.0.0.1:8400"
 export WARDEN_TOKEN="<root-token-from-output>"
 
-# Explore
 ./warden --help
 ```
 
@@ -217,18 +230,7 @@ Once Warden is running, follow a provider guide to configure your first endpoint
 Production mode requires a configuration file and external dependencies (PostgreSQL for storage, and a seal that suits your need).
 
 ```bash
-# Start dependencies (OpenBao, PostgreSQL)
-make deps-up
-
-# Build and run
-make brd
-```
-
-Or manually:
-
-```bash
-go build -o warden ./cmd
-./warden server --config=./warden.local.hcl
+./warden server --config=./warden.hcl
 ```
 
 ### Configuration
