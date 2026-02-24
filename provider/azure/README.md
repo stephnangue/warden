@@ -186,12 +186,12 @@ warden cred spec read azure-ops
 
 ## Step 5: Create a Policy
 
-Create a policy that grants access to the Azure provider gateway:
+Create a policy that grants access to the Azure provider gateway. Note that this policy is intentionally coarse-grained for simplicity, but it can be made much more fine-grained to restrict access to specific paths or capabilities as needed:
 
 ```bash
 warden policy write azure-access - <<EOF
 path "azure/role/+/gateway*" {
-  capabilities = ["create", "read", "update", "delete"]
+  capabilities = ["create", "read", "update", "delete", "patch"]
 }
 EOF
 ```

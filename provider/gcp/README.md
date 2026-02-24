@@ -152,12 +152,12 @@ warden cred spec read gcp-cloud-platform
 
 ## Step 5: Create a Policy
 
-Create a policy that grants access to the GCP provider gateway:
+Create a policy that grants access to the GCP provider gateway. Note that this policy is intentionally coarse-grained for simplicity, but it can be made much more fine-grained to restrict access to specific paths or capabilities as needed:
 
 ```bash
 warden policy write gcp-access - <<EOF
 path "gcp/role/+/gateway*" {
-  capabilities = ["create", "read", "update", "delete"]
+  capabilities = ["create", "read", "update", "delete", "patch"]
 }
 EOF
 ```

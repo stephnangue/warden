@@ -136,12 +136,12 @@ warden cred spec read github-ops
 
 ## Step 5: Create a Policy
 
-Create a policy that grants access to the GitHub provider gateway:
+Create a policy that grants access to the GitHub provider gateway. Note that this policy is intentionally coarse-grained for simplicity, but it can be made much more fine-grained to restrict access to specific paths or capabilities as needed:
 
 ```bash
 warden policy write github-access - <<EOF
 path "github/role/+/gateway*" {
-  capabilities = ["create", "read", "update", "delete"]
+  capabilities = ["create", "read", "update", "delete", "patch"]
 }
 EOF
 ```

@@ -227,12 +227,12 @@ warden cred spec create vault-admin \
 
 ## Step 6: Create a Policy
 
-Create a policy that grants access to the Vault provider gateway:
+Create a policy that grants access to the Vault provider gateway. Note that this policy is intentionally coarse-grained for simplicity, but it can be made much more fine-grained to restrict access to specific paths or capabilities as needed:
 
 ```bash
 warden policy write vault-access - <<EOF
 path "vault/gateway*" {
-  capabilities = ["read", "create", "update", "delete"]
+  capabilities = ["read", "create", "update", "delete", "patch"]
 }
 EOF
 ```
@@ -242,10 +242,10 @@ For transparent mode, also grant access to role-based paths:
 ```bash
 warden policy write vault-access - <<EOF
 path "vault/gateway*" {
-  capabilities = ["read", "create", "update", "delete"]
+  capabilities = ["read", "create", "update", "delete", "patch"]
 }
 path "vault/role/+/gateway*" {
-  capabilities = ["read", "create", "update", "delete"]
+  capabilities = ["read", "create", "update", "delete", "patch"]
 }
 EOF
 ```
