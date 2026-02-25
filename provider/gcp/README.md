@@ -19,22 +19,43 @@ The GCP provider enables proxied access to Google Cloud Platform APIs through Wa
 
 ## Prerequisites
 
-- A running Warden server
-- The Warden CLI installed and configured
+- Docker and Docker Compose installed and running
 - A GCP **service account key** (JSON format) with appropriate IAM permissions
 
-> **New to Warden?** Download the binary from the [latest release](https://github.com/stephnangue/warden/releases/latest), then start the identity provider and Warden in dev mode:
+> **New to Warden?** Follow these steps to get a local dev environment running:
+>
+> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 6–7:
 > ```bash
 > curl -fsSL -o docker-compose.quickstart.yml \
 >   https://raw.githubusercontent.com/stephnangue/warden/main/docker-compose.quickstart.yml
 > docker compose -f docker-compose.quickstart.yml up -d
+> ```
+>
+> **2. Download the latest Warden binary:**
+> ```bash
+> # macOS (Apple Silicon)
+> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_arm64.tar.gz | tar xz
+>
+> # macOS (Intel)
+> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_amd64.tar.gz | tar xz
+>
+> # Linux (x86_64)
+> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_amd64.tar.gz | tar xz
+>
+> # Linux (ARM64)
+> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_arm64.tar.gz | tar xz
+> ```
+>
+> **3. Start the Warden server** in dev mode:
+> ```bash
 > ./warden server --dev
 > ```
-
-```bash
-export WARDEN_ADDR="http://127.0.0.1:8400"
-export WARDEN_TOKEN="<your-token>"
-```
+>
+> **4. In another terminal window**, export the environment variables for the CLI:
+> ```bash
+> export WARDEN_ADDR="http://127.0.0.1:8400"
+> export WARDEN_TOKEN="<your-token>"
+> ```
 
 ### Creating a Service Account Key
 
