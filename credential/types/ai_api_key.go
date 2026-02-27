@@ -24,7 +24,7 @@ func NewAIAPIKeyCredType() *AIAPIKeyCredType {
 			FieldConfig: TokenFieldConfig{
 				PrimaryField:      "api_key",
 				AlternativeFields: []string{},
-				OptionalFields:    []string{"key_id", "key_name", "organization_id"},
+				OptionalFields:    []string{"key_id", "key_name", "organization_id", "project_id"},
 				FieldSchemas: map[string]*credential.CredentialFieldSchema{
 					"api_key": {
 						Description: "AI provider API key for authentication",
@@ -40,6 +40,10 @@ func NewAIAPIKeyCredType() *AIAPIKeyCredType {
 					},
 					"organization_id": {
 						Description: "Organization identifier",
+						Sensitive:   false,
+					},
+					"project_id": {
+						Description: "Project identifier",
 						Sensitive:   false,
 					},
 				},
@@ -60,6 +64,10 @@ func (t *AIAPIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("organization_id").
 			Describe("Organization ID for the AI provider (optional)").
 			Example("org-xxxxxxxxxxxx"),
+
+		credential.StringField("project_id").
+			Describe("Project ID for the AI provider (optional)").
+			Example("proj-xxxxxxxxxxxx"),
 	}
 }
 
@@ -70,10 +78,10 @@ func (t *AIAPIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 func (t *AIAPIKeyCredType) ValidateConfig(config map[string]string, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	switch sourceType {
-	case credential.SourceTypeMistral, credential.SourceTypeLocal:
+	case credential.SourceTypeMistral, credential.SourceTypeOpenAI, credential.SourceTypeLocal:
 		// Supported
 	default:
-		return fmt.Errorf("ai_api_key credentials require a mistral or local source, got: %s", sourceType)
+		return fmt.Errorf("ai_api_key credentials require a mistral, openai, or local source, got: %s", sourceType)
 	}
 
 	// Step 2: Validate config against schema
