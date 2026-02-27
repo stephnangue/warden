@@ -40,6 +40,7 @@ import (
 	"github.com/stephnangue/warden/provider/gcp"
 	"github.com/stephnangue/warden/provider/github"
 	"github.com/stephnangue/warden/provider/gitlab"
+	"github.com/stephnangue/warden/provider/mistral"
 	"github.com/stephnangue/warden/provider/vault"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -86,12 +87,13 @@ Usage: warden server [options]
 	}
 
 	providers = map[string]wardenlogical.Factory{
-		"aws":    aws.Factory,
-		"azure":  azure.Factory,
-		"gcp":    gcp.Factory,
-		"github": github.Factory,
-		"gitlab": gitlab.Factory,
-		"vault":  vault.Factory,
+		"aws":     aws.Factory,
+		"azure":   azure.Factory,
+		"gcp":     gcp.Factory,
+		"github":  github.Factory,
+		"gitlab":  gitlab.Factory,
+		"mistral": mistral.Factory,
+		"vault":   vault.Factory,
 	}
 
 	authMethods = map[string]wardenlogical.Factory{

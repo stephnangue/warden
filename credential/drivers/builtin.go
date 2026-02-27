@@ -39,5 +39,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register Mistral driver factory
+	if err := registry.RegisterFactory(&MistralDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }
