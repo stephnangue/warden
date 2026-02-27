@@ -27,7 +27,7 @@ Warden sits in the request path between AI agents and the services they call —
 | Provider | Status | Credential Source |
 |----------|--------|-------------------|
 | **Mistral** | ✅ GA | API key |
-| OpenAI | Planned | — |
+| **OpenAI** | ✅ GA | API key |
 | Anthropic | Planned | — |
 | Cohere | Planned | — |
 
@@ -153,7 +153,7 @@ curl -H "Authorization: Bearer <your-jwt>" \
 #   3. Forwards the request to https://api.github.com/repos/acme/frontend/contents/README.md
 ```
 
-Transparent mode works with any provider that uses bearer tokens: **Mistral, Azure, GCP, GitHub, GitLab, Vault**. It's the simplest integration path — no code changes, no token exchange, one HTTP call.
+Transparent mode works with any provider that uses bearer tokens: **Mistral, OpenAI, Azure, GCP, GitHub, GitLab, Vault**. It's the simplest integration path — no code changes, no token exchange, one HTTP call.
 
 ### Explicit Mode
 
@@ -179,6 +179,7 @@ Explicit mode is **required for AWS** (SigV4 request signing means Warden must h
 | Provider | Transparent | Explicit |
 |----------|:-----------:|:--------:|
 | **Mistral** | ✅ | ✅ |
+| **OpenAI** | ✅ | ✅ |
 | **AWS** | — | ✅ |
 | **Azure** | ✅ | ✅ |
 | **GCP** | ✅ | ✅ |
@@ -260,6 +261,7 @@ Once Warden is running, follow a provider guide to configure your first endpoint
 
 **AI Providers:**
 - [Mistral](provider/mistral/README.md)
+- [OpenAI](provider/openai/README.md)
 
 **Cloud & SaaS Providers:**
 - [AWS](provider/aws/README.md)
@@ -285,7 +287,7 @@ Warden uses HCL configuration files. See `warden.local.hcl` for a full example c
 
 ## Roadmap
 
-**AI Providers** — OpenAI, Anthropic, Cohere, Google AI (Gemini), xAI, Replicate, Hugging Face, Together AI
+**AI Providers** — Anthropic, Cohere, Google AI (Gemini), xAI, Replicate, Hugging Face, Together AI
 
 **AI Governance** — Per-model cost budgets, token usage tracking, prompt/response audit, rate limiting per agent per model
 

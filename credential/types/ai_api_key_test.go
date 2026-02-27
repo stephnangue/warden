@@ -88,6 +88,32 @@ func TestAIAPIKeyCredType_ValidateConfig(t *testing.T) {
 			wantErr:    true,
 			errMsg:     "api_key",
 		},
+		// --- OpenAI source ---
+		{
+			name: "openai source - valid config",
+			config: map[string]string{
+				"api_key": "sk-xxxxxxxxxxxxxxxxxxxx",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    false,
+		},
+		{
+			name: "openai source - with organization_id and project_id",
+			config: map[string]string{
+				"api_key":         "sk-xxxxxxxxxxxxxxxxxxxx",
+				"organization_id": "org-123",
+				"project_id":      "proj-456",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    false,
+		},
+		{
+			name:       "openai source - missing api_key",
+			config:     map[string]string{},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "api_key",
+		},
 		// --- Unsupported source types ---
 		{
 			name: "unsupported source type - aws",
@@ -96,7 +122,7 @@ func TestAIAPIKeyCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: "aws",
 			wantErr:    true,
-			errMsg:     "require a mistral or local source",
+			errMsg:     "require a mistral, openai, or local source",
 		},
 		{
 			name: "unsupported source type - vault",
@@ -105,7 +131,7 @@ func TestAIAPIKeyCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "require a mistral or local source",
+			errMsg:     "require a mistral, openai, or local source",
 		},
 	}
 
@@ -207,6 +233,7 @@ func TestAIAPIKeyCredType_Parse_OptionalFields(t *testing.T) {
 		"key_id":          "key-123",
 		"key_name":        "production-key",
 		"organization_id": "org-456",
+		"project_id":      "proj-789",
 	}
 
 	cred, err := ct.Parse(rawData, 0, "")
@@ -216,6 +243,7 @@ func TestAIAPIKeyCredType_Parse_OptionalFields(t *testing.T) {
 	assert.Equal(t, "key-123", cred.Data["key_id"])
 	assert.Equal(t, "production-key", cred.Data["key_name"])
 	assert.Equal(t, "org-456", cred.Data["organization_id"])
+	assert.Equal(t, "proj-789", cred.Data["project_id"])
 }
 
 func TestAIAPIKeyCredType_Validate(t *testing.T) {
@@ -313,4 +341,7 @@ func TestAIAPIKeyCredType_FieldSchemas(t *testing.T) {
 
 	assert.Contains(t, schemas, "organization_id")
 	assert.False(t, schemas["organization_id"].Sensitive)
+
+	assert.Contains(t, schemas, "project_id")
+	assert.False(t, schemas["project_id"].Sensitive)
 }

@@ -44,5 +44,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register OpenAI driver factory
+	if err := registry.RegisterFactory(&OpenAIDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }
