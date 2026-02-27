@@ -454,3 +454,20 @@ func BenchmarkIsUnauthenticatedPath_NoMatch(b *testing.B) {
 		backend.IsUnauthenticatedPath("role/provisionner/gateway/v1/secret/data/mykey")
 	}
 }
+
+func TestShouldParseStreamBody(t *testing.T) {
+	t.Run("returns false by default", func(t *testing.T) {
+		b := &StreamingBackend{
+			Backend: &Backend{BackendType: "test"},
+		}
+		assert.False(t, b.ShouldParseStreamBody())
+	})
+
+	t.Run("returns true when enabled", func(t *testing.T) {
+		b := &StreamingBackend{
+			ParseStreamBody: true,
+			Backend:         &Backend{BackendType: "test"},
+		}
+		assert.True(t, b.ShouldParseStreamBody())
+	})
+}

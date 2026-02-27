@@ -11,6 +11,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -603,6 +604,16 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 			return logical.ErrorResponse(logical.ErrNotFoundf("no handler for path %q", req.Path)), nil, logical.ErrNotFoundf("no handler for path %q", req.Path)
 		}
 
+		// Opt-in body parsing for streaming requests.
+		// Backends that implement StreamBodyParser and return true get req.Data
+		// populated before policy evaluation. The body is restored after parsing
+		// so the streaming handler can still read it.
+		if parser, ok := matchingBackend.(logical.StreamBodyParser); ok && parser.ShouldParseStreamBody() {
+			if err := c.parseRequestBody(req); err != nil {
+				return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil, err
+			}
+		}
+
 		req.ClientToken = matchingBackend.ExtractToken(req.HTTPRequest)
 
 		// Check for unauthenticated paths on streaming backends
@@ -810,8 +821,24 @@ func (c *Core) parseRequestBody(req *logical.Request) error {
 		return nil
 	}
 
-	// Parse JSON body (overwrites query params with same keys)
-	return c.parseJSONBody(req)
+	// Parse body based on Content-Type (overwrites query params with same keys)
+	return c.parseBody(req)
+}
+
+// parseBody dispatches to the appropriate body parser based on Content-Type.
+// Supports application/json and application/x-www-form-urlencoded.
+// Unknown content types are silently skipped (body left untouched).
+func (c *Core) parseBody(req *logical.Request) error {
+	contentType := req.HTTPRequest.Header.Get("Content-Type")
+
+	switch {
+	case strings.HasPrefix(contentType, "application/json") || contentType == "":
+		return c.parseJSONBody(req)
+	case strings.HasPrefix(contentType, "application/x-www-form-urlencoded"):
+		return c.parseFormBody(req)
+	default:
+		return nil
+	}
 }
 
 // parseJSONBody parses the JSON body of the request into req.Data
@@ -842,7 +869,76 @@ func (c *Core) parseJSONBody(req *logical.Request) error {
 		return nil
 	}
 
-	return json.Unmarshal(body, &req.Data)
+	if err := json.Unmarshal(body, &req.Data); err != nil {
+		return err
+	}
+	flattenData(req.Data)
+	return nil
+}
+
+// flattenData flattens nested maps in data using dot-separated keys.
+// Only leaf values (non-map) are kept; parent map keys are removed.
+// Arrays are treated as leaf values (not recursed into).
+// Example: {"data": {"key": "val"}, "ttl": "1h"} → {"data.key": "val", "ttl": "1h"}
+func flattenData(data map[string]any) {
+	flat := make(map[string]any, len(data))
+	flattenRecursive("", data, flat)
+	clear(data)
+	maps.Copy(data, flat)
+}
+
+func flattenRecursive(prefix string, data map[string]any, result map[string]any) {
+	for k, v := range data {
+		key := k
+		if prefix != "" {
+			key = prefix + "." + k
+		}
+		if nested, ok := v.(map[string]any); ok {
+			flattenRecursive(key, nested, result)
+		} else {
+			result[key] = v
+		}
+	}
+}
+
+// parseFormBody parses application/x-www-form-urlencoded body into req.Data.
+// Like parseJSONBody, it reads the body with a size limit and restores it for re-reading.
+func (c *Core) parseFormBody(req *logical.Request) error {
+	if req.HTTPRequest.Body == nil {
+		return nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(req.HTTPRequest.Body, maxRequestBodySize+1))
+	if err != nil {
+		return fmt.Errorf("failed to read request body: %w", err)
+	}
+	req.HTTPRequest.Body.Close()
+
+	if int64(len(body)) > maxRequestBodySize {
+		return fmt.Errorf("request body exceeds maximum size of %d bytes", maxRequestBodySize)
+	}
+
+	// Restore body for potential re-reading (audit, streaming, etc.)
+	req.HTTPRequest.Body = io.NopCloser(bytes.NewReader(body))
+
+	if len(body) == 0 {
+		return nil
+	}
+
+	values, err := url.ParseQuery(string(body))
+	if err != nil {
+		return fmt.Errorf("failed to parse form body: %w", err)
+	}
+
+	for k, v := range values {
+		if len(v) == 1 {
+			req.Data[k] = v[0]
+		} else {
+			req.Data[k] = v
+		}
+	}
+
+	return nil
 }
 
 // mintCredentialForRequest mints credentials for streaming requests using the credential manager

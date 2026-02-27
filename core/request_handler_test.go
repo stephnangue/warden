@@ -235,7 +235,7 @@ func TestParseRequestBody(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("non-JSON content type is skipped", func(t *testing.T) {
+	t.Run("form-urlencoded content type is parsed", func(t *testing.T) {
 		body := `name=test&value=123`
 		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
 		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -244,8 +244,72 @@ func TestParseRequestBody(t *testing.T) {
 		}
 		err := core.parseRequestBody(req)
 		require.NoError(t, err)
-		// Body should not be parsed
-		assert.Nil(t, req.Data["name"])
+		assert.Equal(t, "test", req.Data["name"])
+		assert.Equal(t, "123", req.Data["value"])
+	})
+
+	t.Run("form-urlencoded multi-value fields", func(t *testing.T) {
+		body := `tag=a&tag=b&tag=c`
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req := &logical.Request{
+			HTTPRequest: httpReq,
+		}
+		err := core.parseRequestBody(req)
+		require.NoError(t, err)
+		tags, ok := req.Data["tag"].([]string)
+		require.True(t, ok)
+		assert.Equal(t, []string{"a", "b", "c"}, tags)
+	})
+
+	t.Run("form-urlencoded body is restored after parsing", func(t *testing.T) {
+		body := `key=value`
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req := &logical.Request{
+			HTTPRequest: httpReq,
+		}
+		err := core.parseRequestBody(req)
+		require.NoError(t, err)
+		restoredBody, err := io.ReadAll(req.HTTPRequest.Body)
+		require.NoError(t, err)
+		assert.Equal(t, body, string(restoredBody))
+	})
+
+	t.Run("form-urlencoded overwrites query params", func(t *testing.T) {
+		body := `name=from-body`
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test?name=from-query", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req := &logical.Request{
+			HTTPRequest: httpReq,
+		}
+		err := core.parseRequestBody(req)
+		require.NoError(t, err)
+		assert.Equal(t, "from-body", req.Data["name"])
+	})
+
+	t.Run("binary content type skips body parsing", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader("binary data"))
+		httpReq.Header.Set("Content-Type", "application/octet-stream")
+		req := &logical.Request{
+			HTTPRequest: httpReq,
+		}
+		err := core.parseRequestBody(req)
+		require.NoError(t, err)
+		// Data map is initialized (for query params) but body is not parsed into it
+		assert.Empty(t, req.Data)
+	})
+
+	t.Run("xml content type skips body parsing", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader("<root/>"))
+		httpReq.Header.Set("Content-Type", "application/xml")
+		req := &logical.Request{
+			HTTPRequest: httpReq,
+		}
+		err := core.parseRequestBody(req)
+		require.NoError(t, err)
+		// Data map is initialized (for query params) but body is not parsed into it
+		assert.Empty(t, req.Data)
 	})
 
 	t.Run("invalid JSON returns error", func(t *testing.T) {
@@ -290,7 +354,7 @@ func TestParseJSONBody(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("complex JSON object", func(t *testing.T) {
+	t.Run("complex JSON object is flattened", func(t *testing.T) {
 		body := `{
 			"string": "value",
 			"number": 42,
@@ -309,15 +373,84 @@ func TestParseJSONBody(t *testing.T) {
 		err := core.parseJSONBody(req)
 		require.NoError(t, err)
 
+		// Scalar leaf values are unchanged
 		assert.Equal(t, "value", req.Data["string"])
 		assert.Equal(t, float64(42), req.Data["number"])
 		assert.Equal(t, 3.14, req.Data["float"])
 		assert.Equal(t, true, req.Data["bool"])
 		assert.Nil(t, req.Data["null"])
+		// Arrays are treated as leaf values
 		assert.Equal(t, []interface{}{float64(1), float64(2), float64(3)}, req.Data["array"])
-		nested, ok := req.Data["nested"].(map[string]interface{})
+		// Nested maps are flattened into dot-separated keys
+		assert.Nil(t, req.Data["nested"], "parent key should be removed")
+		assert.Equal(t, "value", req.Data["nested.key"])
+	})
+
+	t.Run("deep nesting is fully flattened", func(t *testing.T) {
+		body := `{"a": {"b": {"c": "deep"}}}`
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		req := &logical.Request{
+			HTTPRequest: httpReq,
+			Data:        make(map[string]any),
+		}
+		err := core.parseJSONBody(req)
+		require.NoError(t, err)
+
+		assert.Nil(t, req.Data["a"])
+		assert.Nil(t, req.Data["a.b"])
+		assert.Equal(t, "deep", req.Data["a.b.c"])
+	})
+
+	t.Run("mixed flat and nested keys", func(t *testing.T) {
+		body := `{"ttl": "1h", "data": {"username": "admin", "password": "secret"}}`
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		req := &logical.Request{
+			HTTPRequest: httpReq,
+			Data:        make(map[string]any),
+		}
+		err := core.parseJSONBody(req)
+		require.NoError(t, err)
+
+		assert.Equal(t, "1h", req.Data["ttl"])
+		assert.Nil(t, req.Data["data"])
+		assert.Equal(t, "admin", req.Data["data.username"])
+		assert.Equal(t, "secret", req.Data["data.password"])
+	})
+
+	t.Run("empty nested object produces no keys", func(t *testing.T) {
+		body := `{"a": {}, "b": "kept"}`
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		req := &logical.Request{
+			HTTPRequest: httpReq,
+			Data:        make(map[string]any),
+		}
+		err := core.parseJSONBody(req)
+		require.NoError(t, err)
+
+		assert.Nil(t, req.Data["a"])
+		assert.Equal(t, "kept", req.Data["b"])
+		assert.Equal(t, 1, len(req.Data))
+	})
+
+	t.Run("array of objects is a leaf value", func(t *testing.T) {
+		body := `{"messages": [{"role": "user", "content": "hello"}], "model": "test"}`
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		req := &logical.Request{
+			HTTPRequest: httpReq,
+			Data:        make(map[string]any),
+		}
+		err := core.parseJSONBody(req)
+		require.NoError(t, err)
+
+		assert.Equal(t, "test", req.Data["model"])
+		// Array is preserved as-is, not flattened
+		msgs, ok := req.Data["messages"].([]interface{})
 		require.True(t, ok)
-		assert.Equal(t, "value", nested["key"])
+		assert.Len(t, msgs, 1)
 	})
 }
 
@@ -942,5 +1075,142 @@ func TestHandleTransparentAuth_JWTDifferentRoles(t *testing.T) {
 		lookupID := jwtType.ComputeID(lookupHash)
 
 		assert.Equal(t, tokenID, lookupID, "Token creation and lookup should produce same ID")
+	})
+}
+
+// mockStreamBodyParserBackend implements logical.Backend and logical.StreamBodyParser
+type mockStreamBodyParserBackend struct {
+	mockBackendWithStreamingPaths
+	parseStreamBody bool
+}
+
+func (m *mockStreamBodyParserBackend) ShouldParseStreamBody() bool {
+	return m.parseStreamBody
+}
+
+// TestHandleNonLoginRequest_StreamingBodyParsing tests opt-in body parsing for streaming requests
+func TestHandleNonLoginRequest_StreamingBodyParsing(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	// Mount backend that opts into stream body parsing
+	backend := &mockStreamBodyParserBackend{parseStreamBody: true}
+	entry := &MountEntry{
+		Path:        "vault/",
+		Type:        "vault",
+		Class:       mountClassProvider,
+		UUID:        "vault-uuid",
+		Accessor:    "vault_12345678",
+		NamespaceID: namespace.RootNamespaceID,
+		namespace:   namespace.RootNamespace,
+	}
+	view := &mockBarrierView{prefix: "provider/vault-uuid/"}
+	err := core.router.Mount("vault/", backend, entry, view)
+	require.NoError(t, err)
+
+	t.Run("streaming request with JSON body populates req.Data", func(t *testing.T) {
+		body := `{"key": "value", "ttl": "1h"}`
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/vault/gateway/v1/pki/issue/my-role", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("X-Vault-Token", "test-token")
+		req := &logical.Request{
+			Path:        "vault/gateway/v1/pki/issue/my-role",
+			Operation:   logical.CreateOperation,
+			HTTPRequest: httpReq,
+		}
+
+		// Will fail auth, but req.Data should be populated before that
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+		assert.True(t, req.Streamed)
+		assert.Equal(t, "value", req.Data["key"])
+		assert.Equal(t, "1h", req.Data["ttl"])
+	})
+
+	t.Run("streaming request with form-urlencoded body populates req.Data", func(t *testing.T) {
+		body := `name=test&ttl=2h`
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/vault/gateway/v1/secret/data/mykey", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		httpReq.Header.Set("X-Vault-Token", "test-token")
+		req := &logical.Request{
+			Path:        "vault/gateway/v1/secret/data/mykey",
+			Operation:   logical.CreateOperation,
+			HTTPRequest: httpReq,
+		}
+
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+		assert.True(t, req.Streamed)
+		assert.Equal(t, "test", req.Data["name"])
+		assert.Equal(t, "2h", req.Data["ttl"])
+	})
+
+	t.Run("streaming request body is restored after parsing", func(t *testing.T) {
+		body := `{"key": "value"}`
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/vault/gateway/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("X-Vault-Token", "test-token")
+		req := &logical.Request{
+			Path:        "vault/gateway/test",
+			Operation:   logical.CreateOperation,
+			HTTPRequest: httpReq,
+		}
+
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+		restoredBody, err := io.ReadAll(req.HTTPRequest.Body)
+		require.NoError(t, err)
+		assert.Equal(t, body, string(restoredBody))
+	})
+
+	t.Run("streaming request with binary content type skips parsing", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/vault/gateway/upload", strings.NewReader("binary data"))
+		httpReq.Header.Set("Content-Type", "application/octet-stream")
+		httpReq.Header.Set("X-Vault-Token", "test-token")
+		req := &logical.Request{
+			Path:        "vault/gateway/upload",
+			Operation:   logical.CreateOperation,
+			HTTPRequest: httpReq,
+		}
+
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+		assert.True(t, req.Streamed)
+		// Data map is initialized (for query params) but binary body is not parsed into it
+		assert.Empty(t, req.Data)
+	})
+}
+
+// TestHandleNonLoginRequest_StreamingWithoutBodyParsing tests that backends without
+// StreamBodyParser do not get body parsing on streaming requests
+func TestHandleNonLoginRequest_StreamingWithoutBodyParsing(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	// Mount backend that does NOT opt into stream body parsing (default)
+	backend := &mockBackendWithStreamingPaths{}
+	entry := &MountEntry{
+		Path:        "aws/",
+		Type:        "aws",
+		Class:       mountClassProvider,
+		UUID:        "aws-uuid-2",
+		Accessor:    "aws_87654321",
+		NamespaceID: namespace.RootNamespaceID,
+		namespace:   namespace.RootNamespace,
+	}
+	view := &mockBarrierView{prefix: "provider/aws-uuid-2/"}
+	err := core.router.Mount("aws/", backend, entry, view)
+	require.NoError(t, err)
+
+	t.Run("streaming request without opt-in does not parse body", func(t *testing.T) {
+		body := `{"key": "value"}`
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/aws/gateway/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		req := &logical.Request{
+			Path:        "aws/gateway/test",
+			Operation:   logical.CreateOperation,
+			HTTPRequest: httpReq,
+		}
+
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+		assert.True(t, req.Streamed)
+		// req.Data should be nil - body was NOT parsed
+		assert.Nil(t, req.Data)
 	})
 }

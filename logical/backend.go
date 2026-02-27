@@ -128,3 +128,16 @@ type TransparentModeProvider interface {
 	// without sending tokens (e.g., PKI certificate PEM files).
 	IsUnauthenticatedPath(path string) bool
 }
+
+// StreamBodyParser can be implemented by streaming backends that want the core
+// to parse the request body into req.Data before policy evaluation, even for
+// streaming requests. By default, streaming requests skip body parsing to avoid
+// buffering large payloads. Backends that need req.Data for ACL/policy checks
+// (e.g., Vault) should implement this interface and return true.
+//
+// When enabled, the core parses application/json and application/x-www-form-urlencoded
+// bodies (up to maxRequestBodySize), restores the body for the provider to re-read,
+// and populates req.Data before CheckToken runs.
+type StreamBodyParser interface {
+	ShouldParseStreamBody() bool
+}
