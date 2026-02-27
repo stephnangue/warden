@@ -95,6 +95,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			},
 		},
 		UnauthenticatedPaths: vaultUnauthenticatedPaths,
+		ParseStreamBody:      true,
 		TransparentConfig: &framework.TransparentConfig{
 			Enabled:      false, // Updated via config write or Initialize
 			AutoAuthPath: "",

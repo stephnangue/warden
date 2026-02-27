@@ -117,6 +117,13 @@ type StreamingBackend struct {
 	// Supports: exact match, prefix match (*), segment wildcard (+)
 	UnauthenticatedPaths []string
 
+	// ParseStreamBody enables request body parsing for streaming requests.
+	// When true, the core parses application/json and application/x-www-form-urlencoded
+	// bodies into req.Data before policy evaluation, then restores the body so
+	// the streaming handler can still read it.
+	// Default: false (body is passed raw to the streaming handler).
+	ParseStreamBody bool
+
 	// Backend is the embedded standard framework backend for non-streaming paths
 	*Backend
 
@@ -145,8 +152,9 @@ type StreamingBackend struct {
 	unauthPathsOnce sync.Once
 }
 
-// Ensure StreamingBackend implements logical.Backend
+// Ensure StreamingBackend implements logical.Backend and logical.StreamBodyParser
 var _ logical.Backend = (*StreamingBackend)(nil)
+var _ logical.StreamBodyParser = (*StreamingBackend)(nil)
 
 // initStreaming initializes the streaming path regex patterns
 func (b *StreamingBackend) initStreaming() {
@@ -638,6 +646,11 @@ func (b *StreamingBackend) IsUnauthenticatedPath(path string) bool {
 	}
 
 	return false
+}
+
+// ShouldParseStreamBody implements logical.StreamBodyParser.
+func (b *StreamingBackend) ShouldParseStreamBody() bool {
+	return b.ParseStreamBody
 }
 
 // matchWildcardSegments checks if path segments match a wildcard pattern
