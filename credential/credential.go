@@ -27,6 +27,7 @@ const (
 	SourceTypeGitLab   = "gitlab"
 	SourceTypeGitHub   = "github"
 	SourceTypeMistral  = "mistral"
+	SourceTypeOpenAI   = "openai"
 )
 
 // Category constants for credential categorization
