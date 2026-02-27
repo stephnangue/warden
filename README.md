@@ -1,24 +1,37 @@
 # Warden
 
-**Identity-aware egress gateway for Cloud and SaaS services.**
+**Identity-aware gateway for AI agents — govern every inference call and tool action.**
 
-Your workloads need credentials. They shouldn't have them.
+Your agents need credentials. They shouldn't have them.
 
-Warden eliminates credential exposure by sitting in the request path between your workloads and external APIs. It authenticates callers by their identity, injects short-lived credentials on the fly, enforces fine-grained policies, and logs every API call. Your applications, AI agents, and pipelines never touch a secret.
+Warden sits in the request path between AI agents and the services they call — both AI providers (Mistral, OpenAI, Anthropic) and Cloud/SaaS APIs (AWS, GitHub, Azure). It authenticates callers by identity, injects credentials on the fly, enforces fine-grained policies on every request — including AI-specific fields like model, max_tokens, and temperature — and logs every API call. Your agents never touch a secret.
 
 ```
-┌──────────────┐                  ┌──────────────┐                  ┌──────────────┐
-│  Your app    │                  │              │                  │              │
-│  AI agent    │──── JWT auth ───▶│    Warden    │──── Real creds ─▶│  Cloud/SaaS  │
-│  Terraform   │   no credentials │              │   signed request │   Provider   │
-│  CI/CD       │                  │              │                  │              │
-└──────────────┘                  └──────────────┘                  └──────────────┘
-                                   • Auth ✓
-                                   • Policy ✓
-                                   • Audit ✓
+                                                                       ┌──────────────┐
+                                                                       │ AI Providers │
+┌──────────────┐                  ┌──────────────┐  API key inject     │ Mistral      │
+│  AI agent    │                  │              │────────────────────▶│ OpenAI  ...  │
+│  Your app    │──── JWT auth ───▶│    Warden    │                     └──────────────┘
+│  Terraform   │   no credentials │              │  Real creds         ┌──────────────┐
+│  CI/CD       │                  │              │──signed request────▶│ Cloud / SaaS │
+└──────────────┘                  └──────────────┘                     │ AWS, GitHub  │
+                                    • Auth ✓                           │ Azure  ...   │
+                                    • Policy ✓                         └──────────────┘
+                                    • Audit ✓
 ```
 
 ## Supported Providers
+
+### AI Providers
+
+| Provider | Status | Credential Source |
+|----------|--------|-------------------|
+| **Mistral** | ✅ GA | API key |
+| OpenAI | Planned | — |
+| Anthropic | Planned | — |
+| Cohere | Planned | — |
+
+### Cloud & SaaS Providers
 
 | Provider | Status | Credential Source |
 |----------|--------|-------------------|
@@ -29,57 +42,83 @@ Warden eliminates credential exposure by sitting in the request path between you
 | **GitLab** | ✅ GA | PATs, Deploy tokens |
 | **Vault / OpenBao** | ✅ GA | Token-based |
 
-The roadmap targets 100+ cloud and SaaS providers.
+The roadmap targets all major AI providers and 100+ cloud and SaaS providers.
 
 ## Why Warden?
 
 ### Zero Credential Exposure
 
-Workloads never see or store credentials. Warden intercepts requests, injects short-lived credentials on the fly, and forwards them to providers. No secrets in environment variables, no keys in config files, no credential leaks.
+AI agents never see API keys or cloud credentials. Warden intercepts requests, injects credentials on the fly, and forwards them to providers. No secrets in environment variables, no keys in config files, no credential leaks — even if an agent is compromised, there are no credentials to exfiltrate.
 
 ### Request-Level Audit Trail
 
-Warden doesn't just log who received credentials — it logs what they did with them. Every API call produces a structured audit entry capturing identity, policy result, credential used, request details, and response status.
+Warden doesn't just log who received credentials — it logs what they did with them. Every API call — whether an AI inference or a cloud operation — produces a structured audit entry capturing identity, policy result, credential used, request details, and response status.
 
 ```
-# Vault:   "agent-X was granted AWS credentials at 14:32"
+# Typical:  "agent-X was granted a Mistral API key at 14:32"
+# Warden:   "agent-X (role: mistral-ops) called POST /v1/chat/completions
+#           (model: mistral-large, max_tokens: 4096) → 200, using
+#           credential: mistral-src/mistral-ops"
+#
 # Warden:  "agent-X (role: azure-ops) called PUT .../resourcegroups/my-rg → 201, using
 #           credential: azure-source/azure-cred-spec (ttl: 3599s)"
 ```
 
 ### Fine-Grained Policy Enforcement
 
-Warden constrains what a workload can do by controlling which APIs it can reach and which operations it can perform — at the HTTP path and method level. This is a layer of granularity that providers don't natively offer.
+Warden constrains what an agent can do by controlling which APIs it can reach, which operations it can perform, and — for AI providers — which models and parameters it can use.
 
-A GitHub fine-grained PAT with `contents: read` lets the holder read *every file* in a repo. Warden can restrict an agent to `src/` while blocking `.github/workflows/` and `.env` — something GitHub simply cannot express. A GitLab `read_repository` token can clone, list branches, and compare commits. Warden can limit it to file reads only. For AWS, Warden adds defense-in-depth: destructive operations can be blocked at the gateway regardless of what the underlying IAM role permits.
+A Mistral API key grants access to every model. Warden can restrict an agent to `mistral-small-latest` only, enforce max_tokens limits, and require streaming mode — cost control that API key scoping alone cannot provide. A GitHub fine-grained PAT with `contents: read` lets the holder read *every file* in a repo. Warden can restrict an agent to `src/` while blocking `.github/workflows/` and `.env` — something GitHub simply cannot express. For AWS, destructive operations can be blocked at the gateway regardless of what the underlying IAM role permits.
+
+### AI Request Governance
+
+Warden parses AI request bodies and evaluates policies against inference parameters. This enables cost control and usage governance at the gateway layer:
+
+- **Model access control** — restrict which models each agent identity can use
+- **Token budgets** — enforce max_tokens limits per role
+- **Streaming requirements** — require streaming mode for real-time cost visibility
+- **Full inference audit** — every completion request is logged with model, parameters, and response status
 
 ### Zero Client Modification
 
-Point your SDK, CLI, or tool at Warden's endpoint instead of the provider's. No code changes, no special libraries, no proxy configuration. If your tool supports a custom endpoint URL, it works with Warden.
+Point your AI SDK, CLI, or tool at Warden's endpoint instead of the provider's. The Mistral SDK, OpenAI SDK, LangChain, or any HTTP client — if it supports a custom base URL, it works with Warden. No code changes, no special libraries, no proxy configuration.
 
 ### Identity-Based Access
 
-Every request is tied to a verified identity via JWT. Whether it's a CI/CD pipeline, an AI agent, a Terraform run, or a Kubernetes pod, Warden knows exactly who is making each API call and applies policies accordingly.
+Every request is tied to a verified identity via JWT. Whether it's an AI agent calling Mistral, a CI/CD pipeline deploying to AWS, or a Terraform run provisioning Azure resources, Warden knows exactly who is making each API call and applies policies accordingly.
 
 ### Unified Identity Across Providers
 
-Every cloud and SaaS provider has its own identity system — AWS IAM, Azure Entra ID, GCP IAM, GitHub Apps, GitLab tokens. Multi-cloud means multi-identity: different auth flows, different credential formats, different rotation strategies per provider. Warden collapses all of that into a single JWT. Your workloads authenticate once, with one identity, and Warden translates to each provider's native auth on the fly. One identity plane, regardless of how many providers sit behind it.
+Every provider has its own identity system — Mistral API keys, AWS IAM, Azure Entra ID, GitHub Apps. Multi-provider means multi-identity: different auth flows, different credential formats, different rotation strategies. Warden collapses all of that into a single JWT. Your agents authenticate once, with one identity, and Warden translates to each provider's native auth on the fly. One identity plane, regardless of how many providers sit behind it.
 
 ```
-                                  ┌─── AWS (SigV4)
+                                  ┌─── Mistral (Bearer + API key)
                                   │
-  Workload ── JWT ──▶  Warden  ───┼─── Azure (Bearer + Entra ID)
+                                  ├─── OpenAI (Bearer + API key)
                                   │
-                                  ├─── GCP (Bearer + SA key)
+  AI Agent ── JWT ──▶  Warden  ───┼─── AWS (SigV4)
+                                  │
+                                  ├─── Azure (Bearer + Entra ID)
                                   │
                                   └─── GitHub (Installation token)
 ```
 
 ## Use Cases
 
-### AI Agents
+### AI Agents — Inference Governance
 
-AI agents are autonomous, use broad permissions, and operate opaquely. Without Warden, you give agents long-lived credentials and hope for the best. With Warden, agents authenticate with a scoped JWT and you get a full audit trail of every API call — every file read, every PR created, every cloud resource touched.
+AI agents call AI providers autonomously — choosing models, setting token limits, running completions. Without Warden, an API key grants unlimited access to every model. With Warden, each agent identity has scoped model access, enforced token limits, and every inference call is audited with full request parameters.
+
+```bash
+# Agent can only use mistral-small-latest, max_tokens capped, streaming required
+curl -X POST https://warden.internal/v1/mistral/role/agent-role/gateway/v1/chat/completions \
+  -H "Authorization: Bearer <jwt>" \
+  -d '{"model": "mistral-small-latest", "messages": [...], "stream": true}'
+```
+
+### AI Agents — Tool Use Governance
+
+When agents call cloud APIs — reading GitHub repos, writing to S3, deploying to Azure — Warden governs every tool action. Full audit trail of every file read, every PR created, every cloud resource touched.
 
 > *Marc Brooker, AWS Principal Engineer, [argues](https://brooker.co.za/blog/2026/01/12/agent-box.html) that agent safety requires a deterministic gateway outside the agent that enforces policy on every tool call. Warden is that gateway.*
 
@@ -91,9 +130,9 @@ No more AWS credentials on the machine running `terraform apply`. Terraform poin
 
 Pipelines store credentials as CI secrets — each one a potential leak, each one painful to rotate. With Warden, pipelines authenticate with their workload identity (Kubernetes SA, OIDC token) and access cloud and SaaS APIs through the gateway. No secrets to distribute, no credentials to rotate.
 
-### Multi-Cloud / Multi-Provider
+### Multi-Provider AI Agents
 
-An AI agent that reads from GitHub, writes to S3, and deploys to Azure needs three different credential types, three different auth flows, three different rotation strategies. Without Warden, each integration is its own identity problem. With Warden, the agent gets one JWT and one endpoint pattern. It doesn't matter whether the target is AWS, Azure, or GitHub — the auth flow is identical. Add a new provider and existing workloads gain access without changing a single line of code. The identity complexity is Warden's problem, not the application's.
+An AI agent that calls Mistral for inference, reads from GitHub, writes to S3, and deploys to Azure needs four different credential types, four different auth flows, four different rotation strategies. Without Warden, each integration is its own identity problem. With Warden, the agent gets one JWT and one endpoint pattern. It doesn't matter whether the target is Mistral, AWS, or GitHub — the auth flow is identical. Add a new provider and existing agents gain access without changing a single line of code.
 
 ## Authentication Modes
 
@@ -114,7 +153,7 @@ curl -H "Authorization: Bearer <your-jwt>" \
 #   3. Forwards the request to https://api.github.com/repos/acme/frontend/contents/README.md
 ```
 
-Transparent mode works with any provider that uses bearer tokens: **Azure, GCP, GitHub, GitLab, Vault**. It's the simplest integration path — no code changes, no token exchange, one HTTP call.
+Transparent mode works with any provider that uses bearer tokens: **Mistral, Azure, GCP, GitHub, GitLab, Vault**. It's the simplest integration path — no code changes, no token exchange, one HTTP call.
 
 ### Explicit Mode
 
@@ -139,6 +178,7 @@ Explicit mode is **required for AWS** (SigV4 request signing means Warden must h
 
 | Provider | Transparent | Explicit |
 |----------|:-----------:|:--------:|
+| **Mistral** | ✅ | ✅ |
 | **AWS** | — | ✅ |
 | **Azure** | ✅ | ✅ |
 | **GCP** | ✅ | ✅ |
@@ -148,18 +188,20 @@ Explicit mode is **required for AWS** (SigV4 request signing means Warden must h
 
 ## How It Compares
 
-|  | **Warden** | **Vault** | **Aembit** | **IAM Roles** |
-|---|---|---|---|---|
-| Credential isolation | Credentials never leave Warden | App receives and holds credentials | Credentials pass through edge component | App assumes role directly |
-| Audit granularity | Every API request logged | Credential issuance logged | Access grant logged | CloudTrail only |
-| Policy enforcement | HTTP path + method level + credential scope level | Credential scope level | Workload-to-service level | IAM policy level |
-| Client modification | Change base URL | Integrate SDK / API call | Deploy sidecar agents | Per-cloud configuration |
-| Deployment | Single gateway | Server cluster | SaaS + edge agents | Per-cloud setup |
-| Open source | Yes (MPL-2.0) | Yes (BSL) | No | N/A |
-| Multi-provider | 6 today, 100+ planned | Per-engine configuration | Per-provider integration | Single cloud only |
-| Identity model | Single JWT for all providers | Per-engine auth config | Per-provider identity mapping | Per-cloud IAM |
-
-Warden complements Vault — Vault manages credential lifecycle, Warden adds runtime visibility and policy enforcement. Warden can use Vault as a credential source for AWS.
+|  | **Warden** | **Portkey** | **Aembit** |
+|---|---|---|---|
+| Credential isolation | Credentials never leave Warden | Virtual keys stored in Portkey vault | Credentials pass through edge component |
+| Audit granularity | Every API request logged | Logs + cost analytics (Enterprise) | Access grant logged |
+| Policy enforcement | HTTP path + method + AI parameters | Guardrails (PII, jailbreak) | Workload-to-service level |
+| AI inference governance | Model, token, and parameter policies | Guardrails + rate limiting | N/A |
+| Cloud provider support | AWS, Azure, GCP, GitHub, GitLab, Vault | N/A — AI providers only | Per-provider integration |
+| Client modification | Change base URL | Portkey SDK or Universal API | Deploy sidecar agents |
+| Data residency | Fully self-hosted, your infrastructure | SaaS or airgapped (Enterprise) | SaaS only |
+| Deployment | Single self-hosted gateway | SaaS, hybrid, or airgapped | SaaS + edge agents |
+| Open source | Yes (MPL-2.0) | Gateway only (MIT) | No |
+| Credential rotation | Two-stage async (prepare → activate) | N/A — virtual keys only | Automated via SaaS |
+| Streaming support | Full HTTP streaming (SSE, chunked) | Yes | N/A |
+| Identity model | Single JWT for all providers | RBAC + SSO (Enterprise) | Per-provider identity mapping |
 
 ## Architecture
 
@@ -216,6 +258,10 @@ export WARDEN_TOKEN="<root-token-from-output>"
 
 Once Warden is running, follow a provider guide to configure your first endpoint:
 
+**AI Providers:**
+- [Mistral](provider/mistral/README.md)
+
+**Cloud & SaaS Providers:**
 - [AWS](provider/aws/README.md)
 - [Azure](provider/azure/README.md)
 - [GCP](provider/gcp/README.md)
@@ -239,9 +285,13 @@ Warden uses HCL configuration files. See `warden.local.hcl` for a full example c
 
 ## Roadmap
 
-**Auth** — Kubernetes, SPIFFE, TLS certificates, cloud machine identities (AWS IAM, Azure MI, GCP SA), OIDC, LDAP, SAML
+**AI Providers** — OpenAI, Anthropic, Cohere, Google AI (Gemini), xAI, Replicate, Hugging Face, Together AI
 
-**Providers** — Enterprise cloud (Oracle, IBM, Alibaba), specialized cloud (DigitalOcean, Hetzner, OVH), government cloud (GovCloud, Azure Gov), AI/GPU cloud (CoreWeave, Lambda, RunPod), DevOps SaaS (Terraform Cloud, Datadog, Cloudflare), data SaaS (Snowflake, Databricks, MongoDB Atlas), AI SaaS (OpenAI, Anthropic, Cohere), productivity SaaS (Slack, Jira, Notion)
+**AI Governance** — Per-model cost budgets, token usage tracking, prompt/response audit, rate limiting per agent per model
+
+**Cloud & SaaS Providers** — Enterprise cloud (Oracle, IBM, Alibaba), specialized cloud (DigitalOcean, Hetzner, OVH), government cloud (GovCloud, Azure Gov), AI/GPU cloud (CoreWeave, Lambda, RunPod), DevOps SaaS (Terraform Cloud, Datadog, Cloudflare), data SaaS (Snowflake, Databricks, MongoDB Atlas), productivity SaaS (Slack, Jira, Notion)
+
+**Auth** — Kubernetes, SPIFFE, TLS certificates, cloud machine identities (AWS IAM, Azure MI, GCP SA), OIDC, LDAP, SAML
 
 **Observability** — Structured audit log export (OpenTelemetry, SIEM), new audit device types, Prometheus metrics, distributed tracing
 
