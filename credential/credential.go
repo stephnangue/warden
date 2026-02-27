@@ -14,6 +14,7 @@ const (
 	TypeGCPAccessToken    = "gcp_access_token"
 	TypeGitLabAccessToken = "gitlab_access_token"
 	TypeGitHubToken       = "github_token"
+	TypeAIAPIKey          = "ai_api_key"
 )
 
 // Source type constants
@@ -23,8 +24,9 @@ const (
 	SourceTypeAWS    = "aws"
 	SourceTypeAzure  = "azure"
 	SourceTypeGCP    = "gcp"
-	SourceTypeGitLab  = "gitlab"
-	SourceTypeGitHub  = "github"
+	SourceTypeGitLab   = "gitlab"
+	SourceTypeGitHub   = "github"
+	SourceTypeMistral  = "mistral"
 )
 
 // Category constants for credential categorization
