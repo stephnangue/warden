@@ -312,8 +312,7 @@ func (c *Core) teardownNamespaceStore() error {
 }
 
 func (ns *NamespaceStore) invalidate(ctx context.Context, path string) {
-	// We want to keep invalidation proper fast (as it holds up replication),
-	// so defer invalidation to the next load.
+	// Defer invalidation to the next load for performance.
 	//
 	// TODO(ascheel): handle individual entry invalidation correctly. We'll
 	// need to handle child namespace invalidation as well. sync.Map could be

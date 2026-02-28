@@ -70,10 +70,6 @@ func init() {
 		"raw",
 		"rekey-recovery-key",
 		"rekey",
-		"replication/merkle-check",
-		"replication/recover",
-		"replication/reindex",
-		"replication/status",
 		"rotate",
 		"rotate/root",
 		"rotate/config",
@@ -102,7 +98,7 @@ func (c *Core) CheckToken(ctx context.Context, req *logical.Request, unauth bool
 		// ignore errors...this was best-effort anyways
 		if err != nil && !unauth {
 			if c.standby.Load() {
-				return nil, cbp, te, sdklogical.ErrPerfStandbyPleaseForward
+				return nil, cbp, te, logical.ErrServiceUnavailable("standby node")
 			}
 			return nil, cbp, te, err
 		}

@@ -202,6 +202,7 @@ Explicit mode is **required for AWS** (SigV4 request signing means Warden must h
 | Open source | Yes (MPL-2.0) | Gateway only (MIT) | No |
 | Credential rotation | Two-stage async (prepare → activate) | N/A — virtual keys only | Automated via SaaS |
 | Streaming support | Full HTTP streaming (SSE, chunked) | Yes | N/A |
+| High availability | Active/standby with automatic failover | SaaS-managed | SaaS-managed |
 | Identity model | Single JWT for all providers | RBAC + SSO (Enterprise) | Per-provider identity mapping |
 
 ## Architecture
@@ -214,6 +215,7 @@ Warden is a reverse proxy written in Go. Each provider is registered as a stream
 - **IP-bound sessions** — Sessions are tied to the caller's IP. A stolen session token is useless from a different machine.
 - **Two-stage credential rotation** — Rotation is split into PREPARE (mint new credentials while old ones remain valid) and ACTIVATE (commit new credentials, destroy old ones). For eventually-consistent providers like AWS and Azure, Warden defers activation by a configurable propagation delay, eliminating the polling loops that cloud SDKs typically require.
 - **Seal/unseal model** — Like Vault, Warden protects secrets at rest using envelope encryption. Supports dev mode (in-memory) and production mode with multiple seal types (Shamir, Transit, AWS KMS, GCP KMS, Azure Key Vault, OCI KMS, PKCS11, KMIP) and PostgreSQL storage.
+- **Active/standby HA** — Multiple Warden nodes share a storage backend and use lock-based leader election. One node is active; the rest are hot standbys that forward requests and automatically promote on leader failure. Sealed nodes are prevented from acquiring the leadership lock, eliminating cluster stalls.
 - **Namespace isolation** — Every credential source, policy, and mount point is scoped to a namespace with hard boundaries. Policies cannot leak across namespaces.
 
 ## Getting Started
@@ -281,6 +283,8 @@ Production mode requires a configuration file and external dependencies (Postgre
 ./warden server --config=./warden.hcl
 ```
 
+For high availability, run multiple Warden nodes pointing at the same storage backend. Each node needs `ha_storage` (or an HA-capable `storage` block), plus `api_addr` so standby nodes know where to forward requests. One node becomes active; the rest operate as hot standbys that automatically promote on leader failure.
+
 ### Configuration
 
 Warden uses HCL configuration files. See `warden.local.hcl` for a full example covering storage backend, listener, providers, and auth methods.
@@ -299,7 +303,7 @@ Warden uses HCL configuration files. See `warden.local.hcl` for a full example c
 
 **Security** — Rate limiting per identity, mTLS to upstream providers, audit log tamper detection
 
-**Operations** — Active/standby HA, Helm chart, Docker Compose quick start, Terraform module
+**Operations** — Helm chart, Docker Compose quick start, Terraform module
 
 **Developer experience** — Web UI, Swagger/OpenAPI spec, MCP server for AI agent frameworks, SDKs (Go, Python, TypeScript)
 

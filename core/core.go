@@ -45,11 +45,6 @@ const (
 	// for a highly-available deployment which is undergoing initialization.
 	CoreInitLockPath = "core/initialize-lock"
 
-	// ForwardSSCTokenToActive is the value that must be set in the
-	// forwardToActive to trigger forwarding if a perf standby encounters
-	// an SSC Token that it does not have the WAL state for.
-	ForwardSSCTokenToActive = "new_token"
-
 	// DefaultMinCredSourceRotationPeriod is the minimum allowed rotation period
 	// for credential sources when not explicitly configured (1 day).
 	DefaultMinCredSourceRotationPeriod = 24 * time.Hour
@@ -274,13 +269,17 @@ type Core struct {
 	// Config value for "detect_deadlocks".
 	detectDeadlocks []string
 
-	standby              atomic.Bool
-	standbyDoneCh        chan struct{}
-	standbyStopCh        *atomic.Value
-	standbyRestartCh     *atomic.Value
-	manualStepDownCh     chan struct{}
-	keepHALockOnStepDown *uint32
-	heldHALock           physical.Lock
+	standby          atomic.Bool
+	standbyDoneCh    chan struct{}
+	standbyStopCh    *atomic.Value
+	manualStepDownCh chan struct{}
+	standbyRestartCh chan struct{}
+	heldHALockMu     sync.Mutex
+	heldHALock       physical.Lock
+
+	// leaderParams caches the leader's advertisement info for
+	// efficient lookups from standby nodes.
+	leaderParams atomic.Value // stores *clusterLeaderParams
 
 	// shutdownDoneCh is used to notify when core.Shutdown() completes.
 	// core.Shutdown() is typically issued in a goroutine to allow Warden to
@@ -357,7 +356,33 @@ type CoreConfig struct {
 }
 
 func (c *Core) Shutdown() error {
-	c.logger.Info("Shutting down the core")
+	c.logger.Info("shutting down the core")
+
+	// If HA is enabled, signal the standby loop to stop and wait for it
+	if c.ha != nil {
+		if stopCh := c.standbyStopCh.Load(); stopCh != nil {
+			ch := stopCh.(chan struct{})
+			select {
+			case <-ch:
+				// Already closed (e.g., Shutdown called twice)
+			default:
+				close(ch)
+			}
+		}
+
+		if c.standbyDoneCh != nil {
+			select {
+			case <-c.standbyDoneCh:
+				c.logger.Info("standby loop exited")
+			case <-time.After(30 * time.Second):
+				c.logger.Warn("timed out waiting for standby loop to exit")
+			}
+		}
+
+		// Release the HA lock if still held (guarded to prevent double-unlock
+		// race with the standby loop on the 30s timeout path).
+		c.unlockHeldHALock()
+	}
 
 	// Seal the core, which triggers the full preSeal teardown sequence
 	if err := c.Seal(); err != nil {
@@ -365,7 +390,7 @@ func (c *Core) Shutdown() error {
 		return err
 	}
 
-	c.logger.Info("Core shutdown successfully")
+	c.logger.Info("core shutdown successfully")
 
 	return nil
 }
@@ -441,10 +466,8 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 		audit:                   NewMountTable(),
 		sealed:                  new(uint32),
 		standbyStopCh:           new(atomic.Value),
-		standbyRestartCh:        new(atomic.Value),
 		cachingDisabled:         conf.DisableCache,
 		shutdownDoneCh:          new(atomic.Value),
-		keepHALockOnStepDown:    new(uint32),
 		activeContextCancelFunc: new(atomic.Value),
 		secureRandomReader:      conf.SecureRandomReader,
 		keyRotateGracePeriod:    new(int64),
@@ -453,7 +476,6 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 
 	c.standby.Store(true)
 	c.standbyStopCh.Store(make(chan struct{}, 1))
-	c.standbyRestartCh.Store(make(chan struct{}, 1))
 	atomic.StoreUint32(c.sealed, 1)
 
 	c.shutdownDoneCh.Store(make(chan struct{}))
@@ -1011,28 +1033,8 @@ func (c *Core) unsealInternal(ctx context.Context, rootKey []byte) error {
 		return err
 	}
 
-	// if err := c.startClusterListener(ctx); err != nil {
-	// 	return err
-	// }
-
 	// Do post-unseal setup if HA is not enabled
 	if c.ha == nil {
-		// We still need to set up cluster info even if it's not part of a
-		// cluster right now. This also populates the cached cluster object.
-		// if err := c.setupCluster(ctx); err != nil {
-		// 	c.logger.Error("cluster setup failed", logger.Err(err),)
-		// 	c.barrier.Seal()
-		// 	c.logger.Warn("warden is sealed")
-		// 	return err
-		// }
-
-		// if err := c.migrateSeal(ctx); err != nil {
-		// 	c.logger.Error("seal migration error", logger.Err(err))
-		// 	c.barrier.Seal()
-		// 	c.logger.Warn("warden is sealed")
-		// 	return err
-		// }
-
 		ctx, ctxCancel := context.WithCancel(namespace.RootContext(context.TODO()))
 		if err := c.postUnseal(ctx, ctxCancel, standardUnsealStrategy{}); err != nil {
 			c.logger.Error("post-unseal setup failed", logger.Err(err))
@@ -1051,9 +1053,9 @@ func (c *Core) unsealInternal(ctx context.Context, rootKey []byte) error {
 		// Go to standby mode, wait until we are active to unseal
 		c.standbyDoneCh = make(chan struct{})
 		c.manualStepDownCh = make(chan struct{}, 1)
+		c.standbyRestartCh = make(chan struct{}, 1)
 		c.standbyStopCh.Store(make(chan struct{}, 1))
-		c.standbyRestartCh.Store(make(chan struct{}, 1))
-		//go c.runStandby(c.standbyDoneCh, c.manualStepDownCh, c.standbyStopCh.Load().(chan struct{}), c.standbyRestartCh.Load().(chan struct{}))
+		go c.runStandby(c.standbyDoneCh, c.manualStepDownCh, c.standbyStopCh.Load().(chan struct{}))
 	}
 
 	// Success!
@@ -1153,8 +1155,15 @@ func (c *Core) postUnseal(ctx context.Context, ctxCancelFunc context.CancelFunc,
 		for i := 0; i < postUnsealFuncConcurrency; i++ {
 			go func() {
 				for v := range jobs {
-					v()
-					wg.Done()
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								c.logger.Error("panic in postUnseal func", logger.Any("panic", r))
+							}
+							wg.Done()
+						}()
+						v()
+					}()
 				}
 			}()
 		}
@@ -1183,23 +1192,8 @@ func (c *Core) preSeal() error {
 	c.postUnsealFuncs = nil
 	c.activeTime = time.Time{}
 
-	// // Clear any rotation progress
-	// c.rootRotationConfig = nil
-	// c.recoveryRotationConfig = nil
-
-	// if c.metricsCh != nil {
-	// 	close(c.metricsCh)
-	// 	c.metricsCh = nil
-	// }
 	var result error
 
-	// c.stopForwarding()
-	// c.stopRaftActiveNode()
-	// c.cancelNamespaceDeletion()
-
-	// if err := c.invalidations.Stop(); err != nil {
-	// 	result = multierror.Append(result, fmt.Errorf("error tearing down invalidations: %w", err))
-	// }
 	if err := c.teardownAudits(context.Background()); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error tearing down audits: %w", err))
 	}

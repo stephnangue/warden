@@ -117,9 +117,8 @@ func (c *Core) initializeInternal(ctx context.Context, initParams *InitParams) (
 	recoveryConfig := initParams.RecoveryConfig
 
 	// N.B. Although the core is capable of handling situations where some keys
-	// are stored and some aren't, in practice, replication + HSMs makes this
-	// extremely hard to reason about, to the point that it will probably never
-	// be supported. The reason is that each HSM needs to encode the root key
+	// are stored and some aren't, in practice, multiple HSMs makes this
+	// extremely hard to reason about. The reason is that each HSM needs to encode the root key
 	// separately, which means the shares must be generated independently,
 	// which means both that the shares will be different *AND* there would
 	// need to be a way to actually allow fetching of the generated keys by

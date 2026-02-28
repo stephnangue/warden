@@ -20,6 +20,13 @@ type Config struct {
 	Storage   *StorageBlock   `hcl:"storage,block"`
 	Seals     []KMS           `hcl:"seal,block"`
 
+	// APIAddr is the address advertised to clients for API requests.
+	// In HA mode, standby nodes redirect clients to this address on the active node.
+	APIAddr string `hcl:"api_addr,optional"`
+
+	// DisableClustering disables HA clustering even if the storage backend supports it.
+	DisableClustering bool `hcl:"disable_clustering,optional"`
+
 	// Whether read requests are disabled on standby nodes.
 	DisableStandbyReads bool `hcl:"disable_standby_reads,optional"`
 
@@ -325,10 +332,6 @@ func (k *KMS) IsDisabled() bool {
 
 type StorageBlock struct {
 	Type string `hcl:"type,label"` // "inmem", "file", or "postgres"
-
-	RedirectAddr      string `hcl:"redirect_addr,optional"`
-	ClusterAddr       string `hcl:"cluster_addr,optional"`
-	DisableClustering bool   `hcl:"diable_clustering,optional"`
 
 	// In-memory storage specific config
 	// (no additional config needed, but you could add cache size limits)

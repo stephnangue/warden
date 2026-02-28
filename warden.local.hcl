@@ -6,6 +6,8 @@ min_cred_spec_rotation_period   = "5m"
 
 ip_binding_policy = "optional"
 
+api_addr = "https://127.0.0.1:8400"
+
 seal "static" {
   current_key_id = "20251221-1"
   current_key = "file://./seal.key"
@@ -13,6 +15,8 @@ seal "static" {
 
 storage "postgres" {
   connection_url = "postgres://warden:wardenpassword@localhost:5433/warden?sslmode=disable"
+  ha_enabled     = "true"
+  ha_table       = "warden_ha_locks"
 }
 
 listener "tcp" {

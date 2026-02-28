@@ -1,6 +1,10 @@
 log_format  = "standard"
 log_level   = "trace"
 
+# api_addr is the address advertised to clients and used for inter-node
+# forwarding in HA mode. Required when ha_enabled = "true".
+# api_addr = "https://warden.example.com:8400"
+
 storage "postgres" {
   connection_url = "postgres://hydra:hydrapassword@postgres-hydra:5432/hydra?sslmode=disable"
 }

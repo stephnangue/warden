@@ -237,13 +237,16 @@ func run(cmd *cobra.Command, args []string) error {
 	info["storage"] = conf.Storage.Type
 	infoKeys = append(infoKeys, "storage")
 
-	if coreConfig.ClusterAddr != "" {
-		info["cluster address"] = coreConfig.ClusterAddr
-		infoKeys = append(infoKeys, "cluster address")
-	}
-	if coreConfig.RedirectAddr != "" {
-		info["api address"] = coreConfig.RedirectAddr
+	if conf.APIAddr != "" {
+		info["api address"] = conf.APIAddr
 		infoKeys = append(infoKeys, "api address")
+	}
+	if coreConfig.HAPhysical != nil {
+		info["HA enabled"] = "true"
+		infoKeys = append(infoKeys, "HA enabled")
+	} else {
+		info["HA enabled"] = "false"
+		infoKeys = append(infoKeys, "HA enabled")
 	}
 
 	// Create HTTP handler from core
@@ -561,12 +564,24 @@ func setSeal(conf *config.Config, logger *log.GatedLogger, infoKeys *[]string, i
 
 func createCoreConfig(logger *log.GatedLogger, conf *config.Config, backend phy.Backend, barrierSeal, unwrapSeal core.Seal, secureRandomReader io.Reader,
 ) core.CoreConfig {
+	// Detect HA capability from the physical backend
+	var haPhysical phy.HABackend
+	if ha, ok := backend.(phy.HABackend); ok && ha.HAEnabled() {
+		haPhysical = ha
+	}
+
+	// Today api_addr serves as both the client-facing address and the
+	// internal cluster address because Warden uses HTTP reverse-proxy
+	// forwarding between nodes. When a Raft backend is introduced,
+	// these two may diverge (separate gRPC cluster transport), so we
+	// keep RedirectAddr and ClusterAddr as distinct CoreConfig fields.
 	coreConfig := &core.CoreConfig{
 		RawConfig:          conf,
 		Physical:           backend,
-		RedirectAddr:       conf.Storage.RedirectAddr,
+		RedirectAddr:       conf.APIAddr,
+		ClusterAddr:        conf.APIAddr,
 		StorageType:        conf.Storage.Type,
-		HAPhysical:         nil,
+		HAPhysical:         haPhysical,
 		Seal:               barrierSeal,
 		UnwrapSeal:         unwrapSeal,
 		AuditDevices:       auditDevices,
