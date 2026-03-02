@@ -3,7 +3,7 @@ module github.com/stephnangue/warden
 go 1.26.0
 
 require (
-	github.com/ProtonMail/go-crypto v1.3.0
+	github.com/ProtonMail/go-crypto v1.4.0
 	github.com/aws/aws-sdk-go-v2 v1.41.2
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.10
 	github.com/aws/aws-sdk-go-v2/service/iam v1.53.3
@@ -196,7 +196,7 @@ require (
 	github.com/zclconf/go-cty v1.16.3 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/mod v0.32.0 // indirect
-	golang.org/x/net v0.50.0
+	golang.org/x/net v0.51.0
 	golang.org/x/sync v0.19.0
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0
