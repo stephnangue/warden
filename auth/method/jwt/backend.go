@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -259,8 +260,11 @@ func verifyJWKSURLReachable(ctx context.Context, jwksURL string, caPEM string) e
 	return verifyURLReachable(ctx, jwksURL, caPEM)
 }
 
-// verifyOIDCDiscoveryURLReachable checks that the OIDC discovery URL is reachable
+// verifyOIDCDiscoveryURLReachable checks that the OIDC discovery endpoint is reachable.
+// The oidcDiscoveryURL is the issuer URL (e.g., http://localhost:4444); this function
+// appends /.well-known/openid-configuration to match what the cap/jwt library does.
 func verifyOIDCDiscoveryURLReachable(ctx context.Context, oidcDiscoveryURL string, caPEM string) error {
-	return verifyURLReachable(ctx, oidcDiscoveryURL, caPEM)
+	wellKnown := strings.TrimSuffix(oidcDiscoveryURL, "/") + "/.well-known/openid-configuration"
+	return verifyURLReachable(ctx, wellKnown, caPEM)
 }
 

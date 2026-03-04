@@ -38,6 +38,47 @@ func TestHandleRequest_SealedCore(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
 
+// TestHandleRequest_StandbyNode tests that requests return ErrStandby when the
+// node has transitioned to standby and the active context is canceled.
+func TestHandleRequest_StandbyNode(t *testing.T) {
+	core := createTestCore(t)
+
+	// Simulate standby transition: cancel active context, set standby flag
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	core.activeContext = ctx
+	core.standby.Store(true)
+
+	req := &logical.Request{
+		Path:        "sys/mounts",
+		Operation:   logical.ReadOperation,
+		HTTPRequest: httptest.NewRequest(http.MethodGet, "/v1/sys/mounts", nil),
+	}
+
+	resp, err := core.HandleRequest(context.Background(), req)
+	assert.Nil(t, resp)
+	assert.ErrorIs(t, err, ErrStandby)
+}
+
+// TestCheckToken_StandbyNode tests that CheckToken returns ErrStandby when a
+// token lookup fails on a standby node.
+func TestCheckToken_StandbyNode(t *testing.T) {
+	core := createTestCore(t)
+
+	// Set node to standby
+	core.standby.Store(true)
+
+	req := &logical.Request{
+		Path:        "sys/mounts",
+		Operation:   logical.ReadOperation,
+		ClientToken: "invalid-token-that-will-fail-lookup",
+	}
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	_, _, _, err := core.CheckToken(ctx, req, false)
+	assert.ErrorIs(t, err, ErrStandby)
+}
+
 // TestHandleRequest_NamespaceNotFound tests that requests fail when namespace is not found
 func TestHandleRequest_NamespaceNotFound(t *testing.T) {
 	core := createTestCore(t)
@@ -381,12 +422,11 @@ func TestParseJSONBody(t *testing.T) {
 		assert.Nil(t, req.Data["null"])
 		// Arrays are treated as leaf values
 		assert.Equal(t, []interface{}{float64(1), float64(2), float64(3)}, req.Data["array"])
-		// Nested maps are flattened into dot-separated keys
-		assert.Nil(t, req.Data["nested"], "parent key should be removed")
-		assert.Equal(t, "value", req.Data["nested.key"])
+		// Nested maps are preserved as-is for TypeMap field support
+		assert.Equal(t, map[string]interface{}{"key": "value"}, req.Data["nested"])
 	})
 
-	t.Run("deep nesting is fully flattened", func(t *testing.T) {
+	t.Run("deep nesting is preserved", func(t *testing.T) {
 		body := `{"a": {"b": {"c": "deep"}}}`
 		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -397,9 +437,9 @@ func TestParseJSONBody(t *testing.T) {
 		err := core.parseJSONBody(req)
 		require.NoError(t, err)
 
-		assert.Nil(t, req.Data["a"])
-		assert.Nil(t, req.Data["a.b"])
-		assert.Equal(t, "deep", req.Data["a.b.c"])
+		nested := req.Data["a"].(map[string]interface{})
+		inner := nested["b"].(map[string]interface{})
+		assert.Equal(t, "deep", inner["c"])
 	})
 
 	t.Run("mixed flat and nested keys", func(t *testing.T) {
@@ -414,12 +454,12 @@ func TestParseJSONBody(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, "1h", req.Data["ttl"])
-		assert.Nil(t, req.Data["data"])
-		assert.Equal(t, "admin", req.Data["data.username"])
-		assert.Equal(t, "secret", req.Data["data.password"])
+		nested := req.Data["data"].(map[string]interface{})
+		assert.Equal(t, "admin", nested["username"])
+		assert.Equal(t, "secret", nested["password"])
 	})
 
-	t.Run("empty nested object produces no keys", func(t *testing.T) {
+	t.Run("empty nested object is preserved", func(t *testing.T) {
 		body := `{"a": {}, "b": "kept"}`
 		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -430,9 +470,9 @@ func TestParseJSONBody(t *testing.T) {
 		err := core.parseJSONBody(req)
 		require.NoError(t, err)
 
-		assert.Nil(t, req.Data["a"])
+		assert.Equal(t, map[string]interface{}{}, req.Data["a"])
 		assert.Equal(t, "kept", req.Data["b"])
-		assert.Equal(t, 1, len(req.Data))
+		assert.Equal(t, 2, len(req.Data))
 	})
 
 	t.Run("array of objects is a leaf value", func(t *testing.T) {
@@ -629,23 +669,23 @@ func TestMintCredentialForRequest(t *testing.T) {
 	core := createTestCore(t)
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	t.Run("nil token entry returns error", func(t *testing.T) {
+	t.Run("nil token entry returns 500", func(t *testing.T) {
 		req := &logical.Request{}
 		err := core.mintCredentialForRequest(ctx, req, nil)
-		// The implementation returns an error for nil token entry
 		require.Error(t, err)
+		assert.Equal(t, http.StatusInternalServerError, logical.GetErrorCode(err))
 		assert.Nil(t, req.Credential)
 	})
 
-	t.Run("empty credential spec returns error", func(t *testing.T) {
+	t.Run("empty credential spec returns 400", func(t *testing.T) {
 		req := &logical.Request{}
 		te := &logical.TokenEntry{
 			ID:             "test-token",
 			CredentialSpec: "",
 		}
 		err := core.mintCredentialForRequest(ctx, req, te)
-		// The implementation returns an error when credential spec is empty
 		require.Error(t, err)
+		assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
 		assert.Nil(t, req.Credential)
 	})
 }
@@ -1175,6 +1215,99 @@ func TestHandleNonLoginRequest_StreamingBodyParsing(t *testing.T) {
 		// Data map is initialized (for query params) but binary body is not parsed into it
 		assert.Empty(t, req.Data)
 	})
+}
+
+// TestCheckToken_ConcurrentRequests tests that multiple concurrent requests
+// with the same valid root token all succeed. This reproduces a bug where
+// only the first concurrent request succeeds and subsequent ones get 403.
+func TestCheckToken_ConcurrentRequests(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	// Generate root token
+	rootToken, err := core.tokenStore.GenerateRootToken()
+	require.NoError(t, err)
+	require.NotEmpty(t, rootToken)
+
+	const numGoroutines = 10
+	var wg sync.WaitGroup
+	errs := make(chan error, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := &logical.Request{
+				Path:        "sys/providers",
+				Operation:   logical.ReadOperation,
+				ClientToken: rootToken,
+			}
+			_, _, _, err := core.CheckToken(ctx, req, false)
+			if err != nil {
+				errs <- err
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent CheckToken failed: %v", err)
+	}
+}
+
+// TestHandleRequest_ConcurrentWithRootToken tests that concurrent HandleRequest
+// calls with a valid root token all succeed end-to-end through the HTTP pipeline.
+func TestHandleRequest_ConcurrentWithRootToken(t *testing.T) {
+	core := createTestCore(t)
+
+	// Generate root token
+	rootToken, err := core.tokenStore.GenerateRootToken()
+	require.NoError(t, err)
+
+	const numGoroutines = 10
+	var wg sync.WaitGroup
+	results := make(chan int, numGoroutines) // collect status codes
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/providers?warden-list=true", nil)
+			httpReq.Header.Set("X-Warden-Token", rootToken)
+			req := &logical.Request{
+				Path:        "sys/providers",
+				Operation:   logical.ListOperation,
+				HTTPRequest: httpReq,
+			}
+			resp, err := core.HandleRequest(context.Background(), req)
+			if err != nil {
+				results <- -1
+				return
+			}
+			if resp == nil {
+				results <- 0
+				return
+			}
+			results <- resp.StatusCode
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	failures := 0
+	for code := range results {
+		// 200 or 0 (StatusCode not explicitly set = OK) are acceptable
+		if code != http.StatusOK && code != 0 {
+			failures++
+			t.Errorf("concurrent HandleRequest returned unexpected status: %d", code)
+		}
+	}
+	if failures > 0 {
+		t.Errorf("%d out of %d concurrent requests failed", failures, numGoroutines)
+	}
 }
 
 // TestHandleNonLoginRequest_StreamingWithoutBodyParsing tests that backends without

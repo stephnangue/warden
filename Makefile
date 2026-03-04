@@ -1,4 +1,4 @@
-.PHONY: help build build-fast brd brd-fast build-no-cache up up-logs down logs logs-tail restart clean clean-all shell test test-unit test-integration query status rebuild rebuild-quick watch cache-info edit-config deps-up deps-down deps-logs reset-warden-db reset-warden-db-force warden-db-logs warden-db-shell
+.PHONY: help build build-fast brd brd-fast build-no-cache up up-logs down logs logs-tail restart clean clean-all shell test test-unit test-e2e test-e2e-setup test-e2e-teardown test-e2e-reset query status rebuild rebuild-quick watch cache-info edit-config deps-up deps-down deps-logs reset-warden-db reset-warden-db-force warden-db-logs warden-db-shell
 
 # Enable BuildKit for faster builds
 export DOCKER_BUILDKIT=1
@@ -46,9 +46,14 @@ help:
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test-unit       - Run Go unit tests"
-	@echo "  make test-integration - Run integration tests"
 	@echo "  make test            - Test proxy connection"
 	@echo "  make query           - Run sample query"
+	@echo ""
+	@echo "E2E Testing (3-node HA cluster):"
+	@echo "  make test-e2e-setup    - Start the e2e cluster"
+	@echo "  make test-e2e          - Run all e2e tests"
+	@echo "  make test-e2e-teardown - Stop the e2e cluster"
+	@echo "  make test-e2e-reset    - Reset and restart the e2e cluster"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  make clean           - Clean containers and volumes"
@@ -63,11 +68,31 @@ test-unit:
 	@go test -v -race -coverprofile=coverage.out ./...
 	@echo "✓ All tests passed"
 
-# Run integration tests (if you have a separate integration test suite)
-test-integration:
-	@echo "Running integration tests..."
-	@go test -v -tags=integration ./...
-	@echo "✓ Integration tests passed"
+# Start the e2e 3-node HA cluster
+test-e2e-setup:
+	@echo "Starting e2e cluster..."
+	@bash e2e/setup.sh
+	@echo "✓ E2E cluster ready"
+
+# Run all e2e tests (starts cluster, runs tests, tears down)
+test-e2e: test-e2e-setup
+	@echo "Running e2e tests..."
+	@go test -tags e2e -v ./e2e/... || (bash e2e/teardown.sh && exit 1)
+	@bash e2e/teardown.sh
+	@echo "✓ E2E tests passed"
+
+# Stop the e2e cluster
+test-e2e-teardown:
+	@echo "Tearing down e2e cluster..."
+	@bash e2e/teardown.sh
+	@echo "✓ E2E cluster stopped"
+
+# Reset and restart the e2e cluster
+test-e2e-reset:
+	@echo "Resetting e2e cluster..."
+	@bash e2e/reset.sh
+	@bash e2e/setup.sh
+	@echo "✓ E2E cluster reset and ready"
 
 # Normal build with cache (runs tests first)
 build: test-unit

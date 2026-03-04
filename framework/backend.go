@@ -160,15 +160,30 @@ func (b *Backend) HandleRequest(ctx context.Context, req *logical.Request) (*log
 		raw[k] = v
 	}
 
-	// Look up the callback for this operation
+	// Look up the callback for this operation.
+	// POST (Create) and PUT (Update) are interchangeable: if the exact
+	// operation isn't registered, fall back to the other write operation.
 	var callback OperationFunc
 
 	if path.Operations != nil {
 		if op, ok := path.Operations[req.Operation]; ok {
 			callback = op.Handler()
+		} else if req.Operation == logical.CreateOperation {
+			if op, ok := path.Operations[logical.UpdateOperation]; ok {
+				callback = op.Handler()
+			}
+		} else if req.Operation == logical.UpdateOperation {
+			if op, ok := path.Operations[logical.CreateOperation]; ok {
+				callback = op.Handler()
+			}
 		}
 	} else {
 		callback = path.Callbacks[req.Operation]
+		if callback == nil && req.Operation == logical.CreateOperation {
+			callback = path.Callbacks[logical.UpdateOperation]
+		} else if callback == nil && req.Operation == logical.UpdateOperation {
+			callback = path.Callbacks[logical.CreateOperation]
+		}
 	}
 	ok := callback != nil
 

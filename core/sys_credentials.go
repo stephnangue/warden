@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -276,6 +277,9 @@ func (b *SystemBackend) handleCredentialSourceRead(ctx context.Context, req *log
 	// Retrieve from credential config store
 	source, err := b.core.credConfigStore.GetSource(ctx, name)
 	if err != nil {
+		if errors.Is(err, ErrSourceNotFound) {
+			return logical.ErrorResponse(logical.ErrNotFoundf("credential source %q not found", name)), nil
+		}
 		return logical.ErrorResponse(err), nil
 	}
 
@@ -317,6 +321,9 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 	// Get existing source
 	existingSource, err := b.core.credConfigStore.GetSource(ctx, name)
 	if err != nil {
+		if errors.Is(err, ErrSourceNotFound) {
+			return logical.ErrorResponse(logical.ErrNotFoundf("credential source %q not found", name)), nil
+		}
 		return logical.ErrorResponse(err), nil
 	}
 
@@ -361,6 +368,9 @@ func (b *SystemBackend) handleCredentialSourceDelete(ctx context.Context, req *l
 	// Check for references before deletion
 	references, err := b.core.credConfigStore.CheckSourceReferences(ctx, name)
 	if err != nil {
+		if errors.Is(err, ErrSourceNotFound) {
+			return logical.ErrorResponse(logical.ErrNotFoundf("credential source %q not found", name)), nil
+		}
 		return logical.ErrorResponse(err), nil
 	}
 
@@ -375,6 +385,9 @@ func (b *SystemBackend) handleCredentialSourceDelete(ctx context.Context, req *l
 
 	// Delete via credential config store
 	if err := b.core.credConfigStore.DeleteSource(ctx, name); err != nil {
+		if errors.Is(err, ErrSourceNotFound) {
+			return logical.ErrorResponse(logical.ErrNotFoundf("credential source %q not found", name)), nil
+		}
 		return logical.ErrorResponse(err), nil
 	}
 
@@ -472,6 +485,9 @@ func (b *SystemBackend) handleCredentialSpecRead(ctx context.Context, req *logic
 	// Retrieve from credential config store
 	spec, err := b.core.credConfigStore.GetSpec(ctx, name)
 	if err != nil {
+		if errors.Is(err, ErrSpecNotFound) {
+			return logical.ErrorResponse(logical.ErrNotFoundf("credential spec %q not found", name)), nil
+		}
 		return logical.ErrorResponse(err), nil
 	}
 
@@ -498,6 +514,9 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 	// Get existing spec
 	spec, err := b.core.credConfigStore.GetSpec(ctx, name)
 	if err != nil {
+		if errors.Is(err, ErrSpecNotFound) {
+			return logical.ErrorResponse(logical.ErrNotFoundf("credential spec %q not found", name)), nil
+		}
 		return logical.ErrorResponse(err), nil
 	}
 
@@ -571,6 +590,9 @@ func (b *SystemBackend) handleCredentialSpecDelete(ctx context.Context, req *log
 
 	// Delete via credential config store
 	if err := b.core.credConfigStore.DeleteSpec(ctx, name); err != nil {
+		if errors.Is(err, ErrSpecNotFound) {
+			return logical.ErrorResponse(logical.ErrNotFoundf("credential spec %q not found", name)), nil
+		}
 		return logical.ErrorResponse(err), nil
 	}
 

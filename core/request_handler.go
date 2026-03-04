@@ -101,8 +101,8 @@ func (c *Core) CheckToken(ctx context.Context, req *logical.Request, unauth bool
 		// unauth, we just have no information to attach to the request, so
 		// ignore errors...this was best-effort anyways
 		if err != nil && !unauth {
-			if c.standby.Load() {
-				return nil, cbp, te, sdklogical.ErrPerfStandbyPleaseForward
+			if c.standby.Load() || (c.activeContext != nil && c.activeContext.Err() != nil) {
+				return nil, cbp, te, ErrStandby
 			}
 			return nil, cbp, te, err
 		}
@@ -207,7 +207,8 @@ func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request) 
 			if errors.Is(err, ErrTokenNamespaceMismatch) ||
 				errors.Is(err, ErrTokenNotFound) ||
 				errors.Is(err, ErrTokenExpired) ||
-				errors.Is(err, ErrOriginViolation) {
+				errors.Is(err, ErrOriginViolation) ||
+				errors.Is(err, ErrTypeNotFound) {
 				c.logger.Warn("token lookup failed", logger.Err(err))
 				return nil, nil, sdklogical.ErrPermissionDenied
 			}
@@ -265,7 +266,7 @@ func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logica
 	// Check if the core has an active context
 	if c.activeContext == nil || c.activeContext.Err() != nil {
 		if c.standby.Load() {
-			return logical.ErrorResponse(logical.ErrServiceUnavailable("standby node, please forward to active")), nil
+			return nil, ErrStandby
 		}
 		return logical.ErrorResponse(logical.ErrServiceUnavailable("server context canceled")), nil
 	}
@@ -738,7 +739,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 				logger.Err(err),
 				logger.String("path", req.Path),
 			)
-			return logical.ErrorResponse(logical.ErrInternalf("failed to mint credential: %s", err.Error())), auth, err
+			return logical.ErrorResponse(err), auth, nil
 		}
 	}
 
@@ -869,36 +870,7 @@ func (c *Core) parseJSONBody(req *logical.Request) error {
 		return nil
 	}
 
-	if err := json.Unmarshal(body, &req.Data); err != nil {
-		return err
-	}
-	flattenData(req.Data)
-	return nil
-}
-
-// flattenData flattens nested maps in data using dot-separated keys.
-// Only leaf values (non-map) are kept; parent map keys are removed.
-// Arrays are treated as leaf values (not recursed into).
-// Example: {"data": {"key": "val"}, "ttl": "1h"} → {"data.key": "val", "ttl": "1h"}
-func flattenData(data map[string]any) {
-	flat := make(map[string]any, len(data))
-	flattenRecursive("", data, flat)
-	clear(data)
-	maps.Copy(data, flat)
-}
-
-func flattenRecursive(prefix string, data map[string]any, result map[string]any) {
-	for k, v := range data {
-		key := k
-		if prefix != "" {
-			key = prefix + "." + k
-		}
-		if nested, ok := v.(map[string]any); ok {
-			flattenRecursive(key, nested, result)
-		} else {
-			result[key] = v
-		}
-	}
+	return json.Unmarshal(body, &req.Data)
 }
 
 // parseFormBody parses application/x-www-form-urlencoded body into req.Data.
@@ -944,18 +916,18 @@ func (c *Core) parseFormBody(req *logical.Request) error {
 // mintCredentialForRequest mints credentials for streaming requests using the credential manager
 func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Request, te *logical.TokenEntry) error {
 	if te == nil {
-		return fmt.Errorf("cannot mint credential since token entry is nil")
+		return logical.ErrInternal("cannot mint credential since token entry is nil")
 	}
 	if te.CredentialSpec == "" {
 		c.logger.Debug("no credential spec for token",
 			logger.String("token_id", te.ID),
 		)
-		return fmt.Errorf("cannot mint credential since no credential spec is bound to the token")
+		return logical.ErrBadRequest("cannot mint credential since no credential spec is bound to the token")
 	}
 
 	// Skip if credential manager not initialized
 	if c.credentialManager == nil {
-		return fmt.Errorf("credential manager not initialized")
+		return logical.ErrInternal("credential manager not initialized")
 	}
 
 	// Validate credential spec exists before attempting to issue
@@ -964,7 +936,7 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 			logger.String("token_id", te.ID),
 			logger.String("spec_name", te.CredentialSpec),
 		)
-		return fmt.Errorf("credential spec %q not found or disabled", te.CredentialSpec)
+		return logical.ErrBadRequestf("credential spec %q not found or disabled", te.CredentialSpec)
 	}
 
 	// Calculate token TTL for cache duration

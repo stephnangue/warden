@@ -536,8 +536,7 @@ func (c *Core) unmountInternal(ctx context.Context, path string, updateStorage b
 		return fmt.Errorf("no matching storage %q", path)
 	}
 
-	// Get the backend/mount entry for this path, used to remove ignored
-	// replication prefixes
+	// Get the backend/mount entry for this path
 	backend := c.router.MatchingBackend(ctx, path)
 
 	// Mark the entry as tainted
@@ -788,13 +787,6 @@ func (c *Core) runMountUpdates(ctx context.Context, barrier sdklogical.Storage, 
 			}
 		}
 
-		// In a replication scenario we will let sync invalidation take
-		// care of creating a new required mount that doesn't exist yet.
-		// This should only happen in the upgrade case where a new one is
-		// introduced on the primary; otherwise initial bootstrapping will
-		// ensure this comes over. If we upgrade first, we simply don't
-		// create the mount, so we won't conflict when we sync. If this is
-		// local (e.g. cubbyhole) we do still add it.
 		if !foundRequired {
 			c.mounts.Entries = append(c.mounts.Entries, requiredMount)
 			needPersist = true

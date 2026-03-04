@@ -2,8 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -12,9 +16,12 @@ import (
 )
 
 type ApiListener struct {
-	logger  *logger.GatedLogger
-	server  *http.Server
-	stopped atomic.Bool
+	logger      *logger.GatedLogger
+	server      *http.Server
+	tlsEnabled  bool
+	tlsCertFile string
+	tlsKeyFile  string
+	stopped     atomic.Bool
 }
 
 type ApiListenerConfig struct {
@@ -41,9 +48,37 @@ func NewApiListener(cfg ApiListenerConfig, httpHandler http.Handler) (*ApiListen
 		WriteTimeout: 10 * time.Second,
 	}
 
+	if cfg.TLSEnabled {
+		if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
+			return nil, fmt.Errorf("tls_enabled requires both tls_cert_file and tls_key_file")
+		}
+
+		tlsCfg := &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+
+		if cfg.TLSClientCAFile != "" {
+			caCert, err := os.ReadFile(cfg.TLSClientCAFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read tls_client_ca_file %q: %w", cfg.TLSClientCAFile, err)
+			}
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caCert) {
+				return nil, fmt.Errorf("tls_client_ca_file %q contains no valid certificates", cfg.TLSClientCAFile)
+			}
+			tlsCfg.ClientCAs = caPool
+			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+		}
+
+		server.TLSConfig = tlsCfg
+	}
+
 	return &ApiListener{
-		logger: cfg.Logger,
-		server: server,
+		logger:      cfg.Logger,
+		server:      server,
+		tlsEnabled:  cfg.TLSEnabled,
+		tlsCertFile: cfg.TLSCertFile,
+		tlsKeyFile:  cfg.TLSKeyFile,
 	}, nil
 }
 
@@ -58,12 +93,17 @@ func (l *ApiListener) Type() string {
 // Start begins the HTTP server and listens for shutdown signal
 // Returns an error channel that will receive any startup errors
 func (l *ApiListener) Start(ctx context.Context) error {
-	l.logger.Info("starting HTTP server")
-
 	// Start server in a goroutine
 	errChan := make(chan error, 1)
 	go func() {
-		err := l.server.ListenAndServe()
+		var err error
+		if l.tlsEnabled {
+			l.logger.Info("starting HTTPS server")
+			err = l.server.ListenAndServeTLS(l.tlsCertFile, l.tlsKeyFile)
+		} else {
+			l.logger.Info("starting HTTP server")
+			err = l.server.ListenAndServe()
+		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- err
 		}
