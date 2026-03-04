@@ -21,7 +21,7 @@ import (
 //  1. Builds a logical request from the HTTP request
 //  2. Sends the logical request to core.HandleRequest for processing
 //  3. Writes the logical.Response back to the HTTP response
-func handleLogical(c *core.Core, log *logger.GatedLogger) http.Handler {
+func handleLogical(c *core.Core, log *logger.GatedLogger, forwarder *standbyForwarder) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Reject unsupported HTTP methods
 		switch r.Method {
@@ -40,6 +40,14 @@ func handleLogical(c *core.Core, log *logger.GatedLogger) http.Handler {
 		// Send the logical request to the core for processing
 		resp, err := c.HandleRequest(r.Context(), req)
 		if err != nil {
+			// Standby race: node transitioned to standby mid-request.
+			// Forward to the active node via the same reverse proxy used
+			// by the generic handler, falling back to a 307 redirect.
+			if errors.Is(err, core.ErrStandby) {
+				forwardToActive(c, forwarder, w, r)
+				return
+			}
+
 			statusCode := errorToStatusCode(err)
 			respondError(w, statusCode, err.Error())
 			return

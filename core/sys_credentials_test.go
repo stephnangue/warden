@@ -100,6 +100,41 @@ func TestSystemBackend_HandleCredentialSourceRead(t *testing.T) {
 	assert.Equal(t, "test-source", resp.Data["name"])
 }
 
+func TestSystemBackend_HandleCredentialSourceRead_NotFound(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	schema := backend.pathCredentials()[0].Fields
+	raw := map[string]interface{}{
+		"name": "nonexistent",
+	}
+
+	req := createTestRequest(logical.ReadOperation, "cred/sources/nonexistent", raw)
+	fieldData := createFieldData(schema, raw)
+
+	resp, err := backend.handleCredentialSourceRead(ctx, req, fieldData)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestSystemBackend_HandleCredentialSourceUpdate_NotFound(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	schema := backend.pathCredentials()[0].Fields
+	raw := map[string]interface{}{
+		"name":   "nonexistent",
+		"config": map[string]interface{}{"key": "value"},
+	}
+
+	req := createTestRequest(logical.UpdateOperation, "cred/sources/nonexistent", raw)
+	fieldData := createFieldData(schema, raw)
+
+	resp, err := backend.handleCredentialSourceUpdate(ctx, req, fieldData)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
 func TestSystemBackend_HandleCredentialSourceUpdate(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
@@ -337,6 +372,41 @@ func TestSystemBackend_HandleCredentialSpecRead(t *testing.T) {
 	}
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "test-spec", resp.Data["name"])
+}
+
+func TestSystemBackend_HandleCredentialSpecRead_NotFound(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	schema := backend.pathCredentials()[2].Fields
+	raw := map[string]interface{}{
+		"name": "nonexistent",
+	}
+
+	req := createTestRequest(logical.ReadOperation, "cred/specs/nonexistent", raw)
+	fieldData := createFieldData(schema, raw)
+
+	resp, err := backend.handleCredentialSpecRead(ctx, req, fieldData)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestSystemBackend_HandleCredentialSpecUpdate_NotFound(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	schema := backend.pathCredentials()[2].Fields
+	raw := map[string]interface{}{
+		"name":    "nonexistent",
+		"min_ttl": 3600,
+	}
+
+	req := createTestRequest(logical.UpdateOperation, "cred/specs/nonexistent", raw)
+	fieldData := createFieldData(schema, raw)
+
+	resp, err := backend.handleCredentialSpecUpdate(ctx, req, fieldData)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
 func TestSystemBackend_HandleCredentialSpecUpdate(t *testing.T) {

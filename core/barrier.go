@@ -61,8 +61,7 @@ const (
 
 	// shamirKekPath is used with Shamir in v1.3+ to store a copy of the
 	// unseal key behind the barrier. As with rootKeyPath this is primarily
-	// used by standbys to handle rotations. It also comes into play when
-	// restoring raft snapshots.
+	// used by standbys to handle rotations.
 	shamirKekPath = "core/shamir-kek"
 )
 
@@ -138,14 +137,13 @@ type SecurityBarrierCore interface {
 	// RotateRootKey is used to change the root key used to protect the keyring
 	RotateRootKey(context.Context, []byte) error
 
-	// For replication we must send over the keyring, so this must be available
+	// Keyring returns the current encryption keyring
 	Keyring() (*Keyring, error)
 
-	// For encryption count shipping, a function which handles updating local encryption counts if the consumer succeeds.
-	// This isolates the barrier code from the replication system
+	// ConsumeEncryptionCount handles updating local encryption counts if the consumer succeeds.
 	ConsumeEncryptionCount(consumer func(int64) error) error
 
-	// Add encryption counts from a remote source (downstream cluster node)
+	// AddRemoteEncryptions adds encryption counts from an external source
 	AddRemoteEncryptions(encryptions int64)
 
 	// Check whether an automatic rotation is due
