@@ -1,9 +1,15 @@
 log_format  = "standard"
 log_level   = "trace"
 
-# api_addr is the address advertised to clients and used for inter-node
-# forwarding in HA mode. Required when ha_enabled = "true".
+# api_addr is the address advertised to clients for API requests.
+# Required when ha_enabled = "true".
 # api_addr = "https://warden.example.com:8400"
+
+# cluster_addr is the address used for inter-node cluster communication.
+# A dedicated cluster listener is started on this address with
+# auto-generated mTLS certificates (no external certs needed).
+# Required when ha_enabled = "true".
+# cluster_addr = "https://warden.example.com:8401"
 
 storage "postgres" {
   connection_url = "postgres://hydra:hydrapassword@postgres-hydra:5432/hydra?sslmode=disable"

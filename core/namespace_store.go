@@ -716,7 +716,8 @@ func (ns *NamespaceStore) GetNamespaceByLongestPrefix(ctx context.Context, path 
 
 	combinedPath := ctxNs.Path + path
 	ns.lock.RLock()
-	prefix, entry, _ := ns.namespacesByPath.LongestPrefix(combinedPath)
+	prefix, resolved, _ := ns.namespacesByPath.LongestPrefix(combinedPath)
+	entry := resolved.Clone(false)
 	entry.Tainted = entry.Tainted || ns.creationDeletionMap[entry.UUID]
 	ns.lock.RUnlock()
 	return entry, strings.TrimPrefix(combinedPath, prefix)
@@ -1008,16 +1009,21 @@ func (ns *NamespaceStore) ResolveNamespaceFromRequest(nsHeader, reqPath string) 
 	// Find namespace that matches the longest prefix of reqPath.
 	ns.lock.RLock()
 	_, resolvedNs, trimmedPath := ns.namespacesByPath.LongestPrefix(reqPath)
-	resolvedNs.Tainted = resolvedNs.Tainted || ns.creationDeletionMap[resolvedNs.UUID]
+	// Clone before setting Tainted to avoid mutating the shared namespace
+	// pointer — the trie stores a single *Namespace per path, so concurrent
+	// requests would race on the Tainted field write/read without a copy.
+	// This matches the pattern used by GetNamespaceByAccessor/GetNamespaceByUUID.
+	entry := resolvedNs.Clone(false)
+	entry.Tainted = entry.Tainted || ns.creationDeletionMap[entry.UUID]
 	ns.lock.RUnlock()
 
 	// Ensure that entire header was matched, so unmatched paths don't leak
 	// into the request path.
-	if !strings.HasPrefix(resolvedNs.Path, nsHeader) {
+	if !strings.HasPrefix(entry.Path, nsHeader) {
 		return nil, ""
 	}
 
-	return resolvedNs, trimmedPath
+	return entry, trimmedPath
 }
 
 // GetLockingNamespace walks the namespace tree structure looking for

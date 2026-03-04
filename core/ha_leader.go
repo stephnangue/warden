@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-uuid"
+	"github.com/openbao/openbao/sdk/v2/helper/certutil"
 	"github.com/openbao/openbao/sdk/v2/helper/jsonutil"
 	"github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/logger"
@@ -22,8 +23,10 @@ const (
 // activeAdvertisement is stored in the barrier under core/leader/{uuid}
 // by the active node to advertise its identity to standby nodes.
 type activeAdvertisement struct {
-	RedirectAddr string `json:"redirect_addr"`
-	ClusterAddr  string `json:"cluster_addr,omitempty"`
+	RedirectAddr     string                    `json:"redirect_addr"`
+	ClusterAddr      string                    `json:"cluster_addr,omitempty"`
+	ClusterCert      []byte                    `json:"cluster_cert,omitempty"`
+	ClusterKeyParams *certutil.ClusterKeyParams `json:"cluster_key_params,omitempty"`
 }
 
 // clusterLeaderParams caches leader information to avoid repeated
@@ -38,8 +41,10 @@ type clusterLeaderParams struct {
 // at core/leader/{uuid}.
 func (c *Core) advertiseLeader(ctx context.Context, leaderUUID string) error {
 	adv := &activeAdvertisement{
-		RedirectAddr: c.redirectAddr,
-		ClusterAddr:  c.clusterAddrValue(),
+		RedirectAddr:     c.redirectAddr,
+		ClusterAddr:      c.clusterAddrValue(),
+		ClusterCert:      c.clusterCertDER(),
+		ClusterKeyParams: c.clusterKeyParams(),
 	}
 
 	encoded, err := jsonutil.EncodeJSON(adv)
@@ -56,9 +61,11 @@ func (c *Core) advertiseLeader(ctx context.Context, leaderUUID string) error {
 		return err
 	}
 
+	hasClusterTLS := adv.ClusterCert != nil
 	c.logger.Info("leader advertisement written",
 		logger.String("uuid", leaderUUID),
-		logger.String("redirect_addr", c.redirectAddr))
+		logger.String("redirect_addr", c.redirectAddr),
+		logger.Bool("cluster_tls", hasClusterTLS))
 
 	return nil
 }

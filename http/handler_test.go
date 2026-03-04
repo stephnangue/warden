@@ -4,8 +4,14 @@
 package http
 
 import (
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,7 +29,7 @@ func TestWrapGenericHandler_ValidV1Path(t *testing.T) {
 	})
 
 	// Wrap it
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	// Test with valid /v1/ path
 	req := httptest.NewRequest(http.MethodGet, "/v1/secret/data", nil)
@@ -42,7 +48,7 @@ func TestWrapGenericHandler_InvalidPath_NoV1Prefix(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	// Test with path without /v1/ prefix
 	req := httptest.NewRequest(http.MethodGet, "/api/secret/data", nil)
@@ -61,7 +67,7 @@ func TestWrapGenericHandler_InvalidPath_RootPath(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	// Test with root path
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -79,7 +85,7 @@ func TestWrapGenericHandler_InvalidPath_V2Prefix(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	// Test with /v2/ prefix (should fail)
 	req := httptest.NewRequest(http.MethodGet, "/v2/secret/data", nil)
@@ -97,7 +103,7 @@ func TestWrapGenericHandler_JustV1(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	// Test with just /v1/ path
 	req := httptest.NewRequest(http.MethodGet, "/v1/", nil)
@@ -115,7 +121,7 @@ func TestWrapGenericHandler_SysPath(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	// Test with sys path
 	req := httptest.NewRequest(http.MethodGet, "/v1/sys/init", nil)
@@ -132,7 +138,7 @@ func TestWrapGenericHandler_ErrorResponse_Format(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	// Test with invalid path
 	req := httptest.NewRequest(http.MethodGet, "/invalid", nil)
@@ -176,7 +182,7 @@ func TestWrapGenericHandler_PathPatterns(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			})
 
-			wrapped := wrapGenericHandler(nil, inner, nil)
+			wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 			w := httptest.NewRecorder()
@@ -216,7 +222,7 @@ func TestWrapGenericHandler_AllMethods(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			})
 
-			wrapped := wrapGenericHandler(nil, inner, nil)
+			wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 			req := httptest.NewRequest(method, "/v1/test", nil)
 			w := httptest.NewRecorder()
@@ -242,7 +248,7 @@ func TestWrapGenericHandler_ForwardsHeaders(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/test", nil)
 	req.Header.Set("Authorization", "Bearer token123")
@@ -263,7 +269,7 @@ func TestWrapGenericHandler_ForwardsQueryParams(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/test?list=true&limit=100", nil)
 	w := httptest.NewRecorder()
@@ -288,7 +294,7 @@ func TestWrapGenericHandler_InnerSetsCookies(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
 	w := httptest.NewRecorder()
@@ -308,7 +314,7 @@ func TestWrapGenericHandler_InnerWritesBody(t *testing.T) {
 		w.Write([]byte(`{"status": "ok"}`))
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
 	w := httptest.NewRecorder()
@@ -329,7 +335,7 @@ func TestWrapGenericHandler_CaseSensitivity(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	// /V1/ should fail (case sensitive)
 	req := httptest.NewRequest(http.MethodGet, "/V1/test", nil)
@@ -346,7 +352,7 @@ func TestWrapGenericHandler_PathWithFragment(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	// Fragments are not sent to server, but test URL handling
 	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
@@ -362,7 +368,7 @@ func TestWrapGenericHandler_LongPath(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := wrapGenericHandler(nil, inner, nil)
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
 
 	// Very long path with valid characters
 	longSegment := ""
@@ -377,4 +383,146 @@ func TestWrapGenericHandler_LongPath(t *testing.T) {
 	wrapped.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// =============================================================================
+// isConnectionError Tests
+// =============================================================================
+
+func TestIsConnectionError_Nil(t *testing.T) {
+	assert.False(t, isConnectionError(nil))
+}
+
+func TestIsConnectionError_ConnectionRefused(t *testing.T) {
+	assert.True(t, isConnectionError(syscall.ECONNREFUSED))
+}
+
+func TestIsConnectionError_ConnectionReset(t *testing.T) {
+	assert.True(t, isConnectionError(syscall.ECONNRESET))
+}
+
+func TestIsConnectionError_ConnectionAborted(t *testing.T) {
+	assert.True(t, isConnectionError(syscall.ECONNABORTED))
+}
+
+func TestIsConnectionError_EOF(t *testing.T) {
+	assert.True(t, isConnectionError(io.EOF))
+	assert.True(t, isConnectionError(io.ErrUnexpectedEOF))
+}
+
+func TestIsConnectionError_NetOpError(t *testing.T) {
+	opErr := &net.OpError{
+		Op:  "read",
+		Net: "tcp",
+		Err: errors.New("connection reset by peer"),
+	}
+	assert.True(t, isConnectionError(opErr))
+}
+
+func TestIsConnectionError_GenericError(t *testing.T) {
+	assert.False(t, isConnectionError(errors.New("some random error")))
+}
+
+func TestIsConnectionError_WrappedConnectionRefused(t *testing.T) {
+	inner := syscall.ECONNREFUSED
+	wrapped := errors.Join(errors.New("proxy error"), inner)
+	assert.True(t, isConnectionError(wrapped))
+}
+
+// =============================================================================
+// Proxy Director Tests
+// =============================================================================
+
+// TestProxyDirectorPreservesHostHeader verifies that the standby proxy Director
+// preserves the original Host header instead of rewriting it to the target.
+// This is critical for AWS SigV4: the client signs the Host header, so rewriting
+// it would cause signature verification to fail on the leader.
+func TestProxyDirectorPreservesHostHeader(t *testing.T) {
+	var receivedHost string
+	var receivedForwardedHost string
+
+	// Mock "leader" backend that records the Host header it receives.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHost = r.Host
+		receivedForwardedHost = r.Header.Get("X-Forwarded-Host")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	// Build a proxy with the same Director logic as standbyForwarder.getProxy
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = backendURL.Scheme
+			req.URL.Host = backendURL.Host
+			// Must NOT set req.Host — this is the fix under test.
+
+			req.Header.Set("X-Forwarded-Host", req.Host)
+
+			if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+				req.Header.Set("X-Forwarded-For", clientIP)
+			}
+		},
+	}
+
+	// Send a request with a specific Host header (simulating the client's
+	// original address, e.g., standby node or load balancer).
+	req := httptest.NewRequest(http.MethodGet, "/v1/aws/gateway", nil)
+	req.Host = "standby.example.com:8510"
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "standby.example.com:8510", receivedHost,
+		"backend should receive the original Host header, not the proxy target")
+	assert.Equal(t, "standby.example.com:8510", receivedForwardedHost,
+		"X-Forwarded-Host should contain the original Host")
+}
+
+// TestProxyDirectorSetsForwardingHeaders verifies that X-Forwarded-For and
+// X-Forwarded-Proto are set correctly by the Director.
+func TestProxyDirectorSetsForwardingHeaders(t *testing.T) {
+	var receivedXFF string
+	var receivedXFP string
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedXFF = r.Header.Get("X-Forwarded-For")
+		receivedXFP = r.Header.Get("X-Forwarded-Proto")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = backendURL.Scheme
+			req.URL.Host = backendURL.Host
+
+			req.Header.Set("X-Forwarded-Host", req.Host)
+
+			if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+				req.Header.Set("X-Forwarded-For", clientIP)
+			}
+			if req.TLS != nil {
+				req.Header.Set("X-Forwarded-Proto", "https")
+			} else if req.Header.Get("X-Forwarded-Proto") == "" {
+				req.Header.Set("X-Forwarded-Proto", "http")
+			}
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
+	req.RemoteAddr = "192.168.1.100:54321"
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	// Go's httputil.ReverseProxy appends its own X-Forwarded-For entry
+	// after the Director runs, so the value may contain duplicates.
+	assert.Contains(t, receivedXFF, "192.168.1.100")
+	assert.Equal(t, "http", receivedXFP)
 }

@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/hcl/v2/hclsimple"
@@ -23,6 +25,11 @@ type Config struct {
 	// APIAddr is the address advertised to clients for API requests.
 	// In HA mode, standby nodes redirect clients to this address on the active node.
 	APIAddr string `hcl:"api_addr,optional"`
+
+	// ClusterAddr is the address used for inter-node cluster communication.
+	// A dedicated cluster listener is started on this address with
+	// auto-generated mTLS certificates. Required when HA is enabled.
+	ClusterAddr string `hcl:"cluster_addr,optional"`
 
 	// DisableClustering disables HA clustering even if the storage backend supports it.
 	DisableClustering bool `hcl:"disable_clustering,optional"`
@@ -464,6 +471,27 @@ func LoadConfig(configFile string) (*Config, error) {
 			// valid
 		default:
 			return nil, fmt.Errorf("invalid ip_binding_policy %q: must be one of: disabled, optional, required", config.IPBindingPolicy)
+		}
+	}
+
+	// Validate listener TLS config
+	for i, ln := range config.Listeners {
+		if ln.TLSEnabled && (ln.TLSCertFile == "" || ln.TLSKeyFile == "") {
+			return nil, fmt.Errorf("listener[%d]: tls_enabled requires both tls_cert_file and tls_key_file", i)
+		}
+	}
+
+	// Validate cluster_addr format if set
+	if config.ClusterAddr != "" {
+		u, err := url.Parse(config.ClusterAddr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cluster_addr %q: %w", config.ClusterAddr, err)
+		}
+		if !strings.EqualFold(u.Scheme, "https") {
+			return nil, fmt.Errorf("cluster_addr must use https:// scheme, got %q", config.ClusterAddr)
+		}
+		if u.Host == "" {
+			return nil, fmt.Errorf("cluster_addr must include a host, got %q", config.ClusterAddr)
 		}
 	}
 

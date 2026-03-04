@@ -336,13 +336,11 @@ func (c *Core) initializeInternal(ctx context.Context, initParams *InitParams) (
 		results.SecretShares = barrierKeyShares
 	}
 
-	// Perform initial setup
-	// if err := c.setupCluster(ctx); err != nil {
-	// 	c.logger.Error("cluster setup failed during init",
-	// 		logger.Err(err),
-	// 	)
-	// 	return nil, err
-	// }
+	// Generate initial cluster TLS identity if HA is enabled.
+	if err := c.setupCluster(ctx); err != nil {
+		c.logger.Error("cluster setup failed during init", logger.Err(err))
+		return nil, err
+	}
 
 	activeCtx, ctxCancel := context.WithCancel(namespace.RootContext(nil))
 	if err := c.postUnseal(activeCtx, ctxCancel, standardUnsealStrategy{}); err != nil {

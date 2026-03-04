@@ -47,13 +47,15 @@ type vaultBackend struct {
 	tlsSkipVerify bool
 }
 
-// extractToken extracts Warden token from X-Vault-Token header or Authorization: Bearer
+// extractToken extracts the client token from the request.
+// Checks X-Warden-Token (non-transparent), X-Vault-Token, and Authorization: Bearer (transparent).
 func extractToken(r *http.Request) string {
-	// Primary: X-Vault-Token header (standard Vault header)
+	if token := r.Header.Get("X-Warden-Token"); token != "" {
+		return token
+	}
 	if token := r.Header.Get("X-Vault-Token"); token != "" {
 		return token
 	}
-	// Fallback: Authorization: Bearer
 	authHeader := r.Header.Get("Authorization")
 	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
 		return authHeader[7:]

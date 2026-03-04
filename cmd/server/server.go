@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -32,6 +33,7 @@ import (
 	"github.com/stephnangue/warden/internal/configutil"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/listener/api"
+	clusterlistener "github.com/stephnangue/warden/listener/cluster"
 	log "github.com/stephnangue/warden/logger"
 	wardenlogical "github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/physical"
@@ -213,6 +215,17 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create the secure random reader: %w", err)
 	}
 
+	// Validate HA configuration: cluster_addr and api_addr are required
+	// when the storage backend supports HA and clustering is not disabled.
+	if ha, ok := storage.(phy.HABackend); ok && ha.HAEnabled() && !conf.DisableClustering {
+		if conf.APIAddr == "" {
+			return fmt.Errorf("api_addr is required when HA is enabled")
+		}
+		if conf.ClusterAddr == "" {
+			return fmt.Errorf("cluster_addr is required when HA is enabled")
+		}
+	}
+
 	coreConfig := createCoreConfig(logger, conf, storage, barrierSeal, unwrapSeal, secureRandomReader)
 
 	newCore, newCoreError := core.NewCore(&coreConfig)
@@ -251,12 +264,13 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Create HTTP handler from core
 	httpHandler := wardenhttp.Handler(&wardenhttp.HandlerProperties{
-		Core:   newCore,
-		Logger: logger,
+		Core:                newCore,
+		Logger:              logger,
+		ClusterTLSConfigFunc: newCore.ClusterTLSConfig,
 	})
 
 	// init the listeners
-	lns, err := initListeners(httpHandler, conf, logger, &infoKeys, &info)
+	lns, err := initListeners(httpHandler, newCore, conf, logger, &infoKeys, &info)
 	if err != nil {
 		// Error already logged in initListeners
 		return err
@@ -459,10 +473,10 @@ func buildStorage(config *config.Config, logger *log.GatedLogger) (phy.Backend, 
 	return storage, nil
 }
 
-func initListeners(httpHandler http.Handler, config *config.Config, logger *log.GatedLogger, infoKeys *[]string, info *map[string]string) ([]listener.Listener, error) {
-	lns := make([]listener.Listener, 0, len(config.Listeners))
+func initListeners(httpHandler http.Handler, c *core.Core, conf *config.Config, logger *log.GatedLogger, infoKeys *[]string, info *map[string]string) ([]listener.Listener, error) {
+	lns := make([]listener.Listener, 0, len(conf.Listeners)+1)
 
-	for _, lnConfig := range config.Listeners {
+	for _, lnConfig := range conf.Listeners {
 		switch lnConfig.Type {
 		case listenerTypeTCP, listenerTypeUnix:
 			// construct api listener using shared HTTP handler
@@ -483,7 +497,46 @@ func initListeners(httpHandler http.Handler, config *config.Config, logger *log.
 		}
 	}
 
+	// Start a dedicated cluster listener when cluster_addr is configured.
+	// This listener uses auto-generated mTLS certificates from the Core's
+	// cluster identity for securing inter-node request forwarding.
+	if conf.ClusterAddr != "" {
+		clusterAddr, err := parseListenAddress(conf.ClusterAddr)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing cluster_addr %q: %w", conf.ClusterAddr, err)
+		}
+
+		clusterLn, err := clusterlistener.NewClusterListener(clusterlistener.ClusterListenerConfig{
+			Logger:        logger.WithSystem("cluster"),
+			Address:       clusterAddr,
+			Handler:       httpHandler,
+			TLSConfigFunc: c.ClusterTLSConfig,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error initializing cluster listener: %w", err)
+		}
+		lns = append(lns, clusterLn)
+
+		(*info)["cluster address"] = conf.ClusterAddr
+		*infoKeys = append(*infoKeys, "cluster address")
+		(*info)["cluster listener"] = clusterAddr + " (mTLS auto)"
+		*infoKeys = append(*infoKeys, "cluster listener")
+	}
+
 	return lns, nil
+}
+
+// parseListenAddress extracts the host:port from a URL string.
+// e.g., "https://127.0.0.1:8401" → "127.0.0.1:8401"
+func parseListenAddress(addr string) (string, error) {
+	if strings.Contains(addr, "://") {
+		u, err := url.Parse(addr)
+		if err != nil {
+			return "", err
+		}
+		return u.Host, nil
+	}
+	return addr, nil
 }
 
 // setSeal return barrierSeal, barrierWrapper, unwrapSeal, and all the created seals from the configs so we can close them in run
@@ -570,16 +623,16 @@ func createCoreConfig(logger *log.GatedLogger, conf *config.Config, backend phy.
 		haPhysical = ha
 	}
 
-	// Today api_addr serves as both the client-facing address and the
-	// internal cluster address because Warden uses HTTP reverse-proxy
-	// forwarding between nodes. When a Raft backend is introduced,
-	// these two may diverge (separate gRPC cluster transport), so we
-	// keep RedirectAddr and ClusterAddr as distinct CoreConfig fields.
+	// ClusterAddr is required when HA is enabled (validated in run()).
+	// When HA is not enabled, it may be empty — setupCluster handles
+	// that case by skipping cluster TLS setup.
+	clusterAddr := conf.ClusterAddr
+
 	coreConfig := &core.CoreConfig{
 		RawConfig:          conf,
 		Physical:           backend,
 		RedirectAddr:       conf.APIAddr,
-		ClusterAddr:        conf.APIAddr,
+		ClusterAddr:        clusterAddr,
 		StorageType:        conf.Storage.Type,
 		HAPhysical:         haPhysical,
 		Seal:               barrierSeal,

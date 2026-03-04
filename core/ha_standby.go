@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"fmt"
-	"math/rand/v2"
 	"time"
 
 	metrics "github.com/hashicorp/go-metrics/compat"
@@ -24,13 +23,6 @@ var lockRetryInterval = 10 * time.Second
 // DefaultMaxRequestDuration is the maximum time to wait for in-flight
 // requests to complete when stepping down from active.
 var DefaultMaxRequestDuration = 90 * time.Second
-
-// lockRetryWithJitter returns lockRetryInterval with 20% random jitter
-// to prevent thundering herd when multiple standby nodes retry simultaneously.
-func lockRetryWithJitter() time.Duration {
-	jitter := time.Duration(rand.Int64N(int64(lockRetryInterval) / 5))
-	return lockRetryInterval + jitter
-}
 
 // runStandby is the main HA loop wrapper. It delegates to runStandbyOnce
 // for each iteration and supports restarting via standbyRestartCh.
@@ -88,7 +80,7 @@ func (c *Core) runStandbyOnce(manualStepDownCh chan struct{}, stopCh chan struct
 		if err != nil {
 			c.logger.Error("failed to generate leader UUID", logger.Err(err))
 			select {
-			case <-time.After(lockRetryWithJitter()):
+			case <-time.After(lockRetryInterval):
 				continue
 			case <-stopCh:
 				return false
@@ -99,7 +91,7 @@ func (c *Core) runStandbyOnce(manualStepDownCh chan struct{}, stopCh chan struct
 		if err != nil {
 			c.logger.Error("failed to create HA lock", logger.Err(err))
 			select {
-			case <-time.After(lockRetryWithJitter()):
+			case <-time.After(lockRetryInterval):
 				continue
 			case <-stopCh:
 				return false
@@ -114,7 +106,7 @@ func (c *Core) runStandbyOnce(manualStepDownCh chan struct{}, stopCh chan struct
 			c.logger.Error("failed to acquire HA lock", logger.Err(err))
 			metrics.IncrCounter([]string{"ha", "lock", "acquire", "error"}, 1)
 			select {
-			case <-time.After(lockRetryWithJitter()):
+			case <-time.After(lockRetryInterval):
 				continue
 			case <-stopCh:
 				return false
@@ -141,7 +133,7 @@ func (c *Core) runStandbyOnce(manualStepDownCh chan struct{}, stopCh chan struct
 					c.logger.Error("failed to release lock after fencing registration failure", logger.Err(err))
 				}
 				select {
-				case <-time.After(lockRetryWithJitter()):
+				case <-time.After(lockRetryInterval):
 					continue
 				case <-stopCh:
 					return false
@@ -198,32 +190,36 @@ func (c *Core) becomeActive(leaderUUID string, leaderLostCh <-chan struct{}, man
 
 	activeCtx, activeCtxCancel := context.WithCancel(namespace.RootContext(context.TODO()))
 
-	// Write a preliminary leader advertisement BEFORE postUnseal so that
-	// standby nodes can discover and forward to this node immediately,
-	// rather than getting empty results during the postUnseal window.
+	// Generate a new cluster TLS identity for this leadership term.
+	// setupCluster atomically overwrites any previous identity, avoiding
+	// a nil window that would break concurrent standby forwarding.
+	if err := c.setupCluster(activeCtx); err != nil {
+		c.logger.Error("cluster TLS setup failed", logger.Err(err))
+		c.stateLock.Unlock()
+		activeCtxCancel()
+		return false, fmt.Errorf("cluster TLS setup failed: %w", err)
+	}
+
+	postUnsealStart := time.Now()
+	if err := c.postUnseal(activeCtx, activeCtxCancel, standardUnsealStrategy{}); err != nil {
+		c.stateLock.Unlock()
+		activeCtxCancel()
+		c.logger.Error("post-unseal failed during active transition", logger.Err(err))
+		metrics.MeasureSince([]string{"core", "leadership_setup_failed"}, activeTime)
+		return false, err
+	}
+
+	// Write leader advertisement AFTER postUnseal succeeds so standby
+	// nodes never discover and forward to a node that isn't fully active.
 	leaderInfo := &clusterLeaderParams{
 		LeaderUUID:   leaderUUID,
 		RedirectAddr: c.redirectAddr,
 		ClusterAddr:  c.clusterAddrValue(),
 	}
 	if err := c.advertiseLeader(activeCtx, leaderUUID); err != nil {
-		c.logger.Warn("failed to write preliminary leader advertisement", logger.Err(err))
+		c.logger.Warn("failed to write leader advertisement", logger.Err(err))
 	}
 	c.leaderParams.Store(leaderInfo)
-
-	postUnsealStart := time.Now()
-	if err := c.postUnseal(activeCtx, activeCtxCancel, standardUnsealStrategy{}); err != nil {
-		c.stateLock.Unlock()
-		activeCtxCancel()
-		// Clean up preliminary advertisement on failure
-		if cleanErr := c.clearLeader(leaderUUID); cleanErr != nil {
-			c.logger.Warn("failed to clear preliminary leader advertisement", logger.Err(cleanErr))
-		}
-		c.leaderParams.Store((*clusterLeaderParams)(nil))
-		c.logger.Error("post-unseal failed during active transition", logger.Err(err))
-		metrics.MeasureSince([]string{"core", "leadership_setup_failed"}, activeTime)
-		return false, err
-	}
 
 	metrics.MeasureSince([]string{"ha", "post_unseal", "duration"}, postUnsealStart)
 	metrics.IncrCounter([]string{"ha", "transition", "standby_to_active"}, 1)

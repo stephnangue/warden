@@ -509,7 +509,7 @@ func TestBuildLogicalRequest_PathStripping(t *testing.T) {
 func TestHandleLogical_RejectsUnsupportedMethods(t *testing.T) {
 	// handleLogical rejects unsupported methods before accessing core,
 	// so we can pass nil core for these tests.
-	handler := handleLogical(nil, nil)
+	handler := handleLogical(nil, nil, nil)
 
 	unsupportedMethods := []string{
 		http.MethodConnect,

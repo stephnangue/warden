@@ -6,7 +6,8 @@ min_cred_spec_rotation_period   = "5m"
 
 ip_binding_policy = "optional"
 
-api_addr = "https://127.0.0.1:8400"
+api_addr     = "https://127.0.0.1:8400"
+cluster_addr = "https://127.0.0.1:8401"
 
 seal "static" {
   current_key_id = "20251221-1"

@@ -51,15 +51,61 @@ make brd-fast
 
 ## Running Tests
 
+### Unit Tests
+
 ```bash
 # Unit tests with race detection and coverage
 make test-unit
-
-# Integration tests
-make test-integration
 ```
 
 Coverage output is generated in `coverage.out`.
+
+### End-to-End Tests
+
+E2E tests run against a live 3-node HA cluster with Vault, Hydra, and PostgreSQL.
+
+| Command | Description |
+|---------|-------------|
+| `make test-e2e` | Start the cluster, run all e2e tests, tear down |
+| `make test-e2e-setup` | Start the e2e cluster only |
+| `make test-e2e-teardown` | Stop the e2e cluster |
+| `make test-e2e-reset` | Reset and restart the e2e cluster |
+
+To run a specific test suite or single test against an already-running cluster:
+
+```bash
+make test-e2e-setup
+go test -tags e2e -v ./e2e/forwarding/
+go test -tags e2e -run TestSigV4ThroughStandbyForwarding ./e2e/forwarding/ -v
+make test-e2e-teardown
+```
+
+#### E2E Test Suites
+
+| Package | Focus |
+|---------|-------|
+| `e2e/cluster` | Split-brain detection |
+| `e2e/ha` | Leader election, step-down, failover, node rejoin |
+| `e2e/forwarding` | Standby-to-leader request forwarding, SigV4 preservation |
+| `e2e/provider` | Vault transparent/non-transparent gateway, JWT validation |
+| `e2e/credential` | Credential issuance, caching, TTL expiry, cross-namespace |
+| `e2e/rotation` | Credential source rotation, activation delay, failover persistence |
+| `e2e/namespace` | Namespace CRUD and isolation |
+| `e2e/seal` | Seal/unseal operations |
+| `e2e/auth` | Authentication flows |
+| `e2e/audit` | Audit logging |
+| `e2e/concurrency` | Concurrent request handling |
+
+#### Writing E2E Tests
+
+- Use the `//go:build e2e` build tag
+- Import helpers: `h "github.com/stephnangue/warden/e2e/helpers"`
+- Use `h.GetLeaderPort(t)` and `h.GetStandbyPort(t)` to discover cluster topology
+- Register cleanup via `t.Cleanup` **before** creating resources to avoid orphans on partial failure
+- Accept `409` (conflict) in setup to be idempotent across test reruns
+- Use `h.GetLeaderPort(t)` at cleanup time (not a captured port) to handle leader changes
+
+See [e2e/README.md](e2e/README.md) for full cluster architecture and configuration details.
 
 ## Development Workflow
 

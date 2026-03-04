@@ -283,7 +283,34 @@ Production mode requires a configuration file and external dependencies (Postgre
 ./warden server --config=./warden.hcl
 ```
 
-For high availability, run multiple Warden nodes pointing at the same storage backend. Each node needs `ha_storage` (or an HA-capable `storage` block), plus `api_addr` so standby nodes know where to forward requests. One node becomes active; the rest operate as hot standbys that automatically promote on leader failure.
+### High Availability
+
+Warden supports active/standby HA. Multiple nodes share the same storage backend and use PostgreSQL advisory locks for leader election. One node becomes the active leader; the rest are hot standbys that automatically promote on leader failure.
+
+**How it works:**
+
+- **Standby forwarding** — Standby nodes forward all write and read requests to the active leader via mTLS reverse proxy. Clients can send requests to any node; the response is the same regardless of which node receives it.
+- **Automatic failover** — If the leader fails, a standby acquires the lock and promotes itself. Standby nodes detect the leader change and redirect their forwarding proxy to the new leader.
+- **Sealed node protection** — Sealed nodes are prevented from acquiring the leadership lock, ensuring only fully operational nodes can become leader.
+
+**Configuration** — each node needs `api_addr` (its own API address, used by the leader to advertise itself), `cluster_addr` (its mTLS cluster address for inter-node communication), and a shared storage backend with `ha_enabled`:
+
+```hcl
+api_addr     = "http://10.0.1.1:8400"
+cluster_addr = "https://10.0.1.1:8401"
+
+storage "postgres" {
+  connection_url = "postgres://warden:password@db:5432/warden?sslmode=require"
+  table          = "warden_store"
+  ha_table       = "warden_ha_locks"
+  ha_enabled     = "true"
+}
+
+listener "tcp" {
+  address     = "0.0.0.0:8400"
+  tls_enabled = false
+}
+```
 
 ### Configuration
 
@@ -318,6 +345,7 @@ make deps-up          # Start development dependencies
 make brd-fast         # Build and run (skip tests)
 make dev-watch        # Hot reload for development
 make test-unit        # Run unit tests with race detection
+make test-e2e         # Run e2e tests (3-node HA cluster)
 ```
 
 ## License

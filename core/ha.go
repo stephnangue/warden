@@ -81,14 +81,23 @@ func (c *Core) LeaderLocked() (isLeader bool, leaderAddr, clusterAddr string, er
 	// Read the leader advertisement from barrier storage.
 	adv, err := c.readLeaderAdvertisement(context.Background(), leaderUUID)
 	if err != nil {
-		c.logger.Debug("failed to read leader advertisement, returning empty",
-			logger.Err(err))
+		c.logger.Warn("failed to read leader advertisement from barrier",
+			logger.Err(err), logger.String("leader_uuid", leaderUUID))
 		return false, "", "", nil
 	}
 	if adv == nil {
 		// Advertisement not yet written (brief race on startup).
 		// Fall back to empty — caller will retry.
 		return false, "", "", nil
+	}
+
+	// Load the cluster TLS identity from the leader advertisement so
+	// this standby can authenticate via mTLS when forwarding requests.
+	if adv.ClusterCert != nil && adv.ClusterKeyParams != nil {
+		if err := c.loadLocalClusterTLS(*adv); err != nil {
+			c.logger.Warn("failed to load cluster TLS from leader advertisement",
+				logger.Err(err))
+		}
 	}
 
 	return false, adv.RedirectAddr, adv.ClusterAddr, nil
