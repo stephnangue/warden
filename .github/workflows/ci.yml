@@ -5,9 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
 
 jobs:
-  test:
+  unit:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -26,7 +27,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [unit]
     timeout-minutes: 45
     steps:
       - name: Checkout
