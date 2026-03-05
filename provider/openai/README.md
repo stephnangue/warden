@@ -173,6 +173,32 @@ path "openai/role/+/gateway/v1/chat/completions" {
 EOF
 ```
 
+You can also combine parameter restrictions with runtime conditions to protect costly inference endpoints. For example, restrict chat completions to specific models and trusted networks during business hours:
+
+```bash
+warden policy write openai-prod-restricted - <<EOF
+path "openai/role/+/gateway/v1/chat/completions" {
+  capabilities = ["create"]
+  allowed_parameters = {
+    "model" = ["gpt-4o", "gpt-4o-mini"]
+    "stream" = ["true"]
+    "*"      = []
+  }
+  conditions {
+    source_ip   = ["10.0.0.0/8"]
+    time_window = ["08:00-18:00 UTC"]
+    day_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+  }
+}
+
+path "openai/role/+/gateway/v1/models" {
+  capabilities = ["read"]
+}
+EOF
+```
+
+Condition types are AND-ed (all must be satisfied), values within each type are OR-ed (at least one must match). Supported types: `source_ip` (CIDR or bare IP), `time_window` (`HH:MM-HH:MM TZ`, supports midnight-spanning), `day_of_week` (3-letter abbreviations).
+
 Verify:
 
 ```bash

@@ -217,6 +217,27 @@ path "azure/role/+/gateway*" {
 EOF
 ```
 
+For tighter control, add runtime conditions to protect destructive operations on specific paths. For example, restrict resource group deletion to trusted networks during business hours while leaving read access unconditional:
+
+```bash
+warden policy write azure-prod-restricted - <<EOF
+path "azure/role/+/gateway/management.azure.com/subscriptions/+/resourcegroups/*" {
+  capabilities = ["delete"]
+  conditions {
+    source_ip   = ["10.0.0.0/8"]
+    time_window = ["08:00-18:00 UTC"]
+    day_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+  }
+}
+
+path "azure/role/+/gateway*" {
+  capabilities = ["create", "read", "update", "patch"]
+}
+EOF
+```
+
+Condition types are AND-ed (all must be satisfied), values within each type are OR-ed (at least one must match). Supported types: `source_ip` (CIDR or bare IP), `time_window` (`HH:MM-HH:MM TZ`, supports midnight-spanning), `day_of_week` (3-letter abbreviations).
+
 Verify:
 
 ```bash

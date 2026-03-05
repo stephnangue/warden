@@ -220,3 +220,110 @@ func TestTokenTTLDecrement(t *testing.T) {
 		t.Fatalf("expected non-empty token")
 	}
 }
+
+// TestConditionsSourceIPAllowed verifies that a policy with source_ip condition
+// matching the request IP (127.0.0.1 for localhost) allows the request (T-069).
+func TestConditionsSourceIPAllowed(t *testing.T) {
+	port := h.GetLeaderPort(t)
+
+	h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-allow", port,
+		`{"policy":"path \"vault-nt/gateway/*\" {\n  capabilities = [\"read\",\"list\"]\n  conditions {\n    source_ip = [\"127.0.0.0/8\"]\n  }\n}"}`)
+	h.APIRequest(t, "POST", "auth/jwt/role/e2e-cond-allow-test", port,
+		`{"token_policies":["e2e-cond-allow"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
+
+	jwt := h.GetDefaultJWT(t)
+	loginStatus, token := h.LoginJWT(t, jwt, "e2e-cond-allow-test", port)
+	if loginStatus != 200 && loginStatus != 201 {
+		t.Fatalf("expected 200 or 201 on login, got %d", loginStatus)
+	}
+
+	status, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", port, token)
+	if status != 200 {
+		t.Fatalf("expected 200 with matching source_ip condition, got %d", status)
+	}
+
+	h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-cond-allow-test", port, "")
+	h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-cond-allow", port, "")
+}
+
+// TestConditionsSourceIPDenied verifies that a policy with source_ip condition
+// NOT matching the request IP denies even with correct capabilities (T-070).
+func TestConditionsSourceIPDenied(t *testing.T) {
+	port := h.GetLeaderPort(t)
+
+	h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-deny", port,
+		`{"policy":"path \"vault-nt/gateway/*\" {\n  capabilities = [\"read\",\"list\"]\n  conditions {\n    source_ip = [\"10.0.0.0/8\"]\n  }\n}"}`)
+	h.APIRequest(t, "POST", "auth/jwt/role/e2e-cond-deny-test", port,
+		`{"token_policies":["e2e-cond-deny"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
+
+	jwt := h.GetDefaultJWT(t)
+	loginStatus, token := h.LoginJWT(t, jwt, "e2e-cond-deny-test", port)
+	if loginStatus != 200 && loginStatus != 201 {
+		t.Fatalf("expected 200 or 201 on login, got %d", loginStatus)
+	}
+
+	status, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", port, token)
+	if status != 403 {
+		t.Fatalf("expected 403 with non-matching source_ip condition, got %d", status)
+	}
+
+	h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-cond-deny-test", port, "")
+	h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-cond-deny", port, "")
+}
+
+// TestConditionsInvalidCIDRRejected verifies that creating a policy with an
+// invalid CIDR in source_ip conditions is rejected at parse time (T-071).
+func TestConditionsInvalidCIDRRejected(t *testing.T) {
+	port := h.GetLeaderPort(t)
+
+	status, _ := h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-bad-cidr", port,
+		`{"policy":"path \"secret/*\" {\n  capabilities = [\"read\"]\n  conditions {\n    source_ip = [\"not-a-cidr\"]\n  }\n}"}`)
+	if status != 400 {
+		t.Fatalf("expected 400 for invalid CIDR, got %d", status)
+	}
+}
+
+// TestConditionsUnknownTypeRejected verifies that creating a policy with an
+// unknown condition type is rejected at parse time (T-072).
+func TestConditionsUnknownTypeRejected(t *testing.T) {
+	port := h.GetLeaderPort(t)
+
+	status, _ := h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-bad-type", port,
+		`{"policy":"path \"secret/*\" {\n  capabilities = [\"read\"]\n  conditions {\n    hostname = [\"foo.example.com\"]\n  }\n}"}`)
+	if status != 400 {
+		t.Fatalf("expected 400 for unknown condition type, got %d", status)
+	}
+}
+
+// TestConditionsMergeWithUnconditional verifies that when a role has both a
+// conditional and an unconditional policy for the same path, the unconditional
+// policy wins (OR semantics) and access is granted (T-073).
+func TestConditionsMergeWithUnconditional(t *testing.T) {
+	port := h.GetLeaderPort(t)
+
+	// Conditional policy: source_ip does NOT match loopback
+	h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-restricted", port,
+		`{"policy":"path \"vault-nt/gateway/*\" {\n  capabilities = [\"read\",\"list\"]\n  conditions {\n    source_ip = [\"10.0.0.0/8\"]\n  }\n}"}`)
+	// Unconditional policy for same path
+	h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-unrestricted", port,
+		`{"policy":"path \"vault-nt/gateway/*\" {\n  capabilities = [\"read\",\"list\"]\n}"}`)
+	// Role with both policies
+	h.APIRequest(t, "POST", "auth/jwt/role/e2e-cond-merge-test", port,
+		`{"token_policies":["e2e-cond-restricted","e2e-cond-unrestricted"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
+
+	jwt := h.GetDefaultJWT(t)
+	loginStatus, token := h.LoginJWT(t, jwt, "e2e-cond-merge-test", port)
+	if loginStatus != 200 && loginStatus != 201 {
+		t.Fatalf("expected 200 or 201 on login, got %d", loginStatus)
+	}
+
+	// Unconditional policy wins: access granted despite source_ip mismatch
+	status, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", port, token)
+	if status != 200 {
+		t.Fatalf("expected 200 when unconditional policy overrides conditions, got %d", status)
+	}
+
+	h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-cond-merge-test", port, "")
+	h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-cond-restricted", port, "")
+	h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-cond-unrestricted", port, "")
+}

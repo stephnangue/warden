@@ -2,6 +2,20 @@
 
 All notable changes to Warden are documented in this file.
 
+## [v0.3.0] — 2026-03-05
+
+### New Features
+
+- **Runtime Conditions for CBP Policies** — Policies now support a `conditions` block that restricts access based on runtime context, even when capabilities match. Supported condition types: `source_ip` (CIDR ranges or bare IPs, IPv4/IPv6), `time_window` (time-of-day windows with timezone, including midnight-spanning ranges), and `day_of_week` (3-letter abbreviations). Condition types are AND-ed (all must be satisfied), values within each type are OR-ed (at least one must match). Conditions are validated at policy parse time, not per-request. Paths without conditions work as before. When multiple policies apply to the same path, OR semantics apply: if any policy has no conditions, access is unconditional.
+
+### Documentation
+
+- **Provider README updates** — All 8 provider READMEs (AWS, Azure, GCP, GitHub, GitLab, Vault, Mistral, OpenAI) now include runtime conditions examples showing how to protect destructive or costly operations on specific paths.
+
+### Infrastructure
+
+- **CI release gating** — Release workflow now requires unit and e2e tests to pass before publishing. (#56)
+
 ## [v0.2.1] — 2026-03-05
 
 ### Improvements
@@ -71,6 +85,7 @@ Initial release. See the [v0.1.0 release notes](https://github.com/stephnangue/w
 - Docker image published to `ghcr.io/stephnangue/warden`
 - Pre-built binaries for Linux, macOS, and Windows
 
+[v0.3.0]: https://github.com/stephnangue/warden/compare/v0.2.1...v0.3.0
 [v0.2.1]: https://github.com/stephnangue/warden/compare/v0.2.0...v0.2.1
 [v0.2.0]: https://github.com/stephnangue/warden/compare/v0.1.1...v0.2.0
 [v0.1.1]: https://github.com/stephnangue/warden/compare/v0.1.0...v0.1.1
