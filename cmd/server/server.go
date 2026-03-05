@@ -264,9 +264,10 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Create HTTP handler from core
 	httpHandler := wardenhttp.Handler(&wardenhttp.HandlerProperties{
-		Core:                newCore,
-		Logger:              logger,
+		Core:                 newCore,
+		Logger:               logger,
 		ClusterTLSConfigFunc: newCore.ClusterTLSConfig,
+		ForwardingTimeout:    newCore.ClusterConfig().ForwardingTimeout,
 	})
 
 	// init the listeners
@@ -506,11 +507,14 @@ func initListeners(httpHandler http.Handler, c *core.Core, conf *config.Config, 
 			return nil, fmt.Errorf("error parsing cluster_addr %q: %w", conf.ClusterAddr, err)
 		}
 
+		cc := c.ClusterConfig()
 		clusterLn, err := clusterlistener.NewClusterListener(clusterlistener.ClusterListenerConfig{
 			Logger:        logger.WithSystem("cluster"),
 			Address:       clusterAddr,
 			Handler:       httpHandler,
 			TLSConfigFunc: c.ClusterTLSConfig,
+			ReadTimeout:   cc.ClusterListenerReadTimeout,
+			WriteTimeout:  cc.ClusterListenerWriteTimeout,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("error initializing cluster listener: %w", err)

@@ -13,14 +13,15 @@ import (
 	"syscall"
 	"time"
 
+	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/stephnangue/warden/core"
 	"github.com/stephnangue/warden/logger"
 )
 
 const (
-	// forwardingTimeout is the maximum time for a forwarded request to
-	// the active node before timing out.
-	forwardingTimeout = 60 * time.Second
+	// defaultForwardingTimeout is the maximum time for a forwarded request to
+	// the active node before timing out, when not explicitly configured.
+	defaultForwardingTimeout = 60 * time.Second
 )
 
 // HandlerProperties contains configuration for the HTTP handler
@@ -32,6 +33,10 @@ type HandlerProperties struct {
 	// forwarding requests from standby to active. When nil, forwarding
 	// uses plain HTTP (backward compatible).
 	ClusterTLSConfigFunc func() *tls.Config
+
+	// ForwardingTimeout overrides the default forwarding timeout.
+	// Zero means use the default (60s).
+	ForwardingTimeout time.Duration
 }
 
 // Handler creates and returns the main HTTP handler for Warden.
@@ -43,7 +48,11 @@ func Handler(props *HandlerProperties) http.Handler {
 	// Create a shared forwarder for standby-to-active request forwarding.
 	// Used both by the generic handler (pre-check) and the logical handler
 	// (mid-request standby transition race).
-	forwarder := newStandbyForwarder(log, props.ClusterTLSConfigFunc)
+	fwdTimeout := props.ForwardingTimeout
+	if fwdTimeout == 0 {
+		fwdTimeout = defaultForwardingTimeout
+	}
+	forwarder := newStandbyForwarder(log, props.ClusterTLSConfigFunc, fwdTimeout)
 	forwarder.core = core
 
 	// HA endpoints — must work on standby and sealed nodes.
@@ -85,15 +94,16 @@ var standbyAllowedPaths = map[string]bool{
 type standbyForwarder struct {
 	mu                sync.RWMutex
 	proxy             *httputil.ReverseProxy
-	cachedClusterAddr string // cluster address of the last-known leader; used to detect leader changes and invalidate the cached proxy
-	cachedServerName  string // cert CN of the last-known leader; used to detect cert rotation across leadership terms
+	cachedClusterAddr string         // cluster address of the last-known leader; used to detect leader changes and invalidate the cached proxy
+	cachedServerName  string         // cert CN of the last-known leader; used to detect cert rotation across leadership terms
 	logger            *logger.GatedLogger
 	tlsConfigFunc     func() *tls.Config // returns cluster mTLS config; nil = plain HTTP
 	core              *core.Core         // used for fresh leader lookups in ErrorHandler
+	forwardingTimeout time.Duration      // max time for a forwarded request
 }
 
-func newStandbyForwarder(log *logger.GatedLogger, tlsConfigFunc func() *tls.Config) *standbyForwarder {
-	return &standbyForwarder{logger: log, tlsConfigFunc: tlsConfigFunc}
+func newStandbyForwarder(log *logger.GatedLogger, tlsConfigFunc func() *tls.Config, forwardingTimeout time.Duration) *standbyForwarder {
+	return &standbyForwarder{logger: log, tlsConfigFunc: tlsConfigFunc, forwardingTimeout: forwardingTimeout}
 }
 
 // getProxy returns a reverse proxy targeting the current leader's cluster
@@ -134,7 +144,7 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: forwardingTimeout,
+		ResponseHeaderTimeout: f.forwardingTimeout,
 		IdleConnTimeout:       30 * time.Second,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   10,
@@ -165,6 +175,14 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 		ServerName:   serverName,
 	}
 
+	// Close idle connections from the old proxy's transport to prevent
+	// leaking connections to a previous leader.
+	if f.proxy != nil {
+		if t, ok := f.proxy.Transport.(*http.Transport); ok {
+			t.CloseIdleConnections()
+		}
+	}
+
 	f.proxy = &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
@@ -178,11 +196,15 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 			// Standard proxy header: original Host for backend awareness.
 			req.Header.Set("X-Forwarded-Host", req.Host)
 
-			// Set forwarding headers from the direct client connection.Ò
-			// Overwrite (not append) X-Forwarded-For to prevent spoofing
-			// from untrusted clients injecting arbitrary IPs.
+			// Set forwarding headers from the direct client connection.
+			// Append to X-Forwarded-For to preserve the chain from
+			// upstream proxies (load balancers, etc.).
 			if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
-				req.Header.Set("X-Forwarded-For", clientIP)
+				if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
+					req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
+				} else {
+					req.Header.Set("X-Forwarded-For", clientIP)
+				}
 			}
 			if req.TLS != nil {
 				req.Header.Set("X-Forwarded-Proto", "https")
@@ -219,7 +241,15 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 				return
 			}
 
-			// For non-connection errors (e.g., TLS handshake), fall back to redirect
+			// For non-connection errors (e.g., TLS handshake), do a fresh
+			// leader lookup before redirecting to avoid stale addresses.
+			if f.core != nil {
+				_, freshLeaderAddr, _, leaderErr := f.core.Leader()
+				if leaderErr == nil && freshLeaderAddr != "" {
+					respondStandby(w, r, freshLeaderAddr)
+					return
+				}
+			}
 			respondStandby(w, r, redirectAddr)
 		},
 	}
@@ -270,8 +300,10 @@ func wrapGenericHandler(c *core.Core, handler http.Handler, log *logger.GatedLog
 // forwardToActive forwards a request to the active node via the shared
 // reverse proxy. Falls back to a 307 redirect if the proxy is unavailable.
 func forwardToActive(c *core.Core, forwarder *standbyForwarder, w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	_, leaderAddr, clusterAddr, err := c.Leader()
 	if err != nil || leaderAddr == "" {
+		metrics.IncrCounter([]string{"ha", "forward", "error"}, 1)
 		respondError(w, http.StatusServiceUnavailable, "node is standby and no active node found")
 		return
 	}
@@ -279,10 +311,13 @@ func forwardToActive(c *core.Core, forwarder *standbyForwarder, w http.ResponseW
 	if clusterAddr != "" {
 		if proxy := forwarder.getProxy(clusterAddr, leaderAddr); proxy != nil {
 			proxy.ServeHTTP(w, r)
+			metrics.MeasureSince([]string{"ha", "forward", "duration"}, start)
+			metrics.IncrCounter([]string{"ha", "forward", "success"}, 1)
 			return
 		}
 	}
 
+	metrics.IncrCounter([]string{"ha", "forward", "redirect"}, 1)
 	respondStandby(w, r, leaderAddr)
 }
 
@@ -315,7 +350,9 @@ func isConnectionError(err error) bool {
 	}
 	var netErr *net.OpError
 	if errors.As(err, &netErr) {
-		return true
+		// Only match dial errors (connection refused/timeout) and
+		// read/write errors (connection reset). Exclude DNS, TLS, etc.
+		return netErr.Op == "dial" || netErr.Op == "read" || netErr.Op == "write"
 	}
 	return false
 }
