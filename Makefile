@@ -77,7 +77,7 @@ test-e2e-setup:
 # Run all e2e tests (starts cluster, runs tests, tears down)
 test-e2e: test-e2e-setup
 	@echo "Running e2e tests..."
-	@go test -tags e2e -v ./e2e/... || (bash e2e/teardown.sh && exit 1)
+	@go test -tags e2e -v -p 1 ./e2e/... || (bash e2e/teardown.sh && exit 1)
 	@bash e2e/teardown.sh
 	@echo "✓ E2E tests passed"
 

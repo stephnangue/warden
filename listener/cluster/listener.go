@@ -33,6 +33,11 @@ type ClusterListenerConfig struct {
 	// at handshake time so that leadership transitions (which generate
 	// new certs) take effect without restarting the listener.
 	TLSConfigFunc func() *tls.Config
+
+	// ReadTimeout and WriteTimeout override the defaults for the HTTP server.
+	// Zero means use the built-in defaults (30s read, 60s write).
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
 }
 
 // NewClusterListener creates a new cluster listener that serves the
@@ -43,11 +48,20 @@ func NewClusterListener(cfg ClusterListenerConfig) (*ClusterListener, error) {
 		return nil, errors.New("cluster listener requires a TLS config function")
 	}
 
+	readTimeout := cfg.ReadTimeout
+	if readTimeout == 0 {
+		readTimeout = 30 * time.Second
+	}
+	writeTimeout := cfg.WriteTimeout
+	if writeTimeout == 0 {
+		writeTimeout = 60 * time.Second
+	}
+
 	server := &http.Server{
 		Handler:      cfg.Handler,
 		IdleTimeout:  time.Minute,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		ReadTimeout:  readTimeout,
+		WriteTimeout: writeTimeout,
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			// Use GetConfigForClient to dynamically return the TLS config

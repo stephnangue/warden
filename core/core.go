@@ -317,6 +317,9 @@ type Core struct {
 	// transparentAuthGroup ensures only one implicit auth per JWT to prevent
 	// duplicate token creation when concurrent requests arrive with the same JWT
 	transparentAuthGroup singleflight.Group
+
+	// clusterConfig holds tunable HA cluster parameters (timeouts, intervals).
+	clusterConfig ClusterConfig
 }
 
 type CoreConfig struct {
@@ -499,6 +502,7 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 	c.shutdownDoneCh.Store(make(chan struct{}))
 
 	c.SetConfig(conf.RawConfig)
+	c.clusterConfig = parseClusterConfig(conf.RawConfig)
 
 	// Load seal information.
 	if c.seal == nil {
@@ -786,6 +790,41 @@ func (c *Core) runShutdownHooks() {
 // SetConfig sets core's config object to the newly provided config.
 func (c *Core) SetConfig(conf *config.Config) {
 	c.rawConfig.Store(conf)
+}
+
+// ClusterConfig returns the resolved cluster configuration.
+func (c *Core) ClusterConfig() ClusterConfig {
+	return c.clusterConfig
+}
+
+// parseClusterConfig builds a ClusterConfig from the raw Config, falling back
+// to defaults for any field not explicitly set.
+func parseClusterConfig(conf *config.Config) ClusterConfig {
+	cc := DefaultClusterConfig()
+	if conf == nil {
+		return cc
+	}
+
+	applyDuration := func(src string, dst *time.Duration) {
+		if src == "" {
+			return
+		}
+		if d, err := time.ParseDuration(src); err == nil {
+			*dst = d
+		}
+	}
+
+	applyDuration(conf.GoroutineShutdownTimeout, &cc.GoroutineShutdownTimeout)
+	applyDuration(conf.LockAcquisitionTimeout, &cc.LockAcquisitionTimeout)
+	applyDuration(conf.LeaderCleanupInterval, &cc.LeaderCleanupInterval)
+	applyDuration(conf.StepDownStateLockTimeout, &cc.StepDownStateLockTimeout)
+	applyDuration(conf.LeaderLookupTimeout, &cc.LeaderLookupTimeout)
+	applyDuration(conf.ClockSkewGrace, &cc.ClockSkewGrace)
+	applyDuration(conf.ClusterListenerReadTimeout, &cc.ClusterListenerReadTimeout)
+	applyDuration(conf.ClusterListenerWriteTimeout, &cc.ClusterListenerWriteTimeout)
+	applyDuration(conf.ForwardingTimeout, &cc.ForwardingTimeout)
+
+	return cc
 }
 
 // CredSourceRotationPeriodBounds returns the configured min and max rotation

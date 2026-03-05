@@ -51,6 +51,19 @@ type Config struct {
 	// Valid values: "disabled", "optional", "required"
 	// Defaults to "optional" if not specified.
 	IPBindingPolicy string `hcl:"ip_binding_policy,optional"`
+
+	// HA cluster tuning — all values are Go duration strings (e.g., "30s", "1h").
+	// Omitted values use built-in defaults from core.DefaultClusterConfig().
+
+	GoroutineShutdownTimeout    string `hcl:"goroutine_shutdown_timeout,optional"`
+	LockAcquisitionTimeout      string `hcl:"lock_acquisition_timeout,optional"`
+	LeaderCleanupInterval       string `hcl:"leader_cleanup_interval,optional"`
+	StepDownStateLockTimeout    string `hcl:"step_down_state_lock_timeout,optional"`
+	LeaderLookupTimeout         string `hcl:"leader_lookup_timeout,optional"`
+	ClockSkewGrace              string `hcl:"clock_skew_grace,optional"`
+	ClusterListenerReadTimeout  string `hcl:"cluster_listener_read_timeout,optional"`
+	ClusterListenerWriteTimeout string `hcl:"cluster_listener_write_timeout,optional"`
+	ForwardingTimeout           string `hcl:"forwarding_timeout,optional"`
 }
 
 type KMS struct {
@@ -478,6 +491,34 @@ func LoadConfig(configFile string) (*Config, error) {
 	for i, ln := range config.Listeners {
 		if ln.TLSEnabled && (ln.TLSCertFile == "" || ln.TLSKeyFile == "") {
 			return nil, fmt.Errorf("listener[%d]: tls_enabled requires both tls_cert_file and tls_key_file", i)
+		}
+	}
+
+	// Validate cluster tuning durations if set
+	clusterDurationFields := []struct {
+		name  string
+		value string
+	}{
+		{"goroutine_shutdown_timeout", config.GoroutineShutdownTimeout},
+		{"lock_acquisition_timeout", config.LockAcquisitionTimeout},
+		{"leader_cleanup_interval", config.LeaderCleanupInterval},
+		{"step_down_state_lock_timeout", config.StepDownStateLockTimeout},
+		{"leader_lookup_timeout", config.LeaderLookupTimeout},
+		{"clock_skew_grace", config.ClockSkewGrace},
+		{"cluster_listener_read_timeout", config.ClusterListenerReadTimeout},
+		{"cluster_listener_write_timeout", config.ClusterListenerWriteTimeout},
+		{"forwarding_timeout", config.ForwardingTimeout},
+	}
+	for _, f := range clusterDurationFields {
+		if f.value == "" {
+			continue
+		}
+		d, err := time.ParseDuration(f.value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s %q: %w", f.name, f.value, err)
+		}
+		if d < 0 {
+			return nil, fmt.Errorf("%s must not be negative, got %s", f.name, d)
 		}
 	}
 
