@@ -240,6 +240,21 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 				existingPerms.ResponseKeysFilterPath = pc.Permissions.ResponseKeysFilterPath
 			}
 
+			// Conditions merging: OR semantics across policies.
+			// If existing is already unconditional (nil), it stays nil.
+			// If the new policy has no conditions, clear to nil (unconditional wins).
+			// If both have conditions, append new conditions (OR across sets).
+			if existingPerms.ConditionSets != nil {
+				if pc.Permissions.ConditionSets == nil {
+					existingPerms.ConditionSets = nil
+				} else {
+					existingPerms.ConditionSets = append(
+						existingPerms.ConditionSets,
+						pc.Permissions.ConditionSets...,
+					)
+				}
+			}
+
 		INSERT:
 			switch {
 			case pc.HasSegmentWildcards:
@@ -429,6 +444,21 @@ CHECK:
 
 	if !operationAllowed {
 		return ret
+	}
+
+	// Check conditions before parameter validation. Conditions restrict
+	// access at the path+operation level, independent of parameters.
+	if permissions.ConditionSets != nil {
+		conditionsMet := false
+		for _, conds := range permissions.ConditionSets {
+			if conds.Evaluate(req.ClientIP, time.Now()) {
+				conditionsMet = true
+				break
+			}
+		}
+		if !conditionsMet {
+			return ret
+		}
 	}
 
 	ret.GrantingPolicies = grantingPolicies

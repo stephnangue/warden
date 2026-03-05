@@ -1326,3 +1326,246 @@ func TestCBPPermissions_CloneEmptyMaps(t *testing.T) {
 	assert.Len(t, cloned.AllowedParameters, 0)
 	assert.Len(t, cloned.DeniedParameters, 0)
 }
+
+// =============================================================================
+// Conditions Integration Tests
+// =============================================================================
+
+func TestCBP_ConditionsSourceIP_Allowed(t *testing.T) {
+	ctx := testContext()
+
+	policy := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["read"]
+			conditions {
+				source_ip = ["10.0.0.0/8"]
+			}
+		}
+	`)
+
+	cbp, err := NewCBP(ctx, []*Policy{policy})
+	require.NoError(t, err)
+
+	req := &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "secret/data/foo",
+		ClientIP:  "10.1.2.3",
+	}
+
+	result := cbp.AllowOperation(ctx, req, false)
+	assert.True(t, result.Allowed)
+}
+
+func TestCBP_ConditionsSourceIP_Denied(t *testing.T) {
+	ctx := testContext()
+
+	policy := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["read"]
+			conditions {
+				source_ip = ["10.0.0.0/8"]
+			}
+		}
+	`)
+
+	cbp, err := NewCBP(ctx, []*Policy{policy})
+	require.NoError(t, err)
+
+	req := &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "secret/data/foo",
+		ClientIP:  "192.168.1.1",
+	}
+
+	result := cbp.AllowOperation(ctx, req, false)
+	assert.False(t, result.Allowed)
+}
+
+func TestCBP_ConditionsCapCheckOnly_SkipsConditions(t *testing.T) {
+	ctx := testContext()
+
+	policy := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["read"]
+			conditions {
+				source_ip = ["10.0.0.0/8"]
+			}
+		}
+	`)
+
+	cbp, err := NewCBP(ctx, []*Policy{policy})
+	require.NoError(t, err)
+
+	req := &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "secret/data/foo",
+		ClientIP:  "192.168.1.1", // Does NOT match, but capCheckOnly should skip
+	}
+
+	result := cbp.AllowOperation(ctx, req, true)
+	assert.True(t, result.CapabilitiesBitmap&ReadCapabilityInt > 0)
+}
+
+func TestCBP_ConditionsWithParameters(t *testing.T) {
+	ctx := testContext()
+
+	policy := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["create"]
+			allowed_parameters {
+				"key" = []
+			}
+			conditions {
+				source_ip = ["10.0.0.0/8"]
+			}
+		}
+	`)
+
+	cbp, err := NewCBP(ctx, []*Policy{policy})
+	require.NoError(t, err)
+
+	// Good IP, valid parameter → allowed
+	req := &logical.Request{
+		Operation: logical.CreateOperation,
+		Path:      "secret/data/foo",
+		ClientIP:  "10.1.2.3",
+		Data:      map[string]any{"key": "value"},
+	}
+	result := cbp.AllowOperation(ctx, req, false)
+	assert.True(t, result.Allowed)
+
+	// Bad IP, valid parameter → denied by conditions
+	req.ClientIP = "192.168.1.1"
+	result = cbp.AllowOperation(ctx, req, false)
+	assert.False(t, result.Allowed)
+}
+
+func TestCBP_ConditionsEmpty_NoEffect(t *testing.T) {
+	ctx := testContext()
+
+	policy := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["read"]
+		}
+	`)
+
+	cbp, err := NewCBP(ctx, []*Policy{policy})
+	require.NoError(t, err)
+
+	req := &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "secret/data/foo",
+		ClientIP:  "anything",
+	}
+
+	result := cbp.AllowOperation(ctx, req, false)
+	assert.True(t, result.Allowed)
+}
+
+func TestCBP_MergeConditions_OneUnconditional(t *testing.T) {
+	ctx := testContext()
+
+	policyA := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["read"]
+			conditions {
+				source_ip = ["10.0.0.0/8"]
+			}
+		}
+	`)
+
+	policyB := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["read"]
+		}
+	`)
+
+	cbp, err := NewCBP(ctx, []*Policy{policyA, policyB})
+	require.NoError(t, err)
+
+	// Request from IP outside policyA's range should still succeed
+	// because policyB is unconditional
+	req := &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "secret/data/foo",
+		ClientIP:  "192.168.1.1",
+	}
+
+	result := cbp.AllowOperation(ctx, req, false)
+	assert.True(t, result.Allowed)
+}
+
+func TestCBP_MergeConditions_BothConditional_OR(t *testing.T) {
+	ctx := testContext()
+
+	policyA := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["read"]
+			conditions {
+				source_ip = ["10.0.0.0/8"]
+			}
+		}
+	`)
+
+	policyB := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["read"]
+			conditions {
+				source_ip = ["192.168.0.0/16"]
+			}
+		}
+	`)
+
+	cbp, err := NewCBP(ctx, []*Policy{policyA, policyB})
+	require.NoError(t, err)
+
+	// Matches policyA's conditions
+	req := &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "secret/data/foo",
+		ClientIP:  "10.1.2.3",
+	}
+	result := cbp.AllowOperation(ctx, req, false)
+	assert.True(t, result.Allowed)
+
+	// Matches policyB's conditions
+	req.ClientIP = "192.168.1.1"
+	result = cbp.AllowOperation(ctx, req, false)
+	assert.True(t, result.Allowed)
+
+	// Matches neither
+	req.ClientIP = "172.16.0.1"
+	result = cbp.AllowOperation(ctx, req, false)
+	assert.False(t, result.Allowed)
+}
+
+func TestCBP_MergeConditions_DenyOverrides(t *testing.T) {
+	ctx := testContext()
+
+	policyAllow := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["read"]
+			conditions {
+				source_ip = ["10.0.0.0/8"]
+			}
+		}
+	`)
+
+	policyDeny := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["deny"]
+		}
+	`)
+
+	cbp, err := NewCBP(ctx, []*Policy{policyAllow, policyDeny})
+	require.NoError(t, err)
+
+	req := &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "secret/data/foo",
+		ClientIP:  "10.1.2.3",
+	}
+
+	result := cbp.AllowOperation(ctx, req, false)
+	assert.False(t, result.Allowed)
+}
