@@ -76,7 +76,7 @@ func (c *Core) setupCluster(ctx context.Context) error {
 		},
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageKeyAgreement | x509.KeyUsageCertSign,
 		SerialNumber:          serial,
-		NotBefore:             time.Now().Add(-30 * time.Second),  // clock skew grace
+		NotBefore:             time.Now().Add(-c.clusterConfig.ClockSkewGrace), // clock skew grace
 		NotAfter:              time.Now().Add(262980 * time.Hour), // ~30 years
 		BasicConstraintsValid: true,
 		IsCA:                  true,

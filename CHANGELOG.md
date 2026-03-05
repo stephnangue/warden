@@ -2,6 +2,28 @@
 
 All notable changes to Warden are documented in this file.
 
+## [v0.2.1] — 2026-03-05
+
+### Improvements
+
+- **Configurable HA cluster tuning** — All HA cluster timeouts and intervals are now configurable via HCL: `goroutine_shutdown_timeout`, `lock_acquisition_timeout`, `leader_cleanup_interval`, `step_down_state_lock_timeout`, `leader_lookup_timeout`, `clock_skew_grace`, `cluster_listener_read_timeout`, `cluster_listener_write_timeout`, `forwarding_timeout`. Sensible defaults are provided via `DefaultClusterConfig()`.
+- **Parallel goroutine shutdown** — Background goroutines (key upgrade checker, leader refresh, leader cleanup) now shut down in parallel during step-down with a configurable timeout, preventing sequential hangs.
+- **Lock acquisition timeout** — HA lock acquisition can now be bounded with `lock_acquisition_timeout` to prevent indefinite blocking when the lock backend is unresponsive.
+- **Leader lookup timeout** — Barrier reads in `Leader()` are now bounded by `leader_lookup_timeout` to prevent standby nodes from hanging on slow storage.
+- **Step-down state lock timeout** — Step-down no longer blocks indefinitely waiting for the state lock; falls back to forced teardown after `step_down_state_lock_timeout`.
+- **Leader advertisement failure aborts leadership** — If the active node fails to write its leader advertisement, it immediately steps down instead of running invisibly to standbys.
+- **Forwarding metrics** — Added `ha.forward.{success,error,redirect,duration}` metrics for observability into standby-to-active request forwarding.
+- **X-Forwarded-For chain preservation** — Standby forwarding now appends to existing `X-Forwarded-For` headers instead of overwriting them, preserving the full proxy chain.
+- **Narrower connection error detection** — `isConnectionError` now only matches `dial`, `read`, and `write` operations, excluding DNS and TLS errors from connection-error handling.
+- **Fresh leader lookup on forwarding errors** — Non-connection forwarding errors (e.g., TLS handshake failures) now trigger a fresh leader lookup before redirecting, avoiding stale addresses.
+- **Idle connection cleanup on proxy invalidation** — Old transport connections are closed when the reverse proxy is recreated due to leader changes.
+- **Configurable clock skew grace** — Cluster certificate `NotBefore` offset is now configurable via `clock_skew_grace` (default: 60s, was 30s).
+- **Reduced leader cleanup interval** — Default leader advertisement cleanup interval reduced from 24h to 1h.
+
+### Infrastructure
+
+- **Sequential E2E tests** — E2E test packages now run sequentially (`-p 1`) to prevent HA chaos tests from destabilizing subsequent test suites.
+
 ## [v0.2.0] — 2026-03-04
 
 ### New Features
@@ -49,6 +71,7 @@ Initial release. See the [v0.1.0 release notes](https://github.com/stephnangue/w
 - Docker image published to `ghcr.io/stephnangue/warden`
 - Pre-built binaries for Linux, macOS, and Windows
 
+[v0.2.1]: https://github.com/stephnangue/warden/compare/v0.2.0...v0.2.1
 [v0.2.0]: https://github.com/stephnangue/warden/compare/v0.1.1...v0.2.0
 [v0.1.1]: https://github.com/stephnangue/warden/compare/v0.1.0...v0.1.1
 [v0.1.0]: https://github.com/stephnangue/warden/releases/tag/v0.1.0

@@ -14,10 +14,6 @@ import (
 const (
 	// leaderPrefix is the barrier storage prefix for leader advertisements.
 	leaderPrefix = "core/leader/"
-
-	// leaderCleanupInterval is how often the background cleaner removes
-	// stale leader advertisements from barrier storage.
-	leaderCleanupInterval = 24 * time.Hour
 )
 
 // activeAdvertisement is stored in the barrier under core/leader/{uuid}
@@ -103,7 +99,7 @@ func (c *Core) cleanLeaderPrefix(ctx context.Context, activeUUID string, doneCh,
 	// Run once immediately on startup
 	cleanup()
 
-	ticker := time.NewTicker(leaderCleanupInterval)
+	ticker := time.NewTicker(c.clusterConfig.LeaderCleanupInterval)
 	defer ticker.Stop()
 
 	for {

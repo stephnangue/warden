@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	metrics "github.com/hashicorp/go-metrics/compat"
@@ -99,9 +100,29 @@ func (c *Core) runStandbyOnce(manualStepDownCh chan struct{}, stopCh chan struct
 		}
 
 		// Attempt to acquire the lock. This blocks until the lock is
-		// acquired or stopCh is closed.
+		// acquired, stopCh is closed, or the acquisition timeout fires.
+		lockStopCh := stopCh
+		var lockTimer *time.Timer
+		if timeout := c.clusterConfig.LockAcquisitionTimeout; timeout > 0 {
+			lockStopCh = make(chan struct{})
+			lockTimer = time.NewTimer(timeout)
+			go func() {
+				select {
+				case <-stopCh:
+					close(lockStopCh)
+				case <-lockTimer.C:
+					close(lockStopCh)
+				}
+			}()
+		}
+
 		lockAcquireStart := time.Now()
-		leaderLostCh, err := lock.Lock(stopCh)
+		leaderLostCh, err := lock.Lock(lockStopCh)
+
+		if lockTimer != nil {
+			lockTimer.Stop()
+		}
+
 		if err != nil {
 			c.logger.Error("failed to acquire HA lock", logger.Err(err))
 			metrics.IncrCounter([]string{"ha", "lock", "acquire", "error"}, 1)
@@ -113,9 +134,24 @@ func (c *Core) runStandbyOnce(manualStepDownCh chan struct{}, stopCh chan struct
 			}
 		}
 
-		// If Lock returned nil, the stopCh was closed
+		// If Lock returned nil, either stopCh was closed or the
+		// acquisition timeout fired. Check stopCh to distinguish.
 		if leaderLostCh == nil {
-			return false
+			select {
+			case <-stopCh:
+				return false
+			default:
+				// Acquisition timeout — retry after interval.
+				c.logger.Warn("HA lock acquisition timed out, retrying",
+					logger.Duration("timeout", c.clusterConfig.LockAcquisitionTimeout))
+				metrics.IncrCounter([]string{"ha", "lock", "acquire", "timeout"}, 1)
+				select {
+				case <-time.After(lockRetryInterval):
+					continue
+				case <-stopCh:
+					return false
+				}
+			}
 		}
 
 		// We acquired the lock — become active
@@ -211,15 +247,19 @@ func (c *Core) becomeActive(leaderUUID string, leaderLostCh <-chan struct{}, man
 
 	// Write leader advertisement AFTER postUnseal succeeds so standby
 	// nodes never discover and forward to a node that isn't fully active.
-	leaderInfo := &clusterLeaderParams{
+	// If the advertisement fails, step down — an active node that can't
+	// advertise is invisible to standbys and unusable.
+	if err := c.advertiseLeader(activeCtx, leaderUUID); err != nil {
+		c.logger.Error("failed to write leader advertisement, stepping down", logger.Err(err))
+		c.stateLock.Unlock()
+		activeCtxCancel()
+		return false, fmt.Errorf("leader advertisement failed: %w", err)
+	}
+	c.leaderParams.Store(&clusterLeaderParams{
 		LeaderUUID:   leaderUUID,
 		RedirectAddr: c.redirectAddr,
 		ClusterAddr:  c.clusterAddrValue(),
-	}
-	if err := c.advertiseLeader(activeCtx, leaderUUID); err != nil {
-		c.logger.Warn("failed to write leader advertisement", logger.Err(err))
-	}
-	c.leaderParams.Store(leaderInfo)
+	})
 
 	metrics.MeasureSince([]string{"ha", "post_unseal", "duration"}, postUnsealStart)
 	metrics.IncrCounter([]string{"ha", "transition", "standby_to_active"}, 1)
@@ -275,18 +315,41 @@ func (c *Core) becomeActive(leaderUUID string, leaderLostCh <-chan struct{}, man
 		}
 	}()
 
-	// Stop background goroutines
-	close(keyUpgradeStop)
-	<-keyUpgradeDone
+	// Stop background goroutines in parallel with a timeout.
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() { defer wg.Done(); close(keyUpgradeStop); <-keyUpgradeDone }()
+		go func() { defer wg.Done(); close(leaderRefreshStop); <-leaderRefreshDone }()
+		go func() { defer wg.Done(); close(leaderCleanupStop); <-leaderCleanupDone }()
+		wg.Wait()
+	}()
+	select {
+	case <-shutdownDone:
+	case <-time.After(c.clusterConfig.GoroutineShutdownTimeout):
+		c.logger.Warn("timed out waiting for background goroutines during step-down",
+			logger.Duration("timeout", c.clusterConfig.GoroutineShutdownTimeout))
+	}
 
-	close(leaderRefreshStop)
-	<-leaderRefreshDone
-
-	close(leaderCleanupStop)
-	<-leaderCleanupDone
-
-	// Transition back to standby
-	if grabLockOrStop(c.stateLock.Lock, c.stateLock.Unlock, stopCh) {
+	// Transition back to standby. Use a combined stop channel that fires
+	// on either shutdown or a timeout, so we don't block indefinitely if
+	// the state lock is held by a long-running seal operation.
+	stepDownStop := make(chan struct{})
+	stepDownTimer := time.NewTimer(c.clusterConfig.StepDownStateLockTimeout)
+	go func() {
+		select {
+		case <-stopCh:
+			close(stepDownStop)
+		case <-stepDownTimer.C:
+			c.logger.Warn("timed out waiting for state lock during step-down",
+				logger.Duration("timeout", c.clusterConfig.StepDownStateLockTimeout))
+			close(stepDownStop)
+		}
+	}()
+	if grabLockOrStop(c.stateLock.Lock, c.stateLock.Unlock, stepDownStop) {
+		stepDownTimer.Stop()
 		// Stopped while acquiring lock for step-down teardown.
 		// Still run preSeal to properly shut down subsystems (expiration
 		// manager, rotation manager, mounts, etc.) rather than leaving
@@ -304,6 +367,7 @@ func (c *Core) becomeActive(leaderUUID string, leaderLostCh <-chan struct{}, man
 		}
 		return manualStepDown, nil
 	}
+	stepDownTimer.Stop()
 	defer c.stateLock.Unlock()
 
 	c.standby.Store(true)

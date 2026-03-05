@@ -78,8 +78,11 @@ func (c *Core) LeaderLocked() (isLeader bool, leaderAddr, clusterAddr string, er
 		return false, "", "", nil
 	}
 
-	// Read the leader advertisement from barrier storage.
-	adv, err := c.readLeaderAdvertisement(context.Background(), leaderUUID)
+	// Read the leader advertisement from barrier storage with a timeout
+	// to prevent indefinite hangs if the barrier is slow or unresponsive.
+	lookupCtx, lookupCancel := context.WithTimeout(context.Background(), c.clusterConfig.LeaderLookupTimeout)
+	defer lookupCancel()
+	adv, err := c.readLeaderAdvertisement(lookupCtx, leaderUUID)
 	if err != nil {
 		c.logger.Warn("failed to read leader advertisement from barrier",
 			logger.Err(err), logger.String("leader_uuid", leaderUUID))
