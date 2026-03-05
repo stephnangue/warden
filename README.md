@@ -70,6 +70,8 @@ Warden constrains what an agent can do by controlling which APIs it can reach, w
 
 A Mistral API key grants access to every model. Warden can restrict an agent to `mistral-small-latest` only, enforce max_tokens limits, and require streaming mode — cost control that API key scoping alone cannot provide. A GitHub fine-grained PAT with `contents: read` lets the holder read *every file* in a repo. Warden can restrict an agent to `src/` while blocking `.github/workflows/` and `.env` — something GitHub simply cannot express. For AWS, destructive operations can be blocked at the gateway regardless of what the underlying IAM role permits.
 
+Policies also support **runtime conditions** — source IP restrictions, time-of-day windows, and day-of-week constraints — that deny requests even when capabilities match. This enables scenarios like restricting production deployments to office hours from trusted networks only.
+
 ### AI Request Governance
 
 Warden parses AI request bodies and evaluates policies against inference parameters. This enables cost control and usage governance at the gateway layer:
@@ -193,7 +195,7 @@ Explicit mode is **required for AWS** (SigV4 request signing means Warden must h
 |---|---|---|---|
 | Credential isolation | Credentials never leave Warden | Virtual keys stored in Portkey vault | Credentials pass through edge component |
 | Audit granularity | Every API request logged | Logs + cost analytics (Enterprise) | Access grant logged |
-| Policy enforcement | HTTP path + method + AI parameters | Guardrails (PII, jailbreak) | Workload-to-service level |
+| Policy enforcement | HTTP path + method + AI parameters + runtime conditions (IP, time, day) | Guardrails (PII, jailbreak) | Workload-to-service level |
 | AI inference governance | Model, token, and parameter policies | Guardrails + rate limiting | N/A |
 | Cloud provider support | AWS, Azure, GCP, GitHub, GitLab, Vault | N/A — AI providers only | Per-provider integration |
 | Client modification | Change base URL | Portkey SDK or Universal API | Deploy sidecar agents |
@@ -328,7 +330,7 @@ Warden uses HCL configuration files. See `warden.local.hcl` for a full example c
 
 **Observability** — Structured audit log export (OpenTelemetry, SIEM), new audit device types, Prometheus metrics, distributed tracing
 
-**Security** — Rate limiting per identity, mTLS to upstream providers, audit log tamper detection
+**Security** — Rate limiting per identity, mTLS to upstream providers, audit log tamper detection, additional policy conditions (max request rate, required headers)
 
 **Operations** — Helm chart, Docker Compose quick start, Terraform module
 

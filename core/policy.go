@@ -118,6 +118,7 @@ type PathRules struct {
 	RequiredParametersHCL     []string         `hcl:"required_parameters"`
 	PaginationLimitHCL        int              `hcl:"pagination_limit"`
 	ResponseKeysFilterPathHCL string           `hcl:"list_scan_response_keys_filter_path"`
+	ConditionsHCL             map[string][]string `hcl:"conditions"`
 }
 
 type CBPPermissions struct {
@@ -128,6 +129,11 @@ type CBPPermissions struct {
 	PaginationLimit        int
 	GrantingPoliciesMap    map[uint32][]sdklogical.PolicyInfo
 	ResponseKeysFilterPath string
+	// ConditionSets holds condition sets from all merged policies for this path.
+	// nil means unconditional access (at least one policy had no conditions).
+	// Non-nil: each entry is one policy's conditions; request must satisfy at
+	// least one set (OR between sets, AND within each set's types).
+	ConditionSets []*PolicyConditions
 }
 
 func (p *CBPPermissions) Clone() (*CBPPermissions, error) {
@@ -172,6 +178,17 @@ func (p *CBPPermissions) Clone() (*CBPPermissions, error) {
 			return nil, err
 		}
 		ret.GrantingPoliciesMap = clonedGrantingPoliciesMap.(map[uint32][]sdklogical.PolicyInfo)
+	}
+
+	switch {
+	case p.ConditionSets == nil:
+	case len(p.ConditionSets) == 0:
+		ret.ConditionSets = make([]*PolicyConditions, 0)
+	default:
+		ret.ConditionSets = make([]*PolicyConditions, len(p.ConditionSets))
+		for i, cs := range p.ConditionSets {
+			ret.ConditionSets[i] = cs.Clone()
+		}
 	}
 
 	return ret, nil
@@ -266,6 +283,7 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			"pagination_limit",
 			"expiration",
 			"list_scan_response_keys_filter_path",
+			"conditions",
 		}
 		if err := hclutil.CheckHCLKeys(item.Val, valid); err != nil {
 			return multierror.Prefix(err, fmt.Sprintf("path %q:", key))
@@ -395,6 +413,14 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 		}
 
 		pc.Permissions.PaginationLimit = pc.PaginationLimitHCL
+
+		if len(pc.ConditionsHCL) > 0 {
+			conditions, err := parseAndValidateConditions(pc.ConditionsHCL)
+			if err != nil {
+				return fmt.Errorf("path %q: %w", key, err)
+			}
+			pc.Permissions.ConditionSets = []*PolicyConditions{conditions}
+		}
 	PathFinished:
 		paths = append(paths, &pc)
 	}
