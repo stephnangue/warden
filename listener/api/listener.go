@@ -25,17 +25,24 @@ type ApiListener struct {
 }
 
 type ApiListenerConfig struct {
-	Logger          *logger.GatedLogger
-	Address         string
-	TLSCertFile     string
-	TLSKeyFile      string
-	TLSClientCAFile string
-	TLSEnabled      bool
+	Logger               *logger.GatedLogger
+	Address              string
+	TLSCertFile          string
+	TLSKeyFile           string
+	TLSClientCAFile      string
+	TLSEnabled           bool
+	TLSRequireClientCert *bool    // nil = default (true when TLSClientCAFile set)
+	TrustedProxies       []string // CIDR ranges for LB cert forwarding
 }
 
 func NewApiListener(cfg ApiListenerConfig, httpHandler http.Handler) (*ApiListener, error) {
+	// Validate trusted proxy CIDRs at startup to catch misconfigurations early
+	if err := ValidateCIDRs(cfg.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("listener config: %w", err)
+	}
 
 	var handler http.Handler = httpHandler
+	handler = certForwardingMiddleware(cfg.TrustedProxies)(handler)
 	handler = middleware.RealIP(handler)
 	handler = middleware.RequestID(handler)
 	handler = middleware.Recoverer(handler)
@@ -67,7 +74,12 @@ func NewApiListener(cfg ApiListenerConfig, httpHandler http.Handler) (*ApiListen
 				return nil, fmt.Errorf("tls_client_ca_file %q contains no valid certificates", cfg.TLSClientCAFile)
 			}
 			tlsCfg.ClientCAs = caPool
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+			requireClientCert := cfg.TLSRequireClientCert == nil || *cfg.TLSRequireClientCert
+			if requireClientCert {
+				tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+			} else {
+				tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
+			}
 		}
 
 		server.TLSConfig = tlsCfg

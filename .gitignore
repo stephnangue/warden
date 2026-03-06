@@ -65,3 +65,6 @@ temp/
 .terraform.lock.hcl
 
 test.sh
+
+# E2E generated certs
+e2e/loadbalancer/certs/

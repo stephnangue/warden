@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"github.com/openbao/openbao/helper/namespace"
 	"github.com/openbao/openbao/sdk/v2/helper/pathmanager"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -1014,75 +1016,97 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 }
 
 // handleTransparentAuth performs implicit authentication for transparent mode requests.
-// It first tries to lookup the token (which may be a JWT) using the existing token store.
-// If not found, it performs implicit auth via the configured auto-auth path.
+// It detects the credential type (JWT bearer token or TLS client certificate) and
+// performs lookup/implicit auth accordingly.
 // Uses singleflight to prevent duplicate token creation when concurrent requests
-// arrive with the same JWT+role combination.
+// arrive with the same credential+role combination.
 //
 // IMPORTANT: The role is validated when reusing cached tokens. A token created for
-// JWT+Role1 cannot be reused for JWT+Role2, as they may have different policies.
+// credential+Role1 cannot be reused for credential+Role2, as they may have different policies.
 func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, backend logical.Backend, role string) error {
 	// Mark request as transparent mode - credentials will be cache-only
 	req.Transparent = true
 
 	tmp := backend.(logical.TransparentModeProvider)
 	autoAuthPath := tmp.GetAutoAuthPath()
-	clientToken := req.ClientToken
-
-	// Unauthenticated paths are handled earlier in handleNonLoginRequest
-	// (before we even enter handleTransparentAuth), so if we get here with
-	// no token, it's an error.
-	if clientToken == "" {
-		return fmt.Errorf("no token provided for transparent mode request")
-	}
 
 	// Check if role is available (either from URL or default_role config)
 	if role == "" {
 		return fmt.Errorf("transparent mode requires a role: use /role/{role}/gateway/... path or configure default_role")
 	}
 
-	// Transparent mode only supports JWT tokens
-	if !strings.HasPrefix(clientToken, "eyJ") {
-		return fmt.Errorf("transparent mode requires a JWT token (expected eyJ prefix)")
+	// Detect credential type: client certificate or JWT bearer token
+	var singleflightKey string
+	var lookupFunc func() (*TokenEntry, error)
+	var loginData map[string]any
+	var postLoginLookup func() (*TokenEntry, error)
+
+	// Check for client certificate first (forwarded from LB or direct TLS)
+	clientCert := extractTransparentClientCert(req)
+
+	switch {
+	case clientCert != nil:
+		// Certificate-based transparent auth
+		hash := sha256.Sum256(clientCert.Raw)
+		fingerprint := hex.EncodeToString(hash[:])
+		sfHash := sha256.Sum256([]byte("cert:" + fingerprint + ":" + role))
+		singleflightKey = hex.EncodeToString(sfHash[:])
+		loginData = map[string]any{"role": role}
+		lookupFunc = func() (*TokenEntry, error) {
+			return c.LookupCertTokenWithRole(ctx, fingerprint, role)
+		}
+		postLoginLookup = lookupFunc
+
+	case strings.HasPrefix(req.ClientToken, "eyJ"):
+		// JWT-based transparent auth
+		clientToken := req.ClientToken
+		jwtHash := sha256.Sum256([]byte(clientToken + ":" + role))
+		singleflightKey = hex.EncodeToString(jwtHash[:])
+		loginData = map[string]any{"jwt": clientToken, "role": role}
+		lookupFunc = func() (*TokenEntry, error) {
+			return c.LookupJWTTokenWithRole(ctx, clientToken, role)
+		}
+		postLoginLookup = lookupFunc
+
+	default:
+		return fmt.Errorf("no valid credential for transparent mode (need JWT bearer token or TLS client certificate)")
 	}
 
-	// Step 1: Try to lookup the token using JWT+role for proper ID computation
-	te, err := c.LookupJWTTokenWithRole(ctx, clientToken, role)
+	// Step 1: Try cached lookup
+	// Note: cached tokens are returned without re-checking certificate revocation.
+	// This is an accepted design trade-off — revocation is a best-effort signal and
+	// the token TTL (default 1h) bounds the exposure window. Explicit login requests
+	// always perform full revocation checks. To reduce exposure for revoked certs,
+	// configure a shorter token_ttl on cert roles.
+	te, err := lookupFunc()
 	if err == nil && te != nil {
-		// Token found with correct role
 		req.SetTokenEntry(te)
+		// For cert transparent auth, ClientToken is empty since the client only
+		// sends a certificate. Set it to the token ID so the downstream policy
+		// check in fetchCBPAndTokenEntry doesn't reject it.
+		if req.ClientToken == "" {
+			req.ClientToken = te.ID
+		}
 		return nil
 	}
 
-	// Step 2: Token not found - perform implicit auth with singleflight
-	// Use hash of JWT+role as the key to:
-	// 1. Reduce memory overhead (JWTs can be 1-2KB+)
-	// 2. Avoid storing sensitive JWT in singleflight map keys
-	// 3. Ensure fast fixed-size key comparison
-	jwtHash := sha256.Sum256([]byte(clientToken + ":" + role))
-	singleflightKey := hex.EncodeToString(jwtHash[:])
-
-	// Use singleflight to ensure only one implicit auth per JWT+role combination
-	// This prevents duplicate token creation when concurrent requests arrive
+	// Step 2: Token not found — perform implicit auth with singleflight
 	result, err, shared := c.transparentAuthGroup.Do(singleflightKey, func() (interface{}, error) {
-		// Double-check: another goroutine may have just created the token for this role
-		checkTE, lookupErr := c.LookupJWTTokenWithRole(ctx, clientToken, role)
+		// Double-check: another goroutine may have just created the token
+		checkTE, lookupErr := lookupFunc()
 		if lookupErr == nil && checkTE != nil {
 			return checkTE, nil
 		}
 
-		// Build login request to the auto-auth path (e.g., auth/jwt/login)
+		// Build login request to the auto-auth path (e.g., auth/jwt/login or auth/cert/login)
 		loginPath := strings.TrimSuffix(autoAuthPath, "/") + "/login"
 		loginReq := &logical.Request{
 			Operation:   logical.UpdateOperation,
 			Path:        loginPath,
-			HTTPRequest: req.HTTPRequest,
-			Data: map[string]any{
-				"jwt":  clientToken,
-				"role": role,
-			},
-			ClientIP:  req.ClientIP,
-			RequestID: req.RequestID,
+			HTTPRequest: req.HTTPRequest, // Carries TLS info and forwarded cert context
+			Data:        loginData,
+			ClientIP:    req.ClientIP,
+			RequestID:   req.RequestID,
 		}
 
 		// Perform the login request
@@ -1091,7 +1115,6 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 			return nil, loginErr
 		}
 
-		// Check for authentication errors (e.g., expired JWT, invalid token)
 		if loginResp != nil && loginResp.Err != nil {
 			return nil, loginResp.Err
 		}
@@ -1100,9 +1123,8 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 			return nil, fmt.Errorf("implicit auth returned no auth data")
 		}
 
-		// Lookup the newly created token using JWT+role
-		// The token was created with the JWT as its lookup value, so we can find it directly
-		newTE, lookupErr := c.LookupJWTTokenWithRole(ctx, clientToken, role)
+		// Lookup the newly created token
+		newTE, lookupErr := postLoginLookup()
 		if lookupErr != nil {
 			return nil, fmt.Errorf("failed to lookup created token: %w", lookupErr)
 		}
@@ -1111,16 +1133,34 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 	})
 
 	if err != nil {
-		// Don't cache errors - allow next request to retry
 		c.transparentAuthGroup.Forget(singleflightKey)
 		return err
 	}
 
 	te = result.(*TokenEntry)
-	_ = shared // suppress unused variable warning
+	_ = shared
 
-	// Set the token entry on the request
 	req.SetTokenEntry(te)
-
+	// Ensure ClientToken is set so downstream policy checks (fetchCBPAndTokenEntry)
+	// don't short-circuit on the empty-token guard. For JWT transparent auth the
+	// JWT string is already in ClientToken, but for cert transparent auth there is
+	// no token in the request — only a certificate.
+	if req.ClientToken == "" {
+		req.ClientToken = te.ID
+	}
 	return nil
+}
+
+// extractTransparentClientCert extracts the client certificate from a request.
+// Warden always sits behind a load balancer — client certs arrive exclusively
+// via the X-SSL-Client-Cert header, parsed by the cert forwarding middleware
+// and stored in the request context. On cluster-forwarded requests (standby →
+// leader), the header is re-forwarded and re-parsed, so ForwardedClientCert
+// works correctly for both direct and forwarded paths.
+func extractTransparentClientCert(req *logical.Request) *x509.Certificate {
+	if req.HTTPRequest == nil {
+		return nil
+	}
+
+	return listener.ForwardedClientCert(req.HTTPRequest.Context())
 }

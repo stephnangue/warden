@@ -1,4 +1,4 @@
-package jwt
+package cert
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 const rolePrefix = "role/"
 
 // pathRole returns the role CRUD path definition
-func (b *jwtAuthBackend) pathRole() *framework.Path {
+func (b *certAuthBackend) pathRole() *framework.Path {
 	return &framework.Path{
 		Pattern: "role/" + framework.GenericNameRegex("name"),
 		Fields: map[string]*framework.FieldSchema{
@@ -25,25 +25,33 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 				Description: "Name of the role",
 				Required:    true,
 			},
-			"bound_audiences": {
+			"allowed_common_names": {
 				Type:        framework.TypeCommaStringSlice,
-				Description: "List of audiences that are valid for this role",
+				Description: "Glob patterns for allowed certificate common names",
 			},
-			"bound_subject": {
-				Type:        framework.TypeString,
-				Description: "Subject claim that must match for this role",
-			},
-			"bound_claims": {
-				Type:        framework.TypeMap,
-				Description: "Map of claims that must match for this role",
-			},
-			"bound_uri_patterns": {
+			"allowed_dns_sans": {
 				Type:        framework.TypeCommaStringSlice,
-				Description: "Segment-aware URI patterns to match against uri_claim (e.g. spiffe://+/dept/*, spiffe://*)",
+				Description: "Glob patterns for allowed DNS SANs",
 			},
-			"uri_claim": {
+			"allowed_email_sans": {
+				Type:        framework.TypeCommaStringSlice,
+				Description: "Glob patterns for allowed email SANs",
+			},
+			"allowed_uri_sans": {
+				Type:        framework.TypeCommaStringSlice,
+				Description: "Glob patterns for allowed URI SANs",
+			},
+			"allowed_organizational_units": {
+				Type:        framework.TypeCommaStringSlice,
+				Description: "Allowed organizational units",
+			},
+			"allowed_organizations": {
+				Type:        framework.TypeCommaStringSlice,
+				Description: "Allowed organizations",
+			},
+			"certificate": {
 				Type:        framework.TypeString,
-				Description: "JWT claim to validate against bound_uri_patterns (default: sub)",
+				Description: "Role-specific CA PEM (overrides global trusted CAs)",
 			},
 			"token_policies": {
 				Type:        framework.TypeCommaStringSlice,
@@ -51,7 +59,7 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 			},
 			"token_ttl": {
 				Type:        framework.TypeDurationSecond,
-				Description: "Token TTL",
+				Description: "Token TTL (default: 1h)",
 				Default:     3600,
 			},
 			"token_type": {
@@ -60,18 +68,14 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 				Required:      true,
 				AllowedValues: b.allowedTokenTypeValues(),
 			},
-			"user_claim": {
-				Type:        framework.TypeString,
-				Description: "Claim to use as the principal identity",
-				Default:     "sub",
-			},
 			"cred_spec_name": {
 				Type:        framework.TypeString,
 				Description: "Credential spec name",
 			},
-			"max_age": {
-				Type:        framework.TypeString,
-				Description: "Maximum elapsed time since JWT was issued (iat). Rejects JWTs older than this. Example: 30m, 1h",
+			"principal_claim": {
+				Type:          framework.TypeString,
+				Description:   "Identity source from certificate (overrides global config): cn, dns_san, email_san, uri_san, spiffe_id, serial",
+				AllowedValues: principalClaimAllowedValues(),
 			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -92,13 +96,13 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 				Summary:  "Delete a role",
 			},
 		},
-		HelpSynopsis:    "Manage JWT auth roles",
-		HelpDescription: "Create, read, update, and delete roles for JWT authentication.",
+		HelpSynopsis:    "Manage certificate auth roles",
+		HelpDescription: "Create, read, update, and delete roles for certificate authentication.",
 	}
 }
 
 // pathRoleList returns the role list path definition
-func (b *jwtAuthBackend) pathRoleList() *framework.Path {
+func (b *certAuthBackend) pathRoleList() *framework.Path {
 	return &framework.Path{
 		Pattern: "role/?$",
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -107,18 +111,18 @@ func (b *jwtAuthBackend) pathRoleList() *framework.Path {
 				Summary:  "List all roles",
 			},
 		},
-		HelpSynopsis:    "List JWT auth roles",
-		HelpDescription: "List all configured roles for JWT authentication.",
+		HelpSynopsis:    "List certificate auth roles",
+		HelpDescription: "List all configured roles for certificate authentication.",
 	}
 }
 
 // isValidTokenType checks if the given token type is valid
-func (b *jwtAuthBackend) isValidTokenType(tokenType string) bool {
+func (b *certAuthBackend) isValidTokenType(tokenType string) bool {
 	return slices.Contains(b.validTokenTypes, tokenType)
 }
 
 // handleRoleCreate creates a new role
-func (b *jwtAuthBackend) handleRoleCreate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+func (b *certAuthBackend) handleRoleCreate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
 
 	// Check if role already exists
@@ -153,7 +157,7 @@ func (b *jwtAuthBackend) handleRoleCreate(ctx context.Context, req *logical.Requ
 }
 
 // handleRoleRead reads a role configuration
-func (b *jwtAuthBackend) handleRoleRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+func (b *certAuthBackend) handleRoleRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
 
 	role, err := b.getRole(ctx, name)
@@ -167,24 +171,25 @@ func (b *jwtAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reques
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"name":               role.Name,
-			"bound_audiences":    role.BoundAudiences,
-			"bound_subject":      role.BoundSubject,
-			"bound_claims":       role.BoundClaims,
-			"bound_uri_patterns": role.BoundURIPatterns,
-			"uri_claim":          role.URIClaim,
-			"token_policies":     role.TokenPolicies,
-			"token_ttl":          role.TokenTTL,
-			"token_type":         role.TokenType,
-			"user_claim":         role.UserClaim,
-			"cred_spec_name":     role.CredSpecName,
-			"max_age":            role.MaxAge,
+			"name":                         role.Name,
+			"allowed_common_names":         role.AllowedCommonNames,
+			"allowed_dns_sans":             role.AllowedDNSSANs,
+			"allowed_email_sans":           role.AllowedEmailSANs,
+			"allowed_uri_sans":             role.AllowedURISANs,
+			"allowed_organizational_units": role.AllowedOrganizationalUnits,
+			"allowed_organizations":        role.AllowedOrganizations,
+			"certificate":                  role.Certificate,
+			"token_policies":               role.TokenPolicies,
+			"token_ttl":                    role.TokenTTL,
+			"token_type":                   role.TokenType,
+			"cred_spec_name":               role.CredSpecName,
+			"principal_claim":              role.PrincipalClaim,
 		},
 	}, nil
 }
 
 // handleRoleUpdate updates an existing role or creates it if it doesn't exist (upsert pattern).
-func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+func (b *certAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
 
 	role, err := b.getRole(ctx, name)
@@ -197,20 +202,26 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 		role = b.buildRoleFromFieldData(name, d)
 	} else {
 		// Update existing role — only update fields that are provided
-		if v, ok := d.GetOk("bound_audiences"); ok {
-			role.BoundAudiences = v.([]string)
+		if v, ok := d.GetOk("allowed_common_names"); ok {
+			role.AllowedCommonNames = v.([]string)
 		}
-		if v, ok := d.GetOk("bound_subject"); ok {
-			role.BoundSubject = v.(string)
+		if v, ok := d.GetOk("allowed_dns_sans"); ok {
+			role.AllowedDNSSANs = v.([]string)
 		}
-		if v, ok := d.GetOk("bound_claims"); ok {
-			role.BoundClaims = v.(map[string]any)
+		if v, ok := d.GetOk("allowed_email_sans"); ok {
+			role.AllowedEmailSANs = v.([]string)
 		}
-		if v, ok := d.GetOk("bound_uri_patterns"); ok {
-			role.BoundURIPatterns = v.([]string)
+		if v, ok := d.GetOk("allowed_uri_sans"); ok {
+			role.AllowedURISANs = v.([]string)
 		}
-		if v, ok := d.GetOk("uri_claim"); ok {
-			role.URIClaim = v.(string)
+		if v, ok := d.GetOk("allowed_organizational_units"); ok {
+			role.AllowedOrganizationalUnits = v.([]string)
+		}
+		if v, ok := d.GetOk("allowed_organizations"); ok {
+			role.AllowedOrganizations = v.([]string)
+		}
+		if v, ok := d.GetOk("certificate"); ok {
+			role.Certificate = v.(string)
 		}
 		if v, ok := d.GetOk("token_policies"); ok {
 			role.TokenPolicies = v.([]string)
@@ -221,14 +232,11 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 		if v, ok := d.GetOk("token_type"); ok {
 			role.TokenType = v.(string)
 		}
-		if v, ok := d.GetOk("user_claim"); ok {
-			role.UserClaim = v.(string)
-		}
 		if v, ok := d.GetOk("cred_spec_name"); ok {
 			role.CredSpecName = v.(string)
 		}
-		if v, ok := d.GetOk("max_age"); ok {
-			role.MaxAge = v.(string)
+		if v, ok := d.GetOk("principal_claim"); ok {
+			role.PrincipalClaim = v.(string)
 		}
 	}
 
@@ -259,7 +267,7 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 }
 
 // handleRoleDelete deletes a role
-func (b *jwtAuthBackend) handleRoleDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+func (b *certAuthBackend) handleRoleDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
 
 	if err := b.deleteRole(ctx, name); err != nil {
@@ -275,7 +283,7 @@ func (b *jwtAuthBackend) handleRoleDelete(ctx context.Context, req *logical.Requ
 }
 
 // handleRoleList lists all roles
-func (b *jwtAuthBackend) handleRoleList(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+func (b *certAuthBackend) handleRoleList(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	roles, err := b.listRoles(ctx)
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
@@ -290,12 +298,7 @@ func (b *jwtAuthBackend) handleRoleList(ctx context.Context, req *logical.Reques
 }
 
 // validateRole validates role fields and sets defaults
-func (b *jwtAuthBackend) validateRole(role *JWTRole) error {
-	// Default user claim
-	if role.UserClaim == "" {
-		role.UserClaim = "sub"
-	}
-
+func (b *certAuthBackend) validateRole(role *CertRole) error {
 	// Default token type from config
 	if role.TokenType == "" && b.config != nil && b.config.TokenType != "" {
 		role.TokenType = b.config.TokenType
@@ -311,56 +314,70 @@ func (b *jwtAuthBackend) validateRole(role *JWTRole) error {
 	if role.TokenTTL == "" {
 		role.TokenTTL = time.Hour.String()
 	}
+	// Validate the TTL parses
 	if _, err := role.ParseTokenTTL(); err != nil {
 		return logical.ErrBadRequestf("invalid token_ttl: %v", err)
 	}
 
-	// Validate URI patterns
-	for _, p := range role.BoundURIPatterns {
+	// Require at least one certificate constraint to prevent overly permissive roles
+	// that would accept any certificate signed by a trusted CA.
+	if len(role.AllowedCommonNames) == 0 &&
+		len(role.AllowedDNSSANs) == 0 &&
+		len(role.AllowedEmailSANs) == 0 &&
+		len(role.AllowedURISANs) == 0 &&
+		len(role.AllowedOrganizationalUnits) == 0 &&
+		len(role.AllowedOrganizations) == 0 {
+		return logical.ErrBadRequest("at least one certificate constraint is required (allowed_common_names, allowed_dns_sans, allowed_email_sans, allowed_uri_sans, allowed_organizational_units, or allowed_organizations)")
+	}
+
+	// Validate URI SAN patterns
+	for _, p := range role.AllowedURISANs {
 		if err := helper.ValidatePattern(p); err != nil {
-			return logical.ErrBadRequestf("invalid bound_uri_patterns pattern: %v", err)
+			return logical.ErrBadRequestf("invalid allowed_uri_sans pattern: %v", err)
 		}
 	}
 
-	// Default URI claim to "sub" when patterns are configured
-	if len(role.BoundURIPatterns) > 0 && role.URIClaim == "" {
-		role.URIClaim = "sub"
+	// Validate principal_claim if provided
+	if role.PrincipalClaim != "" && !isValidPrincipalClaim(role.PrincipalClaim) {
+		return logical.ErrBadRequestf("invalid principal_claim %q; must be one of: %v", role.PrincipalClaim, validPrincipalClaims)
 	}
 
-	// Validate max_age if provided
-	if role.MaxAge != "" {
-		maxAge, err := role.ParseMaxAge()
-		if err != nil {
-			return logical.ErrBadRequestf("invalid max_age: %v", err)
-		}
-		if maxAge <= 0 {
-			return logical.ErrBadRequest("max_age must be a positive duration")
+	// Validate role-specific CA PEM if provided
+	if role.Certificate != "" {
+		if _, err := buildCAPool(role.Certificate); err != nil {
+			return logical.ErrBadRequestf("invalid certificate PEM: %v", err)
 		}
 	}
 
 	return nil
 }
 
-// buildRoleFromFieldData creates a JWTRole from request field data
-func (b *jwtAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldData) *JWTRole {
-	role := &JWTRole{
+// buildRoleFromFieldData creates a CertRole from request field data
+func (b *certAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldData) *CertRole {
+	role := &CertRole{
 		Name: name,
 	}
 
-	if v, ok := d.GetOk("bound_audiences"); ok {
-		role.BoundAudiences = v.([]string)
+	if v, ok := d.GetOk("allowed_common_names"); ok {
+		role.AllowedCommonNames = v.([]string)
 	}
-	if v, ok := d.GetOk("bound_subject"); ok {
-		role.BoundSubject = v.(string)
+	if v, ok := d.GetOk("allowed_dns_sans"); ok {
+		role.AllowedDNSSANs = v.([]string)
 	}
-	if v, ok := d.GetOk("bound_claims"); ok {
-		role.BoundClaims = v.(map[string]any)
+	if v, ok := d.GetOk("allowed_email_sans"); ok {
+		role.AllowedEmailSANs = v.([]string)
 	}
-	if v, ok := d.GetOk("bound_uri_patterns"); ok {
-		role.BoundURIPatterns = v.([]string)
+	if v, ok := d.GetOk("allowed_uri_sans"); ok {
+		role.AllowedURISANs = v.([]string)
 	}
-	if v, ok := d.GetOk("uri_claim"); ok {
-		role.URIClaim = v.(string)
+	if v, ok := d.GetOk("allowed_organizational_units"); ok {
+		role.AllowedOrganizationalUnits = v.([]string)
+	}
+	if v, ok := d.GetOk("allowed_organizations"); ok {
+		role.AllowedOrganizations = v.([]string)
+	}
+	if v, ok := d.GetOk("certificate"); ok {
+		role.Certificate = v.(string)
 	}
 	if v, ok := d.GetOk("token_policies"); ok {
 		role.TokenPolicies = v.([]string)
@@ -371,14 +388,11 @@ func (b *jwtAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldD
 	if v, ok := d.GetOk("token_type"); ok {
 		role.TokenType = v.(string)
 	}
-	if v, ok := d.GetOk("user_claim"); ok {
-		role.UserClaim = v.(string)
-	}
 	if v, ok := d.GetOk("cred_spec_name"); ok {
 		role.CredSpecName = v.(string)
 	}
-	if v, ok := d.GetOk("max_age"); ok {
-		role.MaxAge = v.(string)
+	if v, ok := d.GetOk("principal_claim"); ok {
+		role.PrincipalClaim = v.(string)
 	}
 
 	return role
@@ -386,7 +400,7 @@ func (b *jwtAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldD
 
 // Storage helper methods
 
-func (b *jwtAuthBackend) getRole(ctx context.Context, name string) (*JWTRole, error) {
+func (b *certAuthBackend) getRole(ctx context.Context, name string) (*CertRole, error) {
 	entry, err := b.storageView.Get(ctx, rolePrefix+name)
 	if err != nil {
 		return nil, err
@@ -395,7 +409,7 @@ func (b *jwtAuthBackend) getRole(ctx context.Context, name string) (*JWTRole, er
 		return nil, nil
 	}
 
-	var role JWTRole
+	var role CertRole
 	if err := entry.DecodeJSON(&role); err != nil {
 		return nil, err
 	}
@@ -403,7 +417,7 @@ func (b *jwtAuthBackend) getRole(ctx context.Context, name string) (*JWTRole, er
 	return &role, nil
 }
 
-func (b *jwtAuthBackend) setRole(ctx context.Context, role *JWTRole) error {
+func (b *certAuthBackend) setRole(ctx context.Context, role *CertRole) error {
 	entry, err := sdklogical.StorageEntryJSON(rolePrefix+role.Name, role)
 	if err != nil {
 		return err
@@ -412,11 +426,11 @@ func (b *jwtAuthBackend) setRole(ctx context.Context, role *JWTRole) error {
 	return b.storageView.Put(ctx, entry)
 }
 
-func (b *jwtAuthBackend) deleteRole(ctx context.Context, name string) error {
+func (b *certAuthBackend) deleteRole(ctx context.Context, name string) error {
 	return b.storageView.Delete(ctx, rolePrefix+name)
 }
 
-func (b *jwtAuthBackend) listRoles(ctx context.Context) ([]string, error) {
+func (b *certAuthBackend) listRoles(ctx context.Context) ([]string, error) {
 	entries, err := b.storageView.List(ctx, rolePrefix)
 	if err != nil {
 		return nil, err
