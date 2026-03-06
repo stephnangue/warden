@@ -24,24 +24,24 @@ func TestPathRole_Create(t *testing.T) {
 
 	fieldData := &framework.FieldData{
 		Raw: map[string]any{
-			"name":                "test-role",
-			"bound_audiences":     []string{"aud1", "aud2"},
-			"bound_subject":       "test-subject",
-			"token_policies":      []string{"policy1", "policy2"},
-			"token_ttl":           3600,
-			"token_type":          "service",
-			"user_claim":          "email",
-			"cred_spec_name":      "aws-dev",
+			"name":            "test-role",
+			"bound_audiences": []string{"aud1", "aud2"},
+			"bound_subject":   "test-subject",
+			"token_policies":  []string{"policy1", "policy2"},
+			"token_ttl":       3600,
+			"token_type":      "service",
+			"user_claim":      "email",
+			"cred_spec_name":  "aws-dev",
 		},
 		Schema: map[string]*framework.FieldSchema{
-			"name":                {Type: framework.TypeString},
-			"bound_audiences":     {Type: framework.TypeCommaStringSlice},
-			"bound_subject":       {Type: framework.TypeString},
-			"token_policies":      {Type: framework.TypeCommaStringSlice},
-			"token_ttl":           {Type: framework.TypeDurationSecond, Default: 3600},
-			"token_type":          {Type: framework.TypeString, Default: "service"},
-			"user_claim":          {Type: framework.TypeString, Default: "sub"},
-			"cred_spec_name":      {Type: framework.TypeString},
+			"name":            {Type: framework.TypeString},
+			"bound_audiences": {Type: framework.TypeCommaStringSlice},
+			"bound_subject":   {Type: framework.TypeString},
+			"token_policies":  {Type: framework.TypeCommaStringSlice},
+			"token_ttl":       {Type: framework.TypeDurationSecond, Default: 3600},
+			"token_type":      {Type: framework.TypeString, Default: "service"},
+			"user_claim":      {Type: framework.TypeString, Default: "sub"},
+			"cred_spec_name":  {Type: framework.TypeString},
 		},
 	}
 
@@ -57,7 +57,7 @@ func TestPathRole_Create(t *testing.T) {
 	assert.Equal(t, []string{"aud1", "aud2"}, role.BoundAudiences)
 	assert.Equal(t, "test-subject", role.BoundSubject)
 	assert.Equal(t, []string{"policy1", "policy2"}, role.TokenPolicies)
-	assert.Equal(t, time.Hour, role.TokenTTL)
+	assert.Equal(t, time.Hour.String(), role.TokenTTL)
 	assert.Equal(t, "service", role.TokenType)
 	assert.Equal(t, "email", role.UserClaim)
 	assert.Equal(t, "aws-dev", role.CredSpecName)
@@ -70,7 +70,7 @@ func TestPathRole_CreateDuplicate(t *testing.T) {
 	role := &JWTRole{
 		Name:          "existing-role",
 		TokenPolicies: []string{"policy1"},
-		TokenTTL:      time.Hour,
+		TokenTTL:      time.Hour.String(),
 	}
 	err := b.setRole(ctx, role)
 	require.NoError(t, err)
@@ -81,14 +81,14 @@ func TestPathRole_CreateDuplicate(t *testing.T) {
 			"name": "existing-role",
 		},
 		Schema: map[string]*framework.FieldSchema{
-			"name":                {Type: framework.TypeString},
-			"bound_audiences":     {Type: framework.TypeCommaStringSlice},
-			"bound_subject":       {Type: framework.TypeString},
-			"token_policies":      {Type: framework.TypeCommaStringSlice},
-			"token_ttl":           {Type: framework.TypeDurationSecond, Default: 3600},
-			"token_type":          {Type: framework.TypeString, Default: "service"},
-			"user_claim":          {Type: framework.TypeString, Default: "sub"},
-			"cred_spec_name":      {Type: framework.TypeString},
+			"name":            {Type: framework.TypeString},
+			"bound_audiences": {Type: framework.TypeCommaStringSlice},
+			"bound_subject":   {Type: framework.TypeString},
+			"token_policies":  {Type: framework.TypeCommaStringSlice},
+			"token_ttl":       {Type: framework.TypeDurationSecond, Default: 3600},
+			"token_type":      {Type: framework.TypeString, Default: "service"},
+			"user_claim":      {Type: framework.TypeString, Default: "sub"},
+			"cred_spec_name":  {Type: framework.TypeString},
 		},
 	}
 
@@ -102,14 +102,14 @@ func TestPathRole_Read(t *testing.T) {
 
 	// Create role
 	role := &JWTRole{
-		Name:              "read-test-role",
-		BoundAudiences:    []string{"aud1"},
-		BoundSubject:      "sub1",
-		TokenPolicies:     []string{"policy1"},
-		TokenTTL:          2 * time.Hour,
-		TokenType:         "batch",
-		UserClaim:         "preferred_username",
-		CredSpecName:      "aws-prod",
+		Name:           "read-test-role",
+		BoundAudiences: []string{"aud1"},
+		BoundSubject:   "sub1",
+		TokenPolicies:  []string{"policy1"},
+		TokenTTL:       (2 * time.Hour).String(),
+		TokenType:      "batch",
+		UserClaim:      "preferred_username",
+		CredSpecName:   "aws-prod",
 	}
 	err := b.setRole(ctx, role)
 	require.NoError(t, err)
@@ -155,12 +155,12 @@ func TestPathRole_Update(t *testing.T) {
 
 	// Create initial role
 	role := &JWTRole{
-		Name:              "update-test-role",
-		BoundAudiences:    []string{"aud1"},
-		TokenPolicies:     []string{"policy1"},
-		TokenTTL:          time.Hour,
-		TokenType:         "service",
-		UserClaim:         "sub",
+		Name:           "update-test-role",
+		BoundAudiences: []string{"aud1"},
+		TokenPolicies:  []string{"policy1"},
+		TokenTTL:       time.Hour.String(),
+		TokenType:      "service",
+		UserClaim:      "sub",
 	}
 	err := b.setRole(ctx, role)
 	require.NoError(t, err)
@@ -174,14 +174,14 @@ func TestPathRole_Update(t *testing.T) {
 			"cred_spec_name": "new-aws-spec",
 		},
 		Schema: map[string]*framework.FieldSchema{
-			"name":                {Type: framework.TypeString},
-			"bound_audiences":     {Type: framework.TypeCommaStringSlice},
-			"bound_subject":       {Type: framework.TypeString},
-			"token_policies":      {Type: framework.TypeCommaStringSlice},
-			"token_ttl":           {Type: framework.TypeDurationSecond},
-			"token_type":          {Type: framework.TypeString},
-			"user_claim":          {Type: framework.TypeString},
-			"cred_spec_name":      {Type: framework.TypeString},
+			"name":            {Type: framework.TypeString},
+			"bound_audiences": {Type: framework.TypeCommaStringSlice},
+			"bound_subject":   {Type: framework.TypeString},
+			"token_policies":  {Type: framework.TypeCommaStringSlice},
+			"token_ttl":       {Type: framework.TypeDurationSecond},
+			"token_type":      {Type: framework.TypeString},
+			"user_claim":      {Type: framework.TypeString},
+			"cred_spec_name":  {Type: framework.TypeString},
 		},
 	}
 
@@ -193,7 +193,7 @@ func TestPathRole_Update(t *testing.T) {
 	updatedRole, err := b.getRole(ctx, "update-test-role")
 	require.NoError(t, err)
 	assert.Len(t, updatedRole.TokenPolicies, 3)
-	assert.Equal(t, 2*time.Hour, updatedRole.TokenTTL)
+	assert.Equal(t, (2 * time.Hour).String(), updatedRole.TokenTTL)
 	assert.Equal(t, "new-aws-spec", updatedRole.CredSpecName)
 	// Verify unchanged fields
 	assert.Len(t, updatedRole.BoundAudiences, 1)
@@ -228,7 +228,7 @@ func TestPathRole_UpdateCreatesIfNotExists(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, createdRole)
 	assert.Equal(t, "new-role-via-update", createdRole.Name)
-	assert.Equal(t, time.Hour, createdRole.TokenTTL)
+	assert.Equal(t, time.Hour.String(), createdRole.TokenTTL)
 	assert.Equal(t, "service", createdRole.TokenType)
 	// Verify defaults were applied
 	assert.Equal(t, "sub", createdRole.UserClaim)
@@ -241,7 +241,7 @@ func TestPathRole_Delete(t *testing.T) {
 	role := &JWTRole{
 		Name:          "delete-test-role",
 		TokenPolicies: []string{"policy1"},
-		TokenTTL:      time.Hour,
+		TokenTTL:      time.Hour.String(),
 	}
 	err := b.setRole(ctx, role)
 	require.NoError(t, err)
@@ -277,7 +277,7 @@ func TestPathRole_List(t *testing.T) {
 		role := &JWTRole{
 			Name:          name,
 			TokenPolicies: []string{"policy1"},
-			TokenTTL:      time.Hour,
+			TokenTTL:      time.Hour.String(),
 		}
 		err := b.setRole(ctx, role)
 		require.NoError(t, err)
@@ -318,14 +318,14 @@ func TestRole_StorageRoundTrip(t *testing.T) {
 	b, ctx := createTestBackendWithStorage(t)
 
 	original := &JWTRole{
-		Name:              "roundtrip-role",
-		BoundAudiences:    []string{"aud1", "aud2"},
-		BoundSubject:      "test-subject",
-		TokenPolicies:     []string{"policy1", "policy2"},
-		TokenTTL:          2*time.Hour + 30*time.Minute,
-		TokenType:         "batch",
-		UserClaim:         "preferred_username",
-		CredSpecName:      "aws-test-spec",
+		Name:           "roundtrip-role",
+		BoundAudiences: []string{"aud1", "aud2"},
+		BoundSubject:   "test-subject",
+		TokenPolicies:  []string{"policy1", "policy2"},
+		TokenTTL:       (2*time.Hour + 30*time.Minute).String(),
+		TokenType:      "batch",
+		UserClaim:      "preferred_username",
+		CredSpecName:   "aws-test-spec",
 	}
 
 	// Store
@@ -356,14 +356,14 @@ func TestRole_Defaults(t *testing.T) {
 			"token_type": "warden_token", // Required field
 		},
 		Schema: map[string]*framework.FieldSchema{
-			"name":                {Type: framework.TypeString},
-			"bound_audiences":     {Type: framework.TypeCommaStringSlice},
-			"bound_subject":       {Type: framework.TypeString},
-			"token_policies":      {Type: framework.TypeCommaStringSlice},
-			"token_ttl":           {Type: framework.TypeDurationSecond, Default: 3600},
-			"token_type":          {Type: framework.TypeString, Required: true},
-			"user_claim":          {Type: framework.TypeString, Default: "sub"},
-			"cred_spec_name":      {Type: framework.TypeString},
+			"name":            {Type: framework.TypeString},
+			"bound_audiences": {Type: framework.TypeCommaStringSlice},
+			"bound_subject":   {Type: framework.TypeString},
+			"token_policies":  {Type: framework.TypeCommaStringSlice},
+			"token_ttl":       {Type: framework.TypeDurationSecond, Default: 3600},
+			"token_type":      {Type: framework.TypeString, Required: true},
+			"user_claim":      {Type: framework.TypeString, Default: "sub"},
+			"cred_spec_name":  {Type: framework.TypeString},
 		},
 	}
 
@@ -375,7 +375,7 @@ func TestRole_Defaults(t *testing.T) {
 
 	// Verify defaults were applied
 	assert.Equal(t, "sub", role.UserClaim)
-	assert.Equal(t, time.Hour, role.TokenTTL)
+	assert.Equal(t, time.Hour.String(), role.TokenTTL)
 }
 
 // =============================================================================
@@ -395,8 +395,10 @@ func TestPathRole_Fields(t *testing.T) {
 
 	// Check all expected fields exist
 	expectedFields := []string{
-		"name", "bound_audiences", "bound_subject", "token_policies",
+		"name", "bound_audiences", "bound_subject", "bound_claims",
+		"bound_uri_patterns", "uri_claim", "token_policies",
 		"token_ttl", "token_type", "user_claim", "cred_spec_name",
+		"max_age",
 	}
 
 	for _, field := range expectedFields {
@@ -434,4 +436,75 @@ func TestPathRoleList_Operations(t *testing.T) {
 
 	_, hasList := path.Operations[logical.ListOperation]
 	assert.True(t, hasList, "Should have list operation")
+}
+
+func TestPathRole_MaxAgeValidation(t *testing.T) {
+	b, ctx := createTestBackendWithStorage(t)
+
+	tests := []struct {
+		name      string
+		maxAge    string
+		wantErr   bool
+		errSubstr string
+	}{
+		{"valid 30m", "30m", false, ""},
+		{"valid 1h", "1h", false, ""},
+		{"valid 24h", "24h", false, ""},
+		{"invalid format", "not-a-duration", true, "invalid max_age"},
+		{"negative", "-5m", true, "must be a positive"},
+		{"zero", "0s", true, "must be a positive"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fieldData := &framework.FieldData{
+				Raw: map[string]any{
+					"name":       "max-age-test-" + tc.name,
+					"token_type": "service",
+					"max_age":    tc.maxAge,
+				},
+				Schema: map[string]*framework.FieldSchema{
+					"name":       {Type: framework.TypeString},
+					"token_type": {Type: framework.TypeString},
+					"max_age":    {Type: framework.TypeString},
+					"token_ttl":  {Type: framework.TypeDurationSecond, Default: 3600},
+					"user_claim": {Type: framework.TypeString, Default: "sub"},
+				},
+			}
+
+			resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fieldData)
+			require.NoError(t, err)
+			if tc.wantErr {
+				assert.NotNil(t, resp.Err, "expected error for max_age=%q", tc.maxAge)
+				if tc.errSubstr != "" {
+					assert.Contains(t, resp.Err.Error(), tc.errSubstr)
+				}
+			} else {
+				assert.Nil(t, resp.Err, "expected no error for max_age=%q", tc.maxAge)
+				assert.Equal(t, http.StatusCreated, resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestPathRole_MaxAgeRoundTrip(t *testing.T) {
+	b, ctx := createTestBackendWithStorage(t)
+
+	role := &JWTRole{
+		Name:      "max-age-roundtrip",
+		TokenTTL:  time.Hour.String(),
+		TokenType: "service",
+		UserClaim: "sub",
+		MaxAge:    "30m",
+	}
+	err := b.setRole(ctx, role)
+	require.NoError(t, err)
+
+	retrieved, err := b.getRole(ctx, "max-age-roundtrip")
+	require.NoError(t, err)
+	assert.Equal(t, "30m", retrieved.MaxAge)
+
+	maxAge, err := retrieved.ParseMaxAge()
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Minute, maxAge)
 }

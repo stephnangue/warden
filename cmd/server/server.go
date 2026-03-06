@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 	wardenapi "github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/audit"
+	"github.com/stephnangue/warden/auth/method/cert"
 	"github.com/stephnangue/warden/auth/method/jwt"
 	"github.com/stephnangue/warden/config"
 	"github.com/stephnangue/warden/core"
@@ -101,7 +102,8 @@ Usage: warden server [options]
 	}
 
 	authMethods = map[string]wardenlogical.Factory{
-		"jwt": jwt.Factory,
+		"jwt":  jwt.Factory,
+		"cert": cert.Factory,
 	}
 
 	storageBackends = map[string]physical.Factory{
@@ -482,12 +484,14 @@ func initListeners(httpHandler http.Handler, c *core.Core, conf *config.Config, 
 		case listenerTypeTCP, listenerTypeUnix:
 			// construct api listener using shared HTTP handler
 			ln, err := api.NewApiListener(api.ApiListenerConfig{
-				Logger:          logger.WithSystem(subsystemListener),
-				Address:         lnConfig.Address,
-				TLSCertFile:     lnConfig.TLSCertFile,
-				TLSKeyFile:      lnConfig.TLSKeyFile,
-				TLSClientCAFile: lnConfig.TLSClientCAFile,
-				TLSEnabled:      lnConfig.TLSEnabled,
+				Logger:               logger.WithSystem(subsystemListener),
+				Address:              lnConfig.Address,
+				TLSCertFile:          lnConfig.TLSCertFile,
+				TLSKeyFile:           lnConfig.TLSKeyFile,
+				TLSClientCAFile:      lnConfig.TLSClientCAFile,
+				TLSEnabled:           lnConfig.TLSEnabled,
+				TLSRequireClientCert: lnConfig.TLSRequireClientCert,
+				TrustedProxies:       lnConfig.TrustedProxies,
 			}, httpHandler)
 			if err != nil {
 				return nil, fmt.Errorf("error initializing listener of type %s: %s", lnConfig.Type, err)

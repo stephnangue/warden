@@ -104,6 +104,25 @@ services:
     restart: unless-stopped
     command: serve all --dev
 
+  # Nginx load balancer in front of the 3-node Warden cluster (TLS termination)
+  nginx:
+    image: nginx:alpine
+    container_name: e2e-nginx
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./loadbalancer/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./loadbalancer/certs:/etc/nginx/certs:ro
+    networks:
+      - e2e-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "--no-check-certificate", "https://localhost:8000/nginx-health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
 networks:
   e2e-network:
     driver: bridge

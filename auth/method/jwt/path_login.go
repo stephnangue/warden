@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/hashicorp/cap/jwt"
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
+	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -73,7 +75,11 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
 	}
 	if role == nil {
-		return logical.ErrorResponse(logical.ErrNotFoundf("role %q not found", roleName)), nil
+		b.logger.Warn("login failed: role not found", lgr.String("role", roleName))
+		return &logical.Response{
+			StatusCode: http.StatusUnauthorized,
+			Err:        errAuthFailed,
+		}, nil
 	}
 
 	// Build expected claims - merge global config with role-specific
@@ -102,26 +108,45 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 
 	claims, err := b.config.validator.Validate(ctx, jwtToken, expected)
 	if err != nil {
+		b.logger.Warn("login failed: JWT validation error", lgr.Err(err), lgr.String("role", roleName))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
-			Err:        err,
+			Err:        errAuthFailed,
 		}, nil
 	}
 
 	// Validate bound claims from config
 	if err := validateBoundClaims(claims, b.config.BoundClaims); err != nil {
+		b.logger.Warn("login failed: config bound claims check", lgr.Err(err), lgr.String("role", roleName))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
-			Err:        err,
+			Err:        errAuthFailed,
 		}, nil
 	}
 
 	// Validate bound claims from role
 	if err := validateBoundClaims(claims, role.BoundClaims); err != nil {
+		b.logger.Warn("login failed: role bound claims check", lgr.Err(err), lgr.String("role", roleName))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
-			Err:        err,
+			Err:        errAuthFailed,
 		}, nil
+	}
+
+	// Validate bound URI patterns against the configured claim
+	if len(role.BoundURIPatterns) > 0 {
+		uriClaim := role.URIClaim
+		if uriClaim == "" {
+			uriClaim = "sub"
+		}
+		claimValue := extractClaim(claims, uriClaim)
+		if claimValue == "" || !helper.MatchAny(claimValue, role.BoundURIPatterns) {
+			b.logger.Warn("login failed: URI pattern mismatch", lgr.String("claim", uriClaim), lgr.String("role", roleName))
+			return &logical.Response{
+				StatusCode: http.StatusUnauthorized,
+				Err:        errAuthFailed,
+			}, nil
+		}
 	}
 
 	// Extract principal identity - use role's user_claim or fallback to config
@@ -131,18 +156,20 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	}
 	principalID := extractClaim(claims, userClaim)
 	if principalID == "" {
+		b.logger.Warn("login failed: no principal identity in JWT", lgr.String("user_claim", userClaim), lgr.String("role", roleName))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
-			Err:        fmt.Errorf("no principal identity found in jwt"),
+			Err:        errAuthFailed,
 		}, nil
 	}
 
 	// Extract expiration time
 	expValue, ok := claims["exp"]
 	if !ok {
+		b.logger.Warn("login failed: no exp claim in JWT", lgr.String("role", roleName))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
-			Err:        fmt.Errorf("no exp found in jwt"),
+			Err:        errAuthFailed,
 		}, nil
 	}
 
@@ -156,9 +183,10 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	case int:
 		expTimestamp = int64(v)
 	default:
+		b.logger.Warn("login failed: invalid exp format in JWT", lgr.String("role", roleName))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
-			Err:        fmt.Errorf("invalid exp format in jwt"),
+			Err:        errAuthFailed,
 		}, nil
 	}
 
@@ -166,17 +194,68 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	jwtTTL := time.Until(jwtExpiration)
 
 	if jwtTTL <= 0 {
+		b.logger.Warn("login failed: JWT has expired", lgr.String("role", roleName))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
-			Err:        fmt.Errorf("jwt has expired"),
+			Err:        errAuthFailed,
 		}, nil
+	}
+
+	// Validate max_age (iat freshness) if configured on the role
+	if role.MaxAge != "" {
+		maxAge, err := role.ParseMaxAge()
+		if err != nil {
+			b.logger.Warn("login failed: corrupt max_age in role config", lgr.String("role", roleName), lgr.Err(err))
+			return &logical.Response{
+				StatusCode: http.StatusUnauthorized,
+				Err:        errAuthFailed,
+			}, nil
+		}
+		iatValue, ok := claims["iat"]
+		if !ok {
+			b.logger.Warn("login failed: iat claim required when max_age is set", lgr.String("role", roleName))
+			return &logical.Response{
+				StatusCode: http.StatusUnauthorized,
+				Err:        errAuthFailed,
+			}, nil
+		}
+		var iatTimestamp int64
+		switch v := iatValue.(type) {
+		case float64:
+			iatTimestamp = int64(v)
+		case int64:
+			iatTimestamp = v
+		case int:
+			iatTimestamp = int64(v)
+		default:
+			b.logger.Warn("login failed: invalid iat format in JWT", lgr.String("role", roleName))
+			return &logical.Response{
+				StatusCode: http.StatusUnauthorized,
+				Err:        errAuthFailed,
+			}, nil
+		}
+		age := time.Since(time.Unix(iatTimestamp, 0))
+		if age > maxAge {
+			b.logger.Warn("login failed: JWT exceeds max_age",
+				lgr.String("role", roleName),
+				lgr.String("age", age.String()),
+				lgr.String("max_age", maxAge.String()))
+			return &logical.Response{
+				StatusCode: http.StatusUnauthorized,
+				Err:        errAuthFailed,
+			}, nil
+		}
 	}
 
 	// Calculate effective TTL: min(role.TokenTTL, jwtTTL)
 	// The token should never outlive the JWT's actual expiration
 	effectiveTTL := jwtTTL
-	if role.TokenTTL > 0 && role.TokenTTL < jwtTTL {
-		effectiveTTL = role.TokenTTL
+	roleTTL, err := role.ParseTokenTTL()
+	if err != nil {
+		b.logger.Warn("corrupt token_ttl in role config, using JWT TTL", lgr.String("role", roleName), lgr.Err(err))
+	}
+	if roleTTL > 0 && roleTTL < jwtTTL {
+		effectiveTTL = roleTTL
 	}
 
 	// Return auth response using role configuration

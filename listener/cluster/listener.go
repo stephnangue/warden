@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -57,8 +58,21 @@ func NewClusterListener(cfg ClusterListenerConfig) (*ClusterListener, error) {
 		writeTimeout = 60 * time.Second
 	}
 
+	// Wrap the handler to re-parse any cert forwarding headers from the
+	// original request. ParseForwardedCert re-extracts the original client
+	// cert from headers (X-SSL-Client-Cert / XFCC) that the standby's
+	// reverse proxy preserved. This is safe because the cluster listener
+	// enforces mTLS — only authenticated cluster nodes can send requests here.
+	clusterHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		if cert := listener.ParseForwardedCert(r); cert != nil {
+			ctx = listener.WithForwardedClientCert(ctx, cert)
+		}
+		cfg.Handler.ServeHTTP(w, r.WithContext(ctx))
+	})
+
 	server := &http.Server{
-		Handler:      cfg.Handler,
+		Handler:      clusterHandler,
 		IdleTimeout:  time.Minute,
 		ReadTimeout:  readTimeout,
 		WriteTimeout: writeTimeout,

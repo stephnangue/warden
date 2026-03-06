@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stephnangue/warden/auth/helper"
 )
 
 // =============================================================================
@@ -73,7 +75,7 @@ func TestValidateBoundClaims_MissingClaim(t *testing.T) {
 
 	err := validateBoundClaims(claims, boundClaims)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "required claim 'tenant' not found")
+	assert.Contains(t, err.Error(), "not found")
 }
 
 func TestValidateBoundClaims_MismatchedValue(t *testing.T) {
@@ -87,16 +89,16 @@ func TestValidateBoundClaims_MismatchedValue(t *testing.T) {
 
 	err := validateBoundClaims(claims, boundClaims)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "claim 'tenant' does not match")
+	assert.Contains(t, err.Error(), "mismatch")
 }
 
 func TestValidateBoundClaims_NumericClaim(t *testing.T) {
 	claims := map[string]interface{}{
 		"sub":   "user123",
-		"level": 5,
+		"level": float64(5), // JSON numbers decode as float64
 	}
 	boundClaims := map[string]any{
-		"level": 5,
+		"level": float64(5),
 	}
 
 	err := validateBoundClaims(claims, boundClaims)
@@ -105,7 +107,7 @@ func TestValidateBoundClaims_NumericClaim(t *testing.T) {
 
 func TestValidateBoundClaims_BooleanClaim(t *testing.T) {
 	claims := map[string]interface{}{
-		"sub":     "user123",
+		"sub":      "user123",
 		"is_admin": true,
 	}
 	boundClaims := map[string]any{
@@ -114,6 +116,51 @@ func TestValidateBoundClaims_BooleanClaim(t *testing.T) {
 
 	err := validateBoundClaims(claims, boundClaims)
 	assert.NoError(t, err)
+}
+
+// =============================================================================
+// claimValuesEqual Type Safety Tests (Phase 4: M1)
+// =============================================================================
+
+func TestClaimValuesEqual_TypeSafety(t *testing.T) {
+	tests := []struct {
+		name     string
+		actual   interface{}
+		expected interface{}
+		want     bool
+	}{
+		// Same-type matches
+		{"string match", "hello", "hello", true},
+		{"string mismatch", "hello", "world", false},
+		{"float64 match", float64(42), float64(42), true},
+		{"float64 mismatch", float64(42), float64(99), false},
+		{"int match", 5, 5, true},
+		{"int mismatch", 5, 6, false},
+		{"bool true match", true, true, true},
+		{"bool false match", false, false, true},
+		{"bool mismatch", true, false, false},
+
+		// Cross-type numeric (allowed: JSON numbers are float64)
+		{"float64 actual vs int expected", float64(5), 5, true},
+		{"int actual vs float64 expected", 5, float64(5), true},
+		{"int64 actual vs float64 expected", int64(5), float64(5), true},
+
+		// Cross-type rejection (no coercion between unrelated types)
+		{"int vs string rejected", 1, "1", false},
+		{"string vs int rejected", "1", 1, false},
+		{"bool vs string rejected", true, "true", false},
+		{"string vs bool rejected", "true", true, false},
+		{"float vs string rejected", float64(1.0), "1", false},
+		{"string vs float rejected", "1", float64(1.0), false},
+		{"bool vs int rejected", true, 1, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := claimValuesEqual(tc.actual, tc.expected)
+			assert.Equal(t, tc.want, got, "claimValuesEqual(%v [%T], %v [%T])", tc.actual, tc.actual, tc.expected, tc.expected)
+		})
+	}
 }
 
 // =============================================================================
@@ -386,7 +433,7 @@ func TestValidateBoundClaims_TableDriven(t *testing.T) {
 			claims:      map[string]interface{}{"sub": "user", "iss": "wrong"},
 			boundClaims: map[string]any{"iss": "expected"},
 			expectError: true,
-			errorMsg:    "does not match",
+			errorMsg:    "mismatch",
 		},
 		{
 			name:        "Multiple matching claims",
@@ -405,6 +452,57 @@ func TestValidateBoundClaims_TableDriven(t *testing.T) {
 				assert.Contains(t, err.Error(), tc.errorMsg)
 			} else {
 				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// validateBoundURIPatterns Tests (via helper.MatchAny)
+// =============================================================================
+
+func TestBoundURIPatterns_Validation(t *testing.T) {
+	tests := []struct {
+		name       string
+		claimValue string
+		patterns   []string
+		wantMatch  bool
+	}{
+		// SPIFFE ID patterns
+		{"exact spiffe match", "spiffe://example.com/dept/svc", []string{"spiffe://example.com/dept/svc"}, true},
+		{"plus trust domain", "spiffe://example.com/dept/svc", []string{"spiffe://+/dept/svc"}, true},
+		{"prefix wildcard", "spiffe://example.com/dept/team/svc", []string{"spiffe://example.com/dept/*"}, true},
+		{"scheme catch-all", "spiffe://anything/any/path", []string{"spiffe://*"}, true},
+		{"combined plus and star", "spiffe://example.com/dept/team/svc", []string{"spiffe://+/dept/*"}, true},
+		{"mismatch domain", "spiffe://other.com/dept/svc", []string{"spiffe://example.com/dept/svc"}, false},
+		{"mismatch path", "spiffe://example.com/other/svc", []string{"spiffe://+/dept/svc"}, false},
+		{"wrong scheme", "https://example.com/path", []string{"spiffe://*"}, false},
+
+		// Multiple patterns (OR semantics)
+		{"matches second pattern", "spiffe://other.com/web", []string{"spiffe://example.com/web", "spiffe://other.com/web"}, true},
+		{"matches none", "spiffe://third.com/web", []string{"spiffe://example.com/web", "spiffe://other.com/web"}, false},
+
+		// Empty claim
+		{"empty claim value", "", []string{"spiffe://*"}, false},
+		{"empty patterns", "spiffe://example.com/svc", []string{}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			claims := map[string]interface{}{
+				"sub": tc.claimValue,
+			}
+
+			claimValue := extractClaim(claims, "sub")
+			var matched bool
+			if claimValue != "" && len(tc.patterns) > 0 {
+				matched = helper.MatchAny(claimValue, tc.patterns)
+			}
+
+			if tc.wantMatch {
+				assert.True(t, matched, "expected claim %q to match patterns %v", tc.claimValue, tc.patterns)
+			} else {
+				assert.False(t, matched, "expected claim %q NOT to match patterns %v", tc.claimValue, tc.patterns)
 			}
 		})
 	}

@@ -30,9 +30,37 @@ HYDRA_ADMIN="http://localhost:4445"
 echo "=== Warden E2E Cluster Setup ==="
 echo ""
 
-# Step 1: Start infrastructure (PostgreSQL + Vault + Hydra)
-echo "[1/10] Starting infrastructure (PostgreSQL + Vault + Hydra)..."
-$DOCKER_COMPOSE -f "$SCRIPT_DIR/docker-compose.yml" up -d
+# Step 0: Generate TLS certificates for nginx load balancer
+NGINX_CERT_DIR="$SCRIPT_DIR/loadbalancer/certs"
+mkdir -p "$NGINX_CERT_DIR"
+
+if [ ! -f "$NGINX_CERT_DIR/ca.crt" ]; then
+  echo "Generating LB CA certificate..."
+  openssl ecparam -genkey -name prime256v1 -noout -out "$NGINX_CERT_DIR/ca.key" 2>/dev/null
+  openssl req -x509 -new -key "$NGINX_CERT_DIR/ca.key" -out "$NGINX_CERT_DIR/ca.crt" \
+    -days 365 -subj "/CN=E2E LB CA/O=Warden E2E" 2>/dev/null
+fi
+
+if [ ! -f "$NGINX_CERT_DIR/server.crt" ]; then
+  echo "Generating nginx server certificate..."
+  openssl ecparam -genkey -name prime256v1 -noout -out "$NGINX_CERT_DIR/server.key" 2>/dev/null
+  openssl req -x509 -new -key "$NGINX_CERT_DIR/server.key" -out "$NGINX_CERT_DIR/server.crt" \
+    -days 365 -subj "/CN=e2e-nginx-lb" 2>/dev/null
+fi
+
+# Step 1: Start infrastructure (PostgreSQL + Vault + Hydra + Nginx)
+echo "[1/10] Starting infrastructure (PostgreSQL + Vault + Hydra + Nginx)..."
+for pull_attempt in 1 2 3; do
+  if $DOCKER_COMPOSE -f "$SCRIPT_DIR/docker-compose.yml" up -d 2>&1; then
+    break
+  fi
+  if [ "$pull_attempt" -eq 3 ]; then
+    echo "ERROR: docker compose up failed after 3 attempts"
+    exit 1
+  fi
+  echo "  Retrying docker compose up (attempt $((pull_attempt + 1))/3)..."
+  sleep 5
+done
 
 echo "Waiting for PostgreSQL to be ready..."
 until docker exec e2e-postgres-warden pg_isready -U warden -q 2>/dev/null; do
@@ -65,6 +93,20 @@ for attempt in $(seq 1 60); do
   sleep 2
 done
 echo "Hydra is ready."
+
+echo "Waiting for Nginx LB to be ready..."
+for attempt in $(seq 1 30); do
+  if curl -sk "https://127.0.0.1:8000/nginx-health" >/dev/null 2>&1; then
+    break
+  fi
+  if [ "$attempt" -eq 30 ]; then
+    echo "  WARNING: Nginx LB not ready after 30 attempts (LB tests will skip)"
+  fi
+  sleep 1
+done
+if curl -sk "https://127.0.0.1:8000/nginx-health" >/dev/null 2>&1; then
+  echo "Nginx LB is ready."
+fi
 
 # Step 2: Reset E2E tables (clean state)
 echo ""
