@@ -885,7 +885,7 @@ func TestHandleTransparentAuth(t *testing.T) {
 	core := createTestCore(t)
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	t.Run("returns error when no token provided", func(t *testing.T) {
+	t.Run("returns error when no credential provided", func(t *testing.T) {
 		backend := &mockTransparentModeProvider{
 			transparentMode: true,
 			autoAuthPath:    "auth/jwt/",
@@ -896,10 +896,10 @@ func TestHandleTransparentAuth(t *testing.T) {
 
 		err := core.handleTransparentAuth(ctx, req, backend, "terraform")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no token provided")
+		assert.Contains(t, err.Error(), "no valid credential")
 	})
 
-	t.Run("returns error for non-JWT token", func(t *testing.T) {
+	t.Run("returns error for non-JWT non-cert token", func(t *testing.T) {
 		backend := &mockTransparentModeProvider{
 			transparentMode: true,
 			autoAuthPath:    "auth/jwt/",
@@ -910,7 +910,7 @@ func TestHandleTransparentAuth(t *testing.T) {
 
 		err := core.handleTransparentAuth(ctx, req, backend, "terraform")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "transparent mode requires a JWT token")
+		assert.Contains(t, err.Error(), "no valid credential")
 	})
 
 	t.Run("uses existing JWT token when found in cache", func(t *testing.T) {

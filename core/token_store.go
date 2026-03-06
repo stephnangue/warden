@@ -24,6 +24,7 @@ const (
 	TypeAWSAccessKeys = "aws_access_keys"
 	TypeWardenToken   = "warden_token"
 	TypeJWTRole       = "jwt_role"
+	TypeCertRole      = "cert_role"
 )
 
 // Storage path constants for token store organization
@@ -310,6 +311,7 @@ func (s *TokenStore) registerBuiltinTypes() error {
 		&AWSAccessKeysTokenType{},
 		&WardenTokenType{},
 		&JWTRoleTokenType{},
+		&CertRoleTokenType{},
 	}
 
 	for _, tokenType := range builtinTypes {
@@ -409,10 +411,10 @@ func (s *TokenStore) generateWithCollisionDetection(
 
 		// Check for existing token with same ID
 		if existingEntry, found := s.byID.Get(entry.ID); found {
-			// For JWT tokens, the ID is deterministic (based on jwt:role hash).
-			// Finding an existing token means this JWT+role already has a valid token.
+			// For JWT and cert tokens, the ID is deterministic (based on credential:role hash).
+			// Finding an existing token means this credential+role already has a valid token.
 			// Return the existing token instead of treating it as a collision.
-			if meta.Name == TypeJWTRole {
+			if meta.Name == TypeJWTRole || meta.Name == TypeCertRole {
 				return existingEntry, nil
 			}
 
@@ -453,9 +455,9 @@ func (s *TokenStore) generateWithCollisionDetection(
 		}
 
 		// Register token with expiration manager for timer-based TTL enforcement
-		// JWT role tokens are cache-only, so don't persist their expiration entries
+		// JWT and cert role tokens are cache-only, so don't persist their expiration entries
 		if expMgr := s.core.GetExpirationManager(); expMgr != nil && ttl > 0 {
-			persist := entry.Type != TypeJWTRole
+			persist := entry.Type != TypeJWTRole && entry.Type != TypeCertRole
 			if err := expMgr.RegisterToken(ctx, entry.ID, ttl, persist); err != nil {
 				s.logger.Warn("failed to register token with expiration manager",
 					logger.String("token_id", entry.ID),
@@ -1016,8 +1018,8 @@ func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
 // Uses a transaction to ensure atomicity: both token and accessor are stored together
 // or neither is stored if any operation fails
 func (s *TokenStore) persistToken(entry *TokenEntry) error {
-	// Skip persistence for jwt_role tokens - they are cache-only
-	if entry.Type == TypeJWTRole {
+	// Skip persistence for jwt_role and cert_role tokens - they are cache-only
+	if entry.Type == TypeJWTRole || entry.Type == TypeCertRole {
 		return nil
 	}
 
@@ -1283,8 +1285,8 @@ func (s *TokenStore) loadTokenByAccessor(accessor string) (*TokenEntry, error) {
 // Uses a transaction to ensure atomicity: both token and accessor are deleted together
 // or neither is deleted if any operation fails
 func (s *TokenStore) deleteToken(entry *TokenEntry) error {
-	// Skip storage operations for jwt_role tokens - they are cache-only
-	if entry.Type == TypeJWTRole {
+	// Skip storage operations for jwt_role and cert_role tokens - they are cache-only
+	if entry.Type == TypeJWTRole || entry.Type == TypeCertRole {
 		return nil
 	}
 
@@ -1564,6 +1566,112 @@ func (c *Core) LookupJWTTokenWithRole(ctx context.Context, jwt string, role stri
 	// to prevent timing attacks
 	if subtle.ConstantTimeCompare([]byte(expectedHash), []byte(jwtHash)) != 1 {
 		s.logger.Error("JWT token value mismatch",
+			logger.String("token_id", tokenID),
+			logger.String("lookup_key", lookupKey))
+		return nil, ErrTokenNotFound
+	}
+
+	// Validate expiration
+	if !entry.ExpireAt.IsZero() && time.Now().After(entry.ExpireAt) {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementTokensExpired()
+		}
+		return nil, ErrTokenExpired
+	}
+
+	// Validate same-origin policy (IP binding)
+	if err := s.validateIPBinding(ctx, tokenID, entry); err != nil {
+		return nil, err
+	}
+
+	if s.config.EnableMetrics {
+		s.metrics.IncrementTokensResolved()
+	}
+
+	entryCopy := *entry
+	return &entryCopy, nil
+}
+
+// LookupCertTokenWithRole looks up a cert token using both the fingerprint and role.
+// This is used for transparent mode where the same cert with different roles
+// should produce different tokens. The composite "fingerprint:role" value is used
+// for ID computation and validation.
+func (c *Core) LookupCertTokenWithRole(ctx context.Context, certFingerprint string, role string) (*TokenEntry, error) {
+	if c.Sealed() {
+		return nil, fmt.Errorf("the core is sealed")
+	}
+
+	if c.tokenStore == nil {
+		return nil, nil
+	}
+
+	s := c.tokenStore
+
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return nil, ErrStoreClosed
+	}
+	s.mu.RUnlock()
+
+	// Extract namespace from context
+	ns, err := namespace.FromContext(ctx)
+	if err != nil || ns == nil {
+		return nil, errors.New("namespace not found in context")
+	}
+
+	certType := &CertRoleTokenType{}
+
+	// Compute hash of "fingerprint:role" - this matches what's stored in entry.Data["cert_fingerprint"]
+	certHash := certType.ComputeData(certFingerprint, role)
+	// Token ID is computed from the hash
+	tokenID := certType.ComputeID(certHash)
+
+	// Lookup token in cache only - cert tokens are not persisted to storage
+	entry, found := s.byID.Get(tokenID)
+	if !found {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementCacheMisses()
+		}
+		return nil, ErrTokenNotFound
+	}
+
+	if s.config.EnableMetrics {
+		s.metrics.IncrementCacheHits()
+	}
+
+	// Validate namespace binding
+	tokenNs, err := c.namespaceStore.GetNamespaceByAccessor(ctx, entry.NamespaceID)
+	if err != nil || tokenNs == nil {
+		s.logger.Warn("cert token namespace not found",
+			logger.String("token_id", tokenID),
+			logger.String("token_namespace_id", entry.NamespaceID))
+		return nil, ErrTokenNamespaceMismatch
+	}
+
+	isValidNamespace := ns.UUID == tokenNs.UUID || ns.HasParent(tokenNs)
+	if !isValidNamespace {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementNamespaceMismatches()
+		}
+		s.logger.Warn("cert token namespace mismatch",
+			logger.String("token_id", tokenID),
+			logger.String("token_namespace", tokenNs.Path),
+			logger.String("request_namespace", ns.Path))
+		return nil, ErrTokenNamespaceMismatch
+	}
+
+	// Validate token value matches (comparing hashes, not raw fingerprint)
+	lookupKey := certType.LookupKey()
+	expectedHash, ok := entry.Data[lookupKey]
+	if !ok {
+		s.logger.Error("cert token lookup key not found",
+			logger.String("token_id", tokenID),
+			logger.String("lookup_key", lookupKey))
+		return nil, ErrTokenNotFound
+	}
+	if subtle.ConstantTimeCompare([]byte(expectedHash), []byte(certHash)) != 1 {
+		s.logger.Error("cert token value mismatch",
 			logger.String("token_id", tokenID),
 			logger.String("lookup_key", lookupKey))
 		return nil, ErrTokenNotFound

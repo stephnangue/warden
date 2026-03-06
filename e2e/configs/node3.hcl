@@ -22,6 +22,7 @@ storage "postgres" {
 }
 
 listener "tcp" {
-    address     = "127.0.0.1:8520"
-    tls_enabled = false
+    address         = "0.0.0.0:8520"
+    tls_enabled     = false
+    trusted_proxies = ["127.0.0.1/32", "172.16.0.0/12", "192.168.0.0/16"]
 }

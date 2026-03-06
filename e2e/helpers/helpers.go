@@ -4,6 +4,7 @@
 package helpers
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -640,4 +641,151 @@ func JSONFloat(t *testing.T, body []byte, path string) float64 {
 		t.Fatalf("JSON path %q is not a number: %v", path, val)
 	}
 	return f
+}
+
+// --- Load Balancer Helpers ---
+
+// LBPort is the nginx load balancer port (HTTPS).
+const LBPort = 8000
+
+// LBNodeURL returns the base URL for the nginx load balancer.
+func LBNodeURL() string {
+	return fmt.Sprintf("https://127.0.0.1:%d", LBPort)
+}
+
+// LBAvailable checks if the nginx load balancer can actually proxy to the
+// Warden cluster. We probe /v1/sys/health through the LB rather than the
+// nginx-only /nginx-health endpoint, because nginx may be healthy while
+// unable to reach the backend nodes (e.g., on Linux CI where nodes bind
+// to 127.0.0.1 and host.docker.internal maps to the Docker bridge gateway).
+func LBAvailable() bool {
+	status, _, _ := doLBHTTP("GET", LBNodeURL()+"/v1/sys/health", nil, "", nil)
+	// 200 = active leader, 429 = standby — both mean proxying works
+	return status == 200 || status == 429
+}
+
+// SkipWithoutLB skips the test if the load balancer is not available.
+func SkipWithoutLB(t *testing.T) {
+	t.Helper()
+	if !LBAvailable() {
+		t.Skip("nginx load balancer not available (skipping LB test)")
+	}
+}
+
+// doLBHTTP makes an HTTPS request through the LB with optional TLS client cert.
+func doLBHTTP(method, rawURL string, headers map[string]string, body string, clientCert *tls.Certificate) (int, []byte, error) {
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+
+	req, err := http.NewRequest(method, rawURL, bodyReader)
+	if err != nil {
+		return 0, nil, err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if body != "" && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	tlsConfig := &tls.Config{InsecureSkipVerify: true} //nolint:gosec // self-signed e2e cert
+	if clientCert != nil {
+		tlsConfig.Certificates = []tls.Certificate{*clientCert}
+	}
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsConfig},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, respBody, nil
+}
+
+// DoLBRequest makes an HTTPS request through the LB. Fatals on connection errors.
+func DoLBRequest(t *testing.T, method, rawURL string, headers map[string]string, body string, clientCert *tls.Certificate) (int, []byte) {
+	t.Helper()
+	status, respBody, err := doLBHTTP(method, rawURL, headers, body, clientCert)
+	if err != nil {
+		t.Fatalf("LB request failed: %v", err)
+	}
+	return status, respBody
+}
+
+// parseTLSCert parses PEM-encoded cert+key into a tls.Certificate.
+func parseTLSCert(t *testing.T, certPEM, keyPEM string) tls.Certificate {
+	t.Helper()
+	cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		t.Fatalf("failed to parse TLS client cert: %v", err)
+	}
+	return cert
+}
+
+// VaultTransparentRequestViaLB makes a JWT transparent vault gateway request through the LB.
+func VaultTransparentRequestViaLB(t *testing.T, method, vaultPath, role, jwt string) (int, []byte) {
+	t.Helper()
+	u := fmt.Sprintf("%s/v1/vault/role/%s/gateway/v1/%s", LBNodeURL(), role, vaultPath)
+	headers := map[string]string{"Authorization": "Bearer " + jwt}
+	return DoLBRequest(t, method, u, headers, "", nil)
+}
+
+// VaultCertTransparentRequestViaLB makes a cert transparent vault gateway request
+// through the LB. The client presents its TLS certificate to nginx, which
+// validates it against the LB CA and forwards it via X-SSL-Client-Cert.
+func VaultCertTransparentRequestViaLB(t *testing.T, method, vaultPath, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+	t.Helper()
+	cert := parseTLSCert(t, clientCertPEM, clientKeyPEM)
+	u := fmt.Sprintf("%s/v1/vault-cert/role/%s/gateway/v1/%s", LBNodeURL(), role, vaultPath)
+	return DoLBRequest(t, method, u, nil, "", &cert)
+}
+
+// VaultNTRequestViaLB makes a non-transparent vault gateway request through the LB.
+func VaultNTRequestViaLB(t *testing.T, method, vaultPath, wardenToken string) (int, []byte) {
+	t.Helper()
+	u := fmt.Sprintf("%s/v1/vault-nt/gateway/v1/%s", LBNodeURL(), vaultPath)
+	headers := map[string]string{"X-Warden-Token": wardenToken}
+	return DoLBRequest(t, method, u, headers, "", nil)
+}
+
+// LoginJWTViaLB logs in with a JWT and role through the load balancer.
+func LoginJWTViaLB(t *testing.T, jwt, role string) (int, string) {
+	t.Helper()
+	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"%s"}`, jwt, role)
+	status, body := DoLBRequest(t, "POST",
+		fmt.Sprintf("%s/v1/auth/jwt/login", LBNodeURL()),
+		map[string]string{"Content-Type": "application/json"},
+		loginBody, nil,
+	)
+	if status != 200 && status != 201 {
+		return status, ""
+	}
+	data := ParseJSON(t, body)
+	token, _ := JSONPath(data, "data.data.token").(string)
+	if token == "" {
+		token, _ = JSONPath(data, "data.token_id").(string)
+	}
+	return status, token
+}
+
+// CertLoginRequestViaLB performs a cert auth login through the load balancer.
+// The client presents its TLS certificate to nginx for forwarding.
+func CertLoginRequestViaLB(t *testing.T, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+	t.Helper()
+	cert := parseTLSCert(t, clientCertPEM, clientKeyPEM)
+	u := fmt.Sprintf("%s/v1/auth/cert/login", LBNodeURL())
+	headers := map[string]string{"Content-Type": "application/json"}
+	body := fmt.Sprintf(`{"role":"%s"}`, role)
+	return DoLBRequest(t, "POST", u, headers, body, &cert)
 }

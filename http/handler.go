@@ -2,6 +2,7 @@ package http
 
 import (
 	"crypto/tls"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net"
@@ -15,6 +16,7 @@ import (
 
 	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/stephnangue/warden/core"
+	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -210,6 +212,17 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 				req.Header.Set("X-Forwarded-Proto", "https")
 			} else if req.Header.Get("X-Forwarded-Proto") == "" {
 				req.Header.Set("X-Forwarded-Proto", "http")
+			}
+
+			// Re-inject any forwarded client certificate that the API
+			// middleware extracted and stripped. The cluster listener
+			// needs it as a header to pass the cert to the leader.
+			if cert := listener.ForwardedClientCert(req.Context()); cert != nil {
+				pemBytes := pem.EncodeToMemory(&pem.Block{
+					Type:  "CERTIFICATE",
+					Bytes: cert.Raw,
+				})
+				req.Header.Set("X-SSL-Client-Cert", url.QueryEscape(string(pemBytes)))
 			}
 		},
 		Transport: transport,
