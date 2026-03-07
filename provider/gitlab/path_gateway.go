@@ -19,6 +19,7 @@ var headersToRemove = []string{
 	"Authorization",
 	"PRIVATE-TOKEN",
 	"X-Warden-Token",
+	"X-Warden-Role",
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",

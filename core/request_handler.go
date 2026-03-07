@@ -1012,6 +1012,15 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 
 	// Extract role from path (may return default role or empty string)
 	role := tmp.GetTransparentRole(relativePath)
+
+	// X-Warden-Role header takes priority over DefaultRole but not over URL-embedded role.
+	// If the path doesn't start with "role/", any role value came from DefaultRole, not the URL.
+	if !strings.HasPrefix(relativePath, "role/") && req.HTTPRequest != nil {
+		if headerRole := req.HTTPRequest.Header.Get("X-Warden-Role"); headerRole != "" {
+			role = headerRole
+		}
+	}
+
 	return true, role
 }
 
@@ -1032,7 +1041,7 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 
 	// Check if role is available (either from URL or default_role config)
 	if role == "" {
-		return fmt.Errorf("transparent mode requires a role: use /role/{role}/gateway/... path or configure default_role")
+		return fmt.Errorf("transparent mode requires a role: use /role/{role}/gateway/... path, X-Warden-Role header, or configure default_role")
 	}
 
 	// Detect credential type: client certificate or JWT bearer token

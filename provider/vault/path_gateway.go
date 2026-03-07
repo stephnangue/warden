@@ -20,6 +20,7 @@ var headersToRemove = []string{
 	"X-Vault-Token",   // Will be replaced with real Vault token
 	"X-Vault-Request", // Internal Vault header
 	"X-Warden-Token",  // Warden-specific auth header
+	"X-Warden-Role",   // Warden transparent mode role header
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",

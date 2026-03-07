@@ -20,6 +20,7 @@ var headersToRemove = []string{
 	// Security headers (will be replaced with GCP Bearer token)
 	"Authorization",
 	"X-Warden-Token",
+	"X-Warden-Role",
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",

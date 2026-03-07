@@ -878,6 +878,58 @@ func TestIsTransparentRequest(t *testing.T) {
 		assert.True(t, isTransparent)
 		assert.Equal(t, "default-role", role)
 	})
+
+	t.Run("returns header role when no URL role prefix", func(t *testing.T) {
+		backend := &mockTransparentModeProvider{
+			transparentMode: true,
+			autoAuthPath:    "auth/jwt/",
+		}
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/vault/gateway/v1/secret", nil)
+		httpReq.Header.Set("X-Warden-Role", "terraform")
+		req := &logical.Request{
+			Path:        "gateway/v1/secret",
+			HTTPRequest: httpReq,
+		}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "terraform", role)
+	})
+
+	t.Run("URL role takes precedence over header role", func(t *testing.T) {
+		backend := &mockTransparentModeProvider{
+			transparentMode: true,
+			autoAuthPath:    "auth/jwt/",
+		}
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/vault/role/terraform/gateway/v1/secret", nil)
+		httpReq.Header.Set("X-Warden-Role", "operator")
+		req := &logical.Request{
+			Path:        "role/terraform/gateway/v1/secret",
+			HTTPRequest: httpReq,
+		}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "terraform", role)
+	})
+
+	t.Run("header role takes precedence over default role", func(t *testing.T) {
+		backend := &mockTransparentModeProvider{
+			transparentMode: true,
+			autoAuthPath:    "auth/jwt/",
+			defaultRole:     "fallback",
+		}
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/vault/gateway/v1/secret", nil)
+		httpReq.Header.Set("X-Warden-Role", "terraform")
+		req := &logical.Request{
+			Path:        "gateway/v1/secret",
+			HTTPRequest: httpReq,
+		}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "terraform", role)
+	})
 }
 
 // TestHandleTransparentAuth tests the handleTransparentAuth function
