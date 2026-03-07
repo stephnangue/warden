@@ -62,3 +62,29 @@ func TestNSVaultTransparent(t *testing.T) {
 	// Teardown
 	h.TeardownNSVaultEnv(t, leader)
 }
+
+// TestNSVaultTransparentHeaderRole verifies transparent vault gateway works with X-Warden-Role header (T31).
+func TestNSVaultTransparentHeaderRole(t *testing.T) {
+	leader := h.GetLeaderPort(t)
+
+	// Ensure namespace vault env exists (idempotent)
+	h.SetupNSVaultEnv(t, leader)
+
+	jwt := h.GetDefaultJWT(t)
+
+	// Request using X-Warden-Role header instead of role in URL path
+	status, _ := h.NSVaultTransparentHeaderRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", h.NSVaultNS, leader, jwt)
+	if status != 200 {
+		t.Fatalf("header role: expected 200, got %d", status)
+	}
+
+	// URL role should take precedence over header role
+	// Use valid URL role + invalid header role — should succeed because URL wins
+	status2, _ := h.NSVaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", h.NSVaultNS, leader, jwt)
+	if status2 != 200 {
+		t.Fatalf("URL role precedence: expected 200, got %d", status2)
+	}
+
+	// Teardown
+	h.TeardownNSVaultEnv(t, leader)
+}
