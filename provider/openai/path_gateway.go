@@ -18,6 +18,7 @@ var headersToRemove = []string{
 	// Security headers (will be replaced with OpenAI API key)
 	"Authorization",
 	"X-Warden-Token",
+	"X-Warden-Role",
 	// OpenAI-specific headers (will be injected from credential data)
 	"OpenAI-Organization",
 	"OpenAI-Project",

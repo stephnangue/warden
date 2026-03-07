@@ -18,6 +18,7 @@ var headersToRemove = []string{
 	// Security headers (will be replaced with GitHub token)
 	"Authorization",
 	"X-Warden-Token",
+	"X-Warden-Role",
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",

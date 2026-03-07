@@ -410,6 +410,19 @@ func NSVaultTransparentRequest(t *testing.T, method, vaultPath, role, namespace 
 	return DoRequest(t, method, u, headers, "")
 }
 
+// NSVaultTransparentHeaderRequest makes a namespace-scoped transparent Vault gateway request
+// using X-Warden-Role header instead of embedding the role in the URL path.
+func NSVaultTransparentHeaderRequest(t *testing.T, method, vaultPath, role, namespace string, port int, jwt string) (int, []byte) {
+	t.Helper()
+	u := fmt.Sprintf("%s/v1/vault/gateway/v1/%s", NodeURL(port), vaultPath)
+	headers := map[string]string{
+		"Authorization":      "Bearer " + jwt,
+		"X-Warden-Namespace": namespace,
+		"X-Warden-Role":      role,
+	}
+	return DoRequest(t, method, u, headers, "")
+}
+
 // GetNSNTWardenToken obtains a Warden token for non-transparent gateway access
 // within a namespace by logging in via JWT with the e2e-nt-reader role.
 func GetNSNTWardenToken(t *testing.T, namespace string, port int) string {
