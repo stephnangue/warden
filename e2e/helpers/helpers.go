@@ -802,3 +802,28 @@ func CertLoginRequestViaLB(t *testing.T, role, clientCertPEM, clientKeyPEM strin
 	body := fmt.Sprintf(`{"role":"%s"}`, role)
 	return DoLBRequest(t, "POST", u, headers, body, &cert)
 }
+
+// --- Transparent Operations Helpers ---
+
+// TransparentOpsRequest makes a transparent operations request using JWT implicit auth.
+// The namespace must have auto_auth_path configured. Uses X-Warden-Role header.
+func TransparentOpsRequest(t *testing.T, method, path string, port int, jwt, role string) (int, []byte) {
+	t.Helper()
+	u := fmt.Sprintf("%s/v1/%s", NodeURL(port), path)
+	headers := map[string]string{
+		"Authorization": "Bearer " + jwt,
+		"X-Warden-Role": role,
+	}
+	return DoRequest(t, method, u, headers, "")
+}
+
+// TransparentOpsRequestNoRole makes a transparent operations request using JWT implicit auth
+// without specifying a role (relies on default_role configured on the auth method).
+func TransparentOpsRequestNoRole(t *testing.T, method, path string, port int, jwt string) (int, []byte) {
+	t.Helper()
+	u := fmt.Sprintf("%s/v1/%s", NodeURL(port), path)
+	headers := map[string]string{
+		"Authorization": "Bearer " + jwt,
+	}
+	return DoRequest(t, method, u, headers, "")
+}

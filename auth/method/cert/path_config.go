@@ -50,6 +50,10 @@ func (b *certAuthBackend) pathConfig() *framework.Path {
 				Description: "OCSP request timeout (default: 5s). Example: 3s, 10s",
 				Default:     "5s",
 			},
+			"default_role": {
+				Type:        framework.TypeString,
+				Description: "Default role for transparent operations when no role is specified",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{
@@ -97,6 +101,7 @@ func (b *certAuthBackend) handleConfigRead(ctx context.Context, req *logical.Req
 			"revocation_mode":  b.config.RevocationMode,
 			"crl_cache_ttl":    b.config.CRLCacheTTL,
 			"ocsp_timeout":     b.config.OCSPTimeout,
+			"default_role":     b.config.DefaultRole,
 			"trusted_ca_count": certCount,
 		},
 	}, nil
@@ -116,6 +121,7 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		conf["revocation_mode"] = b.config.RevocationMode
 		conf["crl_cache_ttl"] = b.config.CRLCacheTTL
 		conf["ocsp_timeout"] = b.config.OCSPTimeout
+		conf["default_role"] = b.config.DefaultRole
 	}
 
 	// Apply new values from request

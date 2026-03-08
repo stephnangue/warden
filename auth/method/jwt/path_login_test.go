@@ -152,7 +152,7 @@ func TestPathLogin_Fields(t *testing.T) {
 
 	// Check required flags
 	assert.True(t, jwtField.Required, "jwt field should be required")
-	assert.True(t, roleField.Required, "role field should be required")
+	assert.False(t, roleField.Required, "role field should not be required (falls back to default_role)")
 }
 
 func TestPathLogin_Operations(t *testing.T) {
@@ -517,4 +517,102 @@ func TestHandleLogin_RoleNotFound(t *testing.T) {
 	// Should fail because backend is not configured (validator is nil)
 	// This is the expected behavior - role check happens after config validation
 	assert.NotNil(t, resp.Err)
+}
+
+// =============================================================================
+// Default Role Fallback Tests
+// =============================================================================
+
+func TestHandleLogin_DefaultRoleFallback(t *testing.T) {
+	t.Run("uses default_role when role is empty", func(t *testing.T) {
+		ctx := context.Background()
+		conf := &logical.BackendConfig{
+			Logger: testLoggerLogin(),
+		}
+		backend, err := Factory(ctx, conf)
+		require.NoError(t, err)
+
+		b := backend.(*jwtAuthBackend)
+		b.config = &JWTAuthConfig{
+			DefaultRole: "fallback-role",
+		}
+
+		req := &logical.Request{}
+		d := &framework.FieldData{
+			Raw: map[string]any{
+				"jwt":  "some.jwt.token",
+				"role": "",
+			},
+			Schema: b.pathLogin().Fields,
+		}
+
+		resp, err := b.handleLogin(ctx, req, d)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		// Should NOT get "missing role" error — should proceed past role check
+		// and fail on config validation instead (validator is nil)
+		if resp.Err != nil {
+			assert.NotContains(t, resp.Err.Error(), "missing role")
+		}
+	})
+
+	t.Run("explicit role overrides default_role", func(t *testing.T) {
+		ctx := context.Background()
+		conf := &logical.BackendConfig{
+			Logger: testLoggerLogin(),
+		}
+		backend, err := Factory(ctx, conf)
+		require.NoError(t, err)
+
+		b := backend.(*jwtAuthBackend)
+		b.config = &JWTAuthConfig{
+			DefaultRole: "fallback-role",
+		}
+
+		req := &logical.Request{}
+		d := &framework.FieldData{
+			Raw: map[string]any{
+				"jwt":  "some.jwt.token",
+				"role": "explicit-role",
+			},
+			Schema: b.pathLogin().Fields,
+		}
+
+		resp, err := b.handleLogin(ctx, req, d)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		// Should fail on config validation (validator nil), not missing role
+		if resp.Err != nil {
+			assert.NotContains(t, resp.Err.Error(), "missing role")
+		}
+	})
+
+	t.Run("missing role with no default_role returns error", func(t *testing.T) {
+		ctx := context.Background()
+		conf := &logical.BackendConfig{
+			Logger: testLoggerLogin(),
+		}
+		backend, err := Factory(ctx, conf)
+		require.NoError(t, err)
+
+		b := backend.(*jwtAuthBackend)
+		b.config = &JWTAuthConfig{
+			DefaultRole: "", // no default
+		}
+
+		req := &logical.Request{}
+		d := &framework.FieldData{
+			Raw: map[string]any{
+				"jwt":  "some.jwt.token",
+				"role": "",
+			},
+			Schema: b.pathLogin().Fields,
+		}
+
+		resp, err := b.handleLogin(ctx, req, d)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.NotNil(t, resp.Err)
+		assert.Contains(t, resp.Err.Error(), "missing role")
+	})
 }
