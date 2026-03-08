@@ -26,6 +26,7 @@ type CertAuthConfig struct {
 	RevocationMode string        `json:"revocation_mode,omitempty"`    // "none" (default), "crl", "ocsp", "best_effort"
 	CRLCacheTTL    string        `json:"crl_cache_ttl,omitempty"`      // CRL cache TTL (default: "1h")
 	OCSPTimeout    string        `json:"ocsp_timeout,omitempty"`       // OCSP request timeout (default: "5s")
+	DefaultRole    string        `json:"default_role,omitempty"`       // Default role for transparent operations
 
 	// Internal — parsed CA pool
 	caPool *x509.CertPool `json:"-"`

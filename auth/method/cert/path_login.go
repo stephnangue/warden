@@ -26,8 +26,7 @@ func (b *certAuthBackend) pathLogin() *framework.Path {
 		Fields: map[string]*framework.FieldSchema{
 			"role": {
 				Type:        framework.TypeString,
-				Description: "Role to assume after authentication",
-				Required:    true,
+				Description: "Role to assume after authentication (falls back to default_role if configured)",
 			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -56,8 +55,11 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 		return logical.ErrorResponse(logical.ErrBadRequest("no client certificate provided")), nil
 	}
 
-	// Get role name
+	// Get role name — fall back to default_role if configured
 	roleName := d.Get("role").(string)
+	if roleName == "" && b.config != nil && b.config.DefaultRole != "" {
+		roleName = b.config.DefaultRole
+	}
 	if roleName == "" {
 		return logical.ErrorResponse(logical.ErrBadRequest("missing role")), nil
 	}

@@ -80,6 +80,10 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 				Default:       "warden_token",
 				AllowedValues: b.allowedTokenTypeValues(),
 			},
+			"default_role": {
+				Type:        framework.TypeString,
+				Description: "Default role for transparent operations when no role is specified",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{
@@ -134,6 +138,7 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 			"groups_claim": b.config.GroupsClaim,
 			"token_ttl":    b.config.TokenTTL.String(),
 			"token_type":   b.config.TokenType,
+			"default_role": b.config.DefaultRole,
 		},
 	}, nil
 }
@@ -160,6 +165,7 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		conf["groups_claim"] = b.config.GroupsClaim
 		conf["token_ttl"] = b.config.TokenTTL
 		conf["token_type"] = b.config.TokenType
+		conf["default_role"] = b.config.DefaultRole
 	}
 
 	// Apply new values from request

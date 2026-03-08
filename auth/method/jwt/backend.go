@@ -44,6 +44,9 @@ type JWTAuthConfig struct {
 	TokenTTL  time.Duration `json:"token_ttl" default:"1h"`
 	TokenType string        `json:"token_type,omitempty"`
 
+	// Default role for transparent operations when no role is specified
+	DefaultRole string `json:"default_role,omitempty"`
+
 	// Internal
 	validator *jwt.Validator `json:"-"`
 	keySet    jwt.KeySet     `json:"-"`
