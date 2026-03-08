@@ -1362,6 +1362,178 @@ func TestHandleRequest_ConcurrentWithRootToken(t *testing.T) {
 	}
 }
 
+// TestTransparentOps_NonStreamingPath tests transparent operations on non-gateway endpoints
+func TestTransparentOps_NonStreamingPath(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	t.Run("X-Warden-Token skips transparent ops", func(t *testing.T) {
+		// When X-Warden-Token is set, transparent ops should be skipped entirely,
+		// even if namespace has auto_auth_path configured.
+		rootToken, err := core.tokenStore.GenerateRootToken()
+		require.NoError(t, err)
+
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/providers?warden-list=true", nil)
+		httpReq.Header.Set("X-Warden-Token", rootToken)
+		httpReq.Header.Set("X-Warden-Role", "operator")
+		req := &logical.Request{
+			Path:        "sys/providers",
+			Operation:   logical.ListOperation,
+			HTTPRequest: httpReq,
+		}
+
+		resp, _, err := core.handleNonLoginRequest(ctx, req)
+		// Should succeed with root token — transparent ops was skipped
+		assert.Nil(t, err)
+		if resp != nil {
+			assert.NotEqual(t, http.StatusUnauthorized, resp.StatusCode)
+		}
+		// Transparent flag should NOT be set
+		assert.False(t, req.Transparent)
+	})
+
+	t.Run("no auth path means normal flow - Bearer treated as Warden token", func(t *testing.T) {
+		// No X-Warden-Token, no namespace auto_auth_path.
+		// Authorization: Bearer should be treated as a Warden token (normal flow).
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/providers", nil)
+		httpReq.Header.Set("Authorization", "Bearer some-warden-token")
+		req := &logical.Request{
+			Path:        "sys/providers",
+			Operation:   logical.ReadOperation,
+			HTTPRequest: httpReq,
+		}
+
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+		// Should NOT be marked transparent
+		assert.False(t, req.Transparent)
+		// ClientToken should be the Bearer value (extracted by extractToken)
+		assert.Equal(t, "some-warden-token", req.ClientToken)
+	})
+
+	t.Run("JWT transparent ops with namespace auto_auth_path triggers implicit auth", func(t *testing.T) {
+		// Sends Authorization: Bearer <JWT> with namespace auto_auth_path configured.
+		// Since the auth backend isn't actually mounted, this will fail — but it
+		// proves transparent ops was triggered (req.Transparent is set).
+		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXVzZXIifQ.test-sig-ops"
+
+		ns := &namespace.Namespace{
+			ID:   "test-ns-trigger",
+			Path: "trigger/",
+			CustomMetadata: map[string]string{
+				"auto_auth_path": "auth/jwt/",
+			},
+		}
+		nsCtx := namespace.ContextWithNamespace(context.Background(), ns)
+
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/cred/sources", nil)
+		httpReq.Header.Set("Authorization", "Bearer "+sampleJWT)
+		httpReq.Header.Set("X-Warden-Role", "operator")
+		req := &logical.Request{
+			Path:        "sys/cred/sources",
+			Operation:   logical.ReadOperation,
+			HTTPRequest: httpReq,
+		}
+
+		resp, _, _ := core.handleNonLoginRequest(nsCtx, req)
+		// Should fail because auth backend is not mounted, but transparent flag is set
+		require.NotNil(t, resp)
+		assert.True(t, req.Transparent, "request should be marked as transparent")
+	})
+
+	t.Run("JWT transparent ops with cached token succeeds", func(t *testing.T) {
+		// Pre-create a cached token in root namespace, then verify transparent ops finds it.
+		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjYWNoZWQtdXNlciJ9.cached-sig"
+
+		authData := &AuthData{
+			TokenValue:     sampleJWT,
+			RoleName:       "ops-reader",
+			PrincipalID:    "cached-user",
+			ExpireAt:       time.Now().Add(24 * time.Hour),
+			Policies:       []string{"default"},
+			CredentialSpec: "test-spec",
+		}
+		te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+		require.NoError(t, err)
+		require.NotNil(t, te)
+
+		// Use root namespace with auto_auth_path to trigger transparent ops
+		rootWithAuth := &namespace.Namespace{
+			ID:   namespace.RootNamespaceID,
+			Path: "",
+			CustomMetadata: map[string]string{
+				"auto_auth_path": "auth/jwt/",
+			},
+		}
+		nsCtx := namespace.ContextWithNamespace(context.Background(), rootWithAuth)
+
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/cred/sources", nil)
+		httpReq.Header.Set("Authorization", "Bearer "+sampleJWT)
+		httpReq.Header.Set("X-Warden-Role", "ops-reader")
+		req := &logical.Request{
+			Path:        "sys/cred/sources",
+			Operation:   logical.ReadOperation,
+			HTTPRequest: httpReq,
+		}
+
+		_, _, _ = core.handleNonLoginRequest(nsCtx, req)
+		assert.True(t, req.Transparent)
+		assert.NotNil(t, req.TokenEntry())
+		assert.Equal(t, te.ID, req.TokenEntry().ID)
+	})
+
+	t.Run("no credential with auto_auth_path returns auth error", func(t *testing.T) {
+		// No JWT, no cert — namespace has auto_auth_path but no credential
+		ns := &namespace.Namespace{
+			ID:   "test-ns-nocred",
+			Path: "nocred/",
+			CustomMetadata: map[string]string{
+				"auto_auth_path": "auth/cert/",
+			},
+		}
+		nsCtx := namespace.ContextWithNamespace(context.Background(), ns)
+
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/cred/sources", nil)
+		httpReq.Header.Set("X-Warden-Role", "agent")
+		req := &logical.Request{
+			Path:        "sys/cred/sources",
+			Operation:   logical.ReadOperation,
+			HTTPRequest: httpReq,
+		}
+
+		resp, _, _ := core.handleNonLoginRequest(nsCtx, req)
+		require.NotNil(t, resp)
+		assert.True(t, req.Transparent)
+		assert.NotNil(t, resp.Err)
+		assert.Contains(t, resp.Err.Error(), "no valid credential")
+	})
+
+	t.Run("namespace auto_auth_path triggers transparent ops", func(t *testing.T) {
+		// Create a namespace with auto_auth_path in custom_metadata
+		ns := &namespace.Namespace{
+			ID:   "test-ns-id",
+			Path: "team-a/",
+			CustomMetadata: map[string]string{
+				"auto_auth_path": "auth/jwt/",
+			},
+		}
+		nsCtx := namespace.ContextWithNamespace(context.Background(), ns)
+
+		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJucy11c2VyIn0.ns-sig"
+
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/cred/sources", nil)
+		httpReq.Header.Set("Authorization", "Bearer "+sampleJWT)
+		httpReq.Header.Set("X-Warden-Role", "operator")
+		req := &logical.Request{
+			Path:        "sys/cred/sources",
+			Operation:   logical.ReadOperation,
+			HTTPRequest: httpReq,
+		}
+
+		_, _, _ = core.handleNonLoginRequest(nsCtx, req)
+		assert.True(t, req.Transparent)
+	})
+}
+
 // TestHandleNonLoginRequest_StreamingWithoutBodyParsing tests that backends without
 // StreamBodyParser do not get body parsing on streaming requests
 func TestHandleNonLoginRequest_StreamingWithoutBodyParsing(t *testing.T) {

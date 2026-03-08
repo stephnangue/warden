@@ -451,3 +451,29 @@ func SetupCertVaultEnvWithCA(t *testing.T, port int, caCertPEM string) {
 	APIRequest(t, "POST", "auth/cert/role/e2e-cert-nt-reader", port,
 		`{"allowed_common_names":["agent-*"],"token_policies":["vault-nt-gateway-access"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
 }
+
+// --- Cert Transparent Operations Helpers ---
+
+// CertTransparentOpsRequest makes a transparent operations request using cert implicit auth.
+// Sends client cert via X-SSL-Client-Cert header (simulating LB forwarding).
+// The namespace must have auto_auth_path configured.
+func CertTransparentOpsRequest(t *testing.T, method, path string, port int, clientCertPEM, role string) (int, []byte) {
+	t.Helper()
+	u := fmt.Sprintf("%s/v1/%s", NodeURL(port), path)
+	headers := map[string]string{
+		"X-SSL-Client-Cert": URLEncodePEM(clientCertPEM),
+		"X-Warden-Role":     role,
+	}
+	return DoRequest(t, method, u, headers, "")
+}
+
+// CertTransparentOpsRequestNoRole makes a transparent operations request using cert implicit auth
+// without specifying a role (relies on default_role configured on the auth method).
+func CertTransparentOpsRequestNoRole(t *testing.T, method, path string, port int, clientCertPEM string) (int, []byte) {
+	t.Helper()
+	u := fmt.Sprintf("%s/v1/%s", NodeURL(port), path)
+	headers := map[string]string{
+		"X-SSL-Client-Cert": URLEncodePEM(clientCertPEM),
+	}
+	return DoRequest(t, method, u, headers, "")
+}
