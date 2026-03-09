@@ -3,12 +3,12 @@ module github.com/stephnangue/warden
 go 1.26.0
 
 require (
-	github.com/ProtonMail/go-crypto v1.3.0
-	github.com/aws/aws-sdk-go-v2 v1.41.2
-	github.com/aws/aws-sdk-go-v2/credentials v1.19.10
-	github.com/aws/aws-sdk-go-v2/service/iam v1.53.3
-	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.2
-	github.com/aws/aws-sdk-go-v2/service/sts v1.41.7
+	github.com/ProtonMail/go-crypto v1.4.0
+	github.com/aws/aws-sdk-go-v2 v1.41.3
+	github.com/aws/aws-sdk-go-v2/credentials v1.19.11
+	github.com/aws/aws-sdk-go-v2/service/iam v1.53.4
+	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.3
+	github.com/aws/aws-sdk-go-v2/service/sts v1.41.8
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-uuid v1.0.3
@@ -30,7 +30,7 @@ require (
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/oauth2 v0.35.0
+	golang.org/x/oauth2 v0.36.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
@@ -60,11 +60,11 @@ require (
 	github.com/aliyun/alibaba-cloud-sdk-go v1.62.301 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/aws/aws-sdk-go v1.55.6 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.18 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.18 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.5 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.18 // indirect
-	github.com/aws/smithy-go v1.24.1 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.19 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.19 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.6 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.19 // indirect
+	github.com/aws/smithy-go v1.24.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -196,11 +196,11 @@ require (
 	github.com/zclconf/go-cty v1.16.3 // indirect
 	golang.org/x/crypto v0.48.0
 	golang.org/x/mod v0.32.0 // indirect
-	golang.org/x/net v0.50.0
-	golang.org/x/sync v0.19.0
+	golang.org/x/net v0.51.0
+	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0
-	golang.org/x/time v0.14.0
+	golang.org/x/time v0.15.0
 	golang.org/x/tools v0.41.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
