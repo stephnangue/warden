@@ -42,7 +42,7 @@ jobs:
         run: bash e2e/setup.sh
 
       - name: Run E2E tests
-        run: go test -tags e2e -v -count=1 -p 1 -timeout 45m ./e2e/cluster/ ./e2e/provider/ ./e2e/ha/ ./e2e/namespace/ ./e2e/forwarding/ ./e2e/credential/ ./e2e/rotation/ ./e2e/auth/ ./e2e/audit/ ./e2e/seal/ ./e2e/concurrency/ ./e2e/loadbalancer/
+        run: go test -tags e2e -v -count=1 -p 1 -timeout 45m ./e2e/...
 
       - name: Teardown E2E cluster
         if: always()

@@ -1084,6 +1084,13 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 	// Mark request as transparent mode
 	req.Transparent = true
 
+	// Inject client IP into context so validateIPBinding can read it
+	// during cached token lookups. Without this, transparent mode tokens
+	// bypass IP binding because the context has no client IP.
+	if req.ClientIP != "" {
+		ctx = context.WithValue(ctx, logical.ClientIPKey, req.ClientIP)
+	}
+
 	// Detect credential type: client certificate or JWT bearer token
 	var singleflightKey string
 	var lookupFunc func() (*TokenEntry, error)
@@ -1141,12 +1148,22 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		return nil
 	}
 
+	// IP binding violation means the token exists but the client IP doesn't match.
+	// Return the error immediately — don't fall through and create a new token.
+	if err == ErrOriginViolation {
+		return err
+	}
+
 	// Step 2: Token not found — perform implicit auth with singleflight
 	result, err, shared := c.transparentAuthGroup.Do(singleflightKey, func() (interface{}, error) {
 		// Double-check: another goroutine may have just created the token
 		checkTE, lookupErr := lookupFunc()
 		if lookupErr == nil && checkTE != nil {
 			return checkTE, nil
+		}
+		// Same as above: IP binding violation should not trigger re-login
+		if lookupErr == ErrOriginViolation {
+			return nil, lookupErr
 		}
 
 		// Build login request to the auto-auth path (e.g., auth/jwt/login or auth/cert/login)
