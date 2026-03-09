@@ -201,7 +201,14 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 			// Set forwarding headers from the direct client connection.
 			// Append to X-Forwarded-For to preserve the chain from
 			// upstream proxies (load balancers, etc.).
-			if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+			clientIP, _, err := net.SplitHostPort(req.RemoteAddr)
+			if err != nil {
+				// RemoteAddr may be a bare IP (no port) after middleware.RealIP
+				if ip := net.ParseIP(req.RemoteAddr); ip != nil {
+					clientIP = req.RemoteAddr
+				}
+			}
+			if clientIP != "" {
 				if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
 					req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
 				} else {
