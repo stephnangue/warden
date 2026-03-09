@@ -46,6 +46,7 @@ rm -f "$SCRIPT_DIR/configs/warden-audit.log"
 rm -f "$SCRIPT_DIR/.root_token"
 rm -f "$SCRIPT_DIR/.logs"/*.log
 rm -rf "$SCRIPT_DIR/loadbalancer/certs"
+rm -rf "$SCRIPT_DIR/.certs"
 
 echo ""
 echo "Teardown complete."

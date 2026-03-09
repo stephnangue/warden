@@ -30,7 +30,29 @@ HYDRA_ADMIN="http://localhost:4445"
 echo "=== Warden E2E Cluster Setup ==="
 echo ""
 
-# Step 0: Generate TLS certificates for nginx load balancer
+# Step 0a: Generate TLS certificates for Warden API listeners (mTLS support)
+WARDEN_CERT_DIR="$SCRIPT_DIR/.certs"
+mkdir -p "$WARDEN_CERT_DIR"
+
+if [ ! -f "$WARDEN_CERT_DIR/server.crt" ]; then
+  echo "Generating Warden API server certificate..."
+  openssl ecparam -genkey -name prime256v1 -noout -out "$WARDEN_CERT_DIR/server.key" 2>/dev/null
+  openssl req -new -key "$WARDEN_CERT_DIR/server.key" -out "$WARDEN_CERT_DIR/server.csr" \
+    -subj "/CN=warden-e2e/O=Warden E2E" 2>/dev/null
+  openssl x509 -req -in "$WARDEN_CERT_DIR/server.csr" -signkey "$WARDEN_CERT_DIR/server.key" \
+    -out "$WARDEN_CERT_DIR/server.crt" -days 365 \
+    -extfile <(printf "subjectAltName=IP:127.0.0.1,DNS:localhost") 2>/dev/null
+  rm -f "$WARDEN_CERT_DIR/server.csr"
+fi
+
+if [ ! -f "$WARDEN_CERT_DIR/client-ca.crt" ]; then
+  echo "Generating mTLS client CA certificate..."
+  openssl ecparam -genkey -name prime256v1 -noout -out "$WARDEN_CERT_DIR/client-ca.key" 2>/dev/null
+  openssl req -x509 -new -key "$WARDEN_CERT_DIR/client-ca.key" -out "$WARDEN_CERT_DIR/client-ca.crt" \
+    -days 365 -subj "/CN=E2E mTLS Client CA/O=Warden E2E" 2>/dev/null
+fi
+
+# Step 0b: Generate TLS certificates for nginx load balancer
 NGINX_CERT_DIR="$SCRIPT_DIR/loadbalancer/certs"
 mkdir -p "$NGINX_CERT_DIR"
 
@@ -150,12 +172,13 @@ done
 echo ""
 echo "[5/10] Checking initialization status..."
 
-export WARDEN_ADDR="http://127.0.0.1:8500"
+export WARDEN_ADDR="https://127.0.0.1:8500"
+export WARDEN_SKIP_VERIFY="true"
 
 # Wait for at least one node to respond (not 000/unreachable)
 echo "  Waiting for a node to become reachable..."
 for attempt in $(seq 1 30); do
-  HEALTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8500/v1/sys/health" 2>/dev/null || true)
+  HEALTH_CODE=$(curl -sk -o /dev/null -w "%{http_code}" "https://127.0.0.1:8500/v1/sys/health" 2>/dev/null || true)
   if [ -n "$HEALTH_CODE" ] && [ "$HEALTH_CODE" != "000" ]; then
     break
   fi
@@ -206,7 +229,7 @@ for attempt in $(seq 1 10); do
   LEADER_COUNT=0
   STANDBY_COUNT=0
   for port in 8500 8510 8520; do
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${port}/v1/sys/health" 2>/dev/null || echo "000")
+    HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" "https://127.0.0.1:${port}/v1/sys/health" 2>/dev/null || echo "000")
     case "$HTTP_CODE" in
       200) LEADER_COUNT=$((LEADER_COUNT + 1)) ;;
       429) STANDBY_COUNT=$((STANDBY_COUNT + 1)) ;;
@@ -245,7 +268,7 @@ fi
 # Helper: make authenticated Warden API request
 warden_api() {
   local method="$1" path="$2" body="${3:-}"
-  local args=(-s -X "$method" "http://127.0.0.1:8500/v1/${path}" -H "X-Warden-Token: $WARDEN_TOKEN")
+  local args=(-sk -X "$method" "https://127.0.0.1:8500/v1/${path}" -H "X-Warden-Token: $WARDEN_TOKEN")
   if [ -n "$body" ]; then
     args+=(-H "Content-Type: application/json" -d "$body")
   fi
@@ -428,7 +451,7 @@ warden_api POST "auth/jwt/role/e2e-nt-reader" \
 echo "  Obtaining Warden token for non-transparent testing..."
 NT_JWT=$(bash "$SCRIPT_DIR/tools/get_jwt.sh" 2>/dev/null || echo "")
 if [ -n "$NT_JWT" ]; then
-  NT_LOGIN=$(curl -s -X POST "http://127.0.0.1:8500/v1/auth/jwt/login" \
+  NT_LOGIN=$(curl -sk -X POST "https://127.0.0.1:8500/v1/auth/jwt/login" \
     -H "Content-Type: application/json" \
     -d "{\"jwt\":\"$NT_JWT\",\"role\":\"e2e-nt-reader\"}" 2>/dev/null)
   NT_WARDEN_TOKEN=$(echo "$NT_LOGIN" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['token'])" 2>/dev/null || echo "")
@@ -449,8 +472,8 @@ echo "[10/10] Verifying Vault integration..."
 # 10a. Non-transparent mode: read secret through vault-nt gateway with Warden token
 echo "  Testing non-transparent mode (Warden token -> vault-nt/gateway -> Vault)..."
 if [ -n "$NT_WARDEN_TOKEN" ]; then
-  NT_RESULT=$(curl -s -o /dev/null -w "%{http_code}" \
-    "http://127.0.0.1:8500/v1/vault-nt/gateway/v1/secret/data/e2e/app-config" \
+  NT_RESULT=$(curl -sk -o /dev/null -w "%{http_code}" \
+    "https://127.0.0.1:8500/v1/vault-nt/gateway/v1/secret/data/e2e/app-config" \
     -H "X-Warden-Token: $NT_WARDEN_TOKEN" 2>/dev/null)
   if [ "$NT_RESULT" = "200" ]; then
     echo "  Non-transparent mode: OK (HTTP $NT_RESULT)"
@@ -465,8 +488,8 @@ fi
 echo "  Testing transparent mode (JWT -> vault/gateway -> Vault)..."
 TEST_JWT=$(bash "$SCRIPT_DIR/tools/get_jwt.sh" 2>/dev/null || echo "")
 if [ -n "$TEST_JWT" ]; then
-  T_RESULT=$(curl -s -o /dev/null -w "%{http_code}" \
-    "http://127.0.0.1:8500/v1/vault/role/e2e-reader/gateway/v1/secret/data/e2e/app-config" \
+  T_RESULT=$(curl -sk -o /dev/null -w "%{http_code}" \
+    "https://127.0.0.1:8500/v1/vault/role/e2e-reader/gateway/v1/secret/data/e2e/app-config" \
     -H "Authorization: Bearer $TEST_JWT" 2>/dev/null)
   if [ "$T_RESULT" = "200" ]; then
     echo "  Transparent mode: OK (HTTP $T_RESULT)"
@@ -482,7 +505,7 @@ echo ""
 echo "=== CLUSTER READY ==="
 echo ""
 for port in 8500 8510 8520; do
-  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${port}/v1/sys/health" 2>/dev/null)
+  HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" "https://127.0.0.1:${port}/v1/sys/health" 2>/dev/null)
   case "$HTTP_CODE" in
     200) echo "  Node :${port} — ACTIVE (200)" ;;
     429) echo "  Node :${port} — STANDBY (429)" ;;
@@ -495,8 +518,8 @@ echo "  Vault:  $VAULT_ADDR (token: $VAULT_TOKEN)"
 echo "  Hydra:  $HYDRA_PUBLIC (OIDC) / $HYDRA_ADMIN (admin)"
 echo ""
 echo "Vault integration:"
-echo "  Non-transparent: curl -H 'X-Warden-Token: <token>' http://127.0.0.1:8500/v1/vault-nt/gateway/v1/secret/data/e2e/app-config"
-echo "  Transparent:     curl -H 'Authorization: Bearer <jwt>' http://127.0.0.1:8500/v1/vault/role/e2e-reader/gateway/v1/secret/data/e2e/app-config"
+echo "  Non-transparent: curl -k -H 'X-Warden-Token: <token>' https://127.0.0.1:8500/v1/vault-nt/gateway/v1/secret/data/e2e/app-config"
+echo "  Transparent:     curl -k -H 'Authorization: Bearer <jwt>' https://127.0.0.1:8500/v1/vault/role/e2e-reader/gateway/v1/secret/data/e2e/app-config"
 echo "  Get JWT:         bash e2e/tools/get_jwt.sh"
 echo ""
 echo "To start chaos testing:"

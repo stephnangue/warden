@@ -16,9 +16,10 @@ type contextKey string
 
 const ctxForwardedClientCert contextKey = "forwarded_client_cert"
 
-// ForwardedClientCert retrieves a client certificate that was forwarded by a
-// trusted proxy (load balancer) or re-injected by the cluster listener from
-// forwarding headers.
+// ForwardedClientCert retrieves the client certificate stored in the context
+// by the cert forwarding middleware. The cert may originate from a forwarding
+// header (trusted proxy / LB), the TLS connection state (direct mTLS / LB
+// passthrough), or re-injection by the cluster listener on forwarded requests.
 func ForwardedClientCert(ctx context.Context) *x509.Certificate {
 	cert, _ := ctx.Value(ctxForwardedClientCert).(*x509.Certificate)
 	return cert

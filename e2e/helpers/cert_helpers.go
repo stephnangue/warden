@@ -452,6 +452,164 @@ func SetupCertVaultEnvWithCA(t *testing.T, port int, caCertPEM string) {
 		`{"allowed_common_names":["agent-*"],"token_policies":["vault-nt-gateway-access"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
 }
 
+// --- mTLS Client CA Helpers ---
+
+// LoadMTLSClientCA loads the pre-generated mTLS client CA certificate and key
+// from e2e/.certs/. This CA is configured as the tls_client_ca_file on all
+// Warden nodes, so mTLS client certs must be signed by this CA.
+func LoadMTLSClientCA(t *testing.T) (caCertPEM string, caKey *ecdsa.PrivateKey) {
+	t.Helper()
+
+	certPath := filepath.Join(E2EDir(), ".certs", "client-ca.crt")
+	keyPath := filepath.Join(E2EDir(), ".certs", "client-ca.key")
+
+	certData, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("failed to load mTLS client CA cert: %v", err)
+	}
+
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("failed to load mTLS client CA key: %v", err)
+	}
+
+	block, _ := pem.Decode(keyData)
+	if block == nil {
+		t.Fatal("failed to decode mTLS client CA key PEM")
+	}
+
+	switch block.Type {
+	case "PRIVATE KEY":
+		parsed, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if parseErr != nil {
+			t.Fatalf("failed to parse mTLS client CA PKCS8 key: %v", parseErr)
+		}
+		var ok bool
+		caKey, ok = parsed.(*ecdsa.PrivateKey)
+		if !ok {
+			t.Fatalf("mTLS client CA key is not ECDSA: %T", parsed)
+		}
+	default:
+		caKey, err = x509.ParseECPrivateKey(block.Bytes)
+		if err != nil {
+			t.Fatalf("failed to parse mTLS client CA key: %v", err)
+		}
+	}
+
+	return string(certData), caKey
+}
+
+// --- mTLS Request Helpers ---
+
+// CertLoginRequestViaMTLS performs a cert auth login via direct mTLS connection.
+// The client cert is presented during the TLS handshake (not via headers).
+// Warden extracts it from r.TLS.PeerCertificates via the TLS fallback.
+func CertLoginRequestViaMTLS(t *testing.T, port int, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+	t.Helper()
+	cert := parseTLSCert(t, clientCertPEM, clientKeyPEM)
+	u := fmt.Sprintf("%s/v1/auth/cert/login", NodeURL(port))
+	headers := map[string]string{"Content-Type": "application/json"}
+	body := fmt.Sprintf(`{"role":"%s"}`, role)
+	return DoMTLSRequest(t, "POST", u, headers, body, cert)
+}
+
+// CertLoginRequestViaLBPassthrough performs a cert auth login through the nginx
+// TLS passthrough port. The TLS handshake goes end-to-end to Warden, so
+// r.TLS.PeerCertificates contains the client cert.
+func CertLoginRequestViaLBPassthrough(t *testing.T, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+	t.Helper()
+	cert := parseTLSCert(t, clientCertPEM, clientKeyPEM)
+	u := fmt.Sprintf("%s/v1/auth/cert/login", LBPassthroughURL())
+	headers := map[string]string{"Content-Type": "application/json"}
+	body := fmt.Sprintf(`{"role":"%s"}`, role)
+	return DoMTLSRequest(t, "POST", u, headers, body, cert)
+}
+
+// VaultCertTransparentRequestViaMTLS makes a transparent vault gateway request
+// via direct mTLS connection. The client cert is presented during the TLS
+// handshake and extracted by Warden's TLS fallback.
+func VaultCertTransparentRequestViaMTLS(t *testing.T, method, vaultPath, role string, port int, clientCertPEM, clientKeyPEM string) (int, []byte) {
+	t.Helper()
+	cert := parseTLSCert(t, clientCertPEM, clientKeyPEM)
+	u := fmt.Sprintf("%s/v1/vault-cert/role/%s/gateway/v1/%s", NodeURL(port), role, vaultPath)
+	return DoMTLSRequest(t, method, u, nil, "", cert)
+}
+
+// VaultCertTransparentRequestViaLBPassthrough makes a transparent vault gateway
+// request through the nginx TLS passthrough port via mTLS.
+func VaultCertTransparentRequestViaLBPassthrough(t *testing.T, method, vaultPath, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+	t.Helper()
+	cert := parseTLSCert(t, clientCertPEM, clientKeyPEM)
+	u := fmt.Sprintf("%s/v1/vault-cert/role/%s/gateway/v1/%s", LBPassthroughURL(), role, vaultPath)
+	return DoMTLSRequest(t, method, u, nil, "", cert)
+}
+
+// LoginJWTViaLBPassthrough logs in with a JWT through the LB passthrough port.
+// No client cert — just HTTPS with InsecureSkipVerify.
+func LoginJWTViaLBPassthrough(t *testing.T, jwt, role string) (int, string) {
+	t.Helper()
+	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"%s"}`, jwt, role)
+	// Use doLBHTTP (which has InsecureSkipVerify) with no client cert
+	status, body := DoLBRequest(t, "POST",
+		fmt.Sprintf("%s/v1/auth/jwt/login", LBPassthroughURL()),
+		map[string]string{"Content-Type": "application/json"},
+		loginBody, nil,
+	)
+	if status != 200 && status != 201 {
+		return status, ""
+	}
+	data := ParseJSON(t, body)
+	token, _ := JSONPath(data, "data.data.token").(string)
+	if token == "" {
+		token, _ = JSONPath(data, "data.token_id").(string)
+	}
+	return status, token
+}
+
+// VaultTransparentRequestViaLBPassthrough makes a JWT transparent vault gateway
+// request through the nginx TLS passthrough port. No client cert.
+func VaultTransparentRequestViaLBPassthrough(t *testing.T, method, vaultPath, role, jwt string) (int, []byte) {
+	t.Helper()
+	u := fmt.Sprintf("%s/v1/vault/role/%s/gateway/v1/%s", LBPassthroughURL(), role, vaultPath)
+	headers := map[string]string{"Authorization": "Bearer " + jwt}
+	return DoLBRequest(t, method, u, headers, "", nil)
+}
+
+// SetupCertVaultEnvWithMTLSCA sets up a vault provider with cert-based transparent
+// mode using the mTLS client CA. Use this for mTLS tests where clients present
+// their cert during the TLS handshake instead of via headers.
+func SetupCertVaultEnvWithMTLSCA(t *testing.T, port int) {
+	t.Helper()
+	caCertPEM, _ := LoadMTLSClientCA(t)
+
+	// Mount vault-cert provider
+	APIRequest(t, "POST", "sys/providers/vault-cert", port, `{"type":"vault"}`)
+	time.Sleep(1 * time.Second)
+
+	// Configure vault-cert provider
+	APIRequest(t, "PUT", "vault-cert/config", port,
+		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s"}`)
+
+	// Enable transparent mode with cert auth path
+	APIRequest(t, "POST", "vault-cert/config", port,
+		`{"transparent_mode":true,"auto_auth_path":"auth/cert/"}`)
+
+	// Mount cert auth with mTLS client CA
+	SetupCertAuthWithCA(t, port, caCertPEM)
+
+	// Policy for vault-cert gateway access
+	APIRequest(t, "POST", "sys/policies/cbp/vault-cert-gateway-access", port,
+		`{"policy":"path \"vault-cert/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}\npath \"vault-cert/role/+/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}"}`)
+
+	// Cert role for transparent mode (cert_role token type)
+	APIRequest(t, "POST", "auth/cert/role/e2e-cert-reader", port,
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"token_type":"cert_role","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+
+	// Cert role for non-transparent mode (warden_token token type)
+	APIRequest(t, "POST", "auth/cert/role/e2e-cert-nt-reader", port,
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-nt-gateway-access"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+}
+
 // --- Cert Transparent Operations Helpers ---
 
 // CertTransparentOpsRequest makes a transparent operations request using cert implicit auth.

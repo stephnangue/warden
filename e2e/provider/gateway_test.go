@@ -3,6 +3,7 @@
 package provider
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -172,7 +173,12 @@ func TestGatewayResponseContentType(t *testing.T) {
 	}
 	req.Header.Set("Authorization", "Bearer "+jwt)
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)

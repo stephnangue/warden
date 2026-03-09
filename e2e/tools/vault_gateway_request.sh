@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # The root token does NOT have a credential spec and cannot be used for gateway requests.
 JWT=$(bash "$SCRIPT_DIR/tools/get_jwt.sh" 2>/dev/null || echo "")
 if [ -n "$JWT" ]; then
-  LOGIN=$(curl -s -X POST "http://127.0.0.1:${PORT}/v1/auth/jwt/login" \
+  LOGIN=$(curl -sk -X POST "https://127.0.0.1:${PORT}/v1/auth/jwt/login" \
     -H "Content-Type: application/json" \
     -d "{\"jwt\":\"$JWT\",\"role\":\"e2e-nt-reader\"}" 2>/dev/null)
   TOKEN=$(echo "$LOGIN" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['token'])" 2>/dev/null || echo "")
@@ -32,9 +32,9 @@ if [ -z "$TOKEN" ]; then
 fi
 
 # Build gateway URL: /v1/vault-nt/gateway/v1/<vault_path> (non-transparent mount)
-URL="http://127.0.0.1:${PORT}/v1/vault-nt/gateway/v1/${VAULT_PATH}"
+URL="https://127.0.0.1:${PORT}/v1/vault-nt/gateway/v1/${VAULT_PATH}"
 
-ARGS=(-s -X "$METHOD" "$URL" -w "\nHTTP_STATUS:%{http_code}\n")
+ARGS=(-sk -X "$METHOD" "$URL" -w "\nHTTP_STATUS:%{http_code}\n")
 ARGS+=(-H "X-Warden-Token: $TOKEN")
 if [ -n "$BODY" ]; then
   ARGS+=(-H "Content-Type: application/json" -d "$BODY")
