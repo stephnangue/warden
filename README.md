@@ -109,7 +109,7 @@ Every provider has its own identity system — AWS IAM, Azure Entra ID, GitHub A
 
 ### Terraform / Infrastructure as Code
 
-No more AWS credentials on the machine running `terraform apply`. Terraform points at Warden, authenticates with a JWT or TLS cer, and Warden signs requests with just-in-time credentials scoped to the pipeline's identity. Full audit trail of every API call Terraform makes.
+No more AWS credentials on the machine running `terraform apply`. Terraform points at Warden, authenticates with a JWT or TLS certificate, and Warden signs requests with just-in-time credentials scoped to the pipeline's identity. Full audit trail of every API call Terraform makes.
 
 ### CI/CD Pipelines
 
