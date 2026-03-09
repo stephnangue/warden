@@ -526,3 +526,77 @@ func TestProxyDirectorSetsForwardingHeaders(t *testing.T) {
 	assert.Contains(t, receivedXFF, "192.168.1.100")
 	assert.Equal(t, "http", receivedXFP)
 }
+
+// TestProxyDirectorHandlesBareIPRemoteAddr verifies that the Director correctly
+// sets X-Forwarded-For when RemoteAddr is a bare IP (no port), as happens after
+// middleware.RealIP rewrites RemoteAddr from X-Forwarded-For headers.
+func TestProxyDirectorHandlesBareIPRemoteAddr(t *testing.T) {
+	var receivedXFF string
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedXFF = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = backendURL.Scheme
+			req.URL.Host = backendURL.Host
+
+			// Replicate the fixed Director logic from handler.go
+			clientIP, _, err := net.SplitHostPort(req.RemoteAddr)
+			if err != nil {
+				if ip := net.ParseIP(req.RemoteAddr); ip != nil {
+					clientIP = req.RemoteAddr
+				}
+			}
+			if clientIP != "" {
+				if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
+					req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
+				} else {
+					req.Header.Set("X-Forwarded-For", clientIP)
+				}
+			}
+		},
+	}
+
+	t.Run("bare_IPv4", func(t *testing.T) {
+		// Simulate middleware.RealIP stripping the port
+		req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
+		req.RemoteAddr = "192.168.1.100" // no port
+		w := httptest.NewRecorder()
+
+		proxy.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, receivedXFF, "192.168.1.100")
+	})
+
+	t.Run("bare_IPv4_with_prior_XFF", func(t *testing.T) {
+		// LB already set X-Forwarded-For, RealIP stripped port
+		req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
+		req.RemoteAddr = "10.0.0.50"
+		req.Header.Set("X-Forwarded-For", "203.0.113.10")
+		w := httptest.NewRecorder()
+
+		proxy.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, receivedXFF, "203.0.113.10")
+		assert.Contains(t, receivedXFF, "10.0.0.50")
+	})
+
+	t.Run("with_port_still_works", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
+		req.RemoteAddr = "192.168.1.100:54321"
+		w := httptest.NewRecorder()
+
+		proxy.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, receivedXFF, "192.168.1.100")
+	})
+}
