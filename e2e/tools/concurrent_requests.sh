@@ -17,7 +17,7 @@ echo "Firing $COUNT concurrent $METHOD requests to /v1/$PATH_ on port $PORT..."
 
 for i in $(seq 1 "$COUNT"); do
   (
-    ARGS=(-s -X "$METHOD" "http://127.0.0.1:${PORT}/v1/${PATH_}" -w "%{http_code}" -o "$TMPDIR/body_${i}.json")
+    ARGS=(-sk -X "$METHOD" "https://127.0.0.1:${PORT}/v1/${PATH_}" -w "%{http_code}" -o "$TMPDIR/body_${i}.json")
     if [ -n "$TOKEN" ]; then
       ARGS+=(-H "X-Warden-Token: $TOKEN")
     fi

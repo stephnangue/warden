@@ -12,7 +12,7 @@ STANDBY_COUNT=0
 UNREACHABLE=0
 
 for port in 8500 8510 8520; do
-  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${port}/v1/sys/health" 2>/dev/null || echo "000")
+  HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" "https://127.0.0.1:${port}/v1/sys/health" 2>/dev/null || echo "000")
   case "$HTTP_CODE" in
     200)
       LEADER_COUNT=$((LEADER_COUNT + 1))

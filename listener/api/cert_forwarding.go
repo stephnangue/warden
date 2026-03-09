@@ -9,48 +9,52 @@ import (
 )
 
 // certForwardingMiddleware returns middleware that extracts client certificates
-// from forwarding headers sent by trusted proxies. It must run BEFORE
-// middleware.RealIP which overwrites r.RemoteAddr.
+// from the request. It must run BEFORE middleware.RealIP which overwrites
+// r.RemoteAddr.
 //
-// When the request comes from a trusted proxy IP:
-//   - Parses X-Forwarded-Client-Cert (XFCC, Envoy/Istio) or
-//     X-SSL-Client-Cert (NGINX/HAProxy) headers
-//   - Stores the parsed certificate in the request context
-//   - Strips the forwarding headers to prevent downstream leakage
+// Certificate extraction follows a two-tier priority:
 //
-// When the request comes from an untrusted IP:
-//   - Deletes any forwarding headers to prevent spoofing
+//  1. Forwarding headers from trusted proxies (X-Forwarded-Client-Cert or
+//     X-SSL-Client-Cert). Headers from untrusted sources are stripped.
+//  2. TLS peer certificates from the direct connection (r.TLS.PeerCertificates).
+//     Used as a fallback when no forwarded cert is found — covers direct mTLS
+//     connections and load balancers operating in TLS passthrough mode.
+//
+// The TLS fallback is safe because r.TLS.PeerCertificates is populated by
+// Go's TLS stack from the actual handshake and cannot be spoofed via headers.
+// This fallback is NOT applied on the cluster listener (which has its own
+// handler), so standby-to-leader forwarding never picks up the wrong cert.
 func certForwardingMiddleware(trustedProxies []string) func(http.Handler) http.Handler {
 	// Pre-parse CIDR networks at startup
 	networks := parseCIDRs(trustedProxies)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// If no trusted proxies configured, strip headers and pass through
-			if len(networks) == 0 {
+			// --- Header-based extraction ---
+			if len(networks) > 0 {
+				remoteIP := extractRemoteIP(r.RemoteAddr)
+				if remoteIP != nil && isTrustedProxy(remoteIP, networks) {
+					// Trusted proxy — extract cert from forwarding headers
+					cert := listener.ParseForwardedCert(r)
+					if cert != nil {
+						ctx := listener.WithForwardedClientCert(r.Context(), cert)
+						r = r.WithContext(ctx)
+					}
+				} else {
+					listener.StripCertHeaders(r)
+				}
+			} else {
 				listener.StripCertHeaders(r)
-				next.ServeHTTP(w, r)
-				return
 			}
 
-			remoteIP := extractRemoteIP(r.RemoteAddr)
-			if remoteIP == nil {
-				listener.StripCertHeaders(r)
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			if !isTrustedProxy(remoteIP, networks) {
-				listener.StripCertHeaders(r)
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// Trusted proxy — extract cert from forwarding headers
-			cert := listener.ParseForwardedCert(r)
-
-			if cert != nil {
-				ctx := listener.WithForwardedClientCert(r.Context(), cert)
+			// --- TLS fallback: direct mTLS or LB passthrough ---
+			// When no cert was extracted from headers, check the TLS
+			// connection state. This covers two scenarios:
+			//   - Direct mTLS connections (no load balancer)
+			//   - Load balancers in TLS passthrough mode (no header injection)
+			if listener.ForwardedClientCert(r.Context()) == nil &&
+				r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+				ctx := listener.WithForwardedClientCert(r.Context(), r.TLS.PeerCertificates[0])
 				r = r.WithContext(ctx)
 			}
 

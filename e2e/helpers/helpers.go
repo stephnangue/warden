@@ -50,9 +50,9 @@ func RootToken(t *testing.T) string {
 	return strings.TrimSpace(string(data))
 }
 
-// NodeURL returns the base URL for a given port.
+// NodeURL returns the base URL for a given port (HTTPS, self-signed cert).
 func NodeURL(port int) string {
-	return fmt.Sprintf("http://127.0.0.1:%d", port)
+	return fmt.Sprintf("https://127.0.0.1:%d", port)
 }
 
 // --- HTTP Helpers ---
@@ -92,7 +92,12 @@ func doHTTP(method, rawURL string, headers map[string]string, body string) (int,
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // self-signed e2e cert
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
@@ -801,6 +806,86 @@ func CertLoginRequestViaLB(t *testing.T, role, clientCertPEM, clientKeyPEM strin
 	headers := map[string]string{"Content-Type": "application/json"}
 	body := fmt.Sprintf(`{"role":"%s"}`, role)
 	return DoLBRequest(t, "POST", u, headers, body, &cert)
+}
+
+// --- LB Passthrough Helpers ---
+
+// LBPassthroughPort is the nginx TLS passthrough port.
+const LBPassthroughPort = 8001
+
+// LBPassthroughURL returns the base URL for the nginx TLS passthrough port.
+func LBPassthroughURL() string {
+	return fmt.Sprintf("https://127.0.0.1:%d", LBPassthroughPort)
+}
+
+// LBPassthroughAvailable checks if the nginx TLS passthrough port can proxy to
+// the Warden cluster. Uses InsecureSkipVerify since the TLS handshake goes
+// end-to-end to Warden's self-signed cert.
+func LBPassthroughAvailable() bool {
+	status, _, _ := doLBHTTP("GET", LBPassthroughURL()+"/v1/sys/health", nil, "", nil)
+	return status == 200 || status == 429
+}
+
+// SkipWithoutLBPassthrough skips the test if the LB passthrough port is not available.
+func SkipWithoutLBPassthrough(t *testing.T) {
+	t.Helper()
+	if !LBPassthroughAvailable() {
+		t.Skip("nginx LB passthrough port not available (skipping passthrough test)")
+	}
+}
+
+// --- mTLS Helpers ---
+
+// doMTLSHTTP makes an HTTPS request with a TLS client certificate.
+// InsecureSkipVerify is used because Warden uses self-signed certs in e2e.
+func doMTLSHTTP(method, rawURL string, headers map[string]string, body string, clientCert tls.Certificate) (int, []byte, error) {
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+
+	req, err := http.NewRequest(method, rawURL, bodyReader)
+	if err != nil {
+		return 0, nil, err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if body != "" && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // self-signed e2e cert
+		Certificates:       []tls.Certificate{clientCert},
+	}
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsConfig},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, respBody, nil
+}
+
+// DoMTLSRequest makes an HTTPS request with a TLS client certificate.
+// Fatals on connection errors.
+func DoMTLSRequest(t *testing.T, method, rawURL string, headers map[string]string, body string, clientCert tls.Certificate) (int, []byte) {
+	t.Helper()
+	status, respBody, err := doMTLSHTTP(method, rawURL, headers, body, clientCert)
+	if err != nil {
+		t.Fatalf("mTLS request failed: %v", err)
+	}
+	return status, respBody
 }
 
 // --- Transparent Operations Helpers ---

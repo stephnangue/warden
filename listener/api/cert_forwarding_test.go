@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -256,6 +257,169 @@ func TestExtractRemoteIP(t *testing.T) {
 				t.Fatalf("expected %q, got %q", tc.expected, ip.String())
 			}
 		})
+	}
+}
+
+// --- TLS fallback tests ---
+
+func TestCertForwardingMiddleware_TLSFallback_NoProxies(t *testing.T) {
+	_, tlsCert := generateTestCert(t, "direct-tls-client")
+
+	var extractedCert *x509.Certificate
+	handler := certForwardingMiddleware(nil)(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			extractedCert = listener.ForwardedClientCert(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "192.168.1.1:12345"
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{tlsCert},
+	}
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if extractedCert == nil {
+		t.Fatal("expected cert from TLS fallback, got nil")
+	}
+	if extractedCert.Subject.CommonName != "direct-tls-client" {
+		t.Fatalf("expected CN %q, got %q", "direct-tls-client", extractedCert.Subject.CommonName)
+	}
+}
+
+func TestCertForwardingMiddleware_TLSFallback_TrustedProxyNoHeaders(t *testing.T) {
+	_, tlsCert := generateTestCert(t, "passthrough-client")
+
+	var extractedCert *x509.Certificate
+	handler := certForwardingMiddleware([]string{"127.0.0.1/32"})(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			extractedCert = listener.ForwardedClientCert(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	// No cert headers — simulates LB passthrough
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{tlsCert},
+	}
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if extractedCert == nil {
+		t.Fatal("expected cert from TLS fallback in passthrough scenario, got nil")
+	}
+	if extractedCert.Subject.CommonName != "passthrough-client" {
+		t.Fatalf("expected CN %q, got %q", "passthrough-client", extractedCert.Subject.CommonName)
+	}
+}
+
+func TestCertForwardingMiddleware_HeaderWinsOverTLS(t *testing.T) {
+	headerCertPEM, _ := generateTestCert(t, "header-cert")
+	_, tlsCert := generateTestCert(t, "tls-cert")
+
+	var extractedCert *x509.Certificate
+	handler := certForwardingMiddleware([]string{"127.0.0.1/32"})(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			extractedCert = listener.ForwardedClientCert(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-SSL-Client-Cert", url.QueryEscape(headerCertPEM))
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{tlsCert},
+	}
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if extractedCert == nil {
+		t.Fatal("expected cert, got nil")
+	}
+	if extractedCert.Subject.CommonName != "header-cert" {
+		t.Fatalf("expected header cert (CN %q) to win over TLS cert, got CN %q", "header-cert", extractedCert.Subject.CommonName)
+	}
+}
+
+func TestCertForwardingMiddleware_TLSFallback_UntrustedProxyWithTLS(t *testing.T) {
+	_, tlsCert := generateTestCert(t, "untrusted-tls-client")
+
+	var extractedCert *x509.Certificate
+	handler := certForwardingMiddleware([]string{"10.0.0.0/8"})(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			extractedCert = listener.ForwardedClientCert(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "192.168.1.1:12345" // Not in trusted range
+	req.Header.Set("X-SSL-Client-Cert", "spoofed-value")
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{tlsCert},
+	}
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	// Headers should be stripped, but TLS cert should be used
+	if extractedCert == nil {
+		t.Fatal("expected cert from TLS fallback after header stripping, got nil")
+	}
+	if extractedCert.Subject.CommonName != "untrusted-tls-client" {
+		t.Fatalf("expected CN %q, got %q", "untrusted-tls-client", extractedCert.Subject.CommonName)
+	}
+}
+
+func TestCertForwardingMiddleware_NoCertAnywhere(t *testing.T) {
+	var extractedCert *x509.Certificate
+	handler := certForwardingMiddleware([]string{"127.0.0.1/32"})(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			extractedCert = listener.ForwardedClientCert(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	// No headers, no TLS
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if extractedCert != nil {
+		t.Fatal("expected nil cert when no headers and no TLS, got one")
+	}
+}
+
+func TestCertForwardingMiddleware_TLSWithEmptyPeerCerts(t *testing.T) {
+	var extractedCert *x509.Certificate
+	handler := certForwardingMiddleware(nil)(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			extractedCert = listener.ForwardedClientCert(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{}, // TLS but no client cert
+	}
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if extractedCert != nil {
+		t.Fatal("expected nil cert when TLS has empty PeerCertificates")
 	}
 }
 
