@@ -15,7 +15,7 @@ BODY="${4:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TOKEN=$(cat "$SCRIPT_DIR/.root_token" 2>/dev/null || echo "")
 
-ARGS=(-s -X "$METHOD" "http://127.0.0.1:${PORT}/v1/${PATH_}" -w "\nHTTP_STATUS:%{http_code}\n")
+ARGS=(-sk -X "$METHOD" "https://127.0.0.1:${PORT}/v1/${PATH_}" -w "\nHTTP_STATUS:%{http_code}\n")
 if [ -n "$TOKEN" ]; then
   ARGS+=(-H "X-Warden-Token: $TOKEN")
 fi

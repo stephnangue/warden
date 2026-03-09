@@ -6,7 +6,7 @@ min_cred_spec_rotation_period   = "5m"
 
 ip_binding_policy = "disabled"
 
-api_addr     = "http://127.0.0.1:8510"
+api_addr     = "https://127.0.0.1:8510"
 cluster_addr = "https://127.0.0.1:8511"
 
 seal "static" {
@@ -22,7 +22,11 @@ storage "postgres" {
 }
 
 listener "tcp" {
-    address         = "0.0.0.0:8510"
-    tls_enabled     = false
-    trusted_proxies = ["127.0.0.1/32", "172.16.0.0/12", "192.168.0.0/16"]
+    address                 = "0.0.0.0:8510"
+    tls_enabled             = true
+    tls_cert_file           = "../.certs/server.crt"
+    tls_key_file            = "../.certs/server.key"
+    tls_client_ca_file      = "../.certs/client-ca.crt"
+    tls_require_client_cert = false
+    trusted_proxies         = ["127.0.0.1/32", "172.16.0.0/12", "192.168.0.0/16"]
 }

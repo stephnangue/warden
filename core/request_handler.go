@@ -1213,11 +1213,13 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 }
 
 // extractTransparentClientCert extracts the client certificate from a request.
-// Warden always sits behind a load balancer — client certs arrive exclusively
-// via the X-SSL-Client-Cert header, parsed by the cert forwarding middleware
-// and stored in the request context. On cluster-forwarded requests (standby →
-// leader), the header is re-forwarded and re-parsed, so ForwardedClientCert
-// works correctly for both direct and forwarded paths.
+// The cert forwarding middleware stores it in the request context after
+// extracting it from either a forwarding header (X-SSL-Client-Cert or
+// X-Forwarded-Client-Cert from a trusted proxy) or the TLS connection
+// state (r.TLS.PeerCertificates for direct mTLS / LB passthrough).
+// On cluster-forwarded requests (standby → leader), the header is
+// re-forwarded and re-parsed, so ForwardedClientCert works correctly
+// for all paths.
 func extractTransparentClientCert(req *logical.Request) *x509.Certificate {
 	if req.HTTPRequest == nil {
 		return nil

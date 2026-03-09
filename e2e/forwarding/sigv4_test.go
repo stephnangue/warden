@@ -5,6 +5,7 @@ package forwarding
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -158,7 +159,12 @@ func TestSigV4ThroughStandbyForwarding(t *testing.T) {
 	standbyURL := fmt.Sprintf("%s/v1/aws/gateway", h.NodeURL(standby))
 	req := signSTSRequest(t, standbyURL, accessKeyID, secretAccessKey)
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request through standby failed: %v", err)
@@ -234,7 +240,12 @@ func signSigV4Request(t *testing.T, method, targetURL, body, contentType, access
 func sendSigV4AndAssert(t *testing.T, req *http.Request, label string) int {
 	t.Helper()
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		// Transport errors (EOF, connection reset) mean signature verification
@@ -276,7 +287,12 @@ func TestConcurrentSigV4ThroughStandby(t *testing.T) {
 			defer wg.Done()
 
 			req := signSTSRequest(t, standbyURL, accessKeyID, secretAccessKey)
-			client := &http.Client{Timeout: 30 * time.Second}
+			client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 			resp, err := client.Do(req)
 			if err != nil {
 				// Transport error = SigV4 passed
@@ -329,7 +345,12 @@ func TestSigV4DuringLeaderStepDown(t *testing.T) {
 			time.Sleep(time.Duration(i) * 200 * time.Millisecond)
 
 			req := signSTSRequest(t, standbyURL, accessKeyID, secretAccessKey)
-			client := &http.Client{Timeout: 30 * time.Second}
+			client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 			resp, err := client.Do(req)
 
 			mu.Lock()
@@ -469,7 +490,12 @@ func TestSigV4PolicyDenialThroughStandby(t *testing.T) {
 	standbyURL := fmt.Sprintf("%s/v1/aws/gateway", h.NodeURL(standby))
 	req := signSTSRequest(t, standbyURL, accessKeyID, secretAccessKey)
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request through standby failed: %v", err)

@@ -3,6 +3,7 @@
 package forwarding
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -137,7 +138,12 @@ func TestStandbyForwardTimeoutHandling(t *testing.T) {
 
 	h.SignalNode(t, leaderNode, syscall.SIGSTOP)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	token := h.RootToken(t)
 	reqURL := fmt.Sprintf("%s/v1/sys/namespaces?warden-list=true", h.NodeURL(standby))
 

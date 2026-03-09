@@ -30,9 +30,9 @@ if [ -z "$JWT" ]; then
 fi
 
 # Build transparent gateway URL: /v1/vault/role/<role>/gateway/v1/<vault_path>
-URL="http://127.0.0.1:${PORT}/v1/vault/role/${ROLE}/gateway/v1/${VAULT_PATH}"
+URL="https://127.0.0.1:${PORT}/v1/vault/role/${ROLE}/gateway/v1/${VAULT_PATH}"
 
-ARGS=(-s -X "$METHOD" "$URL" -w "\nHTTP_STATUS:%{http_code}\n")
+ARGS=(-sk -X "$METHOD" "$URL" -w "\nHTTP_STATUS:%{http_code}\n")
 ARGS+=(-H "Authorization: Bearer $JWT")
 if [ -n "$BODY" ]; then
   ARGS+=(-H "Content-Type: application/json" -d "$BODY")
