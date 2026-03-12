@@ -338,8 +338,6 @@ func GetCertNTWardenToken(t *testing.T, port int, role string, clientCertPEM str
 func SetupCertVaultEnv(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.PrivateKey) {
 	t.Helper()
 
-	// Mount cert auth first so ValidateAutoAuthPath can resolve it when
-	// the vault-cert provider's auto_auth_path is set below.
 	caCertPEM, caKey = SetupCertAuth(t, port)
 
 	// Mount non-transparent cert auth for NT roles
@@ -458,8 +456,6 @@ func SetupCertAuthWithCA(t *testing.T, port int, caCertPEM string) {
 func SetupCertVaultEnvWithCA(t *testing.T, port int, caCertPEM string) {
 	t.Helper()
 
-	// Mount cert auth first so ValidateAutoAuthPath can resolve it when
-	// the vault-cert provider's auto_auth_path is set below.
 	SetupCertAuthWithCA(t, port, caCertPEM)
 
 	// Mount non-transparent cert auth for NT roles
@@ -635,8 +631,6 @@ func SetupCertVaultEnvWithMTLSCA(t *testing.T, port int) {
 	t.Helper()
 	caCertPEM, _ := LoadMTLSClientCA(t)
 
-	// Mount cert auth first so ValidateAutoAuthPath can resolve it when
-	// the vault-cert provider's auto_auth_path is set below.
 	SetupCertAuthWithCA(t, port, caCertPEM)
 
 	// Mount non-transparent cert auth for NT roles
