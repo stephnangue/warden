@@ -3,6 +3,7 @@ package listener
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
@@ -95,7 +96,7 @@ func ParseXFCCHeader(xfcc string) *x509.Certificate {
 		if normalizedHash != fingerprint {
 			if decoded, err := hex.DecodeString(normalizedHash); err == nil {
 				expected := sha256.Sum256(cert.Raw)
-				if !shaEqual(decoded, expected[:]) {
+				if subtle.ConstantTimeCompare(decoded, expected[:]) != 1 {
 					return nil
 				}
 			} else {
@@ -105,18 +106,6 @@ func ParseXFCCHeader(xfcc string) *x509.Certificate {
 	}
 
 	return cert
-}
-
-func shaEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // ParseSSLClientCertHeader parses the X-SSL-Client-Cert header (NGINX/HAProxy format).

@@ -361,7 +361,7 @@ func (c *Core) handleCancelableRequest(ctx context.Context, req *logical.Request
 	var te *logical.TokenEntry
 
 	if c.isLoginRequest(ctx, req) {
-		resp, auth, err = c.handleLoginRequest(ctx, req)
+		resp, auth, err = c.handleLoginRequest(ctx, req, false)
 		te = req.TokenEntry()
 	} else {
 		resp, auth, err = c.handleNonLoginRequest(ctx, req)
@@ -406,7 +406,7 @@ func (c *Core) isLoginRequest(ctx context.Context, req *logical.Request) bool {
 
 // handleLoginRequest is used to handle a login request, which is an
 // unauthenticated request to the backend.
-func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request) (retResp *logical.Response, retAuth *logical.Auth, retErr error) {
+func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request, isInternalLogin bool) (retResp *logical.Response, retAuth *logical.Auth, retErr error) {
 
 	req.Unauthenticated = true
 
@@ -495,14 +495,20 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request) (re
 	// Route the request
 	resp, routeErr := c.doRouting(ctx, req)
 
-	// If the response generated an authentication, then generate the token
+	// If the response generated an authentication, then generate the token.
+	// Transparent token types (jwt_role, cert_role) are reserved for the
+	// internal gateway auth flow — reject explicit login attempts early.
 	if resp != nil && resp.Auth != nil {
-		respTokenCreate, errCreateToken := c.LoginCreateToken(ctx, resp)
-		if errCreateToken != nil {
-			return respTokenCreate, nil, errCreateToken
+		if !isInternalLogin && (resp.Auth.TokenType == "jwt_role" || resp.Auth.TokenType == "cert_role") {
+			return logical.ErrorResponse(logical.ErrBadRequest("explicit login is not supported for roles with token_type=transparent; use transparent mode instead")), nil, nil
+		} else {
+			respTokenCreate, errCreateToken := c.LoginCreateToken(ctx, resp)
+			if errCreateToken != nil {
+				return respTokenCreate, nil, errCreateToken
+			}
+			resp = respTokenCreate
+			resp.MountClass = req.MountClass
 		}
-		resp = respTokenCreate
-		resp.MountClass = req.MountClass
 	}
 
 	if routeErr != nil {
@@ -1051,7 +1057,8 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 // The role may be empty — the auth method's default_role config provides the fallback.
 func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, backend logical.Backend, role string) error {
 	tmp := backend.(logical.TransparentModeProvider)
-	return c.performImplicitAuth(ctx, req, tmp.GetAutoAuthPath(), role)
+	autoAuthPath := tmp.GetAutoAuthPath()
+	return c.performImplicitAuth(ctx, req, autoAuthPath, role)
 }
 
 // performImplicitAuth performs implicit authentication by detecting the credential type
@@ -1088,8 +1095,8 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 	var singleflightKey string
 	var lookupFunc func() (*TokenEntry, error)
 	var loginData map[string]any
-	var credType string  // "cert" or "jwt" — used for post-login lookup with resolved role
-	var credKey string   // fingerprint or JWT — used for post-login lookup with resolved role
+	var credType string // "cert" or "jwt" — used for post-login lookup with resolved role
+	var credKey string  // fingerprint or JWT — used for post-login lookup with resolved role
 
 	// Check for client certificate first (forwarded from LB or direct TLS)
 	clientCert := extractTransparentClientCert(req)
@@ -1161,7 +1168,7 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		}
 
 		// Perform the login request
-		loginResp, _, loginErr := c.handleLoginRequest(ctx, loginReq)
+		loginResp, _, loginErr := c.handleLoginRequest(ctx, loginReq, true)
 		if loginErr != nil {
 			return nil, loginErr
 		}

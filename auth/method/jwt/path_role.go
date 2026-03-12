@@ -56,8 +56,8 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 			},
 			"token_type": {
 				Type:          framework.TypeString,
-				Description:   "Token type",
-				Required:      true,
+				Description:   "Token type: aws, warden, or transparent (default: transparent)",
+				Default:       "transparent",
 				AllowedValues: b.allowedTokenTypeValues(),
 			},
 			"user_claim": {
@@ -175,7 +175,7 @@ func (b *jwtAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reques
 			"uri_claim":          role.URIClaim,
 			"token_policies":     role.TokenPolicies,
 			"token_ttl":          role.TokenTTL,
-			"token_type":         role.TokenType,
+			"token_type":         helper.DisplayTokenType(role.TokenType),
 			"user_claim":         role.UserClaim,
 			"cred_spec_name":     role.CredSpecName,
 			"max_age":            role.MaxAge,
@@ -219,7 +219,7 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 			role.TokenTTL = (time.Duration(v.(int)) * time.Second).String()
 		}
 		if v, ok := d.GetOk("token_type"); ok {
-			role.TokenType = v.(string)
+			role.TokenType = helper.ResolveTokenType(helper.BackendJWT, v.(string))
 		}
 		if v, ok := d.GetOk("user_claim"); ok {
 			role.UserClaim = v.(string)
@@ -300,6 +300,18 @@ func (b *jwtAuthBackend) validateRole(role *JWTRole) error {
 	if role.TokenType == "" && b.config != nil && b.config.TokenType != "" {
 		role.TokenType = b.config.TokenType
 	}
+
+	// cert_role is always forbidden in JWT auth — it is cert-auth-specific.
+	// jwt_role is the natural default for JWT auth; other types are always allowed.
+	if b.config != nil {
+		if role.TokenType == "cert_role" {
+			return logical.ErrBadRequestf("token_type %q is only valid for cert auth backends", role.TokenType)
+		}
+		if role.TokenType == "" {
+			role.TokenType = "jwt_role"
+		}
+	}
+
 	if role.TokenType == "" {
 		return logical.ErrBadRequestf("token_type is required; must be one of: %v", b.validTokenTypes)
 	}
@@ -369,7 +381,7 @@ func (b *jwtAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldD
 		role.TokenTTL = (time.Duration(v.(int)) * time.Second).String()
 	}
 	if v, ok := d.GetOk("token_type"); ok {
-		role.TokenType = v.(string)
+		role.TokenType = helper.ResolveTokenType(helper.BackendJWT, v.(string))
 	}
 	if v, ok := d.GetOk("user_claim"); ok {
 		role.UserClaim = v.(string)

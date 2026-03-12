@@ -53,10 +53,11 @@ type Backend struct {
 	TokenExtractor func(r *http.Request) string
 
 	// config stores the backend configuration
-	config map[string]any
-	once    sync.Once
-	pathsRe []*regexp.Regexp
-	logger logger.GatedLogger
+	config          map[string]any
+	backendResolver func(ctx context.Context, path string) logical.Backend
+	once            sync.Once
+	pathsRe         []*regexp.Regexp
+	logger          logger.GatedLogger
 }
 
 // Ensure Backend implements logical.Backend
@@ -245,6 +246,7 @@ func (b *Backend) Cleanup(ctx context.Context) {
 func (b *Backend) Setup(ctx context.Context, config *logical.BackendConfig) error {
 	b.config = config.Config
 	b.logger = *config.Logger
+	b.backendResolver = config.BackendResolver
 	return nil
 }
 

@@ -78,7 +78,7 @@ func TestConcurrentJWTLogin(t *testing.T) {
 	jwt := h.GetDefaultJWT(t)
 
 	ok := h.ConcurrentDo(20, func(i int) bool {
-		status, _ := h.LoginJWT(t, jwt, "e2e-reader", leader)
+		status, _ := h.LoginJWTNT(t, jwt, "e2e-nt-reader", leader)
 		return status == 200 || status == 201
 	})
 

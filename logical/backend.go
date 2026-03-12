@@ -97,6 +97,10 @@ type BackendConfig struct {
 	// multiple times only keeps one hook. Use this for process-level cleanup like
 	// shared transport shutdown that must not run on individual unmount.
 	RegisterShutdownHook func(key string, fn func())
+
+	// BackendResolver allows provider backends to look up other mounted backends by path.
+	// Injected by the core when creating provider backends.
+	BackendResolver func(ctx context.Context, path string) Backend
 }
 
 // Factory is the factory function to create a logical backend.

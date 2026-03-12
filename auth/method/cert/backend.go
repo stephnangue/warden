@@ -12,6 +12,7 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -26,7 +27,7 @@ type CertAuthConfig struct {
 	RevocationMode string        `json:"revocation_mode,omitempty"`    // "none" (default), "crl", "ocsp", "best_effort"
 	CRLCacheTTL    string        `json:"crl_cache_ttl,omitempty"`      // CRL cache TTL (default: "1h")
 	OCSPTimeout    string        `json:"ocsp_timeout,omitempty"`       // OCSP request timeout (default: "5s")
-	DefaultRole    string        `json:"default_role,omitempty"`       // Default role for transparent operations
+	DefaultRole string `json:"default_role,omitempty"` // Default role for transparent operations
 
 	// Internal — parsed CA pool
 	caPool *x509.CertPool `json:"-"`
@@ -100,6 +101,14 @@ func (b *certAuthBackend) setupCertConfig(_ context.Context, conf map[string]any
 	}
 	if !isValidPrincipalClaim(config.PrincipalClaim) {
 		return fmt.Errorf("invalid principal_claim %q; must be one of: %v", config.PrincipalClaim, validPrincipalClaims)
+	}
+
+	// jwt_role is always forbidden in cert auth — it is jwt-auth-specific.
+	if config.TokenType == "jwt_role" {
+		return fmt.Errorf("token_type %q is only valid for jwt auth backends", config.TokenType)
+	}
+	if config.TokenType == "" {
+		config.TokenType = "cert_role"
 	}
 
 	// Validate revocation mode
@@ -206,10 +215,10 @@ func principalClaimAllowedValues() []interface{} {
 	return values
 }
 
-// allowedTokenTypeValues converts validTokenTypes to []interface{} for FieldSchema.AllowedValues
+// allowedTokenTypeValues returns the user-facing token type aliases for FieldSchema.AllowedValues
 func (b *certAuthBackend) allowedTokenTypeValues() []interface{} {
-	values := make([]interface{}, len(b.validTokenTypes))
-	for i, t := range b.validTokenTypes {
+	values := make([]interface{}, len(helper.UserTokenTypes))
+	for i, t := range helper.UserTokenTypes {
 		values[i] = t
 	}
 	return values

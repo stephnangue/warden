@@ -2,6 +2,40 @@
 
 All notable changes to Warden are documented in this file.
 
+## [v0.4.0] — 2026-03-11
+
+### New Features
+
+- **TLS Certificate Authentication Method** — New `cert` auth backend supporting direct mTLS (client certificate from the TLS connection) and forwarded certificate modes (via X-Forwarded-Client-Cert / X-SSL-Client-Cert headers). Role-based constraints include allowed common names, DNS/Email/URI SANs (glob patterns), organizational units, and organizations. Principal identity can be extracted from CN, DNS SAN, Email SAN, URI SAN, serial number, or SPIFFE ID. Certificate revocation is supported via CRL, OCSP, or best-effort (OCSP with CRL fallback). Per-role or global CA certificate bundles for chain validation. Fingerprint-based token caching in transparent mode. Generic error messages prevent information leakage.
+
+- **SPIFFE Support Across Auth Methods** — Both the JWT and cert auth methods now support SPIFFE workload identities. In cert auth, the `spiffe_id` principal claim extracts the SPIFFE URI from X.509 SVIDs, and `allowed_uri_sans` constraints use segment-aware pattern matching (`+` = one segment, `*` = one or more trailing segments, e.g. `spiffe://+/ns/*/sa/*`). In JWT auth, new `bound_uri_patterns` and `uri_claim` role fields validate SPIFFE JWT-SVIDs using the same pattern syntax.
+
+- **Certificate Auth CLI Client** — The `warden login` command now supports certificate-based login via the `cert` method. Flags: `--cert` and `--key` (or env vars `WARDEN_CLIENT_CERT` / `WARDEN_CLIENT_KEY`). Custom mount path via `--mount` / `--path`.
+
+- **X-Warden-Role Header** — Clients can now specify their auth role via the `X-Warden-Role` HTTP header. Role resolution precedence (highest to lowest): URL-embedded role path → `X-Warden-Role` header → provider `default_role` → auth method `default_role`. The header is stripped before the request is proxied upstream.
+
+- **Default Role on Auth Methods** — JWT and cert auth methods now support a `default_role` config field used as the final fallback in transparent mode role resolution.
+
+- **Simplified Token Type API** — The `token_type` field on roles and auth method configs now accepts three user-facing aliases instead of internal names: `transparent` (replaces `jwt_role` / `cert_role`), `warden` (replaces `warden_token`), and `aws` (replaces `aws_access_keys`). The API reads back the alias, not the internal name. Internal names are still accepted for backwards compatibility. Default changes from required to `transparent`.
+
+### Security
+
+- **Explicit Login Blocked for Transparent Roles** — Calling the login endpoint directly on a role with `token_type=transparent` now returns `400 Bad Request`. Transparent roles authenticate inline during a gateway request; explicit login would hand a raw backend token to the caller, defeating the transparent mode isolation guarantee.
+
+- **Removed X-Warden-Auth-Path Header** — The per-request auth path selection header has been removed. Auth backend selection is now config-only (`auto_auth_path` on the provider or namespace), preventing clients from downgrading to a weaker auth method.
+
+- **Type-Aware Bound Claims Comparison** — JWT bound claims now use strict type-aware comparison, preventing implicit string coercion vulnerabilities.
+
+- **CRL/OCSP Security Hardening** — CRL signature verification against the issuer certificate; HTTP redirects are blocked on CRL and OCSP fetches; OCSP nonces enabled by default.
+
+### Infrastructure
+
+- **TLS PeerCertificates Fallback** — When no forwarding header is present, the cert auth middleware now reads `r.TLS.PeerCertificates` directly, enabling cert auth in TLS passthrough scenarios (no load balancer TLS termination). (#67)
+
+- **Go 1.26.1** — Upgraded from Go 1.26.0.
+
+- **Dependency Updates** — Updated `go-crypto` to 1.4.0, AWS SDK patches, and various `golang.org/x/*` packages.
+
 ## [v0.3.0] — 2026-03-05
 
 ### New Features
@@ -85,6 +119,7 @@ Initial release. See the [v0.1.0 release notes](https://github.com/stephnangue/w
 - Docker image published to `ghcr.io/stephnangue/warden`
 - Pre-built binaries for Linux, macOS, and Windows
 
+[v0.4.0]: https://github.com/stephnangue/warden/compare/v0.3.0...v0.4.0
 [v0.3.0]: https://github.com/stephnangue/warden/compare/v0.2.1...v0.3.0
 [v0.2.1]: https://github.com/stephnangue/warden/compare/v0.2.0...v0.2.1
 [v0.2.0]: https://github.com/stephnangue/warden/compare/v0.1.1...v0.2.0

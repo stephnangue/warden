@@ -539,6 +539,22 @@ func (b *StreamingBackend) RewriteTransparentPath(path string) string {
 	return rewriter(path)
 }
 
+// ValidateAutoAuthPath verifies that the backend at path exists and is an auth backend.
+// Returns nil if the resolver is unavailable (e.g. in tests) or path is empty.
+func (b *StreamingBackend) ValidateAutoAuthPath(ctx context.Context, path string) error {
+	if b.Backend.backendResolver == nil || path == "" {
+		return nil
+	}
+	backend := b.Backend.backendResolver(ctx, path)
+	if backend == nil {
+		return fmt.Errorf("no backend mounted at %q", path)
+	}
+	if backend.Class() != logical.ClassAuth {
+		return fmt.Errorf("backend at %q is not an auth backend", path)
+	}
+	return nil
+}
+
 // SetTransparentConfig updates the transparent mode configuration at runtime
 func (b *StreamingBackend) SetTransparentConfig(config *TransparentConfig) {
 	b.TransparentConfig = config

@@ -87,14 +87,14 @@ EOF
 
 # Create JWT roles
 ./warden -n PROD/SEC write auth/jwt/role/aws-streamer \
-    token_type=aws_access_keys \
+    token_type=aws \
     token_policies="aws-streaming" \
     user_claim=sub \
     cred_spec_name=aws_local \
     token_ttl=1h
 
 ./warden -n PROD/SEC write auth/jwt/role/aws-kv \
-    token_type=aws_access_keys \
+    token_type=aws \
     token_policies="aws-streaming" \
     user_claim=sub \
     cred_spec_name=aws_static \

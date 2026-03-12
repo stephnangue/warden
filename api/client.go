@@ -40,10 +40,13 @@ const (
 	EnvRateLimit              = "WARDEN_RATE_LIMIT"
 	EnvHTTPProxy              = "WARDEN_HTTP_PROXY"
 	EnvWardenProxyAddr        = "WARDEN_PROXY_ADDR"
+	EnvWardenRole             = "WARDEN_ROLE"
 
 	// NamespaceHeaderName is the header name used to specify the namespace
 	NamespaceHeaderName = "X-Warden-Namespace"
 
+	// RoleHeaderName is the header name used to specify the role
+	RoleHeaderName = "X-Warden-Role"
 
 	TLSErrorString = "This error usually means that the server is running with TLS disabled\n" +
 		"but the client is configured to use TLS. Please either enable TLS\n" +
@@ -550,7 +553,11 @@ func NewClient(c *Config) (*Client, error) {
 
 	if ns := ReadWardenVariable(EnvWardenNamespace); ns != "" {
 		client.setNamespace(ns)
-	} 
+	}
+
+	if role := ReadWardenVariable(EnvWardenRole); role != "" {
+		client.setRole(role)
+	}
 
 	return client, nil
 }
@@ -959,6 +966,59 @@ func (c *Client) WithNamespace(namespace string) *Client {
 		c2.ClearNamespace()
 	} else {
 		c2.SetNamespace(namespace)
+	}
+	return &c2
+}
+
+// SetRole sets the role supplied either via the environment variable
+// or via the command line.
+func (c *Client) SetRole(role string) {
+	c.modifyLock.Lock()
+	defer c.modifyLock.Unlock()
+	c.setRole(role)
+}
+
+// setRole sets the role in the client headers. This method requires
+// that the caller hold the client's modifyLock.
+func (c *Client) setRole(role string) {
+	if c.headers == nil {
+		c.headers = make(http.Header)
+	}
+
+	c.headers.Set(RoleHeaderName, role)
+}
+
+// ClearRole removes the role header from the client if it exists.
+func (c *Client) ClearRole() {
+	c.modifyLock.Lock()
+	defer c.modifyLock.Unlock()
+	if c.headers != nil {
+		c.headers.Del(RoleHeaderName)
+	}
+}
+
+// Role returns the role currently set in this client. It will
+// return an empty string if there is no role set.
+func (c *Client) Role() string {
+	c.modifyLock.Lock()
+	defer c.modifyLock.Unlock()
+	if c.headers == nil {
+		return ""
+	}
+	return c.headers.Get(RoleHeaderName)
+}
+
+// WithRole makes a shallow copy of Client, modifies it to use
+// the given role, and returns it. Passing an empty string will
+// temporarily unset the role.
+func (c *Client) WithRole(role string) *Client {
+	c2 := *c
+	c2.modifyLock = sync.RWMutex{}
+	c2.headers = c.Headers()
+	if role == "" {
+		c2.ClearRole()
+	} else {
+		c2.SetRole(role)
 	}
 	return &c2
 }

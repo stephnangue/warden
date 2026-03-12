@@ -69,7 +69,7 @@ func TestCredentialRevocationOnTokenExpiry(t *testing.T) {
 	leader := h.GetLeaderPort(t)
 
 	jwt := h.GetJWT(t, "e2e-ephemeral", "ephemeral-secret")
-	loginStatus, token := h.LoginJWT(t, jwt, "e2e-nt-reader", leader)
+	loginStatus, token := h.LoginJWTNT(t, jwt, "e2e-nt-reader", leader)
 	if loginStatus != 200 && loginStatus != 201 {
 		t.Skipf("ephemeral login failed with status %d, skipping", loginStatus)
 	}
@@ -98,7 +98,7 @@ func TestIssueCredentialNonExistentSpec(t *testing.T) {
 	leader := h.GetLeaderPort(t)
 
 	jwt := h.GetDefaultJWT(t)
-	loginStatus, token := h.LoginJWT(t, jwt, "e2e-nt-reader", leader)
+	loginStatus, token := h.LoginJWTNT(t, jwt, "e2e-nt-reader", leader)
 	if loginStatus != 200 && loginStatus != 201 {
 		t.Fatalf("login failed with status %d", loginStatus)
 	}
@@ -118,7 +118,7 @@ func TestIssueCredentialExpiredToken(t *testing.T) {
 	leader := h.GetLeaderPort(t)
 
 	jwt := h.GetJWT(t, "e2e-ephemeral", "ephemeral-secret")
-	loginStatus, token := h.LoginJWT(t, jwt, "e2e-nt-reader", leader)
+	loginStatus, token := h.LoginJWTNT(t, jwt, "e2e-nt-reader", leader)
 	if loginStatus != 200 && loginStatus != 201 {
 		t.Skipf("ephemeral login failed with status %d, skipping", loginStatus)
 	}

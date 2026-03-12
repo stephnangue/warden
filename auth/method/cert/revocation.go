@@ -2,7 +2,9 @@ package cert
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +19,7 @@ type revocationChecker struct {
 	crlCache    sync.Map // URL → *crlEntry
 	crlCacheTTL time.Duration
 	ocspTimeout time.Duration
+	crlTimeout  time.Duration
 	httpClient  *http.Client
 }
 
@@ -26,9 +29,16 @@ type crlEntry struct {
 }
 
 func newRevocationChecker(crlCacheTTL, ocspTimeout time.Duration) *revocationChecker {
+	// CRL downloads can be large (up to 10MB); use a longer timeout than OCSP.
+	crlTimeout := 3 * ocspTimeout
+	if crlTimeout < 15*time.Second {
+		crlTimeout = 15 * time.Second
+	}
+
 	return &revocationChecker{
 		crlCacheTTL: crlCacheTTL,
 		ocspTimeout: ocspTimeout,
+		crlTimeout:  crlTimeout,
 		httpClient: &http.Client{
 			Timeout: ocspTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -81,7 +91,7 @@ func (rc *revocationChecker) checkRevocation(cert *x509.Certificate, verifiedCha
 var errRevoked = fmt.Errorf("certificate has been revoked")
 
 func isRevoked(err error) bool {
-	return err == errRevoked
+	return errors.Is(err, errRevoked)
 }
 
 // checkOCSP queries the OCSP responder for the certificate's revocation status.
@@ -129,7 +139,7 @@ func (rc *revocationChecker) checkOCSP(cert *x509.Certificate, issuer *x509.Cert
 }
 
 // checkCRL downloads and checks the CRL distribution points.
-// The issuer is used to verify the CRL signature when available.
+// The issuer is required to verify the CRL signature.
 func (rc *revocationChecker) checkCRL(cert *x509.Certificate, issuer *x509.Certificate) error {
 	if len(cert.CRLDistributionPoints) == 0 {
 		return fmt.Errorf("no CRL distribution points in certificate")
@@ -154,17 +164,31 @@ func (rc *revocationChecker) checkCRL(cert *x509.Certificate, issuer *x509.Certi
 }
 
 // fetchCRL retrieves a CRL from the given URL, using cached data when available.
-// The issuer is used to verify the CRL signature; unsigned/forged CRLs are rejected.
-func (rc *revocationChecker) fetchCRL(url string, issuer *x509.Certificate) (*x509.RevocationList, error) {
+// The issuer is required to verify the CRL signature; unsigned/forged CRLs are rejected.
+func (rc *revocationChecker) fetchCRL(crlURL string, issuer *x509.Certificate) (*x509.RevocationList, error) {
 	// Check cache
-	if cached, ok := rc.crlCache.Load(url); ok {
+	if cached, ok := rc.crlCache.Load(crlURL); ok {
 		entry := cached.(*crlEntry)
 		if time.Since(entry.fetchedAt) < rc.crlCacheTTL {
 			return entry.crl, nil
 		}
 	}
 
-	resp, err := rc.httpClient.Get(url)
+	// Issuer is required to verify the CRL signature — fail-closed.
+	if issuer == nil {
+		return nil, fmt.Errorf("cannot verify CRL signature: issuer certificate not available")
+	}
+
+	// Use a separate timeout for CRL downloads (larger payloads than OCSP).
+	ctx, cancel := context.WithTimeout(context.Background(), rc.crlTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, crlURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create CRL request: %w", err)
+	}
+
+	resp, err := rc.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch CRL: %w", err)
 	}
@@ -185,13 +209,11 @@ func (rc *revocationChecker) fetchCRL(url string, issuer *x509.Certificate) (*x5
 	}
 
 	// Verify the CRL was signed by the issuer to prevent forged CRLs
-	if issuer != nil {
-		if err := crl.CheckSignatureFrom(issuer); err != nil {
-			return nil, fmt.Errorf("CRL signature verification failed: %w", err)
-		}
+	if err := crl.CheckSignatureFrom(issuer); err != nil {
+		return nil, fmt.Errorf("CRL signature verification failed: %w", err)
 	}
 
-	rc.crlCache.Store(url, &crlEntry{
+	rc.crlCache.Store(crlURL, &crlEntry{
 		crl:       crl,
 		fetchedAt: time.Now(),
 	})
