@@ -45,8 +45,13 @@ func (b *jwtAuthBackend) pathLogin() *framework.Path {
 
 // handleLogin handles the login operation
 func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	// Snapshot config under the lock, then release immediately so that
+	// the read lock is NOT held across the JWKS/OIDC HTTP round-trip in
+	// validator.Validate(). This prevents config writes from blocking
+	// until all in-flight login HTTP calls complete.
 	b.configMu.RLock()
-	defer b.configMu.RUnlock()
+	config := b.config
+	b.configMu.RUnlock()
 
 	// Get JWT token
 	jwtToken := d.Get("jwt").(string)
@@ -56,15 +61,15 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 
 	// Get role name — fall back to default_role if configured
 	roleName := d.Get("role").(string)
-	if roleName == "" && b.config != nil && b.config.DefaultRole != "" {
-		roleName = b.config.DefaultRole
+	if roleName == "" && config != nil && config.DefaultRole != "" {
+		roleName = config.DefaultRole
 	}
 	if roleName == "" {
 		return logical.ErrorResponse(logical.ErrBadRequest("missing role")), nil
 	}
 
 	// Check if backend is configured
-	if b.config == nil || b.config.validator == nil {
+	if config == nil || config.validator == nil {
 		return &logical.Response{
 			StatusCode: http.StatusInternalServerError,
 			Err:        fmt.Errorf("JWT auth backend not configured"),
@@ -90,25 +95,25 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	}
 
 	// Global issuer from config
-	if b.config.BoundIssuer != "" {
-		expected.Issuer = b.config.BoundIssuer
+	if config.BoundIssuer != "" {
+		expected.Issuer = config.BoundIssuer
 	}
 
 	// Role-specific subject (overrides config)
 	if role.BoundSubject != "" {
 		expected.Subject = role.BoundSubject
-	} else if b.config.BoundSubject != "" {
-		expected.Subject = b.config.BoundSubject
+	} else if config.BoundSubject != "" {
+		expected.Subject = config.BoundSubject
 	}
 
 	// Role-specific audiences (overrides config)
 	if len(role.BoundAudiences) > 0 {
 		expected.Audiences = role.BoundAudiences
-	} else if len(b.config.BoundAudiences) > 0 {
-		expected.Audiences = b.config.BoundAudiences
+	} else if len(config.BoundAudiences) > 0 {
+		expected.Audiences = config.BoundAudiences
 	}
 
-	claims, err := b.config.validator.Validate(ctx, jwtToken, expected)
+	claims, err := config.validator.Validate(ctx, jwtToken, expected)
 	if err != nil {
 		b.logger.Warn("login failed: JWT validation error", lgr.Err(err), lgr.String("role", roleName))
 		return &logical.Response{
@@ -118,7 +123,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	}
 
 	// Validate bound claims from config
-	if err := validateBoundClaims(claims, b.config.BoundClaims); err != nil {
+	if err := validateBoundClaims(claims, config.BoundClaims); err != nil {
 		b.logger.Warn("login failed: config bound claims check", lgr.Err(err), lgr.String("role", roleName))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
@@ -154,7 +159,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	// Extract principal identity - use role's user_claim or fallback to config
 	userClaim := role.UserClaim
 	if userClaim == "" {
-		userClaim = b.config.UserClaim
+		userClaim = config.UserClaim
 	}
 	principalID := extractClaim(claims, userClaim)
 	if principalID == "" {
@@ -175,16 +180,8 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 		}, nil
 	}
 
-	// Parse expiration time
-	var expTimestamp int64
-	switch v := expValue.(type) {
-	case float64:
-		expTimestamp = int64(v)
-	case int64:
-		expTimestamp = v
-	case int:
-		expTimestamp = int64(v)
-	default:
+	expTimestamp, ok := parseNumericClaim(expValue)
+	if !ok {
 		b.logger.Warn("login failed: invalid exp format in JWT", lgr.String("role", roleName))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
@@ -221,15 +218,8 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 				Err:        errAuthFailed,
 			}, nil
 		}
-		var iatTimestamp int64
-		switch v := iatValue.(type) {
-		case float64:
-			iatTimestamp = int64(v)
-		case int64:
-			iatTimestamp = v
-		case int:
-			iatTimestamp = int64(v)
-		default:
+		iatTimestamp, ok := parseNumericClaim(iatValue)
+		if !ok {
 			b.logger.Warn("login failed: invalid iat format in JWT", lgr.String("role", roleName))
 			return &logical.Response{
 				StatusCode: http.StatusUnauthorized,
@@ -260,7 +250,10 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 		effectiveTTL = roleTTL
 	}
 
-	// Return auth response using role configuration
+	// Return auth response using role configuration.
+	// ClientToken carries the raw JWT so that LoginCreateToken can pass it to
+	// JWTRoleTokenType.Generate(), which hashes jwt+role to compute the
+	// deterministic token ID used for transparent-mode cache lookups.
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
@@ -271,7 +264,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 			TokenType:      role.TokenType,
 			TokenTTL:       effectiveTTL,
 			ClientIP:       req.ClientIP,
-			ClientToken:    jwtToken, // Pass JWT for token types that need the original value
+			ClientToken:    jwtToken,
 		},
 		Data: map[string]any{
 			"principal_id": principalID,

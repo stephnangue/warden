@@ -420,7 +420,7 @@ warden_api PUT "auth/jwt/config" \
 # 9h. Create JWT role linking to credential spec
 echo "  Creating JWT role 'e2e-reader'..."
 warden_api POST "auth/jwt/role/e2e-reader" \
-  '{"token_policies":["vault-gateway-access"],"token_type":"jwt_role","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}'
+  '{"token_policies":["vault-gateway-access"],"token_type":"transparent","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}'
 
 # 9i. Enable transparent mode on Vault provider
 echo "  Enabling transparent mode..."
@@ -442,16 +442,26 @@ echo "  Creating Warden policy 'vault-nt-gateway-access'..."
 warden_api POST "sys/policies/cbp/vault-nt-gateway-access" \
   '{"policy":"path \"vault-nt/gateway*\" {\n  capabilities = [\"read\", \"create\", \"update\", \"delete\", \"list\"]\n}"}'
 
-# 9l. Create JWT role for non-transparent access (produces a warden_token with cred spec)
-echo "  Creating JWT role 'e2e-nt-reader'..."
-warden_api POST "auth/jwt/role/e2e-nt-reader" \
-  '{"token_policies":["vault-nt-gateway-access"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}'
+# 9l. Enable JWT auth method for non-transparent mode (separate mount)
+echo "  Enabling JWT auth method at auth/jwt-nt/ (non-transparent)..."
+warden_api POST "sys/auth/jwt-nt" '{"type":"jwt"}'
 
-# 9m. Obtain a Warden token for non-transparent testing by logging in via JWT
+sleep 1
+
+echo "  Configuring JWT auth (non-transparent)..."
+warden_api PUT "auth/jwt-nt/config" \
+  "{\"mode\":\"oidc\",\"oidc_discovery_url\":\"$HYDRA_PUBLIC\",\"bound_issuer\":\"$HYDRA_PUBLIC\"}"
+
+# 9m. Create JWT role for non-transparent access (produces a warden_token with cred spec)
+echo "  Creating JWT role 'e2e-nt-reader'..."
+warden_api POST "auth/jwt-nt/role/e2e-nt-reader" \
+  '{"token_policies":["vault-nt-gateway-access"],"token_type":"warden","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}'
+
+# 9n. Obtain a Warden token for non-transparent testing by logging in via JWT
 echo "  Obtaining Warden token for non-transparent testing..."
 NT_JWT=$(bash "$SCRIPT_DIR/tools/get_jwt.sh" 2>/dev/null || echo "")
 if [ -n "$NT_JWT" ]; then
-  NT_LOGIN=$(curl -sk -X POST "https://127.0.0.1:8500/v1/auth/jwt/login" \
+  NT_LOGIN=$(curl -sk -X POST "https://127.0.0.1:8500/v1/auth/jwt-nt/login" \
     -H "Content-Type: application/json" \
     -d "{\"jwt\":\"$NT_JWT\",\"role\":\"e2e-nt-reader\"}" 2>/dev/null)
   NT_WARDEN_TOKEN=$(echo "$NT_LOGIN" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['token'])" 2>/dev/null || echo "")

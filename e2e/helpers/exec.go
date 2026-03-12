@@ -3,8 +3,11 @@
 package helpers
 
 import (
+	"fmt"
 	"os/exec"
+	"path/filepath"
 	"sync"
+	"testing"
 )
 
 // ConcurrentRequests fires count concurrent GET requests to path on the given port
@@ -62,4 +65,37 @@ func runScript(script string, args ...string) (string, error) {
 	cmd := exec.Command("bash", allArgs...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// WardenBin returns the absolute path to the warden binary built by setup.sh.
+func WardenBin() string {
+	return filepath.Join(E2EDir(), ".bin", "warden")
+}
+
+// WardenCLI runs the warden CLI binary with the given args and environment variables.
+// Returns combined stdout+stderr output and any error.
+func WardenCLI(t *testing.T, env map[string]string, args ...string) (string, error) {
+	t.Helper()
+	bin := WardenBin()
+	cmd := exec.Command(bin, args...)
+
+	// Build env: inherit current env, then overlay custom vars
+	cmd.Env = append(cmd.Environ(), "WARDEN_SKIP_VERIFY=true")
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// WardenCLIWithPort runs the warden CLI binary pointing at a specific node.
+// Sets WARDEN_ADDR automatically and merges additional env vars.
+func WardenCLIWithPort(t *testing.T, port int, env map[string]string, args ...string) (string, error) {
+	t.Helper()
+	if env == nil {
+		env = make(map[string]string)
+	}
+	env["WARDEN_ADDR"] = NodeURL(port)
+	return WardenCLI(t, env, args...)
 }

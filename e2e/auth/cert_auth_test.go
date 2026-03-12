@@ -12,17 +12,22 @@ import (
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
 
-// setupCertAuthEnv mounts cert auth, configures it, and creates a test role.
-// Returns the CA cert PEM and key for generating client certs.
+// setupCertAuthEnv mounts cert auth, configures it,
+// and creates a test role with warden_token type.
+// Uses the mTLS client CA (tls_client_ca_file) so that client certs presented
+// during TLS handshake (via --cert flag or WARDEN_CLIENT_CERT env) are accepted
+// by the server's VerifyClientCertIfGiven check.
 func setupCertAuthEnv(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.PrivateKey) {
 	t.Helper()
-	certPEM, key := h.SetupCertAuth(t, port)
+	caCertPEM, caKey = h.LoadMTLSClientCA(t)
+	h.SetupCertAuthWithCA(t, port, caCertPEM)
+
 
 	// Create role with CN glob pattern
 	h.APIRequest(t, "POST", "auth/cert/role/agent", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 
-	return certPEM, key
+	return caCertPEM, caKey
 }
 
 func teardownCertAuthEnv(t *testing.T, port int) {
@@ -37,8 +42,9 @@ func TestCertAuthLogin_ValidCertMatchingCN(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/agent", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/agent", port, "")
 
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent-1")
@@ -62,8 +68,9 @@ func TestCertAuthLogin_WrongCN(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/agent", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/agent", port, "")
 
 	// Generate cert with CN that doesn't match
@@ -81,8 +88,9 @@ func TestCertAuthLogin_UntrustedCA(t *testing.T) {
 	_, _ = h.SetupCertAuth(t, port) // setup with CA1
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/agent", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/agent", port, "")
 
 	// Generate a completely different CA and client cert
@@ -101,8 +109,9 @@ func TestCertAuthLogin_DNSSANMatching(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/dns-role", port,
-		`{"allowed_dns_sans":["*.example.com"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_dns_sans":["*.example.com"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/dns-role", port, "")
 
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent", h.WithDNSSANs("agent.example.com"))
@@ -119,8 +128,9 @@ func TestCertAuthLogin_NoCert(t *testing.T) {
 	_, _ = h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/agent", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/agent", port, "")
 
 	// Login without any cert header
@@ -140,8 +150,9 @@ func TestCertAuthLogin_XFCCHeaderFormat(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/agent", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/agent", port, "")
 
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent-xfcc")
@@ -158,8 +169,9 @@ func TestCertAuthLogin_ThroughStandby(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/agent", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/agent", port, "")
 
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent-standby")
@@ -178,6 +190,7 @@ func TestCertAuthConfigAndRoleCRUD(t *testing.T) {
 	_, _ = h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	// Read config
 	status, body := h.APIRequest(t, "GET", "auth/cert/config", port, "")
 	if status != 200 {
@@ -186,7 +199,7 @@ func TestCertAuthConfigAndRoleCRUD(t *testing.T) {
 
 	// Create role
 	h.APIRequest(t, "POST", "auth/cert/role/test-crud", port,
-		`{"allowed_common_names":["test-*"],"token_policies":["default"],"token_type":"warden_token","token_ttl":7200}`)
+		`{"allowed_common_names":["test-*"],"token_policies":["default"],"token_type":"warden","token_ttl":7200}`)
 
 	// Read role
 	status, body = h.APIRequest(t, "GET", "auth/cert/role/test-crud", port, "")
@@ -232,13 +245,14 @@ func TestCertAuthLogin_MultipleRoles(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	// Create two roles with different CN patterns
 	h.APIRequest(t, "POST", "auth/cert/role/web-role", port,
-		`{"allowed_common_names":["web-*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_common_names":["web-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/web-role", port, "")
 
 	h.APIRequest(t, "POST", "auth/cert/role/api-role", port,
-		`{"allowed_common_names":["api-*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":7200}`)
+		`{"allowed_common_names":["api-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":7200}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/api-role", port, "")
 
 	// Login with web cert to web-role
@@ -302,8 +316,9 @@ func TestCertAuthLogin_EmailSANMatching(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/email-role", port,
-		`{"allowed_email_sans":["*@example.com"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_email_sans":["*@example.com"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/email-role", port, "")
 
 	// Matching email SAN
@@ -321,8 +336,9 @@ func TestCertAuthLogin_EmailSANRejected(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/email-role", port,
-		`{"allowed_email_sans":["*@example.com"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_email_sans":["*@example.com"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/email-role", port, "")
 
 	// Non-matching email SAN
@@ -340,8 +356,9 @@ func TestCertAuthLogin_URISANMatching(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/uri-role", port,
-		`{"allowed_uri_sans":["spiffe://cluster.local/*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_uri_sans":["spiffe://cluster.local/*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/uri-role", port, "")
 
 	// Matching URI SAN
@@ -359,8 +376,9 @@ func TestCertAuthLogin_URISANRejected(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/uri-role", port,
-		`{"allowed_uri_sans":["spiffe://cluster.local/*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_uri_sans":["spiffe://cluster.local/*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/uri-role", port, "")
 
 	// Non-matching URI SAN
@@ -378,8 +396,9 @@ func TestCertAuthLogin_OUMatching(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/ou-role", port,
-		`{"allowed_organizational_units":["Engineering"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_organizational_units":["Engineering"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/ou-role", port, "")
 
 	// Matching OU
@@ -397,8 +416,9 @@ func TestCertAuthLogin_OURejected(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/ou-role", port,
-		`{"allowed_organizational_units":["Engineering"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_organizational_units":["Engineering"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/ou-role", port, "")
 
 	// Non-matching OU
@@ -416,12 +436,13 @@ func TestCertAuthLogin_RoleSpecificCA(t *testing.T) {
 	_, _ = h.SetupCertAuth(t, port) // Global CA
 	defer h.TeardownCertAuth(t, port)
 
+
 	// Generate a second CA for the role-specific override
 	roleCA, roleCAKey := h.GenerateTestCA(t)
 
 	// Create role with role-specific CA — this CA overrides the global trusted CA
 	escapedPEM := strings.ReplaceAll(roleCA, "\n", "\\n")
-	roleBody := fmt.Sprintf(`{"allowed_common_names":["role-agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600,"certificate":"%s"}`, escapedPEM)
+	roleBody := fmt.Sprintf(`{"allowed_common_names":["role-agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600,"certificate":"%s"}`, escapedPEM)
 	h.APIRequest(t, "POST", "auth/cert/role/role-ca", port, roleBody)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/role-ca", port, "")
 
@@ -448,8 +469,9 @@ func TestCertAuthLogin_PrincipalClaimDNSSAN(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/dns-principal", port,
-		`{"allowed_dns_sans":["*.example.com"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600,"principal_claim":"dns_san"}`)
+		`{"allowed_dns_sans":["*.example.com"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600,"principal_claim":"dns_san"}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/dns-principal", port, "")
 
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent-dns",
@@ -473,8 +495,9 @@ func TestCertAuthLogin_PrincipalClaimEmailSAN(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/email-principal", port,
-		`{"allowed_email_sans":["*@corp.example.com"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600,"principal_claim":"email_san"}`)
+		`{"allowed_email_sans":["*@corp.example.com"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600,"principal_claim":"email_san"}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/email-principal", port, "")
 
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent-email-p",
@@ -498,8 +521,9 @@ func TestCertAuthLogin_PrincipalClaimURISAN(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/uri-principal", port,
-		`{"allowed_uri_sans":["https://service.example.com/*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600,"principal_claim":"uri_san"}`)
+		`{"allowed_uri_sans":["https://service.example.com/*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600,"principal_claim":"uri_san"}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/uri-principal", port, "")
 
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent-uri-p",
@@ -523,8 +547,9 @@ func TestCertAuthLogin_PrincipalClaimSPIFFEID(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	h.APIRequest(t, "POST", "auth/cert/role/spiffe-principal", port,
-		`{"allowed_uri_sans":["spiffe://prod.example.com/*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600,"principal_claim":"spiffe_id"}`)
+		`{"allowed_uri_sans":["spiffe://prod.example.com/*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600,"principal_claim":"spiffe_id"}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/spiffe-principal", port, "")
 
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent-spiffe",
@@ -548,9 +573,10 @@ func TestCertAuthLogin_PrincipalClaimSerial(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	// Serial-based principal: use CN constraint for authorization, serial for identity
 	h.APIRequest(t, "POST", "auth/cert/role/serial-principal", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600,"principal_claim":"serial"}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600,"principal_claim":"serial"}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/serial-principal", port, "")
 
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent-serial")
@@ -613,7 +639,7 @@ func TestCertAuthConfigReadUpdate(t *testing.T) {
 		fmt.Sprintf(`{"trusted_ca_pem":"%s","principal_claim":"dns_san"}`, escapedPEM))
 
 	h.APIRequest(t, "POST", "auth/cert/role/config-test", port,
-		`{"allowed_dns_sans":["*.test.com"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_dns_sans":["*.test.com"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/config-test", port, "")
 
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent-config",
@@ -637,9 +663,10 @@ func TestCertAuthLogin_MultipleConstraints(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertAuth(t, port)
 	defer h.TeardownCertAuth(t, port)
 
+
 	// Role requires BOTH CN match AND OU match
 	h.APIRequest(t, "POST", "auth/cert/role/multi-constraint", port,
-		`{"allowed_common_names":["agent-*"],"allowed_organizational_units":["Engineering"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"allowed_organizational_units":["Engineering"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/multi-constraint", port, "")
 
 	// Cert matching both CN and OU → should succeed
@@ -692,7 +719,7 @@ func TestCertAuthLogin_IntermediateCA(t *testing.T) {
 	}
 
 	h.APIRequest(t, "POST", "auth/cert/role/chain-role", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden_token","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
 	defer h.APIRequest(t, "DELETE", "auth/cert/role/chain-role", port, "")
 
 	// Client cert signed by intermediate CA → should succeed

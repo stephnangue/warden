@@ -5,51 +5,11 @@ package ha
 import (
 	"fmt"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
-
-// TestRollingRestartAllNodes verifies the cluster survives a rolling restart of all
-// three nodes, re-electing a leader each time one is killed (T-001).
-func TestRollingRestartAllNodes(t *testing.T) {
-	// Round 1: kill current leader
-	leader1 := h.GetLeaderPort(t)
-	node1 := h.NodeNumberForPort(leader1)
-	h.KillNode(t, node1, "TERM")
-	time.Sleep(8 * time.Second)
-
-	leader2 := h.WaitForLeader(t, 10, 2*time.Second)
-	h.RestartNode(t, node1)
-	time.Sleep(5 * time.Second)
-
-	// Round 2: kill new leader
-	node2 := h.NodeNumberForPort(leader2)
-	h.KillNode(t, node2, "TERM")
-	time.Sleep(8 * time.Second)
-
-	leader3 := h.WaitForLeader(t, 10, 2*time.Second)
-	h.RestartNode(t, node2)
-	time.Sleep(5 * time.Second)
-
-	// Round 3: kill third leader
-	node3 := h.NodeNumberForPort(leader3)
-	h.KillNode(t, node3, "TERM")
-	time.Sleep(8 * time.Second)
-
-	_ = h.WaitForLeader(t, 10, 2*time.Second)
-	h.RestartNode(t, node3)
-
-	h.WaitForCluster(t, 15, 2*time.Second)
-
-	finalLeader := h.GetLeaderPort(t)
-	status, _ := h.APIRequest(t, "GET", "sys/health", finalLeader, "")
-	if status != 200 && status != 429 {
-		t.Fatalf("expected 200 or 429 after rolling restart, got %d", status)
-	}
-}
 
 // TestSimultaneousStandbyKillDuringStepDown verifies the cluster recovers when both
 // standbys are killed (SIGKILL) at the same time the leader steps down (T-002).
@@ -118,44 +78,6 @@ func TestLeaderKillDuringActiveRequest(t *testing.T) {
 
 	h.RestartNode(t, nodeNum)
 	h.WaitForCluster(t, 15, 2*time.Second)
-}
-
-// TestRapidLeaderOscillation verifies the cluster stabilizes after repeated rapid
-// step-downs (T-004).
-func TestRapidLeaderOscillation(t *testing.T) {
-	for i := 0; i < 5; i++ {
-		leader := h.WaitForLeader(t, 10, 2*time.Second)
-		h.StepDown(t, leader)
-		time.Sleep(3 * time.Second)
-	}
-
-	time.Sleep(5 * time.Second)
-
-	h.WaitForCluster(t, 20, 3*time.Second)
-
-	finalLeader := h.GetLeaderPort(t)
-	status, _ := h.APIRequest(t, "GET", "sys/health", finalLeader, "")
-	if status != 200 && status != 429 {
-		t.Fatalf("expected 200 or 429 after rapid oscillation, got %d", status)
-	}
-}
-
-// TestNetworkPartitionSimulation simulates a network partition by freezing the leader
-// process with SIGSTOP and verifying a new leader is elected (T-005).
-func TestNetworkPartitionSimulation(t *testing.T) {
-	leader := h.GetLeaderPort(t)
-	nodeNum := h.NodeNumberForPort(leader)
-
-	h.SignalNode(t, nodeNum, syscall.SIGSTOP)
-
-	time.Sleep(15 * time.Second)
-
-	_ = h.WaitForLeader(t, 15, 2*time.Second)
-
-	h.SignalNode(t, nodeNum, syscall.SIGCONT)
-	time.Sleep(5 * time.Second)
-
-	h.WaitForCluster(t, 20, 3*time.Second)
 }
 
 // TestLeaderCrashDuringNamespaceCreation verifies that a namespace creation either

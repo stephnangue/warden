@@ -633,7 +633,7 @@ func TestHandleLoginRequest(t *testing.T) {
 			HTTPRequest: httpReq,
 		}
 
-		resp, auth, err := core.handleLoginRequest(ctx, req)
+		resp, auth, err := core.handleLoginRequest(ctx, req, false)
 		// The path might not exist, but we're testing that Unauthenticated is set
 		assert.True(t, req.Unauthenticated)
 		// Response depends on whether the path exists

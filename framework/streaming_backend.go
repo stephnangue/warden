@@ -539,6 +539,7 @@ func (b *StreamingBackend) RewriteTransparentPath(path string) string {
 	return rewriter(path)
 }
 
+
 // SetTransparentConfig updates the transparent mode configuration at runtime
 func (b *StreamingBackend) SetTransparentConfig(config *TransparentConfig) {
 	b.TransparentConfig = config

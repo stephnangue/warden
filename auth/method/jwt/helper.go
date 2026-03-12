@@ -66,38 +66,19 @@ func claimValuesEqual(actual, expected interface{}) bool {
 	}
 }
 
-// buildJWTMetadata extracts metadata from JWT claims
-func buildJWTMetadata(claims map[string]interface{}, config *JWTAuthConfig) map[string]string {
-	metadata := map[string]string{
-		"auth_method": "jwt",
+// parseNumericClaim extracts an int64 timestamp from a JWT claim value.
+// JWT numeric values may be float64 (JSON decode), int64, or int.
+func parseNumericClaim(value any) (int64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return int64(v), true
+	case int64:
+		return v, true
+	case int:
+		return int64(v), true
+	default:
+		return 0, false
 	}
-
-	// Add standard claims
-	if v, ok := claims["sub"].(string); ok {
-		metadata["subject"] = v
-	}
-	if v, ok := claims["iss"].(string); ok {
-		metadata["issuer"] = v
-	}
-	if v, ok := claims["email"].(string); ok {
-		metadata["email"] = v
-	}
-
-	// Apply claim mappings
-	for jwtClaim, metadataKey := range config.ClaimMappings {
-		if value := extractClaim(claims, jwtClaim); value != "" {
-			metadata[metadataKey] = value
-		}
-	}
-
-	// Extract groups if configured
-	if config.GroupsClaim != "" {
-		if groups := extractClaim(claims, config.GroupsClaim); groups != "" {
-			metadata["groups"] = groups
-		}
-	}
-
-	return metadata
 }
 
 // extractClaim extracts a claim value as a string

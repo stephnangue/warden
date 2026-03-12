@@ -4,6 +4,7 @@
 package jwt
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -353,7 +354,7 @@ func TestRole_Defaults(t *testing.T) {
 	fieldData := &framework.FieldData{
 		Raw: map[string]any{
 			"name":       "defaults-role",
-			"token_type": "warden_token", // Required field
+			"token_type": "warden",
 		},
 		Schema: map[string]*framework.FieldSchema{
 			"name":            {Type: framework.TypeString},
@@ -507,4 +508,148 @@ func TestPathRole_MaxAgeRoundTrip(t *testing.T) {
 	maxAge, err := retrieved.ParseMaxAge()
 	require.NoError(t, err)
 	assert.Equal(t, 30*time.Minute, maxAge)
+}
+
+// createTestBackendWithAllTokenTypes creates a backend that includes jwt_role and
+// cert_role in its valid token types.
+func createTestBackendWithAllTokenTypes(t *testing.T) (*jwtAuthBackend, context.Context) {
+	t.Helper()
+	ctx := context.Background()
+	storage := newInmemStorage()
+	conf := &logical.BackendConfig{
+		Logger:          testLoggerLogin(),
+		StorageView:     storage,
+		ValidTokenTypes: []string{"service", "batch", "user_pass", "aws_access_keys", "warden_token", "jwt_role", "cert_role"},
+	}
+	backend, err := Factory(ctx, conf)
+	require.NoError(t, err)
+	return backend.(*jwtAuthBackend), ctx
+}
+
+// =============================================================================
+// token_type Enforcement Tests
+// =============================================================================
+
+func TestPathRole_TokenType_CertRoleAlwaysForbidden(t *testing.T) {
+	b, ctx := createTestBackendWithAllTokenTypes(t)
+	b.config = &JWTAuthConfig{
+		Mode:    "jwt",
+		JWKSURL: "https://example.com/.well-known/jwks.json",
+	}
+
+	fieldData := &framework.FieldData{
+		Raw: map[string]any{
+			"name":       "cert-role-test",
+			"token_type": "cert_role",
+			"token_ttl":  3600,
+			"user_claim": "sub",
+		},
+		Schema: map[string]*framework.FieldSchema{
+			"name":       {Type: framework.TypeString},
+			"token_type": {Type: framework.TypeString},
+			"token_ttl":  {Type: framework.TypeDurationSecond, Default: 3600},
+			"user_claim": {Type: framework.TypeString, Default: "sub"},
+		},
+	}
+
+	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fieldData)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Err)
+	assert.Contains(t, resp.Err.Error(), "cert auth backends")
+}
+
+func TestPathRole_TokenType_JWTRoleDefaultsWhenEmpty(t *testing.T) {
+	b, ctx := createTestBackendWithAllTokenTypes(t)
+	b.config = &JWTAuthConfig{
+		Mode:    "jwt",
+		JWKSURL: "https://example.com/.well-known/jwks.json",
+	}
+
+	fieldData := &framework.FieldData{
+		Raw: map[string]any{
+			"name":       "jwt-default",
+			"token_ttl":  3600,
+			"user_claim": "sub",
+			// token_type intentionally omitted — should default to jwt_role
+		},
+		Schema: map[string]*framework.FieldSchema{
+			"name":       {Type: framework.TypeString},
+			"token_type": {Type: framework.TypeString},
+			"token_ttl":  {Type: framework.TypeDurationSecond, Default: 3600},
+			"user_claim": {Type: framework.TypeString, Default: "sub"},
+		},
+	}
+
+	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fieldData)
+	require.NoError(t, err)
+	assert.Nil(t, resp.Err)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	role, err := b.getRole(ctx, "jwt-default")
+	require.NoError(t, err)
+	assert.Equal(t, "jwt_role", role.TokenType)
+}
+
+func TestPathRole_TokenType_JWTRoleAlwaysAllowed(t *testing.T) {
+	b, ctx := createTestBackendWithAllTokenTypes(t)
+	b.config = &JWTAuthConfig{
+		Mode:    "jwt",
+		JWKSURL: "https://example.com/.well-known/jwks.json",
+	}
+
+	fieldData := &framework.FieldData{
+		Raw: map[string]any{
+			"name":       "jwt-role-explicit",
+			"token_type": "transparent",
+			"token_ttl":  3600,
+			"user_claim": "sub",
+		},
+		Schema: map[string]*framework.FieldSchema{
+			"name":       {Type: framework.TypeString},
+			"token_type": {Type: framework.TypeString},
+			"token_ttl":  {Type: framework.TypeDurationSecond, Default: 3600},
+			"user_claim": {Type: framework.TypeString, Default: "sub"},
+		},
+	}
+
+	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fieldData)
+	require.NoError(t, err)
+	assert.Nil(t, resp.Err)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	role, err := b.getRole(ctx, "jwt-role-explicit")
+	require.NoError(t, err)
+	assert.Equal(t, "jwt_role", role.TokenType)
+}
+
+func TestPathRole_TokenType_OtherTypesAlwaysAllowed(t *testing.T) {
+	b, ctx := createTestBackendWithAllTokenTypes(t)
+	b.config = &JWTAuthConfig{
+		Mode:    "jwt",
+		JWKSURL: "https://example.com/.well-known/jwks.json",
+	}
+
+	for _, tokenType := range []string{"aws", "warden", "service"} {
+		t.Run(tokenType, func(t *testing.T) {
+			fieldData := &framework.FieldData{
+				Raw: map[string]any{
+					"name":       "mixed-" + tokenType,
+					"token_type": tokenType,
+					"token_ttl":  3600,
+					"user_claim": "sub",
+				},
+				Schema: map[string]*framework.FieldSchema{
+					"name":       {Type: framework.TypeString},
+					"token_type": {Type: framework.TypeString},
+					"token_ttl":  {Type: framework.TypeDurationSecond, Default: 3600},
+					"user_claim": {Type: framework.TypeString, Default: "sub"},
+				},
+			}
+
+			resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fieldData)
+			require.NoError(t, err)
+			assert.Nil(t, resp.Err, "token_type=%q should always be allowed", tokenType)
+			assert.Equal(t, http.StatusCreated, resp.StatusCode)
+		})
+	}
 }

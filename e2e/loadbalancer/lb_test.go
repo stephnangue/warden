@@ -33,7 +33,7 @@ func TestLBJWTNonTransparentRead(t *testing.T) {
 	h.SkipWithoutLB(t)
 
 	jwt := h.GetDefaultJWT(t)
-	loginStatus, wardenToken := h.LoginJWTViaLB(t, jwt, "e2e-nt-reader")
+	loginStatus, wardenToken := h.LoginJWTNTViaLB(t, jwt, "e2e-nt-reader")
 	if loginStatus != 200 && loginStatus != 201 {
 		t.Fatalf("JWT login via LB failed: status %d", loginStatus)
 	}
@@ -87,7 +87,7 @@ func TestLBCertNonTransparentRead(t *testing.T) {
 	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cert-lb-nt")
 
 	// Login via cert through LB to get a warden token
-	loginStatus, loginBody := h.CertLoginRequestViaLB(t, "e2e-cert-nt-reader", clientCertPEM, clientKeyPEM)
+	loginStatus, loginBody := h.CertNTLoginRequestViaLB(t, "e2e-cert-nt-reader", clientCertPEM, clientKeyPEM)
 	if loginStatus != 200 && loginStatus != 201 {
 		t.Fatalf("cert login via LB failed (status %d): %s", loginStatus, string(loginBody))
 	}
@@ -119,7 +119,7 @@ func TestLBCertHeaderForwarding(t *testing.T) {
 	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cert-lb-fwd")
 
 	// Cert login through LB — exercises the full trusted_proxies + TLS forwarding path
-	status, body := h.CertLoginRequestViaLB(t, "e2e-cert-reader", clientCertPEM, clientKeyPEM)
+	status, body := h.CertLoginRequestViaLB(t, "e2e-cert-login", clientCertPEM, clientKeyPEM)
 	if status != 200 && status != 201 {
 		t.Fatalf("cert login through LB failed (status %d): %s — "+
 			"this may indicate trusted_proxies doesn't include Docker bridge CIDR",

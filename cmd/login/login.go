@@ -20,7 +20,7 @@ Usage: warden login [options] [AUTH K=V...]
 
   Authenticates users or machines to Warden using the provided arguments. A
   successful authentication results in a Warden token - conceptually similar to
-  a session token on a website. A token can take many forms : it can be a 
+  a session token on a website. A token can take many forms : it can be a
   username-password or aws-access-keys, depending on the role provided
   during the authentication. By default, this token is cached on the local
   machine for future requests, and store into environment variables.
@@ -30,6 +30,17 @@ Usage: warden login [options] [AUTH K=V...]
   authenticate to the jwt auth method:
 
       $ warden login --method=jwt --token="$JWT_TOKEN" --role="<your_role_name>"
+
+  To authenticate using a client certificate:
+
+      $ warden login --method=cert --role=agent --cert=./agent.pem --key=./agent-key.pem
+
+  Or with environment variables:
+
+      $ export WARDEN_CLIENT_CERT=./agent.pem
+      $ export WARDEN_CLIENT_KEY=./agent-key.pem
+      $ export WARDEN_ROLE=agent
+      $ warden login --method=cert
 
   For more information about the list of configuration parameters available for
   a given auth method, use the "warden auth help TYPE" command. You can also use
@@ -50,12 +61,14 @@ Usage: warden login [options] [AUTH K=V...]
 
 	flagMethod string
 	flagPath   string
-	flagRole   string
 
 	flagToken string
+	flagCert  string
+	flagKey   string
 
 	Handlers = map[string]LoginHandler{
-		"jwt": JWTHandler{},
+		"jwt":  JWTHandler{},
+		"cert": CertHandler{},
 	}
 )
 
@@ -68,10 +81,10 @@ type LoginHandler interface {
 func init() {
 	LoginCmd.Flags().StringVarP(&flagMethod, "method", "m", "", "The auth method to use")
 	LoginCmd.Flags().StringVarP(&flagPath, "path", "p", "", "The path on which the method was enabled")
-	LoginCmd.Flags().StringVarP(&flagRole, "role", "r", "", "The role the assume after successful authentication")
 	LoginCmd.Flags().StringVarP(&flagToken, "token", "t", "", "The JWT to use with JWT auth method")
+	LoginCmd.Flags().StringVar(&flagCert, "cert", "", "The client certificate file for cert auth method")
+	LoginCmd.Flags().StringVar(&flagKey, "key", "", "The client key file for cert auth method")
 	LoginCmd.MarkFlagRequired("method")
-	LoginCmd.MarkFlagRequired("role")
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -82,8 +95,14 @@ func run(cmd *cobra.Command, args []string) error {
 			"auth methods are only available via the API.", flagMethod)
 	}
 
+	// Resolve role from global --role flag (set as WARDEN_ROLE env var) or env var directly
+	role := api.ReadWardenVariable(api.EnvWardenRole)
+	if role == "" {
+		return fmt.Errorf("role is required. Use --role flag or set the WARDEN_ROLE environment variable")
+	}
+
 	config := make(map[string]string)
-	config["role"] = flagRole
+	config["role"] = role
 
 	// Support both --path flag and positional argument
 	path := flagPath
@@ -101,6 +120,11 @@ func run(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("token is required for jwt auth method. Use -t or --token flag")
 		}
 		config["token"] = flagToken
+	case "cert":
+		if flagCert != "" {
+			config["cert"] = flagCert
+			config["key"] = flagKey
+		}
 	default:
 		return fmt.Errorf("unsupported auth method: %s", flagMethod)
 	}

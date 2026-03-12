@@ -358,7 +358,7 @@ func GetNTWardenToken(t *testing.T, port int) string {
 
 	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"e2e-nt-reader"}`, jwt)
 	status, body := DoRequest(t, "POST",
-		fmt.Sprintf("%s/v1/auth/jwt/login", NodeURL(port)),
+		fmt.Sprintf("%s/v1/auth/jwt-nt/login", NodeURL(port)),
 		map[string]string{"Content-Type": "application/json"},
 		loginBody,
 	)
@@ -436,7 +436,7 @@ func GetNSNTWardenToken(t *testing.T, namespace string, port int) string {
 
 	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"e2e-nt-reader"}`, jwt)
 	status, body := DoRequest(t, "POST",
-		fmt.Sprintf("%s/v1/auth/jwt/login", NodeURL(port)),
+		fmt.Sprintf("%s/v1/auth/jwt-nt/login", NodeURL(port)),
 		map[string]string{
 			"Content-Type":       "application/json",
 			"X-Warden-Namespace": namespace,
@@ -490,16 +490,22 @@ func SetupNSVaultEnv(t *testing.T, port int) {
 	NSAPIRequest(t, "POST", "sys/policies/cbp/vault-nt-gateway-access", ns, port,
 		`{"policy":"path \"vault-nt/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}"}`)
 
-	// JWT auth method
+	// JWT auth method (defaults new roles to jwt_role token type)
 	NSAPIRequest(t, "POST", "sys/auth/jwt", ns, port, `{"type":"jwt"}`)
 	NSAPIRequest(t, "PUT", "auth/jwt/config", ns, port,
-		`{"mode":"oidc","oidc_discovery_url":"http://localhost:4444","bound_issuer":"http://localhost:4444","token_type":"jwt_role"}`)
+		`{"mode":"oidc","oidc_discovery_url":"http://localhost:4444","bound_issuer":"http://localhost:4444"}`)
 
-	// JWT roles
+	// JWT role for transparent mode (jwt_role token type)
 	NSAPIRequest(t, "POST", "auth/jwt/role/e2e-reader", ns, port,
-		`{"token_policies":["vault-gateway-access"],"token_type":"jwt_role","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}`)
-	NSAPIRequest(t, "POST", "auth/jwt/role/e2e-nt-reader", ns, port,
-		`{"token_policies":["vault-nt-gateway-access"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}`)
+		`{"token_policies":["vault-gateway-access"],"token_type":"transparent","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}`)
+
+	// JWT auth for explicit login (warden_token type)
+	NSAPIRequest(t, "POST", "sys/auth/jwt-nt", ns, port, `{"type":"jwt"}`)
+	NSAPIRequest(t, "PUT", "auth/jwt-nt/config", ns, port,
+		`{"mode":"oidc","oidc_discovery_url":"http://localhost:4444","bound_issuer":"http://localhost:4444"}`)
+
+	NSAPIRequest(t, "POST", "auth/jwt-nt/role/e2e-nt-reader", ns, port,
+		`{"token_policies":["vault-nt-gateway-access"],"token_type":"warden","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}`)
 
 	// Enable transparent mode
 	NSAPIRequest(t, "POST", "vault/config", ns, port,
@@ -516,6 +522,7 @@ func TeardownNSVaultEnv(t *testing.T, port int) {
 	NSAPIRequest(t, "DELETE", "sys/cred/specs/vault-token-reader", ns, port, "")
 	NSAPIRequest(t, "DELETE", "sys/cred/sources/vault-e2e", ns, port, "")
 	NSAPIRequest(t, "DELETE", "sys/auth/jwt", ns, port, "")
+	NSAPIRequest(t, "DELETE", "sys/auth/jwt-nt", ns, port, "")
 	NSAPIRequest(t, "DELETE", "sys/policies/cbp/vault-gateway-access", ns, port, "")
 	NSAPIRequest(t, "DELETE", "sys/policies/cbp/vault-nt-gateway-access", ns, port, "")
 	time.Sleep(1 * time.Second)
@@ -598,10 +605,25 @@ func GrepNodeLog(t *testing.T, nodeNum int, pattern string) bool {
 // LoginJWT logs in with a JWT and role, returns (statusCode, wardenToken).
 func LoginJWT(t *testing.T, jwt, role string, port int) (int, string) {
 	t.Helper()
+	return loginJWTOnMount(t, "auth/jwt", jwt, role, port, nil)
+}
+
+// LoginJWTNT logs in with a JWT on the non-transparent auth/jwt-nt/ mount.
+func LoginJWTNT(t *testing.T, jwt, role string, port int) (int, string) {
+	t.Helper()
+	return loginJWTOnMount(t, "auth/jwt-nt", jwt, role, port, nil)
+}
+
+func loginJWTOnMount(t *testing.T, mount, jwt, role string, port int, extraHeaders map[string]string) (int, string) {
+	t.Helper()
 	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"%s"}`, jwt, role)
+	headers := map[string]string{"Content-Type": "application/json"}
+	for k, v := range extraHeaders {
+		headers[k] = v
+	}
 	status, body := DoRequest(t, "POST",
-		fmt.Sprintf("%s/v1/auth/jwt/login", NodeURL(port)),
-		map[string]string{"Content-Type": "application/json"},
+		fmt.Sprintf("%s/v1/%s/login", NodeURL(port), mount),
+		headers,
 		loginBody,
 	)
 	if status != 200 && status != 201 {
@@ -618,24 +640,9 @@ func LoginJWT(t *testing.T, jwt, role string, port int) (int, string) {
 // LoginJWTInNS logs in with a JWT and role in a namespace.
 func LoginJWTInNS(t *testing.T, jwt, role, namespace string, port int) (int, string) {
 	t.Helper()
-	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"%s"}`, jwt, role)
-	status, body := DoRequest(t, "POST",
-		fmt.Sprintf("%s/v1/auth/jwt/login", NodeURL(port)),
-		map[string]string{
-			"Content-Type":       "application/json",
-			"X-Warden-Namespace": namespace,
-		},
-		loginBody,
-	)
-	if status != 200 && status != 201 {
-		return status, ""
-	}
-	data := ParseJSON(t, body)
-	token, _ := JSONPath(data, "data.data.token").(string)
-	if token == "" {
-		token, _ = JSONPath(data, "data.token_id").(string)
-	}
-	return status, token
+	return loginJWTOnMount(t, "auth/jwt", jwt, role, port, map[string]string{
+		"X-Warden-Namespace": namespace,
+	})
 }
 
 // VaultDirectRequest makes a request directly to Vault (port 8200).
@@ -780,9 +787,20 @@ func VaultNTRequestViaLB(t *testing.T, method, vaultPath, wardenToken string) (i
 // LoginJWTViaLB logs in with a JWT and role through the load balancer.
 func LoginJWTViaLB(t *testing.T, jwt, role string) (int, string) {
 	t.Helper()
+	return loginJWTViaLBOnMount(t, "auth/jwt", jwt, role)
+}
+
+// LoginJWTNTViaLB logs in with a JWT on the non-transparent auth/jwt-nt/ mount through the LB.
+func LoginJWTNTViaLB(t *testing.T, jwt, role string) (int, string) {
+	t.Helper()
+	return loginJWTViaLBOnMount(t, "auth/jwt-nt", jwt, role)
+}
+
+func loginJWTViaLBOnMount(t *testing.T, mount, jwt, role string) (int, string) {
+	t.Helper()
 	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"%s"}`, jwt, role)
 	status, body := DoLBRequest(t, "POST",
-		fmt.Sprintf("%s/v1/auth/jwt/login", LBNodeURL()),
+		fmt.Sprintf("%s/v1/%s/login", LBNodeURL(), mount),
 		map[string]string{"Content-Type": "application/json"},
 		loginBody, nil,
 	)
@@ -801,8 +819,19 @@ func LoginJWTViaLB(t *testing.T, jwt, role string) (int, string) {
 // The client presents its TLS certificate to nginx for forwarding.
 func CertLoginRequestViaLB(t *testing.T, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
 	t.Helper()
+	return certLoginRequestViaLBOnMount(t, "auth/cert", role, clientCertPEM, clientKeyPEM)
+}
+
+// CertNTLoginRequestViaLB performs a cert auth login on auth/cert-nt/ through the LB.
+func CertNTLoginRequestViaLB(t *testing.T, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+	t.Helper()
+	return certLoginRequestViaLBOnMount(t, "auth/cert-nt", role, clientCertPEM, clientKeyPEM)
+}
+
+func certLoginRequestViaLBOnMount(t *testing.T, mount, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+	t.Helper()
 	cert := parseTLSCert(t, clientCertPEM, clientKeyPEM)
-	u := fmt.Sprintf("%s/v1/auth/cert/login", LBNodeURL())
+	u := fmt.Sprintf("%s/v1/%s/login", LBNodeURL(), mount)
 	headers := map[string]string{"Content-Type": "application/json"}
 	body := fmt.Sprintf(`{"role":"%s"}`, role)
 	return DoLBRequest(t, "POST", u, headers, body, &cert)
