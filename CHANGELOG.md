@@ -20,6 +20,12 @@ All notable changes to Warden are documented in this file.
 
 - **Simplified Token Type API** — The `token_type` field on roles and auth method configs now accepts three user-facing aliases instead of internal names: `transparent` (replaces `jwt_role` / `cert_role`), `warden` (replaces `warden_token`), and `aws` (replaces `aws_access_keys`). The API reads back the alias, not the internal name. Internal names are still accepted for backwards compatibility. Default changes from required to `transparent`.
 
+### Bug Fixes
+
+- **Director LB Forwarding** — Fixed standby Director failing to set `X-Forwarded-For` when `RemoteAddr` is a bare IP (no port) after `middleware.RealIP` processing. The Director now falls back to `net.ParseIP` when `SplitHostPort` fails. (#68)
+
+- **Transparent Mode IP Binding** — Fixed IP binding enforcement in transparent mode by injecting `ClientIP` into context during `performImplicitAuth` and returning `ErrOriginViolation` immediately instead of falling through to create a new token. (#68)
+
 ### Security
 
 - **Explicit Login Blocked for Transparent Roles** — Calling the login endpoint directly on a role with `token_type=transparent` now returns `400 Bad Request`. Transparent roles authenticate inline during a gateway request; explicit login would hand a raw backend token to the caller, defeating the transparent mode isolation guarantee.
@@ -34,9 +40,13 @@ All notable changes to Warden are documented in this file.
 
 - **TLS PeerCertificates Fallback** — When no forwarding header is present, the cert auth middleware now reads `r.TLS.PeerCertificates` directly, enabling cert auth in TLS passthrough scenarios (no load balancer TLS termination). (#67)
 
+- **IP Binding E2E Tests** — Added 16 e2e subtests covering IP binding enforcement across optional and required policies, JWT and cert auth, transparent and non-transparent modes. Simplified CI e2e test command to use `./e2e/...` instead of listing individual packages. (#68)
+
 - **Docker Build Image** — Upgraded the build container from `golang:1.26.0-alpine` to `golang:1.26.1-alpine`.
 
-- **Dependency Updates** — Updated `go-crypto` to 1.4.0, AWS SDK patches, and various `golang.org/x/*` packages.
+- **CI Updates** — Bumped `docker/login-action` to v4 (#64) and `docker/setup-buildx-action` to v4 (#65).
+
+- **Dependency Updates** — Updated `go-crypto` to 1.4.0, AWS SDK patches, and various `golang.org/x/*` packages. (#66)
 
 ## [v0.3.0] — 2026-03-05
 
