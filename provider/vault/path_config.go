@@ -139,13 +139,6 @@ func (b *vaultBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 		tc.DefaultRole = val.(string)
 	}
 
-	// Validate: auto_auth_path must point to a mounted auth backend
-	if err := b.ValidateAutoAuthPath(ctx, tc.AutoAuthPath); err != nil {
-		return &logical.Response{
-			StatusCode: http.StatusBadRequest,
-			Err:        logical.ErrBadRequest(err.Error()),
-		}, nil
-	}
 
 	// Validate: if transparent_mode enabled, auto_auth_path required
 	if tc.Enabled && tc.AutoAuthPath == "" {

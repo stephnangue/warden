@@ -459,7 +459,6 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry, view sd
 			Config:               entry.Config,
 			BackendUUID:          entry.BackendAwareUUID,
 			RegisterShutdownHook: c.RegisterShutdownHook,
-			BackendResolver:      c.router.MatchingBackend,
 		}
 		backend, err = factory(ctx, conf)
 		if err != nil {

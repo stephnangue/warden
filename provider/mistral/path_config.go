@@ -121,13 +121,6 @@ func (b *mistralBackend) handleConfigWrite(ctx context.Context, _ *logical.Reque
 		tc.DefaultRole = val.(string)
 	}
 
-	if err := b.ValidateAutoAuthPath(ctx, tc.AutoAuthPath); err != nil {
-		return &logical.Response{
-			StatusCode: http.StatusBadRequest,
-			Err:        logical.ErrBadRequest(err.Error()),
-		}, nil
-	}
-
 	if tc.Enabled && tc.AutoAuthPath == "" {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
