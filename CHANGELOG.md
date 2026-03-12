@@ -2,7 +2,7 @@
 
 All notable changes to Warden are documented in this file.
 
-## [v0.4.0] — 2026-03-11
+## [v0.4.0] — 2026-03-12
 
 ### New Features
 
