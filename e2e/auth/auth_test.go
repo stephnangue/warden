@@ -15,7 +15,7 @@ func TestJWTLoginValidClaims(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	jwt := h.GetDefaultJWT(t)
 
-	status, token := h.LoginJWT(t, jwt, "e2e-reader", port)
+	status, token := h.LoginJWTNT(t, jwt, "e2e-nt-reader", port)
 	if status != 200 && status != 201 {
 		t.Fatalf("expected 200 or 201, got %d", status)
 	}
@@ -42,7 +42,7 @@ func TestJWTLoginWrongAudience(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
 	h.APIRequest(t, "POST", "auth/jwt/role/e2e-bound-aud", port,
-		`{"token_policies":["vault-gateway-access"],"token_type":"jwt_role","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300,"bound_audiences":["some-other-audience"]}`)
+		`{"token_policies":["vault-gateway-access"],"token_type":"transparent","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300,"bound_audiences":["some-other-audience"]}`)
 
 	jwt := h.GetDefaultJWT(t)
 	status, _ := h.LoginJWT(t, jwt, "e2e-bound-aud", port)
@@ -107,7 +107,7 @@ func TestPolicyDenyOverride(t *testing.T) {
 	h.APIRequest(t, "POST", "sys/policies/cbp/e2e-deny-seal", port,
 		`{"policy":"path \"sys/seal\" {\n  capabilities = [\"deny\"]\n}"}`)
 	h.APIRequest(t, "POST", "auth/jwt/role/e2e-deny-test", port,
-		`{"token_policies":["e2e-allow-all","e2e-deny-seal"],"token_type":"jwt_role","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
+		`{"token_policies":["e2e-allow-all","e2e-deny-seal"],"token_type":"warden","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
 
 	jwt := h.GetDefaultJWT(t)
 	loginStatus, token := h.LoginJWT(t, jwt, "e2e-deny-test", port)
@@ -192,7 +192,7 @@ func TestMultipleAuthRolesDifferentPolicies(t *testing.T) {
 	h.APIRequest(t, "POST", "sys/policies/cbp/e2e-readonly", port,
 		`{"policy":"path \"vault-nt/gateway/v1/secret/data/e2e/*\" {\n  capabilities = [\"read\"]\n}"}`)
 	h.APIRequest(t, "POST", "auth/jwt/role/e2e-readonly", port,
-		`{"token_policies":["e2e-readonly"],"token_type":"jwt_role","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
+		`{"token_policies":["e2e-readonly"],"token_type":"warden","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
 
 	jwt := h.GetDefaultJWT(t)
 	loginStatus, token := h.LoginJWT(t, jwt, "e2e-readonly", port)
@@ -212,7 +212,7 @@ func TestTokenTTLDecrement(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	jwt := h.GetDefaultJWT(t)
 
-	status, token := h.LoginJWT(t, jwt, "e2e-nt-reader", port)
+	status, token := h.LoginJWTNT(t, jwt, "e2e-nt-reader", port)
 	if status != 200 && status != 201 {
 		t.Fatalf("expected 200 or 201, got %d", status)
 	}
@@ -228,11 +228,11 @@ func TestConditionsSourceIPAllowed(t *testing.T) {
 
 	h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-allow", port,
 		`{"policy":"path \"vault-nt/gateway/*\" {\n  capabilities = [\"read\",\"list\"]\n  conditions {\n    source_ip = [\"127.0.0.0/8\"]\n  }\n}"}`)
-	h.APIRequest(t, "POST", "auth/jwt/role/e2e-cond-allow-test", port,
-		`{"token_policies":["e2e-cond-allow"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
+	h.APIRequest(t, "POST", "auth/jwt-nt/role/e2e-cond-allow-test", port,
+		`{"token_policies":["e2e-cond-allow"],"token_type":"warden","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
 
 	jwt := h.GetDefaultJWT(t)
-	loginStatus, token := h.LoginJWT(t, jwt, "e2e-cond-allow-test", port)
+	loginStatus, token := h.LoginJWTNT(t, jwt, "e2e-cond-allow-test", port)
 	if loginStatus != 200 && loginStatus != 201 {
 		t.Fatalf("expected 200 or 201 on login, got %d", loginStatus)
 	}
@@ -242,7 +242,7 @@ func TestConditionsSourceIPAllowed(t *testing.T) {
 		t.Fatalf("expected 200 with matching source_ip condition, got %d", status)
 	}
 
-	h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-cond-allow-test", port, "")
+	h.APIRequest(t, "DELETE", "auth/jwt-nt/role/e2e-cond-allow-test", port, "")
 	h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-cond-allow", port, "")
 }
 
@@ -253,11 +253,11 @@ func TestConditionsSourceIPDenied(t *testing.T) {
 
 	h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-deny", port,
 		`{"policy":"path \"vault-nt/gateway/*\" {\n  capabilities = [\"read\",\"list\"]\n  conditions {\n    source_ip = [\"10.0.0.0/8\"]\n  }\n}"}`)
-	h.APIRequest(t, "POST", "auth/jwt/role/e2e-cond-deny-test", port,
-		`{"token_policies":["e2e-cond-deny"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
+	h.APIRequest(t, "POST", "auth/jwt-nt/role/e2e-cond-deny-test", port,
+		`{"token_policies":["e2e-cond-deny"],"token_type":"warden","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
 
 	jwt := h.GetDefaultJWT(t)
-	loginStatus, token := h.LoginJWT(t, jwt, "e2e-cond-deny-test", port)
+	loginStatus, token := h.LoginJWTNT(t, jwt, "e2e-cond-deny-test", port)
 	if loginStatus != 200 && loginStatus != 201 {
 		t.Fatalf("expected 200 or 201 on login, got %d", loginStatus)
 	}
@@ -267,7 +267,7 @@ func TestConditionsSourceIPDenied(t *testing.T) {
 		t.Fatalf("expected 403 with non-matching source_ip condition, got %d", status)
 	}
 
-	h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-cond-deny-test", port, "")
+	h.APIRequest(t, "DELETE", "auth/jwt-nt/role/e2e-cond-deny-test", port, "")
 	h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-cond-deny", port, "")
 }
 
@@ -308,11 +308,11 @@ func TestConditionsMergeWithUnconditional(t *testing.T) {
 	h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-unrestricted", port,
 		`{"policy":"path \"vault-nt/gateway/*\" {\n  capabilities = [\"read\",\"list\"]\n}"}`)
 	// Role with both policies
-	h.APIRequest(t, "POST", "auth/jwt/role/e2e-cond-merge-test", port,
-		`{"token_policies":["e2e-cond-restricted","e2e-cond-unrestricted"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
+	h.APIRequest(t, "POST", "auth/jwt-nt/role/e2e-cond-merge-test", port,
+		`{"token_policies":["e2e-cond-restricted","e2e-cond-unrestricted"],"token_type":"warden","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
 
 	jwt := h.GetDefaultJWT(t)
-	loginStatus, token := h.LoginJWT(t, jwt, "e2e-cond-merge-test", port)
+	loginStatus, token := h.LoginJWTNT(t, jwt, "e2e-cond-merge-test", port)
 	if loginStatus != 200 && loginStatus != 201 {
 		t.Fatalf("expected 200 or 201 on login, got %d", loginStatus)
 	}
@@ -323,7 +323,7 @@ func TestConditionsMergeWithUnconditional(t *testing.T) {
 		t.Fatalf("expected 200 when unconditional policy overrides conditions, got %d", status)
 	}
 
-	h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-cond-merge-test", port, "")
+	h.APIRequest(t, "DELETE", "auth/jwt-nt/role/e2e-cond-merge-test", port, "")
 	h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-cond-restricted", port, "")
 	h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-cond-unrestricted", port, "")
 }

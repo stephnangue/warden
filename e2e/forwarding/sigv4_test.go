@@ -71,7 +71,7 @@ func setupAWSProvider(t *testing.T, port int) {
 
 	// 4. JWT role that issues aws_access_keys tokens
 	status, body = h.APIRequest(t, "POST", "auth/jwt/role/e2e-aws-sigv4", port,
-		`{"token_type":"aws_access_keys","token_policies":["e2e-aws-gateway"],"user_claim":"sub","cred_spec_name":"e2e-aws-sigv4","token_ttl":3600}`)
+		`{"token_type":"aws","token_policies":["e2e-aws-gateway"],"user_claim":"sub","cred_spec_name":"e2e-aws-sigv4","token_ttl":3600}`)
 	if status != 200 && status != 201 && status != 409 {
 		t.Fatalf("create JWT role: expected 200/201/409, got %d: %s", status, string(body))
 	}
@@ -463,7 +463,7 @@ func TestSigV4PolicyDenialThroughStandby(t *testing.T) {
 
 	// JWT role with the deny policy.
 	status, body = h.APIRequest(t, "POST", "auth/jwt/role/e2e-aws-deny", leader,
-		`{"token_type":"aws_access_keys","token_policies":["e2e-aws-deny"],"user_claim":"sub","cred_spec_name":"e2e-aws-deny","token_ttl":3600}`)
+		`{"token_type":"aws","token_policies":["e2e-aws-deny"],"user_claim":"sub","cred_spec_name":"e2e-aws-deny","token_ttl":3600}`)
 	if status != 200 && status != 201 && status != 409 {
 		t.Fatalf("create JWT role: expected 200/201/409, got %d: %s", status, string(body))
 	}

@@ -6,6 +6,7 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
@@ -31,8 +32,8 @@ func (b *certAuthBackend) pathConfig() *framework.Path {
 			},
 			"token_type": {
 				Type:          framework.TypeString,
-				Description:   "Default token type for roles that don't specify one (default: warden_token)",
-				Default:       "warden_token",
+				Description:   "Default token type for roles that don't specify one (default: transparent)",
+				Default:       "transparent",
 				AllowedValues: b.allowedTokenTypeValues(),
 			},
 			"revocation_mode": {
@@ -97,7 +98,7 @@ func (b *certAuthBackend) handleConfigRead(ctx context.Context, req *logical.Req
 			"trusted_ca_pem":   b.config.TrustedCAPEM,
 			"principal_claim":  b.config.PrincipalClaim,
 			"token_ttl":        b.config.TokenTTL.String(),
-			"token_type":       b.config.TokenType,
+			"token_type":       helper.DisplayTokenType(b.config.TokenType),
 			"revocation_mode":  b.config.RevocationMode,
 			"crl_cache_ttl":    b.config.CRLCacheTTL,
 			"ocsp_timeout":     b.config.OCSPTimeout,
@@ -113,6 +114,7 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 	conf := make(map[string]any)
 
 	// Copy existing config if present
+	b.configMu.RLock()
 	if b.config != nil {
 		conf["trusted_ca_pem"] = b.config.TrustedCAPEM
 		conf["principal_claim"] = b.config.PrincipalClaim
@@ -123,12 +125,18 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		conf["ocsp_timeout"] = b.config.OCSPTimeout
 		conf["default_role"] = b.config.DefaultRole
 	}
+	b.configMu.RUnlock()
 
 	// Apply new values from request
 	for key := range d.Schema {
 		if val, ok := d.GetOk(key); ok {
 			conf[key] = val
 		}
+	}
+
+	// Translate user-facing token_type alias to internal name before setup
+	if rawType, ok := conf["token_type"].(string); ok {
+		conf["token_type"] = helper.ResolveTokenType(helper.BackendCert, rawType)
 	}
 
 	// Setup new config
@@ -139,9 +147,24 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		}, nil
 	}
 
-	// Persist config to storage
+	// Persist the normalized config to storage so that on restart the
+	// parser always sees consistent types (e.g., token_ttl is always a
+	// duration string, never a raw int from an HTTP request).
 	if b.storageView != nil {
-		entry, err := sdklogical.StorageEntryJSON("config", conf)
+		b.configMu.RLock()
+		normalized := map[string]any{
+			"trusted_ca_pem":  b.config.TrustedCAPEM,
+			"principal_claim": b.config.PrincipalClaim,
+			"token_ttl":       b.config.TokenTTL.String(),
+			"token_type":      b.config.TokenType,
+			"revocation_mode": b.config.RevocationMode,
+			"crl_cache_ttl":   b.config.CRLCacheTTL,
+			"ocsp_timeout":    b.config.OCSPTimeout,
+			"default_role": b.config.DefaultRole,
+		}
+		b.configMu.RUnlock()
+
+		entry, err := sdklogical.StorageEntryJSON("config", normalized)
 		if err != nil {
 			return &logical.Response{
 				StatusCode: http.StatusInternalServerError,

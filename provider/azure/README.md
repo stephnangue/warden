@@ -5,14 +5,11 @@ The Azure provider enables proxied access to Azure APIs through Warden. It manag
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
-- [Step 1: Mount the Azure Provider](#step-1-mount-the-azure-provider)
-- [Step 2: Configure the Provider](#step-2-configure-the-provider)
-- [Step 3: Create a Credential Source](#step-3-create-a-credential-source)
-- [Step 4: Create a Credential Spec](#step-4-create-a-credential-spec)
-- [Step 5: Create a Policy](#step-5-create-a-policy)
-- [Step 6: Configure JWT Auth and Create a Role](#step-6-configure-jwt-auth-and-create-a-role)
-- [Step 7: Get a JWT](#step-7-get-a-jwt)
-- [Step 8: Make Requests Through the Gateway](#step-8-make-requests-through-the-gateway)
+- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
+- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
+- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
+- [Step 4: Create a Policy](#step-4-create-a-policy)
+- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
 - [Supported Azure Services](#supported-azure-services)
 - [Credential Rotation](#credential-rotation)
 - [Configuration Reference](#configuration-reference)
@@ -25,7 +22,7 @@ The Azure provider enables proxied access to Azure APIs through Warden. It manag
 
 > **New to Warden?** Follow these steps to get a local dev environment running:
 >
-> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 6–7:
+> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
 > ```bash
 > curl -fsSL -o docker-compose.quickstart.yml \
 >   https://raw.githubusercontent.com/stephnangue/warden/main/docker-compose.quickstart.yml
@@ -105,7 +102,28 @@ Warden needs network access to the following Azure endpoints:
 - `graph.microsoft.com` (Microsoft Graph, required for rotation)
 - Any additional Azure service endpoints you plan to proxy
 
-## Step 1: Mount the Azure Provider
+## Step 1: Configure JWT Auth and Create a Role
+
+Set up a JWT auth method and create a role that binds the credential spec and policy. With transparent mode, clients authenticate directly with their JWT — no separate login step is needed.
+
+> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+
+```bash
+# Enable JWT auth if not already enabled
+warden auth enable --type=jwt
+
+# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
+warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+
+# Create a role that binds the credential spec and policy
+warden write auth/jwt/role/azure-user \
+    token_policies="azure-access" \
+    user_claim=sub \
+    cred_spec_name=azure-ops \
+    token_ttl=1h
+```
+
+## Step 2: Mount and Configure the Provider
 
 Enable the Azure provider at a path of your choice:
 
@@ -124,8 +142,6 @@ Verify the provider is enabled:
 ```bash
 warden provider list
 ```
-
-## Step 2: Configure the Provider
 
 Configure the provider with transparent mode enabled. This allows clients to authenticate with their JWT directly — no explicit Warden login required:
 
@@ -146,7 +162,7 @@ Verify the configuration:
 warden read azure/config
 ```
 
-## Step 3: Create a Credential Source
+## Step 3: Create a Credential Source and Spec
 
 The credential source holds the Azure AD service principal credentials used to authenticate with Azure.
 
@@ -165,8 +181,6 @@ Verify the source was created:
 ```bash
 warden cred source read azure-src
 ```
-
-## Step 4: Create a Credential Spec
 
 Create a credential spec that references the credential source. The spec defines how Warden mints Azure credentials and gets associated with tokens at login time.
 
@@ -205,7 +219,7 @@ Verify:
 warden cred spec read azure-ops
 ```
 
-## Step 5: Create a Policy
+## Step 4: Create a Policy
 
 Create a policy that grants access to the Azure provider gateway. Note that this policy is intentionally coarse-grained for simplicity, but it can be made much more fine-grained to restrict access to specific paths or capabilities as needed:
 
@@ -244,27 +258,7 @@ Verify:
 warden policy read azure-access
 ```
 
-## Step 6: Configure JWT Auth and Create a Role
-
-Set up a JWT auth method and create a role that binds the credential spec and policy. With transparent mode, clients authenticate directly with their JWT — no separate login step is needed.
-
-```bash
-# Enable JWT auth if not already enabled
-warden auth enable --type=jwt
-
-# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
-warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/azure-user \
-    token_type=jwt_role \
-    token_policies="azure-access" \
-    user_claim=sub \
-    cred_spec_name=azure-ops \
-    token_ttl=1h
-```
-
-## Step 7: Get a JWT
+## Step 5: Get a JWT and Make Requests
 
 Get a JWT from Hydra using one of the quickstart clients:
 
@@ -274,8 +268,6 @@ export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
   | jq -r '.access_token')
 ```
-
-## Step 8: Make Requests Through the Gateway
 
 With transparent mode, requests use role-based paths. Warden performs implicit JWT authentication and injects the Azure Bearer token automatically.
 
@@ -373,6 +365,96 @@ Warden supports automatic rotation of Azure service principal credentials via th
 
 > **Note:** Azure AD Bearer tokens are not directly revocable — they expire naturally (typically after 1 hour). Rotation applies to the underlying service principal secrets.
 
+## TLS Certificate Authentication
+
+Steps 4–5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+
+Steps 1–3 (provider setup) are identical. Replace Steps 4–5 with the following.
+
+### Enable Cert Auth
+
+```bash
+warden auth enable --type=cert
+```
+
+### Configure Trusted CA
+
+Provide the PEM-encoded CA certificate that signs your client certificates:
+
+```bash
+warden write auth/cert/config \
+    trusted_ca_pem=@/path/to/ca.pem \
+    default_role=azure-user
+```
+
+### Create a Cert Role
+
+Create a role that binds allowed certificate identities to a credential spec and policy:
+
+```bash
+warden write auth/cert/role/azure-user \
+    allowed_common_names="agent-*" \
+    token_policies="azure-access" \
+    cred_spec_name=azure-ops \
+    token_ttl=1h
+```
+
+The `allowed_common_names` field supports glob patterns. You can also match on other certificate fields: `allowed_dns_sans`, `allowed_email_sans`, `allowed_uri_sans`, or `allowed_organizational_units`.
+
+### Configure Provider for Cert Auth
+
+Update the provider config to use cert auth for transparent mode:
+
+```bash
+warden write azure/config <<EOF
+{
+  "transparent_mode": true,
+  "auto_auth_path": "auth/cert/",
+  "timeout": "30s",
+  "max_body_size": 10485760
+}
+EOF
+```
+
+### Make Requests with Certificates
+
+```bash
+# Role in URL path
+curl --cert client.pem --key client-key.pem \
+    --cacert warden-ca.pem \
+    "https://warden.internal/v1/azure/role/azure-user/gateway/management.azure.com/subscriptions?api-version=2022-12-01"
+
+# Default role (no role in URL)
+curl --cert client.pem --key client-key.pem \
+    --cacert warden-ca.pem \
+    "https://warden.internal/v1/azure/gateway/management.azure.com/subscriptions?api-version=2022-12-01"
+```
+
+### Explicit Login with Certificates
+
+To use cert auth for explicit login (without transparent mode):
+
+```bash
+warden write auth/cert/config \
+    trusted_ca_pem=@/path/to/ca.pem \
+    token_type=warden \
+    default_role=azure-user
+
+warden write auth/cert/role/azure-user \
+    allowed_common_names="agent-*" \
+    token_type=warden \
+    token_policies="azure-access" \
+    cred_spec_name=azure-ops \
+    token_ttl=1h
+```
+
+Then authenticate with the CLI:
+
+```bash
+warden login --method=cert --role=azure-user \
+    --cert=./client.pem --key=./client-key.pem
+```
+
 ## Configuration Reference
 
 ### Provider Config
@@ -381,7 +463,7 @@ Warden supports automatic rotation of Azure service principal credentials via th
 |-------|------|---------|-------------|
 | `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
 | `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
-| `transparent_mode` | bool | `false` | Enable implicit JWT authentication |
+| `transparent_mode` | bool | `false` | Enable implicit authentication (JWT or TLS certificate) |
 | `auto_auth_path` | string | — | JWT auth mount path (required when `transparent_mode` is true) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 

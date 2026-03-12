@@ -5,14 +5,11 @@ The OpenAI provider enables proxied access to the OpenAI API through Warden. It 
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
-- [Step 1: Mount the OpenAI Provider](#step-1-mount-the-openai-provider)
-- [Step 2: Configure the Provider](#step-2-configure-the-provider)
-- [Step 3: Create a Credential Source](#step-3-create-a-credential-source)
-- [Step 4: Create a Credential Spec](#step-4-create-a-credential-spec)
-- [Step 5: Create a Policy](#step-5-create-a-policy)
-- [Step 6: Configure JWT Auth and Create a Role](#step-6-configure-jwt-auth-and-create-a-role)
-- [Step 7: Get a JWT](#step-7-get-a-jwt)
-- [Step 8: Make Requests Through the Gateway](#step-8-make-requests-through-the-gateway)
+- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
+- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
+- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
+- [Step 4: Create a Policy](#step-4-create-a-policy)
+- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
 - [Policy Evaluation on AI Requests](#policy-evaluation-on-ai-requests)
 - [Configuration Reference](#configuration-reference)
 - [Key Management](#key-management)
@@ -24,7 +21,7 @@ The OpenAI provider enables proxied access to the OpenAI API through Warden. It 
 
 > **New to Warden?** Follow these steps to get a local dev environment running:
 >
-> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 6-7:
+> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
 > ```bash
 > curl -fsSL -o docker-compose.quickstart.yml \
 >   https://raw.githubusercontent.com/stephnangue/warden/main/docker-compose.quickstart.yml
@@ -57,7 +54,28 @@ The OpenAI provider enables proxied access to the OpenAI API through Warden. It 
 > export WARDEN_TOKEN="<your-token>"
 > ```
 
-## Step 1: Mount the OpenAI Provider
+## Step 1: Configure JWT Auth and Create a Role
+
+Set up a JWT auth method and create a role that binds the credential spec and policy. With transparent mode, clients authenticate directly with their JWT — no separate login step is needed.
+
+> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+
+```bash
+# Enable JWT auth if not already enabled
+warden auth enable --type=jwt
+
+# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
+warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+
+# Create a role that binds the credential spec and policy
+warden write auth/jwt/role/openai-user \
+    token_policies="openai-access" \
+    user_claim=sub \
+    cred_spec_name=openai-ops \
+    token_ttl=1h
+```
+
+## Step 2: Mount and Configure the Provider
 
 Enable the OpenAI provider at a path of your choice:
 
@@ -76,8 +94,6 @@ Verify the provider is enabled:
 ```bash
 warden provider list
 ```
-
-## Step 2: Configure the Provider
 
 Configure the provider with transparent mode enabled. This allows clients to authenticate with their JWT directly — no explicit Warden login required:
 
@@ -99,9 +115,9 @@ Verify the configuration:
 warden read openai/config
 ```
 
-## Step 3: Create a Credential Source
+## Step 3: Create a Credential Source and Spec
 
-The credential source holds only connection info (`api_url`). The API key is stored on the credential spec (Step 4), allowing multiple specs with different keys to share one source.
+The credential source holds only connection info (`api_url`). The API key is stored on the credential spec below, allowing multiple specs with different keys to share one source.
 
 ```bash
 warden cred source create openai-src \
@@ -115,8 +131,6 @@ Verify the source was created:
 ```bash
 warden cred source read openai-src
 ```
-
-## Step 4: Create a Credential Spec
 
 Create a credential spec that references the credential source. The spec carries the API key and gets associated with tokens at login time.
 
@@ -146,7 +160,7 @@ Verify:
 warden cred spec read openai-ops
 ```
 
-## Step 5: Create a Policy
+## Step 4: Create a Policy
 
 Create a policy that grants access to the OpenAI provider gateway:
 
@@ -205,27 +219,7 @@ Verify:
 warden policy read openai-access
 ```
 
-## Step 6: Configure JWT Auth and Create a Role
-
-Set up a JWT auth method and create a role that binds the credential spec and policy. With transparent mode, clients authenticate directly with their JWT — no separate login step is needed.
-
-```bash
-# Enable JWT auth if not already enabled
-warden auth enable --type=jwt
-
-# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
-warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/openai-user \
-    token_type=jwt_role \
-    token_policies="openai-access" \
-    user_claim=sub \
-    cred_spec_name=openai-ops \
-    token_ttl=1h
-```
-
-## Step 7: Get a JWT
+## Step 5: Get a JWT and Make Requests
 
 Get a JWT from Hydra using one of the quickstart clients:
 
@@ -235,8 +229,6 @@ export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
   | jq -r '.access_token')
 ```
-
-## Step 8: Make Requests Through the Gateway
 
 With transparent mode, requests use role-based paths. Warden performs implicit JWT authentication and injects the OpenAI API key automatically.
 
@@ -341,6 +333,96 @@ This allows operators to enforce policies such as:
 - Enforce maximum token limits
 - Require streaming mode for cost visibility
 
+## TLS Certificate Authentication
+
+Steps 4–5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+
+Steps 1–3 (provider setup) are identical. Replace Steps 4–5 with the following.
+
+### Enable Cert Auth
+
+```bash
+warden auth enable --type=cert
+```
+
+### Configure Trusted CA
+
+Provide the PEM-encoded CA certificate that signs your client certificates:
+
+```bash
+warden write auth/cert/config \
+    trusted_ca_pem=@/path/to/ca.pem \
+    default_role=openai-user
+```
+
+### Create a Cert Role
+
+Create a role that binds allowed certificate identities to a credential spec and policy:
+
+```bash
+warden write auth/cert/role/openai-user \
+    allowed_common_names="agent-*" \
+    token_policies="openai-access" \
+    cred_spec_name=openai-ops \
+    token_ttl=1h
+```
+
+The `allowed_common_names` field supports glob patterns. You can also match on other certificate fields: `allowed_dns_sans`, `allowed_email_sans`, `allowed_uri_sans`, or `allowed_organizational_units`.
+
+### Configure Provider for Cert Auth
+
+Update the provider config to use cert auth for transparent mode:
+
+```bash
+warden write openai/config <<EOF
+{
+  "openai_url": "https://api.openai.com",
+  "transparent_mode": true,
+  "auto_auth_path": "auth/cert/",
+  "timeout": "120s",
+  "max_body_size": 10485760
+}
+EOF
+```
+
+### Make Requests with Certificates
+
+```bash
+curl --cert client.pem --key client-key.pem \
+    --cacert warden-ca.pem \
+    -X POST "https://warden.internal/v1/openai/role/openai-user/gateway/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "gpt-4o",
+      "messages": [{"role": "user", "content": "Hello"}]
+    }'
+```
+
+### Explicit Login with Certificates
+
+To use cert auth for explicit login (without transparent mode):
+
+```bash
+warden write auth/cert/config \
+    trusted_ca_pem=@/path/to/ca.pem \
+    token_type=warden \
+    default_role=openai-user
+
+warden write auth/cert/role/openai-user \
+    allowed_common_names="agent-*" \
+    token_type=warden \
+    token_policies="openai-access" \
+    cred_spec_name=openai-ops \
+    token_ttl=1h
+```
+
+Then authenticate with the CLI:
+
+```bash
+warden login --method=cert --role=openai-user \
+    --cert=./client.pem --key=./client-key.pem
+```
+
 ## Configuration Reference
 
 ### Provider Config
@@ -350,7 +432,7 @@ This allows operators to enforce policies such as:
 | `openai_url` | string | `https://api.openai.com` | OpenAI API base URL (must be HTTPS) |
 | `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
 | `timeout` | duration | `120s` | Request timeout — set high for AI inference |
-| `transparent_mode` | bool | `false` | Enable implicit JWT authentication |
+| `transparent_mode` | bool | `false` | Enable implicit authentication (JWT or TLS certificate) |
 | `auto_auth_path` | string | — | JWT auth mount path (required when `transparent_mode` is true) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 

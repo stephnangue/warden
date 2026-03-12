@@ -44,9 +44,5 @@ func mapToCertAuthConfig(data map[string]any) (*CertAuthConfig, error) {
 		config.TokenTTL = time.Hour
 	}
 
-	if config.TokenType == "" {
-		config.TokenType = "warden_token"
-	}
-
 	return &config, nil
 }

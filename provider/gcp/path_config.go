@@ -103,6 +103,7 @@ func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 		tc.DefaultRole = val.(string)
 	}
 
+
 	// Validate: if transparent_mode enabled, auto_auth_path required
 	if tc.Enabled && tc.AutoAuthPath == "" {
 		return &logical.Response{

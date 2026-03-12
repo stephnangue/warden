@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -164,6 +165,75 @@ func TestRevocationChecker_CheckOCSP_NoServers(t *testing.T) {
 	err := rc.checkOCSP(parsedCert, nil)
 	if err == nil {
 		t.Fatal("expected error when no OCSP servers configured")
+	}
+}
+
+func TestRevocationChecker_CheckCRL_NilIssuerFails(t *testing.T) {
+	caCert, caKey, _ := testCA(t)
+	clientCert := testClientCert(t, caCert, caKey, "nil-issuer-client")
+
+	// Create a valid CRL signed by the CA
+	crlTemplate := &x509.RevocationList{
+		Number:     big.NewInt(1),
+		ThisUpdate: time.Now(),
+		NextUpdate: time.Now().Add(1 * time.Hour),
+	}
+	crlDER, err := x509.CreateRevocationList(rand.Reader, crlTemplate, caCert, caKey)
+	if err != nil {
+		t.Fatalf("failed to create CRL: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(crlDER)
+	}))
+	defer srv.Close()
+
+	clientCert.CRLDistributionPoints = []string{srv.URL}
+
+	rc := newRevocationChecker(time.Hour, 5*time.Second)
+
+	// With nil issuer, fetchCRL must fail-closed (cannot verify signature)
+	err = rc.checkCRL(clientCert, nil)
+	if err == nil {
+		t.Fatal("expected error when issuer is nil, got nil")
+	}
+}
+
+func TestRevocationChecker_IsRevoked_WrappedError(t *testing.T) {
+	// Direct sentinel
+	if !isRevoked(errRevoked) {
+		t.Fatal("isRevoked should detect direct errRevoked")
+	}
+
+	// Wrapped sentinel
+	wrapped := fmt.Errorf("outer: %w", errRevoked)
+	if !isRevoked(wrapped) {
+		t.Fatal("isRevoked should detect wrapped errRevoked")
+	}
+
+	// Unrelated error
+	if isRevoked(fmt.Errorf("some other error")) {
+		t.Fatal("isRevoked should not match unrelated errors")
+	}
+}
+
+func TestRevocationChecker_CRLTimeout_SeparateFromOCSP(t *testing.T) {
+	rc := newRevocationChecker(time.Hour, 5*time.Second)
+
+	// CRL timeout should be longer than OCSP timeout
+	if rc.crlTimeout <= rc.ocspTimeout {
+		t.Fatalf("crlTimeout (%v) should be greater than ocspTimeout (%v)", rc.crlTimeout, rc.ocspTimeout)
+	}
+
+	// Default: 3 * ocspTimeout = 15s
+	if rc.crlTimeout != 15*time.Second {
+		t.Fatalf("expected crlTimeout = 15s, got %v", rc.crlTimeout)
+	}
+
+	// With very short OCSP timeout, CRL timeout should floor at 15s
+	rc2 := newRevocationChecker(time.Hour, 1*time.Second)
+	if rc2.crlTimeout < 15*time.Second {
+		t.Fatalf("expected crlTimeout >= 15s for short OCSP timeout, got %v", rc2.crlTimeout)
 	}
 }
 

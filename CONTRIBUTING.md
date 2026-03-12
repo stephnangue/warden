@@ -4,7 +4,7 @@ We welcome contributions — use cases, documentation, code, bug reports, and fe
 
 ## Prerequisites
 
-- **Go 1.25.1 or later** — [Download Go](https://go.dev/dl/)
+- **Go 1.26.1 or later** — [Download Go](https://go.dev/dl/)
 - **Docker and Docker Compose** — [Install Docker](https://docs.docker.com/get-docker/)
 - **Make** — Pre-installed on macOS/Linux
 - **Git** — [Install Git](https://git-scm.com/downloads)
@@ -92,7 +92,7 @@ make test-e2e-teardown
 | `e2e/rotation` | Credential source rotation, activation delay, failover persistence |
 | `e2e/namespace` | Namespace CRUD and isolation |
 | `e2e/seal` | Seal/unseal operations |
-| `e2e/auth` | Authentication flows |
+| `e2e/auth` | JWT/cert authentication flows, cert auth CLI (flags, env vars, mTLS, privilege escalation), auto_auth_path validation |
 | `e2e/audit` | Audit logging |
 | `e2e/concurrency` | Concurrent request handling |
 

@@ -52,9 +52,5 @@ func mapToJWTAuthConfig(data map[string]any) (*JWTAuthConfig, error) {
 		config.TokenTTL = 1 * time.Hour
 	}
 
-	if config.TokenType == "" {
-		config.TokenType = "warden_token"
-	}
-
 	return &config, nil
 }

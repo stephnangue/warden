@@ -94,6 +94,10 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		conf.RegisterShutdownHook("github-transport", ShutdownHTTPTransport)
 	}
 
+	if err := b.StreamingBackend.Setup(ctx, conf); err != nil {
+		return nil, err
+	}
+
 	// Set defaults
 	b.MaxBodySize = framework.DefaultMaxBodySize
 	b.Timeout = framework.DefaultTimeout

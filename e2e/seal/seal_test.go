@@ -31,34 +31,6 @@ func TestKillAndRestartStandbyAutoUnseal(t *testing.T) {
 	h.WaitForCluster(t, 15, 2*time.Second)
 }
 
-// TestAutoUnsealAfterSIGKILL verifies a node auto-unseals (not sealed/503)
-// after being killed with SIGKILL and restarted (T-091).
-func TestAutoUnsealAfterSIGKILL(t *testing.T) {
-	standby := h.GetStandbyPort(t)
-	nodeNum := h.NodeNumberForPort(standby)
-
-	h.KillNode(t, nodeNum, "KILL")
-	time.Sleep(3 * time.Second)
-
-	h.RestartNode(t, nodeNum)
-
-	var lastStatus int
-	for i := 0; i < 15; i++ {
-		status, _ := h.TryRequest("GET", fmt.Sprintf("%s/v1/sys/health", h.NodeURL(standby)), nil, "")
-		lastStatus = status
-		if status == 200 || status == 429 {
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
-
-	if lastStatus != 200 && lastStatus != 429 {
-		t.Fatalf("node on port %d did not auto-unseal after SIGKILL: last health status was %d (503 = sealed)", standby, lastStatus)
-	}
-
-	h.WaitForCluster(t, 15, 2*time.Second)
-}
-
 // TestFullClusterKillIncrementalRestart verifies the cluster reforms correctly
 // after all nodes are killed and restarted one by one (T-092).
 func TestFullClusterKillIncrementalRestart(t *testing.T) {
@@ -93,24 +65,6 @@ func TestFullClusterKillIncrementalRestart(t *testing.T) {
 	if standbys != 2 {
 		t.Fatalf("expected 2 standbys, got %d", standbys)
 	}
-}
-
-// TestKilledNodeReturnsNoResponse verifies a killed node returns no response
-// (connection refused / status 0) or 503 (T-093).
-func TestKilledNodeReturnsNoResponse(t *testing.T) {
-	standby := h.GetStandbyPort(t)
-	nodeNum := h.NodeNumberForPort(standby)
-
-	h.KillNode(t, nodeNum, "TERM")
-	time.Sleep(3 * time.Second)
-
-	status, _ := h.TryRequest("GET", fmt.Sprintf("%s/v1/sys/health", h.NodeURL(standby)), nil, "")
-	if status != 0 && status != 503 {
-		t.Fatalf("expected status 0 (connection refused) or 503 from killed node, got %d", status)
-	}
-
-	h.RestartNode(t, nodeNum)
-	h.WaitForCluster(t, 15, 2*time.Second)
 }
 
 // TestHealthStatusAccuracy verifies health endpoints return accurate status

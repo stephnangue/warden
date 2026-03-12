@@ -223,19 +223,23 @@ func BuildXFCCHeader(certPEM string) string {
 // CertLoginRequest performs a cert auth login request with a forwarded client cert.
 func CertLoginRequest(t *testing.T, port int, role string, clientCertPEM string) (int, []byte) {
 	t.Helper()
-	token := RootToken(t)
-	u := fmt.Sprintf("%s/v1/auth/cert/login", NodeURL(port))
+	return certLoginRequestOnMount(t, port, "auth/cert", role, clientCertPEM)
+}
+
+// CertNTLoginRequest performs a cert auth login on the non-transparent auth/cert-nt/ mount.
+func CertNTLoginRequest(t *testing.T, port int, role string, clientCertPEM string) (int, []byte) {
+	t.Helper()
+	return certLoginRequestOnMount(t, port, "auth/cert-nt", role, clientCertPEM)
+}
+
+func certLoginRequestOnMount(t *testing.T, port int, mount, role, clientCertPEM string) (int, []byte) {
+	t.Helper()
+	u := fmt.Sprintf("%s/v1/%s/login", NodeURL(port), mount)
 	headers := map[string]string{
-		"Content-Type":       "application/json",
-		"X-SSL-Client-Cert":  URLEncodePEM(clientCertPEM),
-		"X-Warden-Token":     token, // Not used for auth, but needed for routing
+		"Content-Type":      "application/json",
+		"X-SSL-Client-Cert": URLEncodePEM(clientCertPEM),
 	}
 	body := fmt.Sprintf(`{"role":"%s"}`, role)
-
-	// For login, we don't need the warden token since login is unauthenticated.
-	// Remove it and use a plain request.
-	delete(headers, "X-Warden-Token")
-
 	return DoRequest(t, "POST", u, headers, body)
 }
 
@@ -252,6 +256,7 @@ func CertLoginRequestWithXFCC(t *testing.T, port int, role string, clientCertPEM
 }
 
 // SetupCertAuth mounts cert auth, configures trusted CA, and returns the CA cert/key.
+// The mount defaults to cert_role token type.
 func SetupCertAuth(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.PrivateKey) {
 	t.Helper()
 	caCertPEM, caKey = GenerateTestCA(t)
@@ -279,6 +284,29 @@ func TeardownCertAuth(t *testing.T, port int) {
 	APIRequest(t, "DELETE", "sys/auth/cert", port, "")
 }
 
+// SetupCertAuthNT mounts a non-transparent cert auth at auth/cert-nt/ with the given CA.
+func SetupCertAuthNT(t *testing.T, port int, caCertPEM string) {
+	t.Helper()
+
+	status, body := APIRequest(t, "POST", "sys/auth/cert-nt", port, `{"type":"cert"}`)
+	if status != 200 && status != 201 && status != 204 {
+		t.Fatalf("failed to mount cert-nt auth (status %d): %s", status, string(body))
+	}
+
+	escapedPEM := strings.ReplaceAll(caCertPEM, "\n", "\\n")
+	configBody := fmt.Sprintf(`{"trusted_ca_pem":"%s"}`, escapedPEM)
+	status, body = APIRequest(t, "PUT", "auth/cert-nt/config", port, configBody)
+	if status != 200 && status != 204 {
+		t.Fatalf("failed to configure cert-nt auth (status %d): %s", status, string(body))
+	}
+}
+
+// TeardownCertAuthNT unmounts the non-transparent cert auth.
+func TeardownCertAuthNT(t *testing.T, port int) {
+	t.Helper()
+	APIRequest(t, "DELETE", "sys/auth/cert-nt", port, "")
+}
+
 // VaultCertTransparentRequest makes a transparent vault gateway request using
 // a client certificate in the X-SSL-Client-Cert header.
 func VaultCertTransparentRequest(t *testing.T, method, vaultPath, role string, port int, clientCertPEM string) (int, []byte) {
@@ -290,17 +318,17 @@ func VaultCertTransparentRequest(t *testing.T, method, vaultPath, role string, p
 	return DoRequest(t, method, u, headers, "")
 }
 
-// GetCertNTWardenToken logs in via cert auth and returns a warden_token for
+// GetCertNTWardenToken logs in via cert-nt auth and returns a warden_token for
 // non-transparent gateway access.
 func GetCertNTWardenToken(t *testing.T, port int, role string, clientCertPEM string) string {
 	t.Helper()
-	status, body := CertLoginRequest(t, port, role, clientCertPEM)
+	status, body := CertNTLoginRequest(t, port, role, clientCertPEM)
 	if status != 200 && status != 201 {
-		t.Fatalf("cert login failed (status %d): %s", status, string(body))
+		t.Fatalf("cert-nt login failed (status %d): %s", status, string(body))
 	}
 	token := JSONString(t, body, "data.data.token")
 	if token == "" {
-		t.Fatalf("no token in cert login response: %s", string(body))
+		t.Fatalf("no token in cert-nt login response: %s", string(body))
 	}
 	return token
 }
@@ -310,6 +338,11 @@ func GetCertNTWardenToken(t *testing.T, port int, role string, clientCertPEM str
 func SetupCertVaultEnv(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.PrivateKey) {
 	t.Helper()
 
+	caCertPEM, caKey = SetupCertAuth(t, port)
+
+	// Mount non-transparent cert auth for NT roles
+	SetupCertAuthNT(t, port, caCertPEM)
+
 	// Mount vault-cert provider
 	APIRequest(t, "POST", "sys/providers/vault-cert", port, `{"type":"vault"}`)
 	time.Sleep(1 * time.Second)
@@ -318,12 +351,9 @@ func SetupCertVaultEnv(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.P
 	APIRequest(t, "PUT", "vault-cert/config", port,
 		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s"}`)
 
-	// Enable transparent mode with cert auth path
+	// Enable transparent mode with cert auth path (cert auth must exist first)
 	APIRequest(t, "POST", "vault-cert/config", port,
 		`{"transparent_mode":true,"auto_auth_path":"auth/cert/"}`)
-
-	// Mount cert auth method with CA
-	caCertPEM, caKey = SetupCertAuth(t, port)
 
 	// Policy for vault-cert gateway access
 	APIRequest(t, "POST", "sys/policies/cbp/vault-cert-gateway-access", port,
@@ -331,11 +361,11 @@ func SetupCertVaultEnv(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.P
 
 	// Cert role for transparent mode (cert_role token type)
 	APIRequest(t, "POST", "auth/cert/role/e2e-cert-reader", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"token_type":"cert_role","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"token_type":"transparent","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
 
-	// Cert role for non-transparent mode (warden_token token type)
-	APIRequest(t, "POST", "auth/cert/role/e2e-cert-nt-reader", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-nt-gateway-access"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+	// Cert role for non-transparent mode on separate mount
+	APIRequest(t, "POST", "auth/cert-nt/role/e2e-cert-nt-reader", port,
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-nt-gateway-access"],"token_type":"warden","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
 
 	return caCertPEM, caKey
 }
@@ -344,8 +374,10 @@ func SetupCertVaultEnv(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.P
 func TeardownCertVaultEnv(t *testing.T, port int) {
 	t.Helper()
 	APIRequest(t, "DELETE", "auth/cert/role/e2e-cert-reader", port, "")
-	APIRequest(t, "DELETE", "auth/cert/role/e2e-cert-nt-reader", port, "")
+	APIRequest(t, "DELETE", "auth/cert/role/e2e-cert-login", port, "")
 	TeardownCertAuth(t, port)
+	APIRequest(t, "DELETE", "auth/cert-nt/role/e2e-cert-nt-reader", port, "")
+	TeardownCertAuthNT(t, port)
 	APIRequest(t, "DELETE", "sys/policies/cbp/vault-cert-gateway-access", port, "")
 	APIRequest(t, "DELETE", "sys/providers/vault-cert", port, "")
 	time.Sleep(1 * time.Second)
@@ -424,6 +456,11 @@ func SetupCertAuthWithCA(t *testing.T, port int, caCertPEM string) {
 func SetupCertVaultEnvWithCA(t *testing.T, port int, caCertPEM string) {
 	t.Helper()
 
+	SetupCertAuthWithCA(t, port, caCertPEM)
+
+	// Mount non-transparent cert auth for NT roles
+	SetupCertAuthNT(t, port, caCertPEM)
+
 	// Mount vault-cert provider
 	APIRequest(t, "POST", "sys/providers/vault-cert", port, `{"type":"vault"}`)
 	time.Sleep(1 * time.Second)
@@ -432,12 +469,9 @@ func SetupCertVaultEnvWithCA(t *testing.T, port int, caCertPEM string) {
 	APIRequest(t, "PUT", "vault-cert/config", port,
 		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s"}`)
 
-	// Enable transparent mode with cert auth path
+	// Enable transparent mode with cert auth path (cert auth must exist first)
 	APIRequest(t, "POST", "vault-cert/config", port,
 		`{"transparent_mode":true,"auto_auth_path":"auth/cert/"}`)
-
-	// Mount cert auth with the provided CA
-	SetupCertAuthWithCA(t, port, caCertPEM)
 
 	// Policy for vault-cert gateway access
 	APIRequest(t, "POST", "sys/policies/cbp/vault-cert-gateway-access", port,
@@ -445,11 +479,15 @@ func SetupCertVaultEnvWithCA(t *testing.T, port int, caCertPEM string) {
 
 	// Cert role for transparent mode (cert_role token type)
 	APIRequest(t, "POST", "auth/cert/role/e2e-cert-reader", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"token_type":"cert_role","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"token_type":"transparent","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
 
-	// Cert role for non-transparent mode (warden_token token type)
-	APIRequest(t, "POST", "auth/cert/role/e2e-cert-nt-reader", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-nt-gateway-access"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+	// Cert role for explicit login (warden token type) on the transparent cert mount
+	APIRequest(t, "POST", "auth/cert/role/e2e-cert-login", port,
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"token_type":"warden","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+
+	// Cert role for non-transparent mode on separate mount
+	APIRequest(t, "POST", "auth/cert-nt/role/e2e-cert-nt-reader", port,
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-nt-gateway-access"],"token_type":"warden","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
 }
 
 // --- mTLS Client CA Helpers ---
@@ -506,8 +544,19 @@ func LoadMTLSClientCA(t *testing.T) (caCertPEM string, caKey *ecdsa.PrivateKey) 
 // Warden extracts it from r.TLS.PeerCertificates via the TLS fallback.
 func CertLoginRequestViaMTLS(t *testing.T, port int, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
 	t.Helper()
+	return certLoginRequestViaMTLSOnMount(t, port, "auth/cert", role, clientCertPEM, clientKeyPEM)
+}
+
+// CertNTLoginRequestViaMTLS performs a cert auth login on auth/cert-nt/ via direct mTLS.
+func CertNTLoginRequestViaMTLS(t *testing.T, port int, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+	t.Helper()
+	return certLoginRequestViaMTLSOnMount(t, port, "auth/cert-nt", role, clientCertPEM, clientKeyPEM)
+}
+
+func certLoginRequestViaMTLSOnMount(t *testing.T, port int, mount, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+	t.Helper()
 	cert := parseTLSCert(t, clientCertPEM, clientKeyPEM)
-	u := fmt.Sprintf("%s/v1/auth/cert/login", NodeURL(port))
+	u := fmt.Sprintf("%s/v1/%s/login", NodeURL(port), mount)
 	headers := map[string]string{"Content-Type": "application/json"}
 	body := fmt.Sprintf(`{"role":"%s"}`, role)
 	return DoMTLSRequest(t, "POST", u, headers, body, cert)
@@ -582,6 +631,11 @@ func SetupCertVaultEnvWithMTLSCA(t *testing.T, port int) {
 	t.Helper()
 	caCertPEM, _ := LoadMTLSClientCA(t)
 
+	SetupCertAuthWithCA(t, port, caCertPEM)
+
+	// Mount non-transparent cert auth for NT roles
+	SetupCertAuthNT(t, port, caCertPEM)
+
 	// Mount vault-cert provider
 	APIRequest(t, "POST", "sys/providers/vault-cert", port, `{"type":"vault"}`)
 	time.Sleep(1 * time.Second)
@@ -590,12 +644,9 @@ func SetupCertVaultEnvWithMTLSCA(t *testing.T, port int) {
 	APIRequest(t, "PUT", "vault-cert/config", port,
 		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s"}`)
 
-	// Enable transparent mode with cert auth path
+	// Enable transparent mode with cert auth path (cert auth must exist first)
 	APIRequest(t, "POST", "vault-cert/config", port,
 		`{"transparent_mode":true,"auto_auth_path":"auth/cert/"}`)
-
-	// Mount cert auth with mTLS client CA
-	SetupCertAuthWithCA(t, port, caCertPEM)
 
 	// Policy for vault-cert gateway access
 	APIRequest(t, "POST", "sys/policies/cbp/vault-cert-gateway-access", port,
@@ -603,11 +654,15 @@ func SetupCertVaultEnvWithMTLSCA(t *testing.T, port int) {
 
 	// Cert role for transparent mode (cert_role token type)
 	APIRequest(t, "POST", "auth/cert/role/e2e-cert-reader", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"token_type":"cert_role","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"token_type":"transparent","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
 
-	// Cert role for non-transparent mode (warden_token token type)
-	APIRequest(t, "POST", "auth/cert/role/e2e-cert-nt-reader", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-nt-gateway-access"],"token_type":"warden_token","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+	// Cert role for explicit login (warden token type) on the transparent cert mount
+	APIRequest(t, "POST", "auth/cert/role/e2e-cert-login", port,
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"token_type":"warden","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+
+	// Cert role for non-transparent mode on separate mount
+	APIRequest(t, "POST", "auth/cert-nt/role/e2e-cert-nt-reader", port,
+		`{"allowed_common_names":["agent-*"],"token_policies":["vault-nt-gateway-access"],"token_type":"warden","cred_spec_name":"vault-token-reader","token_ttl":3600}`)
 }
 
 // --- Cert Transparent Operations Helpers ---

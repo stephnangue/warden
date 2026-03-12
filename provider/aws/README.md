@@ -5,17 +5,11 @@ The AWS provider enables proxied access to AWS services through Warden. It inter
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
-- [Step 1: Create the IAM User](#step-1-create-the-iam-user)
-- [Step 2: Attach IAM Policies](#step-2-attach-iam-policies)
-- [Step 3: Create Target IAM Roles](#step-3-create-target-iam-roles)
-- [Step 4: Mount the AWS Provider](#step-4-mount-the-aws-provider)
-- [Step 5: Configure the Provider](#step-5-configure-the-provider)
-- [Step 6: Create a Credential Source](#step-6-create-a-credential-source)
-- [Step 7: Create Credential Specs](#step-7-create-credential-specs)
-- [Step 8: Create a Policy](#step-8-create-a-policy)
-- [Step 9: Configure JWT Auth and Create a Role](#step-9-configure-jwt-auth-and-create-a-role)
-- [Step 10: Get a JWT](#step-10-get-a-jwt)
-- [Step 11: Make Requests Through the Gateway](#step-11-make-requests-through-the-gateway)
+- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
+- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
+- [Step 3: Create a Credential Source and Specs](#step-3-create-a-credential-source-and-specs)
+- [Step 4: Create a Policy](#step-4-create-a-policy)
+- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
 - [Architecture Overview](#architecture-overview)
 - [DNS Configuration](#dns-configuration)
 - [Configuration Reference](#configuration-reference)
@@ -31,7 +25,7 @@ The AWS provider enables proxied access to AWS services through Warden. It inter
 
 > **New to Warden?** Follow these steps to get a local dev environment running:
 >
-> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 9–10:
+> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
 > ```bash
 > curl -fsSL -o docker-compose.quickstart.yml \
 >   https://raw.githubusercontent.com/stephnangue/warden/main/docker-compose.quickstart.yml
@@ -64,7 +58,7 @@ The AWS provider enables proxied access to AWS services through Warden. It inter
 > export WARDEN_TOKEN="<your-token>"
 > ```
 
-## Step 1: Create the IAM User
+### Create the IAM User
 
 Create a dedicated IAM user for Warden, called Warden root user. This user holds long-lived access keys that Warden rotates automatically.
 
@@ -75,11 +69,11 @@ aws iam create-access-key --user-name warden-cred-source-root
 
 Save the `AccessKeyId` and `SecretAccessKey` from the output.
 
-## Step 2: Attach IAM Policies
+### Attach IAM Policies
 
 The Warden root user needs two policies:
 
-### SelfManageAccessKeys
+#### SelfManageAccessKeys
 
 Allows the root user to rotate its own access keys. Warden uses this during credential rotation to create new keys and delete old ones.
 
@@ -103,7 +97,7 @@ aws iam put-user-policy \
   }'
 ```
 
-### AssumeRoles
+#### AssumeRoles
 
 Allows the root user to assume roles that grant actual permissions. Scope the `Resource` to match your role naming conventions.
 
@@ -126,7 +120,7 @@ aws iam put-user-policy \
   }'
 ```
 
-## Step 3: Create Target IAM Roles
+### Create Target IAM Roles
 
 Create the roles that consumers will assume through Warden. The trust policy must allow the IAM user to assume the role.
 
@@ -149,7 +143,27 @@ aws iam create-role \
 
 Attach the permissions policies your consumers need to this role (e.g., S3 access, EC2 management).
 
-## Step 4: Mount the AWS Provider
+## Step 1: Configure JWT Auth and Create a Role
+
+Set up a JWT auth method and create a role that binds the credential spec and policy:
+
+```bash
+# Enable JWT auth if not already enabled
+warden auth enable --type=jwt
+
+# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
+warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+
+# Create a role with token type `aws`
+warden write auth/jwt/role/aws-user \
+    token_type=aws \
+    token_policies="aws-access" \
+    user_claim=sub \
+    cred_spec_name=developer \
+    token_ttl=1h
+```
+
+## Step 2: Mount and Configure the Provider
 
 Enable the AWS provider at a path of your choice:
 
@@ -168,8 +182,6 @@ Verify the provider is enabled:
 ```bash
 warden provider list
 ```
-
-## Step 5: Configure the Provider
 
 Configure the provider with proxy domains and timeouts:
 
@@ -191,9 +203,9 @@ Verify:
 warden read aws/config
 ```
 
-## Step 6: Create a Credential Source
+## Step 3: Create a Credential Source and Specs
 
-The credential source tells Warden how to authenticate to AWS and where the base credentials live. Use `AccessKeyId` and `SecretAccessKey` you saved in Step 1 to create the cred source.
+The credential source tells Warden how to authenticate to AWS and where the base credentials live. Use `AccessKeyId` and `SecretAccessKey` you saved in the [Prerequisites](#prerequisites) to create the cred source.
 
 ```bash
 warden cred source create my-aws-source \
@@ -211,8 +223,6 @@ Verify:
 ```bash
 warden cred source read my-aws-source
 ```
-
-## Step 7: Create Credential Specs
 
 A credential spec defines what temporary credentials Warden mints for consumers. Multiple specs can share the same source, each assuming a different role with different permissions and TTLs.
 
@@ -248,9 +258,9 @@ warden cred spec create operator \
   --max-ttl 4h
 ```
 
-Each spec points to a different `role_arn`, so the IAM user's `AssumeRoles` policy must allow assuming all of them (the `devops-*` wildcard in Step 2 covers this).
+Each spec points to a different `role_arn`, so the IAM user's `AssumeRoles` policy must allow assuming all of them (the `devops-*` wildcard in the [AssumeRoles policy](#attach-iam-policies) covers this).
 
-## Step 8: Create a Policy
+## Step 4: Create a Policy
 
 Create a policy that grants access to the AWS provider gateway. Note that this policy is intentionally coarse-grained for simplicity, but it can be made much more fine-grained to restrict access to specific paths or capabilities as needed:
 
@@ -289,27 +299,7 @@ Verify:
 warden policy read aws-access
 ```
 
-## Step 9: Configure JWT Auth and Create a Role
-
-Set up a JWT auth method and create a role that binds the credential spec and policy:
-
-```bash
-# Enable JWT auth if not already enabled
-warden auth enable --type=jwt
-
-# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
-warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/aws-user \
-    token_type=aws_access_keys \
-    token_policies="aws-access" \
-    user_claim=sub \
-    cred_spec_name=developer \
-    token_ttl=1h
-```
-
-## Step 10: Get a JWT
+## Step 5: Get a JWT and Make Requests
 
 Get a JWT from Hydra using one of the quickstart clients:
 
@@ -319,8 +309,6 @@ export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
   | jq -r '.access_token')
 ```
-
-## Step 11: Make Requests Through the Gateway
 
 ### Login and Extract Credentials
 
@@ -488,6 +476,50 @@ warden write aws/config proxy_domains="warden.yourdomain.com"
 ```
 
 For HTTPS, you'll need a **wildcard SSL certificate** (`*.warden.yourdomain.com`), obtainable from Let's Encrypt (free, via DNS-01 challenge), commercial CAs, or internal PKI.
+
+## TLS Certificate Authentication
+
+Steps 1 and 5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+
+Steps 2–4 (provider setup) are identical. Replace Steps 1 and 5 with the following.
+
+### Enable Cert Auth
+
+```bash
+warden auth enable --type=cert
+```
+
+### Configure Trusted CA
+
+Configure the trusted CA for this backend:
+
+```bash
+warden write auth/cert/config \
+    trusted_ca_pem=@/path/to/ca.pem \
+    default_role=aws-user
+```
+
+### Create a role with token type `aws`
+
+```bash
+warden write auth/cert/role/aws-user \
+    allowed_common_names="agent-*" \
+    token_type=aws \
+    token_policies="aws-access" \
+    cred_spec_name=developer \
+    token_ttl=1h
+```
+
+The `allowed_common_names` field supports glob patterns. You can also match on other certificate fields: `allowed_dns_sans`, `allowed_email_sans`, `allowed_uri_sans`, or `allowed_organizational_units`.
+
+### Login and Use
+
+```bash
+warden login --method=cert --role=aws-user \
+    --cert=./client.pem --key=./client-key.pem
+```
+
+Then use AWS tools with the session credentials, exactly as shown in [Step 5](#step-5-get-a-jwt-and-make-requests).
 
 ## Configuration Reference
 

@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/cap/jwt"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -119,6 +120,14 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 		config.UserClaim = "sub"
 	}
 
+	// cert_role is always forbidden in JWT auth — it is cert-auth-specific.
+	if config.TokenType == "cert_role" {
+		return fmt.Errorf("token_type %q is only valid for cert auth backends", config.TokenType)
+	}
+	if config.TokenType == "" {
+		config.TokenType = "jwt_role"
+	}
+
 	// Validate mode is specified
 	if config.Mode == "" {
 		return fmt.Errorf("mode is required: must be 'jwt' or 'oidc'")
@@ -212,10 +221,10 @@ func (b *jwtAuthBackend) SensitiveConfigFields() []string {
 	}
 }
 
-// allowedTokenTypeValues converts validTokenTypes to []interface{} for FieldSchema.AllowedValues
+// allowedTokenTypeValues returns the user-facing token type aliases for FieldSchema.AllowedValues
 func (b *jwtAuthBackend) allowedTokenTypeValues() []interface{} {
-	values := make([]interface{}, len(b.validTokenTypes))
-	for i, t := range b.validTokenTypes {
+	values := make([]interface{}, len(helper.UserTokenTypes))
+	for i, t := range helper.UserTokenTypes {
 		values[i] = t
 	}
 	return values

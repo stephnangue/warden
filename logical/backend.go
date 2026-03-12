@@ -97,6 +97,7 @@ type BackendConfig struct {
 	// multiple times only keeps one hook. Use this for process-level cleanup like
 	// shared transport shutdown that must not run on individual unmount.
 	RegisterShutdownHook func(key string, fn func())
+
 }
 
 // Factory is the factory function to create a logical backend.

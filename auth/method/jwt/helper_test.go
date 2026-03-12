@@ -262,139 +262,34 @@ func TestExtractClaim_NestedPath(t *testing.T) {
 }
 
 // =============================================================================
-// buildJWTMetadata Tests
+// parseNumericClaim Tests
 // =============================================================================
 
-func TestBuildJWTMetadata_BasicClaims(t *testing.T) {
-	claims := map[string]interface{}{
-		"sub":   "user123",
-		"iss":   "https://issuer.example.com",
-		"email": "user@example.com",
-	}
-	config := &JWTAuthConfig{
-		Mode: "jwt",
-	}
-
-	metadata := buildJWTMetadata(claims, config)
-
-	assert.Equal(t, "jwt", metadata["auth_method"])
-	assert.Equal(t, "user123", metadata["subject"])
-	assert.Equal(t, "https://issuer.example.com", metadata["issuer"])
-	assert.Equal(t, "user@example.com", metadata["email"])
-}
-
-func TestBuildJWTMetadata_MissingClaims(t *testing.T) {
-	claims := map[string]interface{}{
-		"sub": "user123",
-	}
-	config := &JWTAuthConfig{
-		Mode: "jwt",
+func TestParseNumericClaim(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    any
+		wantVal  int64
+		wantOk   bool
+	}{
+		{"float64", float64(1234567890), 1234567890, true},
+		{"int64", int64(1234567890), 1234567890, true},
+		{"int", int(1234567890), 1234567890, true},
+		{"float64 with fraction (truncates)", float64(1234567890.5), 1234567890, true},
+		{"string rejected", "1234567890", 0, false},
+		{"bool rejected", true, 0, false},
+		{"nil rejected", nil, 0, false},
 	}
 
-	metadata := buildJWTMetadata(claims, config)
-
-	assert.Equal(t, "jwt", metadata["auth_method"])
-	assert.Equal(t, "user123", metadata["subject"])
-	_, hasIssuer := metadata["issuer"]
-	assert.False(t, hasIssuer)
-	_, hasEmail := metadata["email"]
-	assert.False(t, hasEmail)
-}
-
-func TestBuildJWTMetadata_WithClaimMappings(t *testing.T) {
-	claims := map[string]interface{}{
-		"sub":             "user123",
-		"preferred_name":  "John Doe",
-		"department":      "Engineering",
-		"employee_id":     "E12345",
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			val, ok := parseNumericClaim(tc.value)
+			assert.Equal(t, tc.wantOk, ok)
+			if ok {
+				assert.Equal(t, tc.wantVal, val)
+			}
+		})
 	}
-	config := &JWTAuthConfig{
-		Mode: "jwt",
-		ClaimMappings: map[string]string{
-			"preferred_name": "display_name",
-			"department":     "dept",
-			"employee_id":    "emp_id",
-		},
-	}
-
-	metadata := buildJWTMetadata(claims, config)
-
-	assert.Equal(t, "John Doe", metadata["display_name"])
-	assert.Equal(t, "Engineering", metadata["dept"])
-	assert.Equal(t, "E12345", metadata["emp_id"])
-}
-
-func TestBuildJWTMetadata_WithGroupsClaim(t *testing.T) {
-	claims := map[string]interface{}{
-		"sub":    "user123",
-		"groups": []interface{}{"admin", "developers"},
-	}
-	config := &JWTAuthConfig{
-		Mode:        "jwt",
-		GroupsClaim: "groups",
-	}
-
-	metadata := buildJWTMetadata(claims, config)
-
-	assert.Equal(t, "admin,developers", metadata["groups"])
-}
-
-func TestBuildJWTMetadata_CustomGroupsClaim(t *testing.T) {
-	claims := map[string]interface{}{
-		"sub":   "user123",
-		"roles": []interface{}{"role1", "role2"},
-	}
-	config := &JWTAuthConfig{
-		Mode:        "jwt",
-		GroupsClaim: "roles",
-	}
-
-	metadata := buildJWTMetadata(claims, config)
-
-	assert.Equal(t, "role1,role2", metadata["groups"])
-}
-
-func TestBuildJWTMetadata_EmptyGroupsClaim(t *testing.T) {
-	claims := map[string]interface{}{
-		"sub":    "user123",
-		"groups": []interface{}{},
-	}
-	config := &JWTAuthConfig{
-		Mode:        "jwt",
-		GroupsClaim: "groups",
-	}
-
-	metadata := buildJWTMetadata(claims, config)
-
-	_, hasGroups := metadata["groups"]
-	assert.False(t, hasGroups)
-}
-
-func TestBuildJWTMetadata_MissingGroupsClaim(t *testing.T) {
-	claims := map[string]interface{}{
-		"sub": "user123",
-	}
-	config := &JWTAuthConfig{
-		Mode:        "jwt",
-		GroupsClaim: "groups",
-	}
-
-	metadata := buildJWTMetadata(claims, config)
-
-	_, hasGroups := metadata["groups"]
-	assert.False(t, hasGroups)
-}
-
-func TestBuildJWTMetadata_EmptyConfig(t *testing.T) {
-	claims := map[string]interface{}{
-		"sub": "user123",
-	}
-	config := &JWTAuthConfig{}
-
-	metadata := buildJWTMetadata(claims, config)
-
-	assert.Equal(t, "jwt", metadata["auth_method"])
-	assert.Equal(t, "user123", metadata["subject"])
 }
 
 // =============================================================================

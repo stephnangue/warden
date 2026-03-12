@@ -6,6 +6,7 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
@@ -49,7 +50,7 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 				Description: "Required subject for JWT validation",
 			},
 			"bound_claims": {
-				Type:        framework.TypeKVPairs,
+				Type:        framework.TypeMap,
 				Description: "Map of claims to required values for JWT validation",
 			},
 			"claim_mappings": {
@@ -76,8 +77,8 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			},
 			"token_type": {
 				Type:          framework.TypeString,
-				Description:   "Default token type for roles that don't specify one (default: warden_token)",
-				Default:       "warden_token",
+				Description:   "Default token type for roles that don't specify one (default: transparent)",
+				Default:       "transparent",
 				AllowedValues: b.allowedTokenTypeValues(),
 			},
 			"default_role": {
@@ -137,7 +138,7 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 			"user_claim":   b.config.UserClaim,
 			"groups_claim": b.config.GroupsClaim,
 			"token_ttl":    b.config.TokenTTL.String(),
-			"token_type":   b.config.TokenType,
+			"token_type":   helper.DisplayTokenType(b.config.TokenType),
 			"default_role": b.config.DefaultRole,
 		},
 	}, nil
@@ -148,7 +149,8 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 	// Build config map from field data
 	conf := make(map[string]any)
 
-	// Copy existing config if present
+	// Copy existing config if present (under lock to avoid data race)
+	b.configMu.RLock()
 	if b.config != nil {
 		conf["mode"] = b.config.Mode
 		conf["oidc_discovery_url"] = b.config.OIDCDiscoveryURL
@@ -167,12 +169,18 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		conf["token_type"] = b.config.TokenType
 		conf["default_role"] = b.config.DefaultRole
 	}
+	b.configMu.RUnlock()
 
 	// Apply new values from request
 	for key := range d.Schema {
 		if val, ok := d.GetOk(key); ok {
 			conf[key] = val
 		}
+	}
+
+	// Translate user-facing token_type alias to internal name before setup
+	if rawType, ok := conf["token_type"].(string); ok {
+		conf["token_type"] = helper.ResolveTokenType(helper.BackendJWT, rawType)
 	}
 
 	// Setup new config
@@ -183,9 +191,32 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		}, nil
 	}
 
-	// Persist config to storage
+	// Persist the normalized config to storage so that on restart the
+	// parser always sees consistent types (e.g., token_ttl is always a
+	// duration string, never a raw int from an HTTP request).
 	if b.storageView != nil {
-		entry, err := sdklogical.StorageEntryJSON("config", conf)
+		b.configMu.RLock()
+		normalized := map[string]any{
+			"mode":                   b.config.Mode,
+			"oidc_discovery_url":     b.config.OIDCDiscoveryURL,
+			"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
+			"jwks_url":               b.config.JWKSURL,
+			"jwks_ca_pem":            b.config.JWKSCA,
+			"jwt_validation_pubkeys": b.config.JWTValidationPubKeys,
+			"bound_issuer":           b.config.BoundIssuer,
+			"bound_audiences":        b.config.BoundAudiences,
+			"bound_subject":          b.config.BoundSubject,
+			"bound_claims":           b.config.BoundClaims,
+			"claim_mappings":         b.config.ClaimMappings,
+			"user_claim":             b.config.UserClaim,
+			"groups_claim":           b.config.GroupsClaim,
+			"token_ttl":              b.config.TokenTTL.String(),
+			"token_type":             b.config.TokenType,
+			"default_role": b.config.DefaultRole,
+		}
+		b.configMu.RUnlock()
+
+		entry, err := sdklogical.StorageEntryJSON("config", normalized)
 		if err != nil {
 			return &logical.Response{
 				StatusCode: http.StatusInternalServerError,

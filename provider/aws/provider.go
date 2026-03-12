@@ -114,6 +114,10 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		conf.RegisterShutdownHook("aws-transport", ShutdownHTTPTransport)
 	}
 
+	if err := b.StreamingBackend.Setup(ctx, conf); err != nil {
+		return nil, err
+	}
+
 	// Apply configuration if provided
 	if len(conf.Config) > 0 {
 		if err := ValidateConfig(conf.Config); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path"
 	"slices"
 	"time"
 
@@ -39,7 +40,7 @@ func (b *certAuthBackend) pathRole() *framework.Path {
 			},
 			"allowed_uri_sans": {
 				Type:        framework.TypeCommaStringSlice,
-				Description: "Glob patterns for allowed URI SANs",
+				Description: "Allowed URI SAN patterns using segment wildcards: '+' matches one segment, trailing '*' matches one or more segments (e.g., spiffe://+/ns/*/sa/*)",
 			},
 			"allowed_organizational_units": {
 				Type:        framework.TypeCommaStringSlice,
@@ -64,8 +65,8 @@ func (b *certAuthBackend) pathRole() *framework.Path {
 			},
 			"token_type": {
 				Type:          framework.TypeString,
-				Description:   "Token type",
-				Required:      true,
+				Description:   "Token type: aws, warden, or transparent (default: transparent)",
+				Default:       "transparent",
 				AllowedValues: b.allowedTokenTypeValues(),
 			},
 			"cred_spec_name": {
@@ -181,7 +182,7 @@ func (b *certAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reque
 			"certificate":                  role.Certificate,
 			"token_policies":               role.TokenPolicies,
 			"token_ttl":                    role.TokenTTL,
-			"token_type":                   role.TokenType,
+			"token_type":                   helper.DisplayTokenType(role.TokenType),
 			"cred_spec_name":               role.CredSpecName,
 			"principal_claim":              role.PrincipalClaim,
 		},
@@ -230,7 +231,7 @@ func (b *certAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Req
 			role.TokenTTL = (time.Duration(v.(int)) * time.Second).String()
 		}
 		if v, ok := d.GetOk("token_type"); ok {
-			role.TokenType = v.(string)
+			role.TokenType = helper.ResolveTokenType(helper.BackendCert, v.(string))
 		}
 		if v, ok := d.GetOk("cred_spec_name"); ok {
 			role.CredSpecName = v.(string)
@@ -303,6 +304,18 @@ func (b *certAuthBackend) validateRole(role *CertRole) error {
 	if role.TokenType == "" && b.config != nil && b.config.TokenType != "" {
 		role.TokenType = b.config.TokenType
 	}
+
+	// jwt_role is always forbidden in cert auth — it is jwt-auth-specific.
+	// cert_role is the natural default for cert auth; other types are always allowed.
+	if b.config != nil {
+		if role.TokenType == "jwt_role" {
+			return logical.ErrBadRequestf("token_type %q is only valid for jwt auth backends", role.TokenType)
+		}
+		if role.TokenType == "" {
+			role.TokenType = "cert_role"
+		}
+	}
+
 	if role.TokenType == "" {
 		return logical.ErrBadRequestf("token_type is required; must be one of: %v", b.validTokenTypes)
 	}
@@ -330,7 +343,24 @@ func (b *certAuthBackend) validateRole(role *CertRole) error {
 		return logical.ErrBadRequest("at least one certificate constraint is required (allowed_common_names, allowed_dns_sans, allowed_email_sans, allowed_uri_sans, allowed_organizational_units, or allowed_organizations)")
 	}
 
-	// Validate URI SAN patterns
+	// Validate glob patterns for CN, DNS SANs, and email SANs
+	for _, p := range role.AllowedCommonNames {
+		if _, err := path.Match(p, ""); err != nil {
+			return logical.ErrBadRequestf("invalid allowed_common_names pattern %q: %v", p, err)
+		}
+	}
+	for _, p := range role.AllowedDNSSANs {
+		if _, err := path.Match(p, ""); err != nil {
+			return logical.ErrBadRequestf("invalid allowed_dns_sans pattern %q: %v", p, err)
+		}
+	}
+	for _, p := range role.AllowedEmailSANs {
+		if _, err := path.Match(p, ""); err != nil {
+			return logical.ErrBadRequestf("invalid allowed_email_sans pattern %q: %v", p, err)
+		}
+	}
+
+	// Validate URI SAN segment-wildcard patterns
 	for _, p := range role.AllowedURISANs {
 		if err := helper.ValidatePattern(p); err != nil {
 			return logical.ErrBadRequestf("invalid allowed_uri_sans pattern: %v", err)
@@ -386,7 +416,7 @@ func (b *certAuthBackend) buildRoleFromFieldData(name string, d *framework.Field
 		role.TokenTTL = (time.Duration(v.(int)) * time.Second).String()
 	}
 	if v, ok := d.GetOk("token_type"); ok {
-		role.TokenType = v.(string)
+		role.TokenType = helper.ResolveTokenType(helper.BackendCert, v.(string))
 	}
 	if v, ok := d.GetOk("cred_spec_name"); ok {
 		role.CredSpecName = v.(string)

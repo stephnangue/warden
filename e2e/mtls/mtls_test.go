@@ -21,16 +21,16 @@ func TestMTLSCertLogin(t *testing.T) {
 	caCertPEM, caKey := h.LoadMTLSClientCA(t)
 	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-mtls-login")
 
-	status, body := h.CertLoginRequestViaMTLS(t, port, "e2e-cert-reader", clientCertPEM, clientKeyPEM)
+	status, body := h.CertLoginRequestViaMTLS(t, port, "e2e-cert-login", clientCertPEM, clientKeyPEM)
 	if status != 200 && status != 201 {
 		t.Fatalf("mTLS cert login failed (status %d): %s", status, string(body))
 	}
 
-	// Verify we got a valid token/token_id back
+	// Verify we got a valid warden token back
 	data := h.ParseJSON(t, body)
-	tokenID, _ := h.JSONPath(data, "data.token_id").(string)
-	if tokenID == "" {
-		t.Fatalf("no token_id in mTLS cert login response: %s", string(body))
+	token, _ := h.JSONPath(data, "data.data.token").(string)
+	if token == "" {
+		t.Fatalf("no token in mTLS cert login response: %s", string(body))
 	}
 }
 
@@ -48,15 +48,15 @@ func TestMTLSCertLoginViaStandby(t *testing.T) {
 	caCertPEM, caKey := h.LoadMTLSClientCA(t)
 	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-mtls-standby")
 
-	status, body := h.CertLoginRequestViaMTLS(t, standbyPort, "e2e-cert-reader", clientCertPEM, clientKeyPEM)
+	status, body := h.CertLoginRequestViaMTLS(t, standbyPort, "e2e-cert-login", clientCertPEM, clientKeyPEM)
 	if status != 200 && status != 201 {
 		t.Fatalf("mTLS cert login via standby failed (status %d): %s", status, string(body))
 	}
 
 	data := h.ParseJSON(t, body)
-	tokenID, _ := h.JSONPath(data, "data.token_id").(string)
-	if tokenID == "" {
-		t.Fatalf("no token_id in mTLS cert login via standby response: %s", string(body))
+	token, _ := h.JSONPath(data, "data.data.token").(string)
+	if token == "" {
+		t.Fatalf("no token in mTLS cert login via standby response: %s", string(body))
 	}
 }
 
@@ -93,7 +93,7 @@ func TestMTLSCertNonTransparentRead(t *testing.T) {
 	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-mtls-nt")
 
 	// Login via mTLS with warden_token role
-	loginStatus, loginBody := h.CertLoginRequestViaMTLS(t, port, "e2e-cert-nt-reader", clientCertPEM, clientKeyPEM)
+	loginStatus, loginBody := h.CertNTLoginRequestViaMTLS(t, port, "e2e-cert-nt-reader", clientCertPEM, clientKeyPEM)
 	if loginStatus != 200 && loginStatus != 201 {
 		t.Fatalf("mTLS cert login for NT failed (status %d): %s", loginStatus, string(loginBody))
 	}
@@ -126,15 +126,15 @@ func TestLBPassthroughCertLogin(t *testing.T) {
 	caCertPEM, caKey := h.LoadMTLSClientCA(t)
 	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-passthrough-login")
 
-	status, body := h.CertLoginRequestViaLBPassthrough(t, "e2e-cert-reader", clientCertPEM, clientKeyPEM)
+	status, body := h.CertLoginRequestViaLBPassthrough(t, "e2e-cert-login", clientCertPEM, clientKeyPEM)
 	if status != 200 && status != 201 {
 		t.Fatalf("LB passthrough cert login failed (status %d): %s", status, string(body))
 	}
 
 	data := h.ParseJSON(t, body)
-	tokenID, _ := h.JSONPath(data, "data.token_id").(string)
-	if tokenID == "" {
-		t.Fatalf("no token_id in LB passthrough cert login response: %s", string(body))
+	token, _ := h.JSONPath(data, "data.data.token").(string)
+	if token == "" {
+		t.Fatalf("no token in LB passthrough cert login response: %s", string(body))
 	}
 }
 
