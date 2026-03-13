@@ -39,6 +39,10 @@ Usage: warden write PATH [DATA]
   Write configuration using key=value format:
 
       $ warden write aws/config token_ttl=1h proxy_domains='["localhost","warden"]'
+
+  Use @file to read a value from a file (useful for PEM certificates, large payloads, etc.):
+
+      $ warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem default_role=my-role
 `,
 		Args: cobra.MinimumNArgs(1),
 		RunE: runWrite,
@@ -89,6 +93,16 @@ func runWrite(cmd *cobra.Command, args []string) error {
 				}
 				key := parts[0]
 				value := parts[1]
+
+				// Check for @file reference — read file contents as string
+				if strings.HasPrefix(value, "@") {
+					fileData, err := os.ReadFile(value[1:])
+					if err != nil {
+						return fmt.Errorf("failed to read file for key %q: %w", key, err)
+					}
+					data[key] = string(fileData)
+					continue
+				}
 
 				// Try to infer the type of the value
 				data[key] = inferType(value)

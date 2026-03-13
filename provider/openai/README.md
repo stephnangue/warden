@@ -337,6 +337,8 @@ This allows operators to enforce policies such as:
 
 Steps 4–5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). It does not work in dev mode, which uses plain HTTP. Start Warden with a TLS listener, or place it behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+
 Steps 1–3 (provider setup) are identical. Replace Steps 4–5 with the following.
 
 ### Enable Cert Auth
