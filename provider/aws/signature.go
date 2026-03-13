@@ -184,7 +184,23 @@ func (b *awsBackend) verifyIncomingSignature(
 	// Restore body in the cloned request
 	if len(bodyBytes) > 0 {
 		testReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
+
+	// Only set ContentLength if the client signed the content-length header.
+	// The AWS SDK v4 signer automatically includes content-length in canonical
+	// headers when ContentLength > 0, which causes a signature mismatch if the
+	// client didn't sign it. Setting -1 tells the signer to omit it.
+	contentLengthSigned := false
+	for _, sh := range signedHeadersList {
+		if strings.ToLower(strings.TrimSpace(sh)) == "content-length" {
+			contentLengthSigned = true
+			break
+		}
+	}
+	if contentLengthSigned {
 		testReq.ContentLength = int64(len(bodyBytes))
+	} else {
+		testReq.ContentLength = -1
 	}
 
 	// Compute payload hash

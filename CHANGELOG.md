@@ -2,6 +2,12 @@
 
 All notable changes to Warden are documented in this file.
 
+## [v0.4.1] — 2026-03-13
+
+### Bug Fixes
+
+- **AWS SigV4 Content-Length Signature Mismatch** — Fixed AWS gateway signature verification failing on all POST requests (EC2, DynamoDB, etc.). The AWS SDK v4 signer automatically includes `content-length` in canonical headers when `ContentLength > 0`, but most AWS clients (including the AWS CLI) do not sign `content-length`. The server now respects the client's `SignedHeaders` list and only includes `content-length` in the canonical request when the client actually signed it.
+
 ## [v0.4.0] — 2026-03-12
 
 ### New Features
@@ -131,6 +137,7 @@ Initial release. See the [v0.1.0 release notes](https://github.com/stephnangue/w
 - Docker image published to `ghcr.io/stephnangue/warden`
 - Pre-built binaries for Linux, macOS, and Windows
 
+[v0.4.1]: https://github.com/stephnangue/warden/compare/v0.4.0...v0.4.1
 [v0.4.0]: https://github.com/stephnangue/warden/compare/v0.3.0...v0.4.0
 [v0.3.0]: https://github.com/stephnangue/warden/compare/v0.2.1...v0.3.0
 [v0.2.1]: https://github.com/stephnangue/warden/compare/v0.2.0...v0.2.1
