@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./warden.png" alt="Warden" width="200" />
+</p>
+
 # Warden
 
 **No credentials. Full audit. Every cloud API.**

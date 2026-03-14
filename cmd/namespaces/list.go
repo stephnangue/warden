@@ -29,7 +29,7 @@ Usage: warden namespace list [options]
 
   List all namespaces recursively:
 
-      $ warden namespace list -r
+      $ warden namespace list -R
 
   List namespaces including the parent:
 
@@ -46,7 +46,7 @@ Usage: warden namespace list [options]
 )
 
 func init() {
-	ListCmd.Flags().BoolVarP(&listRecursive, "recursive", "r", false, "Recursively list all descendant namespaces")
+	ListCmd.Flags().BoolVarP(&listRecursive, "recursive", "R", false, "Recursively list all descendant namespaces")
 	ListCmd.Flags().BoolVar(&listIncludeParent, "include-parent", false, "Include the parent namespace in the result")
 	ListCmd.Flags().StringVar(&listFormat, "format", "table", "Output format (table or json)")
 }

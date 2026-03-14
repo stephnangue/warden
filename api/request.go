@@ -94,9 +94,11 @@ func (r *Request) toRetryableHTTP() (*retryablehttp.Request, error) {
 		}
 	}
 
-	// Set authorization header (may override custom headers if provided)
+	// Set Warden token header. X-Warden-Token is the canonical header for
+	// explicit Warden tokens and prevents transparent-mode implicit auth from
+	// treating the token as a JWT credential.
 	if len(r.ClientToken) != 0 {
-		req.Header.Set("Authorization", "Bearer "+r.ClientToken)
+		req.Header.Set("X-Warden-Token", r.ClientToken)
 	}
 
 	return req, nil
