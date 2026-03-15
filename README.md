@@ -1,16 +1,31 @@
 <p align="center">
   <img src="./warden.png" alt="Warden" width="200" />
+  <br/>
+  <a href="https://openbao.org/ecosystem/integrators/">
+    <img src="https://img.shields.io/badge/OpenBao-Integrator-purple" alt="OpenBao Integrator" />
+  </a>
+  <a href="https://github.com/stephnangue/warden/actions/workflows/ci.yml">
+    <img src="https://github.com/stephnangue/warden/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" />
+  </a>
+  <a href="https://github.com/stephnangue/warden/releases/latest">
+    <img src="https://img.shields.io/github/v/release/stephnangue/warden" alt="Latest Release" />
+  </a>
+  <a href="https://goreportcard.com/report/github.com/stephnangue/warden">
+    <img src="https://goreportcard.com/badge/github.com/stephnangue/warden" alt="Go Report Card" />
+  </a>
+  <a href="https://github.com/stephnangue/warden/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/stephnangue/warden" alt="License" />
+  </a>
+  <a href="https://img.shields.io/github/go-mod/go-version/stephnangue/warden">
+    <img src="https://img.shields.io/github/go-mod/go-version/stephnangue/warden" alt="Go Version" />
+  </a>
 </p>
 
 # Warden
 
-**No credentials. Full audit. Every cloud API.**
-
 Warden is an identity-aware egress gateway that replaces cloud credentials with zero-trust access.
 
-With Warden, developers, pipelines, AI agents, and Kubernetes workloads access cloud APIs using identity — whether a JWT, a TLS certificate, or a SPIFFE SVID — while every API call is governed and audited.
-
-Warden sits in the request path between your workloads and the services they call — cloud APIs (AWS, GitHub, Azure), SaaS platforms, and AI providers (Mistral, OpenAI, Anthropic). It authenticates callers by identity, injects credentials on the fly, enforces fine-grained policies on every request, and logs every API call. Your workloads never touch a secret.
+Instead of trusting every workload to handle credentials responsibly, Warden removes that burden entirely. Workloads authenticate to Warden using their own identity (JWT, TLS certificate, or SPIFFE SVID). Warden then mints short-lived credentials, injects them into outbound requests, and forwards them. Workloads never handle cloud credentials directly. The attack surface shrinks to a single, fully audited and tightly controlled component.
 
 ```
 ┌──────────────┐                    ┌──────────────┐                     ┌──────────────┐
