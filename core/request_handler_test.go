@@ -1110,7 +1110,7 @@ func TestHandleTransparentAuth_JWTDifferentRoles(t *testing.T) {
 			ExpireAt:    time.Now().Add(1 * time.Hour),
 			Policies:    []string{"policy1"},
 		}
-		_, err := jwtType.Generate(authData1, entry1)
+		_, err := jwtType.Generate(context.Background(), authData1, entry1)
 		require.NoError(t, err)
 		id1 := jwtType.ComputeID(entry1.Data["jwt"])
 
@@ -1125,7 +1125,7 @@ func TestHandleTransparentAuth_JWTDifferentRoles(t *testing.T) {
 			ExpireAt:    time.Now().Add(1 * time.Hour),
 			Policies:    []string{"policy2"},
 		}
-		_, err = jwtType.Generate(authData2, entry2)
+		_, err = jwtType.Generate(context.Background(), authData2, entry2)
 		require.NoError(t, err)
 		id2 := jwtType.ComputeID(entry2.Data["jwt"])
 
@@ -1153,7 +1153,7 @@ func TestHandleTransparentAuth_JWTDifferentRoles(t *testing.T) {
 			Data: map[string]string{},
 		}
 		authData := &AuthData{TokenValue: sampleJWT, RoleName: "terraform"}
-		jwtType.Generate(authData, entry)
+		jwtType.Generate(context.Background(), authData, entry)
 
 		// Verify the stored value is a hash of JWT+role (not raw value)
 		expectedHash := sha256.Sum256([]byte(sampleJWT + ":terraform"))

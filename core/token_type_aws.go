@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -22,7 +23,7 @@ func (t *AWSAccessKeysTokenType) Metadata() TokenTypeMetadata {
 	}
 }
 
-func (t *AWSAccessKeysTokenType) Generate(authData *AuthData, entry *TokenEntry) (map[string]string, error) {
+func (t *AWSAccessKeysTokenType) Generate(_ context.Context, authData *AuthData, entry *TokenEntry) (map[string]string, error) {
 	accessKeyID := helper.GenerateAWSAccessKeyID()
 	secretAccessKey := helper.GenerateAWSSecretAccessKey()
 

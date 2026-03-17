@@ -419,7 +419,7 @@ func TestHandleLogin_DefaultRoleFallback(t *testing.T) {
 		conf := &logical.BackendConfig{
 			Logger:          testLogger(),
 			StorageView:     storage,
-			ValidTokenTypes: []string{"warden_token"},
+			ValidTokenTypes: []string{"warden_token", "warden_crypto_token"},
 		}
 		backend, err := Factory(context.Background(), conf)
 		require.NoError(t, err)
@@ -456,7 +456,7 @@ func TestHandleLogin_DefaultRoleFallback(t *testing.T) {
 		conf := &logical.BackendConfig{
 			Logger:          testLogger(),
 			StorageView:     storage,
-			ValidTokenTypes: []string{"warden_token"},
+			ValidTokenTypes: []string{"warden_token", "warden_crypto_token"},
 		}
 		backend, err := Factory(context.Background(), conf)
 		require.NoError(t, err)

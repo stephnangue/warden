@@ -1,6 +1,9 @@
 package core
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // TokenTypeMetadata describes a token type's characteristics
 type TokenTypeMetadata struct {
@@ -32,7 +35,7 @@ type TokenType interface {
 	// 1. Generate cryptographically secure random values
 	// 2. Populate entry.Data with all necessary fields
 	// 3. Return the client-facing values (e.g., {"username": "...", "password": "..."})
-	Generate(authData *AuthData, entry *TokenEntry) (map[string]string, error)
+	Generate(ctx context.Context, authData *AuthData, entry *TokenEntry) (map[string]string, error)
 
 	// ValidateValue checks if a token value matches the expected format
 	ValidateValue(tokenValue string) bool
