@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -123,7 +124,7 @@ func TestJWTRoleTokenType_Generate(t *testing.T) {
 			Data: map[string]string{},
 		}
 
-		result, err := jwtType.Generate(nil, entry)
+		result, err := jwtType.Generate(context.Background(), nil, entry)
 		require.NoError(t, err)
 		assert.Empty(t, result["jwt"])
 	})
@@ -134,7 +135,7 @@ func TestJWTRoleTokenType_Generate(t *testing.T) {
 		}
 
 		authData := &AuthData{TokenValue: "", RoleName: "terraform"}
-		result, err := jwtType.Generate(authData, entry)
+		result, err := jwtType.Generate(context.Background(), authData, entry)
 		require.NoError(t, err)
 		assert.Empty(t, result["jwt"])
 	})
@@ -145,7 +146,7 @@ func TestJWTRoleTokenType_Generate(t *testing.T) {
 		}
 
 		authData := &AuthData{TokenValue: sampleJWT, RoleName: ""}
-		result, err := jwtType.Generate(authData, entry)
+		result, err := jwtType.Generate(context.Background(), authData, entry)
 		require.NoError(t, err)
 		// JWT should be stored as hash (not raw value) for security
 		expectedHash := sha256.Sum256([]byte(sampleJWT))
@@ -158,7 +159,7 @@ func TestJWTRoleTokenType_Generate(t *testing.T) {
 		}
 
 		authData := &AuthData{TokenValue: sampleJWT, RoleName: "terraform"}
-		result, err := jwtType.Generate(authData, entry)
+		result, err := jwtType.Generate(context.Background(), authData, entry)
 		require.NoError(t, err)
 		// JWT+role composite should be stored as hash for security
 		expectedHash := sha256.Sum256([]byte(sampleJWT + ":terraform"))
@@ -196,7 +197,7 @@ func TestJWTRoleTokenType_ComputeData(t *testing.T) {
 			Data: map[string]string{},
 		}
 		authData := &AuthData{TokenValue: sampleJWT, RoleName: "myapp"}
-		jwtType.Generate(authData, entry)
+		jwtType.Generate(context.Background(), authData, entry)
 
 		// The stored hash should match ComputeData
 		expectedHash := jwtType.ComputeData(sampleJWT, "myapp")

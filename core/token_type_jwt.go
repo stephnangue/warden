@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -24,7 +25,7 @@ func (t *JWTRoleTokenType) Metadata() TokenTypeMetadata {
 	}
 }
 
-func (t *JWTRoleTokenType) Generate(authData *AuthData, entry *TokenEntry) (map[string]string, error) {
+func (t *JWTRoleTokenType) Generate(_ context.Context, authData *AuthData, entry *TokenEntry) (map[string]string, error) {
 	// For JWT tokens, we don't generate - the JWT comes from an external IdP.
 	// The JWT is passed via authData.TokenValue for transparent mode.
 	//

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -22,7 +23,7 @@ func (t *WardenTokenType) Metadata() TokenTypeMetadata {
 	}
 }
 
-func (t *WardenTokenType) Generate(authData *AuthData, entry *TokenEntry) (map[string]string, error) {
+func (t *WardenTokenType) Generate(_ context.Context, authData *AuthData, entry *TokenEntry) (map[string]string, error) {
 	tokenValue := "cws." + helper.GenerateRandomString(64)
 
 	entry.Data = map[string]string{

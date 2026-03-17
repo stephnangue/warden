@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"testing"
 )
 
@@ -100,7 +101,7 @@ func TestCertRoleTokenType_Generate(t *testing.T) {
 		RoleName:   "agent",
 	}
 
-	result, err := ct.Generate(authData, entry)
+	result, err := ct.Generate(context.Background(), authData, entry)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -121,7 +122,7 @@ func TestCertRoleTokenType_Generate(t *testing.T) {
 
 	// Without authData
 	entry2 := &TokenEntry{Data: map[string]string{"existing": "data"}}
-	result2, err := ct.Generate(nil, entry2)
+	result2, err := ct.Generate(context.Background(), nil, entry2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -132,7 +133,7 @@ func TestCertRoleTokenType_Generate(t *testing.T) {
 	// With empty TokenValue
 	entry3 := &TokenEntry{Data: make(map[string]string)}
 	authData3 := &AuthData{TokenValue: "", RoleName: "agent"}
-	result3, err := ct.Generate(authData3, entry3)
+	result3, err := ct.Generate(context.Background(), authData3, entry3)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

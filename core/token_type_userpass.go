@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -22,7 +23,7 @@ func (t *UserPassTokenType) Metadata() TokenTypeMetadata {
 	}
 }
 
-func (t *UserPassTokenType) Generate(authData *AuthData, entry *TokenEntry) (map[string]string, error) {
+func (t *UserPassTokenType) Generate(_ context.Context, authData *AuthData, entry *TokenEntry) (map[string]string, error) {
 	username := "usr-" + helper.GenerateRandomString(26)
 	password := helper.GenerateRandomString(40)
 

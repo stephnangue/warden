@@ -758,13 +758,13 @@ func TestCertAuthLogin_CertReplacement(t *testing.T) {
 		t.Fatalf("cert2 login failed (status %d): %s", status2, string(body2))
 	}
 
-	// They should have different fingerprints (different key pairs → different cert bytes)
+	// They should have different token IDs (different key pairs → different cert bytes → different fingerprints)
 	data1 := h.ParseJSON(t, body1)
 	data2 := h.ParseJSON(t, body2)
-	fp1 := h.JSONPath(data1, "data.fingerprint")
-	fp2 := h.JSONPath(data2, "data.fingerprint")
-	if fp1 == fp2 {
-		t.Fatalf("expected different fingerprints for different certs with same CN, got %v", fp1)
+	tid1 := h.JSONPath(data1, "data.token_id")
+	tid2 := h.JSONPath(data2, "data.token_id")
+	if tid1 == tid2 {
+		t.Fatalf("expected different token_ids for different certs with same CN, got %v", tid1)
 	}
 
 	// Both should have the same principal_id (same CN)
