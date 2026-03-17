@@ -22,6 +22,7 @@ import (
 	"github.com/openbao/openbao/helper/namespace"
 	"github.com/openbao/openbao/sdk/v2/helper/pathmanager"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	authhelper "github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -551,18 +552,23 @@ func (c *Core) LoginCreateToken(ctx context.Context, resp *logical.Response) (*l
 	}
 
 	data := map[string]any{
-		"token_type":     tokenValue.Type,
+		"token_type":     authhelper.DisplayTokenType(tokenValue.Type),
 		"expire_at":      tokenValue.ExpireAt,
 		"bound_ip":       tokenValue.CreatedByIP,
 		"token_id":       tokenValue.ID,
 		"token_assessor": tokenValue.Accessor,
 		"namespace":      tokenValue.NamespacePath,
+		"principal_id":   tokenValue.PrincipalID,
 		"role":           tokenValue.RoleName,
 		"data":           tokenValue.Data,
 		"policies":       tokenValue.Policies,
 	}
 
 	maps.Copy(resp.Data, data)
+
+	// Remove internal fields that were needed for token generation
+	// but should not be exposed to the client.
+	delete(resp.Data, "fingerprint")
 
 	resp.StatusCode = http.StatusCreated
 

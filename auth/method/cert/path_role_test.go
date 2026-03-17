@@ -24,7 +24,7 @@ func createTestBackendWithAllTokenTypes(t *testing.T) (*certAuthBackend, context
 	conf := &logical.BackendConfig{
 		Logger:          testLogger(),
 		StorageView:     storage,
-		ValidTokenTypes: []string{"service", "batch", "user_pass", "aws_access_keys", "warden_token", "jwt_role", "cert_role"},
+		ValidTokenTypes: []string{"service", "batch", "user_pass", "aws_access_keys", "warden_token", "warden_crypto_token", "jwt_role", "cert_role"},
 	}
 	backend, err := Factory(ctx, conf)
 	require.NoError(t, err)

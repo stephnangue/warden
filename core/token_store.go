@@ -20,11 +20,12 @@ import (
 )
 
 const (
-	TypeUserPass      = "user_pass"
-	TypeAWSAccessKeys = "aws_access_keys"
-	TypeWardenToken   = "warden_token"
-	TypeJWTRole       = "jwt_role"
-	TypeCertRole      = "cert_role"
+	TypeUserPass          = "user_pass"
+	TypeAWSAccessKeys     = "aws_access_keys"
+	TypeWardenToken       = "warden_token"
+	TypeWardenCryptoToken = "warden_crypto_token"
+	TypeJWTRole           = "jwt_role"
+	TypeCertRole          = "cert_role"
 )
 
 // Storage path constants for token store organization
@@ -310,6 +311,7 @@ func (s *TokenStore) registerBuiltinTypes() error {
 		&UserPassTokenType{},
 		&AWSAccessKeysTokenType{},
 		&WardenTokenType{},
+		&WardenCryptoTokenType{encryptor: s.core.barrier},
 		&JWTRoleTokenType{},
 		&CertRoleTokenType{},
 	}
@@ -400,7 +402,7 @@ func (s *TokenStore) generateWithCollisionDetection(
 		entry.Accessor = accessor
 
 		// Let the token type generate its values
-		clientData, err := tokenType.Generate(authData, entry)
+		clientData, err := tokenType.Generate(ctx, authData, entry)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate token: %w", err)
 		}
@@ -455,9 +457,10 @@ func (s *TokenStore) generateWithCollisionDetection(
 		}
 
 		// Register token with expiration manager for timer-based TTL enforcement
-		// JWT and cert role tokens are cache-only, so don't persist their expiration entries
+		// Self-contained tokens (JWT, cert) are cache-only, so don't persist their expiration entries,
+		// Do not also register warden crypto token for expiration
 		if expMgr := s.core.GetExpirationManager(); expMgr != nil && ttl > 0 {
-			persist := entry.Type != TypeJWTRole && entry.Type != TypeCertRole
+			persist := entry.Type != TypeJWTRole && entry.Type != TypeCertRole && entry.Type != TypeWardenCryptoToken
 			if err := expMgr.RegisterToken(ctx, entry.ID, ttl, persist); err != nil {
 				s.logger.Warn("failed to register token with expiration manager",
 					logger.String("token_id", entry.ID),
@@ -514,6 +517,11 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		}
 	} else {
 		tokenID = tokenType.ComputeID(tokenValue)
+	}
+
+	// Self-contained crypto tokens: decrypt and validate inline, no cache/storage lookup
+	if cryptoType, ok := tokenType.(*WardenCryptoTokenType); ok {
+		return s.resolveCryptoToken(ctx, tokenValue, cryptoType, ns)
 	}
 
 	// Lookup token in cache
@@ -1018,8 +1026,8 @@ func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
 // Uses a transaction to ensure atomicity: both token and accessor are stored together
 // or neither is stored if any operation fails
 func (s *TokenStore) persistToken(entry *TokenEntry) error {
-	// Skip persistence for jwt_role and cert_role tokens - they are cache-only
-	if entry.Type == TypeJWTRole || entry.Type == TypeCertRole {
+	// Skip persistence for self-contained tokens - they are cache-only
+	if entry.Type == TypeJWTRole || entry.Type == TypeCertRole || entry.Type == TypeWardenCryptoToken {
 		return nil
 	}
 
@@ -1285,8 +1293,8 @@ func (s *TokenStore) loadTokenByAccessor(accessor string) (*TokenEntry, error) {
 // Uses a transaction to ensure atomicity: both token and accessor are deleted together
 // or neither is deleted if any operation fails
 func (s *TokenStore) deleteToken(entry *TokenEntry) error {
-	// Skip storage operations for jwt_role and cert_role tokens - they are cache-only
-	if entry.Type == TypeJWTRole || entry.Type == TypeCertRole {
+	// Skip storage operations for self-contained tokens - they are cache-only
+	if entry.Type == TypeJWTRole || entry.Type == TypeCertRole || entry.Type == TypeWardenCryptoToken {
 		return nil
 	}
 
@@ -1390,6 +1398,11 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 		}
 	} else {
 		tokenID = tokenType.ComputeID(tokenValue)
+	}
+
+	// Self-contained crypto tokens: decrypt and validate inline, no cache/storage lookup
+	if cryptoType, ok := tokenType.(*WardenCryptoTokenType); ok {
+		return s.lookupCryptoToken(ctx, tokenValue, cryptoType, ns)
 	}
 
 	// Lookup token in cache
@@ -1809,6 +1822,111 @@ func (s *TokenStore) validateIPBinding(ctx context.Context, tokenID string, entr
 	}
 
 	return nil
+}
+
+// resolveCryptoToken validates a self-contained crypto token by decrypting its
+// embedded claims and checking expiration, namespace, and IP binding.
+// validateCryptoTokenClaims validates expiration and namespace binding for
+// decrypted crypto token claims. Shared by resolveCryptoToken and lookupCryptoToken.
+func (s *TokenStore) validateCryptoTokenClaims(
+	ctx context.Context,
+	claims *CryptoTokenClaims,
+	ns *namespace.Namespace,
+) error {
+	// Validate expiration
+	if claims.ExpireAt > 0 && time.Now().Unix() > claims.ExpireAt {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementTokensExpired()
+		}
+		return ErrTokenExpired
+	}
+
+	// Validate namespace binding with hierarchical access
+	tokenNs, err := s.core.namespaceStore.GetNamespaceByAccessor(ctx, claims.NamespaceID)
+	if err != nil || tokenNs == nil {
+		return ErrTokenNamespaceMismatch
+	}
+	if ns.UUID != tokenNs.UUID && !ns.HasParent(tokenNs) {
+		if s.config.EnableMetrics {
+			s.metrics.IncrementNamespaceMismatches()
+		}
+		return ErrTokenNamespaceMismatch
+	}
+
+	return nil
+}
+
+func (s *TokenStore) resolveCryptoToken(
+	ctx context.Context,
+	tokenValue string,
+	cryptoType *WardenCryptoTokenType,
+	ns *namespace.Namespace,
+) (string, string, error) {
+	claims, err := cryptoType.DecryptToken(ctx, tokenValue)
+	if err != nil {
+		return "", "", ErrTokenNotFound
+	}
+
+	if err := s.validateCryptoTokenClaims(ctx, claims, ns); err != nil {
+		return "", "", err
+	}
+
+	// Validate IP binding using a temporary entry for the shared validation logic
+	tempEntry := &TokenEntry{
+		ID:          cryptoType.ComputeID(tokenValue),
+		CreatedByIP: claims.CreatedByIP,
+	}
+	if err := s.validateIPBinding(ctx, tempEntry.ID, tempEntry); err != nil {
+		return "", "", err
+	}
+
+	if s.config.EnableMetrics {
+		s.metrics.IncrementTokensResolved()
+	}
+
+	return claims.PrincipalID, claims.RoleName, nil
+}
+
+// lookupCryptoToken decrypts a self-contained crypto token and reconstructs
+// a TokenEntry from its embedded claims.
+func (s *TokenStore) lookupCryptoToken(
+	ctx context.Context,
+	tokenValue string,
+	cryptoType *WardenCryptoTokenType,
+	ns *namespace.Namespace,
+) (*TokenEntry, error) {
+	claims, err := cryptoType.DecryptToken(ctx, tokenValue)
+	if err != nil {
+		return nil, ErrTokenNotFound
+	}
+
+	if err := s.validateCryptoTokenClaims(ctx, claims, ns); err != nil {
+		return nil, err
+	}
+
+	// Reconstruct TokenEntry from claims
+	entry := &TokenEntry{
+		ID:             cryptoType.ComputeID(tokenValue),
+		Accessor:       claims.Accessor,
+		Type:           TypeWardenCryptoToken,
+		NamespaceID:    claims.NamespaceID,
+		NamespacePath:  claims.NamespacePath,
+		CreatedAt:      time.Unix(claims.CreatedAt, 0),
+		CreatedByIP:    claims.CreatedByIP,
+		PrincipalID:    claims.PrincipalID,
+		RoleName:       claims.RoleName,
+		ExpireAt:       time.Unix(claims.ExpireAt, 0),
+		Data:           map[string]string{"token": tokenValue},
+		Policies:       claims.Policies,
+		CredentialSpec: claims.CredentialSpec,
+	}
+
+	// Validate IP binding
+	if err := s.validateIPBinding(ctx, entry.ID, entry); err != nil {
+		return nil, err
+	}
+
+	return entry, nil
 }
 
 // computeCacheTTL calculates the cache TTL for a token entry.

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"time"
@@ -23,7 +24,7 @@ func (t *CertRoleTokenType) Metadata() TokenTypeMetadata {
 	}
 }
 
-func (t *CertRoleTokenType) Generate(authData *AuthData, entry *TokenEntry) (map[string]string, error) {
+func (t *CertRoleTokenType) Generate(_ context.Context, authData *AuthData, entry *TokenEntry) (map[string]string, error) {
 	// For cert tokens, the certificate comes from the TLS connection.
 	// authData.TokenValue contains the cert fingerprint (SHA-256 of DER bytes).
 	//
