@@ -6,7 +6,7 @@ package core
 import (
 	"context"
 
-	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/internal/namespace"
 )
 
 // NamespaceByID returns back a namespace using its accessor (nsID).

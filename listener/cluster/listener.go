@@ -118,7 +118,7 @@ func (l *ClusterListener) Type() string {
 
 // Start begins the cluster listener with mTLS.
 func (l *ClusterListener) Start(ctx context.Context) error {
-	l.logger.Info("starting cluster listener (mTLS)")
+	l.logger.Info("starting cluster listener (mTLS)", logger.String("address", l.address))
 
 	ln, err := net.Listen("tcp", l.address)
 	if err != nil {

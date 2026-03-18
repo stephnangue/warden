@@ -16,7 +16,7 @@ import (
 	"github.com/hashicorp/go-secure-stdlib/parseutil"
 	"github.com/hashicorp/go-secure-stdlib/strutil"
 	"github.com/mitchellh/copystructure"
-	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/internal/namespace"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/logger"
 )

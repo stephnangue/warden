@@ -7,7 +7,7 @@ import (
 
 	ristretto "github.com/dgraph-io/ristretto/v2"
 	"github.com/google/uuid"
-	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"golang.org/x/sync/singleflight"
 )
