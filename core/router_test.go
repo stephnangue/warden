@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/internal/namespace"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"

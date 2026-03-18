@@ -12,7 +12,7 @@ import (
 	"github.com/hashicorp/hcl"
 	"github.com/hashicorp/hcl/hcl/ast"
 	"github.com/mitchellh/copystructure"
-	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/openbao/openbao/sdk/v2/helper/hclutil"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 )

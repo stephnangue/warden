@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/openbao/openbao/sdk/v2/physical/inmem"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logger"

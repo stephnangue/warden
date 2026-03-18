@@ -18,7 +18,7 @@ import (
 	"github.com/hashicorp/errwrap"
 	wrapping "github.com/openbao/go-kms-wrapping/v2"
 	aeadwrapper "github.com/openbao/go-kms-wrapping/wrappers/aead/v2"
-	physPostgresql "github.com/openbao/openbao/physical/postgresql"
+	physPostgresql "github.com/stephnangue/warden/physical/postgresql"
 	"github.com/openbao/openbao/sdk/v2/logical"
 	phy "github.com/openbao/openbao/sdk/v2/physical"
 	physInmem "github.com/openbao/openbao/sdk/v2/physical/inmem"
@@ -497,6 +497,10 @@ func initListeners(httpHandler http.Handler, c *core.Core, conf *config.Config, 
 				return nil, fmt.Errorf("error initializing listener of type %s: %s", lnConfig.Type, err)
 			}
 			lns = append(lns, ln)
+
+			infoKey := fmt.Sprintf("listener %d", len(lns))
+			(*info)[infoKey] = fmt.Sprintf("%s (addr: %q)", lnConfig.Type, lnConfig.Address)
+			*infoKeys = append(*infoKeys, infoKey)
 		default:
 			return nil, fmt.Errorf("unknown listener type: %s", lnConfig.Type)
 		}

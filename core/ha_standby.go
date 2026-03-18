@@ -7,7 +7,7 @@ import (
 	"time"
 
 	metrics "github.com/hashicorp/go-metrics/compat"
-	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/stephnangue/warden/logger"
 )

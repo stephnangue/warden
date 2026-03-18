@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 )
 
