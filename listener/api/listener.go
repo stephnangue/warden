@@ -110,10 +110,10 @@ func (l *ApiListener) Start(ctx context.Context) error {
 	go func() {
 		var err error
 		if l.tlsEnabled {
-			l.logger.Info("starting HTTPS server")
+			l.logger.Info("starting HTTPS server", logger.String("address", l.server.Addr))
 			err = l.server.ListenAndServeTLS(l.tlsCertFile, l.tlsKeyFile)
 		} else {
-			l.logger.Info("starting HTTP server")
+			l.logger.Info("starting HTTP server", logger.String("address", l.server.Addr))
 			err = l.server.ListenAndServe()
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {

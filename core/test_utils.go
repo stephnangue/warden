@@ -11,8 +11,8 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/openbao/openbao/helper/locking"
-	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/internal/locking"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/openbao/openbao/sdk/v2/physical/inmem"
 	"github.com/stephnangue/warden/audit"

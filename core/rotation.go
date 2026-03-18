@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/openbao/openbao/helper/fairshare"
-	"github.com/openbao/openbao/helper/namespace"
+	"github.com/stephnangue/warden/internal/fairshare"
+	"github.com/stephnangue/warden/internal/namespace"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logger"
