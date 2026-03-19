@@ -26,8 +26,9 @@ const (
 	SourceTypeGCP    = "gcp"
 	SourceTypeGitLab   = "gitlab"
 	SourceTypeGitHub   = "github"
-	SourceTypeMistral  = "mistral"
-	SourceTypeOpenAI   = "openai"
+	SourceTypeMistral    = "mistral"
+	SourceTypeOpenAI     = "openai"
+	SourceTypeAnthropic  = "anthropic"
 )
 
 // Category constants for credential categorization

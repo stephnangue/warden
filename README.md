@@ -31,8 +31,8 @@ Instead of trusting every workload to handle credentials responsibly, Warden rem
 ┌──────────────┐                    ┌──────────────┐                     ┌──────────────┐
 │  Developer   │      Identity      │              │    Scoped Access    │ AWS, Azure   │
 │  K8s pod     │───────────────────▶│    Warden    │───────────────────▶ │ GitHub, GCP  │
-│  Pipeline    │   no credentials   │              │  real credentials   │ Mistral      │
-│  AI agent    │                    │              │                     │ OpenAI  ...  │
+│  Pipeline    │   no credentials   │              │  real credentials   │ Anthropic    │
+│  AI agent    │                    │              │                     │ Mistral ...  │
 └──────────────┘                    └──────────────┘                     └──────────────┘
                                     • Auth ✓
                                     • Policy ✓
@@ -56,9 +56,9 @@ Instead of trusting every workload to handle credentials responsibly, Warden rem
 
 | Provider | Status | Credential Source |
 |----------|--------|-------------------|
+| **Anthropic** | ✅ GA | API key |
 | **Mistral** | ✅ GA | API key |
 | **OpenAI** | ✅ GA | API key |
-| Anthropic | Planned | — |
 | Cohere | Planned | — |
 
 The roadmap targets 100+ cloud and SaaS providers and all major AI providers.
@@ -102,15 +102,15 @@ Warden parses AI request bodies and evaluates policies against inference paramet
 
 ### Zero Client Modification
 
-Point your existing tools at Warden's endpoint instead of the provider's. The AWS CLI, Terraform, GitHub CLI, Mistral SDK, OpenAI SDK, or any HTTP client — if it supports a custom base URL or endpoint override, it works with Warden. No code changes, no special libraries, no proxy configuration.
+Point your existing tools at Warden's endpoint instead of the provider's. The AWS CLI, Terraform, GitHub CLI, Anthropic SDK, Mistral SDK, OpenAI SDK, or any HTTP client — if it supports a custom base URL or endpoint override, it works with Warden. No code changes, no special libraries, no proxy configuration.
 
 ### Identity-Based Access
 
-Every request is tied to a verified identity — via JWT, TLS client certificate, or SPIFFE SVID. Whether it's a developer authenticating with a client certificate from their laptop, a Kubernetes pod identified by its SPIFFE SVID, a CI/CD pipeline deploying to AWS, or an AI agent calling Mistral, Warden knows exactly who is making each API call and applies policies accordingly.
+Every request is tied to a verified identity — via JWT, TLS client certificate, or SPIFFE SVID. Whether it's a developer authenticating with a client certificate from their laptop, a Kubernetes pod identified by its SPIFFE SVID, a CI/CD pipeline deploying to AWS, or an AI agent calling Anthropic, Warden knows exactly who is making each API call and applies policies accordingly.
 
 ### Unified Identity Across Providers
 
-Every provider has its own identity system — AWS IAM, Azure Entra ID, GitHub Apps, Mistral API keys. Multi-provider means multi-identity: different auth flows, different credential formats, different rotation strategies. Warden collapses all of that behind a single identity layer. Your workloads authenticate once — with a JWT or a client certificate — and Warden translates to each provider's native auth on the fly. One identity plane, regardless of how many providers sit behind it.
+Every provider has its own identity system — AWS IAM, Azure Entra ID, GitHub Apps, Anthropic API keys. Multi-provider means multi-identity: different auth flows, different credential formats, different rotation strategies. Warden collapses all of that behind a single identity layer. Your workloads authenticate once — with a JWT or a client certificate — and Warden translates to each provider's native auth on the fly. One identity plane, regardless of how many providers sit behind it.
 
 ```
                                      ┌─── AWS (SigV4)
@@ -118,6 +118,8 @@ Every provider has its own identity system — AWS IAM, Azure Entra ID, GitHub A
                                      ├─── Azure (Bearer + Entra ID)
                                      │
   Workload ── JWT / cert ──▶ Warden ─┼─── GitHub (Installation token)
+                                     │
+                                     ├─── Anthropic (x-api-key)
                                      │
                                      ├─── Mistral (Bearer + API key)
                                      │
@@ -143,10 +145,10 @@ Pods authenticate to Warden using their SPIFFE identity — either an X.509-SVID
 AI agents call AI providers autonomously — choosing models, setting token limits, running completions. Without Warden, an API key grants unlimited access to every model. With Warden, each agent identity has scoped model access, enforced token limits, and every inference call is audited with full request parameters.
 
 ```bash
-# Agent can only use mistral-small-latest, max_tokens capped, streaming required
-curl -X POST https://warden.internal/v1/mistral/role/agent-role/gateway/v1/chat/completions \
+# Agent can only use claude-sonnet-4-20250514, max_tokens capped, streaming required
+curl -X POST https://warden.internal/v1/anthropic/role/agent-role/gateway/v1/messages \
   -H "Authorization: Bearer <jwt>" \
-  -d '{"model": "mistral-small-latest", "messages": [...], "stream": true}'
+  -d '{"model": "claude-sonnet-4-20250514", "max_tokens": 1024, "messages": [...], "stream": true}'
 ```
 
 ### AI Agents — Tool Use Governance
@@ -157,7 +159,7 @@ When agents call cloud APIs — reading GitHub repos, writing to S3, deploying t
 
 ### Multi-Provider Workloads
 
-A workload that reads from GitHub, writes to S3, deploys to Azure, and calls Mistral for inference needs four different credential types, four different auth flows, four different rotation strategies. Without Warden, each integration is its own identity problem. With Warden, the workload gets one JWT and one endpoint pattern. It doesn't matter whether the target is AWS, GitHub, or Mistral — the auth flow is identical. Add a new provider and existing workloads gain access without changing a single line of code.
+A workload that reads from GitHub, writes to S3, deploys to Azure, and calls Anthropic for inference needs four different credential types, four different auth flows, four different rotation strategies. Without Warden, each integration is its own identity problem. With Warden, the workload gets one JWT and one endpoint pattern. It doesn't matter whether the target is AWS, GitHub, or Anthropic — the auth flow is identical. Add a new provider and existing workloads gain access without changing a single line of code.
 
 ## Authentication Methods
 
@@ -189,7 +191,7 @@ curl -H "Authorization: Bearer <your-jwt>" \
 #   3. Forwards the request to https://api.github.com/repos/acme/frontend/contents/README.md
 ```
 
-Transparent mode works with any provider that uses bearer tokens: **Azure, GCP, GitHub, GitLab, Vault, Mistral, OpenAI**. It's the simplest integration path — no code changes, no token exchange, one HTTP call.
+Transparent mode works with any provider that uses bearer tokens or API keys: **Anthropic, Azure, GCP, GitHub, GitLab, Vault, Mistral, OpenAI**. It's the simplest integration path — no code changes, no token exchange, one HTTP call.
 
 ### Explicit Mode
 
@@ -220,6 +222,7 @@ Explicit mode is **required for AWS** (SigV4 request signing means Warden must h
 | **GitHub** | ✅ | ✅ |
 | **GitLab** | ✅ | ✅ |
 | **Vault / OpenBao** | ✅ | ✅ |
+| **Anthropic** | ✅ | ✅ |
 | **Mistral** | ✅ | ✅ |
 | **OpenAI** | ✅ | ✅ |
 
@@ -231,6 +234,7 @@ Explicit mode is **required for AWS** (SigV4 request signing means Warden must h
 | Audit granularity | Every API request logged | Logs + cost analytics (Enterprise) | Access grant logged |
 | Policy enforcement | HTTP path + method + runtime conditions (IP, time, day) + AI parameters | Guardrails (PII, jailbreak) | Workload-to-service level |
 | Cloud provider support | AWS, Azure, GCP, GitHub, GitLab, Vault | N/A — AI providers only | Per-provider integration |
+| AI provider support | Anthropic, Mistral, OpenAI | Multiple AI providers | N/A |
 | AI inference governance | Model, token, and parameter policies | Guardrails + rate limiting | N/A |
 | Client modification | Change base URL | Portkey SDK or Universal API | Deploy sidecar agents |
 | Data residency | Fully self-hosted, your infrastructure | SaaS or airgapped (Enterprise) | SaaS only |
@@ -306,6 +310,7 @@ Once Warden is running, follow a provider guide to configure your first endpoint
 - [Vault / OpenBao](provider/vault/README.md)
 
 **AI Providers:**
+- [Anthropic](provider/anthropic/README.md)
 - [Mistral](provider/mistral/README.md)
 - [OpenAI](provider/openai/README.md)
 
@@ -356,7 +361,7 @@ Warden uses HCL configuration files. See `warden.local.hcl` for a full example c
 
 **Cloud & SaaS Providers** — Enterprise cloud (Oracle, IBM, Alibaba), specialized cloud (DigitalOcean, Hetzner, OVH), government cloud (GovCloud, Azure Gov), AI/GPU cloud (CoreWeave, Lambda, RunPod), DevOps SaaS (Terraform Cloud, Datadog, Cloudflare), data SaaS (Snowflake, Databricks, MongoDB Atlas), productivity SaaS (Slack, Jira, Notion)
 
-**AI Providers** — Anthropic, Cohere, Google AI (Gemini), xAI, Replicate, Hugging Face, Together AI
+**AI Providers** — Cohere, Google AI (Gemini), xAI, Replicate, Hugging Face, Together AI
 
 **AI Governance** — Per-model cost budgets, token usage tracking, prompt/response audit, rate limiting per agent per model
 
