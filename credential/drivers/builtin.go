@@ -49,5 +49,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register Anthropic driver factory
+	if err := registry.RegisterFactory(&AnthropicDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }
