@@ -38,6 +38,7 @@ import (
 	log "github.com/stephnangue/warden/logger"
 	wardenlogical "github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/physical"
+	"github.com/stephnangue/warden/provider/anthropic"
 	"github.com/stephnangue/warden/provider/aws"
 	"github.com/stephnangue/warden/provider/azure"
 	"github.com/stephnangue/warden/provider/gcp"
@@ -91,7 +92,8 @@ Usage: warden server [options]
 	}
 
 	providers = map[string]wardenlogical.Factory{
-		"aws":     aws.Factory,
+		"anthropic": anthropic.Factory,
+		"aws":       aws.Factory,
 		"azure":   azure.Factory,
 		"gcp":     gcp.Factory,
 		"github":  github.Factory,
