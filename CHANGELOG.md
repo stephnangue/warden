@@ -2,6 +2,34 @@
 
 All notable changes to Warden are documented in this file.
 
+## [v0.5.0] — 2026-03-20
+
+### New Features
+
+- **Anthropic AI Provider** — Native Anthropic provider with streaming gateway proxy, transparent mode, and policy evaluation on AI request fields (model, max_tokens, stream, temperature). Injects `x-api-key` and `anthropic-version: 2023-06-01` headers (differs from OpenAI/Mistral Bearer auth). Token extraction supports `X-Warden-Token`, `x-api-key`, and `Authorization: Bearer` for native Anthropic SDK, Claude Code, and Claude Desktop compatibility. Credential driver with SpecVerifier validates API keys at spec creation via `GET /v1/models`. (#81)
+
+- **Warden Crypto Token** — New `warden_crypto_token` self-contained token type for stateless token validation. (#77)
+
+- **`@file` Support for Write Command** — The `warden write` command now supports `@file` syntax to read values from files. (#72)
+
+### Bug Fixes
+
+- **X-Warden-Token Header** — Fixed token header handling and updated README logo. Fixed namespace list flag. (#73)
+
+- **Remove OpenBao Internal Packages** — Removed dependency on OpenBao internal packages and added listener address logging. (#78)
+
+### Documentation
+
+- **Anthropic Provider README** — Full quickstart guide with JWT/cert auth setup, credential source/spec creation, policy examples (model restrictions for Claude models), Anthropic SDK, Claude Code, and Claude Desktop usage examples.
+
+- **README Badges** — Added OpenBao Integrator, CI, release, Go Report Card, license, and Go version badges. (#74)
+
+- **Cert Auth TLS Prerequisite** — Documented that certificate authentication requires TLS on the Warden listener. (#72)
+
+### Infrastructure
+
+- **Dependency Updates** — Bumped `dorny/paths-filter` from 3 to 4 (#75), updated Go minor/patch dependencies (#80), bumped `google.golang.org/grpc` to 1.79.3 (#79).
+
 ## [v0.4.1] — 2026-03-13
 
 ### Bug Fixes
@@ -137,6 +165,7 @@ Initial release. See the [v0.1.0 release notes](https://github.com/stephnangue/w
 - Docker image published to `ghcr.io/stephnangue/warden`
 - Pre-built binaries for Linux, macOS, and Windows
 
+[v0.5.0]: https://github.com/stephnangue/warden/compare/v0.4.1...v0.5.0
 [v0.4.1]: https://github.com/stephnangue/warden/compare/v0.4.0...v0.4.1
 [v0.4.0]: https://github.com/stephnangue/warden/compare/v0.3.0...v0.4.0
 [v0.3.0]: https://github.com/stephnangue/warden/compare/v0.2.1...v0.3.0
