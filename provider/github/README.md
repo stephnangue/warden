@@ -57,6 +57,7 @@ The GitHub provider enables proxied access to the GitHub REST API through Warden
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
 > ```bash
+> export PATH="$PWD:$PATH"
 > export WARDEN_ADDR="http://127.0.0.1:8400"
 > export WARDEN_TOKEN="<your-token>"
 > ```

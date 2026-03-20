@@ -59,6 +59,7 @@ The AWS provider enables proxied access to AWS services through Warden. It inter
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
 > ```bash
+> export PATH="$PWD:$PATH"
 > export WARDEN_ADDR="http://127.0.0.1:8400"
 > export WARDEN_TOKEN="<your-token>"
 > ```
