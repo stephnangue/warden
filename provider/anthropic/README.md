@@ -43,12 +43,17 @@ The Anthropic provider enables proxied access to the Anthropic API through Warde
 > curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_arm64.tar.gz | tar xz
 > ```
 >
-> **3. Start the Warden server** in dev mode:
+> **3. Add the binary to your PATH:**
 > ```bash
-> ./warden server --dev
+> export PATH="$PWD:$PATH"
 > ```
 >
-> **4. In another terminal window**, export the environment variables for the CLI:
+> **4. Start the Warden server** in dev mode:
+> ```bash
+> warden server --dev
+> ```
+>
+> **5. In another terminal window**, export the environment variables for the CLI:
 > ```bash
 > export WARDEN_ADDR="http://127.0.0.1:8400"
 > export WARDEN_TOKEN="<your-token>"
