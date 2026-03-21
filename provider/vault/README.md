@@ -55,14 +55,14 @@ The Vault provider enables proxied access to HashiCorp Vault (or OpenBao) throug
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev
+> warden server --dev --dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
 > ```bash
 > export PATH="$PWD:$PATH"
 > export WARDEN_ADDR="http://127.0.0.1:8400"
-> export WARDEN_TOKEN="<your-token>"
+> export WARDEN_TOKEN="root"
 > ```
 
 ## Step 1: Create an AppRole in Vault
