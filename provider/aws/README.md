@@ -54,14 +54,14 @@ The AWS provider enables proxied access to AWS services through Warden. It inter
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev
+> warden server --dev --dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
 > ```bash
 > export PATH="$PWD:$PATH"
 > export WARDEN_ADDR="http://127.0.0.1:8400"
-> export WARDEN_TOKEN="<your-token>"
+> export WARDEN_TOKEN="root"
 > ```
 
 ### Create the IAM User
