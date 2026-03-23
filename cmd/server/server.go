@@ -67,6 +67,12 @@ var (
 	flagDev          bool
 	flagDevRootToken string
 
+	flagDevTLS                  bool
+	flagDevTLSCertFile          string
+	flagDevTLSKeyFile           string
+	flagDevTLSCACertFile        string
+	flagDevTLSRequireClientCert bool
+
 	ServerCmd = &cobra.Command{
 		Use:   "server",
 		Short: "This command starts a Warden server that responds to API requests",
@@ -119,6 +125,11 @@ func init() {
 	ServerCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to configuration file (e.g., path/to/warden.hcl)")
 	ServerCmd.Flags().BoolVar(&flagDev, "dev", false, "Enable dev mode: inmem storage, auto-init, auto-unseal")
 	ServerCmd.Flags().StringVar(&flagDevRootToken, "dev-root-token", "", "Custom root token for dev mode (any string)")
+	ServerCmd.Flags().BoolVar(&flagDevTLS, "dev-tls", false, "Enable TLS for dev mode listener (auto-generates self-signed cert)")
+	ServerCmd.Flags().StringVar(&flagDevTLSCertFile, "dev-tls-cert-file", "", "Path to TLS certificate file for dev mode")
+	ServerCmd.Flags().StringVar(&flagDevTLSKeyFile, "dev-tls-key-file", "", "Path to TLS private key file for dev mode")
+	ServerCmd.Flags().StringVar(&flagDevTLSCACertFile, "dev-tls-ca-cert-file", "", "Path to CA certificate for client verification in dev mode")
+	ServerCmd.Flags().BoolVar(&flagDevTLSRequireClientCert, "dev-tls-require-client-cert", false, "Require client certificates when CA cert is configured in dev mode")
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -128,6 +139,29 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	if flagDev && configPath != "" {
 		return fmt.Errorf("--config cannot be used with --dev (dev mode always uses inmem storage)")
+	}
+
+	// Infer --dev-tls from explicit cert file flags
+	if flagDevTLSCertFile != "" || flagDevTLSKeyFile != "" || flagDevTLSCACertFile != "" {
+		flagDevTLS = true
+	}
+
+	// Validate dev-tls flags require --dev
+	if flagDevTLS && !flagDev {
+		return fmt.Errorf("--dev-tls can only be used with --dev")
+	}
+	if flagDevTLSRequireClientCert && !flagDev {
+		return fmt.Errorf("--dev-tls-require-client-cert can only be used with --dev")
+	}
+
+	// Validate cert and key must be provided together
+	if (flagDevTLSCertFile != "") != (flagDevTLSKeyFile != "") {
+		return fmt.Errorf("--dev-tls-cert-file and --dev-tls-key-file must be provided together")
+	}
+
+	// Validate require-client-cert needs a CA cert
+	if flagDevTLSRequireClientCert && flagDevTLSCACertFile == "" {
+		return fmt.Errorf("--dev-tls-require-client-cert requires --dev-tls-ca-cert-file")
 	}
 
 	// Load configuration: dev mode builds defaults, otherwise requires config file
@@ -145,6 +179,33 @@ func run(cmd *cobra.Command, args []string) error {
 		conf, err = config.LoadConfig(configPath)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
+		}
+	}
+
+	// Configure TLS for dev mode
+	var devTLSCertDir string
+	if flagDevTLS {
+		certFile, keyFile := flagDevTLSCertFile, flagDevTLSKeyFile
+		if certFile == "" && keyFile == "" {
+			// Auto-generate self-signed certificate
+			var err error
+			certFile, keyFile, devTLSCertDir, err = generateDevTLSCert()
+			if err != nil {
+				return fmt.Errorf("failed to generate dev TLS certificate: %w", err)
+			}
+			defer func() {
+				if devTLSCertDir != "" {
+					os.RemoveAll(devTLSCertDir)
+				}
+			}()
+		}
+		conf.Listeners[0].TLSEnabled = true
+		conf.Listeners[0].TLSCertFile = certFile
+		conf.Listeners[0].TLSKeyFile = keyFile
+		if flagDevTLSCACertFile != "" {
+			conf.Listeners[0].TLSClientCAFile = flagDevTLSCACertFile
+			requireClientCert := flagDevTLSRequireClientCert
+			conf.Listeners[0].TLSRequireClientCert = &requireClientCert
 		}
 	}
 
@@ -353,7 +414,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Print dev mode banner before opening the log gate
 	if flagDev && devInitResult != nil {
-		printDevBanner(cmd.OutOrStdout(), devInitResult)
+		printDevBanner(cmd.OutOrStdout(), devInitResult, devTLSCertDir)
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "\n==> Warden server started! Log data will stream in below:\n")
