@@ -48,7 +48,9 @@ func devModeInit(c *core.Core, customRootToken string) (*core.InitResult, error)
 }
 
 // printDevBanner prints the dev mode startup banner with unseal keys and root token.
-func printDevBanner(w io.Writer, result *core.InitResult) {
+// If devTLSCertDir is non-empty, it also prints the paths to the auto-generated
+// TLS certificate and key, along with usage instructions.
+func printDevBanner(w io.Writer, result *core.InitResult, devTLSCertDir string) {
 	fmt.Fprintf(w, "\n")
 	fmt.Fprintf(w, "==> Warden server started in dev mode! <==\n")
 	fmt.Fprintf(w, "\n")
@@ -66,6 +68,18 @@ func printDevBanner(w io.Writer, result *core.InitResult) {
 
 	fmt.Fprintf(w, "Root Token: %s\n", result.RootToken)
 	fmt.Fprintf(w, "\n")
+
+	if devTLSCertDir != "" {
+		fmt.Fprintf(w, "Dev TLS Certificate:  %s/cert.pem\n", devTLSCertDir)
+		fmt.Fprintf(w, "Dev TLS Private Key:  %s/key.pem\n", devTLSCertDir)
+		fmt.Fprintf(w, "\n")
+		fmt.Fprintf(w, "The certificate is self-signed, clients need to trust it:\n")
+		fmt.Fprintf(w, "\n")
+		fmt.Fprintf(w, "  $ export WARDEN_CACERT=%s/cert.pem\n", devTLSCertDir)
+		fmt.Fprintf(w, "  $ export WARDEN_ADDR=https://127.0.0.1:8400\n")
+		fmt.Fprintf(w, "\n")
+	}
+
 	fmt.Fprintf(w, "Development mode should NOT be used in production installations!\n")
 	fmt.Fprintf(w, "\n")
 }
