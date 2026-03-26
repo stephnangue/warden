@@ -19,10 +19,10 @@ import (
 
 	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/go-multierror"
-	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/openbao/openbao/sdk/v2/helper/pathmanager"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	authhelper "github.com/stephnangue/warden/auth/helper"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -609,8 +609,8 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 				authPath = ns.CustomMetadata["auto_auth_path"]
 			}
 			if authPath != "" {
-				role := req.HTTPRequest.Header.Get("X-Warden-Role")
-				if err := c.performImplicitAuth(ctx, req, authPath, role); err != nil {
+				authRole := req.HTTPRequest.Header.Get("X-Warden-Role")
+				if err := c.performImplicitAuth(ctx, req, authPath, authRole); err != nil {
 					c.logger.Warn("transparent operations auth failed",
 						logger.Err(err),
 						logger.String("path", req.Path),
@@ -789,6 +789,24 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		return nil, auth, retErr
 	}
 
+	// Access backend returned AccessData → mint credential + let backend format response
+	if resp != nil && resp.AccessData != nil {
+		ad := resp.AccessData
+		if te == nil {
+			c.logger.Error("AccessData returned but no token entry", logger.String("path", req.Path))
+			retErr = multierror.Append(retErr, ErrInternalError)
+			return nil, auth, retErr
+		}
+		te.CredentialSpec = ad.CredentialSpec
+		if err := c.mintCredentialForRequest(ctx, req, te); err != nil {
+			c.logger.Error("failed to mint credential for access request",
+				logger.Err(err), logger.String("path", req.Path))
+			return logical.ErrorResponse(err), auth, nil
+		}
+		resp.Data = ad.ResponseBuilder(req.Credential)
+		resp.AccessData = nil
+	}
+
 	// Return the response and error
 	if routeErr != nil {
 		retErr = multierror.Append(retErr, routeErr)
@@ -949,7 +967,7 @@ func (c *Core) parseFormBody(req *logical.Request) error {
 	return nil
 }
 
-// mintCredentialForRequest mints credentials for streaming requests using the credential manager
+// mintCredentialForRequest mints credentials for requests using the credential manager
 func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Request, te *logical.TokenEntry) error {
 	if te == nil {
 		return logical.ErrInternal("cannot mint credential since token entry is nil")
@@ -1038,33 +1056,33 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 		relativePath = strings.TrimPrefix(req.Path, req.MountPoint)
 	}
 
-	// Check if this is a gateway path (transparent mode applies to gateway requests)
-	// Gateway paths are: "gateway", "gateway/...", "role/X/gateway", "role/X/gateway/..."
-	if !strings.HasPrefix(relativePath, "gateway") && !strings.Contains(relativePath, "/gateway") {
+	// Check if this path should trigger transparent auth (delegated to the backend).
+	// Streaming backends match gateway paths; access backends match access/ paths.
+	if !tmp.IsTransparentPath(relativePath) {
 		return false, ""
 	}
 
-	// Extract role from path (may return default role or empty string)
-	role := tmp.GetTransparentRole(relativePath)
+	// Extract auth role from path (may return default auth role or empty string)
+	authRole := tmp.GetAuthRole(relativePath)
 
-	// X-Warden-Role header takes priority over DefaultRole but not over URL-embedded role.
-	// If the path doesn't start with "role/", any role value came from DefaultRole, not the URL.
+	// X-Warden-Role header takes priority over DefaultAuthRole but not over URL-embedded role.
+	// If the path doesn't start with "role/", any role value came from DefaultAuthRole, not the URL.
 	if !strings.HasPrefix(relativePath, "role/") && req.HTTPRequest != nil {
 		if headerRole := req.HTTPRequest.Header.Get("X-Warden-Role"); headerRole != "" {
-			role = headerRole
+			authRole = headerRole
 		}
 	}
 
-	return true, role
+	return true, authRole
 }
 
 // handleTransparentAuth performs implicit authentication for transparent mode (gateway) requests.
 // It delegates to performImplicitAuth for credential detection and login.
-// The role may be empty — the auth method's default_role config provides the fallback.
-func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, backend logical.Backend, role string) error {
+// The authRole may be empty — the auth method's default_role config provides the fallback.
+func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, backend logical.Backend, authRole string) error {
 	tmp := backend.(logical.TransparentModeProvider)
 	autoAuthPath := tmp.GetAutoAuthPath()
-	return c.performImplicitAuth(ctx, req, autoAuthPath, role)
+	return c.performImplicitAuth(ctx, req, autoAuthPath, authRole)
 }
 
 // performImplicitAuth performs implicit authentication by detecting the credential type
@@ -1082,18 +1100,18 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 //	  - Gateway: provider auto_auth_path config
 //	  - Operations: namespace auto_auth_path metadata
 //
-//	Role (first match wins):
+//	Auth role (first match wins):
 //	  1. URL path /role/{name}/gateway/... (gateway only)
 //	  2. X-Warden-Role header
 //	  3. Provider default_role config (gateway only)
 //	  4. Auth method default_role config (login-time fallback)
 //
 // Uses singleflight to prevent duplicate token creation when concurrent requests
-// arrive with the same credential+role combination.
+// arrive with the same credential+authRole combination.
 //
-// IMPORTANT: The role is validated when reusing cached tokens. A token created for
+// IMPORTANT: The auth role is validated when reusing cached tokens. A token created for
 // credential+Role1 cannot be reused for credential+Role2, as they may have different policies.
-func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, autoAuthPath, role string) error {
+func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, autoAuthPath, authRole string) error {
 	// Mark request as transparent mode
 	req.Transparent = true
 
@@ -1119,25 +1137,25 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		// Certificate-based transparent auth
 		hash := sha256.Sum256(clientCert.Raw)
 		fingerprint := hex.EncodeToString(hash[:])
-		sfHash := sha256.Sum256([]byte("cert:" + fingerprint + ":" + role))
+		sfHash := sha256.Sum256([]byte("cert:" + fingerprint + ":" + authRole))
 		singleflightKey = hex.EncodeToString(sfHash[:])
-		loginData = map[string]any{"role": role}
+		loginData = map[string]any{"role": authRole}
 		credType = "cert"
 		credKey = fingerprint
 		lookupFunc = func() (*TokenEntry, error) {
-			return c.LookupCertTokenWithRole(ctx, fingerprint, role)
+			return c.LookupCertTokenWithRole(ctx, fingerprint, authRole)
 		}
 
 	case strings.HasPrefix(req.ClientToken, "eyJ"):
 		// JWT-based transparent auth
 		clientToken := req.ClientToken
-		jwtHash := sha256.Sum256([]byte(clientToken + ":" + role))
+		jwtHash := sha256.Sum256([]byte(clientToken + ":" + authRole))
 		singleflightKey = hex.EncodeToString(jwtHash[:])
-		loginData = map[string]any{"jwt": clientToken, "role": role}
+		loginData = map[string]any{"jwt": clientToken, "role": authRole}
 		credType = "jwt"
 		credKey = clientToken
 		lookupFunc = func() (*TokenEntry, error) {
-			return c.LookupJWTTokenWithRole(ctx, clientToken, role)
+			return c.LookupJWTTokenWithRole(ctx, clientToken, authRole)
 		}
 
 	default:

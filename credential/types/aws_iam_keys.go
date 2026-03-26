@@ -36,7 +36,7 @@ func (t *AWSIAMAccessKeysCredType) ConfigSchema() []*credential.FieldValidator {
 
 		// Common field for vault and aws sources
 		credential.StringField("mint_method").
-			OneOf("kv2_static", "dynamic_aws", "sts_assume_role", "secrets_manager").
+			OneOf("kv2_static", "dynamic_aws", "sts_assume_role", "secrets_manager", "rds_iam_token").
 			Describe("Method for minting AWS credentials").
 			Example("sts_assume_role"),
 

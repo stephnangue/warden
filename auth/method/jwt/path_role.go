@@ -69,6 +69,14 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Credential spec name",
 			},
+			"groups_claim": {
+				Type:        framework.TypeString,
+				Description: "Override global groups_claim for this role",
+			},
+			"group_policy_prefix": {
+				Type:        framework.TypeString,
+				Description: "Override global group_policy_prefix for this role",
+			},
 			"max_age": {
 				Type:        framework.TypeString,
 				Description: "Maximum elapsed time since JWT was issued (iat). Rejects JWTs older than this. Example: 30m, 1h",
@@ -177,8 +185,10 @@ func (b *jwtAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reques
 			"token_ttl":          role.TokenTTL,
 			"token_type":         helper.DisplayTokenType(role.TokenType),
 			"user_claim":         role.UserClaim,
-			"cred_spec_name":     role.CredSpecName,
-			"max_age":            role.MaxAge,
+			"cred_spec_name":      role.CredSpecName,
+			"groups_claim":        role.GroupsClaim,
+			"group_policy_prefix": role.GroupPolicyPrefix,
+			"max_age":             role.MaxAge,
 		},
 	}, nil
 }
@@ -226,6 +236,12 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 		}
 		if v, ok := d.GetOk("cred_spec_name"); ok {
 			role.CredSpecName = v.(string)
+		}
+		if v, ok := d.GetOk("groups_claim"); ok {
+			role.GroupsClaim = v.(string)
+		}
+		if v, ok := d.GetOk("group_policy_prefix"); ok {
+			role.GroupPolicyPrefix = v.(string)
 		}
 		if v, ok := d.GetOk("max_age"); ok {
 			role.MaxAge = v.(string)
@@ -388,6 +404,12 @@ func (b *jwtAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldD
 	}
 	if v, ok := d.GetOk("cred_spec_name"); ok {
 		role.CredSpecName = v.(string)
+	}
+	if v, ok := d.GetOk("groups_claim"); ok {
+		role.GroupsClaim = v.(string)
+	}
+	if v, ok := d.GetOk("group_policy_prefix"); ok {
+		role.GroupPolicyPrefix = v.(string)
 	}
 	if v, ok := d.GetOk("max_age"); ok {
 		role.MaxAge = v.(string)

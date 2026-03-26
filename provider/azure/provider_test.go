@@ -194,7 +194,7 @@ func TestParseConfig(t *testing.T) {
 		assert.Equal(t, 60*time.Second, config.Timeout)
 		assert.True(t, config.TransparentMode)
 		assert.Equal(t, "auth/jwt/", config.AutoAuthPath)
-		assert.Equal(t, "my-role", config.DefaultRole)
+		assert.Equal(t, "my-role", config.DefaultAuthRole)
 	})
 
 	t.Run("timeout as integer seconds", func(t *testing.T) {

@@ -779,7 +779,7 @@ type mockTransparentModeProvider struct {
 	mockProvider
 	transparentMode bool
 	autoAuthPath    string
-	defaultRole     string
+	defaultAuthRole     string
 }
 
 func (m *mockTransparentModeProvider) IsTransparentMode() bool {
@@ -790,7 +790,7 @@ func (m *mockTransparentModeProvider) GetAutoAuthPath() string {
 	return m.autoAuthPath
 }
 
-func (m *mockTransparentModeProvider) GetTransparentRole(path string) string {
+func (m *mockTransparentModeProvider) GetAuthRole(path string) string {
 	// Simple pattern matching for testing: role/{role}/gateway...
 	if strings.HasPrefix(path, "role/") {
 		parts := strings.Split(path, "/")
@@ -798,11 +798,14 @@ func (m *mockTransparentModeProvider) GetTransparentRole(path string) string {
 			return parts[1]
 		}
 	}
-	return m.defaultRole
+	return m.defaultAuthRole
+}
+
+func (m *mockTransparentModeProvider) IsTransparentPath(path string) bool {
+	return strings.HasPrefix(path, "gateway") || strings.Contains(path, "/gateway")
 }
 
 func (m *mockTransparentModeProvider) IsUnauthenticatedPath(path string) bool {
-	// Default to requiring auth for tests
 	return false
 }
 
@@ -832,7 +835,7 @@ func TestIsTransparentRequest(t *testing.T) {
 		backend := &mockTransparentModeProvider{
 			transparentMode: false,
 			autoAuthPath:    "auth/jwt/",
-			defaultRole:     "default",
+			defaultAuthRole:     "default",
 		}
 		req := &logical.Request{Path: "role/terraform/gateway/v1/secret"}
 
@@ -845,7 +848,7 @@ func TestIsTransparentRequest(t *testing.T) {
 		backend := &mockTransparentModeProvider{
 			transparentMode: true,
 			autoAuthPath:    "auth/jwt/",
-			defaultRole:     "", // No default role
+			defaultAuthRole:     "", // No default role
 		}
 		req := &logical.Request{Path: "config"}
 
@@ -870,7 +873,7 @@ func TestIsTransparentRequest(t *testing.T) {
 		backend := &mockTransparentModeProvider{
 			transparentMode: true,
 			autoAuthPath:    "auth/jwt/",
-			defaultRole:     "default-role",
+			defaultAuthRole:     "default-role",
 		}
 		req := &logical.Request{Path: "gateway/v1/secret"}
 
@@ -917,7 +920,7 @@ func TestIsTransparentRequest(t *testing.T) {
 		backend := &mockTransparentModeProvider{
 			transparentMode: true,
 			autoAuthPath:    "auth/jwt/",
-			defaultRole:     "fallback",
+			defaultAuthRole:     "fallback",
 		}
 		httpReq := httptest.NewRequest(http.MethodGet, "/v1/vault/gateway/v1/secret", nil)
 		httpReq.Header.Set("X-Warden-Role", "terraform")

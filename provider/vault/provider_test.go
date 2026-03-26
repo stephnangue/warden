@@ -14,7 +14,7 @@ func TestTransparentModeProvider_ViaStreamingBackend(t *testing.T) {
 		TransparentConfig: &framework.TransparentConfig{
 			Enabled:      true,
 			AutoAuthPath: "auth/jwt/",
-			DefaultRole:  "default-role",
+			DefaultAuthRole:  "default-role",
 		},
 	}
 
@@ -48,12 +48,12 @@ func TestTransparentModeProvider_ViaStreamingBackend(t *testing.T) {
 	})
 }
 
-func TestGetTransparentRole_ViaStreamingBackend(t *testing.T) {
+func TestGetAuthRole_ViaStreamingBackend(t *testing.T) {
 	sb := &framework.StreamingBackend{
 		TransparentConfig: &framework.TransparentConfig{
 			Enabled:      true,
 			AutoAuthPath: "auth/jwt/",
-			DefaultRole:  "default-role",
+			DefaultAuthRole:  "default-role",
 		},
 	}
 
@@ -101,28 +101,28 @@ func TestGetTransparentRole_ViaStreamingBackend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := sb.GetTransparentRole(tt.path)
+			result := sb.GetAuthRole(tt.path)
 			assert.Equal(t, tt.expectedRole, result)
 		})
 	}
 }
 
-func TestGetTransparentRole_NoDefaultRole(t *testing.T) {
+func TestGetAuthRole_NoDefaultAuthRole(t *testing.T) {
 	sb := &framework.StreamingBackend{
 		TransparentConfig: &framework.TransparentConfig{
 			Enabled:      true,
 			AutoAuthPath: "auth/jwt/",
-			DefaultRole:  "", // No default role
+			DefaultAuthRole:  "", // No default role
 		},
 	}
 
 	t.Run("returns empty for non-matching path without default", func(t *testing.T) {
-		result := sb.GetTransparentRole("gateway/v1/secret/data/foo")
+		result := sb.GetAuthRole("gateway/v1/secret/data/foo")
 		assert.Empty(t, result)
 	})
 
 	t.Run("still extracts role from matching path", func(t *testing.T) {
-		result := sb.GetTransparentRole("role/terraform/gateway/v1/secret")
+		result := sb.GetAuthRole("role/terraform/gateway/v1/secret")
 		assert.Equal(t, "terraform", result)
 	})
 }
@@ -174,7 +174,7 @@ func TestRewriteTransparentPath_ViaStreamingBackend(t *testing.T) {
 	}
 }
 
-func TestDefaultTransparentRolePattern(t *testing.T) {
+func TestDefaultAuthRolePattern(t *testing.T) {
 	tests := []struct {
 		name         string
 		path         string
@@ -212,7 +212,7 @@ func TestDefaultTransparentRolePattern(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			matches := framework.DefaultTransparentRolePattern.FindStringSubmatch(tt.path)
+			matches := framework.DefaultAuthRolePattern.FindStringSubmatch(tt.path)
 			if tt.shouldMatch {
 				assert.NotNil(t, matches, "expected path to match: %s", tt.path)
 				if len(matches) > 1 {
@@ -236,13 +236,13 @@ func TestSetTransparentConfig(t *testing.T) {
 	sb.SetTransparentConfig(&framework.TransparentConfig{
 		Enabled:      true,
 		AutoAuthPath: "auth/oidc/",
-		DefaultRole:  "admin",
+		DefaultAuthRole:  "admin",
 	})
 
 	// Now should be enabled
 	assert.True(t, sb.IsTransparentMode())
 	assert.Equal(t, "auth/oidc/", sb.GetAutoAuthPath())
-	assert.Equal(t, "admin", sb.GetTransparentRole("config"))
+	assert.Equal(t, "admin", sb.GetAuthRole("config"))
 }
 
 func TestExtractToken(t *testing.T) {

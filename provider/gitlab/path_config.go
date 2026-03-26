@@ -71,7 +71,7 @@ func (b *gitlabBackend) handleConfigRead(_ context.Context, _ *logical.Request, 
 			"timeout":          b.Timeout.String(),
 			"transparent_mode": tc.Enabled,
 			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultRole,
+			"default_role":     tc.DefaultAuthRole,
 		},
 	}, nil
 }
@@ -105,7 +105,7 @@ func (b *gitlabBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 	tc := &framework.TransparentConfig{
 		Enabled:      b.TransparentConfig.Enabled,
 		AutoAuthPath: b.TransparentConfig.AutoAuthPath,
-		DefaultRole:  b.TransparentConfig.DefaultRole,
+		DefaultAuthRole: b.TransparentConfig.DefaultAuthRole,
 	}
 	if val, ok := d.GetOk("transparent_mode"); ok {
 		tc.Enabled = val.(bool)
@@ -114,7 +114,7 @@ func (b *gitlabBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 		tc.AutoAuthPath = val.(string)
 	}
 	if val, ok := d.GetOk("default_role"); ok {
-		tc.DefaultRole = val.(string)
+		tc.DefaultAuthRole = val.(string)
 	}
 
 	if tc.Enabled && tc.AutoAuthPath == "" {
@@ -134,7 +134,7 @@ func (b *gitlabBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 			"timeout":          b.Timeout.String(),
 			"transparent_mode": tc.Enabled,
 			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultRole,
+			"default_role":     tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return &logical.Response{

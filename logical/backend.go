@@ -119,15 +119,20 @@ type TransparentModeProvider interface {
 	// GetAutoAuthPath returns the auth mount path for implicit authentication (e.g., "auth/jwt/")
 	GetAutoAuthPath() string
 
-	// GetTransparentRole extracts the role name from the request path
-	// For path pattern /role/{role}/gateway/*, returns the role
-	// Returns empty string if path doesn't match transparent pattern
-	GetTransparentRole(path string) string
+	// GetAuthRole extracts the auth role name from the request path for implicit login.
+	// For path pattern /role/{role}/gateway/*, returns the auth role.
+	// Returns empty string if path doesn't match transparent pattern.
+	GetAuthRole(path string) string
 
 	// IsUnauthenticatedPath checks if a path can be accessed without authentication
 	// in transparent mode. Used for read-only endpoints that clients may access
 	// without sending tokens (e.g., PKI certificate PEM files).
 	IsUnauthenticatedPath(path string) bool
+
+	// IsTransparentPath checks if the given path (relative to mount) should trigger
+	// transparent authentication. Streaming backends match gateway paths;
+	// access backends match access/ paths.
+	IsTransparentPath(path string) bool
 }
 
 // StreamBodyParser can be implemented by streaming backends that want the core
