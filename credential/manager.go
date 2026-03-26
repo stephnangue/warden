@@ -139,8 +139,9 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 		return nil, fmt.Errorf("failed to get namespace from context: %w", err)
 	}
 
-	// Build namespace-aware cache key: {namespace-uuid}:{tokenID}
-	cacheKey := fmt.Sprintf("%s:%s", ns.ID, tokenID)
+	// Build namespace-aware cache key: {namespace-uuid}:{tokenID}:{specName}
+	// Including specName allows access backends to mint different specs for the same token.
+	cacheKey := fmt.Sprintf("%s:%s:%s", ns.ID, tokenID, specName)
 
 	// Check cache first
 	if cred, found := m.cache.Get(cacheKey); found {

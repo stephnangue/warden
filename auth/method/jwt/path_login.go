@@ -250,6 +250,30 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 		effectiveTTL = roleTTL
 	}
 
+	// Resolve group-based policies from JWT claims
+	policies := role.TokenPolicies
+	groupsClaim := role.GroupsClaim
+	if groupsClaim == "" {
+		groupsClaim = config.GroupsClaim
+	}
+	if groupsClaim != "" {
+		groups := extractGroupsClaim(claims, groupsClaim)
+		if len(groups) > 0 {
+			prefix := role.GroupPolicyPrefix
+			if prefix == "" {
+				prefix = config.GroupPolicyPrefix
+			}
+			if prefix == "" {
+				prefix = "group-"
+			}
+			groupPolicies := make([]string, len(groups))
+			for i, group := range groups {
+				groupPolicies[i] = prefix + group
+			}
+			policies = append(append([]string{}, policies...), groupPolicies...)
+		}
+	}
+
 	// Return auth response using role configuration.
 	// ClientToken carries the raw JWT so that LoginCreateToken can pass it to
 	// JWTRoleTokenType.Generate(), which hashes jwt+role to compute the
@@ -259,7 +283,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 		Auth: &logical.Auth{
 			PrincipalID:    principalID,
 			RoleName:       roleName,
-			Policies:       role.TokenPolicies,
+			Policies:       policies,
 			CredentialSpec: role.CredSpecName,
 			TokenType:      role.TokenType,
 			TokenTTL:       effectiveTTL,

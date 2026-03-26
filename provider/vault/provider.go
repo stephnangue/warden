@@ -101,7 +101,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		TransparentConfig: &framework.TransparentConfig{
 			Enabled:      false, // Updated via config write or Initialize
 			AutoAuthPath: "",
-			DefaultRole:  "",
+			DefaultAuthRole:  "",
 		},
 		Backend: &framework.Backend{
 			Help:           vaultBackendHelp,
@@ -168,7 +168,7 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 			TLSSkipVerify   bool   `json:"tls_skip_verify"`
 			TransparentMode bool   `json:"transparent_mode"`
 			AutoAuthPath    string `json:"auto_auth_path"`
-			DefaultRole     string `json:"default_role"`
+			DefaultAuthRole string `json:"default_role"`
 		}
 		if err := entry.DecodeJSON(&config); err != nil {
 			return fmt.Errorf("failed to decode config: %w", err)
@@ -190,7 +190,7 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			Enabled:      config.TransparentMode,
 			AutoAuthPath: config.AutoAuthPath,
-			DefaultRole:  config.DefaultRole,
+			DefaultAuthRole: config.DefaultAuthRole,
 		})
 	}
 	return nil

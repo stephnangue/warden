@@ -68,8 +68,12 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			},
 			"groups_claim": {
 				Type:        framework.TypeString,
-				Description: "Claim to use for groups (default: groups)",
-				Default:     "groups",
+				Description: "JWT claim containing group names for dynamic policy mapping. Empty disables group-based policies.",
+			},
+			"group_policy_prefix": {
+				Type:        framework.TypeString,
+				Description: "Prefix prepended to each group name to form the policy name (default: group-)",
+				Default:     "group-",
 			},
 			"token_ttl": {
 				Type:        framework.TypeDurationSecond,
@@ -136,8 +140,9 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 			"bound_claims":           b.config.BoundClaims,
 			"claim_mappings":         b.config.ClaimMappings,
 			"user_claim":   b.config.UserClaim,
-			"groups_claim": b.config.GroupsClaim,
-			"token_ttl":    b.config.TokenTTL.String(),
+			"groups_claim":        b.config.GroupsClaim,
+			"group_policy_prefix": b.config.GroupPolicyPrefix,
+			"token_ttl":           b.config.TokenTTL.String(),
 			"token_type":   helper.DisplayTokenType(b.config.TokenType),
 			"default_role": b.config.DefaultRole,
 		},
@@ -165,6 +170,7 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		conf["claim_mappings"] = b.config.ClaimMappings
 		conf["user_claim"] = b.config.UserClaim
 		conf["groups_claim"] = b.config.GroupsClaim
+		conf["group_policy_prefix"] = b.config.GroupPolicyPrefix
 		conf["token_ttl"] = b.config.TokenTTL
 		conf["token_type"] = b.config.TokenType
 		conf["default_role"] = b.config.DefaultRole
@@ -210,6 +216,7 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 			"claim_mappings":         b.config.ClaimMappings,
 			"user_claim":             b.config.UserClaim,
 			"groups_claim":           b.config.GroupsClaim,
+			"group_policy_prefix":   b.config.GroupPolicyPrefix,
 			"token_ttl":              b.config.TokenTTL.String(),
 			"token_type":             b.config.TokenType,
 			"default_role": b.config.DefaultRole,

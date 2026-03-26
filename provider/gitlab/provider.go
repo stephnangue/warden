@@ -69,9 +69,9 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			},
 		},
 		TransparentConfig: &framework.TransparentConfig{
-			Enabled:      false,
-			AutoAuthPath: "",
-			DefaultRole:  "",
+			Enabled:         false,
+			AutoAuthPath:    "",
+			DefaultAuthRole: "",
 		},
 		Backend: &framework.Backend{
 			Help:           gitlabBackendHelp,
@@ -133,7 +133,7 @@ func (b *gitlabBackend) Initialize(ctx context.Context) error {
 			Timeout         string `json:"timeout"`
 			TransparentMode bool   `json:"transparent_mode"`
 			AutoAuthPath    string `json:"auto_auth_path"`
-			DefaultRole     string `json:"default_role"`
+			DefaultAuthRole string `json:"default_role"`
 		}
 		if err := entry.DecodeJSON(&config); err != nil {
 			return fmt.Errorf("failed to decode config: %w", err)
@@ -149,7 +149,7 @@ func (b *gitlabBackend) Initialize(ctx context.Context) error {
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			Enabled:      config.TransparentMode,
 			AutoAuthPath: config.AutoAuthPath,
-			DefaultRole:  config.DefaultRole,
+			DefaultAuthRole: config.DefaultAuthRole,
 		})
 	}
 	return nil

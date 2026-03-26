@@ -65,7 +65,7 @@ func (b *azureBackend) handleConfigRead(ctx context.Context, req *logical.Reques
 			"timeout":          b.Timeout.String(),
 			"transparent_mode": tc.Enabled,
 			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultRole,
+			"default_role":     tc.DefaultAuthRole,
 		},
 	}, nil
 }
@@ -91,7 +91,7 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 	tc := &framework.TransparentConfig{
 		Enabled:      b.TransparentConfig.Enabled,
 		AutoAuthPath: b.TransparentConfig.AutoAuthPath,
-		DefaultRole:  b.TransparentConfig.DefaultRole,
+		DefaultAuthRole: b.TransparentConfig.DefaultAuthRole,
 	}
 	if val, ok := d.GetOk("transparent_mode"); ok {
 		tc.Enabled = val.(bool)
@@ -100,7 +100,7 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 		tc.AutoAuthPath = val.(string)
 	}
 	if val, ok := d.GetOk("default_role"); ok {
-		tc.DefaultRole = val.(string)
+		tc.DefaultAuthRole = val.(string)
 	}
 
 
@@ -121,7 +121,7 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 			"timeout":          b.Timeout.String(),
 			"transparent_mode": tc.Enabled,
 			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultRole,
+			"default_role":     tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return &logical.Response{

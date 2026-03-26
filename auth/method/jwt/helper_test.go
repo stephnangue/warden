@@ -461,3 +461,74 @@ func TestExtractClaim_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractGroupsClaim(t *testing.T) {
+	tests := []struct {
+		name     string
+		claims   map[string]interface{}
+		claim    string
+		expected []string
+	}{
+		{
+			name:     "string array",
+			claims:   map[string]interface{}{"groups": []interface{}{"db-read", "monitoring"}},
+			claim:    "groups",
+			expected: []string{"db-read", "monitoring"},
+		},
+		{
+			name:     "single string",
+			claims:   map[string]interface{}{"role": "admin"},
+			claim:    "role",
+			expected: []string{"admin"},
+		},
+		{
+			name:     "comma-separated string",
+			claims:   map[string]interface{}{"groups": "db-read,monitoring, admin"},
+			claim:    "groups",
+			expected: []string{"db-read", "monitoring", "admin"},
+		},
+		{
+			name:     "missing claim",
+			claims:   map[string]interface{}{"sub": "user1"},
+			claim:    "groups",
+			expected: nil,
+		},
+		{
+			name:     "empty string",
+			claims:   map[string]interface{}{"groups": ""},
+			claim:    "groups",
+			expected: nil,
+		},
+		{
+			name:     "empty array",
+			claims:   map[string]interface{}{"groups": []interface{}{}},
+			claim:    "groups",
+			expected: []string{},
+		},
+		{
+			name:     "array with non-string elements skipped",
+			claims:   map[string]interface{}{"groups": []interface{}{"admin", 42, "reader"}},
+			claim:    "groups",
+			expected: []string{"admin", "reader"},
+		},
+		{
+			name:     "non-string non-array type returns nil",
+			claims:   map[string]interface{}{"groups": 42},
+			claim:    "groups",
+			expected: nil,
+		},
+		{
+			name:     "cognito:groups nested claim name",
+			claims:   map[string]interface{}{"cognito:groups": []interface{}{"db-read"}},
+			claim:    "cognito:groups",
+			expected: []string{"db-read"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := extractGroupsClaim(tc.claims, tc.claim)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}

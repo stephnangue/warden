@@ -2,6 +2,8 @@ package logical
 
 import (
 	"net/http"
+
+	"github.com/stephnangue/warden/credential"
 )
 
 // Response is a struct that holds the response from a logical backend.
@@ -11,6 +13,11 @@ type Response struct {
 	// Auth, if not nil, contains the authentication information for
 	// this response.
 	Auth *Auth `json:"auth" structs:"auth" mapstructure:"auth"`
+
+	// AccessData, if not nil, signals the core to mint a credential and let
+	// the backend format the response. Mirrors Auth: the backend declares what
+	// it needs, the core handles minting. Cleared before the HTTP response.
+	AccessData *AccessData `json:"-"`
 
 	// StatusCode is the HTTP status code for the response.
 	StatusCode int
@@ -36,6 +43,20 @@ type Response struct {
 
 	// Warnings contains any warnings generated during processing
 	Warnings []string
+}
+
+// AccessData is returned by access backends to request credential minting.
+// Mirrors Auth: the backend declares what it needs, the core handles minting.
+// ResponseBuilder lets each backend own its response format (connection string,
+// presigned URL, raw credentials, etc.) — the core never interprets the output.
+type AccessData struct {
+	// CredentialSpec is the name of the credential spec to mint.
+	CredentialSpec string
+
+	// ResponseBuilder formats the minted credential into the final response data.
+	// The backend closes over its role config and produces whatever fields make sense
+	// for the access type (e.g., "connection_string" for databases, "presigned_url" for S3).
+	ResponseBuilder func(cred *credential.Credential) map[string]interface{}
 }
 
 // NewResponse creates a new Response with default values.

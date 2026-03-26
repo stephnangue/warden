@@ -39,7 +39,8 @@ type JWTAuthConfig struct {
 	BoundClaims    map[string]any    `json:"bound_claims,omitempty"`
 	ClaimMappings  map[string]string `json:"claim_mappings,omitempty"`
 	UserClaim      string            `json:"user_claim,omitempty" default:"sub"`
-	GroupsClaim    string            `json:"groups_claim,omitempty" default:"groups"`
+	GroupsClaim       string            `json:"groups_claim,omitempty"`
+	GroupPolicyPrefix string            `json:"group_policy_prefix,omitempty"`
 
 	// Token settings
 	TokenTTL  time.Duration `json:"token_ttl" default:"1h"`

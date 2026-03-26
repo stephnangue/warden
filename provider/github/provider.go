@@ -69,9 +69,9 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			},
 		},
 		TransparentConfig: &framework.TransparentConfig{
-			Enabled:      false,
-			AutoAuthPath: "",
-			DefaultRole:  "",
+			Enabled:         false,
+			AutoAuthPath:    "",
+			DefaultAuthRole: "",
 		},
 		Backend: &framework.Backend{
 			Help:           githubBackendHelp,
@@ -118,7 +118,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			Enabled:      parsedConfig.TransparentMode,
 			AutoAuthPath: parsedConfig.AutoAuthPath,
-			DefaultRole:  parsedConfig.DefaultRole,
+			DefaultAuthRole: parsedConfig.DefaultAuthRole,
 		})
 	}
 
@@ -143,7 +143,7 @@ func (b *githubBackend) Initialize(ctx context.Context) error {
 			APIVersion      string `json:"api_version"`
 			TransparentMode bool   `json:"transparent_mode"`
 			AutoAuthPath    string `json:"auto_auth_path"`
-			DefaultRole     string `json:"default_role"`
+			DefaultAuthRole string `json:"default_role"`
 		}
 		if err := entry.DecodeJSON(&config); err != nil {
 			return fmt.Errorf("failed to decode config: %w", err)
@@ -164,7 +164,7 @@ func (b *githubBackend) Initialize(ctx context.Context) error {
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			Enabled:      config.TransparentMode,
 			AutoAuthPath: config.AutoAuthPath,
-			DefaultRole:  config.DefaultRole,
+			DefaultAuthRole: config.DefaultAuthRole,
 		})
 	} else {
 		// No persisted config — persist defaults
@@ -176,7 +176,7 @@ func (b *githubBackend) Initialize(ctx context.Context) error {
 			"api_version":      b.apiVersion,
 			"transparent_mode": tc.Enabled,
 			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultRole,
+			"default_role":     tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create default config entry: %w", err)

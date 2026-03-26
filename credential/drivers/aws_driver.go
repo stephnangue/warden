@@ -10,6 +10,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	rdsauth "github.com/aws/aws-sdk-go-v2/feature/rds/auth"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -231,8 +232,10 @@ func (d *AWSDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 		return d.mintViaSTSAssumeRole(ctx, spec)
 	case "secrets_manager":
 		return d.mintViaSecretsManager(ctx, spec)
+	case "rds_iam_token":
+		return d.mintViaRDSIAMToken(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for AWS driver; use 'sts_assume_role' or 'secrets_manager'", mintMethod)
+		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for AWS driver; use 'sts_assume_role', 'secrets_manager', or 'rds_iam_token'", mintMethod)
 	}
 }
 
@@ -370,6 +373,53 @@ func applyKeyMap(data map[string]interface{}, keyMapStr string) map[string]inter
 		}
 	}
 	return result
+}
+
+// mintViaRDSIAMToken generates a short-lived IAM authentication token for RDS.
+// The token is a pre-signed STS GetCallerIdentity URL that RDS accepts as a password.
+// This is a local SigV4 signing operation — no network call to RDS.
+func (d *AWSDriver) mintViaRDSIAMToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	dbEndpoint, err := credential.GetStringRequired(spec.Config, "db_endpoint")
+	if err != nil {
+		return nil, 0, "", err
+	}
+	dbUser, err := credential.GetStringRequired(spec.Config, "db_user")
+	if err != nil {
+		return nil, 0, "", err
+	}
+
+	dbEngine := credential.GetString(spec.Config, "db_engine", "postgres")
+	dbPort := credential.GetString(spec.Config, "db_port", defaultPortForEngine(dbEngine))
+	region := credential.GetString(spec.Config, "region", d.region)
+
+	endpoint := fmt.Sprintf("%s:%s", dbEndpoint, dbPort)
+
+	token, err := rdsauth.BuildAuthToken(ctx, endpoint, region, dbUser, d.baseCreds)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("failed to build RDS IAM auth token: %w", err)
+	}
+
+	rawData := map[string]interface{}{
+		"auth_token": token,
+		"db_host":    dbEndpoint,
+		"db_port":    dbPort,
+		"db_user":    dbUser,
+		"db_engine":  dbEngine,
+		"region":     region,
+		"token_type": "rds_iam",
+	}
+
+	if d.logger != nil {
+		d.logger.Debug("generated RDS IAM auth token",
+			logger.String("spec", spec.Name),
+			logger.String("endpoint", endpoint),
+			logger.String("db_user", dbUser),
+			logger.String("region", region),
+		)
+	}
+
+	// RDS IAM tokens are valid for 15 minutes
+	return rawData, 15 * time.Minute, "", nil
 }
 
 // Revoke attempts to revoke a credential (best-effort)
