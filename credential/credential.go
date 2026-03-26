@@ -15,6 +15,7 @@ const (
 	TypeGitLabAccessToken = "gitlab_access_token"
 	TypeGitHubToken       = "github_token"
 	TypeAIAPIKey          = "ai_api_key"
+	TypeDBAuthToken       = "db_auth_token"
 )
 
 // Source type constants

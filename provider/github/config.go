@@ -24,7 +24,7 @@ type ProviderConfig struct {
 	APIVersion      string
 	TransparentMode bool
 	AutoAuthPath    string
-	DefaultRole     string
+	DefaultAuthRole string
 }
 
 // parseConfig parses configuration from mount config (map[string]any from JSON)
@@ -96,7 +96,7 @@ func parseConfig(conf map[string]any) ProviderConfig {
 		config.AutoAuthPath = aap
 	}
 	if dr, ok := conf["default_role"].(string); ok {
-		config.DefaultRole = dr
+		config.DefaultAuthRole = dr
 	}
 
 	return config

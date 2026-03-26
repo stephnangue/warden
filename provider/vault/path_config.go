@@ -77,7 +77,7 @@ func (b *vaultBackend) handleConfigRead(ctx context.Context, req *logical.Reques
 			"tls_skip_verify":  b.tlsSkipVerify,
 			"transparent_mode": tc.Enabled,
 			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultRole,
+			"default_role":     tc.DefaultAuthRole,
 		},
 	}, nil
 }
@@ -127,7 +127,7 @@ func (b *vaultBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 	tc := &framework.TransparentConfig{
 		Enabled:      b.TransparentConfig.Enabled,
 		AutoAuthPath: b.TransparentConfig.AutoAuthPath,
-		DefaultRole:  b.TransparentConfig.DefaultRole,
+		DefaultAuthRole:  b.TransparentConfig.DefaultAuthRole,
 	}
 	if val, ok := d.GetOk("transparent_mode"); ok {
 		tc.Enabled = val.(bool)
@@ -136,7 +136,7 @@ func (b *vaultBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 		tc.AutoAuthPath = val.(string)
 	}
 	if val, ok := d.GetOk("default_role"); ok {
-		tc.DefaultRole = val.(string)
+		tc.DefaultAuthRole = val.(string)
 	}
 
 
@@ -159,7 +159,7 @@ func (b *vaultBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 			"tls_skip_verify":  b.tlsSkipVerify,
 			"transparent_mode": tc.Enabled,
 			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultRole,
+			"default_role":     tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return &logical.Response{

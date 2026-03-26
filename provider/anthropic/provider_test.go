@@ -104,7 +104,7 @@ func TestParseConfig(t *testing.T) {
 		})
 		assert.True(t, config.TransparentMode)
 		assert.Equal(t, "auth/jwt/", config.AutoAuthPath)
-		assert.Equal(t, "reader", config.DefaultRole)
+		assert.Equal(t, "reader", config.DefaultAuthRole)
 	})
 }
 

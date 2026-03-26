@@ -28,14 +28,14 @@ const (
 	DefaultTimeout     = 30 * time.Second
 )
 
-// DefaultTransparentRolePattern is the default pattern for extracting role from transparent paths.
-// Matches: role/{role}/gateway... and extracts the role name.
-var DefaultTransparentRolePattern = regexp.MustCompile(`^role/([^/]+)/gateway`)
+// DefaultAuthRolePattern is the default pattern for extracting the auth role from transparent paths.
+// Matches: role/{role}/gateway... and extracts the auth role name.
+var DefaultAuthRolePattern = regexp.MustCompile(`^role/([^/]+)/gateway`)
 
 // DefaultPathRewriter rewrites transparent paths to standard paths.
 // Converts: role/X/gateway/... -> gateway/...
 func DefaultPathRewriter(path string) string {
-	return DefaultTransparentRolePattern.ReplaceAllString(path, "gateway")
+	return DefaultAuthRolePattern.ReplaceAllString(path, "gateway")
 }
 
 // TransparentConfig holds declarative transparent mode configuration.
@@ -48,13 +48,13 @@ type TransparentConfig struct {
 	// AutoAuthPath is the auth mount path for implicit authentication (e.g., "auth/jwt/")
 	AutoAuthPath string
 
-	// DefaultRole is the role to use when not specified in URL path
-	DefaultRole string
+	// DefaultAuthRole is the auth role to use when not specified in URL path
+	DefaultAuthRole string
 
-	// RolePattern is the regex pattern to extract role from path (optional)
-	// If nil, uses DefaultTransparentRolePattern: `^role/([^/]+)/gateway`
-	// First capture group is used as the role name
-	RolePattern *regexp.Regexp
+	// AuthRolePattern is the regex pattern to extract the auth role from path (optional)
+	// If nil, uses DefaultAuthRolePattern: `^role/([^/]+)/gateway`
+	// First capture group is used as the auth role name
+	AuthRolePattern *regexp.Regexp
 
 	// PathRewriter converts transparent paths to standard paths (optional)
 	// If nil, uses DefaultPathRewriter: role/X/gateway/... -> gateway/...
@@ -507,23 +507,23 @@ func (b *StreamingBackend) GetAutoAuthPath() string {
 	return b.TransparentConfig.AutoAuthPath
 }
 
-// GetTransparentRole extracts the role name from the request path
-func (b *StreamingBackend) GetTransparentRole(path string) string {
+// GetAuthRole extracts the auth role name from the request path for implicit login.
+func (b *StreamingBackend) GetAuthRole(path string) string {
 	if b.TransparentConfig == nil {
 		return ""
 	}
 
 	// Use custom pattern or default
-	pattern := b.TransparentConfig.RolePattern
+	pattern := b.TransparentConfig.AuthRolePattern
 	if pattern == nil {
-		pattern = DefaultTransparentRolePattern
+		pattern = DefaultAuthRolePattern
 	}
 
 	matches := pattern.FindStringSubmatch(path)
 	if len(matches) > 1 {
-		return matches[1] // First capture group is the role
+		return matches[1] // First capture group is the auth role
 	}
-	return b.TransparentConfig.DefaultRole
+	return b.TransparentConfig.DefaultAuthRole
 }
 
 // RewriteTransparentPath rewrites a transparent path to standard path
@@ -604,6 +604,13 @@ func (b *StreamingBackend) initUnauthPaths() {
 		paths:         tree,
 		wildcardPaths: wildcards,
 	}
+}
+
+// IsTransparentPath checks if the given path should trigger transparent authentication.
+// For streaming backends, this matches gateway paths: "gateway", "gateway/...",
+// "role/X/gateway", "role/X/gateway/...".
+func (b *StreamingBackend) IsTransparentPath(path string) bool {
+	return strings.HasPrefix(path, "gateway") || strings.Contains(path, "/gateway")
 }
 
 // IsUnauthenticatedPath checks if the path matches an unauthenticated pattern.

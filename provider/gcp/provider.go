@@ -69,9 +69,9 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			},
 		},
 		TransparentConfig: &framework.TransparentConfig{
-			Enabled:      false, // Updated via config write or Initialize
-			AutoAuthPath: "",
-			DefaultRole:  "",
+			Enabled:         false, // Updated via config write or Initialize
+			AutoAuthPath:    "",
+			DefaultAuthRole: "",
 		},
 		Backend: &framework.Backend{
 			Help:           gcpBackendHelp,
@@ -114,7 +114,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			Enabled:      parsedConfig.TransparentMode,
 			AutoAuthPath: parsedConfig.AutoAuthPath,
-			DefaultRole:  parsedConfig.DefaultRole,
+			DefaultAuthRole: parsedConfig.DefaultAuthRole,
 		})
 	}
 
@@ -138,7 +138,7 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 			Timeout         string `json:"timeout"`
 			TransparentMode bool   `json:"transparent_mode"`
 			AutoAuthPath    string `json:"auto_auth_path"`
-			DefaultRole     string `json:"default_role"`
+			DefaultAuthRole string `json:"default_role"`
 		}
 		if err := entry.DecodeJSON(&config); err != nil {
 			return fmt.Errorf("failed to decode config: %w", err)
@@ -153,7 +153,7 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			Enabled:      config.TransparentMode,
 			AutoAuthPath: config.AutoAuthPath,
-			DefaultRole:  config.DefaultRole,
+			DefaultAuthRole: config.DefaultAuthRole,
 		})
 	} else {
 		// No persisted config — persist the defaults so a newly enabled
@@ -164,7 +164,7 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 			"timeout":          b.Timeout.String(),
 			"transparent_mode": tc.Enabled,
 			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultRole,
+			"default_role":     tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create default config entry: %w", err)

@@ -17,8 +17,10 @@ type JWTRole struct {
 	TokenTTL         string         `json:"token_ttl"`
 	TokenType        string         `json:"token_type,omitempty"`
 	UserClaim        string         `json:"user_claim,omitempty"`
-	CredSpecName     string         `json:"cred_spec_name,omitempty"`
-	MaxAge           string         `json:"max_age,omitempty"`            // Max time since iat (e.g. "30m", "1h"). Empty = no check.
+	CredSpecName      string         `json:"cred_spec_name,omitempty"`
+	GroupsClaim       string         `json:"groups_claim,omitempty"`       // Override global groups_claim for this role
+	GroupPolicyPrefix string         `json:"group_policy_prefix,omitempty"` // Override global group_policy_prefix for this role
+	MaxAge            string         `json:"max_age,omitempty"`            // Max time since iat (e.g. "30m", "1h"). Empty = no check.
 }
 
 // ParseTokenTTL parses the TokenTTL string to a time.Duration.

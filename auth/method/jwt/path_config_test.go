@@ -137,7 +137,10 @@ func TestPathConfig_DefaultValues(t *testing.T) {
 	assert.Equal(t, "sub", userClaimField.Default)
 
 	groupsClaimField := path.Fields["groups_claim"]
-	assert.Equal(t, "groups", groupsClaimField.Default)
+	assert.Nil(t, groupsClaimField.Default) // empty = disabled
+
+	groupPolicyPrefixField := path.Fields["group_policy_prefix"]
+	assert.Equal(t, "group-", groupPolicyPrefixField.Default)
 }
 
 func TestPathConfig_Operations(t *testing.T) {

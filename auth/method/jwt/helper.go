@@ -100,3 +100,41 @@ func extractClaim(claims map[string]interface{}, claimName string) string {
 	}
 	return ""
 }
+
+// extractGroupsClaim extracts a string slice from a JWT claim.
+// Handles: []interface{} (standard JSON array), string (single group),
+// and comma-separated string.
+func extractGroupsClaim(claims map[string]interface{}, claimName string) []string {
+	value, ok := claims[claimName]
+	if !ok {
+		return nil
+	}
+
+	switch v := value.(type) {
+	case []interface{}:
+		groups := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				groups = append(groups, s)
+			}
+		}
+		return groups
+	case string:
+		if v == "" {
+			return nil
+		}
+		if strings.Contains(v, ",") {
+			parts := strings.Split(v, ",")
+			groups := make([]string, 0, len(parts))
+			for _, p := range parts {
+				if s := strings.TrimSpace(p); s != "" {
+					groups = append(groups, s)
+				}
+			}
+			return groups
+		}
+		return []string{v}
+	default:
+		return nil
+	}
+}
