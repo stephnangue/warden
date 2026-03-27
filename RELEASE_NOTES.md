@@ -1,55 +1,41 @@
-## Warden v0.1.0 — Initial Release
+## Warden v0.6.0
 
-Warden is an identity-aware egress gateway for cloud and SaaS services. Your workloads authenticate with a single JWT; Warden injects short-lived credentials on the fly, enforces fine-grained policies, and logs every API call. No secrets ever reach your applications.
+Warden is an identity-based access layer for cloud APIs, SaaS platforms, databases, and AI providers. It eliminates static credentials from your workloads entirely. Your workload authenticates to Warden with its own identity — a JWT from your identity provider or a TLS certificate. Warden verifies who is calling, evaluates fine-grained capability-based policies, and issues ephemeral request-scoped access: forwarding API requests with short-lived credentials injected, returning database auth tokens, or vending pre-signed URLs. Credentials are minted on demand, scoped to the request, and never exposed to the caller. Every API call is logged with caller identity, target service, and full request context. No secrets ever reach your applications.
+
+### What's New
+
+**Transparent mode is the only mode.** There is no longer a separate "explicit login" flow. Clients pass their JWT or certificate directly to the gateway endpoint — Warden handles authentication implicitly on every request.
 
 ### Providers
 
-| Provider | Transparent Mode | Explicit Mode |
-|----------|:---:|:---:|
-| AWS | — | Yes |
-| Azure | Yes | Yes |
-| GCP | Yes | Yes |
-| GitHub | Yes | Yes |
-| GitLab | Yes | Yes |
-| Vault / OpenBao | Yes | Yes |
+| Provider | Gateway | Credential Type |
+|----------|:---:|---|
+| AWS | Streaming (SigV4) | Access keys via STS or static |
+| Azure | Streaming | OAuth2 tokens |
+| GCP | Streaming | OAuth2 tokens |
+| GitHub | Streaming | Installation tokens |
+| GitLab | Streaming | Project/group tokens |
+| Vault / OpenBao | Streaming | Dynamic Vault tokens |
+| Anthropic | Streaming | API keys |
+| OpenAI | Streaming | API keys |
+| Mistral | Streaming | API keys |
+| **RDS** *(new)* | **Access** | **IAM auth tokens** |
 
-- **Transparent mode** — Single round-trip: JWT in, provider API response out. Works for any provider that uses bearer tokens.
-- **Explicit mode** — Two-step flow required for AWS (SigV4 signing). The caller authenticates first, receives an IP-bound session token pair, then uses it for subsequent requests.
+- **Streaming providers** proxy requests through Warden, injecting credentials in-flight.
+- **Access providers** vend credentials directly (database auth tokens, pre-signed URLs).
 
-### Core Features
+### Breaking Changes
 
-- **Zero credential exposure** — Credentials never leave Warden. Workloads never see or store secrets.
-- **Request-level audit trail** — Every API call is logged with caller identity, target service, HTTP method/path, and timestamp. Supports file, syslog, and socket audit sinks.
-- **Fine-grained policy enforcement** — Capability-based policies at the HTTP path and method level. Restrict a GitHub token to `src/` while blocking `.github/workflows/`, or block destructive AWS operations regardless of IAM permissions.
-- **Unified identity model** — One JWT authenticates across all providers. No per-provider identity mapping.
-- **IP-bound sessions** — Sessions are tied to the caller's IP address. Stolen tokens are useless from a different machine.
-- **Two-stage credential rotation** — PREPARE (mint new) then ACTIVATE (commit and destroy old). Configurable propagation delay for eventually-consistent providers (AWS, Azure).
-- **Seal/unseal model** — Envelope encryption for secrets at rest. Dev mode (in-memory) and production mode with Shamir, Transit, AWS KMS, GCP KMS, Azure Key Vault, OCI KMS, PKCS11, and KMIP seal types.
-- **Namespace isolation** — Credential sources, policies, and mount points are scoped to namespaces with hard boundaries.
+- **`token_type` removed** — The `token_type` field on auth method configs and roles no longer exists. All roles use the transparent type (`jwt_role` or `cert_role`) automatically.
+- **Explicit login blocked** — `/auth/jwt/login` and `/auth/cert/login` return `400`. Use the gateway endpoint directly.
+- **`transparent_mode` config removed** — Remove `"transparent_mode": true` from provider configs. The `auto_auth_path` field (required) controls authentication.
+- **`warden_crypto_token` removed** — Self-contained encrypted tokens are no longer supported.
 
-### Authentication
+### New Features
 
-- JWT auth method with configurable JWKS validation
-
-### Storage Backends
-
-- In-memory (dev mode)
-- File
-- PostgreSQL (production)
-
-### Operations
-
-- CLI with `server`, `operator`, `login`, `providers`, `auth`, `audit`, `namespaces`, `policies`, and `cred` commands
-- Docker image based on distroless (published to `ghcr.io/stephnangue/warden`)
-- HCL configuration files
-- Dev mode for quick exploration (in-memory, auto-init, auto-unseal)
-
-### Binaries
-
-Pre-built binaries are available for:
-- Linux (amd64, arm64)
-- macOS (amd64, arm64)
-- Windows (amd64)
+- **AWS Transparent Mode** — AWS SDK clients authenticate via JWT or TLS certificate. Warden intercepts SigV4-signed requests, verifies the client signature, then re-signs with real AWS credentials. Supports `aws-chunked` streaming uploads.
+- **RDS Provider** — Issues short-lived IAM authentication tokens for PostgreSQL, MySQL, and SQL Server on RDS/Aurora.
+- **TLS in Dev Mode** — `--dev-tls` generates a self-signed certificate at startup for HTTPS development.
 
 ### Getting Started
 
@@ -58,6 +44,7 @@ You need two things: the **Warden binary** (from the assets below) and the **qui
 ```bash
 # 1. Download the binary for your platform from the assets below and make it executable
 chmod +x warden
+export PATH="$PWD:$PATH"
 
 # 2. Download the quick start compose file
 curl -fsSL -o docker-compose.quickstart.yml \
@@ -68,17 +55,17 @@ docker compose -f docker-compose.quickstart.yml up -d
 
 # 4. Start Warden in dev mode
 ./warden server --dev
-
-# 5. In another terminal, get a JWT from Hydra
-curl -s -X POST http://localhost:4444/oauth2/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write"
-
-# 6. Use the JWT with Warden
-export WARDEN_ADDR="http://127.0.0.1:8400"
-export WARDEN_TOKEN="<root-token-from-warden-output>"
-./warden --help
 ```
+
+In a second terminal:
+
+```bash
+export PATH="$PWD:$PATH"
+export WARDEN_ADDR="http://127.0.0.1:8400"
+export WARDEN_TOKEN="root"
+```
+
+Follow any [provider README](https://github.com/stephnangue/warden#providers) to set up JWT auth, mount a provider, and make your first gateway request.
 
 **Pre-configured OAuth2 clients:**
 
