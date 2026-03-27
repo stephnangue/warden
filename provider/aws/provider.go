@@ -32,9 +32,17 @@ type awsBackend struct {
 	processorRegistry *processor.ProcessorRegistry
 }
 
-// extractToken extracts Access Key ID from AWS SigV4 Authorization header
+// extractToken extracts the client token from the request.
+// Handles three modes:
+//   - JWT transparent: JWT in X-Amz-Security-Token (core detects "eyJ" prefix)
+//   - Regular mode: access_key_id (Warden token with AKIA prefix) from SigV4 header
+//   - Cert transparent: access_key_id (role name) from SigV4 header
 func extractToken(r *http.Request) string {
-	// Format: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20231215/...
+	// JWT transparent mode: JWT in X-Amz-Security-Token
+	if secToken := r.Header.Get("X-Amz-Security-Token"); strings.HasPrefix(secToken, "eyJ") {
+		return secToken
+	}
+	// Regular mode or cert transparent: access_key_id from SigV4 header
 	authHeader := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authHeader, "AWS4-HMAC-SHA256") {
 		return ""
@@ -62,6 +70,22 @@ func extractAccessKeyID(authHeader string) string {
 	}
 
 	return authHeader[start : start+end]
+}
+
+// Compile-time interface assertion
+var _ logical.TransparentAuthRoleExtractor = (*awsBackend)(nil)
+
+// GetAuthRoleFromRequest extracts the auth role from the SigV4 Authorization header.
+// Returns (role, true) for transparent requests where access_key_id is a role name.
+// Returns ("", false) for explicit auth where access_key_id is a Warden token (AKIA prefix).
+func (b *awsBackend) GetAuthRoleFromRequest(r *http.Request) (string, bool) {
+	accessKeyID := extractAccessKeyID(r.Header.Get("Authorization"))
+	// AKIA prefix = Warden-issued AWS token (explicit auth) → not transparent
+	if accessKeyID == "" || strings.HasPrefix(accessKeyID, "AKIA") {
+		return "", false
+	}
+	// access_key_id is a role name → transparent mode
+	return accessKeyID, true
 }
 
 // Factory creates a new AWS provider backend using the logical.Factory pattern
@@ -92,6 +116,11 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				HelpSynopsis:    "AWS Gateway proxy",
 				HelpDescription: "Proxies requests to AWS services with signature verification",
 			},
+		},
+		TransparentConfig: &framework.TransparentConfig{
+			Enabled:         false, // Updated via config write or Initialize
+			AutoAuthPath:    "",
+			DefaultAuthRole: "",
 		},
 		Backend: &framework.Backend{
 			Help:           awsBackendHelp,
@@ -154,9 +183,12 @@ func (b *awsBackend) Initialize(ctx context.Context) error {
 	}
 	if entry != nil {
 		var config struct {
-			ProxyDomains []string `json:"proxy_domains"`
-			MaxBodySize  int64    `json:"max_body_size"`
-			Timeout      string   `json:"timeout"`
+			ProxyDomains    []string `json:"proxy_domains"`
+			MaxBodySize     int64    `json:"max_body_size"`
+			Timeout         string   `json:"timeout"`
+			TransparentMode bool     `json:"transparent_mode"`
+			AutoAuthPath    string   `json:"auto_auth_path"`
+			DefaultAuthRole string   `json:"default_role"`
 		}
 		if err := entry.DecodeJSON(&config); err != nil {
 			return fmt.Errorf("failed to decode config: %w", err)
@@ -169,6 +201,12 @@ func (b *awsBackend) Initialize(ctx context.Context) error {
 			}
 		}
 		b.initializeProcessors()
+
+		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
+			Enabled:         config.TransparentMode,
+			AutoAuthPath:    config.AutoAuthPath,
+			DefaultAuthRole: config.DefaultAuthRole,
+		})
 	}
 	return nil
 }
@@ -199,15 +237,18 @@ func (b *awsBackend) initializeProcessors() {
 // ValidateConfig validates AWS provider-specific configuration
 func ValidateConfig(config map[string]any) error {
 	allowedKeys := map[string]bool{
-		"proxy_domains": true,
-		"max_body_size": true,
-		"timeout":       true,
+		"proxy_domains":    true,
+		"max_body_size":    true,
+		"timeout":          true,
+		"transparent_mode": true,
+		"auto_auth_path":   true,
+		"default_role":     true,
 	}
 
 	// Check for unknown keys
 	for key := range config {
 		if !allowedKeys[key] {
-			return fmt.Errorf("unknown configuration key: %s (allowed: proxy_domains, max_body_size, timeout)", key)
+			return fmt.Errorf("unknown configuration key: %s (allowed: proxy_domains, max_body_size, timeout, transparent_mode, auto_auth_path, default_role)", key)
 		}
 	}
 

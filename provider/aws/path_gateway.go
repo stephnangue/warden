@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -26,29 +25,6 @@ var (
 	signRegex          = regexp.MustCompile(`Signature=([a-f0-9]+)`)
 	signedHeadersRegex = regexp.MustCompile(`SignedHeaders=([^,]+)`)
 )
-
-// Hop-by-hop headers that should not be included in signatures
-// These are defined in RFC 2616 Section 13.5.1 and should be removed before re-signing
-var hopByHopHeaders = []string{
-	"Connection",
-	"Keep-Alive",
-	"Proxy-Authenticate",
-	"Proxy-Authorization",
-	"Te", // canonicalized version of "TE"
-	"Trailers",
-	"Transfer-Encoding",
-	"Upgrade",
-}
-
-// Additional headers that shouldn't be forwarded or signed
-var proxyHeaders = []string{
-	"X-Forwarded-For",
-	"X-Forwarded-Host",
-	"X-Forwarded-Proto",
-	"X-Forwarded-Port",
-	"X-Real-Ip",
-	"Forwarded",
-}
 
 type contextKey string
 
@@ -81,79 +57,113 @@ func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 		}
 	}
 
-	// Also ensure the URL Host is set (required for signing)
+	// Ensure the URL Host is set (required for signing)
 	if req.HTTPRequest.URL.Host == "" {
 		req.HTTPRequest.URL.Host = req.HTTPRequest.Host
 	}
 
-	// Process the request and prepare it for proxying
-	r, err := b.processRequest(ctx, req)
+	// Process the request: verify signature, normalize, re-sign
+	r, body, err := b.processRequest(ctx, req)
 	if err != nil {
-		// Error already handled in processRequest
 		return
 	}
 
-	// Forward the request
-	b.Proxy.ServeHTTP(req.ResponseWriter, r)
+	// Forward directly via transport, bypassing httputil.ReverseProxy which
+	// modifies headers (hop-by-hop cleanup, header reordering) and breaks
+	// AWS signatures.
+	b.forwardDirect(req.ResponseWriter, r, body)
 }
 
-// processRequest handles all request processing before proxying
-func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (*http.Request, error) {
-	// Step 1: Read and buffer request body (BEFORE any modifications)
+// processRequest handles all request processing before forwarding.
+// Returns the prepared request and body bytes to forward.
+func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (*http.Request, []byte, error) {
+	// Step 1: Read and buffer request body
 	bodyBytes, err := b.readRequestBody(req.HTTPRequest)
 	if err != nil {
 		http.Error(req.ResponseWriter, "Failed to read request body", http.StatusBadRequest)
-		return nil, err
+		return nil, nil, err
+	}
+	if bodyBytes == nil {
+		bodyBytes = []byte{}
 	}
 
 	// Step 2: Extract service, region, and credentials from Authorization header
 	service, region, _, err := extractFromAuthHeader(req.HTTPRequest.Header.Get("Authorization"))
 	if err != nil {
 		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Step 3: Extract authentication data
-	creds, err := b.authenticate(req)
-	if err != nil {
-		http.Error(req.ResponseWriter, "Permission denied", http.StatusForbidden)
-		return nil, err
+	// Step 3: Extract authentication data for signature verification
+	var verifyCreds aws.Credentials
+	if req.Transparent {
+		// Transparent mode: reconstruct the credentials the client used for signing.
+		// The core already performed JWT/cert auth via performImplicitAuth.
+		// We verify the SigV4 signature for request integrity protection.
+		accessKeyID := extractAccessKeyID(req.HTTPRequest.Header.Get("Authorization"))
+		securityToken := req.HTTPRequest.Header.Get("X-Amz-Security-Token")
+
+		if strings.HasPrefix(securityToken, "eyJ") {
+			// JWT transparent: client used JWT as secret_access_key and session_token
+			verifyCreds = aws.Credentials{
+				AccessKeyID:     accessKeyID,
+				SecretAccessKey: securityToken,
+				SessionToken:    securityToken,
+			}
+		} else {
+			// Cert transparent: client used role name as both access_key_id and secret_access_key
+			verifyCreds = aws.Credentials{
+				AccessKeyID:     accessKeyID,
+				SecretAccessKey: accessKeyID,
+			}
+		}
+	} else {
+		// Regular mode: credentials from token entry
+		var err error
+		verifyCreds, err = b.authenticate(req)
+		if err != nil {
+			http.Error(req.ResponseWriter, "Permission denied", http.StatusForbidden)
+			return nil, nil, err
+		}
 	}
 
 	// Step 4: Verify incoming signature
-	valid, err := b.verifyIncomingSignature(req.HTTPRequest, bodyBytes, creds, service, region)
+	valid, err := b.verifyIncomingSignature(req.HTTPRequest, bodyBytes, verifyCreds, service, region)
 	if err != nil {
 		b.Logger.Warn("Signature verification failed", logger.Err(err))
 		http.Error(req.ResponseWriter, "Signature verification failed", http.StatusForbidden)
-		return nil, err
+		return nil, nil, err
 	}
 	if !valid {
 		b.Logger.Warn("Signature does not match")
 		http.Error(req.ResponseWriter, "Signature does not match", http.StatusForbidden)
-		return nil, fmt.Errorf("signature mismatch")
+		return nil, nil, fmt.Errorf("signature mismatch")
 	}
 
-	// b.Logger.Trace("incoming signature verified successfully",
-	// 	logger.String("access_key", accessKeyID),
-	// 	logger.String("request_id", req.RequestID),
-	// )
+	// Step 5: Clean up transparent mode security token before re-signing.
+	// In transparent mode, X-Amz-Security-Token contains the JWT (or is absent
+	// for cert auth). Remove it so it doesn't leak into the proxied request.
+	// The real AWS session token (if any) will be added by resignRequest when
+	// the minted credentials include a SessionToken.
+	if req.Transparent {
+		req.HTTPRequest.Header.Del("X-Amz-Security-Token")
+	}
 
-	// Step 5: Get AWS credentials
+	// Step 6: Get AWS credentials
 	awsCreds, err := b.getCredentials(req)
 	if err != nil {
 		b.Logger.Warn("Fail to extract aws credentials", logger.Err(err))
 		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Step 6: Create processor context
+	// Step 7: Create processor context and run processor
 	processorCtx := &processor.ProcessorContext{
 		LogicalRequest: req,
 		Service:        service,
 		Region:         region,
 	}
 
-	// Debug: Log incoming request details for Access Point troubleshooting
 	b.Logger.Trace("Incoming request details",
 		logger.String("method", req.HTTPRequest.Method),
 		logger.String("host", req.HTTPRequest.Host),
@@ -166,11 +176,10 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		logger.String("request_id", req.RequestID),
 	)
 
-	// Step 7: Find and execute the appropriate processor
 	proc := b.processorRegistry.FindProcessor(processorCtx)
 	if proc == nil {
 		http.Error(req.ResponseWriter, "Service not supported", http.StatusBadRequest)
-		return nil, fmt.Errorf("no processor found for service: %s", service)
+		return nil, nil, fmt.Errorf("no processor found for service: %s", service)
 	}
 
 	b.Logger.Trace("Selected processor",
@@ -182,7 +191,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	result, err := proc.Process(processorCtx)
 	if err != nil {
 		http.Error(req.ResponseWriter, "Failed to process request", http.StatusBadGateway)
-		return nil, err
+		return nil, nil, err
 	}
 
 	b.Logger.Trace("Processor result",
@@ -198,7 +207,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	target, err := url.Parse(result.TargetURL)
 	if err != nil {
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
-		return nil, err
+		return nil, nil, err
 	}
 
 	req.HTTPRequest.URL.Scheme = target.Scheme
@@ -209,7 +218,6 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 			// Path is already URL-encoded, set RawPath to preserve encoding
 			// and decode it for Path (Go requires Path to be decoded)
 			req.HTTPRequest.URL.RawPath = result.TransformedPath
-			// Decode the path for URL.Path
 			if decodedPath, err := url.PathUnescape(result.TransformedPath); err == nil {
 				req.HTTPRequest.URL.Path = decodedPath
 			} else {
@@ -223,34 +231,87 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	}
 
 	// Clear RequestURI - Go's http.Client requires it to be empty for outgoing requests.
-	// It will use URL.Path, URL.RawPath, and URL.RawQuery instead.
 	req.HTTPRequest.RequestURI = ""
 
-	// Clean up headers before re-signing
-	b.cleanHeadersForSigning(req.HTTPRequest)
-
-	// Step 10: Determine signing service (may differ from routing service)
-	signingService := result.Service
+	// Step 10: Determine signing service and region
+	signingService := service
+	if result.Service != "" {
+		signingService = result.Service
+	}
 	if signingService == "s3-control" {
-		service = "s3" // S3 Control uses s3 for signing
+		signingService = "s3" // S3 Control uses s3 for signing
 	}
 
-	// Step 10.5: Determine signing region (may differ from request region)
-	// This handles pseudo-regions like "aws-global" that must be converted
-	// to real regions (e.g., "us-east-1") for signing.
 	signingRegion := region
 	if result.SigningRegion != "" {
 		signingRegion = result.SigningRegion
 	}
 
-	// Step 11: Re-sign the request with valid credentials
-	if err := b.resignRequest(ctx, req.HTTPRequest, awsCreds, service, signingRegion, bodyBytes); err != nil {
+	// Step 11: Normalize request (decode aws-chunked, strip hop-by-hop/proxy headers)
+	bodyBytes = b.normalizeRequest(req.HTTPRequest, bodyBytes)
+
+	// Step 12: Re-sign the request with valid credentials
+	if err := b.resignRequest(ctx, req.HTTPRequest, awsCreds, signingService, signingRegion, bodyBytes); err != nil {
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
-		return nil, err
+		return nil, nil, err
 	}
 
-	return req.HTTPRequest, nil
+	return req.HTTPRequest, bodyBytes, nil
+}
 
+// forwardDirect sends the signed request directly using the proxy's transport,
+// bypassing httputil.ReverseProxy which modifies headers and breaks AWS signatures.
+func (b *awsBackend) forwardDirect(w http.ResponseWriter, r *http.Request, body []byte) {
+	// Build a fresh request to avoid any state from the original
+	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), bytes.NewReader(body))
+	if err != nil {
+		b.Logger.Error("failed to create direct request", logger.Err(err))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	outReq.Header = r.Header.Clone()
+	outReq.Host = r.Host
+	outReq.ContentLength = int64(len(body))
+
+	// Use the proxy's transport (shares TLS config, connection pooling)
+	transport := b.Proxy.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+
+	resp, err := transport.RoundTrip(outReq)
+	if err != nil {
+		b.Logger.Error("direct forward failed", logger.Err(err))
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	// For streaming responses (SSE, chunked), flush after each write so
+	// the client sees data incrementally instead of waiting for the buffer.
+	if flusher, ok := w.(http.Flusher); ok {
+		buf := make([]byte, 32*1024)
+		for {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				w.Write(buf[:n])
+				flusher.Flush()
+			}
+			if readErr != nil {
+				break
+			}
+		}
+	} else {
+		io.Copy(w, resp.Body)
+	}
 }
 
 func (b *awsBackend) authenticate(req *logical.Request) (aws.Credentials, error) {
@@ -296,7 +357,6 @@ func extractFromAuthHeader(authHeader string) (service, region, accessKeyID stri
 	}
 
 	accessKeyID = matches[1]
-	// dateStamp := matches[2] // YYYYMMDD
 	region = matches[3]
 	service = matches[4]
 
@@ -347,45 +407,5 @@ func (b *awsBackend) restoreRequestBody(r *http.Request, bodyBytes []byte) {
 	} else {
 		r.Body = nil
 		r.ContentLength = 0
-	}
-}
-
-func (b *awsBackend) cleanHeadersForSigning(r *http.Request) {
-	headers := r.Header
-	removedHeaders := []string{}
-
-	// Remove standard hop-by-hop headers
-	for _, h := range hopByHopHeaders {
-		if headers.Get(h) != "" {
-			removedHeaders = append(removedHeaders, h)
-			headers.Del(h)
-		}
-	}
-
-	// Remove proxy-specific headers
-	for _, h := range proxyHeaders {
-		if headers.Get(h) != "" {
-			removedHeaders = append(removedHeaders, h)
-			headers.Del(h)
-		}
-	}
-
-	// Handle Connection header's listed headers
-	// If Connection header lists other headers, remove those too
-	if connectionHeaders := headers.Get("Connection"); connectionHeaders != "" {
-		for _, connHeader := range strings.Split(connectionHeaders, ",") {
-			trimmed := strings.TrimSpace(connHeader)
-			if trimmed != "" {
-				removedHeaders = append(removedHeaders, trimmed)
-				headers.Del(trimmed)
-			}
-		}
-	}
-
-	if len(removedHeaders) > 0 {
-		b.Logger.Trace("headers removed before signing:",
-			logger.Any("removed_headers", removedHeaders),
-			logger.String("request_id", middleware.GetReqID(r.Context())),
-		)
 	}
 }

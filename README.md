@@ -140,20 +140,19 @@ SPIFFE is supported in both methods — JWT-SVIDs via JWT auth and X.509-SVIDs v
 
 ## How workloads interact with Warden
 
-**Transparent mode** — your tool points at Warden's endpoint and makes a normal HTTP request with a JWT in the `Authorization` header, or via mTLS. Warden authenticates, injects credentials, and either forwards the request to the provider or returns an access grant (database auth token, pre-signed URL) directly. No code changes beyond changing the base URL.
-
-**Explicit mode** — your workload first authenticates to Warden and receives an IP-bound session token pair, then uses it for subsequent API calls. Required for AWS (SigV4 request signing), optional for all other providers.
+Your tool points at Warden's endpoint and makes a normal HTTP request with a JWT in the `Authorization` header (or `X-Amz-Security-Token` for AWS), or via mTLS. Warden authenticates, injects credentials, and either forwards the request to the provider or returns an access grant (database auth token, pre-signed URL) directly. No Warden-specific SDK or login step is required.
 
 ## Why not just use the cloud provider's native tooling?
  
-AWS IRSA, GCP Workload Identity, and Azure Managed Identity each solve this within their own cloud. None of them:
- 
+AWS IRSA, GCP Workload Identity, and Azure Managed Identity each let workloads authenticate to their respective cloud without static secrets — but none of them:
+
+- Keep cloud credentials out of the workload entirely — the workload still receives and handles cloud credentials (e.g., an STS token injected into the pod). With Warden, the workload only uses its own identity (JWT or certificate)
 - Work across multiple cloud providers from a single policy layer
 - Cover databases and storage with the same identity and audit model
 - Give you request-level audit tied to the specific workload identity — not just the IAM role shared by many workloads
 - Work for GitHub, GitLab, or any SaaS API
 - Can be deployed on-premises or in air-gapped environments
- 
+
 Warden is the layer that makes workload identity work everywhere, for every credential type, from a single control plane you own.
 
 ## Architecture

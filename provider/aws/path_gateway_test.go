@@ -353,7 +353,7 @@ func TestAwsBackend_RestoreRequestBody(t *testing.T) {
 	}
 }
 
-func TestAwsBackend_CleanHeadersForSigning(t *testing.T) {
+func TestAwsBackend_NormalizeRequest_HopByHopHeaders(t *testing.T) {
 	b := &awsBackend{
 		StreamingBackend: &framework.StreamingBackend{
 			Logger: createTestLogger(),
@@ -378,23 +378,23 @@ func TestAwsBackend_CleanHeadersForSigning(t *testing.T) {
 	req.Header.Set("X-Amz-Date", "20230615T120000Z")
 	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 ...")
 
-	b.cleanHeadersForSigning(req)
+	body := []byte("test body")
+	result := b.normalizeRequest(req, body)
+
+	// Body should pass through unchanged (no aws-chunked)
+	if string(result) != "test body" {
+		t.Errorf("expected body unchanged, got %q", string(result))
+	}
 
 	// Verify hop-by-hop headers are removed
-	hopByHopToCheck := []string{
-		"Connection", "Keep-Alive", "Transfer-Encoding", "Upgrade",
-	}
-	for _, h := range hopByHopToCheck {
+	for _, h := range []string{"Connection", "Keep-Alive", "Transfer-Encoding", "Upgrade"} {
 		if req.Header.Get(h) != "" {
 			t.Errorf("Header %s should have been removed", h)
 		}
 	}
 
 	// Verify proxy headers are removed
-	proxyToCheck := []string{
-		"X-Forwarded-For", "X-Forwarded-Host", "X-Real-Ip",
-	}
-	for _, h := range proxyToCheck {
+	for _, h := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Real-Ip"} {
 		if req.Header.Get(h) != "" {
 			t.Errorf("Header %s should have been removed", h)
 		}
@@ -412,10 +412,7 @@ func TestAwsBackend_CleanHeadersForSigning(t *testing.T) {
 	}
 }
 
-func TestAwsBackend_CleanHeadersForSigning_ConnectionListed(t *testing.T) {
-	// Note: The current implementation deletes Connection before reading it,
-	// so Connection-listed headers won't be removed. This test verifies
-	// the current behavior: only hop-by-hop and proxy headers are removed.
+func TestAwsBackend_NormalizeRequest_ConnectionListed(t *testing.T) {
 	b := &awsBackend{
 		StreamingBackend: &framework.StreamingBackend{
 			Logger: createTestLogger(),
@@ -424,28 +421,104 @@ func TestAwsBackend_CleanHeadersForSigning_ConnectionListed(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/test", nil)
 
-	// Connection header lists additional headers
-	// Note: Since Connection is deleted first (it's in hopByHopHeaders),
-	// headers listed in Connection are NOT removed by the current implementation
+	// Connection header lists additional headers to remove
 	req.Header.Set("Connection", "Custom-Header, Another-Header")
 	req.Header.Set("Custom-Header", "value1")
 	req.Header.Set("Another-Header", "value2")
 	req.Header.Set("Keep-Header", "should-stay")
 
-	b.cleanHeadersForSigning(req)
+	b.normalizeRequest(req, []byte{})
 
 	// Connection should be removed (it's a hop-by-hop header)
 	if req.Header.Get("Connection") != "" {
 		t.Error("Connection header should have been removed")
 	}
 
-	// Due to current implementation, Custom-Header and Another-Header
-	// are NOT removed because Connection is deleted before being read
-	// This documents the current behavior - adjust if implementation changes
-
 	// Other headers should remain
 	if req.Header.Get("Keep-Header") != "should-stay" {
 		t.Error("Keep-Header should be preserved")
+	}
+}
+
+func TestAwsBackend_NormalizeRequest_AWSChunked(t *testing.T) {
+	b := &awsBackend{
+		StreamingBackend: &framework.StreamingBackend{
+			Logger: createTestLogger(),
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/test", nil)
+	req.Header.Set("Content-Encoding", "aws-chunked")
+	req.Header.Set("X-Amz-Decoded-Content-Length", "5")
+	req.Header.Set("X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("Content-Length", "100")
+	req.Header.Set("Expect", "100-continue")
+
+	// aws-chunked encoded body for "hello"
+	chunkedBody := []byte("5;chunk-signature=abc\r\nhello\r\n0;chunk-signature=def\r\n\r\n")
+
+	result := b.normalizeRequest(req, chunkedBody)
+
+	// Body should be decoded
+	if string(result) != "hello" {
+		t.Errorf("expected decoded body 'hello', got %q", string(result))
+	}
+
+	// Streaming headers should be removed
+	if req.Header.Get("Content-Encoding") != "" {
+		t.Error("Content-Encoding should be removed")
+	}
+	if req.Header.Get("X-Amz-Decoded-Content-Length") != "" {
+		t.Error("X-Amz-Decoded-Content-Length should be removed")
+	}
+	if req.Header.Get("X-Amz-Content-Sha256") != "" {
+		t.Error("X-Amz-Content-Sha256 should be removed")
+	}
+	if req.Header.Get("Accept-Encoding") != "" {
+		t.Error("Accept-Encoding should be removed")
+	}
+	if req.Header.Get("Content-Length") != "" {
+		t.Error("Content-Length should be removed")
+	}
+	if req.Header.Get("Expect") != "" {
+		t.Error("Expect should be removed")
+	}
+}
+
+func TestAwsBackend_NormalizeRequest_TrailerHeaders(t *testing.T) {
+	b := &awsBackend{
+		StreamingBackend: &framework.StreamingBackend{
+			Logger: createTestLogger(),
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/test", nil)
+	req.Header.Set("X-Amz-Trailer", "x-amz-checksum-crc32")
+	req.Header.Set("X-Amz-Sdk-Checksum-Algorithm", "CRC32")
+	req.Header.Set("X-Amz-Checksum-Algorithm", "CRC32")
+	req.Header.Set("X-Amz-Checksum-Crc32", "abc123")
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	b.normalizeRequest(req, []byte("data"))
+
+	// Trailer-related headers should be removed
+	if req.Header.Get("X-Amz-Trailer") != "" {
+		t.Error("X-Amz-Trailer should be removed")
+	}
+	if req.Header.Get("X-Amz-Sdk-Checksum-Algorithm") != "" {
+		t.Error("X-Amz-Sdk-Checksum-Algorithm should be removed")
+	}
+	if req.Header.Get("X-Amz-Checksum-Algorithm") != "" {
+		t.Error("X-Amz-Checksum-Algorithm should be removed")
+	}
+	if req.Header.Get("X-Amz-Checksum-Crc32") != "" {
+		t.Error("X-Amz-Checksum-Crc32 should be removed")
+	}
+
+	// Non-trailer headers should be kept
+	if req.Header.Get("Content-Type") != "application/octet-stream" {
+		t.Error("Content-Type should be preserved")
 	}
 }
 
@@ -476,7 +549,7 @@ func BenchmarkParseAWSDate(b *testing.B) {
 	}
 }
 
-func BenchmarkCleanHeadersForSigning(b *testing.B) {
+func BenchmarkNormalizeRequest(b *testing.B) {
 	backend := &awsBackend{StreamingBackend: &framework.StreamingBackend{Logger: createTestLogger()}}
 
 	b.ResetTimer()
@@ -487,6 +560,6 @@ func BenchmarkCleanHeadersForSigning(b *testing.B) {
 		req.Header.Set("X-Forwarded-For", "192.168.1.1")
 		req.Header.Set("Content-Type", "application/json")
 
-		backend.cleanHeadersForSigning(req)
+		backend.normalizeRequest(req, []byte{})
 	}
 }

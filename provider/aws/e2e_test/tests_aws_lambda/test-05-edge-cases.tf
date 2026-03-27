@@ -3,34 +3,6 @@
 # Tests: ARN with colons, special characters, cross-account, dead letter queues
 
 ################################################################################
-# Lambda function code package
-################################################################################
-
-# Node.js function code
-data "archive_file" "nodejs" {
-  type        = "zip"
-  output_path = "${path.module}/nodejs_function_05.zip"
-
-  source {
-    content  = <<-EOF
-      exports.handler = async (event, context) => {
-        console.log('Event:', JSON.stringify(event, null, 2));
-        console.log('Context:', JSON.stringify(context, null, 2));
-        return {
-          statusCode: 200,
-          body: JSON.stringify({
-            message: 'Hello from Node.js Lambda',
-            event: event,
-            requestId: context.awsRequestId
-          })
-        };
-      };
-    EOF
-    filename = "index.js"
-  }
-}
-
-################################################################################
 # Test 42: Function with long name - max 64 characters
 ################################################################################
 resource "aws_lambda_function" "long_name" {

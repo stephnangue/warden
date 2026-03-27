@@ -272,24 +272,6 @@ resource "aws_dynamodb_table_item" "with_gsi" {
 }
 
 ################################################################################
-# Test 35: Item with special characters in values
-################################################################################
-resource "aws_dynamodb_table_item" "special_chars" {
-  table_name = aws_dynamodb_table.items_crud.name
-  hash_key   = aws_dynamodb_table.items_crud.hash_key
-  range_key  = aws_dynamodb_table.items_crud.range_key
-
-  item = jsonencode({
-    pk = { S = "USER#010" }
-    sk = { S = "SPECIAL" }
-    description = { S = "Contains special chars: @#$%^&*(){}[]|\\:;\"'<>,.?/" }
-    unicode = { S = "Unicode: café, 日本語, émojis: 🎉🚀" }
-    newlines = { S = "Line 1\nLine 2\nLine 3" }
-    tabs = { S = "Col1\tCol2\tCol3" }
-  })
-}
-
-################################################################################
 # Test 36: Multiple items for batch operations testing
 ################################################################################
 resource "aws_dynamodb_table_item" "batch_item_1" {

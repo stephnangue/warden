@@ -2,34 +2,6 @@
 # Tests 1-15: Basic Lambda function configurations
 # Tests: runtimes, memory, timeout, environment variables, architectures
 
-################################################################################
-# Lambda function code packages
-################################################################################
-
-# Node.js function code
-data "archive_file" "nodejs" {
-  type        = "zip"
-  output_path = "${path.module}/nodejs_function.zip"
-
-  source {
-    content  = <<-EOF
-      exports.handler = async (event, context) => {
-        console.log('Event:', JSON.stringify(event, null, 2));
-        console.log('Context:', JSON.stringify(context, null, 2));
-        return {
-          statusCode: 200,
-          body: JSON.stringify({
-            message: 'Hello from Node.js Lambda',
-            event: event,
-            requestId: context.awsRequestId
-          })
-        };
-      };
-    EOF
-    filename = "index.js"
-  }
-}
-
 # Python function code
 data "archive_file" "python" {
   type        = "zip"
