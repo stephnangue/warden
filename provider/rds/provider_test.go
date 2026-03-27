@@ -105,19 +105,16 @@ func TestConfigCRUD(t *testing.T) {
 
 	t.Run("default config", func(t *testing.T) {
 		cfg := b.GetAccessConfig()
-		assert.False(t, cfg.TransparentMode)
 		assert.Equal(t, "", cfg.AutoAuthPath)
 	})
 
 	t.Run("set and get config", func(t *testing.T) {
 		err := b.SetAccessConfig(ctx, &framework.AccessConfig{
-			TransparentMode: true,
-			AutoAuthPath:    "auth/jwt/",
+			AutoAuthPath: "auth/jwt/",
 		})
 		require.NoError(t, err)
 
 		cfg := b.GetAccessConfig()
-		assert.True(t, cfg.TransparentMode)
 		assert.Equal(t, "auth/jwt/", cfg.AutoAuthPath)
 	})
 
@@ -127,8 +124,7 @@ func TestConfigCRUD(t *testing.T) {
 			Operation: logical.UpdateOperation,
 			Path:      "config",
 			Data: map[string]any{
-				"transparent_mode": true,
-				"auto_auth_path":   "auth/cert/",
+				"auto_auth_path": "auth/cert/",
 			},
 		})
 		require.NoError(t, err)
@@ -140,21 +136,7 @@ func TestConfigCRUD(t *testing.T) {
 			Path:      "config",
 		})
 		require.NoError(t, err)
-		assert.Equal(t, true, resp.Data["transparent_mode"])
 		assert.Equal(t, "auth/cert/", resp.Data["auto_auth_path"])
-	})
-
-	t.Run("transparent_mode without auto_auth_path fails", func(t *testing.T) {
-		resp, err := b.HandleRequest(ctx, &logical.Request{
-			Operation: logical.UpdateOperation,
-			Path:      "config",
-			Data: map[string]any{
-				"transparent_mode": true,
-				"auto_auth_path":   "",
-			},
-		})
-		require.NoError(t, err)
-		assert.True(t, resp.IsError())
 	})
 }
 
@@ -170,10 +152,9 @@ func TestTransparentModeProvider(t *testing.T) {
 		assert.Equal(t, "", b.GetAuthRole("access/readonly"))
 	})
 
-	t.Run("enabled after config", func(t *testing.T) {
+	t.Run("enabled after config with auto_auth_path", func(t *testing.T) {
 		err := b.SetAccessConfig(ctx, &framework.AccessConfig{
-			TransparentMode: true,
-			AutoAuthPath:    "auth/jwt/",
+			AutoAuthPath: "auth/jwt/",
 		})
 		require.NoError(t, err)
 

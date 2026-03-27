@@ -1,6 +1,6 @@
 # AWS Provider
 
-The AWS provider enables proxied access to AWS services through Warden using transparent mode. Clients embed their identity (JWT or TLS client certificate) directly in standard AWS SDK requests. Warden implicitly authenticates the caller, verifies the request signature for integrity, re-signs the request with real AWS credentials, and forwards it to the target AWS endpoint. No explicit Warden login step is required — the AWS SDK works as normal.
+The AWS provider enables proxied access to AWS services through Warden. Clients embed their identity (JWT or TLS client certificate) directly in standard AWS SDK requests. Warden implicitly authenticates the caller, verifies the request signature for integrity, re-signs the request with real AWS credentials, and forwards it to the target AWS endpoint. No explicit Warden login step is required — the AWS SDK works as normal.
 
 ## Table of Contents
 
@@ -160,13 +160,11 @@ warden auth enable --type=jwt
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
 
-# Create a role with token type `aws`
+# Create a role
 warden write auth/jwt/role/aws-user \
-    token_type=transparent \
     token_policies="aws-access" \
     user_claim=sub \
-    cred_spec_name=developer \
-    token_ttl=1h
+    cred_spec_name=developer
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -189,7 +187,7 @@ Verify the provider is enabled:
 warden provider list
 ```
 
-Configure the provider with transparent mode enabled:
+Configure the provider:
 
 ```bash
 warden write aws/config <<EOF
@@ -197,16 +195,14 @@ warden write aws/config <<EOF
   "proxy_domains": ["localhost"],
   "max_body_size": 10485760,
   "timeout": "30s",
-  "transparent_mode": true,
   "auto_auth_path": "auth/jwt/",
   "default_role": "aws-user"
 }
 EOF
 ```
 
-- `transparent_mode`: enables implicit authentication from embedded credentials in AWS SDK requests.
 - `auto_auth_path`: the auth backend Warden uses to validate the embedded credential (JWT or certificate).
-- `default_role`: the auth role to use for all transparent mode requests. When set, this takes precedence over the `access_key_id` value in the SigV4 header.
+- `default_role`: the auth role to use for all requests. When set, this takes precedence over the `access_key_id` value in the SigV4 header.
 
 For production, set `proxy_domains` to your Warden server's domain (see [DNS Configuration](#dns-configuration)).
 
@@ -314,9 +310,9 @@ warden policy read aws-access
 
 ## Step 5: Configure AWS SDK and Make Requests
 
-In transparent mode there is no explicit login step. The client embeds its identity directly in the AWS SDK credentials, and Warden authenticates implicitly on every request.
+With Warden there is no explicit login step. The client embeds its identity directly in the AWS SDK credentials, and Warden authenticates implicitly on every request.
 
-### JWT Transparent Mode
+### JWT Auth method
 
 Get a JWT from your identity provider (Hydra in this quickstart):
 
@@ -357,9 +353,9 @@ aws lambda list-functions
 
 Warden detects the JWT in the `X-Amz-Security-Token` header, authenticates it against the configured auth backend, verifies the SigV4 signature for request integrity, re-signs the request with real AWS credentials, and proxies it to the target service.
 
-### Certificate Transparent Mode
+### Certificate Auth method
 
-For workloads that already have X.509 certificates (Kubernetes pods with cert-manager, VMs with machine certificates, SPIFFE X.509-SVIDs), transparent mode can authenticate using TLS client certificates instead of JWTs.
+For workloads that already have X.509 certificates (Kubernetes pods with cert-manager, VMs with machine certificates, SPIFFE X.509-SVIDs), Warden can authenticate using TLS client certificates instead of JWTs.
 
 > **Prerequisite:** TLS must be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
@@ -376,19 +372,16 @@ warden write auth/cert/config \
     trusted_ca_pem=@/path/to/ca.pem \
     default_role=aws-user
 
-# Create a role with token type `aws`
+# Create a role
 warden write auth/cert/role/aws-user \
     allowed_common_names="agent-*" \
-    token_type=aws \
     token_policies="aws-access" \
-    cred_spec_name=developer \
-    token_ttl=1h
+    cred_spec_name=developer
 
 # Update the provider to use cert auth
 warden write aws/config <<EOF
 {
   "proxy_domains": ["localhost"],
-  "transparent_mode": true,
   "auto_auth_path": "auth/cert/",
   "default_role": "aws-user"
 }
@@ -399,7 +392,7 @@ The `allowed_common_names` field supports glob patterns. You can also match on o
 
 #### Configure the AWS SDK
 
-In cert transparent mode, the client uses the auth role name as both `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. No session token is needed:
+The client uses the auth role name as both `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. No session token is needed:
 
 ```bash
 export AWS_ACCESS_KEY_ID="aws-user"
@@ -409,7 +402,7 @@ export AWS_ENDPOINT_URL="https://localhost:8400/v1/aws/gateway"
 
 The client certificate is presented during the TLS handshake (or forwarded by a load balancer). Warden extracts it, authenticates against the cert auth backend, and proxies the request.
 
-The AWS CLI does not support presenting client certificates for mTLS. Cert transparent mode requires an HTTP client that supports mTLS, or a load balancer in front of Warden that forwards the client certificate via the `X-SSL-Client-Cert` or `X-Forwarded-Client-Cert` header. When Warden is behind such a load balancer, the AWS CLI works as normal:
+The AWS CLI does not support presenting client certificates for mTLS. Cert auth requires an HTTP client that supports mTLS, or a load balancer in front of Warden that forwards the client certificate via the `X-SSL-Client-Cert` or `X-Forwarded-Client-Cert` header. When Warden is behind such a load balancer, the AWS CLI works as normal:
 
 ## Cleanup
 
@@ -454,16 +447,15 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
        periodically       consumers               permissions
 ```
 
-### Request Flow (Transparent Mode)
+### Request Flow
 
 1. Client signs request using the auth role name and JWT (or role name only for cert mode) as AWS credentials
 2. Request is sent to Warden gateway endpoint
-3. Warden detects transparent mode (JWT in `X-Amz-Security-Token` or non-AKIA `access_key_id`)
-4. Warden implicitly authenticates the caller via the configured auth backend (JWT or cert)
-5. Warden verifies the incoming SigV4 signature for request integrity
-6. Warden retrieves real AWS credentials from the credential spec
-7. Warden re-signs the request with valid AWS credentials
-8. Request is forwarded to the actual AWS endpoint
+3. Warden authenticates the caller via the configured auth backend (JWT in `X-Amz-Security-Token` or role name as `access_key_id` for cert mode)
+4. Warden verifies the incoming SigV4 signature for request integrity
+5. Warden retrieves real AWS credentials from the credential spec
+6. Warden re-signs the request with valid AWS credentials
+7. Request is forwarded to the actual AWS endpoint
 9. Response is returned to the client
 
 ### Security Model
@@ -556,8 +548,7 @@ For HTTPS, you'll need a **wildcard SSL certificate** (`*.warden.yourdomain.com`
 | `proxy_domains` | list(string) | `["localhost"]` | Domains that Warden listens on for proxied requests |
 | `max_body_size` | int | `10485760` (10 MB) | Maximum request body size in bytes (max 100 MB) |
 | `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
-| `transparent_mode` | bool | `false` | Enable transparent mode for implicit JWT/cert authentication |
-| `auto_auth_path` | string | — | Path to auth mount for transparent mode (e.g., `auth/jwt/`, `auth/cert/`). Required when `transparent_mode` is enabled |
+| `auto_auth_path` | string | — | Path to auth mount for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Default auth role when not specified in `access_key_id` |
 
 ### Credential Source Config
@@ -648,7 +639,7 @@ Standard S3 Access Points **are fully supported**. The AWS SDK places the Access
    ```
 2. Check that the Host header matches what the SDK signed.
 3. Ensure Warden is listening on the resolved address.
-4. In JWT transparent mode, ensure the JWT has not expired — an expired JWT will cause a signature mismatch because the SDK signs with the old token value.
+4. In JWT mode, ensure the JWT has not expired — an expired JWT will cause a signature mismatch because the SDK signs with the old token value.
 
 ### Requests fail to reach Warden
 
@@ -656,11 +647,10 @@ Standard S3 Access Points **are fully supported**. The AWS SDK places the Access
 2. `proxy_domains` doesn't match the endpoint URL configured in your AWS SDK.
 3. Firewall rules are blocking the connection.
 
-### Transparent mode returns 401/403
+### Request returns 401/403
 
-1. Verify `transparent_mode` is enabled: `warden read aws/config`.
-2. Check that `auto_auth_path` points to a valid, enabled auth backend (e.g., `auth/jwt/`).
-3. Ensure the auth role exists and has `token_type=aws` and a valid `cred_spec_name`.
+1. Check that `auto_auth_path` points to a valid, enabled auth backend (e.g., `auth/jwt/`).
+2. Ensure the auth role exists and has a valid `cred_spec_name`.
 4. For JWT mode: verify the JWT is valid and not expired.
 5. For cert mode: verify the client certificate is signed by the trusted CA configured in the cert auth backend.
 

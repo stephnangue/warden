@@ -7,10 +7,10 @@ import (
 
 // TokenTypeMetadata describes a token type's characteristics
 type TokenTypeMetadata struct {
-	// Name is the canonical type identifier (e.g., "user_pass", "aws_access_keys")
+	// Name is the canonical type identifier (e.g., "warden_token", "jwt_role")
 	Name string
 
-	// IDPrefix used in token ID computation (e.g., "usrp_", "awsk_", "wtkn_")
+	// IDPrefix used in token ID computation (e.g., "wtkn_", "jwtr_", "crtr_")
 	IDPrefix string
 
 	// ValuePrefix used to detect token type from value (e.g., "usr-", "AKIA", "cws.")
@@ -44,7 +44,7 @@ type TokenType interface {
 	ComputeID(lookupValue string) string
 
 	// LookupKey returns the key name in the Data map that holds the lookup value
-	// E.g., for AWS it's "access_key_id", for user_pass it's "username", for warden it's "token"
+	// E.g., for warden it's "token", for jwt_role it's "token"
 	// This is used for deterministic token value validation after loading from storage
 	LookupKey() string
 }

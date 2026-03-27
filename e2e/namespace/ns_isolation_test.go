@@ -121,9 +121,9 @@ func TestCredentialIssuanceInChildNamespace(t *testing.T) {
 
 	h.SetupNSVaultEnv(t, port)
 
-	token := h.GetNSNTWardenToken(t, h.NSVaultNS, port)
+	jwt := h.GetDefaultJWT(t)
 
-	status, _ := h.NSVaultNTRequest(t, "GET", "secret/data/e2e/app-config", h.NSVaultNS, port, token)
+	status, _ := h.NSVaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", h.NSVaultNS, port, jwt)
 	if status != 200 {
 		t.Fatalf("vault gateway read in namespace: expected 200, got %d", status)
 	}

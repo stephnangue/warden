@@ -8,7 +8,7 @@ import (
 )
 
 // CertRoleTokenType implements certificate-based token handling with role binding.
-// This token type is used when providers operate in transparent mode, where clients
+// This token type is used for implicit authentication, where clients
 // present TLS client certificates and Warden performs implicit authentication.
 // The cert fingerprint + role combination is used as the lookup value, and its hash
 // becomes the token ID.

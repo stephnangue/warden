@@ -147,11 +147,7 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 	// Calculate effective TTL
 	effectiveTTL := b.calculateTTL(cert, role)
 
-	// Determine token type: role overrides global config
-	tokenType := role.TokenType
-	if tokenType == "" && b.config != nil {
-		tokenType = b.config.TokenType
-	}
+	tokenType := "cert_role"
 
 	// Certificate fingerprint for token caching in transparent mode
 	fingerprint := certFingerprint(cert)

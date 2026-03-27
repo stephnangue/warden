@@ -12,7 +12,7 @@ import (
 )
 
 // vaultUnauthenticatedPaths are read-only Vault endpoints that can be accessed
-// without authentication in transparent mode. These are PKI certificate endpoints
+// without authentication. These are PKI certificate endpoints
 // that the Terraform Vault provider accesses without sending tokens.
 var vaultUnauthenticatedPaths = []string{
 	// PKI issuer endpoints (read-only certificate data)
@@ -48,7 +48,7 @@ type vaultBackend struct {
 }
 
 // extractToken extracts the client token from the request.
-// Checks X-Warden-Token (non-transparent), X-Vault-Token, and Authorization: Bearer (transparent).
+// Checks X-Warden-Token, X-Vault-Token, and Authorization: Bearer.
 func extractToken(r *http.Request) string {
 	if token := r.Header.Get("X-Warden-Token"); token != "" {
 		return token
@@ -82,26 +82,25 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				HelpSynopsis:    "Vault Gateway proxy",
 				HelpDescription: "Proxies requests to HashiCorp Vault with token injection",
 			},
-			// Transparent mode: role-based gateway paths
+			// Role-based gateway paths for implicit auth
 			{
 				Pattern:         "role/[^/]+/gateway",
 				Handler:         b.handleTransparentGatewayStreaming,
-				HelpSynopsis:    "Vault Transparent Gateway proxy",
+				HelpSynopsis:    "Vault Gateway proxy",
 				HelpDescription: "Proxies requests to HashiCorp Vault with implicit JWT authentication",
 			},
 			{
 				Pattern:         "role/[^/]+/gateway/.*",
 				Handler:         b.handleTransparentGatewayStreaming,
-				HelpSynopsis:    "Vault Transparent Gateway proxy",
+				HelpSynopsis:    "Vault Gateway proxy",
 				HelpDescription: "Proxies requests to HashiCorp Vault with implicit JWT authentication",
 			},
 		},
 		UnauthenticatedPaths: vaultUnauthenticatedPaths,
 		ParseStreamBody:      true,
 		TransparentConfig: &framework.TransparentConfig{
-			Enabled:      false, // Updated via config write or Initialize
-			AutoAuthPath: "",
-			DefaultAuthRole:  "",
+			AutoAuthPath:    "",
+			DefaultAuthRole: "",
 		},
 		Backend: &framework.Backend{
 			Help:           vaultBackendHelp,
@@ -166,7 +165,6 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 			MaxBodySize     int64  `json:"max_body_size"`
 			Timeout         string `json:"timeout"`
 			TLSSkipVerify   bool   `json:"tls_skip_verify"`
-			TransparentMode bool   `json:"transparent_mode"`
 			AutoAuthPath    string `json:"auto_auth_path"`
 			DefaultAuthRole string `json:"default_role"`
 		}
@@ -188,8 +186,7 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-			Enabled:      config.TransparentMode,
-			AutoAuthPath: config.AutoAuthPath,
+			AutoAuthPath:    config.AutoAuthPath,
 			DefaultAuthRole: config.DefaultAuthRole,
 		})
 	}
@@ -209,15 +206,10 @@ func (b *vaultBackend) handleGatewayStreaming(ctx context.Context, req *logical.
 	return nil
 }
 
-// handleTransparentGatewayStreaming handles transparent mode gateway requests.
+// handleTransparentGatewayStreaming handles gateway requests with implicit auth.
 // The implicit auth has already been performed by the core request handler.
 // This method rewrites the path and delegates to the standard gateway handler.
 func (b *vaultBackend) handleTransparentGatewayStreaming(ctx context.Context, req *logical.Request, fd *framework.FieldData) error {
-	if !b.StreamingBackend.IsTransparentMode() {
-		http.Error(req.ResponseWriter, "Transparent mode not enabled", http.StatusForbidden)
-		return nil
-	}
-
 	// Rewrite the path: /role/{role}/gateway/... -> /gateway/...
 	// The original path in req.Path is relative to the mount point
 	req.Path = b.StreamingBackend.RewriteTransparentPath(req.Path)
@@ -267,7 +259,7 @@ Examples:
   /vault/gateway/database/creds/my-role        → /v1/database/creds/my-role
   /vault/gateway/sys/health                    → /v1/sys/health
 
-Transparent mode allows implicit JWT authentication via role-based paths,
+Implicit JWT authentication via role-based paths,
 eliminating the need for clients to perform an explicit Warden login:
   /vault/role/{role}/gateway/{vault-api-path}
 
@@ -284,7 +276,6 @@ Configuration:
 - tls_skip_verify: Skip TLS certificate verification (default: false, use only for development)
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)
 - timeout: Request timeout duration (e.g., '30s', '5m')
-- transparent_mode: Enable implicit JWT authentication (default: false)
-- auto_auth_path: JWT auth mount path for transparent mode (e.g., 'auth/jwt/')
+- auto_auth_path: Auth mount path for implicit authentication (e.g., 'auth/jwt/')
 - default_role: Fallback role when not specified in the URL path
 `

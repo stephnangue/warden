@@ -22,7 +22,6 @@ type ProviderConfig struct {
 	MaxBodySize     int64
 	Timeout         time.Duration
 	APIVersion      string
-	TransparentMode bool
 	AutoAuthPath    string
 	DefaultAuthRole string
 }
@@ -88,10 +87,7 @@ func parseConfig(conf map[string]any) ProviderConfig {
 		}
 	}
 
-	// Parse transparent mode settings
-	if tm, ok := conf["transparent_mode"].(bool); ok {
-		config.TransparentMode = tm
-	}
+	// Parse auth settings
 	if aap, ok := conf["auto_auth_path"].(string); ok {
 		config.AutoAuthPath = aap
 	}
@@ -168,13 +164,6 @@ func ValidateConfig(conf map[string]any) error {
 	if ver, ok := conf["api_version"]; ok {
 		if _, ok := ver.(string); !ok {
 			return fmt.Errorf("api_version must be a string")
-		}
-	}
-
-	// Validate transparent_mode
-	if tm, ok := conf["transparent_mode"]; ok {
-		if _, ok := tm.(bool); !ok {
-			return fmt.Errorf("transparent_mode must be a boolean")
 		}
 	}
 
