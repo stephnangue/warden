@@ -144,25 +144,23 @@ func TestTransparentOps_CertDefaultRole(t *testing.T) {
 // Precedence and Error Tests
 // =============================================================================
 
-// TestTransparentOps_WardenTokenPrecedence verifies that X-Warden-Token takes
-// precedence — normal auth flow is used, transparent ops skipped (T-TO06).
-func TestTransparentOps_WardenTokenPrecedence(t *testing.T) {
+// TestTransparentOps_BearerTokenPrecedence verifies that Authorization: Bearer
+// takes precedence over X-Warden-Role for transparent auth (T-TO06).
+func TestTransparentOps_BearerTokenPrecedence(t *testing.T) {
 	port := h.GetLeaderPort(t)
+	jwt := h.GetDefaultJWT(t)
 
-	// Get a regular warden token via normal login
-	token := h.GetNTWardenToken(t, port)
-
-	// Send request with X-Warden-Token — transparent ops should be skipped
-	u := fmt.Sprintf("%s/v1/vault-nt/gateway/v1/secret/data/e2e/app-config", h.NodeURL(port))
+	// Send request with Authorization: Bearer and X-Warden-Role
+	u := fmt.Sprintf("%s/v1/vault/role/e2e-reader/gateway/v1/secret/data/e2e/app-config", h.NodeURL(port))
 	headers := map[string]string{
-		"X-Warden-Token": token,
-		"X-Warden-Role":  "e2e-reader",
+		"Authorization": "Bearer " + jwt,
+		"X-Warden-Role": "e2e-reader",
 	}
 	status, _ := h.DoRequest(t, "GET", u, headers, "")
 
-	// Should succeed via normal Warden token flow (transparent ops skipped)
+	// Should succeed via transparent auth flow
 	if status != 200 {
-		t.Fatalf("T-TO06: expected 200 with Warden token precedence, got %d", status)
+		t.Fatalf("T-TO06: expected 200 with Bearer token, got %d", status)
 	}
 }
 
@@ -310,23 +308,22 @@ func TestTransparentOps_CertWrongCN(t *testing.T) {
 	}
 }
 
-// TestTransparentOps_NoAuthPathNormalFlow verifies that without namespace
-// auto_auth_path configured, the Authorization header is treated as a
-// normal Warden token (not transparent ops) (T-TO15).
-func TestTransparentOps_NoAuthPathNormalFlow(t *testing.T) {
+// TestTransparentOps_InvalidBearerRejected verifies that an invalid Bearer token
+// on the transparent gateway is rejected with 401/403 (T-TO15).
+func TestTransparentOps_InvalidBearerRejected(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
-	// Send a request with Authorization: Bearer <random-value> on a non-transparent provider.
-	// This should NOT trigger transparent ops — the bearer value is treated as a Warden token
-	u := fmt.Sprintf("%s/v1/vault-nt/gateway/v1/secret/data/e2e/app-config", h.NodeURL(port))
+	// Send a request with Authorization: Bearer <random-value> on the transparent provider.
+	// This should fail because "not-a-real-jwt" is not a valid JWT
+	u := fmt.Sprintf("%s/v1/vault/role/e2e-reader/gateway/v1/secret/data/e2e/app-config", h.NodeURL(port))
 	headers := map[string]string{
-		"Authorization": "Bearer not-a-real-warden-token",
+		"Authorization": "Bearer not-a-real-jwt",
 	}
 	status, body := h.DoRequest(t, "GET", u, headers, "")
 
-	// Should fail with 401/403 because "not-a-real-warden-token" is not a valid Warden token
+	// Should fail with 401/403 because "not-a-real-jwt" is not a valid JWT
 	if status == 200 {
-		t.Fatalf("T-TO15: expected non-200 for invalid Warden token, got 200: %s", string(body))
+		t.Fatalf("T-TO15: expected non-200 for invalid JWT, got 200: %s", string(body))
 	}
 	if status != 401 && status != 403 {
 		// Some configurations may return 400 for malformed tokens

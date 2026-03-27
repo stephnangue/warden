@@ -697,7 +697,7 @@ func (c *Core) revokeTokenByExpiration(ctx context.Context, entry *ExpirationEnt
 }
 
 // revokeCredentialByExpiration is called by the expiration manager when a credential expires.
-// This handles both cache-only (transparent mode) and persisted credentials.
+// This handles both cache-only (implicit auth) and persisted credentials.
 // The credential manager compares CredentialID to decide whether to delete from cache.
 func (c *Core) revokeCredentialByExpiration(ctx context.Context, entry *ExpirationEntry) error {
 	if c.credentialManager == nil {

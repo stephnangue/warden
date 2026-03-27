@@ -6,7 +6,6 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
-	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
@@ -79,12 +78,6 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 				Type:        framework.TypeDurationSecond,
 				Description: "Token TTL (default: 1h)",
 			},
-			"token_type": {
-				Type:          framework.TypeString,
-				Description:   "Default token type for roles that don't specify one (default: transparent)",
-				Default:       "transparent",
-				AllowedValues: b.allowedTokenTypeValues(),
-			},
 			"default_role": {
 				Type:        framework.TypeString,
 				Description: "Default role for transparent operations when no role is specified",
@@ -142,8 +135,7 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 			"user_claim":   b.config.UserClaim,
 			"groups_claim":        b.config.GroupsClaim,
 			"group_policy_prefix": b.config.GroupPolicyPrefix,
-			"token_ttl":           b.config.TokenTTL.String(),
-			"token_type":   helper.DisplayTokenType(b.config.TokenType),
+			"token_ttl":    b.config.TokenTTL.String(),
 			"default_role": b.config.DefaultRole,
 		},
 	}, nil
@@ -172,7 +164,6 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		conf["groups_claim"] = b.config.GroupsClaim
 		conf["group_policy_prefix"] = b.config.GroupPolicyPrefix
 		conf["token_ttl"] = b.config.TokenTTL
-		conf["token_type"] = b.config.TokenType
 		conf["default_role"] = b.config.DefaultRole
 	}
 	b.configMu.RUnlock()
@@ -182,11 +173,6 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		if val, ok := d.GetOk(key); ok {
 			conf[key] = val
 		}
-	}
-
-	// Translate user-facing token_type alias to internal name before setup
-	if rawType, ok := conf["token_type"].(string); ok {
-		conf["token_type"] = helper.ResolveTokenType(helper.BackendJWT, rawType)
 	}
 
 	// Setup new config
@@ -217,8 +203,7 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 			"user_claim":             b.config.UserClaim,
 			"groups_claim":           b.config.GroupsClaim,
 			"group_policy_prefix":   b.config.GroupPolicyPrefix,
-			"token_ttl":              b.config.TokenTTL.String(),
-			"token_type":             b.config.TokenType,
+			"token_ttl":    b.config.TokenTTL.String(),
 			"default_role": b.config.DefaultRole,
 		}
 		b.configMu.RUnlock()

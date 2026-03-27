@@ -13,7 +13,6 @@ import (
 	"github.com/hashicorp/cap/jwt"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
-	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -43,8 +42,7 @@ type JWTAuthConfig struct {
 	GroupPolicyPrefix string            `json:"group_policy_prefix,omitempty"`
 
 	// Token settings
-	TokenTTL  time.Duration `json:"token_ttl" default:"1h"`
-	TokenType string        `json:"token_type,omitempty"`
+	TokenTTL time.Duration `json:"token_ttl" default:"1h"`
 
 	// Default role for transparent operations when no role is specified
 	DefaultRole string `json:"default_role,omitempty"`
@@ -57,19 +55,17 @@ type JWTAuthConfig struct {
 // jwtAuthBackend is the framework-based JWT authentication backend
 type jwtAuthBackend struct {
 	*framework.Backend
-	config          *JWTAuthConfig
-	configMu        sync.RWMutex
-	logger          *logger.GatedLogger
-	storageView     sdklogical.Storage
-	validTokenTypes []string
+	config      *JWTAuthConfig
+	configMu    sync.RWMutex
+	logger      *logger.GatedLogger
+	storageView sdklogical.Storage
 }
 
 // Factory creates a new JWT auth backend using the logical.Factory pattern
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
 	b := &jwtAuthBackend{
-		logger:          conf.Logger,
-		storageView:     conf.StorageView,
-		validTokenTypes: conf.ValidTokenTypes,
+		logger:      conf.Logger,
+		storageView: conf.StorageView,
 	}
 
 	b.Backend = &framework.Backend{
@@ -119,14 +115,6 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 	}
 	if config.UserClaim == "" {
 		config.UserClaim = "sub"
-	}
-
-	// cert_role is always forbidden in JWT auth — it is cert-auth-specific.
-	if config.TokenType == "cert_role" {
-		return fmt.Errorf("token_type %q is only valid for cert auth backends", config.TokenType)
-	}
-	if config.TokenType == "" {
-		config.TokenType = "jwt_role"
 	}
 
 	// Validate mode is specified
@@ -220,15 +208,6 @@ func (b *jwtAuthBackend) SensitiveConfigFields() []string {
 		"jwks_ca_pem",
 		"jwt_validation_pubkeys",
 	}
-}
-
-// allowedTokenTypeValues returns the user-facing token type aliases for FieldSchema.AllowedValues
-func (b *jwtAuthBackend) allowedTokenTypeValues() []interface{} {
-	values := make([]interface{}, len(helper.UserTokenTypes))
-	for i, t := range helper.UserTokenTypes {
-		values[i] = t
-	}
-	return values
 }
 
 // verifyURLReachable checks that a URL is reachable and returns HTTP 200

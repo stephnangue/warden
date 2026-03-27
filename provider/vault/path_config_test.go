@@ -88,7 +88,8 @@ func TestHandleConfigWrite(t *testing.T) {
 			initialTimeout:       framework.DefaultTimeout,
 			initialTLSSkipVerify: false,
 			fieldData: map[string]interface{}{
-				"vault_address": "https://vault.example.com:8200",
+				"vault_address":  "https://vault.example.com:8200",
+				"auto_auth_path": "auth/jwt/",
 			},
 			expectedVaultAddress:  "https://vault.example.com:8200",
 			expectedMaxBodySize:   framework.DefaultMaxBodySize,
@@ -102,9 +103,10 @@ func TestHandleConfigWrite(t *testing.T) {
 			initialTimeout:       framework.DefaultTimeout,
 			initialTLSSkipVerify: false,
 			fieldData: map[string]interface{}{
-				"vault_address": "https://new.vault.com:8200",
-				"max_body_size": int64(5242880),
-				"timeout":       60, // seconds
+				"vault_address":  "https://new.vault.com:8200",
+				"max_body_size":  int64(5242880),
+				"timeout":        60, // seconds
+				"auto_auth_path": "auth/jwt/",
 			},
 			expectedVaultAddress:  "https://new.vault.com:8200",
 			expectedMaxBodySize:   5242880,
@@ -118,7 +120,8 @@ func TestHandleConfigWrite(t *testing.T) {
 			initialTimeout:       30 * time.Second,
 			initialTLSSkipVerify: false,
 			fieldData: map[string]interface{}{
-				"timeout": 120, // seconds
+				"timeout":        120, // seconds
+				"auto_auth_path": "auth/jwt/",
 			},
 			expectedVaultAddress:  "https://vault.example.com:8200",
 			expectedMaxBodySize:   framework.DefaultMaxBodySize,
@@ -132,7 +135,8 @@ func TestHandleConfigWrite(t *testing.T) {
 			initialTimeout:       framework.DefaultTimeout,
 			initialTLSSkipVerify: false,
 			fieldData: map[string]interface{}{
-				"max_body_size": int64(20971520), // 20MB
+				"max_body_size":  int64(20971520), // 20MB
+				"auto_auth_path": "auth/jwt/",
 			},
 			expectedVaultAddress:  "https://vault.example.com:8200",
 			expectedMaxBodySize:   20971520,
@@ -167,6 +171,12 @@ func TestHandleConfigWrite(t *testing.T) {
 				},
 				"tls_skip_verify": {
 					Type: framework.TypeBool,
+				},
+				"auto_auth_path": {
+					Type: framework.TypeString,
+				},
+				"default_role": {
+					Type: framework.TypeString,
 				},
 			}
 
@@ -211,11 +221,15 @@ func TestHandleConfigWrite_TLSChange(t *testing.T) {
 		"tls_skip_verify": {
 			Type: framework.TypeBool,
 		},
+		"auto_auth_path": {
+			Type: framework.TypeString,
+		},
 	}
 
 	fd := &framework.FieldData{
 		Raw: map[string]interface{}{
 			"tls_skip_verify": true,
+			"auto_auth_path":  "auth/jwt/",
 		},
 		Schema: schema,
 	}

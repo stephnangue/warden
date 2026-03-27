@@ -54,7 +54,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				HelpSynopsis:    "GCP Gateway proxy",
 				HelpDescription: "Proxies requests to Google Cloud APIs with Bearer token injection",
 			},
-			// Transparent mode: role-based gateway paths
+			// Role-based gateway paths for implicit auth
 			{
 				Pattern:         "role/[^/]+/gateway",
 				Handler:         b.handleTransparentGatewayStreaming,
@@ -69,7 +69,6 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			},
 		},
 		TransparentConfig: &framework.TransparentConfig{
-			Enabled:         false, // Updated via config write or Initialize
 			AutoAuthPath:    "",
 			DefaultAuthRole: "",
 		},
@@ -112,8 +111,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		b.Timeout = parsedConfig.Timeout
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-			Enabled:      parsedConfig.TransparentMode,
-			AutoAuthPath: parsedConfig.AutoAuthPath,
+			AutoAuthPath:    parsedConfig.AutoAuthPath,
 			DefaultAuthRole: parsedConfig.DefaultAuthRole,
 		})
 	}
@@ -136,7 +134,6 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 		var config struct {
 			MaxBodySize     int64  `json:"max_body_size"`
 			Timeout         string `json:"timeout"`
-			TransparentMode bool   `json:"transparent_mode"`
 			AutoAuthPath    string `json:"auto_auth_path"`
 			DefaultAuthRole string `json:"default_role"`
 		}
@@ -151,8 +148,7 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-			Enabled:      config.TransparentMode,
-			AutoAuthPath: config.AutoAuthPath,
+			AutoAuthPath:    config.AutoAuthPath,
 			DefaultAuthRole: config.DefaultAuthRole,
 		})
 	} else {
@@ -160,11 +156,10 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 		// GCP provider is immediately configured and readable.
 		tc := b.TransparentConfig
 		defaultEntry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"max_body_size":    b.MaxBodySize,
-			"timeout":          b.Timeout.String(),
-			"transparent_mode": tc.Enabled,
-			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultAuthRole,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create default config entry: %w", err)
@@ -190,15 +185,10 @@ func (b *gcpBackend) handleGatewayStreaming(ctx context.Context, req *logical.Re
 	return nil
 }
 
-// handleTransparentGatewayStreaming handles transparent mode gateway requests.
+// handleTransparentGatewayStreaming handles gateway requests with implicit auth.
 // The implicit auth has already been performed by the core request handler.
 // This method rewrites the path and delegates to the standard gateway handler.
 func (b *gcpBackend) handleTransparentGatewayStreaming(ctx context.Context, req *logical.Request, fd *framework.FieldData) error {
-	if !b.StreamingBackend.IsTransparentMode() {
-		http.Error(req.ResponseWriter, "Transparent mode not enabled", http.StatusForbidden)
-		return nil
-	}
-
 	// Rewrite the path: /role/{role}/gateway/... -> /gateway/...
 	// The original path in req.Path is relative to the mount point
 	req.Path = b.StreamingBackend.RewriteTransparentPath(req.Path)
@@ -216,17 +206,16 @@ func (b *gcpBackend) handleTransparentGatewayStreaming(ctx context.Context, req 
 // ValidateConfig validates GCP provider-specific configuration
 func ValidateConfig(config map[string]any) error {
 	allowedKeys := map[string]bool{
-		"max_body_size":    true,
-		"timeout":          true,
-		"transparent_mode": true,
-		"auto_auth_path":   true,
-		"default_role":     true,
+		"max_body_size":  true,
+		"timeout":        true,
+		"auto_auth_path": true,
+		"default_role":   true,
 	}
 
 	// Check for unknown keys
 	for key := range config {
 		if !allowedKeys[key] {
-			return fmt.Errorf("unknown configuration key: %s (allowed: max_body_size, timeout, transparent_mode, auto_auth_path, default_role)", key)
+			return fmt.Errorf("unknown configuration key: %s (allowed: max_body_size, timeout, auto_auth_path, default_role)", key)
 		}
 	}
 
@@ -283,16 +272,6 @@ func ValidateConfig(config map[string]any) error {
 		}
 	}
 
-	// Validate transparent_mode
-	if tm, ok := config["transparent_mode"]; ok {
-		switch tm.(type) {
-		case bool:
-			// valid
-		default:
-			return fmt.Errorf("transparent_mode must be a boolean")
-		}
-	}
-
 	// Validate auto_auth_path
 	if aap, ok := config["auto_auth_path"]; ok {
 		if _, ok := aap.(string); !ok {
@@ -342,7 +321,7 @@ Examples:
   /gcp/gateway/container.googleapis.com/v1/projects/my-project/locations/-/clusters
   /gcp/gateway/bigquery.googleapis.com/bigquery/v2/projects/my-project/datasets
 
-Transparent mode allows implicit JWT authentication via role-based paths,
+Implicit JWT authentication via role-based paths,
 eliminating the need for clients to perform an explicit Warden login:
   /gcp/role/{role}/gateway/{googleapis-host}/{path}
 
@@ -366,7 +345,6 @@ Credential mint methods:
 Configuration:
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)
 - timeout: Request timeout duration (e.g., '30s', '5m')
-- transparent_mode: Enable implicit JWT authentication (default: false)
-- auto_auth_path: JWT auth mount path for transparent mode (e.g., 'auth/jwt/')
+- auto_auth_path: Auth mount path for implicit authentication (e.g., 'auth/jwt/')
 - default_role: Fallback role when not specified in the URL path
 `

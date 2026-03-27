@@ -30,18 +30,17 @@ func TestCertTransparentReadKVSecret(t *testing.T) {
 	}
 }
 
-// TestCertNonTransparentReadKVSecret verifies cert login produces a
-// warden_token that can be used for non-transparent vault gateway access.
-func TestCertNonTransparentReadKVSecret(t *testing.T) {
+// TestCertTransparentReadKVSecretAlternate verifies cert-based transparent mode
+// reads a vault secret with a different client cert CN.
+func TestCertTransparentReadKVSecretAlternate(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	caCertPEM, caKey := h.SetupCertVaultEnv(t, port)
 	defer h.TeardownCertVaultEnv(t, port)
 
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cert-2")
-	wardenToken := h.GetCertNTWardenToken(t, port, "e2e-cert-nt-reader", clientCertPEM)
 
-	status, body := h.VaultNTRequest(t, "GET",
-		"secret/data/e2e/app-config", port, wardenToken)
+	status, body := h.VaultCertTransparentRequest(t, "GET",
+		"secret/data/e2e/app-config", "e2e-cert-reader", port, clientCertPEM)
 	if status != 200 {
 		t.Fatalf("expected 200, got %d: %s", status, string(body))
 	}
@@ -64,19 +63,18 @@ func TestCertTransparentThroughStandby(t *testing.T) {
 	}
 }
 
-// TestCertNonTransparentThroughStandby verifies that a warden_token obtained
-// via cert login on the leader works for gateway requests through a standby.
-func TestCertNonTransparentThroughStandby(t *testing.T) {
+// TestCertTransparentThroughStandbyAlternate verifies that cert-based transparent
+// mode works through a standby node with a different client cert.
+func TestCertTransparentThroughStandbyAlternate(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	caCertPEM, caKey := h.SetupCertVaultEnv(t, port)
 	defer h.TeardownCertVaultEnv(t, port)
 
-	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cert-nt-standby")
-	wardenToken := h.GetCertNTWardenToken(t, port, "e2e-cert-nt-reader", clientCertPEM)
+	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cert-standby-alt")
 
 	standbyPort := h.GetStandbyPort(t)
-	status, body := h.VaultNTRequest(t, "GET",
-		"secret/data/e2e/app-config", standbyPort, wardenToken)
+	status, body := h.VaultCertTransparentRequest(t, "GET",
+		"secret/data/e2e/app-config", "e2e-cert-reader", standbyPort, clientCertPEM)
 	if status != 200 {
 		t.Fatalf("expected 200 through standby, got %d: %s", status, string(body))
 	}

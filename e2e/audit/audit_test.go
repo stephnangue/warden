@@ -3,8 +3,6 @@
 package audit
 
 import (
-	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -31,28 +29,6 @@ func TestAuditSuccessfulRequestLogged(t *testing.T) {
 	}
 
 	h.CleanupNamespaces(t, leader, "e2e-audit-log-test")
-}
-
-// TestAuditFailedAuthLogged verifies failed authentication attempts are logged (T-082).
-func TestAuditFailedAuthLogged(t *testing.T) {
-	leader := h.GetLeaderPort(t)
-	nodeNum := h.NodeNumberForPort(leader)
-
-	headers := map[string]string{
-		"X-Warden-Token": "audit-test-invalid-token",
-	}
-	h.DoRequest(t, "GET",
-		fmt.Sprintf("%s/v1/sys/namespaces?warden-list=true", h.NodeURL(leader)),
-		headers, "")
-
-	time.Sleep(1 * time.Second)
-
-	log := h.ReadNodeLog(t, nodeNum)
-	if !strings.Contains(log, "permission denied") &&
-		!strings.Contains(log, "denied") &&
-		!strings.Contains(log, "token not found") {
-		t.Fatalf("expected auth failure to be logged (permission denied / denied / token not found), but none found in node %d log", nodeNum)
-	}
 }
 
 // TestAuditNamespaceContext verifies namespace context appears in audit logs (T-083).
@@ -84,8 +60,8 @@ func TestAuditGatewayRequestLogged(t *testing.T) {
 	leader := h.GetLeaderPort(t)
 	nodeNum := h.NodeNumberForPort(leader)
 
-	token := h.GetNTWardenToken(t, leader)
-	h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token)
+	jwt := h.GetDefaultJWT(t)
+	h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
 
 	time.Sleep(1 * time.Second)
 

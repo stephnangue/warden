@@ -38,13 +38,10 @@ func DefaultPathRewriter(path string) string {
 	return DefaultAuthRolePattern.ReplaceAllString(path, "gateway")
 }
 
-// TransparentConfig holds declarative transparent mode configuration.
-// Providers can set this to enable transparent mode without implementing
-// the TransparentModeProvider interface manually.
+// TransparentConfig holds the authentication configuration for implicit auth.
+// When set on a StreamingBackend, the provider performs implicit JWT or cert
+// authentication on every request — no explicit login step is needed.
 type TransparentConfig struct {
-	// Enabled indicates if transparent mode is available for this backend
-	Enabled bool
-
 	// AutoAuthPath is the auth mount path for implicit authentication (e.g., "auth/jwt/")
 	AutoAuthPath string
 
@@ -107,7 +104,7 @@ type StreamingBackend struct {
 	// StreamingPaths are paths that handle streaming operations (e.g., gateway/*)
 	StreamingPaths []*StreamingPath
 
-	// TransparentConfig holds the transparent mode configuration (optional)
+	// TransparentConfig holds the implicit auth configuration
 	// When set, StreamingBackend implements logical.TransparentModeProvider
 	TransparentConfig *TransparentConfig
 
@@ -494,9 +491,9 @@ func (b *StreamingBackend) ExtractToken(r *http.Request) string {
 
 // TransparentModeProvider interface implementation
 
-// IsTransparentMode returns whether transparent mode is enabled for this backend
+// IsTransparentMode returns whether the backend has an auth config set
 func (b *StreamingBackend) IsTransparentMode() bool {
-	return b.TransparentConfig != nil && b.TransparentConfig.Enabled
+	return b.TransparentConfig != nil
 }
 
 // GetAutoAuthPath returns the auth mount path for implicit authentication
@@ -539,8 +536,7 @@ func (b *StreamingBackend) RewriteTransparentPath(path string) string {
 	return rewriter(path)
 }
 
-
-// SetTransparentConfig updates the transparent mode configuration at runtime
+// SetTransparentConfig updates the implicit auth configuration at runtime
 func (b *StreamingBackend) SetTransparentConfig(config *TransparentConfig) {
 	b.TransparentConfig = config
 	// Reset unauthPaths so it gets re-initialized with new config
@@ -554,7 +550,7 @@ func (b *StreamingBackend) SetTransparentConfig(config *TransparentConfig) {
 // Logger must be set on the StreamingBackend before calling this method.
 func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
 	b.Proxy = &httputil.ReverseProxy{
-		Director: func(req *http.Request) {},
+		Director:  func(req *http.Request) {},
 		Transport: transport,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			b.Logger.Error("proxy error",

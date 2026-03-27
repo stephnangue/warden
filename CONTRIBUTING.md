@@ -87,7 +87,7 @@ make test-e2e-teardown
 | `e2e/cluster` | Split-brain detection |
 | `e2e/ha` | Leader election, step-down, failover, node rejoin |
 | `e2e/forwarding` | Standby-to-leader request forwarding, SigV4 preservation |
-| `e2e/provider` | Vault transparent/non-transparent gateway, JWT validation |
+| `e2e/provider` | Vault gateway, JWT validation, JWT validation |
 | `e2e/credential` | Credential issuance, caching, TTL expiry, cross-namespace |
 | `e2e/rotation` | Credential source rotation, activation delay, failover persistence |
 | `e2e/namespace` | Namespace CRUD and isolation |

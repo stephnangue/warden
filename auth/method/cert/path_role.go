@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"path"
-	"slices"
 	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
@@ -63,12 +62,6 @@ func (b *certAuthBackend) pathRole() *framework.Path {
 				Description: "Token TTL (default: 1h)",
 				Default:     3600,
 			},
-			"token_type": {
-				Type:          framework.TypeString,
-				Description:   "Token type: aws, warden, or transparent (default: transparent)",
-				Default:       "transparent",
-				AllowedValues: b.allowedTokenTypeValues(),
-			},
 			"cred_spec_name": {
 				Type:        framework.TypeString,
 				Description: "Credential spec name",
@@ -115,11 +108,6 @@ func (b *certAuthBackend) pathRoleList() *framework.Path {
 		HelpSynopsis:    "List certificate auth roles",
 		HelpDescription: "List all configured roles for certificate authentication.",
 	}
-}
-
-// isValidTokenType checks if the given token type is valid
-func (b *certAuthBackend) isValidTokenType(tokenType string) bool {
-	return slices.Contains(b.validTokenTypes, tokenType)
 }
 
 // handleRoleCreate creates a new role
@@ -181,9 +169,8 @@ func (b *certAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reque
 			"allowed_organizations":        role.AllowedOrganizations,
 			"certificate":                  role.Certificate,
 			"token_policies":               role.TokenPolicies,
-			"token_ttl":                    role.TokenTTL,
-			"token_type":                   helper.DisplayTokenType(role.TokenType),
-			"cred_spec_name":               role.CredSpecName,
+			"token_ttl":       role.TokenTTL,
+			"cred_spec_name": role.CredSpecName,
 			"principal_claim":              role.PrincipalClaim,
 		},
 	}, nil
@@ -229,9 +216,6 @@ func (b *certAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Req
 		}
 		if v, ok := d.GetOk("token_ttl"); ok {
 			role.TokenTTL = (time.Duration(v.(int)) * time.Second).String()
-		}
-		if v, ok := d.GetOk("token_type"); ok {
-			role.TokenType = helper.ResolveTokenType(helper.BackendCert, v.(string))
 		}
 		if v, ok := d.GetOk("cred_spec_name"); ok {
 			role.CredSpecName = v.(string)
@@ -300,28 +284,8 @@ func (b *certAuthBackend) handleRoleList(ctx context.Context, req *logical.Reque
 
 // validateRole validates role fields and sets defaults
 func (b *certAuthBackend) validateRole(role *CertRole) error {
-	// Default token type from config
-	if role.TokenType == "" && b.config != nil && b.config.TokenType != "" {
-		role.TokenType = b.config.TokenType
-	}
-
-	// jwt_role is always forbidden in cert auth — it is jwt-auth-specific.
-	// cert_role is the natural default for cert auth; other types are always allowed.
-	if b.config != nil {
-		if role.TokenType == "jwt_role" {
-			return logical.ErrBadRequestf("token_type %q is only valid for jwt auth backends", role.TokenType)
-		}
-		if role.TokenType == "" {
-			role.TokenType = "cert_role"
-		}
-	}
-
-	if role.TokenType == "" {
-		return logical.ErrBadRequestf("token_type is required; must be one of: %v", b.validTokenTypes)
-	}
-	if !b.isValidTokenType(role.TokenType) {
-		return logical.ErrBadRequestf("invalid token_type %q; must be one of: %v", role.TokenType, b.validTokenTypes)
-	}
+	// Token type is always cert_role for cert auth backends
+	role.TokenType = "cert_role"
 
 	// Default TTL
 	if role.TokenTTL == "" {
@@ -414,9 +378,6 @@ func (b *certAuthBackend) buildRoleFromFieldData(name string, d *framework.Field
 	}
 	if v, ok := d.GetOk("token_ttl"); ok {
 		role.TokenTTL = (time.Duration(v.(int)) * time.Second).String()
-	}
-	if v, ok := d.GetOk("token_type"); ok {
-		role.TokenType = helper.ResolveTokenType(helper.BackendCert, v.(string))
 	}
 	if v, ok := d.GetOk("cred_spec_name"); ok {
 		role.CredSpecName = v.(string)

@@ -89,9 +89,6 @@ type BackendConfig struct {
 	// BackendUUID is a unique identifier provided to this backend
 	BackendUUID string
 
-	// ValidTokenTypes is the list of valid token types that can be used by auth backends
-	ValidTokenTypes []string
-
 	// RegisterShutdownHook registers a function to be called during application
 	// shutdown (preSeal). The key ensures idempotency — registering the same key
 	// multiple times only keeps one hook. Use this for process-level cleanup like
@@ -109,11 +106,11 @@ type SensitiveFieldsProvider interface {
 	SensitiveConfigFields() []string
 }
 
-// TransparentModeProvider can be implemented by providers that support transparent mode,
-// enabling loginless operation where clients send requests with JWTs directly.
+// TransparentModeProvider is implemented by providers that perform implicit authentication.
+// Clients send requests with JWTs or TLS certificates directly — no explicit login step.
 // Warden performs implicit authentication via a bound auth method.
 type TransparentModeProvider interface {
-	// IsTransparentMode returns whether transparent mode is enabled for this provider
+	// IsTransparentMode returns whether the provider has an auth path configured
 	IsTransparentMode() bool
 
 	// GetAutoAuthPath returns the auth mount path for implicit authentication (e.g., "auth/jwt/")
@@ -124,8 +121,8 @@ type TransparentModeProvider interface {
 	// Returns empty string if path doesn't match transparent pattern.
 	GetAuthRole(path string) string
 
-	// IsUnauthenticatedPath checks if a path can be accessed without authentication
-	// in transparent mode. Used for read-only endpoints that clients may access
+	// IsUnauthenticatedPath checks if a path can be accessed without authentication.
+	// Used for read-only endpoints that clients may access
 	// without sending tokens (e.g., PKI certificate PEM files).
 	IsUnauthenticatedPath(path string) bool
 

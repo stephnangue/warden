@@ -4,7 +4,6 @@
 package jwt
 
 import (
-	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -30,7 +29,6 @@ func TestPathRole_Create(t *testing.T) {
 			"bound_subject":   "test-subject",
 			"token_policies":  []string{"policy1", "policy2"},
 			"token_ttl":       3600,
-			"token_type":      "service",
 			"user_claim":      "email",
 			"cred_spec_name":  "aws-dev",
 		},
@@ -40,7 +38,6 @@ func TestPathRole_Create(t *testing.T) {
 			"bound_subject":   {Type: framework.TypeString},
 			"token_policies":  {Type: framework.TypeCommaStringSlice},
 			"token_ttl":       {Type: framework.TypeDurationSecond, Default: 3600},
-			"token_type":      {Type: framework.TypeString, Default: "service"},
 			"user_claim":      {Type: framework.TypeString, Default: "sub"},
 			"cred_spec_name":  {Type: framework.TypeString},
 		},
@@ -59,7 +56,7 @@ func TestPathRole_Create(t *testing.T) {
 	assert.Equal(t, "test-subject", role.BoundSubject)
 	assert.Equal(t, []string{"policy1", "policy2"}, role.TokenPolicies)
 	assert.Equal(t, time.Hour.String(), role.TokenTTL)
-	assert.Equal(t, "service", role.TokenType)
+	assert.Equal(t, "jwt_role", role.TokenType)
 	assert.Equal(t, "email", role.UserClaim)
 	assert.Equal(t, "aws-dev", role.CredSpecName)
 }
@@ -87,7 +84,6 @@ func TestPathRole_CreateDuplicate(t *testing.T) {
 			"bound_subject":   {Type: framework.TypeString},
 			"token_policies":  {Type: framework.TypeCommaStringSlice},
 			"token_ttl":       {Type: framework.TypeDurationSecond, Default: 3600},
-			"token_type":      {Type: framework.TypeString, Default: "service"},
 			"user_claim":      {Type: framework.TypeString, Default: "sub"},
 			"cred_spec_name":  {Type: framework.TypeString},
 		},
@@ -108,7 +104,6 @@ func TestPathRole_Read(t *testing.T) {
 		BoundSubject:   "sub1",
 		TokenPolicies:  []string{"policy1"},
 		TokenTTL:       (2 * time.Hour).String(),
-		TokenType:      "batch",
 		UserClaim:      "preferred_username",
 		CredSpecName:   "aws-prod",
 	}
@@ -129,7 +124,6 @@ func TestPathRole_Read(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "read-test-role", resp.Data["name"])
 	assert.Equal(t, "sub1", resp.Data["bound_subject"])
-	assert.Equal(t, "batch", resp.Data["token_type"])
 	assert.Equal(t, "preferred_username", resp.Data["user_claim"])
 	assert.Equal(t, "aws-prod", resp.Data["cred_spec_name"])
 }
@@ -160,7 +154,6 @@ func TestPathRole_Update(t *testing.T) {
 		BoundAudiences: []string{"aud1"},
 		TokenPolicies:  []string{"policy1"},
 		TokenTTL:       time.Hour.String(),
-		TokenType:      "service",
 		UserClaim:      "sub",
 	}
 	err := b.setRole(ctx, role)
@@ -180,7 +173,6 @@ func TestPathRole_Update(t *testing.T) {
 			"bound_subject":   {Type: framework.TypeString},
 			"token_policies":  {Type: framework.TypeCommaStringSlice},
 			"token_ttl":       {Type: framework.TypeDurationSecond},
-			"token_type":      {Type: framework.TypeString},
 			"user_claim":      {Type: framework.TypeString},
 			"cred_spec_name":  {Type: framework.TypeString},
 		},
@@ -198,7 +190,6 @@ func TestPathRole_Update(t *testing.T) {
 	assert.Equal(t, "new-aws-spec", updatedRole.CredSpecName)
 	// Verify unchanged fields
 	assert.Len(t, updatedRole.BoundAudiences, 1)
-	assert.Equal(t, "service", updatedRole.TokenType)
 }
 
 // TestPathRole_UpdateCreatesIfNotExists verifies the upsert pattern -
@@ -208,14 +199,12 @@ func TestPathRole_UpdateCreatesIfNotExists(t *testing.T) {
 
 	fieldData := &framework.FieldData{
 		Raw: map[string]any{
-			"name":       "new-role-via-update",
-			"token_ttl":  3600,
-			"token_type": "service",
+			"name":      "new-role-via-update",
+			"token_ttl": 3600,
 		},
 		Schema: map[string]*framework.FieldSchema{
-			"name":       {Type: framework.TypeString},
-			"token_ttl":  {Type: framework.TypeDurationSecond},
-			"token_type": {Type: framework.TypeString},
+			"name":      {Type: framework.TypeString},
+			"token_ttl": {Type: framework.TypeDurationSecond},
 		},
 	}
 
@@ -230,7 +219,7 @@ func TestPathRole_UpdateCreatesIfNotExists(t *testing.T) {
 	require.NotNil(t, createdRole)
 	assert.Equal(t, "new-role-via-update", createdRole.Name)
 	assert.Equal(t, time.Hour.String(), createdRole.TokenTTL)
-	assert.Equal(t, "service", createdRole.TokenType)
+	assert.Equal(t, "jwt_role", createdRole.TokenType)
 	// Verify defaults were applied
 	assert.Equal(t, "sub", createdRole.UserClaim)
 }
@@ -324,7 +313,6 @@ func TestRole_StorageRoundTrip(t *testing.T) {
 		BoundSubject:   "test-subject",
 		TokenPolicies:  []string{"policy1", "policy2"},
 		TokenTTL:       (2*time.Hour + 30*time.Minute).String(),
-		TokenType:      "batch",
 		UserClaim:      "preferred_username",
 		CredSpecName:   "aws-test-spec",
 	}
@@ -343,7 +331,6 @@ func TestRole_StorageRoundTrip(t *testing.T) {
 	assert.Equal(t, original.BoundSubject, retrieved.BoundSubject)
 	assert.Equal(t, original.TokenPolicies, retrieved.TokenPolicies)
 	assert.Equal(t, original.TokenTTL, retrieved.TokenTTL)
-	assert.Equal(t, original.TokenType, retrieved.TokenType)
 	assert.Equal(t, original.UserClaim, retrieved.UserClaim)
 	assert.Equal(t, original.CredSpecName, retrieved.CredSpecName)
 }
@@ -353,8 +340,7 @@ func TestRole_Defaults(t *testing.T) {
 
 	fieldData := &framework.FieldData{
 		Raw: map[string]any{
-			"name":       "defaults-role",
-			"token_type": "warden",
+			"name": "defaults-role",
 		},
 		Schema: map[string]*framework.FieldSchema{
 			"name":            {Type: framework.TypeString},
@@ -362,7 +348,6 @@ func TestRole_Defaults(t *testing.T) {
 			"bound_subject":   {Type: framework.TypeString},
 			"token_policies":  {Type: framework.TypeCommaStringSlice},
 			"token_ttl":       {Type: framework.TypeDurationSecond, Default: 3600},
-			"token_type":      {Type: framework.TypeString, Required: true},
 			"user_claim":      {Type: framework.TypeString, Default: "sub"},
 			"cred_spec_name":  {Type: framework.TypeString},
 		},
@@ -398,7 +383,7 @@ func TestPathRole_Fields(t *testing.T) {
 	expectedFields := []string{
 		"name", "bound_audiences", "bound_subject", "bound_claims",
 		"bound_uri_patterns", "uri_claim", "token_policies",
-		"token_ttl", "token_type", "user_claim", "cred_spec_name",
+		"token_ttl", "user_claim", "cred_spec_name",
 		"max_age",
 	}
 
@@ -460,14 +445,12 @@ func TestPathRole_MaxAgeValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fieldData := &framework.FieldData{
 				Raw: map[string]any{
-					"name":       "max-age-test-" + tc.name,
-					"token_type": "service",
-					"max_age":    tc.maxAge,
+					"name":    "max-age-test-" + tc.name,
+					"max_age": tc.maxAge,
 				},
 				Schema: map[string]*framework.FieldSchema{
-					"name":       {Type: framework.TypeString},
-					"token_type": {Type: framework.TypeString},
-					"max_age":    {Type: framework.TypeString},
+					"name":    {Type: framework.TypeString},
+					"max_age": {Type: framework.TypeString},
 					"token_ttl":  {Type: framework.TypeDurationSecond, Default: 3600},
 					"user_claim": {Type: framework.TypeString, Default: "sub"},
 				},
@@ -494,7 +477,6 @@ func TestPathRole_MaxAgeRoundTrip(t *testing.T) {
 	role := &JWTRole{
 		Name:      "max-age-roundtrip",
 		TokenTTL:  time.Hour.String(),
-		TokenType: "service",
 		UserClaim: "sub",
 		MaxAge:    "30m",
 	}
@@ -510,146 +492,3 @@ func TestPathRole_MaxAgeRoundTrip(t *testing.T) {
 	assert.Equal(t, 30*time.Minute, maxAge)
 }
 
-// createTestBackendWithAllTokenTypes creates a backend that includes jwt_role and
-// cert_role in its valid token types.
-func createTestBackendWithAllTokenTypes(t *testing.T) (*jwtAuthBackend, context.Context) {
-	t.Helper()
-	ctx := context.Background()
-	storage := newInmemStorage()
-	conf := &logical.BackendConfig{
-		Logger:          testLoggerLogin(),
-		StorageView:     storage,
-		ValidTokenTypes: []string{"service", "batch", "user_pass", "aws_access_keys", "warden_token", "warden_crypto_token", "jwt_role", "cert_role"},
-	}
-	backend, err := Factory(ctx, conf)
-	require.NoError(t, err)
-	return backend.(*jwtAuthBackend), ctx
-}
-
-// =============================================================================
-// token_type Enforcement Tests
-// =============================================================================
-
-func TestPathRole_TokenType_CertRoleAlwaysForbidden(t *testing.T) {
-	b, ctx := createTestBackendWithAllTokenTypes(t)
-	b.config = &JWTAuthConfig{
-		Mode:    "jwt",
-		JWKSURL: "https://example.com/.well-known/jwks.json",
-	}
-
-	fieldData := &framework.FieldData{
-		Raw: map[string]any{
-			"name":       "cert-role-test",
-			"token_type": "cert_role",
-			"token_ttl":  3600,
-			"user_claim": "sub",
-		},
-		Schema: map[string]*framework.FieldSchema{
-			"name":       {Type: framework.TypeString},
-			"token_type": {Type: framework.TypeString},
-			"token_ttl":  {Type: framework.TypeDurationSecond, Default: 3600},
-			"user_claim": {Type: framework.TypeString, Default: "sub"},
-		},
-	}
-
-	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fieldData)
-	require.NoError(t, err)
-	require.NotNil(t, resp.Err)
-	assert.Contains(t, resp.Err.Error(), "cert auth backends")
-}
-
-func TestPathRole_TokenType_JWTRoleDefaultsWhenEmpty(t *testing.T) {
-	b, ctx := createTestBackendWithAllTokenTypes(t)
-	b.config = &JWTAuthConfig{
-		Mode:    "jwt",
-		JWKSURL: "https://example.com/.well-known/jwks.json",
-	}
-
-	fieldData := &framework.FieldData{
-		Raw: map[string]any{
-			"name":       "jwt-default",
-			"token_ttl":  3600,
-			"user_claim": "sub",
-			// token_type intentionally omitted — should default to jwt_role
-		},
-		Schema: map[string]*framework.FieldSchema{
-			"name":       {Type: framework.TypeString},
-			"token_type": {Type: framework.TypeString},
-			"token_ttl":  {Type: framework.TypeDurationSecond, Default: 3600},
-			"user_claim": {Type: framework.TypeString, Default: "sub"},
-		},
-	}
-
-	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fieldData)
-	require.NoError(t, err)
-	assert.Nil(t, resp.Err)
-	assert.Equal(t, http.StatusCreated, resp.StatusCode)
-
-	role, err := b.getRole(ctx, "jwt-default")
-	require.NoError(t, err)
-	assert.Equal(t, "jwt_role", role.TokenType)
-}
-
-func TestPathRole_TokenType_JWTRoleAlwaysAllowed(t *testing.T) {
-	b, ctx := createTestBackendWithAllTokenTypes(t)
-	b.config = &JWTAuthConfig{
-		Mode:    "jwt",
-		JWKSURL: "https://example.com/.well-known/jwks.json",
-	}
-
-	fieldData := &framework.FieldData{
-		Raw: map[string]any{
-			"name":       "jwt-role-explicit",
-			"token_type": "transparent",
-			"token_ttl":  3600,
-			"user_claim": "sub",
-		},
-		Schema: map[string]*framework.FieldSchema{
-			"name":       {Type: framework.TypeString},
-			"token_type": {Type: framework.TypeString},
-			"token_ttl":  {Type: framework.TypeDurationSecond, Default: 3600},
-			"user_claim": {Type: framework.TypeString, Default: "sub"},
-		},
-	}
-
-	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fieldData)
-	require.NoError(t, err)
-	assert.Nil(t, resp.Err)
-	assert.Equal(t, http.StatusCreated, resp.StatusCode)
-
-	role, err := b.getRole(ctx, "jwt-role-explicit")
-	require.NoError(t, err)
-	assert.Equal(t, "jwt_role", role.TokenType)
-}
-
-func TestPathRole_TokenType_OtherTypesAlwaysAllowed(t *testing.T) {
-	b, ctx := createTestBackendWithAllTokenTypes(t)
-	b.config = &JWTAuthConfig{
-		Mode:    "jwt",
-		JWKSURL: "https://example.com/.well-known/jwks.json",
-	}
-
-	for _, tokenType := range []string{"aws", "warden", "service"} {
-		t.Run(tokenType, func(t *testing.T) {
-			fieldData := &framework.FieldData{
-				Raw: map[string]any{
-					"name":       "mixed-" + tokenType,
-					"token_type": tokenType,
-					"token_ttl":  3600,
-					"user_claim": "sub",
-				},
-				Schema: map[string]*framework.FieldSchema{
-					"name":       {Type: framework.TypeString},
-					"token_type": {Type: framework.TypeString},
-					"token_ttl":  {Type: framework.TypeDurationSecond, Default: 3600},
-					"user_claim": {Type: framework.TypeString, Default: "sub"},
-				},
-			}
-
-			resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fieldData)
-			require.NoError(t, err)
-			assert.Nil(t, resp.Err, "token_type=%q should always be allowed", tokenType)
-			assert.Equal(t, http.StatusCreated, resp.StatusCode)
-		})
-	}
-}

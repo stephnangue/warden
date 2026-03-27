@@ -12,24 +12,14 @@ func TestTransparentModeProvider_ViaStreamingBackend(t *testing.T) {
 	// Create a StreamingBackend with TransparentConfig (mimics what vaultBackend uses)
 	sb := &framework.StreamingBackend{
 		TransparentConfig: &framework.TransparentConfig{
-			Enabled:      true,
-			AutoAuthPath: "auth/jwt/",
-			DefaultAuthRole:  "default-role",
+			AutoAuthPath:    "auth/jwt/",
+			DefaultAuthRole: "default-role",
 		},
 	}
 
 	// Test IsTransparentMode
 	t.Run("IsTransparentMode returns true when enabled", func(t *testing.T) {
 		assert.True(t, sb.IsTransparentMode())
-	})
-
-	t.Run("IsTransparentMode returns false when disabled", func(t *testing.T) {
-		sb2 := &framework.StreamingBackend{
-			TransparentConfig: &framework.TransparentConfig{
-				Enabled: false,
-			},
-		}
-		assert.False(t, sb2.IsTransparentMode())
 	})
 
 	t.Run("IsTransparentMode returns false when config is nil", func(t *testing.T) {
@@ -51,9 +41,8 @@ func TestTransparentModeProvider_ViaStreamingBackend(t *testing.T) {
 func TestGetAuthRole_ViaStreamingBackend(t *testing.T) {
 	sb := &framework.StreamingBackend{
 		TransparentConfig: &framework.TransparentConfig{
-			Enabled:      true,
-			AutoAuthPath: "auth/jwt/",
-			DefaultAuthRole:  "default-role",
+			AutoAuthPath:    "auth/jwt/",
+			DefaultAuthRole: "default-role",
 		},
 	}
 
@@ -110,9 +99,8 @@ func TestGetAuthRole_ViaStreamingBackend(t *testing.T) {
 func TestGetAuthRole_NoDefaultAuthRole(t *testing.T) {
 	sb := &framework.StreamingBackend{
 		TransparentConfig: &framework.TransparentConfig{
-			Enabled:      true,
-			AutoAuthPath: "auth/jwt/",
-			DefaultAuthRole:  "", // No default role
+			AutoAuthPath:    "auth/jwt/",
+			DefaultAuthRole: "", // No default role
 		},
 	}
 
@@ -129,9 +117,7 @@ func TestGetAuthRole_NoDefaultAuthRole(t *testing.T) {
 
 func TestRewriteTransparentPath_ViaStreamingBackend(t *testing.T) {
 	sb := &framework.StreamingBackend{
-		TransparentConfig: &framework.TransparentConfig{
-			Enabled: true,
-		},
+		TransparentConfig: &framework.TransparentConfig{},
 	}
 
 	tests := []struct {
@@ -234,9 +220,8 @@ func TestSetTransparentConfig(t *testing.T) {
 
 	// Set config
 	sb.SetTransparentConfig(&framework.TransparentConfig{
-		Enabled:      true,
-		AutoAuthPath: "auth/oidc/",
-		DefaultAuthRole:  "admin",
+		AutoAuthPath:    "auth/oidc/",
+		DefaultAuthRole: "admin",
 	})
 
 	// Now should be enabled

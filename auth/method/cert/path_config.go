@@ -6,7 +6,6 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
-	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
@@ -29,12 +28,6 @@ func (b *certAuthBackend) pathConfig() *framework.Path {
 			"token_ttl": {
 				Type:        framework.TypeDurationSecond,
 				Description: "Default token TTL (default: 1h)",
-			},
-			"token_type": {
-				Type:          framework.TypeString,
-				Description:   "Default token type for roles that don't specify one (default: transparent)",
-				Default:       "transparent",
-				AllowedValues: b.allowedTokenTypeValues(),
 			},
 			"revocation_mode": {
 				Type:        framework.TypeString,
@@ -97,9 +90,8 @@ func (b *certAuthBackend) handleConfigRead(ctx context.Context, req *logical.Req
 		Data: map[string]any{
 			"trusted_ca_pem":   b.config.TrustedCAPEM,
 			"principal_claim":  b.config.PrincipalClaim,
-			"token_ttl":        b.config.TokenTTL.String(),
-			"token_type":       helper.DisplayTokenType(b.config.TokenType),
-			"revocation_mode":  b.config.RevocationMode,
+			"token_ttl":       b.config.TokenTTL.String(),
+			"revocation_mode": b.config.RevocationMode,
 			"crl_cache_ttl":    b.config.CRLCacheTTL,
 			"ocsp_timeout":     b.config.OCSPTimeout,
 			"default_role":     b.config.DefaultRole,
@@ -119,7 +111,6 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		conf["trusted_ca_pem"] = b.config.TrustedCAPEM
 		conf["principal_claim"] = b.config.PrincipalClaim
 		conf["token_ttl"] = b.config.TokenTTL
-		conf["token_type"] = b.config.TokenType
 		conf["revocation_mode"] = b.config.RevocationMode
 		conf["crl_cache_ttl"] = b.config.CRLCacheTTL
 		conf["ocsp_timeout"] = b.config.OCSPTimeout
@@ -132,11 +123,6 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		if val, ok := d.GetOk(key); ok {
 			conf[key] = val
 		}
-	}
-
-	// Translate user-facing token_type alias to internal name before setup
-	if rawType, ok := conf["token_type"].(string); ok {
-		conf["token_type"] = helper.ResolveTokenType(helper.BackendCert, rawType)
 	}
 
 	// Setup new config
@@ -156,7 +142,6 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 			"trusted_ca_pem":  b.config.TrustedCAPEM,
 			"principal_claim": b.config.PrincipalClaim,
 			"token_ttl":       b.config.TokenTTL.String(),
-			"token_type":      b.config.TokenType,
 			"revocation_mode": b.config.RevocationMode,
 			"crl_cache_ttl":   b.config.CRLCacheTTL,
 			"ocsp_timeout":    b.config.OCSPTimeout,

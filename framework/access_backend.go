@@ -10,15 +10,14 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// AccessConfig holds the transparent mode configuration for access backends.
+// AccessConfig holds the implicit auth configuration for access backends.
 type AccessConfig struct {
-	TransparentMode bool   `json:"transparent_mode"`
-	AutoAuthPath    string `json:"auto_auth_path"`
+	AutoAuthPath string `json:"auto_auth_path"`
 }
 
 // AccessBackend implements logical.Backend for access backends that vend access grants
 // (connection strings, presigned URLs, etc.) without proxying traffic.
-// It provides transparent mode support and storage access, paralleling StreamingBackend
+// It provides implicit auth support and storage access, paralleling StreamingBackend
 // for proxy providers.
 type AccessBackend struct {
 	*Backend
@@ -33,7 +32,7 @@ type AccessBackend struct {
 	// Defaults to "access/" if empty.
 	AccessPathPrefix string
 
-	// cfg holds the persisted transparent mode configuration.
+	// cfg holds the persisted implicit auth configuration.
 	cfg *AccessConfig
 }
 
@@ -58,9 +57,9 @@ func (b *AccessBackend) Setup(ctx context.Context, conf *logical.BackendConfig) 
 
 // --- TransparentModeProvider implementation ---
 
-// IsTransparentMode returns whether transparent mode is enabled.
+// IsTransparentMode returns whether the backend has an auth path configured.
 func (b *AccessBackend) IsTransparentMode() bool {
-	return b.cfg != nil && b.cfg.TransparentMode
+	return b.cfg != nil && b.cfg.AutoAuthPath != ""
 }
 
 // GetAutoAuthPath returns the auth mount path for implicit authentication.
@@ -134,11 +133,6 @@ func (b *AccessBackend) PathAccessConfig() *Path {
 	return &Path{
 		Pattern: "config",
 		Fields: map[string]*FieldSchema{
-			"transparent_mode": {
-				Type:        TypeBool,
-				Description: "Enable transparent mode for implicit JWT authentication",
-				Default:     false,
-			},
 			"auto_auth_path": {
 				Type:        TypeString,
 				Description: "Auth mount path for implicit authentication (e.g., auth/jwt/)",
@@ -155,7 +149,7 @@ func (b *AccessBackend) PathAccessConfig() *Path {
 			},
 		},
 		HelpSynopsis:    "Configure access backend",
-		HelpDescription: "Configure transparent mode and authentication settings.",
+		HelpDescription: "Configure authentication settings.",
 	}
 }
 
@@ -164,8 +158,7 @@ func (b *AccessBackend) handleConfigRead(_ context.Context, _ *logical.Request, 
 	return &logical.Response{
 		StatusCode: 200,
 		Data: map[string]any{
-			"transparent_mode": cfg.TransparentMode,
-			"auto_auth_path":   cfg.AutoAuthPath,
+			"auto_auth_path": cfg.AutoAuthPath,
 		},
 	}, nil
 }
@@ -173,15 +166,8 @@ func (b *AccessBackend) handleConfigRead(_ context.Context, _ *logical.Request, 
 func (b *AccessBackend) handleConfigWrite(ctx context.Context, _ *logical.Request, d *FieldData) (*logical.Response, error) {
 	cfg := b.GetAccessConfig()
 
-	if v, ok := d.GetOk("transparent_mode"); ok {
-		cfg.TransparentMode = v.(bool)
-	}
 	if v, ok := d.GetOk("auto_auth_path"); ok {
 		cfg.AutoAuthPath = v.(string)
-	}
-
-	if cfg.TransparentMode && cfg.AutoAuthPath == "" {
-		return logical.ErrorResponse(logical.ErrBadRequest("auto_auth_path is required when transparent_mode is enabled")), nil
 	}
 
 	if err := b.SetAccessConfig(ctx, cfg); err != nil {

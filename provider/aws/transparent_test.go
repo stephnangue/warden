@@ -30,17 +30,6 @@ func TestExtractToken_CertTransparent(t *testing.T) {
 	}
 }
 
-func TestExtractToken_RegularMode(t *testing.T) {
-	// AKIA access_key_id → return Warden token
-	r, _ := http.NewRequest("GET", "/", nil)
-	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260326/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc")
-
-	token := extractToken(r)
-	if token != "AKIAIOSFODNN7EXAMPLE" {
-		t.Errorf("expected AKIA token, got %q", token)
-	}
-}
-
 func TestExtractToken_RealAWSSecurityToken(t *testing.T) {
 	// Real AWS security token (not JWT) → return access_key_id, not the security token
 	r, _ := http.NewRequest("GET", "/", nil)
@@ -77,18 +66,6 @@ func TestGetAuthRoleFromRequest_RoleName(t *testing.T) {
 	}
 }
 
-func TestGetAuthRoleFromRequest_AKIAPrefix(t *testing.T) {
-	b := &awsBackend{}
-
-	r, _ := http.NewRequest("GET", "/", nil)
-	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260326/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc")
-
-	_, ok := b.GetAuthRoleFromRequest(r)
-	if ok {
-		t.Fatal("expected ok=false for AKIA prefix (explicit auth)")
-	}
-}
-
 func TestGetAuthRoleFromRequest_ASIAPrefix(t *testing.T) {
 	// ASIA = STS temporary credentials, also Warden-compatible
 	b := &awsBackend{}
@@ -119,9 +96,8 @@ func TestGetAuthRoleFromRequest_NoAuthHeader(t *testing.T) {
 func TestValidateConfig_TransparentFields(t *testing.T) {
 	// Transparent mode fields should be allowed
 	err := ValidateConfig(map[string]any{
-		"transparent_mode": true,
-		"auto_auth_path":   "auth/jwt/",
-		"default_role":     "my-role",
+		"auto_auth_path": "auth/jwt/",
+		"default_role":   "my-role",
 	})
 	if err != nil {
 		t.Errorf("expected no error for transparent config, got: %v", err)
@@ -136,7 +112,6 @@ func TestTransparentConfig_SetAndRead(t *testing.T) {
 	}
 
 	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-		Enabled:         true,
 		AutoAuthPath:    "auth/jwt/",
 		DefaultAuthRole: "default-role",
 	})

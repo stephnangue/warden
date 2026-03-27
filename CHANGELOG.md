@@ -74,7 +74,7 @@ All notable changes to Warden are documented in this file.
 
 - **TLS PeerCertificates Fallback** — When no forwarding header is present, the cert auth middleware now reads `r.TLS.PeerCertificates` directly, enabling cert auth in TLS passthrough scenarios (no load balancer TLS termination). (#67)
 
-- **IP Binding E2E Tests** — Added 16 e2e subtests covering IP binding enforcement across optional and required policies, JWT and cert auth, transparent and non-transparent modes. Simplified CI e2e test command to use `./e2e/...` instead of listing individual packages. (#68)
+- **IP Binding E2E Tests** — Added 16 e2e subtests covering IP binding enforcement across optional and required policies, JWT and cert auth, JWT and cert auth modes. Simplified CI e2e test command to use `./e2e/...` instead of listing individual packages. (#68)
 
 - **Docker Build Image** — Upgraded the build container from `golang:1.26.0-alpine` to `golang:1.26.1-alpine`.
 
