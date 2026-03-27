@@ -54,7 +54,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				HelpSynopsis:    "GitLab Gateway proxy",
 				HelpDescription: "Proxies requests to GitLab with token injection",
 			},
-			// Transparent mode: role-based gateway paths
+			// Role-based gateway paths for implicit auth
 			{
 				Pattern:         "role/[^/]+/gateway",
 				Handler:         b.handleTransparentGatewayStreaming,
@@ -69,7 +69,6 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			},
 		},
 		TransparentConfig: &framework.TransparentConfig{
-			Enabled:         false,
 			AutoAuthPath:    "",
 			DefaultAuthRole: "",
 		},
@@ -131,7 +130,6 @@ func (b *gitlabBackend) Initialize(ctx context.Context) error {
 			GitLabAddress   string `json:"gitlab_address"`
 			MaxBodySize     int64  `json:"max_body_size"`
 			Timeout         string `json:"timeout"`
-			TransparentMode bool   `json:"transparent_mode"`
 			AutoAuthPath    string `json:"auto_auth_path"`
 			DefaultAuthRole string `json:"default_role"`
 		}
@@ -147,8 +145,7 @@ func (b *gitlabBackend) Initialize(ctx context.Context) error {
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-			Enabled:      config.TransparentMode,
-			AutoAuthPath: config.AutoAuthPath,
+			AutoAuthPath:    config.AutoAuthPath,
 			DefaultAuthRole: config.DefaultAuthRole,
 		})
 	}
@@ -168,14 +165,9 @@ func (b *gitlabBackend) handleGatewayStreaming(ctx context.Context, req *logical
 	return nil
 }
 
-// handleTransparentGatewayStreaming handles transparent mode gateway requests.
+// handleTransparentGatewayStreaming handles gateway requests with implicit auth.
 // The implicit auth has already been performed by the core request handler.
 func (b *gitlabBackend) handleTransparentGatewayStreaming(ctx context.Context, req *logical.Request, fd *framework.FieldData) error {
-	if !b.StreamingBackend.IsTransparentMode() {
-		http.Error(req.ResponseWriter, "Transparent mode not enabled", http.StatusForbidden)
-		return nil
-	}
-
 	// Rewrite the path: /role/{role}/gateway/... -> /gateway/...
 	req.Path = b.StreamingBackend.RewriteTransparentPath(req.Path)
 
@@ -223,7 +215,7 @@ Examples:
   /gitlab/gateway/api/v4/projects/123/merge_requests
   /gitlab/gateway/api/v4/projects/123/pipelines
 
-Transparent mode allows implicit JWT authentication via role-based paths,
+Implicit JWT authentication via role-based paths,
 eliminating the need for clients to perform an explicit Warden login:
   /gitlab/role/{role}/gateway/{api-path}
 
@@ -237,7 +229,6 @@ Configuration:
 - gitlab_address: Base URL of the GitLab instance (required, e.g., "https://gitlab.com")
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)
 - timeout: Request timeout duration (e.g., '30s', '5m')
-- transparent_mode: Enable implicit JWT authentication (default: false)
-- auto_auth_path: JWT auth mount path for transparent mode (e.g., 'auth/jwt/')
+- auto_auth_path: Auth mount path for implicit authentication (e.g., 'auth/jwt/')
 - default_role: Fallback role when not specified in the URL path
 `

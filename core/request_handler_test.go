@@ -822,7 +822,7 @@ func (m *mockTransparentModeProvider) SpecialPaths() *logical.Paths {
 func TestIsTransparentRequest(t *testing.T) {
 	core := createTestCore(t)
 
-	t.Run("returns false for non-TransparentModeProvider backend", func(t *testing.T) {
+	t.Run("returns false for backend without TransparentModeProvider", func(t *testing.T) {
 		backend := &mockProvider{}
 		req := &logical.Request{Path: "role/terraform/gateway/v1/secret"}
 
@@ -831,7 +831,7 @@ func TestIsTransparentRequest(t *testing.T) {
 		assert.Empty(t, role)
 	})
 
-	t.Run("returns false when transparent mode is disabled", func(t *testing.T) {
+	t.Run("returns false when auth config is not set", func(t *testing.T) {
 		backend := &mockTransparentModeProvider{
 			transparentMode: false,
 			autoAuthPath:    "auth/jwt/",

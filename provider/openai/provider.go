@@ -53,7 +53,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				HelpSynopsis:    "OpenAI Gateway proxy",
 				HelpDescription: "Proxies requests to OpenAI API with API key injection",
 			},
-			// Transparent mode: role-based gateway paths
+			// Role-based gateway paths for implicit auth
 			{
 				Pattern:         "role/[^/]+/gateway",
 				Handler:         b.handleTransparentGatewayStreaming,
@@ -69,8 +69,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		},
 		ParseStreamBody: true, // Enable policy evaluation on model, max_tokens, etc.
 		TransparentConfig: &framework.TransparentConfig{
-			Enabled:      false,
-			AutoAuthPath: "",
+			AutoAuthPath:    "",
 			DefaultAuthRole: "",
 		},
 		Backend: &framework.Backend{
@@ -114,8 +113,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		b.Timeout = parsedConfig.Timeout
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-			Enabled:      parsedConfig.TransparentMode,
-			AutoAuthPath: parsedConfig.AutoAuthPath,
+			AutoAuthPath:    parsedConfig.AutoAuthPath,
 			DefaultAuthRole: parsedConfig.DefaultAuthRole,
 		})
 	}
@@ -138,7 +136,6 @@ func (b *openaiBackend) Initialize(ctx context.Context) error {
 			OpenAIURL       string `json:"openai_url"`
 			MaxBodySize     int64  `json:"max_body_size"`
 			Timeout         string `json:"timeout"`
-			TransparentMode bool   `json:"transparent_mode"`
 			AutoAuthPath    string `json:"auto_auth_path"`
 			DefaultAuthRole string `json:"default_role"`
 		}
@@ -156,20 +153,18 @@ func (b *openaiBackend) Initialize(ctx context.Context) error {
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-			Enabled:      config.TransparentMode,
-			AutoAuthPath: config.AutoAuthPath,
+			AutoAuthPath:    config.AutoAuthPath,
 			DefaultAuthRole: config.DefaultAuthRole,
 		})
 	} else {
 		// No persisted config — persist defaults
 		tc := b.TransparentConfig
 		defaultEntry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"openai_url":       b.openaiURL,
-			"max_body_size":    b.MaxBodySize,
-			"timeout":          b.Timeout.String(),
-			"transparent_mode": tc.Enabled,
-			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultAuthRole,
+			"openai_url":     b.openaiURL,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create default config entry: %w", err)
@@ -195,14 +190,9 @@ func (b *openaiBackend) handleGatewayStreaming(ctx context.Context, req *logical
 	return nil
 }
 
-// handleTransparentGatewayStreaming handles transparent mode gateway requests.
+// handleTransparentGatewayStreaming handles gateway requests with implicit auth.
 // The implicit auth has already been performed by the core request handler.
 func (b *openaiBackend) handleTransparentGatewayStreaming(ctx context.Context, req *logical.Request, fd *framework.FieldData) error {
-	if !b.StreamingBackend.IsTransparentMode() {
-		http.Error(req.ResponseWriter, "Transparent mode not enabled", http.StatusForbidden)
-		return nil
-	}
-
 	// Rewrite the path: /role/{role}/gateway/... -> /gateway/...
 	req.Path = b.StreamingBackend.RewriteTransparentPath(req.Path)
 
@@ -244,7 +234,7 @@ Request body parsing is enabled, allowing policies to evaluate AI request
 fields such as model, max_tokens, temperature, and stream. This enables
 fine-grained cost control and usage policies.
 
-Transparent mode allows implicit JWT authentication via role-based paths,
+Implicit JWT authentication via role-based paths,
 eliminating the need for clients to perform an explicit Warden login:
   /openai/role/{role}/gateway/{api-path}
 
@@ -255,7 +245,6 @@ Configuration:
 - openai_url: OpenAI API base URL (default: https://api.openai.com)
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)
 - timeout: Request timeout duration (default: 120s for AI inference)
-- transparent_mode: Enable implicit JWT authentication (default: false)
-- auto_auth_path: JWT auth mount path for transparent mode (e.g., 'auth/jwt/')
+- auto_auth_path: Auth mount path for implicit authentication (e.g., 'auth/jwt/')
 - default_role: Fallback role when not specified in the URL path
 `

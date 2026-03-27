@@ -84,13 +84,11 @@ func TestParseConfig(t *testing.T) {
 		assert.Equal(t, 45.0, config.Timeout.Seconds())
 	})
 
-	t.Run("transparent mode settings", func(t *testing.T) {
+	t.Run("auth settings", func(t *testing.T) {
 		config := parseConfig(map[string]any{
-			"transparent_mode": true,
 			"auto_auth_path":   "auth/jwt/",
 			"default_role":     "reader",
 		})
-		assert.True(t, config.TransparentMode)
 		assert.Equal(t, "auth/jwt/", config.AutoAuthPath)
 		assert.Equal(t, "reader", config.DefaultAuthRole)
 	})
@@ -134,13 +132,6 @@ func TestValidateConfig(t *testing.T) {
 	t.Run("oversized max_body_size", func(t *testing.T) {
 		err := ValidateConfig(map[string]any{
 			"max_body_size": 200000000, // 200MB
-		})
-		assert.Error(t, err)
-	})
-
-	t.Run("invalid transparent_mode type", func(t *testing.T) {
-		err := ValidateConfig(map[string]any{
-			"transparent_mode": "yes",
 		})
 		assert.Error(t, err)
 	})

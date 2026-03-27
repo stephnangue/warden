@@ -40,7 +40,7 @@ bash e2e/setup.sh
 7. Configures Vault (KV secrets, AppRole auth, policies, token roles)
 8. Creates Hydra OAuth2 clients (`e2e-agent`, `e2e-pipeline`, `e2e-ephemeral`)
 9. Configures Warden (Vault provider, credential source/spec, JWT auth, transparent mode)
-10. Verifies both non-transparent and transparent Vault gateway modes end-to-end
+10. Verifies Vault gateway integration end-to-end
 
 ## External Services
 

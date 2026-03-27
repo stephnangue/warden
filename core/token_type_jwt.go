@@ -9,7 +9,7 @@ import (
 )
 
 // JWTRoleTokenType implements JWT-based token handling with role binding.
-// This token type is used when providers operate in transparent mode, where clients
+// This token type is used for implicit authentication, where clients
 // send requests with JWTs directly and Warden performs implicit authentication.
 // JWTs are recognized by their "eyJ" prefix (base64 encoded '{"').
 // The JWT+role combination is used as the lookup value, and its hash becomes the token ID.
@@ -27,7 +27,7 @@ func (t *JWTRoleTokenType) Metadata() TokenTypeMetadata {
 
 func (t *JWTRoleTokenType) Generate(_ context.Context, authData *AuthData, entry *TokenEntry) (map[string]string, error) {
 	// For JWT tokens, we don't generate - the JWT comes from an external IdP.
-	// The JWT is passed via authData.TokenValue for transparent mode.
+	// The JWT is passed via authData.TokenValue for implicit auth.
 	//
 	// We store a hash of the composite "jwt:role" value (not the raw JWT) for:
 	// - Security: raw JWTs may contain sensitive claims

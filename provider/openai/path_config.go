@@ -32,14 +32,9 @@ func (b *openaiBackend) pathConfig() *framework.Path {
 				Description: "Request timeout duration (e.g., '120s', '5m')",
 				Default:     "120s",
 			},
-			"transparent_mode": {
-				Type:        framework.TypeBool,
-				Description: "Enable transparent mode for implicit JWT authentication",
-				Default:     false,
-			},
 			"auto_auth_path": {
 				Type:        framework.TypeString,
-				Description: "Path to JWT auth mount for transparent mode (e.g., 'auth/jwt/')",
+				Description: "Path to auth mount for implicit authentication (e.g., 'auth/jwt/', 'auth/cert/')" ,
 			},
 			"default_role": {
 				Type:        framework.TypeString,
@@ -67,12 +62,11 @@ func (b *openaiBackend) handleConfigRead(_ context.Context, _ *logical.Request, 
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"openai_url":       b.openaiURL,
-			"max_body_size":    b.MaxBodySize,
-			"timeout":          b.Timeout.String(),
-			"transparent_mode": tc.Enabled,
-			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultAuthRole,
+			"openai_url":     b.openaiURL,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		},
 	}, nil
 }
@@ -107,12 +101,8 @@ func (b *openaiBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 
 	// Transparent mode settings
 	tc := &framework.TransparentConfig{
-		Enabled:      b.TransparentConfig.Enabled,
-		AutoAuthPath: b.TransparentConfig.AutoAuthPath,
+		AutoAuthPath:    b.TransparentConfig.AutoAuthPath,
 		DefaultAuthRole: b.TransparentConfig.DefaultAuthRole,
-	}
-	if val, ok := d.GetOk("transparent_mode"); ok {
-		tc.Enabled = val.(bool)
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -121,10 +111,10 @@ func (b *openaiBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 		tc.DefaultAuthRole = val.(string)
 	}
 
-	if tc.Enabled && tc.AutoAuthPath == "" {
+	if tc.AutoAuthPath == "" {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
-			Err:        logical.ErrBadRequest("auto_auth_path is required when transparent_mode is enabled"),
+			Err:        logical.ErrBadRequest("auto_auth_path is required"),
 		}, nil
 	}
 
@@ -133,12 +123,11 @@ func (b *openaiBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"openai_url":       b.openaiURL,
-			"max_body_size":    b.MaxBodySize,
-			"timeout":          b.Timeout.String(),
-			"transparent_mode": tc.Enabled,
-			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultAuthRole,
+			"openai_url":     b.openaiURL,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return &logical.Response{

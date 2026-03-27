@@ -12,7 +12,6 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
-	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -23,8 +22,7 @@ type CertAuthConfig struct {
 	TrustedCAPEM   string        `json:"trusted_ca_pem"`              // PEM-encoded trusted CA certs
 	PrincipalClaim string        `json:"principal_claim,omitempty"`    // "cn" (default), "dns_san", "email_san", "uri_san", "serial"
 	TokenTTL       time.Duration `json:"token_ttl" default:"1h"`      // Default token TTL
-	TokenType      string        `json:"token_type,omitempty"`         // Default token type
-	RevocationMode string        `json:"revocation_mode,omitempty"`    // "none" (default), "crl", "ocsp", "best_effort"
+	RevocationMode string `json:"revocation_mode,omitempty"`    // "none" (default), "crl", "ocsp", "best_effort"
 	CRLCacheTTL    string        `json:"crl_cache_ttl,omitempty"`      // CRL cache TTL (default: "1h")
 	OCSPTimeout    string        `json:"ocsp_timeout,omitempty"`       // OCSP request timeout (default: "5s")
 	DefaultRole string `json:"default_role,omitempty"` // Default role for transparent operations
@@ -35,20 +33,18 @@ type CertAuthConfig struct {
 
 type certAuthBackend struct {
 	*framework.Backend
-	config             *CertAuthConfig
-	configMu           sync.RWMutex
-	logger             *logger.GatedLogger
-	storageView        sdklogical.Storage
-	validTokenTypes    []string
-	revocationChecker  *revocationChecker
+	config            *CertAuthConfig
+	configMu          sync.RWMutex
+	logger            *logger.GatedLogger
+	storageView       sdklogical.Storage
+	revocationChecker *revocationChecker
 }
 
 // Factory creates a new certificate auth backend
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
 	b := &certAuthBackend{
-		logger:          conf.Logger,
-		storageView:     conf.StorageView,
-		validTokenTypes: conf.ValidTokenTypes,
+		logger:      conf.Logger,
+		storageView: conf.StorageView,
 	}
 
 	b.Backend = &framework.Backend{
@@ -101,14 +97,6 @@ func (b *certAuthBackend) setupCertConfig(_ context.Context, conf map[string]any
 	}
 	if !isValidPrincipalClaim(config.PrincipalClaim) {
 		return fmt.Errorf("invalid principal_claim %q; must be one of: %v", config.PrincipalClaim, validPrincipalClaims)
-	}
-
-	// jwt_role is always forbidden in cert auth — it is jwt-auth-specific.
-	if config.TokenType == "jwt_role" {
-		return fmt.Errorf("token_type %q is only valid for jwt auth backends", config.TokenType)
-	}
-	if config.TokenType == "" {
-		config.TokenType = "cert_role"
 	}
 
 	// Validate revocation mode
@@ -211,15 +199,6 @@ func principalClaimAllowedValues() []interface{} {
 	values := make([]interface{}, len(validPrincipalClaims))
 	for i, v := range validPrincipalClaims {
 		values[i] = v
-	}
-	return values
-}
-
-// allowedTokenTypeValues returns the user-facing token type aliases for FieldSchema.AllowedValues
-func (b *certAuthBackend) allowedTokenTypeValues() []interface{} {
-	values := make([]interface{}, len(helper.UserTokenTypes))
-	for i, t := range helper.UserTokenTypes {
-		values[i] = t
 	}
 	return values
 }

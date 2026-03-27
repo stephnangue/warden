@@ -71,30 +71,14 @@ func TestConcurrentSourceCRUD(t *testing.T) {
 	})
 }
 
-// TestConcurrentJWTLogin verifies 20 concurrent JWT logins do not cause auth
-// races or failures (T-098).
-func TestConcurrentJWTLogin(t *testing.T) {
-	leader := h.GetLeaderPort(t)
-	jwt := h.GetDefaultJWT(t)
-
-	ok := h.ConcurrentDo(20, func(i int) bool {
-		status, _ := h.LoginJWTNT(t, jwt, "e2e-nt-reader", leader)
-		return status == 200 || status == 201
-	})
-
-	if ok < 15 {
-		t.Fatalf("expected >= 15 JWT logins to succeed, got %d", ok)
-	}
-}
-
 // TestConcurrentRequestsDuringRotation verifies concurrent Vault gateway reads
 // succeed while credential rotation may be in progress (T-099).
 func TestConcurrentRequestsDuringRotation(t *testing.T) {
 	leader := h.GetLeaderPort(t)
-	token := h.GetNTWardenToken(t, leader)
+	jwt := h.GetDefaultJWT(t)
 
 	ok := h.ConcurrentDo(10, func(i int) bool {
-		status, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token)
+		status, _ := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
 		return status == 200
 	})
 

@@ -501,7 +501,7 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request, isI
 	// internal gateway auth flow — reject explicit login attempts early.
 	if resp != nil && resp.Auth != nil {
 		if !isInternalLogin && (resp.Auth.TokenType == "jwt_role" || resp.Auth.TokenType == "cert_role") {
-			return logical.ErrorResponse(logical.ErrBadRequest("explicit login is not supported for roles with token_type=transparent; use transparent mode instead")), nil, nil
+			return logical.ErrorResponse(logical.ErrBadRequest("explicit login is not supported for roles with token_type=transparent; clients authenticate implicitly via gateway requests")), nil, nil
 		} else {
 			respTokenCreate, errCreateToken := c.LoginCreateToken(ctx, resp)
 			if errCreateToken != nil {
@@ -669,7 +669,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 			}
 		}
 
-		// Check for transparent mode and perform implicit auth if needed
+		// Perform implicit auth if needed
 		// Skip if already marked as unauthenticated (handled above)
 		if !req.StreamUnauthenticated {
 			if isTransparent, role := c.isTransparentRequest(req, matchingBackend); isTransparent {
@@ -1032,18 +1032,18 @@ func extractToken(r *http.Request) string {
 	return ""
 }
 
-// isTransparentRequest checks if this is a transparent mode request.
-// Returns true and the role name if the backend supports transparent mode,
-// transparent mode is enabled, and the path is a gateway path.
+// isTransparentRequest checks if this request needs implicit authentication.
+// Returns true and the role name if the backend supports implicit auth,
+// has an auth config, and the path is a gateway path.
 // The role may be empty if no role is in the URL and no default role is configured.
 func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backend) (bool, string) {
-	// Check if backend supports transparent mode
+	// Check if backend supports implicit auth
 	tmp, ok := backend.(logical.TransparentModeProvider)
 	if !ok {
 		return false, ""
 	}
 
-	// Check if transparent mode is enabled
+	// Check if auth config is set
 	if !tmp.IsTransparentMode() {
 		return false, ""
 	}
@@ -1089,7 +1089,7 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 	return true, authRole
 }
 
-// handleTransparentAuth performs implicit authentication for transparent mode (gateway) requests.
+// handleTransparentAuth performs implicit authentication for gateway requests.
 // It delegates to performImplicitAuth for credential detection and login.
 // The authRole may be empty — the auth method's default_role config provides the fallback.
 func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, backend logical.Backend, authRole string) error {
@@ -1100,12 +1100,12 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 
 // performImplicitAuth performs implicit authentication by detecting the credential type
 // (JWT bearer token or TLS client certificate), looking up cached tokens, and performing
-// login if needed. Used by both gateway transparent mode and transparent operations.
+// login if needed. Used by both gateway requests and transparent operations.
 //
 // Transparent mode precedence rules:
 //
 //	Credential (first match wins):
-//	  1. X-Warden-Token header → explicit auth, transparent mode skipped entirely
+//	  1. X-Warden-Token header → explicit auth, implicit auth skipped entirely
 //	  2. TLS client certificate (via X-SSL-Client-Cert) → implicit cert auth
 //	  3. Authorization: Bearer eyJ... → implicit JWT auth
 //
@@ -1125,11 +1125,11 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 // IMPORTANT: The auth role is validated when reusing cached tokens. A token created for
 // credential+Role1 cannot be reused for credential+Role2, as they may have different policies.
 func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, autoAuthPath, authRole string) error {
-	// Mark request as transparent mode
+	// Mark request as implicit auth
 	req.Transparent = true
 
 	// Inject client IP into context so validateIPBinding can read it
-	// during cached token lookups. Without this, transparent mode tokens
+	// during cached token lookups. Without this, implicitly-authed tokens
 	// bypass IP binding because the context has no client IP.
 	if req.ClientIP != "" {
 		ctx = context.WithValue(ctx, logical.ClientIPKey, req.ClientIP)

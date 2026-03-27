@@ -52,25 +52,7 @@ The cluster has a **Vault provider** mounted at `vault/` with both modes configu
 | Token | When to use | Header |
 |-------|-------------|--------|
 | Root token (`e2e/.root_token`) | System/admin API calls (`/v1/sys/...`) | `X-Warden-Token` |
-| Warden token (from JWT login) | Non-transparent Vault gateway | `X-Warden-Token` |
-| JWT (`eyJ...` from Hydra) | Transparent Vault gateway | `Authorization: Bearer` |
-
-### Non-Transparent Auth Flow
-
-To test Vault non-transparent mode, you must first obtain a Warden token with a
-credential spec bound to it. The **root token does NOT have a credential spec** and
-cannot be used for gateway requests (it will return 400 "no cred spec bound").
-
-Steps to obtain a non-transparent Warden token:
-1. Get a JWT: `jwt=$(bash e2e/tools/get_jwt.sh)`
-2. Login with the `e2e-nt-reader` role:
-   ```
-   curl -s -X POST http://127.0.0.1:8500/v1/auth/jwt/login \
-     -H "Content-Type: application/json" \
-     -d "{\"jwt\":\"$jwt\",\"role\":\"e2e-nt-reader\"}"
-   ```
-3. Extract the token from `.data.data.token` in the JSON response
-4. Use it as `X-Warden-Token` header for `/v1/vault-nt/gateway/...` requests
+| JWT (`eyJ...` from Hydra) | Transparent gateway requests | `Authorization: Bearer` |
 
 The `vault_gateway_request.sh` tool handles this automatically.
 
@@ -91,7 +73,7 @@ All tools are in `e2e/tools/`. Call them via Bash:
 | `assert_cluster_healthy.sh` | Full cluster health assertion | `bash e2e/tools/assert_cluster_healthy.sh` |
 | `get_jwt.sh` | Get JWT from Hydra | `bash e2e/tools/get_jwt.sh [client_id] [client_secret]` |
 | `vault_gateway_request.sh` | Non-transparent Vault gateway request | `bash e2e/tools/vault_gateway_request.sh <method> <vault_path> [port]` |
-| `vault_transparent_request.sh` | Transparent Vault gateway request (JWT) | `bash e2e/tools/vault_transparent_request.sh <method> <vault_path> [role] [port]` |
+| `vault_gateway_transparent_request.sh` | Transparent Vault gateway request (JWT) | `bash e2e/tools/vault_gateway_transparent_request.sh <method> <vault_path> [role] [port]` |
 
 You can also use raw `curl` commands for more control.
 
@@ -175,7 +157,7 @@ If you find something unexpected, append a JSON line to `e2e/findings/findings.j
 {
   "timestamp": "2026-03-01T10:30:00Z",
   "severity": "HIGH|MEDIUM|LOW|INFO",
-  "category": "leader_kill|cascading_failure|step_down|standby_forwarding|failover_consistency|rejoin|split_brain|crud_during_ha|vault_non_transparent|vault_transparent|vault_cross_mode",
+  "category": "leader_kill|cascading_failure|step_down|standby_forwarding|failover_consistency|rejoin|split_brain|crud_during_ha|vault_gateway|vault_gateway_transparent|vault_mixed",
   "hypothesis": "description of what was tested",
   "actions_taken": "what was done",
   "expected": "what should have happened",
@@ -238,29 +220,21 @@ Also report INFO-level findings for successful resilience observations worth not
 - Delete a provider through a standby during leader transition
 - Create multiple providers concurrently from different nodes
 
-### Category 9: Vault Non-Transparent Mode During HA
-- Read a Vault secret through the gateway on the active leader
-- Read a Vault secret through a standby node (verify forwarding works)
-- Read a Vault secret during leader step-down (expect 307 or success, NOT 500)
-- Kill the leader while a gateway request is in-flight through a standby
+### Category 9: Vault Transparent Mode During HA
+- Read a Vault secret with JWT on the active leader
+- Read a Vault secret with JWT through a standby node (verify forwarding works)
+- Read a Vault secret with JWT during leader step-down (expect 307 or success, NOT 500)
+- Kill the leader while a transparent request is in-flight through a standby
 - Write a new KV secret through the gateway, kill leader, verify it persists in Vault
 - Fire 10+ concurrent gateway reads to verify no credential minting races
 - Read a Vault secret immediately after leader failover (within 1s)
-
-### Category 10: Vault Transparent Mode During HA
-- Read a Vault secret with JWT on the active leader
-- Read a Vault secret with JWT through a standby node
-- Read a Vault secret with JWT during leader step-down
-- Kill the leader while a transparent request is in-flight
 - Same JWT, same role, concurrent requests — verify singleflight deduplication
 - Same JWT, different roles — verify separate tokens are minted
 - Expired JWT — get token from `e2e-ephemeral` client, `sleep 3`, use it → expect 401 (not 500)
 - Invalid JWT (random string starting with `eyJ`) — verify 401 Unauthorized (not 500)
 - Read via transparent mode from all 3 nodes simultaneously
 
-### Category 11: Cross-Mode Operations During HA
-- Mix non-transparent and transparent requests to the same node concurrently
-- Non-transparent read + transparent write during leader transition
+### Category 10: Gateway Operations During HA
 - Gateway request through standby while standby is being killed
 - Verify Vault credential source survives leader failover (read cred source after failover)
 - Verify transparent mode config survives leader failover (read vault/config after failover)
@@ -310,10 +284,9 @@ After EVERY chaos scenario:
 
 - Start with simpler scenarios (single node kill, basic step-down) and progress
   to complex ones (cascading failures, concurrent operations during transitions)
-- For Vault testing, start with non-transparent mode (simpler auth flow), then
-  transparent mode, then cross-mode scenarios
+- For Vault testing, use transparent mode with JWT authentication
 - Track which categories you have covered
-- Aim for at least 2-3 scenarios per category (11 categories total)
+- Aim for at least 2-3 scenarios per category (10 categories total)
 - After completing all scenarios, print a summary report with:
   - Total scenarios run
   - Findings by severity
@@ -329,7 +302,5 @@ After EVERY chaos scenario:
 5. **Log findings** to `e2e/findings/findings.jsonl` as you discover them
 6. **Use `sleep`** between actions to let the system settle (2-5 seconds)
 7. Each hypothesis must be **falsifiable** — state what you expect AND what would indicate a bug
-8. **For non-transparent Vault gateway, NEVER use the root token** — it has no credential
-   spec bound. Instead, obtain a Warden token by logging in via JWT with the `e2e-nt-reader`
-   role (see "Non-Transparent Auth Flow" above). The root token is only for system/admin
-   API calls (`/v1/sys/...`).
+8. **The root token is only for system/admin API calls** (`/v1/sys/...`). For gateway
+   requests, use transparent mode with a JWT in the `Authorization: Bearer` header.

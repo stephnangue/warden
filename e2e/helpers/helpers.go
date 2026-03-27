@@ -350,38 +350,7 @@ func GetDefaultJWT(t *testing.T) string {
 	return GetJWT(t, "e2e-agent", "agent-secret")
 }
 
-// GetNTWardenToken obtains a Warden token for non-transparent gateway access
-// by logging in via JWT with the e2e-nt-reader role.
-func GetNTWardenToken(t *testing.T, port int) string {
-	t.Helper()
-	jwt := GetDefaultJWT(t)
-
-	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"e2e-nt-reader"}`, jwt)
-	status, body := DoRequest(t, "POST",
-		fmt.Sprintf("%s/v1/auth/jwt-nt/login", NodeURL(port)),
-		map[string]string{"Content-Type": "application/json"},
-		loginBody,
-	)
-	if status != 200 && status != 201 {
-		t.Fatalf("JWT login failed (status %d): %s", status, string(body))
-	}
-
-	token := JSONString(t, body, "data.data.token")
-	if token == "" {
-		t.Fatalf("no token in login response: %s", string(body))
-	}
-	return token
-}
-
 // --- Vault Gateway Helpers ---
-
-// VaultNTRequest makes a non-transparent Vault gateway request.
-func VaultNTRequest(t *testing.T, method, vaultPath string, port int, wardenToken string) (int, []byte) {
-	t.Helper()
-	u := fmt.Sprintf("%s/v1/vault-nt/gateway/v1/%s", NodeURL(port), vaultPath)
-	headers := map[string]string{"X-Warden-Token": wardenToken}
-	return DoRequest(t, method, u, headers, "")
-}
 
 // VaultTransparentRequest makes a transparent Vault gateway request.
 func VaultTransparentRequest(t *testing.T, method, vaultPath, role string, port int, jwt string) (int, []byte) {
@@ -392,17 +361,6 @@ func VaultTransparentRequest(t *testing.T, method, vaultPath, role string, port 
 }
 
 // --- Namespace Vault Gateway Helpers ---
-
-// NSVaultNTRequest makes a namespace-scoped non-transparent Vault gateway request.
-func NSVaultNTRequest(t *testing.T, method, vaultPath, namespace string, port int, wardenToken string) (int, []byte) {
-	t.Helper()
-	u := fmt.Sprintf("%s/v1/vault-nt/gateway/v1/%s", NodeURL(port), vaultPath)
-	headers := map[string]string{
-		"X-Warden-Token":     wardenToken,
-		"X-Warden-Namespace": namespace,
-	}
-	return DoRequest(t, method, u, headers, "")
-}
 
 // NSVaultTransparentRequest makes a namespace-scoped transparent Vault gateway request.
 func NSVaultTransparentRequest(t *testing.T, method, vaultPath, role, namespace string, port int, jwt string) (int, []byte) {
@@ -428,32 +386,6 @@ func NSVaultTransparentHeaderRequest(t *testing.T, method, vaultPath, role, name
 	return DoRequest(t, method, u, headers, "")
 }
 
-// GetNSNTWardenToken obtains a Warden token for non-transparent gateway access
-// within a namespace by logging in via JWT with the e2e-nt-reader role.
-func GetNSNTWardenToken(t *testing.T, namespace string, port int) string {
-	t.Helper()
-	jwt := GetDefaultJWT(t)
-
-	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"e2e-nt-reader"}`, jwt)
-	status, body := DoRequest(t, "POST",
-		fmt.Sprintf("%s/v1/auth/jwt-nt/login", NodeURL(port)),
-		map[string]string{
-			"Content-Type":       "application/json",
-			"X-Warden-Namespace": namespace,
-		},
-		loginBody,
-	)
-	if status != 200 && status != 201 {
-		t.Fatalf("NS JWT login failed (status %d): %s", status, string(body))
-	}
-
-	token := JSONString(t, body, "data.data.token")
-	if token == "" {
-		t.Fatalf("no token in NS login response: %s", string(body))
-	}
-	return token
-}
-
 // --- Namespace Setup/Teardown ---
 
 const NSVaultNS = "e2e-ci-ns-gw"
@@ -466,12 +398,7 @@ func SetupNSVaultEnv(t *testing.T, port int) {
 	// Create namespace
 	APIRequest(t, "POST", "sys/namespaces/"+ns, port, "")
 
-	// Non-transparent vault provider
-	NSAPIRequest(t, "POST", "sys/providers/vault-nt", ns, port, `{"type":"vault"}`)
-	NSAPIRequest(t, "PUT", "vault-nt/config", ns, port,
-		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s"}`)
-
-	// Transparent vault provider
+	// Vault provider
 	NSAPIRequest(t, "POST", "sys/providers/vault", ns, port, `{"type":"vault"}`)
 	NSAPIRequest(t, "PUT", "vault/config", ns, port,
 		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s"}`)
@@ -487,29 +414,18 @@ func SetupNSVaultEnv(t *testing.T, port int) {
 	// Policies
 	NSAPIRequest(t, "POST", "sys/policies/cbp/vault-gateway-access", ns, port,
 		`{"policy":"path \"vault/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}\npath \"vault/role/+/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}"}`)
-	NSAPIRequest(t, "POST", "sys/policies/cbp/vault-nt-gateway-access", ns, port,
-		`{"policy":"path \"vault-nt/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}"}`)
-
-	// JWT auth method (defaults new roles to jwt_role token type)
+	// JWT auth method
 	NSAPIRequest(t, "POST", "sys/auth/jwt", ns, port, `{"type":"jwt"}`)
 	NSAPIRequest(t, "PUT", "auth/jwt/config", ns, port,
 		`{"mode":"oidc","oidc_discovery_url":"http://localhost:4444","bound_issuer":"http://localhost:4444"}`)
 
-	// JWT role for transparent mode (jwt_role token type)
+	// JWT role
 	NSAPIRequest(t, "POST", "auth/jwt/role/e2e-reader", ns, port,
-		`{"token_policies":["vault-gateway-access"],"token_type":"transparent","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}`)
+		`{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}`)
 
-	// JWT auth for explicit login (warden_token type)
-	NSAPIRequest(t, "POST", "sys/auth/jwt-nt", ns, port, `{"type":"jwt"}`)
-	NSAPIRequest(t, "PUT", "auth/jwt-nt/config", ns, port,
-		`{"mode":"oidc","oidc_discovery_url":"http://localhost:4444","bound_issuer":"http://localhost:4444"}`)
-
-	NSAPIRequest(t, "POST", "auth/jwt-nt/role/e2e-nt-reader", ns, port,
-		`{"token_policies":["vault-nt-gateway-access"],"token_type":"warden","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}`)
-
-	// Enable transparent mode
+	// Configure auth path
 	NSAPIRequest(t, "POST", "vault/config", ns, port,
-		`{"transparent_mode":true,"auto_auth_path":"auth/jwt/"}`)
+		`{"auto_auth_path":"auth/jwt/"}`)
 }
 
 // TeardownNSVaultEnv removes all resources created by SetupNSVaultEnv.
@@ -517,14 +433,11 @@ func TeardownNSVaultEnv(t *testing.T, port int) {
 	t.Helper()
 	ns := NSVaultNS
 
-	NSAPIRequest(t, "DELETE", "sys/providers/vault-nt", ns, port, "")
 	NSAPIRequest(t, "DELETE", "sys/providers/vault", ns, port, "")
 	NSAPIRequest(t, "DELETE", "sys/cred/specs/vault-token-reader", ns, port, "")
 	NSAPIRequest(t, "DELETE", "sys/cred/sources/vault-e2e", ns, port, "")
 	NSAPIRequest(t, "DELETE", "sys/auth/jwt", ns, port, "")
-	NSAPIRequest(t, "DELETE", "sys/auth/jwt-nt", ns, port, "")
 	NSAPIRequest(t, "DELETE", "sys/policies/cbp/vault-gateway-access", ns, port, "")
-	NSAPIRequest(t, "DELETE", "sys/policies/cbp/vault-nt-gateway-access", ns, port, "")
 	time.Sleep(1 * time.Second)
 
 	CleanupNamespaces(t, port, ns)
@@ -606,12 +519,6 @@ func GrepNodeLog(t *testing.T, nodeNum int, pattern string) bool {
 func LoginJWT(t *testing.T, jwt, role string, port int) (int, string) {
 	t.Helper()
 	return loginJWTOnMount(t, "auth/jwt", jwt, role, port, nil)
-}
-
-// LoginJWTNT logs in with a JWT on the non-transparent auth/jwt-nt/ mount.
-func LoginJWTNT(t *testing.T, jwt, role string, port int) (int, string) {
-	t.Helper()
-	return loginJWTOnMount(t, "auth/jwt-nt", jwt, role, port, nil)
 }
 
 func loginJWTOnMount(t *testing.T, mount, jwt, role string, port int, extraHeaders map[string]string) (int, string) {
@@ -776,24 +683,10 @@ func VaultCertTransparentRequestViaLB(t *testing.T, method, vaultPath, role, cli
 	return DoLBRequest(t, method, u, nil, "", &cert)
 }
 
-// VaultNTRequestViaLB makes a non-transparent vault gateway request through the LB.
-func VaultNTRequestViaLB(t *testing.T, method, vaultPath, wardenToken string) (int, []byte) {
-	t.Helper()
-	u := fmt.Sprintf("%s/v1/vault-nt/gateway/v1/%s", LBNodeURL(), vaultPath)
-	headers := map[string]string{"X-Warden-Token": wardenToken}
-	return DoLBRequest(t, method, u, headers, "", nil)
-}
-
 // LoginJWTViaLB logs in with a JWT and role through the load balancer.
 func LoginJWTViaLB(t *testing.T, jwt, role string) (int, string) {
 	t.Helper()
 	return loginJWTViaLBOnMount(t, "auth/jwt", jwt, role)
-}
-
-// LoginJWTNTViaLB logs in with a JWT on the non-transparent auth/jwt-nt/ mount through the LB.
-func LoginJWTNTViaLB(t *testing.T, jwt, role string) (int, string) {
-	t.Helper()
-	return loginJWTViaLBOnMount(t, "auth/jwt-nt", jwt, role)
 }
 
 func loginJWTViaLBOnMount(t *testing.T, mount, jwt, role string) (int, string) {

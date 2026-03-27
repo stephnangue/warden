@@ -306,28 +306,6 @@ func TestSetupJWTConfig_OIDCDiscoveryURLNotReachable(t *testing.T) {
 }
 
 // =============================================================================
-// setupJWTConfig token_type Enforcement Tests
-// =============================================================================
-
-func TestSetupJWTConfig_CertRoleAlwaysForbidden(t *testing.T) {
-	ctx := context.Background()
-	conf := &logical.BackendConfig{
-		Logger: testLogger(),
-	}
-	backend, err := Factory(ctx, conf)
-	require.NoError(t, err)
-
-	b := backend.(*jwtAuthBackend)
-	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":       "jwt",
-		"jwks_url":   "https://example.com/.well-known/jwks.json",
-		"token_type": "cert_role",
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cert auth backends")
-}
-
-// =============================================================================
 // Initialize Tests
 // =============================================================================
 

@@ -27,22 +27,15 @@ func TestLBJWTTransparentRead(t *testing.T) {
 	}
 }
 
-// TestLBJWTNonTransparentRead verifies JWT login + warden_token gateway read
-// through the load balancer.
-func TestLBJWTNonTransparentRead(t *testing.T) {
+// TestLBJWTTransparentReadAlternate verifies JWT transparent gateway read
+// through the load balancer with a fresh JWT.
+func TestLBJWTTransparentReadAlternate(t *testing.T) {
 	h.SkipWithoutLB(t)
 
 	jwt := h.GetDefaultJWT(t)
-	loginStatus, wardenToken := h.LoginJWTNTViaLB(t, jwt, "e2e-nt-reader")
-	if loginStatus != 200 && loginStatus != 201 {
-		t.Fatalf("JWT login via LB failed: status %d", loginStatus)
-	}
-	if wardenToken == "" {
-		t.Fatal("no warden token from JWT login via LB")
-	}
 
-	status, body := h.VaultNTRequestViaLB(t, "GET",
-		"secret/data/e2e/app-config", wardenToken)
+	status, body := h.VaultTransparentRequestViaLB(t, "GET",
+		"secret/data/e2e/app-config", "e2e-reader", jwt)
 	if status != 200 {
 		t.Fatalf("expected 200, got %d: %s", status, string(body))
 	}
@@ -73,10 +66,9 @@ func TestLBCertTransparentRead(t *testing.T) {
 	}
 }
 
-// TestLBCertNonTransparentRead verifies cert login + warden_token gateway read
-// through the load balancer. The TLS client cert is validated by nginx and
-// forwarded to Warden for authentication.
-func TestLBCertNonTransparentRead(t *testing.T) {
+// TestLBCertTransparentReadAlternate verifies cert transparent vault read
+// through the load balancer with a fresh client cert.
+func TestLBCertTransparentReadAlternate(t *testing.T) {
 	h.SkipWithoutLB(t)
 
 	port := h.GetLeaderPort(t)
@@ -84,30 +76,19 @@ func TestLBCertNonTransparentRead(t *testing.T) {
 	h.SetupCertVaultEnvWithCA(t, port, caCertPEM)
 	defer h.TeardownCertVaultEnv(t, port)
 
-	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cert-lb-nt")
+	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cert-lb-alt")
 
-	// Login via cert through LB to get a warden token
-	loginStatus, loginBody := h.CertNTLoginRequestViaLB(t, "e2e-cert-nt-reader", clientCertPEM, clientKeyPEM)
-	if loginStatus != 200 && loginStatus != 201 {
-		t.Fatalf("cert login via LB failed (status %d): %s", loginStatus, string(loginBody))
-	}
-	wardenToken := h.JSONString(t, loginBody, "data.data.token")
-	if wardenToken == "" {
-		t.Fatalf("no token in cert login response: %s", string(loginBody))
-	}
-
-	// Use the warden token for non-transparent gateway access through LB
-	status, body := h.VaultNTRequestViaLB(t, "GET",
-		"secret/data/e2e/app-config", wardenToken)
+	status, body := h.VaultCertTransparentRequestViaLB(t, "GET",
+		"secret/data/e2e/app-config", "e2e-cert-reader", clientCertPEM, clientKeyPEM)
 	if status != 200 {
 		t.Fatalf("expected 200, got %d: %s", status, string(body))
 	}
 }
 
 // TestLBCertHeaderForwarding verifies that TLS client certificates presented
-// to the LB are properly forwarded to Warden. The end-to-end path is:
+// to the LB are properly forwarded to Warden for transparent gateway auth.
 // client TLS cert -> nginx validates against CA -> X-SSL-Client-Cert header
-// -> Warden trusted_proxies allows Docker bridge CIDR -> cert auth login.
+// -> Warden trusted_proxies allows Docker bridge CIDR -> implicit cert auth -> gateway.
 func TestLBCertHeaderForwarding(t *testing.T) {
 	h.SkipWithoutLB(t)
 
@@ -118,10 +99,11 @@ func TestLBCertHeaderForwarding(t *testing.T) {
 
 	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cert-lb-fwd")
 
-	// Cert login through LB — exercises the full trusted_proxies + TLS forwarding path
-	status, body := h.CertLoginRequestViaLB(t, "e2e-cert-login", clientCertPEM, clientKeyPEM)
-	if status != 200 && status != 201 {
-		t.Fatalf("cert login through LB failed (status %d): %s — "+
+	// Transparent gateway through LB — exercises the full trusted_proxies + TLS forwarding path
+	status, body := h.VaultCertTransparentRequestViaLB(t, "GET",
+		"secret/data/e2e/app-config", "e2e-cert-reader", clientCertPEM, clientKeyPEM)
+	if status != 200 {
+		t.Fatalf("cert transparent gateway through LB failed (status %d): %s — "+
 			"this may indicate trusted_proxies doesn't include Docker bridge CIDR",
 			status, string(body))
 	}

@@ -105,11 +105,11 @@ func TestVaultGatewayDeleteSecret(t *testing.T) {
 // TestVaultGatewayAfterLeaderFailover verifies vault gateway works after leader failover (T-074).
 func TestVaultGatewayAfterLeaderFailover(t *testing.T) {
 	leader := h.GetLeaderPort(t)
-	token := h.GetNTWardenToken(t, leader)
+	jwt := h.GetDefaultJWT(t)
 
 	// Verify gateway works on standby before failover
 	standby := h.GetStandbyPort(t)
-	preStatus, preBody := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", standby, token)
+	preStatus, preBody := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", standby, jwt)
 	if preStatus != 200 {
 		t.Fatalf("pre-failover standby request: expected 200, got %d: %s", preStatus, string(preBody))
 	}
@@ -122,11 +122,8 @@ func TestVaultGatewayAfterLeaderFailover(t *testing.T) {
 	// Wait for a new leader
 	newLeader := h.WaitForLeader(t, 15, 2*time.Second)
 
-	// Get a fresh token from the new leader
-	freshToken := h.GetNTWardenToken(t, newLeader)
-
 	// Verify gateway on the new leader
-	leaderStatus, leaderBody := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", newLeader, freshToken)
+	leaderStatus, leaderBody := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", newLeader, jwt)
 	if leaderStatus != 200 {
 		t.Fatalf("post-failover leader request: expected 200, got %d: %s", leaderStatus, string(leaderBody))
 	}
@@ -196,29 +193,28 @@ func TestGatewayResponseContentType(t *testing.T) {
 	}
 }
 
-// TestBothTransparentAndNonTransparentSameSecret verifies both gateway modes access the same secret (T-079).
-func TestBothTransparentAndNonTransparentSameSecret(t *testing.T) {
+// TestBothTransparentRequestsSameSecret verifies two transparent requests access the same secret (T-079).
+func TestBothTransparentRequestsSameSecret(t *testing.T) {
 	leader := h.GetLeaderPort(t)
 	jwt := h.GetDefaultJWT(t)
-	token := h.GetNTWardenToken(t, leader)
 
-	transparentStatus, transparentBody := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
-	if transparentStatus != 200 {
-		t.Fatalf("transparent: expected 200, got %d: %s", transparentStatus, string(transparentBody))
+	status1, body1 := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
+	if status1 != 200 {
+		t.Fatalf("first request: expected 200, got %d: %s", status1, string(body1))
 	}
 
-	ntStatus, ntBody := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token)
-	if ntStatus != 200 {
-		t.Fatalf("non-transparent: expected 200, got %d: %s", ntStatus, string(ntBody))
+	status2, body2 := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
+	if status2 != 200 {
+		t.Fatalf("second request: expected 200, got %d: %s", status2, string(body2))
 	}
 }
 
 // TestGatewayWithRotationEnabledSource verifies the gateway works with a rotation-enabled credential source (T-080).
 func TestGatewayWithRotationEnabledSource(t *testing.T) {
 	leader := h.GetLeaderPort(t)
-	token := h.GetNTWardenToken(t, leader)
+	jwt := h.GetDefaultJWT(t)
 
-	status, body := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token)
+	status, body := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
 	if status != 200 {
 		t.Fatalf("expected 200, got %d: %s", status, string(body))
 	}

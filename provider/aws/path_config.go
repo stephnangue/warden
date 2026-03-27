@@ -29,14 +29,9 @@ func (b *awsBackend) pathConfig() *framework.Path {
 				Description: "Request timeout duration (e.g., '30s', '5m')",
 				Default:     "30s",
 			},
-			"transparent_mode": {
-				Type:        framework.TypeBool,
-				Description: "Enable transparent mode for implicit JWT/cert authentication",
-				Default:     false,
-			},
 			"auto_auth_path": {
 				Type:        framework.TypeString,
-				Description: "Path to auth mount for transparent mode (e.g., 'auth/jwt/', 'auth/cert/')",
+				Description: "Path to auth mount for implicit authentication (e.g., 'auth/jwt/', 'auth/cert/')" ,
 			},
 			"default_role": {
 				Type:        framework.TypeString,
@@ -64,12 +59,11 @@ func (b *awsBackend) handleConfigRead(ctx context.Context, req *logical.Request,
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"proxy_domains":    b.proxyDomains,
-			"max_body_size":    b.MaxBodySize,
-			"timeout":          b.Timeout.String(),
-			"transparent_mode": tc.Enabled,
-			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultAuthRole,
+			"proxy_domains":  b.proxyDomains,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		},
 	}, nil
 }
@@ -107,14 +101,10 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	// Reinitialize processors with new config
 	b.initializeProcessors()
 
-	// Transparent mode settings — build new config from current values + overrides
+	// Transparent mode settings — build config from current values + overrides
 	tc := &framework.TransparentConfig{
-		Enabled:         b.TransparentConfig.Enabled,
 		AutoAuthPath:    b.TransparentConfig.AutoAuthPath,
 		DefaultAuthRole: b.TransparentConfig.DefaultAuthRole,
-	}
-	if val, ok := d.GetOk("transparent_mode"); ok {
-		tc.Enabled = val.(bool)
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -123,11 +113,11 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 		tc.DefaultAuthRole = val.(string)
 	}
 
-	// Validate: if transparent_mode enabled, auto_auth_path required
-	if tc.Enabled && tc.AutoAuthPath == "" {
+	// Validate: auto_auth_path is required
+	if tc.AutoAuthPath == "" {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
-			Err:        logical.ErrBadRequest("auto_auth_path is required when transparent_mode is enabled"),
+			Err:        logical.ErrBadRequest("auto_auth_path is required"),
 		}, nil
 	}
 
@@ -136,12 +126,11 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"proxy_domains":    b.proxyDomains,
-			"max_body_size":    b.MaxBodySize,
-			"timeout":          b.Timeout.String(),
-			"transparent_mode": tc.Enabled,
-			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultAuthRole,
+			"proxy_domains":  b.proxyDomains,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return &logical.Response{
