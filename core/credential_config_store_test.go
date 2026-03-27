@@ -1251,7 +1251,7 @@ func TestCredentialConfigStore_ClearNamespace(t *testing.T) {
 	for _, name := range []string{"spec-a", "spec-b"} {
 		err := store.CreateSpec(ctx, &credential.CredSpec{
 			Name:   name,
-			Type:   "user_pass",
+			Type:   "vault_token",
 			Source: "src-a",
 			MinTTL: 1 * time.Minute,
 			MaxTTL: 1 * time.Hour,
@@ -1308,13 +1308,13 @@ func TestCredentialConfigStore_ClearNamespace_Isolation(t *testing.T) {
 	// Create source and spec in ns1
 	require.NoError(t, store.CreateSource(ctx1, &credential.CredSource{Name: "src", Type: "local"}))
 	require.NoError(t, store.CreateSpec(ctx1, &credential.CredSpec{
-		Name: "spec", Type: "user_pass", Source: "src", MinTTL: time.Minute, MaxTTL: time.Hour,
+		Name: "spec", Type: "vault_token", Source: "src", MinTTL: time.Minute, MaxTTL: time.Hour,
 	}))
 
 	// Create source and spec in ns2
 	require.NoError(t, store.CreateSource(ctx2, &credential.CredSource{Name: "src", Type: "local"}))
 	require.NoError(t, store.CreateSpec(ctx2, &credential.CredSpec{
-		Name: "spec", Type: "user_pass", Source: "src", MinTTL: time.Minute, MaxTTL: time.Hour,
+		Name: "spec", Type: "vault_token", Source: "src", MinTTL: time.Minute, MaxTTL: time.Hour,
 	}))
 
 	// Clear ns1

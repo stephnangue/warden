@@ -42,33 +42,10 @@ func TestIPBinding(t *testing.T) {
 	h.RestoreIPBindingPolicy(t)
 }
 
-// runIPBindingSubtests runs all 8 subtests (2 auth methods × 2 modes × 2 IP scenarios).
-// Non-transparent denial returns 403 (ErrPermissionDenied from ResolveToken).
+// runIPBindingSubtests runs all 6 subtests (2 auth methods × 1 mode × 2 IP scenarios + cert transparent).
 // Transparent denial returns 401 (ErrUnauthorized from performImplicitAuth).
 func runIPBindingSubtests(t *testing.T, port int, clientCertPEM string) {
 	t.Helper()
-
-	// --- JWT Non-Transparent ---
-	t.Run("JWT_NT_SameIP_Allowed", func(t *testing.T) {
-		token := h.GetNTWardenToken(t, port)
-		status, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", port, token)
-		if status != 200 {
-			t.Fatalf("expected 200, got %d", status)
-		}
-	})
-
-	t.Run("JWT_NT_DifferentIP_Denied", func(t *testing.T) {
-		token := h.GetNTWardenToken(t, port)
-		u := fmt.Sprintf("%s/v1/vault-nt/gateway/v1/secret/data/e2e/app-config", h.NodeURL(port))
-		headers := map[string]string{
-			"X-Warden-Token":  token,
-			"X-Forwarded-For": spoofedIP,
-		}
-		status, _ := h.DoRequest(t, "GET", u, headers, "")
-		if status != 403 {
-			t.Fatalf("expected 403, got %d", status)
-		}
-	})
 
 	// --- JWT Transparent ---
 	t.Run("JWT_T_SameIP_Allowed", func(t *testing.T) {
@@ -95,28 +72,6 @@ func runIPBindingSubtests(t *testing.T, port int, clientCertPEM string) {
 		status, _ = h.DoRequest(t, "GET", u, headers, "")
 		if status != 401 {
 			t.Fatalf("expected 401, got %d", status)
-		}
-	})
-
-	// --- Cert Non-Transparent ---
-	t.Run("Cert_NT_SameIP_Allowed", func(t *testing.T) {
-		token := h.GetCertNTWardenToken(t, port, "e2e-cert-nt-reader", clientCertPEM)
-		status, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", port, token)
-		if status != 200 {
-			t.Fatalf("expected 200, got %d", status)
-		}
-	})
-
-	t.Run("Cert_NT_DifferentIP_Denied", func(t *testing.T) {
-		token := h.GetCertNTWardenToken(t, port, "e2e-cert-nt-reader", clientCertPEM)
-		u := fmt.Sprintf("%s/v1/vault-nt/gateway/v1/secret/data/e2e/app-config", h.NodeURL(port))
-		headers := map[string]string{
-			"X-Warden-Token":  token,
-			"X-Forwarded-For": spoofedIP,
-		}
-		status, _ := h.DoRequest(t, "GET", u, headers, "")
-		if status != 403 {
-			t.Fatalf("expected 403, got %d", status)
 		}
 	})
 

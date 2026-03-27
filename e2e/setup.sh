@@ -415,86 +415,23 @@ sleep 1
 # 9g. Configure JWT auth with Hydra OIDC discovery
 echo "  Configuring JWT auth with Hydra OIDC..."
 warden_api PUT "auth/jwt/config" \
-  "{\"mode\":\"oidc\",\"oidc_discovery_url\":\"$HYDRA_PUBLIC\",\"bound_issuer\":\"$HYDRA_PUBLIC\",\"token_type\":\"jwt_role\"}"
+  "{\"mode\":\"oidc\",\"oidc_discovery_url\":\"$HYDRA_PUBLIC\",\"bound_issuer\":\"$HYDRA_PUBLIC\"}"
 
 # 9h. Create JWT role linking to credential spec
 echo "  Creating JWT role 'e2e-reader'..."
 warden_api POST "auth/jwt/role/e2e-reader" \
-  '{"token_policies":["vault-gateway-access"],"token_type":"transparent","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}'
+  '{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}'
 
 # 9i. Enable transparent mode on Vault provider
 echo "  Enabling transparent mode..."
 warden_api POST "vault/config" \
-  '{"transparent_mode":true,"auto_auth_path":"auth/jwt/"}'
-
-# 9j. Mount a second Vault provider for non-transparent mode
-echo "  Mounting Vault provider at vault-nt/ (non-transparent)..."
-warden_api POST "sys/providers/vault-nt" '{"type":"vault"}'
-
-sleep 1
-
-echo "  Configuring vault-nt provider..."
-warden_api PUT "vault-nt/config" \
-  "{\"vault_address\":\"$VAULT_ADDR\",\"tls_skip_verify\":true,\"timeout\":\"30s\"}"
-
-# 9k. Create Warden policy for non-transparent Vault gateway access
-echo "  Creating Warden policy 'vault-nt-gateway-access'..."
-warden_api POST "sys/policies/cbp/vault-nt-gateway-access" \
-  '{"policy":"path \"vault-nt/gateway*\" {\n  capabilities = [\"read\", \"create\", \"update\", \"delete\", \"list\"]\n}"}'
-
-# 9l. Enable JWT auth method for non-transparent mode (separate mount)
-echo "  Enabling JWT auth method at auth/jwt-nt/ (non-transparent)..."
-warden_api POST "sys/auth/jwt-nt" '{"type":"jwt"}'
-
-sleep 1
-
-echo "  Configuring JWT auth (non-transparent)..."
-warden_api PUT "auth/jwt-nt/config" \
-  "{\"mode\":\"oidc\",\"oidc_discovery_url\":\"$HYDRA_PUBLIC\",\"bound_issuer\":\"$HYDRA_PUBLIC\"}"
-
-# 9m. Create JWT role for non-transparent access (produces a warden_token with cred spec)
-echo "  Creating JWT role 'e2e-nt-reader'..."
-warden_api POST "auth/jwt-nt/role/e2e-nt-reader" \
-  '{"token_policies":["vault-nt-gateway-access"],"token_type":"warden","cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}'
-
-# 9n. Obtain a Warden token for non-transparent testing by logging in via JWT
-echo "  Obtaining Warden token for non-transparent testing..."
-NT_JWT=$(bash "$SCRIPT_DIR/tools/get_jwt.sh" 2>/dev/null || echo "")
-if [ -n "$NT_JWT" ]; then
-  NT_LOGIN=$(curl -sk -X POST "https://127.0.0.1:8500/v1/auth/jwt-nt/login" \
-    -H "Content-Type: application/json" \
-    -d "{\"jwt\":\"$NT_JWT\",\"role\":\"e2e-nt-reader\"}" 2>/dev/null)
-  NT_WARDEN_TOKEN=$(echo "$NT_LOGIN" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['token'])" 2>/dev/null || echo "")
-  if [ -n "$NT_WARDEN_TOKEN" ]; then
-    echo "  Warden token obtained for non-transparent testing."
-  else
-    echo "  WARNING: Could not extract Warden token from login response"
-    echo "  $NT_LOGIN"
-  fi
-else
-  echo "  WARNING: Could not get JWT for non-transparent token creation"
-fi
+  '{"auto_auth_path":"auth/jwt/"}'
 
 # Step 10: Verify Vault integration
 echo ""
 echo "[10/10] Verifying Vault integration..."
 
-# 10a. Non-transparent mode: read secret through vault-nt gateway with Warden token
-echo "  Testing non-transparent mode (Warden token -> vault-nt/gateway -> Vault)..."
-if [ -n "$NT_WARDEN_TOKEN" ]; then
-  NT_RESULT=$(curl -sk -o /dev/null -w "%{http_code}" \
-    "https://127.0.0.1:8500/v1/vault-nt/gateway/v1/secret/data/e2e/app-config" \
-    -H "X-Warden-Token: $NT_WARDEN_TOKEN" 2>/dev/null)
-  if [ "$NT_RESULT" = "200" ]; then
-    echo "  Non-transparent mode: OK (HTTP $NT_RESULT)"
-  else
-    echo "  Non-transparent mode: FAILED (HTTP $NT_RESULT)"
-  fi
-else
-  echo "  Non-transparent mode: SKIPPED (no Warden token available)"
-fi
-
-# 10b. Transparent mode: read secret through vault gateway with JWT
+# 10a. Transparent mode: read secret through vault gateway with JWT
 echo "  Testing transparent mode (JWT -> vault/gateway -> Vault)..."
 TEST_JWT=$(bash "$SCRIPT_DIR/tools/get_jwt.sh" 2>/dev/null || echo "")
 if [ -n "$TEST_JWT" ]; then
@@ -528,8 +465,7 @@ echo "  Vault:  $VAULT_ADDR (token: $VAULT_TOKEN)"
 echo "  Hydra:  $HYDRA_PUBLIC (OIDC) / $HYDRA_ADMIN (admin)"
 echo ""
 echo "Vault integration:"
-echo "  Non-transparent: curl -k -H 'X-Warden-Token: <token>' https://127.0.0.1:8500/v1/vault-nt/gateway/v1/secret/data/e2e/app-config"
-echo "  Transparent:     curl -k -H 'Authorization: Bearer <jwt>' https://127.0.0.1:8500/v1/vault/role/e2e-reader/gateway/v1/secret/data/e2e/app-config"
+echo "  curl -k -H 'Authorization: Bearer <jwt>' https://127.0.0.1:8500/v1/vault/role/e2e-reader/gateway/v1/secret/data/e2e/app-config"
 echo "  Get JWT:         bash e2e/tools/get_jwt.sh"
 echo ""
 echo "To start chaos testing:"

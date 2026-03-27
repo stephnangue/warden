@@ -37,14 +37,9 @@ func (b *githubBackend) pathConfig() *framework.Path {
 				Description: "GitHub REST API version for X-GitHub-Api-Version header (default: 2022-11-28)",
 				Default:     DefaultAPIVersion,
 			},
-			"transparent_mode": {
-				Type:        framework.TypeBool,
-				Description: "Enable transparent mode for implicit JWT authentication",
-				Default:     false,
-			},
 			"auto_auth_path": {
 				Type:        framework.TypeString,
-				Description: "Path to JWT auth mount for transparent mode (e.g., 'auth/jwt/')",
+				Description: "Path to auth mount for implicit authentication (e.g., 'auth/jwt/', 'auth/cert/')" ,
 			},
 			"default_role": {
 				Type:        framework.TypeString,
@@ -72,13 +67,12 @@ func (b *githubBackend) handleConfigRead(_ context.Context, _ *logical.Request, 
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"github_url":       b.githubURL,
-			"max_body_size":    b.MaxBodySize,
-			"timeout":          b.Timeout.String(),
-			"api_version":      b.apiVersion,
-			"transparent_mode": tc.Enabled,
-			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultAuthRole,
+			"github_url":     b.githubURL,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"api_version":    b.apiVersion,
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		},
 	}, nil
 }
@@ -120,12 +114,8 @@ func (b *githubBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 
 	// Transparent mode settings
 	tc := &framework.TransparentConfig{
-		Enabled:      b.TransparentConfig.Enabled,
-		AutoAuthPath: b.TransparentConfig.AutoAuthPath,
+		AutoAuthPath:    b.TransparentConfig.AutoAuthPath,
 		DefaultAuthRole: b.TransparentConfig.DefaultAuthRole,
-	}
-	if val, ok := d.GetOk("transparent_mode"); ok {
-		tc.Enabled = val.(bool)
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -134,10 +124,10 @@ func (b *githubBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 		tc.DefaultAuthRole = val.(string)
 	}
 
-	if tc.Enabled && tc.AutoAuthPath == "" {
+	if tc.AutoAuthPath == "" {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
-			Err:        logical.ErrBadRequest("auto_auth_path is required when transparent_mode is enabled"),
+			Err:        logical.ErrBadRequest("auto_auth_path is required"),
 		}, nil
 	}
 
@@ -146,13 +136,12 @@ func (b *githubBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"github_url":       b.githubURL,
-			"max_body_size":    b.MaxBodySize,
-			"timeout":          b.Timeout.String(),
-			"api_version":      b.apiVersion,
-			"transparent_mode": tc.Enabled,
-			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultAuthRole,
+			"github_url":     b.githubURL,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"api_version":    b.apiVersion,
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return &logical.Response{

@@ -135,10 +135,10 @@ func TestRotationMaxAttemptsFailedState(t *testing.T) {
 // TestConcurrentRotationAndIssuance verifies concurrent Vault requests succeed under rotation (T-039).
 func TestConcurrentRotationAndIssuance(t *testing.T) {
 	port := h.GetLeaderPort(t)
-	ntToken := h.GetNTWardenToken(t, port)
+	jwt := h.GetDefaultJWT(t)
 
 	successes := h.ConcurrentDo(5, func(i int) bool {
-		status, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", port, ntToken)
+		status, _ := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", port, jwt)
 		return status == 200
 	})
 	if successes < 4 {

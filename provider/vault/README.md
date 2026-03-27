@@ -10,10 +10,9 @@ The Vault provider enables proxied access to HashiCorp Vault (or OpenBao) throug
 - [Step 3: Mount and Configure the Provider](#step-3-mount-and-configure-the-provider)
 - [Step 4: Create a Credential Source and Specs](#step-4-create-a-credential-source-and-specs)
 - [Step 5: Create a Policy](#step-5-create-a-policy)
-- [Step 6: Make Requests with Client Certificates (Transparent Mode)](#step-6-make-requests-with-client-certificates)
+- [Step 6: Make Requests with Client Certificates](#step-6-make-requests-with-client-certificates)
 - [Architecture Overview](#architecture-overview)
 - [Mint Methods](#mint-methods)
-- [Transparent Mode](#transparent-mode)
 - [JWT Authentication](#jwt-authentication)
 - [Configuration Reference](#configuration-reference)
 - [Troubleshooting](#troubleshooting)
@@ -197,7 +196,7 @@ Save the `role_id`, `secret_id`, and `secret_id_accessor` from the output.
 
 Set up a TLS certificate auth method and create a role that binds the credential spec and policy. This uses the same CA that signed the client certificate generated in the Prerequisites.
 
-> **This step must come before enabling transparent mode on the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
 
 ```bash
 # Enable cert auth
@@ -212,11 +211,8 @@ warden write auth/cert/config \
 warden write auth/cert/role/vault-user \
     allowed_common_names="agent-*" \
     token_policies="vault-access" \
-    cred_spec_name=vault-reader \
-    token_ttl=1h
+    cred_spec_name=vault-reader
 ```
-
-The `token_type` defaults to `transparent` — you don't need to specify it.
 
 The `allowed_common_names` field supports glob patterns. The client certificate generated in the Prerequisites has CN `agent-quickstart`, which matches `agent-*`. You can also match on other certificate fields: `allowed_dns_sans`, `allowed_email_sans`, `allowed_uri_sans`, or `allowed_organizational_units`.
 
@@ -240,13 +236,12 @@ Verify the provider is enabled:
 warden provider list
 ```
 
-Configure the provider with the Vault server address and enable transparent mode with the cert auth mount from Step 2:
+Configure the provider with the Vault server address and the cert auth mount from Step 2:
 
 ```bash
 warden write vault/config <<EOF
 {
   "vault_address": "http://127.0.0.1:8200",
-  "transparent_mode": true,
   "auto_auth_path": "auth/cert/",
   "timeout": "30s",
   "max_body_size": 10485760
@@ -338,7 +333,7 @@ path "vault/gateway*" {
 EOF
 ```
 
-For transparent mode, also grant access to role-based paths:
+For use cases where the role will be provided in the path, also grant access to role-based paths:
 
 ```bash
 warden policy write vault-access - <<EOF
@@ -380,7 +375,7 @@ warden policy read vault-access
 
 ## Step 6: Make Requests with Client Certificates
 
-With transparent mode enabled in Step 3, clients skip the Warden login entirely. The client certificate is presented during the TLS handshake and Warden performs implicit authentication on every call — no session token to manage.
+No login step is required. The client certificate is presented during the TLS handshake and Warden performs implicit authentication on every call — no session token to manage.
 
 The URL pattern includes the role name: `/v1/vault/role/{role}/gateway/{vault-api-path}`
 
@@ -421,7 +416,7 @@ vault write pki/issue/my-role common_name=example.com
 vault read database/creds/my-role
 ```
 
-Transparent mode with certificates is the simplest and most secure approach — there is no bearer token to leak. It is ideal for workloads that already have X.509 identities: Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+Auth with certificates is the simplest and most secure approach — there is no bearer token to leak. It is ideal for workloads that already have X.509 identities: Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 ---
 
@@ -535,55 +530,6 @@ If cleanup fails, it is retried daily for up to 7 days. Rotation requires `auth_
 | `dynamic_aws` | `aws_access_keys` | Generate temporary AWS credentials via Vault AWS engine |
 | `vault_token` | `vault_token` | Create a child Vault token via token roles |
 
-## Transparent Mode
-
-Transparent mode allows clients to authenticate implicitly with their TLS client certificate or JWT — no separate Warden login step is needed. The provider extracts the role from the URL path, performs implicit auth against the configured auth mount, and issues a short-lived token for the request.
-
-### Enable Transparent Mode
-
-> **Prerequisite**: The auth backend referenced by `auto_auth_path` must be mounted **before** setting this field (see [Step 2](#step-2-configure-cert-auth-and-create-a-role)). Warden validates at configuration time that the backend exists.
-
-```bash
-warden write vault/config <<EOF
-{
-  "vault_address": "http://127.0.0.1:8200",
-  "transparent_mode": true,
-  "auto_auth_path": "auth/cert/",
-  "timeout": "30s"
-}
-EOF
-```
-
-### URL Pattern
-
-```
-/v1/vault/role/{role}/gateway/{vault-api-path}
-```
-
-### Example Requests
-
-```bash
-VAULT_ENDPOINT="${WARDEN_ADDR}/v1/vault/role/vault-user/gateway"
-
-# Read a secret
-curl --cert $CERT_DIR/client.pem --key $CERT_DIR/client.key --cacert $CERT_DIR/ca.pem \
-    "${VAULT_ENDPOINT}/secret/data/myapp"
-
-# List secrets
-curl --cert $CERT_DIR/client.pem --key $CERT_DIR/client.key --cacert $CERT_DIR/ca.pem \
-    "${VAULT_ENDPOINT}/secret/metadata/?list=true"
-```
-
-### Unauthenticated Paths
-
-Certain read-only PKI endpoints are forwarded without authentication, matching Vault's own unauthenticated access policy. This enables tools like Terraform to fetch CA chains without requiring a Warden session:
-
-- `/v1/{mount}/ca/pem`, `/v1/{mount}/ca`
-- `/v1/{mount}/ca_chain`, `/v1/{mount}/cert/ca`
-- `/v1/{mount}/crl`, `/v1/{mount}/crl/pem`
-- `/v1/{mount}/issuer/{id}/pem`, `/v1/{mount}/issuer/{id}/der`
-- `/v1/{mount}/cert/{serial}`
-
 ## JWT Authentication
 
 Steps 2 and 6 above use TLS certificate authentication. Alternatively, you can authenticate with a JWT. This is useful for workloads that obtain tokens from an identity provider (OIDC/OAuth2) — CI/CD pipelines, cloud functions, or services with federated identity.
@@ -614,15 +560,14 @@ warden write auth/jwt/role/vault-user \
     token_ttl=1h
 ```
 
-### Transparent Mode with JWT
+### JWT auth method
 
-Configure the provider to use JWT auth for transparent mode:
+Configure the provider to use JWT auth:
 
 ```bash
 warden write vault/config <<EOF
 {
   "vault_address": "http://127.0.0.1:8200",
-  "transparent_mode": true,
   "auto_auth_path": "auth/jwt/",
   "timeout": "30s"
 }
@@ -658,27 +603,6 @@ vault kv get secret/myapp
 vault kv list secret/
 ```
 
-### Explicit Login with JWT
-
-To use explicit login with JWT instead of transparent mode, set `token_type=warden` on the role:
-
-```bash
-warden write auth/jwt/role/vault-user \
-    token_type=warden \
-    token_policies="vault-access" \
-    user_claim=sub \
-    cred_spec_name=vault-reader \
-    token_ttl=1h
-```
-
-Then authenticate with the CLI:
-
-```bash
-warden login --method=jwt --token=$JWT --role=vault-user
-```
-
-Then make gateway requests using the session token, exactly as shown in [Step 6 Option A](#option-a-explicit-login-standard-mode).
-
 ### Cleanup (JWT)
 
 To stop the identity provider containers:
@@ -697,8 +621,7 @@ docker compose -f docker-compose.quickstart.yml down -v
 | `max_body_size` | int | `10485760` (10 MB) | Maximum request body size in bytes (max 100 MB) |
 | `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
 | `tls_skip_verify` | bool | `false` | Skip TLS certificate verification (development only) |
-| `transparent_mode` | bool | `false` | Enable implicit authentication (TLS certificate or JWT) |
-| `auto_auth_path` | string | — | Auth mount path, e.g. `auth/cert/` or `auth/jwt/` (required when `transparent_mode` is true) |
+| `auto_auth_path` | string | — | Auth mount path for implicit authentication, e.g. `auth/cert/` or `auth/jwt/` |
 | `default_role` | string | — | Fallback role when not specified in the URL path |
 
 ### Credential Source Config
@@ -765,7 +688,6 @@ docker compose -f docker-compose.quickstart.yml down -v
 | `principal_claim` | string | `cn` | Identity source: `cn`, `dns_san`, `email_san`, `uri_san`, `spiffe_id`, `serial` |
 | `default_role` | string | — | Default role when no role is specified in the URL or request |
 | `token_ttl` | duration | `1h` | Default token TTL |
-| `token_type` | string | `transparent` | Default token type for roles; allowed values: `aws`, `warden`, `transparent` |
 | `revocation_mode` | string | `none` | Certificate revocation checking: `none`, `crl`, `ocsp`, `best_effort` |
 
 ### Cert Auth Role Config
@@ -779,7 +701,6 @@ docker compose -f docker-compose.quickstart.yml down -v
 | `allowed_organizational_units` | list | No* | Allowed organizational units |
 | `certificate` | string | No | Role-specific CA PEM (overrides global trusted CAs) |
 | `token_policies` | list | Yes | Policies to assign to tokens |
-| `token_type` | string | No | Defaults to `transparent`; allowed values: `aws`, `warden`, `transparent` |
 | `token_ttl` | duration | No | Token TTL (default: 1h) |
 | `cred_spec_name` | string | No | Credential spec for gateway access |
 | `principal_claim` | string | No | Override global `principal_claim` for this role |
@@ -800,7 +721,6 @@ docker compose -f docker-compose.quickstart.yml down -v
 |-------|------|----------|-------------|
 | `user_claim` | string | Yes | JWT claim to use as the user identity (e.g., `sub`) |
 | `token_policies` | list | Yes | Policies to assign to tokens |
-| `token_type` | string | No | Defaults to `transparent`; allowed values: `aws`, `warden`, `transparent` |
 | `token_ttl` | duration | No | Token TTL (default: 1h) |
 | `cred_spec_name` | string | No | Credential spec for gateway access |
 
@@ -821,9 +741,9 @@ warden write vault/config vault_address=https://vault.example.com:8200
 3. Ensure the client certificate CN matches the `allowed_common_names` pattern on the role.
 4. Verify the client certificate is signed by the CA configured in `trusted_ca_pem`.
 
-### Transparent mode returns 403
+### Request returns 403
 
-1. Verify `transparent_mode` is enabled and `auto_auth_path` is set.
+1. Verify `auto_auth_path` is set in the provider config.
 2. Ensure the cert auth role exists and is bound to a `vault_token` credential spec.
 3. Check the Warden policy grants access to `vault/role/+/gateway*`.
 

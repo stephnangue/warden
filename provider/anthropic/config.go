@@ -21,7 +21,6 @@ type ProviderConfig struct {
 	AnthropicURL    string
 	MaxBodySize     int64
 	Timeout         time.Duration
-	TransparentMode bool
 	AutoAuthPath    string
 	DefaultAuthRole string
 }
@@ -82,10 +81,7 @@ func parseConfig(conf map[string]any) ProviderConfig {
 		}
 	}
 
-	// Parse transparent mode settings
-	if tm, ok := conf["transparent_mode"].(bool); ok {
-		config.TransparentMode = tm
-	}
+	// Parse auth settings
 	if aap, ok := conf["auto_auth_path"].(string); ok {
 		config.AutoAuthPath = aap
 	}
@@ -155,13 +151,6 @@ func ValidateConfig(conf map[string]any) error {
 			}
 		default:
 			return fmt.Errorf("timeout must be a duration string (e.g., '30s') or integer (seconds)")
-		}
-	}
-
-	// Validate transparent_mode
-	if tm, ok := conf["transparent_mode"]; ok {
-		if _, ok := tm.(bool); !ok {
-			return fmt.Errorf("transparent_mode must be a boolean")
 		}
 	}
 

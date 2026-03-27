@@ -22,8 +22,8 @@ import (
 )
 
 // setupAWSProvider provisions an AWS provider with local credentials, a
-// credential spec, policy, and JWT role so that a client can authenticate
-// and receive Warden-issued AWS access keys. Registers cleanup via t.Cleanup.
+// credential spec, policy, and JWT role for transparent mode authentication.
+// Registers cleanup via t.Cleanup.
 //
 // Cleanup is registered eagerly (before creating resources) so that partial
 // failures don't leave orphaned resources. All creates accept 409 (already
@@ -69,9 +69,9 @@ func setupAWSProvider(t *testing.T, port int) {
 		t.Fatalf("create policy: expected 200/201/204/409, got %d: %s", status, string(body))
 	}
 
-	// 4. JWT role that issues aws_access_keys tokens
+	// 4. JWT role for transparent mode
 	status, body = h.APIRequest(t, "POST", "auth/jwt/role/e2e-aws-sigv4", port,
-		`{"token_type":"aws","token_policies":["e2e-aws-gateway"],"user_claim":"sub","cred_spec_name":"e2e-aws-sigv4","token_ttl":3600}`)
+		`{"token_policies":["e2e-aws-gateway"],"user_claim":"sub","cred_spec_name":"e2e-aws-sigv4","token_ttl":3600}`)
 	if status != 200 && status != 201 && status != 409 {
 		t.Fatalf("create JWT role: expected 200/201/409, got %d: %s", status, string(body))
 	}
@@ -81,35 +81,26 @@ func setupAWSProvider(t *testing.T, port int) {
 	if status != 200 && status != 201 && status != 409 {
 		t.Fatalf("create AWS provider: expected 200/201/409, got %d: %s", status, string(body))
 	}
+
+	// 6. Configure auto_auth_path
+	status, body = h.APIRequest(t, "POST", "aws/config", port,
+		`{"auto_auth_path":"auth/jwt/"}`)
+	if status != 200 && status != 201 {
+		t.Fatalf("configure AWS provider: expected 200/201, got %d: %s", status, string(body))
+	}
 }
 
-// getWardenAWSCredentials authenticates via JWT and returns the Warden-issued
-// AWS access key ID and secret access key.
-func getWardenAWSCredentials(t *testing.T, port int) (accessKeyID, secretAccessKey string) {
+// getTransparentSigningCredentials returns the credentials for transparent
+// mode SigV4 signing: the role name as access key and a fresh JWT as secret key.
+func getTransparentSigningCredentials(t *testing.T) (accessKeyID, secretAccessKey string) {
 	t.Helper()
-
 	jwt := h.GetDefaultJWT(t)
-	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"e2e-aws-sigv4"}`, jwt)
-	status, body := h.DoRequest(t, "POST",
-		fmt.Sprintf("%s/v1/auth/jwt/login", h.NodeURL(port)),
-		map[string]string{"Content-Type": "application/json"},
-		loginBody,
-	)
-	if status != 200 && status != 201 {
-		t.Fatalf("JWT login failed (status %d): %s", status, string(body))
-	}
-
-	accessKeyID = h.JSONString(t, body, "data.data.access_key_id")
-	secretAccessKey = h.JSONString(t, body, "data.data.secret_access_key")
-	if accessKeyID == "" || secretAccessKey == "" {
-		t.Fatalf("login response missing AWS credentials: %s", string(body))
-	}
-	return accessKeyID, secretAccessKey
+	return "e2e-aws-sigv4", jwt
 }
 
 // signSTSRequest creates an HTTP request to the Warden AWS gateway and signs
-// it with SigV4 using the given credentials. The request simulates an
-// STS GetCallerIdentity call (POST with empty body).
+// it with SigV4 using transparent mode credentials. The request simulates an
+// STS GetCallerIdentity call (POST with form body).
 func signSTSRequest(t *testing.T, targetURL, accessKeyID, secretAccessKey string) *http.Request {
 	t.Helper()
 
@@ -124,9 +115,11 @@ func signSTSRequest(t *testing.T, targetURL, accessKeyID, secretAccessKey string
 	payloadHash := sha256.Sum256([]byte(body))
 	payloadHashHex := hex.EncodeToString(payloadHash[:])
 
+	// Transparent mode: role name as AccessKeyID, JWT as SecretAccessKey and SessionToken
 	creds := aws.Credentials{
 		AccessKeyID:     accessKeyID,
 		SecretAccessKey: secretAccessKey,
+		SessionToken:    secretAccessKey,
 	}
 
 	signer := v4.NewSigner()
@@ -152,8 +145,8 @@ func TestSigV4ThroughStandbyForwarding(t *testing.T) {
 	// Provision AWS provider infrastructure
 	setupAWSProvider(t, leader)
 
-	// Authenticate and get Warden-issued AWS credentials
-	accessKeyID, secretAccessKey := getWardenAWSCredentials(t, leader)
+	// Get transparent mode signing credentials (role name + JWT)
+	accessKeyID, secretAccessKey := getTransparentSigningCredentials(t)
 
 	// --- Test 1: Send SigV4-signed request through STANDBY ---
 	standbyURL := fmt.Sprintf("%s/v1/aws/gateway", h.NodeURL(standby))
@@ -169,18 +162,24 @@ func TestSigV4ThroughStandbyForwarding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request through standby failed: %v", err)
 	}
+	bodyBytes, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	// The key assertion: SigV4 verification must NOT fail.
-	// 403 means the Host header was rewritten and broke the signature.
-	// Other errors (e.g., 502 from inability to reach real AWS) are
-	// acceptable — they mean SigV4 verification passed.
+	// The key assertion: SigV4 verification on Warden must NOT fail.
+	// A 403 from Warden's signature verification contains "Signature" in the body.
+	// A 403 from AWS (fake credentials rejected) contains XML with an error code
+	// like "InvalidClientTokenId" — this means Warden's verification PASSED and
+	// the request was correctly re-signed and forwarded to AWS.
 	if resp.StatusCode == http.StatusForbidden {
-		t.Fatalf("SigV4 verification failed through standby (status 403): "+
-			"Host header was likely rewritten by the proxy, breaking the signature. "+
-			"Expected any status other than 403, got %d", resp.StatusCode)
+		bodyStr := string(bodyBytes)
+		if strings.Contains(bodyStr, "Signature") && !strings.Contains(bodyStr, "<Error>") {
+			t.Fatalf("SigV4 verification failed through standby (status 403): "+
+				"Warden rejected the signature, likely due to Host header rewrite. Body: %s", bodyStr)
+		}
+		t.Logf("standby forwarding: status 403 from upstream AWS (SigV4 verification on Warden passed, AWS rejected fake credentials)")
+	} else {
+		t.Logf("standby forwarding: status %d (SigV4 verification passed)", resp.StatusCode)
 	}
-	t.Logf("standby forwarding: status %d (SigV4 verification passed)", resp.StatusCode)
 
 	// --- Test 2: Send SigV4-signed request directly to LEADER (control) ---
 	leaderURL := fmt.Sprintf("%s/v1/aws/gateway", h.NodeURL(leader))
@@ -188,23 +187,25 @@ func TestSigV4ThroughStandbyForwarding(t *testing.T) {
 
 	resp2, err := client.Do(req2)
 	if err != nil {
-		// Transport-level errors (EOF, connection reset) mean the request
-		// passed SigV4 verification and reached the internal proxy stage
-		// which failed connecting to the real AWS endpoint. This is fine.
-		t.Logf("leader direct: transport error (SigV4 verification passed, proxy-to-AWS failed as expected): %v", err)
+		t.Logf("leader direct: transport error (SigV4 verification passed, proxy-to-AWS failed): %v", err)
 		return
 	}
+	bodyBytes2, _ := io.ReadAll(resp2.Body)
 	resp2.Body.Close()
 
 	if resp2.StatusCode == http.StatusForbidden {
-		t.Fatalf("SigV4 verification failed on leader directly (status 403): "+
-			"unexpected — this should always work. Got %d", resp2.StatusCode)
+		bodyStr := string(bodyBytes2)
+		if strings.Contains(bodyStr, "Signature") && !strings.Contains(bodyStr, "<Error>") {
+			t.Fatalf("leader direct: Warden SigV4 verification failed (status 403). Body: %s", bodyStr)
+		}
+		t.Logf("leader direct: status 403 from upstream AWS (SigV4 verification on Warden passed)")
+	} else {
+		t.Logf("leader direct: status %d (SigV4 verification passed)", resp2.StatusCode)
 	}
-	t.Logf("leader direct: status %d (SigV4 verification passed)", resp2.StatusCode)
 }
 
 // signSigV4Request creates an HTTP request with a custom body, signs it with
-// SigV4, and returns the request. Useful for testing different payload sizes.
+// SigV4 using transparent mode credentials, and returns the request.
 func signSigV4Request(t *testing.T, method, targetURL, body, contentType, accessKeyID, secretAccessKey, service, region string) *http.Request {
 	t.Helper()
 
@@ -219,9 +220,11 @@ func signSigV4Request(t *testing.T, method, targetURL, body, contentType, access
 	payloadHash := sha256.Sum256([]byte(body))
 	payloadHashHex := hex.EncodeToString(payloadHash[:])
 
+	// Transparent mode: role name as AccessKeyID, JWT as SecretAccessKey and SessionToken
 	creds := aws.Credentials{
 		AccessKeyID:     accessKeyID,
 		SecretAccessKey: secretAccessKey,
+		SessionToken:    secretAccessKey,
 	}
 
 	signer := v4.NewSigner()
@@ -253,12 +256,20 @@ func sendSigV4AndAssert(t *testing.T, req *http.Request, label string) int {
 		t.Logf("%s: transport error (SigV4 passed, proxy-to-AWS failed): %v", label, err)
 		return 0
 	}
-	io.Copy(io.Discard, resp.Body)
+	bodyBytes, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	if resp.StatusCode == http.StatusForbidden {
-		t.Fatalf("%s: SigV4 verification failed (status 403) — "+
-			"signature was likely broken during forwarding", label)
+		bodyStr := string(bodyBytes)
+		// Distinguish Warden's SigV4 rejection from AWS rejecting fake credentials.
+		// Warden's rejection contains "Signature" without XML <Error>.
+		// AWS rejection contains XML with error codes like "InvalidClientTokenId".
+		if strings.Contains(bodyStr, "Signature") && !strings.Contains(bodyStr, "<Error>") {
+			t.Fatalf("%s: SigV4 verification failed (status 403) — "+
+				"signature was likely broken during forwarding. Body: %s", label, bodyStr)
+		}
+		t.Logf("%s: status 403 from upstream AWS (SigV4 verification on Warden passed)", label)
+		return resp.StatusCode
 	}
 	t.Logf("%s: status %d (SigV4 verification passed)", label, resp.StatusCode)
 	return resp.StatusCode
@@ -272,7 +283,7 @@ func TestConcurrentSigV4ThroughStandby(t *testing.T) {
 	standby := h.GetStandbyPort(t)
 
 	setupAWSProvider(t, leader)
-	accessKeyID, secretAccessKey := getWardenAWSCredentials(t, leader)
+	accessKeyID, secretAccessKey := getTransparentSigningCredentials(t)
 
 	const concurrency = 20
 	standbyURL := fmt.Sprintf("%s/v1/aws/gateway", h.NodeURL(standby))
@@ -298,13 +309,17 @@ func TestConcurrentSigV4ThroughStandby(t *testing.T) {
 				// Transport error = SigV4 passed
 				return
 			}
-			io.Copy(io.Discard, resp.Body)
+			bodyBytes, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 
 			if resp.StatusCode == http.StatusForbidden {
-				mu.Lock()
-				failures = append(failures, fmt.Sprintf("goroutine %d: got 403", idx))
-				mu.Unlock()
+				bodyStr := string(bodyBytes)
+				// Only count as failure if it's Warden's rejection, not AWS's
+				if strings.Contains(bodyStr, "Signature") && !strings.Contains(bodyStr, "<Error>") {
+					mu.Lock()
+					failures = append(failures, fmt.Sprintf("goroutine %d: Warden SigV4 rejection", idx))
+					mu.Unlock()
+				}
 			}
 		}(i)
 	}
@@ -326,7 +341,7 @@ func TestSigV4DuringLeaderStepDown(t *testing.T) {
 	standby := h.GetStandbyPort(t)
 
 	setupAWSProvider(t, leader)
-	accessKeyID, secretAccessKey := getWardenAWSCredentials(t, leader)
+	accessKeyID, secretAccessKey := getTransparentSigningCredentials(t)
 
 	standbyURL := fmt.Sprintf("%s/v1/aws/gateway", h.NodeURL(standby))
 
@@ -361,12 +376,16 @@ func TestSigV4DuringLeaderStepDown(t *testing.T) {
 				results = append(results, 0)
 				return
 			}
-			io.Copy(io.Discard, resp.Body)
+			bodyBytes, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			results = append(results, resp.StatusCode)
 
+			// Only flag Warden's SigV4 rejection, not AWS's rejection of fake creds
 			if resp.StatusCode == http.StatusForbidden {
-				got403 = true
+				bodyStr := string(bodyBytes)
+				if strings.Contains(bodyStr, "Signature") && !strings.Contains(bodyStr, "<Error>") {
+					got403 = true
+				}
 			}
 		}()
 	}
@@ -381,11 +400,11 @@ func TestSigV4DuringLeaderStepDown(t *testing.T) {
 	h.WaitForCluster(t, 15, 2*time.Second)
 
 	if got403 {
-		t.Fatalf("SigV4 verification failed (403) during leader step-down — "+
+		t.Fatalf("SigV4 verification failed (403 from Warden) during leader step-down — "+
 			"Host header was likely corrupted. Results: %v", results)
 	}
 
-	t.Logf("step-down results (no 403s): %v", results)
+	t.Logf("step-down results: %v", results)
 }
 
 // TestLargeSigV4BodyThroughStandby verifies that a large (~500KB)
@@ -397,7 +416,7 @@ func TestLargeSigV4BodyThroughStandby(t *testing.T) {
 	standby := h.GetStandbyPort(t)
 
 	setupAWSProvider(t, leader)
-	accessKeyID, secretAccessKey := getWardenAWSCredentials(t, leader)
+	accessKeyID, secretAccessKey := getTransparentSigningCredentials(t)
 
 	// Build a ~500KB form-encoded body (simulates a large STS request).
 	largeValue := strings.Repeat("A", 500*1024)
@@ -461,9 +480,9 @@ func TestSigV4PolicyDenialThroughStandby(t *testing.T) {
 		t.Fatalf("create deny policy: expected 200/201/204/409, got %d: %s", status, string(body))
 	}
 
-	// JWT role with the deny policy.
+	// JWT role with the deny policy (transparent mode)
 	status, body = h.APIRequest(t, "POST", "auth/jwt/role/e2e-aws-deny", leader,
-		`{"token_type":"aws","token_policies":["e2e-aws-deny"],"user_claim":"sub","cred_spec_name":"e2e-aws-deny","token_ttl":3600}`)
+		`{"token_policies":["e2e-aws-deny"],"user_claim":"sub","cred_spec_name":"e2e-aws-deny","token_ttl":3600}`)
 	if status != 200 && status != 201 && status != 409 {
 		t.Fatalf("create JWT role: expected 200/201/409, got %d: %s", status, string(body))
 	}
@@ -471,20 +490,13 @@ func TestSigV4PolicyDenialThroughStandby(t *testing.T) {
 	// AWS provider (may already exist from other tests, ignore conflict).
 	h.APIRequest(t, "POST", "sys/providers/aws", leader, `{"type":"aws"}`)
 
-	// Authenticate with the deny-policy role.
-	jwt := h.GetDefaultJWT(t)
-	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"e2e-aws-deny"}`, jwt)
-	status, body = h.DoRequest(t, "POST",
-		fmt.Sprintf("%s/v1/auth/jwt/login", h.NodeURL(leader)),
-		map[string]string{"Content-Type": "application/json"},
-		loginBody,
-	)
-	if status != 200 && status != 201 {
-		t.Fatalf("JWT login failed (status %d): %s", status, string(body))
-	}
+	// Configure auth path
+	h.APIRequest(t, "POST", "aws/config", leader, `{"auto_auth_path":"auth/jwt/"}`)
 
-	accessKeyID := h.JSONString(t, body, "data.data.access_key_id")
-	secretAccessKey := h.JSONString(t, body, "data.data.secret_access_key")
+	// Use transparent mode signing: role name + JWT
+	jwt := h.GetDefaultJWT(t)
+	accessKeyID := "e2e-aws-deny"
+	secretAccessKey := jwt
 
 	// Send SigV4-signed request through standby — should be denied by policy.
 	standbyURL := fmt.Sprintf("%s/v1/aws/gateway", h.NodeURL(standby))

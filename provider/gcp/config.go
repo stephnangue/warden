@@ -12,7 +12,6 @@ import (
 type ProviderConfig struct {
 	MaxBodySize     int64
 	Timeout         time.Duration
-	TransparentMode bool
 	AutoAuthPath    string
 	DefaultAuthRole string
 }
@@ -65,16 +64,6 @@ func parseConfig(conf map[string]any) ProviderConfig {
 			if v > 0 {
 				config.Timeout = time.Duration(v) * time.Second
 			}
-		}
-	}
-
-	// Parse transparent_mode
-	if tm, ok := conf["transparent_mode"]; ok {
-		switch v := tm.(type) {
-		case bool:
-			config.TransparentMode = v
-		case string:
-			config.TransparentMode = v == "true"
 		}
 	}
 

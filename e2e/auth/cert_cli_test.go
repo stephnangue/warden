@@ -25,182 +25,6 @@ func writeTempPEM(t *testing.T, name, content string) string {
 	return path
 }
 
-// TC-CLI-01: warden login --method=cert with --cert/--key/--role flags
-func TestCLI_CertLogin_WithFlags(t *testing.T) {
-	port := h.GetLeaderPort(t)
-	caCertPEM, caKey := setupCertAuthEnv(t, port)
-	defer teardownCertAuthEnv(t, port)
-
-	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cli-1")
-	certFile := writeTempPEM(t, "client.crt", clientCertPEM)
-	keyFile := writeTempPEM(t, "client.key", clientKeyPEM)
-
-	// Write the server CA cert so the CLI can verify TLS
-	serverCACert := filepath.Join(h.E2EDir(), ".certs", "server.crt")
-
-	out, err := h.WardenCLIWithPort(t, port, map[string]string{
-		"WARDEN_CACERT": serverCACert,
-	},
-		"login", "--method=cert", "--role=agent",
-		"--cert="+certFile, "--key="+keyFile,
-	)
-	if err != nil {
-		t.Fatalf("warden login --method=cert failed: %v\noutput: %s", err, out)
-	}
-
-	if !strings.Contains(out, "principal_id") {
-		t.Fatalf("expected principal_id in output, got: %s", out)
-	}
-}
-
-// TC-CLI-02: warden login --method=cert with env vars (WARDEN_CLIENT_CERT, WARDEN_CLIENT_KEY, WARDEN_ROLE)
-func TestCLI_CertLogin_WithEnvVars(t *testing.T) {
-	port := h.GetLeaderPort(t)
-	caCertPEM, caKey := setupCertAuthEnv(t, port)
-	defer teardownCertAuthEnv(t, port)
-
-	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cli-2")
-	certFile := writeTempPEM(t, "client.crt", clientCertPEM)
-	keyFile := writeTempPEM(t, "client.key", clientKeyPEM)
-
-	serverCACert := filepath.Join(h.E2EDir(), ".certs", "server.crt")
-
-	out, err := h.WardenCLIWithPort(t, port, map[string]string{
-		"WARDEN_CACERT":      serverCACert,
-		"WARDEN_CLIENT_CERT": certFile,
-		"WARDEN_CLIENT_KEY":  keyFile,
-		"WARDEN_ROLE":        "agent",
-	},
-		"login", "--method=cert",
-	)
-	if err != nil {
-		t.Fatalf("warden login --method=cert (env vars) failed: %v\noutput: %s", err, out)
-	}
-
-	if !strings.Contains(out, "principal_id") {
-		t.Fatalf("expected principal_id in output, got: %s", out)
-	}
-}
-
-// TC-CLI-03: warden login --method=cert fails without role
-func TestCLI_CertLogin_MissingRole(t *testing.T) {
-	port := h.GetLeaderPort(t)
-	caCertPEM, caKey := setupCertAuthEnv(t, port)
-	defer teardownCertAuthEnv(t, port)
-
-	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cli-3")
-	certFile := writeTempPEM(t, "client.crt", clientCertPEM)
-	keyFile := writeTempPEM(t, "client.key", clientKeyPEM)
-
-	serverCACert := filepath.Join(h.E2EDir(), ".certs", "server.crt")
-
-	out, err := h.WardenCLIWithPort(t, port, map[string]string{
-		"WARDEN_CACERT": serverCACert,
-	},
-		"login", "--method=cert",
-		"--cert="+certFile, "--key="+keyFile,
-	)
-	if err == nil {
-		t.Fatalf("expected error when role is missing, got success: %s", out)
-	}
-
-	if !strings.Contains(out, "role is required") {
-		t.Fatalf("expected 'role is required' error, got: %s", out)
-	}
-}
-
-// TC-CLI-04: warden login --method=cert with wrong CN is rejected
-func TestCLI_CertLogin_WrongCN(t *testing.T) {
-	port := h.GetLeaderPort(t)
-	caCertPEM, caKey := setupCertAuthEnv(t, port)
-	defer teardownCertAuthEnv(t, port)
-
-	// Generate cert with CN that doesn't match the role's allowed_common_names
-	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "unauthorized-user")
-	certFile := writeTempPEM(t, "client.crt", clientCertPEM)
-	keyFile := writeTempPEM(t, "client.key", clientKeyPEM)
-
-	serverCACert := filepath.Join(h.E2EDir(), ".certs", "server.crt")
-
-	_, err := h.WardenCLIWithPort(t, port, map[string]string{
-		"WARDEN_CACERT": serverCACert,
-	},
-		"login", "--method=cert", "--role=agent",
-		"--cert="+certFile, "--key="+keyFile,
-	)
-	if err == nil {
-		t.Fatal("expected error for wrong CN, but login succeeded")
-	}
-}
-
-// TC-CLI-05: warden login --method=cert with global -r flag
-func TestCLI_CertLogin_GlobalRoleFlag(t *testing.T) {
-	port := h.GetLeaderPort(t)
-	caCertPEM, caKey := setupCertAuthEnv(t, port)
-	defer teardownCertAuthEnv(t, port)
-
-	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cli-5")
-	certFile := writeTempPEM(t, "client.crt", clientCertPEM)
-	keyFile := writeTempPEM(t, "client.key", clientKeyPEM)
-
-	serverCACert := filepath.Join(h.E2EDir(), ".certs", "server.crt")
-
-	// Use -r (global shorthand) instead of --role
-	out, err := h.WardenCLIWithPort(t, port, map[string]string{
-		"WARDEN_CACERT": serverCACert,
-	},
-		"-r", "agent", "login", "--method=cert",
-		"--cert="+certFile, "--key="+keyFile,
-	)
-	if err != nil {
-		t.Fatalf("warden -r agent login --method=cert failed: %v\noutput: %s", err, out)
-	}
-
-	if !strings.Contains(out, "principal_id") {
-		t.Fatalf("expected principal_id in output, got: %s", out)
-	}
-}
-
-// TC-CLI-06: warden login --method=cert via mTLS (no --cert/--key, uses WARDEN_CLIENT_CERT/KEY env)
-func TestCLI_CertLogin_MTLS(t *testing.T) {
-	port := h.GetLeaderPort(t)
-
-	// Use the mTLS client CA so the TLS handshake succeeds (server trusts this CA)
-	caCertPEM, caKey := h.LoadMTLSClientCA(t)
-
-	// Mount cert auth with the mTLS CA
-	h.SetupCertAuthWithCA(t, port, caCertPEM)
-	defer h.TeardownCertAuth(t, port)
-
-	// Create role
-	h.APIRequest(t, "POST", "auth/cert/role/agent", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-gateway-access"],"token_type":"warden","token_ttl":3600}`)
-	defer h.APIRequest(t, "DELETE", "auth/cert/role/agent", port, "")
-
-	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cli-mtls")
-	certFile := writeTempPEM(t, "client.crt", clientCertPEM)
-	keyFile := writeTempPEM(t, "client.key", clientKeyPEM)
-
-	serverCACert := filepath.Join(h.E2EDir(), ".certs", "server.crt")
-
-	// No --cert/--key flags — client cert comes from env vars and goes through TLS handshake
-	out, err := h.WardenCLIWithPort(t, port, map[string]string{
-		"WARDEN_CACERT":      serverCACert,
-		"WARDEN_CLIENT_CERT": certFile,
-		"WARDEN_CLIENT_KEY":  keyFile,
-		"WARDEN_ROLE":        "agent",
-	},
-		"login", "--method=cert",
-	)
-	if err != nil {
-		t.Fatalf("warden login --method=cert (mTLS) failed: %v\noutput: %s", err, out)
-	}
-
-	if !strings.Contains(out, "principal_id") {
-		t.Fatalf("expected principal_id in output, got: %s", out)
-	}
-}
-
 // =============================================================================
 // Transparent Operations via CLI over mTLS with Privilege Escalation
 // =============================================================================
@@ -250,14 +74,12 @@ func setupCLITransparentOpsEnv(t *testing.T, port int) (clientCertFile, clientKe
 		`{"policy":"path \"sys/*\" {\n  capabilities = [\"read\", \"create\", \"update\", \"delete\", \"list\"]\n}\npath \"auth/*\" {\n  capabilities = [\"read\", \"create\", \"update\", \"delete\", \"list\"]\n}"}`)
 
 	// Reader cert role: long-lived (1h), read-only.
-	// Must use cert_role token type for transparent mode — LookupCertTokenWithRole
-	// computes a deterministic ID from fingerprint+role, which requires cert_role.
 	h.NSAPIRequest(t, "POST", "auth/cert/role/reader", ns, port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["reader-policy"],"token_type":"transparent","token_ttl":3600}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["reader-policy"],"token_ttl":3600}`)
 
 	// Admin cert role: short-lived (2m), full access
 	h.NSAPIRequest(t, "POST", "auth/cert/role/admin", ns, port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["admin-policy"],"token_type":"transparent","token_ttl":120}`)
+		`{"allowed_common_names":["agent-*"],"token_policies":["admin-policy"],"token_ttl":120}`)
 
 	// Generate client cert signed by mTLS CA
 	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cli-ops")

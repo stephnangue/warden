@@ -94,36 +94,25 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		return nil, nil, err
 	}
 
-	// Step 3: Extract authentication data for signature verification
-	var verifyCreds aws.Credentials
-	if req.Transparent {
-		// Transparent mode: reconstruct the credentials the client used for signing.
-		// The core already performed JWT/cert auth via performImplicitAuth.
-		// We verify the SigV4 signature for request integrity protection.
-		accessKeyID := extractAccessKeyID(req.HTTPRequest.Header.Get("Authorization"))
-		securityToken := req.HTTPRequest.Header.Get("X-Amz-Security-Token")
+	// Step 3: Reconstruct the credentials the client used for signing.
+	// The core already performed JWT/cert auth via performImplicitAuth.
+	// We verify the SigV4 signature for request integrity protection.
+	accessKeyID := extractAccessKeyID(req.HTTPRequest.Header.Get("Authorization"))
+	securityToken := req.HTTPRequest.Header.Get("X-Amz-Security-Token")
 
-		if strings.HasPrefix(securityToken, "eyJ") {
-			// JWT transparent: client used JWT as secret_access_key and session_token
-			verifyCreds = aws.Credentials{
-				AccessKeyID:     accessKeyID,
-				SecretAccessKey: securityToken,
-				SessionToken:    securityToken,
-			}
-		} else {
-			// Cert transparent: client used role name as both access_key_id and secret_access_key
-			verifyCreds = aws.Credentials{
-				AccessKeyID:     accessKeyID,
-				SecretAccessKey: accessKeyID,
-			}
+	var verifyCreds aws.Credentials
+	if strings.HasPrefix(securityToken, "eyJ") {
+		// JWT transparent: client used JWT as secret_access_key and session_token
+		verifyCreds = aws.Credentials{
+			AccessKeyID:     accessKeyID,
+			SecretAccessKey: securityToken,
+			SessionToken:    securityToken,
 		}
 	} else {
-		// Regular mode: credentials from token entry
-		var err error
-		verifyCreds, err = b.authenticate(req)
-		if err != nil {
-			http.Error(req.ResponseWriter, "Permission denied", http.StatusForbidden)
-			return nil, nil, err
+		// Cert transparent: client used role name as both access_key_id and secret_access_key
+		verifyCreds = aws.Credentials{
+			AccessKeyID:     accessKeyID,
+			SecretAccessKey: accessKeyID,
 		}
 	}
 
@@ -140,14 +129,12 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		return nil, nil, fmt.Errorf("signature mismatch")
 	}
 
-	// Step 5: Clean up transparent mode security token before re-signing.
-	// In transparent mode, X-Amz-Security-Token contains the JWT (or is absent
-	// for cert auth). Remove it so it doesn't leak into the proxied request.
+	// Step 5: Clean up security token before re-signing.
+	// X-Amz-Security-Token contains the JWT (or is absent for cert auth).
+	// Remove it so it doesn't leak into the proxied request.
 	// The real AWS session token (if any) will be added by resignRequest when
 	// the minted credentials include a SessionToken.
-	if req.Transparent {
-		req.HTTPRequest.Header.Del("X-Amz-Security-Token")
-	}
+	req.HTTPRequest.Header.Del("X-Amz-Security-Token")
 
 	// Step 6: Get AWS credentials
 	awsCreds, err := b.getCredentials(req)
@@ -312,13 +299,6 @@ func (b *awsBackend) forwardDirect(w http.ResponseWriter, r *http.Request, body 
 	} else {
 		io.Copy(w, resp.Body)
 	}
-}
-
-func (b *awsBackend) authenticate(req *logical.Request) (aws.Credentials, error) {
-	return aws.Credentials{
-		AccessKeyID:     req.TokenEntry().Data["access_key_id"],
-		SecretAccessKey: req.TokenEntry().Data["secret_access_key"],
-	}, nil
 }
 
 func (b *awsBackend) getCredentials(req *logical.Request) (aws.Credentials, error) {

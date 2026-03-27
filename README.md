@@ -140,7 +140,7 @@ SPIFFE is supported in both methods — JWT-SVIDs via JWT auth and X.509-SVIDs v
 
 ## How workloads interact with Warden
 
-Your tool points at Warden's endpoint and makes a normal HTTP request with a JWT in the `Authorization` header (or `X-Amz-Security-Token` for AWS), or via mTLS. Warden authenticates, injects credentials, and either forwards the request to the provider or returns an access grant (database auth token, pre-signed URL) directly. No Warden-specific SDK or login step is required.
+Your tool points at Warden's endpoint and makes a normal HTTP request with a JWT in the `Authorization` header (for AWS, the JWT is embedded in the SigV4 signing flow), or via mTLS. Warden authenticates, injects credentials, and either forwards the request to the provider or returns an access grant (database auth token, pre-signed URL) directly. No Warden-specific SDK or login step is required.
 
 ## Why not just use the cloud provider's native tooling?
  

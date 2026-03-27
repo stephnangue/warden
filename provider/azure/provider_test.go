@@ -46,7 +46,7 @@ func TestParseGatewayPath(t *testing.T) {
 			wantPath: "/container/blob",
 		},
 		{
-			name:     "transparent mode path",
+			name:     "role-based gateway path",
 			path:     "/azure/role/myrole/gateway/management.azure.com/subscriptions",
 			wantHost: "management.azure.com",
 			wantPath: "/subscriptions",
@@ -179,20 +179,17 @@ func TestParseConfig(t *testing.T) {
 		config := parseConfig(map[string]any{})
 		assert.Equal(t, framework.DefaultMaxBodySize, config.MaxBodySize)
 		assert.Equal(t, framework.DefaultTimeout, config.Timeout)
-		assert.False(t, config.TransparentMode)
 	})
 
 	t.Run("custom values", func(t *testing.T) {
 		config := parseConfig(map[string]any{
-			"max_body_size":    float64(5242880),
-			"timeout":          "60s",
-			"transparent_mode": true,
-			"auto_auth_path":   "auth/jwt/",
-			"default_role":     "my-role",
+			"max_body_size":  float64(5242880),
+			"timeout":        "60s",
+			"auto_auth_path": "auth/jwt/",
+			"default_role":   "my-role",
 		})
 		assert.Equal(t, int64(5242880), config.MaxBodySize)
 		assert.Equal(t, 60*time.Second, config.Timeout)
-		assert.True(t, config.TransparentMode)
 		assert.Equal(t, "auth/jwt/", config.AutoAuthPath)
 		assert.Equal(t, "my-role", config.DefaultAuthRole)
 	})
@@ -240,12 +237,6 @@ func TestValidateConfig(t *testing.T) {
 			config:  map[string]any{"timeout": "not-a-duration"},
 			wantErr: true,
 			errMsg:  "invalid timeout format",
-		},
-		{
-			name:    "transparent_mode wrong type",
-			config:  map[string]any{"transparent_mode": "yes"},
-			wantErr: true,
-			errMsg:  "transparent_mode must be a boolean",
 		},
 	}
 

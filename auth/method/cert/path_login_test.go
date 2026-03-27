@@ -417,9 +417,8 @@ func TestHandleLogin_DefaultRoleFallback(t *testing.T) {
 	t.Run("uses default_role when role is empty", func(t *testing.T) {
 		storage := newInmemStorage()
 		conf := &logical.BackendConfig{
-			Logger:          testLogger(),
-			StorageView:     storage,
-			ValidTokenTypes: []string{"warden_token", "warden_crypto_token"},
+			Logger:      testLogger(),
+			StorageView: storage,
 		}
 		backend, err := Factory(context.Background(), conf)
 		require.NoError(t, err)
@@ -454,9 +453,8 @@ func TestHandleLogin_DefaultRoleFallback(t *testing.T) {
 	t.Run("missing role with no default_role returns error", func(t *testing.T) {
 		storage := newInmemStorage()
 		conf := &logical.BackendConfig{
-			Logger:          testLogger(),
-			StorageView:     storage,
-			ValidTokenTypes: []string{"warden_token", "warden_crypto_token"},
+			Logger:      testLogger(),
+			StorageView: storage,
 		}
 		backend, err := Factory(context.Background(), conf)
 		require.NoError(t, err)

@@ -12,7 +12,7 @@ type TokenEntry struct {
 	// Core Identity (Two-Tier Cache)
 	ID       string // Primary hash-based ID (Tier 1: in-memory cache)
 	Accessor string // Reference ID for safe operations (Tier 2: in-memory cache)
-	Type     string // Token type (user_pass, aws_access_keys, etc.)
+	Type     string // Token type (warden_token, jwt_role, cert_role)
 
 	// Namespace Binding
 	NamespaceID   string // Namespace UUID where token was created

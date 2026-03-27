@@ -8,8 +8,9 @@ import (
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
 
-// TestNSVaultNonTransparent verifies vault-nt gateway works in a namespace (T29).
-func TestNSVaultNonTransparent(t *testing.T) {
+// TestNSVaultTransparentLeaderAndStandby verifies transparent vault gateway works in a namespace
+// on both leader and standby (T29).
+func TestNSVaultTransparentLeaderAndStandby(t *testing.T) {
 	leader := h.GetLeaderPort(t)
 
 	// Clean up any stale environment
@@ -18,18 +19,17 @@ func TestNSVaultNonTransparent(t *testing.T) {
 	// Setup full vault env in namespace
 	h.SetupNSVaultEnv(t, leader)
 
-	// Get namespace-scoped warden token
-	token := h.GetNSNTWardenToken(t, h.NSVaultNS, leader)
+	jwt := h.GetDefaultJWT(t)
 
 	// Request through leader
-	leaderStatus, _ := h.NSVaultNTRequest(t, "GET", "secret/data/e2e/app-config", h.NSVaultNS, leader, token)
+	leaderStatus, _ := h.NSVaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", h.NSVaultNS, leader, jwt)
 	if leaderStatus != 200 {
 		t.Fatalf("leader: expected 200, got %d", leaderStatus)
 	}
 
 	// Request through standby
 	standby := h.GetStandbyPort(t)
-	standbyStatus, _ := h.NSVaultNTRequest(t, "GET", "secret/data/e2e/app-config", h.NSVaultNS, standby, token)
+	standbyStatus, _ := h.NSVaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", h.NSVaultNS, standby, jwt)
 	if standbyStatus != 200 {
 		t.Fatalf("standby: expected 200, got %d", standbyStatus)
 	}

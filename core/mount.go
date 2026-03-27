@@ -441,7 +441,6 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry, view sd
 			Logger:               c.logger.WithSystem("auth"),
 			Config:               entry.Config,
 			BackendUUID:          entry.BackendAwareUUID,
-			ValidTokenTypes:      c.tokenStore.ListTokenTypes(),
 			RegisterShutdownHook: c.RegisterShutdownHook,
 		}
 		backend, err = factory(ctx, conf)

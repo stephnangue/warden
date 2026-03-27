@@ -75,7 +75,7 @@ For impersonation, the source service account needs `iam.serviceAccounts.getAcce
 
 ## Step 1: Configure JWT Auth and Create a Role
 
-Set up a JWT auth method and create a role that binds the credential spec and policy. With transparent mode, clients authenticate directly with their JWT — no separate login step is needed.
+Set up a JWT auth method and create a role that binds the credential spec and policy. Clients authenticate directly with their JWT — no separate login step is needed.
 
 > **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
 
@@ -90,8 +90,7 @@ warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known
 warden write auth/jwt/role/gcp-user \
     token_policies="gcp-access" \
     user_claim=sub \
-    cred_spec_name=gcp-cloud-platform \
-    token_ttl=1h
+    cred_spec_name=gcp-cloud-platform
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -114,12 +113,11 @@ Verify the provider is enabled:
 warden provider list
 ```
 
-Configure the provider with transparent mode enabled. This allows clients to authenticate with their JWT directly — no explicit Warden login required:
+Configure the provider with `auto_auth_path`. This allows clients to authenticate with their JWT directly — no explicit Warden login required:
 
 ```bash
 warden write gcp/config <<EOF
 {
-  "transparent_mode": true,
   "auto_auth_path": "auth/jwt/",
   "timeout": "30s",
   "max_body_size": 10485760
@@ -241,7 +239,7 @@ export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
   | jq -r '.access_token')
 ```
 
-With transparent mode, requests use role-based paths. Warden performs implicit JWT authentication and injects the OAuth2 Bearer token automatically.
+Requests use role-based paths. Warden performs implicit JWT authentication and injects the OAuth2 Bearer token automatically.
 
 The URL pattern is: `/v1/gcp/role/{role}/gateway/{googleapis-host}/{path}`
 
@@ -374,20 +372,18 @@ Create a role that binds allowed certificate identities to a credential spec and
 warden write auth/cert/role/gcp-user \
     allowed_common_names="agent-*" \
     token_policies="gcp-access" \
-    cred_spec_name=gcp-cloud-platform \
-    token_ttl=1h
+    cred_spec_name=gcp-cloud-platform
 ```
 
 The `allowed_common_names` field supports glob patterns. You can also match on other certificate fields: `allowed_dns_sans`, `allowed_email_sans`, `allowed_uri_sans`, or `allowed_organizational_units`.
 
 ### Configure Provider for Cert Auth
 
-Update the provider config to use cert auth for transparent mode:
+Update the provider config to use cert auth:
 
 ```bash
 warden write gcp/config <<EOF
 {
-  "transparent_mode": true,
   "auto_auth_path": "auth/cert/",
   "timeout": "30s",
   "max_body_size": 10485760
@@ -409,31 +405,6 @@ curl --cert client.pem --key client-key.pem \
     "https://warden.internal/v1/gcp/gateway/storage.googleapis.com/storage/v1/b?project=my-project"
 ```
 
-### Explicit Login with Certificates
-
-To use cert auth for explicit login (without transparent mode):
-
-```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    token_type=warden \
-    default_role=gcp-user
-
-warden write auth/cert/role/gcp-user \
-    allowed_common_names="agent-*" \
-    token_type=warden \
-    token_policies="gcp-access" \
-    cred_spec_name=gcp-cloud-platform \
-    token_ttl=1h
-```
-
-Then authenticate with the CLI:
-
-```bash
-warden login --method=cert --role=gcp-user \
-    --cert=./client.pem --key=./client-key.pem
-```
-
 ## Configuration Reference
 
 ### Provider Config
@@ -442,8 +413,7 @@ warden login --method=cert --role=gcp-user \
 |-------|------|---------|-------------|
 | `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
 | `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
-| `transparent_mode` | bool | `false` | Enable implicit authentication (JWT or TLS certificate) |
-| `auto_auth_path` | string | — | JWT auth mount path (required when `transparent_mode` is true) |
+| `auto_auth_path` | string | — | Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 
 ### Credential Source Config

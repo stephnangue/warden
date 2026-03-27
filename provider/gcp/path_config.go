@@ -26,14 +26,9 @@ func (b *gcpBackend) pathConfig() *framework.Path {
 				Description: "Request timeout duration (e.g., '30s', '5m')",
 				Default:     "30s",
 			},
-			"transparent_mode": {
-				Type:        framework.TypeBool,
-				Description: "Enable transparent mode for implicit JWT authentication",
-				Default:     false,
-			},
 			"auto_auth_path": {
 				Type:        framework.TypeString,
-				Description: "Path to JWT auth mount for transparent mode (e.g., 'auth/jwt/')",
+				Description: "Path to auth mount for implicit authentication (e.g., 'auth/jwt/', 'auth/cert/')" ,
 			},
 			"default_role": {
 				Type:        framework.TypeString,
@@ -51,7 +46,7 @@ func (b *gcpBackend) pathConfig() *framework.Path {
 			},
 		},
 		HelpSynopsis:    "Configure GCP provider",
-		HelpDescription: "This endpoint configures the GCP provider settings including body size limits, timeouts, and transparent mode.",
+		HelpDescription: "This endpoint configures the GCP provider settings including body size limits, timeouts, and authentication.",
 	}
 }
 
@@ -61,11 +56,10 @@ func (b *gcpBackend) handleConfigRead(ctx context.Context, req *logical.Request,
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"max_body_size":    b.MaxBodySize,
-			"timeout":          b.Timeout.String(),
-			"transparent_mode": tc.Enabled,
-			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultAuthRole,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		},
 	}, nil
 }
@@ -89,12 +83,8 @@ func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 
 	// Transparent mode settings — build new config from current values + overrides
 	tc := &framework.TransparentConfig{
-		Enabled:      b.TransparentConfig.Enabled,
-		AutoAuthPath: b.TransparentConfig.AutoAuthPath,
+		AutoAuthPath:    b.TransparentConfig.AutoAuthPath,
 		DefaultAuthRole: b.TransparentConfig.DefaultAuthRole,
-	}
-	if val, ok := d.GetOk("transparent_mode"); ok {
-		tc.Enabled = val.(bool)
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -103,12 +93,11 @@ func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 		tc.DefaultAuthRole = val.(string)
 	}
 
-
-	// Validate: if transparent_mode enabled, auto_auth_path required
-	if tc.Enabled && tc.AutoAuthPath == "" {
+	// Validate: auto_auth_path required
+	if tc.AutoAuthPath == "" {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
-			Err:        logical.ErrBadRequest("auto_auth_path is required when transparent_mode is enabled"),
+			Err:        logical.ErrBadRequest("auto_auth_path is required"),
 		}, nil
 	}
 
@@ -117,11 +106,10 @@ func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"max_body_size":    b.MaxBodySize,
-			"timeout":          b.Timeout.String(),
-			"transparent_mode": tc.Enabled,
-			"auto_auth_path":   tc.AutoAuthPath,
-			"default_role":     tc.DefaultAuthRole,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return &logical.Response{

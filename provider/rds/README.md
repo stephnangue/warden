@@ -177,11 +177,10 @@ warden write auth/jwt/config \
 
 warden write auth/jwt/role/db-user \
     token_policies="rds-access" \
-    user_claim=sub \
-    token_ttl=1h
+    user_claim=sub
 ```
 
-Setting `default_role=db-user` means workloads don't need to pass `X-Warden-Role` — the auth method uses this role automatically during transparent authentication.
+Setting `default_role=db-user` means workloads don't need to pass `X-Warden-Role` — the auth method uses this role automatically during authentication.
 
 > **Advanced: Dynamic Policy Mapping with `groups_claim`**
 >
@@ -197,8 +196,7 @@ Setting `default_role=db-user` means workloads don't need to pass `X-Warden-Role
 >
 > warden write auth/jwt/role/db-user \
 >     token_policies="base-access" \
->     user_claim=sub \
->     token_ttl=1h
+>     user_claim=sub
 >
 > # Create policies matching group names
 > warden policy write group-db-read - <<EOF
@@ -220,11 +218,10 @@ Setting `default_role=db-user` means workloads don't need to pass `X-Warden-Role
 warden provider enable --type=rds
 ```
 
-Enable transparent mode so workloads can authenticate with their JWT directly — no explicit Warden login required:
+Workloads authenticate with their JWT directly — no explicit Warden login required:
 
 ```bash
 warden write rds/config \
-    transparent_mode=true \
     auto_auth_path=auth/jwt/
 ```
 
@@ -358,7 +355,7 @@ export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
   | jq -r '.access_token')
 ```
 
-With transparent mode enabled, pass the JWT directly — no login step needed:
+Pass the JWT directly — no login step needed:
 
 ```bash
 curl -s -H "Authorization: Bearer $JWT_TOKEN" \
@@ -445,8 +442,7 @@ This means database audit logs show both the shared IAM user and which Warden wo
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `transparent_mode` | bool | `false` | Enable implicit JWT authentication |
-| `auto_auth_path` | string | — | Auth mount path for implicit authentication (required when `transparent_mode` is true) |
+| `auto_auth_path` | string | — | Auth mount path for implicit authentication (e.g., `auth/jwt/`) |
 
 ### Credential Spec Config (`db_auth_token` type)
 

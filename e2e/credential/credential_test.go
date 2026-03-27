@@ -11,12 +11,12 @@ import (
 )
 
 // TestIssueVaultTokenEndToEnd verifies end-to-end Vault token issuance via
-// non-transparent gateway: login, request secret, verify data exists (T-021).
+// transparent gateway: login, request secret, verify data exists (T-021).
 func TestIssueVaultTokenEndToEnd(t *testing.T) {
 	leader := h.GetLeaderPort(t)
-	token := h.GetNTWardenToken(t, leader)
+	jwt := h.GetDefaultJWT(t)
 
-	status, body := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token)
+	status, body := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
 	if status != 200 {
 		t.Fatalf("expected 200, got %d", status)
 	}
@@ -29,107 +29,85 @@ func TestIssueVaultTokenEndToEnd(t *testing.T) {
 }
 
 // TestCredentialCacheHit verifies that two identical requests with the same
-// token both succeed, exercising the credential cache path (T-022).
+// JWT both succeed, exercising the credential cache path (T-022).
 func TestCredentialCacheHit(t *testing.T) {
 	leader := h.GetLeaderPort(t)
-	token := h.GetNTWardenToken(t, leader)
+	jwt := h.GetDefaultJWT(t)
 
-	status1, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token)
+	status1, _ := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
 	if status1 != 200 {
 		t.Fatalf("first request: expected 200, got %d", status1)
 	}
 
-	status2, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token)
+	status2, _ := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
 	if status2 != 200 {
 		t.Fatalf("second request (cache hit): expected 200, got %d", status2)
 	}
 }
 
-// TestCredentialCacheIsolationBetweenTokens verifies that two different Warden
-// tokens each get independent credential cache entries (T-023).
+// TestCredentialCacheIsolationBetweenTokens verifies that two different JWTs
+// each get independent credential cache entries (T-023).
 func TestCredentialCacheIsolationBetweenTokens(t *testing.T) {
 	leader := h.GetLeaderPort(t)
-	token1 := h.GetNTWardenToken(t, leader)
-	token2 := h.GetNTWardenToken(t, leader)
+	jwt1 := h.GetDefaultJWT(t)
+	jwt2 := h.GetDefaultJWT(t)
 
-	status1, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token1)
+	status1, _ := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt1)
 	if status1 != 200 {
-		t.Fatalf("token1 request: expected 200, got %d", status1)
+		t.Fatalf("jwt1 request: expected 200, got %d", status1)
 	}
 
-	status2, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token2)
+	status2, _ := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt2)
 	if status2 != 200 {
-		t.Fatalf("token2 request: expected 200, got %d", status2)
+		t.Fatalf("jwt2 request: expected 200, got %d", status2)
 	}
 }
 
-// TestCredentialRevocationOnTokenExpiry verifies that an ephemeral token works
+// TestCredentialRevocationOnTokenExpiry verifies that an ephemeral JWT works
 // immediately but may be rejected after its TTL expires (T-025).
 func TestCredentialRevocationOnTokenExpiry(t *testing.T) {
 	leader := h.GetLeaderPort(t)
 
 	jwt := h.GetJWT(t, "e2e-ephemeral", "ephemeral-secret")
-	loginStatus, token := h.LoginJWTNT(t, jwt, "e2e-nt-reader", leader)
-	if loginStatus != 200 && loginStatus != 201 {
-		t.Skipf("ephemeral login failed with status %d, skipping", loginStatus)
-	}
-	if token == "" {
-		t.Skipf("ephemeral login returned no token, skipping")
-	}
 
-	status1, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token)
+	status1, _ := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
 	if status1 != 200 {
 		t.Fatalf("immediate request: expected 200, got %d", status1)
 	}
 
 	time.Sleep(5 * time.Second)
 
-	u := fmt.Sprintf("%s/v1/vault-nt/gateway/v1/secret/data/e2e/app-config", h.NodeURL(leader))
-	headers := map[string]string{"X-Warden-Token": token}
+	u := fmt.Sprintf("%s/v1/vault/role/e2e-reader/gateway/v1/secret/data/e2e/app-config", h.NodeURL(leader))
+	headers := map[string]string{"Authorization": "Bearer " + jwt}
 	status2, _ := h.TryRequest("GET", u, headers, "")
-	if status2 != 200 && status2 != 403 {
-		t.Fatalf("after TTL expiry: expected 200 or 403, got %d", status2)
+	if status2 != 200 && status2 != 403 && status2 != 401 {
+		t.Fatalf("after TTL expiry: expected 200, 403, or 401, got %d", status2)
 	}
 }
 
 // TestIssueCredentialNonExistentSpec verifies the response when accessing a
-// Vault path that may not exist via a valid token (T-026).
+// Vault path that may not exist via a valid JWT (T-026).
 func TestIssueCredentialNonExistentSpec(t *testing.T) {
 	leader := h.GetLeaderPort(t)
-
 	jwt := h.GetDefaultJWT(t)
-	loginStatus, token := h.LoginJWTNT(t, jwt, "e2e-nt-reader", leader)
-	if loginStatus != 200 && loginStatus != 201 {
-		t.Fatalf("login failed with status %d", loginStatus)
-	}
-	if token == "" {
-		t.Fatalf("login returned no token")
-	}
 
-	status, _ := h.VaultNTRequest(t, "GET", "secret/data/nonexistent-path", leader, token)
+	status, _ := h.VaultTransparentRequest(t, "GET", "secret/data/nonexistent-path", "e2e-reader", leader, jwt)
 	if status != 200 && status != 404 {
 		t.Fatalf("expected 200 or 404 for nonexistent path, got %d", status)
 	}
 }
 
 // TestIssueCredentialExpiredToken verifies that using an expired ephemeral
-// token returns 401 or 403 (T-027).
+// JWT returns 401 or 403 (T-027).
 func TestIssueCredentialExpiredToken(t *testing.T) {
 	leader := h.GetLeaderPort(t)
 
 	jwt := h.GetJWT(t, "e2e-ephemeral", "ephemeral-secret")
-	loginStatus, token := h.LoginJWTNT(t, jwt, "e2e-nt-reader", leader)
-	if loginStatus != 200 && loginStatus != 201 {
-		t.Skipf("ephemeral login failed with status %d, skipping", loginStatus)
-	}
-	if token == "" {
-		t.Skipf("ephemeral login returned no token, skipping")
-	}
 
 	time.Sleep(5 * time.Second)
 
-	u := fmt.Sprintf("%s/v1/vault-nt/gateway/v1/secret/data/e2e/app-config", h.NodeURL(leader))
-	headers := map[string]string{"X-Warden-Token": token}
+	u := fmt.Sprintf("%s/v1/vault/role/e2e-reader/gateway/v1/secret/data/e2e/app-config", h.NodeURL(leader))
+	headers := map[string]string{"Authorization": "Bearer " + jwt}
 	status, _ := h.TryRequest("GET", u, headers, "")
 	if status != 403 && status != 401 {
 		t.Fatalf("expected 403 or 401 for expired token, got %d", status)
@@ -140,39 +118,39 @@ func TestIssueCredentialExpiredToken(t *testing.T) {
 // when the backing Vault source is available (T-028).
 func TestCredentialIssuanceSourceDown(t *testing.T) {
 	leader := h.GetLeaderPort(t)
-	token := h.GetNTWardenToken(t, leader)
+	jwt := h.GetDefaultJWT(t)
 
-	status, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token)
+	status, _ := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
 	if status != 200 {
 		t.Fatalf("expected 200 confirming source is working, got %d", status)
 	}
 }
 
-// TestMultipleCredentialTypesFromSameSource verifies that the same token can
+// TestMultipleCredentialTypesFromSameSource verifies that the same JWT can
 // access different Vault paths from the same source (T-029).
 func TestMultipleCredentialTypesFromSameSource(t *testing.T) {
 	leader := h.GetLeaderPort(t)
-	token := h.GetNTWardenToken(t, leader)
+	jwt := h.GetDefaultJWT(t)
 
-	status1, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token)
+	status1, _ := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
 	if status1 != 200 {
 		t.Fatalf("secret/data/e2e/app-config: expected 200, got %d", status1)
 	}
 
-	status2, _ := h.VaultNTRequest(t, "GET", "secret/metadata/e2e/app-config", leader, token)
+	status2, _ := h.VaultTransparentRequest(t, "GET", "secret/metadata/e2e/app-config", "e2e-reader", leader, jwt)
 	if status2 != 200 {
 		t.Fatalf("secret/metadata/e2e/app-config: expected 200, got %d", status2)
 	}
 }
 
 // TestConcurrentCredentialIssuanceSingleflight verifies that 10 concurrent
-// requests with the same token all succeed (T-030).
+// requests with the same JWT all succeed (T-030).
 func TestConcurrentCredentialIssuanceSingleflight(t *testing.T) {
 	leader := h.GetLeaderPort(t)
-	token := h.GetNTWardenToken(t, leader)
+	jwt := h.GetDefaultJWT(t)
 
 	success := h.ConcurrentDo(10, func(i int) bool {
-		status, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token)
+		status, _ := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
 		return status == 200
 	})
 
@@ -189,9 +167,9 @@ func TestCredentialIssuanceAcrossNamespaces(t *testing.T) {
 	h.TeardownNSVaultEnv(t, leader)
 	h.SetupNSVaultEnv(t, leader)
 
-	token := h.GetNSNTWardenToken(t, h.NSVaultNS, leader)
+	jwt := h.GetDefaultJWT(t)
 
-	status, _ := h.NSVaultNTRequest(t, "GET", "secret/data/e2e/app-config", h.NSVaultNS, leader, token)
+	status, _ := h.NSVaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", h.NSVaultNS, leader, jwt)
 	if status != 200 {
 		t.Fatalf("namespace credential issuance: expected 200, got %d", status)
 	}
@@ -203,9 +181,9 @@ func TestCredentialIssuanceAcrossNamespaces(t *testing.T) {
 // continues to work after the leader is killed and a new leader takes over (T-032).
 func TestCredentialIssuanceAfterLeaderFailover(t *testing.T) {
 	leader := h.GetLeaderPort(t)
-	token := h.GetNTWardenToken(t, leader)
+	jwt := h.GetDefaultJWT(t)
 
-	status1, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", leader, token)
+	status1, _ := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", leader, jwt)
 	if status1 != 200 {
 		t.Fatalf("pre-failover request: expected 200, got %d", status1)
 	}
@@ -216,7 +194,7 @@ func TestCredentialIssuanceAfterLeaderFailover(t *testing.T) {
 
 	newLeader := h.WaitForLeader(t, 10, 2*time.Second)
 
-	status2, _ := h.VaultNTRequest(t, "GET", "secret/data/e2e/app-config", newLeader, token)
+	status2, _ := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", newLeader, jwt)
 	if status2 != 200 {
 		t.Fatalf("post-failover request: expected 200, got %d", status2)
 	}
