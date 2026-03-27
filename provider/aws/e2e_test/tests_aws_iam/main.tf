@@ -15,6 +15,13 @@ terraform {
       version = ">= 3.0"
     }
   }
+
+  # S3 Backend Configuration
+  backend "s3" {
+    bucket = "bucket-tutorial-us-east-1-905418489750"
+    key    = "ec2-tests/terraform.tfstate"
+    region = "us-east-1"
+  }
 }
 
 provider "aws" {

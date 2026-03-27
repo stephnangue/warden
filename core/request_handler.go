@@ -1065,6 +1065,19 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 	// Extract auth role from path (may return default auth role or empty string)
 	authRole := tmp.GetAuthRole(relativePath)
 
+	// Fallback: extract role from protocol-specific request headers.
+	// Used by SigV4-compatible providers (AWS, Alibaba Cloud, Scaleway) where
+	// the role is embedded in the Authorization header's Credential field.
+	if authRole == "" {
+		if ext, ok := backend.(logical.TransparentAuthRoleExtractor); ok && req.HTTPRequest != nil {
+			role, isTransparent := ext.GetAuthRoleFromRequest(req.HTTPRequest)
+			if !isTransparent {
+				return false, "" // Not a transparent request (e.g., explicit auth with Warden token)
+			}
+			authRole = role
+		}
+	}
+
 	// X-Warden-Role header takes priority over DefaultAuthRole but not over URL-embedded role.
 	// If the path doesn't start with "role/", any role value came from DefaultAuthRole, not the URL.
 	if !strings.HasPrefix(relativePath, "role/") && req.HTTPRequest != nil {

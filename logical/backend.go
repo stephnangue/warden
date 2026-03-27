@@ -135,6 +135,15 @@ type TransparentModeProvider interface {
 	IsTransparentPath(path string) bool
 }
 
+// TransparentAuthRoleExtractor can be implemented by providers that extract
+// the auth role from protocol-specific request headers rather than the URL path.
+// Used by SigV4-compatible providers (AWS, Alibaba Cloud, Scaleway) where the
+// role is embedded in the Authorization header's Credential field.
+// Returns (role, true) for transparent requests, ("", false) to skip transparent auth.
+type TransparentAuthRoleExtractor interface {
+	GetAuthRoleFromRequest(r *http.Request) (role string, ok bool)
+}
+
 // StreamBodyParser can be implemented by streaming backends that want the core
 // to parse the request body into req.Data before policy evaluation, even for
 // streaming requests. By default, streaming requests skip body parsing to avoid

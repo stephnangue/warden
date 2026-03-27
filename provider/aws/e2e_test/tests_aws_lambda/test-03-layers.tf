@@ -3,34 +3,6 @@
 # Tests: layer creation, versions, compatibility, functions with layers
 
 ################################################################################
-# Lambda function code package
-################################################################################
-
-# Node.js function code (for functions that use layers)
-data "archive_file" "nodejs" {
-  type        = "zip"
-  output_path = "${path.module}/nodejs_function_03.zip"
-
-  source {
-    content  = <<-EOF
-      exports.handler = async (event, context) => {
-        console.log('Event:', JSON.stringify(event, null, 2));
-        console.log('Context:', JSON.stringify(context, null, 2));
-        return {
-          statusCode: 200,
-          body: JSON.stringify({
-            message: 'Hello from Node.js Lambda',
-            event: event,
-            requestId: context.awsRequestId
-          })
-        };
-      };
-    EOF
-    filename = "index.js"
-  }
-}
-
-################################################################################
 # Layer code packages
 ################################################################################
 

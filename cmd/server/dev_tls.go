@@ -42,7 +42,7 @@ func generateDevTLSCert() (certPath, keyPath, certDir string, err error) {
 			CommonName:   "Warden Dev CA",
 			Organization: []string{"Warden Dev"},
 		},
-		DNSNames:    []string{"localhost"},
+		DNSNames:    []string{"localhost", "*.localhost"},
 		IPAddresses: []net.IP{net.ParseIP("127.0.0.1"), net.IPv6loopback},
 
 		NotBefore: time.Now().Add(-1 * time.Minute),
