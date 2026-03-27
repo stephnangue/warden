@@ -2,6 +2,40 @@
 
 All notable changes to Warden are documented in this file.
 
+## [v0.6.0] — 2026-03-27
+
+### Breaking Changes
+
+- **Transparent is Now the Only Authentication Mode** — The `token_type` field has been removed from auth method configs and roles. All authentication is now implicit: JWT backends always use `jwt_role`, cert backends always use `cert_role`. The `"warden"` token type alias and `warden_crypto_token` are no longer available. Existing stored roles are migrated automatically on load.
+
+- **Explicit Login Blocked** — Calling `/auth/jwt/login` or `/auth/cert/login` directly now returns `400 Bad Request` for all roles. Clients authenticate implicitly by passing their JWT or certificate directly to the gateway endpoint.
+
+- **`transparent_mode` Config Field Removed** — The `transparent_mode` boolean on provider configs has been removed. The `auto_auth_path` field (required on all providers) controls which auth backend is used for implicit authentication. Remove `"transparent_mode": true` from existing provider config payloads.
+
+### New Features
+
+- **AWS Transparent Mode with SigV4 Re-signing** — The AWS provider now supports transparent mode. AWS SDK clients authenticate via JWT or TLS certificate without Warden-specific tokens. The gateway intercepts SigV4-signed requests, verifies the client signature, then re-signs with real AWS credentials. Supports `aws-chunked` streaming uploads (S3 PutObject) by stripping chunk signatures and forwarding the decoded body. (#89)
+
+- **RDS Provider (Access Backend)** — New provider type that vends credentials directly instead of proxying traffic. The RDS provider issues short-lived IAM authentication tokens for PostgreSQL, MySQL, and SQL Server on RDS/Aurora. Introduces the access backend framework for credential-vending providers. (#88)
+
+- **TLS in Dev Mode** — New `--dev-tls` and `--dev-tls-san` flags generate a self-signed TLS certificate at startup, enabling HTTPS in development without manual certificate management. (#86)
+
+### Removed
+
+- **`warden_crypto_token`** — The self-contained barrier-encrypted token type has been removed along with all crypto token code paths.
+
+- **`token_type` API Field** — Removed from auth method config and role endpoints. The field is no longer accepted in write requests or returned in read responses.
+
+- **`ValidTokenTypes` Backend Config** — Removed from the internal `logical.BackendConfig` struct. Auth backends no longer receive or validate a list of allowed token types.
+
+### Infrastructure
+
+- **SigV4 E2E Test Fix** — Fixed SigV4 forwarding tests that incorrectly treated HTTP 403 from upstream AWS (fake credentials rejected) as a Warden signature verification failure.
+
+### Documentation
+
+- **Provider READMEs** — Removed `token_type` and `transparent_mode` from all config examples and reference tables. Removed "Explicit Login with Certificates" sections. Updated quickstart instructions with PATH export steps. (#83, #84, #85)
+
 ## [v0.5.0] — 2026-03-20
 
 ### New Features
