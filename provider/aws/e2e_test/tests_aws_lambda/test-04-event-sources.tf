@@ -3,34 +3,6 @@
 # Tests: SQS, SNS, S3, CloudWatch Events, API Gateway
 
 ################################################################################
-# Lambda function code package
-################################################################################
-
-# Node.js function code
-data "archive_file" "nodejs" {
-  type        = "zip"
-  output_path = "${path.module}/nodejs_function_04.zip"
-
-  source {
-    content  = <<-EOF
-      exports.handler = async (event, context) => {
-        console.log('Event:', JSON.stringify(event, null, 2));
-        console.log('Context:', JSON.stringify(context, null, 2));
-        return {
-          statusCode: 200,
-          body: JSON.stringify({
-            message: 'Hello from Node.js Lambda',
-            event: event,
-            requestId: context.awsRequestId
-          })
-        };
-      };
-    EOF
-    filename = "index.js"
-  }
-}
-
-################################################################################
 # Function for event source testing
 ################################################################################
 resource "aws_lambda_function" "event_processor" {

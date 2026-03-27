@@ -16,16 +16,108 @@ import (
 	"github.com/stephnangue/warden/logger"
 )
 
-// resignRequest re-signs the request with valid AWS credentials
+// normalizeRequest prepares a request for re-signing by decoding aws-chunked
+// bodies, stripping trailer-related headers, and removing hop-by-hop/proxy
+// headers that would break the AWS signature. Returns the (possibly decoded)
+// body bytes to forward.
+func (b *awsBackend) normalizeRequest(r *http.Request, bodyBytes []byte) []byte {
+	// Decode aws-chunked body: the chunk signatures were computed with the
+	// client's credentials, which AWS will reject. Decode to plain body and
+	// remove streaming-related headers.
+	if isAWSChunked(r) {
+		decoded, err := decodeAWSChunkedBody(bodyBytes)
+		if err != nil {
+			b.Logger.Warn("failed to decode aws-chunked body, using original",
+				logger.Err(err),
+				logger.String("request_id", middleware.GetReqID(r.Context())),
+			)
+		} else {
+			bodyBytes = decoded
+		}
+
+		removeAWSChunkedEncoding(r)
+		r.Header.Del("X-Amz-Decoded-Content-Length")
+		r.Header.Del("X-Amz-Content-Sha256")
+		r.Header.Del("Accept-Encoding")
+		r.Header.Del("Content-Length")
+		r.Header.Del("Expect")
+	}
+
+	// Strip trailing-checksum headers when X-Amz-Trailer is present.
+	// The SDK sends X-Amz-Trailer to indicate a checksum will follow the body
+	// as a trailing chunk. Since we decode aws-chunked, the trailing checksum
+	// is lost. Strip the promise headers so AWS doesn't expect a checksum that
+	// won't arrive. When X-Amz-Trailer is absent, checksum headers are regular
+	// (inline) values that some S3 operations require (e.g., PutObjectLockConfiguration).
+	if r.Header.Get("X-Amz-Trailer") != "" {
+		r.Header.Del("X-Amz-Trailer")
+		r.Header.Del("X-Amz-Sdk-Checksum-Algorithm")
+		r.Header.Del("X-Amz-Checksum-Algorithm")
+		for key := range r.Header {
+			if strings.HasPrefix(strings.ToLower(key), "x-amz-checksum-") {
+				r.Header.Del(key)
+			}
+		}
+	}
+
+	// Remove hop-by-hop headers (RFC 2616 Section 13.5.1)
+	removedHeaders := []string{}
+	for _, h := range []string{
+		"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
+		"Te", "Trailer", "Trailers", "Transfer-Encoding", "Upgrade",
+	} {
+		if r.Header.Get(h) != "" {
+			removedHeaders = append(removedHeaders, h)
+			r.Header.Del(h)
+		}
+	}
+
+	// Remove proxy-specific headers
+	for _, h := range []string{
+		"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
+		"X-Forwarded-Port", "X-Real-Ip", "Forwarded",
+	} {
+		if r.Header.Get(h) != "" {
+			removedHeaders = append(removedHeaders, h)
+			r.Header.Del(h)
+		}
+	}
+
+	// Remove headers listed in Connection header
+	if connectionHeaders := r.Header.Get("Connection"); connectionHeaders != "" {
+		for _, connHeader := range strings.Split(connectionHeaders, ",") {
+			trimmed := strings.TrimSpace(connHeader)
+			if trimmed != "" {
+				removedHeaders = append(removedHeaders, trimmed)
+				r.Header.Del(trimmed)
+			}
+		}
+	}
+
+	if len(removedHeaders) > 0 {
+		b.Logger.Trace("headers removed during normalization",
+			logger.Any("removed_headers", removedHeaders),
+			logger.String("request_id", middleware.GetReqID(r.Context())),
+		)
+	}
+
+	return bodyBytes
+}
+
+// resignRequest re-signs the request with valid AWS credentials.
+// The request must already be normalized via normalizeRequest.
 func (b *awsBackend) resignRequest(
 	ctx context.Context,
 	r *http.Request,
 	creds aws.Credentials,
-	service,
-	region string,
-	bodyBytes []byte) error {
-	// Compute payload hash
+	service, region string,
+	bodyBytes []byte,
+) error {
+	// Compute payload hash and set the header. S3 requires
+	// X-Amz-Content-Sha256 explicitly; the v4 signer uses the payloadHash
+	// for signature computation but does not set the header.
 	payloadHash := computePayloadHash(bodyBytes)
+	r.Header.Set("X-Amz-Content-Sha256", payloadHash)
 
 	// Get signing time from original request or use current time
 	signingTime := time.Now()
@@ -41,18 +133,93 @@ func (b *awsBackend) resignRequest(
 	// Restore body for signing
 	b.restoreRequestBody(r, bodyBytes)
 
-	// Sign the request
-	// Use the appropriate signer based on service (S3/S3-Control need DisableURIPathEscaping)
+	// Sign the request with the appropriate signer
 	signer := b.getSigner(service)
-	err := signer.SignHTTP(ctx, creds, r, payloadHash, service, region, signingTime)
-	if err != nil {
+	if err := signer.SignHTTP(ctx, creds, r, payloadHash, service, region, signingTime); err != nil {
 		return fmt.Errorf("failed to sign request: %w", err)
 	}
 
-	// b.Logger.Trace("request re-signed successfully",
-	// 	logger.String("request_id", middleware.GetReqID(r.Context())),
-	// )
 	return nil
+}
+
+// isAWSChunked returns true if the request uses aws-chunked content encoding.
+func isAWSChunked(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Content-Encoding"), "aws-chunked")
+}
+
+// decodeAWSChunkedBody decodes an aws-chunked encoded body into plain bytes.
+// AWS chunked format: <hex-size>;chunk-signature=<sig>\r\n<data>\r\n...0;chunk-signature=<sig>\r\n[trailer]\r\n
+func decodeAWSChunkedBody(data []byte) ([]byte, error) {
+	var decoded bytes.Buffer
+	buf := bytes.NewBuffer(data)
+
+	for {
+		// Read the chunk header line: "<hex-size>;chunk-signature=<sig>\r\n"
+		line, err := buf.ReadString('\n')
+		if err != nil {
+			if err == io.EOF && line == "" {
+				break
+			}
+			if err == io.EOF {
+				// Partial line at end — may be trailing data, stop
+				break
+			}
+			return nil, fmt.Errorf("error reading chunk header: %w", err)
+		}
+
+		line = strings.TrimRight(line, "\r\n")
+
+		// Extract hex size (everything before the first ';')
+		sizeStr := line
+		if idx := strings.IndexByte(line, ';'); idx >= 0 {
+			sizeStr = line[:idx]
+		}
+
+		var chunkSize int64
+		if _, err := fmt.Sscanf(sizeStr, "%x", &chunkSize); err != nil {
+			return nil, fmt.Errorf("invalid chunk size %q: %w", sizeStr, err)
+		}
+
+		if chunkSize == 0 {
+			// Terminal chunk — skip any trailing headers
+			break
+		}
+
+		// Read chunkSize bytes of data
+		chunk := make([]byte, chunkSize)
+		if _, err := io.ReadFull(buf, chunk); err != nil {
+			return nil, fmt.Errorf("error reading chunk data: %w", err)
+		}
+		decoded.Write(chunk)
+
+		// Consume trailing \r\n after chunk data
+		if _, err := buf.ReadString('\n'); err != nil && err != io.EOF {
+			return nil, fmt.Errorf("error reading chunk trailer: %w", err)
+		}
+	}
+
+	return decoded.Bytes(), nil
+}
+
+// removeAWSChunkedEncoding removes "aws-chunked" from the Content-Encoding header
+// while preserving any other encodings (e.g., "gzip").
+func removeAWSChunkedEncoding(r *http.Request) {
+	ce := r.Header.Get("Content-Encoding")
+	if ce == "" {
+		return
+	}
+	var remaining []string
+	for _, part := range strings.Split(ce, ",") {
+		trimmed := strings.TrimSpace(part)
+		if !strings.EqualFold(trimmed, "aws-chunked") {
+			remaining = append(remaining, trimmed)
+		}
+	}
+	if len(remaining) == 0 {
+		r.Header.Del("Content-Encoding")
+	} else {
+		r.Header.Set("Content-Encoding", strings.Join(remaining, ", "))
+	}
 }
 
 // getSigner returns the appropriate signer for the service.
@@ -64,7 +231,7 @@ func (b *awsBackend) getSigner(service string) *v4.Signer {
 	return b.signer
 }
 
-// verifyIncomingSignature verifies the AWS Signature V4 of the incoming request
+// verifyIncomingSignature verifies the AWS Signature V4 of the incoming request.
 func (b *awsBackend) verifyIncomingSignature(
 	r *http.Request,
 	bodyBytes []byte,
@@ -95,7 +262,6 @@ func (b *awsBackend) verifyIncomingSignature(
 		return false, fmt.Errorf("no date header found")
 	}
 
-	// Parse the signing time
 	signingTime, err := parseAWSDate(amzDate)
 	if err != nil {
 		return false, fmt.Errorf("invalid date format: %w", err)
@@ -124,31 +290,35 @@ func (b *awsBackend) verifyIncomingSignature(
 		logger.String("request_id", middleware.GetReqID(r.Context())),
 	)
 
-	// Remove ALL headers that were NOT signed by the client
-	// This ensures we only include the headers the client signed
+	// Build a new header map containing only the headers the client signed.
+	// This ensures the signer produces the same canonical request.
 	newHeaders := make(http.Header)
+	contentLengthSigned := false
 	for _, signedHeader := range signedHeadersList {
 		signedHeaderLower := strings.ToLower(strings.TrimSpace(signedHeader))
 
-		// Skip authorization header - it should never be signed
-		if strings.ToLower(signedHeader) == "authorization" {
+		if signedHeaderLower == "authorization" {
+			continue
+		}
+		if signedHeaderLower == "content-length" {
+			contentLengthSigned = true
+		}
+		if signedHeaderLower == "host" {
+			testReq.Host = r.Host
+			testReq.URL.Host = r.Host
 			continue
 		}
 
-		// Find this header in the original request (case-insensitive search)
-		// AWS uses lowercase header names in canonical request, but Go uses Title-Case
-		found := false
+		// Find this header in the original request (case-insensitive)
 		for originalHeaderKey, originalHeaderValues := range r.Header {
 			if strings.ToLower(originalHeaderKey) == signedHeaderLower {
-				// Use the canonical form for the new header map
 				canonicalKey := http.CanonicalHeaderKey(signedHeader)
 				newHeaders[canonicalKey] = originalHeaderValues
-				found = true
 				break
 			}
 		}
 
-		if !found && signedHeader != "host" {
+		if newHeaders.Get(http.CanonicalHeaderKey(signedHeader)) == "" && signedHeaderLower != "host" {
 			b.Logger.Warn("signed header not found in request",
 				logger.String("header", signedHeader),
 				logger.String("request_id", middleware.GetReqID(r.Context())),
@@ -157,85 +327,34 @@ func (b *awsBackend) verifyIncomingSignature(
 	}
 	testReq.Header = newHeaders
 
-	// Ensure Host is set correctly if it was in signed headers
-	for _, sh := range signedHeadersList {
-		if strings.ToLower(sh) == "host" {
-			testReq.Host = r.Host
-			testReq.URL.Host = r.Host
-			break
-		}
-	}
-
-	// NOW log the headers that will actually be used for signing
-	// for k, v := range testReq.Header {
-	// 	b.Logger.Debug("Header BEFORE signing",
-	// 		logger.String("key", k),
-	// 		logger.Any("values", v),
-	// 		logger.String("request_id", middleware.GetReqID(r.Context())),
-	// 	)
-	// }
-
-	// b.Logger.Debug("Host/URL BEFORE signing",
-	// 	logger.String("r.Host", testReq.Host),
-	// 	logger.Any("r.URL", testReq.URL),
-	// 	logger.String("request_id", middleware.GetReqID(r.Context())),
-	// )
-
 	// Restore body in the cloned request
 	if len(bodyBytes) > 0 {
 		testReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
-	// Only set ContentLength if the client signed the content-length header.
-	// The AWS SDK v4 signer automatically includes content-length in canonical
-	// headers when ContentLength > 0, which causes a signature mismatch if the
-	// client didn't sign it. Setting -1 tells the signer to omit it.
-	contentLengthSigned := false
-	for _, sh := range signedHeadersList {
-		if strings.ToLower(strings.TrimSpace(sh)) == "content-length" {
-			contentLengthSigned = true
-			break
-		}
-	}
+	// Only set ContentLength if the client signed it. The AWS SDK v4 signer
+	// automatically includes content-length in canonical headers when
+	// ContentLength > 0, causing a mismatch if the client didn't sign it.
 	if contentLengthSigned {
 		testReq.ContentLength = int64(len(bodyBytes))
 	} else {
 		testReq.ContentLength = -1
 	}
 
-	// Compute payload hash
-	payloadHash := computePayloadHash(bodyBytes)
-
-	// clientHash := testReq.Header.Get("X-Amz-Content-Sha256")
-	// b.Logger.Debug("Payload hash comparison",
-	// 	logger.String("clientHash", clientHash),
-	// 	logger.String("ourHash", payloadHash),
-	// 	logger.Int("bodyLength", len(bodyBytes)),
-	// 	logger.String("request_id", middleware.GetReqID(r.Context())),
-	// )
+	// Determine payload hash for signature verification. For streaming uploads
+	// (aws-chunked), the client uses "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+	// instead of the actual body SHA256. Use the value from the header.
+	payloadHash := r.Header.Get("X-Amz-Content-Sha256")
+	if payloadHash == "" {
+		payloadHash = computePayloadHash(bodyBytes)
+	}
 
 	// Sign the test request with the retrieved credentials
-	// Use the appropriate signer based on service (S3/S3-Control need DisableURIPathEscaping)
 	signer := b.getSigner(service)
 	err = signer.SignHTTP(r.Context(), creds, testReq, payloadHash, service, region, signingTime)
 	if err != nil {
 		return false, fmt.Errorf("failed to sign request for signature verification: %w", err)
 	}
-
-	// DEBUG: Log headers AFTER signing to see what the signer added
-	// for k, v := range testReq.Header {
-	// 	b.Logger.Debug("Header AFTER signing",
-	// 		logger.String("key", k),
-	// 		logger.Any("values", v),
-	// 		logger.String("request_id", middleware.GetReqID(r.Context())),
-	// 	)
-	// }
-
-	// b.Logger.Debug("Host/URL AFTER signing",
-	// 	logger.String("r.Host", testReq.Host),
-	// 	logger.Any("r.URL", testReq.URL),
-	// 	logger.String("request_id", middleware.GetReqID(r.Context())),
-	// )
 
 	// Extract the calculated signature
 	calculatedAuth := testReq.Header.Get("Authorization")
