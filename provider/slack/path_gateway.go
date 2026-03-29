@@ -1,4 +1,4 @@
-package openai
+package slack
 
 import (
 	"context"
@@ -15,13 +15,10 @@ import (
 
 // Headers to remove before proxying
 var headersToRemove = []string{
-	// Security headers (will be replaced with OpenAI API key)
+	// Security headers (will be replaced with Slack bot token)
 	"Authorization",
 	"X-Warden-Token",
 	"X-Warden-Role",
-	// OpenAI-specific headers (will be injected from credential data)
-	"OpenAI-Organization",
-	"OpenAI-Project",
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",
@@ -40,7 +37,7 @@ var headersToRemove = []string{
 	"Forwarded",
 }
 
-func (b *openaiBackend) handleGateway(ctx context.Context, req *logical.Request) {
+func (b *slackBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Apply timeout if configured
 	if b.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -56,10 +53,10 @@ func (b *openaiBackend) handleGateway(ctx context.Context, req *logical.Request)
 	}
 	req.HTTPRequest.Body = http.MaxBytesReader(req.ResponseWriter, req.HTTPRequest.Body, maxBody)
 
-	// Get OpenAI credential (API key + optional org/project)
-	apiKey, orgID, projectID, err := b.getOpenAICredential(req)
+	// Get Slack credential (bot token)
+	apiKey, err := b.getSlackCredential(req)
 	if err != nil {
-		b.Logger.Warn("Failed to get OpenAI API key", logger.Err(err))
+		b.Logger.Warn("Failed to get Slack bot token", logger.Err(err))
 		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -84,10 +81,10 @@ func (b *openaiBackend) handleGateway(ctx context.Context, req *logical.Request)
 	r.Host = parsedURL.Host
 	r.RequestURI = "" // Required for outgoing requests
 
-	// Clean headers and inject OpenAI credentials
-	b.prepareHeaders(r, apiKey, orgID, projectID)
+	// Clean headers and inject Slack credentials
+	b.prepareHeaders(r, apiKey)
 
-	b.Logger.Trace("Proxying OpenAI request",
+	b.Logger.Trace("Proxying Slack request",
 		logger.String("path", r.URL.Path),
 		logger.String("method", r.Method),
 		logger.Bool("has_key", apiKey != ""),
@@ -97,29 +94,26 @@ func (b *openaiBackend) handleGateway(ctx context.Context, req *logical.Request)
 	b.Proxy.ServeHTTP(req.ResponseWriter, r)
 }
 
-// getOpenAICredential extracts the OpenAI API key and optional org/project from the credential
-func (b *openaiBackend) getOpenAICredential(req *logical.Request) (apiKey, orgID, projectID string, err error) {
+// getSlackCredential extracts the Slack bot token from the credential
+func (b *slackBackend) getSlackCredential(req *logical.Request) (apiKey string, err error) {
 	if req.Credential == nil {
-		return "", "", "", fmt.Errorf("no credential available")
+		return "", fmt.Errorf("no credential available")
 	}
 
 	if req.Credential.Type != credential.TypeAPIKey {
-		return "", "", "", fmt.Errorf("unsupported credential type: %s", req.Credential.Type)
+		return "", fmt.Errorf("unsupported credential type: %s", req.Credential.Type)
 	}
 
 	apiKey = req.Credential.Data["api_key"]
 	if apiKey == "" {
-		return "", "", "", fmt.Errorf("credential missing api_key field")
+		return "", fmt.Errorf("credential missing api_key field")
 	}
 
-	orgID = req.Credential.Data["organization_id"]
-	projectID = req.Credential.Data["project_id"]
-
-	return apiKey, orgID, projectID, nil
+	return apiKey, nil
 }
 
-// buildTargetURL constructs the target OpenAI API URL from the gateway path
-func (b *openaiBackend) buildTargetURL(path, rawQuery string) (string, error) {
+// buildTargetURL constructs the target Slack API URL from the gateway path
+func (b *slackBackend) buildTargetURL(path, rawQuery string) (string, error) {
 	// Find gateway path marker
 	gatewayIdx := strings.Index(path, "/gateway")
 	if gatewayIdx == -1 {
@@ -127,19 +121,19 @@ func (b *openaiBackend) buildTargetURL(path, rawQuery string) (string, error) {
 	}
 
 	// Extract path after "/gateway"
-	openaiPath := path[gatewayIdx+8:] // len("/gateway") = 8
-	if openaiPath == "" || openaiPath == "/" {
-		openaiPath = "/"
+	slackPath := path[gatewayIdx+8:] // len("/gateway") = 8
+	if slackPath == "" || slackPath == "/" {
+		slackPath = "/"
 	}
 
 	if rawQuery != "" {
-		return b.openaiURL + openaiPath + "?" + rawQuery, nil
+		return b.slackURL + slackPath + "?" + rawQuery, nil
 	}
-	return b.openaiURL + openaiPath, nil
+	return b.slackURL + slackPath, nil
 }
 
-// prepareHeaders removes unwanted headers and injects the OpenAI credentials
-func (b *openaiBackend) prepareHeaders(r *http.Request, apiKey, orgID, projectID string) {
+// prepareHeaders removes unwanted headers and injects the Slack bot token
+func (b *slackBackend) prepareHeaders(r *http.Request, apiKey string) {
 	// Read Connection header before removing it
 	conn := r.Header.Get("Connection")
 
@@ -157,19 +151,9 @@ func (b *openaiBackend) prepareHeaders(r *http.Request, apiKey, orgID, projectID
 		}
 	}
 
-	// Inject the OpenAI API key using Bearer format
+	// Inject the Slack bot token using Bearer format
 	if apiKey != "" {
 		r.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-
-	// Inject optional OpenAI organization header
-	if orgID != "" {
-		r.Header.Set("OpenAI-Organization", orgID)
-	}
-
-	// Inject optional OpenAI project header
-	if projectID != "" {
-		r.Header.Set("OpenAI-Project", projectID)
 	}
 
 	// Set Accept header if not already set
@@ -179,6 +163,6 @@ func (b *openaiBackend) prepareHeaders(r *http.Request, apiKey, orgID, projectID
 
 	// Set User-Agent if not already set
 	if r.Header.Get("User-Agent") == "" {
-		r.Header.Set("User-Agent", "warden-openai-proxy")
+		r.Header.Set("User-Agent", "warden-slack-proxy")
 	}
 }

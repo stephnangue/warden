@@ -54,5 +54,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register Slack driver factory
+	if err := registry.RegisterFactory(&SlackDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }

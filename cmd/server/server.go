@@ -47,6 +47,7 @@ import (
 	"github.com/stephnangue/warden/provider/mistral"
 	"github.com/stephnangue/warden/provider/openai"
 	"github.com/stephnangue/warden/provider/rds"
+	"github.com/stephnangue/warden/provider/slack"
 	"github.com/stephnangue/warden/provider/vault"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -107,6 +108,7 @@ Usage: warden server [options]
 		"gitlab":  gitlab.Factory,
 		"mistral": mistral.Factory,
 		"openai":  openai.Factory,
+		"slack":   slack.Factory,
 		"vault":   vault.Factory,
 		"rds":     rds.Factory,
 	}

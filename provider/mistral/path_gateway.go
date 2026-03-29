@@ -100,7 +100,7 @@ func (b *mistralBackend) getMistralAPIKey(req *logical.Request) (string, error) 
 		return "", fmt.Errorf("no credential available")
 	}
 
-	if req.Credential.Type != credential.TypeAIAPIKey {
+	if req.Credential.Type != credential.TypeAPIKey {
 		return "", fmt.Errorf("unsupported credential type: %s", req.Credential.Type)
 	}
 

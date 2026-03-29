@@ -1,6 +1,6 @@
-# Anthropic Provider
+# Slack Provider
 
-The Anthropic provider enables proxied access to the Anthropic API through Warden. It streams requests to Anthropic endpoints (messages, models) with automatic API key injection and policy evaluation on AI request fields.
+The Slack provider enables proxied access to the Slack Web API through Warden. It streams requests to Slack API methods (chat.postMessage, conversations.list, etc.) with automatic bot token injection and policy evaluation on request fields like channel, text, and user.
 
 ## Table of Contents
 
@@ -10,14 +10,14 @@ The Anthropic provider enables proxied access to the Anthropic API through Warde
 - [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
 - [Step 4: Create a Policy](#step-4-create-a-policy)
 - [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
-- [Policy Evaluation on AI Requests](#policy-evaluation-on-ai-requests)
+- [Policy Evaluation on Slack Requests](#policy-evaluation-on-slack-requests)
 - [Configuration Reference](#configuration-reference)
-- [Key Management](#key-management)
+- [Token Management](#token-management)
 
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- An **Anthropic API key** from [console.anthropic.com](https://console.anthropic.com)
+- A **Slack Bot Token** (`xoxb-...`) from a [Slack App](https://api.slack.com/apps) with the required OAuth scopes (e.g., `chat:write`, `channels:read`)
 
 > **New to Warden?** Follow these steps to get a local dev environment running:
 >
@@ -74,23 +74,24 @@ warden auth enable --type=jwt
 warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role that binds the credential spec and policy
-warden write auth/jwt/role/anthropic-user \
-    token_policies="anthropic-access" \
-    cred_spec_name=anthropic-ops
+warden write auth/jwt/role/slack-user \
+    token_policies="slack-access" \
+    user_claim=sub \
+    cred_spec_name=slack-ops
 ```
 
 ## Step 2: Mount and Configure the Provider
 
-Enable the Anthropic provider at a path of your choice:
+Enable the Slack provider at a path of your choice:
 
 ```bash
-warden provider enable --type=anthropic
+warden provider enable --type=slack
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=anthropic anthropic-prod
+warden provider enable --type=slack slack-prod
 ```
 
 Verify the provider is enabled:
@@ -102,11 +103,11 @@ warden provider list
 Configure the provider with `auto_auth_path`. This allows clients to authenticate with their JWT directly — no explicit Warden login required:
 
 ```bash
-warden write anthropic/config <<EOF
+warden write slack/config <<EOF
 {
-  "anthropic_url": "https://api.anthropic.com",
+  "slack_url": "https://slack.com/api",
   "auto_auth_path": "auth/jwt/",
-  "timeout": "120s",
+  "timeout": "30s",
   "max_body_size": 10485760
 }
 EOF
@@ -115,80 +116,95 @@ EOF
 Verify the configuration:
 
 ```bash
-warden read anthropic/config
+warden read slack/config
 ```
 
 ## Step 3: Create a Credential Source and Spec
 
-The credential source holds only connection info (`api_url`). The API key is stored on the credential spec below, allowing multiple specs with different keys to share one source.
+The credential source holds only connection info (`api_url`). The bot token is stored on the credential spec below, allowing multiple specs with different tokens to share one source.
 
 ```bash
-warden cred source create anthropic-src \
-  --type=anthropic \
+warden cred source create slack-src \
+  --type=slack \
   --rotation-period=0 \
-  --config=api_url=https://api.anthropic.com
+  --config=api_url=https://slack.com/api
 ```
 
 Verify the source was created:
 
 ```bash
-warden cred source read anthropic-src
+warden cred source read slack-src
 ```
 
-Create a credential spec that references the credential source. The spec carries the API key and gets associated with tokens at login time.
+Create a credential spec that references the credential source. The spec carries the bot token and gets associated with tokens at login time.
 
 ```bash
-warden cred spec create anthropic-ops \
+warden cred spec create slack-ops \
   --type api_key \
-  --source anthropic-src \
-  --config api_key=<your-anthropic-api-key>
+  --source slack-src \
+  --config api_key=xoxb-your-bot-token
 ```
 
-The API key is validated at creation time via a `GET /v1/models` call to the Anthropic API (SpecVerifier). If the key is invalid, spec creation will fail.
+The bot token is validated at creation time via a `POST /auth.test` call to the Slack API (SpecVerifier). If the token is invalid, spec creation will fail.
 
 Verify:
 
 ```bash
-warden cred spec read anthropic-ops
+warden cred spec read slack-ops
 ```
 
 ## Step 4: Create a Policy
 
-Create a policy that grants access to the Anthropic provider gateway:
+Create a policy that grants access to the Slack provider gateway:
 
 ```bash
-warden policy write anthropic-access - <<EOF
-path "anthropic/role/+/gateway*" {
+warden policy write slack-access - <<EOF
+path "slack/role/+/gateway*" {
   capabilities = ["create", "read", "update", "delete", "patch"]
 }
 EOF
 ```
 
-For fine-grained cost control, restrict access based on AI request fields:
+For fine-grained access control, restrict which Slack methods and channels a role can use:
 
 ```bash
-warden policy write anthropic-restricted - <<EOF
-path "anthropic/role/+/gateway/v1/messages" {
+warden policy write slack-restricted - <<EOF
+path "slack/role/+/gateway/chat.postMessage" {
   capabilities = ["create"]
   allowed_parameters = {
-    "model" = ["claude-sonnet-4-20250514", "claude-haiku-4-20250414"]
-    "stream" = ["true"]
-    "*"      = []
+    "channel" = ["#alerts", "#ops"]
+    "text"    = []
+    "*"       = []
+  }
+}
+
+path "slack/role/+/gateway/conversations.list" {
+  capabilities = ["create"]
+}
+
+path "slack/role/+/gateway/conversations.history" {
+  capabilities = ["create"]
+  allowed_parameters = {
+    "channel" = []
+    "limit"   = []
   }
 }
 EOF
 ```
 
-You can also combine parameter restrictions with runtime conditions to protect costly inference endpoints. For example, restrict messages to specific models and trusted networks during business hours:
+You can combine parameter restrictions with runtime conditions. For example, restrict posting to specific channels from trusted networks during business hours:
 
 ```bash
-warden policy write anthropic-prod-restricted - <<EOF
-path "anthropic/role/+/gateway/v1/messages" {
+warden policy write slack-prod-restricted - <<EOF
+path "slack/role/+/gateway/chat.postMessage" {
   capabilities = ["create"]
   allowed_parameters = {
-    "model" = ["claude-sonnet-4-20250514", "claude-haiku-4-20250414"]
-    "stream" = ["true"]
-    "*"      = []
+    "channel" = ["#alerts", "#incidents"]
+    "text"    = []
+    "*"       = []
+  }
+  denied_parameters = {
+    "as_user" = ["true"]
   }
   conditions {
     source_ip   = ["10.0.0.0/8"]
@@ -197,8 +213,8 @@ path "anthropic/role/+/gateway/v1/messages" {
   }
 }
 
-path "anthropic/role/+/gateway/v1/models" {
-  capabilities = ["read"]
+path "slack/role/+/gateway/auth.test" {
+  capabilities = ["create"]
 }
 EOF
 ```
@@ -208,7 +224,7 @@ Condition types are AND-ed (all must be satisfied), values within each type are 
 Verify:
 
 ```bash
-warden policy read anthropic-access
+warden policy read slack-access
 ```
 
 ## Step 5: Get a JWT and Make Requests
@@ -222,130 +238,80 @@ export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
   | jq -r '.access_token')
 ```
 
-Requests use role-based paths. Warden performs implicit JWT authentication and injects the Anthropic API key (via `x-api-key` header) and `anthropic-version` header automatically.
+Requests use role-based paths. Warden performs implicit JWT authentication and injects the Slack bot token automatically.
 
-The URL pattern is: `/v1/anthropic/role/{role}/gateway/{anthropic-api-path}`
+The URL pattern is: `/v1/slack/role/{role}/gateway/{slack-method}`
 
-Export ANTHROPIC_ENDPOINT as environment variable:
+Export SLACK_ENDPOINT as environment variable:
 ```bash
-export ANTHROPIC_ENDPOINT="${WARDEN_ADDR}/v1/anthropic/role/anthropic-user/gateway"
+export SLACK_ENDPOINT="${WARDEN_ADDR}/v1/slack/role/slack-user/gateway"
 ```
 
-### Messages
+### Post a Message
 
 ```bash
-curl -X POST "${ANTHROPIC_ENDPOINT}/v1/messages" \
+curl -X POST "${SLACK_ENDPOINT}/chat.postMessage" \
   -H "Authorization: Bearer ${JWT_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-20250514",
-    "max_tokens": 1024,
-    "messages": [
-      {"role": "user", "content": "Hello, how are you?"}
-    ]
+    "channel": "#general",
+    "text": "Hello from Warden!"
   }'
 ```
 
-### Streaming Messages
+### List Conversations
 
 ```bash
-curl -X POST "${ANTHROPIC_ENDPOINT}/v1/messages" \
+curl -X POST "${SLACK_ENDPOINT}/conversations.list" \
   -H "Authorization: Bearer ${JWT_TOKEN}" \
   -H "Content-Type: application/json" \
-  -N \
   -d '{
-    "model": "claude-sonnet-4-20250514",
-    "max_tokens": 1024,
-    "messages": [
-      {"role": "user", "content": "Write a short poem about the ocean."}
-    ],
-    "stream": true
+    "limit": 100
   }'
 ```
 
-### Using the Anthropic SDK
-
-The Anthropic SDK uses the `x-api-key` header by default. Warden's Anthropic provider accepts this header as a Warden token, so the SDK works with minimal configuration:
-
-```python
-import anthropic
-
-client = anthropic.Anthropic(
-    api_key="<your-warden-jwt-or-token>",
-    base_url="http://127.0.0.1:8400/v1/anthropic/role/anthropic-user/gateway",
-)
-
-message = client.messages.create(
-    model="claude-sonnet-4-20250514",
-    max_tokens=1024,
-    messages=[
-        {"role": "user", "content": "Hello, Claude!"}
-    ],
-)
-print(message.content[0].text)
-```
-
-### Using Claude Code
-
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) uses the `x-api-key` header natively. Set `ANTHROPIC_BASE_URL` to route all Claude Code traffic through Warden:
+### Get Conversation History
 
 ```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8400/v1/anthropic/role/anthropic-user/gateway"
-export ANTHROPIC_API_KEY="<your-warden-jwt-or-token>"
-
-claude
+curl -X POST "${SLACK_ENDPOINT}/conversations.history" \
+  -H "Authorization: Bearer ${JWT_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel": "C01ABC123",
+    "limit": 50
+  }'
 ```
 
-Or persist it in your Claude Code settings (`~/.claude/settings.json`):
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8400/v1/anthropic/role/anthropic-user/gateway"
-  }
-}
-```
-
-For TLS-enabled Warden deployments with certificate authentication:
+### Test Authentication
 
 ```bash
-export ANTHROPIC_BASE_URL="https://warden.internal/v1/anthropic/role/anthropic-user/gateway"
-export NODE_EXTRA_CA_CERTS="/path/to/warden-ca.pem"
-export CLAUDE_CODE_CLIENT_CERT="/path/to/client.pem"
-export CLAUDE_CODE_CLIENT_KEY="/path/to/client-key.pem"
-
-claude
+curl -X POST "${SLACK_ENDPOINT}/auth.test" \
+  -H "Authorization: Bearer ${JWT_TOKEN}" \
+  -H "Content-Type: application/json"
 ```
 
-For dynamic token refresh (e.g., short-lived JWTs), use an API key helper script:
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8400/v1/anthropic/role/anthropic-user/gateway"
-  },
-  "apiKeyHelper": "~/bin/get-warden-jwt.sh"
-}
-```
-
-Where `get-warden-jwt.sh` fetches a fresh JWT from your identity provider.
-
-### Using Claude Desktop
-
-Set environment variables before launching Claude Desktop to route traffic through Warden:
+### Add a Reaction
 
 ```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8400/v1/anthropic/role/anthropic-user/gateway"
-export ANTHROPIC_API_KEY="<your-warden-jwt-or-token>"
-
-open -a "Claude"
+curl -X POST "${SLACK_ENDPOINT}/reactions.add" \
+  -H "Authorization: Bearer ${JWT_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel": "C01ABC123",
+    "name": "thumbsup",
+    "timestamp": "1234567890.123456"
+  }'
 ```
 
-### List Models
+### Get User Info
 
 ```bash
-curl "${ANTHROPIC_ENDPOINT}/v1/models" \
-  -H "Authorization: Bearer ${JWT_TOKEN}"
+curl -X POST "${SLACK_ENDPOINT}/users.info" \
+  -H "Authorization: Bearer ${JWT_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user": "U01ABC123"
+  }'
 ```
 
 ## Cleanup
@@ -361,25 +327,32 @@ docker compose -f docker-compose.quickstart.yml down -v
 
 Since Warden dev mode uses in-memory storage, all configuration is lost when the server stops.
 
-## Policy Evaluation on AI Requests
+## Policy Evaluation on Slack Requests
 
-The Anthropic provider has request body parsing enabled (`ParseStreamBody: true`), which means Warden can evaluate policies against fields in the AI request body. This enables fine-grained cost control and usage policies.
+The Slack provider has request body parsing enabled (`ParseStreamBody: true`), which means Warden can evaluate policies against fields in the Slack request body. This enables fine-grained access control that goes beyond what Slack's native permission model offers.
+
+**Slack's native model:** One bot token = one set of OAuth scopes. If a bot has `chat:write`, it can post to any channel it's in.
+
+**Warden's CBP layer adds:** One bot token, many Warden roles with different policies. Each role can be restricted to specific methods, channels, fields, source IPs, and time windows.
 
 Evaluable fields include:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `model` | string | Model to use (e.g., `claude-sonnet-4-20250514`, `claude-haiku-4-20250414`, `claude-opus-4-20250514`) |
-| `max_tokens` | integer | Maximum tokens to generate (required by Anthropic API) |
-| `temperature` | float | Sampling temperature |
-| `stream` | boolean | Whether to stream the response |
-| `top_p` | float | Nucleus sampling parameter |
-| `top_k` | integer | Top-k sampling parameter |
+| `channel` | string | Channel ID or name (e.g., `#general`, `C01ABC123`) |
+| `text` | string | Message text content |
+| `user` | string | User ID |
+| `as_user` | boolean | Whether to post as the authenticated user |
+| `thread_ts` | string | Thread timestamp for replies |
+| `name` | string | Reaction name (for `reactions.add`) |
+| `timestamp` | string | Message timestamp |
+| `limit` | integer | Pagination limit |
 
 This allows operators to enforce policies such as:
-- Restrict which models users can access
-- Enforce maximum token limits
-- Require streaming mode for cost visibility
+- Restrict which channels a service can post to
+- Prevent impersonation (`as_user` denied)
+- Limit read-only services to `conversations.list` and `conversations.history`
+- Require specific fields to be present (`required_parameters`)
 
 ## TLS Certificate Authentication
 
@@ -402,7 +375,7 @@ Provide the PEM-encoded CA certificate that signs your client certificates:
 ```bash
 warden write auth/cert/config \
     trusted_ca_pem=@/path/to/ca.pem \
-    default_role=anthropic-user
+    default_role=slack-user
 ```
 
 ### Create a Cert Role
@@ -410,10 +383,10 @@ warden write auth/cert/config \
 Create a role that binds allowed certificate identities to a credential spec and policy:
 
 ```bash
-warden write auth/cert/role/anthropic-user \
+warden write auth/cert/role/slack-user \
     allowed_common_names="agent-*" \
-    token_policies="anthropic-access" \
-    cred_spec_name=anthropic-ops
+    token_policies="slack-access" \
+    cred_spec_name=slack-ops
 ```
 
 The `allowed_common_names` field supports glob patterns. You can also match on other certificate fields: `allowed_dns_sans`, `allowed_email_sans`, `allowed_uri_sans`, or `allowed_organizational_units`.
@@ -423,11 +396,11 @@ The `allowed_common_names` field supports glob patterns. You can also match on o
 Update the provider config to use cert auth:
 
 ```bash
-warden write anthropic/config <<EOF
+warden write slack/config <<EOF
 {
-  "anthropic_url": "https://api.anthropic.com",
+  "slack_url": "https://slack.com/api",
   "auto_auth_path": "auth/cert/",
-  "timeout": "120s",
+  "timeout": "30s",
   "max_body_size": 10485760
 }
 EOF
@@ -438,12 +411,11 @@ EOF
 ```bash
 curl --cert client.pem --key client-key.pem \
     --cacert warden-ca.pem \
-    -X POST "https://warden.internal/v1/anthropic/role/anthropic-user/gateway/v1/messages" \
+    -X POST "https://warden.internal/v1/slack/role/slack-user/gateway/chat.postMessage" \
     -H "Content-Type: application/json" \
     -d '{
-      "model": "claude-sonnet-4-20250514",
-      "max_tokens": 1024,
-      "messages": [{"role": "user", "content": "Hello"}]
+      "channel": "#general",
+      "text": "Hello from Warden with mTLS!"
     }'
 ```
 
@@ -453,9 +425,9 @@ curl --cert client.pem --key client-key.pem \
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `anthropic_url` | string | `https://api.anthropic.com` | Anthropic API base URL (must be HTTPS) |
+| `slack_url` | string | `https://slack.com/api` | Slack API base URL (must be HTTPS) |
 | `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
-| `timeout` | duration | `120s` | Request timeout — set high for AI inference |
+| `timeout` | duration | `30s` | Request timeout |
 | `auto_auth_path` | string | — | Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 
@@ -463,30 +435,29 @@ curl --cert client.pem --key client-key.pem \
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `api_url` | string | `https://api.anthropic.com` | Anthropic API base URL (must be HTTPS) |
+| `api_url` | string | `https://slack.com/api` | Slack API base URL (must be HTTPS) |
 
 ### Credential Spec Config
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `api_key` | string | Yes | Anthropic API key (sensitive — masked in output) |
-| `organization_id` | string | No | Organization identifier |
+| `api_key` | string | Yes | Slack bot token (sensitive — masked in output) |
 
-## Key Management
+## Token Management
 
 | Aspect | Details |
 |--------|---------|
-| **Storage** | API key is stored on the credential spec (not the source) |
-| **Validation** | Key is verified at spec creation via `GET /v1/models` |
-| **Rotation** | Manual — Anthropic does not expose key management APIs |
+| **Storage** | Bot token is stored on the credential spec (not the source) |
+| **Validation** | Token is verified at spec creation via `POST /auth.test` |
+| **Rotation** | Manual — Slack bot tokens are tied to app installations |
 | **Lifetime** | Static — no expiration or auto-refresh |
 
-**To rotate an API key:**
+**To rotate a bot token:**
 
-1. Create a new API key in the [Anthropic console](https://console.anthropic.com)
+1. Regenerate the token in the [Slack App settings](https://api.slack.com/apps) or reinstall the app to the workspace
 2. Update the credential spec:
    ```bash
-   warden cred spec update anthropic-ops \
-     --config api_key=<new-api-key>
+   warden cred spec update slack-ops \
+     --config api_key=xoxb-new-bot-token
    ```
-3. Delete the old key from the Anthropic console
+3. Revoke the old token from the Slack App settings if needed

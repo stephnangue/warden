@@ -9,18 +9,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAIAPIKeyCredType_Metadata(t *testing.T) {
-	ct := NewAIAPIKeyCredType()
+func TestAPIKeyCredType_Metadata(t *testing.T) {
+	ct := NewAPIKeyCredType()
 	metadata := ct.Metadata()
 
-	assert.Equal(t, credential.TypeAIAPIKey, metadata.Name)
+	assert.Equal(t, credential.TypeAPIKey, metadata.Name)
 	assert.Equal(t, credential.CategoryAPI, metadata.Category)
-	assert.Contains(t, metadata.Description, "AI provider")
+	assert.Contains(t, metadata.Description, "API key")
 	assert.Equal(t, time.Duration(0), metadata.DefaultTTL)
 }
 
-func TestAIAPIKeyCredType_ValidateConfig(t *testing.T) {
-	ct := NewAIAPIKeyCredType()
+func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
+	ct := NewAPIKeyCredType()
 
 	tests := []struct {
 		name       string
@@ -114,6 +114,22 @@ func TestAIAPIKeyCredType_ValidateConfig(t *testing.T) {
 			wantErr:    true,
 			errMsg:     "api_key",
 		},
+		// --- Slack source ---
+		{
+			name: "slack source - valid config",
+			config: map[string]string{
+				"api_key": "xoxb-xxxxxxxxxxxxxxxxxxxx",
+			},
+			sourceType: credential.SourceTypeSlack,
+			wantErr:    false,
+		},
+		{
+			name:       "slack source - missing api_key",
+			config:     map[string]string{},
+			sourceType: credential.SourceTypeSlack,
+			wantErr:    true,
+			errMsg:     "api_key",
+		},
 		// --- Unsupported source types ---
 		{
 			name: "unsupported source type - aws",
@@ -122,7 +138,7 @@ func TestAIAPIKeyCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: "aws",
 			wantErr:    true,
-			errMsg:     "require a mistral, openai, anthropic, or local source",
+			errMsg:     "require a mistral, openai, anthropic, slack, or local source",
 		},
 		{
 			name: "unsupported source type - vault",
@@ -131,7 +147,7 @@ func TestAIAPIKeyCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "require a mistral, openai, anthropic, or local source",
+			errMsg:     "require a mistral, openai, anthropic, slack, or local source",
 		},
 	}
 
@@ -150,8 +166,8 @@ func TestAIAPIKeyCredType_ValidateConfig(t *testing.T) {
 	}
 }
 
-func TestAIAPIKeyCredType_Parse(t *testing.T) {
-	ct := NewAIAPIKeyCredType()
+func TestAPIKeyCredType_Parse(t *testing.T) {
+	ct := NewAPIKeyCredType()
 
 	tests := []struct {
 		name     string
@@ -213,7 +229,7 @@ func TestAIAPIKeyCredType_Parse(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				assert.NotNil(t, cred)
-				assert.Equal(t, credential.TypeAIAPIKey, cred.Type)
+				assert.Equal(t, credential.TypeAPIKey, cred.Type)
 				assert.Equal(t, credential.CategoryAPI, cred.Category)
 				assert.Equal(t, tt.leaseTTL, cred.LeaseTTL)
 				assert.Equal(t, tt.leaseID, cred.LeaseID)
@@ -225,8 +241,8 @@ func TestAIAPIKeyCredType_Parse(t *testing.T) {
 	}
 }
 
-func TestAIAPIKeyCredType_Parse_OptionalFields(t *testing.T) {
-	ct := NewAIAPIKeyCredType()
+func TestAPIKeyCredType_Parse_OptionalFields(t *testing.T) {
+	ct := NewAPIKeyCredType()
 
 	rawData := map[string]interface{}{
 		"api_key":         "sk-xxxxxxxxxxxxxxxxxxxx",
@@ -246,8 +262,8 @@ func TestAIAPIKeyCredType_Parse_OptionalFields(t *testing.T) {
 	assert.Equal(t, "proj-789", cred.Data["project_id"])
 }
 
-func TestAIAPIKeyCredType_Validate(t *testing.T) {
-	ct := NewAIAPIKeyCredType()
+func TestAPIKeyCredType_Validate(t *testing.T) {
+	ct := NewAPIKeyCredType()
 
 	tests := []struct {
 		name    string
@@ -258,7 +274,7 @@ func TestAIAPIKeyCredType_Validate(t *testing.T) {
 		{
 			name: "valid credential",
 			cred: &credential.Credential{
-				Type: credential.TypeAIAPIKey,
+				Type: credential.TypeAPIKey,
 				Data: map[string]string{
 					"api_key": "sk-xxxxxxxxxxxxxxxxxxxx",
 				},
@@ -274,12 +290,12 @@ func TestAIAPIKeyCredType_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "expected type ai_api_key",
+			errMsg:  "expected type api_key",
 		},
 		{
 			name: "missing api_key",
 			cred: &credential.Credential{
-				Type: credential.TypeAIAPIKey,
+				Type: credential.TypeAPIKey,
 				Data: map[string]string{},
 			},
 			wantErr: true,
@@ -288,7 +304,7 @@ func TestAIAPIKeyCredType_Validate(t *testing.T) {
 		{
 			name: "empty api_key",
 			cred: &credential.Credential{
-				Type: credential.TypeAIAPIKey,
+				Type: credential.TypeAPIKey,
 				Data: map[string]string{
 					"api_key": "",
 				},
@@ -313,20 +329,20 @@ func TestAIAPIKeyCredType_Validate(t *testing.T) {
 	}
 }
 
-func TestAIAPIKeyCredType_RequiresSpecRotation(t *testing.T) {
-	ct := NewAIAPIKeyCredType()
+func TestAPIKeyCredType_RequiresSpecRotation(t *testing.T) {
+	ct := NewAPIKeyCredType()
 	assert.False(t, ct.RequiresSpecRotation())
 }
 
-func TestAIAPIKeyCredType_SensitiveConfigFields(t *testing.T) {
-	ct := NewAIAPIKeyCredType()
+func TestAPIKeyCredType_SensitiveConfigFields(t *testing.T) {
+	ct := NewAPIKeyCredType()
 	fields := ct.SensitiveConfigFields()
 	assert.Len(t, fields, 1)
 	assert.Contains(t, fields, "api_key")
 }
 
-func TestAIAPIKeyCredType_FieldSchemas(t *testing.T) {
-	ct := NewAIAPIKeyCredType()
+func TestAPIKeyCredType_FieldSchemas(t *testing.T) {
+	ct := NewAPIKeyCredType()
 	schemas := ct.FieldSchemas()
 
 	assert.Contains(t, schemas, "api_key")
