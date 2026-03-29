@@ -13,19 +13,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMistralDriverFactory_Type(t *testing.T) {
-	factory := &MistralDriverFactory{}
-	assert.Equal(t, credential.SourceTypeMistral, factory.Type())
+func TestSlackDriverFactory_Type(t *testing.T) {
+	factory := &SlackDriverFactory{}
+	assert.Equal(t, credential.SourceTypeSlack, factory.Type())
 }
 
-func TestMistralDriverFactory_SensitiveConfigFields(t *testing.T) {
-	factory := &MistralDriverFactory{}
+func TestSlackDriverFactory_SensitiveConfigFields(t *testing.T) {
+	factory := &SlackDriverFactory{}
 	fields := factory.SensitiveConfigFields()
 	assert.Nil(t, fields, "source has no secrets — they live in the spec")
 }
 
-func TestMistralDriverFactory_ValidateConfig(t *testing.T) {
-	factory := &MistralDriverFactory{}
+func TestSlackDriverFactory_ValidateConfig(t *testing.T) {
+	factory := &SlackDriverFactory{}
 
 	tests := []struct {
 		name    string
@@ -40,17 +40,17 @@ func TestMistralDriverFactory_ValidateConfig(t *testing.T) {
 		},
 		{
 			name:    "valid explicit api_url",
-			config:  map[string]string{"api_url": "https://api.mistral.ai"},
+			config:  map[string]string{"api_url": "https://slack.com/api"},
 			wantErr: false,
 		},
 		{
 			name:    "valid custom api_url",
-			config:  map[string]string{"api_url": "https://mistral.example.com"},
+			config:  map[string]string{"api_url": "https://slack.example.com"},
 			wantErr: false,
 		},
 		{
 			name:    "invalid api_url scheme",
-			config:  map[string]string{"api_url": "http://api.mistral.ai"},
+			config:  map[string]string{"api_url": "http://slack.com/api"},
 			wantErr: true,
 			errMsg:  "must use https://",
 		},
@@ -75,31 +75,31 @@ func TestMistralDriverFactory_ValidateConfig(t *testing.T) {
 	}
 }
 
-func TestMistralDriverFactory_Create(t *testing.T) {
-	factory := &MistralDriverFactory{}
+func TestSlackDriverFactory_Create(t *testing.T) {
+	factory := &SlackDriverFactory{}
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	driver, err := factory.Create(map[string]string{
-		"api_url": "https://api.mistral.ai",
+		"api_url": "https://slack.com/api",
 	}, log)
 	require.NoError(t, err)
 	assert.NotNil(t, driver)
-	assert.Equal(t, credential.SourceTypeMistral, driver.Type())
+	assert.Equal(t, credential.SourceTypeSlack, driver.Type())
 }
 
-func TestMistralDriver_Type(t *testing.T) {
-	driver := &MistralDriver{
+func TestSlackDriver_Type(t *testing.T) {
+	driver := &SlackDriver{
 		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeMistral,
+			Type:   credential.SourceTypeSlack,
 			Config: map[string]string{},
 		},
 	}
-	assert.Equal(t, credential.SourceTypeMistral, driver.Type())
+	assert.Equal(t, credential.SourceTypeSlack, driver.Type())
 }
 
-func TestMistralDriver_Cleanup(t *testing.T) {
-	driver := &MistralDriver{
+func TestSlackDriver_Cleanup(t *testing.T) {
+	driver := &SlackDriver{
 		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeMistral,
+			Type:   credential.SourceTypeSlack,
 			Config: map[string]string{},
 		},
 		httpClient: &http.Client{},
@@ -108,14 +108,14 @@ func TestMistralDriver_Cleanup(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestMistralDriver_Revoke_NoOp(t *testing.T) {
-	driver := &MistralDriver{
+func TestSlackDriver_Revoke_NoOp(t *testing.T) {
+	driver := &SlackDriver{
 		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeMistral,
+			Type:   credential.SourceTypeSlack,
 			Config: map[string]string{},
 		},
 	}
-	// Mistral API keys are static — revoke is a no-op
+	// Slack bot tokens are static — revoke is a no-op
 	err := driver.Revoke(context.Background(), "any-lease-id")
 	assert.NoError(t, err)
 
@@ -123,52 +123,52 @@ func TestMistralDriver_Revoke_NoOp(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestMistralDriver_NotRotatable(t *testing.T) {
-	driver := &MistralDriver{
+func TestSlackDriver_NotRotatable(t *testing.T) {
+	driver := &SlackDriver{
 		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeMistral,
+			Type:   credential.SourceTypeSlack,
 			Config: map[string]string{},
 		},
 	}
-	// MistralDriver should not implement Rotatable
+	// SlackDriver should not implement Rotatable
 	var sd credential.SourceDriver = driver
 	_, ok := sd.(credential.Rotatable)
-	assert.False(t, ok, "MistralDriver should not implement credential.Rotatable")
+	assert.False(t, ok, "SlackDriver should not implement credential.Rotatable")
 }
 
-func TestMistralDriver_MintCredential(t *testing.T) {
-	driver := &MistralDriver{
+func TestSlackDriver_MintCredential(t *testing.T) {
+	driver := &SlackDriver{
 		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeMistral,
-			Config: map[string]string{"api_url": "https://api.mistral.ai"},
+			Type:   credential.SourceTypeSlack,
+			Config: map[string]string{"api_url": "https://slack.com/api"},
 		},
 	}
 
 	spec := &credential.CredSpec{
-		Name: "test-mistral",
+		Name: "test-slack",
 		Type: credential.TypeAPIKey,
 		Config: map[string]string{
-			"api_key": "sk-test-key-123",
+			"api_key": "xoxb-test-token-123",
 		},
 	}
 
 	rawData, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
-	assert.Equal(t, "sk-test-key-123", rawData["api_key"])
+	assert.Equal(t, "xoxb-test-token-123", rawData["api_key"])
 	assert.Equal(t, time.Duration(0), ttl)
 	assert.Equal(t, "", leaseID)
 }
 
-func TestMistralDriver_MintCredential_EmptyKey(t *testing.T) {
-	driver := &MistralDriver{
+func TestSlackDriver_MintCredential_EmptyKey(t *testing.T) {
+	driver := &SlackDriver{
 		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeMistral,
+			Type:   credential.SourceTypeSlack,
 			Config: map[string]string{},
 		},
 	}
 
 	spec := &credential.CredSpec{
-		Name: "test-mistral",
+		Name: "test-slack",
 		Type: credential.TypeAPIKey,
 		Config: map[string]string{
 			"api_key": "",
@@ -177,46 +177,23 @@ func TestMistralDriver_MintCredential_EmptyKey(t *testing.T) {
 
 	_, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no Mistral API key configured")
+	assert.Contains(t, err.Error(), "no Slack bot token configured")
 }
 
-func TestMistralDriver_MintCredential_WithOrganizationID(t *testing.T) {
-	driver := &MistralDriver{
-		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeMistral,
-			Config: map[string]string{},
-		},
-	}
-
-	spec := &credential.CredSpec{
-		Name: "test-mistral",
-		Type: credential.TypeAPIKey,
-		Config: map[string]string{
-			"api_key":         "sk-test-key-123",
-			"organization_id": "org-456",
-		},
-	}
-
-	rawData, _, _, err := driver.MintCredential(context.Background(), spec)
-	require.NoError(t, err)
-	assert.Equal(t, "sk-test-key-123", rawData["api_key"])
-	assert.Equal(t, "org-456", rawData["organization_id"])
-}
-
-func TestMistralDriver_VerifySpec(t *testing.T) {
+func TestSlackDriver_VerifySpec(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodGet, r.Method)
-		assert.Equal(t, "/v1/models", r.URL.Path)
-		assert.Equal(t, "Bearer sk-valid-key", r.Header.Get("Authorization"))
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/auth.test", r.URL.Path)
+		assert.Equal(t, "Bearer xoxb-valid-token", r.Header.Get("Authorization"))
 
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"object":"list","data":[]}`))
+		w.Write([]byte(`{"ok":true,"url":"https://test.slack.com/","team":"Test","user":"bot"}`))
 	}))
 	defer server.Close()
 
-	driver := &MistralDriver{
+	driver := &SlackDriver{
 		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeMistral,
+			Type:   credential.SourceTypeSlack,
 			Config: map[string]string{"api_url": server.URL},
 		},
 		httpClient: server.Client(),
@@ -226,7 +203,7 @@ func TestMistralDriver_VerifySpec(t *testing.T) {
 		Name: "test-verify",
 		Type: credential.TypeAPIKey,
 		Config: map[string]string{
-			"api_key": "sk-valid-key",
+			"api_key": "xoxb-valid-token",
 		},
 	}
 
@@ -234,16 +211,16 @@ func TestMistralDriver_VerifySpec(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestMistralDriver_VerifySpec_InvalidKey(t *testing.T) {
+func TestSlackDriver_VerifySpec_InvalidKey(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"message":"Unauthorized"}`))
+		w.Write([]byte(`{"ok":false,"error":"invalid_auth"}`))
 	}))
 	defer server.Close()
 
-	driver := &MistralDriver{
+	driver := &SlackDriver{
 		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeMistral,
+			Type:   credential.SourceTypeSlack,
 			Config: map[string]string{"api_url": server.URL},
 		},
 		httpClient: server.Client(),
@@ -253,7 +230,7 @@ func TestMistralDriver_VerifySpec_InvalidKey(t *testing.T) {
 		Name: "test-verify",
 		Type: credential.TypeAPIKey,
 		Config: map[string]string{
-			"api_key": "sk-invalid-key",
+			"api_key": "xoxb-invalid-token",
 		},
 	}
 
@@ -262,10 +239,10 @@ func TestMistralDriver_VerifySpec_InvalidKey(t *testing.T) {
 	assert.Contains(t, err.Error(), "verification failed")
 }
 
-func TestMistralDriver_VerifySpec_EmptyKey(t *testing.T) {
-	driver := &MistralDriver{
+func TestSlackDriver_VerifySpec_EmptyKey(t *testing.T) {
+	driver := &SlackDriver{
 		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeMistral,
+			Type:   credential.SourceTypeSlack,
 			Config: map[string]string{},
 		},
 		httpClient: &http.Client{},
@@ -281,46 +258,46 @@ func TestMistralDriver_VerifySpec_EmptyKey(t *testing.T) {
 
 	err := driver.VerifySpec(context.Background(), spec)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no Mistral API key configured")
+	assert.Contains(t, err.Error(), "no Slack bot token configured")
 }
 
-func TestMistralDriver_GetAPIURL(t *testing.T) {
-	driver := &MistralDriver{
+func TestSlackDriver_GetAPIURL(t *testing.T) {
+	driver := &SlackDriver{
 		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeMistral,
-			Config: map[string]string{"api_url": "https://api.mistral.ai/"},
+			Type:   credential.SourceTypeSlack,
+			Config: map[string]string{"api_url": "https://slack.com/api/"},
 		},
 	}
 	// getAPIURL trims trailing slash
-	assert.Equal(t, "https://api.mistral.ai", driver.getAPIURL())
+	assert.Equal(t, "https://slack.com/api", driver.getAPIURL())
 }
 
-func TestMistralDriver_GetAPIURL_Default(t *testing.T) {
-	driver := &MistralDriver{
+func TestSlackDriver_GetAPIURL_Default(t *testing.T) {
+	driver := &SlackDriver{
 		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeMistral,
+			Type:   credential.SourceTypeSlack,
 			Config: map[string]string{},
 		},
 	}
-	assert.Equal(t, DefaultMistralAPIURL, driver.getAPIURL())
+	assert.Equal(t, DefaultSlackAPIURL, driver.getAPIURL())
 }
 
-func TestValidateMistralURL(t *testing.T) {
+func TestValidateSlackURL(t *testing.T) {
 	tests := []struct {
 		url     string
 		wantErr bool
 		errMsg  string
 	}{
-		{"https://api.mistral.ai", false, ""},
-		{"https://mistral.example.com", false, ""},
-		{"http://api.mistral.ai", true, "must use https://"},
-		{"ftp://api.mistral.ai", true, "must use https://"},
+		{"https://slack.com/api", false, ""},
+		{"https://slack.example.com", false, ""},
+		{"http://slack.com/api", true, "must use https://"},
+		{"ftp://slack.com/api", true, "must use https://"},
 		{"https://", true, "must include a host"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.url, func(t *testing.T) {
-			err := validateMistralURL(tt.url)
+			err := validateSlackURL(tt.url)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)

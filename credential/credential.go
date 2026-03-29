@@ -14,7 +14,7 @@ const (
 	TypeGCPAccessToken    = "gcp_access_token"
 	TypeGitLabAccessToken = "gitlab_access_token"
 	TypeGitHubToken       = "github_token"
-	TypeAIAPIKey          = "ai_api_key"
+	TypeAPIKey            = "api_key"
 	TypeDBAuthToken       = "db_auth_token"
 )
 
@@ -30,6 +30,7 @@ const (
 	SourceTypeMistral    = "mistral"
 	SourceTypeOpenAI     = "openai"
 	SourceTypeAnthropic  = "anthropic"
+	SourceTypeSlack      = "slack"
 )
 
 // Category constants for credential categorization
