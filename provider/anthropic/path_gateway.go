@@ -106,7 +106,7 @@ func (b *anthropicBackend) getAnthropicCredential(req *logical.Request) (apiKey 
 		return "", fmt.Errorf("no credential available")
 	}
 
-	if req.Credential.Type != credential.TypeAIAPIKey {
+	if req.Credential.Type != credential.TypeAPIKey {
 		return "", fmt.Errorf("unsupported credential type: %s", req.Credential.Type)
 	}
 

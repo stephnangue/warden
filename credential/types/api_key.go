@@ -6,19 +6,19 @@ import (
 	"github.com/stephnangue/warden/credential"
 )
 
-// AIAPIKeyCredType handles AI provider API keys (Mistral, OpenAI, Anthropic, etc.)
-type AIAPIKeyCredType struct {
+// APIKeyCredType handles static API key credentials (OpenAI, Anthropic, Mistral, Slack, etc.)
+type APIKeyCredType struct {
 	*BaseTokenType
 }
 
-// NewAIAPIKeyCredType creates a new AI API key credential type
-func NewAIAPIKeyCredType() *AIAPIKeyCredType {
-	return &AIAPIKeyCredType{
+// NewAPIKeyCredType creates a new API key credential type
+func NewAPIKeyCredType() *APIKeyCredType {
+	return &APIKeyCredType{
 		BaseTokenType: &BaseTokenType{
 			TypeMetadata: credential.TypeMetadata{
-				Name:        credential.TypeAIAPIKey,
+				Name:        credential.TypeAPIKey,
 				Category:    credential.CategoryAPI,
-				Description: "API key for AI provider authentication (Mistral, OpenAI, Anthropic, etc.)",
+				Description: "API key for provider authentication (OpenAI, Anthropic, Mistral, Slack, etc.)",
 				DefaultTTL:  0, // Static API keys have no default TTL
 			},
 			FieldConfig: TokenFieldConfig{
@@ -27,7 +27,7 @@ func NewAIAPIKeyCredType() *AIAPIKeyCredType {
 				OptionalFields:    []string{"key_id", "key_name", "organization_id", "project_id"},
 				FieldSchemas: map[string]*credential.CredentialFieldSchema{
 					"api_key": {
-						Description: "AI provider API key for authentication",
+						Description: "API key for authentication",
 						Sensitive:   true,
 					},
 					"key_id": {
@@ -53,35 +53,35 @@ func NewAIAPIKeyCredType() *AIAPIKeyCredType {
 	}
 }
 
-// ConfigSchema returns the declarative schema for AI API key credential config.
+// ConfigSchema returns the declarative schema for API key credential config.
 // The API key is stored at the spec level (like GitHub PATs), not on the source.
-func (t *AIAPIKeyCredType) ConfigSchema() []*credential.FieldValidator {
+func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
 		credential.StringField("api_key").
-			Describe("AI provider API key").
+			Describe("API key for provider authentication").
 			Example("sk-xxxxxxxxxxxxxxxxxxxx"),
 
 		credential.StringField("organization_id").
-			Describe("Organization ID for the AI provider (optional)").
+			Describe("Organization ID (optional)").
 			Example("org-xxxxxxxxxxxx"),
 
 		credential.StringField("project_id").
-			Describe("Project ID for the AI provider (optional)").
+			Describe("Project ID (optional)").
 			Example("proj-xxxxxxxxxxxx"),
 	}
 }
 
-// ValidateConfig validates the Config for an AI API key credential spec.
+// ValidateConfig validates the Config for an API key credential spec.
 // The API key is stored at the spec level (like GitHub PATs). The source only
 // holds connection info (api_url). This allows multiple specs with different
 // API keys to share one source.
-func (t *AIAPIKeyCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	switch sourceType {
-	case credential.SourceTypeMistral, credential.SourceTypeOpenAI, credential.SourceTypeAnthropic, credential.SourceTypeLocal:
+	case credential.SourceTypeMistral, credential.SourceTypeOpenAI, credential.SourceTypeAnthropic, credential.SourceTypeSlack, credential.SourceTypeLocal:
 		// Supported
 	default:
-		return fmt.Errorf("ai_api_key credentials require a mistral, openai, anthropic, or local source, got: %s", sourceType)
+		return fmt.Errorf("api_key credentials require a mistral, openai, anthropic, slack, or local source, got: %s", sourceType)
 	}
 
 	// Step 2: Validate config against schema
@@ -99,11 +99,11 @@ func (t *AIAPIKeyCredType) ValidateConfig(config map[string]string, sourceType s
 }
 
 // RequiresSpecRotation returns false — API keys live in source config, not spec.
-func (t *AIAPIKeyCredType) RequiresSpecRotation() bool {
+func (t *APIKeyCredType) RequiresSpecRotation() bool {
 	return false
 }
 
 // SensitiveConfigFields returns spec config keys that should be masked in output
-func (t *AIAPIKeyCredType) SensitiveConfigFields() []string {
+func (t *APIKeyCredType) SensitiveConfigFields() []string {
 	return []string{"api_key"}
 }

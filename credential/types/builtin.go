@@ -34,8 +34,8 @@ func RegisterBuiltinTypes(registry *credential.TypeRegistry) error {
 		return err
 	}
 
-	// Register AI API key type
-	if err := registry.Register(NewAIAPIKeyCredType()); err != nil {
+	// Register API key type
+	if err := registry.Register(NewAPIKeyCredType()); err != nil {
 		return err
 	}
 

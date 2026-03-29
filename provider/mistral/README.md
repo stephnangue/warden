@@ -140,7 +140,7 @@ Create a credential spec that references the credential source. The spec carries
 
 ```bash
 warden cred spec create mistral-ops \
-  --type ai_api_key \
+  --type api_key \
   --source mistral-src \
   --config api_key=<your-mistral-api-key>
 ```
@@ -149,7 +149,7 @@ Optionally include an organization ID:
 
 ```bash
 warden cred spec create mistral-ops \
-  --type ai_api_key \
+  --type api_key \
   --source mistral-src \
   --config api_key=<your-mistral-api-key> \
   --config organization_id=<your-org-id>

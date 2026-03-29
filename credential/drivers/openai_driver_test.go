@@ -146,7 +146,7 @@ func TestOpenAIDriver_MintCredential(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-openai",
-		Type: credential.TypeAIAPIKey,
+		Type: credential.TypeAPIKey,
 		Config: map[string]string{
 			"api_key": "sk-test-key-123",
 		},
@@ -169,7 +169,7 @@ func TestOpenAIDriver_MintCredential_EmptyKey(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-openai",
-		Type: credential.TypeAIAPIKey,
+		Type: credential.TypeAPIKey,
 		Config: map[string]string{
 			"api_key": "",
 		},
@@ -190,7 +190,7 @@ func TestOpenAIDriver_MintCredential_WithOrganizationID(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-openai",
-		Type: credential.TypeAIAPIKey,
+		Type: credential.TypeAPIKey,
 		Config: map[string]string{
 			"api_key":         "sk-test-key-123",
 			"organization_id": "org-456",
@@ -213,7 +213,7 @@ func TestOpenAIDriver_MintCredential_WithProjectID(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-openai",
-		Type: credential.TypeAIAPIKey,
+		Type: credential.TypeAPIKey,
 		Config: map[string]string{
 			"api_key":    "sk-test-key-123",
 			"project_id": "proj-789",
@@ -236,7 +236,7 @@ func TestOpenAIDriver_MintCredential_WithAllOptionalFields(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-openai",
-		Type: credential.TypeAIAPIKey,
+		Type: credential.TypeAPIKey,
 		Config: map[string]string{
 			"api_key":         "sk-test-key-123",
 			"organization_id": "org-456",
@@ -272,7 +272,7 @@ func TestOpenAIDriver_VerifySpec(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-verify",
-		Type: credential.TypeAIAPIKey,
+		Type: credential.TypeAPIKey,
 		Config: map[string]string{
 			"api_key": "sk-valid-key",
 		},
@@ -299,7 +299,7 @@ func TestOpenAIDriver_VerifySpec_InvalidKey(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-verify",
-		Type: credential.TypeAIAPIKey,
+		Type: credential.TypeAPIKey,
 		Config: map[string]string{
 			"api_key": "sk-invalid-key",
 		},
@@ -321,7 +321,7 @@ func TestOpenAIDriver_VerifySpec_EmptyKey(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-verify",
-		Type: credential.TypeAIAPIKey,
+		Type: credential.TypeAPIKey,
 		Config: map[string]string{
 			"api_key": "",
 		},
