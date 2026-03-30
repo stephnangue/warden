@@ -4,17 +4,18 @@ go 1.26.0
 
 require (
 	github.com/ProtonMail/go-crypto v1.4.1
-	github.com/aws/aws-sdk-go-v2 v1.41.4
-	github.com/aws/aws-sdk-go-v2/credentials v1.19.12
-	github.com/aws/aws-sdk-go-v2/service/iam v1.53.6
-	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.4
-	github.com/aws/aws-sdk-go-v2/service/sts v1.41.9
+	github.com/aws/aws-sdk-go-v2 v1.41.5
+	github.com/aws/aws-sdk-go-v2/credentials v1.19.13
+	github.com/aws/aws-sdk-go-v2/feature/rds/auth v1.6.20
+	github.com/aws/aws-sdk-go-v2/service/iam v1.53.7
+	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.5
+	github.com/aws/aws-sdk-go-v2/service/sts v1.41.10
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-uuid v1.0.3
 	github.com/hashicorp/hcl/v2 v2.24.0
-	github.com/hashicorp/vault/api v1.22.0
+	github.com/hashicorp/vault/api v1.23.0
 	github.com/mitchellh/copystructure v1.2.0
 	github.com/oklog/ulid v1.3.1
 	github.com/openbao/go-kms-wrapping/v2 v2.7.0
@@ -28,7 +29,7 @@ require (
 	github.com/openbao/go-kms-wrapping/wrappers/static/v2 v2.1.1
 	github.com/openbao/go-kms-wrapping/wrappers/transit/v2 v2.7.0
 	github.com/openbao/openbao/sdk/v2 v2.5.1
-	github.com/rs/zerolog v1.34.0
+	github.com/rs/zerolog v1.35.0
 	github.com/sasha-s/go-deadlock v0.3.9
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
@@ -61,11 +62,10 @@ require (
 	github.com/aliyun/alibaba-cloud-sdk-go v1.62.301 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/aws/aws-sdk-go v1.55.6 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/rds/auth v1.6.20 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.20 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.20 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.21 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.21 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.7 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.20 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.21 // indirect
 	github.com/aws/smithy-go v1.24.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/clipperhouse/displaywidth v0.10.0 // indirect
@@ -158,7 +158,7 @@ require (
 	github.com/hashicorp/go-sockaddr v1.0.7 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/hashicorp/hcl v1.0.1-vault-7
-	github.com/jackc/pgx/v5 v5.8.0
+	github.com/jackc/pgx/v5 v5.9.1
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
