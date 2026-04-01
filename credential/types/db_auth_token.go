@@ -48,7 +48,7 @@ func NewDBAuthTokenCredType() *DBAuthTokenCredType {
 						Sensitive:   false,
 					},
 					"db_engine": {
-						Description: "Database engine (postgres, mysql, sqlserver)",
+						Description: "Database engine (postgres, mysql)",
 						Sensitive:   false,
 					},
 					"token_type": {
@@ -92,11 +92,11 @@ func (t *DBAuthTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("mydb.postgres.database.azure.com"),
 
 		credential.StringField("db_port").
-			Describe("Database port (defaults based on engine: postgres=5432, mysql=3306, sqlserver=1433)").
+			Describe("Database port (defaults based on engine: postgres=5432, mysql=3306)").
 			Example("5432"),
 
 		credential.StringField("db_engine").
-			OneOf("postgres", "mysql", "sqlserver").
+			OneOf("postgres", "mysql").
 			Describe("Database engine type").
 			Example("postgres"),
 

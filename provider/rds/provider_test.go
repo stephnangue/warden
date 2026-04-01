@@ -364,15 +364,6 @@ func TestFormatConnectionString(t *testing.T) {
 		)
 	})
 
-	t.Run("sqlserver", func(t *testing.T) {
-		grant := &rdsGrant{DBName: "myapp", DBEngine: "sqlserver"}
-		result := formatConnectionString(cred, grant, "workload-c")
-		assert.Equal(t,
-			"sqlserver://app_user:my-token@mydb.rds.amazonaws.com:5432?database=myapp&encrypt=true&app+name=workload-c",
-			result,
-		)
-	})
-
 	t.Run("engine fallback from credential", func(t *testing.T) {
 		grant := &rdsGrant{DBName: "myapp", DBEngine: ""}
 		result := formatConnectionString(cred, grant, "workload-d")

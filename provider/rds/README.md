@@ -2,7 +2,7 @@
 
 The RDS provider is an **access backend** that vends ready-to-use database connection strings with short-lived IAM authentication tokens. It does not proxy database traffic — workloads use the returned connection string to connect to RDS directly.
 
-Supports PostgreSQL, MySQL, and SQL Server on Amazon RDS and Aurora. Both use the same IAM authentication mechanism — the only difference is the endpoint hostname.
+Supports PostgreSQL and MySQL on Amazon RDS and Aurora. Both use the same IAM authentication mechanism — the only difference is the endpoint hostname.
 
 ## Table of Contents
 
@@ -144,22 +144,6 @@ GRANT SELECT ON myapp.* TO 'app_readonly'@'%';
 CREATE USER 'app_readwrite'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS';
 GRANT SELECT, INSERT, UPDATE, DELETE ON myapp.* TO 'app_readwrite'@'%';
 ```
-
-**SQL Server:**
-```sql
--- Read-only user (requires RDS with Kerberos/Windows auth or IAM integration)
-CREATE LOGIN [app_readonly] FROM EXTERNAL PROVIDER;
-CREATE USER [app_readonly] FOR LOGIN [app_readonly];
-ALTER ROLE db_datareader ADD MEMBER [app_readonly];
-
--- Read-write user
-CREATE LOGIN [app_readwrite] FROM EXTERNAL PROVIDER;
-CREATE USER [app_readwrite] FOR LOGIN [app_readwrite];
-ALTER ROLE db_datareader ADD MEMBER [app_readwrite];
-ALTER ROLE db_datawriter ADD MEMBER [app_readwrite];
-```
-
-> **Note:** RDS for SQL Server IAM authentication requires Active Directory integration. See [AWS docs](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html) for setup.
 
 Each database user name must match the `db_user` in its corresponding credential spec (Step 3). Warden controls which workload gets which user — the database controls what that user can do.
 
@@ -432,7 +416,6 @@ Warden injects the requesting principal's identity into the connection string fo
 |--------|-----------|------------|
 | PostgreSQL | `application_name=<principal>` | `pg_stat_activity`, server logs |
 | MySQL | `connectionAttributes=program_name:<principal>` | `performance_schema.session_connect_attrs` |
-| SQL Server | `app name=<principal>` | `sys.dm_exec_sessions` |
 
 This means database audit logs show both the shared IAM user and which Warden workload opened the connection — without requiring per-workload database users.
 
@@ -451,8 +434,8 @@ This means database audit logs show both the shared IAM user and which Warden wo
 | `mint_method` | string | Yes | Must be `rds_iam_token` |
 | `db_endpoint` | string | Yes | RDS endpoint hostname |
 | `db_user` | string | Yes | Database user mapped to IAM identity |
-| `db_engine` | string | No | `postgres` (default), `mysql`, or `sqlserver` |
-| `db_port` | string | No | Defaults based on engine (5432, 3306, 1433) |
+| `db_engine` | string | No | `postgres` (default) or `mysql` |
+| `db_port` | string | No | Defaults based on engine (5432, 3306) |
 | `region` | string | No | AWS region (defaults to source region) |
 | `role_arn` | string | No | IAM role ARN for cross-account access |
 
