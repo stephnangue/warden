@@ -70,9 +70,14 @@ func (b *AccessBackend) GetAutoAuthPath() string {
 	return b.cfg.AutoAuthPath
 }
 
-// GetAuthRole returns empty string — auth role resolution is the auth
-// method's responsibility (via X-Warden-Role header or auth method's default_role).
-func (b *AccessBackend) GetAuthRole(path string) string {
+// GetAuthRole extracts the auth role from the ?role= query parameter.
+// Falls back to empty string (auth method's default_role provides the fallback).
+func (b *AccessBackend) GetAuthRole(_ string, req *logical.Request) string {
+	if req != nil {
+		if role, ok := req.Data["role"].(string); ok {
+			return role
+		}
+	}
 	return ""
 }
 
