@@ -71,7 +71,7 @@ func (b *rdsBackend) pathGrants() *framework.Path {
 			},
 			"db_engine": {
 				Type:        framework.TypeString,
-				Description: "Database engine (postgres, mysql, sqlserver). Overrides the spec value if set.",
+				Description: "Database engine (postgres, mysql). Overrides the spec value if set.",
 			},
 			"description": {
 				Type:        framework.TypeString,
@@ -237,9 +237,6 @@ func formatConnectionString(cred *credential.Credential, grant *rdsGrant, princi
 	case "mysql":
 		return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?tls=true&connectionAttributes=program_name:%s",
 			user, url.QueryEscape(token), host, port, dbName, principal)
-	case "sqlserver":
-		return fmt.Sprintf("sqlserver://%s:%s@%s:%s?database=%s&encrypt=true&app+name=%s",
-			url.QueryEscape(user), url.QueryEscape(token), host, port, dbName, principal)
 	default: // postgres
 		return fmt.Sprintf("host=%s port=%s dbname=%s user=%s password=%s sslmode=require application_name=%s",
 			host, port, dbName, user, token, principal)

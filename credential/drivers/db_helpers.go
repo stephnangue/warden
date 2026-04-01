@@ -5,8 +5,6 @@ func defaultPortForEngine(engine string) string {
 	switch engine {
 	case "mysql":
 		return "3306"
-	case "sqlserver":
-		return "1433"
 	default: // postgres
 		return "5432"
 	}
