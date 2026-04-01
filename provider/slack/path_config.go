@@ -62,11 +62,11 @@ func (b *slackBackend) handleConfigRead(_ context.Context, _ *logical.Request, _
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"slack_url":       b.slackURL,
-			"max_body_size":   b.MaxBodySize,
-			"timeout":         b.Timeout.String(),
-			"auto_auth_path":  tc.AutoAuthPath,
-			"default_role":    tc.DefaultAuthRole,
+			"slack_url":      b.slackURL,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		},
 	}, nil
 }
@@ -123,11 +123,11 @@ func (b *slackBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"slack_url":       b.slackURL,
-			"max_body_size":   b.MaxBodySize,
-			"timeout":         b.Timeout.String(),
-			"auto_auth_path":  tc.AutoAuthPath,
-			"default_role":    tc.DefaultAuthRole,
+			"slack_url":      b.slackURL,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return &logical.Response{

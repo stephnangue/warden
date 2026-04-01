@@ -97,4 +97,3 @@ func (r *Response) AddHeader(key, value string) {
 func (r *Response) AddWarning(warning string) {
 	r.Warnings = append(r.Warnings, warning)
 }
-

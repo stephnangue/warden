@@ -202,4 +202,3 @@ func (b *azureBackend) prepareHeaders(r *http.Request, bearerToken string) {
 		r.Header.Set("Authorization", "Bearer "+bearerToken)
 	}
 }
-

@@ -12,13 +12,13 @@ type Operation string
 
 const (
 	// The operations below are called per path
-	CreateOperation      Operation = "create"
-	ReadOperation        Operation = "read"
-	UpdateOperation      Operation = "update"
-	PatchOperation       Operation = "patch"
-	DeleteOperation      Operation = "delete"
-	ListOperation        Operation = "list"
-	ScanOperation        Operation = "scan"
+	CreateOperation Operation = "create"
+	ReadOperation   Operation = "read"
+	UpdateOperation Operation = "update"
+	PatchOperation  Operation = "patch"
+	DeleteOperation Operation = "delete"
+	ListOperation   Operation = "list"
+	ScanOperation   Operation = "scan"
 
 	HelpOperation        Operation = "help"
 	ResolveRoleOperation Operation = "resolve-role"

@@ -44,9 +44,9 @@ func (r *Response) Error() error {
 
 	// Build up the error object
 	respErr := &ResponseError{
-		HTTPMethod:    r.Request.Method,
-		URL:           r.Request.URL.String(),
-		StatusCode:    r.StatusCode,
+		HTTPMethod: r.Request.Method,
+		URL:        r.Request.URL.String(),
+		StatusCode: r.StatusCode,
 	}
 
 	// Decode the error response if we can. Note that we wrap the bodyBuf

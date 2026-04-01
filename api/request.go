@@ -12,13 +12,13 @@ import (
 // Request is a raw request configuration structure used to initiate
 // API requests to the Warden server.
 type Request struct {
-	Method        string
-	URL           *url.URL
-	Host          string
-	Params        url.Values
-	Headers       http.Header
-	ClientToken   string
-	Obj           interface{}
+	Method      string
+	URL         *url.URL
+	Host        string
+	Params      url.Values
+	Headers     http.Header
+	ClientToken string
+	Obj         interface{}
 
 	// When possible, use BodyBytes as it is more efficient due to how the
 	// retry logic works

@@ -10,7 +10,7 @@ import (
 
 // LogEntry represents a single audit log entry
 type LogEntry struct {
-	Type      string    `json:"type"`      // "request" or "response"
+	Type      string    `json:"type"` // "request" or "response"
 	Timestamp time.Time `json:"timestamp"`
 
 	// Request information (always present)
@@ -33,13 +33,13 @@ type Request struct {
 	Operation string `json:"operation"` // create, read, update, delete, list, stream
 
 	// Path information
-	Path       string `json:"path"`                   // Full request path
-	MountPoint string `json:"mount_point,omitempty"`  // Mount point prefix
-	MountType  string `json:"mount_type,omitempty"`   // Backend type (vault, aws, jwt)
-	MountClass string `json:"mount_class,omitempty"`  // provider, auth, system, audit
+	Path       string `json:"path"`                  // Full request path
+	MountPoint string `json:"mount_point,omitempty"` // Mount point prefix
+	MountType  string `json:"mount_type,omitempty"`  // Backend type (vault, aws, jwt)
+	MountClass string `json:"mount_class,omitempty"` // provider, auth, system, audit
 
 	// HTTP details
-	Method   string              `json:"method"`           // GET, POST, PUT, DELETE
+	Method   string              `json:"method"` // GET, POST, PUT, DELETE
 	ClientIP string              `json:"client_ip"`
 	Headers  map[string][]string `json:"headers,omitempty"`
 	Data     map[string]any      `json:"data,omitempty"`

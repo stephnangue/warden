@@ -171,8 +171,8 @@ func TestMapToJWTAuthConfig_GroupsClaim(t *testing.T) {
 
 func TestMapToJWTAuthConfig_WithCACerts(t *testing.T) {
 	data := map[string]any{
-		"mode":                 "oidc",
-		"oidc_discovery_url":   "https://issuer.example.com/.well-known/openid-configuration",
+		"mode":                  "oidc",
+		"oidc_discovery_url":    "https://issuer.example.com/.well-known/openid-configuration",
 		"oidc_discovery_ca_pem": "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----",
 	}
 
@@ -208,17 +208,17 @@ func TestMapToJWTAuthConfig_EmptyMap(t *testing.T) {
 
 func TestMapToJWTAuthConfig_AllFields(t *testing.T) {
 	data := map[string]any{
-		"mode":                   "jwt",
-		"jwks_url":               "https://example.com/.well-known/jwks.json",
-		"jwks_ca_pem":            "cert-content",
-		"bound_issuer":           "https://issuer.example.com",
-		"bound_audiences":        []string{"aud1"},
-		"bound_subject":          "expected-sub",
-		"bound_claims":           map[string]any{"claim1": "value1"},
-		"claim_mappings":         map[string]string{"c1": "m1"},
-		"user_claim":             "email",
-		"groups_claim":           "roles",
-		"token_ttl":              "4h",
+		"mode":            "jwt",
+		"jwks_url":        "https://example.com/.well-known/jwks.json",
+		"jwks_ca_pem":     "cert-content",
+		"bound_issuer":    "https://issuer.example.com",
+		"bound_audiences": []string{"aud1"},
+		"bound_subject":   "expected-sub",
+		"bound_claims":    map[string]any{"claim1": "value1"},
+		"claim_mappings":  map[string]string{"c1": "m1"},
+		"user_claim":      "email",
+		"groups_claim":    "roles",
+		"token_ttl":       "4h",
 	}
 
 	config, err := mapToJWTAuthConfig(data)
@@ -243,9 +243,9 @@ func TestMapToJWTAuthConfig_AllFields(t *testing.T) {
 
 func TestMapToJWTAuthConfig_DurationParsing(t *testing.T) {
 	tests := []struct {
-		name            string
-		tokenTTL        string
-		expectedTTL     time.Duration
+		name        string
+		tokenTTL    string
+		expectedTTL time.Duration
 	}{
 		{"Seconds", "30s", 30 * time.Second},
 		{"Minutes", "10m", 10 * time.Minute},

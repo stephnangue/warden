@@ -383,9 +383,9 @@ func TestSys_EnableAuth(t *testing.T) {
 			Type:        "ldap",
 			Description: "LDAP auth backend",
 			Config: map[string]any{
-				"url":              "ldap://ldap.example.com",
-				"userdn":           "ou=Users,dc=example,dc=com",
-				"groupdn":          "ou=Groups,dc=example,dc=com",
+				"url":               "ldap://ldap.example.com",
+				"userdn":            "ou=Users,dc=example,dc=com",
+				"groupdn":           "ou=Groups,dc=example,dc=com",
 				"default_lease_ttl": 3600,
 				"max_lease_ttl":     7200,
 			},

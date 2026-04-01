@@ -457,10 +457,10 @@ func TestHandleGateway_StreamUnauthenticated(t *testing.T) {
 			rr := httptest.NewRecorder()
 
 			req := &logical.Request{
-				Path:                       "gateway/v1/pki/issuer/abc/pem",
-				HTTPRequest:                httpReq,
-				ResponseWriter:             rr,
-				Credential:                 tt.credential,
+				Path:                  "gateway/v1/pki/issuer/abc/pem",
+				HTTPRequest:           httpReq,
+				ResponseWriter:        rr,
+				Credential:            tt.credential,
 				StreamUnauthenticated: tt.transparentUnauthenticated,
 			}
 
@@ -493,7 +493,7 @@ func TestGetVaultToken_StreamUnauthenticated(t *testing.T) {
 	// StreamUnauthenticated request with nil credential
 	// would fail if getVaultToken is called
 	req := &logical.Request{
-		Credential:                 nil,
+		Credential:            nil,
 		StreamUnauthenticated: true,
 	}
 

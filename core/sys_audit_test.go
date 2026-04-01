@@ -4,9 +4,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

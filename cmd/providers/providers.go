@@ -26,7 +26,6 @@ Usage: warden provider <subcommand> [options]
 	}
 )
 
-
 func init() {
 	ProvidersCmd.AddCommand(EnableCmd)
 	ProvidersCmd.AddCommand(DisableCmd)

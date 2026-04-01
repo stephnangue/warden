@@ -19,9 +19,9 @@ const (
 // activeAdvertisement is stored in the barrier under core/leader/{uuid}
 // by the active node to advertise its identity to standby nodes.
 type activeAdvertisement struct {
-	RedirectAddr     string                    `json:"redirect_addr"`
-	ClusterAddr      string                    `json:"cluster_addr,omitempty"`
-	ClusterCert      []byte                    `json:"cluster_cert,omitempty"`
+	RedirectAddr     string                     `json:"redirect_addr"`
+	ClusterAddr      string                     `json:"cluster_addr,omitempty"`
+	ClusterCert      []byte                     `json:"cluster_cert,omitempty"`
 	ClusterKeyParams *certutil.ClusterKeyParams `json:"cluster_key_params,omitempty"`
 }
 

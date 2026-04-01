@@ -96,8 +96,8 @@ var standbyAllowedPaths = map[string]bool{
 type standbyForwarder struct {
 	mu                sync.RWMutex
 	proxy             *httputil.ReverseProxy
-	cachedClusterAddr string         // cluster address of the last-known leader; used to detect leader changes and invalidate the cached proxy
-	cachedServerName  string         // cert CN of the last-known leader; used to detect cert rotation across leadership terms
+	cachedClusterAddr string // cluster address of the last-known leader; used to detect leader changes and invalidate the cached proxy
+	cachedServerName  string // cert CN of the last-known leader; used to detect cert rotation across leadership terms
 	logger            *logger.GatedLogger
 	tlsConfigFunc     func() *tls.Config // returns cluster mTLS config; nil = plain HTTP
 	core              *core.Core         // used for fresh leader lookups in ErrorHandler

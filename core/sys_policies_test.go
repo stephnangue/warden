@@ -338,12 +338,12 @@ func TestValidateMountPath(t *testing.T) {
 		{"valid-path/", false},  // Trailing slash is OK
 
 		// Transparent mode reserved words
-		{"role", true},             // Reserved segment
-		{"role/admin", true},       // Path containing reserved segment
-		{"my/role/path", true},     // Reserved segment in middle
-		{"gateway", true},          // Reserved segment
-		{"gateway/api", true},      // Path containing reserved segment
-		{"my/gateway/path", true},  // Reserved segment in middle
+		{"role", true},            // Reserved segment
+		{"role/admin", true},      // Path containing reserved segment
+		{"my/role/path", true},    // Reserved segment in middle
+		{"gateway", true},         // Reserved segment
+		{"gateway/api", true},     // Path containing reserved segment
+		{"my/gateway/path", true}, // Reserved segment in middle
 
 		// Similar names that should be allowed
 		{"myrole", false},          // Not a segment match

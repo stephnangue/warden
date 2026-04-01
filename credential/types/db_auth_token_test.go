@@ -105,7 +105,7 @@ func TestDBAuthTokenCredType_ValidateConfig_CloudSQL(t *testing.T) {
 
 	config := map[string]string{
 		"mint_method":            "cloud_sql_iam_token",
-		"db_user":               "db-reader@myproject.iam",
+		"db_user":                "db-reader@myproject.iam",
 		"target_service_account": "db-reader@myproject.iam.gserviceaccount.com",
 	}
 
@@ -118,7 +118,7 @@ func TestDBAuthTokenCredType_ValidateConfig_CloudSQL_WrongSource(t *testing.T) {
 
 	config := map[string]string{
 		"mint_method":            "cloud_sql_iam_token",
-		"db_user":               "db-reader",
+		"db_user":                "db-reader",
 		"target_service_account": "sa@proj.iam.gserviceaccount.com",
 	}
 

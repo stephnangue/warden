@@ -233,7 +233,7 @@ func TestCredSpecRegistry_Concurrent(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			spec := &CredSpec{
-				Name: string(rune('a' + idx%26)) + string(rune('0' + idx/26)),
+				Name: string(rune('a'+idx%26)) + string(rune('0'+idx/26)),
 				Type: "vault_token",
 			}
 			registry.Register(spec)

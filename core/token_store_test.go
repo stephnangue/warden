@@ -22,11 +22,11 @@ func TestTokenStore_GenerateToken(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
-		Policies:     []string{"default", "admin"},
-		ClientIP:     "192.168.1.100",
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
+		Policies:    []string{"default", "admin"},
+		ClientIP:    "192.168.1.100",
 	}
 
 	// Generate token
@@ -61,9 +61,9 @@ func TestTokenStore_GenerateToken_DifferentTypes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			authData := &AuthData{
-				PrincipalID:  "test-user-" + tt.tokenType,
-				RoleName:     "test-role",
-						ExpireAt:     time.Now().Add(24 * time.Hour),
+				PrincipalID: "test-user-" + tt.tokenType,
+				RoleName:    "test-role",
+				ExpireAt:    time.Now().Add(24 * time.Hour),
 			}
 
 			entry, err := core.tokenStore.GenerateToken(ctx, tt.tokenType, authData)
@@ -82,9 +82,9 @@ func TestTokenStore_GenerateToken_UnsupportedType(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	_, err := core.tokenStore.GenerateToken(ctx, "unsupported_type", authData)
@@ -110,9 +110,9 @@ func TestTokenStore_GenerateToken_NoNamespace(t *testing.T) {
 	defer core.tokenStore.Close()
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	_, err := core.tokenStore.GenerateToken(context.Background(), TypeWardenToken, authData)
@@ -128,9 +128,9 @@ func TestTokenStore_ResolveToken(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
@@ -167,9 +167,9 @@ func TestTokenStore_ResolveToken_Expired(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(-1 * time.Hour), // Already expired
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(-1 * time.Hour), // Already expired
 	}
 
 	_, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -185,10 +185,10 @@ func TestTokenStore_LookupToken(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
-		Policies:     []string{"default"},
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
+		Policies:    []string{"default"},
 	}
 
 	// Generate token
@@ -229,9 +229,9 @@ func TestTokenStore_LookupToken_Expired(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(50 * time.Millisecond), // Short expiration
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(50 * time.Millisecond), // Short expiration
 	}
 
 	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -255,10 +255,10 @@ func TestTokenStore_LookupToken_SameOriginViolation(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
-		ClientIP:     "192.168.1.100",
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
+		ClientIP:    "192.168.1.100",
 	}
 
 	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -281,10 +281,10 @@ func TestTokenStore_LookupToken_SameOriginPass(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
-		ClientIP:     "192.168.1.100",
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
+		ClientIP:    "192.168.1.100",
 	}
 
 	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -307,9 +307,9 @@ func TestTokenStore_LookupToken_NoNamespace(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -331,9 +331,9 @@ func TestTokenStore_LookupByAccessor(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
@@ -370,9 +370,9 @@ func TestTokenStore_RevokeByAccessor(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
@@ -444,9 +444,9 @@ func TestTokenStore_GetMetrics(t *testing.T) {
 	// Generate some tokens
 	for i := 0; i < 3; i++ {
 		authData := &AuthData{
-			PrincipalID:  "test-user",
-			RoleName:     "test-role",
-				ExpireAt:     time.Now().Add(24 * time.Hour),
+			PrincipalID: "test-user",
+			RoleName:    "test-role",
+			ExpireAt:    time.Now().Add(24 * time.Hour),
 		}
 		_, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
 		require.NoError(t, err)
@@ -478,9 +478,9 @@ func TestTokenStore_Close(t *testing.T) {
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Attempting to generate after close should fail
@@ -497,9 +497,9 @@ func TestTokenStore_Sealed(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -525,9 +525,9 @@ func TestTokenStore_WardenToken(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "warden-user",
-		RoleName:     "warden-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "warden-user",
+		RoleName:    "warden-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate Warden token
@@ -562,9 +562,9 @@ func TestTokenStore_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			for j := 0; j < tokensPerGoroutine; j++ {
 				authData := &AuthData{
-					PrincipalID:  "user",
-					RoleName:     "role",
-								ExpireAt:     time.Now().Add(24 * time.Hour),
+					PrincipalID: "user",
+					RoleName:    "role",
+					ExpireAt:    time.Now().Add(24 * time.Hour),
 				}
 
 				entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -632,9 +632,9 @@ func TestTokenStore_LoadFromStorage(t *testing.T) {
 
 	// Generate a token
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -666,9 +666,9 @@ func TestTokenStore_RevokeByExpiration(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
@@ -708,9 +708,9 @@ func TestTokenStore_RevokeByExpiration_CleansAccessor(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
@@ -740,9 +740,9 @@ func TestTokenStore_RevokeByExpiration_CleansStorage(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
@@ -770,9 +770,9 @@ func TestTokenStore_RevokeByExpiration_MultipleTimes(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
@@ -794,9 +794,9 @@ func TestTokenStore_ExpirationManagerRevoker(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
@@ -835,9 +835,9 @@ func TestTokenStore_RevokeByExpiration_JWTToken(t *testing.T) {
 
 	// Create a JWT role token
 	authData := &AuthData{
-		PrincipalID:  "jwt-user",
-		RoleName:     "jwt-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
+		PrincipalID: "jwt-user",
+		RoleName:    "jwt-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	entry, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
@@ -867,9 +867,9 @@ func TestTokenStore_RevokeByExpiration_ConcurrentRevocation(t *testing.T) {
 
 	for i := 0; i < numTokens; i++ {
 		authData := &AuthData{
-			PrincipalID:  "test-user",
-			RoleName:     "test-role",
-				ExpireAt:     time.Now().Add(24 * time.Hour),
+			PrincipalID: "test-user",
+			RoleName:    "test-role",
+			ExpireAt:    time.Now().Add(24 * time.Hour),
 		}
 
 		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -957,10 +957,10 @@ func TestIPBindingPolicy_Disabled(t *testing.T) {
 
 	// Create token with IP binding
 	authData := &AuthData{
-		PrincipalID:  "test-user",
-		RoleName:     "test-role",
-		ExpireAt:     time.Now().Add(24 * time.Hour),
-		ClientIP:     "192.168.1.100",
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
+		ClientIP:    "192.168.1.100",
 	}
 
 	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -986,10 +986,10 @@ func TestIPBindingPolicy_Optional(t *testing.T) {
 
 	t.Run("both IPs present and match", func(t *testing.T) {
 		authData := &AuthData{
-			PrincipalID:  "test-user-1",
-			RoleName:     "test-role",
-				ExpireAt:     time.Now().Add(24 * time.Hour),
-			ClientIP:     "192.168.1.100",
+			PrincipalID: "test-user-1",
+			RoleName:    "test-role",
+			ExpireAt:    time.Now().Add(24 * time.Hour),
+			ClientIP:    "192.168.1.100",
 		}
 
 		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -1003,10 +1003,10 @@ func TestIPBindingPolicy_Optional(t *testing.T) {
 
 	t.Run("both IPs present but mismatch", func(t *testing.T) {
 		authData := &AuthData{
-			PrincipalID:  "test-user-2",
-			RoleName:     "test-role",
-				ExpireAt:     time.Now().Add(24 * time.Hour),
-			ClientIP:     "192.168.1.100",
+			PrincipalID: "test-user-2",
+			RoleName:    "test-role",
+			ExpireAt:    time.Now().Add(24 * time.Hour),
+			ClientIP:    "192.168.1.100",
 		}
 
 		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -1021,9 +1021,9 @@ func TestIPBindingPolicy_Optional(t *testing.T) {
 
 	t.Run("no creation IP allows any request IP", func(t *testing.T) {
 		authData := &AuthData{
-			PrincipalID:  "test-user-3",
-			RoleName:     "test-role",
-				ExpireAt:     time.Now().Add(24 * time.Hour),
+			PrincipalID: "test-user-3",
+			RoleName:    "test-role",
+			ExpireAt:    time.Now().Add(24 * time.Hour),
 			// No ClientIP
 		}
 
@@ -1038,10 +1038,10 @@ func TestIPBindingPolicy_Optional(t *testing.T) {
 
 	t.Run("no request IP allows access", func(t *testing.T) {
 		authData := &AuthData{
-			PrincipalID:  "test-user-4",
-			RoleName:     "test-role",
-				ExpireAt:     time.Now().Add(24 * time.Hour),
-			ClientIP:     "192.168.1.100",
+			PrincipalID: "test-user-4",
+			RoleName:    "test-role",
+			ExpireAt:    time.Now().Add(24 * time.Hour),
+			ClientIP:    "192.168.1.100",
 		}
 
 		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -1066,10 +1066,10 @@ func TestIPBindingPolicy_Required(t *testing.T) {
 
 	t.Run("both IPs present and match succeeds", func(t *testing.T) {
 		authData := &AuthData{
-			PrincipalID:  "test-user-req-1",
-			RoleName:     "test-role",
-				ExpireAt:     time.Now().Add(24 * time.Hour),
-			ClientIP:     "192.168.1.100",
+			PrincipalID: "test-user-req-1",
+			RoleName:    "test-role",
+			ExpireAt:    time.Now().Add(24 * time.Hour),
+			ClientIP:    "192.168.1.100",
 		}
 
 		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -1083,9 +1083,9 @@ func TestIPBindingPolicy_Required(t *testing.T) {
 
 	t.Run("no creation IP fails", func(t *testing.T) {
 		authData := &AuthData{
-			PrincipalID:  "test-user-req-2",
-			RoleName:     "test-role",
-				ExpireAt:     time.Now().Add(24 * time.Hour),
+			PrincipalID: "test-user-req-2",
+			RoleName:    "test-role",
+			ExpireAt:    time.Now().Add(24 * time.Hour),
 			// No ClientIP
 		}
 
@@ -1101,10 +1101,10 @@ func TestIPBindingPolicy_Required(t *testing.T) {
 
 	t.Run("no request IP fails", func(t *testing.T) {
 		authData := &AuthData{
-			PrincipalID:  "test-user-req-3",
-			RoleName:     "test-role",
-				ExpireAt:     time.Now().Add(24 * time.Hour),
-			ClientIP:     "192.168.1.100",
+			PrincipalID: "test-user-req-3",
+			RoleName:    "test-role",
+			ExpireAt:    time.Now().Add(24 * time.Hour),
+			ClientIP:    "192.168.1.100",
 		}
 
 		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)

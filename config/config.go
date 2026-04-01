@@ -412,14 +412,14 @@ func (s *StorageBlock) Config() map[string]string {
 }
 
 type ListenerBlock struct {
-	Type                  string   `hcl:"type,label"` // "tcp", "unix", etc.
-	Address               string   `hcl:"address"`
-	TLSCertFile           string   `hcl:"tls_cert_file,optional"`
-	TLSKeyFile            string   `hcl:"tls_key_file,optional"`
-	TLSClientCAFile       string   `hcl:"tls_client_ca_file,optional"`
-	TLSEnabled            bool     `hcl:"tls_enabled,optional"`
-	TLSRequireClientCert  *bool    `hcl:"tls_require_client_cert,optional"` // nil = default (true when tls_client_ca_file set)
-	TrustedProxies        []string `hcl:"trusted_proxies,optional"`         // CIDR ranges for LB cert forwarding
+	Type                 string   `hcl:"type,label"` // "tcp", "unix", etc.
+	Address              string   `hcl:"address"`
+	TLSCertFile          string   `hcl:"tls_cert_file,optional"`
+	TLSKeyFile           string   `hcl:"tls_key_file,optional"`
+	TLSClientCAFile      string   `hcl:"tls_client_ca_file,optional"`
+	TLSEnabled           bool     `hcl:"tls_enabled,optional"`
+	TLSRequireClientCert *bool    `hcl:"tls_require_client_cert,optional"` // nil = default (true when tls_client_ca_file set)
+	TrustedProxies       []string `hcl:"trusted_proxies,optional"`         // CIDR ranges for LB cert forwarding
 }
 
 func LoadConfig(configFile string) (*Config, error) {

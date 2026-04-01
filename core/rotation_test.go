@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,8 +26,8 @@ type mockRotatableDriver struct {
 	cleanupError     error
 	preparedConfig   map[string]string
 	cleanupConfig    map[string]string
-	activateAfter    time.Duration    // >0 triggers slow path
-	failUntilAttempt int32            // fail PrepareRotation until this many calls
+	activateAfter    time.Duration // >0 triggers slow path
+	failUntilAttempt int32         // fail PrepareRotation until this many calls
 }
 
 func (d *mockRotatableDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
@@ -384,9 +384,9 @@ func TestRotationManager_ExponentialBackoff(t *testing.T) {
 		{1, 20 * time.Second, 24 * time.Second},   // 20s + jitter
 		{2, 40 * time.Second, 48 * time.Second},   // 40s + jitter
 		{3, 80 * time.Second, 96 * time.Second},   // 80s + jitter
-		{4, 160 * time.Second, 192 * time.Second},  // 160s + jitter
-		{5, 300 * time.Second, 360 * time.Second},  // capped at 5m + jitter
-		{6, 300 * time.Second, 360 * time.Second},  // still capped
+		{4, 160 * time.Second, 192 * time.Second}, // 160s + jitter
+		{5, 300 * time.Second, 360 * time.Second}, // capped at 5m + jitter
+		{6, 300 * time.Second, 360 * time.Second}, // still capped
 	}
 
 	for _, tc := range tests {
@@ -543,9 +543,9 @@ type mockDriverFactory struct {
 	driver credential.SourceDriver
 }
 
-func (f *mockDriverFactory) Type() string                              { return "mock" }
-func (f *mockDriverFactory) ValidateConfig(map[string]string) error    { return nil }
-func (f *mockDriverFactory) SensitiveConfigFields() []string           { return nil }
+func (f *mockDriverFactory) Type() string                           { return "mock" }
+func (f *mockDriverFactory) ValidateConfig(map[string]string) error { return nil }
+func (f *mockDriverFactory) SensitiveConfigFields() []string        { return nil }
 func (f *mockDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	return f.driver, nil
 }
@@ -581,7 +581,7 @@ func createTestRotationManager(t *testing.T, driver *mockRotatableDriver) (*Rota
 	// Create rotation manager with storage
 	storage := NewBarrierView(core.barrier, rotationStoragePath)
 	rm := NewRotationManager(core, log.WithSubsystem("rotation"), storage)
-	rm.backoffScale = 0.001 // Scale down backoffs for fast tests (10s -> 10ms)
+	rm.backoffScale = 0.001                 // Scale down backoffs for fast tests (10s -> 10ms)
 	rm.tickInterval = 50 * time.Millisecond // Fast ticks for tests
 	rm.Start()
 

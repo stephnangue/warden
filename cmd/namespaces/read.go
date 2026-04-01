@@ -46,7 +46,6 @@ func init() {
 	ReadCmd.Flags().StringVar(&readFormat, "format", "table", "Output format (table or json)")
 }
 
-
 func runRead(cmd *cobra.Command, args []string) error {
 	path := args[0]
 

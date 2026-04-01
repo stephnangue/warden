@@ -18,7 +18,6 @@ import (
 	"github.com/hashicorp/errwrap"
 	wrapping "github.com/openbao/go-kms-wrapping/v2"
 	aeadwrapper "github.com/openbao/go-kms-wrapping/wrappers/aead/v2"
-	physPostgresql "github.com/stephnangue/warden/physical/postgresql"
 	"github.com/openbao/openbao/sdk/v2/logical"
 	phy "github.com/openbao/openbao/sdk/v2/physical"
 	physInmem "github.com/openbao/openbao/sdk/v2/physical/inmem"
@@ -38,6 +37,7 @@ import (
 	log "github.com/stephnangue/warden/logger"
 	wardenlogical "github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/physical"
+	physPostgresql "github.com/stephnangue/warden/physical/postgresql"
 	"github.com/stephnangue/warden/provider/anthropic"
 	"github.com/stephnangue/warden/provider/aws"
 	"github.com/stephnangue/warden/provider/azure"
@@ -102,15 +102,15 @@ Usage: warden server [options]
 	providers = map[string]wardenlogical.Factory{
 		"anthropic": anthropic.Factory,
 		"aws":       aws.Factory,
-		"azure":   azure.Factory,
-		"gcp":     gcp.Factory,
-		"github":  github.Factory,
-		"gitlab":  gitlab.Factory,
-		"mistral": mistral.Factory,
-		"openai":  openai.Factory,
-		"slack":   slack.Factory,
-		"vault":   vault.Factory,
-		"rds":     rds.Factory,
+		"azure":     azure.Factory,
+		"gcp":       gcp.Factory,
+		"github":    github.Factory,
+		"gitlab":    gitlab.Factory,
+		"mistral":   mistral.Factory,
+		"openai":    openai.Factory,
+		"slack":     slack.Factory,
+		"vault":     vault.Factory,
+		"rds":       rds.Factory,
 	}
 
 	authMethods = map[string]wardenlogical.Factory{
