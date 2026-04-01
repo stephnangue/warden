@@ -264,9 +264,9 @@ func (s *CredentialConfigStore) loadAllSources(namespaceID string) ([]*credentia
 		source, err := s.loadSource(namespaceID, key)
 		if err != nil {
 			s.logger.Warn("failed to load source from storage",
-			logger.String("namespace", namespaceID),
-			logger.String("source_name", key),
-			logger.Err(err),
+				logger.String("namespace", namespaceID),
+				logger.String("source_name", key),
+				logger.Err(err),
 			)
 			continue
 		}

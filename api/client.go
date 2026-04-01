@@ -24,23 +24,23 @@ import (
 )
 
 const (
-	EnvWardenAddress          = "WARDEN_ADDR"
-	EnvWardenCACert           = "WARDEN_CACERT"
-	EnvWardenCACertBytes      = "WARDEN_CACERT_BYTES"
-	EnvWardenCAPath           = "WARDEN_CAPATH"
-	EnvWardenClientCert       = "WARDEN_CLIENT_CERT"
-	EnvWardenClientKey        = "WARDEN_CLIENT_KEY"
-	EnvWardenClientTimeout    = "WARDEN_CLIENT_TIMEOUT"
-	EnvWardenSRVLookup        = "WARDEN_SRV_LOOKUP"
-	EnvWardenSkipVerify       = "WARDEN_SKIP_VERIFY"
-	EnvWardenTLSServerName    = "WARDEN_TLS_SERVER_NAME"
-	EnvWardenMaxRetries       = "WARDEN_MAX_RETRIES"
-	EnvWardenToken            = "WARDEN_TOKEN"
-	EnvWardenNamespace        = "WARDEN_NAMESPACE"
-	EnvRateLimit              = "WARDEN_RATE_LIMIT"
-	EnvHTTPProxy              = "WARDEN_HTTP_PROXY"
-	EnvWardenProxyAddr        = "WARDEN_PROXY_ADDR"
-	EnvWardenRole             = "WARDEN_ROLE"
+	EnvWardenAddress       = "WARDEN_ADDR"
+	EnvWardenCACert        = "WARDEN_CACERT"
+	EnvWardenCACertBytes   = "WARDEN_CACERT_BYTES"
+	EnvWardenCAPath        = "WARDEN_CAPATH"
+	EnvWardenClientCert    = "WARDEN_CLIENT_CERT"
+	EnvWardenClientKey     = "WARDEN_CLIENT_KEY"
+	EnvWardenClientTimeout = "WARDEN_CLIENT_TIMEOUT"
+	EnvWardenSRVLookup     = "WARDEN_SRV_LOOKUP"
+	EnvWardenSkipVerify    = "WARDEN_SKIP_VERIFY"
+	EnvWardenTLSServerName = "WARDEN_TLS_SERVER_NAME"
+	EnvWardenMaxRetries    = "WARDEN_MAX_RETRIES"
+	EnvWardenToken         = "WARDEN_TOKEN"
+	EnvWardenNamespace     = "WARDEN_NAMESPACE"
+	EnvRateLimit           = "WARDEN_RATE_LIMIT"
+	EnvHTTPProxy           = "WARDEN_HTTP_PROXY"
+	EnvWardenProxyAddr     = "WARDEN_PROXY_ADDR"
+	EnvWardenRole          = "WARDEN_ROLE"
 
 	// NamespaceHeaderName is the header name used to specify the namespace
 	NamespaceHeaderName = "X-Warden-Namespace"
@@ -488,11 +488,11 @@ func parseRateLimit(val string) (rate float64, burst int, err error) {
 
 // Client is the client to the Warden API. Create a client with NewClient.
 type Client struct {
-	modifyLock         sync.RWMutex
-	addr               *url.URL
-	config             *Config
-	token              string
-	headers            http.Header
+	modifyLock sync.RWMutex
+	addr       *url.URL
+	config     *Config
+	token      string
+	headers    http.Header
 }
 
 // NewClient returns a new client for the given configuration.
@@ -915,7 +915,6 @@ func (c *Client) Headers() http.Header {
 
 	return ret
 }
-
 
 // SetNamespace sets the namespace supplied either via the environment variable
 // or via the command line.

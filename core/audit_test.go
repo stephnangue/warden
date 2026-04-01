@@ -8,9 +8,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/internal/locking"
 	"github.com/stephnangue/warden/internal/namespace"
-	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -23,17 +23,17 @@ func createMockCoreForAudit() *Core {
 	router := NewRouter(log)
 
 	return &Core{
-		logger:        log,
-		router:        router,
-		mounts:        NewMountTable(),
-		audit:         NewMountTable(),
-		mountsLock:    locking.DeadlockRWMutex{},
-		auditLock:     sync.RWMutex{},
-		authMethods:   make(map[string]logical.Factory),
-		providers:     make(map[string]logical.Factory),
-		auditDevices:  make(map[string]audit.Factory),
-		tokenStore:    nil, // Not needed for audit tests
-		auditManager:  newMockAuditManagerFull(),
+		logger:       log,
+		router:       router,
+		mounts:       NewMountTable(),
+		audit:        NewMountTable(),
+		mountsLock:   locking.DeadlockRWMutex{},
+		auditLock:    sync.RWMutex{},
+		authMethods:  make(map[string]logical.Factory),
+		providers:    make(map[string]logical.Factory),
+		auditDevices: make(map[string]audit.Factory),
+		tokenStore:   nil, // Not needed for audit tests
+		auditManager: newMockAuditManagerFull(),
 	}
 }
 

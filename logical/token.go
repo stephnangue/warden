@@ -24,8 +24,8 @@ type TokenEntry struct {
 	CreatedByReqID string    // Request ID that created token
 
 	// Authorization
-	PrincipalID  string // Associated principal
-	RoleName     string // Associated role
+	PrincipalID string // Associated principal
+	RoleName    string // Associated role
 
 	// Lifecycle
 	ExpireAt time.Time // Expiration time
@@ -37,11 +37,11 @@ type TokenEntry struct {
 	mu   sync.RWMutex
 	used bool // One-time use flag
 
-    //Policies attached to this token 
-    Policies       []string
+	//Policies attached to this token
+	Policies []string
 
-    // Credential spec for this token if any
-    CredentialSpec string
+	// Credential spec for this token if any
+	CredentialSpec string
 }
 
 // MarkUsed marks the token as used (for one-time use tokens)

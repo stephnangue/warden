@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )

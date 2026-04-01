@@ -10,7 +10,6 @@ import (
 	"github.com/stephnangue/warden/logger"
 )
 
-
 // prepareJob implements fairshare.Job for the PREPARE stage of credential rotation.
 //
 // On success it either:

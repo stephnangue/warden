@@ -98,8 +98,8 @@ func TestParseConfig(t *testing.T) {
 
 	t.Run("auth settings", func(t *testing.T) {
 		config := parseConfig(map[string]any{
-			"auto_auth_path":   "auth/jwt/",
-			"default_role":     "reader",
+			"auto_auth_path": "auth/jwt/",
+			"default_role":   "reader",
 		})
 		assert.Equal(t, "auth/jwt/", config.AutoAuthPath)
 		assert.Equal(t, "reader", config.DefaultAuthRole)

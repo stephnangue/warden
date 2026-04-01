@@ -28,10 +28,10 @@ type Backend interface {
 	Config() map[string]any
 
 	// Return the backend type
-    Type() string
+	Type() string
 
 	// Return the backend class
-    Class() BackendClass
+	Class() BackendClass
 
 	HandleExistenceCheck(ctx context.Context, req *Request) (checkFound bool, exists bool, err error)
 
@@ -43,11 +43,11 @@ type Backend interface {
 	// at the end.
 	SpecialPaths() *Paths
 
-    // ExtractToken extracts token value from request (just extraction, no validation).
-    // Returns empty string if no token found.
+	// ExtractToken extracts token value from request (just extraction, no validation).
+	// Returns empty string if no token found.
 	// Each provider has it own way to pass token.
 	// This will be used by the core to extract the provided token.
-    ExtractToken(r *http.Request) string
+	ExtractToken(r *http.Request) string
 }
 
 // BackendClass is the class of backend that is being implemented
@@ -56,10 +56,10 @@ type BackendClass uint32
 // The these are the class of backends that can be derived from
 // logical.Backend
 const (
-	ClassUnknown    BackendClass = 0 // This is also the zero-value for BackendClass
-	ClassProvider   BackendClass = 1
-	ClassAuth       BackendClass = 2
-	ClassSystem     BackendClass = 3
+	ClassUnknown  BackendClass = 0 // This is also the zero-value for BackendClass
+	ClassProvider BackendClass = 1
+	ClassAuth     BackendClass = 2
+	ClassSystem   BackendClass = 3
 )
 
 // Stringer implementation
@@ -94,7 +94,6 @@ type BackendConfig struct {
 	// multiple times only keeps one hook. Use this for process-level cleanup like
 	// shared transport shutdown that must not run on individual unmount.
 	RegisterShutdownHook func(key string, fn func())
-
 }
 
 // Factory is the factory function to create a logical backend.

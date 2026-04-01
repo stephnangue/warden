@@ -16,7 +16,6 @@ import (
 	"github.com/stephnangue/warden/logger"
 )
 
-
 // gitlabMaxResponseBodySize limits response body reads to prevent OOM
 const gitlabMaxResponseBodySize = 1 << 20 // 1MB
 
@@ -642,4 +641,3 @@ func (d *GitLabDriver) getOAuth2Token(ctx context.Context) (string, error) {
 
 	return tokenResp.AccessToken, nil
 }
-

@@ -263,10 +263,10 @@ func (f *AzureDriverFactory) Create(config map[string]string, log *logger.GatedL
 			Type:   credential.SourceTypeAzure,
 			Config: config,
 		},
-		logger:     log.WithSubsystem(credential.SourceTypeAzure),
-		tokenCache: make(map[string]*cachedAzureToken),
-		objectIDCache:  make(map[string]string),
-		httpClient:     &http.Client{Timeout: 30 * time.Second},
+		logger:        log.WithSubsystem(credential.SourceTypeAzure),
+		tokenCache:    make(map[string]*cachedAzureToken),
+		objectIDCache: make(map[string]string),
+		httpClient:    &http.Client{Timeout: 30 * time.Second},
 	}
 
 	// Validate source credentials by acquiring a token

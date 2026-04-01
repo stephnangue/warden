@@ -93,7 +93,7 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 				Summary:  "Configure JWT authentication",
 			},
 		},
-		HelpSynopsis:    "Configure JWT authentication",
+		HelpSynopsis: "Configure JWT authentication",
 		HelpDescription: `This endpoint configures the JWT/OIDC authentication method.
 
 Set 'mode' to 'jwt' with a 'jwks_url' or 'jwt_validation_pubkeys' for static
@@ -132,11 +132,11 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 			"bound_subject":          b.config.BoundSubject,
 			"bound_claims":           b.config.BoundClaims,
 			"claim_mappings":         b.config.ClaimMappings,
-			"user_claim":   b.config.UserClaim,
-			"groups_claim":        b.config.GroupsClaim,
-			"group_policy_prefix": b.config.GroupPolicyPrefix,
-			"token_ttl":    b.config.TokenTTL.String(),
-			"default_role": b.config.DefaultRole,
+			"user_claim":             b.config.UserClaim,
+			"groups_claim":           b.config.GroupsClaim,
+			"group_policy_prefix":    b.config.GroupPolicyPrefix,
+			"token_ttl":              b.config.TokenTTL.String(),
+			"default_role":           b.config.DefaultRole,
 		},
 	}, nil
 }
@@ -202,9 +202,9 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 			"claim_mappings":         b.config.ClaimMappings,
 			"user_claim":             b.config.UserClaim,
 			"groups_claim":           b.config.GroupsClaim,
-			"group_policy_prefix":   b.config.GroupPolicyPrefix,
-			"token_ttl":    b.config.TokenTTL.String(),
-			"default_role": b.config.DefaultRole,
+			"group_policy_prefix":    b.config.GroupPolicyPrefix,
+			"token_ttl":              b.config.TokenTTL.String(),
+			"default_role":           b.config.DefaultRole,
 		}
 		b.configMu.RUnlock()
 

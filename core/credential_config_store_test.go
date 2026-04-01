@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/openbao/openbao/sdk/v2/physical/inmem"
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -83,11 +83,11 @@ func TestCredentialConfigStore_CreateSpec(t *testing.T) {
 	}
 
 	spec := &credential.CredSpec{
-		Name:       "test-spec",
-		Type:       "vault_token",
-		Source:"test-source",
-		MinTTL:     time.Hour,
-		MaxTTL:     24 * time.Hour,
+		Name:   "test-spec",
+		Type:   "vault_token",
+		Source: "test-source",
+		MinTTL: time.Hour,
+		MaxTTL: 24 * time.Hour,
 	}
 
 	// Create spec
@@ -134,9 +134,9 @@ func TestCredentialConfigStore_CreateSpecDuplicate(t *testing.T) {
 	}
 
 	spec := &credential.CredSpec{
-		Name:       "test-spec",
-		Type:       "vault_token",
-		Source:"test-source",
+		Name:   "test-spec",
+		Type:   "vault_token",
+		Source: "test-source",
 	}
 
 	// Create first spec
@@ -147,9 +147,9 @@ func TestCredentialConfigStore_CreateSpecDuplicate(t *testing.T) {
 
 	// Try to create duplicate (same name, different type/source)
 	spec2 := &credential.CredSpec{
-		Name:       "test-spec",
-		Type:       "aws_access_keys",
-		Source:"test-source", // Use same source
+		Name:   "test-spec",
+		Type:   "aws_access_keys",
+		Source: "test-source", // Use same source
 	}
 
 	err = store.CreateSpec(ctx, spec2)
@@ -172,11 +172,11 @@ func TestCredentialConfigStore_UpdateSpec(t *testing.T) {
 	}
 
 	spec := &credential.CredSpec{
-		Name:       "test-spec",
-		Type:       "vault_token",
-		Source:"test-source",
-		MinTTL:     time.Hour,
-		MaxTTL:     24 * time.Hour,
+		Name:   "test-spec",
+		Type:   "vault_token",
+		Source: "test-source",
+		MinTTL: time.Hour,
+		MaxTTL: 24 * time.Hour,
 	}
 
 	// Create spec
@@ -220,9 +220,9 @@ func TestCredentialConfigStore_DeleteSpec(t *testing.T) {
 	}
 
 	spec := &credential.CredSpec{
-		Name:       "test-spec",
-		Type:       "vault_token",
-		Source:"test-source",
+		Name:   "test-spec",
+		Type:   "vault_token",
+		Source: "test-source",
 	}
 
 	// Create spec
@@ -274,9 +274,9 @@ func TestCredentialConfigStore_ListSpecs(t *testing.T) {
 	// Create multiple specs
 	for i := 1; i <= 3; i++ {
 		spec := &credential.CredSpec{
-			Name:       "spec-" + string(rune('0'+i)),
-			Type:       "vault_token",
-			Source:"test-source",
+			Name:   "spec-" + string(rune('0'+i)),
+			Type:   "vault_token",
+			Source: "test-source",
 		}
 		if err := store.CreateSpec(ctx, spec); err != nil {
 			t.Fatalf("failed to create spec %d: %v", i, err)
@@ -399,9 +399,9 @@ func TestCredentialConfigStore_CheckSourceReferences(t *testing.T) {
 	// Create specs referencing the source
 	for i := 1; i <= 2; i++ {
 		spec := &credential.CredSpec{
-			Name:       "spec-" + string(rune('0'+i)),
-			Type:       "vault_token",
-			Source:"test-source",
+			Name:   "spec-" + string(rune('0'+i)),
+			Type:   "vault_token",
+			Source: "test-source",
 		}
 		if err := store.CreateSpec(ctx, spec); err != nil {
 			t.Fatalf("failed to create spec %d: %v", i, err)
@@ -410,9 +410,9 @@ func TestCredentialConfigStore_CheckSourceReferences(t *testing.T) {
 
 	// Create spec NOT referencing the source
 	otherSpec := &credential.CredSpec{
-		Name:       "other-spec",
-		Type:       "vault_token",
-		Source:"other-source",
+		Name:   "other-spec",
+		Type:   "vault_token",
+		Source: "other-source",
 	}
 	if err := store.CreateSpec(ctx, otherSpec); err != nil {
 		t.Fatalf("failed to create other spec: %v", err)
@@ -474,9 +474,9 @@ func TestCredentialConfigStore_NamespaceIsolation(t *testing.T) {
 
 	// Create spec in namespace 1
 	spec1 := &credential.CredSpec{
-		Name:       "shared-name",
-		Type:       "vault_token",
-		Source:"source1",
+		Name:   "shared-name",
+		Type:   "vault_token",
+		Source: "source1",
 	}
 	if err := store.CreateSpec(ctx1, spec1); err != nil {
 		t.Fatalf("failed to create spec in ns1: %v", err)
@@ -484,9 +484,9 @@ func TestCredentialConfigStore_NamespaceIsolation(t *testing.T) {
 
 	// Create spec with same name in namespace 2
 	spec2 := &credential.CredSpec{
-		Name:       "shared-name",
-		Type:       "aws_access_keys",
-		Source:"source2",
+		Name:   "shared-name",
+		Type:   "aws_access_keys",
+		Source: "source2",
 	}
 	if err := store.CreateSpec(ctx2, spec2); err != nil {
 		t.Fatalf("failed to create spec in ns2: %v", err)
@@ -526,9 +526,9 @@ func TestCredentialConfigStore_LoadFromStorage(t *testing.T) {
 
 	// Create spec
 	spec := &credential.CredSpec{
-		Name:       "test-spec",
-		Type:       "vault_token",
-		Source:"test-source",
+		Name:   "test-spec",
+		Type:   "vault_token",
+		Source: "test-source",
 	}
 	if err := store.CreateSpec(ctx, spec); err != nil {
 		t.Fatalf("failed to create spec: %v", err)
@@ -587,9 +587,9 @@ func TestCredentialConfigStore_CacheEviction(t *testing.T) {
 	// (depends on cache configuration)
 	for i := 0; i < 100; i++ {
 		spec := &credential.CredSpec{
-			Name:       "spec-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
-			Type:       "vault_token",
-			Source:"test-source",
+			Name:   "spec-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
+			Type:   "vault_token",
+			Source: "test-source",
 		}
 		if err := store.CreateSpec(ctx, spec); err != nil {
 			t.Fatalf("failed to create spec %d: %v", i, err)
@@ -770,22 +770,22 @@ func TestCredentialConfigStore_ValidateSpec_TypeValidation(t *testing.T) {
 		{
 			name: "valid credential type",
 			spec: &credential.CredSpec{
-				Name:       "valid-spec",
-				Type:       "test_cred_type",
-				Source:"test-source",
-				MinTTL:     5 * time.Minute,
-				MaxTTL:     1 * time.Hour,
+				Name:   "valid-spec",
+				Type:   "test_cred_type",
+				Source: "test-source",
+				MinTTL: 5 * time.Minute,
+				MaxTTL: 1 * time.Hour,
 			},
 			expectError: false,
 		},
 		{
 			name: "invalid credential type",
 			spec: &credential.CredSpec{
-				Name:       "invalid-spec",
-				Type:       "nonexistent_type",
-				Source:"test-source",
-				MinTTL:     5 * time.Minute,
-				MaxTTL:     1 * time.Hour,
+				Name:   "invalid-spec",
+				Type:   "nonexistent_type",
+				Source: "test-source",
+				MinTTL: 5 * time.Minute,
+				MaxTTL: 1 * time.Hour,
 			},
 			expectError: true,
 			errorMsg:    "unknown credential type",
@@ -793,11 +793,11 @@ func TestCredentialConfigStore_ValidateSpec_TypeValidation(t *testing.T) {
 		{
 			name: "empty credential type",
 			spec: &credential.CredSpec{
-				Name:       "empty-type-spec",
-				Type:       "",
-				Source:"test-source",
-				MinTTL:     5 * time.Minute,
-				MaxTTL:     1 * time.Hour,
+				Name:   "empty-type-spec",
+				Type:   "",
+				Source: "test-source",
+				MinTTL: 5 * time.Minute,
+				MaxTTL: 1 * time.Hour,
 			},
 			expectError: true,
 			errorMsg:    "spec type cannot be empty",
@@ -805,11 +805,11 @@ func TestCredentialConfigStore_ValidateSpec_TypeValidation(t *testing.T) {
 		{
 			name: "invalid source reference",
 			spec: &credential.CredSpec{
-				Name:       "bad-source-spec",
-				Type:       "test_cred_type",
-				Source:"nonexistent-source",
-				MinTTL:     5 * time.Minute,
-				MaxTTL:     1 * time.Hour,
+				Name:   "bad-source-spec",
+				Type:   "test_cred_type",
+				Source: "nonexistent-source",
+				MinTTL: 5 * time.Minute,
+				MaxTTL: 1 * time.Hour,
 			},
 			expectError: true,
 			errorMsg:    "source 'nonexistent-source' not found",
@@ -1009,9 +1009,9 @@ func TestCredentialConfigStore_ValidateSpec_SourceParamsValidation(t *testing.T)
 		{
 			name: "valid source params",
 			spec: &credential.CredSpec{
-				Name:       "valid-params-spec",
-				Type:       "validating_type",
-				Source:"test-source",
+				Name:   "valid-params-spec",
+				Type:   "validating_type",
+				Source: "test-source",
 				Config: map[string]string{
 					"required_field": "value",
 				},
@@ -1206,9 +1206,9 @@ func TestCredentialConfigStore_BuiltinLocalSource(t *testing.T) {
 
 	t.Run("Can create spec using built-in local source", func(t *testing.T) {
 		spec := &credential.CredSpec{
-			Name:       "test-local-spec",
-			Type:       "vault_token",
-			Source:"local",
+			Name:   "test-local-spec",
+			Type:   "vault_token",
+			Source: "local",
 			Config: map[string]string{
 				"kv2_mount":   "secret",
 				"secret_path": "db/creds",

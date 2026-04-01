@@ -169,8 +169,8 @@ func (b *certAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reque
 			"allowed_organizations":        role.AllowedOrganizations,
 			"certificate":                  role.Certificate,
 			"token_policies":               role.TokenPolicies,
-			"token_ttl":       role.TokenTTL,
-			"cred_spec_name": role.CredSpecName,
+			"token_ttl":                    role.TokenTTL,
+			"cred_spec_name":               role.CredSpecName,
 			"principal_claim":              role.PrincipalClaim,
 		},
 	}, nil

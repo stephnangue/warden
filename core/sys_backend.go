@@ -40,7 +40,7 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 				"audit-hash/*",
 			},
 		},
-		Paths:        b.paths(),
+		Paths: b.paths(),
 	}
 
 	return b
@@ -87,7 +87,6 @@ func (b *SystemBackend) respondCreated(data map[string]any) *logical.Response {
 		Data:       data,
 	}
 }
-
 
 // ValidateMountPath performs custom validation for mount paths
 func ValidateMountPath(path string) error {

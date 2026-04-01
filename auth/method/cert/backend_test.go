@@ -52,4 +52,3 @@ func TestFactory_SpecialPaths(t *testing.T) {
 	require.NotNil(t, paths)
 	assert.Contains(t, paths.Unauthenticated, "login")
 }
-

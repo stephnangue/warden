@@ -13,9 +13,9 @@ import (
 
 	"github.com/hashicorp/go-uuid"
 	"github.com/mitchellh/copystructure"
-	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/openbao/openbao/sdk/v2/helper/jsonutil"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )

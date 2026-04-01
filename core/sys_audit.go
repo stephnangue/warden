@@ -9,8 +9,8 @@ import (
 
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 )
 
 // generateHMACSalt generates a cryptographically secure random salt for HMAC operations.

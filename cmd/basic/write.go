@@ -154,4 +154,3 @@ func inferType(value string) interface{} {
 	// Default to string
 	return value
 }
-

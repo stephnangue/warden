@@ -6,8 +6,8 @@ import (
 	"maps"
 	"strings"
 
-	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -192,4 +192,3 @@ func (b *SystemBackend) handleProviderList(ctx context.Context, req *logical.Req
 		"mounts": mounts,
 	}), nil
 }
-

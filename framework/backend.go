@@ -55,13 +55,12 @@ type Backend struct {
 	// config stores the backend configuration
 	config  map[string]any
 	once    sync.Once
-	pathsRe         []*regexp.Regexp
-	logger          logger.GatedLogger
+	pathsRe []*regexp.Regexp
+	logger  logger.GatedLogger
 }
 
 // Ensure Backend implements logical.Backend
 var _ logical.Backend = (*Backend)(nil)
-
 
 // OperationFunc is the callback called for an operation on a path.
 type OperationFunc func(context.Context, *logical.Request, *FieldData) (*logical.Response, error)
@@ -247,7 +246,6 @@ func (b *Backend) Setup(ctx context.Context, config *logical.BackendConfig) erro
 	b.logger = *config.Logger
 	return nil
 }
-
 
 // Config returns the backend configuration
 func (b *Backend) Config() map[string]any {

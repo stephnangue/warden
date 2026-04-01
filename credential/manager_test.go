@@ -57,13 +57,13 @@ func (m *mockConfigStore) AddSource(source *CredSource) {
 
 // mockSourceDriver implements SourceDriver for testing
 type mockSourceDriver struct {
-	driverType     string
-	mintFunc       func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error)
-	revokeFunc     func(ctx context.Context, leaseID string) error
-	revokeCalls    atomic.Int32
-	mintCalls      atomic.Int32
-	lastRevokeID   string
-	lastRevokeMu   sync.Mutex
+	driverType   string
+	mintFunc     func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error)
+	revokeFunc   func(ctx context.Context, leaseID string) error
+	revokeCalls  atomic.Int32
+	mintCalls    atomic.Int32
+	lastRevokeID string
+	lastRevokeMu sync.Mutex
 }
 
 func newMockSourceDriver(driverType string) *mockSourceDriver {

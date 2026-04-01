@@ -14,8 +14,8 @@ type Auth struct {
 	// is associated with.
 	Policies []string `json:"policies" mapstructure:"policies" structs:"policies"`
 
-    // Credential spec as a result of the authentification if any
-    CredentialSpec string
+	// Credential spec as a result of the authentification if any
+	CredentialSpec string
 
 	// ClientToken is the token that is generated for the authentication.
 	ClientToken string `json:"client_token" mapstructure:"client_token" structs:"client_token"`
@@ -34,18 +34,17 @@ type Auth struct {
 	// requesting path.
 	PolicyResults *sdklogical.PolicyResults `json:"policy_results"`
 
-	PrincipalID  string 
+	PrincipalID string
 
-	RoleName     string
+	RoleName string
 
-	TokenTTL     time.Duration
+	TokenTTL time.Duration
 
-	NamespaceID   string // Namespace UUID
+	NamespaceID string // Namespace UUID
 
 	NamespacePath string // Namespace path
 
 	ClientIP string
-
 }
 
 // AuthData contains the authentication data used to generate a token.

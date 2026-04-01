@@ -449,8 +449,8 @@ func TestPathRole_MaxAgeValidation(t *testing.T) {
 					"max_age": tc.maxAge,
 				},
 				Schema: map[string]*framework.FieldSchema{
-					"name":    {Type: framework.TypeString},
-					"max_age": {Type: framework.TypeString},
+					"name":       {Type: framework.TypeString},
+					"max_age":    {Type: framework.TypeString},
 					"token_ttl":  {Type: framework.TypeDurationSecond, Default: 3600},
 					"user_claim": {Type: framework.TypeString, Default: "sub"},
 				},
@@ -491,4 +491,3 @@ func TestPathRole_MaxAgeRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 30*time.Minute, maxAge)
 }
-

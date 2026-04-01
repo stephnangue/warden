@@ -118,11 +118,11 @@ func TestCredential_RemainingTTL(t *testing.T) {
 // TestCredential_ShouldRotate tests rotation threshold logic
 func TestCredential_ShouldRotate(t *testing.T) {
 	tests := []struct {
-		name       string
-		leaseTTL   time.Duration
-		issuedAt   time.Time
-		revocable  bool
-		threshold  float64
+		name         string
+		leaseTTL     time.Duration
+		issuedAt     time.Time
+		revocable    bool
+		threshold    float64
 		shouldRotate bool
 	}{
 		{
@@ -188,12 +188,12 @@ func TestCredential_ShouldRotate(t *testing.T) {
 func TestCredential_Metadata(t *testing.T) {
 	now := time.Now()
 	cred := &Credential{
-		Type:       TypeVaultToken,
-		Category:   CategoryDatabase,
-		LeaseTTL:   time.Hour,
-		LeaseID:    "lease-123",
-		TokenID:    "token-456",
-		IssuedAt:   now,
+		Type:     TypeVaultToken,
+		Category: CategoryDatabase,
+		LeaseTTL: time.Hour,
+		LeaseID:  "lease-123",
+		TokenID:  "token-456",
+		IssuedAt: now,
 		Data: map[string]string{
 			"username": "testuser",
 			"password": "testpass",

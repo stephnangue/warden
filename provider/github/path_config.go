@@ -39,7 +39,7 @@ func (b *githubBackend) pathConfig() *framework.Path {
 			},
 			"auto_auth_path": {
 				Type:        framework.TypeString,
-				Description: "Path to auth mount for implicit authentication (e.g., 'auth/jwt/', 'auth/cert/')" ,
+				Description: "Path to auth mount for implicit authentication (e.g., 'auth/jwt/', 'auth/cert/')",
 			},
 			"default_role": {
 				Type:        framework.TypeString,

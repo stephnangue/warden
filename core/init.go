@@ -11,10 +11,10 @@ import (
 
 	"github.com/hashicorp/go-uuid"
 	wrapping "github.com/openbao/go-kms-wrapping/v2"
-	"github.com/stephnangue/warden/internal/namespace"
-	"github.com/stephnangue/warden/internal/pgpkeys"
 	"github.com/openbao/openbao/sdk/v2/helper/shamir"
 	"github.com/stephnangue/warden/core/seal"
+	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/internal/pgpkeys"
 	"github.com/stephnangue/warden/logger"
 )
 

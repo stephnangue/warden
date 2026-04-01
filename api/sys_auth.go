@@ -125,6 +125,6 @@ func (c *Sys) AuthInfoWithContext(ctx context.Context, path string) (*AuthMountO
 
 // Rather than duplicate, we can use modern Go's type aliasing
 type (
-	AuthMountInput   = MountInput
-	AuthMountOutput   = MountOutput
+	AuthMountInput  = MountInput
+	AuthMountOutput = MountOutput
 )

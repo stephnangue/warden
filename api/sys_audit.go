@@ -66,7 +66,6 @@ func (c *Sys) EnableAuditWithContext(ctx context.Context, path string, auditInpu
 	return nil
 }
 
-
 func (c *Sys) DisableAudit(path string) error {
 	return c.DisableAuditWithContext(context.Background(), path)
 }

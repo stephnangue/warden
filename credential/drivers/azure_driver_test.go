@@ -277,8 +277,8 @@ func TestAzureDriver_PrepareSpecRotation_MissingClientID(t *testing.T) {
 	driver := newTestAzureDriver()
 
 	spec := &credential.CredSpec{
-		Name: "test-spec",
-		Type: credential.TypeAzureBearerToken,
+		Name:   "test-spec",
+		Type:   credential.TypeAzureBearerToken,
 		Config: map[string]string{
 			// Missing client_id
 		},
@@ -415,7 +415,7 @@ func TestValidateTenantID(t *testing.T) {
 		{"ABCDEF12-3456-7890-ABCD-EF1234567890", false},
 		{"not-a-uuid", true},
 		{"", true},
-		{"00000000-0000-0000-0000-00000000000", true},  // too short
+		{"00000000-0000-0000-0000-00000000000", true},   // too short
 		{"00000000-0000-0000-0000-0000000000001", true}, // too long
 		{"../../../etc/passwd", true},
 	}
@@ -428,4 +428,3 @@ func TestValidateTenantID(t *testing.T) {
 		}
 	}
 }
-

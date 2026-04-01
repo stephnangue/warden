@@ -182,14 +182,14 @@ func (c *Sys) MountInfoWithContext(ctx context.Context, path string) (*MountOutp
 }
 
 type MountInput struct {
-	Type                  string            `json:"type"`
-	Description           string            `json:"description"`
-	Config                map[string]any    `json:"config" mapstructure:"config"`
+	Type        string         `json:"type"`
+	Description string         `json:"description"`
+	Config      map[string]any `json:"config" mapstructure:"config"`
 }
 
 type MountOutput struct {
-	Type                  string            `json:"type"`
-	Description           string            `json:"description"`
-	Accessor              string            `json:"accessor"`
-	Config                map[string]any    `json:"config" mapstructure:"config"`
+	Type        string         `json:"type"`
+	Description string         `json:"description"`
+	Accessor    string         `json:"accessor"`
+	Config      map[string]any `json:"config" mapstructure:"config"`
 }
