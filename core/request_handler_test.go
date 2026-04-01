@@ -790,7 +790,7 @@ func (m *mockTransparentModeProvider) GetAutoAuthPath() string {
 	return m.autoAuthPath
 }
 
-func (m *mockTransparentModeProvider) GetAuthRole(path string) string {
+func (m *mockTransparentModeProvider) GetAuthRole(path string, _ *logical.Request) string {
 	// Simple pattern matching for testing: role/{role}/gateway...
 	if strings.HasPrefix(path, "role/") {
 		parts := strings.Split(path, "/")
@@ -1534,6 +1534,85 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 
 		_, _, _ = core.handleNonLoginRequest(nsCtx, req)
 		assert.True(t, req.Transparent)
+	})
+
+	t.Run("role query param takes precedence over X-Warden-Role header", func(t *testing.T) {
+		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJwcmVjLXVzZXIifQ.prec-sig"
+
+		// Pre-create cached tokens for both roles
+		for _, roleName := range []string{"from-query", "from-header"} {
+			authData := &AuthData{
+				TokenValue:     sampleJWT,
+				RoleName:       roleName,
+				PrincipalID:    "prec-user",
+				ExpireAt:       time.Now().Add(24 * time.Hour),
+				Policies:       []string{"default"},
+				CredentialSpec: "test-spec",
+			}
+			_, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+			require.NoError(t, err)
+		}
+
+		ns := &namespace.Namespace{
+			ID:   "test-ns-prec",
+			Path: "prec/",
+			CustomMetadata: map[string]string{
+				"auto_auth_path": "auth/jwt/",
+			},
+		}
+		nsCtx := namespace.ContextWithNamespace(context.Background(), ns)
+
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/cred/sources?role=from-query", nil)
+		httpReq.Header.Set("Authorization", "Bearer "+sampleJWT)
+		httpReq.Header.Set("X-Warden-Role", "from-header")
+		req := &logical.Request{
+			Path:        "sys/cred/sources",
+			Operation:   logical.ReadOperation,
+			HTTPRequest: httpReq,
+		}
+
+		_, _, _ = core.handleNonLoginRequest(nsCtx, req)
+		assert.True(t, req.Transparent)
+		require.NotNil(t, req.TokenEntry())
+		assert.Equal(t, "from-query", req.TokenEntry().RoleName)
+	})
+
+	t.Run("X-Warden-Role header used when no role query param", func(t *testing.T) {
+		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWxsYmFjay11c2VyIn0.fallback-sig"
+
+		authData := &AuthData{
+			TokenValue:     sampleJWT,
+			RoleName:       "from-header",
+			PrincipalID:    "fallback-user",
+			ExpireAt:       time.Now().Add(24 * time.Hour),
+			Policies:       []string{"default"},
+			CredentialSpec: "test-spec",
+		}
+		_, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+		require.NoError(t, err)
+
+		ns := &namespace.Namespace{
+			ID:   "test-ns-fallback",
+			Path: "fallback/",
+			CustomMetadata: map[string]string{
+				"auto_auth_path": "auth/jwt/",
+			},
+		}
+		nsCtx := namespace.ContextWithNamespace(context.Background(), ns)
+
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/cred/sources", nil)
+		httpReq.Header.Set("Authorization", "Bearer "+sampleJWT)
+		httpReq.Header.Set("X-Warden-Role", "from-header")
+		req := &logical.Request{
+			Path:        "sys/cred/sources",
+			Operation:   logical.ReadOperation,
+			HTTPRequest: httpReq,
+		}
+
+		_, _, _ = core.handleNonLoginRequest(nsCtx, req)
+		assert.True(t, req.Transparent)
+		require.NotNil(t, req.TokenEntry())
+		assert.Equal(t, "from-header", req.TokenEntry().RoleName)
 	})
 }
 

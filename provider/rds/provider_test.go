@@ -149,7 +149,7 @@ func TestTransparentModeProvider(t *testing.T) {
 	t.Run("disabled by default", func(t *testing.T) {
 		assert.False(t, b.IsTransparentMode())
 		assert.Equal(t, "", b.GetAutoAuthPath())
-		assert.Equal(t, "", b.GetAuthRole("access/readonly"))
+		assert.Equal(t, "", b.GetAuthRole("access/readonly", nil))
 	})
 
 	t.Run("enabled after config with auto_auth_path", func(t *testing.T) {
@@ -160,7 +160,21 @@ func TestTransparentModeProvider(t *testing.T) {
 
 		assert.True(t, b.IsTransparentMode())
 		assert.Equal(t, "auth/jwt/", b.GetAutoAuthPath())
-		assert.Equal(t, "", b.GetAuthRole("access/readonly"))
+		assert.Equal(t, "", b.GetAuthRole("access/readonly", nil))
+	})
+
+	t.Run("extracts role from query parameter", func(t *testing.T) {
+		req := &logical.Request{
+			Data: map[string]any{"role": "data-team"},
+		}
+		assert.Equal(t, "data-team", b.GetAuthRole("access/readonly", req))
+	})
+
+	t.Run("returns empty when no role in request", func(t *testing.T) {
+		req := &logical.Request{
+			Data: map[string]any{},
+		}
+		assert.Equal(t, "", b.GetAuthRole("access/readonly", req))
 	})
 
 	t.Run("IsUnauthenticatedPath always false", func(t *testing.T) {

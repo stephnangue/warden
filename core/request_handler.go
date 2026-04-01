@@ -603,13 +603,19 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// Triggered when there's no explicit X-Warden-Token but an auth path
 		// is configured on the namespace. The Authorization: Bearer value is
 		// treated as a JWT credential, not a Warden token.
+		// Auth role precedence: ?role= query param > X-Warden-Role header > auth method default_role.
 		if req.HTTPRequest != nil && req.HTTPRequest.Header.Get("X-Warden-Token") == "" {
 			var authPath string
 			if ns, _ := namespace.FromContext(ctx); ns != nil {
 				authPath = ns.CustomMetadata["auto_auth_path"]
 			}
 			if authPath != "" {
-				authRole := req.HTTPRequest.Header.Get("X-Warden-Role")
+				var authRole string
+			if role, ok := req.Data["role"].(string); ok {
+				authRole = role
+			} else {
+				authRole = req.HTTPRequest.Header.Get("X-Warden-Role")
+			}
 				if err := c.performImplicitAuth(ctx, req, authPath, authRole); err != nil {
 					c.logger.Warn("transparent operations auth failed",
 						logger.Err(err),
@@ -1063,7 +1069,7 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 	}
 
 	// Extract auth role from path (may return default auth role or empty string)
-	authRole := tmp.GetAuthRole(relativePath)
+	authRole := tmp.GetAuthRole(relativePath, req)
 
 	// Fallback: extract role from protocol-specific request headers.
 	// Used by SigV4-compatible providers (AWS, Alibaba Cloud, Scaleway) where
