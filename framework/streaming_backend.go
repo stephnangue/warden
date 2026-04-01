@@ -505,7 +505,7 @@ func (b *StreamingBackend) GetAutoAuthPath() string {
 }
 
 // GetAuthRole extracts the auth role name from the request path for implicit login.
-func (b *StreamingBackend) GetAuthRole(path string) string {
+func (b *StreamingBackend) GetAuthRole(path string, _ *logical.Request) string {
 	if b.TransparentConfig == nil {
 		return ""
 	}

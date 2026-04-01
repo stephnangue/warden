@@ -116,10 +116,11 @@ type TransparentModeProvider interface {
 	// GetAutoAuthPath returns the auth mount path for implicit authentication (e.g., "auth/jwt/")
 	GetAutoAuthPath() string
 
-	// GetAuthRole extracts the auth role name from the request path for implicit login.
-	// For path pattern /role/{role}/gateway/*, returns the auth role.
-	// Returns empty string if path doesn't match transparent pattern.
-	GetAuthRole(path string) string
+	// GetAuthRole extracts the auth role name for implicit login.
+	// Streaming backends extract the role from the path (e.g., /role/{role}/gateway/*).
+	// Access backends read the "role" query parameter from req.Data.
+	// Returns empty string if no role is found.
+	GetAuthRole(path string, req *Request) string
 
 	// IsUnauthenticatedPath checks if a path can be accessed without authentication.
 	// Used for read-only endpoints that clients may access

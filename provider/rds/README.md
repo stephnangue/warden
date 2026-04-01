@@ -180,7 +180,7 @@ warden write auth/jwt/role/db-user \
     user_claim=sub
 ```
 
-Setting `default_role=db-user` means workloads don't need to pass `X-Warden-Role` — the auth method uses this role automatically during authentication.
+Setting `default_role=db-user` means workloads don't need to pass `?role=` — the auth method uses this role automatically during authentication.
 
 > **Advanced: Dynamic Policy Mapping with `groups_claim`**
 >
@@ -362,12 +362,11 @@ curl -s -H "Authorization: Bearer $JWT_TOKEN" \
   "${WARDEN_ADDR}/v1/rds/access/readonly" | jq
 ```
 
-The auth method's `default_role` determines which policies apply. To use a specific auth role, pass `X-Warden-Role`:
+The auth method's `default_role` determines which policies apply. To use a specific auth role, pass the `role` query parameter:
 
 ```bash
 curl -s -H "Authorization: Bearer $JWT_TOKEN" \
-  -H "X-Warden-Role: data-team" \
-  "${WARDEN_ADDR}/v1/rds/access/readonly" | jq
+  "${WARDEN_ADDR}/v1/rds/access/readonly?role=data-team" | jq
 ```
 
 Response:

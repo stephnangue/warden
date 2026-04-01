@@ -90,7 +90,7 @@ func TestGetAuthRole_ViaStreamingBackend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := sb.GetAuthRole(tt.path)
+			result := sb.GetAuthRole(tt.path, nil)
 			assert.Equal(t, tt.expectedRole, result)
 		})
 	}
@@ -105,12 +105,12 @@ func TestGetAuthRole_NoDefaultAuthRole(t *testing.T) {
 	}
 
 	t.Run("returns empty for non-matching path without default", func(t *testing.T) {
-		result := sb.GetAuthRole("gateway/v1/secret/data/foo")
+		result := sb.GetAuthRole("gateway/v1/secret/data/foo", nil)
 		assert.Empty(t, result)
 	})
 
 	t.Run("still extracts role from matching path", func(t *testing.T) {
-		result := sb.GetAuthRole("role/terraform/gateway/v1/secret")
+		result := sb.GetAuthRole("role/terraform/gateway/v1/secret", nil)
 		assert.Equal(t, "terraform", result)
 	})
 }
@@ -227,7 +227,7 @@ func TestSetTransparentConfig(t *testing.T) {
 	// Now should be enabled
 	assert.True(t, sb.IsTransparentMode())
 	assert.Equal(t, "auth/oidc/", sb.GetAutoAuthPath())
-	assert.Equal(t, "admin", sb.GetAuthRole("config"))
+	assert.Equal(t, "admin", sb.GetAuthRole("config", nil))
 }
 
 func TestExtractToken(t *testing.T) {
