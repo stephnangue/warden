@@ -611,11 +611,11 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 			}
 			if authPath != "" {
 				var authRole string
-			if role, ok := req.Data["role"].(string); ok {
-				authRole = role
-			} else {
-				authRole = req.HTTPRequest.Header.Get("X-Warden-Role")
-			}
+				if role, ok := req.Data["role"].(string); ok {
+					authRole = role
+				} else {
+					authRole = req.HTTPRequest.Header.Get("X-Warden-Role")
+				}
 				if err := c.performImplicitAuth(ctx, req, authPath, authRole); err != nil {
 					c.logger.Warn("transparent operations auth failed",
 						logger.Err(err),

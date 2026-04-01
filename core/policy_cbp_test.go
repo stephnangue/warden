@@ -359,9 +359,9 @@ func TestCBP_MultipleSegmentWildcards(t *testing.T) {
 	}{
 		{"secret/app1/data/key1", true},
 		{"secret/app2/data/key2", true},
-		{"secret/app1/data", false},             // Missing last segment
-		{"secret/app1/metadata/key1", false},    // Wrong middle segment
-		{"secret/app1/data/key1/extra", false},  // Extra segment
+		{"secret/app1/data", false},            // Missing last segment
+		{"secret/app1/metadata/key1", false},   // Wrong middle segment
+		{"secret/app1/data/key1/extra", false}, // Extra segment
 	}
 
 	for _, tc := range testCases {

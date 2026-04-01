@@ -11,10 +11,10 @@ import (
 
 var (
 	LoginCmd = &cobra.Command{
-		Use:   "login",
-    	SilenceUsage:  true,
+		Use:           "login",
+		SilenceUsage:  true,
 		SilenceErrors: true,
-		Short: "This command is used to authenticate to Warden server.",
+		Short:         "This command is used to authenticate to Warden server.",
 		Long: `
 Usage: warden login [options] [AUTH K=V...]
 

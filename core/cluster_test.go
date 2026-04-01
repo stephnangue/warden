@@ -702,4 +702,3 @@ func TestHA_LeaderAdvertisement_NoClusterTLS_WithoutClusterAddr(t *testing.T) {
 	assert.Nil(t, adv.ClusterCert)
 	assert.Nil(t, adv.ClusterKeyParams)
 }
-

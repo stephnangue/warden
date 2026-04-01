@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	WardenEnvPrefix  = "WARDEN_"
+	WardenEnvPrefix = "WARDEN_"
 )
 
 func ReadWardenVariable(name string) string {

@@ -19,13 +19,13 @@ import (
 
 // CertAuthConfig represents certificate authentication configuration
 type CertAuthConfig struct {
-	TrustedCAPEM   string        `json:"trusted_ca_pem"`              // PEM-encoded trusted CA certs
-	PrincipalClaim string        `json:"principal_claim,omitempty"`    // "cn" (default), "dns_san", "email_san", "uri_san", "serial"
-	TokenTTL       time.Duration `json:"token_ttl" default:"1h"`      // Default token TTL
-	RevocationMode string `json:"revocation_mode,omitempty"`    // "none" (default), "crl", "ocsp", "best_effort"
-	CRLCacheTTL    string        `json:"crl_cache_ttl,omitempty"`      // CRL cache TTL (default: "1h")
-	OCSPTimeout    string        `json:"ocsp_timeout,omitempty"`       // OCSP request timeout (default: "5s")
-	DefaultRole string `json:"default_role,omitempty"` // Default role for transparent operations
+	TrustedCAPEM   string        `json:"trusted_ca_pem"`            // PEM-encoded trusted CA certs
+	PrincipalClaim string        `json:"principal_claim,omitempty"` // "cn" (default), "dns_san", "email_san", "uri_san", "serial"
+	TokenTTL       time.Duration `json:"token_ttl" default:"1h"`    // Default token TTL
+	RevocationMode string        `json:"revocation_mode,omitempty"` // "none" (default), "crl", "ocsp", "best_effort"
+	CRLCacheTTL    string        `json:"crl_cache_ttl,omitempty"`   // CRL cache TTL (default: "1h")
+	OCSPTimeout    string        `json:"ocsp_timeout,omitempty"`    // OCSP request timeout (default: "5s")
+	DefaultRole    string        `json:"default_role,omitempty"`    // Default role for transparent operations
 
 	// Internal — parsed CA pool
 	caPool *x509.CertPool `json:"-"`

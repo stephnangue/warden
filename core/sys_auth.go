@@ -6,10 +6,10 @@ import (
 	"maps"
 	"strings"
 
-	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 )
 
 // maskMountConfigValue is the default mask used for sensitive mount config fields
@@ -240,4 +240,3 @@ func (b *SystemBackend) handleAuthList(ctx context.Context, req *logical.Request
 		"mounts": mounts,
 	}), nil
 }
-

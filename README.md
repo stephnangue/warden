@@ -13,6 +13,12 @@
   <a href="https://goreportcard.com/report/github.com/stephnangue/warden">
     <img src="https://goreportcard.com/badge/github.com/stephnangue/warden" alt="Go Report Card" />
   </a>
+  <a href="https://pkg.go.dev/github.com/stephnangue/warden">
+    <img src="https://pkg.go.dev/badge/github.com/stephnangue/warden.svg" alt="Go Reference" />
+  </a>
+  <a href="https://codecov.io/gh/stephnangue/warden">
+    <img src="https://codecov.io/gh/stephnangue/warden/branch/main/graph/badge.svg" alt="codecov" />
+  </a>
   <a href="https://github.com/stephnangue/warden/blob/main/LICENSE">
     <img src="https://img.shields.io/github/license/stephnangue/warden" alt="License" />
   </a>

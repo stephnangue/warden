@@ -117,10 +117,10 @@ func TestNamespace_Clone(t *testing.T) {
 
 func TestNamespace_TrimmedPath(t *testing.T) {
 	tests := []struct {
-		name  string
+		name   string
 		nsPath string
-		input string
-		want  string
+		input  string
+		want   string
 	}{
 		{"strips prefix", "org1/", "org1/secret/foo", "secret/foo"},
 		{"no match", "org1/", "other/path", "other/path"},

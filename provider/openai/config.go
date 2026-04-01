@@ -21,7 +21,7 @@ type ProviderConfig struct {
 	OpenAIURL       string
 	MaxBodySize     int64
 	Timeout         time.Duration
-	AutoAuthPath string
+	AutoAuthPath    string
 	DefaultAuthRole string
 }
 

@@ -160,11 +160,11 @@ func (b *slackBackend) Initialize(ctx context.Context) error {
 		// No persisted config — persist defaults
 		tc := b.TransparentConfig
 		defaultEntry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"slack_url":       b.slackURL,
-			"max_body_size":   b.MaxBodySize,
-			"timeout":         b.Timeout.String(),
-			"auto_auth_path":  tc.AutoAuthPath,
-			"default_role":    tc.DefaultAuthRole,
+			"slack_url":      b.slackURL,
+			"max_body_size":  b.MaxBodySize,
+			"timeout":        b.Timeout.String(),
+			"auto_auth_path": tc.AutoAuthPath,
+			"default_role":   tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create default config entry: %w", err)

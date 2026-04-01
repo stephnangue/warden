@@ -444,11 +444,11 @@ func TestOperationFromHTTPMethod_TableDriven(t *testing.T) {
 
 func TestExtractClientIP_TableDriven(t *testing.T) {
 	tests := []struct {
-		name         string
-		xRealIP      string
+		name          string
+		xRealIP       string
 		xForwardedFor string
-		remoteAddr   string
-		expected     string
+		remoteAddr    string
+		expected      string
 	}{
 		{"X-Real-IP takes priority", "1.1.1.1", "2.2.2.2", "3.3.3.3:1234", "1.1.1.1"},
 		{"X-Forwarded-For when no X-Real-IP", "", "2.2.2.2", "3.3.3.3:1234", "2.2.2.2"},

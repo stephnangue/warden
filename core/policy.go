@@ -12,9 +12,9 @@ import (
 	"github.com/hashicorp/hcl"
 	"github.com/hashicorp/hcl/hcl/ast"
 	"github.com/mitchellh/copystructure"
-	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/openbao/openbao/sdk/v2/helper/hclutil"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/internal/namespace"
 )
 
 const (
@@ -27,7 +27,7 @@ const (
 	SudoCapability   = "sudo"
 	RootCapability   = "root"
 	PatchCapability  = "patch"
-	ScanCapability = "scan"
+	ScanCapability   = "scan"
 )
 
 const (
@@ -67,7 +67,7 @@ var cap2Int = map[string]uint32{
 	ListCapability:   ListCapabilityInt,
 	SudoCapability:   SudoCapabilityInt,
 	PatchCapability:  PatchCapabilityInt,
-	ScanCapability: ScanCapabilityInt,
+	ScanCapability:   ScanCapabilityInt,
 }
 
 // Policy is used to represent the policy specified by an CBP configuration.
@@ -113,11 +113,11 @@ type PathRules struct {
 
 	// These keys are used at the top level to make the HCL nicer; we store in
 	// the CBPPermissions object though
-	AllowedParametersHCL      map[string][]any `hcl:"allowed_parameters"`
-	DeniedParametersHCL       map[string][]any `hcl:"denied_parameters"`
-	RequiredParametersHCL     []string         `hcl:"required_parameters"`
-	PaginationLimitHCL        int              `hcl:"pagination_limit"`
-	ResponseKeysFilterPathHCL string           `hcl:"list_scan_response_keys_filter_path"`
+	AllowedParametersHCL      map[string][]any    `hcl:"allowed_parameters"`
+	DeniedParametersHCL       map[string][]any    `hcl:"denied_parameters"`
+	RequiredParametersHCL     []string            `hcl:"required_parameters"`
+	PaginationLimitHCL        int                 `hcl:"pagination_limit"`
+	ResponseKeysFilterPathHCL string              `hcl:"list_scan_response_keys_filter_path"`
 	ConditionsHCL             map[string][]string `hcl:"conditions"`
 }
 

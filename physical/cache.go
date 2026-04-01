@@ -186,7 +186,7 @@ func (c *cache) Put(ctx context.Context, entry *physical.Entry) error {
 		// While lower layers could modify entry, we want to ensure we don't
 		// open ourselves up to cache modification so clone the entry.
 		cacheEntry := &physical.Entry{
-			Key:      entry.Key,
+			Key: entry.Key,
 		}
 		if entry.Value != nil {
 			cacheEntry.Value = make([]byte, len(entry.Value))
@@ -321,7 +321,7 @@ func (c *cacheTransaction) Put(ctx context.Context, entry *physical.Entry) error
 		// While lower layers could modify entry, we want to ensure we don't
 		// open ourselves up to cache modification so clone the entry.
 		cacheEntry := &physical.Entry{
-			Key:      entry.Key,
+			Key: entry.Key,
 		}
 		if entry.Value != nil {
 			cacheEntry.Value = make([]byte, len(entry.Value))

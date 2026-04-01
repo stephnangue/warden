@@ -132,7 +132,6 @@ var GetAWSKMSFunc = func(kms *config.KMS, opts ...wrapping.Option) (wrapping.Wra
 	return wrapper, info, nil
 }
 
-
 func GetAzureKeyVaultKMSFunc(kms *config.KMS, opts ...wrapping.Option) (wrapping.Wrapper, map[string]string, error) {
 	wrapper := azurekeyvault.NewWrapper()
 	wrapperInfo, err := wrapper.SetConfig(context.Background(), append(opts, wrapping.WithConfigMap(kms.Config()))...)

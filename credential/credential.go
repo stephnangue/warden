@@ -20,17 +20,17 @@ const (
 
 // Source type constants
 const (
-	SourceTypeLocal  = "local"
-	SourceTypeVault  = "hvault"
-	SourceTypeAWS    = "aws"
-	SourceTypeAzure  = "azure"
-	SourceTypeGCP    = "gcp"
-	SourceTypeGitLab   = "gitlab"
-	SourceTypeGitHub   = "github"
-	SourceTypeMistral    = "mistral"
-	SourceTypeOpenAI     = "openai"
-	SourceTypeAnthropic  = "anthropic"
-	SourceTypeSlack      = "slack"
+	SourceTypeLocal     = "local"
+	SourceTypeVault     = "hvault"
+	SourceTypeAWS       = "aws"
+	SourceTypeAzure     = "azure"
+	SourceTypeGCP       = "gcp"
+	SourceTypeGitLab    = "gitlab"
+	SourceTypeGitHub    = "github"
+	SourceTypeMistral   = "mistral"
+	SourceTypeOpenAI    = "openai"
+	SourceTypeAnthropic = "anthropic"
+	SourceTypeSlack     = "slack"
 )
 
 // Category constants for credential categorization
@@ -114,9 +114,9 @@ func (c *Credential) ShouldRotate(threshold float64) bool {
 
 type CredSource struct {
 	Name           string
-	Type           string            // local, hvault, aws, azure_key_vault, gcp_secret_manager
+	Type           string // local, hvault, aws, azure_key_vault, gcp_secret_manager
 	Config         map[string]string
-	RotationPeriod time.Duration     // 0 means no rotation
+	RotationPeriod time.Duration // 0 means no rotation
 }
 
 type CredSourceRegistry struct {

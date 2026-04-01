@@ -36,14 +36,14 @@ type FileDeviceConfig struct {
 
 // Configuration validation limits
 const (
-	MinBufferSize   = 1
-	MaxBufferSize   = 100000
-	MinFlushPeriod  = 100 * time.Millisecond
-	MaxFlushPeriod  = 1 * time.Hour
-	MinRotateSize   = 0 // 0 means no size-based rotation
-	MaxRotateSize   = 100 * 1024 * 1024 * 1024 // 100GB
-	MinMaxBackups   = 1
-	MaxMaxBackups   = 1000
+	MinBufferSize  = 1
+	MaxBufferSize  = 100000
+	MinFlushPeriod = 100 * time.Millisecond
+	MaxFlushPeriod = 1 * time.Hour
+	MinRotateSize  = 0                        // 0 means no size-based rotation
+	MaxRotateSize  = 100 * 1024 * 1024 * 1024 // 100GB
+	MinMaxBackups  = 1
+	MaxMaxBackups  = 1000
 )
 
 func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {

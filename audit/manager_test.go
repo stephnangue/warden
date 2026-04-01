@@ -50,7 +50,7 @@ func TestManagerParallelVsSequential(t *testing.T) {
 	// Test parallel execution
 	t.Run("Parallel", func(t *testing.T) {
 		log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-		manager := NewAuditManager(log) 
+		manager := NewAuditManager(log)
 		for i, device := range devices {
 			if err := manager.RegisterDevice(fmt.Sprintf("device-%d", i), device); err != nil {
 				t.Fatalf("Failed to register device: %v", err)
@@ -115,7 +115,7 @@ func TestManagerSingleDeviceOptimization(t *testing.T) {
 	})
 
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log) 
+	manager := NewAuditManager(log)
 	if err := manager.RegisterDevice("single", device); err != nil {
 		t.Fatalf("Failed to register device: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestManagerSingleDeviceOptimization(t *testing.T) {
 
 func TestManagerEmptyDevices(t *testing.T) {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log) 
+	manager := NewAuditManager(log)
 	defer manager.Close()
 
 	entry := &LogEntry{
@@ -206,7 +206,7 @@ func TestManagerDisabledDevices(t *testing.T) {
 	})
 
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log) 
+	manager := NewAuditManager(log)
 	if err := manager.RegisterDevice("disabled", device); err != nil {
 		t.Fatalf("Failed to register device: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestManagerDisabledDevices(t *testing.T) {
 func TestManagerErrorAggregation(t *testing.T) {
 	// Create manager with multiple devices, some will fail
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log) 
+	manager := NewAuditManager(log)
 	defer manager.Close()
 
 	// Device 1: will succeed
@@ -306,7 +306,7 @@ func TestManagerErrorAggregation(t *testing.T) {
 func TestManagerPartialFailure(t *testing.T) {
 	// Test case where some devices succeed and some fail
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log) 
+	manager := NewAuditManager(log)
 	defer manager.Close()
 
 	// Device 1: succeeds
@@ -346,7 +346,7 @@ func TestManagerPartialFailure(t *testing.T) {
 func TestManagerAllDevicesFail(t *testing.T) {
 	// Test case where all devices fail
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log) 
+	manager := NewAuditManager(log)
 	defer manager.Close()
 
 	// Device with invalid path that will fail
@@ -402,7 +402,7 @@ func TestManagerConcurrentLogging(t *testing.T) {
 	})
 
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log) 
+	manager := NewAuditManager(log)
 	if err := manager.RegisterDevice("concurrent", device); err != nil {
 		t.Fatalf("Failed to register device: %v", err)
 	}
@@ -468,7 +468,7 @@ func BenchmarkManagerSingleDevice(b *testing.B) {
 	})
 
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log) 
+	manager := NewAuditManager(log)
 	manager.RegisterDevice("bench", device)
 	defer manager.Close()
 
@@ -492,7 +492,7 @@ func BenchmarkManagerSingleDevice(b *testing.B) {
 
 func BenchmarkManagerMultiDeviceParallel(b *testing.B) {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log) 
+	manager := NewAuditManager(log)
 	defer manager.Close()
 
 	numDevices := 5

@@ -10,14 +10,14 @@ import (
 
 // Mock wrapper for testing
 type mockWrapper struct {
-	keyID           string
-	wrapperType     wrapping.WrapperType
-	encryptFunc     func(ctx context.Context, plaintext []byte, options ...wrapping.Option) (*wrapping.BlobInfo, error)
-	decryptFunc     func(ctx context.Context, data *wrapping.BlobInfo, options ...wrapping.Option) ([]byte, error)
-	setConfigFunc   func(ctx context.Context, options ...wrapping.Option) (*wrapping.WrapperConfig, error)
-	initCalled      bool
-	finalizeCalled  bool
-	shouldFailInit  bool
+	keyID              string
+	wrapperType        wrapping.WrapperType
+	encryptFunc        func(ctx context.Context, plaintext []byte, options ...wrapping.Option) (*wrapping.BlobInfo, error)
+	decryptFunc        func(ctx context.Context, data *wrapping.BlobInfo, options ...wrapping.Option) ([]byte, error)
+	setConfigFunc      func(ctx context.Context, options ...wrapping.Option) (*wrapping.WrapperConfig, error)
+	initCalled         bool
+	finalizeCalled     bool
+	shouldFailInit     bool
 	shouldFailFinalize bool
 }
 

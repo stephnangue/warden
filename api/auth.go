@@ -44,4 +44,3 @@ func (a *Auth) login(ctx context.Context, authMethod AuthMethod) (*Resource, err
 
 	return r, nil
 }
-

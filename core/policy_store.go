@@ -11,8 +11,8 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	"github.com/stephnangue/warden/internal/namespace"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -232,7 +232,7 @@ func (ps *PolicyStore) getCBPView(ns *namespace.Namespace) BarrierView {
 		return ps.core.systemBarrierView.SubView(policySubPath + cbpSubPath)
 	}
 
-	return ps.core.namespaceMountEntryView(ns, systemBarrierPrefix + policySubPath + cbpSubPath)
+	return ps.core.namespaceMountEntryView(ns, systemBarrierPrefix+policySubPath+cbpSubPath)
 }
 
 // getBarrierView returns the appropriate barrier view for the given namespace and policy type.

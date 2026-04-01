@@ -357,8 +357,8 @@ func TestGenerateConfigDocs(t *testing.T) {
 		"int",
 		"duration",
 		"bool",
-		"Yes",  // Required
-		"No",   // Not required
+		"Yes", // Required
+		"No",  // Not required
 		"https://vault.example.com",
 		"Vault server address",
 	}

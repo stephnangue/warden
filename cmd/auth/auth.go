@@ -26,7 +26,6 @@ Usage: warden auth <subcommand> [options]
 	}
 )
 
-
 func init() {
 	AuthCmd.AddCommand(EnableCmd)
 	AuthCmd.AddCommand(DisableCmd)

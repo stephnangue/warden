@@ -267,10 +267,10 @@ func TestExtractClaim_NestedPath(t *testing.T) {
 
 func TestParseNumericClaim(t *testing.T) {
 	tests := []struct {
-		name     string
-		value    any
-		wantVal  int64
-		wantOk   bool
+		name    string
+		value   any
+		wantVal int64
+		wantOk  bool
 	}{
 		{"float64", float64(1234567890), 1234567890, true},
 		{"int64", int64(1234567890), 1234567890, true},

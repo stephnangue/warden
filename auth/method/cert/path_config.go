@@ -90,8 +90,8 @@ func (b *certAuthBackend) handleConfigRead(ctx context.Context, req *logical.Req
 		Data: map[string]any{
 			"trusted_ca_pem":   b.config.TrustedCAPEM,
 			"principal_claim":  b.config.PrincipalClaim,
-			"token_ttl":       b.config.TokenTTL.String(),
-			"revocation_mode": b.config.RevocationMode,
+			"token_ttl":        b.config.TokenTTL.String(),
+			"revocation_mode":  b.config.RevocationMode,
 			"crl_cache_ttl":    b.config.CRLCacheTTL,
 			"ocsp_timeout":     b.config.OCSPTimeout,
 			"default_role":     b.config.DefaultRole,
@@ -145,7 +145,7 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 			"revocation_mode": b.config.RevocationMode,
 			"crl_cache_ttl":   b.config.CRLCacheTTL,
 			"ocsp_timeout":    b.config.OCSPTimeout,
-			"default_role": b.config.DefaultRole,
+			"default_role":    b.config.DefaultRole,
 		}
 		b.configMu.RUnlock()
 
