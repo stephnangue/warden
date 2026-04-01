@@ -16,7 +16,7 @@ All notable changes to Warden are documented in this file.
 
 - **AWS Transparent Mode with SigV4 Re-signing** — The AWS provider now supports transparent mode. AWS SDK clients authenticate via JWT or TLS certificate without Warden-specific tokens. The gateway intercepts SigV4-signed requests, verifies the client signature, then re-signs with real AWS credentials. Supports `aws-chunked` streaming uploads (S3 PutObject) by stripping chunk signatures and forwarding the decoded body. (#89)
 
-- **RDS Provider (Access Backend)** — New provider type that vends credentials directly instead of proxying traffic. The RDS provider issues short-lived IAM authentication tokens for PostgreSQL, MySQL, and SQL Server on RDS/Aurora. Introduces the access backend framework for credential-vending providers. (#88)
+- **RDS Provider (Access Backend)** — New provider type that vends credentials directly instead of proxying traffic. The RDS provider issues short-lived IAM authentication tokens for PostgreSQL and MySQL on RDS/Aurora. Introduces the access backend framework for credential-vending providers. (#88)
 
 - **TLS in Dev Mode** — New `--dev-tls` and `--dev-tls-san` flags generate a self-signed TLS certificate at startup, enabling HTTPS in development without manual certificate management. (#86)
 

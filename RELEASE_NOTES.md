@@ -34,7 +34,7 @@ Warden is an identity-based access layer for cloud APIs, SaaS platforms, databas
 ### New Features
 
 - **AWS Transparent Mode** — AWS SDK clients authenticate via JWT or TLS certificate. Warden intercepts SigV4-signed requests, verifies the client signature, then re-signs with real AWS credentials. Supports `aws-chunked` streaming uploads.
-- **RDS Provider** — Issues short-lived IAM authentication tokens for PostgreSQL, MySQL, and SQL Server on RDS/Aurora.
+- **RDS Provider** — Issues short-lived IAM authentication tokens for PostgreSQL and MySQL on RDS/Aurora.
 - **TLS in Dev Mode** — `--dev-tls` generates a self-signed certificate at startup for HTTPS development.
 
 ### Getting Started
