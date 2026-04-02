@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
 	"testing"
 	"time"
 
@@ -703,6 +704,10 @@ func (f *testDriverFactory) SensitiveConfigFields() []string {
 	return []string{}
 }
 
+func (f *testDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+	return "", fmt.Errorf("test driver cannot infer type")
+}
+
 // testDriver is a minimal driver for testing
 type testDriver struct{}
 
@@ -975,6 +980,10 @@ func (f *validatingDriverFactory) ValidateConfig(config map[string]string) error
 
 func (f *validatingDriverFactory) SensitiveConfigFields() []string {
 	return []string{}
+}
+
+func (f *validatingDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+	return "", fmt.Errorf("validating driver cannot infer type")
 }
 
 // TestCredentialConfigStore_ValidateSpec_SourceParamsValidation tests source params validation

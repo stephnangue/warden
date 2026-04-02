@@ -546,6 +546,9 @@ type mockDriverFactory struct {
 func (f *mockDriverFactory) Type() string                           { return "mock" }
 func (f *mockDriverFactory) ValidateConfig(map[string]string) error { return nil }
 func (f *mockDriverFactory) SensitiveConfigFields() []string        { return nil }
+func (f *mockDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+	return "", fmt.Errorf("mock driver cannot infer type")
+}
 func (f *mockDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	return f.driver, nil
 }

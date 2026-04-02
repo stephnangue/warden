@@ -98,6 +98,19 @@ func (f *AWSDriverFactory) SensitiveConfigFields() []string {
 	return []string{"secret_access_key"}
 }
 
+// InferCredentialType infers the credential type from the spec's mint_method.
+func (f *AWSDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
+	mintMethod := specConfig["mint_method"]
+	switch mintMethod {
+	case "rds_iam_token":
+		return credential.TypeDBAuthToken, nil
+	case "sts_assume_role", "secrets_manager", "":
+		return credential.TypeAWSAccessKeys, nil
+	default:
+		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
+	}
+}
+
 // Create instantiates a new AWSDriver
 func (f *AWSDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	accessKeyID := credential.GetString(config, "access_key_id", "")

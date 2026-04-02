@@ -42,6 +42,12 @@ type SourceDriverFactory interface {
 
 	// SensitiveConfigFields returns the list of config keys that should be masked in output
 	SensitiveConfigFields() []string
+
+	// InferCredentialType determines the credential type from the spec config.
+	// Simple sources return a fixed type (ignoring specConfig).
+	// Multi-type sources inspect specConfig (e.g., mint_method) to disambiguate.
+	// Returns error if the type cannot be inferred and must be provided explicitly.
+	InferCredentialType(specConfig map[string]string) (string, error)
 }
 
 // SourceDriver defines the interface for credential source drivers.
