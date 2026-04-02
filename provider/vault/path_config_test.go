@@ -240,8 +240,8 @@ func TestHandleConfigWrite_TLSChange(t *testing.T) {
 	assert.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.True(t, b.tlsSkipVerify)
-	// Transport should have been updated (different instance)
-	assert.NotEqual(t, sharedTransport, b.Proxy.Transport)
+	// Transport should have been updated (different pointer)
+	assert.True(t, b.Proxy.Transport != sharedTransport, "transport should be a new instance")
 }
 
 func TestPathConfig_Schema(t *testing.T) {
