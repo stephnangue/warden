@@ -10,6 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stephnangue/warden/auth/helper"
+	"context"
+	"net/http"
+	"net/http/httptest"
 )
 
 // =============================================================================
@@ -532,3 +535,62 @@ func TestExtractGroupsClaim(t *testing.T) {
 		})
 	}
 }
+
+func TestVerifyURLReachable_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	err := verifyURLReachable(context.Background(), srv.URL, "")
+	assert.NoError(t, err)
+}
+
+func TestVerifyURLReachable_NonOKStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	err := verifyURLReachable(context.Background(), srv.URL, "")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected status code")
+}
+
+func TestVerifyURLReachable_Unreachable(t *testing.T) {
+	err := verifyURLReachable(context.Background(), "http://localhost:1", "")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to connect")
+}
+
+func TestVerifyURLReachable_InvalidCA(t *testing.T) {
+	err := verifyURLReachable(context.Background(), "https://example.com", "not-a-pem")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse CA certificate")
+}
+
+// =============================================================================
+// verifyOIDCDiscoveryURLReachable Tests
+// =============================================================================
+
+func TestVerifyOIDCDiscoveryURLReachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/openid-configuration" {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	err := verifyOIDCDiscoveryURLReachable(context.Background(), srv.URL, "")
+	assert.NoError(t, err)
+
+	// With trailing slash
+	err = verifyOIDCDiscoveryURLReachable(context.Background(), srv.URL+"/", "")
+	assert.NoError(t, err)
+}
+
+// =============================================================================
+// handleConfigWrite with storage persistence
+// =============================================================================

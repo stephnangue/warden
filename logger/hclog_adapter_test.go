@@ -325,3 +325,84 @@ func TestHCLogAdapter_LargeNumberOfArgs(t *testing.T) {
 		assert.Contains(t, output, strings.ReplaceAll("valueN", "N", string(rune('0'+i))))
 	}
 }
+
+func TestHCLogAdapter_ResetNamed(t *testing.T) {
+	logger, _ := createTestLogger(t)
+	adapter := NewHCLogAdapter(logger)
+
+	named := adapter.Named("first")
+	assert.Equal(t, "first", named.Name())
+
+	nested := named.Named("second")
+	assert.Equal(t, "first.second", nested.Name())
+
+	// ResetNamed should reset to just the given name
+	reset := nested.ResetNamed("fresh")
+	assert.Equal(t, "fresh", reset.Name())
+}
+
+func TestHCLogAdapter_GetLevel_AtTraceLevel(t *testing.T) {
+	// Note: zerolog uses a global level set by NewZerologLogger, so we can
+	// only reliably test with TraceLevel (the most permissive).
+	buf := &bytes.Buffer{}
+	config := &Config{
+		Level:   TraceLevel,
+		Format:  JSONFormat,
+		Outputs: []io.Writer{buf},
+	}
+	gateConfig := GatedWriterConfig{
+		Underlying:   buf,
+		InitialState: GateOpen,
+	}
+	gl, _ := NewGatedLogger(config, gateConfig)
+	adapter := NewHCLogAdapter(gl)
+
+	level := adapter.GetLevel()
+	assert.True(t, adapter.IsTrace())
+	assert.True(t, adapter.IsDebug())
+	assert.True(t, adapter.IsInfo())
+	assert.True(t, adapter.IsWarn())
+	assert.True(t, adapter.IsError())
+	assert.Equal(t, hclog.Trace, level)
+}
+
+func TestHCLogAdapter_SetLevel_NoOp(t *testing.T) {
+	logger, _ := createTestLogger(t)
+	adapter := NewHCLogAdapter(logger)
+
+	// SetLevel is a no-op, but should not panic
+	adapter.SetLevel(hclog.Error)
+	adapter.SetLevel(hclog.Trace)
+	adapter.SetLevel(hclog.Off)
+}
+
+func TestHCLogAdapter_Log_AllLevels(t *testing.T) {
+	logger, buf := createTestLogger(t)
+	adapter := NewHCLogAdapter(logger)
+
+	adapter.Log(hclog.Trace, "trace via Log")
+	adapter.Log(hclog.Debug, "debug via Log")
+	adapter.Log(hclog.Info, "info via Log")
+	adapter.Log(hclog.Warn, "warn via Log")
+	adapter.Log(hclog.Error, "error via Log")
+
+	output := buf.String()
+	assert.Contains(t, output, "trace via Log")
+	assert.Contains(t, output, "debug via Log")
+	assert.Contains(t, output, "info via Log")
+	assert.Contains(t, output, "warn via Log")
+	assert.Contains(t, output, "error via Log")
+}
+
+func TestHCLogAdapter_Log_DefaultLevel(t *testing.T) {
+	logger, buf := createTestLogger(t)
+	adapter := NewHCLogAdapter(logger)
+
+	// Level that doesn't match any case falls to default (Info)
+	adapter.Log(hclog.Level(99), "unknown level")
+	assert.Contains(t, buf.String(), "unknown level")
+}
+
+// =============================================================================
+// LogLevel and OutputFormat String/Parse
+// =============================================================================

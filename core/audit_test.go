@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/audit"
+	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/internal/locking"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
@@ -544,4 +548,467 @@ func TestEnableDisableAudit_Concurrent(t *testing.T) {
 
 	// Verify all audits are removed
 	assert.Nil(t, core.audit.Entries)
+}
+
+// =============================================================================
+// buildAuditRequest Tests
+// =============================================================================
+
+func TestBuildAuditRequest_NilRequest(t *testing.T) {
+	result := buildAuditRequest(nil, nil)
+	assert.Nil(t, result)
+}
+
+func TestBuildAuditRequest_BasicFields(t *testing.T) {
+	req := &logical.Request{
+		RequestID:  "req-123",
+		Operation:  logical.ReadOperation,
+		Path:       "secret/data/foo",
+		MountPoint: "secret/",
+		MountType:  "kv",
+		ClientIP:   "192.168.1.1",
+		Data:       map[string]any{"key": "value"},
+	}
+
+	result := buildAuditRequest(req, nil)
+	require.NotNil(t, result)
+	assert.Equal(t, "req-123", result.ID)
+	assert.Equal(t, "read", result.Operation)
+	assert.Equal(t, "secret/data/foo", result.Path)
+	assert.Equal(t, "secret/", result.MountPoint)
+	assert.Equal(t, "kv", result.MountType)
+	assert.Equal(t, "192.168.1.1", result.ClientIP)
+	assert.Equal(t, "value", result.Data["key"])
+}
+
+func TestBuildAuditRequest_WithAuditPath(t *testing.T) {
+	req := &logical.Request{
+		Path:      "internal/path",
+		AuditPath: "external/path",
+	}
+	result := buildAuditRequest(req, nil)
+	assert.Equal(t, "external/path", result.Path)
+}
+
+func TestBuildAuditRequest_WithNamespace(t *testing.T) {
+	req := &logical.Request{
+		Path:       "secret/data/foo",
+		MountPoint: "PROD/DEV/secret/",
+	}
+	ns := &namespace.Namespace{
+		ID:   "ns-123",
+		Path: "PROD/DEV/",
+	}
+	result := buildAuditRequest(req, ns)
+	assert.Equal(t, "ns-123", result.NamespaceID)
+	assert.Equal(t, "PROD/DEV/", result.NamespacePath)
+	assert.Equal(t, "secret/", result.MountPoint)
+}
+
+func TestBuildAuditRequest_WithHTTPRequest(t *testing.T) {
+	httpReq, _ := http.NewRequest("GET", "/v1/secret/data/foo", nil)
+	httpReq.Header.Set("X-Request-Id", "ext-123")
+
+	req := &logical.Request{
+		Path:        "secret/data/foo",
+		HTTPRequest: httpReq,
+	}
+	result := buildAuditRequest(req, nil)
+	assert.Equal(t, "GET", result.Method)
+	assert.NotNil(t, result.Headers)
+	assert.Contains(t, result.Headers["X-Request-Id"], "ext-123")
+}
+
+// =============================================================================
+// buildAuditResponse Tests
+// =============================================================================
+
+func TestBuildAuditResponse_NilResponse(t *testing.T) {
+	result := buildAuditResponse(nil, nil, nil)
+	assert.Nil(t, result)
+}
+
+func TestBuildAuditResponse_Basic(t *testing.T) {
+	resp := &logical.Response{
+		StatusCode: http.StatusOK,
+		Data:       map[string]any{"key": "value"},
+		Warnings:   []string{"warn1"},
+	}
+	result := buildAuditResponse(resp, nil, nil)
+	require.NotNil(t, result)
+	assert.Equal(t, http.StatusOK, result.StatusCode)
+	assert.Equal(t, "value", result.Data["key"])
+	assert.Contains(t, result.Warnings, "warn1")
+}
+
+func TestBuildAuditResponse_WithCredential(t *testing.T) {
+	resp := &logical.Response{StatusCode: http.StatusOK}
+	cred := &credential.Credential{
+		CredentialID: "cred-123",
+		Type:         "aws",
+		Category:     "dynamic",
+		LeaseTTL:     time.Hour,
+		LeaseID:      "lease-123",
+		SourceName:   "aws-prod",
+		SourceType:   "aws",
+		SpecName:     "dev-spec",
+		Revocable:    true,
+		Data:         map[string]string{"key": "val"},
+	}
+	result := buildAuditResponse(resp, nil, cred)
+	require.NotNil(t, result.Credential)
+	assert.Equal(t, "cred-123", result.Credential.CredentialID)
+	assert.Equal(t, "aws", result.Credential.Type)
+	assert.Equal(t, int64(3600), result.Credential.LeaseTTL)
+	assert.Equal(t, "val", result.Credential.Data["key"])
+}
+
+func TestBuildAuditResponse_WithAuthResult(t *testing.T) {
+	resp := &logical.Response{
+		StatusCode: http.StatusOK,
+		Auth: &logical.Auth{
+			TokenType:      "jwt_role",
+			PrincipalID:    "user@example.com",
+			RoleName:       "admin",
+			Policies:       []string{"default", "admin"},
+			TokenTTL:       time.Hour,
+			CredentialSpec: "aws-dev",
+		},
+	}
+	result := buildAuditResponse(resp, nil, nil)
+	require.NotNil(t, result.AuthResult)
+	assert.Equal(t, "jwt_role", result.AuthResult.TokenType)
+	assert.Equal(t, "user@example.com", result.AuthResult.PrincipalID)
+	assert.Equal(t, "admin", result.AuthResult.RoleName)
+	assert.Equal(t, int64(3600), result.AuthResult.TokenTTL)
+}
+
+func TestBuildAuditResponse_WithUpstreamURL(t *testing.T) {
+	resp := &logical.Response{StatusCode: http.StatusOK, Streamed: true}
+	req := &logical.Request{UpstreamURL: "https://api.example.com/v1/chat"}
+	result := buildAuditResponse(resp, req, nil)
+	assert.Equal(t, "https://api.example.com/v1/chat", result.UpstreamURL)
+	assert.True(t, result.Streamed)
+}
+
+func TestBuildAuditResponse_WithHeaders(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Content-Type", "application/json")
+	resp := &logical.Response{
+		StatusCode: http.StatusOK,
+		Headers:    headers,
+	}
+	result := buildAuditResponse(resp, nil, nil)
+	assert.Contains(t, result.Headers["Content-Type"], "application/json")
+}
+
+// =============================================================================
+// buildAuditAuth Tests
+// =============================================================================
+
+func TestBuildAuditAuth_NilBoth(t *testing.T) {
+	result := buildAuditAuth(nil, nil)
+	assert.Nil(t, result)
+}
+
+func TestBuildAuditAuth_FromTokenEntry(t *testing.T) {
+	te := &logical.TokenEntry{
+		ID:            "tok-123",
+		Accessor:      "acc-123",
+		Type:          "jwt_role",
+		PrincipalID:   "user@example.com",
+		RoleName:      "admin",
+		Policies:      []string{"default"},
+		NamespaceID:   "ns-1",
+		NamespacePath: "PROD/",
+		CreatedByIP:   "10.0.0.1",
+		ExpireAt:      time.Now().Add(time.Hour),
+	}
+
+	result := buildAuditAuth(nil, te)
+	require.NotNil(t, result)
+	assert.Equal(t, "tok-123", result.TokenID)
+	assert.Equal(t, "acc-123", result.TokenAccessor)
+	assert.Equal(t, "user@example.com", result.PrincipalID)
+	assert.Equal(t, "ns-1", result.NamespaceID)
+	assert.Equal(t, "10.0.0.1", result.CreatedByIP)
+	assert.Greater(t, result.ExpiresAt, int64(0))
+	assert.Greater(t, result.TokenTTL, int64(0))
+}
+
+func TestBuildAuditAuth_FromAuth(t *testing.T) {
+	auth := &logical.Auth{
+		TokenAccessor: "auth-acc",
+		TokenType:     "cert_role",
+		PrincipalID:   "agent-1",
+		RoleName:      "role-1",
+		Policies:      []string{"p1", "p2"},
+		PolicyResults: &sdklogical.PolicyResults{
+			Allowed: true,
+			GrantingPolicies: []sdklogical.PolicyInfo{
+				{Name: "p1"},
+			},
+		},
+	}
+
+	result := buildAuditAuth(auth, nil)
+	require.NotNil(t, result)
+	assert.Equal(t, "auth-acc", result.TokenAccessor)
+	assert.Equal(t, "cert_role", result.TokenType)
+	assert.Equal(t, "agent-1", result.PrincipalID)
+	assert.True(t, result.PolicyResults.Allowed)
+	assert.Contains(t, result.PolicyResults.GrantingPolicies, "p1")
+}
+
+func TestBuildAuditAuth_AuthOverridesTE(t *testing.T) {
+	te := &logical.TokenEntry{
+		PrincipalID: "old-user",
+		RoleName:    "old-role",
+	}
+	auth := &logical.Auth{
+		PrincipalID: "new-user",
+		RoleName:    "new-role",
+	}
+	result := buildAuditAuth(auth, te)
+	assert.Equal(t, "new-user", result.PrincipalID)
+	assert.Equal(t, "new-role", result.RoleName)
+}
+
+// =============================================================================
+// buildAuditAuthResult Tests
+// =============================================================================
+
+func TestBuildAuditAuthResult_Nil(t *testing.T) {
+	assert.Nil(t, buildAuditAuthResult(nil))
+}
+
+func TestBuildAuditAuthResult_Basic(t *testing.T) {
+	auth := &logical.Auth{
+		TokenType:      "jwt_role",
+		PrincipalID:    "user",
+		RoleName:       "admin",
+		Policies:       []string{"default"},
+		TokenTTL:       30 * time.Minute,
+		CredentialSpec: "aws-dev",
+	}
+	result := buildAuditAuthResult(auth)
+	require.NotNil(t, result)
+	assert.Equal(t, "jwt_role", result.TokenType)
+	assert.Equal(t, "user", result.PrincipalID)
+	assert.Equal(t, int64(1800), result.TokenTTL)
+	assert.Equal(t, "aws-dev", result.CredentialSpec)
+}
+
+// =============================================================================
+// buildAuditCredential Tests
+// =============================================================================
+
+func TestBuildAuditCredential_Nil(t *testing.T) {
+	assert.Nil(t, buildAuditCredential(nil))
+}
+
+func TestBuildAuditCredential_Basic(t *testing.T) {
+	cred := &credential.Credential{
+		CredentialID: "cred-1",
+		Type:         "aws",
+		Category:     "dynamic",
+		LeaseTTL:     time.Hour,
+		LeaseID:      "lease-1",
+		TokenID:      "tok-1",
+		SourceName:   "aws-prod",
+		SourceType:   "aws",
+		SpecName:     "dev",
+		Revocable:    true,
+		Data:         map[string]string{"access_key_id": "AKIA123"},
+	}
+	result := buildAuditCredential(cred)
+	require.NotNil(t, result)
+	assert.Equal(t, "cred-1", result.CredentialID)
+	assert.Equal(t, "AKIA123", result.Data["access_key_id"])
+	assert.True(t, result.Revocable)
+}
+
+func TestBuildAuditCredential_NilData(t *testing.T) {
+	cred := &credential.Credential{
+		CredentialID: "cred-1",
+		Data:         nil,
+	}
+	result := buildAuditCredential(cred)
+	require.NotNil(t, result)
+	assert.Nil(t, result.Data)
+}
+
+// =============================================================================
+// copyMapAny Tests
+// =============================================================================
+
+func TestCopyMapAny_Nil(t *testing.T) {
+	assert.Nil(t, copyMapAny(nil))
+}
+
+func TestCopyMapAny_NonNil(t *testing.T) {
+	original := map[string]any{"a": 1, "b": "two"}
+	copied := copyMapAny(original)
+	assert.Equal(t, original, copied)
+
+	copied["c"] = 3
+	assert.NotContains(t, original, "c")
+}
+
+// =============================================================================
+// copyHeaders Tests
+// =============================================================================
+
+func TestCopyHeaders_Nil(t *testing.T) {
+	assert.Nil(t, copyHeaders(nil))
+}
+
+func TestCopyHeaders_Basic(t *testing.T) {
+	headers := http.Header{
+		"Content-Type": []string{"application/json"},
+		"X-Custom":     []string{"val1", "val2"},
+	}
+	copied := copyHeaders(headers)
+	assert.Equal(t, []string{"application/json"}, copied["Content-Type"])
+	assert.Equal(t, []string{"val1", "val2"}, copied["X-Custom"])
+
+	copied["New-Header"] = []string{"new"}
+	_, exists := headers["New-Header"]
+	assert.False(t, exists)
+}
+
+func TestCopyHeaders_NilValues(t *testing.T) {
+	headers := http.Header{
+		"X-Empty": nil,
+	}
+	copied := copyHeaders(headers)
+	assert.Nil(t, copied["X-Empty"])
+}
+
+// =============================================================================
+// BarrierEncryptorAccess Tests
+// =============================================================================
+
+func TestNewBarrierEncryptorAccess(t *testing.T) {
+	mock := &mockBarrierEncryptor{}
+	access := NewBarrierEncryptorAccess(mock)
+	require.NotNil(t, access)
+
+	ctx := context.Background()
+
+	ct, err := access.Encrypt(ctx, "key", []byte("plain"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("encrypted:plain"), ct)
+
+	pt, err := access.Decrypt(ctx, "key", []byte("cipher"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("decrypted:cipher"), pt)
+}
+
+type mockBarrierEncryptor struct{}
+
+func (m *mockBarrierEncryptor) Encrypt(_ context.Context, _ string, plaintext []byte) ([]byte, error) {
+	return append([]byte("encrypted:"), plaintext...), nil
+}
+
+func (m *mockBarrierEncryptor) Decrypt(_ context.Context, _ string, ciphertext []byte) ([]byte, error) {
+	return append([]byte("decrypted:"), ciphertext...), nil
+}
+
+// =============================================================================
+// buildResponseAuditEntry Tests
+// =============================================================================
+
+func TestBuildResponseAuditEntry(t *testing.T) {
+	core := createMockCoreForAudit()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	req := &logical.Request{
+		RequestID: "req-1",
+		Path:      "secret/data/foo",
+	}
+	resp := &logical.Response{
+		StatusCode: http.StatusOK,
+		Data:       map[string]any{"key": "val"},
+	}
+
+	entry := core.buildResponseAuditEntry(ctx, req, resp, nil, nil, nil)
+	require.NotNil(t, entry)
+	assert.Equal(t, "response", entry.Type)
+	assert.NotNil(t, entry.Request)
+	assert.NotNil(t, entry.Response)
+	assert.Empty(t, entry.Error)
+}
+
+func TestBuildResponseAuditEntry_WithOuterErr(t *testing.T) {
+	core := createMockCoreForAudit()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	req := &logical.Request{Path: "secret/data/foo"}
+	resp := &logical.Response{StatusCode: http.StatusInternalServerError}
+
+	entry := core.buildResponseAuditEntry(ctx, req, resp, nil, nil, assert.AnError)
+	assert.Equal(t, assert.AnError.Error(), entry.Error)
+}
+
+func TestBuildResponseAuditEntry_WithRespErr(t *testing.T) {
+	core := createMockCoreForAudit()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	req := &logical.Request{Path: "secret/data/foo"}
+	resp := &logical.Response{
+		StatusCode: http.StatusBadRequest,
+		Err:        assert.AnError,
+	}
+
+	entry := core.buildResponseAuditEntry(ctx, req, resp, nil, nil, nil)
+	assert.Equal(t, assert.AnError.Error(), entry.Error)
+}
+
+func TestBuildResponseAuditEntry_WithCredential(t *testing.T) {
+	core := createMockCoreForAudit()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	req := &logical.Request{
+		Path: "secret/data/foo",
+		Credential: &credential.Credential{
+			CredentialID: "cred-1",
+			Type:         "aws",
+		},
+	}
+	resp := &logical.Response{StatusCode: http.StatusOK}
+
+	entry := core.buildResponseAuditEntry(ctx, req, resp, nil, nil, nil)
+	require.NotNil(t, entry.Response.Credential)
+	assert.Equal(t, "cred-1", entry.Response.Credential.CredentialID)
+}
+
+// =============================================================================
+// buildRequestAuditEntry Tests
+// =============================================================================
+
+func TestBuildRequestAuditEntry(t *testing.T) {
+	core := createMockCoreForAudit()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	req := &logical.Request{
+		RequestID: "req-1",
+		Operation: logical.CreateOperation,
+		Path:      "auth/jwt/login",
+	}
+
+	entry := core.buildRequestAuditEntry(ctx, req, nil, nil, nil)
+	require.NotNil(t, entry)
+	assert.Equal(t, "request", entry.Type)
+	assert.NotZero(t, entry.Timestamp)
+}
+
+func TestBuildRequestAuditEntry_WithError(t *testing.T) {
+	core := createMockCoreForAudit()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	req := &logical.Request{Path: "test"}
+
+	entry := core.buildRequestAuditEntry(ctx, req, nil, nil, assert.AnError)
+	assert.Equal(t, assert.AnError.Error(), entry.Error)
 }
