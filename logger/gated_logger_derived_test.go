@@ -5,6 +5,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGatedLogger_WithSystemPreservesGate(t *testing.T) {
@@ -226,3 +228,82 @@ func TestGatedLogger_ClearFromDerivedLogger(t *testing.T) {
 		t.Error("Expected no output after clearing buffer")
 	}
 }
+
+func TestGatedLogger_FlushGate(t *testing.T) {
+	var buf bytes.Buffer
+
+	config := DefaultConfig()
+	config.Format = JSONFormat
+	config.Environment = "production"
+
+	gateConfig := GatedWriterConfig{
+		Underlying:   &buf,
+		InitialState: GateClosed,
+	}
+
+	gl, _ := NewGatedLogger(config, gateConfig)
+
+	gl.Info("buffered message")
+
+	// FlushGate should flush without opening
+	err := gl.FlushGate()
+	require.NoError(t, err)
+
+	assert.Contains(t, buf.String(), "buffered message")
+	assert.False(t, gl.IsGateOpen())
+}
+
+func TestGatedLogger_BufferedSize(t *testing.T) {
+	var buf bytes.Buffer
+
+	config := DefaultConfig()
+	config.Format = JSONFormat
+	config.Environment = "production"
+
+	gateConfig := GatedWriterConfig{
+		Underlying:   &buf,
+		InitialState: GateClosed,
+	}
+
+	gl, _ := NewGatedLogger(config, gateConfig)
+
+	assert.Equal(t, 0, gl.BufferedSize())
+
+	gl.Info("some message")
+	assert.Greater(t, gl.BufferedSize(), 0)
+}
+
+// =============================================================================
+// GatedWriter with nil underlying
+// =============================================================================
+
+func TestGatedWriter_NilUnderlying(t *testing.T) {
+	gw := NewGatedWriter(GatedWriterConfig{
+		Underlying:   nil,
+		InitialState: GateOpen,
+	})
+
+	// Should not panic - nil underlying defaults to io.Discard
+	n, err := gw.Write([]byte("test"))
+	assert.NoError(t, err)
+	assert.Equal(t, 4, n)
+}
+
+// =============================================================================
+// HCLogAdapter - ResetNamed, GetLevel at various levels, SetLevel
+// =============================================================================
+
+func TestNewGatedLogger_NilConfig(t *testing.T) {
+	gl, gate := NewGatedLogger(nil, GatedWriterConfig{
+		InitialState: GateOpen,
+	})
+	require.NotNil(t, gl)
+	require.NotNil(t, gate)
+
+	// Should not panic
+	gl.Info("test with nil config")
+}
+
+// =============================================================================
+// ZerologLogger typed fields in logging
+// =============================================================================

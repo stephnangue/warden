@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"fmt"
 )
 
 func TestFileSink(t *testing.T) {
@@ -118,4 +120,107 @@ func findSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestFileSinkNameAndType(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "audit.log")
+	sink, err := NewFileSink(FileSinkConfig{Path: path})
+	if err != nil {
+		t.Fatalf("NewFileSink failed: %v", err)
+	}
+	defer sink.Close()
+
+	if sink.Name() != path {
+		t.Errorf("expected %s, got %s", path, sink.Name())
+	}
+	if sink.Type() != "file" {
+		t.Errorf("expected file, got %s", sink.Type())
+	}
+}
+
+func TestFileSinkRotateBySize(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "audit.log")
+
+	sink, err := NewFileSink(FileSinkConfig{
+		Path:       path,
+		RotateSize: 50, // Very small to trigger rotation
+		MaxBackups: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewFileSink failed: %v", err)
+	}
+	defer sink.Close()
+
+	ctx := context.Background()
+
+	// Write enough data to trigger rotation
+	for i := 0; i < 10; i++ {
+		data := []byte(`{"message":"this is a test log entry that is long enough"}`)
+		if err := sink.Write(ctx, data); err != nil {
+			t.Fatalf("Write failed on iteration %d: %v", i, err)
+		}
+	}
+
+	// Wait for async cleanup
+	time.Sleep(100 * time.Millisecond)
+
+	// Check that backup files exist
+	matches, _ := filepath.Glob(path + ".*")
+	if len(matches) == 0 {
+		t.Error("expected backup files after rotation")
+	}
+}
+
+func TestFileSinkRotateDaily(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "audit.log")
+
+	sink, err := NewFileSink(FileSinkConfig{
+		Path:        path,
+		RotateDaily: true,
+		MaxBackups:  2,
+	})
+	if err != nil {
+		t.Fatalf("NewFileSink failed: %v", err)
+	}
+
+	// Force lastRotate to yesterday to trigger daily rotation
+	sink.lastRotate = time.Now().Add(-25 * time.Hour)
+
+	ctx := context.Background()
+	if err := sink.Write(ctx, []byte(`{"test":"daily rotation"}`)); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	sink.Close()
+
+	// Check backup exists
+	matches, _ := filepath.Glob(path + ".*")
+	if len(matches) == 0 {
+		t.Error("expected backup file after daily rotation")
+	}
+}
+
+func TestCleanupBackupsAsync(t *testing.T) {
+	tmpDir := t.TempDir()
+	basePath := filepath.Join(tmpDir, "audit.log")
+
+	// Create several backup files
+	for i := 0; i < 5; i++ {
+		f, err := os.Create(basePath + "." + time.Now().Add(time.Duration(i)*time.Second).Format("20060102-150405") + fmt.Sprintf("%d", i))
+		if err != nil {
+			t.Fatalf("failed to create backup: %v", err)
+		}
+		f.Close()
+	}
+
+	cleanupBackupsAsync(basePath, 2)
+	time.Sleep(100 * time.Millisecond)
+
+	matches, _ := filepath.Glob(basePath + ".*")
+	if len(matches) > 2 {
+		t.Errorf("expected at most 2 backups, got %d", len(matches))
+	}
 }

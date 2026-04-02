@@ -16,6 +16,7 @@ import (
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	"net/http/httptest"
 )
 
 // testLoggerConfig creates a logger for tests that discards output
@@ -402,3 +403,91 @@ func TestPathConfig_FieldDescriptions(t *testing.T) {
 		assert.NotEmpty(t, field.Description, "Field %s should have a description", name)
 	}
 }
+
+func TestHandleConfigWrite_PersistsToStorage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"keys":[]}`))
+	}))
+	defer srv.Close()
+
+	b, ctx := createTestBackendWithStorage(t)
+
+	d := &framework.FieldData{
+		Raw: map[string]any{
+			"mode":     "jwt",
+			"jwks_url": srv.URL,
+		},
+		Schema: b.pathConfig().Fields,
+	}
+
+	resp, err := b.handleConfigWrite(ctx, &logical.Request{}, d)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Verify config was persisted to storage
+	entry, err := b.storageView.Get(ctx, "config")
+	require.NoError(t, err)
+	assert.NotNil(t, entry)
+}
+
+// =============================================================================
+// Role Update with all fields
+// =============================================================================
+
+func TestHandleConfigWrite_MergesExisting(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"keys":[]}`))
+	}))
+	defer srv.Close()
+
+	b, ctx := createTestBackendWithStorage(t)
+
+	// First write
+	d := &framework.FieldData{
+		Raw: map[string]any{
+			"mode":     "jwt",
+			"jwks_url": srv.URL,
+		},
+		Schema: b.pathConfig().Fields,
+	}
+	resp, err := b.handleConfigWrite(ctx, &logical.Request{}, d)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Second write - update bound_issuer only
+	d2 := &framework.FieldData{
+		Raw: map[string]any{
+			"bound_issuer": "https://issuer.example.com",
+		},
+		Schema: b.pathConfig().Fields,
+	}
+	resp2, err := b.handleConfigWrite(ctx, &logical.Request{}, d2)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+	assert.Equal(t, "https://issuer.example.com", b.config.BoundIssuer)
+}
+
+// =============================================================================
+// handleConfigRead with default_role
+// =============================================================================
+
+func TestHandleConfigRead_WithDefaultRole(t *testing.T) {
+	b, _ := createTestBackendWithStorage(t)
+	b.config = &JWTAuthConfig{
+		Mode:        "jwt",
+		JWKSURL:     "https://example.com/jwks",
+		DefaultRole: "auto-role",
+		UserClaim:   "sub",
+		TokenTTL:    time.Hour,
+	}
+
+	resp, err := b.handleConfigRead(context.Background(), &logical.Request{}, &framework.FieldData{})
+	require.NoError(t, err)
+	assert.Equal(t, "auto-role", resp.Data["default_role"])
+}
+
+// =============================================================================
+// buildRoleFromFieldData all fields
+// =============================================================================

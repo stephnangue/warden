@@ -9,6 +9,11 @@ import (
 	"testing"
 
 	"github.com/stephnangue/warden/logical"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -621,4 +626,247 @@ func TestWriteLogicalResponse_BinaryBody(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, binaryData, w.Body.Bytes())
+}
+
+func TestErrorToStatusCode_UnsupportedOperation(t *testing.T) {
+	assert.Equal(t, http.StatusMethodNotAllowed, errorToStatusCode(sdklogical.ErrUnsupportedOperation))
+}
+
+func TestErrorToStatusCode_UnsupportedPath(t *testing.T) {
+	assert.Equal(t, http.StatusNotFound, errorToStatusCode(sdklogical.ErrUnsupportedPath))
+}
+
+func TestErrorToStatusCode_PermissionDenied(t *testing.T) {
+	assert.Equal(t, http.StatusForbidden, errorToStatusCode(sdklogical.ErrPermissionDenied))
+}
+
+func TestErrorToStatusCode_InvalidRequest(t *testing.T) {
+	assert.Equal(t, http.StatusBadRequest, errorToStatusCode(sdklogical.ErrInvalidRequest))
+}
+
+func TestErrorToStatusCode_GenericError(t *testing.T) {
+	assert.Equal(t, http.StatusInternalServerError, errorToStatusCode(errors.New("something broke")))
+}
+
+func TestErrorToStatusCode_WrappedErrors(t *testing.T) {
+	wrapped := fmt.Errorf("handler: %w", sdklogical.ErrPermissionDenied)
+	assert.Equal(t, http.StatusForbidden, errorToStatusCode(wrapped))
+
+	wrapped2 := fmt.Errorf("handler: %w", sdklogical.ErrInvalidRequest)
+	assert.Equal(t, http.StatusBadRequest, errorToStatusCode(wrapped2))
+
+	wrapped3 := fmt.Errorf("handler: %w", sdklogical.ErrUnsupportedPath)
+	assert.Equal(t, http.StatusNotFound, errorToStatusCode(wrapped3))
+
+	wrapped4 := fmt.Errorf("handler: %w", sdklogical.ErrUnsupportedOperation)
+	assert.Equal(t, http.StatusMethodNotAllowed, errorToStatusCode(wrapped4))
+}
+
+// =============================================================================
+// writeLogicalResponse Tests (Err, Data, Streamed)
+// =============================================================================
+
+func TestWriteLogicalResponse_WithErr(t *testing.T) {
+	w := httptest.NewRecorder()
+	resp := &logical.Response{
+		Err: errors.New("something failed"),
+	}
+
+	writeLogicalResponse(w, resp)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+
+	var body map[string][]string
+	err := json.Unmarshal(w.Body.Bytes(), &body)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"something failed"}, body["errors"])
+}
+
+func TestWriteLogicalResponse_WithErrAndStatusCode(t *testing.T) {
+	w := httptest.NewRecorder()
+	resp := &logical.Response{
+		StatusCode: http.StatusBadRequest,
+		Err:        errors.New("invalid input"),
+	}
+
+	writeLogicalResponse(w, resp)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid input")
+}
+
+func TestWriteLogicalResponse_WithData(t *testing.T) {
+	w := httptest.NewRecorder()
+	resp := &logical.Response{
+		Data: map[string]any{
+			"key":   "value",
+			"count": 42,
+		},
+	}
+
+	writeLogicalResponse(w, resp)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+
+	var body map[string]map[string]any
+	err := json.Unmarshal(w.Body.Bytes(), &body)
+	require.NoError(t, err)
+	assert.Equal(t, "value", body["data"]["key"])
+	assert.Equal(t, float64(42), body["data"]["count"])
+}
+
+func TestWriteLogicalResponse_BodyTakesPriorityOverData(t *testing.T) {
+	w := httptest.NewRecorder()
+	resp := &logical.Response{
+		Body: []byte(`{"custom":"body"}`),
+		Data: map[string]any{"should": "be ignored"},
+	}
+
+	writeLogicalResponse(w, resp)
+
+	assert.Equal(t, `{"custom":"body"}`, w.Body.String())
+}
+
+func TestWriteLogicalResponse_BodyTakesPriorityOverErr(t *testing.T) {
+	w := httptest.NewRecorder()
+	resp := &logical.Response{
+		Body: []byte(`{"custom":"body"}`),
+		Err:  errors.New("should be ignored"),
+	}
+
+	writeLogicalResponse(w, resp)
+
+	assert.Equal(t, `{"custom":"body"}`, w.Body.String())
+}
+
+func TestWriteLogicalResponse_Streamed(t *testing.T) {
+	w := httptest.NewRecorder()
+	// Simulate that the backend already wrote to the response writer
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("streamed content"))
+
+	resp := &logical.Response{
+		Streamed:   true,
+		StatusCode: http.StatusCreated, // should be ignored
+		Body:       []byte("should not appear"),
+	}
+
+	writeLogicalResponse(w, resp)
+
+	// The function should return early without writing anything additional.
+	// The recorder already has what the backend wrote.
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "streamed content", w.Body.String())
+}
+
+func TestWriteLogicalResponse_ErrTakesPriorityOverData(t *testing.T) {
+	w := httptest.NewRecorder()
+	resp := &logical.Response{
+		Err:  errors.New("error wins"),
+		Data: map[string]any{"should": "be ignored"},
+	}
+
+	writeLogicalResponse(w, resp)
+
+	assert.Contains(t, w.Body.String(), "error wins")
+	assert.NotContains(t, w.Body.String(), "ignored")
+}
+
+// =============================================================================
+// JSON struct tests
+// =============================================================================
+
+func TestWriteLogicalResponse_DataWithNestedMap(t *testing.T) {
+	w := httptest.NewRecorder()
+	resp := &logical.Response{
+		Data: map[string]any{
+			"nested": map[string]any{
+				"inner": "value",
+			},
+		},
+	}
+
+	writeLogicalResponse(w, resp)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	data := body["data"].(map[string]any)
+	nested := data["nested"].(map[string]any)
+	assert.Equal(t, "value", nested["inner"])
+}
+
+func TestWriteLogicalResponse_DataEmpty(t *testing.T) {
+	w := httptest.NewRecorder()
+	resp := &logical.Response{
+		Data: map[string]any{},
+	}
+
+	writeLogicalResponse(w, resp)
+
+	// Empty map is still serialized
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"data":{}`)
+}
+
+// =============================================================================
+// HandlerProperties struct test
+// =============================================================================
+
+func TestHandleLogical_SealedCore(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleLogical(c, log, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sys/providers", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Sealed core returns an error response via writeLogicalResponse
+	assert.Contains(t, w.Body.String(), "sealed")
+}
+
+func TestHandleLogical_AllowedMethods(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleLogical(c, log, nil)
+
+	methods := []string{
+		http.MethodGet, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, "LIST",
+		http.MethodHead, http.MethodOptions,
+	}
+	for _, method := range methods {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, "/v1/sys/providers", nil)
+			req.RemoteAddr = "127.0.0.1:1234"
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			// Should NOT be 405 (sealed error is fine)
+			assert.NotEqual(t, http.StatusMethodNotAllowed, w.Code)
+		})
+	}
+}
+
+// =============================================================================
+// handleSysInitPut Tests (with real core)
+// =============================================================================
+
+func TestHandleLogical_ErrorToStatusCode_Integration(t *testing.T) {
+	// handleLogical with a sealed core calls HandleRequest which returns
+	// an error response (not an error). This covers the writeLogicalResponse
+	// path. The error-to-status-code path requires HandleRequest to return
+	// a Go error, which happens with ErrStandby (tested via standby forwarding)
+	// or other internal errors. We already test errorToStatusCode directly.
+	// This test just confirms the full handler path works end-to-end.
+	c, log := createTestCoreForHTTP(t)
+	handler := handleLogical(c, log, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Sealed core -> error response with "sealed" message
+	assert.Contains(t, w.Body.String(), "sealed")
 }

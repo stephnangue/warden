@@ -319,3 +319,19 @@ func TestAWSDriver_MintCredential_TTLExceedsMaximum(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds maximum")
 }
+
+func TestAWSDriver_Type_ViaFactory(t *testing.T) {
+	// Don't call Create (it tries to authenticate with AWS).
+	// Just test Type() on a manually constructed driver.
+	driver := &AWSDriver{
+		credSource: &credential.CredSource{
+			Type:   credential.SourceTypeAWS,
+			Config: map[string]string{},
+		},
+	}
+	assert.Equal(t, credential.SourceTypeAWS, driver.Type())
+}
+
+// =============================================================================
+// AzureDriver readLimitedBody Test
+// =============================================================================

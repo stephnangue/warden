@@ -587,3 +587,725 @@ func containsSubstring(s, substr string) bool {
 	}
 	return false
 }
+
+func TestJSONFormatName(t *testing.T) {
+	f := NewJSONFormat()
+	if f.Name() != "json" {
+		t.Errorf("expected json, got %s", f.Name())
+	}
+}
+
+func TestJSONFormatWithPrefix(t *testing.T) {
+	f := NewJSONFormat(WithPrefix("AUDIT: "))
+
+	entry := &LogEntry{
+		Timestamp: time.Now(),
+		Request:   &Request{ID: "req-1", Path: "/test"},
+	}
+
+	data, err := f.FormatRequest(context.Background(), entry)
+	if err != nil {
+		t.Fatalf("FormatRequest failed: %v", err)
+	}
+	if string(data[:7]) != "AUDIT: " {
+		t.Errorf("expected prefix 'AUDIT: ', got %s", string(data[:7]))
+	}
+
+	// FormatResponse with prefix
+	entry.Response = &Response{StatusCode: 200}
+	data, err = f.FormatResponse(context.Background(), entry)
+	if err != nil {
+		t.Fatalf("FormatResponse failed: %v", err)
+	}
+	if string(data[:7]) != "AUDIT: " {
+		t.Errorf("expected prefix 'AUDIT: ', got %s", string(data[:7]))
+	}
+}
+
+func TestFormatResponse(t *testing.T) {
+	f := NewJSONFormat()
+
+	entry := &LogEntry{
+		Timestamp: time.Now(),
+		Request:   &Request{ID: "req-1", Path: "/test"},
+		Response: &Response{
+			StatusCode: 200,
+			Data:       map[string]any{"key": "value"},
+		},
+	}
+
+	data, err := f.FormatResponse(context.Background(), entry)
+	if err != nil {
+		t.Fatalf("FormatResponse failed: %v", err)
+	}
+
+	var result LogEntry
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if result.Type != "response" {
+		t.Errorf("expected type 'response', got %s", result.Type)
+	}
+}
+
+func TestFormatResponseWithSalting(t *testing.T) {
+	mockSalt := func(ctx context.Context, data string) (string, error) {
+		return "hmac-sha256:" + data + "-salted", nil
+	}
+
+	t.Run("salt response data", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.data"}))
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Response: &Response{
+				StatusCode: 200,
+				Data:       map[string]any{"secret": "value123"},
+			},
+		}
+
+		data, err := f.FormatResponse(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatResponse failed: %v", err)
+		}
+
+		var result LogEntry
+		json.Unmarshal(data, &result)
+		if v, ok := result.Response.Data["secret"].(string); ok {
+			if v == "value123" {
+				t.Error("response data was not salted")
+			}
+		}
+	})
+
+	t.Run("salt response data specific key", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.data.secret"}))
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Response: &Response{
+				StatusCode: 200,
+				Data:       map[string]any{"secret": "value123", "public": "safe"},
+			},
+		}
+
+		data, err := f.FormatResponse(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatResponse failed: %v", err)
+		}
+
+		var result LogEntry
+		json.Unmarshal(data, &result)
+		if v, ok := result.Response.Data["public"].(string); ok {
+			if v != "safe" {
+				t.Error("public field should not be salted")
+			}
+		}
+	})
+
+	t.Run("salt response headers all", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.headers"}))
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Response: &Response{
+				StatusCode: 200,
+				Headers:    map[string][]string{"Authorization": {"Bearer token123"}},
+			},
+		}
+
+		data, err := f.FormatResponse(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatResponse failed: %v", err)
+		}
+
+		var result LogEntry
+		json.Unmarshal(data, &result)
+		if result.Response.Headers["Authorization"][0] == "Bearer token123" {
+			t.Error("response header was not salted")
+		}
+	})
+
+	t.Run("salt response headers specific", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.headers.Authorization"}))
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Response: &Response{
+				StatusCode: 200,
+				Headers: map[string][]string{
+					"Authorization": {"Bearer token123"},
+					"Content-Type":  {"application/json"},
+				},
+			},
+		}
+
+		data, err := f.FormatResponse(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatResponse failed: %v", err)
+		}
+
+		var result LogEntry
+		json.Unmarshal(data, &result)
+		if result.Response.Headers["Content-Type"][0] != "application/json" {
+			t.Error("Content-Type should not be salted")
+		}
+	})
+
+	t.Run("salt auth result", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{
+			"response.auth_result.principal_id",
+			"response.auth_result.credential_spec",
+		}))
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Response: &Response{
+				StatusCode: 200,
+				AuthResult: &AuthResult{
+					PrincipalID:    "user@example.com",
+					CredentialSpec: "spec-123",
+					RoleName:       "admin",
+				},
+			},
+		}
+
+		data, err := f.FormatResponse(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatResponse failed: %v", err)
+		}
+
+		var result LogEntry
+		json.Unmarshal(data, &result)
+		if result.Response.AuthResult.PrincipalID == "user@example.com" {
+			t.Error("principal_id should be salted")
+		}
+		if result.Response.AuthResult.CredentialSpec == "spec-123" {
+			t.Error("credential_spec should be salted")
+		}
+		if result.Response.AuthResult.RoleName != "admin" {
+			t.Error("role_name should not be salted")
+		}
+	})
+
+	t.Run("salt auth token accessor", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"auth.token_accessor"}))
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Auth:      &Auth{TokenAccessor: "acc-123"},
+		}
+
+		data, err := f.FormatRequest(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatRequest failed: %v", err)
+		}
+
+		var result LogEntry
+		json.Unmarshal(data, &result)
+		if result.Auth.TokenAccessor == "acc-123" {
+			t.Error("token_accessor should be salted")
+		}
+	})
+
+	t.Run("salt auth created_by_ip", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"auth.created_by_ip"}))
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Auth:      &Auth{CreatedByIP: "10.0.0.1"},
+		}
+
+		data, err := f.FormatRequest(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatRequest failed: %v", err)
+		}
+
+		var result LogEntry
+		json.Unmarshal(data, &result)
+		if result.Auth.CreatedByIP == "10.0.0.1" {
+			t.Error("created_by_ip should be salted")
+		}
+	})
+
+	t.Run("salt policy results granting policies", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"auth.policy_results.granting_policies"}))
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Auth: &Auth{
+				PolicyResults: &PolicyResults{
+					Allowed:          true,
+					GrantingPolicies: []string{"policy1", "policy2"},
+				},
+			},
+		}
+
+		data, err := f.FormatRequest(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatRequest failed: %v", err)
+		}
+
+		var result LogEntry
+		json.Unmarshal(data, &result)
+		if result.Auth.PolicyResults.GrantingPolicies[0] == "policy1" {
+			t.Error("granting policy should be salted")
+		}
+	})
+
+	t.Run("salt request headers all", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"request.headers"}))
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Request: &Request{
+				ID:      "req-1",
+				Headers: map[string][]string{"X-Token": {"secret"}},
+			},
+		}
+
+		data, err := f.FormatRequest(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatRequest failed: %v", err)
+		}
+
+		var result LogEntry
+		json.Unmarshal(data, &result)
+		if result.Request.Headers["X-Token"][0] == "secret" {
+			t.Error("request header should be salted")
+		}
+	})
+
+	t.Run("salt request headers specific", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"request.headers.X-Token"}))
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Request: &Request{
+				ID: "req-1",
+				Headers: map[string][]string{
+					"X-Token":      {"secret"},
+					"Content-Type": {"text/plain"},
+				},
+			},
+		}
+
+		data, err := f.FormatRequest(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatRequest failed: %v", err)
+		}
+
+		var result LogEntry
+		json.Unmarshal(data, &result)
+		if result.Request.Headers["Content-Type"][0] != "text/plain" {
+			t.Error("Content-Type should not be salted")
+		}
+	})
+
+	t.Run("salt credential id", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.credential.credential_id"}))
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Response: &Response{
+				Credential: &Credential{CredentialID: "cred-123", Type: "aws"},
+			},
+		}
+
+		data, err := f.FormatResponse(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatResponse failed: %v", err)
+		}
+
+		var result LogEntry
+		json.Unmarshal(data, &result)
+		if result.Response.Credential.CredentialID == "cred-123" {
+			t.Error("credential_id should be salted")
+		}
+	})
+
+	t.Run("salt credential data specific key", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.credential.data.secret_key"}))
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Response: &Response{
+				Credential: &Credential{
+					CredentialID: "cred-1",
+					Data: map[string]string{
+						"access_key": "AKIA123",
+						"secret_key": "secret",
+					},
+				},
+			},
+		}
+
+		data, err := f.FormatResponse(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatResponse failed: %v", err)
+		}
+
+		var result LogEntry
+		json.Unmarshal(data, &result)
+		if result.Response.Credential.Data["access_key"] != "AKIA123" {
+			t.Error("access_key should not be salted")
+		}
+		if result.Response.Credential.Data["secret_key"] == "secret" {
+			t.Error("secret_key should be salted")
+		}
+	})
+
+	t.Run("salt nil response", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.data"}))
+		entry := &LogEntry{Timestamp: time.Now()}
+
+		_, err := f.FormatRequest(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("should handle nil response: %v", err)
+		}
+	})
+
+	t.Run("salt nil auth", func(t *testing.T) {
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"auth.token_id"}))
+		entry := &LogEntry{Timestamp: time.Now()}
+
+		_, err := f.FormatRequest(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("should handle nil auth: %v", err)
+		}
+	})
+}
+
+func TestOmitResponseFields(t *testing.T) {
+	tests := []struct {
+		name       string
+		omitFields []string
+		entry      *LogEntry
+		check      func(*testing.T, []byte)
+	}{
+		{
+			name:       "omit response.auth_result",
+			omitFields: []string{"response.auth_result"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response: &Response{
+					StatusCode: 200,
+					AuthResult: &AuthResult{PrincipalID: "user1", RoleName: "admin"},
+				},
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "auth_result") {
+					t.Error("auth_result should be omitted")
+				}
+			},
+		},
+		{
+			name:       "omit response.auth_result sub-fields",
+			omitFields: []string{"response.auth_result.principal_id"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response: &Response{
+					StatusCode: 200,
+					AuthResult: &AuthResult{PrincipalID: "user1", RoleName: "admin"},
+				},
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "user1") {
+					t.Error("principal_id value should be omitted")
+				}
+				if !containsBytes(data, "admin") {
+					t.Error("role_name should still be present")
+				}
+			},
+		},
+		{
+			name:       "omit response.status_code",
+			omitFields: []string{"response.status_code"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response:  &Response{StatusCode: 404, MountClass: "provider"},
+			},
+			check: func(t *testing.T, data []byte) {
+				// status_code should be 0 (zero value)
+				if containsBytes(data, "404") {
+					t.Error("status_code 404 should be omitted")
+				}
+			},
+		},
+		{
+			name:       "omit response.mount_class",
+			omitFields: []string{"response.mount_class"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response:  &Response{StatusCode: 200, MountClass: "provider"},
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "provider") {
+					t.Error("mount_class should be omitted")
+				}
+			},
+		},
+		{
+			name:       "omit response.warnings",
+			omitFields: []string{"response.warnings"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response:  &Response{StatusCode: 200, Warnings: []string{"warn1"}},
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "warn1") {
+					t.Error("warnings should be omitted")
+				}
+			},
+		},
+		{
+			name:       "omit response.streamed",
+			omitFields: []string{"response.streamed"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response:  &Response{StatusCode: 200, Streamed: true},
+			},
+			check: func(t *testing.T, data []byte) {
+				// just ensure no error
+			},
+		},
+		{
+			name:       "omit response headers specific",
+			omitFields: []string{"response.headers.X-Secret"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response: &Response{
+					StatusCode: 200,
+					Headers:    map[string][]string{"X-Secret": {"val"}, "X-Public": {"pub"}},
+				},
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "X-Secret") {
+					t.Error("X-Secret header should be omitted")
+				}
+				if !containsBytes(data, "X-Public") {
+					t.Error("X-Public should remain")
+				}
+			},
+		},
+		{
+			name:       "omit response data specific key",
+			omitFields: []string{"response.data.secret"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response: &Response{
+					StatusCode: 200,
+					Data:       map[string]any{"secret": "val", "public": "pub"},
+				},
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "\"secret\"") {
+					t.Error("secret key should be omitted")
+				}
+			},
+		},
+		{
+			name:       "omit error",
+			omitFields: []string{"error"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Error:     "something went wrong",
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "something went wrong") {
+					t.Error("error should be omitted")
+				}
+			},
+		},
+		{
+			name:       "omit entire request",
+			omitFields: []string{"request"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Request:   &Request{ID: "req-1", Path: "/test"},
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "req-1") {
+					t.Error("request should be omitted")
+				}
+			},
+		},
+		{
+			name:       "omit entire response",
+			omitFields: []string{"response"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response:  &Response{StatusCode: 200},
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "200") {
+					t.Error("response should be omitted")
+				}
+			},
+		},
+		{
+			name:       "omit auth sub-fields",
+			omitFields: []string{"auth.token_id", "auth.token_accessor", "auth.token_type", "auth.principal_id", "auth.role_name", "auth.policies", "auth.token_ttl", "auth.expires_at", "auth.namespace_id", "auth.namespace_path", "auth.created_by_ip"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Auth: &Auth{
+					TokenID:       "t1",
+					TokenAccessor: "ta1",
+					TokenType:     "service",
+					PrincipalID:   "p1",
+					RoleName:      "r1",
+					Policies:      []string{"pol1"},
+					TokenTTL:      3600,
+					ExpiresAt:     1234567890,
+					NamespaceID:   "ns1",
+					NamespacePath: "nsp1",
+					CreatedByIP:   "10.0.0.1",
+				},
+			},
+			check: func(t *testing.T, data []byte) {
+				// Just ensure it doesn't error
+			},
+		},
+		{
+			name:       "omit auth policy_results",
+			omitFields: []string{"auth.policy_results"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Auth: &Auth{
+					PolicyResults: &PolicyResults{
+						Allowed:          true,
+						GrantingPolicies: []string{"p1"},
+					},
+				},
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "policy_results") {
+					t.Error("policy_results should be omitted")
+				}
+			},
+		},
+		{
+			name:       "omit auth policy_results sub-field",
+			omitFields: []string{"auth.policy_results.granting_policies"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Auth: &Auth{
+					PolicyResults: &PolicyResults{
+						Allowed:          true,
+						GrantingPolicies: []string{"p1"},
+					},
+				},
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "p1") {
+					t.Error("granting_policies should be omitted")
+				}
+			},
+		},
+		{
+			name:       "omit request sub-fields",
+			omitFields: []string{"request.id", "request.operation", "request.path", "request.mount_point", "request.mount_type", "request.mount_class", "request.method", "request.client_ip", "request.namespace_id", "request.namespace_path", "request.unauthenticated", "request.streamed", "request.transparent"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Request: &Request{
+					ID:              "r1",
+					Operation:       "read",
+					Path:            "/test",
+					MountPoint:      "mp",
+					MountType:       "mt",
+					MountClass:      "mc",
+					Method:          "GET",
+					ClientIP:        "1.2.3.4",
+					NamespaceID:     "ns",
+					NamespacePath:   "nsp",
+					Unauthenticated: true,
+					Streamed:        true,
+					Transparent:     true,
+				},
+			},
+			check: func(t *testing.T, data []byte) {
+				// Just ensure no error
+			},
+		},
+		{
+			name:       "omit request headers specific",
+			omitFields: []string{"request.headers.Authorization"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Request: &Request{
+					ID:      "r1",
+					Headers: map[string][]string{"Authorization": {"Bearer x"}, "Accept": {"*/*"}},
+				},
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "Authorization") {
+					t.Error("Authorization header should be omitted")
+				}
+			},
+		},
+		{
+			name:       "omit credential sub-fields",
+			omitFields: []string{"response.credential.credential_id", "response.credential.type", "response.credential.category", "response.credential.lease_ttl", "response.credential.lease_id", "response.credential.token_id", "response.credential.source_name", "response.credential.source_type", "response.credential.spec_name", "response.credential.revocable"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response: &Response{
+					Credential: &Credential{
+						CredentialID: "c1",
+						Type:         "aws",
+						Category:     "cloud",
+						LeaseTTL:     3600,
+						LeaseID:      "l1",
+						TokenID:      "t1",
+						SourceName:   "s1",
+						SourceType:   "local",
+						SpecName:     "sp1",
+						Revocable:    true,
+					},
+				},
+			},
+			check: func(t *testing.T, data []byte) {
+				// Just ensure no error
+			},
+		},
+		{
+			name:       "omit credential data specific key",
+			omitFields: []string{"response.credential.data.secret_key"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response: &Response{
+					Credential: &Credential{
+						CredentialID: "c1",
+						Data:         map[string]string{"access_key": "AK", "secret_key": "SK"},
+					},
+				},
+			},
+			check: func(t *testing.T, data []byte) {
+				if containsBytes(data, "secret_key") {
+					t.Error("secret_key should be omitted")
+				}
+				if !containsBytes(data, "access_key") {
+					t.Error("access_key should remain")
+				}
+			},
+		},
+		{
+			name:       "omit auth result sub-fields",
+			omitFields: []string{"response.auth_result.token_type", "response.auth_result.policies", "response.auth_result.token_ttl", "response.auth_result.credential_spec", "response.auth_result.role_name"},
+			entry: &LogEntry{
+				Timestamp: time.Now(),
+				Response: &Response{
+					AuthResult: &AuthResult{
+						TokenType:      "service",
+						PrincipalID:    "user1",
+						RoleName:       "admin",
+						Policies:       []string{"p1"},
+						TokenTTL:       3600,
+						CredentialSpec: "spec",
+					},
+				},
+			},
+			check: func(t *testing.T, data []byte) {
+				// Just ensure no error
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := NewJSONFormat(WithOmitFields(tc.omitFields))
+			data, err := f.FormatRequest(context.Background(), tc.entry)
+			if err != nil {
+				t.Fatalf("FormatRequest failed: %v", err)
+			}
+			tc.check(t, data)
+		})
+	}
+}

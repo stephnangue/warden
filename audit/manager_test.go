@@ -570,3 +570,200 @@ func BenchmarkManagerMultiDeviceSequential(b *testing.B) {
 		manager.LogRequest(ctx, entry)
 	}
 }
+
+func TestManagerListDevices(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+	defer mgr.Close()
+
+	if devs := mgr.ListDevices(); len(devs) != 0 {
+		t.Errorf("expected 0 devices, got %d", len(devs))
+	}
+
+	tmpDir := t.TempDir()
+	sink, _ := NewFileSink(FileSinkConfig{Path: filepath.Join(tmpDir, "a.log")})
+	dev := NewDevice("dev1", NewJSONFormat(), sink, &DeviceConfig{Name: "dev1", Enabled: true})
+	mgr.RegisterDevice("dev1", dev)
+
+	if devs := mgr.ListDevices(); len(devs) != 1 {
+		t.Errorf("expected 1 device, got %d", len(devs))
+	}
+}
+
+func TestManagerUnregisterDevice(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+
+	tmpDir := t.TempDir()
+	sink, _ := NewFileSink(FileSinkConfig{Path: filepath.Join(tmpDir, "a.log")})
+	dev := NewDevice("dev1", NewJSONFormat(), sink, &DeviceConfig{Name: "dev1", Enabled: true})
+	mgr.RegisterDevice("dev1", dev)
+
+	if err := mgr.UnregisterDevice("dev1"); err != nil {
+		t.Errorf("UnregisterDevice failed: %v", err)
+	}
+
+	if devs := mgr.ListDevices(); len(devs) != 0 {
+		t.Errorf("expected 0 devices after unregister, got %d", len(devs))
+	}
+
+	// Unregister non-existent device
+	if err := mgr.UnregisterDevice("nonexistent"); err == nil {
+		t.Error("expected error for non-existent device")
+	}
+}
+
+func TestManagerGetDevice(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+	defer mgr.Close()
+
+	tmpDir := t.TempDir()
+	sink, _ := NewFileSink(FileSinkConfig{Path: filepath.Join(tmpDir, "a.log")})
+	dev := NewDevice("dev1", NewJSONFormat(), sink, &DeviceConfig{Name: "dev1", Enabled: true})
+	mgr.RegisterDevice("dev1", dev)
+
+	got, err := mgr.GetDevice("dev1")
+	if err != nil {
+		t.Errorf("GetDevice failed: %v", err)
+	}
+	if got.Name() != "dev1" {
+		t.Errorf("expected dev1, got %s", got.Name())
+	}
+
+	_, err = mgr.GetDevice("nonexistent")
+	if err == nil {
+		t.Error("expected error for non-existent device")
+	}
+}
+
+func TestManagerReset(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+
+	tmpDir := t.TempDir()
+	sink, _ := NewFileSink(FileSinkConfig{Path: filepath.Join(tmpDir, "a.log")})
+	dev := NewDevice("dev1", NewJSONFormat(), sink, &DeviceConfig{Name: "dev1", Enabled: true})
+	mgr.RegisterDevice("dev1", dev)
+
+	if err := mgr.Reset(context.Background()); err != nil {
+		t.Errorf("Reset failed: %v", err)
+	}
+
+	if devs := mgr.ListDevices(); len(devs) != 0 {
+		t.Errorf("expected 0 devices after reset, got %d", len(devs))
+	}
+}
+
+func TestManagerDuplicateRegister(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+	defer mgr.Close()
+
+	tmpDir := t.TempDir()
+	sink, _ := NewFileSink(FileSinkConfig{Path: filepath.Join(tmpDir, "a.log")})
+	dev := NewDevice("dev1", NewJSONFormat(), sink, &DeviceConfig{Name: "dev1", Enabled: true})
+	mgr.RegisterDevice("dev1", dev)
+
+	sink2, _ := NewFileSink(FileSinkConfig{Path: filepath.Join(tmpDir, "b.log")})
+	dev2 := NewDevice("dev1", NewJSONFormat(), sink2, &DeviceConfig{Name: "dev1", Enabled: true})
+	if err := mgr.RegisterDevice("dev1", dev2); err == nil {
+		t.Error("expected error registering duplicate device")
+	}
+}
+
+func TestManagerLogResponse(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+
+	tmpDir := t.TempDir()
+	sink, _ := NewFileSink(FileSinkConfig{Path: filepath.Join(tmpDir, "a.log")})
+	dev := NewDevice("dev1", NewJSONFormat(), sink, &DeviceConfig{Name: "dev1", Enabled: true})
+	mgr.RegisterDevice("dev1", dev)
+	defer mgr.Close()
+
+	entry := &LogEntry{
+		Timestamp: time.Now(),
+		Request:   &Request{ID: "req-1", Path: "/test"},
+		Response:  &Response{StatusCode: 200},
+	}
+
+	continued, err := mgr.LogResponse(context.Background(), entry)
+	if err != nil {
+		t.Errorf("LogResponse failed: %v", err)
+	}
+	if !continued {
+		t.Error("expected continue=true")
+	}
+}
+
+func TestManagerFormatErrors(t *testing.T) {
+	m := &manager{}
+
+	if err := m.formatErrors(nil); err != nil {
+		t.Errorf("expected nil for no errors, got %v", err)
+	}
+
+	if err := m.formatErrors([]error{fmt.Errorf("one error")}); err == nil {
+		t.Error("expected error for single error")
+	}
+
+	err := m.formatErrors([]error{fmt.Errorf("err1"), fmt.Errorf("err2")})
+	if err == nil {
+		t.Error("expected aggregated error")
+	}
+}
+
+func TestManagerSequentialLogResponse(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManagerWithConfig(AuditManagerConfig{Logger: log, Parallel: false})
+
+	tmpDir := t.TempDir()
+	for i := 0; i < 3; i++ {
+		sink, _ := NewFileSink(FileSinkConfig{Path: filepath.Join(tmpDir, fmt.Sprintf("a%d.log", i))})
+		dev := NewDevice(fmt.Sprintf("dev%d", i), NewJSONFormat(), sink, &DeviceConfig{Name: fmt.Sprintf("dev%d", i), Enabled: true})
+		mgr.RegisterDevice(fmt.Sprintf("dev%d", i), dev)
+	}
+	defer mgr.Close()
+
+	entry := &LogEntry{
+		Timestamp: time.Now(),
+		Request:   &Request{ID: "req-1", Path: "/test"},
+		Response:  &Response{StatusCode: 200},
+	}
+
+	continued, err := mgr.LogResponse(context.Background(), entry)
+	if err != nil {
+		t.Errorf("LogResponse failed: %v", err)
+	}
+	if !continued {
+		t.Error("expected continue=true")
+	}
+}
+
+func TestManagerParallelLogResponse(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+
+	tmpDir := t.TempDir()
+	for i := 0; i < 3; i++ {
+		sink, _ := NewFileSink(FileSinkConfig{Path: filepath.Join(tmpDir, fmt.Sprintf("a%d.log", i))})
+		dev := NewDevice(fmt.Sprintf("dev%d", i), NewJSONFormat(), sink, &DeviceConfig{Name: fmt.Sprintf("dev%d", i), Enabled: true})
+		mgr.RegisterDevice(fmt.Sprintf("dev%d", i), dev)
+	}
+	defer mgr.Close()
+
+	entry := &LogEntry{
+		Timestamp: time.Now(),
+		Request:   &Request{ID: "req-1", Path: "/test"},
+		Response:  &Response{StatusCode: 200},
+	}
+
+	continued, err := mgr.LogResponse(context.Background(), entry)
+	if err != nil {
+		t.Errorf("LogResponse failed: %v", err)
+	}
+	if !continued {
+		t.Error("expected continue=true")
+	}
+}
