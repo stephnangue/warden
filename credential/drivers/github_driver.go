@@ -86,6 +86,11 @@ func (f *GitHubDriverFactory) SensitiveConfigFields() []string {
 	return nil
 }
 
+// InferCredentialType always returns github_token for GitHub sources.
+func (f *GitHubDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+	return credential.TypeGitHubToken, nil
+}
+
 // Create instantiates a new GitHubDriver.
 // The driver only needs the github_url from source config. Auth credentials
 // are provided per-spec at MintCredential time.

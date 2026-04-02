@@ -84,8 +84,7 @@ func (b *SystemBackend) pathCredentials() []*framework.Path {
 				},
 				"type": {
 					Type:        framework.TypeString,
-					Description: "The credential type",
-					Required:    true,
+					Description: "The credential type (optional — inferred from source type and config when omitted)",
 				},
 				"source": {
 					Type:        framework.TypeString,
@@ -433,6 +432,29 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 	maxTTL, _ := d.Get("max_ttl").(int)
 	rotationPeriod, _ := d.Get("rotation_period").(int)
 
+	specConfig := convertToStringMap(configAny)
+
+	// Infer credential type from source if not provided
+	if specType == "" {
+		src, err := b.core.credConfigStore.GetSource(ctx, source)
+		if err != nil {
+			if errors.Is(err, ErrSourceNotFound) {
+				return logical.ErrorResponse(logical.ErrBadRequestf("source '%s' not found", source)), nil
+			}
+			return logical.ErrorResponse(err), nil
+		}
+		factory, err := b.core.credentialDriverRegistry.GetFactory(src.Type)
+		if err != nil {
+			return logical.ErrorResponse(logical.ErrBadRequestf("unknown source type: %s", src.Type)), nil
+		}
+		specType, err = factory.InferCredentialType(specConfig)
+		if err != nil {
+			return logical.ErrorResponse(logical.ErrBadRequestf(
+				"cannot infer credential type for source type '%s': %s — please specify 'type' explicitly",
+				src.Type, err.Error())), nil
+		}
+	}
+
 	b.logger.Info("creating credential spec",
 		logger.String("name", name),
 		logger.String("type", specType),
@@ -451,7 +473,7 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 		Name:           name,
 		Type:           specType,
 		Source:         source,
-		Config:         convertToStringMap(configAny),
+		Config:         specConfig,
 		MinTTL:         time.Duration(minTTL) * time.Second,
 		MaxTTL:         time.Duration(maxTTL) * time.Second,
 		RotationPeriod: time.Duration(rotationPeriod) * time.Second,

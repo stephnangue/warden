@@ -3,6 +3,7 @@ package credential
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -129,6 +130,10 @@ func (f *mockSourceDriverFactory) ValidateConfig(config map[string]string) error
 
 func (f *mockSourceDriverFactory) SensitiveConfigFields() []string {
 	return []string{"password", "secret"}
+}
+
+func (f *mockSourceDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+	return "", fmt.Errorf("mock driver cannot infer type")
 }
 
 // mockCredentialType implements Type for testing

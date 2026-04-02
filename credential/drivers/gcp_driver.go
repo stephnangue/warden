@@ -120,6 +120,19 @@ func (f *GCPDriverFactory) SensitiveConfigFields() []string {
 	return []string{"service_account_key"}
 }
 
+// InferCredentialType infers the credential type from the spec's mint_method.
+func (f *GCPDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
+	mintMethod := specConfig["mint_method"]
+	switch mintMethod {
+	case "cloud_sql_iam_token":
+		return credential.TypeDBAuthToken, nil
+	case "":
+		return credential.TypeGCPAccessToken, nil
+	default:
+		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
+	}
+}
+
 // Create instantiates a new GCPDriver
 func (f *GCPDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &GCPDriver{
