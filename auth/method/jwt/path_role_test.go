@@ -491,3 +491,183 @@ func TestPathRole_MaxAgeRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 30*time.Minute, maxAge)
 }
+
+func TestHandleRoleUpdate_AllFields(t *testing.T) {
+	b, ctx := createTestBackendWithStorage(t)
+
+	// Create initial role
+	role := &JWTRole{
+		Name:      "full-update-role",
+		TokenTTL:  time.Hour.String(),
+		UserClaim: "sub",
+		TokenType: "jwt_role",
+	}
+	err := b.setRole(ctx, role)
+	require.NoError(t, err)
+
+	fd := &framework.FieldData{
+		Raw: map[string]any{
+			"name":                "full-update-role",
+			"bound_audiences":    []string{"new-aud"},
+			"bound_subject":      "new-sub",
+			"bound_claims":       map[string]any{"tenant": "acme"},
+			"bound_uri_patterns": []string{"spiffe://*"},
+			"uri_claim":          "custom_claim",
+			"token_policies":     []string{"new-policy"},
+			"token_ttl":          7200,
+			"user_claim":         "email",
+			"cred_spec_name":     "aws-spec",
+			"groups_claim":       "groups",
+			"group_policy_prefix": "grp-",
+			"max_age":            "1h",
+		},
+		Schema: map[string]*framework.FieldSchema{
+			"name":                {Type: framework.TypeString},
+			"bound_audiences":     {Type: framework.TypeCommaStringSlice},
+			"bound_subject":       {Type: framework.TypeString},
+			"bound_claims":        {Type: framework.TypeMap},
+			"bound_uri_patterns":  {Type: framework.TypeCommaStringSlice},
+			"uri_claim":           {Type: framework.TypeString},
+			"token_policies":      {Type: framework.TypeCommaStringSlice},
+			"token_ttl":           {Type: framework.TypeDurationSecond},
+			"user_claim":          {Type: framework.TypeString},
+			"cred_spec_name":      {Type: framework.TypeString},
+			"groups_claim":        {Type: framework.TypeString},
+			"group_policy_prefix": {Type: framework.TypeString},
+			"max_age":             {Type: framework.TypeString},
+		},
+	}
+
+	resp, err := b.handleRoleUpdate(ctx, &logical.Request{}, fd)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	updated, _ := b.getRole(ctx, "full-update-role")
+	assert.Equal(t, []string{"new-aud"}, updated.BoundAudiences)
+	assert.Equal(t, "new-sub", updated.BoundSubject)
+	assert.Equal(t, "custom_claim", updated.URIClaim)
+	assert.Equal(t, "email", updated.UserClaim)
+	assert.Equal(t, "aws-spec", updated.CredSpecName)
+	assert.Equal(t, "groups", updated.GroupsClaim)
+	assert.Equal(t, "grp-", updated.GroupPolicyPrefix)
+	assert.Equal(t, "1h", updated.MaxAge)
+}
+
+// =============================================================================
+// validateRole Tests
+// =============================================================================
+
+func TestValidateRole_InvalidMaxAge(t *testing.T) {
+	b, _ := createTestBackendWithStorage(t)
+
+	role := &JWTRole{
+		Name:   "bad-max-age",
+		MaxAge: "invalid",
+	}
+	err := b.validateRole(role)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid max_age")
+}
+
+func TestValidateRole_NegativeMaxAge(t *testing.T) {
+	b, _ := createTestBackendWithStorage(t)
+
+	role := &JWTRole{
+		Name:   "neg-max-age",
+		MaxAge: "-5m",
+	}
+	err := b.validateRole(role)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "must be a positive")
+}
+
+func TestValidateRole_InvalidTTL(t *testing.T) {
+	b, _ := createTestBackendWithStorage(t)
+
+	role := &JWTRole{
+		Name:     "bad-ttl",
+		TokenTTL: "not-a-duration",
+	}
+	err := b.validateRole(role)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid token_ttl")
+}
+
+func TestValidateRole_DefaultsApplied(t *testing.T) {
+	b, _ := createTestBackendWithStorage(t)
+
+	role := &JWTRole{Name: "defaults"}
+	err := b.validateRole(role)
+	require.NoError(t, err)
+	assert.Equal(t, "sub", role.UserClaim)
+	assert.Equal(t, "jwt_role", role.TokenType)
+	assert.Equal(t, time.Hour.String(), role.TokenTTL)
+}
+
+func TestValidateRole_URIPatternsSetDefaultClaim(t *testing.T) {
+	b, _ := createTestBackendWithStorage(t)
+
+	role := &JWTRole{
+		Name:             "uri-defaults",
+		BoundURIPatterns: []string{"spiffe://*"},
+	}
+	err := b.validateRole(role)
+	require.NoError(t, err)
+	assert.Equal(t, "sub", role.URIClaim)
+}
+
+// =============================================================================
+// Initialize with storage
+// =============================================================================
+
+func TestBuildRoleFromFieldData_AllFields(t *testing.T) {
+	b, _ := createTestBackendWithStorage(t)
+
+	fd := &framework.FieldData{
+		Raw: map[string]any{
+			"name":                "full-role",
+			"bound_audiences":    []string{"aud1"},
+			"bound_subject":      "sub1",
+			"bound_claims":       map[string]any{"k": "v"},
+			"bound_uri_patterns": []string{"spiffe://*"},
+			"uri_claim":          "custom",
+			"token_policies":     []string{"p1"},
+			"token_ttl":          3600,
+			"user_claim":         "email",
+			"cred_spec_name":     "spec",
+			"groups_claim":       "groups",
+			"group_policy_prefix": "grp-",
+			"max_age":            "30m",
+		},
+		Schema: map[string]*framework.FieldSchema{
+			"name":                {Type: framework.TypeString},
+			"bound_audiences":     {Type: framework.TypeCommaStringSlice},
+			"bound_subject":       {Type: framework.TypeString},
+			"bound_claims":        {Type: framework.TypeMap},
+			"bound_uri_patterns":  {Type: framework.TypeCommaStringSlice},
+			"uri_claim":           {Type: framework.TypeString},
+			"token_policies":      {Type: framework.TypeCommaStringSlice},
+			"token_ttl":           {Type: framework.TypeDurationSecond},
+			"user_claim":          {Type: framework.TypeString},
+			"cred_spec_name":      {Type: framework.TypeString},
+			"groups_claim":        {Type: framework.TypeString},
+			"group_policy_prefix": {Type: framework.TypeString},
+			"max_age":             {Type: framework.TypeString},
+		},
+	}
+
+	role := b.buildRoleFromFieldData("full-role", fd)
+	assert.Equal(t, "full-role", role.Name)
+	assert.Equal(t, []string{"aud1"}, role.BoundAudiences)
+	assert.Equal(t, "sub1", role.BoundSubject)
+	assert.Equal(t, "custom", role.URIClaim)
+	assert.Equal(t, "email", role.UserClaim)
+	assert.Equal(t, "spec", role.CredSpecName)
+	assert.Equal(t, "groups", role.GroupsClaim)
+	assert.Equal(t, "grp-", role.GroupPolicyPrefix)
+	assert.Equal(t, "30m", role.MaxAge)
+}
+
+// =============================================================================
+// Initialize with persisted config
+// =============================================================================

@@ -52,3 +52,24 @@ func TestBufferedSink(t *testing.T) {
 		t.Error("Log file is empty after buffered writes")
 	}
 }
+
+func TestBufferedSinkNameAndType(t *testing.T) {
+	tmpDir := t.TempDir()
+	fileSink, err := NewFileSink(FileSinkConfig{Path: filepath.Join(tmpDir, "audit.log")})
+	if err != nil {
+		t.Fatalf("NewFileSink failed: %v", err)
+	}
+
+	bs, err := NewBufferedSink(BufferedSinkConfig{Sink: fileSink})
+	if err != nil {
+		t.Fatalf("NewBufferedSink failed: %v", err)
+	}
+	defer bs.Close()
+
+	if bs.Name() == "" {
+		t.Error("expected non-empty name")
+	}
+	if bs.Type() != "buffered-file" {
+		t.Errorf("expected buffered-file, got %s", bs.Type())
+	}
+}

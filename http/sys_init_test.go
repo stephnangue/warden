@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"strings"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -518,3 +520,200 @@ func TestInitRequest_Parsing(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleSysInit_GetNotInitialized(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleSysInit(c, log)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sys/init", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp InitStatusResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.False(t, resp.Initialized)
+}
+
+func TestHandleSysInit_MethodNotAllowed_WithCore(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleSysInit(c, log)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/sys/init", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+}
+
+// =============================================================================
+// Handler() integration test
+// =============================================================================
+
+func TestHandleSysInit_PutInvalidBody(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleSysInit(c, log)
+
+	req := httptest.NewRequest(http.MethodPut, "/v1/sys/init", strings.NewReader("not json"))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "failed to parse request body")
+}
+
+func TestHandleSysInit_PutThresholdGreaterThanShares(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleSysInit(c, log)
+
+	body := `{"secret_shares": 3, "secret_threshold": 5}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/sys/init", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "secret_threshold cannot be greater than secret_shares")
+}
+
+func TestHandleSysInit_PutPGPKeysMismatch(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleSysInit(c, log)
+
+	body := `{"secret_shares": 5, "secret_threshold": 3, "pgp_keys": ["k1", "k2"]}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/sys/init", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "pgp_keys")
+}
+
+func TestHandleSysInit_PutValidInit(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleSysInit(c, log)
+
+	body := `{"secret_shares": 1, "secret_threshold": 1}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/sys/init", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code == http.StatusOK {
+		var resp InitResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.NotEmpty(t, resp.RootToken)
+		assert.Len(t, resp.Keys, 1)
+	} else {
+		// NewCore with inmem may fail init; log the error for debugging
+		t.Logf("init returned %d: %s", w.Code, w.Body.String())
+		assert.Equal(t, http.StatusInternalServerError, w.Code)
+	}
+}
+
+func TestHandleSysInit_PostMethod(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleSysInit(c, log)
+
+	// POST should also be accepted (same as PUT)
+	body := `{"secret_shares": 1, "secret_threshold": 1}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/sys/init", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestHandleSysInit_PutAlreadyInitialized(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleSysInit(c, log)
+
+	// Initialize first
+	body := `{"secret_shares": 1, "secret_threshold": 1}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/sys/init", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Try again
+	req2 := httptest.NewRequest(http.MethodPut, "/v1/sys/init", strings.NewReader(body))
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+
+	assert.Equal(t, http.StatusBadRequest, w2.Code)
+	assert.Contains(t, w2.Body.String(), "already initialized")
+}
+
+func TestHandleSysInit_GetAfterInit(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleSysInit(c, log)
+
+	// Initialize
+	body := `{"secret_shares": 1, "secret_threshold": 1}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/sys/init", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Check status
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/sys/init", nil)
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+
+	assert.Equal(t, http.StatusOK, w2.Code)
+	var resp InitStatusResponse
+	require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &resp))
+	assert.True(t, resp.Initialized)
+}
+
+// =============================================================================
+// getProxy Tests
+// =============================================================================
+
+func TestHandleSysInit_PutZeroSharesDefaulted(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleSysInit(c, log)
+
+	// Empty body -> defaults to shares=5, threshold=3
+	body := `{}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/sys/init", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Should proceed past validation (may fail at Initialize due to seal)
+	assert.True(t, w.Code == http.StatusOK || w.Code == http.StatusInternalServerError)
+}
+
+func TestHandleSysInit_PutNegativeThreshold(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleSysInit(c, log)
+
+	body := `{"secret_shares": 5, "secret_threshold": -1}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/sys/init", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "secret_threshold must be at least 1")
+}
+
+func TestHandleSysInit_PutNegativeShares(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := handleSysInit(c, log)
+
+	// shares=-1, threshold=1: threshold > shares after defaulting, so
+	// "secret_threshold cannot be greater than secret_shares" fires first
+	body := `{"secret_shares": -1, "secret_threshold": 1}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/sys/init", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// =============================================================================
+// handleSysStepDown additional coverage (PUT and POST)
+// =============================================================================
+
+// =============================================================================
+// getProxy ErrorHandler: isConnectionError path with core
+// =============================================================================

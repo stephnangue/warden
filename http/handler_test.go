@@ -14,6 +14,9 @@ import (
 	"syscall"
 	"testing"
 
+	"fmt"
+
+	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -599,4 +602,270 @@ func TestProxyDirectorHandlesBareIPRemoteAddr(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, receivedXFF, "192.168.1.100")
 	})
+}
+
+func TestRespondStandby_BasicRedirect(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/sys/health", nil)
+	w := httptest.NewRecorder()
+
+	respondStandby(w, req, "https://leader.example.com:8200")
+
+	assert.Equal(t, http.StatusTemporaryRedirect, w.Code)
+	loc := w.Header().Get("Location")
+	assert.Equal(t, "https://leader.example.com:8200/v1/sys/health", loc)
+}
+
+func TestRespondStandby_PreservesQueryParams(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/secret/data?version=2&format=json", nil)
+	w := httptest.NewRecorder()
+
+	respondStandby(w, req, "https://leader.example.com:8200")
+
+	loc := w.Header().Get("Location")
+	assert.Contains(t, loc, "version=2")
+	assert.Contains(t, loc, "format=json")
+	assert.Equal(t, http.StatusTemporaryRedirect, w.Code)
+}
+
+func TestRespondStandby_InvalidLeaderAddress(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
+	w := httptest.NewRecorder()
+
+	respondStandby(w, req, "://invalid-url")
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid leader address")
+}
+
+func TestRespondStandby_PreservesPath(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPut, "/v1/aws/gateway/s3/bucket/key", nil)
+	w := httptest.NewRecorder()
+
+	respondStandby(w, req, "http://10.0.0.1:8200")
+
+	loc := w.Header().Get("Location")
+	assert.Equal(t, "http://10.0.0.1:8200/v1/aws/gateway/s3/bucket/key", loc)
+}
+
+// =============================================================================
+// standbyAllowedPaths Tests
+// =============================================================================
+
+func TestStandbyAllowedPaths_Contents(t *testing.T) {
+	expected := []string{
+		"/v1/sys/health",
+		"/v1/sys/ready",
+		"/v1/sys/leader",
+		"/v1/sys/seal-status",
+		"/v1/sys/init",
+	}
+	for _, p := range expected {
+		assert.True(t, standbyAllowedPaths[p], "expected %s to be allowed on standby", p)
+	}
+	assert.Equal(t, len(expected), len(standbyAllowedPaths))
+}
+
+func TestStandbyAllowedPaths_NotAllowed(t *testing.T) {
+	notAllowed := []string{
+		"/v1/sys/step-down",
+		"/v1/sys/providers",
+		"/v1/aws/gateway",
+		"/v1/secret/data",
+	}
+	for _, p := range notAllowed {
+		assert.False(t, standbyAllowedPaths[p], "expected %s to NOT be allowed on standby", p)
+	}
+}
+
+// =============================================================================
+// isConnectionError Tests (additional coverage)
+// =============================================================================
+
+func TestIsConnectionError_DialOpError(t *testing.T) {
+	err := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	assert.True(t, isConnectionError(err))
+}
+
+func TestIsConnectionError_WriteOpError(t *testing.T) {
+	err := &net.OpError{Op: "write", Net: "tcp", Err: errors.New("broken pipe")}
+	assert.True(t, isConnectionError(err))
+}
+
+func TestIsConnectionError_LookupOpError(t *testing.T) {
+	// DNS lookup errors should NOT be connection errors
+	err := &net.OpError{Op: "lookup", Net: "ip", Err: errors.New("no such host")}
+	assert.False(t, isConnectionError(err))
+}
+
+func TestIsConnectionError_WrappedEOF(t *testing.T) {
+	err := fmt.Errorf("proxy: %w", io.EOF)
+	assert.True(t, isConnectionError(err))
+}
+
+func TestIsConnectionError_WrappedUnexpectedEOF(t *testing.T) {
+	err := fmt.Errorf("proxy: %w", io.ErrUnexpectedEOF)
+	assert.True(t, isConnectionError(err))
+}
+
+func TestIsConnectionError_WrappedConnReset(t *testing.T) {
+	err := fmt.Errorf("transport: %w", syscall.ECONNRESET)
+	assert.True(t, isConnectionError(err))
+}
+
+func TestIsConnectionError_WrappedConnAborted(t *testing.T) {
+	err := fmt.Errorf("transport: %w", syscall.ECONNABORTED)
+	assert.True(t, isConnectionError(err))
+}
+
+func TestIsConnectionError_TLSOpError(t *testing.T) {
+	// TLS handshake errors (op != dial/read/write) should NOT be connection errors
+	err := &net.OpError{Op: "remote error", Net: "tcp", Err: errors.New("tls: bad certificate")}
+	assert.False(t, isConnectionError(err))
+}
+
+// =============================================================================
+// errorToStatusCode Tests
+// =============================================================================
+
+func TestHandlerProperties_Defaults(t *testing.T) {
+	props := &HandlerProperties{}
+	assert.Nil(t, props.Core)
+	assert.Nil(t, props.Logger)
+	assert.Nil(t, props.ClusterTLSConfigFunc)
+	assert.Equal(t, 0, int(props.ForwardingTimeout))
+}
+
+// =============================================================================
+// Helper: create a minimal core for HTTP handler tests
+// =============================================================================
+
+func TestHandler_InvalidPath(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := Handler(&HandlerProperties{Core: c, Logger: log})
+
+	req := httptest.NewRequest(http.MethodGet, "/not-v1/test", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestHandler_HealthEndpoint(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := Handler(&HandlerProperties{Core: c, Logger: log})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sys/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Not initialized -> 501
+	assert.Equal(t, http.StatusNotImplemented, w.Code)
+}
+
+func TestHandler_ReadyEndpoint(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := Handler(&HandlerProperties{Core: c, Logger: log})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sys/ready", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}
+
+func TestHandler_LeaderEndpoint(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := Handler(&HandlerProperties{Core: c, Logger: log})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sys/leader", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestHandler_SealStatusEndpoint(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := Handler(&HandlerProperties{Core: c, Logger: log})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sys/seal-status", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// =============================================================================
+// handleLogical Tests (with real core)
+// =============================================================================
+
+func TestHandler_InitEndpoint(t *testing.T) {
+	c, log := createTestCoreForHTTP(t)
+	handler := Handler(&HandlerProperties{Core: c, Logger: log})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sys/init", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestForwardToActive_NoLeader(t *testing.T) {
+	// Core without HA -> Leader() returns ErrHANotEnabled
+	c, _ := createTestCoreForHTTP(t)
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	fwd := newStandbyForwarder(log, nil, 30)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
+	w := httptest.NewRecorder()
+
+	forwardToActive(c, fwd, w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Contains(t, w.Body.String(), "no active node found")
+}
+
+// =============================================================================
+// getProxy Director & ErrorHandler Tests (via actual proxy request)
+// =============================================================================
+
+func TestWrapGenericHandler_StandbyForwarding(t *testing.T) {
+	// Core starts in standby mode. Non-allowed paths should trigger forwardToActive.
+	c, log := createTestCoreForHTTP(t)
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	fwd := newStandbyForwarder(log, nil, 30)
+
+	wrapped := wrapGenericHandler(c, inner, log, fwd)
+
+	// /v1/sys/providers is NOT in standbyAllowedPaths, so should forward
+	req := httptest.NewRequest(http.MethodGet, "/v1/sys/providers", nil)
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	// forwardToActive with no HA -> 503
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Contains(t, w.Body.String(), "no active node found")
+}
+
+func TestWrapGenericHandler_StandbyAllowedPath(t *testing.T) {
+	// Allowed paths should pass through even in standby mode
+	c, log := createTestCoreForHTTP(t)
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Inner", "yes")
+		w.WriteHeader(http.StatusOK)
+	})
+	fwd := newStandbyForwarder(log, nil, 30)
+
+	wrapped := wrapGenericHandler(c, inner, log, fwd)
+
+	// /v1/sys/health IS in standbyAllowedPaths
+	req := httptest.NewRequest(http.MethodGet, "/v1/sys/health", nil)
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	// Should reach inner handler
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "yes", w.Header().Get("X-Inner"))
 }

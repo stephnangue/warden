@@ -615,3 +615,38 @@ func TestHandleLogin_DefaultRoleFallback(t *testing.T) {
 		assert.Contains(t, resp.Err.Error(), "missing role")
 	})
 }
+
+func TestHandleLogin_DefaultRoleUsedWhenConfigSet(t *testing.T) {
+	ctx := context.Background()
+	conf := &logical.BackendConfig{
+		Logger: testLoggerForCoverage(),
+	}
+	backend, err := Factory(ctx, conf)
+	require.NoError(t, err)
+
+	b := backend.(*jwtAuthBackend)
+	b.config = &JWTAuthConfig{
+		DefaultRole: "auto-role",
+		// validator is nil, so we'll get "not configured"
+	}
+
+	req := &logical.Request{}
+	d := &framework.FieldData{
+		Raw: map[string]any{
+			"jwt":  "some.jwt.token",
+			"role": "",
+		},
+		Schema: b.pathLogin().Fields,
+	}
+
+	resp, err := b.handleLogin(ctx, req, d)
+	require.NoError(t, err)
+	// Should fail on "not configured" not "missing role"
+	assert.NotNil(t, resp.Err)
+	assert.NotContains(t, resp.Err.Error(), "missing role")
+	assert.Contains(t, resp.Err.Error(), "not configured")
+}
+
+// =============================================================================
+// handleConfigWrite merges with existing config
+// =============================================================================

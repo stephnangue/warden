@@ -13,6 +13,7 @@ import (
 
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 )
 
 // testLogger creates a logger for tests that discards output
@@ -376,4 +377,64 @@ func TestBackend_Class(t *testing.T) {
 
 	b := backend.(*jwtAuthBackend)
 	assert.Equal(t, logical.ClassAuth, b.Backend.BackendClass)
+}
+
+func TestSensitiveConfigFields(t *testing.T) {
+	ctx := context.Background()
+	conf := &logical.BackendConfig{Logger: testLogger()}
+	backend, err := Factory(ctx, conf)
+	require.NoError(t, err)
+
+	b := backend.(*jwtAuthBackend)
+	fields := b.SensitiveConfigFields()
+	assert.Contains(t, fields, "oidc_discovery_ca_pem")
+	assert.Contains(t, fields, "jwks_ca_pem")
+	assert.Contains(t, fields, "jwt_validation_pubkeys")
+}
+
+// =============================================================================
+// JWTRole Tests
+// =============================================================================
+
+func TestInitialize_WithStorageView(t *testing.T) {
+	b, ctx := createTestBackendWithStorage(t)
+
+	// Empty storage should succeed
+	err := b.Initialize(ctx)
+	require.NoError(t, err)
+}
+
+// =============================================================================
+// Login with default_role from config
+// =============================================================================
+
+func TestInitialize_WithPersistedConfig(t *testing.T) {
+	b, ctx := createTestBackendWithStorage(t)
+
+	// Store a config that will fail (no reachable JWKS) - to verify Initialize tries
+	configMap := map[string]any{
+		"mode":     "jwt",
+		"jwks_url": "http://localhost:1/.well-known/jwks.json",
+	}
+	entry, err := sdklogical.StorageEntryJSON("config", configMap)
+	require.NoError(t, err)
+	err = b.storageView.Put(ctx, entry)
+	require.NoError(t, err)
+
+	err = b.Initialize(ctx)
+	// Should error because JWKS URL is not reachable
+	assert.Error(t, err)
+}
+
+func testLoggerForCoverage() *logger.GatedLogger {
+	config := &logger.Config{
+		Level:   logger.ErrorLevel,
+		Format:  logger.JSONFormat,
+		Outputs: []io.Writer{io.Discard},
+	}
+	gateConfig := logger.GatedWriterConfig{
+		Underlying: io.Discard,
+	}
+	gl, _ := logger.NewGatedLogger(config, gateConfig)
+	return gl
 }

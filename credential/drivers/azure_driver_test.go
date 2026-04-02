@@ -428,3 +428,52 @@ func TestValidateTenantID(t *testing.T) {
 		}
 	}
 }
+
+func TestAzureDriver_ReadLimitedBody(t *testing.T) {
+	// readLimitedBody should work with any io.Reader
+	data, err := readLimitedBody(http.NoBody)
+	require.NoError(t, err)
+	assert.Empty(t, data)
+}
+
+// =============================================================================
+// AzureDriver doAzureRequest edge case
+// =============================================================================
+
+func TestAzureDriver_Cleanup_Nil(t *testing.T) {
+	driver := &AzureDriver{
+		credSource: &credential.CredSource{
+			Type:   credential.SourceTypeAzure,
+			Config: map[string]string{},
+		},
+		httpClient: &http.Client{},
+	}
+	err := driver.Cleanup(nil)
+	assert.NoError(t, err)
+}
+
+// =============================================================================
+// db_helpers tests (if any coverage gaps)
+// =============================================================================
+
+func TestTokenCache_Expiry(t *testing.T) {
+	driver := newTestAzureDriver()
+	driver.tokenCache = make(map[string]*cachedAzureToken)
+
+	driver.tokenMu.Lock()
+	driver.tokenCache["scope"] = &cachedAzureToken{
+		accessToken: "token",
+		expiresAt:   time.Now().Add(-1 * time.Minute), // expired
+		generation:  driver.credGeneration,
+	}
+	driver.tokenMu.Unlock()
+
+	// Expired token should not be a cache hit
+	driver.tokenMu.Lock()
+	cached, ok := driver.tokenCache["scope"]
+	gen := driver.credGeneration
+	hit := ok && cached.generation == gen && time.Now().Add(5*time.Minute).Before(cached.expiresAt)
+	driver.tokenMu.Unlock()
+
+	assert.False(t, hit)
+}

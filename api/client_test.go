@@ -1063,3 +1063,196 @@ func TestClient_NewRequestWithURLParsing(t *testing.T) {
 		}
 	})
 }
+
+func TestClient_NamespaceOperations(t *testing.T) {
+	config := DefaultConfig()
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Initially empty
+	if ns := client.Namespace(); ns != "" {
+		t.Errorf("expected empty namespace, got %q", ns)
+	}
+
+	// Set namespace
+	client.SetNamespace("prod")
+	if ns := client.Namespace(); ns != "prod" {
+		t.Errorf("expected prod, got %q", ns)
+	}
+
+	// Clear namespace
+	client.ClearNamespace()
+	if ns := client.Namespace(); ns != "" {
+		t.Errorf("expected empty after clear, got %q", ns)
+	}
+}
+
+func TestClient_WithNamespace(t *testing.T) {
+	config := DefaultConfig()
+	client, _ := NewClient(config)
+
+	client.SetNamespace("original")
+
+	// WithNamespace creates a copy
+	c2 := client.WithNamespace("other")
+	if c2.Namespace() != "other" {
+		t.Errorf("expected other, got %q", c2.Namespace())
+	}
+
+	// Original unchanged
+	if client.Namespace() != "original" {
+		t.Errorf("expected original unchanged, got %q", client.Namespace())
+	}
+
+	// Empty string clears
+	c3 := client.WithNamespace("")
+	if c3.Namespace() != "" {
+		t.Errorf("expected empty, got %q", c3.Namespace())
+	}
+}
+
+func TestClient_RoleOperations(t *testing.T) {
+	config := DefaultConfig()
+	client, _ := NewClient(config)
+
+	if r := client.Role(); r != "" {
+		t.Errorf("expected empty role, got %q", r)
+	}
+
+	client.SetRole("admin")
+	if r := client.Role(); r != "admin" {
+		t.Errorf("expected admin, got %q", r)
+	}
+
+	client.ClearRole()
+	if r := client.Role(); r != "" {
+		t.Errorf("expected empty after clear, got %q", r)
+	}
+}
+
+func TestClient_WithRole(t *testing.T) {
+	config := DefaultConfig()
+	client, _ := NewClient(config)
+
+	client.SetRole("admin")
+
+	c2 := client.WithRole("reader")
+	if c2.Role() != "reader" {
+		t.Errorf("expected reader, got %q", c2.Role())
+	}
+	if client.Role() != "admin" {
+		t.Errorf("expected admin unchanged, got %q", client.Role())
+	}
+
+	c3 := client.WithRole("")
+	if c3.Role() != "" {
+		t.Errorf("expected empty, got %q", c3.Role())
+	}
+}
+
+func TestClient_Headers(t *testing.T) {
+	config := DefaultConfig()
+	client, _ := NewClient(config)
+
+	// Set headers
+	headers := http.Header{"X-Custom": {"val1"}}
+	client.SetHeaders(headers)
+
+	got := client.Headers()
+	if got.Get("X-Custom") != "val1" {
+		t.Errorf("expected val1, got %q", got.Get("X-Custom"))
+	}
+
+	// Headers returns a copy
+	got.Set("X-Custom", "modified")
+	if client.Headers().Get("X-Custom") != "val1" {
+		t.Error("expected headers to be a copy")
+	}
+}
+
+func TestClient_CloneHeaders(t *testing.T) {
+	config := DefaultConfig()
+	client, _ := NewClient(config)
+
+	if client.CloneHeaders() {
+		t.Error("expected CloneHeaders false by default")
+	}
+
+	client.SetCloneHeaders(true)
+	if !client.CloneHeaders() {
+		t.Error("expected CloneHeaders true after setting")
+	}
+}
+
+func TestClient_Clone(t *testing.T) {
+	config := DefaultConfig()
+	client, _ := NewClient(config)
+	client.SetToken("my-token")
+
+	c2, err := client.Clone()
+	if err != nil {
+		t.Fatalf("Clone failed: %v", err)
+	}
+	if c2 == nil {
+		t.Fatal("expected non-nil clone")
+	}
+}
+
+func TestClient_CloneWithHeaders(t *testing.T) {
+	config := DefaultConfig()
+	client, _ := NewClient(config)
+	client.SetHeaders(http.Header{"X-Custom": {"val"}})
+
+	c2, err := client.CloneWithHeaders()
+	if err != nil {
+		t.Fatalf("CloneWithHeaders failed: %v", err)
+	}
+
+	h := c2.Headers()
+	if h == nil || h.Get("X-Custom") != "val" {
+		t.Errorf("expected cloned headers, got %v", h)
+	}
+}
+
+func TestClient_RawRequestWithContext_Basic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":{"ok":true}}`))
+	}))
+	defer server.Close()
+
+	config := DefaultConfig()
+	config.Address = server.URL
+	client, _ := NewClient(config)
+
+	r := client.NewRequest(http.MethodGet, "/v1/test")
+	resp, err := client.RawRequestWithContext(context.Background(), r)
+	if err != nil {
+		t.Fatalf("RawRequestWithContext failed: %v", err)
+	}
+	resp.Body.Close()
+}
+
+func TestClient_ReadEnvironment_WardenAddress(t *testing.T) {
+	config := DefaultConfig()
+
+	old := os.Getenv(EnvWardenAddress)
+	defer func() {
+		if old != "" {
+			os.Setenv(EnvWardenAddress, old)
+		} else {
+			os.Unsetenv(EnvWardenAddress)
+		}
+	}()
+
+	os.Setenv(EnvWardenAddress, "http://custom:9999")
+	err := config.ReadEnvironment()
+	if err != nil {
+		t.Fatalf("ReadEnvironment failed: %v", err)
+	}
+	if config.Address != "http://custom:9999" {
+		t.Errorf("expected http://custom:9999, got %s", config.Address)
+	}
+}
