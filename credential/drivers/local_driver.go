@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
@@ -37,6 +38,11 @@ func (f *LocalDriverFactory) ValidateConfig(config map[string]string) error {
 // SensitiveConfigFields returns the list of config keys that should be masked in output
 func (f *LocalDriverFactory) SensitiveConfigFields() []string {
 	return []string{} // Local driver has no sensitive config fields
+}
+
+// InferCredentialType cannot infer the type for local sources — it must be specified explicitly.
+func (f *LocalDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+	return "", fmt.Errorf("local source supports multiple credential types; specify type explicitly")
 }
 
 // MintCredential retrieves static credential data from the spec's SourceParams

@@ -172,6 +172,19 @@ func (f *VaultDriverFactory) SensitiveConfigFields() []string {
 	return []string{"token", "secret_id", "secret_id_accessor"}
 }
 
+// InferCredentialType infers the credential type from the spec's mint_method.
+func (f *VaultDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
+	mintMethod := specConfig["mint_method"]
+	switch mintMethod {
+	case "dynamic_aws", "kv2_static":
+		return credential.TypeAWSAccessKeys, nil
+	case "vault_token", "":
+		return credential.TypeVaultToken, nil
+	default:
+		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
+	}
+}
+
 // authenticate performs Vault authentication only if needed (thread-safe)
 func (d *VaultDriver) authenticate(ctx context.Context) error {
 	authMethod := credential.GetString(d.credSource.Config, "auth_method", "")

@@ -256,6 +256,19 @@ func (f *AzureDriverFactory) SensitiveConfigFields() []string {
 	return []string{"client_secret"}
 }
 
+// InferCredentialType infers the credential type from the spec's mint_method.
+func (f *AzureDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
+	mintMethod := specConfig["mint_method"]
+	switch mintMethod {
+	case "azure_db_iam_token":
+		return credential.TypeDBAuthToken, nil
+	case "":
+		return credential.TypeAzureBearerToken, nil
+	default:
+		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
+	}
+}
+
 // Create instantiates a new AzureDriver
 func (f *AzureDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &AzureDriver{

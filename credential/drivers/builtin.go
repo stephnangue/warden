@@ -39,24 +39,13 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
-	// Register Mistral driver factory
-	if err := registry.RegisterFactory(&MistralDriverFactory{}); err != nil {
-		return err
-	}
-
-	// Register OpenAI driver factory
-	if err := registry.RegisterFactory(&OpenAIDriverFactory{}); err != nil {
-		return err
-	}
-
-	// Register Anthropic driver factory
-	if err := registry.RegisterFactory(&AnthropicDriverFactory{}); err != nil {
-		return err
-	}
-
-	// Register Slack driver factory
-	if err := registry.RegisterFactory(&SlackDriverFactory{}); err != nil {
-		return err
+	// Register static API key driver factories (Anthropic, OpenAI, Mistral, Slack)
+	for _, provider := range []APIKeyProviderConfig{
+		AnthropicProvider, OpenAIProvider, MistralProvider, SlackProvider,
+	} {
+		if err := registry.RegisterFactory(NewStaticAPIKeyDriverFactory(provider)); err != nil {
+			return err
+		}
 	}
 
 	return nil
