@@ -194,7 +194,6 @@ Mints an Azure AD Bearer token using the client credentials flow:
 
 ```bash
 warden cred spec create azure-ops \
-  --type azure_bearer_token \
   --source azure-src \
   --config auth_method=bearer_token \
   --config client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
@@ -208,7 +207,6 @@ Fetches a secret directly from Azure Key Vault:
 
 ```bash
 warden cred spec create azure-kv \
-  --type azure_bearer_token \
   --source azure-src \
   --config auth_method=key_vault_secret \
   --config client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \

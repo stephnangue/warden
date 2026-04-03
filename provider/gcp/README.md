@@ -159,7 +159,6 @@ Mint OAuth2 access tokens using the source service account directly:
 
 ```bash
 warden cred spec create gcp-cloud-platform \
-  --type=gcp_access_token \
   --source=gcp-sa \
   --min-ttl=5m \
   --max-ttl=1h \
@@ -173,7 +172,6 @@ Mint tokens on behalf of another service account:
 
 ```bash
 warden cred spec create gcp-impersonated \
-  --type=gcp_access_token \
   --source=gcp-sa \
   --min-ttl=5m \
   --max-ttl=1h \

@@ -39,11 +39,20 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
-	// Register static API key driver factories (Anthropic, OpenAI, Mistral, Slack)
+	// Register static API key driver factories (Anthropic, OpenAI, Mistral, Slack, PagerDuty)
 	for _, provider := range []APIKeyProviderConfig{
-		AnthropicProvider, OpenAIProvider, MistralProvider, SlackProvider,
+		AnthropicProvider, OpenAIProvider, MistralProvider, SlackProvider, PagerDutyProvider,
 	} {
 		if err := registry.RegisterFactory(NewStaticAPIKeyDriverFactory(provider)); err != nil {
+			return err
+		}
+	}
+
+	// Register OAuth2 client credentials driver factories
+	for _, provider := range []OAuth2ProviderConfig{
+		PagerDutyOAuth2Provider,
+	} {
+		if err := registry.RegisterFactory(NewOAuth2DriverFactory(provider)); err != nil {
 			return err
 		}
 	}

@@ -39,6 +39,11 @@ func RegisterBuiltinTypes(registry *credential.TypeRegistry) error {
 		return err
 	}
 
+	// Register OAuth bearer token type
+	if err := registry.Register(NewOAuthBearerTokenCredType()); err != nil {
+		return err
+	}
+
 	// Register database auth token type
 	if err := registry.Register(NewDBAuthTokenCredType()); err != nil {
 		return err

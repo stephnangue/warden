@@ -10,6 +10,7 @@ const (
 	DefaultOpenAIAPIURL    = "https://api.openai.com"
 	DefaultMistralAPIURL   = "https://api.mistral.ai"
 	DefaultSlackAPIURL     = "https://slack.com/api"
+	DefaultPagerDutyAPIURL = "https://api.pagerduty.com"
 )
 
 // AnthropicProvider defines the Anthropic API key provider configuration.
@@ -59,6 +60,23 @@ var MistralProvider = APIKeyProviderConfig{
 		}
 	},
 	OptionalMetadata: []string{"organization_id"},
+}
+
+// PagerDutyProvider defines the PagerDuty API key provider configuration.
+var PagerDutyProvider = APIKeyProviderConfig{
+	SourceType:     credential.SourceTypePagerDuty,
+	DisplayName:    "PagerDuty",
+	DefaultAPIURL:  DefaultPagerDutyAPIURL,
+	VerifyEndpoint: "/users/me",
+	VerifyMethod:   http.MethodGet,
+	BuildAuthHeaders: func(apiKey string) map[string]string {
+		return map[string]string{
+			"Authorization": "Bearer " + apiKey,
+			"Accept":        "application/json",
+			"Content-Type":  "application/json",
+		}
+	},
+	OptionalMetadata: nil,
 }
 
 // SlackProvider defines the Slack API key provider configuration.

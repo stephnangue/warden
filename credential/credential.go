@@ -16,21 +16,24 @@ const (
 	TypeGitHubToken       = "github_token"
 	TypeAPIKey            = "api_key"
 	TypeDBAuthToken       = "db_auth_token"
+	TypeOAuthBearerToken  = "oauth_bearer_token"
 )
 
 // Source type constants
 const (
-	SourceTypeLocal     = "local"
-	SourceTypeVault     = "hvault"
-	SourceTypeAWS       = "aws"
-	SourceTypeAzure     = "azure"
-	SourceTypeGCP       = "gcp"
-	SourceTypeGitLab    = "gitlab"
-	SourceTypeGitHub    = "github"
-	SourceTypeMistral   = "mistral"
-	SourceTypeOpenAI    = "openai"
-	SourceTypeAnthropic = "anthropic"
-	SourceTypeSlack     = "slack"
+	SourceTypeLocal          = "local"
+	SourceTypeVault          = "hvault"
+	SourceTypeAWS            = "aws"
+	SourceTypeAzure          = "azure"
+	SourceTypeGCP            = "gcp"
+	SourceTypeGitLab         = "gitlab"
+	SourceTypeGitHub         = "github"
+	SourceTypeMistral        = "mistral"
+	SourceTypeOpenAI         = "openai"
+	SourceTypeAnthropic      = "anthropic"
+	SourceTypeSlack          = "slack"
+	SourceTypePagerDuty      = "pagerduty"
+	SourceTypePagerDutyOAuth = "pagerduty_oauth2"
 )
 
 // Category constants for credential categorization

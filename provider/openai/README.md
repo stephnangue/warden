@@ -140,7 +140,6 @@ Create a credential spec that references the credential source. The spec carries
 
 ```bash
 warden cred spec create openai-ops \
-  --type api_key \
   --source openai-src \
   --config api_key=<your-openai-api-key>
 ```
@@ -149,7 +148,6 @@ Optionally include an organization ID and/or project ID:
 
 ```bash
 warden cred spec create openai-ops \
-  --type api_key \
   --source openai-src \
   --config api_key=<your-openai-api-key> \
   --config organization_id=<your-org-id> \

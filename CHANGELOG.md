@@ -2,6 +2,43 @@
 
 All notable changes to Warden are documented in this file.
 
+## [v0.7.0] — 2026-04-03
+
+### New Features
+
+- **PagerDuty Provider** — New streaming gateway provider for the PagerDuty REST API v2. Proxies requests to incidents, services, users, schedules, and escalation policies with automatic credential injection. Supports two credential modes: static API tokens and OAuth2 client credentials.
+
+- **Generic OAuth2 Client Credentials Driver** — New reusable credential driver that exchanges `client_id`/`client_secret` for bearer tokens via the standard OAuth2 client credentials grant (RFC 6749). Parameterized by an `OAuth2ProviderConfig` struct — adding a new OAuth2 provider requires only a config definition, no custom driver code. PagerDuty is the first provider to use it; future OAuth2 providers (Datadog, Twilio, etc.) can reuse it directly.
+
+- **OAuth Bearer Token Credential Type** — New `oauth_bearer_token` credential type for OAuth2-minted bearer tokens. Tokens have a TTL from the provider's `expires_in` response and are minted on demand when leases expire. Primary field is `api_key` for compatibility with `BearerAPIKeyExtractor`.
+
+- **HTTP Proxy Framework** — Extracted a generic `httpproxy` framework from the provider implementations. All streaming providers (Anthropic, GitHub, GitLab, Mistral, OpenAI, PagerDuty, Slack) now share a single `ProviderSpec`-based implementation, reducing per-provider code from ~500 lines to ~30 lines. (#114)
+
+- **Credential Type Inference** — The `--type` flag on `warden cred spec create` is now optional. When omitted, the credential type is inferred from the source driver via `InferCredentialType`. All provider READMEs updated to omit the flag. (#111)
+
+- **Slack Provider** — New streaming gateway provider for the Slack Web API with body parsing for policy evaluation on request fields (channel, text, user). (#97)
+
+- **`?role=` Query Parameter** — Non-gateway backends now accept a `?role=` query parameter as an alternative to the `X-Warden-Role` header or URL path segment. (#108)
+
+### Improvements
+
+- **Unified Static API Key Driver** — Replaced four separate API key drivers (Anthropic, OpenAI, Mistral, Slack) with a single `StaticAPIKeyDriver` parameterized by `APIKeyProviderConfig`. (#111)
+
+### Bug Fixes
+
+- **SQL Server Removal** — Removed SQL Server physical storage backend. (#92)
+- **CI Permissions** — Added explicit permissions block to CI workflow. (#99)
+
+### Infrastructure
+
+- **Test Coverage** — Increased test coverage across all packages. (#110)
+- **Badges** — Added pkg.go.dev and Codecov badges. (#109)
+- **Dependency Updates** — Bumped Go minor/patch dependencies. (#98)
+
+### Documentation
+
+- **Provider READMEs** — Removed `--type` from all `cred spec create` examples (now inferred). Added PagerDuty provider README with full quickstart for both static API token and OAuth2 client credentials modes.
+
 ## [v0.6.0] — 2026-03-27
 
 ### Breaking Changes
@@ -199,6 +236,8 @@ Initial release. See the [v0.1.0 release notes](https://github.com/stephnangue/w
 - Docker image published to `ghcr.io/stephnangue/warden`
 - Pre-built binaries for Linux, macOS, and Windows
 
+[v0.7.0]: https://github.com/stephnangue/warden/compare/v0.6.0...v0.7.0
+[v0.6.0]: https://github.com/stephnangue/warden/compare/v0.5.0...v0.6.0
 [v0.5.0]: https://github.com/stephnangue/warden/compare/v0.4.1...v0.5.0
 [v0.4.1]: https://github.com/stephnangue/warden/compare/v0.4.0...v0.4.1
 [v0.4.0]: https://github.com/stephnangue/warden/compare/v0.3.0...v0.4.0
