@@ -168,7 +168,6 @@ Create a credential spec that references the credential source. The spec defines
 
 ```bash
 warden cred spec create gitlab-project-token \
-  --type=gitlab_access_token \
   --source=gitlab-pat \
   --min-ttl=1h \
   --max-ttl=24h \
@@ -183,7 +182,6 @@ warden cred spec create gitlab-project-token \
 
 ```bash
 warden cred spec create gitlab-group-token \
-  --type=gitlab_access_token \
   --source=gitlab-pat \
   --min-ttl=1h \
   --max-ttl=24h \

@@ -140,7 +140,6 @@ Create a credential spec that references the credential source. The spec carries
 
 ```bash
 warden cred spec create slack-ops \
-  --type api_key \
   --source slack-src \
   --config api_key=xoxb-your-bot-token
 ```

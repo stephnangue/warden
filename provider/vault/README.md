@@ -303,7 +303,6 @@ The Vault provider gateway requires a credential spec of type `vault_token`. War
 ```bash
 # Read-only Vault token
 warden cred spec create vault-reader \
-  --type vault_token \
   --source vault-prod \
   --config mint_method=vault_token \
   --config token_role=reader \
@@ -312,7 +311,6 @@ warden cred spec create vault-reader \
 
 # Admin Vault token with custom TTL
 warden cred spec create vault-admin \
-  --type vault_token \
   --source vault-prod \
   --config mint_method=vault_token \
   --config token_role=admin \

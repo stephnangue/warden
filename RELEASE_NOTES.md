@@ -1,10 +1,14 @@
-## Warden v0.6.0
+## Warden v0.7.0
 
 Warden is an identity-based access layer for cloud APIs, SaaS platforms, databases, and AI providers. It eliminates static credentials from your workloads entirely. Your workload authenticates to Warden with its own identity — a JWT from your identity provider or a TLS certificate. Warden verifies who is calling, evaluates fine-grained capability-based policies, and issues ephemeral request-scoped access: forwarding API requests with short-lived credentials injected, returning database auth tokens, or vending pre-signed URLs. Credentials are minted on demand, scoped to the request, and never exposed to the caller. Every API call is logged with caller identity, target service, and full request context. No secrets ever reach your applications.
 
 ### What's New
 
-**Transparent mode is the only mode.** There is no longer a separate "explicit login" flow. Clients pass their JWT or certificate directly to the gateway endpoint — Warden handles authentication implicitly on every request.
+**PagerDuty provider with dual credential modes.** The new PagerDuty provider proxies requests to the PagerDuty REST API v2 with automatic credential injection. Two credential modes are supported: static API tokens (for simple setups) and OAuth2 client credentials (for production deployments with auto-refreshing bearer tokens).
+
+**Generic HTTP proxy framework.** All streaming providers now share a single `httpproxy.ProviderSpec`-based implementation. Adding a new provider requires ~30 lines of configuration instead of ~500 lines of boilerplate.
+
+**Credential type inference.** The `--type` flag on `warden cred spec create` is now optional — the type is inferred from the source driver automatically.
 
 ### Providers
 
@@ -19,23 +23,22 @@ Warden is an identity-based access layer for cloud APIs, SaaS platforms, databas
 | Anthropic | Streaming | API keys |
 | OpenAI | Streaming | API keys |
 | Mistral | Streaming | API keys |
-| **RDS** *(new)* | **Access** | **IAM auth tokens** |
+| Slack | Streaming | API keys |
+| **PagerDuty** *(new)* | **Streaming** | **API keys / OAuth2 bearer tokens** |
+| RDS | Access | IAM auth tokens |
 
 - **Streaming providers** proxy requests through Warden, injecting credentials in-flight.
 - **Access providers** vend credentials directly (database auth tokens, pre-signed URLs).
 
-### Breaking Changes
-
-- **`token_type` removed** — The `token_type` field on auth method configs and roles no longer exists. All roles use the transparent type (`jwt_role` or `cert_role`) automatically.
-- **Explicit login blocked** — `/auth/jwt/login` and `/auth/cert/login` return `400`. Use the gateway endpoint directly.
-- **`transparent_mode` config removed** — Remove `"transparent_mode": true` from provider configs. The `auto_auth_path` field (required) controls authentication.
-- **`warden_crypto_token` removed** — Self-contained encrypted tokens are no longer supported.
-
 ### New Features
 
-- **AWS Transparent Mode** — AWS SDK clients authenticate via JWT or TLS certificate. Warden intercepts SigV4-signed requests, verifies the client signature, then re-signs with real AWS credentials. Supports `aws-chunked` streaming uploads.
-- **RDS Provider** — Issues short-lived IAM authentication tokens for PostgreSQL and MySQL on RDS/Aurora.
-- **TLS in Dev Mode** — `--dev-tls` generates a self-signed certificate at startup for HTTPS development.
+- **PagerDuty Provider** — Streaming gateway for PagerDuty REST API v2. Supports static API tokens (`pagerduty` source) and OAuth2 client credentials (`pagerduty_oauth2` source) with automatic token minting and refresh.
+- **Slack Provider** — Streaming gateway for Slack Web API with policy evaluation on request fields (channel, text, user).
+- **Generic OAuth2 Client Credentials Driver** — Reusable credential driver for any OAuth2 provider using the client credentials grant. PagerDuty is the first consumer; future OAuth2 providers can reuse it with config only.
+- **OAuth Bearer Token Credential Type** — New `oauth_bearer_token` type for dynamically minted OAuth2 bearer tokens with TTL-based lifecycle.
+- **HTTP Proxy Framework** — Shared `httpproxy.ProviderSpec` eliminates per-provider boilerplate across all streaming providers.
+- **Credential Type Inference** — `--type` on `warden cred spec create` is now optional; inferred from the source driver.
+- **`?role=` Query Parameter** — Non-gateway backends accept `?role=` as an alternative to `X-Warden-Role` header.
 
 ### Getting Started
 

@@ -138,7 +138,7 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: "aws",
 			wantErr:    true,
-			errMsg:     "require a mistral, openai, anthropic, slack, or local source",
+			errMsg:     "require a mistral, openai, anthropic, slack, pagerduty, or local source",
 		},
 		{
 			name: "unsupported source type - vault",
@@ -147,7 +147,7 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "require a mistral, openai, anthropic, slack, or local source",
+			errMsg:     "require a mistral, openai, anthropic, slack, pagerduty, or local source",
 		},
 	}
 
