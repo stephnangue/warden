@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -121,7 +122,7 @@ func TestAWSDriver_Cleanup(t *testing.T) {
 			Config: map[string]string{},
 		},
 	}
-	err := driver.Cleanup(nil)
+	err := driver.Cleanup(context.TODO())
 	assert.NoError(t, err)
 }
 
@@ -134,11 +135,11 @@ func TestAWSDriver_Revoke_STS(t *testing.T) {
 	}
 
 	// STS credentials can't be revoked — should return nil
-	err := driver.Revoke(nil, "sts:ASIA1234567890ABCDEF")
+	err := driver.Revoke(context.TODO(), "sts:ASIA1234567890ABCDEF")
 	assert.NoError(t, err)
 
 	// Empty lease ID — should return nil
-	err = driver.Revoke(nil, "")
+	err = driver.Revoke(context.TODO(), "")
 	assert.NoError(t, err)
 }
 
@@ -253,7 +254,7 @@ func TestAWSDriver_MintCredential_InvalidMethod(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method")
 }
@@ -284,7 +285,7 @@ func TestAWSDriver_MintCredential_TTLBelowMinimum(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "below minimum")
 }
@@ -315,7 +316,7 @@ func TestAWSDriver_MintCredential_TTLExceedsMaximum(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds maximum")
 }

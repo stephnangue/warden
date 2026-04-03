@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -157,7 +158,7 @@ func TestAzureDriver_Cleanup(t *testing.T) {
 			Config: map[string]string{},
 		},
 	}
-	err := driver.Cleanup(nil)
+	err := driver.Cleanup(context.TODO())
 	assert.NoError(t, err)
 }
 
@@ -169,10 +170,10 @@ func TestAzureDriver_Revoke_NoOp(t *testing.T) {
 		},
 	}
 	// Azure tokens can't be revoked - should be no-op
-	err := driver.Revoke(nil, "any-lease-id")
+	err := driver.Revoke(context.TODO(), "any-lease-id")
 	assert.NoError(t, err)
 
-	err = driver.Revoke(nil, "")
+	err = driver.Revoke(context.TODO(), "")
 	assert.NoError(t, err)
 }
 
@@ -187,7 +188,7 @@ func TestAzureDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 			"mint_method": "invalid_method",
 		},
 	}
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method 'invalid_method'")
 }
@@ -204,7 +205,7 @@ func TestAzureDriver_MintCredential_BearerToken_MissingCredentials(t *testing.T)
 			"client_secret": "test-secret",
 		},
 	}
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "'client_id' and 'client_secret'")
 
@@ -217,7 +218,7 @@ func TestAzureDriver_MintCredential_BearerToken_MissingCredentials(t *testing.T)
 			"client_id":   "test-client",
 		},
 	}
-	_, _, _, err = driver.MintCredential(nil, spec2)
+	_, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "'client_id' and 'client_secret'")
 }
@@ -236,7 +237,7 @@ func TestAzureDriver_MintCredential_KeyVaultSecret_MissingConfig(t *testing.T) {
 			"secret_name":   "test-secret",
 		},
 	}
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "'vault_name' and 'secret_name'")
 
@@ -251,7 +252,7 @@ func TestAzureDriver_MintCredential_KeyVaultSecret_MissingConfig(t *testing.T) {
 			"vault_name":    "test-vault",
 		},
 	}
-	_, _, _, err = driver.MintCredential(nil, spec2)
+	_, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "'vault_name' and 'secret_name'")
 }
@@ -284,7 +285,7 @@ func TestAzureDriver_PrepareSpecRotation_MissingClientID(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.PrepareSpecRotation(nil, spec)
+	_, _, _, err := driver.PrepareSpecRotation(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "'client_id'")
 }
@@ -307,7 +308,7 @@ func TestAzureDriver_CommitSpecRotation(t *testing.T) {
 	}
 
 	// CommitSpecRotation is a no-op - just logs
-	err := driver.CommitSpecRotation(nil, spec, map[string]string{
+	err := driver.CommitSpecRotation(context.TODO(), spec, map[string]string{
 		"client_secret": "new-secret",
 	})
 	assert.NoError(t, err)
@@ -326,16 +327,16 @@ func TestAzureDriver_CleanupSpecRotation_EmptyConfig(t *testing.T) {
 	}
 
 	// Empty client_id or old_secret_id should be a no-op
-	err := driver.CleanupSpecRotation(nil, map[string]string{})
+	err := driver.CleanupSpecRotation(context.TODO(), map[string]string{})
 	assert.NoError(t, err)
 
-	err = driver.CleanupSpecRotation(nil, map[string]string{
+	err = driver.CleanupSpecRotation(context.TODO(), map[string]string{
 		"client_id": "test-client",
 		// Missing old_secret_id
 	})
 	assert.NoError(t, err)
 
-	err = driver.CleanupSpecRotation(nil, map[string]string{
+	err = driver.CleanupSpecRotation(context.TODO(), map[string]string{
 		// Missing client_id
 		"old_secret_id": "test-key",
 	})
@@ -365,7 +366,7 @@ func TestAzureDriver_CommitRotation_ResetsSourceVerified(t *testing.T) {
 	driver.sourceVerified = true
 
 	// CommitRotation will fail (no real Azure) but should reset sourceVerified first
-	err := driver.CommitRotation(nil, map[string]string{
+	err := driver.CommitRotation(context.TODO(), map[string]string{
 		"tenant_id":     "test-tenant",
 		"client_id":     "test-client",
 		"client_secret": "new-secret",
@@ -448,7 +449,7 @@ func TestAzureDriver_Cleanup_Nil(t *testing.T) {
 		},
 		httpClient: &http.Client{},
 	}
-	err := driver.Cleanup(nil)
+	err := driver.Cleanup(context.TODO())
 	assert.NoError(t, err)
 }
 

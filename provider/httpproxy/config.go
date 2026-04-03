@@ -1,4 +1,4 @@
-package openai
+package httpproxy
 
 import (
 	"encoding/json"
@@ -10,31 +10,26 @@ import (
 	"github.com/stephnangue/warden/framework"
 )
 
-// DefaultOpenAIURL is the default OpenAI API base URL
-const DefaultOpenAIURL = "https://api.openai.com"
-
-// DefaultOpenAITimeout is the default request timeout for AI inference
-const DefaultOpenAITimeout = 120 * time.Second
-
-// ProviderConfig holds parsed configuration for the OpenAI provider
-type ProviderConfig struct {
-	OpenAIURL       string
+// BaseConfig holds the standard parsed configuration fields shared by all httpproxy providers.
+type BaseConfig struct {
+	ProviderURL     string
 	MaxBodySize     int64
 	Timeout         time.Duration
 	AutoAuthPath    string
 	DefaultAuthRole string
 }
 
-// parseConfig parses configuration from mount config (map[string]any from JSON)
-func parseConfig(conf map[string]any) ProviderConfig {
-	config := ProviderConfig{
-		OpenAIURL:   DefaultOpenAIURL,
+// ParseConfig parses standard configuration fields from a mount config map.
+// urlKey is the provider-specific config key for the URL (e.g., "openai_url").
+func ParseConfig(conf map[string]any, urlKey string, defaultURL string, defaultTimeout time.Duration) BaseConfig {
+	config := BaseConfig{
+		ProviderURL: defaultURL,
 		MaxBodySize: framework.DefaultMaxBodySize,
-		Timeout:     DefaultOpenAITimeout,
+		Timeout:     defaultTimeout,
 	}
 
-	if addr, ok := conf["openai_url"].(string); ok && addr != "" {
-		config.OpenAIURL = addr
+	if addr, ok := conf[urlKey].(string); ok && addr != "" {
+		config.ProviderURL = addr
 	}
 
 	// Parse max_body_size — handle various JSON number types
@@ -92,11 +87,12 @@ func parseConfig(conf map[string]any) ProviderConfig {
 	return config
 }
 
-// ValidateConfig validates provider-level configuration
-func ValidateConfig(conf map[string]any) error {
-	// openai_url is optional (defaults to api.openai.com), but if provided must be valid
-	if addr, ok := conf["openai_url"].(string); ok && addr != "" {
-		if err := validateOpenAIAddress(addr); err != nil {
+// ValidateConfig validates the standard configuration fields.
+// urlKey is the provider-specific config key for the URL (e.g., "openai_url").
+func ValidateConfig(conf map[string]any, urlKey string) error {
+	// Validate URL if provided
+	if addr, ok := conf[urlKey].(string); ok && addr != "" {
+		if err := ValidateURL(addr, urlKey); err != nil {
 			return err
 		}
 	}
@@ -171,23 +167,23 @@ func ValidateConfig(conf map[string]any) error {
 	return nil
 }
 
-// validateOpenAIAddress validates that the openai_url is a well-formed HTTPS URL
-func validateOpenAIAddress(addr string) error {
+// ValidateURL validates that a URL is well-formed with an https:// scheme.
+func ValidateURL(addr string, urlKey string) error {
 	if addr == "" {
-		return nil // Empty means use default
+		return nil
 	}
 
 	parsed, err := url.Parse(addr)
 	if err != nil {
-		return fmt.Errorf("invalid openai_url: %w", err)
+		return fmt.Errorf("invalid %s: %w", urlKey, err)
 	}
 
 	if parsed.Scheme != "https" {
-		return fmt.Errorf("openai_url must use https:// scheme, got: %s", parsed.Scheme)
+		return fmt.Errorf("%s must use https:// scheme, got: %s", urlKey, parsed.Scheme)
 	}
 
 	if parsed.Host == "" {
-		return fmt.Errorf("openai_url must include a host")
+		return fmt.Errorf("%s must include a host", urlKey)
 	}
 
 	return nil

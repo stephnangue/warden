@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stephnangue/warden/credential"
@@ -84,7 +85,7 @@ func TestGCPDriver_Cleanup(t *testing.T) {
 			Config: map[string]string{},
 		},
 	}
-	require.NoError(t, d.Cleanup(nil))
+	require.NoError(t, d.Cleanup(context.TODO()))
 }
 
 func TestGCPDriver_Revoke_NoOp(t *testing.T) {
@@ -94,7 +95,7 @@ func TestGCPDriver_Revoke_NoOp(t *testing.T) {
 			Config: map[string]string{},
 		},
 	}
-	require.NoError(t, d.Revoke(nil, "some-lease-id"))
+	require.NoError(t, d.Revoke(context.TODO(), "some-lease-id"))
 }
 
 func TestGCPDriver_SupportsRotation(t *testing.T) {
@@ -122,7 +123,7 @@ func TestGCPDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := d.MintCredential(nil, spec)
+	_, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method")
 }
@@ -143,7 +144,7 @@ func TestGCPDriver_MintCredential_ImpersonationMissingTarget(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := d.MintCredential(nil, spec)
+	_, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "target_service_account")
 }
