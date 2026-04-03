@@ -149,7 +149,6 @@ Create a credential spec that references the credential source. The spec carries
 
 ```bash
 warden cred spec create github-ops \
-  --type github_token \
   --source github-src \
   --config auth_method=app \
   --config app_id=<your-app-id> \
@@ -161,7 +160,6 @@ warden cred spec create github-ops \
 
 ```bash
 warden cred spec create github-ops \
-  --type github_token \
   --source github-src \
   --config auth_method=pat \
   --config token=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

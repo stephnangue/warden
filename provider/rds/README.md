@@ -236,7 +236,6 @@ Create credential specs for each database user / permission level. The `role_arn
 ```bash
 # Read-only spec
 warden cred spec create rds-readonly \
-  --type db_auth_token \
   --source aws-prod \
   --config mint_method=rds_iam_token \
   --config db_endpoint=mydb.abc123.us-east-1.rds.amazonaws.com \
@@ -247,7 +246,6 @@ warden cred spec create rds-readonly \
 
 # Read-write spec
 warden cred spec create rds-readwrite \
-  --type db_auth_token \
   --source aws-prod \
   --config mint_method=rds_iam_token \
   --config db_endpoint=mydb.abc123.us-east-1.rds.amazonaws.com \
@@ -261,7 +259,6 @@ For Aurora, use the cluster or reader endpoint:
 
 ```bash
 warden cred spec create aurora-readonly \
-  --type db_auth_token \
   --source aws-prod \
   --config mint_method=rds_iam_token \
   --config db_endpoint=mydb.cluster-ro-abc123.us-east-1.rds.amazonaws.com \
@@ -274,7 +271,6 @@ For cross-account access, add `role_arn`:
 
 ```bash
 warden cred spec create rds-cross-account \
-  --type db_auth_token \
   --source aws-prod \
   --config mint_method=rds_iam_token \
   --config db_endpoint=mydb.xyz789.eu-west-1.rds.amazonaws.com \

@@ -16,7 +16,7 @@ import (
 // allAPIKeyProviders returns the 4 built-in API key provider configs for table-driven tests.
 func allAPIKeyProviders() []APIKeyProviderConfig {
 	return []APIKeyProviderConfig{
-		AnthropicProvider, OpenAIProvider, MistralProvider, SlackProvider,
+		AnthropicProvider, OpenAIProvider, MistralProvider, SlackProvider, PagerDutyProvider,
 	}
 }
 
@@ -312,6 +312,16 @@ func TestStaticAPIKeyDriver_VerifySpec(t *testing.T) {
 			expectedPath:   "/auth.test",
 			checkHeaders: func(t *testing.T, r *http.Request) {
 				assert.Equal(t, "Bearer sk-valid-key", r.Header.Get("Authorization"))
+				assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+			},
+		},
+		{
+			provider:       PagerDutyProvider,
+			expectedMethod: http.MethodGet,
+			expectedPath:   "/users/me",
+			checkHeaders: func(t *testing.T, r *http.Request) {
+				assert.Equal(t, "Bearer sk-valid-key", r.Header.Get("Authorization"))
+				assert.Equal(t, "application/json", r.Header.Get("Accept"))
 				assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 			},
 		},

@@ -238,7 +238,6 @@ A credential spec defines what temporary credentials Warden mints for consumers.
 ```bash
 # Spec for developers — read-only access, short TTL
 warden cred spec create developer \
-  --type aws_access_keys \
   --source my-aws-source \
   --config mint_method=sts_assume_role \
   --config role_arn=arn:aws:iam::<ACCOUNT_ID>:role/devops-readonly-role \
@@ -248,7 +247,6 @@ warden cred spec create developer \
 
 # Spec for CI/CD pipelines — deploy permissions
 warden cred spec create deployer \
-  --type aws_access_keys \
   --source my-aws-source \
   --config mint_method=sts_assume_role \
   --config role_arn=arn:aws:iam::<ACCOUNT_ID>:role/devops-deploy-role \
@@ -258,7 +256,6 @@ warden cred spec create deployer \
 
 # Spec for operators — full access, longer TTL
 warden cred spec create operator \
-  --type aws_access_keys \
   --source my-aws-source \
   --config mint_method=sts_assume_role \
   --config role_arn=arn:aws:iam::<ACCOUNT_ID>:role/devops-operator-role \

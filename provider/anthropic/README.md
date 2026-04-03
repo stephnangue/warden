@@ -139,7 +139,6 @@ Create a credential spec that references the credential source. The spec carries
 
 ```bash
 warden cred spec create anthropic-ops \
-  --type api_key \
   --source anthropic-src \
   --config api_key=<your-anthropic-api-key>
 ```
