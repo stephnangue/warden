@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -154,7 +155,7 @@ func TestVaultDriver_Cleanup(t *testing.T) {
 			Config: map[string]string{},
 		},
 	}
-	err := driver.Cleanup(nil)
+	err := driver.Cleanup(context.TODO())
 	assert.NoError(t, err)
 }
 
@@ -166,7 +167,7 @@ func TestVaultDriver_Revoke_EmptyLeaseID(t *testing.T) {
 		},
 	}
 	// Empty lease ID should be a no-op
-	err := driver.Revoke(nil, "")
+	err := driver.Revoke(context.TODO(), "")
 	assert.NoError(t, err)
 }
 
@@ -263,7 +264,7 @@ func TestVaultDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 		Type:   credential.TypeAWSAccessKeys,
 		Config: map[string]string{},
 	}
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method ''")
 
@@ -275,7 +276,7 @@ func TestVaultDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 			"mint_method": "invalid",
 		},
 	}
-	_, _, _, err = driver.MintCredential(nil, spec2)
+	_, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method 'invalid'")
 }
@@ -298,7 +299,7 @@ func TestVaultDriver_MintCredential_DatabaseRouting(t *testing.T) {
 			"mint_method": "kv2_static",
 		},
 	}
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kv2_mount and secret_path are required")
 
@@ -311,7 +312,7 @@ func TestVaultDriver_MintCredential_DatabaseRouting(t *testing.T) {
 			"database_mount": "database",
 		},
 	}
-	_, _, _, err = driver.MintCredential(nil, spec2)
+	_, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "database_mount and role_name are required")
 }
@@ -334,7 +335,7 @@ func TestVaultDriver_MintCredential_AWSRouting(t *testing.T) {
 			"mint_method": "kv2_static",
 		},
 	}
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kv2_mount and secret_path are required")
 
@@ -347,7 +348,7 @@ func TestVaultDriver_MintCredential_AWSRouting(t *testing.T) {
 			"aws_mount":   "aws",
 		},
 	}
-	_, _, _, err = driver.MintCredential(nil, spec2)
+	_, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "aws_mount and role_name are required")
 }
@@ -370,7 +371,7 @@ func TestVaultDriver_MintCredential_VaultTokenRouting(t *testing.T) {
 			"mint_method": "vault_token",
 		},
 	}
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "token_role is required")
 }
@@ -395,7 +396,7 @@ func TestVaultDriver_FetchDynamicAWSCreds_InvalidTTL(t *testing.T) {
 			"ttl":         "not-a-duration",
 		},
 	}
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid ttl format")
 }
@@ -419,7 +420,7 @@ func TestVaultDriver_FetchDynamicVaultToken_InvalidTTL(t *testing.T) {
 			"ttl":         "bad",
 		},
 	}
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid ttl format")
 }
@@ -434,7 +435,7 @@ func TestVaultDriver_Authenticate_UnsupportedMethod(t *testing.T) {
 		},
 	}
 
-	err := driver.authenticate(nil)
+	err := driver.authenticate(context.TODO())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported auth method")
 }
@@ -450,7 +451,7 @@ func TestVaultDriver_Authenticate_NoMethod(t *testing.T) {
 	}
 
 	// No auth method should be a no-op
-	err := driver.authenticate(nil)
+	err := driver.authenticate(context.TODO())
 	assert.NoError(t, err)
 }
 
@@ -464,7 +465,7 @@ func TestVaultDriver_PrepareRotation_NonApprole(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.PrepareRotation(nil)
+	_, _, _, err := driver.PrepareRotation(context.TODO())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rotation only supported for approle")
 }
@@ -480,7 +481,7 @@ func TestVaultDriver_PrepareRotation_MissingRoleName(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.PrepareRotation(nil)
+	_, _, _, err := driver.PrepareRotation(context.TODO())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "role_name is required")
 }
@@ -496,13 +497,13 @@ func TestVaultDriver_CleanupRotation_EmptyAccessor(t *testing.T) {
 	}
 
 	// Empty accessor should be a no-op
-	err := driver.CleanupRotation(nil, map[string]string{
+	err := driver.CleanupRotation(context.TODO(), map[string]string{
 		"secret_id_accessor": "",
 	})
 	assert.NoError(t, err)
 
 	// Missing key should also be a no-op
-	err = driver.CleanupRotation(nil, map[string]string{})
+	err = driver.CleanupRotation(context.TODO(), map[string]string{})
 	assert.NoError(t, err)
 }
 
@@ -528,7 +529,7 @@ func TestVaultDriver_FetchDynamicAWSCreds_TTLBelowMinimum(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "below minimum")
 }
@@ -555,7 +556,7 @@ func TestVaultDriver_FetchDynamicAWSCreds_TTLExceedsMaximum(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds maximum")
 }
@@ -581,7 +582,7 @@ func TestVaultDriver_FetchDynamicVaultToken_TTLBelowMinimum(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "below minimum")
 }
@@ -607,7 +608,7 @@ func TestVaultDriver_FetchDynamicVaultToken_TTLExceedsMaximum(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(nil, spec)
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds maximum")
 }
