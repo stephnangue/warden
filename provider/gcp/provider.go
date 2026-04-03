@@ -59,13 +59,13 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				Pattern:         "role/[^/]+/gateway",
 				Handler:         b.handleTransparentGatewayStreaming,
 				HelpSynopsis:    "GCP Transparent Gateway proxy",
-				HelpDescription: "Proxies requests to Google Cloud APIs with implicit JWT authentication",
+				HelpDescription: "Proxies requests to Google Cloud APIs with role embedded in URL path",
 			},
 			{
 				Pattern:         "role/[^/]+/gateway/.*",
 				Handler:         b.handleTransparentGatewayStreaming,
 				HelpSynopsis:    "GCP Transparent Gateway proxy",
-				HelpDescription: "Proxies requests to Google Cloud APIs with implicit JWT authentication",
+				HelpDescription: "Proxies requests to Google Cloud APIs with role embedded in URL path",
 			},
 		},
 		TransparentConfig: &framework.TransparentConfig{
@@ -299,13 +299,12 @@ const gcpBackendHelp = `
 The GCP provider enables proxying requests to Google Cloud APIs with automatic
 credential management and Bearer token injection.
 
-Clients authenticate to Warden with a session token (via X-Warden-Token or
-Authorization: Bearer header). The provider obtains a GCP OAuth2 access token
-from the credential manager — minted by exchanging the source's service account
-key, or by impersonating a target service account via the IAM Credentials API —
-and injects it into the proxied request's Authorization header. This allows
-Warden to broker Google Cloud access without exposing service account keys to
-clients.
+Warden performs implicit authentication on every request and obtains a GCP
+OAuth2 access token from the credential manager — minted by exchanging the
+source's service account key, or by impersonating a target service account
+via the IAM Credentials API — and injects it into the proxied request's
+Authorization header. This allows Warden to broker Google Cloud access
+without exposing service account keys to clients.
 
 The gateway path format is:
   /gcp/gateway/{googleapis-host}/{path}
@@ -321,12 +320,9 @@ Examples:
   /gcp/gateway/container.googleapis.com/v1/projects/my-project/locations/-/clusters
   /gcp/gateway/bigquery.googleapis.com/bigquery/v2/projects/my-project/datasets
 
-Implicit JWT authentication via role-based paths,
-eliminating the need for clients to perform an explicit Warden login:
+The role can be provided via the X-Warden-Role header, or embedded in
+the URL path:
   /gcp/role/{role}/gateway/{googleapis-host}/{path}
-
-The core extracts the role from the URL, performs implicit JWT auth against
-the configured auth mount, and issues a short-lived token for the request.
 
 Supported Google Cloud APIs (non-exhaustive):
 - Cloud Storage (storage.googleapis.com)

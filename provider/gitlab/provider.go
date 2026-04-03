@@ -1,197 +1,88 @@
 package gitlab
 
 import (
-	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
-	"time"
 
+	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/httpproxy"
 )
 
-// gitlabBackend is the streaming backend for GitLab provider operations
-type gitlabBackend struct {
-	*framework.StreamingBackend
-	gitlabAddress string // e.g., "https://gitlab.com" or "https://gitlab.example.com"
-}
+var (
+	sharedTransport        = httpproxy.NewTransport()
+	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
+)
 
-// extractToken extracts Warden token from PRIVATE-TOKEN, Authorization: Bearer, or X-Warden-Token headers
+// extractToken extracts Warden token from PRIVATE-TOKEN, Authorization: Bearer, or X-Warden-Token headers.
 func extractToken(r *http.Request) string {
-	// Primary: PRIVATE-TOKEN header (standard GitLab header)
 	if token := r.Header.Get("PRIVATE-TOKEN"); token != "" {
 		return token
 	}
-	// Secondary: Authorization: Bearer
 	authHeader := r.Header.Get("Authorization")
 	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
 		return authHeader[7:]
 	}
-	// Fallback: X-Warden-Token
 	if token := r.Header.Get("X-Warden-Token"); token != "" {
 		return token
 	}
 	return ""
 }
 
-// Factory creates a new GitLab provider backend using the logical.Factory pattern
-func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
-	b := &gitlabBackend{}
-
-	// Create the streaming backend with gateway path for streaming
-	b.StreamingBackend = &framework.StreamingBackend{
-		StreamingPaths: []*framework.StreamingPath{
-			{
-				Pattern:         "gateway",
-				Handler:         b.handleGatewayStreaming,
-				HelpSynopsis:    "GitLab Gateway proxy",
-				HelpDescription: "Proxies requests to GitLab with token injection",
-			},
-			{
-				Pattern:         "gateway/.*",
-				Handler:         b.handleGatewayStreaming,
-				HelpSynopsis:    "GitLab Gateway proxy",
-				HelpDescription: "Proxies requests to GitLab with token injection",
-			},
-			// Role-based gateway paths for implicit auth
-			{
-				Pattern:         "role/[^/]+/gateway",
-				Handler:         b.handleTransparentGatewayStreaming,
-				HelpSynopsis:    "GitLab Transparent Gateway proxy",
-				HelpDescription: "Proxies requests to GitLab with implicit JWT authentication",
-			},
-			{
-				Pattern:         "role/[^/]+/gateway/.*",
-				Handler:         b.handleTransparentGatewayStreaming,
-				HelpSynopsis:    "GitLab Transparent Gateway proxy",
-				HelpDescription: "Proxies requests to GitLab with implicit JWT authentication",
-			},
-		},
-		TransparentConfig: &framework.TransparentConfig{
-			AutoAuthPath:    "",
-			DefaultAuthRole: "",
-		},
-		Backend: &framework.Backend{
-			Help:           gitlabBackendHelp,
-			BackendType:    "gitlab",
-			BackendClass:   logical.ClassProvider,
-			TokenExtractor: extractToken,
-			Paths:          b.paths(),
-		},
+// validateGitLabAddress validates that the gitlab_address is a well-formed URL.
+// Unlike other providers, GitLab allows HTTP for development instances.
+func validateGitLabAddress(addr string) error {
+	if addr == "" {
+		return fmt.Errorf("gitlab_address is required")
 	}
-
-	// Set common fields
-	b.Logger = conf.Logger.WithSubsystem("gitlab")
-	b.StorageView = conf.StorageView
-
-	// Initialize reverse proxy with GitLab transport
-	b.StreamingBackend.InitProxy(sharedTransport)
-
-	// Register transport shutdown hook for process-level cleanup
-	if conf.RegisterShutdownHook != nil {
-		conf.RegisterShutdownHook("gitlab-transport", ShutdownHTTPTransport)
-	}
-
-	if err := b.StreamingBackend.Setup(ctx, conf); err != nil {
-		return nil, err
-	}
-
-	// Set defaults
-	b.MaxBodySize = framework.DefaultMaxBodySize
-	b.Timeout = framework.DefaultTimeout
-
-	// Apply configuration if provided
-	if len(conf.Config) > 0 {
-		if err := ValidateConfig(conf.Config); err != nil {
-			return nil, fmt.Errorf("invalid configuration: %w", err)
-		}
-		parsedConfig := parseConfig(conf.Config)
-		b.gitlabAddress = parsedConfig.GitLabAddress
-		b.MaxBodySize = parsedConfig.MaxBodySize
-		b.Timeout = parsedConfig.Timeout
-	}
-
-	return b, nil
-}
-
-// Initialize loads persisted config from storage
-func (b *gitlabBackend) Initialize(ctx context.Context) error {
-	if b.StorageView == nil {
-		return nil
-	}
-
-	entry, err := b.StorageView.Get(ctx, "config")
+	parsed, err := url.Parse(addr)
 	if err != nil {
-		return fmt.Errorf("failed to read config from storage: %w", err)
+		return fmt.Errorf("invalid gitlab_address: %w", err)
 	}
-	if entry != nil {
-		var config struct {
-			GitLabAddress   string `json:"gitlab_address"`
-			MaxBodySize     int64  `json:"max_body_size"`
-			Timeout         string `json:"timeout"`
-			AutoAuthPath    string `json:"auto_auth_path"`
-			DefaultAuthRole string `json:"default_role"`
-		}
-		if err := entry.DecodeJSON(&config); err != nil {
-			return fmt.Errorf("failed to decode config: %w", err)
-		}
-		b.gitlabAddress = config.GitLabAddress
-		b.MaxBodySize = config.MaxBodySize
-		if config.Timeout != "" {
-			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
-				b.Timeout = timeout
-			}
-		}
-
-		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-			AutoAuthPath:    config.AutoAuthPath,
-			DefaultAuthRole: config.DefaultAuthRole,
-		})
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return fmt.Errorf("gitlab_address must use http:// or https:// scheme, got: %s", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("gitlab_address must include a host")
 	}
 	return nil
 }
 
-// paths returns the configuration paths for the GitLab provider
-func (b *gitlabBackend) paths() []*framework.Path {
-	return []*framework.Path{
-		b.pathConfig(),
-	}
+// Spec defines the GitLab provider configuration for the httpproxy framework.
+var Spec = &httpproxy.ProviderSpec{
+	Name:                 "gitlab",
+	DefaultURL:           "", // GitLab requires explicit address
+	URLConfigKey:         "gitlab_address",
+	DefaultTimeout:       framework.DefaultTimeout,
+	ParseStreamBody:      false,
+	UserAgent:            "warden-gitlab-proxy",
+	HelpText:             gitlabBackendHelp,
+	ExtractCredentials:   httpproxy.TypedTokenExtractor(credential.TypeGitLabAccessToken, "access_token", "Authorization", "Bearer "),
+	ExtractToken:         extractToken,
+	ExtraHeadersToRemove: []string{"PRIVATE-TOKEN"},
+	Transport:            sharedTransport,
+	ShutdownTransport: func() {
+		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
+	},
+	ValidateExtraConfig: func(conf map[string]any) error {
+		addr, ok := conf["gitlab_address"].(string)
+		if !ok || addr == "" {
+			return fmt.Errorf("gitlab_address is required")
+		}
+		return validateGitLabAddress(addr)
+	},
 }
 
-// handleGatewayStreaming handles streaming gateway requests
-func (b *gitlabBackend) handleGatewayStreaming(ctx context.Context, req *logical.Request, fd *framework.FieldData) error {
-	b.handleGateway(ctx, req)
-	return nil
-}
-
-// handleTransparentGatewayStreaming handles gateway requests with implicit auth.
-// The implicit auth has already been performed by the core request handler.
-func (b *gitlabBackend) handleTransparentGatewayStreaming(ctx context.Context, req *logical.Request, fd *framework.FieldData) error {
-	// Rewrite the path: /role/{role}/gateway/... -> /gateway/...
-	req.Path = b.StreamingBackend.RewriteTransparentPath(req.Path)
-
-	// Also update the HTTP request URL path for the proxy
-	if req.HTTPRequest != nil && req.HTTPRequest.URL != nil {
-		req.HTTPRequest.URL.Path = b.StreamingBackend.RewriteTransparentPath(req.HTTPRequest.URL.Path)
-	}
-
-	// Delegate to standard gateway handler
-	b.handleGateway(ctx, req)
-	return nil
-}
-
-// SensitiveConfigFields returns the list of config fields that should be masked in output
-func (b *gitlabBackend) SensitiveConfigFields() []string {
-	return []string{}
-}
+// Factory creates a new GitLab provider backend.
+var Factory = httpproxy.NewFactory(Spec)
 
 const gitlabBackendHelp = `
 The GitLab provider enables proxying requests to GitLab (SaaS or self-hosted)
 with automatic credential management and access token injection.
 
-Clients authenticate to Warden with a session token (via PRIVATE-TOKEN,
-Authorization: Bearer, or X-Warden-Token header). The provider obtains a
+Warden performs implicit authentication on every request and obtains a
 GitLab access token from the credential manager — either a personal access
 token (PAT) or an OAuth2 token depending on the source configuration — and
 injects it as an Authorization: Bearer header in the proxied request. This
@@ -215,12 +106,9 @@ Examples:
   /gitlab/gateway/api/v4/projects/123/merge_requests
   /gitlab/gateway/api/v4/projects/123/pipelines
 
-Implicit JWT authentication via role-based paths,
-eliminating the need for clients to perform an explicit Warden login:
+The role can be provided via the X-Warden-Role header, or embedded in
+the URL path:
   /gitlab/role/{role}/gateway/{api-path}
-
-The core extracts the role from the URL, performs implicit JWT auth against
-the configured auth mount, and issues a short-lived token for the request.
 
 Self-hosted GitLab instances are supported by setting gitlab_address to the
 instance URL (e.g., "https://gitlab.example.com").
