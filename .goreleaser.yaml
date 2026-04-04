@@ -47,7 +47,7 @@ dockers_v2:
     tags:
       - "v{{ .Version }}"
       - latest
-    dockerfile: Dockerfile.goreleaser
+    dockerfile: deploy/Dockerfile.goreleaser
 
 release:
   github:

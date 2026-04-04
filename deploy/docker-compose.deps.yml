@@ -15,7 +15,7 @@ services:
     volumes:
       - vault-data:/vault/data
       - vault-logs:/vault/logs
-      - ./certs/warden:/vault/certs
+      - ../certs/warden:/vault/certs
     networks:
       - app-network
     healthcheck:
@@ -24,8 +24,8 @@ services:
       timeout: 5s
       retries: 5
     command: >
-      server -dev 
-      -dev-root-token-id="root" 
+      server -dev
+      -dev-root-token-id="root"
       -dev-listen-address=0.0.0.0:8200
 
   # MySQL Backend Server
@@ -41,8 +41,7 @@ services:
       MYSQL_PASSWORD: vaultpassword
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./scripts:/docker-entrypoint-initdb.d
-      - ./certs/mysql:/etc/mysql/certs:ro
+      - ../certs/mysql:/etc/mysql/certs:ro
     networks:
       - app-network
     healthcheck:
@@ -56,6 +55,26 @@ services:
       --ssl-cert=/etc/mysql/certs/server-cert.pem
       --ssl-key=/etc/mysql/certs/server-key.pem
       --require-secure-transport=ON
+
+  # PostgreSQL for Warden Backend
+  postgres-warden:
+    image: postgres:15-alpine
+    container_name: postgres-warden
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: warden
+      POSTGRES_PASSWORD: wardenpassword
+      POSTGRES_DB: warden
+    volumes:
+      - postgres-warden-data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warden"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # PostgreSQL for Hydra
   postgres-hydra:
@@ -114,7 +133,7 @@ services:
       # JWT Access Token Configuration
       STRATEGIES_ACCESS_TOKEN: jwt
       # Optional: Configure JWT lifespan (default is 1h)
-      TTL_ACCESS_TOKEN: 1h
+      TTL_ACCESS_TOKEN: 15m
       TTL_REFRESH_TOKEN: 720h
       TTL_ID_TOKEN: 1h
     networks:
@@ -127,37 +146,6 @@ services:
     restart: unless-stopped
     command: serve all --dev
 
-  # Warden
-  warden:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      cache_from:
-        - warden:latest
-      target: final
-    container_name: warden
-    ports:
-      - "4000:4000"
-      - "8400:8400"
-    environment:
-      TLS_CERT_FILE: "/certs/warden-cert.pem"
-      TLS_KEY_FILE: "/certs/warden-key.pem"
-      TLS_CA_FILE: "/certs/ca.pem"
-    volumes:
-      - ./warden.hcl:/config/warden.hcl:ro
-      - ./certs/warden:/certs:ro
-      - ./:/logs:rw
-    depends_on:
-      mysql-server:
-        condition: service_healthy
-      vault:
-        condition: service_healthy
-      hydra:
-        condition: service_started
-    networks:
-      - app-network
-    restart: unless-stopped
-
   # MySQL Client (for testing/debugging)
   mysql-client:
     image: mysql:8.0
@@ -169,8 +157,6 @@ services:
       MYSQL_PASSWORD: proxy123
     networks:
       - app-network
-    depends_on:
-      - warden
     command: tail -f /dev/null
 
   # Vault Init Container (runs once to configure Vault)
@@ -189,10 +175,10 @@ services:
       mysql-server:
         condition: service_healthy
     volumes:
-      - ./scripts:/scripts
-      - ./certs/vault:/certs:ro
+      - ../scripts:/scripts
+      - ../certs/vault:/certs:ro
     entrypoint: /bin/sh
-    command: 
+    command:
       -c "
       apk add --no-cache mysql-client netcat-openbsd &&
       /scripts/init-vault.sh "
@@ -206,11 +192,9 @@ services:
     depends_on:
       mysql-server:
         condition: service_healthy
-      warden:
-        condition: service_started
     volumes:
-      - ./scripts:/scripts
-      - ./certs/mysql:/certs:ro
+      - ../scripts:/scripts
+      - ../certs/mysql:/certs:ro
     working_dir: /scripts
     environment:
       MYSQL_HOST: mysql-server
@@ -238,20 +222,20 @@ services:
       hydra:
         condition: service_started
     volumes:
-      - ./scripts:/scripts
+      - ../scripts:/scripts
     entrypoint: /bin/sh
-    command: >
-     sh -c "
-      echo 'Waiting for Hydra to be ready...' &&
-      while ! wget -q --spider http://hydra:4445/health/ready 2>/dev/null; do
-        echo 'Waiting for Hydra Admin API...' &&
-        sleep 2
-      done &&
-      echo 'Hydra is ready! Creating OAuth2 clients...' &&
-      /scripts/create-clients.sh &&
-      echo 'OAuth2 clients created successfully!' &&
-      tail -f /dev/null 
-      "
+    command:
+      - -c
+      - |
+        echo 'Waiting for Hydra to be ready...'
+        while ! wget -q --spider http://hydra:4445/health/ready 2>/dev/null; do
+          echo 'Waiting for Hydra Admin API...'
+          sleep 2
+        done
+        echo 'Hydra is ready! Creating OAuth2 clients...'
+        /scripts/create-clients.sh
+        echo 'OAuth2 clients created successfully!'
+        tail -f /dev/null
 
 networks:
   app-network:
@@ -262,4 +246,5 @@ volumes:
   vault-data:
   vault-logs:
   mysql-data:
+  postgres-warden-data:
   postgres-hydra-data:

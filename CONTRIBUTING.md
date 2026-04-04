@@ -125,7 +125,7 @@ make dev-watch
 
 ```bash
 make brd-fast
-./warden server --config=./warden.local.hcl
+./warden server --config=./deploy/config/warden.local.hcl
 ```
 
 ### Database Management

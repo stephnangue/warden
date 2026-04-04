@@ -202,7 +202,7 @@ listener "tcp" {
 
 ### Configuration
 
-Warden uses HCL configuration files. See `warden.local.hcl` for a full example covering storage backend, listener, providers, and auth methods.
+Warden uses HCL configuration files. See `deploy/config/warden.local.hcl` for a full example covering storage backend, listener, providers, and auth methods.
 
 ## Contributing
 

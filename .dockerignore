@@ -64,7 +64,6 @@ backup_*
 # Scripts (not needed in container)
 scripts/
 *.sh
-!generate-certs.sh
 
 # Certificates (should be mounted)
 certs/

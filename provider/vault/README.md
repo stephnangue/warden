@@ -534,9 +534,9 @@ Steps 2 and 6 above use TLS certificate authentication. Alternatively, you can a
 
 > **Prerequisite:** JWT authentication requires an identity provider that issues JWTs. The quickstart uses [Ory Hydra](https://www.ory.sh/hydra/) via Docker Compose:
 > ```bash
-> curl -fsSL -o docker-compose.quickstart.yml \
->   https://raw.githubusercontent.com/stephnangue/warden/main/docker-compose.quickstart.yml
-> docker compose -f docker-compose.quickstart.yml up -d
+> curl -fsSL -o deploy/docker-compose.quickstart.yml \
+>   https://raw.githubusercontent.com/stephnangue/warden/main/deploy/docker-compose.quickstart.yml
+> docker compose -f deploy/docker-compose.quickstart.yml up -d
 > ```
 
 Steps 1, 3-5 (provider setup) are identical. Replace Steps 2 and 6 with the following.
@@ -606,7 +606,7 @@ vault kv list secret/
 To stop the identity provider containers:
 
 ```bash
-docker compose -f docker-compose.quickstart.yml down -v
+docker compose -f deploy/docker-compose.quickstart.yml down -v
 ```
 
 ## Configuration Reference
