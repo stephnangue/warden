@@ -56,7 +56,7 @@ var Spec = &httpproxy.ProviderSpec{
 	DefaultURL:           "", // GitLab requires explicit address
 	URLConfigKey:         "gitlab_address",
 	DefaultTimeout:       framework.DefaultTimeout,
-	ParseStreamBody:      false,
+	ParseStreamBody:      true,
 	UserAgent:            "warden-gitlab-proxy",
 	HelpText:             gitlabBackendHelp,
 	ExtractCredentials:   httpproxy.TypedTokenExtractor(credential.TypeGitLabAccessToken, "access_token", "Authorization", "Bearer "),
