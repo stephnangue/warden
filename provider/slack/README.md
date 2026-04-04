@@ -125,9 +125,12 @@ The credential source holds only connection info (`api_url`). The bot token is s
 
 ```bash
 warden cred source create slack-src \
-  --type=slack \
+  --type=apikey \
   --rotation-period=0 \
-  --config=api_url=https://slack.com/api
+  --config=api_url=https://slack.com/api \
+  --config=verify_endpoint=/auth.test \
+  --config=verify_method=POST \
+  --config=display_name=Slack
 ```
 
 Verify the source was created:
@@ -432,9 +435,12 @@ curl --cert client.pem --key client-key.pem \
 
 ### Credential Source Config
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `api_url` | string | `https://slack.com/api` | Slack API base URL (must be HTTPS) |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `api_url` | string | No | API base URL (default: `https://slack.com/api`) |
+| `verify_endpoint` | string | No | Verification path (e.g., `/auth.test`) |
+| `verify_method` | string | No | HTTP method for verification (default: `GET`) |
+| `display_name` | string | No | Label for logs/errors (default: `API Key`) |
 
 ### Credential Spec Config
 

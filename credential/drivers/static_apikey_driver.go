@@ -18,64 +18,90 @@ const apiKeyMaxResponseBodySize = 1 << 20 // 1MB
 // apiKeyMaxRetryAttempts for retryable API operations
 const apiKeyMaxRetryAttempts = 3
 
-// AuthHeaderFunc builds authentication headers for a given API key.
-type AuthHeaderFunc func(apiKey string) map[string]string
-
-// APIKeyProviderConfig holds the per-provider differences that parameterize
-// the static API key driver. Each API key provider (OpenAI, Anthropic, etc.)
-// is defined as a config instance rather than a separate driver type.
-type APIKeyProviderConfig struct {
-	SourceType       string         // e.g. credential.SourceTypeAnthropic
-	DisplayName      string         // e.g. "Anthropic" (for error messages, logs)
-	DefaultAPIURL    string         // e.g. "https://api.anthropic.com"
-	VerifyEndpoint   string         // e.g. "/v1/models"
-	VerifyMethod     string         // e.g. http.MethodGet
-	BuildAuthHeaders AuthHeaderFunc // builds the auth headers given an API key
-	OptionalMetadata []string       // spec config fields to copy into rawData (e.g. ["organization_id"])
-}
+// Valid auth_header_type values for API key verification.
+const (
+	apiKeyAuthBearer       = "bearer"
+	apiKeyAuthToken        = "token"
+	apiKeyAuthCustomHeader = "custom_header"
+)
 
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*StaticAPIKeyDriver)(nil)
 var _ credential.SpecVerifier = (*StaticAPIKeyDriver)(nil)
 
-// StaticAPIKeyDriver provides API key credentials for any provider configured
-// via APIKeyProviderConfig.
-//
-// The source config holds only connection info (api_url). Auth credentials
-// (api_key) live in the credential spec config and are read at MintCredential
-// time. This allows multiple specs with different API keys to share one source.
+// StaticAPIKeyDriver provides API key credentials configured entirely via
+// the source config map. Auth credentials (api_key) live in the credential
+// spec config and are read at MintCredential time.
 type StaticAPIKeyDriver struct {
-	provider   APIKeyProviderConfig
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
 	httpClient *http.Client
 }
 
 // StaticAPIKeyDriverFactory creates StaticAPIKeyDriver instances.
-// One factory instance is registered per provider, each with a different config.
-type StaticAPIKeyDriverFactory struct {
-	provider APIKeyProviderConfig
-}
+type StaticAPIKeyDriverFactory struct{}
 
-// NewStaticAPIKeyDriverFactory creates a factory for the given provider config.
-func NewStaticAPIKeyDriverFactory(provider APIKeyProviderConfig) *StaticAPIKeyDriverFactory {
-	return &StaticAPIKeyDriverFactory{provider: provider}
-}
-
-// Type returns the driver type identifier for this provider.
+// Type returns the driver type identifier.
 func (f *StaticAPIKeyDriverFactory) Type() string {
-	return f.provider.SourceType
+	return credential.SourceTypeAPIKey
 }
 
 // ValidateConfig validates source configuration using declarative schema.
-// The source only holds connection info (api_url).
 func (f *StaticAPIKeyDriverFactory) ValidateConfig(config map[string]string) error {
-	return credential.ValidateSchema(config,
+	if err := credential.ValidateSchema(config,
 		credential.StringField("api_url").
-			Custom(validateAPIKeyURL).
-			Describe(fmt.Sprintf("%s API base URL (default: %s)", f.provider.DisplayName, f.provider.DefaultAPIURL)).
-			Example(f.provider.DefaultAPIURL),
-	)
+			Custom(validateAPIKeyOptionalURL).
+			Describe("API base URL (HTTPS)").
+			Example("https://api.openai.com"),
+
+		credential.StringField("verify_endpoint").
+			Describe("Path appended to api_url for verification (skip if empty)").
+			Example("/v1/models"),
+
+		credential.StringField("verify_method").
+			Custom(validateAPIKeyVerifyMethod).
+			Describe("HTTP method for verification (default: GET)").
+			Example("GET"),
+
+		credential.StringField("auth_header_type").
+			Custom(validateAPIKeyAuthHeaderType).
+			Describe("How to attach API key for verification: bearer, token, custom_header (default: bearer)").
+			Example("bearer"),
+
+		credential.StringField("auth_header_name").
+			Describe("Header name when auth_header_type=custom_header").
+			Example("x-api-key"),
+
+		credential.StringField("extra_headers").
+			Describe("Additional static headers as comma-separated key:value pairs").
+			Example("anthropic-version:2023-06-01"),
+
+		credential.StringField("optional_metadata").
+			Describe("Comma-separated spec config fields to copy into credential data").
+			Example("organization_id,project_id"),
+
+		credential.StringField("display_name").
+			Describe("Human-readable label for logs/errors (default: API Key)").
+			Example("OpenAI"),
+	); err != nil {
+		return err
+	}
+
+	// auth_header_name is required when auth_header_type is custom_header
+	if credential.GetString(config, "auth_header_type", "") == apiKeyAuthCustomHeader {
+		if credential.GetString(config, "auth_header_name", "") == "" {
+			return fmt.Errorf("auth_header_name is required when auth_header_type is custom_header")
+		}
+	}
+
+	// Validate extra_headers format
+	if raw := credential.GetString(config, "extra_headers", ""); raw != "" {
+		if _, err := parseExtraHeaders(raw); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // SensitiveConfigFields returns the list of source config keys that should be masked.
@@ -84,8 +110,7 @@ func (f *StaticAPIKeyDriverFactory) SensitiveConfigFields() []string {
 	return nil
 }
 
-// InferCredentialType returns the credential type for API key providers.
-// All API key providers use the same credential type.
+// InferCredentialType returns the credential type for API key sources.
 func (f *StaticAPIKeyDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
 	return credential.TypeAPIKey, nil
 }
@@ -93,12 +118,11 @@ func (f *StaticAPIKeyDriverFactory) InferCredentialType(_ map[string]string) (st
 // Create instantiates a new StaticAPIKeyDriver.
 func (f *StaticAPIKeyDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &StaticAPIKeyDriver{
-		provider: f.provider,
 		credSource: &credential.CredSource{
-			Type:   f.provider.SourceType,
+			Type:   credential.SourceTypeAPIKey,
 			Config: config,
 		},
-		logger:     log.WithSubsystem(f.provider.SourceType),
+		logger:     log.WithSubsystem(credential.SourceTypeAPIKey),
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 	return driver, nil
@@ -106,12 +130,17 @@ func (f *StaticAPIKeyDriverFactory) Create(config map[string]string, log *logger
 
 // Type returns the driver type.
 func (d *StaticAPIKeyDriver) Type() string {
-	return d.provider.SourceType
+	return credential.SourceTypeAPIKey
+}
+
+// displayName returns the configured display name or "API Key".
+func (d *StaticAPIKeyDriver) displayName() string {
+	return credential.GetString(d.credSource.Config, "display_name", "API Key")
 }
 
 // getAPIURL returns the API base URL from source config.
 func (d *StaticAPIKeyDriver) getAPIURL() string {
-	return strings.TrimRight(credential.GetString(d.credSource.Config, "api_url", d.provider.DefaultAPIURL), "/")
+	return strings.TrimRight(credential.GetString(d.credSource.Config, "api_url", ""), "/")
 }
 
 // MintCredential returns the API key from spec config.
@@ -119,7 +148,7 @@ func (d *StaticAPIKeyDriver) getAPIURL() string {
 func (d *StaticAPIKeyDriver) MintCredential(_ context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
 	apiKey := credential.GetString(spec.Config, "api_key", "")
 	if apiKey == "" {
-		return nil, 0, "", fmt.Errorf("no %s API key configured in spec", d.provider.DisplayName)
+		return nil, 0, "", fmt.Errorf("no %s API key configured in spec", d.displayName())
 	}
 
 	rawData := map[string]interface{}{
@@ -127,7 +156,7 @@ func (d *StaticAPIKeyDriver) MintCredential(_ context.Context, spec *credential.
 	}
 
 	// Copy optional metadata from spec config
-	for _, field := range d.provider.OptionalMetadata {
+	for _, field := range parseOptionalMetadata(d.credSource.Config) {
 		if val := credential.GetString(spec.Config, field, ""); val != "" {
 			rawData[field] = val
 		}
@@ -139,7 +168,7 @@ func (d *StaticAPIKeyDriver) MintCredential(_ context.Context, spec *credential.
 // Revoke is a no-op for static API keys.
 func (d *StaticAPIKeyDriver) Revoke(_ context.Context, leaseID string) error {
 	if d.logger != nil {
-		d.logger.Debug(fmt.Sprintf("%s API keys are static, skipping revocation", d.provider.DisplayName),
+		d.logger.Debug(fmt.Sprintf("%s API keys are static, skipping revocation", d.displayName()),
 			logger.String("lease_id", leaseID),
 		)
 	}
@@ -153,14 +182,24 @@ func (d *StaticAPIKeyDriver) Cleanup(_ context.Context) error {
 }
 
 // VerifySpec validates that the spec's API key is functional by calling
-// the provider's verification endpoint.
+// the configured verification endpoint.
 func (d *StaticAPIKeyDriver) VerifySpec(ctx context.Context, spec *credential.CredSpec) error {
+	name := d.displayName()
+
 	apiKey := credential.GetString(spec.Config, "api_key", "")
 	if apiKey == "" {
-		return fmt.Errorf("no %s API key configured in spec", d.provider.DisplayName)
+		return fmt.Errorf("no %s API key configured in spec", name)
 	}
 
-	apiURL := d.getAPIURL() + d.provider.VerifyEndpoint
+	verifyEndpoint := credential.GetString(d.credSource.Config, "verify_endpoint", "")
+	if verifyEndpoint == "" {
+		return nil
+	}
+
+	apiURL := d.getAPIURL() + verifyEndpoint
+
+	method := credential.GetString(d.credSource.Config, "verify_method", http.MethodGet)
+	headers := buildAPIKeyAuthHeaders(d.credSource.Config, apiKey)
 
 	retryConfig := HTTPRetryConfig{
 		MaxAttempts:       apiKeyMaxRetryAttempts,
@@ -171,21 +210,92 @@ func (d *StaticAPIKeyDriver) VerifySpec(ctx context.Context, spec *credential.Cr
 	}
 
 	httpReq := HTTPRequest{
-		Method:  d.provider.VerifyMethod,
+		Method:  method,
 		URL:     apiURL,
-		Headers: d.provider.BuildAuthHeaders(apiKey),
+		Headers: headers,
 	}
 
 	_, _, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
-		return fmt.Errorf("%s API key verification failed: %w", d.provider.DisplayName, err)
+		return fmt.Errorf("%s API key verification failed: %w", name, err)
 	}
 
 	return nil
 }
 
+// buildAPIKeyAuthHeaders builds authentication headers based on source config.
+func buildAPIKeyAuthHeaders(config map[string]string, apiKey string) map[string]string {
+	headerType := credential.GetString(config, "auth_header_type", apiKeyAuthBearer)
+	headers := map[string]string{"Accept": "application/json"}
+
+	switch headerType {
+	case apiKeyAuthToken:
+		headers["Authorization"] = "Token " + apiKey
+	case apiKeyAuthCustomHeader:
+		name := credential.GetString(config, "auth_header_name", "")
+		if name != "" {
+			headers[name] = apiKey
+		}
+	default: // bearer
+		headers["Authorization"] = "Bearer " + apiKey
+	}
+
+	// Apply extra static headers
+	if raw := credential.GetString(config, "extra_headers", ""); raw != "" {
+		if parsed, err := parseExtraHeaders(raw); err == nil {
+			for k, v := range parsed {
+				headers[k] = v
+			}
+		}
+	}
+
+	return headers
+}
+
+// parseExtraHeaders parses comma-separated "key:value" pairs into a map.
+func parseExtraHeaders(raw string) (map[string]string, error) {
+	headers := make(map[string]string)
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		idx := strings.Index(pair, ":")
+		if idx < 1 {
+			return nil, fmt.Errorf("invalid extra_headers entry %q: expected key:value format", pair)
+		}
+		key := strings.TrimSpace(pair[:idx])
+		val := strings.TrimSpace(pair[idx+1:])
+		headers[key] = val
+	}
+	return headers, nil
+}
+
+// parseOptionalMetadata parses comma-separated field names from source config.
+func parseOptionalMetadata(config map[string]string) []string {
+	raw := credential.GetString(config, "optional_metadata", "")
+	if raw == "" {
+		return nil
+	}
+	var fields []string
+	for _, f := range strings.Split(raw, ",") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			fields = append(fields, f)
+		}
+	}
+	return fields
+}
+
+// validateAPIKeyOptionalURL validates that api_url, if non-empty, is a well-formed HTTPS URL.
+func validateAPIKeyOptionalURL(rawURL string) error {
+	if rawURL == "" {
+		return nil
+	}
+	return validateAPIKeyURL(rawURL)
+}
+
 // validateAPIKeyURL validates that the api_url is a well-formed HTTPS URL.
-// This consolidates the identical per-provider URL validators.
 func validateAPIKeyURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -198,4 +308,30 @@ func validateAPIKeyURL(rawURL string) error {
 		return fmt.Errorf("api_url must include a host")
 	}
 	return nil
+}
+
+// validateAPIKeyVerifyMethod validates that verify_method is GET or POST.
+func validateAPIKeyVerifyMethod(method string) error {
+	if method == "" {
+		return nil
+	}
+	switch method {
+	case http.MethodGet, http.MethodPost:
+		return nil
+	default:
+		return fmt.Errorf("verify_method must be GET or POST, got: %s", method)
+	}
+}
+
+// validateAPIKeyAuthHeaderType validates the auth_header_type enum.
+func validateAPIKeyAuthHeaderType(headerType string) error {
+	if headerType == "" {
+		return nil
+	}
+	switch headerType {
+	case apiKeyAuthBearer, apiKeyAuthToken, apiKeyAuthCustomHeader:
+		return nil
+	default:
+		return fmt.Errorf("auth_header_type must be one of: bearer, token, custom_header; got: %s", headerType)
+	}
 }

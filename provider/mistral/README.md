@@ -125,9 +125,12 @@ The credential source holds only connection info (`api_url`). The API key is sto
 
 ```bash
 warden cred source create mistral-src \
-  --type=mistral \
+  --type=apikey \
   --rotation-period=0 \
-  --config=api_url=https://api.mistral.ai
+  --config=api_url=https://api.mistral.ai \
+  --config=verify_endpoint=/v1/models \
+  --config=optional_metadata=organization_id \
+  --config=display_name=Mistral
 ```
 
 Verify the source was created:
@@ -400,9 +403,12 @@ curl --cert client.pem --key client-key.pem \
 
 ### Credential Source Config
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `api_url` | string | `https://api.mistral.ai` | Mistral API base URL (must be HTTPS) |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `api_url` | string | No | API base URL (default: `https://api.mistral.ai`) |
+| `verify_endpoint` | string | No | Verification path (e.g., `/v1/models`) |
+| `optional_metadata` | string | No | Comma-separated spec fields to copy into credential data (e.g., `organization_id`) |
+| `display_name` | string | No | Label for logs/errors (default: `API Key`) |
 
 ### Credential Spec Config
 

@@ -21,19 +21,15 @@ const (
 
 // Source type constants
 const (
-	SourceTypeLocal          = "local"
-	SourceTypeVault          = "hvault"
-	SourceTypeAWS            = "aws"
-	SourceTypeAzure          = "azure"
-	SourceTypeGCP            = "gcp"
-	SourceTypeGitLab         = "gitlab"
-	SourceTypeGitHub         = "github"
-	SourceTypeMistral        = "mistral"
-	SourceTypeOpenAI         = "openai"
-	SourceTypeAnthropic      = "anthropic"
-	SourceTypeSlack          = "slack"
-	SourceTypePagerDuty      = "pagerduty"
-	SourceTypePagerDutyOAuth = "pagerduty_oauth2"
+	SourceTypeLocal  = "local"
+	SourceTypeVault  = "hvault"
+	SourceTypeAWS    = "aws"
+	SourceTypeAzure  = "azure"
+	SourceTypeGCP    = "gcp"
+	SourceTypeGitLab = "gitlab"
+	SourceTypeGitHub = "github"
+	SourceTypeAPIKey = "apikey"
+	SourceTypeOAuth2 = "oauth2"
 )
 
 // Category constants for credential categorization

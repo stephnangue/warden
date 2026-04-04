@@ -15,34 +15,12 @@ import (
 // oauth2MaxRetryAttempts for retryable token endpoint calls
 const oauth2MaxRetryAttempts = 3
 
-// OAuth2ProviderConfig holds the per-provider differences that parameterize
-// the OAuth2 client credentials driver. Each OAuth2 provider (PagerDuty, etc.)
-// is defined as a config instance rather than a separate driver type.
-type OAuth2ProviderConfig struct {
-	SourceType       string         // e.g. credential.SourceTypePagerDutyOAuth
-	DisplayName      string         // e.g. "PagerDuty" (for error messages, logs)
-	DefaultTokenURL  string         // e.g. "https://identity.pagerduty.com/oauth/token"
-	DefaultScopes    string         // default OAuth2 scopes (space-separated)
-	VerifyURL        string         // optional endpoint to verify minted tokens
-	VerifyMethod     string         // HTTP method for verify (default GET)
-	BuildAuthHeaders AuthHeaderFunc // how to attach token for verification
-}
-
-// PagerDutyOAuth2Provider defines the PagerDuty OAuth2 provider configuration.
-var PagerDutyOAuth2Provider = OAuth2ProviderConfig{
-	SourceType:      credential.SourceTypePagerDutyOAuth,
-	DisplayName:     "PagerDuty",
-	DefaultTokenURL: "https://identity.pagerduty.com/oauth/token",
-	DefaultScopes:   "",
-	VerifyURL:       "https://api.pagerduty.com/users/me",
-	VerifyMethod:    http.MethodGet,
-	BuildAuthHeaders: func(apiKey string) map[string]string {
-		return map[string]string{
-			"Authorization": "Bearer " + apiKey,
-			"Accept":        "application/json",
-		}
-	},
-}
+// Valid auth_header_type values for OAuth2 token verification.
+const (
+	oauth2AuthBearer       = "bearer"
+	oauth2AuthToken        = "token"
+	oauth2AuthCustomHeader = "custom_header"
+)
 
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*OAuth2Driver)(nil)
@@ -50,53 +28,85 @@ var _ credential.SpecVerifier = (*OAuth2Driver)(nil)
 
 // OAuth2Driver exchanges OAuth2 client credentials for bearer tokens.
 //
-// The source config holds client_id, client_secret, and optionally token_url.
+// All provider-specific configuration lives in the source config map:
+// client_id, client_secret, token_url (required); default_scopes, verify_url,
+// verify_method, auth_header_type, auth_header_name, display_name (optional).
+//
 // The spec config holds an optional scope override. The driver POSTs to the
 // token endpoint using the client_credentials grant type and returns the
-// resulting access_token as an api_key field (for BearerAPIKeyExtractor
-// compatibility).
+// resulting access_token as an api_key field.
 type OAuth2Driver struct {
-	provider   OAuth2ProviderConfig
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
 	httpClient *http.Client
 }
 
 // OAuth2DriverFactory creates OAuth2Driver instances.
-// One factory instance is registered per provider, each with a different config.
-type OAuth2DriverFactory struct {
-	provider OAuth2ProviderConfig
-}
+type OAuth2DriverFactory struct{}
 
-// NewOAuth2DriverFactory creates a factory for the given provider config.
-func NewOAuth2DriverFactory(provider OAuth2ProviderConfig) *OAuth2DriverFactory {
-	return &OAuth2DriverFactory{provider: provider}
-}
-
-// Type returns the driver type identifier for this provider.
+// Type returns the driver type identifier.
 func (f *OAuth2DriverFactory) Type() string {
-	return f.provider.SourceType
+	return credential.SourceTypeOAuth2
 }
 
 // ValidateConfig validates source configuration.
-// Requires client_id and client_secret; token_url is optional.
+// Requires client_id, client_secret, and token_url.
 func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
-	return credential.ValidateSchema(config,
+	if err := credential.ValidateSchema(config,
 		credential.StringField("client_id").
 			Required().
-			Describe(fmt.Sprintf("%s OAuth2 client ID", f.provider.DisplayName)).
+			Describe("OAuth2 client ID").
 			Example("your-client-id"),
 
 		credential.StringField("client_secret").
 			Required().
-			Describe(fmt.Sprintf("%s OAuth2 client secret", f.provider.DisplayName)).
+			Describe("OAuth2 client secret").
 			Example("your-client-secret"),
 
 		credential.StringField("token_url").
+			Required().
 			Custom(validateOAuth2TokenURL).
-			Describe(fmt.Sprintf("OAuth2 token endpoint (default: %s)", f.provider.DefaultTokenURL)).
-			Example(f.provider.DefaultTokenURL),
-	)
+			Describe("OAuth2 token endpoint (HTTPS)").
+			Example("https://identity.pagerduty.com/oauth/token"),
+
+		credential.StringField("default_scopes").
+			Describe("Default OAuth2 scopes (space-separated)").
+			Example("read write"),
+
+		credential.StringField("verify_url").
+			Custom(validateOAuth2OptionalURL).
+			Describe("Endpoint to verify minted tokens (skip if empty)").
+			Example("https://api.pagerduty.com/users/me"),
+
+		credential.StringField("verify_method").
+			Custom(validateOAuth2VerifyMethod).
+			Describe("HTTP method for verify_url (default: GET)").
+			Example("GET"),
+
+		credential.StringField("auth_header_type").
+			Custom(validateOAuth2AuthHeaderType).
+			Describe("How to attach token for verification: bearer, token, custom_header (default: bearer)").
+			Example("bearer"),
+
+		credential.StringField("auth_header_name").
+			Describe("Header name when auth_header_type=custom_header").
+			Example("X-Api-Key"),
+
+		credential.StringField("display_name").
+			Describe("Human-readable label for logs/errors (default: OAuth2)").
+			Example("PagerDuty"),
+	); err != nil {
+		return err
+	}
+
+	// auth_header_name is required when auth_header_type is custom_header
+	if credential.GetString(config, "auth_header_type", "") == oauth2AuthCustomHeader {
+		if credential.GetString(config, "auth_header_name", "") == "" {
+			return fmt.Errorf("auth_header_name is required when auth_header_type is custom_header")
+		}
+	}
+
+	return nil
 }
 
 // SensitiveConfigFields returns the list of source config keys that should be masked.
@@ -104,7 +114,7 @@ func (f *OAuth2DriverFactory) SensitiveConfigFields() []string {
 	return []string{"client_secret"}
 }
 
-// InferCredentialType returns the credential type for OAuth2 providers.
+// InferCredentialType returns the credential type for OAuth2 sources.
 func (f *OAuth2DriverFactory) InferCredentialType(_ map[string]string) (string, error) {
 	return credential.TypeOAuthBearerToken, nil
 }
@@ -112,12 +122,11 @@ func (f *OAuth2DriverFactory) InferCredentialType(_ map[string]string) (string, 
 // Create instantiates a new OAuth2Driver.
 func (f *OAuth2DriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &OAuth2Driver{
-		provider: f.provider,
 		credSource: &credential.CredSource{
-			Type:   f.provider.SourceType,
+			Type:   credential.SourceTypeOAuth2,
 			Config: config,
 		},
-		logger:     log.WithSubsystem(f.provider.SourceType),
+		logger:     log.WithSubsystem(credential.SourceTypeOAuth2),
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 	return driver, nil
@@ -125,12 +134,12 @@ func (f *OAuth2DriverFactory) Create(config map[string]string, log *logger.Gated
 
 // Type returns the driver type.
 func (d *OAuth2Driver) Type() string {
-	return d.provider.SourceType
+	return credential.SourceTypeOAuth2
 }
 
-// getTokenURL returns the token endpoint URL from source config or default.
-func (d *OAuth2Driver) getTokenURL() string {
-	return credential.GetString(d.credSource.Config, "token_url", d.provider.DefaultTokenURL)
+// displayName returns the configured display name or "OAuth2".
+func (d *OAuth2Driver) displayName() string {
+	return credential.GetString(d.credSource.Config, "display_name", "OAuth2")
 }
 
 // oauth2TokenResponse is the standard OAuth2 token endpoint response.
@@ -143,14 +152,17 @@ type oauth2TokenResponse struct {
 
 // MintCredential exchanges client credentials for a bearer token.
 func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
-	clientID := credential.GetString(d.credSource.Config, "client_id", "")
-	clientSecret := credential.GetString(d.credSource.Config, "client_secret", "")
+	config := d.credSource.Config
+	name := d.displayName()
 
+	clientID := credential.GetString(config, "client_id", "")
+	clientSecret := credential.GetString(config, "client_secret", "")
 	if clientID == "" || clientSecret == "" {
-		return nil, 0, "", fmt.Errorf("%s OAuth2 source missing client_id or client_secret", d.provider.DisplayName)
+		return nil, 0, "", fmt.Errorf("%s OAuth2 source missing client_id or client_secret", name)
 	}
 
-	scope := credential.GetString(spec.Config, "scope", d.provider.DefaultScopes)
+	defaultScopes := credential.GetString(config, "default_scopes", "")
+	scope := credential.GetString(spec.Config, "scope", defaultScopes)
 
 	// Build token request body
 	form := url.Values{
@@ -172,7 +184,7 @@ func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.Cred
 
 	httpReq := HTTPRequest{
 		Method: http.MethodPost,
-		URL:    d.getTokenURL(),
+		URL:    credential.GetString(config, "token_url", ""),
 		Body:   []byte(form.Encode()),
 		Headers: map[string]string{
 			"Content-Type": "application/x-www-form-urlencoded",
@@ -182,16 +194,16 @@ func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.Cred
 
 	body, _, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("%s OAuth2 token exchange failed: %w", d.provider.DisplayName, err)
+		return nil, 0, "", fmt.Errorf("%s OAuth2 token exchange failed: %w", name, err)
 	}
 
 	var tokenResp oauth2TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, 0, "", fmt.Errorf("failed to decode %s OAuth2 token response: %w", d.provider.DisplayName, err)
+		return nil, 0, "", fmt.Errorf("failed to decode %s OAuth2 token response: %w", name, err)
 	}
 
 	if tokenResp.AccessToken == "" {
-		return nil, 0, "", fmt.Errorf("%s OAuth2 token response missing access_token", d.provider.DisplayName)
+		return nil, 0, "", fmt.Errorf("%s OAuth2 token response missing access_token", name)
 	}
 
 	rawData := map[string]interface{}{
@@ -215,7 +227,7 @@ func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.Cred
 // Revoke is a no-op for OAuth2 bearer tokens — they expire naturally.
 func (d *OAuth2Driver) Revoke(_ context.Context, leaseID string) error {
 	if d.logger != nil {
-		d.logger.Debug(fmt.Sprintf("%s OAuth2 bearer tokens expire naturally, skipping revocation", d.provider.DisplayName),
+		d.logger.Debug(fmt.Sprintf("%s OAuth2 bearer tokens expire naturally, skipping revocation", d.displayName()),
 			logger.String("lease_id", leaseID),
 		)
 	}
@@ -229,31 +241,24 @@ func (d *OAuth2Driver) Cleanup(_ context.Context) error {
 }
 
 // VerifySpec validates the spec by minting a token and optionally calling
-// the provider's verification endpoint.
+// the configured verification endpoint.
 func (d *OAuth2Driver) VerifySpec(ctx context.Context, spec *credential.CredSpec) error {
+	name := d.displayName()
+
 	rawData, _, _, err := d.MintCredential(ctx, spec)
 	if err != nil {
-		return fmt.Errorf("%s OAuth2 spec verification failed: %w", d.provider.DisplayName, err)
+		return fmt.Errorf("%s OAuth2 spec verification failed: %w", name, err)
 	}
 
-	if d.provider.VerifyURL == "" {
+	verifyURL := credential.GetString(d.credSource.Config, "verify_url", "")
+	if verifyURL == "" {
 		return nil
 	}
 
 	token, _ := rawData["api_key"].(string)
+	headers := buildOAuth2AuthHeaders(d.credSource.Config, token)
 
-	headers := map[string]string{
-		"Authorization": "Bearer " + token,
-		"Accept":        "application/json",
-	}
-	if d.provider.BuildAuthHeaders != nil {
-		headers = d.provider.BuildAuthHeaders(token)
-	}
-
-	method := d.provider.VerifyMethod
-	if method == "" {
-		method = http.MethodGet
-	}
+	method := credential.GetString(d.credSource.Config, "verify_method", http.MethodGet)
 
 	retryConfig := HTTPRetryConfig{
 		MaxAttempts:       oauth2MaxRetryAttempts,
@@ -265,29 +270,88 @@ func (d *OAuth2Driver) VerifySpec(ctx context.Context, spec *credential.CredSpec
 
 	httpReq := HTTPRequest{
 		Method:  method,
-		URL:     d.provider.VerifyURL,
+		URL:     verifyURL,
 		Headers: headers,
 	}
 
 	_, _, err = ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
-		return fmt.Errorf("%s OAuth2 token verification failed: %w", d.provider.DisplayName, err)
+		return fmt.Errorf("%s OAuth2 token verification failed: %w", name, err)
 	}
 
 	return nil
 }
 
+// buildOAuth2AuthHeaders builds authentication headers based on auth_header_type config.
+func buildOAuth2AuthHeaders(config map[string]string, token string) map[string]string {
+	headerType := credential.GetString(config, "auth_header_type", oauth2AuthBearer)
+	headers := map[string]string{"Accept": "application/json"}
+
+	switch headerType {
+	case oauth2AuthToken:
+		headers["Authorization"] = "Token " + token
+	case oauth2AuthCustomHeader:
+		name := credential.GetString(config, "auth_header_name", "")
+		if name != "" {
+			headers[name] = token
+		}
+	default: // bearer
+		headers["Authorization"] = "Bearer " + token
+	}
+
+	return headers
+}
+
 // validateOAuth2TokenURL validates that the token_url is a well-formed HTTPS URL.
 func validateOAuth2TokenURL(rawURL string) error {
+	return validateOAuth2HTTPSURL(rawURL, "token_url")
+}
+
+// validateOAuth2OptionalURL validates that verify_url, if non-empty, is a well-formed HTTPS URL.
+func validateOAuth2OptionalURL(rawURL string) error {
+	if rawURL == "" {
+		return nil
+	}
+	return validateOAuth2HTTPSURL(rawURL, "verify_url")
+}
+
+// validateOAuth2HTTPSURL validates that a URL is well-formed HTTPS.
+func validateOAuth2HTTPSURL(rawURL, fieldName string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid token_url: %w", err)
+		return fmt.Errorf("invalid %s: %w", fieldName, err)
 	}
 	if parsed.Scheme != "https" {
-		return fmt.Errorf("token_url must use https:// scheme, got: %s", parsed.Scheme)
+		return fmt.Errorf("%s must use https:// scheme, got: %s", fieldName, parsed.Scheme)
 	}
 	if parsed.Host == "" {
-		return fmt.Errorf("token_url must include a host")
+		return fmt.Errorf("%s must include a host", fieldName)
 	}
 	return nil
+}
+
+// validateOAuth2VerifyMethod validates that verify_method is GET or POST.
+func validateOAuth2VerifyMethod(method string) error {
+	if method == "" {
+		return nil
+	}
+	switch method {
+	case http.MethodGet, http.MethodPost:
+		return nil
+	default:
+		return fmt.Errorf("verify_method must be GET or POST, got: %s", method)
+	}
+}
+
+// validateOAuth2AuthHeaderType validates the auth_header_type enum.
+func validateOAuth2AuthHeaderType(headerType string) error {
+	if headerType == "" {
+		return nil
+	}
+	switch headerType {
+	case oauth2AuthBearer, oauth2AuthToken, oauth2AuthCustomHeader:
+		return nil
+	default:
+		return fmt.Errorf("auth_header_type must be one of: bearer, token, custom_header; got: %s", headerType)
+	}
 }

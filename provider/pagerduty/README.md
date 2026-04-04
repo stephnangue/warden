@@ -1,6 +1,6 @@
 # PagerDuty Provider
 
-The PagerDuty provider enables proxied access to the PagerDuty REST API v2 through Warden. It forwards requests to PagerDuty endpoints (incidents, services, users, schedules, etc.) with automatic credential injection and policy evaluation. Two credential modes are supported: static API tokens and OAuth2 client credentials.
+The PagerDuty provider enables proxied access to the PagerDuty REST API v2 through Warden. It forwards requests to PagerDuty endpoints (incidents, services, users, schedules, etc.) with automatic credential injection and policy evaluation. Two credential modes are supported: static API tokens (`apikey` source type) and OAuth2 client credentials (`oauth2` source type).
 
 ## Table of Contents
 
@@ -128,9 +128,11 @@ The credential source holds only connection info (`api_url`). The API token is s
 
 ```bash
 warden cred source create pagerduty-src \
-  --type=pagerduty \
+  --type=apikey \
   --rotation-period=0 \
-  --config=api_url=https://api.pagerduty.com
+  --config=api_url=https://api.pagerduty.com \
+  --config=verify_endpoint=/users/me \
+  --config=display_name=PagerDuty
 ```
 
 Create a credential spec that references the credential source. The spec carries the API token and gets associated with tokens at login time.
@@ -313,21 +315,13 @@ The source holds the OAuth2 app credentials (`client_id`, `client_secret`). Toke
 
 ```bash
 warden cred source create pagerduty-oauth-src \
-  --type=pagerduty_oauth2 \
-  --rotation-period=0 \
-  --config=client_id=your-client-id \
-  --config=client_secret=your-client-secret
-```
-
-Optionally, override the default token endpoint:
-
-```bash
-warden cred source create pagerduty-oauth-src \
-  --type=pagerduty_oauth2 \
+  --type=oauth2 \
   --rotation-period=0 \
   --config=client_id=your-client-id \
   --config=client_secret=your-client-secret \
-  --config=token_url=https://identity.pagerduty.com/oauth/token
+  --config=token_url=https://identity.pagerduty.com/oauth/token \
+  --config=verify_url=https://api.pagerduty.com/users/me \
+  --config=display_name=PagerDuty
 ```
 
 ### Create an OAuth2 Credential Spec
@@ -430,17 +424,25 @@ curl --cert client.pem --key client-key.pem \
 
 ### Credential Source Config (Static API Token)
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `api_url` | string | `https://api.pagerduty.com` | PagerDuty API base URL (must be HTTPS) |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `api_url` | string | No | API base URL (default: `https://api.pagerduty.com`) |
+| `verify_endpoint` | string | No | Verification path (e.g., `/users/me`) |
+| `display_name` | string | No | Label for logs/errors (default: `API Key`) |
 
 ### Credential Source Config (OAuth2 Client Credentials)
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `client_id` | string | Yes | PagerDuty OAuth2 application client ID |
-| `client_secret` | string | Yes | PagerDuty OAuth2 application client secret (sensitive — masked in output) |
-| `token_url` | string | No | OAuth2 token endpoint (default: `https://identity.pagerduty.com/oauth/token`) |
+| `client_id` | string | Yes | OAuth2 application client ID |
+| `client_secret` | string | Yes | OAuth2 application client secret (sensitive — masked in output) |
+| `token_url` | string | Yes | OAuth2 token endpoint (e.g., `https://identity.pagerduty.com/oauth/token`) |
+| `default_scopes` | string | No | Default OAuth2 scopes (space-separated) |
+| `verify_url` | string | No | Endpoint to verify minted tokens (e.g., `https://api.pagerduty.com/users/me`) |
+| `verify_method` | string | No | HTTP method for verify_url (default: `GET`) |
+| `auth_header_type` | string | No | How to attach token for verification: `bearer`, `token`, `custom_header` (default: `bearer`) |
+| `auth_header_name` | string | No | Header name when `auth_header_type=custom_header` |
+| `display_name` | string | No | Human-readable label for logs/errors (default: `OAuth2`) |
 
 ### Credential Spec Config (Static API Token)
 

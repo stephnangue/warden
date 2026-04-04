@@ -21,10 +21,8 @@ func TestRegisterBuiltinDrivers(t *testing.T) {
 		credential.SourceTypeGCP,
 		credential.SourceTypeGitLab,
 		credential.SourceTypeGitHub,
-		credential.SourceTypeMistral,
-		credential.SourceTypeOpenAI,
-		credential.SourceTypeAnthropic,
-		credential.SourceTypeSlack,
+		credential.SourceTypeAPIKey,
+		credential.SourceTypeOAuth2,
 	}
 	for _, typeName := range expectedTypes {
 		factory, err := registry.GetFactory(typeName)

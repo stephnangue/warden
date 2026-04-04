@@ -60,8 +60,8 @@ the URL path:
   /pagerduty/role/{role}/gateway/{api-path}
 
 Two credential source types are supported:
-- pagerduty: Static API token (stored in spec config as api_key)
-- pagerduty_oauth2: OAuth2 client credentials flow (client_id/client_secret
+- apikey: Static API token (stored in spec config as api_key)
+- oauth2: OAuth2 client credentials flow (client_id/client_secret/token_url
   on source, scope on spec; tokens are minted dynamically)
 
 Configuration:

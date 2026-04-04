@@ -124,9 +124,15 @@ The credential source holds only connection info (`api_url`). The API key is sto
 
 ```bash
 warden cred source create anthropic-src \
-  --type=anthropic \
+  --type=apikey \
   --rotation-period=0 \
-  --config=api_url=https://api.anthropic.com
+  --config=api_url=https://api.anthropic.com \
+  --config=verify_endpoint=/v1/models \
+  --config=auth_header_type=custom_header \
+  --config=auth_header_name=x-api-key \
+  --config=extra_headers=anthropic-version:2023-06-01 \
+  --config=optional_metadata=organization_id \
+  --config=display_name=Anthropic
 ```
 
 Verify the source was created:
@@ -460,9 +466,15 @@ curl --cert client.pem --key client-key.pem \
 
 ### Credential Source Config
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `api_url` | string | `https://api.anthropic.com` | Anthropic API base URL (must be HTTPS) |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `api_url` | string | No | API base URL (default: `https://api.anthropic.com`) |
+| `verify_endpoint` | string | No | Verification path (e.g., `/v1/models`) |
+| `auth_header_type` | string | No | Auth method: `bearer`, `token`, `custom_header` (default: `bearer`) |
+| `auth_header_name` | string | No | Header name when `auth_header_type=custom_header` (e.g., `x-api-key`) |
+| `extra_headers` | string | No | Additional static headers as `key:value` pairs (e.g., `anthropic-version:2023-06-01`) |
+| `optional_metadata` | string | No | Comma-separated spec fields to copy into credential data |
+| `display_name` | string | No | Label for logs/errors (default: `API Key`) |
 
 ### Credential Spec Config
 
