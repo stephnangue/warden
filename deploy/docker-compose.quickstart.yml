@@ -4,12 +4,12 @@
 # generate JWTs and try Warden immediately. No other files needed.
 #
 # Usage:
-#   docker compose -f docker-compose.quickstart.yml up -d
+#   docker compose -f deploy/docker-compose.quickstart.yml up -d
 #   # Wait ~15s for initialization, then check logs:
-#   docker compose -f docker-compose.quickstart.yml logs hydra-client-init
+#   docker compose -f deploy/docker-compose.quickstart.yml logs hydra-client-init
 #
 # Clean up:
-#   docker compose -f docker-compose.quickstart.yml down -v
+#   docker compose -f deploy/docker-compose.quickstart.yml down -v
 
 services:
   postgres-hydra:

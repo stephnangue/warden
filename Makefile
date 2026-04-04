@@ -6,6 +6,8 @@ export COMPOSE_DOCKER_CLI_BUILD=1
 
 IMAGE_NAME ?= warden
 CONTAINER_NAME ?= warden
+DC = docker-compose -p warden -f deploy/docker-compose.yml
+DC_DEPS = docker-compose -p warden -f deploy/docker-compose.deps.yml
 
 help:
 	@echo "========================================"
@@ -97,12 +99,12 @@ test-e2e-reset:
 # Normal build with cache (runs tests first)
 build: test-unit
 	@echo "Building $(IMAGE_NAME) with cache..."
-	docker-compose build
+	$(DC) build
 
 # Fast parallel build (runs tests first)
 build-fast: test-unit
 	@echo "Building $(IMAGE_NAME) with parallel processing..."
-	docker-compose build --parallel
+	$(DC) build --parallel
 
 # Build and run warden locally (runs tests first)
 brd: test-unit
@@ -110,13 +112,13 @@ brd: test-unit
 	@go build -v -o warden .
 	@echo "✓ Warden built successfully"
 	@echo "Starting warden locally..."
-	@./warden server --config=./warden.local.hcl
+	@./warden server --config=./deploy/config/warden.local.hcl
 
 # Ultra-fast rebuild (code changes only - no logs)
 brd-fast:
 	@echo "⚡ Ultra-fast rebuild (code changes only)..."
 	@go build -o warden .
-	@echo "✓ Done! Run './warden server --config=./warden.local.hcl' to start"
+	@echo "✓ Done! Run './warden server --config=./deploy/config/warden.local.hcl' to start"
 
 # Live development mode with hot reload
 dev-watch:
@@ -132,64 +134,64 @@ dev-watch:
 # Build without cache (clean build, runs tests first)
 build-no-cache: test-unit
 	@echo "Building $(IMAGE_NAME) without cache..."
-	docker-compose build --no-cache --pull
+	$(DC) build --no-cache --pull
 
 # Quick rebuild for code changes only
 rebuild-quick:
 	@echo "Quick rebuild (code changes only)..."
-	docker-compose build $(CONTAINER_NAME)
+	$(DC) build $(CONTAINER_NAME)
 
 # Start warden proxy
 up:
-	docker-compose up -d
+	$(DC) up -d
 
 # Start with logs
 up-logs:
-	docker-compose up
+	$(DC) up
 
 # Stop warden proxy
 down:
 	@echo "Stopping warden proxy..."
-	docker-compose down
+	$(DC) down
 	@echo "✓ Stopped"
 
 reup:
-	docker-compose down
-	docker-compose up -d
+	$(DC) down
+	$(DC) up -d
 
 # View logs (follow mode)
 logs:
-	docker-compose logs -f $(CONTAINER_NAME)
+	$(DC) logs -f $(CONTAINER_NAME)
 
 vault-logs:
-	docker-compose logs -f vault-init
+	$(DC) logs -f vault-init
 
 
 # View last 100 lines of logs
 logs-tail:
-	docker-compose logs --tail=100 $(CONTAINER_NAME)
+	$(DC) logs --tail=100 $(CONTAINER_NAME)
 
 # Watch logs with tail
 watch:
-	docker-compose logs -f --tail=100 $(CONTAINER_NAME)
+	$(DC) logs -f --tail=100 $(CONTAINER_NAME)
 
 # Restart proxy
 restart:
 	@echo "Restarting warden..."
-	docker-compose restart $(CONTAINER_NAME)
+	$(DC) restart $(CONTAINER_NAME)
 	@sleep 2
 	@echo "✓ Restarted"
 
 # Clean containers and volumes
 clean:
 	@echo "Cleaning up..."
-	docker-compose down -v
+	$(DC) down -v
 	@echo "✓ Cleaned"
 
 # Deep clean including build cache
 clean-all:
 	@echo "Deep cleaning (including build cache)..."
-	docker-compose down -v
+	$(DC) down -v
 	docker builder prune -af
 	docker system prune -af
 	@echo "✓ Deep clean completed"
@@ -214,7 +216,7 @@ query:
 
 # Show status
 status:
-	docker-compose ps
+	$(DC) ps
 
 # Show build cache usage
 cache-info:
@@ -228,7 +230,7 @@ stats:
 
 # Follow logs and grep for errors
 logs-errors:
-	docker-compose logs -f $(CONTAINER_NAME) | grep -i error
+	$(DC) logs -f $(CONTAINER_NAME) | grep -i error
 
 # Complete setup (build + up, includes tests)
 setup: build up
@@ -247,6 +249,7 @@ prod-build: test-unit
 	docker build \
 		--build-arg BUILDKIT_INLINE_CACHE=1 \
 		--cache-from $(IMAGE_NAME):latest \
+		-f deploy/Dockerfile \
 		-t $(IMAGE_NAME):latest \
 		-t $(IMAGE_NAME):$(shell date +%Y%m%d) \
 		.
@@ -255,18 +258,18 @@ prod-build: test-unit
 # Start only dependencies (for local warden development)
 deps-up:
 	@echo "Starting dependencies (Vault, MySQL, PostgreSQL, Hydra)..."
-	docker-compose -f docker-compose.deps.yml up -d
+	$(DC_DEPS) up -d
 	@echo "✓ Dependencies started"
 
 # Stop dependencies
 deps-down:
 	@echo "Stopping dependencies..."
-	docker-compose -f docker-compose.deps.yml down
+	$(DC_DEPS) down
 	@echo "✓ Dependencies stopped"
 
 # View dependency logs
 deps-logs:
-	docker-compose -f docker-compose.deps.yml logs -f
+	$(DC_DEPS) logs -f
 
 # Reset Warden PostgreSQL database (removes all data)
 reset-warden-db:
@@ -274,34 +277,34 @@ reset-warden-db:
 	@echo "Press Ctrl+C to cancel, or wait 5 seconds to continue..."
 	@sleep 5
 	@echo "Stopping and removing postgres-warden container..."
-	@docker-compose -f docker-compose.deps.yml stop postgres-warden
-	@docker-compose -f docker-compose.deps.yml rm -f postgres-warden
+	@$(DC_DEPS) stop postgres-warden
+	@$(DC_DEPS) rm -f postgres-warden
 	@echo "Removing postgres-warden-data volume..."
 	@docker volume rm warden_postgres-warden-data 2>/dev/null || echo "Volume not found or already removed"
 	@echo "Starting postgres-warden service..."
-	@docker-compose -f docker-compose.deps.yml up -d postgres-warden
+	@$(DC_DEPS) up -d postgres-warden
 	@echo "Waiting for database to be ready..."
 	@sleep 5
-	@docker-compose -f docker-compose.deps.yml exec -T postgres-warden pg_isready -U warden && echo "✓ Database is ready" || echo "⚠️  Database may still be starting"
+	@$(DC_DEPS) exec -T postgres-warden pg_isready -U warden && echo "✓ Database is ready" || echo "⚠️  Database may still be starting"
 	@echo "✓ Warden database reset complete!"
 
 # Reset Warden PostgreSQL database without confirmation (use with caution)
 reset-warden-db-force:
 	@echo "Stopping and removing postgres-warden container..."
-	@docker-compose -f docker-compose.deps.yml stop postgres-warden
-	@docker-compose -f docker-compose.deps.yml rm -f postgres-warden
+	@$(DC_DEPS) stop postgres-warden
+	@$(DC_DEPS) rm -f postgres-warden
 	@echo "Removing postgres-warden-data volume..."
 	@docker volume rm warden_postgres-warden-data 2>/dev/null || echo "Volume not found or already removed"
 	@echo "Starting postgres-warden service..."
-	@docker-compose -f docker-compose.deps.yml up -d postgres-warden
+	@$(DC_DEPS) up -d postgres-warden
 	@echo "Waiting for database to be ready..."
 	@sleep 5
-	@docker-compose -f docker-compose.deps.yml exec -T postgres-warden pg_isready -U warden && echo "✓ Database is ready" || echo "⚠️  Database may still be starting"
+	@$(DC_DEPS) exec -T postgres-warden pg_isready -U warden && echo "✓ Database is ready" || echo "⚠️  Database may still be starting"
 	@echo "✓ Warden database reset complete!"
 
 # View Warden PostgreSQL logs
 warden-db-logs:
-	@docker-compose -f docker-compose.deps.yml logs -f postgres-warden
+	@$(DC_DEPS) logs -f postgres-warden
 
 # Connect to Warden PostgreSQL database
 warden-db-shell:
