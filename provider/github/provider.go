@@ -38,7 +38,7 @@ var Spec = &httpproxy.ProviderSpec{
 	DefaultURL:         DefaultGitHubURL,
 	URLConfigKey:       "github_url",
 	DefaultTimeout:     framework.DefaultTimeout,
-	ParseStreamBody:    false,
+	ParseStreamBody:    true,
 	UserAgent:          "warden-github-proxy",
 	HelpText:           githubBackendHelp,
 	ExtractCredentials: httpproxy.TypedTokenExtractor(credential.TypeGitHubToken, "token", "Authorization", "token "),

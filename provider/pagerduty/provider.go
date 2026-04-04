@@ -23,7 +23,7 @@ var Spec = &httpproxy.ProviderSpec{
 	DefaultURL:         DefaultPagerDutyURL,
 	URLConfigKey:       "pagerduty_url",
 	DefaultTimeout:     DefaultPagerDutyTimeout,
-	ParseStreamBody:    false,
+	ParseStreamBody:    true,
 	UserAgent:          "warden-pagerduty-proxy",
 	HelpText:           pagerdutyBackendHelp,
 	ExtractCredentials: httpproxy.BearerAPIKeyExtractor,
