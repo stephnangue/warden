@@ -48,6 +48,7 @@ import (
 	"github.com/stephnangue/warden/provider/openai"
 	"github.com/stephnangue/warden/provider/pagerduty"
 	"github.com/stephnangue/warden/provider/rds"
+	"github.com/stephnangue/warden/provider/servicenow"
 	"github.com/stephnangue/warden/provider/slack"
 	"github.com/stephnangue/warden/provider/vault"
 	"golang.org/x/text/cases"
@@ -109,8 +110,9 @@ Usage: warden server [options]
 		"gitlab":    gitlab.Factory,
 		"mistral":   mistral.Factory,
 		"openai":    openai.Factory,
-		"pagerduty": pagerduty.Factory,
-		"slack":     slack.Factory,
+		"pagerduty":  pagerduty.Factory,
+		"servicenow": servicenow.Factory,
+		"slack":      slack.Factory,
 		"vault":     vault.Factory,
 		"rds":       rds.Factory,
 	}
