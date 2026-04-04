@@ -2,6 +2,30 @@
 
 All notable changes to Warden are documented in this file.
 
+## [v0.8.0] — 2026-04-04
+
+### Breaking Changes
+
+- **`apikey` replaces per-provider source types** — The source types `anthropic`, `openai`, `mistral`, `slack`, and `pagerduty` have been removed. A single `apikey` driver type handles all static API key providers. Existing sources must be recreated with `--type=apikey` and explicit config fields. Source type constants `SourceTypeAnthropic`, `SourceTypeOpenAI`, `SourceTypeMistral`, `SourceTypeSlack`, and `SourceTypePagerDuty` are removed from the Go API.
+
+- **`oauth2` replaces `pagerduty_oauth2`** — The `pagerduty_oauth2` source type has been removed. A single `oauth2` driver type handles all OAuth2 client credentials providers. `token_url` is now a required field (no provider-specific defaults). Source type constant `SourceTypePagerDutyOAuth` is removed from the Go API.
+
+### New Features
+
+- **Generic API Key Driver (`apikey`)** — Single config-driven credential source driver for any API key provider. Configurable via source config: `api_url`, `verify_endpoint`, `verify_method`, `auth_header_type` (`bearer`/`token`/`custom_header`), `auth_header_name`, `extra_headers` (comma-separated `key:value` pairs for static headers like `anthropic-version:2023-06-01`), `optional_metadata` (comma-separated spec fields to forward), and `display_name`.
+
+- **Generic OAuth2 Driver (`oauth2`)** — Single config-driven credential source driver for any OAuth2 client credentials provider. Configurable via source config: `client_id`, `client_secret`, `token_url` (required), `default_scopes`, `verify_url`, `verify_method`, `auth_header_type`, `auth_header_name`, and `display_name`.
+
+### Removed
+
+- **`static_apikey_providers.go`** — Per-provider config definitions (`AnthropicProvider`, `OpenAIProvider`, `MistralProvider`, `SlackProvider`, `PagerDutyProvider`) and the `APIKeyProviderConfig` struct.
+- **`OAuth2ProviderConfig`** — Per-provider OAuth2 config definitions (`PagerDutyOAuth2Provider`) and the `OAuth2ProviderConfig` struct.
+- **`AuthHeaderFunc`** type — Replaced by declarative `auth_header_type`/`auth_header_name` config fields.
+
+### Documentation
+
+- **Provider READMEs** — Updated all credential source creation examples and config reference tables for the generic `apikey` and `oauth2` driver types (Anthropic, OpenAI, Mistral, Slack, PagerDuty).
+
 ## [v0.7.0] — 2026-04-03
 
 ### New Features

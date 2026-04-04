@@ -78,10 +78,10 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	switch sourceType {
-	case credential.SourceTypeMistral, credential.SourceTypeOpenAI, credential.SourceTypeAnthropic, credential.SourceTypeSlack, credential.SourceTypePagerDuty, credential.SourceTypeLocal:
+	case credential.SourceTypeAPIKey, credential.SourceTypeLocal:
 		// Supported
 	default:
-		return fmt.Errorf("api_key credentials require a mistral, openai, anthropic, slack, pagerduty, or local source, got: %s", sourceType)
+		return fmt.Errorf("api_key credentials require an apikey or local source, got: %s", sourceType)
 	}
 
 	// Step 2: Validate config against schema

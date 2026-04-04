@@ -59,7 +59,7 @@ func (t *OAuthBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 // ValidateConfig validates the Config for an OAuth bearer token credential spec.
 func (t *OAuthBearerTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
 	switch sourceType {
-	case credential.SourceTypePagerDutyOAuth:
+	case credential.SourceTypeOAuth2:
 		// Supported OAuth2 source types
 	default:
 		return fmt.Errorf("oauth_bearer_token credentials require an OAuth2 source, got: %s", sourceType)

@@ -29,28 +29,38 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 		wantErr    bool
 		errMsg     string
 	}{
-		// --- Mistral source ---
+		// --- apikey source ---
 		{
-			name: "mistral source - valid config",
+			name: "apikey source - valid config",
 			config: map[string]string{
 				"api_key": "sk-xxxxxxxxxxxxxxxxxxxx",
 			},
-			sourceType: credential.SourceTypeMistral,
+			sourceType: credential.SourceTypeAPIKey,
 			wantErr:    false,
 		},
 		{
-			name: "mistral source - with organization_id",
+			name: "apikey source - with organization_id",
 			config: map[string]string{
 				"api_key":         "sk-xxxxxxxxxxxxxxxxxxxx",
 				"organization_id": "org-123",
 			},
-			sourceType: credential.SourceTypeMistral,
+			sourceType: credential.SourceTypeAPIKey,
 			wantErr:    false,
 		},
 		{
-			name:       "mistral source - missing api_key",
+			name: "apikey source - with organization_id and project_id",
+			config: map[string]string{
+				"api_key":         "sk-xxxxxxxxxxxxxxxxxxxx",
+				"organization_id": "org-123",
+				"project_id":      "proj-456",
+			},
+			sourceType: credential.SourceTypeAPIKey,
+			wantErr:    false,
+		},
+		{
+			name:       "apikey source - missing api_key",
 			config:     map[string]string{},
-			sourceType: credential.SourceTypeMistral,
+			sourceType: credential.SourceTypeAPIKey,
 			wantErr:    true,
 			errMsg:     "api_key",
 		},
@@ -88,48 +98,6 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			wantErr:    true,
 			errMsg:     "api_key",
 		},
-		// --- OpenAI source ---
-		{
-			name: "openai source - valid config",
-			config: map[string]string{
-				"api_key": "sk-xxxxxxxxxxxxxxxxxxxx",
-			},
-			sourceType: credential.SourceTypeOpenAI,
-			wantErr:    false,
-		},
-		{
-			name: "openai source - with organization_id and project_id",
-			config: map[string]string{
-				"api_key":         "sk-xxxxxxxxxxxxxxxxxxxx",
-				"organization_id": "org-123",
-				"project_id":      "proj-456",
-			},
-			sourceType: credential.SourceTypeOpenAI,
-			wantErr:    false,
-		},
-		{
-			name:       "openai source - missing api_key",
-			config:     map[string]string{},
-			sourceType: credential.SourceTypeOpenAI,
-			wantErr:    true,
-			errMsg:     "api_key",
-		},
-		// --- Slack source ---
-		{
-			name: "slack source - valid config",
-			config: map[string]string{
-				"api_key": "xoxb-xxxxxxxxxxxxxxxxxxxx",
-			},
-			sourceType: credential.SourceTypeSlack,
-			wantErr:    false,
-		},
-		{
-			name:       "slack source - missing api_key",
-			config:     map[string]string{},
-			sourceType: credential.SourceTypeSlack,
-			wantErr:    true,
-			errMsg:     "api_key",
-		},
 		// --- Unsupported source types ---
 		{
 			name: "unsupported source type - aws",
@@ -138,7 +106,7 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: "aws",
 			wantErr:    true,
-			errMsg:     "require a mistral, openai, anthropic, slack, pagerduty, or local source",
+			errMsg:     "require an apikey or local source",
 		},
 		{
 			name: "unsupported source type - vault",
@@ -147,7 +115,7 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "require a mistral, openai, anthropic, slack, pagerduty, or local source",
+			errMsg:     "require an apikey or local source",
 		},
 	}
 

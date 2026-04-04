@@ -30,15 +30,15 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 		errMsg     string
 	}{
 		{
-			name:       "pagerduty_oauth2 source - empty config (scope optional)",
+			name:       "oauth2 source - empty config (scope optional)",
 			config:     map[string]string{},
-			sourceType: credential.SourceTypePagerDutyOAuth,
+			sourceType: credential.SourceTypeOAuth2,
 			wantErr:    false,
 		},
 		{
-			name:       "pagerduty_oauth2 source - with scope",
+			name:       "oauth2 source - with scope",
 			config:     map[string]string{"scope": "read write"},
-			sourceType: credential.SourceTypePagerDutyOAuth,
+			sourceType: credential.SourceTypeOAuth2,
 			wantErr:    false,
 		},
 		{
@@ -56,9 +56,9 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 			errMsg:     "require an OAuth2 source",
 		},
 		{
-			name:       "unsupported source type - static pagerduty",
+			name:       "unsupported source type - static apikey",
 			config:     map[string]string{},
-			sourceType: credential.SourceTypePagerDuty,
+			sourceType: credential.SourceTypeAPIKey,
 			wantErr:    true,
 			errMsg:     "require an OAuth2 source",
 		},

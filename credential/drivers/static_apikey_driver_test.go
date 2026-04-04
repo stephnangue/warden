@@ -13,197 +13,221 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// allAPIKeyProviders returns the 4 built-in API key provider configs for table-driven tests.
-func allAPIKeyProviders() []APIKeyProviderConfig {
-	return []APIKeyProviderConfig{
-		AnthropicProvider, OpenAIProvider, MistralProvider, SlackProvider, PagerDutyProvider,
-	}
-}
-
 // =============================================================================
-// Factory Tests (parameterized)
+// Factory Tests
 // =============================================================================
 
 func TestStaticAPIKeyDriverFactory_Type(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			f := NewStaticAPIKeyDriverFactory(p)
-			assert.Equal(t, p.SourceType, f.Type())
-		})
-	}
+	f := &StaticAPIKeyDriverFactory{}
+	assert.Equal(t, credential.SourceTypeAPIKey, f.Type())
 }
 
 func TestStaticAPIKeyDriverFactory_SensitiveConfigFields(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			f := NewStaticAPIKeyDriverFactory(p)
-			assert.Nil(t, f.SensitiveConfigFields())
-		})
-	}
+	f := &StaticAPIKeyDriverFactory{}
+	assert.Nil(t, f.SensitiveConfigFields())
+}
+
+func TestStaticAPIKeyDriverFactory_InferCredentialType(t *testing.T) {
+	f := &StaticAPIKeyDriverFactory{}
+	ct, err := f.InferCredentialType(map[string]string{})
+	require.NoError(t, err)
+	assert.Equal(t, credential.TypeAPIKey, ct)
 }
 
 func TestStaticAPIKeyDriverFactory_ValidateConfig(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		f := NewStaticAPIKeyDriverFactory(p)
+	f := &StaticAPIKeyDriverFactory{}
 
-		t.Run(p.DisplayName+"/valid_empty_config", func(t *testing.T) {
-			err := f.ValidateConfig(map[string]string{})
-			assert.NoError(t, err)
-		})
+	tests := []struct {
+		name    string
+		config  map[string]string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "valid empty config",
+			config:  map[string]string{},
+			wantErr: false,
+		},
+		{
+			name:    "valid with api_url",
+			config:  map[string]string{"api_url": "https://api.openai.com"},
+			wantErr: false,
+		},
+		{
+			name: "valid with all optional fields",
+			config: map[string]string{
+				"api_url":           "https://api.anthropic.com",
+				"verify_endpoint":   "/v1/models",
+				"verify_method":     "GET",
+				"auth_header_type":  "custom_header",
+				"auth_header_name":  "x-api-key",
+				"extra_headers":     "anthropic-version:2023-06-01",
+				"optional_metadata": "organization_id",
+				"display_name":      "Anthropic",
+			},
+			wantErr: false,
+		},
+		{
+			name:    "invalid api_url - http scheme",
+			config:  map[string]string{"api_url": "http://example.com"},
+			wantErr: true,
+			errMsg:  "must use https://",
+		},
+		{
+			name:    "invalid api_url - no host",
+			config:  map[string]string{"api_url": "https://"},
+			wantErr: true,
+			errMsg:  "must include a host",
+		},
+		{
+			name:    "invalid verify_method",
+			config:  map[string]string{"verify_method": "DELETE"},
+			wantErr: true,
+			errMsg:  "verify_method must be GET or POST",
+		},
+		{
+			name:    "invalid auth_header_type",
+			config:  map[string]string{"auth_header_type": "basic"},
+			wantErr: true,
+			errMsg:  "auth_header_type must be one of",
+		},
+		{
+			name:    "custom_header without auth_header_name",
+			config:  map[string]string{"auth_header_type": "custom_header"},
+			wantErr: true,
+			errMsg:  "auth_header_name is required",
+		},
+		{
+			name: "custom_header with auth_header_name",
+			config: map[string]string{
+				"auth_header_type": "custom_header",
+				"auth_header_name": "x-api-key",
+			},
+			wantErr: false,
+		},
+		{
+			name:    "invalid extra_headers format",
+			config:  map[string]string{"extra_headers": "no-colon"},
+			wantErr: true,
+			errMsg:  "expected key:value format",
+		},
+		{
+			name:    "valid extra_headers",
+			config:  map[string]string{"extra_headers": "anthropic-version:2023-06-01,x-custom:value"},
+			wantErr: false,
+		},
+	}
 
-		t.Run(p.DisplayName+"/valid_explicit_url", func(t *testing.T) {
-			err := f.ValidateConfig(map[string]string{"api_url": p.DefaultAPIURL})
-			assert.NoError(t, err)
-		})
-
-		t.Run(p.DisplayName+"/valid_custom_url", func(t *testing.T) {
-			err := f.ValidateConfig(map[string]string{"api_url": "https://custom.example.com"})
-			assert.NoError(t, err)
-		})
-
-		t.Run(p.DisplayName+"/invalid_http_scheme", func(t *testing.T) {
-			err := f.ValidateConfig(map[string]string{"api_url": "http://example.com"})
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "must use https://")
-		})
-
-		t.Run(p.DisplayName+"/invalid_no_host", func(t *testing.T) {
-			err := f.ValidateConfig(map[string]string{"api_url": "https://"})
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "must include a host")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := f.ValidateConfig(tt.config)
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }
 
 func TestStaticAPIKeyDriverFactory_Create(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			f := NewStaticAPIKeyDriverFactory(p)
-			log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-			driver, err := f.Create(map[string]string{"api_url": p.DefaultAPIURL}, log)
-			require.NoError(t, err)
-			require.NotNil(t, driver)
-			assert.Equal(t, p.SourceType, driver.Type())
-		})
-	}
-}
-
-func TestStaticAPIKeyDriverFactory_InferCredentialType(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			f := NewStaticAPIKeyDriverFactory(p)
-			ct, err := f.InferCredentialType(map[string]string{})
-			require.NoError(t, err)
-			assert.Equal(t, credential.TypeAPIKey, ct)
-		})
-	}
-}
-
-// =============================================================================
-// Driver Tests (parameterized)
-// =============================================================================
-
-func createTestDriver(t *testing.T, p APIKeyProviderConfig) *StaticAPIKeyDriver {
-	t.Helper()
-	f := NewStaticAPIKeyDriverFactory(p)
+	f := &StaticAPIKeyDriverFactory{}
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	driver, err := f.Create(map[string]string{}, log)
+	driver, err := f.Create(map[string]string{"api_url": "https://api.openai.com"}, log)
+	require.NoError(t, err)
+	require.NotNil(t, driver)
+	assert.Equal(t, credential.SourceTypeAPIKey, driver.Type())
+}
+
+// =============================================================================
+// Driver Tests
+// =============================================================================
+
+func createTestAPIKeyDriver(t *testing.T, config map[string]string) *StaticAPIKeyDriver {
+	t.Helper()
+	f := &StaticAPIKeyDriverFactory{}
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	driver, err := f.Create(config, log)
 	require.NoError(t, err)
 	return driver.(*StaticAPIKeyDriver)
 }
 
 func TestStaticAPIKeyDriver_Type(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			d := createTestDriver(t, p)
-			assert.Equal(t, p.SourceType, d.Type())
-		})
-	}
+	d := createTestAPIKeyDriver(t, map[string]string{})
+	assert.Equal(t, credential.SourceTypeAPIKey, d.Type())
 }
 
 func TestStaticAPIKeyDriver_Cleanup(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			d := createTestDriver(t, p)
-			assert.NoError(t, d.Cleanup(context.Background()))
-		})
-	}
+	d := createTestAPIKeyDriver(t, map[string]string{})
+	assert.NoError(t, d.Cleanup(context.Background()))
 }
 
 func TestStaticAPIKeyDriver_Revoke_NoOp(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			d := createTestDriver(t, p)
-			assert.NoError(t, d.Revoke(context.Background(), "any-lease-id"))
-			assert.NoError(t, d.Revoke(context.Background(), ""))
-		})
-	}
+	d := createTestAPIKeyDriver(t, map[string]string{})
+	assert.NoError(t, d.Revoke(context.Background(), "any-lease-id"))
+	assert.NoError(t, d.Revoke(context.Background(), ""))
 }
 
 func TestStaticAPIKeyDriver_NotRotatable(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			d := createTestDriver(t, p)
-			var sd credential.SourceDriver = d
-			_, ok := sd.(credential.Rotatable)
-			assert.False(t, ok, "%s should not implement credential.Rotatable", p.DisplayName)
-		})
-	}
+	d := createTestAPIKeyDriver(t, map[string]string{})
+	var sd credential.SourceDriver = d
+	_, ok := sd.(credential.Rotatable)
+	assert.False(t, ok, "StaticAPIKeyDriver should not implement credential.Rotatable")
 }
 
 func TestStaticAPIKeyDriver_MintCredential(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			d := createTestDriver(t, p)
-			spec := &credential.CredSpec{
-				Name:   "test",
-				Type:   credential.TypeAPIKey,
-				Config: map[string]string{"api_key": "sk-test-key-123"},
-			}
-			rawData, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
-			require.NoError(t, err)
-			assert.Equal(t, "sk-test-key-123", rawData["api_key"])
-			assert.Equal(t, time.Duration(0), ttl)
-			assert.Empty(t, leaseID)
-		})
+	d := createTestAPIKeyDriver(t, map[string]string{})
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Type:   credential.TypeAPIKey,
+		Config: map[string]string{"api_key": "sk-test-key-123"},
 	}
+	rawData, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-test-key-123", rawData["api_key"])
+	assert.Equal(t, time.Duration(0), ttl)
+	assert.Empty(t, leaseID)
 }
 
 func TestStaticAPIKeyDriver_MintCredential_EmptyKey(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			d := createTestDriver(t, p)
-			spec := &credential.CredSpec{
-				Name:   "test",
-				Type:   credential.TypeAPIKey,
-				Config: map[string]string{"api_key": ""},
-			}
-			_, _, _, err := d.MintCredential(context.Background(), spec)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), p.DisplayName+" API key")
-		})
+	d := createTestAPIKeyDriver(t, map[string]string{"display_name": "OpenAI"})
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Type:   credential.TypeAPIKey,
+		Config: map[string]string{"api_key": ""},
 	}
+	_, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OpenAI API key")
 }
 
-func TestStaticAPIKeyDriver_GetAPIURL_Default(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			d := createTestDriver(t, p)
-			assert.Equal(t, p.DefaultAPIURL, d.getAPIURL())
-		})
+func TestStaticAPIKeyDriver_MintCredential_DisplayName(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{})
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Config: map[string]string{},
 	}
+	_, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "API Key") // default display name
+}
+
+func TestStaticAPIKeyDriver_GetAPIURL(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{"api_url": "https://api.openai.com"})
+	assert.Equal(t, "https://api.openai.com", d.getAPIURL())
 }
 
 func TestStaticAPIKeyDriver_GetAPIURL_TrailingSlash(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			f := NewStaticAPIKeyDriverFactory(p)
-			log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-			driver, _ := f.Create(map[string]string{"api_url": p.DefaultAPIURL + "/"}, log)
-			d := driver.(*StaticAPIKeyDriver)
-			assert.Equal(t, p.DefaultAPIURL, d.getAPIURL())
-		})
-	}
+	d := createTestAPIKeyDriver(t, map[string]string{"api_url": "https://api.openai.com/"})
+	assert.Equal(t, "https://api.openai.com", d.getAPIURL())
+}
+
+func TestStaticAPIKeyDriver_GetAPIURL_Empty(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{})
+	assert.Equal(t, "", d.getAPIURL())
 }
 
 // =============================================================================
@@ -211,8 +235,10 @@ func TestStaticAPIKeyDriver_GetAPIURL_TrailingSlash(t *testing.T) {
 // =============================================================================
 
 func TestStaticAPIKeyDriver_MintCredential_OptionalMetadata(t *testing.T) {
-	t.Run("OpenAI copies organization_id and project_id", func(t *testing.T) {
-		d := createTestDriver(t, OpenAIProvider)
+	t.Run("copies configured metadata fields", func(t *testing.T) {
+		d := createTestAPIKeyDriver(t, map[string]string{
+			"optional_metadata": "organization_id,project_id",
+		})
 		spec := &credential.CredSpec{
 			Name: "test",
 			Config: map[string]string{
@@ -227,40 +253,25 @@ func TestStaticAPIKeyDriver_MintCredential_OptionalMetadata(t *testing.T) {
 		assert.Equal(t, "proj-789", rawData["project_id"])
 	})
 
-	t.Run("Anthropic copies organization_id", func(t *testing.T) {
-		d := createTestDriver(t, AnthropicProvider)
+	t.Run("skips empty metadata fields", func(t *testing.T) {
+		d := createTestAPIKeyDriver(t, map[string]string{
+			"optional_metadata": "organization_id",
+		})
 		spec := &credential.CredSpec{
-			Name: "test",
-			Config: map[string]string{
-				"api_key":         "sk-ant-test",
-				"organization_id": "org-123",
-			},
+			Name:   "test",
+			Config: map[string]string{"api_key": "sk-test"},
 		}
 		rawData, _, _, err := d.MintCredential(context.Background(), spec)
 		require.NoError(t, err)
-		assert.Equal(t, "org-123", rawData["organization_id"])
+		assert.Nil(t, rawData["organization_id"])
 	})
 
-	t.Run("Mistral copies organization_id", func(t *testing.T) {
-		d := createTestDriver(t, MistralProvider)
+	t.Run("no metadata when not configured", func(t *testing.T) {
+		d := createTestAPIKeyDriver(t, map[string]string{})
 		spec := &credential.CredSpec{
 			Name: "test",
 			Config: map[string]string{
-				"api_key":         "sk-mistral-test",
-				"organization_id": "org-123",
-			},
-		}
-		rawData, _, _, err := d.MintCredential(context.Background(), spec)
-		require.NoError(t, err)
-		assert.Equal(t, "org-123", rawData["organization_id"])
-	})
-
-	t.Run("Slack copies no optional metadata", func(t *testing.T) {
-		d := createTestDriver(t, SlackProvider)
-		spec := &credential.CredSpec{
-			Name: "test",
-			Config: map[string]string{
-				"api_key":         "xoxb-test",
+				"api_key":         "sk-test",
 				"organization_id": "org-123",
 			},
 		}
@@ -271,132 +282,264 @@ func TestStaticAPIKeyDriver_MintCredential_OptionalMetadata(t *testing.T) {
 }
 
 // =============================================================================
-// VerifySpec Tests (provider-specific due to different endpoints/headers)
+// VerifySpec Tests
 // =============================================================================
 
-func TestStaticAPIKeyDriver_VerifySpec(t *testing.T) {
+func TestStaticAPIKeyDriver_VerifySpec_Bearer(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/v1/models", r.URL.Path)
+		assert.Equal(t, "Bearer sk-valid-key", r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	d := &StaticAPIKeyDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeAPIKey,
+			Config: map[string]string{
+				"api_url":         server.URL,
+				"verify_endpoint": "/v1/models",
+			},
+		},
+		httpClient: server.Client(),
+	}
+
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Config: map[string]string{"api_key": "sk-valid-key"},
+	}
+	err := d.VerifySpec(context.Background(), spec)
+	assert.NoError(t, err)
+}
+
+func TestStaticAPIKeyDriver_VerifySpec_CustomHeader(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/v1/models", r.URL.Path)
+		assert.Equal(t, "sk-valid-key", r.Header.Get("x-api-key"))
+		assert.Equal(t, "2023-06-01", r.Header.Get("anthropic-version"))
+		assert.Empty(t, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	d := &StaticAPIKeyDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeAPIKey,
+			Config: map[string]string{
+				"api_url":          server.URL,
+				"verify_endpoint":  "/v1/models",
+				"auth_header_type": "custom_header",
+				"auth_header_name": "x-api-key",
+				"extra_headers":    "anthropic-version:2023-06-01",
+			},
+		},
+		httpClient: server.Client(),
+	}
+
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Config: map[string]string{"api_key": "sk-valid-key"},
+	}
+	err := d.VerifySpec(context.Background(), spec)
+	assert.NoError(t, err)
+}
+
+func TestStaticAPIKeyDriver_VerifySpec_PostMethod(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/auth.test", r.URL.Path)
+		assert.Equal(t, "Bearer sk-valid-key", r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	d := &StaticAPIKeyDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeAPIKey,
+			Config: map[string]string{
+				"api_url":         server.URL,
+				"verify_endpoint": "/auth.test",
+				"verify_method":   "POST",
+			},
+		},
+		httpClient: server.Client(),
+	}
+
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Config: map[string]string{"api_key": "sk-valid-key"},
+	}
+	err := d.VerifySpec(context.Background(), spec)
+	assert.NoError(t, err)
+}
+
+func TestStaticAPIKeyDriver_VerifySpec_NoVerifyEndpoint(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{})
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Config: map[string]string{"api_key": "sk-test"},
+	}
+	err := d.VerifySpec(context.Background(), spec)
+	assert.NoError(t, err) // skips verification
+}
+
+func TestStaticAPIKeyDriver_VerifySpec_InvalidKey(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"invalid_auth"}`))
+	}))
+	defer server.Close()
+
+	d := &StaticAPIKeyDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeAPIKey,
+			Config: map[string]string{
+				"api_url":         server.URL,
+				"verify_endpoint": "/v1/models",
+			},
+		},
+		httpClient: server.Client(),
+	}
+
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Config: map[string]string{"api_key": "sk-invalid"},
+	}
+	err := d.VerifySpec(context.Background(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "verification failed")
+}
+
+func TestStaticAPIKeyDriver_VerifySpec_EmptyKey(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{"display_name": "OpenAI"})
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Config: map[string]string{"api_key": ""},
+	}
+	err := d.VerifySpec(context.Background(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OpenAI API key")
+}
+
+// =============================================================================
+// BuildAuthHeaders Tests
+// =============================================================================
+
+func TestBuildAPIKeyAuthHeaders(t *testing.T) {
 	tests := []struct {
-		provider       APIKeyProviderConfig
-		expectedMethod string
-		expectedPath   string
-		checkHeaders   func(t *testing.T, r *http.Request)
+		name          string
+		config        map[string]string
+		apiKey        string
+		expectHeader  string
+		expectValue   string
+		noAuthzHeader bool
 	}{
 		{
-			provider:       AnthropicProvider,
-			expectedMethod: http.MethodGet,
-			expectedPath:   "/v1/models",
-			checkHeaders: func(t *testing.T, r *http.Request) {
-				assert.Equal(t, "sk-valid-key", r.Header.Get("x-api-key"))
-				assert.Equal(t, "2023-06-01", r.Header.Get("anthropic-version"))
-			},
+			name:         "default bearer",
+			config:       map[string]string{},
+			apiKey:       "sk-123",
+			expectHeader: "Authorization",
+			expectValue:  "Bearer sk-123",
 		},
 		{
-			provider:       OpenAIProvider,
-			expectedMethod: http.MethodGet,
-			expectedPath:   "/v1/models",
-			checkHeaders: func(t *testing.T, r *http.Request) {
-				assert.Equal(t, "Bearer sk-valid-key", r.Header.Get("Authorization"))
-			},
+			name:         "explicit bearer",
+			config:       map[string]string{"auth_header_type": "bearer"},
+			apiKey:       "sk-123",
+			expectHeader: "Authorization",
+			expectValue:  "Bearer sk-123",
 		},
 		{
-			provider:       MistralProvider,
-			expectedMethod: http.MethodGet,
-			expectedPath:   "/v1/models",
-			checkHeaders: func(t *testing.T, r *http.Request) {
-				assert.Equal(t, "Bearer sk-valid-key", r.Header.Get("Authorization"))
-			},
+			name:         "token type",
+			config:       map[string]string{"auth_header_type": "token"},
+			apiKey:       "sk-123",
+			expectHeader: "Authorization",
+			expectValue:  "Token sk-123",
 		},
 		{
-			provider:       SlackProvider,
-			expectedMethod: http.MethodPost,
-			expectedPath:   "/auth.test",
-			checkHeaders: func(t *testing.T, r *http.Request) {
-				assert.Equal(t, "Bearer sk-valid-key", r.Header.Get("Authorization"))
-				assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
-			},
-		},
-		{
-			provider:       PagerDutyProvider,
-			expectedMethod: http.MethodGet,
-			expectedPath:   "/users/me",
-			checkHeaders: func(t *testing.T, r *http.Request) {
-				assert.Equal(t, "Bearer sk-valid-key", r.Header.Get("Authorization"))
-				assert.Equal(t, "application/json", r.Header.Get("Accept"))
-				assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
-			},
+			name:          "custom header",
+			config:        map[string]string{"auth_header_type": "custom_header", "auth_header_name": "x-api-key"},
+			apiKey:        "sk-123",
+			expectHeader:  "x-api-key",
+			expectValue:   "sk-123",
+			noAuthzHeader: true,
 		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.provider.DisplayName, func(t *testing.T) {
-			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, tt.expectedMethod, r.Method)
-				assert.Equal(t, tt.expectedPath, r.URL.Path)
-				tt.checkHeaders(t, r)
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(`{"ok":true}`))
-			}))
-			defer server.Close()
-
-			d := &StaticAPIKeyDriver{
-				provider: tt.provider,
-				credSource: &credential.CredSource{
-					Type:   tt.provider.SourceType,
-					Config: map[string]string{"api_url": server.URL},
-				},
-				httpClient: server.Client(),
+		t.Run(tt.name, func(t *testing.T) {
+			headers := buildAPIKeyAuthHeaders(tt.config, tt.apiKey)
+			assert.Equal(t, tt.expectValue, headers[tt.expectHeader])
+			assert.Equal(t, "application/json", headers["Accept"])
+			if tt.noAuthzHeader {
+				_, hasAuth := headers["Authorization"]
+				assert.False(t, hasAuth)
 			}
-
-			spec := &credential.CredSpec{
-				Name:   "test-verify",
-				Config: map[string]string{"api_key": "sk-valid-key"},
-			}
-			err := d.VerifySpec(context.Background(), spec)
-			assert.NoError(t, err)
 		})
 	}
 }
 
-func TestStaticAPIKeyDriver_VerifySpec_InvalidKey(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusUnauthorized)
-				w.Write([]byte(`{"error":"invalid_auth"}`))
-			}))
-			defer server.Close()
-
-			d := &StaticAPIKeyDriver{
-				provider: p,
-				credSource: &credential.CredSource{
-					Type:   p.SourceType,
-					Config: map[string]string{"api_url": server.URL},
-				},
-				httpClient: server.Client(),
-			}
-
-			spec := &credential.CredSpec{
-				Name:   "test-verify",
-				Config: map[string]string{"api_key": "sk-invalid"},
-			}
-			err := d.VerifySpec(context.Background(), spec)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "verification failed")
-		})
+func TestBuildAPIKeyAuthHeaders_ExtraHeaders(t *testing.T) {
+	config := map[string]string{
+		"auth_header_type": "custom_header",
+		"auth_header_name": "x-api-key",
+		"extra_headers":    "anthropic-version:2023-06-01,x-custom:value",
 	}
+	headers := buildAPIKeyAuthHeaders(config, "sk-test")
+	assert.Equal(t, "sk-test", headers["x-api-key"])
+	assert.Equal(t, "2023-06-01", headers["anthropic-version"])
+	assert.Equal(t, "value", headers["x-custom"])
 }
 
-func TestStaticAPIKeyDriver_VerifySpec_EmptyKey(t *testing.T) {
-	for _, p := range allAPIKeyProviders() {
-		t.Run(p.DisplayName, func(t *testing.T) {
-			d := createTestDriver(t, p)
-			spec := &credential.CredSpec{
-				Name:   "test-verify",
-				Config: map[string]string{"api_key": ""},
+// =============================================================================
+// ParseExtraHeaders Tests
+// =============================================================================
+
+func TestParseExtraHeaders(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    map[string]string
+		wantErr bool
+	}{
+		{
+			name: "single pair",
+			raw:  "anthropic-version:2023-06-01",
+			want: map[string]string{"anthropic-version": "2023-06-01"},
+		},
+		{
+			name: "multiple pairs",
+			raw:  "key1:val1,key2:val2",
+			want: map[string]string{"key1": "val1", "key2": "val2"},
+		},
+		{
+			name: "with spaces",
+			raw:  " key1 : val1 , key2 : val2 ",
+			want: map[string]string{"key1": "val1", "key2": "val2"},
+		},
+		{
+			name:    "invalid format",
+			raw:     "no-colon",
+			wantErr: true,
+		},
+		{
+			name: "empty string",
+			raw:  "",
+			want: map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseExtraHeaders(tt.raw)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.want, got)
 			}
-			err := d.VerifySpec(context.Background(), spec)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), p.DisplayName+" API key")
 		})
 	}
 }
