@@ -90,10 +90,11 @@ the URL path:
   /servicenow/role/{role}/gateway/{api-path}
 
 Two credential source types are supported:
-- apikey: Static API token (stored in spec config as api_key)
+- apikey: Static bearer token (stored in spec config as api_key)
 - oauth2: OAuth2 client credentials flow (client_id/client_secret/token_url
   on source, scope on spec; token_url is typically
-  https://{instance}.service-now.com/oauth_token.do)
+  https://{instance}.service-now.com/oauth_token.do; default scope
+  is "useraccount")
 
 Configuration:
 - servicenow_url: ServiceNow instance URL (required, e.g., "https://mycompany.service-now.com")
