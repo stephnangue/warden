@@ -4,6 +4,9 @@
 
 set -e
 
+# Always run from project root
+cd "$(dirname "$0")/.."
+
 echo "Generating TLS certificates..."
 
 # Create certificate directories
