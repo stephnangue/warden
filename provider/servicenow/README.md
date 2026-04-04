@@ -19,7 +19,7 @@ The ServiceNow provider enables proxied access to a ServiceNow instance REST API
 
 - Docker and Docker Compose installed and running
 - A **ServiceNow instance** with REST API access enabled
-- A **ServiceNow API token** (from System OAuth > Application Registry) **or** a **ServiceNow OAuth2 App** (client_id and client_secret from System OAuth > Application Registry)
+- A **ServiceNow user account** with REST API access (for Basic Auth via the `apikey` source type) **or** a **ServiceNow OAuth2 App** (client_id and client_secret from System OAuth > Application Registry)
 
 > **New to Warden?** Follow these steps to get a local dev environment running:
 >
@@ -478,13 +478,13 @@ curl --cert client.pem --key client-key.pem \
 
 **To rotate a static API token:**
 
-1. Generate a new API token in ServiceNow (System OAuth > Application Registry)
+1. Generate new credentials in ServiceNow
 2. Update the credential spec:
    ```bash
    warden cred spec update servicenow-ops \
      --config api_key=your-new-api-token
    ```
-3. Revoke the old token in ServiceNow
+3. Revoke the old credentials in ServiceNow
 
 ### OAuth2 Client Credentials
 
