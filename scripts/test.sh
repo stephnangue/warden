@@ -118,7 +118,7 @@ EOF
 ./warden cred spec create aws_static \
   --type aws_access_keys \
   --source vault \
-  --config mint_method=kv2_static \
+  --config mint_method=static_aws \
   --config kv2_mount=kv_static_secret \
   --config secret_path=aws/prod
 ./warden cred spec create aws_dynamic \
@@ -233,7 +233,7 @@ EOF
 ./warden -n PROD/SEC cred spec create aws_static \
   --type aws_access_keys \
   --source vault \
-  --config mint_method=kv2_static \
+  --config mint_method=static_aws \
   --config kv2_mount=kv_static_secret \
   --config secret_path=aws/prod
 ./warden -n PROD/SEC cred spec create aws_dynamic \
@@ -442,7 +442,7 @@ export VAULT_ADDR=http://localhost:8400/v1/PROD/DEV/vault-auto/role/provisionner
 ./warden -n PROD/DEV cred spec create aws_static \
   --type aws_access_keys \
   --source vault \
-  --config mint_method=kv2_static \
+  --config mint_method=static_aws \
   --config kv2_mount=kv_static_secret \
   --config secret_path=aws/prod
 

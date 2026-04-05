@@ -68,6 +68,20 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("project_id").
 			Describe("Project ID (optional)").
 			Example("proj-xxxxxxxxxxxx"),
+
+		// Vault source - static_apikey fields
+		credential.StringField("mint_method").
+			OneOf("static_apikey").
+			Describe("Mint method (required for vault source)").
+			Example("static_apikey"),
+
+		credential.StringField("kv2_mount").
+			Describe("Vault KV2 mount path (required for static_apikey)").
+			Example("secret"),
+
+		credential.StringField("secret_path").
+			Describe("Path to secret in KV2 (required for static_apikey)").
+			Example("apikeys/my-service"),
 	}
 }
 
@@ -78,10 +92,10 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	switch sourceType {
-	case credential.SourceTypeAPIKey, credential.SourceTypeLocal:
+	case credential.SourceTypeAPIKey, credential.SourceTypeLocal, credential.SourceTypeVault:
 		// Supported
 	default:
-		return fmt.Errorf("api_key credentials require an apikey or local source, got: %s", sourceType)
+		return fmt.Errorf("api_key credentials require an apikey, local, or vault source, got: %s", sourceType)
 	}
 
 	// Step 2: Validate config against schema
@@ -90,9 +104,22 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 		return err
 	}
 
-	// Step 3: api_key is required for all source types
-	if config["api_key"] == "" {
-		return fmt.Errorf("'api_key' is required")
+	// Step 3: Source-specific validation
+	switch sourceType {
+	case credential.SourceTypeVault:
+		if config["mint_method"] != "static_apikey" {
+			return fmt.Errorf("'mint_method' must be 'static_apikey' for vault source, got: %s", config["mint_method"])
+		}
+		if config["kv2_mount"] == "" {
+			return fmt.Errorf("'kv2_mount' is required when mint_method is static_apikey")
+		}
+		if config["secret_path"] == "" {
+			return fmt.Errorf("'secret_path' is required when mint_method is static_apikey")
+		}
+	default:
+		if config["api_key"] == "" {
+			return fmt.Errorf("'api_key' is required")
+		}
 	}
 
 	return nil

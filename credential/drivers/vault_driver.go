@@ -176,8 +176,14 @@ func (f *VaultDriverFactory) SensitiveConfigFields() []string {
 func (f *VaultDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
 	mintMethod := specConfig["mint_method"]
 	switch mintMethod {
-	case "dynamic_aws", "kv2_static":
+	case "static_aws", "dynamic_aws":
 		return credential.TypeAWSAccessKeys, nil
+	case "static_apikey":
+		return credential.TypeAPIKey, nil
+	case "dynamic_gcp":
+		return credential.TypeGCPAccessToken, nil
+	case "oauth2":
+		return credential.TypeOAuthBearerToken, nil
 	case "vault_token", "":
 		return credential.TypeVaultToken, nil
 	default:
@@ -269,16 +275,18 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 
 	switch mintMethod {
-	case "kv2_static":
+	case "static_aws", "static_apikey":
 		return d.fetchStaticKVSecret(ctx, spec)
-	case "dynamic_database":
-		return d.fetchDynamicDatabaseCreds(ctx, spec)
 	case "dynamic_aws":
 		return d.fetchDynamicAWSCreds(ctx, spec)
+	case "dynamic_gcp":
+		return d.fetchDynamicGCPCreds(ctx, spec)
 	case "vault_token":
 		return d.fetchDynamicVaultToken(ctx, spec)
+	case "oauth2":
+		return d.fetchOAuth2Creds(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; use 'kv2_static', 'dynamic_database', 'dynamic_aws', or 'vault_token'", mintMethod)
+		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'dynamic_aws', 'dynamic_gcp', 'vault_token', 'oauth2'", mintMethod)
 	}
 }
 
@@ -310,56 +318,6 @@ func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, spec *credential.
 
 	// Return raw data (static, no lease)
 	return secret.Data, 0, "", nil
-}
-
-// fetchDynamicDatabaseCreds fetches dynamic database credentials from Vault database engine
-func (d *VaultDriver) fetchDynamicDatabaseCreds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
-	dbMount := credential.GetString(spec.Config, "database_mount", "")
-	roleName := credential.GetString(spec.Config, "role_name", "")
-
-	if dbMount == "" || roleName == "" {
-		return nil, 0, "", fmt.Errorf("database_mount and role_name are required for dynamic database credentials")
-	}
-
-	// Read credentials
-	path := fmt.Sprintf("%s/creds/%s", dbMount, roleName)
-	secret, err := d.vault.Logical().ReadWithContext(ctx, path)
-	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to generate database credentials: %w", err)
-	}
-
-	if secret == nil || secret.Data == nil {
-		return nil, 0, "", fmt.Errorf("no credentials returned for role '%s' on mount '%s'", roleName, dbMount)
-	}
-
-	leaseTTL := time.Duration(secret.LeaseDuration) * time.Second
-
-	// Validate lease TTL is positive
-	if leaseTTL <= 0 {
-		return nil, 0, "", fmt.Errorf("Vault returned invalid lease duration for database credentials on mount '%s'", dbMount)
-	}
-
-	// Add optional database name if provided in config
-	rawData := make(map[string]interface{})
-	for k, v := range secret.Data {
-		rawData[k] = v
-	}
-	database := credential.GetString(spec.Config, "database", "")
-	if database != "" {
-		rawData["database"] = database
-	}
-
-	if d.logger != nil {
-		d.logger.Trace("generated dynamic database credentials from Vault",
-			logger.String("spec", spec.Name),
-			logger.String("mount", dbMount),
-			logger.String("vault_role", roleName),
-			logger.String("lease_id", secret.LeaseID),
-			logger.String("lease_ttl", leaseTTL.String()),
-		)
-	}
-
-	return rawData, leaseTTL, secret.LeaseID, nil
 }
 
 // fetchDynamicAWSCreds fetches dynamic AWS credentials from Vault AWS engine
@@ -442,6 +400,117 @@ func (d *VaultDriver) fetchDynamicAWSCreds(ctx context.Context, spec *credential
 			logger.String("mount", awsMount),
 			logger.String("vault_role", roleName),
 			logger.String("lease_id", secret.LeaseID),
+			logger.String("lease_ttl", leaseTTL.String()),
+		)
+	}
+
+	return rawData, leaseTTL, secret.LeaseID, nil
+}
+
+// fetchDynamicGCPCreds fetches dynamic GCP credentials from Vault GCP secret engine
+func (d *VaultDriver) fetchDynamicGCPCreds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	gcpMount := credential.GetString(spec.Config, "gcp_mount", "")
+	roleName := credential.GetString(spec.Config, "role_name", "")
+
+	if gcpMount == "" || roleName == "" {
+		return nil, 0, "", fmt.Errorf("gcp_mount and role_name are required for dynamic GCP credentials")
+	}
+
+	// Build path based on role_type (roleset or static-account)
+	roleType := credential.GetString(spec.Config, "role_type", "roleset")
+	var path string
+	switch roleType {
+	case "roleset":
+		path = fmt.Sprintf("%s/roleset/%s/token", gcpMount, roleName)
+	case "static-account":
+		path = fmt.Sprintf("%s/static-account/%s/token", gcpMount, roleName)
+	default:
+		return nil, 0, "", fmt.Errorf("unsupported role_type '%s'; use 'roleset' or 'static-account'", roleType)
+	}
+
+	secret, err := d.vault.Logical().ReadWithContext(ctx, path)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("failed to generate GCP credentials: %w", err)
+	}
+
+	if secret == nil || secret.Data == nil {
+		return nil, 0, "", fmt.Errorf("no credentials returned for role '%s' on mount '%s'", roleName, gcpMount)
+	}
+
+	leaseTTL := time.Duration(secret.LeaseDuration) * time.Second
+
+	// GCP tokens may have zero lease duration; use token_ttl from response if available
+	if leaseTTL <= 0 {
+		if ttlStr, ok := secret.Data["token_ttl"].(string); ok && ttlStr != "" {
+			if parsed, err := time.ParseDuration(ttlStr); err == nil {
+				leaseTTL = parsed
+			}
+		}
+		// Default to 1 hour if still zero (GCP access tokens expire in ~1h)
+		if leaseTTL <= 0 {
+			leaseTTL = 1 * time.Hour
+		}
+	}
+
+	rawData := make(map[string]interface{})
+	for k, v := range secret.Data {
+		rawData[k] = v
+	}
+
+	if d.logger != nil {
+		d.logger.Debug("generated dynamic GCP credentials from Vault",
+			logger.String("spec", spec.Name),
+			logger.String("mount", gcpMount),
+			logger.String("vault_role", roleName),
+			logger.String("role_type", roleType),
+			logger.String("lease_ttl", leaseTTL.String()),
+		)
+	}
+
+	return rawData, leaseTTL, secret.LeaseID, nil
+}
+
+// fetchOAuth2Creds fetches OAuth2 credentials from an OpenBao/Vault OAuth2 secret engine
+// (compatible with openbao-plugin-secrets-oauthapp)
+func (d *VaultDriver) fetchOAuth2Creds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	oauth2Mount := credential.GetString(spec.Config, "oauth2_mount", "")
+	credentialName := credential.GetString(spec.Config, "credential_name", "")
+
+	if oauth2Mount == "" || credentialName == "" {
+		return nil, 0, "", fmt.Errorf("oauth2_mount and credential_name are required for oauth2 credentials")
+	}
+
+	path := fmt.Sprintf("%s/creds/%s", oauth2Mount, credentialName)
+	secret, err := d.vault.Logical().ReadWithContext(ctx, path)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("failed to fetch OAuth2 credentials: %w", err)
+	}
+
+	if secret == nil || secret.Data == nil {
+		return nil, 0, "", fmt.Errorf("no credentials returned for '%s' on mount '%s'", credentialName, oauth2Mount)
+	}
+
+	// Compute TTL from expire_time if available (RFC3339 timestamp from oauthapp plugin)
+	leaseTTL := time.Duration(secret.LeaseDuration) * time.Second
+	if expireTime, ok := secret.Data["expire_time"].(string); ok && expireTime != "" {
+		if parsed, err := time.Parse(time.RFC3339, expireTime); err == nil {
+			remaining := time.Until(parsed)
+			if remaining > 0 {
+				leaseTTL = remaining
+			}
+		}
+	}
+
+	rawData := make(map[string]interface{})
+	for k, v := range secret.Data {
+		rawData[k] = v
+	}
+
+	if d.logger != nil {
+		d.logger.Debug("fetched OAuth2 credentials from Vault",
+			logger.String("spec", spec.Name),
+			logger.String("mount", oauth2Mount),
+			logger.String("credential_name", credentialName),
 			logger.String("lease_ttl", leaseTTL.String()),
 		)
 	}

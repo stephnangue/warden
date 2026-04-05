@@ -110,9 +110,9 @@ func TestAWSIAMAccessKeysCredType_ValidateConfig_VaultSource(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name: "valid kv2_static config",
+			name: "valid static_aws config",
 			config: map[string]string{
-				"mint_method": "kv2_static",
+				"mint_method": "static_aws",
 				"kv2_mount":   "secret",
 				"secret_path": "aws-creds/myapp",
 			},
@@ -146,9 +146,9 @@ func TestAWSIAMAccessKeysCredType_ValidateConfig_VaultSource(t *testing.T) {
 			errMsg:     "role_name",
 		},
 		{
-			name: "kv2_static without secret_path",
+			name: "static_aws without secret_path",
 			config: map[string]string{
-				"mint_method": "kv2_static",
+				"mint_method": "static_aws",
 				"kv2_mount":   "secret",
 			},
 			sourceType: credential.SourceTypeVault,

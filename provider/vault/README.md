@@ -524,9 +524,12 @@ If cleanup fails, it is retried daily for up to 7 days. Rotation requires `auth_
 
 | Mint Method | Credential Type | Description |
 |-------------|-----------------|-------------|
-| `kv2_static` | `aws_access_keys` | Fetch static secrets from Vault KV v2 |
+| `static_aws` | `aws_access_keys` | Fetch static AWS credentials from Vault KV v2 |
+| `static_apikey` | `api_key` | Fetch static API keys from Vault KV v2 |
 | `dynamic_aws` | `aws_access_keys` | Generate temporary AWS credentials via Vault AWS engine |
+| `dynamic_gcp` | `gcp_access_token` | Generate GCP access tokens via Vault GCP engine |
 | `vault_token` | `vault_token` | Create a child Vault token via token roles |
+| `oauth2` | `oauth_bearer_token` | Fetch OAuth2 tokens via Vault OAuth2 plugin (openbao-plugin-secrets-oauthapp) |
 
 ## JWT Authentication
 
@@ -645,22 +648,21 @@ docker compose -f deploy/docker-compose.quickstart.yml down -v
 | `display_name` | string | No | User-friendly name attached to the token |
 | `meta` | string | No | Metadata attached to the token |
 
-### Credential Spec Config — kv2_static
+### Credential Spec Config — static_aws
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `kv2_static` |
+| `mint_method` | string | Yes | Must be `static_aws` |
 | `kv2_mount` | string | Yes | KV v2 mount path in Vault |
 | `secret_path` | string | Yes | Path to the secret within the mount |
 
-### Credential Spec Config — dynamic_database
+### Credential Spec Config — static_apikey
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `dynamic_database` |
-| `database_mount` | string | Yes | Vault database engine mount path |
-| `role_name` | string | Yes | Database role name configured in Vault |
-| `database` | string | No | Database name (passed through to credential data) |
+| `mint_method` | string | Yes | Must be `static_apikey` |
+| `kv2_mount` | string | Yes | KV v2 mount path in Vault |
+| `secret_path` | string | Yes | Path to the secret within the mount |
 
 ### Credential Spec Config — dynamic_aws
 
@@ -672,6 +674,23 @@ docker compose -f deploy/docker-compose.quickstart.yml down -v
 | `role_arn` | string | No | ARN of the role to assume (for STS) |
 | `role_session_name` | string | No | Session name for the STS assumption |
 | `ttl` | duration | No | Credential TTL (clamped to min/max bounds) |
+
+### Credential Spec Config — dynamic_gcp
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | Yes | Must be `dynamic_gcp` |
+| `gcp_mount` | string | Yes | Vault GCP secrets engine mount path |
+| `role_name` | string | Yes | GCP roleset or static account name |
+| `role_type` | string | No | `roleset` (default) or `static-account` |
+
+### Credential Spec Config — oauth2
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | Yes | Must be `oauth2` |
+| `oauth2_mount` | string | Yes | Vault OAuth2 secrets engine mount path |
+| `credential_name` | string | Yes | Credential name configured in the OAuth2 plugin |
 
 ### TTL Bounds
 

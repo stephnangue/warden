@@ -106,16 +106,48 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: "aws",
 			wantErr:    true,
-			errMsg:     "require an apikey or local source",
+			errMsg:     "require an apikey, local, or vault source",
+		},
+		// --- Vault source ---
+		{
+			name: "vault source - valid static_apikey config",
+			config: map[string]string{
+				"mint_method": "static_apikey",
+				"kv2_mount":   "secret",
+				"secret_path": "apikeys/my-service",
+			},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    false,
 		},
 		{
-			name: "unsupported source type - vault",
+			name: "vault source - missing mint_method",
 			config: map[string]string{
-				"api_key": "sk-test",
+				"kv2_mount":   "secret",
+				"secret_path": "apikeys/my-service",
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
-			errMsg:     "require an apikey or local source",
+			errMsg:     "'mint_method' must be 'static_apikey'",
+		},
+		{
+			name: "vault source - missing kv2_mount",
+			config: map[string]string{
+				"mint_method": "static_apikey",
+				"secret_path": "apikeys/my-service",
+			},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "'kv2_mount' is required",
+		},
+		{
+			name: "vault source - missing secret_path",
+			config: map[string]string{
+				"mint_method": "static_apikey",
+				"kv2_mount":   "secret",
+			},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "'secret_path' is required",
 		},
 	}
 

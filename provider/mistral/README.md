@@ -164,6 +164,36 @@ Verify:
 warden cred spec read mistral-ops
 ```
 
+### Alternative: Vault/OpenBao as Credential Source
+
+Instead of storing the API key directly in Warden, you can store it in a Vault/OpenBao KV v2 secret engine and have Warden fetch it at runtime. This centralizes secret management in Vault.
+
+**Prerequisites:** A Vault/OpenBao instance with:
+- A KV v2 mount containing your Mistral API key (e.g., at `secret/mistral/ops` with an `api_key` field)
+- An AppRole configured for Warden access
+
+```bash
+# Create a Vault credential source
+warden cred source create mistral-vault-src \
+  --type=hvault \
+  --config=vault_address=https://vault.example.com \
+  --config=auth_method=approle \
+  --config=role_id=your-role-id \
+  --config=secret_id=your-secret-id \
+  --config=approle_mount=approle \
+  --config=role_name=warden-role \
+  --rotation-period=24h
+
+# Create a credential spec using the static_apikey mint method
+warden cred spec create mistral-ops \
+  --source mistral-vault-src \
+  --config mint_method=static_apikey \
+  --config kv2_mount=secret \
+  --config secret_path=mistral/ops
+```
+
+The KV v2 secret at `secret/mistral/ops` should contain at minimum an `api_key` field. Warden fetches the secret from Vault on each credential request.
+
 ## Step 4: Create a Policy
 
 Create a policy that grants access to the Mistral provider gateway:
@@ -416,6 +446,14 @@ curl --cert client.pem --key client-key.pem \
 |-------|------|----------|-------------|
 | `api_key` | string | Yes | Mistral AI API key (sensitive — masked in output) |
 | `organization_id` | string | No | Organization identifier |
+
+### Credential Spec Config (Vault — static_apikey)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | Yes | Must be `static_apikey` |
+| `kv2_mount` | string | Yes | KV v2 mount path in Vault |
+| `secret_path` | string | Yes | Path to the secret within the mount |
 
 ## Key Management
 
