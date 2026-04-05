@@ -155,6 +155,36 @@ Verify:
 warden cred spec read slack-ops
 ```
 
+### Alternative: Vault/OpenBao as Credential Source
+
+Instead of storing the bot token directly in Warden, you can store it in a Vault/OpenBao KV v2 secret engine and have Warden fetch it at runtime. This centralizes secret management in Vault.
+
+**Prerequisites:** A Vault/OpenBao instance with:
+- A KV v2 mount containing your Slack bot token (e.g., at `secret/slack/ops` with an `api_key` field)
+- An AppRole configured for Warden access
+
+```bash
+# Create a Vault credential source
+warden cred source create slack-vault-src \
+  --type=hvault \
+  --config=vault_address=https://vault.example.com \
+  --config=auth_method=approle \
+  --config=role_id=your-role-id \
+  --config=secret_id=your-secret-id \
+  --config=approle_mount=approle \
+  --config=role_name=warden-role \
+  --rotation-period=24h
+
+# Create a credential spec using the static_apikey mint method
+warden cred spec create slack-ops \
+  --source slack-vault-src \
+  --config mint_method=static_apikey \
+  --config kv2_mount=secret \
+  --config secret_path=slack/ops
+```
+
+The KV v2 secret at `secret/slack/ops` should contain at minimum an `api_key` field. Warden fetches the secret from Vault on each credential request.
+
 ## Step 4: Create a Policy
 
 Create a policy that grants access to the Slack provider gateway:
@@ -447,6 +477,14 @@ curl --cert client.pem --key client-key.pem \
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `api_key` | string | Yes | Slack bot token (sensitive — masked in output) |
+
+### Credential Spec Config (Vault — static_apikey)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | Yes | Must be `static_apikey` |
+| `kv2_mount` | string | Yes | KV v2 mount path in Vault |
+| `secret_path` | string | Yes | Path to the secret within the mount |
 
 ## Token Management
 

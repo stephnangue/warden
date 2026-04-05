@@ -36,17 +36,17 @@ func (t *AWSIAMAccessKeysCredType) ConfigSchema() []*credential.FieldValidator {
 
 		// Common field for vault and aws sources
 		credential.StringField("mint_method").
-			OneOf("kv2_static", "dynamic_aws", "sts_assume_role", "secrets_manager", "rds_iam_token").
+			OneOf("static_aws", "dynamic_aws", "sts_assume_role", "secrets_manager", "rds_iam_token").
 			Describe("Method for minting AWS credentials").
 			Example("sts_assume_role"),
 
 		// Vault source - KV2 static fields
 		credential.StringField("kv2_mount").
-			Describe("Vault KV2 mount path (required for kv2_static)").
+			Describe("Vault KV2 mount path (required for static_aws)").
 			Example("secret"),
 
 		credential.StringField("secret_path").
-			Describe("Path to secret in KV2 (required for kv2_static)").
+			Describe("Path to secret in KV2 (required for static_aws)").
 			Example("aws/prod/keys"),
 
 		// Vault source - Dynamic AWS fields
@@ -159,12 +159,12 @@ func (t *AWSIAMAccessKeysCredType) validateVaultConfig(config map[string]string)
 	}
 
 	switch mintMethod {
-	case "kv2_static":
+	case "static_aws":
 		if config["kv2_mount"] == "" {
-			return fmt.Errorf("'kv2_mount' is required when mint_method is kv2_static")
+			return fmt.Errorf("'kv2_mount' is required when mint_method is static_aws")
 		}
 		if config["secret_path"] == "" {
-			return fmt.Errorf("'secret_path' is required when mint_method is kv2_static")
+			return fmt.Errorf("'secret_path' is required when mint_method is static_aws")
 		}
 	case "dynamic_aws":
 		if config["aws_mount"] == "" {

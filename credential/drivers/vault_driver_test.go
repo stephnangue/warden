@@ -281,7 +281,7 @@ func TestVaultDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported mint_method 'invalid'")
 }
 
-func TestVaultDriver_MintCredential_DatabaseRouting(t *testing.T) {
+func TestVaultDriver_MintCredential_StaticRouting(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
@@ -291,30 +291,29 @@ func TestVaultDriver_MintCredential_DatabaseRouting(t *testing.T) {
 		},
 	}
 
-	// kv2_static without kv2_mount should fail on missing fields
+	// static_aws without kv2_mount should fail on missing fields
 	spec := &credential.CredSpec{
-		Name: "test-db",
-		Type: credential.TypeVaultToken,
+		Name: "test-static-aws",
+		Type: credential.TypeAWSAccessKeys,
 		Config: map[string]string{
-			"mint_method": "kv2_static",
+			"mint_method": "static_aws",
 		},
 	}
 	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kv2_mount and secret_path are required")
 
-	// dynamic_database without role_name should fail on missing fields
+	// static_apikey without kv2_mount should fail on missing fields
 	spec2 := &credential.CredSpec{
-		Name: "test-db-dynamic",
-		Type: credential.TypeVaultToken,
+		Name: "test-static-apikey",
+		Type: credential.TypeAPIKey,
 		Config: map[string]string{
-			"mint_method":    "dynamic_database",
-			"database_mount": "database",
+			"mint_method": "static_apikey",
 		},
 	}
 	_, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "database_mount and role_name are required")
+	assert.Contains(t, err.Error(), "kv2_mount and secret_path are required")
 }
 
 func TestVaultDriver_MintCredential_AWSRouting(t *testing.T) {
@@ -327,12 +326,12 @@ func TestVaultDriver_MintCredential_AWSRouting(t *testing.T) {
 		},
 	}
 
-	// kv2_static without kv2_mount should fail on missing fields
+	// static_aws without kv2_mount should fail on missing fields
 	spec := &credential.CredSpec{
 		Name: "test-aws",
 		Type: credential.TypeAWSAccessKeys,
 		Config: map[string]string{
-			"mint_method": "kv2_static",
+			"mint_method": "static_aws",
 		},
 	}
 	_, _, _, err := driver.MintCredential(context.TODO(), spec)
@@ -374,6 +373,99 @@ func TestVaultDriver_MintCredential_VaultTokenRouting(t *testing.T) {
 	_, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "token_role is required")
+}
+
+func TestVaultDriver_MintCredential_DynamicGCPRouting(t *testing.T) {
+	driver := &VaultDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeVault,
+			Config: map[string]string{
+				"vault_address": "http://127.0.0.1:8200",
+			},
+		},
+	}
+
+	// dynamic_gcp without gcp_mount should fail
+	spec := &credential.CredSpec{
+		Name: "test-gcp",
+		Type: credential.TypeGCPAccessToken,
+		Config: map[string]string{
+			"mint_method": "dynamic_gcp",
+		},
+	}
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gcp_mount and role_name are required")
+
+	// dynamic_gcp with invalid role_type should fail
+	spec2 := &credential.CredSpec{
+		Name: "test-gcp-bad-type",
+		Type: credential.TypeGCPAccessToken,
+		Config: map[string]string{
+			"mint_method": "dynamic_gcp",
+			"gcp_mount":   "gcp",
+			"role_name":   "my-role",
+			"role_type":   "invalid",
+		},
+	}
+	_, _, _, err = driver.MintCredential(context.TODO(), spec2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported role_type")
+}
+
+func TestVaultDriver_MintCredential_OAuth2Routing(t *testing.T) {
+	driver := &VaultDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeVault,
+			Config: map[string]string{
+				"vault_address": "http://127.0.0.1:8200",
+			},
+		},
+	}
+
+	// oauth2 without oauth2_mount should fail
+	spec := &credential.CredSpec{
+		Name: "test-oauth2",
+		Type: credential.TypeOAuthBearerToken,
+		Config: map[string]string{
+			"mint_method": "oauth2",
+		},
+	}
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "oauth2_mount and credential_name are required")
+}
+
+func TestVaultDriverFactory_InferCredentialType(t *testing.T) {
+	factory := &VaultDriverFactory{}
+
+	tests := []struct {
+		name       string
+		mintMethod string
+		wantType   string
+		wantErr    bool
+	}{
+		{"static_aws", "static_aws", credential.TypeAWSAccessKeys, false},
+		{"dynamic_aws", "dynamic_aws", credential.TypeAWSAccessKeys, false},
+		{"static_apikey", "static_apikey", credential.TypeAPIKey, false},
+		{"dynamic_gcp", "dynamic_gcp", credential.TypeGCPAccessToken, false},
+		{"oauth2", "oauth2", credential.TypeOAuthBearerToken, false},
+		{"vault_token", "vault_token", credential.TypeVaultToken, false},
+		{"empty defaults to vault_token", "", credential.TypeVaultToken, false},
+		{"unsupported", "invalid", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			credType, err := factory.InferCredentialType(map[string]string{"mint_method": tt.mintMethod})
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantType, credType)
+			}
+		})
+	}
 }
 
 func TestVaultDriver_FetchDynamicAWSCreds_InvalidTTL(t *testing.T) {

@@ -150,6 +150,49 @@ The API token is validated at creation time via a `GET /api/now/table/sys_user?s
 
 See [OAuth2 Client Credentials Mode](#oauth2-client-credentials-mode) below for setup with `client_id` and `client_secret`.
 
+### Option C: Vault/OpenBao as Credential Source
+
+Instead of storing the API token directly in Warden, you can store it in a Vault/OpenBao KV v2 secret engine and have Warden fetch it at runtime. This centralizes secret management in Vault.
+
+**Prerequisites:** A Vault/OpenBao instance with:
+- A KV v2 mount containing your ServiceNow API token (e.g., at `secret/servicenow/ops` with an `api_key` field)
+- An AppRole configured for Warden access
+
+```bash
+# Create a Vault credential source
+warden cred source create servicenow-vault-src \
+  --type=hvault \
+  --config=vault_address=https://vault.example.com \
+  --config=auth_method=approle \
+  --config=role_id=your-role-id \
+  --config=secret_id=your-secret-id \
+  --config=approle_mount=approle \
+  --config=role_name=warden-role \
+  --rotation-period=24h
+```
+
+Create a credential spec using the `static_apikey` mint method:
+
+```bash
+warden cred spec create servicenow-ops \
+  --source servicenow-vault-src \
+  --config mint_method=static_apikey \
+  --config kv2_mount=secret \
+  --config secret_path=servicenow/ops
+```
+
+The KV v2 secret at `secret/servicenow/ops` should contain at minimum an `api_key` field. Warden fetches the secret from Vault on each credential request.
+
+You can also use the `oauth2` mint method if you have an OAuth2 plugin (openbao-plugin-secrets-oauthapp) configured in Vault:
+
+```bash
+warden cred spec create servicenow-ops \
+  --source servicenow-vault-src \
+  --config mint_method=oauth2 \
+  --config oauth2_mount=oauth2 \
+  --config credential_name=servicenow
+```
+
 Verify:
 
 ```bash
@@ -464,6 +507,34 @@ curl --cert client.pem --key client-key.pem \
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `scope` | string | No | OAuth2 scope to request (e.g., `useraccount`) |
+
+### Credential Source Config (Vault/OpenBao)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `vault_address` | string | Yes | Vault server address (e.g., `https://vault.example.com`) |
+| `vault_namespace` | string | No | Vault namespace (Enterprise/HCP only) |
+| `auth_method` | string | No | Authentication method (`approle`) |
+| `role_id` | string | Yes* | AppRole role ID (*required when `auth_method=approle`) |
+| `secret_id` | string | Yes* | AppRole secret ID (*required when `auth_method=approle`) |
+| `approle_mount` | string | Yes* | AppRole auth mount path (*required when `auth_method=approle`) |
+| `role_name` | string | Yes* | AppRole role name for rotation (*required when `auth_method=approle`) |
+
+### Credential Spec Config (Vault — static_apikey)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | Yes | Must be `static_apikey` |
+| `kv2_mount` | string | Yes | KV v2 mount path in Vault |
+| `secret_path` | string | Yes | Path to the secret within the mount |
+
+### Credential Spec Config (Vault — oauth2)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | Yes | Must be `oauth2` |
+| `oauth2_mount` | string | Yes | Vault OAuth2 secrets engine mount path |
+| `credential_name` | string | Yes | Credential name configured in the OAuth2 plugin |
 
 ## Token Management
 

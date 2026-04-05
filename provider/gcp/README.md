@@ -181,6 +181,42 @@ warden cred spec create gcp-impersonated \
   --config=lifetime=3600s
 ```
 
+### Option C: Vault/OpenBao GCP Secret Engine
+
+Instead of storing a service account key in Warden, you can use the Vault GCP secret engine to dynamically mint access tokens. Vault manages the service account lifecycle.
+
+**Prerequisites:** A Vault/OpenBao instance with:
+- The GCP secret engine mounted and configured with a roleset or static account
+- An AppRole configured for Warden access
+
+```bash
+# Create a Vault credential source
+warden cred source create gcp-vault-src \
+  --type=hvault \
+  --config=vault_address=https://vault.example.com \
+  --config=auth_method=approle \
+  --config=role_id=your-role-id \
+  --config=secret_id=your-secret-id \
+  --config=approle_mount=approle \
+  --config=role_name=warden-role \
+  --rotation-period=24h
+
+# Create a credential spec using the dynamic_gcp mint method (roleset)
+warden cred spec create gcp-cloud-platform \
+  --source gcp-vault-src \
+  --config mint_method=dynamic_gcp \
+  --config gcp_mount=gcp \
+  --config role_name=my-roleset
+
+# Or using a static account instead of a roleset
+warden cred spec create gcp-static \
+  --source gcp-vault-src \
+  --config mint_method=dynamic_gcp \
+  --config gcp_mount=gcp \
+  --config role_name=my-static-account \
+  --config role_type=static-account
+```
+
 Verify:
 
 ```bash
@@ -309,8 +345,9 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 |--------|-------------|----------------|----------|
 | `access_token` | OAuth2 token from source SA key | ~1 hour (auto-refreshed) | Direct access with source SA permissions |
 | `impersonated_access_token` | Token minted on behalf of another SA | Configurable via `lifetime` (default: 1h) | Least-privilege delegation without sharing target SA keys |
+| `dynamic_gcp` | Token from Vault GCP secret engine | ~1 hour | Vault-managed service accounts — no SA key in Warden |
 
-Both methods return tokens that expire naturally and cannot be revoked.
+Both `access_token` and `impersonated_access_token` return tokens that expire naturally and cannot be revoked. `dynamic_gcp` delegates token minting to the Vault GCP engine.
 
 ### Returned Credential Data
 
@@ -436,3 +473,12 @@ curl --cert client.pem --key client-key.pem \
 | `target_service_account` | string | Yes | Email of the service account to impersonate |
 | `scopes` | string | No | Comma-separated OAuth2 scopes (default: `https://www.googleapis.com/auth/cloud-platform`) |
 | `lifetime` | string | No | Token lifetime (default: `3600s`, max: `43200s` / 12 hours) |
+
+### Credential Spec Config (Vault — dynamic_gcp)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | Yes | Must be `dynamic_gcp` |
+| `gcp_mount` | string | Yes | Vault GCP secrets engine mount path |
+| `role_name` | string | Yes | GCP roleset or static account name in Vault |
+| `role_type` | string | No | `roleset` (default) or `static-account` |

@@ -2,6 +2,29 @@
 
 All notable changes to Warden are documented in this file.
 
+## [v0.9.0] — 2026-04-06
+
+### Breaking Changes
+
+- **`kv2_static` mint method removed** — Replaced by `static_aws`. Existing credential specs using `mint_method=kv2_static` must be updated to `mint_method=static_aws`. The `kv2_mount` and `secret_path` config fields are unchanged.
+
+- **`dynamic_database` mint method removed** — The Vault database engine mint method has been removed from the Vault driver. Credential specs using `mint_method=dynamic_database` will no longer work.
+
+### New Features
+
+- **`static_apikey` mint method** — Fetch static API keys from Vault/OpenBao KV v2 and infer the `api_key` credential type. Allows any provider that uses API keys (OpenAI, Anthropic, Mistral, Slack, PagerDuty, ServiceNow) to store secrets in Vault instead of directly in Warden.
+
+- **`dynamic_gcp` mint method** — Generate GCP OAuth2 access tokens via the Vault GCP secret engine. Supports both `roleset` and `static-account` role types. No service account key needs to be stored in Warden.
+
+- **`oauth2` mint method** — Fetch OAuth2 bearer tokens via a Vault/OpenBao OAuth2 secret engine plugin (compatible with openbao-plugin-secrets-oauthapp). Infers the `oauth_bearer_token` credential type. TTL is computed from the plugin's `expire_time` response field.
+
+- **Vault as universal credential source** — The `api_key`, `gcp_access_token`, and `oauth_bearer_token` credential types now accept `hvault` as a valid source type, in addition to their native source types. This enables centralized secret management through Vault/OpenBao for all providers.
+
+### Documentation
+
+- **Provider READMEs** — Added Vault/OpenBao credential source examples and configuration reference tables to PagerDuty, ServiceNow, OpenAI, Anthropic, Mistral, Slack, and GCP provider READMEs.
+- **Vault Provider README** — Updated mint methods table with all new methods (`static_aws`, `static_apikey`, `dynamic_gcp`, `oauth2`) and added configuration reference sections.
+
 ## [v0.8.0] — 2026-04-04
 
 ### Breaking Changes
