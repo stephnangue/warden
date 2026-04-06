@@ -30,6 +30,7 @@ const (
 	SourceTypeGitHub = "github"
 	SourceTypeAPIKey = "apikey"
 	SourceTypeOAuth2 = "oauth2"
+	SourceTypeIBM    = "ibm"
 )
 
 // Category constants for credential categorization

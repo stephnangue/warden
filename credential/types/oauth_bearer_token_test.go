@@ -46,21 +46,21 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeLocal,
 			wantErr:    true,
-			errMsg:     "require an oauth2 or vault source",
+			errMsg:     "require an oauth2, vault, or ibm source",
 		},
 		{
 			name:       "unsupported source type - aws",
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeAWS,
 			wantErr:    true,
-			errMsg:     "require an oauth2 or vault source",
+			errMsg:     "require an oauth2, vault, or ibm source",
 		},
 		{
 			name:       "unsupported source type - static apikey",
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeAPIKey,
 			wantErr:    true,
-			errMsg:     "require an oauth2 or vault source",
+			errMsg:     "require an oauth2, vault, or ibm source",
 		},
 	}
 
