@@ -40,6 +40,7 @@ import (
 	physPostgresql "github.com/stephnangue/warden/physical/postgresql"
 	"github.com/stephnangue/warden/provider/anthropic"
 	"github.com/stephnangue/warden/provider/aws"
+	"github.com/stephnangue/warden/provider/datadog"
 	"github.com/stephnangue/warden/provider/azure"
 	"github.com/stephnangue/warden/provider/gcp"
 	"github.com/stephnangue/warden/provider/github"
@@ -103,20 +104,21 @@ Usage: warden server [options]
 	}
 
 	providers = map[string]wardenlogical.Factory{
-		"anthropic": anthropic.Factory,
-		"aws":       aws.Factory,
-		"azure":     azure.Factory,
-		"gcp":       gcp.Factory,
-		"github":    github.Factory,
-		"gitlab":    gitlab.Factory,
-		"mistral":   mistral.Factory,
-		"openai":     openai.Factory,
-		"ovh":        ovh.Factory,
-		"pagerduty":  pagerduty.Factory,
-		"servicenow": servicenow.Factory,
-		"slack":      slack.Factory,
-		"vault":     vault.Factory,
-		"rds":       rds.Factory,
+		"anthropic":   anthropic.Factory,
+		"aws":         aws.Factory,
+		"azure":       azure.Factory,
+		"datadog":     datadog.Factory,
+		"gcp":         gcp.Factory,
+		"github":      github.Factory,
+		"gitlab":      gitlab.Factory,
+		"mistral":     mistral.Factory,
+		"openai":      openai.Factory,
+		"ovh":         ovh.Factory,
+		"pagerduty":   pagerduty.Factory,
+		"servicenow":  servicenow.Factory,
+		"slack":       slack.Factory,
+		"vault":       vault.Factory,
+		"rds":         rds.Factory,
 	}
 
 	authMethods = map[string]wardenlogical.Factory{
