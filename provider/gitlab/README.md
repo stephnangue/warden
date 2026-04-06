@@ -27,9 +27,9 @@ The GitLab provider enables proxied access to the GitLab REST API through Warden
 >
 > **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
 > ```bash
-> curl -fsSL -o deploy/docker-compose.quickstart.yml \
+> curl -fsSL -o docker-compose.quickstart.yml \
 >   https://raw.githubusercontent.com/stephnangue/warden/main/deploy/docker-compose.quickstart.yml
-> docker compose -f deploy/docker-compose.quickstart.yml up -d
+> docker compose -f docker-compose.quickstart.yml up -d
 > ```
 >
 > **2. Download the latest Warden binary:**
@@ -319,7 +319,7 @@ To stop Warden and the identity provider:
 # Stop Warden (Ctrl+C in the terminal where it's running)
 
 # Stop and remove the identity provider containers
-docker compose -f deploy/docker-compose.quickstart.yml down -v
+docker compose -f docker-compose.quickstart.yml down -v
 ```
 
 Since Warden dev mode uses in-memory storage, all configuration is lost when the server stops.

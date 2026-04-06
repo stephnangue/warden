@@ -82,6 +82,10 @@ path "auth/token/create/*" {
 path "auth/token/revoke-accessor" {
   capabilities = ["update"]
 }
+
+path "secret/data/*" {
+  capabilities = ["read","list"]
+}
 EOF
 
 echo ""

@@ -2,6 +2,21 @@
 
 All notable changes to Warden are documented in this file.
 
+## [v0.9.1] — 2026-04-06
+
+### Bug Fixes
+
+- **`--type` flag no longer required on `cred spec create`** — The CLI enforced `--type` as required even though the server can infer the credential type from the source driver. The flag is now optional, matching the server-side behavior documented since v0.7.0. (#111)
+
+### Documentation
+
+- **AWS Provider README** — Added Vault/OpenBao credential source section with `static_aws` and `dynamic_aws` mint method examples and configuration reference tables.
+- **Quickstart paths** — Fixed docker-compose quickstart file path in all provider READMEs (`deploy/docker-compose.quickstart.yml` → `docker-compose.quickstart.yml`).
+
+### Infrastructure
+
+- **Vault init script** — Added `secret/data/*` read/list capabilities to the Vault policy, enabling KV v2 secret access for the `static_apikey` and `static_aws` mint methods.
+
 ## [v0.9.0] — 2026-04-06
 
 ### Breaking Changes
