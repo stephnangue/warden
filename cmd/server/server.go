@@ -46,6 +46,7 @@ import (
 	"github.com/stephnangue/warden/provider/gitlab"
 	"github.com/stephnangue/warden/provider/mistral"
 	"github.com/stephnangue/warden/provider/openai"
+	"github.com/stephnangue/warden/provider/ovh"
 	"github.com/stephnangue/warden/provider/pagerduty"
 	"github.com/stephnangue/warden/provider/rds"
 	"github.com/stephnangue/warden/provider/servicenow"
@@ -109,7 +110,8 @@ Usage: warden server [options]
 		"github":    github.Factory,
 		"gitlab":    gitlab.Factory,
 		"mistral":   mistral.Factory,
-		"openai":    openai.Factory,
+		"openai":     openai.Factory,
+		"ovh":        ovh.Factory,
 		"pagerduty":  pagerduty.Factory,
 		"servicenow": servicenow.Factory,
 		"slack":      slack.Factory,
