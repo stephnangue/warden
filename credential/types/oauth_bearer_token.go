@@ -56,8 +56,8 @@ func (t *OAuthBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 
 		// Vault source - OAuth2 plugin fields
 		credential.StringField("mint_method").
-			OneOf("oauth2").
-			Describe("Mint method (required for vault source)").
+			OneOf("oauth2", "iam_token").
+			Describe("Mint method (required for vault/ibm source)").
 			Example("oauth2"),
 
 		credential.StringField("oauth2_mount").
@@ -73,10 +73,10 @@ func (t *OAuthBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 // ValidateConfig validates the Config for an OAuth bearer token credential spec.
 func (t *OAuthBearerTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
 	switch sourceType {
-	case credential.SourceTypeOAuth2, credential.SourceTypeVault:
+	case credential.SourceTypeOAuth2, credential.SourceTypeVault, credential.SourceTypeIBM:
 		// Supported
 	default:
-		return fmt.Errorf("oauth_bearer_token credentials require an oauth2 or vault source, got: %s", sourceType)
+		return fmt.Errorf("oauth_bearer_token credentials require an oauth2, vault, or ibm source, got: %s", sourceType)
 	}
 
 	schema := t.ConfigSchema()
@@ -84,8 +84,9 @@ func (t *OAuthBearerTokenCredType) ValidateConfig(config map[string]string, sour
 		return err
 	}
 
-	// Vault source requires oauth2 mint_method with mount and credential_name
-	if sourceType == credential.SourceTypeVault {
+	// Source-specific validation
+	switch sourceType {
+	case credential.SourceTypeVault:
 		if config["mint_method"] != "oauth2" {
 			return fmt.Errorf("'mint_method' must be 'oauth2' for vault source, got: %s", config["mint_method"])
 		}
@@ -94,6 +95,11 @@ func (t *OAuthBearerTokenCredType) ValidateConfig(config map[string]string, sour
 		}
 		if config["credential_name"] == "" {
 			return fmt.Errorf("'credential_name' is required when mint_method is oauth2")
+		}
+	case credential.SourceTypeIBM:
+		// IBM source uses iam_token mint method (default); no additional spec config needed
+		if mm := config["mint_method"]; mm != "" && mm != "iam_token" {
+			return fmt.Errorf("'mint_method' must be 'iam_token' for ibm source, got: %s", mm)
 		}
 	}
 

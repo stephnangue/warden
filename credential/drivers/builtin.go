@@ -49,5 +49,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register IBM Cloud driver factory
+	if err := registry.RegisterFactory(&IBMDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }
