@@ -1,19 +1,14 @@
-## Warden v0.9.0
+## Warden v0.9.1
 
 Warden is an identity-based access layer for cloud APIs, SaaS platforms, databases, and AI providers. It eliminates static credentials from your workloads entirely. Your workload authenticates to Warden with its own identity — a JWT from your identity provider or a TLS certificate. Warden verifies who is calling, evaluates fine-grained capability-based policies, and issues ephemeral request-scoped access: forwarding API requests with short-lived credentials injected, returning database auth tokens, or vending pre-signed URLs. Credentials are minted on demand, scoped to the request, and never exposed to the caller. Every API call is logged with caller identity, target service, and full request context. No secrets ever reach your applications.
 
 ### What's New
 
-**Vault/OpenBao as a universal credential source.** Any provider that uses API keys or OAuth2 tokens can now fetch credentials from Vault/OpenBao instead of storing them directly in Warden. Store your API keys in a KV v2 secret engine, mint GCP tokens through the Vault GCP engine, or fetch OAuth2 tokens through the openbao-plugin-secrets-oauthapp plugin — all using a single `hvault` credential source.
+**`--type` flag is now truly optional on `cred spec create`.** The CLI previously enforced `--type` as required, even though the server has been able to infer the credential type from the source driver since v0.7.0. The flag is now optional — when omitted, the type is inferred automatically.
 
-**New Vault mint methods:**
+**AWS provider: Vault/OpenBao credential source.** The AWS provider README now documents how to use `hvault` as a credential source with `static_aws` (static credentials from KV v2) and `dynamic_aws` (temporary credentials from the Vault AWS secrets engine) mint methods.
 
-| Mint Method | Credential Type | Description |
-|---|---|---|
-| `static_aws` | `aws_access_keys` | Fetch static AWS credentials from KV v2 (replaces `kv2_static`) |
-| `static_apikey` | `api_key` | Fetch static API keys from KV v2 |
-| `dynamic_gcp` | `gcp_access_token` | Mint GCP tokens via Vault GCP secret engine |
-| `oauth2` | `oauth_bearer_token` | Fetch OAuth2 tokens via Vault OAuth2 plugin |
+**Quickstart path fix.** All provider READMEs now reference the correct docker-compose quickstart file path.
 
 ### Providers
 
@@ -35,12 +30,6 @@ Warden is an identity-based access layer for cloud APIs, SaaS platforms, databas
 
 - **Streaming providers** proxy requests through Warden, injecting credentials in-flight.
 - **Access providers** vend credentials directly (database auth tokens, pre-signed URLs).
-
-### Breaking Changes
-
-- **`kv2_static` removed** — Replaced by `static_aws`. Update existing specs: `mint_method=kv2_static` becomes `mint_method=static_aws`. Config fields `kv2_mount` and `secret_path` are unchanged.
-
-- **`dynamic_database` removed** — The Vault database engine mint method has been removed.
 
 ### Getting Started
 

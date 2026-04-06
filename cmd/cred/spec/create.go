@@ -29,14 +29,13 @@ var (
 )
 
 func init() {
-	CreateCmd.Flags().StringVar(&createType, "type", "", "Credential type (required)")
+	CreateCmd.Flags().StringVar(&createType, "type", "", "Credential type (optional — inferred from source when omitted)")
 	CreateCmd.Flags().StringVar(&createSource, "source", "", "Source name (required)")
 	CreateCmd.Flags().StringToStringVar(&createConfig, "config", nil, "Type-specific configuration (key=value)")
 	CreateCmd.Flags().StringVar(&createMinTTL, "min-ttl", "1h", "Minimum TTL")
 	CreateCmd.Flags().StringVar(&createMaxTTL, "max-ttl", "24h", "Maximum TTL")
 	CreateCmd.Flags().StringVar(&createRotationPeriod, "rotation-period", "", "Rotation period for credentials stored in the spec (e.g., '24h', '7d'). Empty means no rotation")
 
-	CreateCmd.MarkFlagRequired("type")
 	CreateCmd.MarkFlagRequired("source")
 }
 

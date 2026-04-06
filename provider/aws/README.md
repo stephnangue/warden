@@ -27,9 +27,9 @@ The AWS provider enables proxied access to AWS services through Warden. Clients 
 >
 > **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
 > ```bash
-> curl -fsSL -o deploy/docker-compose.quickstart.yml \
+> curl -fsSL -o docker-compose.quickstart.yml \
 >   https://raw.githubusercontent.com/stephnangue/warden/main/deploy/docker-compose.quickstart.yml
-> docker compose -f deploy/docker-compose.quickstart.yml up -d
+> docker compose -f docker-compose.quickstart.yml up -d
 > ```
 >
 > **2. Download the latest Warden binary:**
@@ -266,6 +266,56 @@ warden cred spec create operator \
 
 Each spec points to a different `role_arn`, so the IAM user's `AssumeRoles` policy must allow assuming all of them (the `devops-*` wildcard in the [AssumeRoles policy](#attach-iam-policies) covers this).
 
+### Alternative: Vault/OpenBao as Credential Source
+
+Instead of storing AWS credentials directly in Warden, you can store them in a Vault/OpenBao instance and have Warden fetch them at runtime. This supports two mint methods: `static_aws` (static credentials from KV v2) and `dynamic_aws` (temporary credentials from the Vault AWS secrets engine).
+
+**Prerequisites:** A Vault/OpenBao instance with:
+- An AppRole configured for Warden access
+- Either a KV v2 mount containing AWS credentials, or an AWS secrets engine with configured roles
+
+```bash
+# Create a Vault credential source
+warden cred source create aws-vault-src \
+  --type=hvault \
+  --config=vault_address=https://vault.example.com \
+  --config=auth_method=approle \
+  --config=role_id=<role-id> \
+  --config=secret_id=<secret-id> \
+  --config=approle_mount=approle \
+  --config=role_name=warden-role \
+  --rotation-period=24h
+```
+
+#### static_aws — fetch static credentials from KV v2
+
+The KV v2 secret must contain `access_key_id` and `secret_access_key` fields.
+
+```bash
+warden cred spec create developer \
+  --source aws-vault-src \
+  --config mint_method=static_aws \
+  --config kv2_mount=secret \
+  --config secret_path=aws/creds \
+  --min-ttl 600s \
+  --max-ttl 2h
+```
+
+#### dynamic_aws — generate credentials via Vault AWS secrets engine
+
+Vault generates temporary AWS credentials using its [AWS secrets engine](https://developer.hashicorp.com/vault/docs/secrets/aws). The role must already be configured in Vault.
+
+```bash
+warden cred spec create developer \
+  --source aws-vault-src \
+  --config mint_method=dynamic_aws \
+  --config aws_mount=aws \
+  --config role_name=my-vault-aws-role \
+  --config ttl=1h \
+  --min-ttl 600s \
+  --max-ttl 2h
+```
+
 ## Step 4: Create a Policy
 
 Create a policy that grants access to the AWS provider gateway. Note that this policy is intentionally coarse-grained for simplicity, but it can be made much more fine-grained to restrict access to specific paths or capabilities as needed:
@@ -409,7 +459,7 @@ To stop Warden and the identity provider:
 # Stop Warden (Ctrl+C in the terminal where it's running)
 
 # Stop and remove the identity provider containers
-docker compose -f deploy/docker-compose.quickstart.yml down -v
+docker compose -f docker-compose.quickstart.yml down -v
 ```
 
 Since Warden dev mode uses in-memory storage, all configuration is lost when the server stops.
@@ -575,6 +625,25 @@ For HTTPS, you'll need a **wildcard SSL certificate** (`*.warden.yourdomain.com`
 | `mint_method` | string | Yes | Must be `secrets_manager` |
 | `secret_id` | string | Yes | Secret ID or ARN in Secrets Manager |
 | `version_stage` | string | No | Version stage to retrieve (default: `AWSCURRENT`) |
+
+### Credential Spec Config — static_aws (via hvault)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | Yes | Must be `static_aws` |
+| `kv2_mount` | string | Yes | KV v2 mount path in Vault |
+| `secret_path` | string | Yes | Path to secret (must contain `access_key_id` and `secret_access_key`) |
+
+### Credential Spec Config — dynamic_aws (via hvault)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | Yes | Must be `dynamic_aws` |
+| `aws_mount` | string | Yes | Vault AWS secrets engine mount path |
+| `role_name` | string | Yes | AWS role name configured in Vault |
+| `role_arn` | string | No | ARN of the role to assume (for STS) |
+| `role_session_name` | string | No | Session name for STS assumption |
+| `ttl` | duration | No | Credential TTL (clamped to spec min/max bounds) |
 
 ### TTL Bounds
 
