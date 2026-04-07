@@ -54,5 +54,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register Elasticsearch driver factory
+	if err := registry.RegisterFactory(&ElasticDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }

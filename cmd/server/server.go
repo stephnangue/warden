@@ -41,6 +41,7 @@ import (
 	"github.com/stephnangue/warden/provider/anthropic"
 	"github.com/stephnangue/warden/provider/aws"
 	"github.com/stephnangue/warden/provider/datadog"
+	"github.com/stephnangue/warden/provider/elastic"
 	"github.com/stephnangue/warden/provider/azure"
 	"github.com/stephnangue/warden/provider/gcp"
 	"github.com/stephnangue/warden/provider/github"
@@ -108,6 +109,7 @@ Usage: warden server [options]
 		"aws":         aws.Factory,
 		"azure":       azure.Factory,
 		"datadog":     datadog.Factory,
+		"elastic":     elastic.Factory,
 		"gcp":         gcp.Factory,
 		"github":      github.Factory,
 		"gitlab":      gitlab.Factory,
