@@ -49,6 +49,7 @@ import (
 	"github.com/stephnangue/warden/provider/github"
 	"github.com/stephnangue/warden/provider/gitlab"
 	"github.com/stephnangue/warden/provider/mistral"
+	"github.com/stephnangue/warden/provider/newrelic"
 	"github.com/stephnangue/warden/provider/openai"
 	"github.com/stephnangue/warden/provider/ovh"
 	"github.com/stephnangue/warden/provider/pagerduty"
@@ -119,6 +120,7 @@ Usage: warden server [options]
 		"github":      github.Factory,
 		"gitlab":      gitlab.Factory,
 		"mistral":     mistral.Factory,
+		"newrelic":    newrelic.Factory,
 		"openai":      openai.Factory,
 		"ovh":         ovh.Factory,
 		"pagerduty":   pagerduty.Factory,
