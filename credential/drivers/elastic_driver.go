@@ -158,7 +158,7 @@ func (f *ElasticDriverFactory) Create(config map[string]string, log *logger.Gate
 func (d *ElasticDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
 	prefix := credential.GetString(d.credSource.Config, "key_name_prefix", "warden")
 	keyName := credential.GetString(spec.Config, "key_name", fmt.Sprintf("%s-%s-%d", prefix, spec.Name, time.Now().Unix()))
-	expiration := credential.GetString(spec.Config, "expiration", "")
+	expiration := credential.GetString(spec.Config, "expiration", "1h")
 
 	reqBody := map[string]interface{}{
 		"name": keyName,

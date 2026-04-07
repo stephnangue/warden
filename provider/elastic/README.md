@@ -480,7 +480,7 @@ curl --cert client.pem --key client-key.pem \
 |-------|------|----------|-------------|
 | `key_name` | string | No | Override for the generated API key name |
 | `role_descriptors` | string | No | JSON string of Elasticsearch role descriptors to scope the minted key |
-| `expiration` | string | No | Key expiration (e.g., `1h`, `30d`). Default: no expiration |
+| `expiration` | string | No | Key expiration (e.g., `1h`, `30d`). Default: `1h` |
 
 ### Credential Source Config (Vault/OpenBao — `hvault` type)
 
