@@ -40,6 +40,7 @@ import (
 	physPostgresql "github.com/stephnangue/warden/physical/postgresql"
 	"github.com/stephnangue/warden/provider/anthropic"
 	"github.com/stephnangue/warden/provider/aws"
+	"github.com/stephnangue/warden/provider/cohere"
 	"github.com/stephnangue/warden/provider/datadog"
 	"github.com/stephnangue/warden/provider/azure"
 	"github.com/stephnangue/warden/provider/gcp"
@@ -107,6 +108,7 @@ Usage: warden server [options]
 		"anthropic":   anthropic.Factory,
 		"aws":         aws.Factory,
 		"azure":       azure.Factory,
+		"cohere":      cohere.Factory,
 		"datadog":     datadog.Factory,
 		"gcp":         gcp.Factory,
 		"github":      github.Factory,
