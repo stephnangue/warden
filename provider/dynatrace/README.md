@@ -176,7 +176,7 @@ warden cred spec create dynatrace-platform \
   --config scope="storage:buckets:read storage:logs:read"
 ```
 
-> **Note:** The `token_param.resource` on the source config injects the `resource` form parameter into the OAuth2 token exchange, as required by Dynatrace SSO. OAuth2 tokens are valid for 5 minutes and are automatically refreshed by Warden.
+> **Note:** The `token_param.resource` on the source config injects the `resource` form parameter into the OAuth2 token exchange, as required by Dynatrace SSO. OAuth2 tokens are valid for 5 minutes; when a token expires, Warden transparently re-mints a fresh one on the next request.
 
 When using OAuth2, configure the provider URL to point to the Platform API:
 
@@ -532,5 +532,5 @@ curl --cert client.pem --key client-key.pem \
 |--------|---------|
 | **Storage** | Client credentials are stored on the credential source (not the spec) |
 | **Minting** | Warden exchanges credentials for a bearer token on each request (cached by TTL) |
-| **Lifetime** | 5 minutes (automatically refreshed by Warden) |
+| **Lifetime** | 5 minutes (Warden transparently re-mints on the next request after expiry) |
 | **Rate Limits** | 50 requests/minute per environment |
