@@ -54,6 +54,7 @@ import (
 	"github.com/stephnangue/warden/provider/rds"
 	"github.com/stephnangue/warden/provider/servicenow"
 	"github.com/stephnangue/warden/provider/slack"
+	"github.com/stephnangue/warden/provider/splunk"
 	"github.com/stephnangue/warden/provider/vault"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -121,6 +122,7 @@ Usage: warden server [options]
 		"pagerduty":   pagerduty.Factory,
 		"servicenow":  servicenow.Factory,
 		"slack":       slack.Factory,
+		"splunk":      splunk.Factory,
 		"vault":       vault.Factory,
 		"rds":         rds.Factory,
 	}
