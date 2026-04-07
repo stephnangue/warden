@@ -175,6 +175,39 @@ func TestOAuth2DriverFactory_ValidateConfig(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "valid config with token_param extra params",
+			config: map[string]string{
+				"client_id":              "test-client-id",
+				"client_secret":          "test-client-secret",
+				"token_url":              "https://auth.example.com/token",
+				"token_param.resource":   "urn:dtaccount:abc123",
+				"token_param.audience":   "https://api.example.com",
+			},
+			wantErr: false,
+		},
+		{
+			name: "token_param overriding grant_type",
+			config: map[string]string{
+				"client_id":              "test-client-id",
+				"client_secret":          "test-client-secret",
+				"token_url":              "https://auth.example.com/token",
+				"token_param.grant_type": "password",
+			},
+			wantErr: true,
+			errMsg:  "token_param.grant_type cannot override core OAuth2 field",
+		},
+		{
+			name: "token_param overriding client_id",
+			config: map[string]string{
+				"client_id":              "test-client-id",
+				"client_secret":          "test-client-secret",
+				"token_url":              "https://auth.example.com/token",
+				"token_param.client_id":  "override",
+			},
+			wantErr: true,
+			errMsg:  "token_param.client_id cannot override core OAuth2 field",
+		},
 	}
 
 	for _, tt := range tests {
@@ -344,6 +377,53 @@ func TestOAuth2Driver_MintCredential_DefaultScope(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "test-token", rawData["api_key"])
 	assert.Equal(t, 1800*time.Second, ttl)
+}
+
+func TestOAuth2Driver_MintCredential_ExtraTokenParams(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := r.ParseForm()
+		require.NoError(t, err)
+
+		// Core fields still present
+		assert.Equal(t, "client_credentials", r.Form.Get("grant_type"))
+		assert.Equal(t, "test-id", r.Form.Get("client_id"))
+
+		// Extra token params
+		assert.Equal(t, "urn:dtaccount:abc123", r.Form.Get("resource"))
+		assert.Equal(t, "https://api.example.com", r.Form.Get("audience"))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "test-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeOAuth2,
+			Config: map[string]string{
+				"client_id":            "test-id",
+				"client_secret":        "test-secret",
+				"token_url":            server.URL,
+				"token_param.resource": "urn:dtaccount:abc123",
+				"token_param.audience": "https://api.example.com",
+			},
+		},
+		httpClient: server.Client(),
+	}
+
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Type:   credential.TypeOAuthBearerToken,
+		Config: map[string]string{},
+	}
+
+	rawData, _, _, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "test-token", rawData["api_key"])
 }
 
 func TestOAuth2Driver_MintCredential_NoExpiresIn(t *testing.T) {

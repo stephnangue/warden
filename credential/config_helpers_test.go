@@ -100,6 +100,57 @@ func TestGetDurationRequired(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestGetPrefixed(t *testing.T) {
+	tests := []struct {
+		name   string
+		config map[string]string
+		prefix string
+		want   map[string]string
+	}{
+		{
+			name:   "empty config",
+			config: map[string]string{},
+			prefix: "token_param.",
+			want:   map[string]string{},
+		},
+		{
+			name:   "no matching prefix",
+			config: map[string]string{"client_id": "test", "scope": "read"},
+			prefix: "token_param.",
+			want:   map[string]string{},
+		},
+		{
+			name:   "single match",
+			config: map[string]string{"token_param.resource": "urn:dtaccount:123", "client_id": "test"},
+			prefix: "token_param.",
+			want:   map[string]string{"resource": "urn:dtaccount:123"},
+		},
+		{
+			name: "multiple matches",
+			config: map[string]string{
+				"token_param.resource": "urn:dtaccount:123",
+				"token_param.audience": "https://api.example.com",
+				"client_id":            "test",
+			},
+			prefix: "token_param.",
+			want:   map[string]string{"resource": "urn:dtaccount:123", "audience": "https://api.example.com"},
+		},
+		{
+			name:   "key equal to prefix is skipped",
+			config: map[string]string{"token_param.": "value"},
+			prefix: "token_param.",
+			want:   map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetPrefixed(tt.config, tt.prefix)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestValidateRequired(t *testing.T) {
 	cfg := map[string]string{"a": "1", "b": "2", "empty": ""}
 

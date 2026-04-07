@@ -99,6 +99,18 @@ func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 		return err
 	}
 
+	// Validate token_param.* keys don't override core form fields
+	protectedFields := map[string]bool{
+		"grant_type":    true,
+		"client_id":     true,
+		"client_secret": true,
+	}
+	for key := range credential.GetPrefixed(config, "token_param.") {
+		if protectedFields[key] {
+			return fmt.Errorf("token_param.%s cannot override core OAuth2 field", key)
+		}
+	}
+
 	// auth_header_name is required when auth_header_type is custom_header
 	if credential.GetString(config, "auth_header_type", "") == oauth2AuthCustomHeader {
 		if credential.GetString(config, "auth_header_name", "") == "" {
@@ -172,6 +184,11 @@ func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.Cred
 	}
 	if scope != "" {
 		form.Set("scope", scope)
+	}
+
+	// Apply extra token form parameters from source config (token_param.* keys)
+	for k, v := range credential.GetPrefixed(config, "token_param.") {
+		form.Set(k, v)
 	}
 
 	retryConfig := HTTPRetryConfig{
