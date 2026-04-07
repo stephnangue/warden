@@ -3,6 +3,7 @@ package credential
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -104,6 +105,23 @@ func GetDurationRequired(config map[string]string, key string) (time.Duration, e
 		return 0, fmt.Errorf("config key '%s' must be a valid duration: %w", key, err)
 	}
 	return d, nil
+}
+
+// GetPrefixed returns all config entries whose key starts with the given prefix,
+// stripping the prefix from the returned keys. Keys equal to the prefix (empty
+// suffix) are skipped. For example, with prefix "token_param.", a config key
+// "token_param.resource" returns as "resource".
+func GetPrefixed(config map[string]string, prefix string) map[string]string {
+	result := make(map[string]string)
+	for k, v := range config {
+		if strings.HasPrefix(k, prefix) {
+			stripped := strings.TrimPrefix(k, prefix)
+			if stripped != "" {
+				result[stripped] = v
+			}
+		}
+	}
+	return result
 }
 
 // ValidateRequired checks that all required config keys are present and non-empty
