@@ -321,7 +321,7 @@ func TestElasticDriver_MintCredential(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, rawData["api_key"], "should return encoded API key")
-	assert.Equal(t, time.Duration(0), ttl, "no expiration set, TTL should be 0")
+	assert.True(t, ttl > 0, "default expiration of 1h should produce a positive TTL")
 	assert.Equal(t, "elastic:new-key-id-123", leaseID)
 }
 
