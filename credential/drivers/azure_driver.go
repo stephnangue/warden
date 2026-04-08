@@ -248,12 +248,21 @@ func (f *AzureDriverFactory) ValidateConfig(config map[string]string) error {
 			Required().
 			Describe("Secret ID for the client secret (for rotation tracking)").
 			Example("secret-id-uuid"),
+
+		credential.StringField("ca_data").
+			Custom(ValidateCAData).
+			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
+			Example("LS0tLS1CRUdJTi..."),
+
+		credential.BoolField("tls_skip_verify").
+			Describe("Skip TLS certificate verification (development only)").
+			Example("false"),
 	)
 }
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
 func (f *AzureDriverFactory) SensitiveConfigFields() []string {
-	return []string{"client_secret"}
+	return []string{"client_secret", "ca_data"}
 }
 
 // InferCredentialType infers the credential type from the spec's mint_method.
@@ -279,8 +288,13 @@ func (f *AzureDriverFactory) Create(config map[string]string, log *logger.GatedL
 		logger:        log.WithSubsystem(credential.SourceTypeAzure),
 		tokenCache:    make(map[string]*cachedAzureToken),
 		objectIDCache: make(map[string]string),
-		httpClient:    &http.Client{Timeout: 30 * time.Second},
 	}
+
+	httpClient, err := BuildHTTPClient(config, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+	driver.httpClient = httpClient
 
 	// Validate source credentials by acquiring a token
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

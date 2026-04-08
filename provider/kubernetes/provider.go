@@ -27,7 +27,8 @@ func extractToken(r *http.Request) string {
 }
 
 // validateKubernetesURL validates that the kubernetes_url is a well-formed HTTPS URL.
-func validateKubernetesURL(addr string) error {
+// When tlsSkipVerify is true, http:// is also accepted for dev/test environments.
+func validateKubernetesURL(addr string, tlsSkipVerify bool) error {
 	if addr == "" {
 		return fmt.Errorf("kubernetes_url is required")
 	}
@@ -35,7 +36,7 @@ func validateKubernetesURL(addr string) error {
 	if err != nil {
 		return fmt.Errorf("invalid kubernetes_url: %w", err)
 	}
-	if parsed.Scheme != "https" {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && tlsSkipVerify) {
 		return fmt.Errorf("kubernetes_url must use https:// scheme, got: %s", parsed.Scheme)
 	}
 	if parsed.Host == "" {
@@ -62,7 +63,11 @@ var Spec = &httpproxy.ProviderSpec{
 		if !ok || addr == "" {
 			return fmt.Errorf("kubernetes_url is required")
 		}
-		return validateKubernetesURL(addr)
+		skipVerify := false
+		if v, ok := conf["tls_skip_verify"].(bool); ok {
+			skipVerify = v
+		}
+		return validateKubernetesURL(addr, skipVerify)
 	},
 }
 

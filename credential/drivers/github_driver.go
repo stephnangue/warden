@@ -74,16 +74,27 @@ func (f *GitHubDriverFactory) Type() string {
 func (f *GitHubDriverFactory) ValidateConfig(config map[string]string) error {
 	return credential.ValidateSchema(config,
 		credential.StringField("github_url").
-			Custom(validateGitHubURL).
+			Custom(func(v string) error {
+				return validateGitHubURL(v, credential.GetBool(config, "tls_skip_verify", false))
+			}).
 			Describe("GitHub API URL (use default for github.com, or specify GitHub Enterprise URL)").
 			Example("https://api.github.com"),
+
+		credential.StringField("ca_data").
+			Custom(ValidateCAData).
+			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
+			Example("LS0tLS1CRUdJTi..."),
+
+		credential.BoolField("tls_skip_verify").
+			Describe("Skip TLS certificate verification (development only)").
+			Example("false"),
 	)
 }
 
 // SensitiveConfigFields returns the list of source config keys that should be masked.
 // No secrets are stored on the source — they live in the spec config.
 func (f *GitHubDriverFactory) SensitiveConfigFields() []string {
-	return nil
+	return []string{"ca_data"}
 }
 
 // InferCredentialType always returns github_token for GitHub sources.
@@ -100,10 +111,16 @@ func (f *GitHubDriverFactory) Create(config map[string]string, log *logger.Gated
 			Type:   credential.SourceTypeGitHub,
 			Config: config,
 		},
-		logger:     log.WithSubsystem(credential.SourceTypeGitHub),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		appTokens:  make(map[string]*appTokenCache),
+		logger:    log.WithSubsystem(credential.SourceTypeGitHub),
+		appTokens: make(map[string]*appTokenCache),
 	}
+
+	httpClient, err := BuildHTTPClient(config, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+	driver.httpClient = httpClient
+
 	return driver, nil
 }
 
@@ -420,13 +437,14 @@ func ValidatePEMBlock(pemData string) error {
 	return nil
 }
 
-// validateGitHubURL validates that the github_url is a well-formed HTTPS URL
-func validateGitHubURL(rawURL string) error {
+// validateGitHubURL validates that the github_url is a well-formed HTTPS URL.
+// When tlsSkipVerify is true, http:// is also accepted for dev/test environments.
+func validateGitHubURL(rawURL string, tlsSkipVerify bool) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid github_url: %w", err)
 	}
-	if parsed.Scheme != "https" {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && tlsSkipVerify) {
 		return fmt.Errorf("github_url must use https:// scheme, got: %s", parsed.Scheme)
 	}
 	if parsed.Host == "" {

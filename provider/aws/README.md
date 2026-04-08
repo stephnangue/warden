@@ -595,6 +595,8 @@ For HTTPS, you'll need a **wildcard SSL certificate** (`*.warden.yourdomain.com`
 | `proxy_domains` | list(string) | `["localhost"]` | Domains that Warden listens on for proxied requests |
 | `max_body_size` | int | `10485760` (10 MB) | Maximum request body size in bytes (max 100 MB) |
 | `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
+| `tls_skip_verify` | bool | `false` | Skip TLS certificate verification; also allows `http://` URLs (development only) |
+| `ca_data` | string | — | Base64-encoded PEM CA certificate for custom/self-signed CAs |
 | `auto_auth_path` | string | — | Path to auth mount for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Default auth role when not specified in `access_key_id` |
 
@@ -606,6 +608,8 @@ For HTTPS, you'll need a **wildcard SSL certificate** (`*.warden.yourdomain.com`
 | `secret_access_key` | string | Yes | IAM user secret access key |
 | `region` | string | Yes | AWS region for API calls |
 | `assume_role_arn` | string | No | Role ARN for source driver to assume (needed for Secrets Manager mint method) |
+| `tls_skip_verify` | bool | No | Skip TLS certificate verification; also allows `http://` URLs (default: `false`) |
+| `ca_data` | string | No | Base64-encoded PEM CA certificate for custom/self-signed CAs |
 
 ### Credential Spec Config — sts_assume_role
 

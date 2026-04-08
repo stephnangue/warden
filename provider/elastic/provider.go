@@ -54,7 +54,8 @@ func extractToken(r *http.Request) string {
 }
 
 // validateElasticURL validates that the elastic_url is a well-formed HTTPS URL.
-func validateElasticURL(addr string) error {
+// When tlsSkipVerify is true, http:// is also accepted for dev/test environments.
+func validateElasticURL(addr string, tlsSkipVerify bool) error {
 	if addr == "" {
 		return fmt.Errorf("elastic_url is required")
 	}
@@ -62,7 +63,7 @@ func validateElasticURL(addr string) error {
 	if err != nil {
 		return fmt.Errorf("invalid elastic_url: %w", err)
 	}
-	if parsed.Scheme != "https" {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && tlsSkipVerify) {
 		return fmt.Errorf("elastic_url must use https:// scheme, got: %s", parsed.Scheme)
 	}
 	if parsed.Host == "" {
@@ -87,7 +88,11 @@ var Spec = &httpproxy.ProviderSpec{
 		if !ok || addr == "" {
 			return fmt.Errorf("elastic_url is required")
 		}
-		return validateElasticURL(addr)
+		skipVerify := false
+		if v, ok := conf["tls_skip_verify"].(bool); ok {
+			skipVerify = v
+		}
+		return validateElasticURL(addr, skipVerify)
 	},
 }
 

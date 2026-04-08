@@ -38,7 +38,8 @@ func TestGitLabDriverFactory_SensitiveConfigFields(t *testing.T) {
 	fields := factory.SensitiveConfigFields()
 	assert.Contains(t, fields, "personal_access_token")
 	assert.Contains(t, fields, "application_secret")
-	assert.Len(t, fields, 2)
+	assert.Contains(t, fields, "ca_data")
+	assert.Len(t, fields, 3)
 }
 
 func TestGitLabDriverFactory_ValidateConfig(t *testing.T) {

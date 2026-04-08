@@ -36,6 +36,10 @@ func (b *vaultBackend) pathConfig() *framework.Path {
 				Description: "Skip TLS certificate verification (not recommended for production)",
 				Default:     false,
 			},
+			"ca_data": {
+				Type:        framework.TypeString,
+				Description: "Base64-encoded PEM CA certificate for custom/self-signed CAs",
+			},
 			"auto_auth_path": {
 				Type:        framework.TypeString,
 				Description: "Path to auth mount for implicit authentication (e.g., 'auth/jwt/', 'auth/cert/')",
@@ -70,6 +74,7 @@ func (b *vaultBackend) handleConfigRead(ctx context.Context, req *logical.Reques
 			"max_body_size":   b.MaxBodySize,
 			"timeout":         b.Timeout.String(),
 			"tls_skip_verify": b.tlsSkipVerify,
+			"ca_data":         b.caData,
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 		},
@@ -108,13 +113,29 @@ func (b *vaultBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 	tlsChanged := false
 	if val, ok := d.GetOk("tls_skip_verify"); ok {
 		newVal := val.(bool)
-		tlsChanged = b.tlsSkipVerify != newVal
+		if b.tlsSkipVerify != newVal {
+			tlsChanged = true
+		}
 		b.tlsSkipVerify = newVal
+	}
+	if val, ok := d.GetOk("ca_data"); ok {
+		newVal := val.(string)
+		if b.caData != newVal {
+			tlsChanged = true
+		}
+		b.caData = newVal
 	}
 
 	// Update transport if TLS settings changed
 	if tlsChanged {
-		b.Proxy.Transport = newVaultTransport(b.tlsSkipVerify)
+		transport, err := newVaultTransport(b.caData, b.tlsSkipVerify)
+		if err != nil {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        logical.ErrBadRequest(err.Error()),
+			}, nil
+		}
+		b.Proxy.Transport = transport
 	}
 
 	// Transparent mode settings — build new config from current values + overrides
@@ -146,6 +167,7 @@ func (b *vaultBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 			"max_body_size":   b.MaxBodySize,
 			"timeout":         b.Timeout.String(),
 			"tls_skip_verify": b.tlsSkipVerify,
+			"ca_data":         b.caData,
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 		})

@@ -269,19 +269,22 @@ func TestValidateConfig(t *testing.T) {
 
 func TestValidateURL(t *testing.T) {
 	tests := []struct {
-		name    string
-		addr    string
-		wantErr bool
+		name           string
+		addr           string
+		tlsSkipVerify  bool
+		wantErr        bool
 	}{
-		{"empty is valid", "", false},
-		{"valid HTTPS", "https://api.example.com", false},
-		{"HTTP rejected", "http://api.example.com", true},
-		{"no scheme", "api.example.com", true},
-		{"no host", "https://", true},
+		{"empty is valid", "", false, false},
+		{"valid HTTPS", "https://api.example.com", false, false},
+		{"HTTP rejected without tls_skip_verify", "http://api.example.com", false, true},
+		{"HTTP allowed with tls_skip_verify", "http://api.example.com", true, false},
+		{"no scheme", "api.example.com", false, true},
+		{"no host", "https://", false, true},
+		{"FTP rejected even with tls_skip_verify", "ftp://api.example.com", true, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateURL(tc.addr, "api_url")
+			err := ValidateURL(tc.addr, "api_url", tc.tlsSkipVerify)
 			if tc.wantErr {
 				assert.Error(t, err)
 			} else {

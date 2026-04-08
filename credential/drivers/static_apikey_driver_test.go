@@ -24,7 +24,7 @@ func TestStaticAPIKeyDriverFactory_Type(t *testing.T) {
 
 func TestStaticAPIKeyDriverFactory_SensitiveConfigFields(t *testing.T) {
 	f := &StaticAPIKeyDriverFactory{}
-	assert.Nil(t, f.SensitiveConfigFields())
+	assert.Contains(t, f.SensitiveConfigFields(), "ca_data")
 }
 
 func TestStaticAPIKeyDriverFactory_InferCredentialType(t *testing.T) {
@@ -564,13 +564,23 @@ func TestValidateAPIKeyURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.url, func(t *testing.T) {
-			err := validateAPIKeyURL(tt.url)
+			err := validateAPIKeyURL(tt.url, false)
 			if tt.wantErr {
 				require.Error(t, err)
+
 				assert.Contains(t, err.Error(), tt.errMsg)
 			} else {
 				require.NoError(t, err)
 			}
 		})
 	}
+}
+
+func TestValidateAPIKeyURL_TLSSkipVerify(t *testing.T) {
+	// HTTP allowed when tlsSkipVerify is true
+	require.NoError(t, validateAPIKeyURL("http://api.local", true))
+	// HTTPS still works
+	require.NoError(t, validateAPIKeyURL("https://api.local", true))
+	// FTP still rejected
+	require.Error(t, validateAPIKeyURL("ftp://api.local", true))
 }

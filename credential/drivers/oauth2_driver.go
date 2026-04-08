@@ -65,7 +65,9 @@ func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 
 		credential.StringField("token_url").
 			Required().
-			Custom(validateOAuth2TokenURL).
+			Custom(func(v string) error {
+				return validateOAuth2HTTPSURL(v, "token_url", credential.GetBool(config, "tls_skip_verify", false))
+			}).
 			Describe("OAuth2 token endpoint (HTTPS)").
 			Example("https://identity.pagerduty.com/oauth/token"),
 
@@ -74,7 +76,12 @@ func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 			Example("read write"),
 
 		credential.StringField("verify_url").
-			Custom(validateOAuth2OptionalURL).
+			Custom(func(v string) error {
+				if v == "" {
+					return nil
+				}
+				return validateOAuth2HTTPSURL(v, "verify_url", credential.GetBool(config, "tls_skip_verify", false))
+			}).
 			Describe("Endpoint to verify minted tokens (skip if empty)").
 			Example("https://api.pagerduty.com/users/me"),
 
@@ -95,6 +102,15 @@ func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 		credential.StringField("display_name").
 			Describe("Human-readable label for logs/errors (default: OAuth2)").
 			Example("PagerDuty"),
+
+		credential.StringField("ca_data").
+			Custom(ValidateCAData).
+			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
+			Example("LS0tLS1CRUdJTi..."),
+
+		credential.BoolField("tls_skip_verify").
+			Describe("Skip TLS certificate verification (development only)").
+			Example("false"),
 	); err != nil {
 		return err
 	}
@@ -123,7 +139,7 @@ func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 
 // SensitiveConfigFields returns the list of source config keys that should be masked.
 func (f *OAuth2DriverFactory) SensitiveConfigFields() []string {
-	return []string{"client_secret"}
+	return []string{"client_secret", "ca_data"}
 }
 
 // InferCredentialType returns the credential type for OAuth2 sources.
@@ -138,9 +154,15 @@ func (f *OAuth2DriverFactory) Create(config map[string]string, log *logger.Gated
 			Type:   credential.SourceTypeOAuth2,
 			Config: config,
 		},
-		logger:     log.WithSubsystem(credential.SourceTypeOAuth2),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		logger: log.WithSubsystem(credential.SourceTypeOAuth2),
 	}
+
+	httpClient, err := BuildHTTPClient(config, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+	driver.httpClient = httpClient
+
 	return driver, nil
 }
 
@@ -321,7 +343,7 @@ func buildOAuth2AuthHeaders(config map[string]string, token string) map[string]s
 
 // validateOAuth2TokenURL validates that the token_url is a well-formed HTTPS URL.
 func validateOAuth2TokenURL(rawURL string) error {
-	return validateOAuth2HTTPSURL(rawURL, "token_url")
+	return validateOAuth2HTTPSURL(rawURL, "token_url", false)
 }
 
 // validateOAuth2OptionalURL validates that verify_url, if non-empty, is a well-formed HTTPS URL.
@@ -329,16 +351,17 @@ func validateOAuth2OptionalURL(rawURL string) error {
 	if rawURL == "" {
 		return nil
 	}
-	return validateOAuth2HTTPSURL(rawURL, "verify_url")
+	return validateOAuth2HTTPSURL(rawURL, "verify_url", false)
 }
 
 // validateOAuth2HTTPSURL validates that a URL is well-formed HTTPS.
-func validateOAuth2HTTPSURL(rawURL, fieldName string) error {
+// When tlsSkipVerify is true, http:// is also accepted for dev/test environments.
+func validateOAuth2HTTPSURL(rawURL, fieldName string, tlsSkipVerify bool) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid %s: %w", fieldName, err)
 	}
-	if parsed.Scheme != "https" {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && tlsSkipVerify) {
 		return fmt.Errorf("%s must use https:// scheme, got: %s", fieldName, parsed.Scheme)
 	}
 	if parsed.Host == "" {

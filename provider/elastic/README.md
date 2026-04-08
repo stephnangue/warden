@@ -473,6 +473,8 @@ curl --cert client.pem --key client-key.pem \
 | `api_key_id` | string | No | API key ID (extracted from `api_key` if omitted) |
 | `activation_delay` | duration | No | Wait period for key propagation during rotation (default: `10s`) |
 | `key_name_prefix` | string | No | Prefix for generated API key names (default: `warden`) |
+| `tls_skip_verify` | bool | No | Skip TLS certificate verification; also allows `http://` URLs (default: `false`) |
+| `ca_data` | string | No | Base64-encoded PEM CA certificate for custom/self-signed CAs |
 
 ### Credential Spec Config (Elasticsearch Driver)
 
@@ -535,3 +537,35 @@ curl --cert client.pem --key client-key.pem \
 | **Rotation** | Automatic — source key is rotated per `rotation-period` via the Security API |
 | **Propagation** | 10-second default activation delay (configurable via `activation_delay`) |
 | **Lifecycle** | PrepareRotation (create new key) → wait → CommitRotation (switch) → CleanupRotation (invalidate old) |
+
+## Self-Hosted Elasticsearch
+
+### Custom CA Certificate
+
+If your Elasticsearch cluster uses a certificate signed by a private CA:
+
+```bash
+CA_DATA=$(base64 < /path/to/corporate-ca.pem)
+
+warden write elastic/config <<EOF
+{
+  "elastic_url": "https://elastic.internal.corp:9200",
+  "ca_data": "${CA_DATA}",
+  "auto_auth_path": "auth/jwt/"
+}
+EOF
+```
+
+### Development / Testing (no TLS)
+
+For local development against an Elasticsearch instance without TLS:
+
+```bash
+warden write elastic/config <<EOF
+{
+  "elastic_url": "http://localhost:9200",
+  "tls_skip_verify": true,
+  "auto_auth_path": "auth/jwt/"
+}
+EOF
+```

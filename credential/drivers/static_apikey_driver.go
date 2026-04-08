@@ -50,7 +50,9 @@ func (f *StaticAPIKeyDriverFactory) Type() string {
 func (f *StaticAPIKeyDriverFactory) ValidateConfig(config map[string]string) error {
 	if err := credential.ValidateSchema(config,
 		credential.StringField("api_url").
-			Custom(validateAPIKeyOptionalURL).
+			Custom(func(v string) error {
+				return validateAPIKeyURL(v, credential.GetBool(config, "tls_skip_verify", false))
+			}).
 			Describe("API base URL (HTTPS)").
 			Example("https://api.openai.com"),
 
@@ -83,6 +85,15 @@ func (f *StaticAPIKeyDriverFactory) ValidateConfig(config map[string]string) err
 		credential.StringField("display_name").
 			Describe("Human-readable label for logs/errors (default: API Key)").
 			Example("OpenAI"),
+
+		credential.StringField("ca_data").
+			Custom(ValidateCAData).
+			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
+			Example("LS0tLS1CRUdJTi..."),
+
+		credential.BoolField("tls_skip_verify").
+			Describe("Skip TLS certificate verification (development only)").
+			Example("false"),
 	); err != nil {
 		return err
 	}
@@ -107,7 +118,7 @@ func (f *StaticAPIKeyDriverFactory) ValidateConfig(config map[string]string) err
 // SensitiveConfigFields returns the list of source config keys that should be masked.
 // No secrets are stored on the source — they live in the spec config.
 func (f *StaticAPIKeyDriverFactory) SensitiveConfigFields() []string {
-	return nil
+	return []string{"ca_data"}
 }
 
 // InferCredentialType returns the credential type for API key sources.
@@ -122,9 +133,15 @@ func (f *StaticAPIKeyDriverFactory) Create(config map[string]string, log *logger
 			Type:   credential.SourceTypeAPIKey,
 			Config: config,
 		},
-		logger:     log.WithSubsystem(credential.SourceTypeAPIKey),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		logger: log.WithSubsystem(credential.SourceTypeAPIKey),
 	}
+
+	httpClient, err := BuildHTTPClient(config, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+	driver.httpClient = httpClient
+
 	return driver, nil
 }
 
@@ -292,16 +309,17 @@ func validateAPIKeyOptionalURL(rawURL string) error {
 	if rawURL == "" {
 		return nil
 	}
-	return validateAPIKeyURL(rawURL)
+	return validateAPIKeyURL(rawURL, false)
 }
 
 // validateAPIKeyURL validates that the api_url is a well-formed HTTPS URL.
-func validateAPIKeyURL(rawURL string) error {
+// When tlsSkipVerify is true, http:// is also accepted for dev/test environments.
+func validateAPIKeyURL(rawURL string, tlsSkipVerify bool) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid api_url: %w", err)
 	}
-	if parsed.Scheme != "https" {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && tlsSkipVerify) {
 		return fmt.Errorf("api_url must use https:// scheme, got: %s", parsed.Scheme)
 	}
 	if parsed.Host == "" {

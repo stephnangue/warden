@@ -341,7 +341,7 @@ To restrict token creation to specific namespaces, use a `Role` and `RoleBinding
 | `timeout` | string | No | Request timeout duration (default: `30s`) |
 | `auto_auth_path` | string | Yes | Auth mount path for implicit authentication (e.g., `auth/jwt/`) |
 | `default_role` | string | No | Default role when not specified in URL path |
-| `tls_skip_verify` | bool | No | Skip TLS certificate verification (default: `false`) |
+| `tls_skip_verify` | bool | No | Skip TLS certificate verification; also allows `http://` URLs (default: `false`) |
 | `ca_data` | string | No | Base64-encoded PEM CA certificate for custom CAs |
 
 ### Credential Source Configuration
@@ -351,7 +351,7 @@ To restrict token creation to specific namespaces, use a `Role` and `RoleBinding
 | `kubernetes_url` | string | Yes | Kubernetes API server URL |
 | `token` | string | Yes | Bearer token for authenticating to the API server |
 | `ca_data` | string | No | Base64-encoded PEM CA certificate |
-| `tls_skip_verify` | string | No | Skip TLS verification (`true`/`false`, default: `false`) |
+| `tls_skip_verify` | string | No | Skip TLS verification; also allows `http://` URLs (`true`/`false`, default: `false`) |
 | `source_service_account` | string | No | Name of the source SA (required for rotation) |
 | `source_namespace` | string | No | Namespace of the source SA (required for rotation) |
 | `source_token_ttl` | string | No | TTL for rotated source tokens (default: `24h`, min: `10m`, max: `48h`) |
@@ -455,3 +455,34 @@ warden cred source create k8s-source \
 - The driver retries on HTTP 429 with exponential backoff (up to 3 attempts)
 - If rate limiting persists, reduce the frequency of credential minting by increasing spec TTLs or adjusting client request patterns
 - Check API server audit logs or metrics for throttling configuration
+
+## Custom CA Certificate
+
+If your Kubernetes cluster uses a certificate signed by a private CA (common with self-managed clusters):
+
+```bash
+# Base64-encode the cluster CA certificate
+CA_DATA=$(base64 < /path/to/cluster-ca.pem)
+
+warden write kubernetes/config <<EOF
+{
+  "kubernetes_url": "https://k8s-api.internal.corp:6443",
+  "ca_data": "${CA_DATA}",
+  "auto_auth_path": "auth/jwt/"
+}
+EOF
+```
+
+## Development / Testing (no TLS)
+
+For local development against a Kubernetes API server without TLS (e.g., kind, minikube):
+
+```bash
+warden write kubernetes/config <<EOF
+{
+  "kubernetes_url": "http://localhost:8080",
+  "tls_skip_verify": true,
+  "auto_auth_path": "auth/jwt/"
+}
+EOF
+```

@@ -40,7 +40,7 @@ func TestGitHubDriverFactory_Type(t *testing.T) {
 func TestGitHubDriverFactory_SensitiveConfigFields(t *testing.T) {
 	factory := &GitHubDriverFactory{}
 	fields := factory.SensitiveConfigFields()
-	assert.Nil(t, fields, "source has no secrets — they live in the spec")
+	assert.Contains(t, fields, "ca_data")
 }
 
 func TestGitHubDriverFactory_ValidateConfig(t *testing.T) {
@@ -512,7 +512,7 @@ func TestValidateGitHubURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.url, func(t *testing.T) {
-			err := validateGitHubURL(tt.url)
+			err := validateGitHubURL(tt.url, false)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)
@@ -521,6 +521,15 @@ func TestValidateGitHubURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateGitHubURL_TLSSkipVerify(t *testing.T) {
+	// HTTP allowed when tlsSkipVerify is true
+	require.NoError(t, validateGitHubURL("http://github.local", true))
+	// HTTPS still works
+	require.NoError(t, validateGitHubURL("https://github.local", true))
+	// FTP still rejected
+	require.Error(t, validateGitHubURL("ftp://github.local", true))
 }
 
 func TestGenerateAppJWT(t *testing.T) {

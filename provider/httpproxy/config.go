@@ -107,9 +107,20 @@ func ParseConfig(conf map[string]any, urlKey string, defaultURL string, defaultT
 // ValidateConfig validates the standard configuration fields.
 // urlKey is the provider-specific config key for the URL (e.g., "openai_url").
 func ValidateConfig(conf map[string]any, urlKey string) error {
+	// Parse tls_skip_verify before URL validation so HTTP can be conditionally allowed
+	skipVerify := false
+	if v, ok := conf["tls_skip_verify"]; ok {
+		switch b := v.(type) {
+		case bool:
+			skipVerify = b
+		case string:
+			skipVerify = b == "true" || b == "1"
+		}
+	}
+
 	// Validate URL if provided
 	if addr, ok := conf[urlKey].(string); ok && addr != "" {
-		if err := ValidateURL(addr, urlKey); err != nil {
+		if err := ValidateURL(addr, urlKey, skipVerify); err != nil {
 			return err
 		}
 	}
@@ -218,7 +229,8 @@ func ValidateConfig(conf map[string]any, urlKey string) error {
 }
 
 // ValidateURL validates that a URL is well-formed with an https:// scheme.
-func ValidateURL(addr string, urlKey string) error {
+// When tlsSkipVerify is true, http:// is also accepted for dev/test environments.
+func ValidateURL(addr string, urlKey string, tlsSkipVerify bool) error {
 	if addr == "" {
 		return nil
 	}
@@ -229,7 +241,11 @@ func ValidateURL(addr string, urlKey string) error {
 	}
 
 	if parsed.Scheme != "https" {
-		return fmt.Errorf("%s must use https:// scheme, got: %s", urlKey, parsed.Scheme)
+		if parsed.Scheme == "http" && tlsSkipVerify {
+			// Allow HTTP when TLS verification is disabled (dev/test)
+		} else {
+			return fmt.Errorf("%s must use https:// scheme, got: %s", urlKey, parsed.Scheme)
+		}
 	}
 
 	if parsed.Host == "" {

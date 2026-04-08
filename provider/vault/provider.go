@@ -45,6 +45,7 @@ type vaultBackend struct {
 	*framework.StreamingBackend
 	vaultAddress  string
 	tlsSkipVerify bool
+	caData        string
 }
 
 // extractToken extracts the client token from the request.
@@ -139,10 +140,15 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		b.MaxBodySize = parsedConfig.MaxBodySize
 		b.Timeout = parsedConfig.Timeout
 		b.tlsSkipVerify = parsedConfig.TLSSkipVerify
+		b.caData = parsedConfig.CAData
 
-		// Update transport if TLS skip verify is set
-		if b.tlsSkipVerify {
-			b.Proxy.Transport = newVaultTransport(b.tlsSkipVerify)
+		// Update transport if custom TLS config is set
+		if b.tlsSkipVerify || b.caData != "" {
+			transport, err := newVaultTransport(b.caData, b.tlsSkipVerify)
+			if err != nil {
+				return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+			}
+			b.Proxy.Transport = transport
 		}
 	}
 
@@ -166,6 +172,7 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 			MaxBodySize     int64  `json:"max_body_size"`
 			Timeout         string `json:"timeout"`
 			TLSSkipVerify   bool   `json:"tls_skip_verify"`
+			CAData          string `json:"ca_data"`
 			AutoAuthPath    string `json:"auto_auth_path"`
 			DefaultAuthRole string `json:"default_role"`
 		}
@@ -175,15 +182,20 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 		b.vaultAddress = config.VaultAddress
 		b.MaxBodySize = config.MaxBodySize
 		b.tlsSkipVerify = config.TLSSkipVerify
+		b.caData = config.CAData
 		if config.Timeout != "" {
 			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
 				b.Timeout = timeout
 			}
 		}
 
-		// Update transport if TLS skip verify is set
-		if b.tlsSkipVerify {
-			b.Proxy.Transport = newVaultTransport(b.tlsSkipVerify)
+		// Update transport if custom TLS config is set
+		if b.tlsSkipVerify || b.caData != "" {
+			transport, err := newVaultTransport(b.caData, b.tlsSkipVerify)
+			if err != nil {
+				return fmt.Errorf("invalid TLS configuration: %w", err)
+			}
+			b.Proxy.Transport = transport
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{

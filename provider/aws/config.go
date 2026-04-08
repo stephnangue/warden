@@ -10,9 +10,11 @@ import (
 
 // ProviderConfig holds parsed configuration
 type ProviderConfig struct {
-	ProxyDomains []string
-	MaxBodySize  int64
-	Timeout      time.Duration
+	ProxyDomains  []string
+	MaxBodySize   int64
+	Timeout       time.Duration
+	TLSSkipVerify bool
+	CAData        string
 }
 
 func parseConfig(conf map[string]any) ProviderConfig {
@@ -65,6 +67,19 @@ func parseConfig(conf map[string]any) ProviderConfig {
 		timeOut = framework.DefaultTimeout
 	}
 	config.Timeout = timeOut
+
+	// Parse TLS settings
+	if v, ok := conf["tls_skip_verify"]; ok {
+		switch b := v.(type) {
+		case bool:
+			config.TLSSkipVerify = b
+		case string:
+			config.TLSSkipVerify = b == "true" || b == "1"
+		}
+	}
+	if v, ok := conf["ca_data"].(string); ok {
+		config.CAData = v
+	}
 
 	return config
 }

@@ -2,6 +2,9 @@ package aws
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -61,6 +64,32 @@ func newTransport() *http.Transport {
 	}
 
 	return transport
+}
+
+// newTransportWithTLS creates an HTTP transport with custom TLS configuration.
+func newTransportWithTLS(caData string, skipVerify bool) (*http.Transport, error) {
+	t := newTransport()
+
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		ClientSessionCache: tls.NewLRUClientSessionCache(100),
+		InsecureSkipVerify: skipVerify,
+	}
+
+	if caData != "" {
+		pemBytes, err := base64.StdEncoding.DecodeString(caData)
+		if err != nil {
+			return nil, fmt.Errorf("ca_data is not valid base64: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemBytes) {
+			return nil, fmt.Errorf("ca_data contains no valid PEM certificates")
+		}
+		tlsConfig.RootCAs = pool
+	}
+
+	t.TLSClientConfig = tlsConfig
+	return t, nil
 }
 
 // ShutdownHTTPTransport should be called during application shutdown

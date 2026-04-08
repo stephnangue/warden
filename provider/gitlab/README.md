@@ -445,6 +445,8 @@ curl --cert client.pem --key client-key.pem \
 | `auth_method` | string | Yes | Must be `pat` |
 | `personal_access_token` | string | Yes | Personal access token with `api` scope |
 | `activation_delay` | duration | No | Delay before activating rotated credentials (default: `1m`) |
+| `tls_skip_verify` | bool | No | Skip TLS certificate verification; also allows `http://` URLs (default: `false`) |
+| `ca_data` | string | No | Base64-encoded PEM CA certificate for custom/self-signed CAs |
 
 ### Credential Source Config (OAuth2 Mode)
 
@@ -455,6 +457,8 @@ curl --cert client.pem --key client-key.pem \
 | `application_id` | string | Yes | OAuth2 application ID |
 | `application_secret` | string | Yes | OAuth2 application secret |
 | `activation_delay` | duration | No | Delay before activating rotated credentials (default: `1m`) |
+| `tls_skip_verify` | bool | No | Skip TLS certificate verification; also allows `http://` URLs (default: `false`) |
+| `ca_data` | string | No | Base64-encoded PEM CA certificate for custom/self-signed CAs |
 
 ### Credential Spec Config (Project Access Token)
 
@@ -492,3 +496,34 @@ EOF
 ```
 
 All gateway requests will be proxied to the configured GitLab instance.
+
+### Custom CA Certificate
+
+If your GitLab instance uses a certificate signed by a private CA:
+
+```bash
+# Base64-encode the CA certificate
+CA_DATA=$(base64 < /path/to/corporate-ca.pem)
+
+warden write gitlab/config <<EOF
+{
+  "gitlab_address": "https://gitlab.internal.corp",
+  "ca_data": "${CA_DATA}",
+  "auto_auth_path": "auth/jwt/"
+}
+EOF
+```
+
+### Development / Testing (no TLS)
+
+For local development against a GitLab instance without TLS:
+
+```bash
+warden write gitlab/config <<EOF
+{
+  "gitlab_address": "http://localhost:8080",
+  "tls_skip_verify": true,
+  "auto_auth_path": "auth/jwt/"
+}
+EOF
+```

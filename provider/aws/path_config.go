@@ -29,6 +29,15 @@ func (b *awsBackend) pathConfig() *framework.Path {
 				Description: "Request timeout duration (e.g., '30s', '5m')",
 				Default:     "30s",
 			},
+			"tls_skip_verify": {
+				Type:        framework.TypeBool,
+				Description: "Skip TLS certificate verification (not recommended for production)",
+				Default:     false,
+			},
+			"ca_data": {
+				Type:        framework.TypeString,
+				Description: "Base64-encoded PEM CA certificate for custom/self-signed CAs",
+			},
 			"auto_auth_path": {
 				Type:        framework.TypeString,
 				Description: "Path to auth mount for implicit authentication (e.g., 'auth/jwt/', 'auth/cert/')",
@@ -59,11 +68,13 @@ func (b *awsBackend) handleConfigRead(ctx context.Context, req *logical.Request,
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"proxy_domains":  b.proxyDomains,
-			"max_body_size":  b.MaxBodySize,
-			"timeout":        b.Timeout.String(),
-			"auto_auth_path": tc.AutoAuthPath,
-			"default_role":   tc.DefaultAuthRole,
+			"proxy_domains":   b.proxyDomains,
+			"max_body_size":   b.MaxBodySize,
+			"timeout":         b.Timeout.String(),
+			"tls_skip_verify": b.tlsSkipVerify,
+			"ca_data":         b.caData,
+			"auto_auth_path":  tc.AutoAuthPath,
+			"default_role":    tc.DefaultAuthRole,
 		},
 	}, nil
 }
@@ -83,6 +94,12 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	if val, ok := d.GetOk("timeout"); ok {
 		conf["timeout"] = val
 	}
+	if val, ok := d.GetOk("tls_skip_verify"); ok {
+		conf["tls_skip_verify"] = val
+	}
+	if val, ok := d.GetOk("ca_data"); ok {
+		conf["ca_data"] = val
+	}
 
 	// Validate configuration
 	if err := ValidateConfig(conf); err != nil {
@@ -97,6 +114,26 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	b.proxyDomains = parsedConfig.ProxyDomains
 	b.MaxBodySize = parsedConfig.MaxBodySize
 	b.Timeout = parsedConfig.Timeout
+
+	// Update transport if TLS settings changed
+	tlsChanged := b.tlsSkipVerify != parsedConfig.TLSSkipVerify || b.caData != parsedConfig.CAData
+	b.tlsSkipVerify = parsedConfig.TLSSkipVerify
+	b.caData = parsedConfig.CAData
+	if tlsChanged {
+		if b.tlsSkipVerify || b.caData != "" {
+			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+			if err != nil {
+				return &logical.Response{
+					StatusCode: http.StatusBadRequest,
+					Err:        logical.ErrBadRequest(err.Error()),
+				}, nil
+			}
+			b.Proxy.Transport = transport
+		} else {
+			initTransport()
+			b.Proxy.Transport = sharedTransport
+		}
+	}
 
 	// Reinitialize processors with new config
 	b.initializeProcessors()
@@ -126,11 +163,13 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"proxy_domains":  b.proxyDomains,
-			"max_body_size":  b.MaxBodySize,
-			"timeout":        b.Timeout.String(),
-			"auto_auth_path": tc.AutoAuthPath,
-			"default_role":   tc.DefaultAuthRole,
+			"proxy_domains":   b.proxyDomains,
+			"max_body_size":   b.MaxBodySize,
+			"timeout":         b.Timeout.String(),
+			"tls_skip_verify": b.tlsSkipVerify,
+			"ca_data":         b.caData,
+			"auto_auth_path":  tc.AutoAuthPath,
+			"default_role":    tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return &logical.Response{
