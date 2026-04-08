@@ -429,4 +429,3 @@ func TestHandleTransparentGatewayStreaming(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusOK, rr.Code)
 }
-

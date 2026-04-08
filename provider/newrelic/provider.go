@@ -13,11 +13,6 @@ const DefaultNewRelicURL = "https://api.newrelic.com"
 // DefaultNewRelicTimeout is the default request timeout for New Relic API calls
 const DefaultNewRelicTimeout = 30 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // extractToken extracts the Warden session token from the Api-Key header,
 // allowing New Relic clients to authenticate naturally. Falls back to
 // X-Warden-Token and Authorization: Bearer for standard Warden clients.
@@ -46,10 +41,6 @@ var Spec = &httpproxy.ProviderSpec{
 	UserAgent:          "warden-newrelic-proxy",
 	HelpText:           newrelicBackendHelp,
 	ExtractCredentials: httpproxy.HeaderAPIKeyExtractor("Api-Key"),
-	Transport:          sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 }
 
 // Factory creates a new New Relic provider backend.

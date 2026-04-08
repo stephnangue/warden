@@ -183,11 +183,11 @@ func ValidateConfig(conf map[string]any, urlKey string) error {
 
 	// Validate tls_skip_verify
 	if v, ok := conf["tls_skip_verify"]; ok {
-		switch v.(type) {
+		switch v := v.(type) {
 		case bool:
 			// valid
 		case string:
-			s := v.(string)
+			s := v
 			if s != "true" && s != "false" && s != "1" && s != "0" {
 				return fmt.Errorf("tls_skip_verify must be a boolean, got string: %s", s)
 			}

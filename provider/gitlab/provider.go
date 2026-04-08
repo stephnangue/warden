@@ -11,11 +11,6 @@ import (
 	"github.com/stephnangue/warden/provider/httpproxy"
 )
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // extractToken extracts Warden token from PRIVATE-TOKEN, Authorization: Bearer, or X-Warden-Token headers.
 func extractToken(r *http.Request) string {
 	if token := r.Header.Get("PRIVATE-TOKEN"); token != "" {
@@ -62,10 +57,6 @@ var Spec = &httpproxy.ProviderSpec{
 	ExtractCredentials:   httpproxy.TypedTokenExtractor(credential.TypeGitLabAccessToken, "access_token", "Authorization", "Bearer "),
 	ExtractToken:         extractToken,
 	ExtraHeadersToRemove: []string{"PRIVATE-TOKEN"},
-	Transport:            sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 	ValidateExtraConfig: func(conf map[string]any) error {
 		addr, ok := conf["gitlab_address"].(string)
 		if !ok || addr == "" {

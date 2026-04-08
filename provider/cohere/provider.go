@@ -12,11 +12,6 @@ const DefaultCohereURL = "https://api.cohere.com"
 // DefaultCohereTimeout is the default request timeout for AI inference
 const DefaultCohereTimeout = 120 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // Spec defines the Cohere provider configuration for the httpproxy framework.
 var Spec = &httpproxy.ProviderSpec{
 	Name:               "cohere",
@@ -27,10 +22,6 @@ var Spec = &httpproxy.ProviderSpec{
 	UserAgent:          "warden-cohere-proxy",
 	HelpText:           cohereBackendHelp,
 	ExtractCredentials: httpproxy.BearerAPIKeyExtractor,
-	Transport:          sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 }
 
 // Factory creates a new Cohere provider backend.

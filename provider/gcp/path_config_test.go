@@ -7,8 +7,8 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -230,4 +230,3 @@ func TestSensitiveConfigFields(t *testing.T) {
 	fields := b.SensitiveConfigFields()
 	assert.Empty(t, fields)
 }
-

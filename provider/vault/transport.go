@@ -1,28 +1,25 @@
 package vault
 
 import (
-	"context"
 	"crypto/tls"
 	"log"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"golang.org/x/net/http2"
 )
 
 var (
-	sharedTransport        *http.Transport
-	transportCleanupCtx    context.Context
-	transportCleanupCancel context.CancelFunc
+	sharedTransport *http.Transport
+	transportOnce   sync.Once
 )
 
-func init() {
-	sharedTransport = newVaultTransport(false)
-
-	// Start background cleanup with proper lifecycle management
-	transportCleanupCtx, transportCleanupCancel = context.WithCancel(context.Background())
-	go cleanupIdleConnections(transportCleanupCtx, sharedTransport)
+func initTransport() {
+	transportOnce.Do(func() {
+		sharedTransport = newVaultTransport(false)
+	})
 }
 
 // newVaultTransport creates an HTTP transport optimized for Vault workloads
@@ -66,26 +63,8 @@ func newVaultTransport(tlsSkipVerify bool) *http.Transport {
 	return transport
 }
 
-// cleanupIdleConnections periodically closes idle connections
-func cleanupIdleConnections(ctx context.Context, transport *http.Transport) {
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			transport.CloseIdleConnections()
-		}
-	}
-}
-
 // ShutdownHTTPTransport should be called during application shutdown
 func ShutdownHTTPTransport() {
-	if transportCleanupCancel != nil {
-		transportCleanupCancel()
-	}
 	if sharedTransport != nil {
 		sharedTransport.CloseIdleConnections()
 	}

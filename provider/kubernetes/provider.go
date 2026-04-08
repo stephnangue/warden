@@ -13,11 +13,6 @@ import (
 // DefaultKubernetesTimeout is the default request timeout for Kubernetes API calls
 const DefaultKubernetesTimeout = 30 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // extractToken extracts the Warden session token from incoming HTTP requests.
 // It checks X-Warden-Token first, then falls back to Authorization: Bearer.
 func extractToken(r *http.Request) string {
@@ -61,11 +56,7 @@ var Spec = &httpproxy.ProviderSpec{
 	ExtractCredentials: httpproxy.TypedTokenExtractor(
 		credential.TypeKubernetesToken, "token", "Authorization", "Bearer ",
 	),
-	ExtractToken:  extractToken,
-	Transport:     sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
+	ExtractToken: extractToken,
 	ValidateExtraConfig: func(conf map[string]any) error {
 		addr, ok := conf["kubernetes_url"].(string)
 		if !ok || addr == "" {

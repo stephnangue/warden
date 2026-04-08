@@ -12,11 +12,6 @@ const DefaultSlackURL = "https://slack.com/api"
 // DefaultSlackTimeout is the default request timeout for Slack API calls
 const DefaultSlackTimeout = 30 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // Spec defines the Slack provider configuration for the httpproxy framework.
 var Spec = &httpproxy.ProviderSpec{
 	Name:               "slack",
@@ -27,10 +22,6 @@ var Spec = &httpproxy.ProviderSpec{
 	UserAgent:          "warden-slack-proxy",
 	HelpText:           slackBackendHelp,
 	ExtractCredentials: httpproxy.BearerAPIKeyExtractor,
-	Transport:          sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 }
 
 // Factory creates a new Slack provider backend.

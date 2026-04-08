@@ -12,11 +12,6 @@ const DefaultPagerDutyURL = "https://api.pagerduty.com"
 // DefaultPagerDutyTimeout is the default request timeout for PagerDuty API calls
 const DefaultPagerDutyTimeout = 30 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // Spec defines the PagerDuty provider configuration for the httpproxy framework.
 var Spec = &httpproxy.ProviderSpec{
 	Name:               "pagerduty",
@@ -27,10 +22,6 @@ var Spec = &httpproxy.ProviderSpec{
 	UserAgent:          "warden-pagerduty-proxy",
 	HelpText:           pagerdutyBackendHelp,
 	ExtractCredentials: httpproxy.BearerAPIKeyExtractor,
-	Transport:          sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 }
 
 // Factory creates a new PagerDuty provider backend.

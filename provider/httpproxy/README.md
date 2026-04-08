@@ -9,7 +9,7 @@ The `httpproxy` package provides a configuration-driven framework for building W
 - Config CRUD endpoint (`config`) with storage persistence
 - HTTP reverse proxy with timeout and max body size enforcement
 - Header sanitization (security, hop-by-hop, proxy headers)
-- HTTP/2 transport with connection pooling and idle cleanup
+- HTTP/2 transport with connection pooling and lazy initialization
 - Config validation (URL, timeout, max_body_size, auto_auth_path, default_role)
 
 ## Quick start: simple API-key provider
@@ -29,11 +29,6 @@ const (
     DefaultTimeout = 30 * time.Second
 )
 
-var (
-    sharedTransport        = httpproxy.NewTransport()
-    transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 var Spec = &httpproxy.ProviderSpec{
     Name:               "myprovider",
     DefaultURL:         DefaultURL,
@@ -42,10 +37,6 @@ var Spec = &httpproxy.ProviderSpec{
     ParseStreamBody:    false,
     HelpText:           helpText,
     ExtractCredentials: httpproxy.BearerAPIKeyExtractor,
-    Transport:          sharedTransport,
-    ShutdownTransport: func() {
-        httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-    },
 }
 
 var Factory = httpproxy.NewFactory(Spec)
@@ -96,8 +87,6 @@ Both paths perform implicit authentication and credential injection. The only di
 | `DefaultTimeout` | Default request timeout. Use `120 * time.Second` for AI inference, `30 * time.Second` for REST APIs. |
 | `HelpText` | Backend help description shown in `warden path-help`. |
 | `ExtractCredentials` | Function that extracts credentials from the request and returns headers to inject. See [Credential extractors](#credential-extractors). |
-| `Transport` | Shared `*http.Transport` for this provider type. Create via `httpproxy.NewTransport()`. |
-| `ShutdownTransport` | Cleanup function called during application shutdown. |
 
 ### Optional fields
 
@@ -115,6 +104,7 @@ Both paths perform implicit authentication and credential injection. The only di
 | `OnConfigWrite` | `nil` | Process extra config fields during config write. |
 | `OnInitialize` | `nil` | Load extra fields from persisted config during initialization. |
 | `ValidateExtraConfig` | `nil` | Custom validation for provider-specific config fields. |
+| `NewTransport` | `DefaultNewTransport` | Factory returning `(*http.Transport, func())`. Called lazily on first instantiation. Override for custom transport settings. |
 
 ## Credential extractors
 

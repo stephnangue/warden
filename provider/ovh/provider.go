@@ -12,11 +12,6 @@ const DefaultOVHURL = "https://eu.api.ovh.com/1.0"
 // DefaultOVHTimeout is the default request timeout for OVH API calls
 const DefaultOVHTimeout = 30 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // Spec defines the OVH provider configuration for the httpproxy framework.
 var Spec = &httpproxy.ProviderSpec{
 	Name:               "ovh",
@@ -27,10 +22,6 @@ var Spec = &httpproxy.ProviderSpec{
 	UserAgent:          "warden-ovh-proxy",
 	HelpText:           ovhBackendHelp,
 	ExtractCredentials: httpproxy.BearerAPIKeyExtractor,
-	Transport:          sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 }
 
 // Factory creates a new OVH provider backend.

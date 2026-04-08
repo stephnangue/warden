@@ -75,7 +75,6 @@ func testLogger() *logger.GatedLogger {
 }
 
 func testSpec() *ProviderSpec {
-	transport := NewTransport()
 	return &ProviderSpec{
 		Name:               "testprovider",
 		DefaultURL:         "https://api.test.com",
@@ -84,8 +83,10 @@ func testSpec() *ProviderSpec {
 		ParseStreamBody:    true,
 		HelpText:           "Test provider help",
 		ExtractCredentials: BearerAPIKeyExtractor,
-		Transport:          transport,
-		ShutdownTransport:  func() { transport.CloseIdleConnections() },
+		NewTransport: func() (*http.Transport, func()) {
+			t := NewTransport()
+			return t, func() { t.CloseIdleConnections() }
+		},
 	}
 }
 
@@ -330,8 +331,21 @@ func TestNewTransport(t *testing.T) {
 
 func TestShutdownTransport(t *testing.T) {
 	transport := NewTransport()
-	cancel := StartCleanup(transport)
-	ShutdownTransport(transport, cancel)
+	ShutdownTransport(transport)
+}
+
+func TestDefaultNewTransport(t *testing.T) {
+	transport, shutdown := DefaultNewTransport()
+	assert.NotNil(t, transport)
+	assert.NotNil(t, shutdown)
+	shutdown()
+}
+
+func TestNewFactory_NilNewTransport(t *testing.T) {
+	spec := testSpec()
+	spec.NewTransport = nil
+	b := setupBackend(t, spec)
+	assert.NotNil(t, b)
 }
 
 // --- NewFactory tests ---

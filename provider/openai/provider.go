@@ -39,26 +39,17 @@ const DefaultOpenAIURL = "https://api.openai.com"
 // DefaultOpenAITimeout is the default request timeout for AI inference
 const DefaultOpenAITimeout = 120 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // Spec defines the OpenAI provider configuration for the httpproxy framework.
 var Spec = &httpproxy.ProviderSpec{
-	Name:            "openai",
-	DefaultURL:      DefaultOpenAIURL,
-	URLConfigKey:    "openai_url",
-	DefaultTimeout:  DefaultOpenAITimeout,
-	ParseStreamBody: true,
-	UserAgent:       "warden-openai-proxy",
-	HelpText:        openaiBackendHelp,
-	ExtractCredentials: openaiCredentialExtractor,
+	Name:                 "openai",
+	DefaultURL:           DefaultOpenAIURL,
+	URLConfigKey:         "openai_url",
+	DefaultTimeout:       DefaultOpenAITimeout,
+	ParseStreamBody:      true,
+	UserAgent:            "warden-openai-proxy",
+	HelpText:             openaiBackendHelp,
+	ExtractCredentials:   openaiCredentialExtractor,
 	ExtraHeadersToRemove: []string{"OpenAI-Organization", "OpenAI-Project"},
-	Transport:            sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 }
 
 // Factory creates a new OpenAI provider backend.
