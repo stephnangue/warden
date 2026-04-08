@@ -1,7 +1,9 @@
 package httpproxy
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -17,6 +19,8 @@ type BaseConfig struct {
 	Timeout         time.Duration
 	AutoAuthPath    string
 	DefaultAuthRole string
+	TLSSkipVerify   bool
+	CAData          string // base64-encoded PEM CA certificate
 }
 
 // ParseConfig parses standard configuration fields from a mount config map.
@@ -82,6 +86,19 @@ func ParseConfig(conf map[string]any, urlKey string, defaultURL string, defaultT
 	}
 	if dr, ok := conf["default_role"].(string); ok {
 		config.DefaultAuthRole = dr
+	}
+
+	// Parse TLS settings
+	if v, ok := conf["tls_skip_verify"]; ok {
+		switch b := v.(type) {
+		case bool:
+			config.TLSSkipVerify = b
+		case string:
+			config.TLSSkipVerify = b == "true" || b == "1"
+		}
+	}
+	if v, ok := conf["ca_data"].(string); ok {
+		config.CAData = v
 	}
 
 	return config
@@ -161,6 +178,39 @@ func ValidateConfig(conf map[string]any, urlKey string) error {
 	if dr, ok := conf["default_role"]; ok {
 		if _, ok := dr.(string); !ok {
 			return fmt.Errorf("default_role must be a string")
+		}
+	}
+
+	// Validate tls_skip_verify
+	if v, ok := conf["tls_skip_verify"]; ok {
+		switch v.(type) {
+		case bool:
+			// valid
+		case string:
+			s := v.(string)
+			if s != "true" && s != "false" && s != "1" && s != "0" {
+				return fmt.Errorf("tls_skip_verify must be a boolean, got string: %s", s)
+			}
+		default:
+			return fmt.Errorf("tls_skip_verify must be a boolean, got %T", v)
+		}
+	}
+
+	// Validate ca_data
+	if v, ok := conf["ca_data"]; ok {
+		caStr, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("ca_data must be a string")
+		}
+		if caStr != "" {
+			pemBytes, err := base64.StdEncoding.DecodeString(caStr)
+			if err != nil {
+				return fmt.Errorf("ca_data is not valid base64: %w", err)
+			}
+			block, _ := pem.Decode(pemBytes)
+			if block == nil {
+				return fmt.Errorf("ca_data contains no valid PEM data")
+			}
 		}
 	}
 

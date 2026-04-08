@@ -38,6 +38,15 @@ func (b *proxyBackend) pathConfig() *framework.Path {
 			Type:        framework.TypeString,
 			Description: "Default role to use when not specified in URL path",
 		},
+		"tls_skip_verify": {
+			Type:        framework.TypeBool,
+			Description: "Skip TLS certificate verification (for dev/test clusters)",
+			Default:     false,
+		},
+		"ca_data": {
+			Type:        framework.TypeString,
+			Description: "Base64-encoded PEM CA certificate for custom certificate authorities",
+		},
 	}
 
 	// Merge extra config fields from spec
@@ -72,6 +81,8 @@ func (b *proxyBackend) handleConfigRead(_ context.Context, _ *logical.Request, _
 		"timeout":           b.Timeout.String(),
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
+		"tls_skip_verify":   b.tlsSkipVerify,
+		"ca_data":           b.caData,
 	}
 
 	// Add extra fields from provider state
@@ -139,6 +150,33 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 
 	b.StreamingBackend.SetTransparentConfig(tc)
 
+	// Process TLS settings
+	tlsChanged := false
+	if val, ok := d.GetOk("tls_skip_verify"); ok {
+		newSkip := val.(bool)
+		if newSkip != b.tlsSkipVerify {
+			b.tlsSkipVerify = newSkip
+			tlsChanged = true
+		}
+	}
+	if val, ok := d.GetOk("ca_data"); ok {
+		newCA := val.(string)
+		if newCA != b.caData {
+			b.caData = newCA
+			tlsChanged = true
+		}
+	}
+	if tlsChanged {
+		transport, err := NewTransportWithTLS(b.caData, b.tlsSkipVerify)
+		if err != nil {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        logical.ErrBadRequest(err.Error()),
+			}, nil
+		}
+		b.Proxy.Transport = transport
+	}
+
 	// Process extra config fields
 	if b.spec.OnConfigWrite != nil {
 		b.mu.Lock()
@@ -162,6 +200,8 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 			"timeout":           b.Timeout.String(),
 			"auto_auth_path":    tc.AutoAuthPath,
 			"default_role":      tc.DefaultAuthRole,
+			"tls_skip_verify":   b.tlsSkipVerify,
+			"ca_data":           b.caData,
 		}
 
 		// Add extra state to persisted config

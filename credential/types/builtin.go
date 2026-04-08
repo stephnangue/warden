@@ -49,5 +49,10 @@ func RegisterBuiltinTypes(registry *credential.TypeRegistry) error {
 		return err
 	}
 
+	// Register Kubernetes token type
+	if err := registry.Register(NewKubernetesTokenCredType()); err != nil {
+		return err
+	}
+
 	return nil
 }

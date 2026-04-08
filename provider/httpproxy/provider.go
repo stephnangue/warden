@@ -92,10 +92,12 @@ type ProviderSpec struct {
 // proxyBackend is the concrete backend type created by NewFactory.
 type proxyBackend struct {
 	*framework.StreamingBackend
-	providerURL string
-	spec        *ProviderSpec
-	extraState  map[string]any
-	mu          sync.RWMutex
+	providerURL   string
+	spec          *ProviderSpec
+	extraState    map[string]any
+	mu            sync.RWMutex
+	tlsSkipVerify bool
+	caData        string
 }
 
 // NewFactory creates a logical.Factory from a ProviderSpec.
@@ -193,6 +195,17 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 				DefaultAuthRole: parsedConfig.DefaultAuthRole,
 			})
 
+			// Apply TLS configuration if provided
+			if parsedConfig.CAData != "" || parsedConfig.TLSSkipVerify {
+				transport, err := NewTransportWithTLS(parsedConfig.CAData, parsedConfig.TLSSkipVerify)
+				if err != nil {
+					return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+				}
+				b.Proxy.Transport = transport
+				b.tlsSkipVerify = parsedConfig.TLSSkipVerify
+				b.caData = parsedConfig.CAData
+			}
+
 			// Process extra config fields
 			if spec.OnInitialize != nil {
 				b.extraState = spec.OnInitialize(conf.Config, b.extraState)
@@ -250,6 +263,19 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 			DefaultAuthRole: defaultRole,
 		})
 
+		// Load TLS configuration
+		skipVerify, _ := config["tls_skip_verify"].(bool)
+		caData, _ := config["ca_data"].(string)
+		if caData != "" || skipVerify {
+			transport, err := NewTransportWithTLS(caData, skipVerify)
+			if err != nil {
+				return fmt.Errorf("failed to configure TLS: %w", err)
+			}
+			b.Proxy.Transport = transport
+			b.tlsSkipVerify = skipVerify
+			b.caData = caData
+		}
+
 		// Load extra state
 		if b.spec.OnInitialize != nil {
 			b.mu.Lock()
@@ -265,6 +291,8 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 			"timeout":           b.Timeout.String(),
 			"auto_auth_path":    tc.AutoAuthPath,
 			"default_role":      tc.DefaultAuthRole,
+			"tls_skip_verify":   b.tlsSkipVerify,
+			"ca_data":           b.caData,
 		}
 
 		// Add extra state defaults
@@ -313,5 +341,5 @@ func (b *proxyBackend) handleTransparentGatewayStreaming(ctx context.Context, re
 
 // SensitiveConfigFields returns the list of config fields that should be masked in output.
 func (b *proxyBackend) SensitiveConfigFields() []string {
-	return []string{}
+	return []string{"ca_data"}
 }

@@ -59,5 +59,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register Kubernetes driver factory
+	if err := registry.RegisterFactory(&KubernetesDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }
