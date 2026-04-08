@@ -12,11 +12,6 @@ import (
 // ServiceNow APIs can be slow for large table queries, so a 60s default is used.
 const DefaultServiceNowTimeout = 60 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // validateServiceNowURL validates that the servicenow_url is a well-formed HTTPS URL.
 func validateServiceNowURL(addr string) error {
 	if addr == "" {
@@ -45,10 +40,6 @@ var Spec = &httpproxy.ProviderSpec{
 	UserAgent:          "warden-servicenow-proxy",
 	HelpText:           servicenowBackendHelp,
 	ExtractCredentials: httpproxy.BearerAPIKeyExtractor,
-	Transport:          sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 	ValidateExtraConfig: func(conf map[string]any) error {
 		addr, ok := conf["servicenow_url"].(string)
 		if !ok || addr == "" {

@@ -80,13 +80,11 @@ type ProviderSpec struct {
 	// If nil, no extra validation is performed beyond the standard fields.
 	ValidateExtraConfig func(conf map[string]any) error
 
-	// Transport is the shared HTTP transport for this provider type.
-	// All instances of this provider share the same transport for connection pooling.
-	// Created at package init time via httpproxy.NewTransport().
-	Transport *http.Transport
-
-	// ShutdownTransport is called during application shutdown to clean up the transport.
-	ShutdownTransport func()
+	// NewTransport creates the shared HTTP transport for this provider type.
+	// Called lazily on first backend instantiation via sync.Once.
+	// Returns the transport and a shutdown function.
+	// If nil, DefaultNewTransport is used.
+	NewTransport func() (*http.Transport, func())
 }
 
 // proxyBackend is the concrete backend type created by NewFactory.
@@ -102,7 +100,21 @@ type proxyBackend struct {
 
 // NewFactory creates a logical.Factory from a ProviderSpec.
 func NewFactory(spec *ProviderSpec) logical.Factory {
+	newTransport := spec.NewTransport
+	if newTransport == nil {
+		newTransport = DefaultNewTransport
+	}
+
+	var (
+		sharedTransport *http.Transport
+		shutdownFn      func()
+		transportOnce   sync.Once
+	)
+
 	return func(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
+		transportOnce.Do(func() {
+			sharedTransport, shutdownFn = newTransport()
+		})
 		b := &proxyBackend{
 			spec:       spec,
 			extraState: make(map[string]any),
@@ -159,11 +171,11 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 		b.StorageView = conf.StorageView
 
 		// Initialize reverse proxy with provider-type shared transport
-		b.StreamingBackend.InitProxy(spec.Transport)
+		b.StreamingBackend.InitProxy(sharedTransport)
 
 		// Register transport shutdown hook
-		if conf.RegisterShutdownHook != nil && spec.ShutdownTransport != nil {
-			conf.RegisterShutdownHook(spec.Name+"-transport", spec.ShutdownTransport)
+		if conf.RegisterShutdownHook != nil && shutdownFn != nil {
+			conf.RegisterShutdownHook(spec.Name+"-transport", shutdownFn)
 		}
 
 		if err := b.StreamingBackend.Setup(ctx, conf); err != nil {

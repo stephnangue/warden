@@ -115,7 +115,8 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	b.Logger = conf.Logger.WithSubsystem("vault")
 	b.StorageView = conf.StorageView
 
-	// Initialize reverse proxy with Vault transport
+	// Initialize reverse proxy with Vault transport (lazily created on first use)
+	initTransport()
 	b.StreamingBackend.InitProxy(sharedTransport)
 
 	// Register transport shutdown hook for process-level cleanup

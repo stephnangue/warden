@@ -12,11 +12,6 @@ import (
 // DefaultSplunkTimeout is the default request timeout for Splunk API calls
 const DefaultSplunkTimeout = 30 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // extractToken extracts the Warden session token from incoming HTTP requests.
 // It checks X-Warden-Token first, then Authorization: Splunk (since Splunk
 // clients natively use this format for session tokens), then falls back to
@@ -64,10 +59,6 @@ var Spec = &httpproxy.ProviderSpec{
 	HelpText:           splunkBackendHelp,
 	ExtractCredentials: httpproxy.BearerAPIKeyExtractor,
 	ExtractToken:       extractToken,
-	Transport:          sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 	ValidateExtraConfig: func(conf map[string]any) error {
 		addr, ok := conf["splunk_url"].(string)
 		if !ok || addr == "" {

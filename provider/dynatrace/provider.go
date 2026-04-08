@@ -12,11 +12,6 @@ import (
 // DefaultDynatraceTimeout is the default request timeout for Dynatrace API calls.
 const DefaultDynatraceTimeout = 30 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // dynatraceCredentialExtractor extracts credentials and returns the appropriate
 // Authorization header. Dynatrace Environment API uses "Api-Token" prefix for
 // static API tokens, while Platform API uses "Bearer" prefix for OAuth2 tokens.
@@ -56,10 +51,6 @@ var Spec = &httpproxy.ProviderSpec{
 	UserAgent:          "warden-dynatrace-proxy",
 	HelpText:           dynatraceBackendHelp,
 	ExtractCredentials: dynatraceCredentialExtractor,
-	Transport:          sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 }
 
 // Factory creates a new Dynatrace provider backend.

@@ -14,11 +14,6 @@ import (
 // DefaultElasticTimeout is the default request timeout for Elasticsearch API calls
 const DefaultElasticTimeout = 30 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // elasticCredentialExtractor extracts the pre-encoded API key from a TypeAPIKey
 // credential and injects it as the Authorization: ApiKey header.
 //
@@ -87,10 +82,6 @@ var Spec = &httpproxy.ProviderSpec{
 	HelpText:           elasticBackendHelp,
 	ExtractCredentials: elasticCredentialExtractor,
 	ExtractToken:       extractToken,
-	Transport:          sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 	ValidateExtraConfig: func(conf map[string]any) error {
 		addr, ok := conf["elastic_url"].(string)
 		if !ok || addr == "" {

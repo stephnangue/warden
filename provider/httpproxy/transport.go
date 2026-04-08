@@ -1,7 +1,6 @@
 package httpproxy
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -81,31 +80,17 @@ func NewTransportWithTLS(caData string, skipVerify bool) (*http.Transport, error
 	return t, nil
 }
 
-// StartCleanup starts a background goroutine that periodically closes idle connections.
-// Returns a cancel function to stop the cleanup goroutine.
-func StartCleanup(transport *http.Transport) context.CancelFunc {
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				transport.CloseIdleConnections()
-			}
-		}
-	}()
-	return cancel
-}
-
-// ShutdownTransport stops the cleanup goroutine and closes idle connections.
-func ShutdownTransport(transport *http.Transport, cancel context.CancelFunc) {
-	if cancel != nil {
-		cancel()
-	}
+// ShutdownTransport closes idle connections on the transport.
+// Called during application shutdown for a clean exit.
+func ShutdownTransport(transport *http.Transport) {
 	if transport != nil {
 		transport.CloseIdleConnections()
 	}
+}
+
+// DefaultNewTransport creates a standard transport and returns it
+// with a shutdown function. Used as the default when ProviderSpec.NewTransport is nil.
+func DefaultNewTransport() (*http.Transport, func()) {
+	t := NewTransport()
+	return t, func() { ShutdownTransport(t) }
 }

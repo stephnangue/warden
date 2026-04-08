@@ -14,11 +14,6 @@ const DefaultAnthropicURL = "https://api.anthropic.com"
 // DefaultAnthropicTimeout is the default request timeout for AI inference
 const DefaultAnthropicTimeout = 120 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // extractToken extracts Warden token from X-Warden-Token, x-api-key, or Authorization: Bearer headers.
 // Anthropic clients typically send credentials via x-api-key, so we accept that as a Warden token source.
 func extractToken(r *http.Request) string {
@@ -48,10 +43,6 @@ var Spec = &httpproxy.ProviderSpec{
 	ExtractToken:         extractToken,
 	ExtraHeadersToRemove: []string{"x-api-key", "anthropic-version"},
 	DefaultHeaders:       map[string]string{"anthropic-version": "2023-06-01"},
-	Transport:            sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 }
 
 // Factory creates a new Anthropic provider backend.

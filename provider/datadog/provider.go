@@ -12,11 +12,6 @@ const DefaultDatadogURL = "https://api.datadoghq.com"
 // DefaultDatadogTimeout is the default request timeout for Datadog API calls
 const DefaultDatadogTimeout = 30 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // Spec defines the Datadog provider configuration for the httpproxy framework.
 var Spec = &httpproxy.ProviderSpec{
 	Name:            "datadog",
@@ -30,10 +25,6 @@ var Spec = &httpproxy.ProviderSpec{
 		map[string]string{"api_key": "DD-API-KEY"},
 		map[string]string{"application_key": "DD-APPLICATION-KEY"},
 	),
-	Transport: sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 }
 
 // Factory creates a new Datadog provider backend.

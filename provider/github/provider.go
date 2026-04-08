@@ -15,11 +15,6 @@ const DefaultGitHubURL = "https://api.github.com"
 // DefaultAPIVersion is the default GitHub REST API version
 const DefaultAPIVersion = "2022-11-28"
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // extractToken extracts Warden token from Authorization: Bearer or X-Warden-Token headers.
 func extractToken(r *http.Request) string {
 	if token := r.Header.Get("X-Warden-Token"); token != "" {
@@ -44,10 +39,6 @@ var Spec = &httpproxy.ProviderSpec{
 	ExtractCredentials: httpproxy.TypedTokenExtractor(credential.TypeGitHubToken, "token", "Authorization", "token "),
 	ExtractToken:       extractToken,
 	DefaultAccept:      "application/vnd.github+json",
-	Transport:          sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 	ExtraConfigFields: map[string]*framework.FieldSchema{
 		"api_version": {
 			Type:        framework.TypeString,

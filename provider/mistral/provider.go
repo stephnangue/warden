@@ -12,11 +12,6 @@ const DefaultMistralURL = "https://api.mistral.ai"
 // DefaultMistralTimeout is the default request timeout for AI inference
 const DefaultMistralTimeout = 120 * time.Second
 
-var (
-	sharedTransport        = httpproxy.NewTransport()
-	transportCleanupCancel = httpproxy.StartCleanup(sharedTransport)
-)
-
 // Spec defines the Mistral provider configuration for the httpproxy framework.
 var Spec = &httpproxy.ProviderSpec{
 	Name:               "mistral",
@@ -27,10 +22,6 @@ var Spec = &httpproxy.ProviderSpec{
 	UserAgent:          "warden-mistral-proxy",
 	HelpText:           mistralBackendHelp,
 	ExtractCredentials: httpproxy.BearerAPIKeyExtractor,
-	Transport:          sharedTransport,
-	ShutdownTransport: func() {
-		httpproxy.ShutdownTransport(sharedTransport, transportCleanupCancel)
-	},
 }
 
 // Factory creates a new Mistral provider backend.
