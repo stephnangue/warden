@@ -423,6 +423,8 @@ curl --cert client.pem --key client-key.pem \
 | `auth_header_type` | string | No | How to attach token for verification: `bearer`, `token`, `custom_header` (default: `bearer`) |
 | `auth_header_name` | string | No | Header name when `auth_header_type=custom_header` |
 | `display_name` | string | No | Human-readable label for logs/errors (default: `OAuth2`) |
+| `tls_skip_verify` | bool | No | Skip TLS certificate verification; also allows `http://` URLs (default: `false`) |
+| `ca_data` | string | No | Base64-encoded PEM CA certificate for custom/self-signed CAs |
 
 ### Credential Spec Config (OAuth2 Client Credentials)
 

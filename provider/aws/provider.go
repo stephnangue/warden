@@ -2,7 +2,9 @@ package aws
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -30,6 +32,8 @@ type awsBackend struct {
 	s3Signer          *v4.Signer // Signer for S3/S3-Control with DisableURIPathEscaping
 	proxyDomains      []string
 	processorRegistry *processor.ProcessorRegistry
+	tlsSkipVerify     bool
+	caData            string
 }
 
 // extractToken extracts the client token from the request.
@@ -153,7 +157,18 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		b.proxyDomains = parsedConfig.ProxyDomains
 		b.MaxBodySize = parsedConfig.MaxBodySize
 		b.Timeout = parsedConfig.Timeout
+		b.tlsSkipVerify = parsedConfig.TLSSkipVerify
+		b.caData = parsedConfig.CAData
 		b.initializeProcessors()
+
+		// Update transport if custom TLS config is set
+		if b.tlsSkipVerify || b.caData != "" {
+			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+			if err != nil {
+				return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+			}
+			b.Proxy.Transport = transport
+		}
 	}
 
 	// Ensure defaults are set even when no config is provided
@@ -183,6 +198,8 @@ func (b *awsBackend) Initialize(ctx context.Context) error {
 			ProxyDomains    []string `json:"proxy_domains"`
 			MaxBodySize     int64    `json:"max_body_size"`
 			Timeout         string   `json:"timeout"`
+			TLSSkipVerify   bool     `json:"tls_skip_verify"`
+			CAData          string   `json:"ca_data"`
 			AutoAuthPath    string   `json:"auto_auth_path"`
 			DefaultAuthRole string   `json:"default_role"`
 		}
@@ -191,12 +208,23 @@ func (b *awsBackend) Initialize(ctx context.Context) error {
 		}
 		b.proxyDomains = config.ProxyDomains
 		b.MaxBodySize = config.MaxBodySize
+		b.tlsSkipVerify = config.TLSSkipVerify
+		b.caData = config.CAData
 		if config.Timeout != "" {
 			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
 				b.Timeout = timeout
 			}
 		}
 		b.initializeProcessors()
+
+		// Update transport if custom TLS config is set
+		if b.tlsSkipVerify || b.caData != "" {
+			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+			if err != nil {
+				return fmt.Errorf("invalid TLS configuration: %w", err)
+			}
+			b.Proxy.Transport = transport
+		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			AutoAuthPath:    config.AutoAuthPath,
@@ -232,17 +260,19 @@ func (b *awsBackend) initializeProcessors() {
 // ValidateConfig validates AWS provider-specific configuration
 func ValidateConfig(config map[string]any) error {
 	allowedKeys := map[string]bool{
-		"proxy_domains":  true,
-		"max_body_size":  true,
-		"timeout":        true,
-		"auto_auth_path": true,
-		"default_role":   true,
+		"proxy_domains":   true,
+		"max_body_size":   true,
+		"timeout":         true,
+		"tls_skip_verify": true,
+		"ca_data":         true,
+		"auto_auth_path":  true,
+		"default_role":    true,
 	}
 
 	// Check for unknown keys
 	for key := range config {
 		if !allowedKeys[key] {
-			return fmt.Errorf("unknown configuration key: %s (allowed: proxy_domains, max_body_size, timeout, auto_auth_path, default_role)", key)
+			return fmt.Errorf("unknown configuration key: %s (allowed: proxy_domains, max_body_size, timeout, tls_skip_verify, ca_data, auto_auth_path, default_role)", key)
 		}
 	}
 
@@ -314,13 +344,44 @@ func ValidateConfig(config map[string]any) error {
 		}
 	}
 
+	// Validate tls_skip_verify
+	if v, ok := config["tls_skip_verify"]; ok {
+		switch v := v.(type) {
+		case bool:
+			// valid
+		case string:
+			if v != "true" && v != "false" && v != "1" && v != "0" {
+				return fmt.Errorf("tls_skip_verify must be a boolean, got string: %s", v)
+			}
+		default:
+			return fmt.Errorf("tls_skip_verify must be a boolean, got %T", v)
+		}
+	}
+
+	// Validate ca_data
+	if v, ok := config["ca_data"]; ok {
+		caStr, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("ca_data must be a string")
+		}
+		if caStr != "" {
+			pemBytes, err := base64.StdEncoding.DecodeString(caStr)
+			if err != nil {
+				return fmt.Errorf("ca_data is not valid base64: %w", err)
+			}
+			block, _ := pem.Decode(pemBytes)
+			if block == nil {
+				return fmt.Errorf("ca_data contains no valid PEM data")
+			}
+		}
+	}
+
 	return nil
 }
 
 // SensitiveConfigFields returns the list of config fields that should be masked in output
 func (b *awsBackend) SensitiveConfigFields() []string {
-	// AWS provider doesn't store credentials in config - uses credential minting from specs
-	return []string{}
+	return []string{"ca_data"}
 }
 
 const awsBackendHelp = `

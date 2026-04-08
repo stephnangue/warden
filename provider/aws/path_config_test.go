@@ -296,7 +296,7 @@ func TestValidateConfig(t *testing.T) {
 func TestSensitiveConfigFields(t *testing.T) {
 	b := &awsBackend{}
 	fields := b.SensitiveConfigFields()
-	assert.Empty(t, fields)
+	assert.Contains(t, fields, "ca_data")
 }
 
 // --- Initialize tests ---

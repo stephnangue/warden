@@ -112,12 +112,21 @@ func (f *GCPDriverFactory) ValidateConfig(config map[string]string) error {
 			}).
 			Describe("GCP service account key in JSON format").
 			Example("{\"type\":\"service_account\",\"project_id\":\"...\",\"private_key\":\"...\"}"),
+
+		credential.StringField("ca_data").
+			Custom(ValidateCAData).
+			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
+			Example("LS0tLS1CRUdJTi..."),
+
+		credential.BoolField("tls_skip_verify").
+			Describe("Skip TLS certificate verification (development only)").
+			Example("false"),
 	)
 }
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
 func (f *GCPDriverFactory) SensitiveConfigFields() []string {
-	return []string{"service_account_key"}
+	return []string{"service_account_key", "ca_data"}
 }
 
 // InferCredentialType infers the credential type from the spec's mint_method.
@@ -142,8 +151,13 @@ func (f *GCPDriverFactory) Create(config map[string]string, log *logger.GatedLog
 		},
 		logger:     log.WithSubsystem(credential.SourceTypeGCP),
 		tokenCache: NewTokenCache(),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
+
+	httpClient, err := BuildHTTPClient(config, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+	driver.httpClient = httpClient
 
 	// Validate source credentials by acquiring a token
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

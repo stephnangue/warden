@@ -228,5 +228,5 @@ func TestConfigWrite(t *testing.T) {
 func TestSensitiveConfigFields(t *testing.T) {
 	b := setupBackend(t)
 	fields := b.SensitiveConfigFields()
-	assert.Empty(t, fields)
+	assert.Contains(t, fields, "ca_data")
 }

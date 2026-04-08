@@ -26,7 +26,9 @@ func TestOAuth2DriverFactory_Type(t *testing.T) {
 func TestOAuth2DriverFactory_SensitiveConfigFields(t *testing.T) {
 	f := &OAuth2DriverFactory{}
 	fields := f.SensitiveConfigFields()
-	assert.Equal(t, []string{"client_secret"}, fields)
+	assert.Contains(t, fields, "client_secret")
+	assert.Contains(t, fields, "ca_data")
+	assert.Len(t, fields, 2)
 }
 
 func TestOAuth2DriverFactory_InferCredentialType(t *testing.T) {
@@ -812,4 +814,13 @@ func TestValidateOAuth2TokenURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateOAuth2HTTPSURL_TLSSkipVerify(t *testing.T) {
+	// HTTP allowed when tlsSkipVerify is true
+	require.NoError(t, validateOAuth2HTTPSURL("http://auth.local/token", "token_url", true))
+	// HTTPS still works
+	require.NoError(t, validateOAuth2HTTPSURL("https://auth.local/token", "token_url", true))
+	// FTP still rejected
+	require.Error(t, validateOAuth2HTTPSURL("ftp://auth.local/token", "token_url", true))
 }

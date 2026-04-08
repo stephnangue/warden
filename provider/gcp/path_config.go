@@ -26,6 +26,15 @@ func (b *gcpBackend) pathConfig() *framework.Path {
 				Description: "Request timeout duration (e.g., '30s', '5m')",
 				Default:     "30s",
 			},
+			"tls_skip_verify": {
+				Type:        framework.TypeBool,
+				Description: "Skip TLS certificate verification (not recommended for production)",
+				Default:     false,
+			},
+			"ca_data": {
+				Type:        framework.TypeString,
+				Description: "Base64-encoded PEM CA certificate for custom/self-signed CAs",
+			},
 			"auto_auth_path": {
 				Type:        framework.TypeString,
 				Description: "Path to auth mount for implicit authentication (e.g., 'auth/jwt/', 'auth/cert/')",
@@ -56,10 +65,12 @@ func (b *gcpBackend) handleConfigRead(ctx context.Context, req *logical.Request,
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"max_body_size":  b.MaxBodySize,
-			"timeout":        b.Timeout.String(),
-			"auto_auth_path": tc.AutoAuthPath,
-			"default_role":   tc.DefaultAuthRole,
+			"max_body_size":   b.MaxBodySize,
+			"timeout":         b.Timeout.String(),
+			"tls_skip_verify": b.tlsSkipVerify,
+			"ca_data":         b.caData,
+			"auto_auth_path":  tc.AutoAuthPath,
+			"default_role":    tc.DefaultAuthRole,
 		},
 	}, nil
 }
@@ -79,6 +90,39 @@ func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 		b.Timeout = time.Duration(val.(int)) * time.Second
 	} else if b.Timeout == 0 {
 		b.Timeout = framework.DefaultTimeout
+	}
+
+	// Handle TLS settings
+	tlsChanged := false
+	if val, ok := d.GetOk("tls_skip_verify"); ok {
+		newVal := val.(bool)
+		if b.tlsSkipVerify != newVal {
+			tlsChanged = true
+		}
+		b.tlsSkipVerify = newVal
+	}
+	if val, ok := d.GetOk("ca_data"); ok {
+		newVal := val.(string)
+		if b.caData != newVal {
+			tlsChanged = true
+		}
+		b.caData = newVal
+	}
+
+	if tlsChanged {
+		if b.tlsSkipVerify || b.caData != "" {
+			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+			if err != nil {
+				return &logical.Response{
+					StatusCode: http.StatusBadRequest,
+					Err:        logical.ErrBadRequest(err.Error()),
+				}, nil
+			}
+			b.Proxy.Transport = transport
+		} else {
+			initTransport()
+			b.Proxy.Transport = sharedTransport
+		}
 	}
 
 	// Transparent mode settings — build new config from current values + overrides
@@ -106,10 +150,12 @@ func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"max_body_size":  b.MaxBodySize,
-			"timeout":        b.Timeout.String(),
-			"auto_auth_path": tc.AutoAuthPath,
-			"default_role":   tc.DefaultAuthRole,
+			"max_body_size":   b.MaxBodySize,
+			"timeout":         b.Timeout.String(),
+			"tls_skip_verify": b.tlsSkipVerify,
+			"ca_data":         b.caData,
+			"auto_auth_path":  tc.AutoAuthPath,
+			"default_role":    tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return &logical.Response{

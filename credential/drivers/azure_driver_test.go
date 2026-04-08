@@ -36,7 +36,8 @@ func TestAzureDriverFactory_SensitiveConfigFields(t *testing.T) {
 	factory := &AzureDriverFactory{}
 	fields := factory.SensitiveConfigFields()
 	assert.Contains(t, fields, "client_secret")
-	assert.Len(t, fields, 1)
+	assert.Contains(t, fields, "ca_data")
+	assert.Len(t, fields, 2)
 }
 
 func TestAzureDriverFactory_ValidateConfig(t *testing.T) {

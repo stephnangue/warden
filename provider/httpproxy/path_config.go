@@ -103,11 +103,17 @@ func (b *proxyBackend) handleConfigRead(_ context.Context, _ *logical.Request, _
 
 // handleConfigWrite handles writing the provider configuration.
 func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	// Read tls_skip_verify before URL validation so HTTP can be conditionally allowed
+	skipVerify := b.tlsSkipVerify
+	if val, ok := d.GetOk("tls_skip_verify"); ok {
+		skipVerify = val.(bool)
+	}
+
 	if val, ok := d.GetOk(b.spec.URLConfigKey); ok {
 		addr := val.(string)
 		if addr != "" {
 			addr = strings.TrimRight(addr, "/")
-			if err := ValidateURL(addr, b.spec.URLConfigKey); err != nil {
+			if err := ValidateURL(addr, b.spec.URLConfigKey, skipVerify); err != nil {
 				return &logical.Response{
 					StatusCode: http.StatusBadRequest,
 					Err:        logical.ErrBadRequest(err.Error()),

@@ -621,7 +621,8 @@ docker compose -f docker-compose.quickstart.yml down -v
 | `vault_address` | string | — | Base URL of the Vault instance (required, e.g., `https://vault.example.com:8200`) |
 | `max_body_size` | int | `10485760` (10 MB) | Maximum request body size in bytes (max 100 MB) |
 | `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
-| `tls_skip_verify` | bool | `false` | Skip TLS certificate verification (development only) |
+| `tls_skip_verify` | bool | `false` | Skip TLS certificate verification; also allows `http://` URLs (development only) |
+| `ca_data` | string | — | Base64-encoded PEM CA certificate for custom/self-signed CAs |
 | `auto_auth_path` | string | — | Auth mount path for implicit authentication, e.g. `auth/cert/` or `auth/jwt/` |
 | `default_role` | string | — | Fallback role when not specified in the URL path |
 

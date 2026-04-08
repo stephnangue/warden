@@ -66,7 +66,8 @@ func (f *ElasticDriverFactory) ValidateConfig(config map[string]string) error {
 		credential.StringField("elastic_url").
 			Required().
 			Custom(func(v string) error {
-				if !strings.HasPrefix(v, "https://") {
+				skipTLS := credential.GetBool(config, "tls_skip_verify", false)
+				if !strings.HasPrefix(v, "https://") && !(strings.HasPrefix(v, "http://") && skipTLS) {
 					return fmt.Errorf("elastic_url must use https scheme, got: %s", v)
 				}
 				if _, err := url.Parse(v); err != nil {
@@ -99,12 +100,21 @@ func (f *ElasticDriverFactory) ValidateConfig(config map[string]string) error {
 		credential.StringField("key_name_prefix").
 			Describe("Prefix for generated API key names (default: warden)").
 			Example("warden"),
+
+		credential.StringField("ca_data").
+			Custom(ValidateCAData).
+			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
+			Example("LS0tLS1CRUdJTi..."),
+
+		credential.BoolField("tls_skip_verify").
+			Describe("Skip TLS certificate verification (development only)").
+			Example("false"),
 	)
 }
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
 func (f *ElasticDriverFactory) SensitiveConfigFields() []string {
-	return []string{"api_key"}
+	return []string{"api_key", "ca_data"}
 }
 
 // InferCredentialType returns the credential type for Elasticsearch sources.
@@ -120,8 +130,13 @@ func (f *ElasticDriverFactory) Create(config map[string]string, log *logger.Gate
 			Config: config,
 		},
 		logger:     log.WithSubsystem(credential.SourceTypeElastic),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
+
+	httpClient, err := BuildHTTPClient(config, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+	driver.httpClient = httpClient
 
 	// Extract API key ID from pre-encoded value if not explicitly provided
 	apiKeyID := credential.GetString(config, "api_key_id", "")

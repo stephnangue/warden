@@ -14,6 +14,8 @@ type ProviderConfig struct {
 	Timeout         time.Duration
 	AutoAuthPath    string
 	DefaultAuthRole string
+	TLSSkipVerify   bool
+	CAData          string
 }
 
 // parseConfig parses configuration from mount config (map[string]any from JSON)
@@ -75,6 +77,19 @@ func parseConfig(conf map[string]any) ProviderConfig {
 	// Parse default_role
 	if dr, ok := conf["default_role"].(string); ok {
 		config.DefaultAuthRole = dr
+	}
+
+	// Parse TLS settings
+	if v, ok := conf["tls_skip_verify"]; ok {
+		switch b := v.(type) {
+		case bool:
+			config.TLSSkipVerify = b
+		case string:
+			config.TLSSkipVerify = b == "true" || b == "1"
+		}
+	}
+	if v, ok := conf["ca_data"].(string); ok {
+		config.CAData = v
 	}
 
 	return config

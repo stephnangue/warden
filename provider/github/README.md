@@ -418,6 +418,8 @@ curl --cert client.pem --key client-key.pem \
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `github_url` | string | `https://api.github.com` | GitHub API base URL (must be HTTPS) |
+| `tls_skip_verify` | bool | `false` | Skip TLS certificate verification; also allows `http://` URLs (development only) |
+| `ca_data` | string | — | Base64-encoded PEM CA certificate for custom/self-signed CAs |
 
 ### Credential Spec Config (App Mode)
 
@@ -448,3 +450,33 @@ EOF
 ```
 
 All gateway requests will be proxied to the configured Enterprise Server instance.
+
+### Custom CA Certificate
+
+If your GitHub Enterprise instance uses a certificate signed by a private CA:
+
+```bash
+CA_DATA=$(base64 < /path/to/corporate-ca.pem)
+
+warden write github/config <<EOF
+{
+  "github_url": "https://github.internal.corp/api/v3",
+  "ca_data": "${CA_DATA}",
+  "auto_auth_path": "auth/jwt/"
+}
+EOF
+```
+
+### Development / Testing (no TLS)
+
+For local development against a GitHub Enterprise instance without TLS:
+
+```bash
+warden write github/config <<EOF
+{
+  "github_url": "http://localhost:3000/api/v3",
+  "tls_skip_verify": true,
+  "auto_auth_path": "auth/jwt/"
+}
+EOF
+```

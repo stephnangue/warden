@@ -448,6 +448,8 @@ curl --cert client.pem --key client-key.pem \
 |-------|------|---------|-------------|
 | `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
 | `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
+| `tls_skip_verify` | bool | `false` | Skip TLS certificate verification; also allows `http://` URLs (development only) |
+| `ca_data` | string | — | Base64-encoded PEM CA certificate for custom/self-signed CAs |
 | `auto_auth_path` | string | — | Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 
@@ -457,6 +459,8 @@ curl --cert client.pem --key client-key.pem \
 |-------|------|----------|-------------|
 | `service_account_key` | string | Yes | Full JSON service account key |
 | `activation_delay` | duration | No | Delay before activating rotated keys (default: `2m`) |
+| `tls_skip_verify` | bool | No | Skip TLS certificate verification; also allows `http://` URLs (default: `false`) |
+| `ca_data` | string | No | Base64-encoded PEM CA certificate for custom/self-signed CAs |
 
 ### Credential Spec Config (Direct Access Token)
 

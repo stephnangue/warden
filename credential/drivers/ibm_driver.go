@@ -84,7 +84,8 @@ func (f *IBMDriverFactory) ValidateConfig(config map[string]string) error {
 
 		credential.StringField("iam_endpoint").
 			Custom(func(v string) error {
-				if !strings.HasPrefix(v, "https://") {
+				skipTLS := credential.GetBool(config, "tls_skip_verify", false)
+				if !strings.HasPrefix(v, "https://") && !(strings.HasPrefix(v, "http://") && skipTLS) {
 					return fmt.Errorf("iam_endpoint must use https scheme, got: %s", v)
 				}
 				if _, err := url.Parse(v); err != nil {
@@ -94,12 +95,21 @@ func (f *IBMDriverFactory) ValidateConfig(config map[string]string) error {
 			}).
 			Describe("IBM Cloud IAM endpoint (optional, defaults to https://iam.cloud.ibm.com)").
 			Example("https://iam.cloud.ibm.com"),
+
+		credential.StringField("ca_data").
+			Custom(ValidateCAData).
+			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
+			Example("LS0tLS1CRUdJTi..."),
+
+		credential.BoolField("tls_skip_verify").
+			Describe("Skip TLS certificate verification (development only)").
+			Example("false"),
 	)
 }
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
 func (f *IBMDriverFactory) SensitiveConfigFields() []string {
-	return []string{"api_key"}
+	return []string{"api_key", "ca_data"}
 }
 
 // InferCredentialType infers the credential type from the spec's mint_method.
@@ -122,8 +132,13 @@ func (f *IBMDriverFactory) Create(config map[string]string, log *logger.GatedLog
 		},
 		logger:     log.WithSubsystem(credential.SourceTypeIBM),
 		tokenCache: NewTokenCache(),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
+
+	httpClient, err := BuildHTTPClient(config, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+	driver.httpClient = httpClient
 
 	// Validate source credentials by acquiring a token
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

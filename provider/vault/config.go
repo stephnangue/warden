@@ -16,6 +16,7 @@ type ProviderConfig struct {
 	MaxBodySize   int64
 	Timeout       time.Duration
 	TLSSkipVerify bool
+	CAData        string
 }
 
 // parseConfig parses configuration from mount config (map[string]any from JSON)
@@ -81,6 +82,11 @@ func parseConfig(conf map[string]any) ProviderConfig {
 		case string:
 			config.TLSSkipVerify = v == "true"
 		}
+	}
+
+	// Parse ca_data
+	if v, ok := conf["ca_data"].(string); ok {
+		config.CAData = v
 	}
 
 	return config

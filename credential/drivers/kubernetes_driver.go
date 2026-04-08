@@ -2,9 +2,6 @@ package drivers
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -77,20 +74,7 @@ func (f *KubernetesDriverFactory) ValidateConfig(config map[string]string) error
 			Example("eyJhbGciOiJSUzI1NiIs..."),
 
 		credential.StringField("ca_data").
-			Custom(func(v string) error {
-				if v == "" {
-					return nil
-				}
-				pemBytes, err := base64.StdEncoding.DecodeString(v)
-				if err != nil {
-					return fmt.Errorf("ca_data is not valid base64: %w", err)
-				}
-				pool := x509.NewCertPool()
-				if !pool.AppendCertsFromPEM(pemBytes) {
-					return fmt.Errorf("ca_data contains no valid PEM certificates")
-				}
-				return nil
-			}).
+			Custom(ValidateCAData).
 			Describe("Base64-encoded PEM CA certificate for the cluster").
 			Example("LS0tLS1CRUdJTi..."),
 
@@ -148,7 +132,7 @@ func (f *KubernetesDriverFactory) Create(config map[string]string, log *logger.G
 		logger: log.WithSubsystem(credential.SourceTypeKubernetes),
 	}
 
-	httpClient, err := driver.buildHTTPClient(config)
+	httpClient, err := BuildHTTPClient(config, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP client: %w", err)
 	}
@@ -426,7 +410,7 @@ func (d *KubernetesDriver) CommitRotation(ctx context.Context, newConfig map[str
 	d.authMu.Unlock()
 
 	if tlsChanged {
-		httpClient, err := d.buildHTTPClient(newConfig)
+		httpClient, err := BuildHTTPClient(newConfig, 30*time.Second)
 		if err != nil {
 			// Rollback config on TLS rebuild failure
 			d.authMu.Lock()
@@ -470,36 +454,6 @@ func buildTokenRequestBody(expirationSeconds int64, audiences []string) ([]byte,
 	}
 
 	return json.Marshal(reqBody)
-}
-
-// buildHTTPClient creates an HTTP client with custom TLS configuration.
-func (d *KubernetesDriver) buildHTTPClient(config map[string]string) (*http.Client, error) {
-	tlsConfig := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-	}
-
-	if credential.GetBool(config, "tls_skip_verify", false) {
-		tlsConfig.InsecureSkipVerify = true
-	}
-
-	if caData := credential.GetString(config, "ca_data", ""); caData != "" {
-		pemBytes, err := base64.StdEncoding.DecodeString(caData)
-		if err != nil {
-			return nil, fmt.Errorf("ca_data is not valid base64: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pemBytes) {
-			return nil, fmt.Errorf("ca_data contains no valid PEM certificates")
-		}
-		tlsConfig.RootCAs = pool
-	}
-
-	return &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: tlsConfig,
-		},
-	}, nil
 }
 
 // verifyConnection checks API server connectivity using the /version endpoint,

@@ -79,6 +79,20 @@ func (f *GitLabDriverFactory) ValidateConfig(config map[string]string) error {
 		return err
 	}
 
+	// Validate TLS fields
+	if err := credential.ValidateSchema(config,
+		credential.StringField("ca_data").
+			Custom(ValidateCAData).
+			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
+			Example("LS0tLS1CRUdJTi..."),
+
+		credential.BoolField("tls_skip_verify").
+			Describe("Skip TLS certificate verification (development only)").
+			Example("false"),
+	); err != nil {
+		return err
+	}
+
 	// Validate auth_method and conditional fields
 	authMethod := credential.GetString(config, "auth_method", "pat")
 	if err := credential.ValidateSchema(config,
@@ -118,7 +132,7 @@ func (f *GitLabDriverFactory) ValidateConfig(config map[string]string) error {
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
 func (f *GitLabDriverFactory) SensitiveConfigFields() []string {
-	return []string{"personal_access_token", "application_secret"}
+	return []string{"personal_access_token", "application_secret", "ca_data"}
 }
 
 // InferCredentialType always returns gitlab_access_token for GitLab sources.
@@ -135,8 +149,13 @@ func (f *GitLabDriverFactory) Create(config map[string]string, log *logger.Gated
 		},
 		logger:     log.WithSubsystem(credential.SourceTypeGitLab),
 		tokenCache: NewTokenCache(),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
+
+	httpClient, err := BuildHTTPClient(config, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+	driver.httpClient = httpClient
 
 	// Verify credentials by calling the API
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

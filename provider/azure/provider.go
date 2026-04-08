@@ -2,7 +2,9 @@ package azure
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -17,6 +19,8 @@ import (
 // azureBackend is the streaming backend for Azure provider operations
 type azureBackend struct {
 	*framework.StreamingBackend
+	tlsSkipVerify bool
+	caData        string
 }
 
 // extractToken extracts Warden token from Authorization Bearer header or X-Warden-Token header
@@ -110,6 +114,17 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		parsedConfig := parseConfig(conf.Config)
 		b.MaxBodySize = parsedConfig.MaxBodySize
 		b.Timeout = parsedConfig.Timeout
+		b.tlsSkipVerify = parsedConfig.TLSSkipVerify
+		b.caData = parsedConfig.CAData
+
+		// Update transport if custom TLS config is set
+		if b.tlsSkipVerify || b.caData != "" {
+			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+			if err != nil {
+				return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+			}
+			b.Proxy.Transport = transport
+		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			AutoAuthPath:    parsedConfig.AutoAuthPath,
@@ -135,6 +150,8 @@ func (b *azureBackend) Initialize(ctx context.Context) error {
 		var config struct {
 			MaxBodySize     int64  `json:"max_body_size"`
 			Timeout         string `json:"timeout"`
+			TLSSkipVerify   bool   `json:"tls_skip_verify"`
+			CAData          string `json:"ca_data"`
 			AutoAuthPath    string `json:"auto_auth_path"`
 			DefaultAuthRole string `json:"default_role"`
 		}
@@ -142,10 +159,21 @@ func (b *azureBackend) Initialize(ctx context.Context) error {
 			return fmt.Errorf("failed to decode config: %w", err)
 		}
 		b.MaxBodySize = config.MaxBodySize
+		b.tlsSkipVerify = config.TLSSkipVerify
+		b.caData = config.CAData
 		if config.Timeout != "" {
 			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
 				b.Timeout = timeout
 			}
+		}
+
+		// Update transport if custom TLS config is set
+		if b.tlsSkipVerify || b.caData != "" {
+			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+			if err != nil {
+				return fmt.Errorf("invalid TLS configuration: %w", err)
+			}
+			b.Proxy.Transport = transport
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
@@ -157,10 +185,12 @@ func (b *azureBackend) Initialize(ctx context.Context) error {
 		// Azure provider is immediately configured and readable.
 		tc := b.TransparentConfig
 		defaultEntry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"max_body_size":  b.MaxBodySize,
-			"timeout":        b.Timeout.String(),
-			"auto_auth_path": tc.AutoAuthPath,
-			"default_role":   tc.DefaultAuthRole,
+			"max_body_size":   b.MaxBodySize,
+			"timeout":         b.Timeout.String(),
+			"tls_skip_verify": b.tlsSkipVerify,
+			"ca_data":         b.caData,
+			"auto_auth_path":  tc.AutoAuthPath,
+			"default_role":    tc.DefaultAuthRole,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create default config entry: %w", err)
@@ -207,16 +237,18 @@ func (b *azureBackend) handleTransparentGatewayStreaming(ctx context.Context, re
 // ValidateConfig validates Azure provider-specific configuration
 func ValidateConfig(config map[string]any) error {
 	allowedKeys := map[string]bool{
-		"max_body_size":  true,
-		"timeout":        true,
-		"auto_auth_path": true,
-		"default_role":   true,
+		"max_body_size":   true,
+		"timeout":         true,
+		"tls_skip_verify": true,
+		"ca_data":         true,
+		"auto_auth_path":  true,
+		"default_role":    true,
 	}
 
 	// Check for unknown keys
 	for key := range config {
 		if !allowedKeys[key] {
-			return fmt.Errorf("unknown configuration key: %s (allowed: max_body_size, timeout, auto_auth_path, default_role)", key)
+			return fmt.Errorf("unknown configuration key: %s (allowed: max_body_size, timeout, tls_skip_verify, ca_data, auto_auth_path, default_role)", key)
 		}
 	}
 
@@ -287,13 +319,44 @@ func ValidateConfig(config map[string]any) error {
 		}
 	}
 
+	// Validate tls_skip_verify
+	if v, ok := config["tls_skip_verify"]; ok {
+		switch v := v.(type) {
+		case bool:
+			// valid
+		case string:
+			if v != "true" && v != "false" && v != "1" && v != "0" {
+				return fmt.Errorf("tls_skip_verify must be a boolean, got string: %s", v)
+			}
+		default:
+			return fmt.Errorf("tls_skip_verify must be a boolean, got %T", v)
+		}
+	}
+
+	// Validate ca_data
+	if v, ok := config["ca_data"]; ok {
+		caStr, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("ca_data must be a string")
+		}
+		if caStr != "" {
+			pemBytes, err := base64.StdEncoding.DecodeString(caStr)
+			if err != nil {
+				return fmt.Errorf("ca_data is not valid base64: %w", err)
+			}
+			block, _ := pem.Decode(pemBytes)
+			if block == nil {
+				return fmt.Errorf("ca_data contains no valid PEM data")
+			}
+		}
+	}
+
 	return nil
 }
 
 // SensitiveConfigFields returns the list of config fields that should be masked in output
 func (b *azureBackend) SensitiveConfigFields() []string {
-	// Azure provider doesn't store credentials in config - uses credential minting from specs
-	return []string{}
+	return []string{"ca_data"}
 }
 
 const azureBackendHelp = `

@@ -2,6 +2,9 @@ package vault
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -18,12 +21,31 @@ var (
 
 func initTransport() {
 	transportOnce.Do(func() {
-		sharedTransport = newVaultTransport(false)
+		t, _ := newVaultTransport("", false)
+		sharedTransport = t
 	})
 }
 
 // newVaultTransport creates an HTTP transport optimized for Vault workloads
-func newVaultTransport(tlsSkipVerify bool) *http.Transport {
+func newVaultTransport(caData string, tlsSkipVerify bool) (*http.Transport, error) {
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		ClientSessionCache: tls.NewLRUClientSessionCache(100),
+		InsecureSkipVerify: tlsSkipVerify,
+	}
+
+	if caData != "" {
+		pemBytes, err := base64.StdEncoding.DecodeString(caData)
+		if err != nil {
+			return nil, fmt.Errorf("ca_data is not valid base64: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemBytes) {
+			return nil, fmt.Errorf("ca_data contains no valid PEM certificates")
+		}
+		tlsConfig.RootCAs = pool
+	}
+
 	transport := &http.Transport{
 		// Connection pool settings
 		MaxIdleConns:        100,
@@ -33,12 +55,7 @@ func newVaultTransport(tlsSkipVerify bool) *http.Transport {
 
 		// TLS configuration
 		TLSHandshakeTimeout: 10 * time.Second,
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			// Enable session resumption for faster TLS handshakes
-			ClientSessionCache: tls.NewLRUClientSessionCache(100),
-			InsecureSkipVerify: tlsSkipVerify,
-		},
+		TLSClientConfig:     tlsConfig,
 
 		// Dialer settings
 		DialContext: (&net.Dialer{
@@ -60,7 +77,7 @@ func newVaultTransport(tlsSkipVerify bool) *http.Transport {
 		log.Printf("Failed to configure HTTP/2: %v", err)
 	}
 
-	return transport
+	return transport, nil
 }
 
 // ShutdownHTTPTransport should be called during application shutdown

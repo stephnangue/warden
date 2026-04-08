@@ -437,6 +437,8 @@ curl --cert client.pem --key client-key.pem \
 | `splunk_url` | string | — (required) | Splunk management API base URL (must use HTTPS, include port 8089) |
 | `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
 | `timeout` | duration | `30s` | Request timeout |
+| `tls_skip_verify` | bool | `false` | Skip TLS certificate verification; also allows `http://` URLs (development only) |
+| `ca_data` | string | — | Base64-encoded PEM CA certificate for custom/self-signed CAs |
 | `auto_auth_path` | string | — | Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 
@@ -560,3 +562,35 @@ curl -k -u admin:password -X POST \
 | Token creation | REST API or Web UI | Web UI or support ticket |
 
 When using Splunk Cloud, ensure that the REST API endpoints you need are in the allowed list for your Splunk Cloud version.
+
+## Self-Hosted Splunk
+
+### Custom CA Certificate
+
+If your Splunk instance uses a certificate signed by a private CA:
+
+```bash
+CA_DATA=$(base64 < /path/to/corporate-ca.pem)
+
+warden write splunk/config <<EOF
+{
+  "splunk_url": "https://splunk.internal.corp:8089",
+  "ca_data": "${CA_DATA}",
+  "auto_auth_path": "auth/jwt/"
+}
+EOF
+```
+
+### Development / Testing (no TLS)
+
+For local development against a Splunk instance without TLS:
+
+```bash
+warden write splunk/config <<EOF
+{
+  "splunk_url": "http://localhost:8089",
+  "tls_skip_verify": true,
+  "auto_auth_path": "auth/jwt/"
+}
+EOF
+```
