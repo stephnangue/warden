@@ -33,7 +33,7 @@ The Kubernetes provider enables proxied access to Kubernetes API servers through
 >
 > **2. Start Warden in dev mode:**
 > ```bash
-> warden server -dev -dev-root-token-id=root
+> warden server --dev --dev-root-token=root
 > ```
 
 ## Step 1: Configure JWT Auth and Create a Role
@@ -42,11 +42,12 @@ Enable JWT auth and create a role bound to a Warden policy:
 
 ```bash
 # Enable JWT auth (if not already enabled)
-warden auth enable -type=jwt -path=auth/jwt/
+warden auth enable --type=jwt --path=auth/jwt/
 
 # Configure JWT auth with your OIDC provider
 warden write auth/jwt/config \
-  oidc_discovery_url="http://localhost:4444/.well-known/openid-configuration" \
+  mode=jwt \
+  jwks_url="http://localhost:4444/.well-known/jwks.json" \
   default_role="k8s-user"
 
 # Create a role
@@ -60,7 +61,7 @@ warden write auth/jwt/role/k8s-user \
 
 ```bash
 # Enable the Kubernetes provider
-warden provider enable -type=kubernetes
+warden provider enable --type=kubernetes
 
 # Configure the provider with your cluster's API server URL
 warden write kubernetes/config \

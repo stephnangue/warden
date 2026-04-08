@@ -481,13 +481,13 @@ func (d *GitLabDriver) preparePATRotation(ctx context.Context) (map[string]strin
 }
 
 // prepareOAuth2Rotation rotates the OAuth2 application secret.
-// The rotate_secret endpoint atomically replaces the old secret, so
+// The renew-secret endpoint atomically replaces the old secret, so
 // activateAfter=0 is returned (fast path, no propagation delay needed).
 func (d *GitLabDriver) prepareOAuth2Rotation(ctx context.Context) (map[string]string, map[string]string, time.Duration, error) {
 	applicationID := credential.GetString(d.credSource.Config, "application_id", "")
 
 	// Rotate the application secret via admin API
-	path := fmt.Sprintf("/api/v4/applications/%s/rotate_secret", url.PathEscape(applicationID))
+	path := fmt.Sprintf("/api/v4/applications/%s/renew-secret", url.PathEscape(applicationID))
 	respBody, err := d.doGitLabRequest(ctx, http.MethodPost, path, nil)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to rotate OAuth2 application secret: %w", err)

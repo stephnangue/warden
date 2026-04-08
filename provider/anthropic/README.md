@@ -493,7 +493,7 @@ curl --cert client.pem --key client-key.pem \
 | `timeout` | duration | `120s` | Request timeout — set high for AI inference |
 | `tls_skip_verify` | bool | `false` | Skip TLS certificate verification; also allows `http://` URLs (development only) |
 | `ca_data` | string | — | Base64-encoded PEM CA certificate for custom/self-signed CAs |
-| `auto_auth_path` | string | — | Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
+| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 
 ### Credential Source Config

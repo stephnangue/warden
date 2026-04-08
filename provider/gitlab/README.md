@@ -333,6 +333,7 @@ Warden mints short-lived, scoped access tokens for GitLab projects and groups th
 | Value | Role |
 |-------|------|
 | 10 | Guest |
+| 15 | Planner |
 | 20 | Reporter |
 | 30 | Developer |
 | 40 | Maintainer |
@@ -355,17 +356,17 @@ Warden mints short-lived, scoped access tokens for GitLab projects and groups th
 GitLab credentials support the two-stage async rotation pattern:
 
 - **PAT mode:** Rotates via `POST /api/v4/personal_access_tokens/{id}/rotate`. GitLab immediately revokes the old token and issues a new one.
-- **OAuth2 mode:** Rotates via `POST /api/v4/applications/{id}/rotate_secret`. GitLab immediately invalidates the old secret.
+- **OAuth2 mode:** Rotates via `POST /api/v4/applications/{id}/renew-secret`. GitLab immediately invalidates the old secret.
 
 The default activation delay is **1 minute** (configurable via `activation_delay` in the credential source config). No cleanup is needed since GitLab automatically invalidates old credentials during rotation.
 
 ## TLS Certificate Authentication
 
-Steps 4–5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 > **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
-Steps 1–3 (provider setup) are identical. Replace Steps 4–5 with the following.
+Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
@@ -434,7 +435,7 @@ curl --cert client.pem --key client-key.pem \
 | `gitlab_address` | string | — | GitLab instance URL (required, e.g., `https://gitlab.com`) |
 | `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
 | `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
-| `auto_auth_path` | string | — | Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
+| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 
 ### Credential Source Config (PAT Mode)
