@@ -559,7 +559,7 @@ func TestGitLabDriver_PrepareRotation_OAuth2_FastPath(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/applications/app-123/rotate_secret":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/applications/app-123/renew-secret":
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"secret": "new-rotated-secret",
@@ -590,7 +590,7 @@ func TestGitLabDriver_PrepareRotation_OAuth2_FastPath(t *testing.T) {
 	newConfig, cleanupConfig, activateAfter, err := driver.PrepareRotation(context.Background())
 	require.NoError(t, err)
 
-	// GitLab rotate_secret is atomic — must use fast path (no activation delay)
+	// GitLab renew-secret is atomic — must use fast path (no activation delay)
 	assert.Equal(t, time.Duration(0), activateAfter, "GitLab OAuth2 rotation must use activateAfter=0 (fast path)")
 	assert.Equal(t, "new-rotated-secret", newConfig["application_secret"])
 	assert.Equal(t, "app-123", cleanupConfig["application_id"])

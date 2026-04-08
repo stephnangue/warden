@@ -336,11 +336,11 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 ## TLS Certificate Authentication
 
-Steps 4–5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 > **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
-Steps 1–3 (provider setup) are identical. Replace Steps 4–5 with the following.
+Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
@@ -407,10 +407,10 @@ curl --cert client.pem --key client-key.pem \
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `github_url` | string | `https://api.github.com` | GitHub API base URL (must be HTTPS) |
-| `api_version` | string | `2022-11-28` | GitHub REST API version header |
+| `api_version` | string | `2022-11-28` | GitHub REST API version header (latest: `2026-03-10`) |
 | `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
 | `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
-| `auto_auth_path` | string | — | Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
+| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 
 ### Credential Source Config

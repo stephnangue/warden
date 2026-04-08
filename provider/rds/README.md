@@ -40,7 +40,7 @@ RDS IAM tokens are valid for **15 minutes** and are generated locally via SigV4 
 
 ### 1. Warden server
 
-A running Warden server. See the [Anthropic provider README](../anthropic/README.md) for quickstart instructions (download binary, start dev server, set env vars).
+A running Warden server. See the [AWS provider README](../aws/README.md) for quickstart instructions (download binary, start dev server, set env vars).
 
 ### 2. AWS IAM credentials
 
@@ -420,9 +420,9 @@ This means database audit logs show both the shared IAM user and which Warden wo
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `auto_auth_path` | string | — | Auth mount path for implicit authentication (e.g., `auth/jwt/`) |
+| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`) |
 
-### Credential Spec Config (`db_auth_token` type)
+### Credential Spec Config (`rds_iam_token` type)
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|

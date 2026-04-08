@@ -1,6 +1,6 @@
 # Azure Provider
 
-The Azure provider enables proxied access to Azure APIs through Warden. It manages Azure AD credentials, supports Bearer token minting and Key Vault secret fetching, and handles automated credential rotation via the Microsoft Graph API.
+The Azure provider enables proxied access to Azure APIs through Warden. It manages Microsoft Entra ID credentials, supports Bearer token minting and Key Vault secret fetching, and handles automated credential rotation via the Microsoft Graph API.
 
 ## Table of Contents
 
@@ -18,7 +18,7 @@ The Azure provider enables proxied access to Azure APIs through Warden. It manag
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- An Azure AD **App Registration** (service principal) with a client secret
+- A Microsoft Entra ID **App Registration** (service principal) with a client secret
 
 > **New to Warden?** Follow these steps to get a local dev environment running:
 >
@@ -61,9 +61,9 @@ The Azure provider enables proxied access to Azure APIs through Warden. It manag
 > export WARDEN_TOKEN="root"
 > ```
 
-### Creating an Azure AD App Registration
+### Creating a Microsoft Entra ID App Registration
 
-1. Go to **Azure Portal** > **Azure Active Directory** > **App registrations** > **New registration**.
+1. Go to **Azure Portal** > **Microsoft Entra ID** > **App registrations** > **New registration**.
 2. Name the application (e.g., `warden-source`) and set the account type (typically "Single tenant").
 3. Click **Register** and note the following values:
    - **Application (client) ID** — used as `client_id`
@@ -95,7 +95,7 @@ If you want Warden to automatically rotate service principal credentials, the so
 
 1. Go to **App registrations** > your app > **API permissions** > **Add a permission**.
 2. Select **Microsoft Graph** > **Application permissions**.
-3. Add `Application.ReadWrite.All`.
+3. Add `Application.ReadWrite.OwnedBy` (sufficient for rotating the app's own credentials). Use `Application.ReadWrite.All` only if Warden manages credentials for other applications.
 4. Click **Grant admin consent** for your tenant.
 
 > **Note:** Without Graph API permissions, credential rotation will be unavailable but all other features (token minting, proxying, Key Vault secret fetching) will work normally.
@@ -103,7 +103,7 @@ If you want Warden to automatically rotate service principal credentials, the so
 ### Network Access
 
 Warden needs network access to the following Azure endpoints:
-- `login.microsoftonline.com` (Azure AD authentication)
+- `login.microsoftonline.com` (Microsoft Entra ID authentication)
 - `management.azure.com` (Azure Resource Manager)
 - `graph.microsoft.com` (Microsoft Graph, required for rotation)
 - Any additional Azure service endpoints you plan to proxy
@@ -168,7 +168,7 @@ warden read azure/config
 
 ## Step 3: Create a Credential Source and Spec
 
-The credential source holds the Azure AD service principal credentials used to authenticate with Azure.
+The credential source holds the Microsoft Entra ID service principal credentials used to authenticate with Azure.
 
 ```bash
 warden cred source create azure-src \
@@ -190,7 +190,7 @@ Create a credential spec that references the credential source. The spec defines
 
 ### Option A: Bearer Token (Recommended)
 
-Mints an Azure AD Bearer token using the client credentials flow:
+Mints an Microsoft Entra ID Bearer token using the client credentials flow:
 
 ```bash
 warden cred spec create azure-ops \
@@ -292,7 +292,7 @@ curl "${AZURE_ENDPOINT}/management.azure.com/subscriptions?api-version=2022-12-0
 ### Get a Key Vault Secret
 
 ```bash
-curl "${AZURE_ENDPOINT}/myvault.vault.azure.net/secrets/my-secret?api-version=7.4" \
+curl "${AZURE_ENDPOINT}/myvault.vault.azure.net/secrets/my-secret?api-version=7.6" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
@@ -313,7 +313,7 @@ curl "${AZURE_ENDPOINT}/graph.microsoft.com/v1.0/users" \
 ### List Resource Groups
 
 ```bash
-curl "${AZURE_ENDPOINT}/management.azure.com/subscriptions/<subscription-id>/resourcegroups?api-version=2021-04-01" \
+curl "${AZURE_ENDPOINT}/management.azure.com/subscriptions/<subscription-id>/resourcegroups?api-version=2025-04-01" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
@@ -365,15 +365,15 @@ Warden supports automatic rotation of Azure service principal credentials via th
 | Source rotation | Rotates the source service principal's own credentials |
 | Spec rotation | Rotates workload service principal credentials |
 
-> **Note:** Azure AD Bearer tokens are not directly revocable — they expire naturally (typically after 1 hour). Rotation applies to the underlying service principal secrets.
+> **Note:** Microsoft Entra ID Bearer tokens are not directly revocable — they expire naturally (typically after 1 hour). Rotation applies to the underlying service principal secrets.
 
 ## TLS Certificate Authentication
 
-Steps 4–5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 > **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
-Steps 1–3 (provider setup) are identical. Replace Steps 4–5 with the following.
+Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
@@ -442,14 +442,14 @@ curl --cert client.pem --key client-key.pem \
 | `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
 | `tls_skip_verify` | bool | `false` | Skip TLS certificate verification; also allows `http://` URLs (development only) |
 | `ca_data` | string | — | Base64-encoded PEM CA certificate for custom/self-signed CAs |
-| `auto_auth_path` | string | — | Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
+| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 
 ### Credential Source Config
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `tenant_id` | string | Yes | Azure AD Tenant ID (UUID format) |
+| `tenant_id` | string | Yes | Microsoft Entra ID Tenant ID (UUID format) |
 | `client_id` | string | Yes | Service Principal Application (Client) ID |
 | `client_secret` | string | Yes | Service Principal client secret |
 | `subscription_id` | string | No | Azure Subscription ID |

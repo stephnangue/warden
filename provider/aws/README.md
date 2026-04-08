@@ -503,7 +503,7 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 5. Warden retrieves real AWS credentials from the credential spec
 6. Warden re-signs the request with valid AWS credentials
 7. Request is forwarded to the actual AWS endpoint
-9. Response is returned to the client
+8. Response is returned to the client
 
 ### Security Model
 
@@ -597,7 +597,7 @@ For HTTPS, you'll need a **wildcard SSL certificate** (`*.warden.yourdomain.com`
 | `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
 | `tls_skip_verify` | bool | `false` | Skip TLS certificate verification; also allows `http://` URLs (development only) |
 | `ca_data` | string | — | Base64-encoded PEM CA certificate for custom/self-signed CAs |
-| `auto_auth_path` | string | — | Path to auth mount for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
+| `auto_auth_path` | string | Yes | Path to auth mount for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Default auth role when not specified in `access_key_id` |
 
 ### Credential Source Config
@@ -721,8 +721,8 @@ Standard S3 Access Points **are fully supported**. The AWS SDK places the Access
 
 1. Check that `auto_auth_path` points to a valid, enabled auth backend (e.g., `auth/jwt/`).
 2. Ensure the auth role exists and has a valid `cred_spec_name`.
-4. For JWT mode: verify the JWT is valid and not expired.
-5. For cert mode: verify the client certificate is signed by the trusted CA configured in the cert auth backend.
+3. For JWT mode: verify the JWT is valid and not expired.
+4. For cert mode: verify the client certificate is signed by the trusted CA configured in the cert auth backend.
 
 ### S3 Control API returns 403
 
