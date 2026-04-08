@@ -1123,10 +1123,10 @@ func TestOmitResponseFields(t *testing.T) {
 			omitFields: []string{"response"},
 			entry: &LogEntry{
 				Timestamp: time.Now(),
-				Response:  &Response{StatusCode: 200},
+				Response:  &Response{StatusCode: 999},
 			},
 			check: func(t *testing.T, data []byte) {
-				if containsBytes(data, "200") {
+				if containsBytes(data, "999") {
 					t.Error("response should be omitted")
 				}
 			},
