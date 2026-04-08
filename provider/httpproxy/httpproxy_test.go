@@ -526,7 +526,7 @@ func TestInitialize_WithExtraState(t *testing.T) {
 func TestSensitiveConfigFields(t *testing.T) {
 	b := setupBackend(t, testSpec())
 	type sf interface{ SensitiveConfigFields() []string }
-	assert.Empty(t, b.(sf).SensitiveConfigFields())
+	assert.Equal(t, []string{"ca_data"}, b.(sf).SensitiveConfigFields())
 }
 
 // --- Config CRUD tests ---

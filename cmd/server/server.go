@@ -44,6 +44,7 @@ import (
 	"github.com/stephnangue/warden/provider/datadog"
 	"github.com/stephnangue/warden/provider/dynatrace"
 	"github.com/stephnangue/warden/provider/elastic"
+	"github.com/stephnangue/warden/provider/kubernetes"
 	"github.com/stephnangue/warden/provider/azure"
 	"github.com/stephnangue/warden/provider/gcp"
 	"github.com/stephnangue/warden/provider/github"
@@ -116,6 +117,7 @@ Usage: warden server [options]
 		"datadog":     datadog.Factory,
 		"dynatrace":   dynatrace.Factory,
 		"elastic":     elastic.Factory,
+		"kubernetes":  kubernetes.Factory,
 		"gcp":         gcp.Factory,
 		"github":      github.Factory,
 		"gitlab":      gitlab.Factory,

@@ -17,6 +17,7 @@ const (
 	TypeAPIKey            = "api_key"
 	TypeDBAuthToken       = "db_auth_token"
 	TypeOAuthBearerToken  = "oauth_bearer_token"
+	TypeKubernetesToken   = "kubernetes_token"
 )
 
 // Source type constants
@@ -30,8 +31,9 @@ const (
 	SourceTypeGitHub = "github"
 	SourceTypeAPIKey = "apikey"
 	SourceTypeOAuth2 = "oauth2"
-	SourceTypeIBM     = "ibm"
-	SourceTypeElastic = "elastic"
+	SourceTypeIBM        = "ibm"
+	SourceTypeElastic    = "elastic"
+	SourceTypeKubernetes = "kubernetes"
 )
 
 // Category constants for credential categorization
