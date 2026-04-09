@@ -58,6 +58,7 @@ import (
 	"github.com/stephnangue/warden/provider/servicenow"
 	"github.com/stephnangue/warden/provider/slack"
 	"github.com/stephnangue/warden/provider/splunk"
+	"github.com/stephnangue/warden/provider/tfe"
 	"github.com/stephnangue/warden/provider/vault"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -129,6 +130,7 @@ Usage: warden server [options]
 		"servicenow":  servicenow.Factory,
 		"slack":       slack.Factory,
 		"splunk":      splunk.Factory,
+		"tfe":         tfe.Factory,
 		"vault":       vault.Factory,
 		"rds":         rds.Factory,
 	}
