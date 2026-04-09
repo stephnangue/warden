@@ -2,10 +2,10 @@ package logger
 
 import (
 	"errors"
-	"testing"
-	"time"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"testing"
+	"time"
 )
 
 func TestFieldConstructors(t *testing.T) {
@@ -144,4 +144,3 @@ func TestF_LegacyConstructor(t *testing.T) {
 // =============================================================================
 // NewZerologLogger with sampling config
 // =============================================================================
-

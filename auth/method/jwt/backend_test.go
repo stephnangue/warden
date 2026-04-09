@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
-	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 )
 
 // testLogger creates a logger for tests that discards output

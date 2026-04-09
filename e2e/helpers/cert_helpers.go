@@ -242,8 +242,8 @@ func CertLoginRequestWithXFCC(t *testing.T, port int, role string, clientCertPEM
 	t.Helper()
 	u := fmt.Sprintf("%s/v1/auth/cert/login", NodeURL(port))
 	headers := map[string]string{
-		"Content-Type":               "application/json",
-		"X-Forwarded-Client-Cert":    BuildXFCCHeader(clientCertPEM),
+		"Content-Type":            "application/json",
+		"X-Forwarded-Client-Cert": BuildXFCCHeader(clientCertPEM),
 	}
 	body := fmt.Sprintf(`{"role":"%s"}`, role)
 	return DoRequest(t, "POST", u, headers, body)
@@ -406,7 +406,6 @@ func SetupCertVaultEnvWithCA(t *testing.T, port int, caCertPEM string) {
 
 	SetupCertAuthWithCA(t, port, caCertPEM)
 
-
 	// Mount vault-cert provider
 	APIRequest(t, "POST", "sys/providers/vault-cert", port, `{"type":"vault"}`)
 	time.Sleep(1 * time.Second)
@@ -568,7 +567,6 @@ func SetupCertVaultEnvWithMTLSCA(t *testing.T, port int) {
 	caCertPEM, _ := LoadMTLSClientCA(t)
 
 	SetupCertAuthWithCA(t, port, caCertPEM)
-
 
 	// Mount vault-cert provider
 	APIRequest(t, "POST", "sys/providers/vault-cert", port, `{"type":"vault"}`)

@@ -41,16 +41,16 @@ import (
 	ansible_tower "github.com/stephnangue/warden/provider/ansible_tower"
 	"github.com/stephnangue/warden/provider/anthropic"
 	"github.com/stephnangue/warden/provider/aws"
+	"github.com/stephnangue/warden/provider/azure"
 	"github.com/stephnangue/warden/provider/cloudflare"
 	"github.com/stephnangue/warden/provider/cohere"
 	"github.com/stephnangue/warden/provider/datadog"
 	"github.com/stephnangue/warden/provider/dynatrace"
 	"github.com/stephnangue/warden/provider/elastic"
-	"github.com/stephnangue/warden/provider/kubernetes"
-	"github.com/stephnangue/warden/provider/azure"
 	"github.com/stephnangue/warden/provider/gcp"
 	"github.com/stephnangue/warden/provider/github"
 	"github.com/stephnangue/warden/provider/gitlab"
+	"github.com/stephnangue/warden/provider/kubernetes"
 	"github.com/stephnangue/warden/provider/mistral"
 	"github.com/stephnangue/warden/provider/newrelic"
 	"github.com/stephnangue/warden/provider/openai"
@@ -115,28 +115,28 @@ Usage: warden server [options]
 	providers = map[string]wardenlogical.Factory{
 		"ansible_tower": ansible_tower.Factory,
 		"anthropic":     anthropic.Factory,
-		"aws":         aws.Factory,
-		"azure":       azure.Factory,
-		"cloudflare":  cloudflare.Factory,
-		"cohere":      cohere.Factory,
-		"datadog":     datadog.Factory,
-		"dynatrace":   dynatrace.Factory,
-		"elastic":     elastic.Factory,
-		"kubernetes":  kubernetes.Factory,
-		"gcp":         gcp.Factory,
-		"github":      github.Factory,
-		"gitlab":      gitlab.Factory,
-		"mistral":     mistral.Factory,
-		"newrelic":    newrelic.Factory,
-		"openai":      openai.Factory,
-		"ovh":         ovh.Factory,
-		"pagerduty":   pagerduty.Factory,
-		"servicenow":  servicenow.Factory,
-		"slack":       slack.Factory,
-		"splunk":      splunk.Factory,
-		"tfe":         tfe.Factory,
-		"vault":       vault.Factory,
-		"rds":         rds.Factory,
+		"aws":           aws.Factory,
+		"azure":         azure.Factory,
+		"cloudflare":    cloudflare.Factory,
+		"cohere":        cohere.Factory,
+		"datadog":       datadog.Factory,
+		"dynatrace":     dynatrace.Factory,
+		"elastic":       elastic.Factory,
+		"kubernetes":    kubernetes.Factory,
+		"gcp":           gcp.Factory,
+		"github":        github.Factory,
+		"gitlab":        gitlab.Factory,
+		"mistral":       mistral.Factory,
+		"newrelic":      newrelic.Factory,
+		"openai":        openai.Factory,
+		"ovh":           ovh.Factory,
+		"pagerduty":     pagerduty.Factory,
+		"servicenow":    servicenow.Factory,
+		"slack":         slack.Factory,
+		"splunk":        splunk.Factory,
+		"tfe":           tfe.Factory,
+		"vault":         vault.Factory,
+		"rds":           rds.Factory,
 	}
 
 	authMethods = map[string]wardenlogical.Factory{

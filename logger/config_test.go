@@ -1,9 +1,9 @@
 package logger
 
 import (
-	"testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"testing"
 )
 
 func TestProductionConfig(t *testing.T) {
@@ -39,4 +39,3 @@ func TestDefaultFileConfig(t *testing.T) {
 // =============================================================================
 // GatedWriter FlushGate and BufferedSize
 // =============================================================================
-

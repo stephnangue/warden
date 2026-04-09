@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stephnangue/warden/auth/helper"
 	"context"
+	"github.com/stephnangue/warden/auth/helper"
 	"net/http"
 	"net/http/httptest"
 )

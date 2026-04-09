@@ -20,14 +20,14 @@ func newTestLogger() *logger.GatedLogger {
 
 func testBackend() *Backend {
 	return &Backend{
-		Help:        "test backend help",
-		BackendType: "test",
+		Help:         "test backend help",
+		BackendType:  "test",
 		BackendClass: logical.ClassProvider,
 		Paths: []*Path{
 			{
 				Pattern: "config",
 				Fields: map[string]*FieldSchema{
-					"name": {Type: TypeString, Description: "The name"},
+					"name":  {Type: TypeString, Description: "The name"},
 					"count": {Type: TypeInt, Default: 10, Description: "A count"},
 				},
 				Operations: map[logical.Operation]OperationHandler{
@@ -47,7 +47,7 @@ func testBackend() *Backend {
 						Callback: func(_ context.Context, _ *logical.Request, d *FieldData) (*logical.Response, error) {
 							return &logical.Response{
 								StatusCode: http.StatusOK,
-								Data: map[string]any{"message": "updated"},
+								Data:       map[string]any{"message": "updated"},
 							}, nil
 						},
 						Summary: "Update config",
@@ -66,7 +66,7 @@ func testBackend() *Backend {
 						Callback: func(_ context.Context, _ *logical.Request, d *FieldData) (*logical.Response, error) {
 							return &logical.Response{
 								StatusCode: http.StatusOK,
-								Data: map[string]any{"name": d.Get("name")},
+								Data:       map[string]any{"name": d.Get("name")},
 							}, nil
 						},
 					},

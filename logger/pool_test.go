@@ -1,9 +1,9 @@
 package logger
 
 import (
+	"github.com/stretchr/testify/require"
 	"io"
 	"testing"
-	"github.com/stretchr/testify/require"
 )
 
 func TestLoggerPool(t *testing.T) {
@@ -33,4 +33,3 @@ func TestLoggerPool(t *testing.T) {
 // =============================================================================
 // GatedLogger with nil config
 // =============================================================================
-

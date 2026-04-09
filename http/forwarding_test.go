@@ -323,4 +323,3 @@ func TestGetProxy_ErrorHandler_ConnectionError_NoLeader(t *testing.T) {
 // =============================================================================
 // wrapGenericHandler standby forwarding path
 // =============================================================================
-

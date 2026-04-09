@@ -188,4 +188,3 @@ func TestConditionsUnknownTypeRejected(t *testing.T) {
 		t.Fatalf("expected 400 for unknown condition type, got %d", status)
 	}
 }
-

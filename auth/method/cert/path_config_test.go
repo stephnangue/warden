@@ -2,13 +2,13 @@ package cert
 
 import (
 	"context"
+	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/logical"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"net/http"
 	"testing"
 	"time"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/logical"
 )
 
 func TestSetupCertConfig_InvalidPrincipalClaim(t *testing.T) {
@@ -252,4 +252,3 @@ func TestHandleConfigWrite_MergesWithExisting(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "new-default", b.config.DefaultRole)
 }
-

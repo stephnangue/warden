@@ -1,14 +1,24 @@
-## Warden v0.9.1
+## Warden v0.10.0
 
 Warden is an identity-based access layer for cloud APIs, SaaS platforms, databases, and AI providers. It eliminates static credentials from your workloads entirely. Your workload authenticates to Warden with its own identity — a JWT from your identity provider or a TLS certificate. Warden verifies who is calling, evaluates fine-grained capability-based policies, and issues ephemeral request-scoped access: forwarding API requests with short-lived credentials injected, returning database auth tokens, or vending pre-signed URLs. Credentials are minted on demand, scoped to the request, and never exposed to the caller. Every API call is logged with caller identity, target service, and full request context. No secrets ever reach your applications.
 
 ### What's New
 
-**`--type` flag is now truly optional on `cred spec create`.** The CLI previously enforced `--type` as required, even though the server has been able to infer the credential type from the source driver since v0.7.0. The flag is now optional — when omitted, the type is inferred automatically.
+**11 new providers.** This release adds support for OVH, Datadog, Cohere, Elastic, Dynatrace, Splunk, New Relic, Kubernetes, Terraform Enterprise (TFE), Cloudflare, and Ansible Tower — bringing Warden's provider count from 13 to 24. Each provider ships with a full quickstart guide, configuration reference, and policy examples.
 
-**AWS provider: Vault/OpenBao credential source.** The AWS provider README now documents how to use `hvault` as a credential source with `static_aws` (static credentials from KV v2) and `dynamic_aws` (temporary credentials from the Vault AWS secrets engine) mint methods.
+**Kubernetes provider with automatic token rotation.** The Kubernetes provider mints short-lived ServiceAccount tokens via the TokenRequest API. Tokens are audience-scoped for multi-tenant security with configurable TTL (10m–48h, default 1h).
 
-**Quickstart path fix.** All provider READMEs now reference the correct docker-compose quickstart file path.
+**Elastic provider with programmatic key rotation.** The Elastic provider supports a dedicated `elastic` credential driver that programmatically creates and rotates Elasticsearch API keys with configurable expiration and role descriptors for scoped permissions.
+
+**IBM Cloud credential driver.** New `ibm` source type mints IAM bearer tokens from IBM Cloud API keys via the IAM token exchange endpoint. Supports automatic source API key rotation with a 2-minute default activation delay.
+
+**Custom CA certificates and TLS skip verify everywhere.** All providers and credential drivers now support `ca_data` (inline PEM CA certificate) and `tls_skip_verify` config options via a shared TLS helper. Self-hosted instances with private CAs or development environments using HTTP are now supported out of the box. (#140)
+
+**Extra OAuth2 token form parameters.** The OAuth2 credential driver now supports arbitrary additional form parameters via `token_param.*` config keys (e.g., `token_param.resource=urn:dtaccount:123`). This enables providers like Dynatrace that require non-standard OAuth2 form fields. (#131)
+
+**Lazy transport initialization.** Transport creation has been refactored from eager package-level initialization to lazy initialization via a `sync.Once` factory pattern. Transports are only created when a provider is actually mounted, eliminating unnecessary startup overhead and background goroutines. (#138)
+
+**httpproxy reliability fixes.** Resolved data races, an HTTP/2 regression caused by TLS finalization ordering, and validation gaps (`max_body_size=0` rejection, 100 MB cap). The Bearer token extractor is now case-insensitive per RFC 7235. (#143)
 
 ### Providers
 
@@ -27,6 +37,17 @@ Warden is an identity-based access layer for cloud APIs, SaaS platforms, databas
 | PagerDuty | Streaming | API keys / OAuth2 (native or via Vault) |
 | ServiceNow | Streaming | API keys / OAuth2 (native or via Vault) |
 | RDS | Access | IAM auth tokens |
+| OVH | Streaming | OAuth2 tokens (native or via Vault) |
+| Datadog | Streaming | API keys (native or via Vault) |
+| Cohere | Streaming | API keys (native or via Vault) |
+| Elastic | Streaming | API keys (native, rotated, or via Vault) |
+| Dynatrace | Streaming | API tokens / OAuth2 (native or via Vault) |
+| Splunk | Streaming | Bearer tokens (native or via Vault) |
+| New Relic | Streaming | API keys (native or via Vault) |
+| Kubernetes | Streaming | ServiceAccount tokens (TokenRequest API) |
+| TFE / HCP Terraform | Streaming | Bearer tokens (native or via Vault) |
+| Cloudflare | Streaming | API tokens (native or via Vault) |
+| Ansible Tower | Streaming | PAT / Bearer tokens (native or via Vault) |
 
 - **Streaming providers** proxy requests through Warden, injecting credentials in-flight.
 - **Access providers** vend credentials directly (database auth tokens, pre-signed URLs).

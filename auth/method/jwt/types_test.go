@@ -1,10 +1,10 @@
 package jwt
 
 import (
-	"testing"
-	"time"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"testing"
+	"time"
 )
 
 func TestJWTRole_ParseTokenTTL(t *testing.T) {
@@ -91,4 +91,3 @@ func TestMapToJWTAuthConfig_TTLTypes(t *testing.T) {
 // =============================================================================
 // verifyURLReachable Tests
 // =============================================================================
-

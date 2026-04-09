@@ -1,10 +1,10 @@
 package drivers
 
 import (
-	"testing"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"testing"
 )
 
 func TestRegisterBuiltinDrivers(t *testing.T) {
@@ -34,4 +34,3 @@ func TestRegisterBuiltinDrivers(t *testing.T) {
 // =============================================================================
 // readLimitedBody Tests
 // =============================================================================
-
