@@ -38,6 +38,7 @@ import (
 	wardenlogical "github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/physical"
 	physPostgresql "github.com/stephnangue/warden/physical/postgresql"
+	ansible_tower "github.com/stephnangue/warden/provider/ansible_tower"
 	"github.com/stephnangue/warden/provider/anthropic"
 	"github.com/stephnangue/warden/provider/aws"
 	"github.com/stephnangue/warden/provider/cloudflare"
@@ -112,7 +113,8 @@ Usage: warden server [options]
 	}
 
 	providers = map[string]wardenlogical.Factory{
-		"anthropic":   anthropic.Factory,
+		"ansible_tower": ansible_tower.Factory,
+		"anthropic":     anthropic.Factory,
 		"aws":         aws.Factory,
 		"azure":       azure.Factory,
 		"cloudflare":  cloudflare.Factory,
