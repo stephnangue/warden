@@ -268,7 +268,7 @@ path "elastic/role/+/gateway/_cat/indices" {
   capabilities = ["read"]
 }
 
-path "elastic/role/+/gateway/my-index-*/_search" {
+path "elastic/role/+/gateway/my-index-*" {
   capabilities = ["read"]
 }
 EOF
