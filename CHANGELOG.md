@@ -2,6 +2,65 @@
 
 All notable changes to Warden are documented in this file.
 
+## [v0.10.0] — 2026-04-09
+
+### New Features
+
+- **OVH Provider** — New streaming gateway provider for the OVHcloud REST API. Proxies requests to account info, cloud projects, domains, and IPs with automatic credential injection. Supports OAuth2 client credentials and Vault/OpenBao credential sources. Multi-region support (EU, Canada, US). (#127)
+
+- **Datadog Provider** — New streaming gateway provider for the Datadog REST API. Proxies requests to metrics, monitors, dashboards, logs, and events. Injects `DD-API-KEY` and `DD-APPLICATION-KEY` headers. Multi-site support (US1, US3, US5, EU1, AP1, AP2, US1-FED). Supports static API keys and Vault/OpenBao credential sources. (#129)
+
+- **Cohere Provider** — New streaming gateway provider for the Cohere API. Proxies requests to chat, embed, rerank, generate, and models endpoints. Bearer token auth with support for v1 and v2 API endpoints, streaming chat, and request-body policies for model and token restrictions. (#130)
+
+- **Elastic Provider** — New streaming gateway provider for the Elasticsearch REST API. Proxies requests to search, index, cluster, and security endpoints. Supports three credential modes: static API keys, Elasticsearch driver with programmatic key rotation (72-hour default), and Vault/OpenBao. Role descriptor support for scoped permissions. (#132)
+
+- **Dynatrace Provider** — New streaming gateway provider for the Dynatrace REST API. Proxies requests to entities, metrics, logs, problems, settings, and tokens. Supports API token auth (`Api-Token` header) and OAuth2 client credentials. Covers both Environment API and Platform API. (#133)
+
+- **Splunk Provider** — New streaming gateway provider for the Splunk REST API. Proxies requests to search jobs, saved searches, dashboards, indexes, and token management. Bearer token auth with HTTPS validation. Supports namespace-scoped endpoints (`/servicesNS/`). Compatible with Splunk Enterprise (v7.3+) and Splunk Cloud (v8.0.2007+). (#135)
+
+- **New Relic Provider** — New streaming gateway provider for the New Relic REST API v2 and NerdGraph (GraphQL) API. Injects `Api-Key` header. Supports NRQL queries, entity search, and dashboard management. Multi-datacenter support (US, EU). (#135, #136)
+
+- **Kubernetes Provider** — New streaming gateway provider for the Kubernetes API server. Proxies requests to pods, deployments, services, and namespaces. Mints short-lived ServiceAccount tokens via the TokenRequest API with automatic rotation. Audience-scoped tokens for multi-tenant security. Configurable TTL (10m–48h, default 1h). (#137)
+
+- **TFE Provider** — New streaming gateway provider for Terraform Enterprise and HCP Terraform. Proxies requests to organizations, workspaces, runs, state versions, variables, and projects. Bearer token auth with JSON:API (`application/vnd.api+json`) support. Supports user, team, and organization token types. (#142)
+
+- **Cloudflare Provider** — New streaming gateway provider for the Cloudflare API v4. Proxies requests to zones, DNS records, workers, and accounts. API token auth with token verification via `/user/tokens/verify`. (#144)
+
+- **Ansible Tower Provider** — New streaming gateway provider for the Ansible Tower/AWX/AAP REST API. Proxies requests to job templates, jobs, inventories, projects, hosts, and workflow templates. Bearer auth with Personal Access Tokens (PAT). Supports Ansible Tower (v3.5+), AWX (v18.0+), and Red Hat Ansible Automation Platform (v2.0+). (#145)
+
+- **IBM Cloud Credential Driver (`ibm`)** — New credential source driver for IBM Cloud. Mints IAM bearer tokens from IBM Cloud API keys via the IAM token exchange endpoint. Supports automatic source API key rotation with a 2-minute default activation delay. Account ID discovery from API key. (#128)
+
+- **Extra OAuth2 Token Form Parameters** — The OAuth2 credential driver now supports arbitrary additional form parameters via `token_param.*` config keys (e.g., `token_param.resource=urn:dtaccount:123`). Core fields (`grant_type`, `client_id`, `client_secret`) are protected from override. Enables providers like Dynatrace that require non-standard OAuth2 form fields. (#131)
+
+- **`ca_data` and `tls_skip_verify` across all providers and drivers** — Standardized TLS configuration across the entire codebase. All providers and all credential drivers now support `ca_data` (inline PEM CA certificate) and `tls_skip_verify` config options via a shared TLS helper. When `tls_skip_verify=true`, `http://` URLs are permitted for dev/test environments. (#140)
+
+### Improvements
+
+- **Lazy transport initialization** — Refactored transport creation from eager package-level initialization to lazy initialization via `sync.Once` factory pattern. Transports are only created when a provider is actually mounted, eliminating unnecessary startup overhead and background goroutines. (#138)
+
+### Bug Fixes
+
+- **httpproxy data races, HTTP/2 regression, and validation gaps** — Extended mutex coverage to protect `providerURL`, `MaxBodySize`, `Timeout`, `Proxy.Transport`, `tlsSkipVerify`, and `caData` from concurrent access. Fixed `NewTransportWithTLS` silently breaking HTTP/2 by configuring HTTP/2 after TLS finalization. Reject `max_body_size=0` with bounds validation (100 MB cap). Made `DefaultTokenExtractor` case-insensitive for the Bearer scheme per RFC 7235. (#143)
+
+- **Elastic API key expiration default** — Set default API key expiration to 1 hour when no explicit expiration is configured. (#134)
+
+- **Flaky `TestOmitResponseFields` test** — Fixed race condition in the `omit_entire_response` test subcase. (#139)
+
+- **Provider README inaccuracies** — Corrected GitLab `renew-secret` endpoint path and other documentation errors across provider READMEs. (#141)
+
+- **CBP policy wildcard usage** — Corrected `*` vs `+` wildcard usage in capability-based policy examples across all provider READMEs. (#146)
+
+### Infrastructure
+
+- **Dependency updates** — Bumped `github.com/go-jose/go-jose/v4` from 4.1.3 to 4.1.4 (#112). Updated Go minor/patch dependencies (#125).
+- **CI** — Bumped `codecov/codecov-action` from v5 to v6 (#124).
+
+### Documentation
+
+- **Provider READMEs** — Added full quickstart guides, configuration reference tables, and policy examples for all 11 new providers (OVH, Datadog, Cohere, Elastic, Dynatrace, Splunk, New Relic, Kubernetes, TFE, Cloudflare, Ansible Tower).
+- **Self-hosted TLS examples** — Added custom CA and HTTP dev-mode configuration examples to GitLab, GitHub, Elastic, Splunk, ServiceNow, and Kubernetes READMEs. (#140)
+- **CBP policy wildcard corrections** — Fixed wildcard usage across all existing provider READMEs. (#146)
+
 ## [v0.9.1] — 2026-04-06
 
 ### Bug Fixes
@@ -298,6 +357,10 @@ Initial release. See the [v0.1.0 release notes](https://github.com/stephnangue/w
 - Docker image published to `ghcr.io/stephnangue/warden`
 - Pre-built binaries for Linux, macOS, and Windows
 
+[v0.10.0]: https://github.com/stephnangue/warden/compare/v0.9.1...v0.10.0
+[v0.9.1]: https://github.com/stephnangue/warden/compare/v0.9.0...v0.9.1
+[v0.9.0]: https://github.com/stephnangue/warden/compare/v0.8.0...v0.9.0
+[v0.8.0]: https://github.com/stephnangue/warden/compare/v0.7.0...v0.8.0
 [v0.7.0]: https://github.com/stephnangue/warden/compare/v0.6.0...v0.7.0
 [v0.6.0]: https://github.com/stephnangue/warden/compare/v0.5.0...v0.6.0
 [v0.5.0]: https://github.com/stephnangue/warden/compare/v0.4.1...v0.5.0
