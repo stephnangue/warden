@@ -197,14 +197,14 @@ func TestHandleRoleUpdate_ExistingRole(t *testing.T) {
 	// Update with new fields
 	fd := &framework.FieldData{
 		Raw: map[string]any{
-			"name":               "upd-role",
+			"name":                 "upd-role",
 			"allowed_common_names": []string{"new-*"},
-			"token_ttl":          7200,
+			"token_ttl":            7200,
 		},
 		Schema: map[string]*framework.FieldSchema{
-			"name":               {Type: framework.TypeString},
+			"name":                 {Type: framework.TypeString},
 			"allowed_common_names": {Type: framework.TypeCommaStringSlice},
-			"token_ttl":          {Type: framework.TypeDurationSecond},
+			"token_ttl":            {Type: framework.TypeDurationSecond},
 		},
 	}
 	resp, err := b.handleRoleUpdate(ctx, &logical.Request{}, fd)
@@ -271,10 +271,10 @@ func TestValidateRole_InvalidGlobPattern(t *testing.T) {
 func TestValidateRole_InvalidDNSSANGlob(t *testing.T) {
 	b, _ := createTestBackend(t)
 	role := &CertRole{
-		Name:            "bad-dns-glob",
+		Name:               "bad-dns-glob",
 		AllowedCommonNames: []string{"*"},
-		AllowedDNSSANs: []string{"[invalid"},
-		TokenTTL:        "1h",
+		AllowedDNSSANs:     []string{"[invalid"},
+		TokenTTL:           "1h",
 	}
 	err := b.validateRole(role)
 	assert.Error(t, err)

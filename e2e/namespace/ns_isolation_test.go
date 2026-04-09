@@ -130,4 +130,3 @@ func TestCredentialIssuanceInChildNamespace(t *testing.T) {
 
 	h.TeardownNSVaultEnv(t, port)
 }
-

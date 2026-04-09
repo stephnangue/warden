@@ -2,11 +2,11 @@ package cert
 
 import (
 	"crypto/x509"
-	"net/url"
-	"testing"
+	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/stephnangue/warden/logical"
+	"net/url"
+	"testing"
 )
 
 func TestIsValidPrincipalClaim(t *testing.T) {
@@ -128,4 +128,3 @@ func TestExtractClientCert_NilHTTPRequest(t *testing.T) {
 // =============================================================================
 // Full handleLogin flow tests
 // =============================================================================
-

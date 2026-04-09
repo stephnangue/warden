@@ -48,12 +48,12 @@ func TestFileDeviceFactoryWithOptions(t *testing.T) {
 	logPath := filepath.Join(tmpDir, "audit.log")
 
 	dev, err := f.Create(context.Background(), "test/", "test device", "custom-accessor", map[string]any{
-		"file_path":    logPath,
-		"hmac_key":     "secret-key",
-		"salt_fields":  []any{"auth.token_id"},
-		"omit_fields":  []any{"request.data"},
-		"prefix":       "AUDIT: ",
-		"buffer_size":  float64(50),
+		"file_path":   logPath,
+		"hmac_key":    "secret-key",
+		"salt_fields": []any{"auth.token_id"},
+		"omit_fields": []any{"request.data"},
+		"prefix":      "AUDIT: ",
+		"buffer_size": float64(50),
 	})
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)

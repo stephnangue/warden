@@ -121,11 +121,11 @@ func newK8sMockServer(t *testing.T) *httptest.Server {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"major":        "1",
-			"minor":        "29",
-			"gitVersion":   "v1.29.0",
-			"goVersion":    "go1.21.5",
-			"platform":     "linux/amd64",
+			"major":      "1",
+			"minor":      "29",
+			"gitVersion": "v1.29.0",
+			"goVersion":  "go1.21.5",
+			"platform":   "linux/amd64",
 		})
 	})
 

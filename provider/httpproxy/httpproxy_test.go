@@ -271,10 +271,10 @@ func TestValidateConfig(t *testing.T) {
 
 func TestValidateURL(t *testing.T) {
 	tests := []struct {
-		name           string
-		addr           string
-		tlsSkipVerify  bool
-		wantErr        bool
+		name          string
+		addr          string
+		tlsSkipVerify bool
+		wantErr       bool
 	}{
 		{"empty is valid", "", false, false},
 		{"valid HTTPS", "https://api.example.com", false, false},

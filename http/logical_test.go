@@ -8,10 +8,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/stephnangue/warden/logical"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/stephnangue/warden/logical"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"

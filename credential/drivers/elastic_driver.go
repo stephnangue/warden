@@ -129,7 +129,7 @@ func (f *ElasticDriverFactory) Create(config map[string]string, log *logger.Gate
 			Type:   credential.SourceTypeElastic,
 			Config: config,
 		},
-		logger:     log.WithSubsystem(credential.SourceTypeElastic),
+		logger: log.WithSubsystem(credential.SourceTypeElastic),
 	}
 
 	httpClient, err := BuildHTTPClient(config, 30*time.Second)

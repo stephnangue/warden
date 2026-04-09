@@ -3,11 +3,11 @@ package logger
 import (
 	"bytes"
 	"errors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io"
 	"testing"
 	"time"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestZerologLogger_TypedFieldsInOutput(t *testing.T) {
@@ -193,4 +193,3 @@ func TestNewZerologLogger_NilConfig(t *testing.T) {
 	require.NotNil(t, logger)
 	logger.Info("nil config test")
 }
-

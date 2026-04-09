@@ -299,11 +299,11 @@ func TestConcurrentSigV4ThroughStandby(t *testing.T) {
 
 			req := signSTSRequest(t, standbyURL, accessKeyID, secretAccessKey)
 			client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
+				Timeout: 30 * time.Second,
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				},
+			}
 			resp, err := client.Do(req)
 			if err != nil {
 				// Transport error = SigV4 passed
@@ -361,11 +361,11 @@ func TestSigV4DuringLeaderStepDown(t *testing.T) {
 
 			req := signSTSRequest(t, standbyURL, accessKeyID, secretAccessKey)
 			client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
+				Timeout: 30 * time.Second,
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				},
+			}
 			resp, err := client.Do(req)
 
 			mu.Lock()

@@ -136,10 +136,10 @@ func TestOAuth2DriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "invalid verify_method",
 			config: map[string]string{
-				"client_id":      "test-client-id",
-				"client_secret":  "test-client-secret",
-				"token_url":      "https://auth.example.com/token",
-				"verify_method":  "DELETE",
+				"client_id":     "test-client-id",
+				"client_secret": "test-client-secret",
+				"token_url":     "https://auth.example.com/token",
+				"verify_method": "DELETE",
 			},
 			wantErr: true,
 			errMsg:  "verify_method must be GET or POST",
@@ -180,11 +180,11 @@ func TestOAuth2DriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "valid config with token_param extra params",
 			config: map[string]string{
-				"client_id":              "test-client-id",
-				"client_secret":          "test-client-secret",
-				"token_url":              "https://auth.example.com/token",
-				"token_param.resource":   "urn:dtaccount:abc123",
-				"token_param.audience":   "https://api.example.com",
+				"client_id":            "test-client-id",
+				"client_secret":        "test-client-secret",
+				"token_url":            "https://auth.example.com/token",
+				"token_param.resource": "urn:dtaccount:abc123",
+				"token_param.audience": "https://api.example.com",
 			},
 			wantErr: false,
 		},
@@ -202,10 +202,10 @@ func TestOAuth2DriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "token_param overriding client_id",
 			config: map[string]string{
-				"client_id":              "test-client-id",
-				"client_secret":          "test-client-secret",
-				"token_url":              "https://auth.example.com/token",
-				"token_param.client_id":  "override",
+				"client_id":             "test-client-id",
+				"client_secret":         "test-client-secret",
+				"token_url":             "https://auth.example.com/token",
+				"token_param.client_id": "override",
 			},
 			wantErr: true,
 			errMsg:  "token_param.client_id cannot override core OAuth2 field",
@@ -734,12 +734,12 @@ func TestOAuth2Driver_VerifySpec_TokenAuthHeader(t *testing.T) {
 
 func TestBuildOAuth2AuthHeaders(t *testing.T) {
 	tests := []struct {
-		name           string
-		config         map[string]string
-		token          string
-		expectHeader   string
-		expectValue    string
-		noAuthzHeader  bool
+		name          string
+		config        map[string]string
+		token         string
+		expectHeader  string
+		expectValue   string
+		noAuthzHeader bool
 	}{
 		{
 			name:         "default bearer",

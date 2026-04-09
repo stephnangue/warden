@@ -10,17 +10,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stephnangue/warden/logical"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/logical"
 	"math/big"
 	"net/http"
 	"time"
-	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
-	"github.com/stephnangue/warden/framework"
 )
 
 // =============================================================================
