@@ -40,6 +40,7 @@ import (
 	physPostgresql "github.com/stephnangue/warden/physical/postgresql"
 	"github.com/stephnangue/warden/provider/anthropic"
 	"github.com/stephnangue/warden/provider/aws"
+	"github.com/stephnangue/warden/provider/cloudflare"
 	"github.com/stephnangue/warden/provider/cohere"
 	"github.com/stephnangue/warden/provider/datadog"
 	"github.com/stephnangue/warden/provider/dynatrace"
@@ -113,6 +114,7 @@ Usage: warden server [options]
 		"anthropic":   anthropic.Factory,
 		"aws":         aws.Factory,
 		"azure":       azure.Factory,
+		"cloudflare":  cloudflare.Factory,
 		"cohere":      cohere.Factory,
 		"datadog":     datadog.Factory,
 		"dynatrace":   dynatrace.Factory,
