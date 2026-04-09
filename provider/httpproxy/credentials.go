@@ -3,6 +3,7 @@ package httpproxy
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logical"
@@ -113,7 +114,7 @@ func DefaultTokenExtractor(r *http.Request) string {
 		return token
 	}
 	authHeader := r.Header.Get("Authorization")
-	if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
 		return authHeader[7:]
 	}
 	return ""

@@ -13,16 +13,23 @@ import (
 )
 
 func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) {
+	// Snapshot mutable fields under read lock to avoid races with config writes
+	b.mu.RLock()
+	timeout := b.Timeout
+	maxBody := b.MaxBodySize
+	providerURL := b.providerURL
+	proxy := b.Proxy
+	b.mu.RUnlock()
+
 	// Apply timeout if configured
-	if b.Timeout > 0 {
+	if timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, b.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
 	}
 
 	// Enforce max body size
-	maxBody := b.MaxBodySize
 	if maxBody <= 0 {
 		maxBody = framework.DefaultMaxBodySize
 	}
@@ -37,7 +44,7 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	}
 
 	// Build target URL
-	targetURL, err := b.buildTargetURL(req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
+	targetURL, err := buildTargetURL(providerURL, req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
 	if err != nil {
 		b.Logger.Error("Failed to build target URL", logger.Err(err))
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
@@ -66,11 +73,11 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	)
 
 	// Forward the request (body streams through without buffering)
-	b.Proxy.ServeHTTP(req.ResponseWriter, r)
+	proxy.ServeHTTP(req.ResponseWriter, r)
 }
 
 // buildTargetURL constructs the target URL from the gateway path.
-func (b *proxyBackend) buildTargetURL(path, rawQuery string) (string, error) {
+func buildTargetURL(providerURL, path, rawQuery string) (string, error) {
 	gatewayIdx := strings.Index(path, "/gateway")
 	if gatewayIdx == -1 {
 		return "", fmt.Errorf("invalid gateway path: %s", path)
@@ -83,9 +90,9 @@ func (b *proxyBackend) buildTargetURL(path, rawQuery string) (string, error) {
 	}
 
 	if rawQuery != "" {
-		return b.providerURL + apiPath + "?" + rawQuery, nil
+		return providerURL + apiPath + "?" + rawQuery, nil
 	}
-	return b.providerURL + apiPath, nil
+	return providerURL + apiPath, nil
 }
 
 // prepareHeaders removes unwanted headers and injects credential + provider headers.
@@ -122,7 +129,9 @@ func (b *proxyBackend) prepareHeaders(r *http.Request, credHeaders map[string]st
 		r.Header.Set(k, v)
 	}
 
-	// Inject dynamic headers (derived from config state)
+	// Inject dynamic headers as fallbacks — only set if the client didn't already
+	// provide them. This differs from DefaultHeaders and credential headers which
+	// always override.
 	if b.spec.DynamicHeaders != nil {
 		b.mu.RLock()
 		state := b.extraState

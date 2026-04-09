@@ -57,6 +57,8 @@ func TestNewTransportWithTLS_ValidCAData(t *testing.T) {
 	require.NotNil(t, transport)
 	assert.False(t, transport.TLSClientConfig.InsecureSkipVerify)
 	assert.NotNil(t, transport.TLSClientConfig.RootCAs)
+	// Verify HTTP/2 is properly configured after TLS customization
+	assert.Contains(t, transport.TLSClientConfig.NextProtos, "h2")
 }
 
 func TestNewTransportWithTLS_InvalidBase64(t *testing.T) {

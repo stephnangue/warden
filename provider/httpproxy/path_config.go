@@ -74,6 +74,7 @@ func (b *proxyBackend) pathConfig() *framework.Path {
 
 // handleConfigRead handles reading the provider configuration.
 func (b *proxyBackend) handleConfigRead(_ context.Context, _ *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	b.mu.RLock()
 	tc := b.TransparentConfig
 	data := map[string]any{
 		b.spec.URLConfigKey: b.providerURL,
@@ -87,13 +88,12 @@ func (b *proxyBackend) handleConfigRead(_ context.Context, _ *logical.Request, _
 
 	// Add extra fields from provider state
 	if b.spec.OnConfigRead != nil {
-		b.mu.RLock()
 		extra := b.spec.OnConfigRead(b.extraState)
-		b.mu.RUnlock()
 		for k, v := range extra {
 			data[k] = v
 		}
 	}
+	b.mu.RUnlock()
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,
@@ -104,11 +104,15 @@ func (b *proxyBackend) handleConfigRead(_ context.Context, _ *logical.Request, _
 // handleConfigWrite handles writing the provider configuration.
 func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	// Read tls_skip_verify before URL validation so HTTP can be conditionally allowed
+	b.mu.RLock()
 	skipVerify := b.tlsSkipVerify
+	b.mu.RUnlock()
 	if val, ok := d.GetOk("tls_skip_verify"); ok {
 		skipVerify = val.(bool)
 	}
 
+	// Validate inputs before acquiring the write lock
+	var newURL string
 	if val, ok := d.GetOk(b.spec.URLConfigKey); ok {
 		addr := val.(string)
 		if addr != "" {
@@ -119,27 +123,44 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 					Err:        logical.ErrBadRequest(err.Error()),
 				}, nil
 			}
-			b.providerURL = addr
+			newURL = addr
 		}
 	}
 
+	// Validate max_body_size bounds
+	var newMaxBodySize int64
+	var hasMaxBodySize bool
 	if val, ok := d.GetOk("max_body_size"); ok {
-		b.MaxBodySize = val.(int64)
-	} else if b.MaxBodySize == 0 {
-		b.MaxBodySize = framework.DefaultMaxBodySize
+		newMaxBodySize = val.(int64)
+		hasMaxBodySize = true
+		if newMaxBodySize <= 0 {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        logical.ErrBadRequest("max_body_size must be greater than 0"),
+			}, nil
+		}
+		if newMaxBodySize > 104857600 { // 100MB
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        logical.ErrBadRequest("max_body_size must not exceed 104857600 bytes (100MB)"),
+			}, nil
+		}
 	}
 
+	var newTimeout time.Duration
+	var hasTimeout bool
 	if val, ok := d.GetOk("timeout"); ok {
-		b.Timeout = time.Duration(val.(int)) * time.Second
-	} else if b.Timeout == 0 {
-		b.Timeout = b.spec.DefaultTimeout
+		newTimeout = time.Duration(val.(int)) * time.Second
+		hasTimeout = true
 	}
 
 	// Transparent mode settings
+	b.mu.RLock()
 	tc := &framework.TransparentConfig{
 		AutoAuthPath:    b.TransparentConfig.AutoAuthPath,
 		DefaultAuthRole: b.TransparentConfig.DefaultAuthRole,
 	}
+	b.mu.RUnlock()
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
 	}
@@ -154,38 +175,65 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		}, nil
 	}
 
-	b.StreamingBackend.SetTransparentConfig(tc)
-
 	// Process TLS settings
+	b.mu.RLock()
+	oldSkipVerify := b.tlsSkipVerify
+	oldCAData := b.caData
+	b.mu.RUnlock()
+
+	newSkipVerify := oldSkipVerify
+	newCAData := oldCAData
 	tlsChanged := false
 	if val, ok := d.GetOk("tls_skip_verify"); ok {
-		newSkip := val.(bool)
-		if newSkip != b.tlsSkipVerify {
-			b.tlsSkipVerify = newSkip
+		newSkipVerify = val.(bool)
+		if newSkipVerify != oldSkipVerify {
 			tlsChanged = true
 		}
 	}
 	if val, ok := d.GetOk("ca_data"); ok {
-		newCA := val.(string)
-		if newCA != b.caData {
-			b.caData = newCA
+		newCAData = val.(string)
+		if newCAData != oldCAData {
 			tlsChanged = true
 		}
 	}
+
+	var newTransport *http.Transport
 	if tlsChanged {
-		transport, err := NewTransportWithTLS(b.caData, b.tlsSkipVerify)
+		var err error
+		newTransport, err = NewTransportWithTLS(newCAData, newSkipVerify)
 		if err != nil {
 			return &logical.Response{
 				StatusCode: http.StatusBadRequest,
 				Err:        logical.ErrBadRequest(err.Error()),
 			}, nil
 		}
-		b.Proxy.Transport = transport
 	}
+
+	// All validation passed — apply changes under write lock
+	b.mu.Lock()
+	if newURL != "" {
+		b.providerURL = newURL
+	}
+	if hasMaxBodySize {
+		b.MaxBodySize = newMaxBodySize
+	} else if b.MaxBodySize == 0 {
+		b.MaxBodySize = framework.DefaultMaxBodySize
+	}
+	if hasTimeout {
+		b.Timeout = newTimeout
+	} else if b.Timeout == 0 {
+		b.Timeout = b.spec.DefaultTimeout
+	}
+	if tlsChanged {
+		b.tlsSkipVerify = newSkipVerify
+		b.caData = newCAData
+		b.Proxy.Transport = newTransport
+	}
+
+	b.StreamingBackend.SetTransparentConfig(tc)
 
 	// Process extra config fields
 	if b.spec.OnConfigWrite != nil {
-		b.mu.Lock()
 		newState, err := b.spec.OnConfigWrite(d, b.extraState)
 		if err != nil {
 			b.mu.Unlock()
@@ -195,30 +243,27 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 			}, nil
 		}
 		b.extraState = newState
-		b.mu.Unlock()
 	}
+
+	// Snapshot config for persistence while still holding the lock
+	configData := map[string]any{
+		b.spec.URLConfigKey: b.providerURL,
+		"max_body_size":     b.MaxBodySize,
+		"timeout":           b.Timeout.String(),
+		"auto_auth_path":    tc.AutoAuthPath,
+		"default_role":      tc.DefaultAuthRole,
+		"tls_skip_verify":   b.tlsSkipVerify,
+		"ca_data":           b.caData,
+	}
+	if b.spec.OnConfigRead != nil {
+		for k, v := range b.spec.OnConfigRead(b.extraState) {
+			configData[k] = v
+		}
+	}
+	b.mu.Unlock()
 
 	// Persist config to storage
 	if b.StorageView != nil {
-		configData := map[string]any{
-			b.spec.URLConfigKey: b.providerURL,
-			"max_body_size":     b.MaxBodySize,
-			"timeout":           b.Timeout.String(),
-			"auto_auth_path":    tc.AutoAuthPath,
-			"default_role":      tc.DefaultAuthRole,
-			"tls_skip_verify":   b.tlsSkipVerify,
-			"ca_data":           b.caData,
-		}
-
-		// Add extra state to persisted config
-		if b.spec.OnConfigRead != nil {
-			b.mu.RLock()
-			for k, v := range b.spec.OnConfigRead(b.extraState) {
-				configData[k] = v
-			}
-			b.mu.RUnlock()
-		}
-
 		entry, err := sdklogical.StorageEntryJSON("config", configData)
 		if err != nil {
 			return &logical.Response{

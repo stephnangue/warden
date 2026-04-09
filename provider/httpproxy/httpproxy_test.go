@@ -123,6 +123,7 @@ func TestDefaultTokenExtractor(t *testing.T) {
 		{"Bearer token", map[string]string{"Authorization": "Bearer my-bearer-token"}, "my-bearer-token"},
 		{"X-Warden-Token takes priority", map[string]string{"X-Warden-Token": "warden", "Authorization": "Bearer bearer"}, "warden"},
 		{"No token", map[string]string{}, ""},
+		{"Lowercase bearer", map[string]string{"Authorization": "bearer my-token"}, "my-token"},
 		{"Non-Bearer auth ignored", map[string]string{"Authorization": "Basic abc"}, ""},
 	}
 	for _, tc := range tests {
@@ -244,6 +245,7 @@ func TestValidateConfig(t *testing.T) {
 		{"valid URL", map[string]any{"api_url": "https://api.example.com"}, ""},
 		{"HTTP rejected", map[string]any{"api_url": "http://api.example.com"}, "https://"},
 		{"invalid timeout", map[string]any{"timeout": "bad"}, "invalid timeout"},
+		{"zero max_body_size", map[string]any{"max_body_size": 0}, "greater than 0"},
 		{"negative max_body_size", map[string]any{"max_body_size": -1}, "greater than 0"},
 		{"oversized max_body_size", map[string]any{"max_body_size": 200000000}, "100MB"},
 		{"valid string timeout", map[string]any{"timeout": "30s"}, ""},
@@ -614,6 +616,34 @@ func TestConfigWrite_InvalidURL(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
+func TestConfigWrite_ZeroMaxBodySize(t *testing.T) {
+	b := setupBackend(t, testSpec())
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "config",
+		Data: map[string]any{
+			"max_body_size":  int64(0),
+			"auto_auth_path": "auth/jwt/",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestConfigWrite_OversizedMaxBodySize(t *testing.T) {
+	b := setupBackend(t, testSpec())
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "config",
+		Data: map[string]any{
+			"max_body_size":  int64(200000000),
+			"auto_auth_path": "auth/jwt/",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
 func TestConfigWrite_MissingAutoAuthPath(t *testing.T) {
 	b := setupBackend(t, testSpec())
 	resp, err := b.HandleRequest(context.Background(), &logical.Request{
@@ -781,7 +811,7 @@ func TestHandleTransparentGatewayStreaming(t *testing.T) {
 // --- buildTargetURL tests ---
 
 func TestBuildTargetURL(t *testing.T) {
-	pb := &proxyBackend{providerURL: "https://api.test.com"}
+	providerURL := "https://api.test.com"
 	tests := []struct {
 		name     string
 		path     string
@@ -797,7 +827,7 @@ func TestBuildTargetURL(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := pb.buildTargetURL(tc.path, tc.query)
+			result, err := buildTargetURL(providerURL, tc.path, tc.query)
 			if tc.wantErr {
 				assert.Error(t, err)
 			} else {

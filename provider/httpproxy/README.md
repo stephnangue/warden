@@ -92,7 +92,7 @@ Both paths perform implicit authentication and credential injection. The only di
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `ParseStreamBody` | `false` | Enable request body parsing for policy evaluation (model, max_tokens, etc.). Set `true` for AI providers. |
+| `ParseStreamBody` | `false` | Enable request body parsing for policy evaluation. When `true`, the framework extracts fields like `model` and `max_tokens` from the JSON request body so access control policies can enforce per-model or per-parameter rules. Set `true` for AI providers (OpenAI, Anthropic, etc.), `false` for REST APIs. |
 | `UserAgent` | `"warden-{Name}-proxy"` | User-Agent header on proxied requests. |
 | `ExtractToken` | `DefaultTokenExtractor` | Override how the Warden session token is extracted from incoming requests. |
 | `ExtraHeadersToRemove` | `[]` | Provider-specific headers to strip beyond the [base set](#base-headers-removed). |
@@ -129,6 +129,19 @@ ExtractCredentials: httpproxy.HeaderAPIKeyExtractor("x-api-key"),
 ```
 
 Used by: Anthropic.
+
+### `MultiFieldAPIKeyExtractor(requiredFields, optionalFields)`
+
+Extracts multiple fields from a `TypeAPIKey` credential and maps them to headers. Required fields must be present; optional fields are included when non-empty.
+
+```go
+ExtractCredentials: httpproxy.MultiFieldAPIKeyExtractor(
+    map[string]string{"api_key": "Authorization"},                                      // required
+    map[string]string{"org_id": "OpenAI-Organization", "project_id": "OpenAI-Project"}, // optional
+),
+```
+
+Used by: Datadog.
 
 ### `TypedTokenExtractor(credType, credField, headerName, headerPrefix)`
 
@@ -199,7 +212,7 @@ var Spec = &httpproxy.ProviderSpec{
 
 ## Extra config fields
 
-For providers with config beyond the standard five fields (url, max_body_size, timeout, auto_auth_path, default_role), use `ExtraConfigFields` with the state callbacks. See the GitHub provider for a complete example:
+For providers with config beyond the standard seven fields (url, max_body_size, timeout, auto_auth_path, default_role, tls_skip_verify, ca_data), use `ExtraConfigFields` with the state callbacks. See the GitHub provider for a complete example:
 
 ```go
 var Spec = &httpproxy.ProviderSpec{
@@ -287,9 +300,19 @@ These providers have fundamentally different request handling and should remain 
 
 | Provider | Credential extractor | Custom token? | Extra config? |
 |----------|---------------------|---------------|---------------|
+| Anthropic | `HeaderAPIKeyExtractor("x-api-key")` | Yes | No |
+| Cohere | `BearerAPIKeyExtractor` | No | No |
+| Datadog | `MultiFieldAPIKeyExtractor` | No | No |
+| Dynatrace | Custom | No | No |
+| Elastic | Custom | Yes | Yes |
+| GitHub | `TypedTokenExtractor` | Yes | Yes |
+| GitLab | `TypedTokenExtractor` | Yes | No |
+| Kubernetes | `TypedTokenExtractor` | Yes | No |
 | Mistral | `BearerAPIKeyExtractor` | No | No |
+| NewRelic | `HeaderAPIKeyExtractor("Api-Key")` | Yes | No |
+| OpenAI | Custom | No | No |
+| OVH | `BearerAPIKeyExtractor` | No | No |
+| PagerDuty | `BearerAPIKeyExtractor` | No | No |
+| ServiceNow | `BearerAPIKeyExtractor` | No | Yes |
 | Slack | `BearerAPIKeyExtractor` | No | No |
-| OpenAI | Custom (api_key + org + project) | No | No |
-| Anthropic | `HeaderAPIKeyExtractor("x-api-key")` | Yes (x-api-key) | No |
-| GitLab | `TypedTokenExtractor` | Yes (PRIVATE-TOKEN) | No |
-| GitHub | `TypedTokenExtractor` | No | Yes (api_version) |
+| Splunk | `BearerAPIKeyExtractor` | Yes | Yes |
