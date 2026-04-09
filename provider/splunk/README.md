@@ -247,7 +247,7 @@ path "splunk/role/+/gateway/services/apps/local" {
 }
 
 # Dashboards (read-only via namespace)
-path "splunk/role/+/gateway/servicesNS/*/search/data/ui/views" {
+path "splunk/role/+/gateway/servicesNS/+/search/data/ui/views" {
   capabilities = ["read"]
 }
 EOF

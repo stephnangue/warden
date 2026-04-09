@@ -229,7 +229,7 @@ path "tfe/role/+/gateway/api/v2/organizations/*" {
 }
 
 # Workspaces (read-only)
-path "tfe/role/+/gateway/api/v2/organizations/*/workspaces" {
+path "tfe/role/+/gateway/api/v2/organizations/+/workspaces" {
   capabilities = ["read"]
 }
 
