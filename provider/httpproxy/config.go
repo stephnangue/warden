@@ -150,7 +150,7 @@ func ValidateConfig(conf map[string]any, urlKey string) error {
 		default:
 			return fmt.Errorf("max_body_size must be an integer, got %T", maxSize)
 		}
-		if size < 0 {
+		if size <= 0 {
 			return fmt.Errorf("max_body_size must be greater than 0")
 		}
 		if size > 104857600 { // 100MB

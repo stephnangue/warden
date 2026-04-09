@@ -58,7 +58,9 @@ type ProviderSpec struct {
 	DefaultHeaders map[string]string
 
 	// DynamicHeaders returns headers to set based on current config state.
-	// Called on every request. Use for headers derived from config values.
+	// Called on every request as fallbacks — only set if the client did not
+	// already provide the header. Use DefaultHeaders for headers that must
+	// always override client values.
 	DynamicHeaders func(state map[string]any) map[string]string
 
 	// DefaultAccept overrides the default Accept header (defaults to "application/json").
@@ -244,6 +246,7 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 			return fmt.Errorf("failed to decode config: %w", err)
 		}
 
+		b.mu.Lock()
 		if urlVal, ok := config[b.spec.URLConfigKey].(string); ok && urlVal != "" {
 			b.providerURL = strings.TrimRight(urlVal, "/")
 		}
@@ -281,6 +284,7 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 		if caData != "" || skipVerify {
 			transport, err := NewTransportWithTLS(caData, skipVerify)
 			if err != nil {
+				b.mu.Unlock()
 				return fmt.Errorf("failed to configure TLS: %w", err)
 			}
 			b.Proxy.Transport = transport
@@ -290,12 +294,12 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 
 		// Load extra state
 		if b.spec.OnInitialize != nil {
-			b.mu.Lock()
 			b.extraState = b.spec.OnInitialize(config, b.extraState)
-			b.mu.Unlock()
 		}
+		b.mu.Unlock()
 	} else {
 		// No persisted config — persist defaults
+		b.mu.RLock()
 		tc := b.TransparentConfig
 		configData := map[string]any{
 			b.spec.URLConfigKey: b.providerURL,
@@ -309,12 +313,11 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 
 		// Add extra state defaults
 		if b.spec.OnConfigRead != nil {
-			b.mu.RLock()
 			for k, v := range b.spec.OnConfigRead(b.extraState) {
 				configData[k] = v
 			}
-			b.mu.RUnlock()
 		}
+		b.mu.RUnlock()
 
 		defaultEntry, err := sdklogical.StorageEntryJSON("config", configData)
 		if err != nil {
