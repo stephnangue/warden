@@ -2,12 +2,8 @@ package gcp
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -234,122 +230,15 @@ func (b *gcpBackend) handleTransparentGatewayStreaming(ctx context.Context, req 
 
 // ValidateConfig validates GCP provider-specific configuration
 func ValidateConfig(config map[string]any) error {
-	allowedKeys := map[string]bool{
-		"max_body_size":   true,
-		"timeout":         true,
-		"tls_skip_verify": true,
-		"ca_data":         true,
-		"auto_auth_path":  true,
-		"default_role":    true,
+	if err := framework.ValidateAllowedKeys(config,
+		"max_body_size", "timeout", "tls_skip_verify", "ca_data",
+		"auto_auth_path", "default_role"); err != nil {
+		return err
 	}
-
-	// Check for unknown keys
-	for key := range config {
-		if !allowedKeys[key] {
-			return fmt.Errorf("unknown configuration key: %s (allowed: max_body_size, timeout, tls_skip_verify, ca_data, auto_auth_path, default_role)", key)
-		}
+	if err := framework.ValidateCommonConfig(config); err != nil {
+		return err
 	}
-
-	// Validate max_body_size
-	if maxSize, ok := config["max_body_size"]; ok {
-		var size int64
-		switch v := maxSize.(type) {
-		case int:
-			size = int64(v)
-		case int64:
-			size = v
-		case float64:
-			size = int64(v)
-		case json.Number:
-			parsed, err := v.Int64()
-			if err != nil {
-				return fmt.Errorf("max_body_size must be an integer, got json.Number that can't be parsed: %w", err)
-			}
-			size = parsed
-		case string:
-			parsed, err := strconv.ParseInt(v, 10, 64)
-			if err != nil {
-				return fmt.Errorf("max_body_size must be an integer, got string that can't be parsed: %w", err)
-			}
-			size = parsed
-		default:
-			return fmt.Errorf("max_body_size must be an integer, got %T", maxSize)
-		}
-		if size < 0 {
-			return fmt.Errorf("max_body_size must be greater than 0")
-		}
-		if size > 104857600 { // 100MB
-			return fmt.Errorf("max_body_size must not exceed 104857600 bytes (100MB)")
-		}
-	}
-
-	// Validate timeout
-	if timeout, ok := config["timeout"]; ok {
-		switch v := timeout.(type) {
-		case string:
-			if _, err := time.ParseDuration(v); err != nil {
-				return fmt.Errorf("invalid timeout format: %w (expected format: '30s', '5m', '1h')", err)
-			}
-		case int:
-			if v < 0 {
-				return fmt.Errorf("timeout must be greater than 0 seconds")
-			}
-		case float64:
-			if v < 0 {
-				return fmt.Errorf("timeout must be greater than 0 seconds")
-			}
-		default:
-			return fmt.Errorf("timeout must be a duration string (e.g., '30s') or integer (seconds)")
-		}
-	}
-
-	// Validate auto_auth_path
-	if aap, ok := config["auto_auth_path"]; ok {
-		if _, ok := aap.(string); !ok {
-			return fmt.Errorf("auto_auth_path must be a string")
-		}
-	}
-
-	// Validate default_role
-	if dr, ok := config["default_role"]; ok {
-		if _, ok := dr.(string); !ok {
-			return fmt.Errorf("default_role must be a string")
-		}
-	}
-
-	// Validate tls_skip_verify
-	if v, ok := config["tls_skip_verify"]; ok {
-		switch v := v.(type) {
-		case bool:
-			// valid
-		case string:
-			if v != "true" && v != "false" && v != "1" && v != "0" {
-				return fmt.Errorf("tls_skip_verify must be a boolean, got string: %s", v)
-			}
-		default:
-			return fmt.Errorf("tls_skip_verify must be a boolean, got %T", v)
-		}
-	}
-
-	// Validate ca_data
-	if v, ok := config["ca_data"]; ok {
-		caStr, ok := v.(string)
-		if !ok {
-			return fmt.Errorf("ca_data must be a string")
-		}
-		if caStr != "" {
-			pemBytes, err := base64.StdEncoding.DecodeString(caStr)
-			if err != nil {
-				return fmt.Errorf("ca_data is not valid base64: %w", err)
-			}
-			block, _ := pem.Decode(pemBytes)
-			if block == nil {
-				return fmt.Errorf("ca_data contains no valid PEM data")
-			}
-		}
-	}
-
-	return nil
+	return framework.ValidateTLSConfig(config)
 }
 
 // SensitiveConfigFields returns the list of config fields that should be masked in output

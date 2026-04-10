@@ -3,7 +3,6 @@ package gitlab
 import (
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/stephnangue/warden/credential"
@@ -26,25 +25,6 @@ func extractToken(r *http.Request) string {
 	return ""
 }
 
-// validateGitLabAddress validates that the gitlab_address is a well-formed URL.
-// Unlike other providers, GitLab allows HTTP for development instances.
-func validateGitLabAddress(addr string) error {
-	if addr == "" {
-		return fmt.Errorf("gitlab_address is required")
-	}
-	parsed, err := url.Parse(addr)
-	if err != nil {
-		return fmt.Errorf("invalid gitlab_address: %w", err)
-	}
-	if parsed.Scheme != "https" && parsed.Scheme != "http" {
-		return fmt.Errorf("gitlab_address must use http:// or https:// scheme, got: %s", parsed.Scheme)
-	}
-	if parsed.Host == "" {
-		return fmt.Errorf("gitlab_address must include a host")
-	}
-	return nil
-}
-
 // Spec defines the GitLab provider configuration for the httpproxy framework.
 var Spec = &httpproxy.ProviderSpec{
 	Name:                 "gitlab",
@@ -62,7 +42,7 @@ var Spec = &httpproxy.ProviderSpec{
 		if !ok || addr == "" {
 			return fmt.Errorf("gitlab_address is required")
 		}
-		return validateGitLabAddress(addr)
+		return nil
 	},
 }
 

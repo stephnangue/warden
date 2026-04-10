@@ -2,7 +2,6 @@ package servicenow
 
 import (
 	"fmt"
-	"net/url"
 	"time"
 
 	"github.com/stephnangue/warden/provider/httpproxy"
@@ -11,25 +10,6 @@ import (
 // DefaultServiceNowTimeout is the default request timeout for ServiceNow API calls.
 // ServiceNow APIs can be slow for large table queries, so a 60s default is used.
 const DefaultServiceNowTimeout = 60 * time.Second
-
-// validateServiceNowURL validates that the servicenow_url is a well-formed HTTPS URL.
-// When tlsSkipVerify is true, http:// is also accepted for dev/test environments.
-func validateServiceNowURL(addr string, tlsSkipVerify bool) error {
-	if addr == "" {
-		return fmt.Errorf("servicenow_url is required")
-	}
-	parsed, err := url.Parse(addr)
-	if err != nil {
-		return fmt.Errorf("invalid servicenow_url: %w", err)
-	}
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && tlsSkipVerify) {
-		return fmt.Errorf("servicenow_url must use https:// scheme, got: %s", parsed.Scheme)
-	}
-	if parsed.Host == "" {
-		return fmt.Errorf("servicenow_url must include a host")
-	}
-	return nil
-}
 
 // Spec defines the ServiceNow provider configuration for the httpproxy framework.
 var Spec = &httpproxy.ProviderSpec{
@@ -46,11 +26,7 @@ var Spec = &httpproxy.ProviderSpec{
 		if !ok || addr == "" {
 			return fmt.Errorf("servicenow_url is required")
 		}
-		skipVerify := false
-		if v, ok := conf["tls_skip_verify"].(bool); ok {
-			skipVerify = v
-		}
-		return validateServiceNowURL(addr, skipVerify)
+		return nil
 	},
 }
 

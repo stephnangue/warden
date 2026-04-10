@@ -1,8 +1,7 @@
 package aws
 
 import (
-	"encoding/json"
-	"strconv"
+	"fmt"
 	"time"
 
 	"github.com/stephnangue/warden/framework"
@@ -20,7 +19,10 @@ type ProviderConfig struct {
 func parseConfig(conf map[string]any) ProviderConfig {
 	config := ProviderConfig{
 		ProxyDomains: []string{"localhost"},
+		MaxBodySize:  framework.ParseMaxBodySize(conf),
+		Timeout:      framework.ParseTimeout(conf, framework.DefaultTimeout),
 	}
+
 	// Parse proxy_domains
 	if domains, ok := conf["proxy_domains"].([]string); ok {
 		config.ProxyDomains = domains
@@ -33,53 +35,37 @@ func parseConfig(conf map[string]any) ProviderConfig {
 		}
 	}
 
-	// Parse max_body_size
-	maxBodySize := framework.DefaultMaxBodySize
-	if maxSize, ok := conf["max_body_size"].(int64); ok && maxSize > 0 {
-		maxBodySize = maxSize
-	} else if maxSize, ok := conf["max_body_size"].(int); ok && maxSize > 0 {
-		maxBodySize = int64(maxSize)
-	} else if maxSize, ok := conf["max_body_size"].(float64); ok && maxSize > 0 {
-		maxBodySize = int64(maxSize)
-	} else if maxSize, ok := conf["max_body_size"].(json.Number); ok {
-		// Handle json.Number type (from JSON decoder with UseNumber)
-		if parsed, err := maxSize.Int64(); err == nil && parsed > 0 {
-			maxBodySize = parsed
-		}
-	} else if maxSize, ok := conf["max_body_size"].(string); ok {
-		// Handle string conversion (e.g., from JSON number stored as string)
-		if parsed, err := strconv.ParseInt(maxSize, 10, 64); err == nil && parsed > 0 {
-			maxBodySize = parsed
-		}
-	}
-	config.MaxBodySize = maxBodySize
-
-	// Parse timeout
-	timeOut := framework.DefaultTimeout
-	if timeout, ok := conf["timeout"].(int); ok {
-		timeOut = time.Duration(timeout) * time.Second
-	} else if timeout, ok := conf["timeout"].(string); ok {
-		if d, err := time.ParseDuration(timeout); err == nil {
-			timeOut = d
-		}
-	}
-	if timeOut == 0 {
-		timeOut = framework.DefaultTimeout
-	}
-	config.Timeout = timeOut
-
-	// Parse TLS settings
-	if v, ok := conf["tls_skip_verify"]; ok {
-		switch b := v.(type) {
-		case bool:
-			config.TLSSkipVerify = b
-		case string:
-			config.TLSSkipVerify = b == "true" || b == "1"
-		}
-	}
-	if v, ok := conf["ca_data"].(string); ok {
-		config.CAData = v
-	}
+	config.TLSSkipVerify, config.CAData = framework.ParseTLSConfig(conf)
 
 	return config
+}
+
+// ValidateConfig validates AWS provider-specific configuration
+func ValidateConfig(config map[string]any) error {
+	if err := framework.ValidateAllowedKeys(config,
+		"proxy_domains", "max_body_size", "timeout", "tls_skip_verify", "ca_data",
+		"auto_auth_path", "default_role"); err != nil {
+		return err
+	}
+
+	// Validate proxy_domains
+	if domains, ok := config["proxy_domains"]; ok {
+		switch v := domains.(type) {
+		case []any:
+			for i, d := range v {
+				if _, ok := d.(string); !ok {
+					return fmt.Errorf("proxy_domains[%d] must be a string", i)
+				}
+			}
+		case []string:
+		default:
+			return fmt.Errorf("proxy_domains must be an array of strings")
+		}
+	}
+
+	if err := framework.ValidateCommonConfig(config); err != nil {
+		return err
+	}
+
+	return framework.ValidateTLSConfig(config)
 }

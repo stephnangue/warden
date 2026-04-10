@@ -64,5 +64,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register Scaleway driver factory
+	if err := registry.RegisterFactory(&ScalewayDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }

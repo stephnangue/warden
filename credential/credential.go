@@ -18,6 +18,7 @@ const (
 	TypeDBAuthToken       = "db_auth_token"
 	TypeOAuthBearerToken  = "oauth_bearer_token"
 	TypeKubernetesToken   = "kubernetes_token"
+	TypeScalewayKeys     = "scaleway_keys"
 )
 
 // Source type constants
@@ -34,6 +35,7 @@ const (
 	SourceTypeIBM        = "ibm"
 	SourceTypeElastic    = "elastic"
 	SourceTypeKubernetes = "kubernetes"
+	SourceTypeScaleway   = "scaleway"
 )
 
 // Category constants for credential categorization

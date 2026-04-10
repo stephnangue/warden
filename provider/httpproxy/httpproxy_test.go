@@ -286,7 +286,7 @@ func TestValidateURL(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateURL(tc.addr, "api_url", tc.tlsSkipVerify)
+			err := framework.ValidateURL(tc.addr, "api_url", tc.tlsSkipVerify)
 			if tc.wantErr {
 				assert.Error(t, err)
 			} else {

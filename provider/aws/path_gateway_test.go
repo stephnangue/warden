@@ -10,6 +10,7 @@ import (
 
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/provider/sigv4"
 )
 
 // createTestLogger creates a logger for testing that discards output
@@ -83,7 +84,7 @@ func TestExtractFromAuthHeader(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service, region, accessKey, err := extractFromAuthHeader(tt.authHeader)
+			service, region, accessKey, err := sigv4.ExtractFromAuthHeader(tt.authHeader)
 
 			if tt.expectError {
 				if err == nil {
@@ -138,9 +139,9 @@ func TestComputePayloadHash(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := computePayloadHash(tt.body)
+			got := sigv4.ComputePayloadHash(tt.body)
 			if got != tt.expected {
-				t.Errorf("computePayloadHash() = %s, want %s", got, tt.expected)
+				t.Errorf("sigv4.ComputePayloadHash() = %s, want %s", got, tt.expected)
 			}
 		})
 	}
@@ -190,7 +191,7 @@ func TestParseAWSDate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseAWSDate(tt.dateStr)
+			got, err := sigv4.ParseAWSDate(tt.dateStr)
 
 			if tt.expectError {
 				if err == nil {
@@ -203,7 +204,7 @@ func TestParseAWSDate(t *testing.T) {
 				t.Fatalf("Unexpected error: %v", err)
 			}
 			if !got.Equal(tt.expected) {
-				t.Errorf("parseAWSDate() = %v, want %v", got, tt.expected)
+				t.Errorf("sigv4.ParseAWSDate() = %v, want %v", got, tt.expected)
 			}
 		})
 	}
@@ -255,15 +256,9 @@ func TestAwsBackend_ReadRequestBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := &awsBackend{
-				StreamingBackend: &framework.StreamingBackend{
-					MaxBodySize: tt.maxBodySize,
-				},
-			}
-
 			req := httptest.NewRequest(http.MethodPost, "/test", bytes.NewBufferString(tt.body))
 
-			got, err := b.readRequestBody(req)
+			got, err := sigv4.ReadRequestBody(req, tt.maxBodySize)
 
 			if tt.expectError {
 				if err == nil {
@@ -283,16 +278,10 @@ func TestAwsBackend_ReadRequestBody(t *testing.T) {
 }
 
 func TestAwsBackend_ReadRequestBody_NilBody(t *testing.T) {
-	b := &awsBackend{
-		StreamingBackend: &framework.StreamingBackend{
-			MaxBodySize: 1024,
-		},
-	}
-
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Body = nil
 
-	got, err := b.readRequestBody(req)
+	got, err := sigv4.ReadRequestBody(req, 1024)
 
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -323,10 +312,9 @@ func TestAwsBackend_RestoreRequestBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := &awsBackend{}
 			req := httptest.NewRequest(http.MethodPost, "/test", nil)
 
-			b.restoreRequestBody(req, tt.bodyBytes)
+			sigv4.RestoreRequestBody(req, tt.bodyBytes)
 
 			if len(tt.bodyBytes) > 0 {
 				// Body should be restored
@@ -527,7 +515,7 @@ func BenchmarkExtractFromAuthHeader(b *testing.B) {
 
 	b.ResetTimer()
 	for b.Loop() {
-		extractFromAuthHeader(authHeader)
+		sigv4.ExtractFromAuthHeader(authHeader)
 	}
 }
 
@@ -536,7 +524,7 @@ func BenchmarkComputePayloadHash(b *testing.B) {
 
 	b.ResetTimer()
 	for b.Loop() {
-		computePayloadHash(body)
+		sigv4.ComputePayloadHash(body)
 	}
 }
 
@@ -545,7 +533,7 @@ func BenchmarkParseAWSDate(b *testing.B) {
 
 	b.ResetTimer()
 	for b.Loop() {
-		parseAWSDate(dateStr)
+		sigv4.ParseAWSDate(dateStr)
 	}
 }
 
