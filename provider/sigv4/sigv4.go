@@ -21,6 +21,11 @@ import (
 	"github.com/stephnangue/warden/logger"
 )
 
+// maxChunkSize caps individual chunk allocation when decoding aws-chunked bodies
+// to prevent denial-of-service via a malicious chunk header. AWS SDKs use chunks
+// up to ~1MB; 10MB per chunk is generous.
+const maxChunkSize = 10 << 20 // 10MB
+
 
 var (
 	// AuthRegex parses the SigV4 Authorization header into access_key_id, date, region, service.
@@ -408,6 +413,10 @@ func DecodeAWSChunkedBody(data []byte) ([]byte, error) {
 
 		if chunkSize == 0 {
 			break
+		}
+
+		if chunkSize < 0 || chunkSize > maxChunkSize {
+			return nil, fmt.Errorf("chunk size %d exceeds maximum allowed (%d bytes)", chunkSize, maxChunkSize)
 		}
 
 		chunk := make([]byte, chunkSize)
