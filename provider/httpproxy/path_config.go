@@ -117,7 +117,7 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		addr := val.(string)
 		if addr != "" {
 			addr = strings.TrimRight(addr, "/")
-			if err := ValidateURL(addr, b.spec.URLConfigKey, skipVerify); err != nil {
+			if err := framework.ValidateURL(addr, b.spec.URLConfigKey, skipVerify); err != nil {
 				return &logical.Response{
 					StatusCode: http.StatusBadRequest,
 					Err:        logical.ErrBadRequest(err.Error()),

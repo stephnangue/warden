@@ -44,13 +44,20 @@ func dynatraceCredentialExtractor(req *logical.Request) (map[string]string, erro
 // Spec defines the Dynatrace provider configuration for the httpproxy framework.
 var Spec = &httpproxy.ProviderSpec{
 	Name:               "dynatrace",
-	DefaultURL:         "https://{environment-id}.live.dynatrace.com",
+	DefaultURL:         "", // Instance-specific, must be configured
 	URLConfigKey:       "dynatrace_url",
 	DefaultTimeout:     DefaultDynatraceTimeout,
 	ParseStreamBody:    true,
 	UserAgent:          "warden-dynatrace-proxy",
 	HelpText:           dynatraceBackendHelp,
 	ExtractCredentials: dynatraceCredentialExtractor,
+	ValidateExtraConfig: func(conf map[string]any) error {
+		addr, ok := conf["dynatrace_url"].(string)
+		if !ok || addr == "" {
+			return fmt.Errorf("dynatrace_url is required")
+		}
+		return nil
+	},
 }
 
 // Factory creates a new Dynatrace provider backend.

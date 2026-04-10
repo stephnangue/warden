@@ -54,5 +54,10 @@ func RegisterBuiltinTypes(registry *credential.TypeRegistry) error {
 		return err
 	}
 
+	// Register Scaleway keys type
+	if err := registry.Register(&ScalewayKeysCredType{}); err != nil {
+		return err
+	}
+
 	return nil
 }

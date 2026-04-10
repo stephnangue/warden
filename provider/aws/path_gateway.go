@@ -1,42 +1,19 @@
 package aws
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/aws/processor"
-)
-
-var (
-	authRegex          = regexp.MustCompile(`AWS4-HMAC-SHA256 Credential=([^/]+)/([^/]+)/([^/]+)/([^/]+)/aws4_request`)
-	signRegex          = regexp.MustCompile(`Signature=([a-f0-9]+)`)
-	signedHeadersRegex = regexp.MustCompile(`SignedHeaders=([^,]+)`)
-)
-
-type contextKey string
-
-const (
-	ClientTokenKey contextKey = "clientToken"
-	AWSCredsKey    contextKey = "awsCreds"
-	TokenKey       contextKey = "token"
-	RoleNameKey    contextKey = "roleName"
-	PrincipalIDKey contextKey = "principalID"
-	TargetURLKey   contextKey = "targetURL"
-	ServiceKey     contextKey = "service"
-	RegionKey      contextKey = "region"
+	"github.com/stephnangue/warden/provider/sigv4"
 )
 
 func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
@@ -71,14 +48,18 @@ func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Forward directly via transport, bypassing httputil.ReverseProxy which
 	// modifies headers (hop-by-hop cleanup, header reordering) and breaks
 	// AWS signatures.
-	b.forwardDirect(req.ResponseWriter, r, body)
+	transport := b.Proxy.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	sigv4.ForwardDirect(b.Logger, req.ResponseWriter, r, body, transport)
 }
 
 // processRequest handles all request processing before forwarding.
 // Returns the prepared request and body bytes to forward.
 func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (*http.Request, []byte, error) {
 	// Step 1: Read and buffer request body
-	bodyBytes, err := b.readRequestBody(req.HTTPRequest)
+	bodyBytes, err := sigv4.ReadRequestBody(req.HTTPRequest, b.MaxBodySize)
 	if err != nil {
 		http.Error(req.ResponseWriter, "Failed to read request body", http.StatusBadRequest)
 		return nil, nil, err
@@ -88,7 +69,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	}
 
 	// Step 2: Extract service, region, and credentials from Authorization header
-	service, region, _, err := extractFromAuthHeader(req.HTTPRequest.Header.Get("Authorization"))
+	service, region, _, err := sigv4.ExtractFromAuthHeader(req.HTTPRequest.Header.Get("Authorization"))
 	if err != nil {
 		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
 		return nil, nil, err
@@ -97,20 +78,20 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// Step 3: Reconstruct the credentials the client used for signing.
 	// The core already performed JWT/cert auth via performImplicitAuth.
 	// We verify the SigV4 signature for request integrity protection.
-	accessKeyID := extractAccessKeyID(req.HTTPRequest.Header.Get("Authorization"))
+	accessKeyID := sigv4.ExtractAccessKeyID(req.HTTPRequest.Header.Get("Authorization"))
 	securityToken := req.HTTPRequest.Header.Get("X-Amz-Security-Token")
 
-	var verifyCreds aws.Credentials
+	var verifyCreds awssdk.Credentials
 	if strings.HasPrefix(securityToken, "eyJ") {
 		// JWT transparent: client used JWT as secret_access_key and session_token
-		verifyCreds = aws.Credentials{
+		verifyCreds = awssdk.Credentials{
 			AccessKeyID:     accessKeyID,
 			SecretAccessKey: securityToken,
 			SessionToken:    securityToken,
 		}
 	} else {
 		// Cert transparent: client used role name as both access_key_id and secret_access_key
-		verifyCreds = aws.Credentials{
+		verifyCreds = awssdk.Credentials{
 			AccessKeyID:     accessKeyID,
 			SecretAccessKey: accessKeyID,
 		}
@@ -246,72 +227,17 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	return req.HTTPRequest, bodyBytes, nil
 }
 
-// forwardDirect sends the signed request directly using the proxy's transport,
-// bypassing httputil.ReverseProxy which modifies headers and breaks AWS signatures.
-func (b *awsBackend) forwardDirect(w http.ResponseWriter, r *http.Request, body []byte) {
-	// Build a fresh request to avoid any state from the original
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), bytes.NewReader(body))
-	if err != nil {
-		b.Logger.Error("failed to create direct request", logger.Err(err))
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-	outReq.Header = r.Header.Clone()
-	outReq.Host = r.Host
-	outReq.ContentLength = int64(len(body))
-
-	// Use the proxy's transport (shares TLS config, connection pooling)
-	transport := b.Proxy.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-
-	resp, err := transport.RoundTrip(outReq)
-	if err != nil {
-		b.Logger.Error("direct forward failed", logger.Err(err))
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	// Copy response headers
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-
-	// For streaming responses (SSE, chunked), flush after each write so
-	// the client sees data incrementally instead of waiting for the buffer.
-	if flusher, ok := w.(http.Flusher); ok {
-		buf := make([]byte, 32*1024)
-		for {
-			n, readErr := resp.Body.Read(buf)
-			if n > 0 {
-				w.Write(buf[:n])
-				flusher.Flush()
-			}
-			if readErr != nil {
-				break
-			}
-		}
-	} else {
-		io.Copy(w, resp.Body)
-	}
-}
-
-func (b *awsBackend) getCredentials(req *logical.Request) (aws.Credentials, error) {
+func (b *awsBackend) getCredentials(req *logical.Request) (awssdk.Credentials, error) {
 	switch req.Credential.Type {
 	case credential.TypeAWSAccessKeys:
 		if req.Credential.LeaseTTL == 0 {
-			return aws.Credentials{
+			return awssdk.Credentials{
 				AccessKeyID:     req.Credential.Data["access_key_id"],
 				SecretAccessKey: req.Credential.Data["secret_access_key"],
 				Source:          req.Credential.Data["cred_source"],
 			}, nil
 		} else {
-			return aws.Credentials{
+			return awssdk.Credentials{
 				AccessKeyID:     req.Credential.Data["access_key_id"],
 				SecretAccessKey: req.Credential.Data["secret_access_key"],
 				Source:          req.Credential.Data["cred_source"],
@@ -321,71 +247,6 @@ func (b *awsBackend) getCredentials(req *logical.Request) (aws.Credentials, erro
 			}, nil
 		}
 	default:
-		return aws.Credentials{}, fmt.Errorf("unsupported aws credential type : %s", req.Credential.Type)
-	}
-}
-
-// extractFromAuthHeader parses service, region, and access key from Authorization header
-func extractFromAuthHeader(authHeader string) (service, region, accessKeyID string, err error) {
-	if authHeader == "" {
-		return "", "", "", fmt.Errorf("empty authorization header")
-	}
-
-	matches := authRegex.FindStringSubmatch(authHeader)
-	if len(matches) != 5 {
-		return "", "", "", fmt.Errorf("invalid authorization header format")
-	}
-
-	accessKeyID = matches[1]
-	region = matches[3]
-	service = matches[4]
-
-	return service, region, accessKeyID, nil
-}
-
-// computePayloadHash computes SHA256 hash of the payload
-func computePayloadHash(body []byte) string {
-	h := sha256.New()
-	h.Write(body)
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// parseAWSDate parses AWS date format (YYYYMMDDTHHMMSSZ)
-func parseAWSDate(dateStr string) (time.Time, error) {
-	return time.Parse("20060102T150405Z", dateStr)
-}
-
-func (b *awsBackend) readRequestBody(r *http.Request) ([]byte, error) {
-	if r.Body == nil {
-		return nil, nil
-	}
-
-	// Limit body size if configured
-	reader := io.Reader(r.Body)
-	if b.MaxBodySize > 0 {
-		reader = io.LimitReader(r.Body, b.MaxBodySize)
-	}
-
-	bodyBytes, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, err
-	}
-	r.Body.Close()
-
-	// Check if we hit the size limit
-	if b.MaxBodySize > 0 && int64(len(bodyBytes)) >= b.MaxBodySize {
-		return nil, fmt.Errorf("request body exceeds maximum size of %d bytes", b.MaxBodySize)
-	}
-
-	return bodyBytes, nil
-}
-
-func (b *awsBackend) restoreRequestBody(r *http.Request, bodyBytes []byte) {
-	if len(bodyBytes) > 0 {
-		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		r.ContentLength = int64(len(bodyBytes))
-	} else {
-		r.Body = nil
-		r.ContentLength = 0
+		return awssdk.Credentials{}, fmt.Errorf("unsupported aws credential type : %s", req.Credential.Type)
 	}
 }

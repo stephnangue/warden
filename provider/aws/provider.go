@@ -2,12 +2,8 @@ package aws
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +12,7 @@ import (
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/aws/processor"
 	"github.com/stephnangue/warden/provider/aws/processor/s3"
+	"github.com/stephnangue/warden/provider/sigv4"
 )
 
 // HostRewrite contains information about a rewritten virtual-hosted URL
@@ -50,29 +47,7 @@ func extractToken(r *http.Request) string {
 	if !strings.HasPrefix(authHeader, "AWS4-HMAC-SHA256") {
 		return ""
 	}
-	return extractAccessKeyID(authHeader)
-}
-
-// extractAccessKeyID extracts the Access Key ID from an AWS SigV4 Authorization header.
-// Format: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20231215/us-east-1/s3/aws4_request
-func extractAccessKeyID(authHeader string) string {
-	const prefix = "Credential="
-	idx := strings.Index(authHeader, prefix)
-	if idx == -1 {
-		return ""
-	}
-
-	start := idx + len(prefix)
-	if start >= len(authHeader) {
-		return ""
-	}
-
-	end := strings.IndexByte(authHeader[start:], '/')
-	if end == -1 {
-		return ""
-	}
-
-	return authHeader[start : start+end]
+	return sigv4.ExtractAccessKeyID(authHeader)
 }
 
 // Compile-time interface assertion
@@ -82,7 +57,7 @@ var _ logical.TransparentAuthRoleExtractor = (*awsBackend)(nil)
 // Returns (role, true) when access_key_id is present (used as the role name).
 // Returns ("", false) when no Authorization header is present.
 func (b *awsBackend) GetAuthRoleFromRequest(r *http.Request) (string, bool) {
-	accessKeyID := extractAccessKeyID(r.Header.Get("Authorization"))
+	accessKeyID := sigv4.ExtractAccessKeyID(r.Header.Get("Authorization"))
 	if accessKeyID == "" {
 		return "", false
 	}
@@ -255,128 +230,6 @@ func (b *awsBackend) initializeProcessors() {
 	b.processorRegistry.Register(s3.NewS3ControlProcessor(b.proxyDomains, b.Logger))
 	b.processorRegistry.Register(s3.NewS3Processor(b.proxyDomains, b.Logger))
 	b.processorRegistry.Register(processor.NewGenericAWSProcessor(b.proxyDomains, b.Logger))
-}
-
-// ValidateConfig validates AWS provider-specific configuration
-func ValidateConfig(config map[string]any) error {
-	allowedKeys := map[string]bool{
-		"proxy_domains":   true,
-		"max_body_size":   true,
-		"timeout":         true,
-		"tls_skip_verify": true,
-		"ca_data":         true,
-		"auto_auth_path":  true,
-		"default_role":    true,
-	}
-
-	// Check for unknown keys
-	for key := range config {
-		if !allowedKeys[key] {
-			return fmt.Errorf("unknown configuration key: %s (allowed: proxy_domains, max_body_size, timeout, tls_skip_verify, ca_data, auto_auth_path, default_role)", key)
-		}
-	}
-
-	// Validate proxy_domains
-	if domains, ok := config["proxy_domains"]; ok {
-		switch v := domains.(type) {
-		case []any:
-			for i, d := range v {
-				if _, ok := d.(string); !ok {
-					return fmt.Errorf("proxy_domains[%d] must be a string", i)
-				}
-			}
-		case []string:
-		default:
-			return fmt.Errorf("proxy_domains must be an array of strings")
-		}
-	}
-
-	// Validate max_body_size
-	if maxSize, ok := config["max_body_size"]; ok {
-		var size int64
-		switch v := maxSize.(type) {
-		case int:
-			size = int64(v)
-		case int64:
-			size = v
-		case float64:
-			size = int64(v)
-		case json.Number:
-			parsed, err := v.Int64()
-			if err != nil {
-				return fmt.Errorf("max_body_size must be an integer, got json.Number that can't be parsed: %w", err)
-			}
-			size = parsed
-		case string:
-			parsed, err := strconv.ParseInt(v, 10, 64)
-			if err != nil {
-				return fmt.Errorf("max_body_size must be an integer, got string that can't be parsed: %w", err)
-			}
-			size = parsed
-		default:
-			return fmt.Errorf("max_body_size must be an integer, got %T", maxSize)
-		}
-		if size < 0 {
-			return fmt.Errorf("max_body_size must be greater than 0")
-		}
-		if size > 104857600 { // 100MB
-			return fmt.Errorf("max_body_size must not exceed 104857600 bytes (100MB)")
-		}
-	}
-
-	// Validate timeout
-	if timeout, ok := config["timeout"]; ok {
-		switch v := timeout.(type) {
-		case string:
-			if _, err := time.ParseDuration(v); err != nil {
-				return fmt.Errorf("invalid timeout format: %w (expected format: '30s', '5m', '1h')", err)
-			}
-		case int:
-			if v < 0 {
-				return fmt.Errorf("timeout must be greater than 0 seconds")
-			}
-		case float64:
-			if v < 0 {
-				return fmt.Errorf("timeout must be greater than 0 seconds")
-			}
-		default:
-			return fmt.Errorf("timeout must be a duration string (e.g., '30s') or integer (seconds)")
-		}
-	}
-
-	// Validate tls_skip_verify
-	if v, ok := config["tls_skip_verify"]; ok {
-		switch v := v.(type) {
-		case bool:
-			// valid
-		case string:
-			if v != "true" && v != "false" && v != "1" && v != "0" {
-				return fmt.Errorf("tls_skip_verify must be a boolean, got string: %s", v)
-			}
-		default:
-			return fmt.Errorf("tls_skip_verify must be a boolean, got %T", v)
-		}
-	}
-
-	// Validate ca_data
-	if v, ok := config["ca_data"]; ok {
-		caStr, ok := v.(string)
-		if !ok {
-			return fmt.Errorf("ca_data must be a string")
-		}
-		if caStr != "" {
-			pemBytes, err := base64.StdEncoding.DecodeString(caStr)
-			if err != nil {
-				return fmt.Errorf("ca_data is not valid base64: %w", err)
-			}
-			block, _ := pem.Decode(pemBytes)
-			if block == nil {
-				return fmt.Errorf("ca_data contains no valid PEM data")
-			}
-		}
-	}
-
-	return nil
 }
 
 // SensitiveConfigFields returns the list of config fields that should be masked in output

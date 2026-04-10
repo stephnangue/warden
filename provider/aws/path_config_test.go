@@ -15,6 +15,7 @@ import (
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/sigv4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -434,7 +435,7 @@ func TestExtractAccessKeyID(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, extractAccessKeyID(tt.header))
+			assert.Equal(t, tt.expected, sigv4.ExtractAccessKeyID(tt.header))
 		})
 	}
 }
@@ -463,20 +464,20 @@ func TestRemoveAWSChunkedEncoding(t *testing.T) {
 	t.Run("only aws-chunked", func(t *testing.T) {
 		r, _ := http.NewRequest("PUT", "/", nil)
 		r.Header.Set("Content-Encoding", "aws-chunked")
-		removeAWSChunkedEncoding(r)
+		sigv4.RemoveAWSChunkedEncoding(r)
 		assert.Empty(t, r.Header.Get("Content-Encoding"))
 	})
 
 	t.Run("aws-chunked with gzip", func(t *testing.T) {
 		r, _ := http.NewRequest("PUT", "/", nil)
 		r.Header.Set("Content-Encoding", "gzip, aws-chunked")
-		removeAWSChunkedEncoding(r)
+		sigv4.RemoveAWSChunkedEncoding(r)
 		assert.Equal(t, "gzip", r.Header.Get("Content-Encoding"))
 	})
 
 	t.Run("no content-encoding", func(t *testing.T) {
 		r, _ := http.NewRequest("PUT", "/", nil)
-		removeAWSChunkedEncoding(r)
+		sigv4.RemoveAWSChunkedEncoding(r)
 		assert.Empty(t, r.Header.Get("Content-Encoding"))
 	})
 }
@@ -503,28 +504,28 @@ func TestPaths(t *testing.T) {
 
 func TestDecodeAWSChunkedBody_MultipleChunks(t *testing.T) {
 	body := []byte("5;chunk-signature=aaa\r\nhello\r\n6;chunk-signature=bbb\r\n world\r\n0;chunk-signature=ccc\r\n\r\n")
-	decoded, err := decodeAWSChunkedBody(body)
+	decoded, err := sigv4.DecodeAWSChunkedBody(body)
 	require.NoError(t, err)
 	assert.Equal(t, "hello world", string(decoded))
 }
 
 func TestDecodeAWSChunkedBody_InvalidHexSize(t *testing.T) {
 	body := []byte("ZZ;chunk-signature=aaa\r\ndata\r\n")
-	_, err := decodeAWSChunkedBody(body)
+	_, err := sigv4.DecodeAWSChunkedBody(body)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid chunk size")
 }
 
 func TestDecodeAWSChunkedBody_Empty(t *testing.T) {
 	body := []byte("0;chunk-signature=aaa\r\n\r\n")
-	decoded, err := decodeAWSChunkedBody(body)
+	decoded, err := sigv4.DecodeAWSChunkedBody(body)
 	require.NoError(t, err)
 	assert.Empty(t, decoded)
 }
 
 func TestDecodeAWSChunkedBody_TruncatedData(t *testing.T) {
 	body := []byte("a;chunk-signature=aaa\r\nshort\r\n")
-	_, err := decodeAWSChunkedBody(body)
+	_, err := sigv4.DecodeAWSChunkedBody(body)
 	assert.Error(t, err)
 }
 
@@ -554,13 +555,13 @@ func jsonNumber(s string) json.Number {
 
 func TestIsAWSChunked(t *testing.T) {
 	r, _ := http.NewRequest("PUT", "/", nil)
-	assert.False(t, isAWSChunked(r))
+	assert.False(t, sigv4.IsAWSChunked(r))
 
 	r.Header.Set("Content-Encoding", "aws-chunked")
-	assert.True(t, isAWSChunked(r))
+	assert.True(t, sigv4.IsAWSChunked(r))
 
 	r.Header.Set("Content-Encoding", "gzip, aws-chunked")
-	assert.True(t, isAWSChunked(r))
+	assert.True(t, sigv4.IsAWSChunked(r))
 }
 
 // --- Factory tests ---
@@ -715,7 +716,7 @@ func TestProcessRequest_ValidSignature_NoCredential(t *testing.T) {
 	// (access_key_id = secret_access_key = role name)
 	httpReq := httptest.NewRequest(http.MethodGet, "http://s3.us-east-1.amazonaws.com/gateway/my-bucket/key", nil)
 	httpReq.Host = "s3.us-east-1.amazonaws.com"
-	httpReq.Header.Set("X-Amz-Content-Sha256", computePayloadHash([]byte{}))
+	httpReq.Header.Set("X-Amz-Content-Sha256", sigv4.ComputePayloadHash([]byte{}))
 
 	signingTime := time.Now().UTC()
 	creds := aws.Credentials{
@@ -723,7 +724,7 @@ func TestProcessRequest_ValidSignature_NoCredential(t *testing.T) {
 		SecretAccessKey: "my-role",
 	}
 	signer := v4.NewSigner()
-	_ = signer.SignHTTP(context.Background(), creds, httpReq, computePayloadHash([]byte{}), "s3", "us-east-1", signingTime)
+	_ = signer.SignHTTP(context.Background(), creds, httpReq, sigv4.ComputePayloadHash([]byte{}), "s3", "us-east-1", signingTime)
 
 	rr := httptest.NewRecorder()
 	req := &logical.Request{
@@ -765,7 +766,7 @@ func TestProcessRequest_ValidSignature_WithCredential(t *testing.T) {
 
 	httpReq := httptest.NewRequest(http.MethodGet, "http://s3.us-east-1.amazonaws.com/gateway/my-bucket/key", nil)
 	httpReq.Host = "s3.us-east-1.amazonaws.com"
-	httpReq.Header.Set("X-Amz-Content-Sha256", computePayloadHash([]byte{}))
+	httpReq.Header.Set("X-Amz-Content-Sha256", sigv4.ComputePayloadHash([]byte{}))
 
 	signingTime := time.Now().UTC()
 	creds := aws.Credentials{
@@ -773,7 +774,7 @@ func TestProcessRequest_ValidSignature_WithCredential(t *testing.T) {
 		SecretAccessKey: "my-role",
 	}
 	signer := v4.NewSigner()
-	_ = signer.SignHTTP(context.Background(), creds, httpReq, computePayloadHash([]byte{}), "s3", "us-east-1", signingTime)
+	_ = signer.SignHTTP(context.Background(), creds, httpReq, sigv4.ComputePayloadHash([]byte{}), "s3", "us-east-1", signingTime)
 
 	rr := httptest.NewRecorder()
 	req := &logical.Request{
@@ -819,7 +820,7 @@ func TestForwardDirect(t *testing.T) {
 	r.RequestURI = ""
 	rr := httptest.NewRecorder()
 
-	b.forwardDirect(rr, r, []byte{})
+	sigv4.ForwardDirect(b.Logger, rr, r, []byte{}, b.Proxy.Transport)
 
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "test", rr.Header().Get("X-Custom"))

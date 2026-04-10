@@ -3,7 +3,6 @@ package elastic
 import (
 	"fmt"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
@@ -53,25 +52,6 @@ func extractToken(r *http.Request) string {
 	return ""
 }
 
-// validateElasticURL validates that the elastic_url is a well-formed HTTPS URL.
-// When tlsSkipVerify is true, http:// is also accepted for dev/test environments.
-func validateElasticURL(addr string, tlsSkipVerify bool) error {
-	if addr == "" {
-		return fmt.Errorf("elastic_url is required")
-	}
-	parsed, err := url.Parse(addr)
-	if err != nil {
-		return fmt.Errorf("invalid elastic_url: %w", err)
-	}
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && tlsSkipVerify) {
-		return fmt.Errorf("elastic_url must use https:// scheme, got: %s", parsed.Scheme)
-	}
-	if parsed.Host == "" {
-		return fmt.Errorf("elastic_url must include a host")
-	}
-	return nil
-}
-
 // Spec defines the Elastic provider configuration for the httpproxy framework.
 var Spec = &httpproxy.ProviderSpec{
 	Name:               "elastic",
@@ -88,11 +68,7 @@ var Spec = &httpproxy.ProviderSpec{
 		if !ok || addr == "" {
 			return fmt.Errorf("elastic_url is required")
 		}
-		skipVerify := false
-		if v, ok := conf["tls_skip_verify"].(bool); ok {
-			skipVerify = v
-		}
-		return validateElasticURL(addr, skipVerify)
+		return nil
 	},
 }
 

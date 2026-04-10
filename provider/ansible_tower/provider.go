@@ -25,11 +25,7 @@ var Spec = &httpproxy.ProviderSpec{
 		if !ok || addr == "" {
 			return fmt.Errorf("ansible_tower_url is required")
 		}
-		skipVerify := false
-		if v, ok := conf["tls_skip_verify"].(bool); ok {
-			skipVerify = v
-		}
-		return httpproxy.ValidateURL(addr, "ansible_tower_url", skipVerify)
+		return nil
 	},
 }
 
