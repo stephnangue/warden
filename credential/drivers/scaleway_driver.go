@@ -271,8 +271,7 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 	}
 
 	d.logger.Info("created dynamic Scaleway API key",
-		logger.String("access_key", resp.AccessKey),
-		logger.String("application_id", resp.ApplicationID),
+		logger.String("access_key", truncateID(resp.AccessKey, 8)),
 		logger.String("spec", spec.Name),
 		logger.String("expires_at", resp.ExpiresAt),
 	)
@@ -328,7 +327,7 @@ func (d *ScalewayDriver) Revoke(ctx context.Context, leaseID string) error {
 	}
 
 	d.logger.Info("revoked dynamic Scaleway API key",
-		logger.String("access_key", leaseID),
+		logger.String("access_key", truncateID(leaseID, 8)),
 	)
 
 	return nil
@@ -452,7 +451,7 @@ func (d *ScalewayDriver) PrepareRotation(ctx context.Context) (map[string]string
 	}
 
 	d.logger.Info("prepared new management key for rotation",
-		logger.String("new_access_key", newKey.AccessKey),
+		logger.String("new_access_key", truncateID(newKey.AccessKey, 8)),
 	)
 
 	activateAfter := credential.GetDuration(d.credSource.Config, "activation_delay", DefaultScalewayActivationDelay)
@@ -467,7 +466,7 @@ func (d *ScalewayDriver) CommitRotation(ctx context.Context, newConfig map[strin
 	d.credSource.Config = newConfig
 
 	d.logger.Info("committed rotated management key",
-		logger.String("new_access_key", credential.GetString(newConfig, "management_access_key", "")),
+		logger.String("new_access_key", truncateID(credential.GetString(newConfig, "management_access_key", ""), 8)),
 	)
 
 	return nil
@@ -508,13 +507,13 @@ func (d *ScalewayDriver) CleanupRotation(ctx context.Context, cleanupConfig map[
 	if err != nil {
 		d.logger.Warn("failed to delete old management key during cleanup",
 			logger.Err(err),
-			logger.String("access_key", oldAccessKey),
+			logger.String("access_key", truncateID(oldAccessKey, 8)),
 		)
 		return fmt.Errorf("failed to delete old management key: %w", err)
 	}
 
 	d.logger.Info("deleted old management key",
-		logger.String("access_key", oldAccessKey),
+		logger.String("access_key", truncateID(oldAccessKey, 8)),
 	)
 
 	return nil
