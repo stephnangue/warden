@@ -1,213 +1,37 @@
 package scaleway
 
 import (
-	"context"
 	"fmt"
-	"net/http"
-	"strings"
 	"time"
 
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/logical"
-	"github.com/stephnangue/warden/provider/sigv4"
+	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/provider/dualgateway"
 )
 
-// scalewayBackend is the backend for Scaleway provider operations
-type scalewayBackend struct {
-	*framework.StreamingBackend
-	s3Signer    *v4.Signer // SigV4 signer with DisableURIPathEscaping for S3
-	scalewayURL string     // Scaleway API base URL (default: https://api.scaleway.com)
+// Spec defines the Scaleway dual-mode gateway provider.
+var Spec = &dualgateway.ProviderSpec{
+	Name:           "scaleway",
+	HelpText:       scalewayBackendHelp,
+	CredentialType: credential.TypeScalewayKeys,
+
+	DefaultURL:     "https://api.scaleway.com",
+	URLConfigKey:   "scaleway_url",
+	DefaultTimeout: 30 * time.Second,
+	UserAgent:      "warden-scaleway-proxy",
+
+	APIAuth: dualgateway.APIAuthStrategy{
+		HeaderName:        "X-Auth-Token",
+		HeaderValueFormat: "%s",
+		CredentialField:   "secret_key",
+	},
+
+	S3Endpoint: func(_ map[string]any, region string) string {
+		return fmt.Sprintf("s3.%s.scw.cloud", region)
+	},
 }
 
-// extractToken extracts the client token from the request.
-// Handles three modes:
-//   - Standard: X-Warden-Token or Authorization: Bearer
-//   - S3 JWT transparent: JWT (eyJ prefix) in SigV4 Credential access_key_id
-//   - S3 Cert transparent: role name from SigV4 Credential access_key_id
-func extractToken(r *http.Request) string {
-	// Standard Warden token
-	if token := r.Header.Get("X-Warden-Token"); token != "" {
-		return token
-	}
-
-	// Bearer token
-	authHeader := r.Header.Get("Authorization")
-	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
-		return authHeader[7:]
-	}
-
-	// S3 transparent: extract access_key_id from SigV4 header
-	if sigv4.IsSigV4Request(r) {
-		accessKeyID := sigv4.ExtractAccessKeyID(authHeader)
-		if accessKeyID != "" {
-			return accessKeyID
-		}
-	}
-
-	return ""
-}
-
-// Compile-time interface assertion
-var _ logical.TransparentAuthRoleExtractor = (*scalewayBackend)(nil)
-
-// GetAuthRoleFromRequest extracts the auth role from the SigV4 Authorization header.
-// For S3 requests, the access_key_id is used as the role name (cert transparent auth).
-// For JWT transparent auth, the JWT is the access_key_id and role comes from the path or X-Warden-Role.
-func (b *scalewayBackend) GetAuthRoleFromRequest(r *http.Request) (string, bool) {
-	if !sigv4.IsSigV4Request(r) {
-		return "", false
-	}
-	accessKeyID := sigv4.ExtractAccessKeyID(r.Header.Get("Authorization"))
-	if accessKeyID == "" {
-		return "", false
-	}
-	// JWT tokens start with "eyJ" — they carry auth identity, not the role name
-	if strings.HasPrefix(accessKeyID, "eyJ") {
-		return "", false
-	}
-	return accessKeyID, true
-}
-
-// Factory creates a new Scaleway provider backend
-func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
-	b := &scalewayBackend{
-		s3Signer: v4.NewSigner(func(o *v4.SignerOptions) {
-			o.DisableURIPathEscaping = true
-		}),
-		scalewayURL: DefaultScalewayURL,
-	}
-
-	b.StreamingBackend = &framework.StreamingBackend{
-		StreamingPaths: []*framework.StreamingPath{
-			{
-				Pattern:         "gateway",
-				Handler:         b.handleGatewayStreaming,
-				HelpSynopsis:    "Scaleway Gateway proxy",
-				HelpDescription: "Proxies requests to Scaleway APIs with auto-detection of standard API vs S3",
-			},
-			{
-				Pattern:         "gateway/.*",
-				Handler:         b.handleGatewayStreaming,
-				HelpSynopsis:    "Scaleway Gateway proxy",
-				HelpDescription: "Proxies requests to Scaleway APIs with auto-detection of standard API vs S3",
-			},
-			{
-				Pattern:         "role/[^/]+/gateway",
-				Handler:         b.handleGatewayStreaming,
-				HelpSynopsis:    "Scaleway Transparent Gateway proxy",
-				HelpDescription: "Proxies requests to Scaleway APIs with role embedded in URL path",
-			},
-			{
-				Pattern:         "role/[^/]+/gateway/.*",
-				Handler:         b.handleGatewayStreaming,
-				HelpSynopsis:    "Scaleway Transparent Gateway proxy",
-				HelpDescription: "Proxies requests to Scaleway APIs with role embedded in URL path",
-			},
-		},
-		TransparentConfig: &framework.TransparentConfig{
-			AutoAuthPath:    "",
-			DefaultAuthRole: "",
-		},
-		Backend: &framework.Backend{
-			Help:           scalewayBackendHelp,
-			BackendType:    "scaleway",
-			BackendClass:   logical.ClassProvider,
-			TokenExtractor: extractToken,
-			Paths:          b.paths(),
-		},
-	}
-
-	b.Logger = conf.Logger.WithSubsystem("scaleway")
-	b.StorageView = conf.StorageView
-
-	initTransport()
-	b.StreamingBackend.InitProxy(sharedTransport)
-
-	if conf.RegisterShutdownHook != nil {
-		conf.RegisterShutdownHook("scaleway-transport", ShutdownHTTPTransport)
-	}
-
-	if err := b.StreamingBackend.Setup(ctx, conf); err != nil {
-		return nil, err
-	}
-
-	if len(conf.Config) > 0 {
-		if err := ValidateConfig(conf.Config); err != nil {
-			return nil, fmt.Errorf("invalid configuration: %w", err)
-		}
-		parsedConfig := parseConfig(conf.Config)
-		b.scalewayURL = parsedConfig.ScalewayURL
-		b.MaxBodySize = parsedConfig.MaxBodySize
-		b.Timeout = parsedConfig.Timeout
-	}
-
-	if b.MaxBodySize <= 0 {
-		b.MaxBodySize = framework.DefaultMaxBodySize
-	}
-	if b.Timeout <= 0 {
-		b.Timeout = DefaultScalewayTimeout
-	}
-
-	return b, nil
-}
-
-// Initialize loads persisted config from storage
-func (b *scalewayBackend) Initialize(ctx context.Context) error {
-	if b.StorageView == nil {
-		return nil
-	}
-
-	entry, err := b.StorageView.Get(ctx, "config")
-	if err != nil {
-		return fmt.Errorf("failed to read config from storage: %w", err)
-	}
-	if entry != nil {
-		var config struct {
-			ScalewayURL     string `json:"scaleway_url"`
-			MaxBodySize     int64  `json:"max_body_size"`
-			Timeout         string `json:"timeout"`
-			AutoAuthPath    string `json:"auto_auth_path"`
-			DefaultAuthRole string `json:"default_role"`
-		}
-		if err := entry.DecodeJSON(&config); err != nil {
-			return fmt.Errorf("failed to decode config: %w", err)
-		}
-		if config.ScalewayURL != "" {
-			b.scalewayURL = config.ScalewayURL
-		}
-		b.MaxBodySize = config.MaxBodySize
-		if config.Timeout != "" {
-			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
-				b.Timeout = timeout
-			}
-		}
-
-		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-			AutoAuthPath:    config.AutoAuthPath,
-			DefaultAuthRole: config.DefaultAuthRole,
-		})
-	}
-	return nil
-}
-
-// paths returns the configuration paths for the Scaleway provider
-func (b *scalewayBackend) paths() []*framework.Path {
-	return []*framework.Path{
-		b.pathConfig(),
-	}
-}
-
-// handleGatewayStreaming wraps handleGateway for the streaming path handler
-func (b *scalewayBackend) handleGatewayStreaming(ctx context.Context, req *logical.Request, fd *framework.FieldData) error {
-	b.handleGateway(ctx, req)
-	return nil
-}
-
-// SensitiveConfigFields returns the list of config fields that should be masked in output
-func (b *scalewayBackend) SensitiveConfigFields() []string {
-	return []string{}
-}
+// Factory creates a new Scaleway provider backend.
+var Factory = dualgateway.NewFactory(Spec)
 
 const scalewayBackendHelp = `
 The Scaleway provider enables proxying requests to Scaleway APIs with automatic

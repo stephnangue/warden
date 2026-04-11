@@ -147,6 +147,7 @@ cd provider/scaleway/e2e_test
 
 export TF_VAR_access_token="${JWT_TOKEN}"
 export TF_VAR_scaleway_project_id="your-project-id"
+export TF_VAR_scaleway_organization_id="your-organization-id"
 
 terraform init
 terraform apply -auto-approve

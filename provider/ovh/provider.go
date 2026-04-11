@@ -1,58 +1,78 @@
 package ovh
 
 import (
+	"fmt"
 	"time"
 
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/provider/dualgateway"
 )
 
-// DefaultOVHURL is the default OVH API base URL (Europe region)
-const DefaultOVHURL = "https://eu.api.ovh.com/1.0"
+// Spec defines the OVH dual-mode gateway provider.
+var Spec = &dualgateway.ProviderSpec{
+	Name:           "ovh",
+	HelpText:       ovhBackendHelp,
+	CredentialType: credential.TypeOVHKeys,
 
-// DefaultOVHTimeout is the default request timeout for OVH API calls
-const DefaultOVHTimeout = 30 * time.Second
+	DefaultURL:     "https://eu.api.ovh.com/1.0",
+	URLConfigKey:   "ovh_url",
+	DefaultTimeout: 30 * time.Second,
+	UserAgent:      "warden-ovh-proxy",
 
-// Spec defines the OVH provider configuration for the httpproxy framework.
-var Spec = &httpproxy.ProviderSpec{
-	Name:               "ovh",
-	DefaultURL:         DefaultOVHURL,
-	URLConfigKey:       "ovh_url",
-	DefaultTimeout:     DefaultOVHTimeout,
-	ParseStreamBody:    true,
-	UserAgent:          "warden-ovh-proxy",
-	HelpText:           ovhBackendHelp,
-	ExtractCredentials: httpproxy.BearerAPIKeyExtractor,
+	APIAuth: dualgateway.APIAuthStrategy{
+		HeaderName:         "Authorization",
+		HeaderValueFormat:  "Bearer %s",
+		CredentialField:    "api_token",
+		StripAuthorization: true,
+	},
+
+	S3Endpoint: func(_ map[string]any, region string) string {
+		return fmt.Sprintf("s3.%s.io.cloud.ovh.net", region)
+	},
 }
 
 // Factory creates a new OVH provider backend.
-var Factory = httpproxy.NewFactory(Spec)
+var Factory = dualgateway.NewFactory(Spec)
 
 const ovhBackendHelp = `
-The OVH provider enables proxying requests to the OVHcloud REST API
-with automatic credential management and OAuth2 bearer token injection.
+The OVH provider enables proxying requests to OVHcloud APIs with automatic
+credential management and dual authentication mode support.
 
-Warden performs implicit authentication on every request and obtains an
-OAuth2 bearer token from the credential manager, injecting it into the
-proxied request's Authorization header. This allows Warden to broker
-OVH access without exposing tokens to clients.
+The provider auto-detects the request type based on the Authorization header:
+- Standard API requests: injects Authorization: Bearer header with the API
+  token and forwards to the configured ovh_url (default: https://eu.api.ovh.com/1.0)
+- S3 Object Storage requests (AWS SigV4): verifies the incoming signature, re-signs
+  with real OVH S3 credentials, and forwards to s3.{region}.io.cloud.ovh.net
 
 The gateway path format is:
   /ovh/gateway/{api-path}
-
-Examples:
-  /ovh/gateway/me
-  /ovh/gateway/cloud/project
-  /ovh/gateway/domain
-  /ovh/gateway/ip
 
 The role can be provided via the X-Warden-Role header, or embedded in
 the URL path:
   /ovh/role/{role}/gateway/{api-path}
 
+Standard API examples:
+  /ovh/role/{role}/gateway/me
+  /ovh/role/{role}/gateway/cloud/project
+  /ovh/role/{role}/gateway/domain
+  /ovh/role/{role}/gateway/ip
+
+S3 Object Storage:
+  Clients sign requests with SigV4 using their Warden JWT (as both
+  aws_access_key_id and aws_secret_access_key) or role name (cert auth).
+  Warden verifies the signature, re-signs with real OVH S3 keys, and
+  forwards to the regional S3 endpoint.
+
+  S3 regions: gra, bhs, sbg, de, uk, waw
+
+Credential type: ovh_keys
+  - api_token: API bearer token for the REST API
+  - access_key: S3 access key for Object Storage
+  - secret_key: S3 secret key for Object Storage
+
 Two credential source types are supported:
-- oauth2: OAuth2 client credentials flow (client_id/client_secret/token_url
-  on source, scope on spec; tokens are minted dynamically)
-- vault: HashiCorp Vault / OpenBao dynamic secret engine
+- local (static_keys): Static credentials stored on the spec
+- hvault (static_ovh): Keys fetched from a Vault/OpenBao KV v2 secret
 
 Regional API endpoints and their matching OAuth2 token URLs:
 - EU:  ovh_url=https://eu.api.ovh.com/1.0   token_url=https://www.ovh.com/auth/oauth2/token

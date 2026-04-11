@@ -19,6 +19,7 @@ const (
 	TypeOAuthBearerToken  = "oauth_bearer_token"
 	TypeKubernetesToken   = "kubernetes_token"
 	TypeScalewayKeys     = "scaleway_keys"
+	TypeOVHKeys          = "ovh_keys"
 )
 
 // Source type constants
