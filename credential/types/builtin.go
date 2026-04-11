@@ -59,5 +59,10 @@ func RegisterBuiltinTypes(registry *credential.TypeRegistry) error {
 		return err
 	}
 
+	// Register OVH keys type
+	if err := registry.Register(&OVHKeysCredType{}); err != nil {
+		return err
+	}
+
 	return nil
 }

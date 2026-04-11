@@ -106,13 +106,13 @@ build-fast: test-unit
 	@echo "Building $(IMAGE_NAME) with parallel processing..."
 	$(DC) build --parallel
 
-# Build and run warden locally (runs tests first)
+# Build and run warden locally in dev mode (runs tests first)
 brd: test-unit
 	@echo "Building warden locally..."
 	@go build -v -o warden .
 	@echo "✓ Warden built successfully"
-	@echo "Starting warden locally..."
-	@./warden server --config=./deploy/config/warden.local.hcl
+	@echo "Starting warden in dev mode..."
+	@./warden server --dev --dev-root-token=root
 
 # Ultra-fast rebuild (code changes only - no logs)
 brd-fast:

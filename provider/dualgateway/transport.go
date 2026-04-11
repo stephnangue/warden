@@ -1,4 +1,4 @@
-package scaleway
+package dualgateway
 
 import (
 	"crypto/tls"
@@ -22,7 +22,6 @@ func initTransport() {
 	})
 }
 
-// newTransport creates an HTTP transport optimized for Scaleway workloads
 func newTransport() *http.Transport {
 	transport := &http.Transport{
 		MaxIdleConns:        200,
@@ -53,7 +52,7 @@ func newTransport() *http.Transport {
 	return transport
 }
 
-// ShutdownHTTPTransport should be called during application shutdown
+// ShutdownHTTPTransport should be called during application shutdown.
 func ShutdownHTTPTransport() {
 	if sharedTransport != nil {
 		sharedTransport.CloseIdleConnections()
