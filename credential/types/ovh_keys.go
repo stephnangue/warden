@@ -26,41 +26,26 @@ func (t *OVHKeysCredType) Metadata() credential.TypeMetadata {
 // ConfigSchema returns the declarative schema for OVH key credential config
 func (t *OVHKeysCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
-		credential.StringField("access_key").
-			Describe("OVH S3 access key").
-			Example("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
-
-		credential.StringField("secret_key").
-			Describe("OVH S3 secret key").
-			Example("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
-
-		credential.StringField("api_token").
-			Describe("OVH API bearer token for REST API").
-			Example("eyJhbGciOiJSUzI1NiIs..."),
-
 		credential.StringField("mint_method").
-			OneOf("static_keys", "static_ovh").
+			OneOf("oauth2_token", "dynamic_s3", "oauth2_token_and_s3").
 			Describe("Mint method for credential minting").
-			Example("static_keys"),
+			Example("oauth2_token"),
 
-		// Vault source fields
-		credential.StringField("kv2_mount").
-			Describe("Vault KV2 mount path (required for static_ovh)").
-			Example("secret"),
+		// Per-spec overrides for S3 user targeting
+		credential.StringField("project_id").
+			Describe("Public Cloud project ID (overrides source default, required for dynamic_s3/oauth2_token_and_s3)").
+			Example("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
 
-		credential.StringField("secret_path").
-			Describe("Path to secret in KV2 (required for static_ovh)").
-			Example("ovh/prod/keys"),
+		credential.StringField("user_id").
+			Describe("Public Cloud user ID (overrides source default, required for dynamic_s3/oauth2_token_and_s3)").
+			Example("12345"),
 	}
 }
 
 // ValidateConfig validates the Config for an OVH credential spec
 func (t *OVHKeysCredType) ValidateConfig(config map[string]string, sourceType string) error {
-	switch sourceType {
-	case credential.SourceTypeLocal, credential.SourceTypeVault:
-		// Supported
-	default:
-		return fmt.Errorf("ovh_keys credentials require a local or vault source, got: %s", sourceType)
+	if sourceType != credential.SourceTypeOVH {
+		return fmt.Errorf("ovh_keys credentials require an ovh source, got: %s", sourceType)
 	}
 
 	schema := t.ConfigSchema()
@@ -68,27 +53,12 @@ func (t *OVHKeysCredType) ValidateConfig(config map[string]string, sourceType st
 		return err
 	}
 
-	switch sourceType {
-	case credential.SourceTypeVault:
-		if config["mint_method"] != "static_ovh" {
-			return fmt.Errorf("'mint_method' must be 'static_ovh' for vault source, got: %s", config["mint_method"])
-		}
-		if config["kv2_mount"] == "" {
-			return fmt.Errorf("'kv2_mount' is required when mint_method is static_ovh")
-		}
-		if config["secret_path"] == "" {
-			return fmt.Errorf("'secret_path' is required when mint_method is static_ovh")
-		}
+	mintMethod := config["mint_method"]
+	switch mintMethod {
+	case "oauth2_token", "dynamic_s3", "oauth2_token_and_s3":
+		// Valid — driver handles the rest
 	default:
-		if config["access_key"] == "" {
-			return fmt.Errorf("'access_key' is required")
-		}
-		if config["secret_key"] == "" {
-			return fmt.Errorf("'secret_key' is required")
-		}
-		if config["api_token"] == "" {
-			return fmt.Errorf("'api_token' is required")
-		}
+		return fmt.Errorf("'mint_method' must be 'oauth2_token', 'dynamic_s3', or 'oauth2_token_and_s3', got: %s", mintMethod)
 	}
 
 	return nil
@@ -96,19 +66,33 @@ func (t *OVHKeysCredType) ValidateConfig(config map[string]string, sourceType st
 
 // Parse converts raw credential data from source into structured Credential
 func (t *OVHKeysCredType) Parse(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
-	accessKey, ok := rawData["access_key"].(string)
-	if !ok || accessKey == "" {
-		return nil, fmt.Errorf("%w: missing or invalid access_key", credential.ErrInvalidCredential)
+	accessKey, _ := rawData["access_key"].(string)
+	secretKey, _ := rawData["secret_key"].(string)
+	apiToken, _ := rawData["api_token"].(string)
+
+	// S3 mode fields must come as a pair
+	if (accessKey != "") != (secretKey != "") {
+		if accessKey == "" {
+			return nil, fmt.Errorf("%w: access_key is required when secret_key is provided", credential.ErrInvalidCredential)
+		}
+		return nil, fmt.Errorf("%w: secret_key is required when access_key is provided", credential.ErrInvalidCredential)
 	}
 
-	secretKey, ok := rawData["secret_key"].(string)
-	if !ok || secretKey == "" {
-		return nil, fmt.Errorf("%w: missing or invalid secret_key", credential.ErrInvalidCredential)
+	hasS3 := accessKey != "" && secretKey != ""
+	hasAPI := apiToken != ""
+
+	// At least one complete mode required
+	if !hasS3 && !hasAPI {
+		return nil, fmt.Errorf("%w: at least one mode is required: api_token for API mode, or access_key + secret_key for S3 mode", credential.ErrInvalidCredential)
 	}
 
-	apiToken, ok := rawData["api_token"].(string)
-	if !ok || apiToken == "" {
-		return nil, fmt.Errorf("%w: missing or invalid api_token", credential.ErrInvalidCredential)
+	data := make(map[string]string)
+	if hasS3 {
+		data["access_key"] = accessKey
+		data["secret_key"] = secretKey
+	}
+	if hasAPI {
+		data["api_token"] = apiToken
 	}
 
 	return &credential.Credential{
@@ -118,11 +102,7 @@ func (t *OVHKeysCredType) Parse(rawData map[string]interface{}, leaseTTL time.Du
 		LeaseID:   leaseID,
 		IssuedAt:  time.Now(),
 		Revocable: leaseTTL > 0,
-		Data: map[string]string{
-			"access_key": accessKey,
-			"secret_key": secretKey,
-			"api_token":  apiToken,
-		},
+		Data:      data,
 	}, nil
 }
 
@@ -132,14 +112,22 @@ func (t *OVHKeysCredType) Validate(cred *credential.Credential) error {
 		return fmt.Errorf("%w: expected type %s, got %s", credential.ErrInvalidCredential, credential.TypeOVHKeys, cred.Type)
 	}
 
-	if cred.Data["access_key"] == "" {
-		return fmt.Errorf("%w: missing access_key", credential.ErrInvalidCredential)
+	hasAccessKey := cred.Data["access_key"] != ""
+	hasSecretKey := cred.Data["secret_key"] != ""
+	hasAPIToken := cred.Data["api_token"] != ""
+
+	// S3 mode fields must come as a pair
+	if hasAccessKey != hasSecretKey {
+		if !hasAccessKey {
+			return fmt.Errorf("%w: missing access_key (required when secret_key is present)", credential.ErrInvalidCredential)
+		}
+		return fmt.Errorf("%w: missing secret_key (required when access_key is present)", credential.ErrInvalidCredential)
 	}
-	if cred.Data["secret_key"] == "" {
-		return fmt.Errorf("%w: missing secret_key", credential.ErrInvalidCredential)
-	}
-	if cred.Data["api_token"] == "" {
-		return fmt.Errorf("%w: missing api_token", credential.ErrInvalidCredential)
+
+	hasS3 := hasAccessKey && hasSecretKey
+
+	if !hasS3 && !hasAPIToken {
+		return fmt.Errorf("%w: at least one mode is required: api_token or access_key + secret_key", credential.ErrInvalidCredential)
 	}
 
 	return nil
@@ -164,22 +152,22 @@ func (t *OVHKeysCredType) RequiresSpecRotation() bool {
 
 // SensitiveConfigFields returns spec config keys that should be masked in output
 func (t *OVHKeysCredType) SensitiveConfigFields() []string {
-	return []string{"secret_key", "api_token"}
+	return nil
 }
 
 // FieldSchemas returns metadata about the credential's data fields
 func (t *OVHKeysCredType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
 	return map[string]*credential.CredentialFieldSchema{
 		"access_key": {
-			Description: "OVH S3 access key",
+			Description: "OVH S3 access key (required for S3 mode, optional if only using API mode)",
 			Sensitive:   false,
 		},
 		"secret_key": {
-			Description: "OVH S3 secret key",
+			Description: "OVH S3 secret key (required for S3 mode, optional if only using API mode)",
 			Sensitive:   true,
 		},
 		"api_token": {
-			Description: "OVH API bearer token",
+			Description: "OVH API bearer token (required for API mode, optional if only using S3 mode)",
 			Sensitive:   true,
 		},
 	}

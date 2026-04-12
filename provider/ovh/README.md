@@ -22,9 +22,8 @@ The OVH provider enables proxied access to OVHcloud APIs through Warden. It supp
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- An **OVHcloud account** with:
-  - An API token (from [OVHcloud IAM](https://www.ovh.com/auth/)) for the REST API
-  - S3 credentials (access key + secret key) for Object Storage — generate via `openstack ec2 credentials create` or the OVHcloud Control Panel
+- An **OVHcloud account** with an OAuth2 service account (`client_id` + `client_secret`) — create one via [OVHcloud IAM](https://www.ovh.com/auth/) with `flow: "CLIENT_CREDENTIALS"`
+- For S3 Object Storage: a Public Cloud project ID and user ID
 
 > **New to Warden?** Follow these steps to get a local dev environment running:
 >
@@ -128,56 +127,73 @@ warden read ovh/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static Keys
+Create an OVH credential source using an OAuth2 service account. Warden automatically mints bearer tokens (~1h TTL, auto-refreshed) and/or creates S3 credentials on demand.
 
-Create an OVH credential source and spec with your API token and S3 keys:
+**Prerequisites:** An OVH OAuth2 service account — create one via `POST /me/api/oauth2/client` with `flow: "CLIENT_CREDENTIALS"`. See the [e2e test README](e2e_test/README.md#creating-an-oauth2-api-token) for step-by-step instructions.
 
 ```bash
 warden cred source create ovh-src \
-  --type=local
-
-warden cred spec create ovh-ops \
-  --source ovh-src \
-  --type=ovh_keys \
-  --config mint_method=static_keys \
-  --config access_key=your-s3-access-key \
-  --config secret_key=your-s3-secret-key \
-  --config api_token=your-oauth2-bearer-token
+  --type=ovh \
+  --config client_id=your-client-id \
+  --config client_secret=your-client-secret \
+  --config ovh_endpoint=ovh-eu \
+  --config project_id=your-cloud-project-id \
+  --config user_id=your-cloud-user-id
 ```
 
-### Option B: Vault/OpenBao as Credential Source
+The `project_id` and `user_id` are only needed for S3 credential management (`dynamic_s3` and `oauth2_token_and_s3` mint methods). They can be omitted if you only need API tokens, or overridden per-spec for multi-tenant S3 access.
 
-Store your OVH credentials in a Vault/OpenBao KV v2 secret engine and have Warden fetch them at runtime.
-
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your OVH credentials (e.g., at `secret/ovh/prod` with `access_key`, `secret_key`, and `api_token` fields)
-- An AppRole configured for Warden access
+**API-only mode** (auto-refreshed OAuth2 bearer tokens):
 
 ```bash
-warden cred source create ovh-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=your-role-id \
-  --config=secret_id=your-secret-id \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
-
-warden cred spec create ovh-ops \
-  --source ovh-vault-src \
+warden cred spec create ovh-api \
+  --source ovh-src \
   --type=ovh_keys \
-  --config mint_method=static_ovh \
-  --config kv2_mount=secret \
-  --config secret_path=ovh/prod
+  --config mint_method=oauth2_token
 ```
 
-The KV v2 secret at `secret/ovh/prod` should contain `access_key`, `secret_key`, and `api_token` fields.
+**S3-only mode** (dynamic S3 credentials, revocable):
+
+```bash
+warden cred spec create ovh-s3 \
+  --source ovh-src \
+  --type=ovh_keys \
+  --config mint_method=dynamic_s3
+```
+
+**Dual mode** (OAuth2 token + S3 credentials):
+
+```bash
+warden cred spec create ovh-dual \
+  --source ovh-src \
+  --type=ovh_keys \
+  --config mint_method=oauth2_token_and_s3
+```
+
+**Multi-tenant S3 access** — override `project_id` and `user_id` per-spec to target different S3 users:
+
+```bash
+# Read-only S3 user
+warden cred spec create ovh-s3-reader \
+  --source ovh-src \
+  --type=ovh_keys \
+  --config mint_method=dynamic_s3 \
+  --config project_id=my-project \
+  --config user_id=reader-user-id
+
+# Read-write S3 user
+warden cred spec create ovh-s3-writer \
+  --source ovh-src \
+  --type=ovh_keys \
+  --config mint_method=dynamic_s3 \
+  --config project_id=my-project \
+  --config user_id=writer-user-id
+```
 
 Verify:
 
 ```bash
-warden cred spec read ovh-ops
+warden cred spec read ovh-api
 ```
 
 ## Step 4: Create a Policy
@@ -465,53 +481,54 @@ aws s3 ls s3://my-bucket/ \
 | `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 
-### Credential Spec Config (static_keys)
+### Credential Source Config (OVH OAuth2)
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `static_keys` |
-| `access_key` | string | Yes | OVH S3 access key |
-| `secret_key` | string | Yes | OVH S3 secret key (sensitive — masked in output) |
-| `api_token` | string | Yes | API bearer token for the REST API (sensitive — masked in output) |
+| `client_id` | string | Yes | OAuth2 service account client ID |
+| `client_secret` | string | Yes | OAuth2 service account client secret (sensitive) |
+| `ovh_endpoint` | string | No | Regional endpoint: `ovh-eu` (default), `ovh-ca`, or `ovh-us` |
+| `project_id` | string | For S3 | Default Public Cloud project ID (can be overridden per-spec) |
+| `user_id` | string | For S3 | Default Public Cloud user ID (can be overridden per-spec) |
 
-### Credential Spec Config (Vault — static_ovh)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `static_ovh` |
-| `kv2_mount` | string | Yes | KV v2 mount path in Vault |
-| `secret_path` | string | Yes | Path to the secret within the mount |
-
-### Credential Source Config (Vault/OpenBao)
+### Credential Spec Config (OVH source — oauth2_token)
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `vault_address` | string | Yes | Vault server address (e.g., `https://vault.example.com`) |
-| `vault_namespace` | string | No | Vault namespace (Enterprise/HCP only) |
-| `auth_method` | string | No | Authentication method (`approle`) |
-| `role_id` | string | Yes* | AppRole role ID (*required when `auth_method=approle`) |
-| `secret_id` | string | Yes* | AppRole secret ID (*required when `auth_method=approle`) |
-| `approle_mount` | string | Yes* | AppRole auth mount path (*required when `auth_method=approle`) |
-| `role_name` | string | Yes* | AppRole role name for rotation (*required when `auth_method=approle`) |
+| `mint_method` | string | Yes | Must be `oauth2_token` |
+
+### Credential Spec Config (OVH source — dynamic_s3)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | Yes | Must be `dynamic_s3` |
+| `project_id` | string | No | Override source default project ID |
+| `user_id` | string | No | Override source default user ID |
+
+### Credential Spec Config (OVH source — oauth2_token_and_s3)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mint_method` | string | Yes | Must be `oauth2_token_and_s3` |
+| `project_id` | string | No | Override source default project ID |
+| `user_id` | string | No | Override source default user ID |
 
 ## Token Management
 
-### Static Keys
-
 | Aspect | Details |
 |--------|---------|
-| **Storage** | Access key, secret key, and API token are stored on the credential spec |
-| **Rotation** | Manual — regenerate in OVHcloud Control Panel and update the spec |
-| **Lifetime** | Static — no expiration or auto-refresh |
+| **Storage** | OAuth2 `client_id` + `client_secret` stored on the credential source (long-lived) |
+| **API tokens** | Auto-minted via `client_credentials` grant, ~1h TTL, refreshed automatically |
+| **S3 credentials** | Created on demand via OVH API, revoked when credential lease expires |
+| **Rotation** | Rotate the OAuth2 service account secret in OVHcloud IAM, then update the source |
 
-**To rotate static credentials:**
+**To rotate the OAuth2 service account:**
 
-1. Generate new S3 credentials via `openstack ec2 credentials create` and/or a new API token in OVHcloud IAM
-2. Update the credential spec:
+1. Create a new service account or regenerate the secret in OVHcloud IAM
+2. Update the credential source:
    ```bash
-   warden cred spec update ovh-ops \
-     --config access_key=new-access-key \
-     --config secret_key=new-secret-key \
-     --config api_token=new-api-token
+   warden cred source update ovh-src \
+     --config client_id=new-client-id \
+     --config client_secret=new-client-secret
    ```
-3. Revoke the old credentials in the OVHcloud Control Panel
+3. Revoke the old service account in OVHcloud IAM

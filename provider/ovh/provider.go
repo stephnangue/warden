@@ -70,9 +70,17 @@ Credential type: ovh_keys
   - access_key: S3 access key for Object Storage
   - secret_key: S3 secret key for Object Storage
 
-Two credential source types are supported:
-- local (static_keys): Static credentials stored on the spec
-- hvault (static_ovh): Keys fetched from a Vault/OpenBao KV v2 secret
+Credential source: ovh (OAuth2 service account)
+  Warden automatically mints bearer tokens via client_credentials grant
+  (~1h TTL, auto-refreshed) and creates S3 credentials on demand.
+
+  Mint methods:
+  - oauth2_token: Mints API bearer tokens only
+  - dynamic_s3: Creates S3 access_key + secret_key (revocable)
+  - oauth2_token_and_s3: Both API token + S3 credentials
+
+  Source config: client_id, client_secret, ovh_endpoint (ovh-eu/ovh-ca/ovh-us),
+  project_id, user_id (for S3). project_id and user_id can be overridden per-spec.
 
 Regional API endpoints and their matching OAuth2 token URLs:
 - EU:  ovh_url=https://eu.api.ovh.com/1.0   token_url=https://www.ovh.com/auth/oauth2/token

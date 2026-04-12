@@ -29,13 +29,13 @@ All tests use **free or near-free** resources only:
 
 1. **Warden server running** with the OVH provider mounted
 2. **OVHcloud account** with a Public Cloud project
-3. **OVH credentials** — API token + S3 access key/secret key (stored as `ovh_keys` credential type)
+3. **OVH OAuth2 service account** (`client_id` + `client_secret`) — see [Creating an OAuth2 API Token](#creating-an-oauth2-api-token) below
 4. **JWT auth configured** with a role bound to an OVH credential spec
 5. **Terraform >= 1.10** installed
 
 ### OVH API Permissions
 
-The API token (`api_token`) must have the following OVHcloud API permissions (`{serviceName}` is your Public Cloud project ID, i.e. the `ovh_service_name` variable):
+The OAuth2 service account must have the following OVHcloud API permissions (`{serviceName}` is your Public Cloud project ID, i.e. the `ovh_service_name` variable):
 
 | API Route | Method | Used By | Purpose |
 |-----------|--------|---------|---------|
@@ -60,13 +60,14 @@ All permissions are **read-only**. No write operations are performed on the OVH 
 
 ### OVH Credential Setup
 
-The OVH provider uses `ovh_keys` credentials with three fields:
+The OVH provider uses an OVH source (`--type=ovh`) with an OAuth2 service account to automatically mint bearer tokens and S3 credentials.
 
 | Field | Purpose | How to Obtain |
 |-------|---------|---------------|
-| `api_token` | Bearer token for REST API | See [Creating an OAuth2 token](#creating-an-oauth2-api-token) below |
-| `access_key` | S3 access key for Object Storage | See [Creating S3 credentials](#creating-s3-credentials) below |
-| `secret_key` | S3 secret key for Object Storage | Generated alongside access_key |
+| `client_id` | OAuth2 service account ID | See [Creating an OAuth2 API Token](#creating-an-oauth2-api-token) below (steps 1-2) |
+| `client_secret` | OAuth2 service account secret | Generated alongside client_id (step 2) |
+| `project_id` | Public Cloud project ID (for S3) | OVHcloud Control Panel > Public Cloud |
+| `user_id` | Public Cloud user ID (for S3) | OVHcloud Control Panel > Public Cloud > Users & Roles |
 
 #### Creating an OAuth2 API Token
 
@@ -113,6 +114,8 @@ The token is valid for **1 hour**. For regional endpoints, use the matching toke
 - EU: `https://www.ovh.com/auth/oauth2/token`
 - CA: `https://ca.ovh.com/auth/oauth2/token`
 - US: `https://us.ovhcloud.com/auth/oauth2/token`
+
+> **Note:** Warden handles token minting automatically using the `client_id` and `client_secret` from steps 2-3. Step 4 is only needed if you want to test the OVH API directly outside of Warden.
 
 #### Creating S3 Credentials
 
@@ -181,20 +184,28 @@ warden write ovh/config <<EOF
   "timeout": "30s"
 }
 EOF
+```
 
-# Create credential source
+```bash
+# Create OVH credential source with OAuth2 service account
 warden cred source create ovh-src \
-  --type=local
+  --type=ovh \
+  --config client_id=<your-client-id> \
+  --config client_secret=<your-client-secret> \
+  --config ovh_endpoint=ovh-eu \
+  --config project_id=<your-cloud-project-id> \
+  --config user_id=<your-cloud-user-id>
 
-# Create credential spec with OVH keys
+# Create credential spec — dual mode (auto-minted API token + dynamic S3 keys)
 warden cred spec create ovh-ops \
   --source ovh-src \
   --type=ovh_keys \
-  --config mint_method=static_keys \
-  --config access_key=<your-s3-access-key> \
-  --config secret_key=<your-s3-secret-key> \
-  --config api_token=<your-api-bearer-token>
+  --config mint_method=oauth2_token_and_s3
+```
 
+Other mint methods: `oauth2_token` (API only), `dynamic_s3` (S3 only).
+
+```bash
 # Create policy
 warden policy write ovh-access - <<EOF
 path "ovh/role/+/gateway*" {
