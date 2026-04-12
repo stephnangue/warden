@@ -64,5 +64,10 @@ func RegisterBuiltinTypes(registry *credential.TypeRegistry) error {
 		return err
 	}
 
+	// Register Cloudflare keys type
+	if err := registry.Register(&CloudflareKeysCredType{}); err != nil {
+		return err
+	}
+
 	return nil
 }

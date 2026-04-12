@@ -20,6 +20,7 @@ const (
 	TypeKubernetesToken   = "kubernetes_token"
 	TypeScalewayKeys     = "scaleway_keys"
 	TypeOVHKeys          = "ovh_keys"
+	TypeCloudflareKeys   = "cloudflare_keys"
 )
 
 // Source type constants
@@ -37,6 +38,7 @@ const (
 	SourceTypeElastic    = "elastic"
 	SourceTypeKubernetes = "kubernetes"
 	SourceTypeScaleway   = "scaleway"
+	SourceTypeCloudflare = "cloudflare"
 )
 
 // Category constants for credential categorization
