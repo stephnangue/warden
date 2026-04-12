@@ -1,6 +1,9 @@
 # Cloudflare Provider
 
-The Cloudflare provider enables proxied access to the Cloudflare API v4 through Warden. It forwards requests to Cloudflare endpoints (zones, DNS records, Workers, accounts, etc.) with automatic credential injection and policy evaluation. Cloudflare API tokens are the supported credential mode (`apikey` source type), as Cloudflare does not natively support OAuth2 client credentials for API access.
+The Cloudflare provider enables proxied access to Cloudflare APIs through Warden. It supports two authentication modes, auto-detected per request:
+
+- **Standard API** — Injects `Authorization: Bearer` header with the API token. Covers zones, DNS records, Workers, accounts, firewall rules, and all other Cloudflare products.
+- **R2 Object Storage** — Verifies the client's SigV4 signature, re-signs with real Cloudflare R2 credentials, and forwards to `<account_id>.r2.cloudflarestorage.com`. Compatible with any S3 client (AWS CLI, boto3, s3cmd, MinIO).
 
 ## Table of Contents
 
@@ -10,6 +13,7 @@ The Cloudflare provider enables proxied access to the Cloudflare API v4 through 
 - [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
 - [Step 4: Create a Policy](#step-4-create-a-policy)
 - [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
+- [R2 Object Storage](#r2-object-storage)
 - [TLS Certificate Authentication](#tls-certificate-authentication)
 - [Configuration Reference](#configuration-reference)
 - [Token Management](#token-management)
@@ -17,7 +21,9 @@ The Cloudflare provider enables proxied access to the Cloudflare API v4 through 
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- A **Cloudflare API Token** (from Cloudflare Dashboard > My Profile > API Tokens)
+- A **Cloudflare account** with:
+  - An API token (from Cloudflare Dashboard > My Profile > API Tokens) for the REST API
+  - R2 API credentials (access key ID + secret access key) for Object Storage — generate via Cloudflare Dashboard > R2 > Manage R2 API Tokens
 
 > **New to Warden?** Follow these steps to get a local dev environment running:
 >
@@ -100,15 +106,30 @@ Verify the provider is enabled:
 warden provider list
 ```
 
-Configure the provider with `auto_auth_path`. This allows clients to authenticate with their JWT directly — no explicit Warden login required:
+Configure the provider with `auto_auth_path` and `account_id`. The `account_id` is required for R2 Object Storage and can be found in the Cloudflare Dashboard URL (`https://dash.cloudflare.com/<account_id>`):
 
 ```bash
 warden write cloudflare/config <<EOF
 {
   "cloudflare_url": "https://api.cloudflare.com/client/v4",
+  "account_id": "your-cloudflare-account-id",
   "auto_auth_path": "auth/jwt/",
   "timeout": "30s",
   "max_body_size": 10485760
+}
+EOF
+```
+
+For EU or FedRAMP jurisdictions, add the `r2_jurisdiction` field:
+
+```bash
+warden write cloudflare/config <<EOF
+{
+  "cloudflare_url": "https://api.cloudflare.com/client/v4",
+  "account_id": "your-cloudflare-account-id",
+  "r2_jurisdiction": "eu",
+  "auto_auth_path": "auth/jwt/",
+  "timeout": "30s"
 }
 EOF
 ```
@@ -121,39 +142,55 @@ warden read cloudflare/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static API Token
+### Option A: Static Keys
 
-The credential source holds only connection info (`api_url`). The API token is stored on the credential spec below, allowing multiple specs with different tokens to share one source.
+Create a Cloudflare credential source and spec. You can configure both modes or just the one you need:
+
+**Dual-mode (API + R2):**
 
 ```bash
 warden cred source create cloudflare-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=api_url=https://api.cloudflare.com/client/v4 \
-  --config=verify_endpoint=/user/tokens/verify \
-  --config=display_name=Cloudflare
-```
+  --type=local
 
-Create a credential spec that references the credential source. The spec carries the API token and gets associated with tokens at login time.
-
-```bash
 warden cred spec create cloudflare-ops \
   --source cloudflare-src \
-  --config api_key=your-cloudflare-api-token
+  --type=cloudflare_keys \
+  --config mint_method=static_keys \
+  --config access_key_id=your-r2-access-key-id \
+  --config secret_access_key=your-r2-secret-access-key \
+  --config api_token=your-cloudflare-api-token
 ```
 
-The API token is validated at creation time via a `GET /user/tokens/verify` call to the Cloudflare API (SpecVerifier). If the token is invalid, spec creation will fail.
+**API-only (no R2):**
+
+```bash
+warden cred spec create cloudflare-api-only \
+  --source cloudflare-src \
+  --type=cloudflare_keys \
+  --config mint_method=static_keys \
+  --config api_token=your-cloudflare-api-token
+```
+
+**R2-only (no API):**
+
+```bash
+warden cred spec create cloudflare-r2-only \
+  --source cloudflare-src \
+  --type=cloudflare_keys \
+  --config mint_method=static_keys \
+  --config access_key_id=your-r2-access-key-id \
+  --config secret_access_key=your-r2-secret-access-key
+```
 
 ### Option B: Vault/OpenBao as Credential Source
 
-Instead of storing the API token directly in Warden, you can store it in a Vault/OpenBao KV v2 secret engine and have Warden fetch it at runtime. This centralizes secret management in Vault.
+Store your Cloudflare credentials in a Vault/OpenBao KV v2 secret engine and have Warden fetch them at runtime.
 
 **Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your Cloudflare API token (e.g., at `secret/cloudflare/ops` with an `api_key` field)
+- A KV v2 mount containing your Cloudflare credentials (e.g., at `secret/cloudflare/prod` with at least `api_token` and/or `access_key_id` + `secret_access_key` fields)
 - An AppRole configured for Warden access
 
 ```bash
-# Create a Vault credential source
 warden cred source create cloudflare-vault-src \
   --type=hvault \
   --config=vault_address=https://vault.example.com \
@@ -163,19 +200,16 @@ warden cred source create cloudflare-vault-src \
   --config=approle_mount=approle \
   --config=role_name=warden-role \
   --rotation-period=24h
-```
 
-Create a credential spec using the `static_apikey` mint method:
-
-```bash
 warden cred spec create cloudflare-ops \
   --source cloudflare-vault-src \
-  --config mint_method=static_apikey \
+  --type=cloudflare_keys \
+  --config mint_method=static_cloudflare \
   --config kv2_mount=secret \
-  --config secret_path=cloudflare/ops
+  --config secret_path=cloudflare/prod
 ```
 
-The KV v2 secret at `secret/cloudflare/ops` should contain at minimum an `api_key` field. Warden fetches the secret from Vault on each credential request.
+The KV v2 secret at `secret/cloudflare/prod` should contain at least `api_token` (for API mode) and/or `access_key_id` + `secret_access_key` (for R2 mode).
 
 Verify:
 
@@ -306,6 +340,60 @@ curl -s "${CF_ENDPOINT}/accounts/${ACCOUNT_ID}" \
   -H "Content-Type: application/json"
 ```
 
+## R2 Object Storage
+
+The Cloudflare provider auto-detects R2 requests by the presence of a SigV4 `Authorization` header. Any S3-compatible client works — AWS CLI, boto3, s3cmd, MinIO Client.
+
+### R2 Transparent Auth with JWT
+
+Configure your S3 client to point at Warden's gateway endpoint. Use your JWT as both the access key and secret key:
+
+```bash
+aws configure set aws_access_key_id "${JWT_TOKEN}"
+aws configure set aws_secret_access_key "${JWT_TOKEN}"
+aws configure set region auto
+```
+
+### R2 Transparent Auth with Certificates
+
+For certificate-based authentication, use the role name as both the access key and secret key:
+
+```bash
+aws configure set aws_access_key_id "cloudflare-user"
+aws configure set aws_secret_access_key "cloudflare-user"
+aws configure set region auto
+```
+
+### R2 Operations
+
+```bash
+# List buckets
+aws s3 ls \
+  --endpoint-url "${WARDEN_ADDR}/v1/cloudflare/role/cloudflare-user/gateway"
+
+# List objects in a bucket
+aws s3 ls s3://my-bucket/ \
+  --endpoint-url "${WARDEN_ADDR}/v1/cloudflare/role/cloudflare-user/gateway"
+
+# Upload a file
+aws s3 cp myfile.txt s3://my-bucket/myfile.txt \
+  --endpoint-url "${WARDEN_ADDR}/v1/cloudflare/role/cloudflare-user/gateway"
+
+# Download a file
+aws s3 cp s3://my-bucket/myfile.txt ./downloaded.txt \
+  --endpoint-url "${WARDEN_ADDR}/v1/cloudflare/role/cloudflare-user/gateway"
+```
+
+### R2 Jurisdictions
+
+| Jurisdiction | R2 Endpoint | Config |
+|-------------|-------------|--------|
+| Default | `<account_id>.r2.cloudflarestorage.com` | `r2_jurisdiction` omitted or empty |
+| EU | `<account_id>.eu.r2.cloudflarestorage.com` | `r2_jurisdiction=eu` |
+| FedRAMP | `<account_id>.fedramp.r2.cloudflarestorage.com` | `r2_jurisdiction=fedramp` |
+
+R2 always uses `auto` as the region for SigV4 signing. The `account_id` is configured in the provider config (Step 2).
+
 ## Cleanup
 
 To stop Warden and the identity provider:
@@ -364,6 +452,7 @@ Update the provider config to use cert auth:
 warden write cloudflare/config <<EOF
 {
   "cloudflare_url": "https://api.cloudflare.com/client/v4",
+  "account_id": "your-cloudflare-account-id",
   "auto_auth_path": "auth/cert/",
   "timeout": "30s",
   "max_body_size": 10485760
@@ -373,11 +462,20 @@ EOF
 
 ### Make Requests with Certificates
 
+Standard API:
+
 ```bash
 curl --cert client.pem --key client-key.pem \
     --cacert warden-ca.pem \
     -s "https://warden.internal/v1/cloudflare/role/cloudflare-user/gateway/zones" \
     -H "Content-Type: application/json"
+```
+
+R2 Object Storage:
+
+```bash
+aws s3 ls s3://my-bucket/ \
+  --endpoint-url "https://warden.internal/v1/cloudflare/role/cloudflare-user/gateway"
 ```
 
 ## Configuration Reference
@@ -386,25 +484,32 @@ curl --cert client.pem --key client-key.pem \
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `cloudflare_url` | string | `https://api.cloudflare.com/client/v4` | Cloudflare API base URL (must be HTTPS) |
+| `cloudflare_url` | string | `https://api.cloudflare.com/client/v4` | Cloudflare API base URL |
+| `account_id` | string | — | Cloudflare account ID (required for R2 Object Storage) |
+| `r2_jurisdiction` | string | — | R2 jurisdiction: empty (default), `eu`, or `fedramp` |
 | `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
 | `timeout` | duration | `30s` | Request timeout |
 | `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 
-### Credential Source Config (Static API Token)
+### Credential Spec Config (static_keys)
+
+At least one mode must be configured: `api_token` for the REST API, or `access_key_id` + `secret_access_key` for R2. Both can be set for dual-mode access.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `api_url` | string | No | API base URL (default: `https://api.cloudflare.com/client/v4`) |
-| `verify_endpoint` | string | No | Verification path (e.g., `/user/tokens/verify`) |
-| `display_name` | string | No | Label for logs/errors (default: `API Key`) |
+| `mint_method` | string | Yes | Must be `static_keys` |
+| `access_key_id` | string | R2 mode | Cloudflare R2 access key ID (required with `secret_access_key`) |
+| `secret_access_key` | string | R2 mode | Cloudflare R2 secret access key (sensitive — required with `access_key_id`) |
+| `api_token` | string | API mode | API bearer token for the REST API (sensitive) |
 
-### Credential Spec Config (Static API Token)
+### Credential Spec Config (Vault — static_cloudflare)
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `api_key` | string | Yes | Cloudflare API token (sensitive — masked in output) |
+| `mint_method` | string | Yes | Must be `static_cloudflare` |
+| `kv2_mount` | string | Yes | KV v2 mount path in Vault |
+| `secret_path` | string | Yes | Path to the secret within the mount |
 
 ### Credential Source Config (Vault/OpenBao)
 
@@ -418,32 +523,34 @@ curl --cert client.pem --key client-key.pem \
 | `approle_mount` | string | Yes* | AppRole auth mount path (*required when `auth_method=approle`) |
 | `role_name` | string | Yes* | AppRole role name for rotation (*required when `auth_method=approle`) |
 
-### Credential Spec Config (Vault — static_apikey)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `static_apikey` |
-| `kv2_mount` | string | Yes | KV v2 mount path in Vault |
-| `secret_path` | string | Yes | Path to the secret within the mount |
-
 ## Token Management
 
-### Static API Token
+### Static Keys
 
 | Aspect | Details |
 |--------|---------|
-| **Storage** | API token is stored on the credential spec (not the source) |
-| **Validation** | Token is verified at spec creation via `GET /user/tokens/verify` |
-| **Rotation** | Manual — regenerate in Cloudflare and update the spec |
-| **Lifetime** | Configurable expiration in Cloudflare Dashboard; Warden does not auto-rotate |
+| **Storage** | Credentials (api_token and/or access_key_id + secret_access_key) are stored on the credential spec |
+| **Rotation** | Manual — regenerate in Cloudflare Dashboard and update the spec |
+| **Lifetime** | Static — no expiration or auto-refresh |
 
-**To rotate a static API token:**
+**To rotate static credentials:**
 
-1. Create a new API token in Cloudflare (My Profile > API Tokens > Create Token)
-2. Update the credential spec:
+1. Generate new credentials in Cloudflare Dashboard (R2 > Manage R2 API Tokens for R2 keys, My Profile > API Tokens for API tokens)
+2. Update the credential spec with the fields you use:
    ```bash
+   # Dual-mode
    warden cred spec update cloudflare-ops \
-     --config api_key=your-new-api-token
-   ```
-3. Delete the old token in Cloudflare Dashboard
+     --config access_key_id=new-access-key-id \
+     --config secret_access_key=new-secret-access-key \
+     --config api_token=new-api-token
 
+   # API-only
+   warden cred spec update cloudflare-api-only \
+     --config api_token=new-api-token
+
+   # R2-only
+   warden cred spec update cloudflare-r2-only \
+     --config access_key_id=new-access-key-id \
+     --config secret_access_key=new-secret-access-key
+   ```
+3. Revoke the old credentials in the Cloudflare Dashboard
