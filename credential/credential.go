@@ -38,6 +38,7 @@ const (
 	SourceTypeElastic    = "elastic"
 	SourceTypeKubernetes = "kubernetes"
 	SourceTypeScaleway   = "scaleway"
+	SourceTypeOVH        = "ovh"
 	SourceTypeCloudflare = "cloudflare"
 )
 

@@ -69,5 +69,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register OVH driver factory
+	if err := registry.RegisterFactory(&OVHDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }
