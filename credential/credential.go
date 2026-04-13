@@ -40,6 +40,7 @@ const (
 	SourceTypeScaleway   = "scaleway"
 	SourceTypeOVH        = "ovh"
 	SourceTypeCloudflare = "cloudflare"
+	SourceTypeGrafana    = "grafana"
 )
 
 // Category constants for credential categorization

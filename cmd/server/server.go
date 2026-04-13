@@ -48,6 +48,7 @@ import (
 	"github.com/stephnangue/warden/provider/dynatrace"
 	"github.com/stephnangue/warden/provider/elastic"
 	"github.com/stephnangue/warden/provider/gcp"
+	"github.com/stephnangue/warden/provider/grafana"
 	"github.com/stephnangue/warden/provider/github"
 	"github.com/stephnangue/warden/provider/gitlab"
 	"github.com/stephnangue/warden/provider/kubernetes"
@@ -126,6 +127,7 @@ Usage: warden server [options]
 		"elastic":       elastic.Factory,
 		"kubernetes":    kubernetes.Factory,
 		"gcp":           gcp.Factory,
+		"grafana":       grafana.Factory,
 		"github":        github.Factory,
 		"gitlab":        gitlab.Factory,
 		"mistral":       mistral.Factory,
