@@ -199,8 +199,14 @@ func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.Cre
 		"api_key": tokenResult.Key,
 	}
 
-	// leaseID is the service account ID for cleanup
-	leaseID := fmt.Sprintf("%d", saResult.ID)
+	// leaseID encodes orgID and service account ID for cleanup.
+	// Format: "<orgID>:<saID>" when orgID is set, "<saID>" otherwise.
+	var leaseID string
+	if orgID != "" {
+		leaseID = fmt.Sprintf("%s:%d", orgID, saResult.ID)
+	} else {
+		leaseID = fmt.Sprintf("%d", saResult.ID)
+	}
 
 	if d.logger != nil {
 		d.logger.Debug("minted Grafana service account token",
@@ -220,9 +226,9 @@ func (d *GrafanaDriver) Revoke(ctx context.Context, leaseID string) error {
 		return nil
 	}
 
-	// leaseID is the service account ID
-	path := fmt.Sprintf("/api/serviceaccounts/%s", leaseID)
-	if _, _, err := d.doGrafanaRequest(ctx, http.MethodDelete, path, nil, ""); err != nil {
+	saID, orgID := parseGrafanaLeaseID(leaseID)
+	path := fmt.Sprintf("/api/serviceaccounts/%s", saID)
+	if _, _, err := d.doGrafanaRequest(ctx, http.MethodDelete, path, nil, orgID); err != nil {
 		return fmt.Errorf("failed to delete service account %s: %w", leaseID, err)
 	}
 
@@ -297,6 +303,15 @@ func (d *GrafanaDriver) doGrafanaRequest(ctx context.Context, method, path strin
 		)
 	}
 	return respBody, status, err
+}
+
+// parseGrafanaLeaseID splits a leaseID into (saID, orgID).
+// Format: "<orgID>:<saID>" or "<saID>" (legacy / default org).
+func parseGrafanaLeaseID(leaseID string) (saID, orgID string) {
+	if i := strings.LastIndex(leaseID, ":"); i >= 0 {
+		return leaseID[i+1:], leaseID[:i]
+	}
+	return leaseID, ""
 }
 
 // deleteServiceAccount is a best-effort cleanup helper.

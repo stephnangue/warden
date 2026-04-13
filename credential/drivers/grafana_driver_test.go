@@ -278,7 +278,7 @@ func TestGrafanaDriver_MintCredential_CustomConfig(t *testing.T) {
 	rawData, _, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "glsa_custom", rawData["api_key"])
-	assert.Equal(t, "100", leaseID)
+	assert.Equal(t, "99:100", leaseID)
 }
 
 func TestGrafanaDriver_MintCredential_InvalidRole(t *testing.T) {
@@ -634,4 +634,21 @@ func TestGrafanaDriver_AuthorizationHeader(t *testing.T) {
 
 	_, _, err := driver.doGrafanaRequest(context.Background(), http.MethodGet, "/api/serviceaccounts/search", nil, "")
 	require.NoError(t, err)
+}
+
+func TestParseGrafanaLeaseID(t *testing.T) {
+	tests := []struct {
+		leaseID       string
+		wantSAID      string
+		wantOrgID     string
+	}{
+		{"1337", "1337", ""},
+		{"42:1337", "1337", "42"},
+		{"org:with:colon:99", "99", "org:with:colon"},
+	}
+	for _, tc := range tests {
+		saID, orgID := parseGrafanaLeaseID(tc.leaseID)
+		assert.Equal(t, tc.wantSAID, saID, "leaseID=%q saID", tc.leaseID)
+		assert.Equal(t, tc.wantOrgID, orgID, "leaseID=%q orgID", tc.leaseID)
+	}
 }
