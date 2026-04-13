@@ -58,6 +58,7 @@ import (
 	"github.com/stephnangue/warden/provider/pagerduty"
 	"github.com/stephnangue/warden/provider/rds"
 	"github.com/stephnangue/warden/provider/scaleway"
+	"github.com/stephnangue/warden/provider/sentry"
 	"github.com/stephnangue/warden/provider/servicenow"
 	"github.com/stephnangue/warden/provider/slack"
 	"github.com/stephnangue/warden/provider/splunk"
@@ -139,6 +140,7 @@ Usage: warden server [options]
 		"vault":         vault.Factory,
 		"rds":           rds.Factory,
 		"scaleway":      scaleway.Factory,
+		"sentry":        sentry.Factory,
 	}
 
 	authMethods = map[string]wardenlogical.Factory{
