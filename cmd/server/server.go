@@ -58,6 +58,7 @@ import (
 	"github.com/stephnangue/warden/provider/openai"
 	"github.com/stephnangue/warden/provider/ovh"
 	"github.com/stephnangue/warden/provider/pagerduty"
+	"github.com/stephnangue/warden/provider/prometheus"
 	"github.com/stephnangue/warden/provider/rds"
 	"github.com/stephnangue/warden/provider/scaleway"
 	"github.com/stephnangue/warden/provider/sentry"
@@ -137,6 +138,7 @@ Usage: warden server [options]
 		"openai":        openai.Factory,
 		"ovh":           ovh.Factory,
 		"pagerduty":     pagerduty.Factory,
+		"prometheus":    prometheus.Factory,
 		"servicenow":    servicenow.Factory,
 		"slack":         slack.Factory,
 		"splunk":        splunk.Factory,
