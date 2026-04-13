@@ -40,6 +40,7 @@ import (
 	physPostgresql "github.com/stephnangue/warden/physical/postgresql"
 	ansible_tower "github.com/stephnangue/warden/provider/ansible_tower"
 	"github.com/stephnangue/warden/provider/anthropic"
+	"github.com/stephnangue/warden/provider/atlassian"
 	"github.com/stephnangue/warden/provider/aws"
 	"github.com/stephnangue/warden/provider/azure"
 	"github.com/stephnangue/warden/provider/cloudflare"
@@ -118,6 +119,7 @@ Usage: warden server [options]
 	providers = map[string]wardenlogical.Factory{
 		"ansible_tower": ansible_tower.Factory,
 		"anthropic":     anthropic.Factory,
+		"atlassian":     atlassian.Factory,
 		"aws":           aws.Factory,
 		"azure":         azure.Factory,
 		"cloudflare":    cloudflare.Factory,
