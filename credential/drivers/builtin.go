@@ -74,5 +74,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register Grafana driver factory
+	if err := registry.RegisterFactory(&GrafanaDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }
