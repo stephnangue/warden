@@ -152,7 +152,7 @@ warden cred spec create ovh-api \
   --config mint_method=oauth2_token
 ```
 
-**S3-only mode** (dynamic S3 credentials, revocable):
+**S3-only mode** (dynamic S3 credentials, ~1h TTL, revoked and re-created on expiry):
 
 ```bash
 warden cred spec create ovh-s3 \
@@ -519,7 +519,7 @@ aws s3 ls s3://my-bucket/ \
 |--------|---------|
 | **Storage** | OAuth2 `client_id` + `client_secret` stored on the credential source (long-lived) |
 | **API tokens** | Auto-minted via `client_credentials` grant, ~1h TTL, refreshed automatically |
-| **S3 credentials** | Created on demand via OVH API, revoked when credential lease expires |
+| **S3 credentials** | Created on demand via OVH API, ~1h TTL (tied to OAuth2 token lifetime), revoked and re-created on expiry |
 | **Rotation** | Rotate the OAuth2 service account secret in OVHcloud IAM, then update the source |
 
 **To rotate the OAuth2 service account:**

@@ -76,7 +76,7 @@ Credential source: ovh (OAuth2 service account)
 
   Mint methods:
   - oauth2_token: Mints API bearer tokens only
-  - dynamic_s3: Creates S3 access_key + secret_key (revocable)
+  - dynamic_s3: Creates S3 access_key + secret_key (~1h TTL, revocable)
   - oauth2_token_and_s3: Both API token + S3 credentials
 
   Source config: client_id, client_secret, ovh_endpoint (ovh-eu/ovh-ca/ovh-us),
