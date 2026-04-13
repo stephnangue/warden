@@ -286,7 +286,7 @@ func TestOVHDriver_MintDynamicS3(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "s3-access-key-123", rawData["access_key"])
 	assert.Equal(t, "s3-secret-key-456", rawData["secret_key"])
-	assert.Equal(t, time.Duration(0), ttl) // S3 keys are static
+	assert.Equal(t, 3599*time.Second, ttl) // TTL from OAuth2 token
 	assert.Equal(t, "proj-123/user-456/s3-access-key-123", leaseID)
 }
 
