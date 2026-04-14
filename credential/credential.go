@@ -41,6 +41,7 @@ const (
 	SourceTypeOVH        = "ovh"
 	SourceTypeCloudflare = "cloudflare"
 	SourceTypeGrafana    = "grafana"
+	SourceTypeHoneycomb  = "honeycomb"
 )
 
 // Category constants for credential categorization

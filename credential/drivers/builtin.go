@@ -79,5 +79,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register Honeycomb driver factory
+	if err := registry.RegisterFactory(&HoneycombDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }
