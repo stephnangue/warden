@@ -20,7 +20,7 @@ services:
 
   # Vault dev server for testing gateway proxy
   vault:
-    image: hashicorp/vault:latest
+    image: hashicorp/vault:1.18
     container_name: e2e-vault
     ports:
       - "8200:8200"
