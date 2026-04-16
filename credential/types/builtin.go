@@ -69,5 +69,10 @@ func RegisterBuiltinTypes(registry *credential.TypeRegistry) error {
 		return err
 	}
 
+	// Register IBM Cloud keys type
+	if err := registry.Register(&IBMCloudKeysCredType{}); err != nil {
+		return err
+	}
+
 	return nil
 }

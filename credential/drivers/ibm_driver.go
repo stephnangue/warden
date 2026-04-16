@@ -118,6 +118,8 @@ func (f *IBMDriverFactory) InferCredentialType(specConfig map[string]string) (st
 	switch mintMethod {
 	case "iam_token", "":
 		return credential.TypeOAuthBearerToken, nil
+	case "iam_with_cos":
+		return credential.TypeIBMCloudKeys, nil
 	default:
 		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
 	}
@@ -172,8 +174,10 @@ func (d *IBMDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	switch mintMethod {
 	case "iam_token":
 		return d.mintIAMToken(ctx, spec)
+	case "iam_with_cos":
+		return d.mintIAMWithCOS(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for IBM driver; use 'iam_token'", mintMethod)
+		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for IBM driver; use 'iam_token' or 'iam_with_cos'", mintMethod)
 	}
 }
 
@@ -199,6 +203,38 @@ func (d *IBMDriver) mintIAMToken(ctx context.Context, spec *credential.CredSpec)
 	}
 
 	// No leaseID — IAM tokens expire naturally and cannot be revoked
+	return rawData, ttl, "", nil
+}
+
+// mintIAMWithCOS mints an IAM bearer token and combines it with static COS HMAC keys from spec config.
+func (d *IBMDriver) mintIAMWithCOS(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	token, expiry, err := d.getIAMToken(ctx)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("failed to acquire IBM IAM token: %w", err)
+	}
+
+	ttl := time.Until(expiry)
+	rawData := map[string]interface{}{
+		"access_token": token,
+	}
+
+	// Add optional COS HMAC keys from spec config (API-only mode is valid)
+	accessKeyID := credential.GetString(spec.Config, "access_key_id", "")
+	secretAccessKey := credential.GetString(spec.Config, "secret_access_key", "")
+	if accessKeyID != "" && secretAccessKey != "" {
+		rawData["access_key_id"] = accessKeyID
+		rawData["secret_access_key"] = secretAccessKey
+	}
+
+	if d.logger != nil {
+		hasCOS := accessKeyID != "" && secretAccessKey != ""
+		d.logger.Debug("minted IBM Cloud keys (IAM token + COS HMAC)",
+			logger.String("spec", spec.Name),
+			logger.String("ttl", ttl.String()),
+			logger.Bool("has_cos", hasCOS),
+		)
+	}
+
 	return rawData, ttl, "", nil
 }
 

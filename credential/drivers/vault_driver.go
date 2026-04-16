@@ -2,7 +2,9 @@ package drivers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -182,6 +184,8 @@ func (f *VaultDriverFactory) InferCredentialType(specConfig map[string]string) (
 		return credential.TypeAPIKey, nil
 	case "dynamic_gcp":
 		return credential.TypeGCPAccessToken, nil
+	case "dynamic_ibm":
+		return credential.TypeIBMCloudKeys, nil
 	case "oauth2":
 		return credential.TypeOAuthBearerToken, nil
 	case "vault_token", "":
@@ -281,12 +285,14 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 		return d.fetchDynamicAWSCreds(ctx, spec)
 	case "dynamic_gcp":
 		return d.fetchDynamicGCPCreds(ctx, spec)
+	case "dynamic_ibm":
+		return d.fetchDynamicIBMCreds(ctx, spec)
 	case "vault_token":
 		return d.fetchDynamicVaultToken(ctx, spec)
 	case "oauth2":
 		return d.fetchOAuth2Creds(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'dynamic_aws', 'dynamic_gcp', 'vault_token', 'oauth2'", mintMethod)
+		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'dynamic_aws', 'dynamic_gcp', 'dynamic_ibm', 'vault_token', 'oauth2'", mintMethod)
 	}
 }
 
@@ -516,6 +522,157 @@ func (d *VaultDriver) fetchOAuth2Creds(ctx context.Context, spec *credential.Cre
 	}
 
 	return rawData, leaseTTL, secret.LeaseID, nil
+}
+
+// fetchDynamicIBMCreds fetches dynamic IBM Cloud credentials from Vault IBM secrets engine,
+// exchanges the API key for an IAM bearer token, and optionally includes COS HMAC keys.
+func (d *VaultDriver) fetchDynamicIBMCreds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	ibmMount := credential.GetString(spec.Config, "ibm_mount", "")
+	roleName := credential.GetString(spec.Config, "role_name", "")
+
+	if ibmMount == "" || roleName == "" {
+		return nil, 0, "", fmt.Errorf("ibm_mount and role_name are required for dynamic IBM credentials")
+	}
+
+	// Step 1: Fetch dynamic API key from Vault IBM secrets engine
+	path := fmt.Sprintf("%s/creds/%s", ibmMount, roleName)
+
+	data := make(map[string]interface{})
+	ttl := credential.GetString(spec.Config, "ttl", "")
+	if ttl != "" {
+		parsedTTL, err := time.ParseDuration(ttl)
+		if err != nil {
+			return nil, 0, "", fmt.Errorf("invalid ttl format '%s': %w", ttl, err)
+		}
+		if spec.MinTTL > 0 && parsedTTL < spec.MinTTL {
+			return nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", parsedTTL, spec.MinTTL)
+		}
+		if spec.MaxTTL > 0 && parsedTTL > spec.MaxTTL {
+			return nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", parsedTTL, spec.MaxTTL)
+		}
+		data["ttl"] = parsedTTL.String()
+	}
+
+	var secret *api.Secret
+	var err error
+	if len(data) > 0 {
+		secret, err = d.vault.Logical().WriteWithContext(ctx, path, data)
+	} else {
+		secret, err = d.vault.Logical().ReadWithContext(ctx, path)
+	}
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("failed to generate IBM credentials from Vault: %w", err)
+	}
+	if secret == nil || secret.Data == nil {
+		return nil, 0, "", fmt.Errorf("no credentials returned for role '%s' on mount '%s'", roleName, ibmMount)
+	}
+
+	// Extract API key from Vault response
+	apiKey, _ := secret.Data["api_key"].(string)
+	if apiKey == "" {
+		return nil, 0, "", fmt.Errorf("Vault IBM engine did not return an api_key for role '%s'", roleName)
+	}
+
+	vaultLeaseTTL := time.Duration(secret.LeaseDuration) * time.Second
+
+	// Step 2: Exchange API key for IAM bearer token
+	iamEndpoint := credential.GetString(spec.Config, "iam_endpoint", defaultIBMIAMEndpoint)
+	accessToken, tokenExpiry, err := exchangeIBMAPIKeyForToken(ctx, nil, apiKey, iamEndpoint)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("failed to exchange IBM API key for IAM token: %w", err)
+	}
+
+	// Step 3: Build result with IAM token
+	rawData := map[string]interface{}{
+		"access_token": accessToken,
+	}
+
+	// Add optional COS HMAC keys from spec config
+	accessKeyID := credential.GetString(spec.Config, "access_key_id", "")
+	secretAccessKey := credential.GetString(spec.Config, "secret_access_key", "")
+	if accessKeyID != "" && secretAccessKey != "" {
+		rawData["access_key_id"] = accessKeyID
+		rawData["secret_access_key"] = secretAccessKey
+	}
+
+	// Step 4: Compute TTL as min(vault_lease, iam_token_expiry)
+	iamTTL := time.Until(tokenExpiry)
+	leaseTTL := vaultLeaseTTL
+	if leaseTTL <= 0 || (iamTTL > 0 && iamTTL < leaseTTL) {
+		leaseTTL = iamTTL
+	}
+	if leaseTTL <= 0 {
+		return nil, 0, "", fmt.Errorf("Vault returned invalid lease duration for IBM credentials on mount '%s'", ibmMount)
+	}
+
+	if d.logger != nil {
+		hasCOS := accessKeyID != "" && secretAccessKey != ""
+		d.logger.Debug("generated dynamic IBM credentials from Vault",
+			logger.String("spec", spec.Name),
+			logger.String("mount", ibmMount),
+			logger.String("vault_role", roleName),
+			logger.String("lease_id", secret.LeaseID),
+			logger.String("lease_ttl", leaseTTL.String()),
+			logger.Bool("has_cos", hasCOS),
+		)
+	}
+
+	return rawData, leaseTTL, secret.LeaseID, nil
+}
+
+// exchangeIBMAPIKeyForToken exchanges an IBM Cloud API key for an IAM bearer token.
+// This is used by fetchDynamicIBMCreds to convert the Vault-issued API key into a usable token.
+func exchangeIBMAPIKeyForToken(ctx context.Context, httpClient *http.Client, apiKey, iamEndpoint string) (string, time.Time, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	form := url.Values{
+		"grant_type": {"urn:ibm:params:oauth:grant-type:apikey"},
+		"apikey":     {apiKey},
+	}
+
+	respBody, _, err := ExecuteWithRetry(ctx, httpClient, HTTPRequest{
+		Method: "POST",
+		URL:    iamEndpoint + "/identity/token",
+		Body:   []byte(form.Encode()),
+		Headers: map[string]string{
+			"Content-Type": "application/x-www-form-urlencoded",
+			"Accept":       "application/json",
+		},
+	}, HTTPRetryConfig{
+		MaxAttempts:       3,
+		MaxBodySize:       1 << 20,
+		RetryableStatuses: []int{429, 500},
+		BaseBackoff:       1 * time.Second,
+		JitterPercent:     20,
+	})
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("IBM IAM token request failed: %w", err)
+	}
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int64  `json:"expires_in"`
+		Expiration  int64  `json:"expiration"`
+	}
+	if err := json.Unmarshal(respBody, &tokenResp); err != nil {
+		return "", time.Time{}, fmt.Errorf("failed to decode IAM token response: %w", err)
+	}
+	if tokenResp.AccessToken == "" {
+		return "", time.Time{}, fmt.Errorf("IAM token response missing access_token")
+	}
+
+	var expiry time.Time
+	if tokenResp.Expiration > 0 {
+		expiry = time.Unix(tokenResp.Expiration, 0)
+	} else if tokenResp.ExpiresIn > 0 {
+		expiry = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	} else {
+		expiry = time.Now().Add(1 * time.Hour)
+	}
+
+	return tokenResp.AccessToken, expiry, nil
 }
 
 // fetchDynamicVaultToken generates a Vault token via auth/token/create/{role}
