@@ -21,6 +21,7 @@ const (
 	TypeScalewayKeys     = "scaleway_keys"
 	TypeOVHKeys          = "ovh_keys"
 	TypeCloudflareKeys   = "cloudflare_keys"
+	TypeIBMCloudKeys     = "ibmcloud_keys"
 )
 
 // Source type constants

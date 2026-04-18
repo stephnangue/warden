@@ -118,6 +118,8 @@ func (f *IBMDriverFactory) InferCredentialType(specConfig map[string]string) (st
 	switch mintMethod {
 	case "iam_token", "":
 		return credential.TypeOAuthBearerToken, nil
+	case "iam_with_cos":
+		return credential.TypeIBMCloudKeys, nil
 	default:
 		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
 	}
@@ -172,8 +174,10 @@ func (d *IBMDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	switch mintMethod {
 	case "iam_token":
 		return d.mintIAMToken(ctx, spec)
+	case "iam_with_cos":
+		return d.mintIAMWithCOS(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for IBM driver; use 'iam_token'", mintMethod)
+		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for IBM driver; use 'iam_token' or 'iam_with_cos'", mintMethod)
 	}
 }
 
@@ -199,6 +203,38 @@ func (d *IBMDriver) mintIAMToken(ctx context.Context, spec *credential.CredSpec)
 	}
 
 	// No leaseID — IAM tokens expire naturally and cannot be revoked
+	return rawData, ttl, "", nil
+}
+
+// mintIAMWithCOS mints an IAM bearer token and combines it with static COS HMAC keys from spec config.
+func (d *IBMDriver) mintIAMWithCOS(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	token, expiry, err := d.getIAMToken(ctx)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("failed to acquire IBM IAM token: %w", err)
+	}
+
+	ttl := time.Until(expiry)
+	rawData := map[string]interface{}{
+		"access_token": token,
+	}
+
+	// Add optional COS HMAC keys from spec config (API-only mode is valid)
+	accessKeyID := credential.GetString(spec.Config, "access_key_id", "")
+	secretAccessKey := credential.GetString(spec.Config, "secret_access_key", "")
+	if accessKeyID != "" && secretAccessKey != "" {
+		rawData["access_key_id"] = accessKeyID
+		rawData["secret_access_key"] = secretAccessKey
+	}
+
+	if d.logger != nil {
+		hasCOS := accessKeyID != "" && secretAccessKey != ""
+		d.logger.Debug("minted IBM Cloud keys (IAM token + COS HMAC)",
+			logger.String("spec", spec.Name),
+			logger.String("ttl", ttl.String()),
+			logger.Bool("has_cos", hasCOS),
+		)
+	}
+
 	return rawData, ttl, "", nil
 }
 
@@ -392,55 +428,7 @@ func (d *IBMDriver) getIAMToken(ctx context.Context) (string, time.Time, error) 
 // acquireIAMToken exchanges the source API key for an IAM bearer token.
 func (d *IBMDriver) acquireIAMToken(ctx context.Context) (string, time.Time, error) {
 	apiKey := credential.GetString(d.credSource.Config, "api_key", "")
-	if apiKey == "" {
-		return "", time.Time{}, fmt.Errorf("api_key is empty")
-	}
-
-	iamEndpoint := d.getIAMEndpoint()
-
-	form := url.Values{
-		"grant_type": {"urn:ibm:params:oauth:grant-type:apikey"},
-		"apikey":     {apiKey},
-	}
-
-	respBody, _, err := ExecuteWithRetry(ctx, d.httpClient, HTTPRequest{
-		Method: "POST",
-		URL:    iamEndpoint + "/identity/token",
-		Body:   []byte(form.Encode()),
-		Headers: map[string]string{
-			"Content-Type": "application/x-www-form-urlencoded",
-			"Accept":       "application/json",
-		},
-	}, defaultIBMRetryConfig())
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("IBM IAM token request failed: %w", err)
-	}
-
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-		ExpiresIn   int64  `json:"expires_in"`
-		Expiration  int64  `json:"expiration"` // Unix timestamp
-	}
-	if err := json.Unmarshal(respBody, &tokenResp); err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to decode IAM token response: %w", err)
-	}
-
-	if tokenResp.AccessToken == "" {
-		return "", time.Time{}, fmt.Errorf("IAM token response missing access_token")
-	}
-
-	// Compute expiry from either expiration (Unix timestamp) or expires_in (seconds)
-	var expiry time.Time
-	if tokenResp.Expiration > 0 {
-		expiry = time.Unix(tokenResp.Expiration, 0)
-	} else if tokenResp.ExpiresIn > 0 {
-		expiry = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
-	} else {
-		expiry = time.Now().Add(1 * time.Hour) // fallback
-	}
-
-	return tokenResp.AccessToken, expiry, nil
+	return exchangeIBMAPIKeyForIAMToken(ctx, d.httpClient, apiKey, d.getIAMEndpoint())
 }
 
 // ============================================================================

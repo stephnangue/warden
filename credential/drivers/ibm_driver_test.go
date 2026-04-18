@@ -80,6 +80,12 @@ func TestIBMDriverFactory_InferCredentialType(t *testing.T) {
 		assert.Equal(t, credential.TypeOAuthBearerToken, ct)
 	})
 
+	t.Run("iam_with_cos", func(t *testing.T) {
+		ct, err := f.InferCredentialType(map[string]string{"mint_method": "iam_with_cos"})
+		require.NoError(t, err)
+		assert.Equal(t, credential.TypeIBMCloudKeys, ct)
+	})
+
 	t.Run("unsupported mint method", func(t *testing.T) {
 		_, err := f.InferCredentialType(map[string]string{"mint_method": "invalid"})
 		require.Error(t, err)
@@ -519,6 +525,78 @@ func TestIBMDriver_VerifySpec(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "spec verification failed")
 	})
+}
+
+// ============================================================================
+// iam_with_cos Mint Method Tests
+// ============================================================================
+
+func TestIBMDriver_MintIAMWithCOS_DualMode(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+
+	spec := &credential.CredSpec{
+		Name: "test-spec",
+		Config: map[string]string{
+			"mint_method":       "iam_with_cos",
+			"access_key_id":     "cos-access-key",
+			"secret_access_key": "cos-secret-key",
+		},
+	}
+
+	rawData, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, rawData["access_token"])
+	assert.Equal(t, "cos-access-key", rawData["access_key_id"])
+	assert.Equal(t, "cos-secret-key", rawData["secret_access_key"])
+	assert.True(t, ttl > 0)
+	assert.Empty(t, leaseID, "IAM tokens should have no lease ID")
+}
+
+func TestIBMDriver_MintIAMWithCOS_APIOnly(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+
+	spec := &credential.CredSpec{
+		Name: "test-spec",
+		Config: map[string]string{
+			"mint_method": "iam_with_cos",
+		},
+	}
+
+	rawData, _, _, err := d.MintCredential(context.TODO(), spec)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, rawData["access_token"])
+	_, hasAK := rawData["access_key_id"]
+	_, hasSK := rawData["secret_access_key"]
+	assert.False(t, hasAK, "COS keys should be absent when not configured")
+	assert.False(t, hasSK, "COS keys should be absent when not configured")
+}
+
+func TestIBMDriver_MintIAMWithCOS_InvalidKey(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.credSource.Config["api_key"] = "invalid-key"
+	d.tokenCache.Clear()
+
+	spec := &credential.CredSpec{
+		Name: "test-spec",
+		Config: map[string]string{
+			"mint_method": "iam_with_cos",
+		},
+	}
+
+	_, _, _, err := d.MintCredential(context.TODO(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to acquire IBM IAM token")
 }
 
 // ============================================================================

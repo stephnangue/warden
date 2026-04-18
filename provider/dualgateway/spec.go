@@ -112,4 +112,26 @@ type ProviderSpec struct {
 	// that reads "access_key" and "secret_key" from credential.Data
 	// after validating CredentialType.
 	ExtractS3Credentials func(req *logical.Request) (awssdk.Credentials, error)
+
+	// --- Optional API-mode URL override ---
+
+	// RewriteAPITarget, if non-nil, overrides API-mode target URL construction.
+	// Default behavior (nil): targetURL = providerURL + apiPath.
+	//
+	// Providers that route to multiple upstream hostnames based on the request
+	// path (e.g., IBM Cloud, where each service has a different host) use this
+	// hook to parse the path and build the correct target URL.
+	//
+	// Arguments:
+	//   providerURL - the configured upstream URL (may be ignored)
+	//   apiPath     - the path after "/gateway" (always starts with "/", possibly just "/")
+	//   state       - the map produced by OnConfigParsed (may be nil)
+	//
+	// Returns:
+	//   full target URL (scheme + host + path + optional query) on success
+	//   non-nil error to reject the request with HTTP 400
+	//
+	// Only invoked for API-mode requests; SigV4 (S3/COS) requests continue to use
+	// S3Endpoint and are never routed through this hook.
+	RewriteAPITarget func(providerURL, apiPath string, state map[string]any) (string, error)
 }

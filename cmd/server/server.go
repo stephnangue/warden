@@ -50,6 +50,7 @@ import (
 	"github.com/stephnangue/warden/provider/elastic"
 	"github.com/stephnangue/warden/provider/gcp"
 	"github.com/stephnangue/warden/provider/grafana"
+	"github.com/stephnangue/warden/provider/ibmcloud"
 	"github.com/stephnangue/warden/provider/honeycomb"
 	"github.com/stephnangue/warden/provider/github"
 	"github.com/stephnangue/warden/provider/gitlab"
@@ -133,6 +134,7 @@ Usage: warden server [options]
 		"gcp":           gcp.Factory,
 		"grafana":       grafana.Factory,
 		"honeycomb":     honeycomb.Factory,
+		"ibmcloud":      ibmcloud.Factory,
 		"github":        github.Factory,
 		"gitlab":        gitlab.Factory,
 		"mistral":       mistral.Factory,

@@ -413,6 +413,29 @@ func TestVaultDriver_MintCredential_DynamicGCPRouting(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported role_type")
 }
 
+func TestVaultDriver_MintCredential_DynamicIBMRouting(t *testing.T) {
+	driver := &VaultDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeVault,
+			Config: map[string]string{
+				"vault_address": "http://127.0.0.1:8200",
+			},
+		},
+	}
+
+	// dynamic_ibm without ibm_mount/role_name should fail before hitting Vault
+	spec := &credential.CredSpec{
+		Name: "test-ibm",
+		Type: credential.TypeIBMCloudKeys,
+		Config: map[string]string{
+			"mint_method": "dynamic_ibm",
+		},
+	}
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ibm_mount and role_name are required")
+}
+
 func TestVaultDriver_MintCredential_OAuth2Routing(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
@@ -449,6 +472,7 @@ func TestVaultDriverFactory_InferCredentialType(t *testing.T) {
 		{"dynamic_aws", "dynamic_aws", credential.TypeAWSAccessKeys, false},
 		{"static_apikey", "static_apikey", credential.TypeAPIKey, false},
 		{"dynamic_gcp", "dynamic_gcp", credential.TypeGCPAccessToken, false},
+		{"dynamic_ibm", "dynamic_ibm", credential.TypeIBMCloudKeys, false},
 		{"oauth2", "oauth2", credential.TypeOAuthBearerToken, false},
 		{"vault_token", "vault_token", credential.TypeVaultToken, false},
 		{"empty defaults to vault_token", "", credential.TypeVaultToken, false},

@@ -285,3 +285,179 @@ func TestS3EndpointWithState(t *testing.T) {
 	state := map[string]any{"account_id": "abc123"}
 	assert.Equal(t, "abc123.r2.cloudflarestorage.com", spec.S3Endpoint(state, "auto"))
 }
+
+// --- RewriteAPITarget hook ---
+
+// specWithRewrite clones headerAuthSpec and adds a RewriteAPITarget function that
+// forwards /gateway/<host>/<rest> to https://<host><rest> on the given upstream.
+func specWithRewrite(rewrite func(providerURL, apiPath string, state map[string]any) (string, error), onConfigParsed func(map[string]any) map[string]any) *ProviderSpec {
+	return &ProviderSpec{
+		Name:           "rewritetest",
+		HelpText:       "h",
+		CredentialType: "test_keys",
+		DefaultURL:     "https://api.unused.com",
+		URLConfigKey:   "rewrite_url",
+		DefaultTimeout: 30e9,
+		UserAgent:      "warden-rewrite-proxy",
+		APIAuth: APIAuthStrategy{
+			HeaderName:        "X-Auth-Token",
+			HeaderValueFormat: "%s",
+			CredentialField:   "secret_key",
+		},
+		S3Endpoint: func(_ map[string]any, region string) string {
+			return "s3." + region + ".rewrite.cloud"
+		},
+		OnConfigParsed:   onConfigParsed,
+		RewriteAPITarget: rewrite,
+	}
+}
+
+func TestHandleAPIRequest_RewriteAPITarget_Invoked(t *testing.T) {
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	rewrite := func(_ string, apiPath string, _ map[string]any) (string, error) {
+		// Prepend "/transformed" and send to upstream
+		return upstream.URL + "/transformed" + apiPath, nil
+	}
+	b := createBackend(t, specWithRewrite(rewrite, nil))
+
+	rec := httptest.NewRecorder()
+	req := &logical.Request{
+		HTTPRequest:    httptest.NewRequest("GET", "/gateway/foo", nil),
+		ResponseWriter: rec,
+		Credential: &credential.Credential{
+			Type: "test_keys",
+			Data: map[string]string{"secret_key": "v"},
+		},
+	}
+	b.handleAPIRequest(context.Background(), req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "/transformed/foo", gotPath, "upstream should receive the transformed path")
+}
+
+func TestHandleAPIRequest_RewriteAPITarget_ErrorReturns400(t *testing.T) {
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	rewrite := func(_ string, _ string, _ map[string]any) (string, error) {
+		return "", assertableError("host not allowed")
+	}
+	b := createBackend(t, specWithRewrite(rewrite, nil))
+
+	rec := httptest.NewRecorder()
+	req := &logical.Request{
+		HTTPRequest:    httptest.NewRequest("GET", "/gateway/whatever", nil),
+		ResponseWriter: rec,
+		Credential: &credential.Credential{
+			Type: "test_keys",
+			Data: map[string]string{"secret_key": "v"},
+		},
+	}
+	b.handleAPIRequest(context.Background(), req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "host not allowed")
+	assert.False(t, upstreamCalled, "upstream must not be hit when hook rejects")
+}
+
+// assertableError is a simple fmt.Stringer-based error without pulling fmt.Errorf
+// closures into table tests.
+type assertableError string
+
+func (e assertableError) Error() string { return string(e) }
+
+func TestHandleAPIRequest_NilRewriteUsesDefault(t *testing.T) {
+	// Regression: Scaleway/OVH/Cloudflare rely on the default providerURL + apiPath behavior.
+	var gotURL string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURL = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	b := createBackend(t, headerAuthSpec)
+	b.providerURL = upstream.URL
+
+	rec := httptest.NewRecorder()
+	req := &logical.Request{
+		HTTPRequest:    httptest.NewRequest("GET", "/gateway/v1/servers", nil),
+		ResponseWriter: rec,
+		Credential: &credential.Credential{
+			Type: "test_keys",
+			Data: map[string]string{"secret_key": "v"},
+		},
+	}
+	b.handleAPIRequest(context.Background(), req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "/v1/servers", gotURL)
+}
+
+func TestHandleAPIRequest_RewriteAPITarget_ReceivesState(t *testing.T) {
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	onConfigParsed := func(_ map[string]any) map[string]any {
+		return map[string]any{"tenant": "acme"}
+	}
+	rewrite := func(_ string, apiPath string, state map[string]any) (string, error) {
+		tenant, _ := state["tenant"].(string)
+		return upstream.URL + "/" + tenant + apiPath, nil
+	}
+	spec := specWithRewrite(rewrite, onConfigParsed)
+	b := createBackend(t, spec)
+	// Manually trigger OnConfigParsed state population since createBackend doesn't pass config
+	b.extraState = onConfigParsed(nil)
+
+	rec := httptest.NewRecorder()
+	req := &logical.Request{
+		HTTPRequest:    httptest.NewRequest("GET", "/gateway/thing", nil),
+		ResponseWriter: rec,
+		Credential: &credential.Credential{
+			Type: "test_keys",
+			Data: map[string]string{"secret_key": "v"},
+		},
+	}
+	b.handleAPIRequest(context.Background(), req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "/acme/thing", gotPath)
+}
+
+func TestHandleGateway_SigV4_DoesNotInvokeRewriteAPITarget(t *testing.T) {
+	// Verifies that SigV4 (S3/COS) requests route to handleS3Request and never
+	// invoke the API-mode hook. Regression guard for the IBM COS design.
+	hookInvoked := false
+	rewrite := func(_ string, _ string, _ map[string]any) (string, error) {
+		hookInvoked = true
+		return "https://wrong.example.com/", nil
+	}
+	b := createBackend(t, specWithRewrite(rewrite, nil))
+
+	rec := httptest.NewRecorder()
+	httpReq := httptest.NewRequest("GET", "/gateway/some/bucket/key", nil)
+	httpReq.Header.Set("Authorization",
+		"AWS4-HMAC-SHA256 Credential=test/20260410/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc")
+	req := &logical.Request{
+		HTTPRequest:    httpReq,
+		ResponseWriter: rec,
+	}
+
+	b.handleGateway(context.Background(), req)
+
+	assert.False(t, hookInvoked, "RewriteAPITarget must not be called for SigV4 requests")
+}
