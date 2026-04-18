@@ -428,55 +428,7 @@ func (d *IBMDriver) getIAMToken(ctx context.Context) (string, time.Time, error) 
 // acquireIAMToken exchanges the source API key for an IAM bearer token.
 func (d *IBMDriver) acquireIAMToken(ctx context.Context) (string, time.Time, error) {
 	apiKey := credential.GetString(d.credSource.Config, "api_key", "")
-	if apiKey == "" {
-		return "", time.Time{}, fmt.Errorf("api_key is empty")
-	}
-
-	iamEndpoint := d.getIAMEndpoint()
-
-	form := url.Values{
-		"grant_type": {"urn:ibm:params:oauth:grant-type:apikey"},
-		"apikey":     {apiKey},
-	}
-
-	respBody, _, err := ExecuteWithRetry(ctx, d.httpClient, HTTPRequest{
-		Method: "POST",
-		URL:    iamEndpoint + "/identity/token",
-		Body:   []byte(form.Encode()),
-		Headers: map[string]string{
-			"Content-Type": "application/x-www-form-urlencoded",
-			"Accept":       "application/json",
-		},
-	}, defaultIBMRetryConfig())
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("IBM IAM token request failed: %w", err)
-	}
-
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-		ExpiresIn   int64  `json:"expires_in"`
-		Expiration  int64  `json:"expiration"` // Unix timestamp
-	}
-	if err := json.Unmarshal(respBody, &tokenResp); err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to decode IAM token response: %w", err)
-	}
-
-	if tokenResp.AccessToken == "" {
-		return "", time.Time{}, fmt.Errorf("IAM token response missing access_token")
-	}
-
-	// Compute expiry from either expiration (Unix timestamp) or expires_in (seconds)
-	var expiry time.Time
-	if tokenResp.Expiration > 0 {
-		expiry = time.Unix(tokenResp.Expiration, 0)
-	} else if tokenResp.ExpiresIn > 0 {
-		expiry = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
-	} else {
-		expiry = time.Now().Add(1 * time.Hour) // fallback
-	}
-
-	return tokenResp.AccessToken, expiry, nil
+	return exchangeIBMAPIKeyForIAMToken(ctx, d.httpClient, apiKey, d.getIAMEndpoint())
 }
 
 // ============================================================================

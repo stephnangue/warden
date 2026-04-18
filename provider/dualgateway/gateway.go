@@ -93,9 +93,25 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 		defer cancel()
 	}
 
-	// Build target URL — strip the Warden gateway prefix
+	// Build target URL — strip the Warden gateway prefix.
+	// Providers that route to multiple upstream hosts based on the request path
+	// can supply a RewriteAPITarget hook; otherwise we concatenate providerURL + apiPath.
 	apiPath := extractAPIPath(req.HTTPRequest.URL.Path)
-	targetURL := strings.TrimRight(snap.providerURL, "/") + apiPath
+	var targetURL string
+	if b.spec.RewriteAPITarget != nil {
+		var rewriteErr error
+		targetURL, rewriteErr = b.spec.RewriteAPITarget(snap.providerURL, apiPath, snap.extraState)
+		if rewriteErr != nil {
+			b.Logger.Warn("RewriteAPITarget rejected request",
+				logger.String("path", apiPath),
+				logger.Err(rewriteErr),
+			)
+			http.Error(req.ResponseWriter, rewriteErr.Error(), http.StatusBadRequest)
+			return
+		}
+	} else {
+		targetURL = strings.TrimRight(snap.providerURL, "/") + apiPath
+	}
 
 	outReq, err := http.NewRequestWithContext(ctx, req.HTTPRequest.Method, targetURL, nil)
 	if err != nil {
