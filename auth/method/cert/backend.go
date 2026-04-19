@@ -54,6 +54,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		PathsSpecial: &logical.Paths{
 			Unauthenticated: []string{
 				"login",
+				"introspect/roles",
 			},
 		},
 		Paths: []*framework.Path{
@@ -61,6 +62,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			b.pathConfig(),
 			b.pathRole(),
 			b.pathRoleList(),
+			b.pathIntrospect(),
 		},
 	}
 
