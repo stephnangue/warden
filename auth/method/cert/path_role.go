@@ -25,6 +25,10 @@ func (b *certAuthBackend) pathRole() *framework.Path {
 				Description: "Name of the role",
 				Required:    true,
 			},
+			"description": {
+				Type:        framework.TypeString,
+				Description: "Human-readable description of the role's purpose, surfaced via introspection so agents can select an appropriate role",
+			},
 			"allowed_common_names": {
 				Type:        framework.TypeCommaStringSlice,
 				Description: "Glob patterns for allowed certificate common names",
@@ -161,6 +165,7 @@ func (b *certAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reque
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
 			"name":                         role.Name,
+			"description":                  role.Description,
 			"allowed_common_names":         role.AllowedCommonNames,
 			"allowed_dns_sans":             role.AllowedDNSSANs,
 			"allowed_email_sans":           role.AllowedEmailSANs,
@@ -190,6 +195,9 @@ func (b *certAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Req
 		role = b.buildRoleFromFieldData(name, d)
 	} else {
 		// Update existing role — only update fields that are provided
+		if v, ok := d.GetOk("description"); ok {
+			role.Description = v.(string)
+		}
 		if v, ok := d.GetOk("allowed_common_names"); ok {
 			role.AllowedCommonNames = v.([]string)
 		}
@@ -352,6 +360,9 @@ func (b *certAuthBackend) buildRoleFromFieldData(name string, d *framework.Field
 		Name: name,
 	}
 
+	if v, ok := d.GetOk("description"); ok {
+		role.Description = v.(string)
+	}
 	if v, ok := d.GetOk("allowed_common_names"); ok {
 		role.AllowedCommonNames = v.([]string)
 	}
