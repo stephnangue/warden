@@ -24,6 +24,10 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 				Description: "Name of the role",
 				Required:    true,
 			},
+			"description": {
+				Type:        framework.TypeString,
+				Description: "Human-readable description of the role's purpose, surfaced via introspection so agents can select an appropriate role",
+			},
 			"bound_audiences": {
 				Type:        framework.TypeCommaStringSlice,
 				Description: "List of audiences that are valid for this role",
@@ -164,6 +168,7 @@ func (b *jwtAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reques
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
 			"name":                role.Name,
+			"description":         role.Description,
 			"bound_audiences":     role.BoundAudiences,
 			"bound_subject":       role.BoundSubject,
 			"bound_claims":        role.BoundClaims,
@@ -194,6 +199,9 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 		role = b.buildRoleFromFieldData(name, d)
 	} else {
 		// Update existing role — only update fields that are provided
+		if v, ok := d.GetOk("description"); ok {
+			role.Description = v.(string)
+		}
 		if v, ok := d.GetOk("bound_audiences"); ok {
 			role.BoundAudiences = v.([]string)
 		}
@@ -339,6 +347,9 @@ func (b *jwtAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldD
 		Name: name,
 	}
 
+	if v, ok := d.GetOk("description"); ok {
+		role.Description = v.(string)
+	}
 	if v, ok := d.GetOk("bound_audiences"); ok {
 		role.BoundAudiences = v.([]string)
 	}

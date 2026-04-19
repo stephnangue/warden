@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"testing"
 
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -429,6 +430,59 @@ func TestHandleRoleUpdate_AllFieldsOnExistingRole(t *testing.T) {
 	assert.Equal(t, []string{"NewOrg"}, updated.AllowedOrganizations)
 	assert.Equal(t, "dns_san", updated.PrincipalClaim)
 	assert.Equal(t, "new-spec", updated.CredSpecName)
+}
+
+func TestPathRole_DescriptionRoundTrip(t *testing.T) {
+	b, ctx := createTestBackend(t)
+	b.config = &CertAuthConfig{PrincipalClaim: "cn"}
+
+	createFD := roleFieldData(map[string]any{
+		"name":        "desc-role",
+		"description": "read-only prod KV secrets",
+	})
+	createFD.Schema["description"] = &framework.FieldSchema{Type: framework.TypeString}
+
+	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, createFD)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	readFD := &framework.FieldData{
+		Raw:    map[string]any{"name": "desc-role"},
+		Schema: map[string]*framework.FieldSchema{"name": {Type: framework.TypeString}},
+	}
+	resp, err = b.handleRoleRead(ctx, &logical.Request{}, readFD)
+	require.NoError(t, err)
+	assert.Equal(t, "read-only prod KV secrets", resp.Data["description"])
+
+	updateFD := roleFieldData(map[string]any{
+		"name":        "desc-role",
+		"description": "updated text",
+	})
+	updateFD.Schema["description"] = &framework.FieldSchema{Type: framework.TypeString}
+	_, err = b.handleRoleUpdate(ctx, &logical.Request{}, updateFD)
+	require.NoError(t, err)
+
+	role, err := b.getRole(ctx, "desc-role")
+	require.NoError(t, err)
+	assert.Equal(t, "updated text", role.Description)
+}
+
+func TestCertRole_PreUpgradeDecodesWithEmptyDescription(t *testing.T) {
+	// A role persisted before the description field existed has no
+	// `description` key in its JSON. Ensure it decodes cleanly.
+	b, ctx := createTestBackend(t)
+
+	raw := []byte(`{"name":"legacy","allowed_common_names":["test-*"],"token_policies":["p"],"token_ttl":"1h0m0s"}`)
+	require.NoError(t, b.storageView.Put(ctx, &sdklogical.StorageEntry{
+		Key:   rolePrefix + "legacy",
+		Value: raw,
+	}))
+
+	role, err := b.getRole(ctx, "legacy")
+	require.NoError(t, err)
+	require.NotNil(t, role)
+	assert.Equal(t, "", role.Description)
+	assert.Equal(t, []string{"test-*"}, role.AllowedCommonNames)
 }
 
 // =============================================================================

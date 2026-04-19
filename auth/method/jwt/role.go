@@ -8,6 +8,7 @@ import (
 // Used for both runtime and storage (TokenTTL stored as string for JSON readability).
 type JWTRole struct {
 	Name              string         `json:"name"`
+	Description       string         `json:"description,omitempty"`
 	BoundAudiences    []string       `json:"bound_audiences,omitempty"`
 	BoundSubject      string         `json:"bound_subject,omitempty"`
 	BoundClaims       map[string]any `json:"bound_claims,omitempty"`

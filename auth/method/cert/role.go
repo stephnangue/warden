@@ -6,6 +6,7 @@ import "time"
 // Used for both runtime and storage (TokenTTL stored as string for JSON readability).
 type CertRole struct {
 	Name                       string   `json:"name"`
+	Description                string   `json:"description,omitempty"`
 	AllowedCommonNames         []string `json:"allowed_common_names,omitempty"`
 	AllowedDNSSANs             []string `json:"allowed_dns_sans,omitempty"`
 	AllowedEmailSANs           []string `json:"allowed_email_sans,omitempty"`

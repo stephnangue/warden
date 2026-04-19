@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -666,6 +667,66 @@ func TestBuildRoleFromFieldData_AllFields(t *testing.T) {
 	assert.Equal(t, "groups", role.GroupsClaim)
 	assert.Equal(t, "grp-", role.GroupPolicyPrefix)
 	assert.Equal(t, "30m", role.MaxAge)
+}
+
+func TestPathRole_DescriptionRoundTrip(t *testing.T) {
+	b, ctx := createTestBackendWithStorage(t)
+
+	schema := map[string]*framework.FieldSchema{
+		"name":        {Type: framework.TypeString},
+		"description": {Type: framework.TypeString},
+	}
+
+	createFD := &framework.FieldData{
+		Raw: map[string]any{
+			"name":        "desc-role",
+			"description": "read-only prod KV secrets",
+		},
+		Schema: schema,
+	}
+	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, createFD)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	readFD := &framework.FieldData{
+		Raw:    map[string]any{"name": "desc-role"},
+		Schema: map[string]*framework.FieldSchema{"name": {Type: framework.TypeString}},
+	}
+	resp, err = b.handleRoleRead(ctx, &logical.Request{}, readFD)
+	require.NoError(t, err)
+	assert.Equal(t, "read-only prod KV secrets", resp.Data["description"])
+
+	updateFD := &framework.FieldData{
+		Raw: map[string]any{
+			"name":        "desc-role",
+			"description": "updated text",
+		},
+		Schema: schema,
+	}
+	_, err = b.handleRoleUpdate(ctx, &logical.Request{}, updateFD)
+	require.NoError(t, err)
+
+	role, err := b.getRole(ctx, "desc-role")
+	require.NoError(t, err)
+	assert.Equal(t, "updated text", role.Description)
+}
+
+func TestJWTRole_PreUpgradeDecodesWithEmptyDescription(t *testing.T) {
+	// A role persisted before the description field existed has no
+	// `description` key in its JSON. Ensure it decodes cleanly.
+	b, ctx := createTestBackendWithStorage(t)
+
+	raw := []byte(`{"name":"legacy","bound_audiences":["aud1"],"token_policies":["p"],"token_ttl":"1h0m0s","user_claim":"sub"}`)
+	require.NoError(t, b.storageView.Put(ctx, &sdklogical.StorageEntry{
+		Key:   rolePrefix + "legacy",
+		Value: raw,
+	}))
+
+	role, err := b.getRole(ctx, "legacy")
+	require.NoError(t, err)
+	require.NotNil(t, role)
+	assert.Equal(t, "", role.Description)
+	assert.Equal(t, []string{"aud1"}, role.BoundAudiences)
 }
 
 // =============================================================================
