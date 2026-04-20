@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/cap/jwt"
-	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -122,38 +121,14 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 		}, nil
 	}
 
-	// Validate bound claims from config
-	if err := validateBoundClaims(claims, config.BoundClaims); err != nil {
-		b.logger.Warn("login failed: config bound claims check", lgr.Err(err), lgr.String("role", roleName))
+	// Post-Validate claim checks (config + role bound claims, bound URIs).
+	// Shared with introspection via matchRole so the two paths cannot drift.
+	if err := matchRole(claims, config.BoundClaims, role); err != nil {
+		b.logger.Warn("login failed: bound claims check", lgr.Err(err), lgr.String("role", roleName))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
 			Err:        errAuthFailed,
 		}, nil
-	}
-
-	// Validate bound claims from role
-	if err := validateBoundClaims(claims, role.BoundClaims); err != nil {
-		b.logger.Warn("login failed: role bound claims check", lgr.Err(err), lgr.String("role", roleName))
-		return &logical.Response{
-			StatusCode: http.StatusUnauthorized,
-			Err:        errAuthFailed,
-		}, nil
-	}
-
-	// Validate bound URI patterns against the configured claim
-	if len(role.BoundURIPatterns) > 0 {
-		uriClaim := role.URIClaim
-		if uriClaim == "" {
-			uriClaim = "sub"
-		}
-		claimValue := extractClaim(claims, uriClaim)
-		if claimValue == "" || !helper.MatchAny(claimValue, role.BoundURIPatterns) {
-			b.logger.Warn("login failed: URI pattern mismatch", lgr.String("claim", uriClaim), lgr.String("role", roleName))
-			return &logical.Response{
-				StatusCode: http.StatusUnauthorized,
-				Err:        errAuthFailed,
-			}, nil
-		}
 	}
 
 	// Extract principal identity - use role's user_claim or fallback to config
