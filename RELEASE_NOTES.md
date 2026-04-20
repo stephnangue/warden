@@ -1,24 +1,20 @@
-## Warden v0.10.0
+## Warden v0.11.0
 
-Warden is an identity-based access layer for cloud APIs, SaaS platforms, databases, and AI providers. It eliminates static credentials from your workloads entirely. Your workload authenticates to Warden with its own identity — a JWT from your identity provider or a TLS certificate. Warden verifies who is calling, evaluates fine-grained capability-based policies, and issues ephemeral request-scoped access: forwarding API requests with short-lived credentials injected, returning database auth tokens, or vending pre-signed URLs. Credentials are minted on demand, scoped to the request, and never exposed to the caller. Every API call is logged with caller identity, target service, and full request context. No secrets ever reach your applications.
+Warden is the open-source egress gateway for AI agents and MCP servers — every API call is authenticated, authorized, and audited, and no credentials ever reach the caller. Your agent or MCP server authenticates to Warden with its own identity (a JWT from your identity provider or a TLS certificate). Warden verifies who is calling, evaluates fine-grained capability-based policies, and issues ephemeral request-scoped access: forwarding API requests with short-lived credentials injected, returning database auth tokens, or vending pre-signed URLs. Credentials are minted on demand, scoped to the request, and never exposed to the caller. Every API call is logged with caller identity, target service, and full request context. No secrets ever reach your applications.
 
 ### What's New
 
-**11 new providers.** This release adds support for OVH, Datadog, Cohere, Elastic, Dynatrace, Splunk, New Relic, Kubernetes, Terraform Enterprise (TFE), Cloudflare, and Ansible Tower — bringing Warden's provider count from 13 to 24. Each provider ships with a full quickstart guide, configuration reference, and policy examples.
+**Agent role introspection.** Autonomous agents typically talk to many external systems, and each system requires its own role (roles bind to credential specs). Until now, agents needed those role names distributed out-of-band — which does not scale. This release introduces a self-describing API: an agent presents only its identity vehicle (JWT bearer or TLS client certificate) and gets back the roles it could assume, with human-readable descriptions to help pick the right role per task. Shipped in three layers: a new `description` field on JWT and cert roles (#162), a per-backend `GET /v1/auth/{mount}/introspect/roles` endpoint that reuses login-time constraint matchers (#163), and a system-backend aggregator at `GET /v1/sys/introspect/roles` that fans out to all matching mounts in the caller's namespace (#166).
 
-**Kubernetes provider with automatic token rotation.** The Kubernetes provider mints short-lived ServiceAccount tokens via the TokenRequest API. Tokens are audience-scoped for multi-tenant security with configurable TTL (10m–48h, default 1h).
+**`dualgateway` framework for dual-mode providers.** A new shared framework for providers that auto-detect between REST API proxying and S3-compatible object storage (SigV4 verify/re-sign/forward) on a per-request basis. Providers supply a `ProviderSpec` describing auth strategy, S3 endpoint format, and credential type; the framework handles transport, token extraction, transparent auth, config CRUD, and the SigV4 lifecycle. (#148, #149)
 
-**Elastic provider with programmatic key rotation.** The Elastic provider supports a dedicated `elastic` credential driver that programmatically creates and rotates Elasticsearch API keys with configurable expiration and role descriptors for scoped permissions.
+**Seven new providers.** Scaleway (#148), Sentry (#153), Grafana (#155), Atlassian (#157), Prometheus (#158), Honeycomb (#159), and IBM Cloud (#161) — bringing Warden's provider count from 24 to 31. Scaleway, Atlassian, and IBM Cloud ship as dual-mode providers out of the gate. Grafana and Honeycomb include dedicated source drivers that programmatically provision and rotate service-account tokens.
 
-**IBM Cloud credential driver.** New `ibm` source type mints IAM bearer tokens from IBM Cloud API keys via the IAM token exchange endpoint. Supports automatic source API key rotation with a 2-minute default activation delay.
+**OVH upgraded to dual-mode with a new source driver.** The OVH provider (introduced in v0.10.0 as REST-only) now operates in dual-mode via `dualgateway`, and ships with a new OVH source driver that mints credentials via OAuth2. (#149, #151)
 
-**Custom CA certificates and TLS skip verify everywhere.** All providers and credential drivers now support `ca_data` (inline PEM CA certificate) and `tls_skip_verify` config options via a shared TLS helper. Self-hosted instances with private CAs or development environments using HTTP are now supported out of the box. (#140)
+**Cloudflare upgraded to dual-mode with R2 S3 support.** The Cloudflare provider now proxies Cloudflare R2's S3-compatible API alongside the REST endpoints. (#150)
 
-**Extra OAuth2 token form parameters.** The OAuth2 credential driver now supports arbitrary additional form parameters via `token_param.*` config keys (e.g., `token_param.resource=urn:dtaccount:123`). This enables providers like Dynatrace that require non-standard OAuth2 form fields. (#131)
-
-**Lazy transport initialization.** Transport creation has been refactored from eager package-level initialization to lazy initialization via a `sync.Once` factory pattern. Transports are only created when a provider is actually mounted, eliminating unnecessary startup overhead and background goroutines. (#138)
-
-**httpproxy reliability fixes.** Resolved data races, an HTTP/2 regression caused by TLS finalization ordering, and validation gaps (`max_body_size=0` rejection, 100 MB cap). The Bearer token extractor is now case-insensitive per RFC 7235. (#143)
+**Bug fixes.** Dynamic S3 credentials now have a TTL bounded by the authorizing OAuth2 token's lifetime, closing a credential-exposure window (#152). The Grafana source driver's leaseID now encodes `orgID` to prevent service-account collisions across tenants (#156).
 
 ### Providers
 
@@ -37,7 +33,7 @@ Warden is an identity-based access layer for cloud APIs, SaaS platforms, databas
 | PagerDuty | Streaming | API keys / OAuth2 (native or via Vault) |
 | ServiceNow | Streaming | API keys / OAuth2 (native or via Vault) |
 | RDS | Access | IAM auth tokens |
-| OVH | Streaming | OAuth2 tokens (native or via Vault) |
+| OVH | Dual-mode (REST + S3) | OAuth2 tokens (native or via Vault) |
 | Datadog | Streaming | API keys (native or via Vault) |
 | Cohere | Streaming | API keys (native or via Vault) |
 | Elastic | Streaming | API keys (native, rotated, or via Vault) |
@@ -46,10 +42,18 @@ Warden is an identity-based access layer for cloud APIs, SaaS platforms, databas
 | New Relic | Streaming | API keys (native or via Vault) |
 | Kubernetes | Streaming | ServiceAccount tokens (TokenRequest API) |
 | TFE / HCP Terraform | Streaming | Bearer tokens (native or via Vault) |
-| Cloudflare | Streaming | API tokens (native or via Vault) |
+| Cloudflare | Dual-mode (REST + R2 S3) | API tokens (native or via Vault) |
 | Ansible Tower | Streaming | PAT / Bearer tokens (native or via Vault) |
+| Scaleway | Dual-mode (REST + S3) | API keys (native or via Vault) |
+| Sentry | Streaming | Bearer tokens (native or via Vault) |
+| Grafana | Streaming | Service-account tokens (native, rotated, or via Vault) |
+| Atlassian | Dual-mode (Cloud + Data Center) | API tokens / PAT (native or via Vault) |
+| Prometheus | Streaming | Bearer tokens (native or via Vault) |
+| Honeycomb | Streaming | API keys (native, rotated, or via Vault) |
+| IBM Cloud | Dual-mode (REST + S3) | IAM tokens via `ibm` driver or Vault |
 
 - **Streaming providers** proxy requests through Warden, injecting credentials in-flight.
+- **Dual-mode providers** auto-detect between REST API proxying and S3-compatible object storage on a per-request basis.
 - **Access providers** vend credentials directly (database auth tokens, pre-signed URLs).
 
 ### Getting Started
