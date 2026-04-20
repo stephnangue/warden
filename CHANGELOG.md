@@ -2,6 +2,51 @@
 
 All notable changes to Warden are documented in this file.
 
+## [v0.11.0] — 2026-04-20
+
+### New Features
+
+- **Agent Role Introspection** — New self-describing API that lets an autonomous agent discover the roles it may assume by presenting only its identity vehicle (JWT bearer or TLS client certificate). Removes the need to distribute role names to agents out-of-band, which does not scale for agents that interact with many external systems. Shipped in three layers:
+  - `description` free-text field on JWT and certificate roles, plumbed through role CRUD and surfaced to introspection consumers. Backwards compatible with roles persisted before the field existed. (#162)
+  - `GET /v1/auth/{mount}/introspect/roles` on both JWT and certificate backends. Each backend iterates its own roles and reuses its login-time constraint matchers (bound claims and URI patterns for JWT, cert constraint checks for cert), returning only the roles the presented credential could actually satisfy within that mount. Factored a shared `matchRole` helper so login and introspection cannot drift on which claims are enforced. (#163)
+  - `GET /v1/sys/introspect/roles` system-backend aggregator that detects the caller's credential type, collects all matching auth mounts in the caller's namespace, fans out to each mount's per-backend introspect path in parallel (capped at 10 concurrent goroutines), and returns the aggregated, sorted role set with a per-mount `warnings[]` channel. Mounts that do not implement introspection are silently skipped so support can roll out incrementally. (#166)
+
+- **`dualgateway` framework for dual-mode gateway providers** — New shared framework for providers that auto-detect between REST API proxying and S3-compatible object storage (SigV4 verify/re-sign/forward) on a per-request basis. Providers supply a `ProviderSpec` describing their differences (auth strategy, S3 endpoint format, credential type); the framework handles transport, token extraction, transparent auth, config CRUD, and SigV4 lifecycle. Introduced alongside the Scaleway and OVH dual-mode providers. (#148, #149)
+
+- **Scaleway Provider** — New dual-mode (REST + S3) provider for the Scaleway API, built on `dualgateway`. Object-storage requests are verified and re-signed via SigV4 to Scaleway's S3-compatible endpoints. (#148)
+
+- **Sentry Provider** — New streaming gateway provider for the Sentry REST API. (#153)
+
+- **Grafana Provider** — New streaming gateway provider for the Grafana HTTP API, plus a source driver that programmatically provisions and rotates service-account tokens scoped by `orgID`. (#155)
+
+- **Atlassian Provider** — New dual-mode gateway provider with auth for both Atlassian Cloud and Data Center deployments. (#157)
+
+- **Prometheus Provider** — New streaming gateway provider for the Prometheus HTTP API. (#158)
+
+- **Honeycomb Provider** — New streaming gateway provider for the Honeycomb REST API, plus a matching source driver. (#159)
+
+- **IBM Cloud Provider** — New dual-mode gateway provider for the IBM Cloud APIs, paired with the `ibm` credential driver introduced in v0.10.0 and with dynamic Vault/OpenBao credential sourcing. (#161)
+
+- **OVH Provider upgraded to dual-mode** — The OVH provider (introduced in v0.10.0 as REST-only) now operates in dual-mode via `dualgateway`, and ships with a new OVH source driver that mints OVH credentials via OAuth2. (#149, #151)
+
+- **Cloudflare Provider upgraded to dual-mode with R2 S3 support** — The Cloudflare provider (introduced in v0.10.0) now operates in dual-mode via `dualgateway` and adds proxying for Cloudflare R2's S3-compatible API. (#150)
+
+### Bug Fixes
+
+- **Dynamic S3 credentials now have a TTL tied to the OAuth2 token lifetime** — Previously, dynamic S3 credentials could outlive the OAuth2 token that authorized them. The TTL is now bounded by the token lifetime, closing a credential-exposure window. (#152)
+
+- **Grafana leaseID now encodes `orgID` to prevent service-account leak** — The Grafana source driver's leaseID derivation omitted the organization ID, which could cause lease collisions across tenants and, in the worst case, return another tenant's service account. leaseID now incorporates `orgID`. (#156)
+
+### Infrastructure
+
+- **Dependency updates** — Bumped Go minor/patch dependencies in two batches (#154: 3 updates, #164: 7 updates).
+
+### Documentation
+
+- **README revamp for AI-agent audience** — Rewrote the primary README to position Warden as infrastructure for autonomous AI agents. Motivating examples and Getting Started flow refactored accordingly. (#160)
+
+- **Architecture and provider reference split into `docs/`** — Extracted detailed architecture and provider descriptions out of the README into standalone docs under `docs/`. Expanded the MCP server framing. (#165)
+
 ## [v0.10.0] — 2026-04-09
 
 ### New Features
