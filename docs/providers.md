@@ -1,6 +1,6 @@
 # Providers
 
-Warden supports 31 providers across LLMs, cloud, observability, code hosting, secrets, and more. Follow the link for each provider to configure your endpoint.
+Warden supports 32 providers across LLMs, cloud, observability, code hosting, secrets, and more. Follow the link for each provider to configure your endpoint.
 
 Status: ✅ available, 🔜 on the roadmap.
 
@@ -18,6 +18,7 @@ Status: ✅ available, 🔜 on the roadmap.
 | Provider | Warden does | Status |
 |---|---|---|
 | [AWS](../provider/aws/README.md) | Re-signs requests with temporary STS credentials | ✅ |
+| [Alicloud](../provider/alicloud/README.md) | Proxies Alicloud OpenAPI (ACS3) and OSS (S3-compatible), re-signing with STS AssumeRole credentials | ✅ |
 | [Azure](../provider/azure/README.md) | Issues Microsoft Entra ID Bearer tokens | ✅ |
 | [GCP](../provider/gcp/README.md) | Issues temporary access tokens | ✅ |
 | [IBM Cloud](../provider/ibmcloud/README.md) | Issues IAM Bearer tokens | ✅ |
@@ -87,6 +88,4 @@ Status: ✅ available, 🔜 on the roadmap.
 | GCP Cloud Storage | Issues pre-signed URL | 🔜 |
 | Azure Blob Storage | Issues pre-signed URL | 🔜 |
 
-## Internal backends
 
-`httpproxy`, `sigv4`, and `dualgateway` live in the `provider/` directory but are not standalone providers — they are shared frameworks used to build the providers above (generic HTTP proxy scaffolding, AWS SigV4 signing, and the dual-mode gateway backend for providers supporting both role-embedded and header-based authentication). Contributors building a new provider typically start from these.

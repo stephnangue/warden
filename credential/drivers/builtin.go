@@ -84,5 +84,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register Alicloud driver factory
+	if err := registry.RegisterFactory(&AlicloudDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }
