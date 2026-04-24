@@ -74,5 +74,10 @@ func RegisterBuiltinTypes(registry *credential.TypeRegistry) error {
 		return err
 	}
 
+	// Register Alicloud keys type
+	if err := registry.Register(&AlicloudKeysCredType{}); err != nil {
+		return err
+	}
+
 	return nil
 }

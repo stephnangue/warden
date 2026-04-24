@@ -38,6 +38,7 @@ import (
 	wardenlogical "github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/physical"
 	physPostgresql "github.com/stephnangue/warden/physical/postgresql"
+	"github.com/stephnangue/warden/provider/alicloud"
 	ansible_tower "github.com/stephnangue/warden/provider/ansible_tower"
 	"github.com/stephnangue/warden/provider/anthropic"
 	"github.com/stephnangue/warden/provider/atlassian"
@@ -120,6 +121,7 @@ Usage: warden server [options]
 	}
 
 	providers = map[string]wardenlogical.Factory{
+		"alicloud":      alicloud.Factory,
 		"ansible_tower": ansible_tower.Factory,
 		"anthropic":     anthropic.Factory,
 		"atlassian":     atlassian.Factory,

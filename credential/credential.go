@@ -22,6 +22,7 @@ const (
 	TypeOVHKeys          = "ovh_keys"
 	TypeCloudflareKeys   = "cloudflare_keys"
 	TypeIBMCloudKeys     = "ibmcloud_keys"
+	TypeAlicloudKeys     = "alicloud_keys"
 )
 
 // Source type constants
@@ -43,6 +44,7 @@ const (
 	SourceTypeCloudflare = "cloudflare"
 	SourceTypeGrafana    = "grafana"
 	SourceTypeHoneycomb  = "honeycomb"
+	SourceTypeAlicloud   = "alicloud"
 )
 
 // Category constants for credential categorization
