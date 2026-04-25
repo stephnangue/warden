@@ -128,6 +128,12 @@ Your agent or MCP server points at Warden's endpoint instead of the provider's a
 
 See [docs/architecture.md](docs/architecture.md) for Warden's design decisions, high availability model, and deployment configuration.
 
+## Tutorials
+
+End-to-end walkthroughs that combine Warden with real-world workloads:
+
+- [docs/tutorials/vault-policy-hygiene.md](docs/tutorials/vault-policy-hygiene.md) — a Goose AI agent that audits OpenBao ACL policies for hygiene (dead-mount references, orphan bindings, duplicates, least-privilege smells), with both the OpenBao calls and the Anthropic inference flowing through Warden. The agent holds zero credentials.
+
 ## Contributing
 
 We welcome contributions! See the [contributing guide](CONTRIBUTING.md) for setup instructions, build commands, testing conventions, and submission guidelines.
