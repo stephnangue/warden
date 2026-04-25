@@ -240,10 +240,13 @@ Sensitive headers (the JWT itself, upstream tokens) are HMAC-redacted via
 
 ## 5. Wire Warden: JWT auth, two providers, one policy
 
-Both providers (Vault and Anthropic) use the same transparent-role gateway
-shape — registered at [provider/httpproxy/provider.go:131-155](../../provider/httpproxy/provider.go#L131-L155)
-and shared between Vault and Anthropic. **The JWT auth method is shared
-across both** — one identity, two egress paths.
+Both providers expose the same `role/<name>/gateway/...` URL shape, so callers
+see a uniform interface — but the implementations are separate. Anthropic is
+built on the shared [provider/httpproxy](../../provider/httpproxy/) framework,
+while Vault registers its own gateway paths in
+[provider/vault/provider.go](../../provider/vault/provider.go) and handles
+them in [provider/vault/path_gateway.go](../../provider/vault/path_gateway.go).
+**The JWT auth method is shared across both** — one identity, two egress paths.
 
 ### 5a. Enable JWT auth pointed at Forgejo
 
