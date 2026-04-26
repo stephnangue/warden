@@ -7,10 +7,10 @@ authenticates with a per-job OIDC JWT issued by a local Forgejo instance, and
 reaches OpenBao **and** the Anthropic API exclusively through Warden. The agent
 holds zero credentials: no OpenBao token, no Anthropic API key.
 
-This is the first of two tutorials. A follow-up will cover an audit-log-driven
-**least-privilege proposer** (an AWS IAM Access Analyzer-style agent that
-narrows policies based on what tokens actually used). That sequel reuses the
-identical Warden + Goose plumbing built here.
+This is the first in a series of tutorials. One planned follow-up covers an
+audit-log-driven **least-privilege proposer** (an AWS IAM Access Analyzer-style
+agent that narrows policies based on what tokens actually used) — it reuses
+the identical Warden + Goose plumbing built here.
 
 Versions pinned in this tutorial: OpenBao **2.5.3**, Forgejo **7.x**,
 Forgejo Runner **6.x**. Adjust to your needs, but the JWKS path discovery in
@@ -238,7 +238,7 @@ with the format defined at [audit/types.go:12-26](../../audit/types.go#L12-L26).
 Sensitive headers (the JWT itself, upstream tokens) are HMAC-redacted via
 [audit/hmac.go](../../audit/hmac.go) before they hit disk.
 
-## 5. Wire Warden: JWT auth, two providers, one policy
+## 5. Wire Warden: JWT auth, two providers, two policies
 
 Both providers expose the same `role/<name>/gateway/...` URL shape, so callers
 see a uniform interface — but the implementations are separate. Anthropic is
@@ -293,7 +293,7 @@ warden cred spec create policy-scanner --source openbao-root \
 warden write auth/jwt/role/policy-scanner \
      bound_claims='{"repository":"admin/policy-hygiene","ref":"refs/heads/main","ref_type":"branch"}' \
      cred_spec_name=policy-scanner \
-     token_policies=agent-policy
+     token_policies=vault-readonly
 ```
 
 For step 3 to work, OpenBao needs a `policy-reader` token role that can
@@ -336,7 +336,7 @@ warden cred spec create anthropic-ops --source anthropic-src \
 warden write auth/jwt/role/anthropic-ops \
      bound_claims='{"repository":"admin/policy-hygiene","ref":"refs/heads/main","ref_type":"branch"}' \
      cred_spec_name=anthropic-ops \
-     token_policies=agent-policy
+     token_policies=anthropic-ops
 ```
 
 This is the only place the Anthropic key is ever entered. Warden's Anthropic
@@ -346,14 +346,20 @@ and injects its own stored values, so what the agent sends in those headers
 is irrelevant — Warden replaces it. SSE streaming passes through unbuffered
 ([provider/httpproxy/gateway.go](../../provider/httpproxy/gateway.go)).
 
-### 5d. One access policy covering both gateways — fine-grained
+### 5d. Two access policies, one per role — fine-grained
 
 The whole point of this tutorial is policy hygiene, so the agent's own access
-policy practices what it preaches: **only the exact paths and capabilities
+policies practice what they preach: **only the exact paths and capabilities
 the recipe needs, nothing more.** A wildcard like
 `vault/role/policy-scanner/gateway/*` with full CRUD would let the agent
 *modify or delete* OpenBao policies — exactly the `least_privilege_smell` the
 recipe is meant to flag.
+
+**One policy per role, not one bundled across both.** A combined policy
+attached to both JWT roles would let a Vault-side token also call Anthropic
+(and vice versa) — extra authority neither role needs, since each role's
+`cred_spec_name` only mints credentials for one upstream. Splitting by
+capability keeps each token's reach equal to what it can actually use.
 
 The agent's full call inventory:
 
@@ -375,7 +381,8 @@ Anthropic path *itself* starts with `v1/`. So policy stanzas read
 `vault/role/policy-scanner/gateway/sys/policies/acl`.
 
 ```bash
-cat > /tmp/agent-policy.hcl <<'EOF'
+# Vault-side policy → attached to the policy-scanner role only
+cat > /tmp/vault-readonly.hcl <<'EOF'
 # ── OpenBao read-only policy introspection ─────────────────────────────
 path "vault/role/policy-scanner/gateway/v1/sys/policies/acl" {
   capabilities = ["list"]
@@ -399,7 +406,11 @@ path "vault/role/policy-scanner/gateway/v1/identity/entity/id" {
 path "vault/role/policy-scanner/gateway/v1/identity/entity/id/*" {
   capabilities = ["read"]
 }
+EOF
+warden policy write vault-readonly /tmp/vault-readonly.hcl
 
+# Anthropic-side policy → attached to the anthropic-ops role only
+cat > /tmp/anthropic-ops.hcl <<'EOF'
 # ── Anthropic: only Messages + Models, nothing else ────────────────────
 path "anthropic/role/anthropic-ops/gateway/v1/messages" {
   capabilities = ["create"]
@@ -408,13 +419,14 @@ path "anthropic/role/anthropic-ops/gateway/v1/models" {
   capabilities = ["read"]
 }
 EOF
-warden policy write agent-policy /tmp/agent-policy.hcl
+warden policy write anthropic-ops /tmp/anthropic-ops.hcl
 ```
 
-This policy is what enforcement looks like end-to-end: even if the LLM
+These policies are what enforcement looks like end-to-end: even if the LLM
 hallucinates a `bao policy delete` or a curl to `/v1/admin-api-keys`, Warden
-returns 403. The agent's authority is bounded by what the recipe requires,
-not by what its credentials happen to allow.
+returns 403. Each token's authority is bounded by exactly what its role's
+recipe step requires — not by what its credentials happen to allow, and not
+by what the *other* role on the same JWT identity is doing.
 
 If you discover Warden 403s on a path you legitimately need (e.g. you extend
 the recipe to read group bindings), tail Warden's audit log to see the
@@ -422,9 +434,10 @@ exact path being denied, then add the minimal stanza. The CBP capabilities
 are: `create`, `read`, `update`, `delete`, `list`, `patch`
 ([core/policy.go:22-29](../../core/policy.go#L22-L29)).
 
-Both `auth/jwt/role/*` definitions in 5b and 5c attached `agent-policy` via
-`token_policies`, so any JWT that satisfies the `bound_claims` gets exactly
-this access — no more, no less.
+The `auth/jwt/role/*` definitions in 5b and 5c each attach their own policy
+(`vault-readonly` for `policy-scanner`, `anthropic-ops` for `anthropic-ops`)
+via `token_policies`, so each JWT that satisfies the `bound_claims` gets
+exactly the access its role needs — no more, no less.
 
 ## 6. The Goose recipe
 
@@ -735,9 +748,9 @@ policy through the Vault gateway:
   "auth": {
     "principal_id": "repository:admin/policy-hygiene:ref:refs/heads/main",
     "role_name": "policy-scanner",
-    "policies": ["agent-policy"],
+    "policies": ["vault-readonly"],
     "policy_results": {
-      "granting_policies": ["agent-policy"]
+      "granting_policies": ["vault-readonly"]
     }
   }
 }
@@ -748,11 +761,11 @@ Three things to verify here:
 1. **`auth.principal_id`** is derived from Forgejo's JWT claims (`repository`,
    `ref`) — proof that the identity comes from the OIDC token, not a stored
    token in the agent's environment.
-2. **`auth.policy_results.granting_policies`** names `agent-policy` — proof
+2. **`auth.policy_results.granting_policies`** names `vault-readonly` — proof
    that the fine-grained access stanzas from section 5d are what authorized
    the call. If the agent had tried `bao policy delete orphan`, this entry
    would carry `error: "permission denied"` and a `403` response status,
-   because no stanza in `agent-policy` grants `delete` on
+   because no stanza in `vault-readonly` grants `delete` on
    `/v1/sys/policies/acl/*`.
 3. **`request.transparent: true`** ([audit/types.go:54](../../audit/types.go#L54))
    marks calls that came in via the `role/*/gateway/*` path — i.e., that
