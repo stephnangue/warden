@@ -12,15 +12,17 @@ audit-log-driven **least-privilege proposer** (an AWS IAM Access Analyzer-style
 agent that narrows policies based on what tokens actually used) — it reuses
 the identical Warden + Goose plumbing built here.
 
-Versions pinned in this tutorial: OpenBao **2.5.3**, Forgejo **7.x**,
-Forgejo Runner **6.x**. Adjust to your needs, but the JWKS path discovery in
-section 3 will handle Forgejo version drift automatically.
+Versions pinned in this tutorial: OpenBao **2.5.3**, Forgejo **15.x**,
+Forgejo Runner **12.8.0**. Forgejo 15+ and Runner 12.5+ are required for
+the per-job OIDC token feature this tutorial relies on. The JWKS path
+discovery in section 3 will handle Forgejo version drift within the 15.x line
+automatically.
 
 ---
 
 ## 1. What you'll build
 
-![Architecture: a Forgejo-hosted AI agent in the centre of the Warden boundary calls outward with a Forgejo-signed JWT on both legs; Warden's Anthropic gateway swaps the JWT for the real Claude API key, and Warden's Vault gateway swaps the JWT for an OpenBao token.](images/policy-hygiene-architecture.png)
+![Architecture: a Forgejo-hosted AI agent in the centre of the Warden boundary calls outward with a Forgejo-signed JWT on both legs; Warden's Anthropic gateway swaps the JWT for the real Claude API key, and Warden's Vault gateway swaps the JWT for an OpenBao token.](../images/policy-hygiene-architecture.png)
 
 The **same Forgejo-signed JWT** — minted per Actions job by curling
 `$ACTIONS_ID_TOKEN_REQUEST_URL`, auto-expired when the job ends — is used on
@@ -51,7 +53,12 @@ The `bao` and `goose` CLIs are installed inside the Actions job's container
 
 ## 3. Bring up the stack with Docker Compose
 
-Save this as `docker-compose.yml` in a fresh working directory:
+The three files we'll use (`docker-compose.yml`, `bao-init.sh`,
+`forgejo-init.sh`) are alongside this README. Either `cd` into this folder
+to run them in place, or copy them to a fresh working directory.
+
+`docker-compose.yml` runs OpenBao, Forgejo, the Forgejo runner, and two
+one-shot init services that bootstrap state so you don't have to:
 
 ```yaml
 services:
@@ -62,19 +69,52 @@ services:
       BAO_DEV_ROOT_TOKEN_ID: dev-bao-root
       BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
 
+  bao-init:
+    image: openbao/openbao:2.5.3
+    depends_on: [openbao]
+    environment:
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: dev-bao-root
+    volumes:
+      - ./bao-init.sh:/init.sh:ro
+      - ./bao-out:/out
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        until bao status >/dev/null 2>&1; do sleep 1; done;
+        sh /init.sh
+    restart: "no"
+
   forgejo:
-    image: codeberg.org/forgejo/forgejo:7
+    image: codeberg.org/forgejo/forgejo:15
     hostname: forgejo.local
     ports: ["3000:3000", "2222:22"]
     environment:
       FORGEJO__server__ROOT_URL: http://forgejo.local:3000/
       FORGEJO__actions__ENABLED: "true"
+      FORGEJO__security__INSTALL_LOCK: "true"
     volumes:
-      - forgejo-data:/var/lib/gitea
+      - forgejo-data:/data
+
+  forgejo-init:
+    image: codeberg.org/forgejo/forgejo:15
+    depends_on: [forgejo]
+    user: "1000:1000"
+    volumes:
+      - forgejo-data:/data
+      - ./forgejo-init.sh:/init.sh:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        until forgejo --config /data/gitea/conf/app.ini admin user list >/dev/null 2>&1; do sleep 1; done;
+        sh /init.sh
+    restart: "no"
 
   runner:
-    image: code.forgejo.org/forgejo/runner:6
+    image: code.forgejo.org/forgejo/runner:12.8.0
     depends_on: [forgejo]
+    user: "0:0"
+    command: ["/bin/forgejo-runner", "daemon", "--config", "/data/config.yaml"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./runner-config:/data
@@ -85,6 +125,67 @@ volumes:
   forgejo-data:
 ```
 
+`bao-init.sh` provisions the AppRole, ACL, and token role Warden uses to
+auth against OpenBao, and writes `ROLE_ID`/`SECRET_ID` to
+`bao-out/creds.env` for section 5b to source:
+
+```sh
+#!/bin/sh
+set -eu
+
+bao auth list -format=json 2>/dev/null | grep -q '"approle/"' \
+  || bao auth enable approle
+
+bao policy write policy-reader-acl - <<'EOF'
+path "sys/policies/acl/*"   { capabilities = ["read", "list"] }
+path "sys/mounts"           { capabilities = ["read"] }
+path "sys/auth"             { capabilities = ["read"] }
+path "identity/entity/id"   { capabilities = ["list"] }
+path "identity/entity/id/*" { capabilities = ["read"] }
+EOF
+
+bao write auth/token/roles/policy-reader \
+  allowed_policies=policy-reader-acl \
+  orphan=true period=10m
+
+bao policy write warden-vault-source - <<'EOF'
+path "auth/token/create/policy-reader"          { capabilities = ["update"] }
+path "auth/approle/role/warden-policy-scanner"  { capabilities = ["read"] }
+EOF
+
+bao write auth/approle/role/warden-policy-scanner \
+  token_policies=warden-vault-source \
+  token_ttl=1h token_max_ttl=24h
+
+ROLE_ID=$(bao read -field=role_id auth/approle/role/warden-policy-scanner/role-id)
+SECRET_ID=$(bao write -force -field=secret_id auth/approle/role/warden-policy-scanner/secret-id)
+
+mkdir -p /out
+cat > /out/creds.env <<EOF
+ROLE_ID=$ROLE_ID
+SECRET_ID=$SECRET_ID
+EOF
+```
+
+`forgejo-init.sh` creates the `siteowner` admin user (idempotent):
+
+```sh
+#!/bin/sh
+set -eu
+
+FORGEJO="forgejo --config /data/gitea/conf/app.ini"
+
+if $FORGEJO admin user list 2>/dev/null | awk '{print $2}' | grep -qx siteowner; then
+  exit 0
+fi
+
+$FORGEJO admin user create \
+  --admin --username siteowner --password warden-tutorial \
+  --email siteowner@local --must-change-password=false
+```
+
+Make sure both scripts are executable: `chmod +x bao-init.sh forgejo-init.sh`.
+
 Then:
 
 1. Map `forgejo.local` to localhost so both your browser and Warden's JWT
@@ -92,21 +193,23 @@ Then:
    ```bash
    echo "127.0.0.1 forgejo.local" | sudo tee -a /etc/hosts
    ```
-2. Start OpenBao and Forgejo:
+2. Start the long-running services and run the one-shot init pair:
    ```bash
    docker compose up -d openbao forgejo
+   docker compose up bao-init forgejo-init   # both exit on success
    ```
-   Wait ~30 s and confirm Forgejo's healthcheck:
+   Confirm Forgejo's healthcheck:
    ```bash
    curl -sf http://forgejo.local:3000/api/healthz
    ```
-3. Open `http://forgejo.local:3000/` in a browser, complete the install
-   wizard, and create the admin user `admin`.
-4. Create a new repo `admin/policy-hygiene`, then clone it locally:
+   `bao-init` writes `bao-out/creds.env` (used in section 5b);
+   `forgejo-init` provisions the `siteowner` admin.
+3. Sign in at `http://forgejo.local:3000/` as `siteowner` / `warden-tutorial`,
+   create a new repo `siteowner/policy-hygiene`, then clone it locally:
    ```bash
-   git clone http://forgejo.local:3000/admin/policy-hygiene.git
+   git clone http://forgejo.local:3000/siteowner/policy-hygiene.git
    ```
-5. Register the runner. In the Forgejo admin UI go to **Site Administration →
+4. Register the runner. In the Forgejo admin UI go to **Site Administration →
    Actions → Runners → New runner** to obtain a registration token, then:
    ```bash
    docker compose run --rm runner forgejo-runner register \
@@ -114,17 +217,25 @@ Then:
      --instance http://forgejo.local:3000 \
      --token <REGISTRATION_TOKEN> \
      --name local-runner \
-     --labels "docker:docker://alpine:3.20"
+     --labels "docker:docker://node:20-bookworm-slim"
+   ```
+   Create a runner config so spawned job containers can resolve
+   `forgejo.local` (the JWT's `iss` claim hostname):
+   ```bash
+   cat > runner-config/config.yaml <<'EOF'
+   container:
+     options: "--add-host=forgejo.local:host-gateway --add-host=host.docker.internal:host-gateway"
+   EOF
    docker compose up -d runner
    ```
-6. Discover Forgejo's OIDC config — Warden will use these URLs in section 5:
+5. Discover Forgejo's OIDC config — Warden will use these URLs in section 5:
    ```bash
    curl -sf http://forgejo.local:3000/.well-known/openid-configuration | \
      jq '{issuer, jwks_uri}'
    ```
    Note the values; on Forgejo 7 you'll typically see
    `http://forgejo.local:3000` and
-   `http://forgejo.local:3000/api/v1/actions/oidc/jwks`. Use whatever the
+   `http://forgejo.local:3000/login/oauth/keys`. Use whatever the
    discovery endpoint returns — do not hardcode.
 
 ### Seed OpenBao with deliberately varied policies
@@ -138,8 +249,8 @@ CLI on the host for this one-time setup; download it from the
 export VAULT_ADDR=http://127.0.0.1:8200
 export VAULT_TOKEN=dev-bao-root
 
-# kv-v2 + userpass so the "good" policies have something real to reference
-bao secrets enable -path=secret kv-v2
+# Dev mode pre-mounts kv-v2 at secret/, so we only need to add userpass
+# (the "good" policies reference both engines).
 bao auth enable userpass
 
 cat > /tmp/clean.hcl <<'EOF'
@@ -200,9 +311,7 @@ In a new shell:
 warden server --dev --dev-root-token=dev-warden-root
 ```
 
-The `--dev*` flags are defined at [cmd/server/server.go:172-178](../../cmd/server/server.go#L172-L178)
-and the dev listener is hard-coded to `127.0.0.1:8400` per
-[config/config.go:555](../../config/config.go#L555).
+The dev listener is hard-coded to `127.0.0.1:8400`.
 
 In a third shell — the **admin shell**, used only to run the bootstrap
 commands in section 5 — set:
@@ -224,28 +333,23 @@ JWKS_URI=$(curl -sf http://forgejo.local:3000/.well-known/openid-configuration \
 curl -sf "$JWKS_URI" | jq '.keys | length'   # should print >= 1
 ```
 
-### Enable the audit log
+### Audit log: already running
 
-Section 8 will tail this to confirm every agent request flows through Warden
-with attributable identity. From the admin shell:
+Warden auto-creates a default file audit device on first start — no
+`audit enable` command needed. It writes to `warden-audit.log` in the
+directory you launched `warden server` from, mounted at the `file/` accessor.
+Section 8 will tail it to confirm every agent request flows through Warden
+with attributable identity.
 
-```bash
-warden audit enable --type=file --file-path=/tmp/warden-audit.log
-```
-
-The log is line-delimited JSON, one entry per request and one per response,
-with the format defined at [audit/types.go:12-26](../../audit/types.go#L12-L26).
-Sensitive headers (the JWT itself, upstream tokens) are HMAC-redacted via
-[audit/hmac.go](../../audit/hmac.go) before they hit disk.
+The log is line-delimited JSON, one entry per request and one per response.
+Sensitive headers (the JWT itself, upstream tokens) are HMAC-redacted before
+they hit disk.
 
 ## 5. Wire Warden: JWT auth, two providers, two policies
 
 Both providers expose the same `role/<name>/gateway/...` URL shape, so callers
-see a uniform interface — but the implementations are separate. Anthropic is
-built on the shared [provider/httpproxy](../../provider/httpproxy/) framework,
-while Vault registers its own gateway paths in
-[provider/vault/provider.go](../../provider/vault/provider.go) and handles
-them in [provider/vault/path_gateway.go](../../provider/vault/path_gateway.go).
+see a uniform interface — but the implementations are separate (Anthropic uses
+Warden's shared HTTP-proxy framework; Vault has its own gateway).
 **The JWT auth method is shared across both** — one identity, two egress paths.
 
 ### 5a. Enable JWT auth pointed at Forgejo
@@ -256,8 +360,8 @@ Use the URLs you discovered in section 3:
 warden auth enable --type=jwt
 warden write auth/jwt/config \
      mode=jwt \
-     jwks_url=http://forgejo.local:3000/api/v1/actions/oidc/jwks \
-     bound_issuer=http://forgejo.local:3000 \
+     jwks_url=http://forgejo.local:3000/api/actions/.well-known/keys \
+     bound_issuer=http://forgejo.local:3000/api/actions \
      default_audience=http://warden.local
 ```
 
@@ -268,54 +372,50 @@ tokens minted for the wrong system.
 
 ### 5b. Vault provider → OpenBao
 
-Following the canonical setup in [provider/vault/README.md](../../provider/vault/README.md):
+`bao-init` (from section 3) already provisioned the AppRole, ACL policy,
+and token role Warden needs, and wrote `ROLE_ID`/`SECRET_ID` to
+`bao-out/creds.env`. Source that into the admin shell, then wire the
+provider through Warden — `hvault` sources only accept AppRole login;
+static tokens are not supported by design.
 
 ```bash
+# Pick up ROLE_ID and SECRET_ID written by bao-init
+. ./bao-out/creds.env
+
 # 1. Enable the provider
 warden provider enable --type=vault vault
 warden write vault/config \
-     vault_address=http://host.docker.internal:8200 \
+     vault_address=http://127.0.0.1:8200 \
      auto_auth_path=auth/jwt/
 
-# 2. Credential source — for dev, the OpenBao root token
-warden cred source create openbao-root --type=vault \
-     --config=vault_address=http://host.docker.internal:8200 \
-     --config=auth_method=token \
-     --config=token=dev-bao-root
+# 2. Credential source — Warden authenticates to OpenBao via the AppRole.
+#    rotation_period rotates the AppRole's secret_id automatically (24h is
+#    the configured minimum).
+warden cred source create openbao-root --type=hvault \
+     --rotation-period=24h \
+     --config=vault_address=http://127.0.0.1:8200 \
+     --config=auth_method=approle \
+     --config=approle_mount=approle/ \
+     --config=role_name=warden-policy-scanner \
+     --config=role_id=$ROLE_ID \
+     --config=secret_id=$SECRET_ID
 
-# 3. Credential spec — mints OpenBao tokens with the read-only role
+# 3. Credential spec — mints OpenBao tokens via the policy-reader role
 warden cred spec create policy-scanner --source openbao-root \
      --config mint_method=vault_token \
      --config token_role=policy-reader \
-     --config ttl=10m
+     --config ttl=1h
 
 # 4. JWT role bound to the Forgejo repo's main branch
 warden write auth/jwt/role/policy-scanner \
-     bound_claims='{"repository":"admin/policy-hygiene","ref":"refs/heads/main","ref_type":"branch"}' \
+     bound_claims='{"repository":"siteowner/policy-hygiene","ref":"refs/heads/main","ref_type":"branch"}' \
      cred_spec_name=policy-scanner \
      token_policies=vault-readonly
 ```
 
-For step 3 to work, OpenBao needs a `policy-reader` token role that can
-`read`/`list` on `sys/policies/acl/*`, `sys/mounts`, `sys/auth`, and
-`identity/entity`. Create it on the host:
-
-```bash
-bao policy write policy-reader-acl - <<'EOF'
-path "sys/policies/acl/*"  { capabilities = ["read", "list"] }
-path "sys/mounts"          { capabilities = ["read"] }
-path "sys/auth"            { capabilities = ["read"] }
-path "identity/entity/id"  { capabilities = ["list"] }
-path "identity/entity/id/*"{ capabilities = ["read"] }
-EOF
-bao write auth/token/roles/policy-reader \
-     allowed_policies=policy-reader-acl \
-     orphan=true period=10m
-```
-
 ### 5c. Anthropic provider → api.anthropic.com
 
-Following [provider/anthropic/README.md](../../provider/anthropic/README.md):
+Following the canonical setup for the Anthropic provider:
 
 ```bash
 warden provider enable --type=anthropic anthropic
@@ -325,26 +425,26 @@ warden write anthropic/config \
      timeout=120s
 
 warden cred source create anthropic-src --type=apikey \
+     --rotation-period=0 \
      --config=api_url=https://api.anthropic.com \
      --config=verify_endpoint=/v1/models \
      --config=auth_header_type=custom_header \
-     --config=auth_header_name=x-api-key
+     --config=auth_header_name=x-api-key \
+     --config=extra_headers=anthropic-version:2023-06-01
 
 warden cred spec create anthropic-ops --source anthropic-src \
      --config api_key=<your-anthropic-key>
 
 warden write auth/jwt/role/anthropic-ops \
-     bound_claims='{"repository":"admin/policy-hygiene","ref":"refs/heads/main","ref_type":"branch"}' \
+     bound_claims='{"repository":"siteowner/policy-hygiene","ref":"refs/heads/main","ref_type":"branch"}' \
      cred_spec_name=anthropic-ops \
      token_policies=anthropic-ops
 ```
 
 This is the only place the Anthropic key is ever entered. Warden's Anthropic
-provider strips any incoming `x-api-key` and `anthropic-version` headers
-([provider/anthropic/provider.go:44-45](../../provider/anthropic/provider.go#L44-L45))
-and injects its own stored values, so what the agent sends in those headers
-is irrelevant — Warden replaces it. SSE streaming passes through unbuffered
-([provider/httpproxy/gateway.go](../../provider/httpproxy/gateway.go)).
+provider strips any incoming `x-api-key` and `anthropic-version` headers and
+injects its own stored values, so what the agent sends in those headers is
+irrelevant — Warden replaces it. SSE streaming passes through unbuffered.
 
 ### 5d. Two access policies, one per role — fine-grained
 
@@ -385,7 +485,7 @@ Anthropic path *itself* starts with `v1/`. So policy stanzas read
 cat > /tmp/vault-readonly.hcl <<'EOF'
 # ── OpenBao read-only policy introspection ─────────────────────────────
 path "vault/role/policy-scanner/gateway/v1/sys/policies/acl" {
-  capabilities = ["list"]
+  capabilities = ["read"]
 }
 path "vault/role/policy-scanner/gateway/v1/sys/policies/acl/*" {
   capabilities = ["read"]
@@ -401,7 +501,7 @@ path "vault/role/policy-scanner/gateway/v1/sys/auth" {
 
 # ── Identity entity introspection (for orphan-binding detection) ───────
 path "vault/role/policy-scanner/gateway/v1/identity/entity/id" {
-  capabilities = ["list"]
+  capabilities = ["read"]
 }
 path "vault/role/policy-scanner/gateway/v1/identity/entity/id/*" {
   capabilities = ["read"]
@@ -431,8 +531,7 @@ by what the *other* role on the same JWT identity is doing.
 If you discover Warden 403s on a path you legitimately need (e.g. you extend
 the recipe to read group bindings), tail Warden's audit log to see the
 exact path being denied, then add the minimal stanza. The CBP capabilities
-are: `create`, `read`, `update`, `delete`, `list`, `patch`
-([core/policy.go:22-29](../../core/policy.go#L22-L29)).
+are: `create`, `read`, `update`, `delete`, `list`, `patch`.
 
 The `auth/jwt/role/*` definitions in 5b and 5c each attach their own policy
 (`vault-readonly` for `policy-scanner`, `anthropic-ops` for `anthropic-ops`)
@@ -441,7 +540,7 @@ exactly the access its role needs — no more, no less.
 
 ## 6. The Goose recipe
 
-Save this as `policy-hygiene.yaml` in the `admin/policy-hygiene` repo. It
+Save this as `policy-hygiene.yaml` in the `siteowner/policy-hygiene` repo. It
 uses the recipe schema documented in [Goose's `recipe-reference`](https://goose-docs.ai/docs/guides/recipes/recipe-reference).
 
 ```yaml
@@ -464,7 +563,10 @@ parameters:
 instructions: |
   You are a security auditor performing a HYGIENE REVIEW of every ACL policy on
   this OpenBao cluster. The `bao` CLI in your shell is already pointed at Warden —
-  do not log in, do not set a token.
+  **do not log in, do not set a token, and do not modify `VAULT_ADDR` or
+  `VAULT_TOKEN`**. They are pre-set to the Warden gateway URL and a per-job
+  JWT respectively. Just call `bao` directly; the existing env routes through
+  Warden.
 
   Collect the ground truth first (make these calls once, cache the output):
     - `bao policy list`                  → all policy names
@@ -508,8 +610,10 @@ instructions: |
 prompt: |
   Run the full hygiene audit against Warden role {{ warden_role }} at
   {{ warden_addr }}. Start by gathering the ground-truth lists, then iterate
-  through every policy. Return the structured report defined in the response
-  schema.
+  through every policy. Produce a plain Markdown report — one section per
+  policy, with severity (`ok` / `warning` / `critical`), bound entity count,
+  and a bulleted finding list (category, line excerpt, remediation). End with
+  a one-line summary: total / critical / warning / ok counts.
 
 extensions:
   - type: builtin
@@ -518,50 +622,7 @@ extensions:
 
 settings:
   goose_provider: anthropic
-  goose_model: claude-sonnet-4-6
-  temperature: 0.2
-  max_turns: 40
-
-response:
-  json_schema:
-    type: object
-    required: [policies, summary, ground_truth]
-    properties:
-      ground_truth:
-        type: object
-        required: [secret_mounts, auth_mounts, live_entities]
-        properties:
-          secret_mounts: { type: array, items: { type: string } }
-          auth_mounts:   { type: array, items: { type: string } }
-          live_entities: { type: integer }
-      summary:
-        type: object
-        required: [total, critical, warning, ok]
-        properties:
-          total:    { type: integer }
-          critical: { type: integer }
-          warning:  { type: integer }
-          ok:       { type: integer }
-      policies:
-        type: array
-        items:
-          type: object
-          required: [name, severity, bound_entities, findings]
-          properties:
-            name:           { type: string }
-            severity:       { type: string, enum: [ok, warning, critical] }
-            bound_entities: { type: integer }
-            findings:
-              type: array
-              items:
-                type: object
-                required: [category, line_excerpt, remediation]
-                properties:
-                  category:
-                    type: string
-                    enum: [dead_mount_reference, orphan_binding, duplicate_or_contradictory_path, least_privilege_smell]
-                  line_excerpt: { type: string }
-                  remediation:  { type: string }
+  goose_model: claude-haiku-4-5
 ```
 
 A few notes on the recipe:
@@ -592,34 +653,57 @@ on:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  id-token: write       # required to request OIDC JWTs inside a step
+enable-openid-connect: true   # Forgejo's equivalent of GitHub's `permissions: id-token: write`
 
 jobs:
   hygiene:
     runs-on: docker
     container:
-      image: alpine:3.20
+      image: node:20-bookworm-slim
     env:
       WARDEN_ADDR:    http://host.docker.internal:8400
       VAULT_ADDR:     http://host.docker.internal:8400/v1/vault/role/policy-scanner/gateway
       ANTHROPIC_HOST: http://host.docker.internal:8400/v1/anthropic/role/anthropic-ops/gateway
     steps:
+      - name: Install git (so actions/checkout uses git clone, not REST)
+        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+
       - uses: actions/checkout@v4
 
       - name: Install bao + goose CLIs
         run: |
-          apk add --no-cache curl jq bash ca-certificates
-          curl -fsSL https://github.com/openbao/openbao/releases/download/v2.5.3/bao_2.5.3_Linux_x86_64.tar.gz \
+          apt-get install -y --no-install-recommends curl jq bash bzip2 libgomp1 libxcb1 libdbus-1-3
+          case "$(uname -m)" in
+            aarch64|arm64) BAO_ARCH=arm64 ;;
+            x86_64|amd64)  BAO_ARCH=x86_64 ;;
+          esac
+          curl -fsSL "https://github.com/openbao/openbao/releases/download/v2.5.3/bao_2.5.3_Linux_${BAO_ARCH}.tar.gz" \
             | tar xz -C /usr/local/bin
-          curl -fsSL https://github.com/aaif-goose/goose/releases/latest/download/download_cli.sh | bash
+          curl -fsSL https://github.com/aaif-goose/goose/releases/latest/download/download_cli.sh | CONFIGURE=false bash
+          mv /root/.local/bin/goose /usr/local/bin/
 
       - name: Mint Warden JWT from Forgejo OIDC
+        shell: bash
         run: |
-          WARDEN_JWT=$(curl -sSL \
+          set -euo pipefail
+          RESPONSE=$(curl -sSL \
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=http://warden.local" \
-            | jq -r .value)
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=http://warden.local")
+          WARDEN_JWT=$(echo "$RESPONSE" | jq -r .value)
+          if [ -z "$WARDEN_JWT" ] || [ "$WARDEN_JWT" = "null" ]; then
+            echo "Failed to mint JWT. OIDC response was:"
+            echo "$RESPONSE"
+            exit 1
+          fi
+          if [[ "$WARDEN_JWT" != eyJ* ]]; then
+            echo "JWT doesn't look like a JWT (got ${WARDEN_JWT:0:20}...)"
+            exit 1
+          fi
+          # Print claims (public — signed but not encrypted) so bound_claims mismatches are visible
+          PAYLOAD=$(echo "$WARDEN_JWT" | cut -d. -f2)
+          while [ $(( ${#PAYLOAD} % 4 )) -ne 0 ]; do PAYLOAD="${PAYLOAD}="; done
+          echo "JWT claims:"
+          echo "$PAYLOAD" | tr '_-' '/+' | base64 -d 2>/dev/null | jq .
           echo "::add-mask::$WARDEN_JWT"
           echo "WARDEN_JWT=$WARDEN_JWT" >> $GITHUB_ENV
 
@@ -633,12 +717,15 @@ jobs:
             || { echo "Warden->Anthropic leg broken"; exit 1; }
 
       - name: Run Goose hygiene audit
+        env:
+          GOOSE_STREAM_TIMEOUT: "300"   # default 30s is too short for Sonnet's structured output
         run: |
           export VAULT_TOKEN="$WARDEN_JWT"
           export ANTHROPIC_API_KEY="$WARDEN_JWT"
-          goose run --recipe policy-hygiene.yaml \
-              --params warden_role=policy-scanner warden_addr=$WARDEN_ADDR \
-              > hygiene-report.json
+          goose run --debug --recipe policy-hygiene.yaml \
+              --params warden_role=policy-scanner \
+              --params warden_addr=$WARDEN_ADDR \
+              2>&1 | tee hygiene-report.json
 
       - uses: actions/upload-artifact@v3
         if: always()
@@ -677,13 +764,13 @@ git commit -m "hygiene audit recipe"
 git push origin main
 ```
 
-Open `http://forgejo.local:3000/admin/policy-hygiene/actions` and watch the
+Open `http://forgejo.local:3000/siteowner/policy-hygiene/actions` and watch the
 `policy-hygiene` workflow. When it finishes, download the `hygiene-report`
 artifact from the run page, or via API:
 
 ```bash
 curl -H "Authorization: token <PAT>" \
-     "http://forgejo.local:3000/api/v1/repos/admin/policy-hygiene/actions/artifacts/<id>/zip" \
+     "http://forgejo.local:3000/api/v1/repos/siteowner/policy-hygiene/actions/artifacts/<id>/zip" \
      -o hygiene-report.zip
 unzip hygiene-report.zip
 jq '.summary, .policies[] | select(.severity != "ok")' hygiene-report.json
@@ -717,14 +804,14 @@ and the response status. Tail it during the run, or query it after:
 
 ```bash
 # How many requests did the agent make through each gateway?
-jq -r 'select(.type == "request") | .request.mount_point' /tmp/warden-audit.log \
+jq -r 'select(.type == "request") | .request.mount_point' warden-audit.log \
   | sort | uniq -c
 #       6 anthropic/        (LLM turns + 1 pre-flight)
 #      12 vault/            (5 policies + secrets/auth list + entity reads + pre-flight)
 
 # What did the JWT actually grant?
 jq -r 'select(.type == "request") | [.auth.principal_id, .auth.role_name, .request.path] | @tsv' \
-  /tmp/warden-audit.log | sort -u | head
+  warden-audit.log | sort -u | head
 ```
 
 A single representative entry — what Warden sees when the agent reads one
@@ -746,7 +833,7 @@ policy through the Vault gateway:
     "transparent": true
   },
   "auth": {
-    "principal_id": "repository:admin/policy-hygiene:ref:refs/heads/main",
+    "principal_id": "repository:siteowner/policy-hygiene:ref:refs/heads/main",
     "role_name": "policy-scanner",
     "policies": ["vault-readonly"],
     "policy_results": {
@@ -767,14 +854,10 @@ Three things to verify here:
    would carry `error: "permission denied"` and a `403` response status,
    because no stanza in `vault-readonly` grants `delete` on
    `/v1/sys/policies/acl/*`.
-3. **`request.transparent: true`** ([audit/types.go:54](../../audit/types.go#L54))
-   marks calls that came in via the `role/*/gateway/*` path — i.e., that
-   Warden authenticated the client via JWT in a header rather than a Warden
-   session token. This is how you spot agentic traffic in a busy log.
-
-The audit field reference: request shape at [audit/types.go:30-54](../../audit/types.go#L30-L54),
-response shape at [audit/types.go:58-72](../../audit/types.go#L58-L72), auth
-shape at [audit/types.go:87-97](../../audit/types.go#L87-L97).
+3. **`request.transparent: true`** marks calls that came in via the
+   `role/*/gateway/*` path — i.e., that Warden authenticated the client via
+   JWT in a header rather than a Warden session token. This is how you spot
+   agentic traffic in a busy log.
 
 ## 9. Moving to production
 
@@ -823,15 +906,17 @@ actor.
 
 Three operational adjustments worth making explicit in production:
 
-- Rotate the upstream `openbao-root` source to an AppRole scoped to
-  `read`/`list` on `sys/policies/acl/*` only. Dev uses the root token for
-  expedience; production must not.
+- The dev AppRole is already minimally scoped (only `update` on
+  `auth/token/create/policy-reader`). For production, also bind it to a CIDR
+  via `bound_cidr_list`, wrap secret_id issuance with `-wrap-ttl=60s`, and
+  shorten the policy-reader token role's `period` to the agent's actual job
+  duration.
 - Rotate the Anthropic key by updating the spec in Warden. The CI job is
   unaffected — it still authenticates with its JWT.
-- Ship the audit log enabled in section 4 to a SIEM (Splunk, Elastic,
-  Datadog) instead of a local file: `warden audit enable --type=socket
-  --address=siem:9514` or `--type=syslog`. The JSON shape is the same as in
-  section 8.
+- Replace the default file audit device with a socket or syslog one to ship
+  to a SIEM (Splunk, Elastic, Datadog): `warden audit disable file && warden
+  audit enable --type=socket --address=siem:9514` (or `--type=syslog`). The
+  JSON shape is the same as in section 8.
 
 ## 10. What's next
 

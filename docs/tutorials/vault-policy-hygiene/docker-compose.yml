@@ -1,0 +1,62 @@
+services:
+  openbao:
+    image: openbao/openbao:2.5.3
+    ports: ["8200:8200"]
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: dev-bao-root
+      BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+
+  bao-init:
+    image: openbao/openbao:2.5.3
+    depends_on: [openbao]
+    environment:
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: dev-bao-root
+    volumes:
+      - ./bao-init.sh:/init.sh:ro
+      - ./bao-out:/out
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        until bao status >/dev/null 2>&1; do sleep 1; done;
+        sh /init.sh
+    restart: "no"
+
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:15
+    hostname: forgejo.local
+    ports: ["3000:3000", "2222:22"]
+    environment:
+      FORGEJO__server__ROOT_URL: http://forgejo.local:3000/
+      FORGEJO__actions__ENABLED: "true"
+      FORGEJO__security__INSTALL_LOCK: "true"
+    volumes:
+      - forgejo-data:/data
+
+  forgejo-init:
+    image: codeberg.org/forgejo/forgejo:15
+    depends_on: [forgejo]
+    user: "1000:1000"
+    volumes:
+      - forgejo-data:/data
+      - ./forgejo-init.sh:/init.sh:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        until forgejo --config /data/gitea/conf/app.ini admin user list >/dev/null 2>&1; do sleep 1; done;
+        sh /init.sh
+    restart: "no"
+
+  runner:
+    image: code.forgejo.org/forgejo/runner:12.8.0
+    depends_on: [forgejo]
+    user: "0:0"
+    command: ["/bin/forgejo-runner", "daemon", "--config", "/data/config.yaml"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./runner-config:/data
+    extra_hosts:
+      - "forgejo.local:host-gateway"
+
+volumes:
+  forgejo-data:
