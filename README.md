@@ -132,7 +132,7 @@ See [docs/architecture.md](docs/architecture.md) for Warden's design decisions, 
 
 End-to-end walkthroughs that combine Warden with real-world workloads:
 
-- [docs/tutorials/vault-policy-hygiene.md](docs/tutorials/vault-policy-hygiene.md) — a Goose AI agent that audits OpenBao ACL policies for hygiene (dead-mount references, orphan bindings, duplicates, least-privilege smells), with both the OpenBao calls and the Anthropic inference flowing through Warden. The agent holds zero credentials.
+- [Vault policy hygiene](docs/tutorials/vault-policy-hygiene/README.md) — a Goose AI agent that audits OpenBao ACL policies for hygiene (dead-mount references, orphan bindings, duplicates, least-privilege smells), with both the OpenBao calls and the Anthropic inference flowing through Warden. The agent holds zero credentials.
 
 ## Contributing
 

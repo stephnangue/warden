@@ -1,0 +1,170 @@
+version: "1.0.0"
+title: "OpenBao policy hygiene audit"
+description: "Audit every ACL policy on an OpenBao cluster via Warden for dead-mount references, orphan bindings, duplicates, and least-privilege smells."
+
+parameters:
+  - key: warden_role
+    input_type: string
+    requirement: optional
+    default: policy-scanner
+    description: "Warden Vault-provider role whose spec mints a read-only OpenBao token"
+  - key: warden_addr
+    input_type: string
+    requirement: optional
+    default: "http://127.0.0.1:8400"
+    description: "Warden HTTP listener"
+
+instructions: |
+  You are a security auditor performing a HYGIENE REVIEW of every ACL policy on
+  this OpenBao cluster. The `bao` CLI in your shell is already pointed at Warden —
+  **do not log in, do not set a token, and do not modify `VAULT_ADDR` or
+  `VAULT_TOKEN`**. They are pre-set to the Warden gateway URL and a per-job
+  JWT respectively. Just call `bao` directly; the existing env routes through
+  Warden.
+
+  Collect the ground truth first. **Always pipe verbose JSON through `jq`
+  to extract only the fields you need** — raw `bao …list -format=json`
+  outputs are big and accumulate in context across turns, eating into the
+  Anthropic input-token rate limit. Use these exact extractions:
+    - `bao policy list`                                              → policy names
+    - `bao secrets list -format=json | jq -r 'keys[]'`               → secret-mount paths only
+    - `bao auth list    -format=json | jq -r 'keys[]'`               → auth-mount paths only
+    - `bao list -format=json identity/entity/id | jq -r '.[]'`       → entity IDs only
+    - For each entity, extract just name + policies:
+        bao read -format=json identity/entity/id/<id> \
+          | jq -c '{name: .data.name, policies: .data.policies}'
+      Build a map { policy_name -> [entity_names_binding_it] } from those.
+
+  Policy bodies (`bao policy read <name>`) DO need to be read in full —
+  that is what you analyse for the four findings.
+
+  Then, for each policy (`bao policy read NAME`), emit findings in exactly
+  these four categories. Do not invent others. Cite the HCL line excerpt.
+
+    1. dead_mount_reference
+       A `path "<prefix>/*"` whose prefix does NOT match any mount from
+       `bao secrets list` or `bao auth list`. Remediation: remove the stanza
+       or restore the mount.
+
+    2. orphan_binding
+       The policy is attached to zero live entities (not found in the map built
+       above) AND is not a built-in (`default`, `root`). Remediation: delete or
+       document its purpose.
+
+    3. duplicate_or_contradictory_path
+       Same `path "X"` declared twice in one policy, especially with differing
+       capabilities. Remediation: merge into a single stanza.
+
+    4. least_privilege_smell
+       Any of:
+         - `capabilities` list contains "sudo"
+         - `path "*"` or `path "sys/*"` at top level
+         - `create`/`update`/`delete`/`patch` on a glob path without
+           `allowed_parameters` narrowing
+       Remediation: narrow path, drop sudo, add allowed_parameters.
+
+  Do NOT score policies 0–100 — that's subjective. Instead, for each policy
+  report the finding list, and derive a deterministic severity:
+    - critical: any least_privilege_smell with "sudo" OR path "*"
+    - warning:  any other finding
+    - ok:       no findings
+
+prompt: |
+  Run the full hygiene audit against Warden role {{ warden_role }} at
+  {{ warden_addr }}, then publish the report as the Slack channel canvas
+  on `$SLACK_CHANNEL`. **Build the Markdown file incrementally** with
+  shell tool calls — do NOT compose the full report as a single final
+  assistant message. Your final assistant message should be one short
+  line confirming what you did.
+
+  Sequence:
+
+  1. Gather ground-truth via the jq-extracted commands from instructions
+     (mount paths, entity-id list, per-entity {name, policies}). Build a
+     policy → [entity_names] map mentally.
+
+  2. Start the report file:
+        printf '# OpenBao policy hygiene\n\n' > hygiene-report.md
+
+  3. For each policy from `bao policy list` (skip built-ins `default` and
+     `root`):
+       a. `bao policy read <name>`
+       b. Analyse for the four finding categories from instructions and
+          derive severity (ok / warning / critical).
+       c. APPEND that policy's section to the file in one shell call:
+            cat >> hygiene-report.md <<'EOF'
+            ## <name> — <severity>
+            Bound entities: <N>
+            - **<category>**: `<line excerpt>` — <remediation>
+            ...
+            EOF
+       d. Drop prior findings from your context — the file is the source
+          of truth.
+
+  4. Append a summary section:
+        cat >> hygiene-report.md <<'EOF'
+        ## Summary
+        Total: <N>, critical: <N>, warning: <N>, ok: <N>
+        EOF
+
+  5. Publish as the channel canvas on `$SLACK_CHANNEL`. Slack renders
+     Canvas markdown natively (a plain `.md` file upload appears as a
+     blob with no formatting). A channel can have at most one canvas, so
+     if one already exists from a prior run, delete it first. All calls
+     go through Warden with `Authorization: Bearer $WARDEN_JWT`.
+
+       a. Check for an existing channel canvas:
+            EXISTING=$(curl -sSf -H "Authorization: Bearer $WARDEN_JWT" \
+              "$SLACK_HOST/conversations.info?channel=$SLACK_CHANNEL" \
+              | jq -r '.channel.properties.canvas.file_id // empty')
+
+       b. If one exists, delete it:
+            if [ -n "$EXISTING" ]; then
+              jq -n --arg id "$EXISTING" '{canvas_id:$id}' \
+                | curl -sSf -H "Authorization: Bearer $WARDEN_JWT" \
+                       -H "Content-Type: application/json" \
+                       --data @- \
+                       "$SLACK_HOST/canvases.delete"
+            fi
+
+       c. Create the new channel canvas. Pipe the file via
+          `jq --rawfile` so the markdown body never enters your context.
+          Pass an explicit `title` (otherwise the canvas inherits the
+          channel name):
+            jq -n --arg ch "$SLACK_CHANNEL" \
+                  --arg title "OpenBao policy hygiene — $(date -u +%Y-%m-%d)" \
+                  --rawfile md hygiene-report.md \
+                  '{channel_id:$ch,title:$title,document_content:{type:"markdown",markdown:$md}}' \
+              | curl -sSf -H "Authorization: Bearer $WARDEN_JWT" \
+                     -H "Content-Type: application/json" \
+                     --data @- \
+                     "$SLACK_HOST/conversations.canvases.create"
+
+       d. Post a one-line notification so members see it in chat (the
+          canvas is also pinned in the channel header):
+            jq -n --arg ch "$SLACK_CHANNEL" \
+                  '{channel:$ch,text:"OpenBao policy hygiene canvas updated."}' \
+              | curl -sSf -H "Authorization: Bearer $WARDEN_JWT" \
+                     -H "Content-Type: application/json" \
+                     --data @- \
+                     "$SLACK_HOST/chat.postMessage"
+
+  6. Final assistant message — one short line, e.g.
+     "Audit complete: 8 policies; 1 critical, 4 warning, 3 ok. Canvas
+     updated." Do NOT repeat the report contents here.
+
+  Do NOT skip the canvas publish even if findings are zero.
+
+extensions:
+  - type: builtin
+    name: developer
+    description: "Shell + file tools so the agent can run the bao CLI"
+
+settings:
+  goose_provider: anthropic
+  # deepseek-chat = Flash in non-thinking mode. Thinking mode (deepseek-v4-flash
+  # or deepseek-reasoner) needs Goose to round-trip thinking/reasoning_content
+  # blocks, which it doesn't yet. Revisit before 2026-07-24 (deepseek-chat alias
+  # retirement) — by then either Goose adds support or DeepSeek exposes a
+  # disable-thinking param on deepseek-v4-flash.
+  goose_model: deepseek-chat

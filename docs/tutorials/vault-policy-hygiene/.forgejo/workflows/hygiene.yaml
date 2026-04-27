@@ -1,0 +1,101 @@
+name: policy-hygiene
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+enable-openid-connect: true   # Forgejo's equivalent of GitHub's `permissions: id-token: write`
+
+jobs:
+  hygiene:
+    runs-on: docker
+    container:
+      image: node:20-bookworm-slim
+    env:
+      WARDEN_ADDR:    http://host.docker.internal:8400
+      VAULT_ADDR:     http://host.docker.internal:8400/v1/vault/role/policy-scanner/gateway
+      ANTHROPIC_HOST: http://host.docker.internal:8400/v1/anthropic/role/anthropic-ops/gateway
+      SLACK_HOST:     http://host.docker.internal:8400/v1/slack/role/slack-ops/gateway
+      SLACK_CHANNEL:  C0123456789   # ← replace with your channel ID
+    steps:
+      - name: Install git (so actions/checkout uses git clone, not REST)
+        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v4
+
+      - name: Install bao + goose CLIs
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends curl jq bash bzip2 libgomp1 libxcb1 libdbus-1-3
+          case "$(uname -m)" in
+            aarch64|arm64) BAO_ARCH=arm64 ;;
+            x86_64|amd64)  BAO_ARCH=x86_64 ;;
+          esac
+          curl --retry 3 --retry-delay 5 -fsSL \
+            "https://github.com/openbao/openbao/releases/download/v2.5.3/bao_2.5.3_Linux_${BAO_ARCH}.tar.gz" \
+            | tar xz -C /usr/local/bin
+          # Pin goose to v1.32.0 — the upstream `latest` release tag is
+          # currently unmarked (v2 release candidates exist but none is
+          # "latest"), so /releases/latest/download/... returns 404.
+          curl --retry 3 --retry-delay 5 -fsSL \
+            https://github.com/aaif-goose/goose/releases/download/v1.32.0/download_cli.sh \
+            | CONFIGURE=false bash
+          mv /root/.local/bin/goose /usr/local/bin/
+
+      - name: Mint Warden JWT from Forgejo OIDC
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl -sSL \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=http://warden.local")
+          WARDEN_JWT=$(echo "$RESPONSE" | jq -r .value)
+          if [ -z "$WARDEN_JWT" ] || [ "$WARDEN_JWT" = "null" ]; then
+            echo "Failed to mint JWT. OIDC response was:"
+            echo "$RESPONSE"
+            exit 1
+          fi
+          if [[ "$WARDEN_JWT" != eyJ* ]]; then
+            echo "JWT doesn't look like a JWT (got ${WARDEN_JWT:0:20}...)"
+            exit 1
+          fi
+          # Print claims (public — signed but not encrypted) so bound_claims mismatches are visible
+          PAYLOAD=$(echo "$WARDEN_JWT" | cut -d. -f2)
+          while [ $(( ${#PAYLOAD} % 4 )) -ne 0 ]; do PAYLOAD="${PAYLOAD}="; done
+          echo "JWT claims:"
+          echo "$PAYLOAD" | tr '_-' '/+' | base64 -d 2>/dev/null | jq .
+          echo "::add-mask::$WARDEN_JWT"
+          echo "WARDEN_JWT=$WARDEN_JWT" >> $GITHUB_ENV
+
+      - name: Pre-flight all three Warden legs
+        run: |
+          export VAULT_TOKEN="$WARDEN_JWT"
+          bao policy list > /dev/null \
+            || { echo "Warden->OpenBao leg broken"; exit 1; }
+          # /v1/models isn't exposed on every Anthropic-compatible upstream
+          # (DeepSeek's compat layer omits it). Only treat 401/403 as a
+          # failure — any other status proves Warden auth + policy worked.
+          status=$(curl -s -o /dev/null -w "%{http_code}" \
+                       -H "x-api-key: $WARDEN_JWT" -H "anthropic-version: 2023-06-01" \
+                       "$ANTHROPIC_HOST/v1/models")
+          case "$status" in 401|403) echo "Warden->Anthropic leg broken (status $status)"; exit 1 ;; esac
+          curl -sf -X POST -H "Authorization: Bearer $WARDEN_JWT" \
+               "$SLACK_HOST/auth.test" > /dev/null \
+            || { echo "Warden->Slack leg broken"; exit 1; }
+
+      - name: Run Goose hygiene audit
+        env:
+          GOOSE_STREAM_TIMEOUT: "300"   # default 30s is too short for the structured output
+        run: |
+          export VAULT_TOKEN="$WARDEN_JWT"
+          export ANTHROPIC_API_KEY="$WARDEN_JWT"
+          goose run --debug --recipe policy-hygiene.yaml \
+              --params warden_role=policy-scanner \
+              --params warden_addr=$WARDEN_ADDR \
+              2>&1 | tee hygiene-report.json
+
+      - uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: hygiene-report
+          path: hygiene-report.json

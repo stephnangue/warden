@@ -22,6 +22,21 @@ services:
         sh /init.sh
     restart: "no"
 
+  bao-seed:
+    image: openbao/openbao:2.5.3
+    depends_on: [openbao]
+    environment:
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: dev-bao-root
+    volumes:
+      - ./bao-seed.sh:/seed.sh:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        until bao status >/dev/null 2>&1; do sleep 1; done;
+        sh /seed.sh
+    restart: "no"
+
   forgejo:
     image: codeberg.org/forgejo/forgejo:15
     hostname: forgejo.local
