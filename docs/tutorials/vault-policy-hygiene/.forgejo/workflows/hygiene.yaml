@@ -91,11 +91,10 @@ jobs:
           export ANTHROPIC_API_KEY="$WARDEN_JWT"
           goose run --debug --recipe policy-hygiene.yaml \
               --params warden_role=policy-scanner \
-              --params warden_addr=$WARDEN_ADDR \
-              2>&1 | tee hygiene-report.json
+              --params warden_addr=$WARDEN_ADDR
 
       - uses: actions/upload-artifact@v3
         if: always()
         with:
           name: hygiene-report
-          path: hygiene-report.json
+          path: hygiene-report.md     # built incrementally by the agent; recoverable even if Slack delivery fails
