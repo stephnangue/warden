@@ -57,10 +57,12 @@ workflow, download the report. Production is a URL swap; section 9 covers it.
   Warden's credential store, not into any CI variable.** You paste it once
   during section 5 and never again.
 - (Optional, for Slack delivery) A Slack workspace, a [bot user OAuth token](https://api.slack.com/authentication/token-types#bot)
-  (`xoxb-...`) with the `files:write` scope, and a channel ID
-  (e.g. `C0123456789`) the bot is a member of. Same rule: the token goes into
-  Warden, never into a CI variable. Skip this if you only want the
-  Forgejo-Actions artefact and don't care about Slack delivery.
+  (`xoxb-...`) with the `canvases:write`, `channels:read`, and `chat:write`
+  scopes (the report is published as a channel canvas, not a file upload),
+  and a channel ID (e.g. `C0123456789`) the bot is a member of. Same rule:
+  the token goes into Warden, never into a CI variable. Skip this if you
+  only want the Forgejo-Actions artefact and don't care about Slack
+  delivery.
 
 The `bao` and `goose` CLIs are installed inside the Actions job's container
 — you do not run them on the host.
@@ -353,12 +355,15 @@ The log is line-delimited JSON, one entry per request and one per response.
 Sensitive headers (the JWT itself, upstream tokens) are HMAC-redacted before
 they hit disk.
 
-## 5. Wire Warden: JWT auth, two providers, two policies
+## 5. Wire Warden: JWT auth, three providers, three policies
 
-Both providers expose the same `role/<name>/gateway/...` URL shape, so callers
-see a uniform interface — but the implementations are separate (Anthropic uses
-Warden's shared HTTP-proxy framework; Vault has its own gateway).
-**The JWT auth method is shared across both** — one identity, two egress paths.
+All three providers (Vault, Anthropic, and the optional Slack) expose the
+same `role/<name>/gateway/...` URL shape, so callers see a uniform
+interface — but the implementations are separate. Anthropic and Slack are
+built on Warden's shared HTTP-proxy framework, while Vault has its own
+gateway. **The JWT auth method is shared across all three** — one
+identity, up to three egress paths (Slack is skipped if you don't pass
+`--slack-token` to `warden-init.sh`).
 
 This whole section is automated by [`warden-init.sh`](warden-init.sh) (next
 to this README). From the directory where `bao-out/creds.env` lives, in the
@@ -459,7 +464,8 @@ Anthropic path *itself* starts with `v1/`. So policy stanzas read
 `vault/role/policy-scanner/gateway/v1/sys/policies/acl`, not
 `vault/role/policy-scanner/gateway/sys/policies/acl`.
 
-The two policies that `warden-init.sh` writes:
+The policies that `warden-init.sh` writes (the third, `slack-ops`, is only
+written when `--slack-token` is passed):
 
 ```hcl
 # vault-readonly — attached to the policy-scanner JWT role only
@@ -774,20 +780,19 @@ jobs:
 
       - name: Run Goose hygiene audit
         env:
-          GOOSE_STREAM_TIMEOUT: "300"   # default 30s is too short for Sonnet's structured output
+          GOOSE_STREAM_TIMEOUT: "300"   # default 30s is too short for the structured output
         run: |
           export VAULT_TOKEN="$WARDEN_JWT"
           export ANTHROPIC_API_KEY="$WARDEN_JWT"
           goose run --debug --recipe policy-hygiene.yaml \
               --params warden_role=policy-scanner \
-              --params warden_addr=$WARDEN_ADDR \
-              2>&1 | tee hygiene-report.json
+              --params warden_addr=$WARDEN_ADDR
 
       - uses: actions/upload-artifact@v3
         if: always()
         with:
           name: hygiene-report
-          path: hygiene-report.json
+          path: hygiene-report.md     # built incrementally by the agent; recoverable even if Slack delivery fails
 ```
 
 A few notes on the workflow:
@@ -822,28 +827,37 @@ git push origin main
 ```
 
 Open `http://forgejo.local:3000/siteowner/policy-hygiene/actions` and watch the
-`policy-hygiene` workflow. When it finishes, download the `hygiene-report`
-artifact from the run page, or via API:
+`policy-hygiene` workflow. When it finishes, the report is in two places:
+the channel canvas on Slack (if Slack delivery was wired up in 5e), and the
+`hygiene-report.md` artifact on the workflow run. Pull it via API:
 
 ```bash
 curl -H "Authorization: token <PAT>" \
      "http://forgejo.local:3000/api/v1/repos/siteowner/policy-hygiene/actions/artifacts/<id>/zip" \
      -o hygiene-report.zip
 unzip hygiene-report.zip
-jq '.summary, .policies[] | select(.severity != "ok")' hygiene-report.json
+cat hygiene-report.md
 ```
 
-Expected (trimmed) output across the five seed policies:
+Expected output across the seven analysed policies (the five seed policies
+in `bao-seed.sh` plus `policy-reader-acl` and `warden-vault-source` from
+`bao-init.sh` — built-ins `default` and `root` are skipped):
 
-- `clean` — severity `ok`, `bound_entities: 1`, no findings.
+- `clean` — severity `ok`, bound to `anchor-user`, no findings.
 - `root-ish` — severity `critical`, finding `least_privilege_smell` citing
-  the `sudo` line.
+  the `sudo` line plus `path "*"` at top level.
 - `dead-mount` — severity `warning`, finding `dead_mount_reference` citing
-  `kv-legacy/*`, remediation "remove stanza or mount kv-legacy".
+  `kv-legacy/*` and `aws-prod/creds/admin`, remediation "remove stanza or
+  restore the mount".
 - `duplicates` — severity `warning`, finding
-  `duplicate_or_contradictory_path`.
-- `orphan` — severity `warning`, `bound_entities: 0`, finding
+  `duplicate_or_contradictory_path` on `secret/data/app/*`.
+- `orphan` — severity `warning`, zero bound entities, finding
   `orphan_binding`.
+- `policy-reader-acl` — severity `warning`, `orphan_binding` (it's bound
+  to a token role, not an entity, which is invisible to the audit's entity
+  scan).
+- `warden-vault-source` — severity `warning`, `orphan_binding` (bound to
+  the AppRole, same caveat).
 
 Every finding is concrete, verifiable, and maps to a specific remediation.
 The agent does not write 0–100 risk scores or design opinions — those would
