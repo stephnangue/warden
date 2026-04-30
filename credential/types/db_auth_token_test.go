@@ -153,6 +153,136 @@ func TestDBAuthTokenCredType_ValidateConfig_Azure_MissingHost(t *testing.T) {
 	assert.Contains(t, err.Error(), "db_host")
 }
 
+func TestDBAuthTokenCredType_ValidateConfig_Redshift_Provisioned(t *testing.T) {
+	ct := NewDBAuthTokenCredType()
+
+	config := map[string]string{
+		"mint_method":        "redshift_iam_token",
+		"db_endpoint":        "my-cluster.abc123.us-east-1.redshift.amazonaws.com",
+		"cluster_identifier": "my-cluster",
+		"region":             "us-east-1",
+	}
+
+	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	assert.NoError(t, err)
+}
+
+func TestDBAuthTokenCredType_ValidateConfig_Redshift_Serverless(t *testing.T) {
+	ct := NewDBAuthTokenCredType()
+
+	config := map[string]string{
+		"mint_method":    "redshift_iam_token",
+		"db_endpoint":    "my-wg.123456789.us-east-1.redshift-serverless.amazonaws.com",
+		"workgroup_name": "my-wg",
+		"region":         "us-east-1",
+	}
+
+	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	assert.NoError(t, err)
+}
+
+func TestDBAuthTokenCredType_ValidateConfig_Redshift_WithDuration(t *testing.T) {
+	ct := NewDBAuthTokenCredType()
+
+	config := map[string]string{
+		"mint_method":        "redshift_iam_token",
+		"db_endpoint":        "my-cluster.example.redshift.amazonaws.com",
+		"cluster_identifier": "my-cluster",
+		"duration_seconds":   "3600",
+	}
+
+	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	assert.NoError(t, err)
+}
+
+func TestDBAuthTokenCredType_ValidateConfig_Redshift_WrongSource(t *testing.T) {
+	ct := NewDBAuthTokenCredType()
+
+	config := map[string]string{
+		"mint_method":        "redshift_iam_token",
+		"db_endpoint":        "x",
+		"cluster_identifier": "x",
+	}
+
+	err := ct.ValidateConfig(config, credential.SourceTypeGCP)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "aws source")
+}
+
+func TestDBAuthTokenCredType_ValidateConfig_Redshift_MissingEndpoint(t *testing.T) {
+	ct := NewDBAuthTokenCredType()
+
+	config := map[string]string{
+		"mint_method":        "redshift_iam_token",
+		"cluster_identifier": "my-cluster",
+	}
+
+	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "db_endpoint")
+}
+
+func TestDBAuthTokenCredType_ValidateConfig_Redshift_NoClusterOrWorkgroup(t *testing.T) {
+	ct := NewDBAuthTokenCredType()
+
+	config := map[string]string{
+		"mint_method": "redshift_iam_token",
+		"db_endpoint": "x",
+	}
+
+	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cluster_identifier")
+	assert.Contains(t, err.Error(), "workgroup_name")
+}
+
+func TestDBAuthTokenCredType_ValidateConfig_Redshift_BothClusterAndWorkgroup(t *testing.T) {
+	ct := NewDBAuthTokenCredType()
+
+	config := map[string]string{
+		"mint_method":        "redshift_iam_token",
+		"db_endpoint":        "x",
+		"cluster_identifier": "my-cluster",
+		"workgroup_name":     "my-wg",
+	}
+
+	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "exactly one")
+}
+
+func TestDBAuthTokenCredType_ValidateConfig_Redshift_DurationOutOfRange(t *testing.T) {
+	ct := NewDBAuthTokenCredType()
+
+	for _, d := range []string{"0", "100", "899", "3601", "10000"} {
+		t.Run("duration="+d, func(t *testing.T) {
+			config := map[string]string{
+				"mint_method":        "redshift_iam_token",
+				"db_endpoint":        "x",
+				"cluster_identifier": "my-cluster",
+				"duration_seconds":   d,
+			}
+			err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "duration_seconds")
+		})
+	}
+}
+
+func TestDBAuthTokenCredType_ValidateConfig_Redshift_InvalidDuration(t *testing.T) {
+	ct := NewDBAuthTokenCredType()
+
+	config := map[string]string{
+		"mint_method":        "redshift_iam_token",
+		"db_endpoint":        "x",
+		"cluster_identifier": "my-cluster",
+		"duration_seconds":   "not-a-number",
+	}
+
+	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	assert.Error(t, err)
+}
+
 func TestDBAuthTokenCredType_RequiresSpecRotation(t *testing.T) {
 	ct := NewDBAuthTokenCredType()
 	assert.False(t, ct.RequiresSpecRotation())

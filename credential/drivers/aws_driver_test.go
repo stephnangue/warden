@@ -334,5 +334,134 @@ func TestAWSDriver_Type_ViaFactory(t *testing.T) {
 }
 
 // =============================================================================
+// AWSDriver redshift_iam_token tests
+// =============================================================================
+
+func TestAWSDriverFactory_InferCredentialType_Redshift(t *testing.T) {
+	factory := &AWSDriverFactory{}
+
+	credType, err := factory.InferCredentialType(map[string]string{
+		"mint_method": "redshift_iam_token",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, credential.TypeDBAuthToken, credType)
+}
+
+// newRedshiftTestDriver creates a driver with verified base creds and built clients,
+// suitable for exercising mintViaRedshiftIAMToken's validation paths.
+// It does NOT make real AWS calls — tests must short-circuit before the SDK call.
+func newRedshiftTestDriver(t *testing.T) *AWSDriver {
+	t.Helper()
+	driver := &AWSDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeAWS,
+			Config: map[string]string{
+				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+				"secret_access_key": "secret",
+				"region":            "us-east-1",
+			},
+		},
+		region: "us-east-1",
+	}
+	driver.buildClients(driver.baseCreds)
+	driver.baseCredsVerified = true
+	return driver
+}
+
+func TestAWSDriver_MintCredential_RedshiftIAMToken_MissingEndpoint(t *testing.T) {
+	driver := newRedshiftTestDriver(t)
+
+	spec := &credential.CredSpec{
+		Name: "redshift-test",
+		Type: credential.TypeDBAuthToken,
+		Config: map[string]string{
+			"mint_method":        "redshift_iam_token",
+			"cluster_identifier": "my-cluster",
+		},
+	}
+
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "db_endpoint")
+}
+
+func TestAWSDriver_MintCredential_RedshiftIAMToken_NoClusterOrWorkgroup(t *testing.T) {
+	driver := newRedshiftTestDriver(t)
+
+	spec := &credential.CredSpec{
+		Name: "redshift-test",
+		Type: credential.TypeDBAuthToken,
+		Config: map[string]string{
+			"mint_method": "redshift_iam_token",
+			"db_endpoint": "my-cluster.redshift.amazonaws.com",
+		},
+	}
+
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cluster_identifier")
+	assert.Contains(t, err.Error(), "workgroup_name")
+}
+
+func TestAWSDriver_MintCredential_RedshiftIAMToken_BothClusterAndWorkgroup(t *testing.T) {
+	driver := newRedshiftTestDriver(t)
+
+	spec := &credential.CredSpec{
+		Name: "redshift-test",
+		Type: credential.TypeDBAuthToken,
+		Config: map[string]string{
+			"mint_method":        "redshift_iam_token",
+			"db_endpoint":        "x",
+			"cluster_identifier": "my-cluster",
+			"workgroup_name":     "my-wg",
+		},
+	}
+
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exactly one")
+}
+
+func TestAWSDriver_MintCredential_RedshiftIAMToken_DurationOutOfRange(t *testing.T) {
+	driver := newRedshiftTestDriver(t)
+
+	for _, d := range []string{"100", "899", "3601", "100000"} {
+		t.Run("duration="+d, func(t *testing.T) {
+			spec := &credential.CredSpec{
+				Name: "redshift-test",
+				Type: credential.TypeDBAuthToken,
+				Config: map[string]string{
+					"mint_method":        "redshift_iam_token",
+					"db_endpoint":        "x",
+					"cluster_identifier": "my-cluster",
+					"duration_seconds":   d,
+				},
+			}
+			_, _, _, err := driver.MintCredential(context.TODO(), spec)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "duration_seconds")
+		})
+	}
+}
+
+func TestAWSDriver_MintCredential_UnsupportedMethodMessage_IncludesRedshift(t *testing.T) {
+	// Sanity check: the error message for unknown mint methods should advertise
+	// the new redshift_iam_token option so users see it in the surfaced error.
+	driver := newRedshiftTestDriver(t)
+
+	spec := &credential.CredSpec{
+		Name: "test-spec",
+		Type: credential.TypeAWSAccessKeys,
+		Config: map[string]string{
+			"mint_method": "definitely-not-real",
+		},
+	}
+
+	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "redshift_iam_token")
+}
+
+// =============================================================================
 // AzureDriver readLimitedBody Test
 // =============================================================================

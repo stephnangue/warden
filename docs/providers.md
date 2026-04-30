@@ -1,6 +1,6 @@
 # Providers
 
-Warden supports 32 providers across LLMs, cloud, observability, code hosting, secrets, and more. Follow the link for each provider to configure your endpoint.
+Warden supports 33 providers across LLMs, cloud, observability, code hosting, secrets, and more. Follow the link for each provider to configure your endpoint.
 
 Status: ✅ available, 🔜 on the roadmap.
 
@@ -74,8 +74,8 @@ Status: ✅ available, 🔜 on the roadmap.
 
 | Provider | Warden does | Status |
 |---|---|---|
-| [AWS RDS / Aurora](../provider/rds/README.md) | Issues IAM database auth token | 🔜 |
-| AWS Redshift | Issues IAM database auth token | 🔜 |
+| [AWS RDS / Aurora](../provider/rds/README.md) | Issues IAM database auth token | ✅ |
+| [AWS Redshift](../provider/redshift/README.md) | Issues IAM database auth token | ✅ |
 | GCP Cloud SQL | Issues IAM database auth token | 🔜 |
 | Azure SQL | Issues Entra database auth token | 🔜 |
 | Snowflake | Issues database auth token | 🔜 |
