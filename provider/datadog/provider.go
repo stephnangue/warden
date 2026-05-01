@@ -3,7 +3,7 @@ package datadog
 import (
 	"time"
 
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultDatadogURL is the default Datadog API base URL (US1 site)

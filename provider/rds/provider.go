@@ -9,7 +9,7 @@ import (
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/provider/dbaccess"
+	"github.com/stephnangue/warden/provider/sdk/dbaccess"
 )
 
 // Spec declares the RDS access backend.

@@ -4,13 +4,13 @@ import (
 	"testing"
 
 	"github.com/stephnangue/warden/credential"
-	"github.com/stephnangue/warden/provider/dbaccess"
+	"github.com/stephnangue/warden/provider/sdk/dbaccess"
 	"github.com/stretchr/testify/assert"
 )
 
 // Standard backend behavior (Factory wiring, config CRUD, grant CRUD,
 // transparent mode, access-endpoint plumbing, role query parameter) is
-// covered by provider/dbaccess/provider_test.go against the shared
+// covered by provider/sdk/dbaccess/provider_test.go against the shared
 // framework. These tests cover only the RDS-specific formatter, including
 // engine-specific DSN shapes and MySQL token escaping.
 

@@ -13,7 +13,7 @@ import (
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/aws/processor"
-	"github.com/stephnangue/warden/provider/sigv4"
+	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
 
 func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {

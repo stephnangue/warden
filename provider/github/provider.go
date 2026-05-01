@@ -6,7 +6,7 @@ import (
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultGitHubURL is the default GitHub API base URL

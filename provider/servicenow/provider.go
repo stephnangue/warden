@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultServiceNowTimeout is the default request timeout for ServiceNow API calls.

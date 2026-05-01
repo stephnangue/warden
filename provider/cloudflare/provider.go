@@ -8,7 +8,7 @@ import (
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
-	"github.com/stephnangue/warden/provider/dualgateway"
+	"github.com/stephnangue/warden/provider/sdk/dualgateway"
 )
 
 // DefaultCloudflareURL is the default Cloudflare API base URL

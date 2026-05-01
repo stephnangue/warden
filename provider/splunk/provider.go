@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultSplunkTimeout is the default request timeout for Splunk API calls

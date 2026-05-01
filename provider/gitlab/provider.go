@@ -7,7 +7,7 @@ import (
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // extractToken extracts Warden token from PRIVATE-TOKEN, Authorization: Bearer, or X-Warden-Token headers.

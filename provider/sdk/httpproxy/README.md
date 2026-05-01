@@ -21,7 +21,7 @@ package myprovider
 
 import (
     "time"
-    "github.com/stephnangue/warden/provider/httpproxy"
+    "github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 const (

@@ -13,7 +13,7 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logical"
-	"github.com/stephnangue/warden/provider/sigv4"
+	"github.com/stephnangue/warden/provider/sdk/sigv4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

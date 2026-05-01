@@ -15,7 +15,7 @@ import (
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
-	"github.com/stephnangue/warden/provider/sigv4"
+	"github.com/stephnangue/warden/provider/sdk/sigv4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

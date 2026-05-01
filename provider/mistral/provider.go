@@ -3,7 +3,7 @@ package mistral
 import (
 	"time"
 
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultMistralURL is the default Mistral API base URL

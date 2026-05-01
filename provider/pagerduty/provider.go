@@ -3,7 +3,7 @@ package pagerduty
 import (
 	"time"
 
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultPagerDutyURL is the default PagerDuty API base URL

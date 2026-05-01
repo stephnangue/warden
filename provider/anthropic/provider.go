@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultAnthropicURL is the default Anthropic API base URL

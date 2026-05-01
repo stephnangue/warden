@@ -6,7 +6,7 @@ import (
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logical"
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultHoneycombURL is the default Honeycomb API base URL (US region).

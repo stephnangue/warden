@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultNewRelicURL is the default New Relic API base URL (US datacenter)
