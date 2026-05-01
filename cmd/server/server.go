@@ -63,6 +63,7 @@ import (
 	"github.com/stephnangue/warden/provider/pagerduty"
 	"github.com/stephnangue/warden/provider/prometheus"
 	"github.com/stephnangue/warden/provider/rds"
+	"github.com/stephnangue/warden/provider/redshift"
 	"github.com/stephnangue/warden/provider/scaleway"
 	"github.com/stephnangue/warden/provider/sentry"
 	"github.com/stephnangue/warden/provider/servicenow"
@@ -151,6 +152,7 @@ Usage: warden server [options]
 		"tfe":           tfe.Factory,
 		"vault":         vault.Factory,
 		"rds":           rds.Factory,
+		"redshift":      redshift.Factory,
 		"scaleway":      scaleway.Factory,
 		"sentry":        sentry.Factory,
 	}

@@ -12,6 +12,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	rdsauth "github.com/aws/aws-sdk-go-v2/feature/rds/auth"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
+	"github.com/aws/aws-sdk-go-v2/service/redshift"
+	"github.com/aws/aws-sdk-go-v2/service/redshiftserverless"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/stephnangue/warden/credential"
@@ -42,11 +44,13 @@ type AWSDriver struct {
 	authMu         sync.Mutex
 
 	// AWS clients (rebuilt on auth changes)
-	stsClient            *sts.Client
-	secretsManagerClient *secretsmanager.Client
-	iamClient            *iam.Client
-	region               string
-	baseCredsVerified    bool
+	stsClient                  *sts.Client
+	secretsManagerClient       *secretsmanager.Client
+	iamClient                  *iam.Client
+	redshiftClient             *redshift.Client
+	redshiftServerlessClient   *redshiftserverless.Client
+	region                     string
+	baseCredsVerified          bool
 }
 
 // AWSDriverFactory creates AWSDriver instances
@@ -102,7 +106,7 @@ func (f *AWSDriverFactory) SensitiveConfigFields() []string {
 func (f *AWSDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
 	mintMethod := specConfig["mint_method"]
 	switch mintMethod {
-	case "rds_iam_token":
+	case "rds_iam_token", "redshift_iam_token":
 		return credential.TypeDBAuthToken, nil
 	case "sts_assume_role", "secrets_manager", "":
 		return credential.TypeAWSAccessKeys, nil
@@ -229,6 +233,8 @@ func (d *AWSDriver) buildClients(creds aws.CredentialsProvider) {
 	d.stsClient = sts.NewFromConfig(cfg)
 	d.secretsManagerClient = secretsmanager.NewFromConfig(cfg)
 	d.iamClient = iam.NewFromConfig(cfg)
+	d.redshiftClient = redshift.NewFromConfig(cfg)
+	d.redshiftServerlessClient = redshiftserverless.NewFromConfig(cfg)
 }
 
 // MintCredential mints credentials using AWS based on credential spec
@@ -247,8 +253,10 @@ func (d *AWSDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 		return d.mintViaSecretsManager(ctx, spec)
 	case "rds_iam_token":
 		return d.mintViaRDSIAMToken(ctx, spec)
+	case "redshift_iam_token":
+		return d.mintViaRedshiftIAMToken(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for AWS driver; use 'sts_assume_role', 'secrets_manager', or 'rds_iam_token'", mintMethod)
+		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for AWS driver; use 'sts_assume_role', 'secrets_manager', 'rds_iam_token', or 'redshift_iam_token'", mintMethod)
 	}
 }
 
@@ -433,6 +441,116 @@ func (d *AWSDriver) mintViaRDSIAMToken(ctx context.Context, spec *credential.Cre
 
 	// RDS IAM tokens are valid for 15 minutes
 	return rawData, 15 * time.Minute, "", nil
+}
+
+// mintViaRedshiftIAMToken generates a short-lived IAM authentication token for
+// Amazon Redshift. Unlike RDS IAM (local SigV4 signing), Redshift requires an
+// AWS API call:
+//   - cluster_identifier set → redshift:GetClusterCredentialsWithIAM (provisioned)
+//   - workgroup_name set     → redshift-serverless:GetCredentials  (serverless)
+//
+// Both APIs return a database user (mapped 1:1 to the source IAM identity for
+// provisioned, workgroup-scoped for serverless) and a temporary password.
+func (d *AWSDriver) mintViaRedshiftIAMToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	dbEndpoint, err := credential.GetStringRequired(spec.Config, "db_endpoint")
+	if err != nil {
+		return nil, 0, "", err
+	}
+
+	clusterID := credential.GetString(spec.Config, "cluster_identifier", "")
+	workgroup := credential.GetString(spec.Config, "workgroup_name", "")
+	if clusterID == "" && workgroup == "" {
+		return nil, 0, "", fmt.Errorf("redshift_iam_token requires either 'cluster_identifier' (provisioned) or 'workgroup_name' (serverless)")
+	}
+	if clusterID != "" && workgroup != "" {
+		return nil, 0, "", fmt.Errorf("redshift_iam_token requires exactly one of 'cluster_identifier' or 'workgroup_name', not both")
+	}
+
+	dbName := credential.GetString(spec.Config, "db_name", "")
+	dbPort := credential.GetString(spec.Config, "db_port", "5439")
+	region := credential.GetString(spec.Config, "region", d.region)
+
+	durationSeconds := credential.GetInt(spec.Config, "duration_seconds", 900)
+	if durationSeconds < 900 || durationSeconds > 3600 {
+		return nil, 0, "", fmt.Errorf("duration_seconds must be between 900 and 3600 (got %d)", durationSeconds)
+	}
+
+	var (
+		dbUser     string
+		dbPassword string
+		expiration *time.Time
+		deployment string
+	)
+
+	if clusterID != "" {
+		input := &redshift.GetClusterCredentialsWithIAMInput{
+			ClusterIdentifier: aws.String(clusterID),
+			DurationSeconds:   aws.Int32(int32(durationSeconds)),
+		}
+		if dbName != "" {
+			input.DbName = aws.String(dbName)
+		}
+		out, err := d.redshiftClient.GetClusterCredentialsWithIAM(ctx, input)
+		if err != nil {
+			return nil, 0, "", fmt.Errorf("Redshift GetClusterCredentialsWithIAM failed for cluster %s: %w", clusterID, err)
+		}
+		if out.DbUser == nil || out.DbPassword == nil {
+			return nil, 0, "", fmt.Errorf("Redshift GetClusterCredentialsWithIAM returned empty credentials for cluster %s", clusterID)
+		}
+		dbUser = *out.DbUser
+		dbPassword = *out.DbPassword
+		expiration = out.Expiration
+		deployment = "provisioned"
+	} else {
+		input := &redshiftserverless.GetCredentialsInput{
+			WorkgroupName:   aws.String(workgroup),
+			DurationSeconds: aws.Int32(int32(durationSeconds)),
+		}
+		if dbName != "" {
+			input.DbName = aws.String(dbName)
+		}
+		out, err := d.redshiftServerlessClient.GetCredentials(ctx, input)
+		if err != nil {
+			return nil, 0, "", fmt.Errorf("Redshift Serverless GetCredentials failed for workgroup %s: %w", workgroup, err)
+		}
+		if out.DbUser == nil || out.DbPassword == nil {
+			return nil, 0, "", fmt.Errorf("Redshift Serverless GetCredentials returned empty credentials for workgroup %s", workgroup)
+		}
+		dbUser = *out.DbUser
+		dbPassword = *out.DbPassword
+		expiration = out.Expiration
+		deployment = "serverless"
+	}
+
+	leaseTTL := time.Duration(durationSeconds) * time.Second
+	if expiration != nil {
+		if remaining := time.Until(*expiration); remaining > 0 {
+			leaseTTL = remaining
+		}
+	}
+
+	rawData := map[string]interface{}{
+		"auth_token": dbPassword,
+		"db_user":    dbUser,
+		"db_host":    dbEndpoint,
+		"db_port":    dbPort,
+		"region":     region,
+		"deployment": deployment,
+		"token_type": "redshift_iam",
+	}
+
+	if d.logger != nil {
+		d.logger.Debug("generated Redshift IAM auth token",
+			logger.String("spec", spec.Name),
+			logger.String("deployment", deployment),
+			logger.String("endpoint", dbEndpoint),
+			logger.String("db_user", dbUser),
+			logger.String("region", region),
+			logger.String("lease_ttl", leaseTTL.String()),
+		)
+	}
+
+	return rawData, leaseTTL, "", nil
 }
 
 // Revoke attempts to revoke a credential (best-effort)
