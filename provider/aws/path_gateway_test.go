@@ -10,7 +10,7 @@ import (
 
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
-	"github.com/stephnangue/warden/provider/sigv4"
+	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
 
 // createTestLogger creates a logger for testing that discards output

@@ -3,7 +3,7 @@ package slack
 import (
 	"time"
 
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultSlackURL is the default Slack API base URL

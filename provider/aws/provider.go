@@ -12,7 +12,7 @@ import (
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/aws/processor"
 	"github.com/stephnangue/warden/provider/aws/processor/s3"
-	"github.com/stephnangue/warden/provider/sigv4"
+	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
 
 // HostRewrite contains information about a rewritten virtual-hosted URL

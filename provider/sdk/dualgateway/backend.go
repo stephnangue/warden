@@ -11,7 +11,7 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
-	"github.com/stephnangue/warden/provider/sigv4"
+	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
 
 // dualgatewayBackend is the generic backend for dual-mode gateway providers.

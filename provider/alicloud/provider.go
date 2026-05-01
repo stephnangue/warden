@@ -12,7 +12,7 @@ import (
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
-	"github.com/stephnangue/warden/provider/sigv4"
+	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
 
 // alicloudBackend is the streaming backend for Alicloud provider operations.

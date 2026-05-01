@@ -4,7 +4,7 @@
 // a ProviderSpec and call NewFactory; all CRUD plumbing, storage, transparent
 // auth, and access-endpoint wiring is handled by the framework.
 //
-// This mirrors the shape of provider/httpproxy for streaming providers.
+// This mirrors the shape of provider/sdk/httpproxy for streaming providers.
 package dbaccess
 
 import (

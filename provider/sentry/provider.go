@@ -3,7 +3,7 @@ package sentry
 import (
 	"time"
 
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultSentryURL is the default Sentry API base URL

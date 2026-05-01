@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/stephnangue/warden/provider/sigv4"
+	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
 
 // extractToken extracts the client token from the request.

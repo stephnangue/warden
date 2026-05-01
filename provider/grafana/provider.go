@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultGrafanaURL is the default Grafana Cloud API base URL.

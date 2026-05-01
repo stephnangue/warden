@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
-	"github.com/stephnangue/warden/provider/dualgateway"
+	"github.com/stephnangue/warden/provider/sdk/dualgateway"
 )
 
 // Spec defines the OVH dual-mode gateway provider.

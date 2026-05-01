@@ -3,7 +3,7 @@ package cohere
 import (
 	"time"
 
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultCohereURL is the default Cohere API base URL

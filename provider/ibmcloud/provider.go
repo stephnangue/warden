@@ -11,7 +11,7 @@ import (
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
-	"github.com/stephnangue/warden/provider/dualgateway"
+	"github.com/stephnangue/warden/provider/sdk/dualgateway"
 )
 
 // DefaultIBMCloudURL is a placeholder — ignored in API mode when RewriteAPITarget routes

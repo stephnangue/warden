@@ -6,7 +6,7 @@ import (
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logical"
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // openaiCredentialExtractor extracts api_key (as Bearer), organization_id, and project_id.

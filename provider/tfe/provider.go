@@ -3,7 +3,7 @@ package tfe
 import (
 	"time"
 
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultTFEURL is the default HCP Terraform API base URL

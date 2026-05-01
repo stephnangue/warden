@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
-	"github.com/stephnangue/warden/provider/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultKubernetesTimeout is the default request timeout for Kubernetes API calls
