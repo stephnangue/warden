@@ -69,14 +69,14 @@ Warden closes the gap by sitting in the path: the agent identifies itself, Warde
 What an enterprise gets from putting Warden in the path:
 
 - **Discovery** — identity-scoped introspection. Agents learn which systems and roles are open to them; nothing has to be pre-loaded into the agent's environment.
-- **Policy with runtime conditions** — role and path checks plus `source_ip`, `time_window`, and `day_of_week` predicates evaluated at request time.
-- **Identity-bound access** — JWT (including SPIFFE JWT-SVID) or TLS client certificate (including SPIFFE X.509-SVID); same internal session either way.
+- **Fine-grained access policy** — per-action capabilities and parameter filters, evaluated at request time against caller IP, time of day, and day of week.
+- **Identity-bound access** — JWT (including SPIFFE JWT-SVID) or TLS client certificate (including SPIFFE X.509-SVID); every grant scoped to the actual caller, not a pooled credential.
 - **Audit** — every request tied to the original identity, the role used, and the upstream called.
 - **Credentials never leave Warden** — a prompt-injected agent has nothing to leak; there is no credential in its environment to exfiltrate.
 
-## Providers
+## Supported systems
 
-33 providers across LLMs, cloud, code-hosting, observability, ITSM, Kubernetes, secrets, and databases. Follow a provider link below to configure your first endpoint, or see [docs/providers.md](docs/providers.md) for the full list.
+33 systems across LLMs, cloud, code-hosting, observability, ITSM, Kubernetes, secrets, and databases. Follow any link below to configure your first endpoint, or see [docs/providers.md](docs/providers.md) for the full list.
 
 | Category | Providers | Warden does | Status |
 |---|---|---|---|
