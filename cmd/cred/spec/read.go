@@ -25,40 +25,54 @@ func runRead(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	spec, err := c.Sys().GetCredentialSpec(name)
+	sp, err := c.Sys().GetCredentialSpec(name)
 	if err != nil {
 		return fmt.Errorf("error reading credential spec %s: %w", name, err)
 	}
 
-	headers := []string{"Key", "Value"}
-	data := [][]any{
-		{"Name", spec.Name},
-		{"Type", spec.Type},
-		{"Source", spec.Source},
-		{"Min TTL", spec.MinTTL},
-		{"Max TTL", spec.MaxTTL},
+	data := map[string]any{
+		"name":    sp.Name,
+		"type":    sp.Type,
+		"source":  sp.Source,
+		"min_ttl": sp.MinTTL,
+		"max_ttl": sp.MaxTTL,
 	}
-
-	// Add rotation period if configured
-	if spec.RotationPeriod > 0 {
-		data = append(data, []any{"Rotation Period", spec.RotationPeriod})
-	} else {
-		data = append(data, []any{"Rotation Period", "disabled"})
+	if sp.RotationPeriod > 0 {
+		data["rotation_period"] = sp.RotationPeriod.String()
 	}
-
-	if len(spec.Config) > 0 {
-		data = append(data, []any{"Config", ""})
-		// Sort config keys for consistent output
-		keys := make([]string, 0, len(spec.Config))
-		for key := range spec.Config {
-			keys = append(keys, key)
+	if len(sp.Config) > 0 {
+		cfg := make(map[string]any, len(sp.Config))
+		for k, v := range sp.Config {
+			cfg[k] = v
 		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			data = append(data, []any{fmt.Sprintf("  %s", key), spec.Config[key]})
-		}
+		data["config"] = cfg
 	}
 
-	helpers.PrintTable(headers, data)
-	return nil
+	return helpers.RenderMap(data, func() {
+		headers := []string{"Key", "Value"}
+		rows := [][]any{
+			{"Name", sp.Name},
+			{"Type", sp.Type},
+			{"Source", sp.Source},
+			{"Min TTL", sp.MinTTL},
+			{"Max TTL", sp.MaxTTL},
+		}
+		if sp.RotationPeriod > 0 {
+			rows = append(rows, []any{"Rotation Period", sp.RotationPeriod})
+		} else {
+			rows = append(rows, []any{"Rotation Period", "disabled"})
+		}
+		if len(sp.Config) > 0 {
+			rows = append(rows, []any{"Config", ""})
+			keys := make([]string, 0, len(sp.Config))
+			for k := range sp.Config {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				rows = append(rows, []any{fmt.Sprintf("  %s", k), sp.Config[k]})
+			}
+		}
+		helpers.PrintTable(headers, rows)
+	})
 }

@@ -2,7 +2,6 @@ package basic
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -45,14 +44,10 @@ Usage: warden delete PATH [flags]
 		RunE: runDelete,
 	}
 
-	// Output format flag for delete
-	deleteOutputFormat string
-	// Force flag to skip confirmation
 	deleteForce bool
 )
 
 func init() {
-	DeleteCmd.Flags().StringVarP(&deleteOutputFormat, "format", "", "table", "Output format: table, json")
 	DeleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Skip confirmation prompt")
 }
 
@@ -87,38 +82,17 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to delete %s: %w", path, err)
 	}
 
-	// Handle response
 	if resource == nil || resource.Data == nil {
-		fmt.Printf("Successfully deleted: %s\n", path)
-		return nil
+		return helpers.RenderMap(map[string]any{"path": path, "deleted": true}, func() {
+			fmt.Printf("Successfully deleted: %s\n", path)
+		})
 	}
 
-	switch deleteOutputFormat {
-	case "json":
-		return outputDeleteJSON(resource.Data)
-	case "table":
-		// Check if there's a message in the response
+	return helpers.RenderMap(resource.Data, func() {
 		if msg, ok := resource.Data["message"]; ok {
 			fmt.Println(msg)
-		} else {
-			helpers.PrintMapAsTable(resource.Data)
+			return
 		}
-		return nil
-	default:
-		return fmt.Errorf("unknown output format: %s", deleteOutputFormat)
-	}
-}
-
-func outputDeleteJSON(data map[string]any) error {
-	output, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal response: %w", err)
-	}
-	fmt.Println(string(output))
-	return nil
-}
-
-// PrintSuccessMessage prints a simple success message to stdout
-func PrintSuccessMessage(path string) {
-	fmt.Fprintf(os.Stdout, "Success! Deleted: %s\n", path)
+		helpers.PrintMapAsTable(resource.Data)
+	})
 }

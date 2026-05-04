@@ -1,7 +1,6 @@
 package basic
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 
@@ -9,13 +8,12 @@ import (
 	"github.com/stephnangue/warden/cmd/helpers"
 )
 
-var (
-	ReadCmd = &cobra.Command{
-		Use:           "read",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		Short:         "Read data from a path",
-		Long: `
+var ReadCmd = &cobra.Command{
+	Use:           "read",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	Short:         "Read data from a path",
+	Long: `
 Usage: warden read PATH
 
   Read data from the given path. The path should be in the format
@@ -35,29 +33,23 @@ Usage: warden read PATH
     Read system mounts:
 
       $ warden read sys/mounts
+
+    Project specific fields:
+
+      $ warden read aws/config --fields proxy_domains,timeout
 `,
-		Args: cobra.ExactArgs(1),
-		RunE: runRead,
-	}
-
-	// Output format flag
-	outputFormat string
-)
-
-func init() {
-	ReadCmd.Flags().StringVarP(&outputFormat, "format", "f", "table", "Output format: table, json")
+	Args: cobra.ExactArgs(1),
+	RunE: runRead,
 }
 
 func runRead(cmd *cobra.Command, args []string) error {
 	path := args[0]
 
-	// Create the client
 	c, err := helpers.Client()
 	if err != nil {
 		return err
 	}
 
-	// Read from the path
 	resource, err := c.Operator().Read(path)
 	if err != nil {
 		return fmt.Errorf("failed to read from %s: %w", path, err)
@@ -68,22 +60,7 @@ func runRead(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	switch outputFormat {
-	case "json":
-		return outputJSON(resource.Data)
-	case "table":
+	return helpers.RenderMap(resource.Data, func() {
 		helpers.PrintMapAsTable(resource.Data)
-		return nil
-	default:
-		return fmt.Errorf("unknown output format: %s", outputFormat)
-	}
-}
-
-func outputJSON(data map[string]any) error {
-	output, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal response: %w", err)
-	}
-	fmt.Println(string(output))
-	return nil
+	})
 }

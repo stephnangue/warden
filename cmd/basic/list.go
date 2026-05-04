@@ -1,7 +1,6 @@
 package basic
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 
@@ -9,13 +8,12 @@ import (
 	"github.com/stephnangue/warden/cmd/helpers"
 )
 
-var (
-	ListCmd = &cobra.Command{
-		Use:           "list",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		Short:         "List data from a path",
-		Long: `
+var ListCmd = &cobra.Command{
+	Use:           "list",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	Short:         "List data from a path",
+	Long: `
 Usage: warden list PATH
 
   List data from the given path. The path should be in the format
@@ -36,28 +34,18 @@ Usage: warden list PATH
 
       $ warden list sys/namespaces
 `,
-		Args: cobra.ExactArgs(1),
-		RunE: runList,
-	}
-
-	// Output format flag for list
-	listOutputFormat string
-)
-
-func init() {
-	ListCmd.Flags().StringVarP(&listOutputFormat, "format", "f", "table", "Output format: table, json")
+	Args: cobra.ExactArgs(1),
+	RunE: runList,
 }
 
 func runList(cmd *cobra.Command, args []string) error {
 	path := args[0]
 
-	// Create the client
 	c, err := helpers.Client()
 	if err != nil {
 		return err
 	}
 
-	// List from the path
 	resource, err := c.Operator().List(path)
 	if err != nil {
 		return fmt.Errorf("failed to list from %s: %w", path, err)
@@ -68,65 +56,42 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	switch listOutputFormat {
-	case "json":
-		return outputListJSON(resource.Data)
-	case "table":
-		printKeys(resource.Data)
+	keys := extractKeys(resource.Data)
+
+	// Table mode keeps the existing "Keys\n  key1\n  key2" layout. Other
+	// formats render via the shared helper, which honors --fields.
+	if helpers.ResolveFormat() == helpers.FormatTable {
+		printKeys(keys)
 		return nil
-	default:
-		return fmt.Errorf("unknown output format: %s", listOutputFormat)
 	}
+	return helpers.RenderMap(resource.Data, nil)
 }
 
-func outputListJSON(data map[string]any) error {
-	output, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal response: %w", err)
+func extractKeys(data map[string]any) []string {
+	raw, ok := data["keys"]
+	if !ok || raw == nil {
+		return nil
 	}
-	fmt.Println(string(output))
+	switch v := raw.(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			out = append(out, fmt.Sprintf("%v", item))
+		}
+		return out
+	}
 	return nil
 }
 
-// printKeys prints the keys in the format:
-//
-//	Keys
-//	  key1
-//	  key2
-func printKeys(data map[string]any) {
-	keys, ok := data["keys"]
-	if !ok {
+func printKeys(keys []string) {
+	if len(keys) == 0 {
 		fmt.Println("No keys found")
 		return
 	}
-
-	// Check for nil keys
-	if keys == nil {
-		fmt.Println("No keys found")
-		return
-	}
-
-	// Handle both []string and []interface{} types
-	switch v := keys.(type) {
-	case []string:
-		if len(v) == 0 {
-			fmt.Println("No keys found")
-			return
-		}
-		fmt.Println("Keys")
-		for _, key := range v {
-			fmt.Printf("  %s\n", key)
-		}
-	case []interface{}:
-		if len(v) == 0 {
-			fmt.Println("No keys found")
-			return
-		}
-		fmt.Println("Keys")
-		for _, key := range v {
-			fmt.Printf("  %v\n", key)
-		}
-	default:
-		fmt.Println("No keys found")
+	fmt.Println("Keys")
+	for _, key := range keys {
+		fmt.Printf("  %s\n", key)
 	}
 }

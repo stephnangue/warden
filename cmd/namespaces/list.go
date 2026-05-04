@@ -10,7 +10,6 @@ import (
 var (
 	listRecursive     bool
 	listIncludeParent bool
-	listFormat        string
 
 	ListCmd = &cobra.Command{
 		Use:           "list",
@@ -35,9 +34,9 @@ Usage: warden namespace list [options]
 
       $ warden namespace list --include-parent
 
-  List namespaces in table format:
+  Output as JSON:
 
-      $ warden namespace list --format=table
+      $ warden namespace list -o json
 
   For more information about namespaces, please see the documentation.
 `,
@@ -48,49 +47,52 @@ Usage: warden namespace list [options]
 func init() {
 	ListCmd.Flags().BoolVarP(&listRecursive, "recursive", "R", false, "Recursively list all descendant namespaces")
 	ListCmd.Flags().BoolVar(&listIncludeParent, "include-parent", false, "Include the parent namespace in the result")
-	ListCmd.Flags().StringVar(&listFormat, "format", "table", "Output format (table or json)")
 }
 
 func runList(cmd *cobra.Command, args []string) error {
-	// Create the client
 	c, err := helpers.Client()
 	if err != nil {
 		return err
 	}
 
-	// List namespaces
 	namespaces, err := c.Sys().ListNamespaces(listRecursive, listIncludeParent)
 	if err != nil {
 		return fmt.Errorf("error listing namespaces: %w", err)
 	}
 
 	if len(namespaces) == 0 {
-		fmt.Println("No namespaces found.")
-		return nil
+		return helpers.RenderList(nil, func() {
+			fmt.Println("No namespaces found.")
+		})
 	}
 
-	// Display results based on format
-	if listFormat == "json" {
-		// TODO: Implement JSON output
-		fmt.Println("JSON output not yet implemented")
-		return nil
-	}
-
-	// Table format
-	fmt.Printf("Found %d namespace(s):\n\n", len(namespaces))
-
-	// Build table data
-	headers := []string{"Path", "ID", "Metadata"}
-	data := make([][]any, 0, len(namespaces))
-
+	items := make([]map[string]any, 0, len(namespaces))
 	for _, ns := range namespaces {
-		metadata := ""
-		if len(ns.CustomMetadata) > 0 {
-			metadata = fmt.Sprintf("%d key(s)", len(ns.CustomMetadata))
+		item := map[string]any{
+			"path": ns.Path,
+			"id":   ns.ID,
 		}
-		data = append(data, []any{ns.Path, ns.ID, metadata})
+		if len(ns.CustomMetadata) > 0 {
+			meta := make(map[string]any, len(ns.CustomMetadata))
+			for k, v := range ns.CustomMetadata {
+				meta[k] = v
+			}
+			item["custom_metadata"] = meta
+		}
+		items = append(items, item)
 	}
 
-	helpers.PrintTable(headers, data)
-	return nil
+	return helpers.RenderList(items, func() {
+		fmt.Printf("Found %d namespace(s):\n\n", len(namespaces))
+		headers := []string{"Path", "ID", "Metadata"}
+		data := make([][]any, 0, len(namespaces))
+		for _, ns := range namespaces {
+			metadata := ""
+			if len(ns.CustomMetadata) > 0 {
+				metadata = fmt.Sprintf("%d key(s)", len(ns.CustomMetadata))
+			}
+			data = append(data, []any{ns.Path, ns.ID, metadata})
+		}
+		helpers.PrintTable(headers, data)
+	})
 }

@@ -30,13 +30,11 @@ Usage: warden policy read <name>
 func runRead(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
-	// Create the client
 	c, err := helpers.Client()
 	if err != nil {
 		return err
 	}
 
-	// Read the policy
 	policy, err := c.Sys().GetPolicy(name)
 	if err != nil {
 		return fmt.Errorf("error reading policy: %w", err)
@@ -46,8 +44,12 @@ func runRead(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("policy not found: %s", name)
 	}
 
-	// Print the policy content
-	fmt.Println(policy.Policy)
+	data := map[string]any{
+		"name":   name,
+		"policy": policy.Policy,
+	}
 
-	return nil
+	return helpers.RenderMap(data, func() {
+		fmt.Println(policy.Policy)
+	})
 }

@@ -7,20 +7,12 @@ import (
 	"github.com/stephnangue/warden/cmd/helpers"
 )
 
-var (
-	listFormat string
-
-	ListCmd = &cobra.Command{
-		Use:           "list",
-		Short:         "List all credential sources",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		RunE:          runList,
-	}
-)
-
-func init() {
-	ListCmd.Flags().StringVar(&listFormat, "format", "table", "Output format (table or json)")
+var ListCmd = &cobra.Command{
+	Use:           "list",
+	Short:         "List all credential sources",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runList,
 }
 
 func runList(cmd *cobra.Command, args []string) error {
@@ -35,20 +27,25 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(sources) == 0 {
-		fmt.Println("No credential sources found.")
-		return nil
-	}
-
-	headers := []string{"Name", "Type"}
-	data := make([][]any, 0, len(sources))
-
-	for _, source := range sources {
-		data = append(data, []any{
-			source.Name,
-			source.Type,
+		return helpers.RenderList(nil, func() {
+			fmt.Println("No credential sources found.")
 		})
 	}
 
-	helpers.PrintTable(headers, data)
-	return nil
+	items := make([]map[string]any, 0, len(sources))
+	for _, s := range sources {
+		items = append(items, map[string]any{
+			"name": s.Name,
+			"type": s.Type,
+		})
+	}
+
+	return helpers.RenderList(items, func() {
+		headers := []string{"Name", "Type"}
+		data := make([][]any, 0, len(items))
+		for _, m := range items {
+			data = append(data, []any{m["name"], m["type"]})
+		}
+		helpers.PrintTable(headers, data)
+	})
 }

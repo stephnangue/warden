@@ -28,27 +28,26 @@ Usage: warden policy list
 }
 
 func runList(cmd *cobra.Command, args []string) error {
-	// Create the client
 	c, err := helpers.Client()
 	if err != nil {
 		return err
 	}
 
-	// List policies
 	policies, err := c.Sys().ListPolicies()
 	if err != nil {
 		return fmt.Errorf("error listing policies: %w", err)
 	}
 
 	if len(policies) == 0 {
-		fmt.Println("No policies found")
-		return nil
+		return helpers.RenderStrings(nil, func() {
+			fmt.Println("No policies found")
+		})
 	}
 
-	fmt.Println("Policies")
-	for _, policy := range policies {
-		fmt.Printf("  %s\n", policy)
-	}
-
-	return nil
+	return helpers.RenderStrings(policies, func() {
+		fmt.Println("Policies")
+		for _, policy := range policies {
+			fmt.Printf("  %s\n", policy)
+		}
+	})
 }

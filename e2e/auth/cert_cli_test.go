@@ -125,7 +125,7 @@ func TestCLI_TransparentOps_PrivilegeEscalation(t *testing.T) {
 
 	// Step 1: Read cert auth config — no --role needed (default_role=reader)
 	out, err := h.WardenCLIWithPort(t, port, env,
-		"read", "-f", "json", "auth/cert/config")
+		"-o", "json", "read", "auth/cert/config")
 	if err != nil {
 		t.Fatalf("Step 1: read auth/cert/config failed: %v\noutput: %s", err, out)
 	}
@@ -135,18 +135,18 @@ func TestCLI_TransparentOps_PrivilegeEscalation(t *testing.T) {
 
 	// Step 2: Create a policy with --role=admin (escalate to write access)
 	out, err = h.WardenCLIWithPort(t, port, env,
-		"--role", "admin", "write", "sys/policies/cbp/e2e-test-created",
+		"-o", "json", "--role", "admin", "write", "sys/policies/cbp/e2e-test-created",
 		`policy=path "sys/health" { capabilities = ["read"] }`)
 	if err != nil {
 		t.Fatalf("Step 2: write policy with --role=admin failed: %v\noutput: %s", err, out)
 	}
-	if !strings.Contains(out, "Success") {
-		t.Fatalf("Step 2: expected success message, got: %s", out)
+	if !strings.Contains(out, `"written": true`) {
+		t.Fatalf("Step 2: expected success envelope with \"written\": true, got: %s", out)
 	}
 
 	// Step 3: Read back the created policy — default reader role
 	out, err = h.WardenCLIWithPort(t, port, env,
-		"read", "-f", "json", "sys/policies/cbp/e2e-test-created")
+		"-o", "json", "read", "sys/policies/cbp/e2e-test-created")
 	if err != nil {
 		t.Fatalf("Step 3: read back policy failed: %v\noutput: %s", err, out)
 	}
@@ -156,7 +156,7 @@ func TestCLI_TransparentOps_PrivilegeEscalation(t *testing.T) {
 
 	// Step 4: Verify default reader role cannot write
 	_, err = h.WardenCLIWithPort(t, port, env,
-		"write", "sys/policies/cbp/e2e-test-forbidden",
+		"-o", "json", "write", "sys/policies/cbp/e2e-test-forbidden",
 		`policy=path "sys/health" { capabilities = ["read"] }`)
 	if err == nil {
 		t.Fatal("Step 4: expected write with default reader role to fail, but it succeeded")

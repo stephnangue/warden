@@ -2,6 +2,19 @@
 
 All notable changes to Warden are documented in this file.
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **`--format` / `-f` flag removed from CLI commands.** Replaced by a global persistent `--output` / `-o` flag on the root command, accepting `table`, `json`, `ndjson`, or `text`. The output format now also autodetects: `table` when stdout is a TTY, `json` when piped or redirected, so `warden read aws/config | jq` works without any flag. Also honors `WARDEN_OUTPUT`. Affected commands: `read`, `list`, `delete`, `namespace list`, `namespace read`, `cred source list`, `cred spec list`. Note: the `--format` flag on `audit enable` is unrelated (it configures the audit device's log format) and is unchanged.
+
+- **CLI success/empty messages are structured in non-table output modes.** Scripts running in a non-TTY context (which now autodetects to `json`) previously saw plain-text strings on stdout — `Success! Data written to: <path>` after `warden write`, `Successfully deleted: <path>` after `warden delete`, `No providers enabled` (etc.) after empty list commands. These are now JSON envelopes: `{"path": "<path>", "written": true}` for write, `{"path": "<path>", "deleted": true}` for delete, `[]` for empty lists. Scripts that grep for the human strings need to update; agents that parse JSON were already broken by the human strings and now work correctly. Pass `-o table` to keep the human messages.
+
+### New Features
+
+- **Global `--output` / `-o` flag with TTY autodetect.** A single persistent flag controls output format for every command. Defaults to `table` on a terminal and `json` when piped, so agents and scripts get machine-readable output without configuration. Supports `table`, `json`, `ndjson`, and `text` (single-line `key=value`).
+- **Global `--fields` / `-F` flag for context-window discipline.** Comma-separated dot-paths project structured output to only the requested fields — for example `warden read sys/policies/admin --fields name,rules.*.path`. Path syntax: dot for nesting, `*` for "every key/element at this level." Missing paths are silently omitted. Honors `WARDEN_FIELDS`. Useful for keeping AI agent context windows small.
+
 ## [v0.11.0] — 2026-04-20
 
 ### New Features

@@ -8,13 +8,12 @@ import (
 	"github.com/stephnangue/warden/cmd/helpers"
 )
 
-var (
-	ReadCmd = &cobra.Command{
-		Use:           "read PATH",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		Short:         "Show information on an audit device",
-		Long: `
+var ReadCmd = &cobra.Command{
+	Use:           "read PATH",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	Short:         "Show information on an audit device",
+	Long: `
 Usage: warden audit read PATH
 
   Show information on an audit device enabled on the provided PATH.
@@ -23,10 +22,9 @@ Usage: warden audit read PATH
 
       $ warden audit read file/
 `,
-		Args: cobra.ExactArgs(1),
-		RunE: runRead,
-	}
-)
+	Args: cobra.ExactArgs(1),
+	RunE: runRead,
+}
 
 func runRead(cmd *cobra.Command, args []string) error {
 	c, err := helpers.Client()
@@ -36,34 +34,43 @@ func runRead(cmd *cobra.Command, args []string) error {
 
 	path := args[0]
 
-	// Get audit device info for the specified path
 	auditInfo, err := c.Sys().AuditInfo(path)
 	if err != nil {
 		return fmt.Errorf("error reading audit device at path %s: %w", path, err)
 	}
 
-	// Display audit device information
-	headers := []string{"Key", "Value"}
-	data := [][]any{
-		{"path", path},
-		{"type", auditInfo.Type},
-		{"accessor", auditInfo.Accessor},
-		{"description", auditInfo.Description},
+	data := map[string]any{
+		"path":        path,
+		"type":        auditInfo.Type,
+		"accessor":    auditInfo.Accessor,
+		"description": auditInfo.Description,
 	}
-
-	// Add config entries if present (sorted for consistent output)
 	if len(auditInfo.Config) > 0 {
-		keys := make([]string, 0, len(auditInfo.Config))
-		for key := range auditInfo.Config {
-			keys = append(keys, key)
+		cfg := make(map[string]any, len(auditInfo.Config))
+		for k, v := range auditInfo.Config {
+			cfg[k] = v
 		}
-		sort.Strings(keys)
-
-		for _, key := range keys {
-			data = append(data, []any{fmt.Sprintf("config.%s", key), auditInfo.Config[key]})
-		}
+		data["config"] = cfg
 	}
 
-	helpers.PrintTable(headers, data)
-	return nil
+	return helpers.RenderMap(data, func() {
+		headers := []string{"Key", "Value"}
+		rows := [][]any{
+			{"path", path},
+			{"type", auditInfo.Type},
+			{"accessor", auditInfo.Accessor},
+			{"description", auditInfo.Description},
+		}
+		if len(auditInfo.Config) > 0 {
+			keys := make([]string, 0, len(auditInfo.Config))
+			for k := range auditInfo.Config {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				rows = append(rows, []any{fmt.Sprintf("config.%s", k), auditInfo.Config[k]})
+			}
+		}
+		helpers.PrintTable(headers, rows)
+	})
 }

@@ -25,43 +25,58 @@ func runRead(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	source, err := c.Sys().GetCredentialSource(name)
+	src, err := c.Sys().GetCredentialSource(name)
 	if err != nil {
 		return fmt.Errorf("error reading credential source %s: %w", name, err)
 	}
 
-	headers := []string{"Key", "Value"}
-	data := [][]any{
-		{"Name", source.Name},
-		{"Type", source.Type},
+	data := map[string]any{
+		"name": src.Name,
+		"type": src.Type,
 	}
-
-	if source.RotationPeriod > 0 {
-		data = append(data, []any{"Rotation Period", source.RotationPeriod.String()})
+	if src.RotationPeriod > 0 {
+		data["rotation_period"] = src.RotationPeriod.String()
 	}
-	if source.NextRotation != "" {
-		data = append(data, []any{"Next Rotation", source.NextRotation})
+	if src.NextRotation != "" {
+		data["next_rotation"] = src.NextRotation
 	}
-	if source.LastRotation != "" {
-		data = append(data, []any{"Last Rotation", source.LastRotation})
+	if src.LastRotation != "" {
+		data["last_rotation"] = src.LastRotation
 	}
-
-	if len(source.Config) > 0 {
-		data = append(data, []any{"Configuration", ""})
-
-		// Sort config keys alphabetically
-		keys := make([]string, 0, len(source.Config))
-		for key := range source.Config {
-			keys = append(keys, key)
+	if len(src.Config) > 0 {
+		cfg := make(map[string]any, len(src.Config))
+		for k, v := range src.Config {
+			cfg[k] = v
 		}
-		sort.Strings(keys)
-
-		for _, key := range keys {
-			// Server already masks sensitive values
-			data = append(data, []any{fmt.Sprintf("  %s", key), source.Config[key]})
-		}
+		data["config"] = cfg
 	}
 
-	helpers.PrintTable(headers, data)
-	return nil
+	return helpers.RenderMap(data, func() {
+		headers := []string{"Key", "Value"}
+		rows := [][]any{
+			{"Name", src.Name},
+			{"Type", src.Type},
+		}
+		if src.RotationPeriod > 0 {
+			rows = append(rows, []any{"Rotation Period", src.RotationPeriod.String()})
+		}
+		if src.NextRotation != "" {
+			rows = append(rows, []any{"Next Rotation", src.NextRotation})
+		}
+		if src.LastRotation != "" {
+			rows = append(rows, []any{"Last Rotation", src.LastRotation})
+		}
+		if len(src.Config) > 0 {
+			rows = append(rows, []any{"Configuration", ""})
+			keys := make([]string, 0, len(src.Config))
+			for k := range src.Config {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				rows = append(rows, []any{fmt.Sprintf("  %s", k), src.Config[k]})
+			}
+		}
+		helpers.PrintTable(headers, rows)
+	})
 }

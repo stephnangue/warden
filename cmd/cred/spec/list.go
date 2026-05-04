@@ -7,20 +7,12 @@ import (
 	"github.com/stephnangue/warden/cmd/helpers"
 )
 
-var (
-	listFormat string
-
-	ListCmd = &cobra.Command{
-		Use:           "list",
-		Short:         "List all credential specifications",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		RunE:          runList,
-	}
-)
-
-func init() {
-	ListCmd.Flags().StringVar(&listFormat, "format", "table", "Output format (table or json)")
+var ListCmd = &cobra.Command{
+	Use:           "list",
+	Short:         "List all credential specifications",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runList,
 }
 
 func runList(cmd *cobra.Command, args []string) error {
@@ -35,28 +27,36 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(specs) == 0 {
-		fmt.Println("No credential specs found.")
-		return nil
-	}
-
-	headers := []string{"Name", "Type", "Source", "Min TTL", "Max TTL", "Rotation Period"}
-	data := make([][]any, 0, len(specs))
-
-	for _, spec := range specs {
-		rotationPeriod := any("disabled")
-		if spec.RotationPeriod > 0 {
-			rotationPeriod = spec.RotationPeriod
-		}
-		data = append(data, []any{
-			spec.Name,
-			spec.Type,
-			spec.Source,
-			spec.MinTTL,
-			spec.MaxTTL,
-			rotationPeriod,
+		return helpers.RenderList(nil, func() {
+			fmt.Println("No credential specs found.")
 		})
 	}
 
-	helpers.PrintTable(headers, data)
-	return nil
+	items := make([]map[string]any, 0, len(specs))
+	for _, s := range specs {
+		item := map[string]any{
+			"name":    s.Name,
+			"type":    s.Type,
+			"source":  s.Source,
+			"min_ttl": s.MinTTL,
+			"max_ttl": s.MaxTTL,
+		}
+		if s.RotationPeriod > 0 {
+			item["rotation_period"] = s.RotationPeriod.String()
+		}
+		items = append(items, item)
+	}
+
+	return helpers.RenderList(items, func() {
+		headers := []string{"Name", "Type", "Source", "Min TTL", "Max TTL", "Rotation Period"}
+		data := make([][]any, 0, len(specs))
+		for _, s := range specs {
+			rotationPeriod := any("disabled")
+			if s.RotationPeriod > 0 {
+				rotationPeriod = s.RotationPeriod
+			}
+			data = append(data, []any{s.Name, s.Type, s.Source, s.MinTTL, s.MaxTTL, rotationPeriod})
+		}
+		helpers.PrintTable(headers, data)
+	})
 }
