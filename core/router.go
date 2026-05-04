@@ -11,6 +11,7 @@ import (
 	"github.com/armon/go-radix"
 	"github.com/openbao/openbao/sdk/v2/helper/salt"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -857,6 +858,46 @@ func pathsToRadix(paths []string) *radix.Tree {
 	}
 
 	return tree
+}
+
+// WalkFrameworkBackends invokes fn for every framework-based mount in the
+// caller's namespace (derived from ctx), passing the namespace-relative mount
+// prefix and the *framework.Backend. Backends that don't implement
+// framework.Backend (audit devices, custom implementations) are skipped.
+// Stop walking by returning false.
+//
+// Used by the sys/schema handler to assemble a namespace-scoped OpenAPI doc:
+// a tenant in namespace `team-a/` only sees their own mounts, not other
+// tenants'.
+//
+// The callback runs while the router's read lock is held. Callers must keep
+// the callback fast and non-blocking (no I/O, no router mutations, no
+// acquiring this lock again) or risk stalling all routing on this server.
+func (r *Router) WalkFrameworkBackends(ctx context.Context, fn func(prefix string, b *framework.Backend) bool) error {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	r.root.WalkPrefix(ns.Path, func(fullPrefix string, value any) bool {
+		re, ok := value.(*routeEntry)
+		if !ok || re == nil {
+			return false
+		}
+		fb, ok := re.backend.(*framework.Backend)
+		if !ok {
+			return false
+		}
+		// Strip the namespace path so callers see the mount prefix relative
+		// to the namespace, matching how the API addresses the mount.
+		relPrefix := strings.TrimPrefix(fullPrefix, ns.Path)
+		// Walk callback returns true to STOP; our fn returns true to CONTINUE.
+		return !fn(relPrefix, fb)
+	})
+	return nil
 }
 
 func wildcardError(path, msg string) error {

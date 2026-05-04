@@ -12,6 +12,7 @@ All notable changes to Warden are documented in this file.
 
 ### New Features
 
+- **Server-side OpenAPI 3.0 schema endpoint** at `GET /v1/sys/schema` and the Vault-compatible alias `GET /v1/sys/internal/specs/openapi`. Returns a namespace-scoped OpenAPI document covering the system backend (`sys/*`) plus every framework-based mount reachable in the caller's namespace, so a tenant cannot enumerate another tenant's backends. Pass `?path=<path>` to project to a single operation. Implementation ports OpenBao's SDK OpenAPI generator into warden's framework fork (adapted to warden's local `logical.BackendClass`/`Operation`/`Response` types) and restores OAS-doc bundling in `handleRootHelp` so per-mount `?warden-help=1` returns the document directly. New `framework.DocumentPathsWithMountPrefix` prepends the mount prefix to path keys when assembling a server-wide doc, and a new `Router.WalkFrameworkBackends(ctx, fn)` walks the namespace's mounts.
 - **Input hardening at the CLI boundary.** Three validators in `cmd/helpers/path.go` reject malformed inputs before any HTTP call, with errors classified as exit code `3` (`invalid_input`):
   - `ValidatePath` — every path/name positional arg across all read/list/write/delete and typed mutating commands. Rejects traversal (`..`), absolute paths, control bytes, `?`/`#`, and `%` percent-encoding.
   - `ValidateHeaderValue` — `--namespace` and `--role`. Rejects CR/LF (header injection) and control bytes.

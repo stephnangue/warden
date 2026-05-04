@@ -368,10 +368,23 @@ func (b *Backend) handleRootHelp(req *logical.Request) (*logical.Response, error
 		return nil, err
 	}
 
+	data := map[string]interface{}{
+		"help": help,
+	}
+
+	// Bundle the OpenAPI document for this backend so an agent can fetch the
+	// schema with `?warden-help=1`. Generation failure is logged but does not
+	// fail the request — the partial doc plus the human help text is still
+	// useful on its own. handleRootHelp only runs after Setup, so b.logger is
+	// always initialized here.
+	doc := NewOASDocument("")
+	if err := DocumentPaths(b, "", doc); err != nil {
+		b.logger.Warn("error generating OpenAPI document for help response", logger.Err(err))
+	}
+	data["openapi"] = doc
+
 	return &logical.Response{
-		Data: map[string]interface{}{
-			"help": help,
-		},
+		Data: data,
 	}, nil
 }
 
