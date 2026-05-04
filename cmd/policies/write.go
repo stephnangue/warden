@@ -65,7 +65,7 @@ func runWrite(cmd *cobra.Command, args []string) error {
 	}
 
 	if policyContent == "" {
-		return fmt.Errorf("policy content cannot be empty")
+		return fmt.Errorf("policy content cannot be empty: %w", helpers.ErrInvalidInput)
 	}
 
 	// Create the client
@@ -80,6 +80,7 @@ func runWrite(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error writing policy: %w", err)
 	}
 
-	fmt.Printf("Success! Uploaded policy: %s\n", name)
-	return nil
+	return helpers.RenderMap(map[string]any{"name": name, "written": true}, func() {
+		fmt.Printf("Success! Uploaded policy: %s\n", name)
+	})
 }

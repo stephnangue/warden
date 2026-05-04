@@ -80,6 +80,7 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error enabling provider: %w", err)
 	}
 
-	fmt.Printf("Success! Enabled %s provider at: %s\n", enableType, path)
-	return nil
+	return helpers.RenderMap(map[string]any{"path": path, "type": enableType, "enabled": true}, func() {
+		fmt.Printf("Success! Enabled %s provider at: %s\n", enableType, path)
+	})
 }

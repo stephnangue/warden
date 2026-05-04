@@ -50,10 +50,6 @@ Usage: warden write PATH [DATA]
 )
 
 func runWrite(cmd *cobra.Command, args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("path argument is required")
-	}
-
 	path := args[0]
 
 	// Create the client
@@ -89,7 +85,7 @@ func runWrite(cmd *cobra.Command, args []string) error {
 			for _, arg := range args[1:] {
 				parts := strings.SplitN(arg, "=", 2)
 				if len(parts) != 2 {
-					return fmt.Errorf("invalid key=value format: %s", arg)
+					return fmt.Errorf("invalid key=value format %q: %w", arg, helpers.ErrInvalidInput)
 				}
 				key := parts[0]
 				value := parts[1]

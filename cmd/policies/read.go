@@ -41,7 +41,7 @@ func runRead(cmd *cobra.Command, args []string) error {
 	}
 
 	if policy == nil {
-		return fmt.Errorf("policy not found: %s", name)
+		return fmt.Errorf("policy %q not found: %w", name, helpers.ErrNotFound)
 	}
 
 	data := map[string]any{

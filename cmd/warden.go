@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -29,6 +28,10 @@ var (
 		Long: `Warden eliminates cloud credentials and enforces Zero Trust for every cloud API call.
 It acts as an authorization proxy for humans, machines, and AI, ensuring least privilege,
 safe operations, and complete visibility.`,
+		// Silence Cobra's default error/usage printing so the central renderer
+		// in Execute() is the only thing that writes to stderr on failure.
+		SilenceErrors: true,
+		SilenceUsage:  true,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			if flagNamespace != "" {
 				os.Setenv("WARDEN_NAMESPACE", flagNamespace)
@@ -42,8 +45,7 @@ safe operations, and complete visibility.`,
 
 func Execute() {
 	if err := wardenCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(int(helpers.RenderError(err)))
 	}
 }
 

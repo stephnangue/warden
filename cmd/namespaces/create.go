@@ -68,15 +68,27 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error creating namespace: %w", err)
 	}
 
-	fmt.Printf("Success! Created namespace: %s\n", output.Path)
-	fmt.Printf("Namespace ID: %s\n", output.ID)
-
+	data := map[string]any{
+		"path":    output.Path,
+		"id":      output.ID,
+		"created": true,
+	}
 	if len(output.CustomMetadata) > 0 {
-		fmt.Println("\nMetadata:")
-		for key, value := range output.CustomMetadata {
-			fmt.Printf("  %s = %s\n", key, value)
+		md := make(map[string]any, len(output.CustomMetadata))
+		for k, v := range output.CustomMetadata {
+			md[k] = v
 		}
+		data["custom_metadata"] = md
 	}
 
-	return nil
+	return helpers.RenderMap(data, func() {
+		fmt.Printf("Success! Created namespace: %s\n", output.Path)
+		fmt.Printf("Namespace ID: %s\n", output.ID)
+		if len(output.CustomMetadata) > 0 {
+			fmt.Println("\nMetadata:")
+			for key, value := range output.CustomMetadata {
+				fmt.Printf("  %s = %s\n", key, value)
+			}
+		}
+	})
 }

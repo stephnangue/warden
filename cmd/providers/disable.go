@@ -43,6 +43,7 @@ func runDisable(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error disabling provider at path %s: %w", path, err)
 	}
 
-	fmt.Printf("Success! Disabled provider at: %s\n", path)
-	return nil
+	return helpers.RenderMap(map[string]any{"path": path, "disabled": true}, func() {
+		fmt.Printf("Success! Disabled provider at: %s\n", path)
+	})
 }

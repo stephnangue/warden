@@ -79,6 +79,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error deleting policy: %w", err)
 	}
 
-	fmt.Printf("Success! Deleted policy: %s\n", name)
-	return nil
+	return helpers.RenderMap(map[string]any{"name": name, "deleted": true}, func() {
+		fmt.Printf("Success! Deleted policy: %s\n", name)
+	})
 }

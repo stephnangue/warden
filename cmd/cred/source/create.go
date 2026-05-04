@@ -65,19 +65,33 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error creating credential source: %w", err)
 	}
 
-	fmt.Printf("Success! Created credential source: %s\n", output.Name)
-	fmt.Printf("  Type: %s\n", output.Type)
+	data := map[string]any{
+		"name":    output.Name,
+		"type":    output.Type,
+		"created": true,
+	}
 	if output.RotationPeriod > 0 {
-		fmt.Printf("  Rotation Period: %s\n", output.RotationPeriod)
+		data["rotation_period"] = output.RotationPeriod.String()
 	}
-
 	if len(output.Config) > 0 {
-		fmt.Println("  Configuration:")
-		for key, value := range output.Config {
-			// Server already masks sensitive values
-			fmt.Printf("    %s: %s\n", key, value)
+		cfg := make(map[string]any, len(output.Config))
+		for k, v := range output.Config {
+			cfg[k] = v
 		}
+		data["config"] = cfg
 	}
 
-	return nil
+	return helpers.RenderMap(data, func() {
+		fmt.Printf("Success! Created credential source: %s\n", output.Name)
+		fmt.Printf("  Type: %s\n", output.Type)
+		if output.RotationPeriod > 0 {
+			fmt.Printf("  Rotation Period: %s\n", output.RotationPeriod)
+		}
+		if len(output.Config) > 0 {
+			fmt.Println("  Configuration:")
+			for key, value := range output.Config {
+				fmt.Printf("    %s: %s\n", key, value)
+			}
+		}
+	})
 }
