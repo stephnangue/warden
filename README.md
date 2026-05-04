@@ -29,87 +29,83 @@
 
 # Warden
 
-**The open-source egress gateway for AI agents — every API call is authenticated, authorized, and audited. No credentials ever reach the agent.**
+**The secure gateway connecting AI agents to the enterprise systems they need to do real work.**
+
+Agents discover what they're allowed to access. Warden brokers every connection. Operators get one control plane for identity, policy, and audit — across every cloud, code-host, observability stack, database, and SaaS the agent reaches.
 
 ---
 
-AI agents need to call cloud APIs, read files, query databases, and interact with third-party services. Today, that means embedding API keys, cloud credentials, or database passwords into the agent's environment — where a single prompt injection can exfiltrate them.
+## The enterprise problem
 
-The same credential-exposure problem hits **MCP servers** — each one wraps an external API and holds its credential in process env, one per tool, never rotating.
+Agents are useful only when they reach real systems: cloud accounts, code repositories, observability stacks, databases, ITSM, secrets backends. Today, pointing an agent at production means handing it over-scoped, long-lived credentials, with no per-request policy and no identity-tied audit. Each new system is another credential in the agent's environment, governed by nothing in the request path.
 
-Warden sits at the egress point. Your agent or MCP server authenticates with its identity. Warden enforces your access policy, injects ephemeral credentials, and forwards the request. The caller never sees a secret.
+The control gap, not the credential, is the headline. **MCP servers** make it acute — every server wraps one upstream API and holds one credential in process env, so an agent with a dozen tools has a dozen static secrets scattered across a dozen processes, none of them rotating, none of them governed.
+
+Warden closes the gap by sitting in the path: the agent identifies itself, Warden decides what it can reach, and Warden brokers the connection.
+
+## How Warden works: discover then connect
 
 ```
 ┌──────────────┐                    ┌──────────────┐                     ┌──────────────┐
-│              │      Identity      │              │    Scoped Access    │ AWS, Azure   │
-│   AI Agent   │───────────────────▶│    Warden    │───────────────────▶ │ GitHub, GCP  │
-│  MCP Server  │   no credentials   │              │  real credentials   │ Anthropic    │
-│              │                    │              │                     │ OpenAI, S3   │
-│              │                    │              │                     │ RDS, ...     │
+│              │   1. Discover      │              │                     │              │
+│              │ ─────────────────▶ │              │                     │ AWS, Azure   │
+│   AI Agent   │   what can I do?   │              │                     │ GCP, GitHub  │
+│  MCP Server  │                    │    Warden    │   real credentials  │ Anthropic    │
+│              │   2. Connect       │              │ ──────────────────▶ │ OpenAI, RDS  │
+│              │ ─────────────────▶ │              │                     │ Slack, K8s   │
+│              │   identity only    │              │                     │ ...          │
 └──────────────┘                    └──────────────┘                     └──────────────┘
                                     • Identity ✓
                                     • Policy ✓
                                     • Audit ✓
 ```
 
-## The problem
+**Discover.** The agent presents its identity — a JWT or TLS client certificate — and asks Warden which roles it is permitted to assume. Warden answers with the set of roles open to that exact identity, each with a human-readable description. The agent learns what it can do without anyone shipping a config file or distributing role names out of band.
 
-AI agents are the most credential-exposed workloads in your stack:
+**Connect.** The agent picks a role and points at Warden as if it were the upstream. Warden authenticates the identity, applies the role's policy at request time, and attaches the upstream credential before forwarding — or vends a scoped grant directly, such as a database auth token or a pre-signed URL. The credential belongs to Warden, never to the agent — and is ephemeral wherever the upstream supports it.
 
-- **Prompt injection exfiltration** — an agent with API keys in its environment is one adversarial prompt away from leaking them
-- **Over-scoped access** — agents get broad cloud credentials with no per-request policy on what they can actually call
-- **No audit trail** — when an agent calls an API, there is no record tying that specific request to that specific agent identity
-- **Hardcoded secrets** — agent frameworks and MCP servers require API keys in environment variables or config files. Every MCP server wraps one external API and holds one credential baked into its process env. Static secrets, one per tool, never rotating
-- **Multi-provider sprawl** — an agent calling Anthropic, AWS, and GitHub needs three separate API keys in a single `.env`. An agent with a dozen MCP servers has this at N× — every credential for every tool, scattered across process envs
+## The enterprise control plane
 
-The common thread: **the credential exists in the agent's environment — with more scope than needed, for longer than necessary, and no policy governing its use.**
+What an enterprise gets from putting Warden in the path:
 
-Warden eliminates the credential from the agent entirely. Your agent authenticates with its identity. Warden handles every credential.
-
-## What Warden covers
- 
-| Your client needs | Warden handles |
-|---|---|
-| Call LLM APIs (Anthropic, OpenAI, Mistral...) | Request forwarding, with injected API keys |
-| Call cloud APIs (AWS, GCP, Azure, GitHub, GitLab...) | Request forwarding, with injected ephemeral credentials |
-| Query databases (RDS, Cloud SQL, Redshift, Snowflake...) | Ephemeral database auth tokens — replacing static passwords entirely |
-| Read and write files (S3, GCS, Azure Blob...) | Pre-signed URLs, scoped to exactly one object and operation |
-
-One binary. One policy model. One audit log. Across every API your agent touches.
+- **Discovery** — identity-scoped introspection. Agents learn which systems and roles are open to them; nothing has to be pre-loaded into the agent's environment.
+- **Policy with runtime conditions** — role and path checks plus `source_ip`, `time_window`, and `day_of_week` predicates evaluated at request time.
+- **Identity-bound access** — JWT (including SPIFFE JWT-SVID) or TLS client certificate (including SPIFFE X.509-SVID); same internal session either way.
+- **Audit** — every request tied to the original identity, the role used, and the upstream called.
+- **Credentials never leave Warden** — a prompt-injected agent has nothing to leak; there is no credential in its environment to exfiltrate.
 
 ## Providers
 
-Warden supports 31 providers across LLMs, cloud, observability, secrets, and more. Follow a provider link below to configure your first endpoint, or see [docs/providers.md](docs/providers.md) for the full list.
+33 providers across LLMs, cloud, code-hosting, observability, ITSM, Kubernetes, secrets, and databases. Follow a provider link below to configure your first endpoint, or see [docs/providers.md](docs/providers.md) for the full list.
 
-| Provider | Category | Warden does | Status |
+| Category | Providers | Warden does | Status |
 |---|---|---|---|
-| [Anthropic](provider/anthropic/README.md), [OpenAI](provider/openai/README.md), [Mistral](provider/mistral/README.md), [Cohere](provider/cohere/README.md) | LLM APIs | Injects API key | ✅ |
-| [AWS](provider/aws/README.md), [Azure](provider/azure/README.md), [GCP](provider/gcp/README.md) | Cloud infrastructure | Temporary credentials | ✅ |
-| [GitHub](provider/github/README.md), [GitLab](provider/gitlab/README.md) | Code hosting & CI/CD | Injects App token or PAT | ✅ |
-| [Datadog](provider/datadog/README.md), [Grafana](provider/grafana/README.md), [Prometheus](provider/prometheus/README.md) | Observability | Injects API key / proxies metrics | ✅ |
-| [HashiCorp Vault / OpenBao](provider/vault/README.md) | Secrets backend | Mints short-lived tokens | ✅ |
-| [Kubernetes](provider/kubernetes/README.md) | Infrastructure automation | Injects service account token | ✅ |
-| [AWS RDS / Aurora](provider/rds/README.md) | Database | Issues IAM auth token | 🔜 |
+| LLM APIs | [Anthropic](provider/anthropic/README.md), [OpenAI](provider/openai/README.md), [Mistral](provider/mistral/README.md), [Cohere](provider/cohere/README.md) | Injects API key | ✅ |
+| Cloud infrastructure | [AWS](provider/aws/README.md), [Azure](provider/azure/README.md), [GCP](provider/gcp/README.md), [Alicloud](provider/alicloud/README.md), [IBM Cloud](provider/ibmcloud/README.md), [OVH](provider/ovh/README.md), [Scaleway](provider/scaleway/README.md), [Cloudflare](provider/cloudflare/README.md) | Temporary credentials / Bearer tokens | ✅ |
+| Code hosting & CI/CD | [GitHub](provider/github/README.md), [GitLab](provider/gitlab/README.md), [Atlassian](provider/atlassian/README.md), [Ansible Tower](provider/ansible_tower/README.md), [Terraform Enterprise](provider/tfe/README.md) | Injects App token, PAT, or Bearer token | ✅ |
+| Observability | [Datadog](provider/datadog/README.md), [Dynatrace](provider/dynatrace/README.md), [Elastic](provider/elastic/README.md), [Grafana](provider/grafana/README.md), [Honeycomb](provider/honeycomb/README.md), [New Relic](provider/newrelic/README.md), [Prometheus](provider/prometheus/README.md), [Sentry](provider/sentry/README.md), [Splunk](provider/splunk/README.md) | Injects API key / proxies metrics | ✅ |
+| Incident & ITSM | [PagerDuty](provider/pagerduty/README.md), [ServiceNow](provider/servicenow/README.md), [Slack](provider/slack/README.md) | Injects Bearer token | ✅ |
+| Kubernetes | [Kubernetes](provider/kubernetes/README.md) | Injects service account token | ✅ |
+| Secrets backend | [HashiCorp Vault / OpenBao](provider/vault/README.md) | Mints short-lived tokens | ✅ |
+| Databases | [AWS RDS / Aurora](provider/rds/README.md), [AWS Redshift](provider/redshift/README.md) | Issues IAM database auth token | ✅ |
 
+## Use cases
 
-## Use Cases
+**SRE agents** — incident-response agents reaching Prometheus, Grafana, Kubernetes, and PagerDuty under one policy layer. Warden scopes each call to the agent's identity — query dashboards but not delete them, restart a pod but not modify IAM. Every action during an incident is tied to the agent's identity in the audit log.
 
-**SRE agents** — incident response agents that query Prometheus, read logs from Grafana, restart services, and page on-call need broad infrastructure access. Warden scopes each API call to the agent's identity and policy — the agent can query dashboards but can't delete them, can restart a pod but can't modify IAM roles. Full audit trail of every action taken during an incident.
+**Agentic coding** — code agents that push to GitHub, deploy to AWS, and read from artifact stores all through one identity. Warden enforces which repos they push to, which buckets they read, and logs every action.
 
-**Agentic coding** — code agents that push to GitHub, deploy to AWS, and read from S3 authenticate once with their identity. Warden enforces which repos they can push to, which buckets they can read, and logs every action.
+**RAG pipelines** — retrieval agents reaching production databases and object stores under per-request grants. Warden vends a database auth token or pre-signed URL scoped to the exact query or object the agent needs.
 
-**RAG pipelines** — retrieval agents that query databases and read from object storage get scoped, ephemeral credentials for each request. No database password in the agent's config. No S3 keys in the environment.
+**Multi-model orchestration** — an agent reaching Anthropic for reasoning, OpenAI for embeddings, and Mistral for classification through one identity, one policy layer, and one audit log across all three.
 
-**Multi-model orchestration** — an agent calling Anthropic for reasoning, OpenAI for embeddings, and Mistral for classification has three API keys today. With Warden, it has zero — one identity, one policy layer, one audit log across all providers.
+**MCP servers** — point the MCP server at Warden instead of the upstream API. The MCP server authenticates with its identity, Warden brokers the connection, and the same gateway covers every tool the server exposes — replacing the per-tool-credential-in-env model with one identity and one policy surface.
 
-**MCP servers** — an MCP server that wraps the GitHub API or the AWS SDK holds a credential per tool. Point it at Warden instead: the MCP server authenticates with its identity, Warden injects the credential per request, and a prompt injection in the agent above cannot exfiltrate anything — there is nothing in the MCP process to exfiltrate.
-
-**Autonomous workflows** — long-running agents that operate over hours or days get time-scoped access. Warden issues ephemeral credentials per request — no long-lived tokens that accumulate risk over the lifetime of the workflow.
+**Autonomous workflows** — long-running agents that reach systems over hours or days with time-scoped access. Warden issues credentials per request, so no token outlives the work it was minted for.
 
 Warden also secures non-agent workloads — CI/CD pipelines, microservices, developer machines — with the same identity-based model.
 
-
-## Authentication Methods
+## Authentication methods
 
 Warden supports multiple methods for verifying caller identity.
 
@@ -120,19 +116,20 @@ Warden supports multiple methods for verifying caller identity.
 
 SPIFFE is supported in both methods — JWT-SVIDs via JWT auth and X.509-SVIDs via certificate auth. Both methods produce the same internal session. Once authenticated, the caller interacts with Warden identically regardless of how they proved their identity.
 
-## How clients interact with Warden
+## Tutorial: one identity, three systems, zero credentials
 
-Your agent or MCP server points at Warden's endpoint instead of the provider's and includes its identity token (JWT) in the request — or connects via mTLS. Warden authenticates the caller, checks the access policy, injects ephemeral credentials, and forwards the request to the provider. For databases and storage, Warden returns an access grant (auth token, pre-signed URL) directly. No Warden-specific SDK, no login step — just swap the base URL.
+A walk-through of the discover-then-connect model end to end:
+
+- A Goose AI agent audits OpenBao ACL policies for hygiene — dead-mount references, orphan bindings, duplicates, least-privilege smells.
+- Three egress legs: OpenBao (read), an Anthropic-compatible LLM (reason), Slack (deliver as a channel canvas).
+- One Forgejo OIDC JWT covers all three legs, with three independently scoped Warden policies governing what each leg may do.
+- The agent holds zero credentials.
+
+See [docs/tutorials/vault-policy-hygiene/README.md](docs/tutorials/vault-policy-hygiene/README.md) for the full walk-through.
 
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for Warden's design decisions, high availability model, and deployment configuration.
-
-## Tutorials
-
-End-to-end walkthroughs that combine Warden with real-world workloads:
-
-- [Vault policy hygiene](docs/tutorials/vault-policy-hygiene/README.md) — a Goose AI agent that audits OpenBao ACL policies for hygiene (dead-mount references, orphan bindings, duplicates, least-privilege smells). All three egress legs — OpenBao inspection, Anthropic-compatible inference, and Slack delivery as a channel canvas — flow through Warden, gated by per-job Forgejo OIDC JWTs. The agent holds zero credentials.
 
 ## Contributing
 
