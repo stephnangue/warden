@@ -45,6 +45,9 @@ Usage: warden policy write <name> <policy_file>
 func runWrite(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	policyPath := args[1]
+	if err := helpers.ValidatePath(name); err != nil {
+		return err
+	}
 
 	// Read policy content
 	var policyContent string

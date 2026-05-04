@@ -53,6 +53,9 @@ func init() {
 
 func runDelete(cmd *cobra.Command, args []string) error {
 	path := args[0]
+	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
 
 	// Ask for confirmation unless -y flag is used
 	if !deleteForce {
