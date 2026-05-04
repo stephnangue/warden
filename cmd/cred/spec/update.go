@@ -37,7 +37,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	// Require at least one update parameter
 	if len(updateConfig) == 0 && updateMinTTL == "" && updateMaxTTL == "" && updateRotationPeriod == "" {
-		return fmt.Errorf("no update parameters provided. Use --config, --min-ttl, --max-ttl, or --rotation-period")
+		return fmt.Errorf("no update parameters provided (use --config, --min-ttl, --max-ttl, or --rotation-period): %w", helpers.ErrInvalidInput)
 	}
 
 	c, err := helpers.Client()
@@ -83,6 +83,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error updating credential spec: %w", err)
 	}
 
-	fmt.Printf("Success! Updated credential spec: %s\n", output.Name)
-	return nil
+	return helpers.RenderMap(map[string]any{"name": output.Name, "updated": true}, func() {
+		fmt.Printf("Success! Updated credential spec: %s\n", output.Name)
+	})
 }

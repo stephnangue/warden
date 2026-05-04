@@ -51,6 +51,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error deleting credential source: %w", err)
 	}
 
-	fmt.Printf("Success! Deleted credential source: %s\n", name)
-	return nil
+	return helpers.RenderMap(map[string]any{"name": name, "deleted": true}, func() {
+		fmt.Printf("Success! Deleted credential source: %s\n", name)
+	})
 }

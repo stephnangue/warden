@@ -65,16 +65,29 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error updating namespace: %w", err)
 	}
 
-	fmt.Printf("Success! Updated namespace: %s\n", output.Path)
-
+	data := map[string]any{
+		"path":    output.Path,
+		"updated": true,
+	}
 	if len(output.CustomMetadata) > 0 {
-		fmt.Println("\nUpdated Metadata:")
-		for key, value := range output.CustomMetadata {
-			fmt.Printf("  %s = %s\n", key, value)
+		md := make(map[string]any, len(output.CustomMetadata))
+		for k, v := range output.CustomMetadata {
+			md[k] = v
 		}
+		data["custom_metadata"] = md
 	} else {
-		fmt.Println("\nMetadata cleared")
+		data["custom_metadata"] = map[string]any{}
 	}
 
-	return nil
+	return helpers.RenderMap(data, func() {
+		fmt.Printf("Success! Updated namespace: %s\n", output.Path)
+		if len(output.CustomMetadata) > 0 {
+			fmt.Println("\nUpdated Metadata:")
+			for key, value := range output.CustomMetadata {
+				fmt.Printf("  %s = %s\n", key, value)
+			}
+		} else {
+			fmt.Println("\nMetadata cleared")
+		}
+	})
 }

@@ -85,14 +85,26 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error creating credential spec: %w", err)
 	}
 
-	fmt.Printf("Success! Created credential spec: %s\n", output.Name)
-	fmt.Printf("  Type: %s\n", output.Type)
-	fmt.Printf("  Source: %s\n", output.Source)
-	fmt.Printf("  Min TTL: %s\n", output.MinTTL)
-	fmt.Printf("  Max TTL: %s\n", output.MaxTTL)
+	data := map[string]any{
+		"name":    output.Name,
+		"type":    output.Type,
+		"source":  output.Source,
+		"min_ttl": output.MinTTL.String(),
+		"max_ttl": output.MaxTTL.String(),
+		"created": true,
+	}
 	if output.RotationPeriod > 0 {
-		fmt.Printf("  Rotation Period: %s\n", output.RotationPeriod)
+		data["rotation_period"] = output.RotationPeriod.String()
 	}
 
-	return nil
+	return helpers.RenderMap(data, func() {
+		fmt.Printf("Success! Created credential spec: %s\n", output.Name)
+		fmt.Printf("  Type: %s\n", output.Type)
+		fmt.Printf("  Source: %s\n", output.Source)
+		fmt.Printf("  Min TTL: %s\n", output.MinTTL)
+		fmt.Printf("  Max TTL: %s\n", output.MaxTTL)
+		if output.RotationPeriod > 0 {
+			fmt.Printf("  Rotation Period: %s\n", output.RotationPeriod)
+		}
+	})
 }

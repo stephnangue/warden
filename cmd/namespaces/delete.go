@@ -86,6 +86,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error deleting namespace: %w", err)
 	}
 
-	fmt.Printf("Success! Deleted namespace: %s\n", path)
-	return nil
+	return helpers.RenderMap(map[string]any{"path": path, "deleted": true}, func() {
+		fmt.Printf("Success! Deleted namespace: %s\n", path)
+	})
 }

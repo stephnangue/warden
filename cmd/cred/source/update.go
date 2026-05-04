@@ -48,6 +48,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error updating credential source: %w", err)
 	}
 
-	fmt.Printf("Success! Updated credential source: %s\n", output.Name)
-	return nil
+	return helpers.RenderMap(map[string]any{"name": output.Name, "updated": true}, func() {
+		fmt.Printf("Success! Updated credential source: %s\n", output.Name)
+	})
 }
