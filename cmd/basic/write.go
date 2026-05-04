@@ -122,8 +122,9 @@ func runWrite(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to write to %s: %w", path, err)
 	}
 
-	fmt.Printf("Success! Data written to: %s\n", path)
-	return nil
+	return helpers.RenderMap(map[string]any{"path": path, "written": true}, func() {
+		fmt.Printf("Success! Data written to: %s\n", path)
+	})
 }
 
 // inferType attempts to infer the type of a string value

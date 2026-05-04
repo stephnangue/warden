@@ -9,6 +9,7 @@ import (
 	"github.com/stephnangue/warden/cmd/auth"
 	"github.com/stephnangue/warden/cmd/basic"
 	"github.com/stephnangue/warden/cmd/cred"
+	"github.com/stephnangue/warden/cmd/helpers"
 	"github.com/stephnangue/warden/cmd/login"
 	"github.com/stephnangue/warden/cmd/namespaces"
 	"github.com/stephnangue/warden/cmd/operator"
@@ -49,6 +50,8 @@ func Execute() {
 func init() {
 	wardenCmd.PersistentFlags().StringVarP(&flagNamespace, "namespace", "n", "", "Warden namespace to use for the command (can also use WARDEN_NAMESPACE env var)")
 	wardenCmd.PersistentFlags().StringVarP(&flagRole, "role", "r", "", "Warden role to use for the command (can also use WARDEN_ROLE env var)")
+	wardenCmd.PersistentFlags().StringVarP(helpers.OutputFlagPtr(), "output", "o", "", "Output format: table, json, ndjson, text. Defaults to table on a TTY, json otherwise. Honors WARDEN_OUTPUT.")
+	wardenCmd.PersistentFlags().StringVarP(helpers.FieldsFlagPtr(), "fields", "F", "", "Comma-separated dot-paths to project from structured output (e.g. name,metadata.created_at,tokens.*.id). Honors WARDEN_FIELDS.")
 
 	wardenCmd.AddCommand(server.ServerCmd)
 	wardenCmd.AddCommand(operator.OperatorCmd)
