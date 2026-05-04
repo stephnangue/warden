@@ -72,6 +72,9 @@ func (b *SystemBackend) paths() []*framework.Path {
 	paths = append(paths, b.pathAudit()...)
 	paths = append(paths, b.pathAuditHash()...)
 
+	// OpenAPI / schema endpoint (agent-facing introspection)
+	paths = append(paths, b.pathOpenAPI()...)
+
 	return paths
 }
 

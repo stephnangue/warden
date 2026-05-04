@@ -5,12 +5,188 @@ import (
 	"testing"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// newFrameworkTestBackend constructs a minimal framework.Backend that satisfies
+// logical.Backend, suitable for mounting in router tests.
+func newFrameworkTestBackend(t *testing.T, name string) *framework.Backend {
+	t.Helper()
+	b := &framework.Backend{
+		Help:         "test backend " + name,
+		BackendType:  name,
+		BackendClass: logical.ClassProvider,
+		Paths: []*framework.Path{
+			{
+				Pattern: "config",
+				Operations: map[logical.Operation]framework.OperationHandler{
+					logical.ReadOperation: &framework.PathOperation{
+						Callback: func(_ context.Context, _ *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+							return &logical.Response{}, nil
+						},
+					},
+				},
+			},
+		},
+	}
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	require.NoError(t, b.Setup(context.Background(), &logical.BackendConfig{Logger: log, Config: map[string]any{}}))
+	return b
+}
+
+// TestRouter_WalkFrameworkBackends_FindsMounts asserts the walker yields each
+// framework-based mount in the caller's namespace exactly once and exposes
+// the namespace-relative prefix.
+func TestRouter_WalkFrameworkBackends_FindsMounts(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	awsBackend := newFrameworkTestBackend(t, "aws")
+	azureBackend := newFrameworkTestBackend(t, "azure")
+
+	for _, m := range []struct {
+		prefix  string
+		uuid    string
+		backend logical.Backend
+	}{
+		{"aws/", "aws-uuid", awsBackend},
+		{"azure/", "azure-uuid", azureBackend},
+	} {
+		entry := &MountEntry{
+			Path: m.prefix, Type: "mock", Class: mountClassProvider,
+			UUID: m.uuid, Accessor: "mock_" + m.uuid,
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		}
+		view := &mockBarrierView{prefix: "provider/" + m.uuid + "/"}
+		require.NoError(t, router.Mount(m.prefix, m.backend, entry, view))
+	}
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	seen := map[string]string{}
+	err := router.WalkFrameworkBackends(ctx, func(prefix string, b *framework.Backend) bool {
+		seen[prefix] = b.BackendType
+		return true
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "aws", seen["aws/"], "aws mount should be visible at relative prefix \"aws/\"")
+	assert.Equal(t, "azure", seen["azure/"], "azure mount should be visible at relative prefix \"azure/\"")
+	assert.Len(t, seen, 2, "walker yielded duplicates or missed a mount: %v", seen)
+}
+
+// TestRouter_WalkFrameworkBackends_SkipsNonFramework asserts that mounts
+// implementing logical.Backend but not *framework.Backend are silently
+// skipped (audit devices, custom implementations).
+func TestRouter_WalkFrameworkBackends_SkipsNonFramework(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	mock := newMockProvider()
+	entry := &MountEntry{
+		Path: "mock/", Type: "mock", Class: mountClassProvider,
+		UUID: "mock-uuid", Accessor: "mock_acc",
+		NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+	}
+	view := &mockBarrierView{prefix: "provider/mock-uuid/"}
+	require.NoError(t, router.Mount("mock/", mock, entry, view))
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	count := 0
+	err := router.WalkFrameworkBackends(ctx, func(prefix string, b *framework.Backend) bool {
+		count++
+		return true
+	})
+	require.NoError(t, err)
+	assert.Zero(t, count, "non-framework backend should be skipped")
+}
+
+// TestRouter_WalkFrameworkBackends_StopEarly verifies the walker honors a
+// false return as a stop signal (so callers can short-circuit on first match).
+func TestRouter_WalkFrameworkBackends_StopEarly(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	for _, name := range []string{"aws", "azure", "gcp"} {
+		entry := &MountEntry{
+			Path: name + "/", Type: "mock", Class: mountClassProvider,
+			UUID: name + "-uuid", Accessor: "mock_" + name,
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		}
+		view := &mockBarrierView{prefix: "provider/" + name + "-uuid/"}
+		require.NoError(t, router.Mount(name+"/", newFrameworkTestBackend(t, name), entry, view))
+	}
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	count := 0
+	err := router.WalkFrameworkBackends(ctx, func(prefix string, b *framework.Backend) bool {
+		count++
+		return false // stop after the first
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "walker should stop after callback returns false")
+}
+
+// TestRouter_WalkFrameworkBackends_NamespaceIsolation is the security-critical
+// test: a tenant in namespace A must NOT see backends mounted in namespace B
+// when they walk. Without this guarantee, the sys/schema endpoint would leak
+// every tenant's mount tree to every other tenant.
+func TestRouter_WalkFrameworkBackends_NamespaceIsolation(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	teamA := &namespace.Namespace{ID: "ns-team-a", UUID: "uuid-a", Path: "team-a/"}
+	teamB := &namespace.Namespace{ID: "ns-team-b", UUID: "uuid-b", Path: "team-b/"}
+
+	mount := func(t *testing.T, mp string, ns *namespace.Namespace, name string) {
+		t.Helper()
+		entry := &MountEntry{
+			Path: mp, Type: "mock", Class: mountClassProvider,
+			UUID: ns.ID + "-" + name + "-uuid", Accessor: "mock_" + ns.ID + "_" + name,
+			NamespaceID: ns.ID, namespace: ns,
+		}
+		view := &mockBarrierView{prefix: "provider/" + entry.UUID + "/"}
+		require.NoError(t, router.Mount(mp, newFrameworkTestBackend(t, name), entry, view))
+	}
+
+	mount(t, "aws/", teamA, "aws-a")
+	mount(t, "azure/", teamA, "azure-a")
+	mount(t, "aws/", teamB, "aws-b")
+
+	collect := func(ns *namespace.Namespace) map[string]string {
+		ctx := namespace.ContextWithNamespace(context.Background(), ns)
+		seen := map[string]string{}
+		err := router.WalkFrameworkBackends(ctx, func(prefix string, b *framework.Backend) bool {
+			seen[prefix] = b.BackendType
+			return true
+		})
+		require.NoError(t, err)
+		return seen
+	}
+
+	a := collect(teamA)
+	assert.Equal(t, map[string]string{"aws/": "aws-a", "azure/": "azure-a"}, a, "team-a should see only its own mounts")
+
+	b := collect(teamB)
+	assert.Equal(t, map[string]string{"aws/": "aws-b"}, b, "team-b should see only its own mount, not team-a's")
+}
+
+// TestRouter_WalkFrameworkBackends_RequiresNamespaceContext asserts the
+// walker errors when the caller forgot to set a namespace on the context.
+// Without this guard, a buggy caller could leak cross-tenant data.
+func TestRouter_WalkFrameworkBackends_RequiresNamespaceContext(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	router := NewRouter(log)
+
+	err := router.WalkFrameworkBackends(context.Background(), func(_ string, _ *framework.Backend) bool {
+		t.Fatal("callback should not run when context lacks a namespace")
+		return false
+	})
+	require.Error(t, err)
+}
 
 // TestNewRouter tests creating a new router
 func TestNewRouter(t *testing.T) {
