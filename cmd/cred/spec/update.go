@@ -34,6 +34,9 @@ func init() {
 
 func runUpdate(cmd *cobra.Command, args []string) error {
 	name := args[0]
+	if err := helpers.ValidatePath(name); err != nil {
+		return err
+	}
 
 	// Require at least one update parameter
 	if len(updateConfig) == 0 && updateMinTTL == "" && updateMaxTTL == "" && updateRotationPeriod == "" {

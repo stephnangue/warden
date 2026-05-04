@@ -40,6 +40,9 @@ Usage: warden namespace read <path>
 
 func runRead(cmd *cobra.Command, args []string) error {
 	path := args[0]
+	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
 
 	c, err := helpers.Client()
 	if err != nil {

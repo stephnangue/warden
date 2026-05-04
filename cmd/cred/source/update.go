@@ -28,6 +28,9 @@ func init() {
 
 func runUpdate(cmd *cobra.Command, args []string) error {
 	name := args[0]
+	if err := helpers.ValidatePath(name); err != nil {
+		return err
+	}
 
 	c, err := helpers.Client()
 	if err != nil {

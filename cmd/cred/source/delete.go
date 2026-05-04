@@ -27,6 +27,9 @@ func init() {
 
 func runDelete(cmd *cobra.Command, args []string) error {
 	name := args[0]
+	if err := helpers.ValidatePath(name); err != nil {
+		return err
+	}
 
 	if !deleteForce {
 		fmt.Printf("WARNING: This will permanently delete credential source '%s'\n", name)

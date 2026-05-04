@@ -68,6 +68,10 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		path = path + "/"
 	}
 
+	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
+
 	// Build auth mount input
 	authInput := &api.AuthMountInput{
 		Type:        enableType,

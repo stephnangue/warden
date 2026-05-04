@@ -33,6 +33,9 @@ func runRead(cmd *cobra.Command, args []string) error {
 	}
 
 	path := args[0]
+	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
 
 	auditInfo, err := c.Sys().AuditInfo(path)
 	if err != nil {

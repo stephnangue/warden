@@ -47,6 +47,9 @@ func init() {
 
 func runUpdate(cmd *cobra.Command, args []string) error {
 	path := args[0]
+	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
 
 	// Create the client
 	c, err := helpers.Client()

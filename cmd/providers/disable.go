@@ -36,6 +36,9 @@ func runDisable(cmd *cobra.Command, args []string) error {
 	}
 
 	path := args[0]
+	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
 
 	// Unmount the provider
 	err = c.Sys().Unmount(path)

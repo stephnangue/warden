@@ -32,13 +32,20 @@ safe operations, and complete visibility.`,
 		// in Execute() is the only thing that writes to stderr on failure.
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if err := helpers.ValidateHeaderValue("--namespace", flagNamespace); err != nil {
+				return err
+			}
+			if err := helpers.ValidateHeaderValue("--role", flagRole); err != nil {
+				return err
+			}
 			if flagNamespace != "" {
 				os.Setenv("WARDEN_NAMESPACE", flagNamespace)
 			}
 			if flagRole != "" {
 				os.Setenv("WARDEN_ROLE", flagRole)
 			}
+			return nil
 		},
 	}
 )

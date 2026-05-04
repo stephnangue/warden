@@ -71,6 +71,10 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		path = path + "/"
 	}
 
+	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
+
 	// Build config
 	config := make(map[string]any)
 	if enableFilePath != "" {
