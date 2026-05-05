@@ -32,6 +32,7 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 			Unauthenticated: []string{
 				"init",
 				"health",
+				"introspect/roles",
 			},
 			Root: []string{
 				"auth/*",
