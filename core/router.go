@@ -862,9 +862,16 @@ func pathsToRadix(paths []string) *radix.Tree {
 
 // WalkFrameworkBackends invokes fn for every framework-based mount in the
 // caller's namespace (derived from ctx), passing the namespace-relative mount
-// prefix and the *framework.Backend. Backends that don't implement
-// framework.Backend (audit devices, custom implementations) are skipped.
+// prefix and the raw logical.Backend (the wrapper as it was registered).
+// Mounts that don't ultimately wrap a *framework.Backend (audit devices,
+// custom implementations) are skipped via framework.ExtractBackend.
 // Stop walking by returning false.
+//
+// Yielding the raw logical.Backend (rather than the inner *Backend) lets
+// `framework.DocumentMount` work with arbitrary wrapper chains: provider
+// wrappers embed *StreamingBackend, auth methods embed *Backend directly,
+// the system backend embeds *Backend. Reflection-based extraction handles
+// all of them.
 //
 // Used by the sys/schema handler to assemble a namespace-scoped OpenAPI doc:
 // a tenant in namespace `team-a/` only sees their own mounts, not other
@@ -873,7 +880,7 @@ func pathsToRadix(paths []string) *radix.Tree {
 // The callback runs while the router's read lock is held. Callers must keep
 // the callback fast and non-blocking (no I/O, no router mutations, no
 // acquiring this lock again) or risk stalling all routing on this server.
-func (r *Router) WalkFrameworkBackends(ctx context.Context, fn func(prefix string, b *framework.Backend) bool) error {
+func (r *Router) WalkFrameworkBackends(ctx context.Context, fn func(prefix string, b logical.Backend) bool) error {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
 		return err
@@ -887,15 +894,16 @@ func (r *Router) WalkFrameworkBackends(ctx context.Context, fn func(prefix strin
 		if !ok || re == nil {
 			return false
 		}
-		fb, ok := re.backend.(*framework.Backend)
-		if !ok {
+		// Skip backends that don't ultimately wrap a *framework.Backend so
+		// the callback can rely on documentability.
+		if framework.ExtractBackend(re.backend) == nil {
 			return false
 		}
 		// Strip the namespace path so callers see the mount prefix relative
 		// to the namespace, matching how the API addresses the mount.
 		relPrefix := strings.TrimPrefix(fullPrefix, ns.Path)
 		// Walk callback returns true to STOP; our fn returns true to CONTINUE.
-		return !fn(relPrefix, fb)
+		return !fn(relPrefix, re.backend)
 	})
 	return nil
 }

@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/stephnangue/warden/framework"
@@ -68,13 +67,20 @@ func (b *SystemBackend) handleOpenAPI(ctx context.Context, req *logical.Request,
 
 	// 1. Document the system backend itself. It hosts this handler and is
 	//    NOT in the router's mount table, so the walker below would miss it.
+	//    The system backend has no streaming paths so DocumentPathsWithMountPrefix
+	//    is sufficient.
 	if err := framework.DocumentPathsWithMountPrefix(b.Backend, "sys/", doc); err != nil {
 		b.logger.Warn("openapi: failed to document system backend", logger.Err(err))
 	}
 
-	// 2. Walk every framework-based mount in the caller's namespace.
-	if err := b.core.router.WalkFrameworkBackends(ctx, func(prefix string, backend *framework.Backend) bool {
-		if err := framework.DocumentPathsWithMountPrefix(backend, prefix, doc); err != nil {
+	// 2. Walk every framework-based mount in the caller's namespace. Use
+	//    DocumentMount because mounts arrive as wrappers (e.g. *awsBackend
+	//    embedding *StreamingBackend) — DocumentMount extracts the inner
+	//    *framework.Backend regardless of the wrapper chain. StreamingPaths
+	//    (gateway proxies) are intentionally not documented; see the
+	//    DocumentMount doc comment for why.
+	if err := b.core.router.WalkFrameworkBackends(ctx, func(prefix string, backend logical.Backend) bool {
+		if err := framework.DocumentMount(backend, prefix, doc); err != nil {
 			b.logger.Warn("openapi: failed to document mount", logger.String("mount", prefix), logger.Err(err))
 		}
 		return true
@@ -86,7 +92,9 @@ func (b *SystemBackend) handleOpenAPI(ctx context.Context, req *logical.Request,
 	if pathFilter, _ := d.Get("path").(string); pathFilter != "" {
 		projected := projectOASToPath(doc, pathFilter)
 		if projected == nil {
-			return logical.ErrorResponse(fmt.Errorf("path %q not found in schema", pathFilter)), nil
+			// Use a CodedError so the response gets HTTP 404 (the CLI
+			// classifier maps that to ExitNotFound / "not_found").
+			return logical.ErrorResponse(logical.ErrNotFoundf("path %q not found in schema", pathFilter)), nil
 		}
 		doc = projected
 	}
@@ -97,6 +105,11 @@ func (b *SystemBackend) handleOpenAPI(ctx context.Context, req *logical.Request,
 // projectOASToPath returns a new OASDocument containing only the operation
 // matching `path`. Several common spellings are tried (with/without leading or
 // trailing slash) so callers don't have to reason about path normalization.
+//
+// Component schemas referenced by `$ref` from the path-item are also copied
+// into the projected doc so consumers can resolve request/response bodies
+// without needing the full document.
+//
 // Returns nil if no spelling matches.
 func projectOASToPath(doc *framework.OASDocument, path string) *framework.OASDocument {
 	if doc == nil {
@@ -109,13 +122,92 @@ func projectOASToPath(doc *framework.OASDocument, path string) *framework.OASDoc
 		"/" + strings.TrimPrefix(strings.TrimSuffix(path, "/"), "/"),
 	}
 	for _, c := range candidates {
-		if item, ok := doc.Paths[c]; ok {
-			out := framework.NewOASDocument(doc.Info.Version)
-			out.Info = doc.Info
-			out.Paths[c] = item
-			return out
+		item, ok := doc.Paths[c]
+		if !ok {
+			continue
 		}
+		out := framework.NewOASDocument(doc.Info.Version)
+		out.Info = doc.Info
+		out.Paths[c] = item
+
+		// Walk the path-item for $ref strings and copy referenced
+		// component schemas. Without this, agents see body parameters as
+		// opaque "$ref": "#/components/schemas/..." with nowhere to
+		// follow the reference.
+		copyReferencedSchemas(item, doc.Components.Schemas, out.Components.Schemas)
+		return out
 	}
 	return nil
+}
+
+// copyReferencedSchemas walks `item` recursively, finds every `$ref` of the
+// form "#/components/schemas/<name>", and copies the corresponding schema
+// from `from` into `to`. Already-copied schemas are not re-walked, so cycles
+// terminate.
+func copyReferencedSchemas(item *framework.OASPathItem, from, to map[string]*framework.OASSchema) {
+	if item == nil || from == nil || to == nil {
+		return
+	}
+	for _, op := range []*framework.OASOperation{item.Get, item.Post, item.Delete} {
+		if op == nil {
+			continue
+		}
+		copyOperationRefs(op, from, to)
+	}
+}
+
+func copyOperationRefs(op *framework.OASOperation, from, to map[string]*framework.OASSchema) {
+	if op == nil {
+		return
+	}
+	if op.RequestBody != nil {
+		walkContentRefs(op.RequestBody.Content, from, to)
+	}
+	for _, resp := range op.Responses {
+		if resp == nil {
+			continue
+		}
+		walkContentRefs(resp.Content, from, to)
+	}
+}
+
+func walkContentRefs(content framework.OASContent, from, to map[string]*framework.OASSchema) {
+	for _, mt := range content {
+		if mt == nil || mt.Schema == nil {
+			continue
+		}
+		walkSchemaRefs(mt.Schema, from, to)
+	}
+}
+
+func walkSchemaRefs(s *framework.OASSchema, from, to map[string]*framework.OASSchema) {
+	if s == nil {
+		return
+	}
+	if s.Ref != "" {
+		const prefix = "#/components/schemas/"
+		if name, ok := strings.CutPrefix(s.Ref, prefix); ok {
+			if _, already := to[name]; !already {
+				if ref, ok := from[name]; ok && ref != nil {
+					to[name] = ref
+					// Recurse into the referenced schema in case it
+					// itself $refs other components.
+					walkSchemaRefs(ref, from, to)
+					for _, prop := range ref.Properties {
+						walkSchemaRefs(prop, from, to)
+					}
+					if ref.Items != nil {
+						walkSchemaRefs(ref.Items, from, to)
+					}
+				}
+			}
+		}
+	}
+	for _, prop := range s.Properties {
+		walkSchemaRefs(prop, from, to)
+	}
+	if s.Items != nil {
+		walkSchemaRefs(s.Items, from, to)
+	}
 }
 
