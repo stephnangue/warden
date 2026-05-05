@@ -63,6 +63,7 @@ func init() {
 	wardenCmd.PersistentFlags().StringVarP(&flagRole, "role", "r", "", "Warden role to use for the command (can also use WARDEN_ROLE env var)")
 	wardenCmd.PersistentFlags().StringVarP(helpers.OutputFlagPtr(), "output", "o", "", "Output format: table, json, ndjson, text. Defaults to table on a TTY, json otherwise. Honors WARDEN_OUTPUT.")
 	wardenCmd.PersistentFlags().StringVarP(helpers.FieldsFlagPtr(), "fields", "F", "", "Comma-separated dot-paths to project from structured output (e.g. name,metadata.created_at,tokens.*.id). Honors WARDEN_FIELDS.")
+	wardenCmd.PersistentFlags().BoolVarP(helpers.DryRunFlagPtr(), "dry-run", "D", false, "Send X-Warden-Dry-Run on every request so the server validates without mutating. Honors WARDEN_DRY_RUN. Server enforcement is not yet shipped — see CHANGELOG.")
 
 	wardenCmd.AddCommand(server.ServerCmd)
 	wardenCmd.AddCommand(operator.OperatorCmd)
