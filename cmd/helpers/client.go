@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/stephnangue/warden/api"
 )
@@ -32,6 +33,18 @@ func Client() (*api.Client, error) {
 	// Turn off retries on the CLI
 	if api.ReadWardenVariable(api.EnvWardenMaxRetries) == "" {
 		client.SetMaxRetries(0)
+	}
+
+	// If WARDEN_TOKEN is a JWT, also send it as `Authorization: Bearer` so
+	// identity-introspection endpoints (sys/introspect/roles, the AWS
+	// gateway, etc.) can read the JWT directly. The "eyJ" prefix is the
+	// base64 of `{"`, the start of every JWT header — the same heuristic
+	// used server-side by provider/aws to detect JWT-shaped tokens.
+	// X-Warden-Token is still set; this is additive.
+	if token := client.Token(); strings.HasPrefix(token, "eyJ") {
+		h := client.Headers()
+		h.Set("Authorization", "Bearer "+token)
+		client.SetHeaders(h)
 	}
 
 	c = client
