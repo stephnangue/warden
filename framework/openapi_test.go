@@ -352,6 +352,161 @@ func TestDocumentPathsWithMountPrefix_NormalizesSlashes(t *testing.T) {
 	}
 }
 
+// --- DocumentMount: regular Paths only (StreamingPaths intentionally excluded) ---
+
+// TestDocumentMount_DocumentsRegularPaths confirms the basic case works the
+// same as the underlying DocumentPathsWithMountPrefix.
+func TestDocumentMount_DocumentsRegularPaths(t *testing.T) {
+	b := &Backend{
+		BackendType:  "aws",
+		BackendClass: logical.ClassProvider,
+		Paths: []*Path{{
+			Pattern: "config",
+			Operations: map[logical.Operation]OperationHandler{
+				logical.ReadOperation: &PathOperation{},
+			},
+			HelpSynopsis: "AWS config",
+		}},
+	}
+	doc := NewOASDocument("test")
+	if err := DocumentMount(b, "aws/", doc); err != nil {
+		t.Fatalf("DocumentMount: %v", err)
+	}
+	if _, ok := doc.Paths["/aws/config"]; !ok {
+		t.Errorf("missing /aws/config; got %v", pathKeysAny(doc))
+	}
+}
+
+// TestDocumentMount_ExcludesStreamingPaths pins the design decision that
+// StreamingPaths (gateway proxies) are not documented: they accept arbitrary
+// HTTP methods and sub-paths, so any OAS fragment we'd emit would mislead
+// agents and codegen tooling.
+func TestDocumentMount_ExcludesStreamingPaths(t *testing.T) {
+	b := &Backend{
+		BackendType:  "vault",
+		BackendClass: logical.ClassProvider,
+		Paths: []*Path{{
+			Pattern: "config",
+			Operations: map[logical.Operation]OperationHandler{
+				logical.ReadOperation: &PathOperation{},
+			},
+			HelpSynopsis: "Vault config",
+		}},
+	}
+	sb := &StreamingBackend{
+		Backend: b,
+		StreamingPaths: []*StreamingPath{
+			{Pattern: "gateway", HelpSynopsis: "Gateway root"},
+			{Pattern: "gateway/passthrough", HelpSynopsis: "Gateway sub-path"},
+		},
+	}
+
+	doc := NewOASDocument("test")
+	if err := DocumentMount(sb, "vault/", doc); err != nil {
+		t.Fatalf("DocumentMount: %v", err)
+	}
+
+	if _, ok := doc.Paths["/vault/config"]; !ok {
+		t.Errorf("regular path /vault/config missing; got %v", pathKeysAny(doc))
+	}
+	if _, ok := doc.Paths["/vault/gateway"]; ok {
+		t.Errorf("streaming path /vault/gateway should NOT be documented; got %v", pathKeysAny(doc))
+	}
+	if _, ok := doc.Paths["/vault/gateway/passthrough"]; ok {
+		t.Errorf("streaming path /vault/gateway/passthrough should NOT be documented; got %v", pathKeysAny(doc))
+	}
+}
+
+// TestDocumentMount_NonFrameworkValueIsSilent ensures DocumentMount returns
+// nil (not an error) for inputs that don't wrap a *framework.Backend, so the
+// schema handler's walker can pass arbitrary logical.Backend values without
+// pre-checking.
+func TestDocumentMount_NonFrameworkValueIsSilent(t *testing.T) {
+	type unrelated struct{ Name string }
+	doc := NewOASDocument("test")
+	if err := DocumentMount(&unrelated{}, "x/", doc); err != nil {
+		t.Errorf("expected nil error for non-framework backend, got: %v", err)
+	}
+	if len(doc.Paths) != 0 {
+		t.Errorf("expected no paths added; got: %v", pathKeysAny(doc))
+	}
+}
+
+// --- ExtractBackend: pulls *Backend out of arbitrary embedding chains ---
+
+// directWrapper mimics how auth methods (jwt, cert) and the system backend
+// embed *framework.Backend directly.
+type directWrapper struct {
+	*Backend
+	extra string
+}
+
+// streamingWrapper mimics how providers embed *StreamingBackend, which itself
+// has a *Backend field.
+type streamingWrapper struct {
+	*StreamingBackend
+	extra string
+}
+
+func TestExtractBackend_NilInput(t *testing.T) {
+	if got := ExtractBackend(nil); got != nil {
+		t.Errorf("ExtractBackend(nil) = %v; want nil", got)
+	}
+}
+
+func TestExtractBackend_DirectPointer(t *testing.T) {
+	b := &Backend{BackendType: "x"}
+	if got := ExtractBackend(b); got != b {
+		t.Errorf("ExtractBackend(*Backend) = %p; want %p", got, b)
+	}
+}
+
+func TestExtractBackend_DirectEmbed(t *testing.T) {
+	b := &Backend{BackendType: "auth-jwt"}
+	w := &directWrapper{Backend: b, extra: "jwt-state"}
+	got := ExtractBackend(w)
+	if got != b {
+		t.Errorf("ExtractBackend(directWrapper) = %p; want %p (the embedded *Backend)", got, b)
+	}
+}
+
+func TestExtractBackend_StreamingEmbed(t *testing.T) {
+	b := &Backend{BackendType: "aws"}
+	sb := &StreamingBackend{Backend: b}
+	got := ExtractBackend(sb)
+	if got != b {
+		t.Errorf("ExtractBackend(*StreamingBackend) = %p; want %p (the inner *Backend)", got, b)
+	}
+}
+
+func TestExtractBackend_ProviderWrapperOverStreaming(t *testing.T) {
+	// This is the case the sys/schema bug surfaced: *awsBackend embeds
+	// *StreamingBackend, which embeds *Backend. Two layers of indirection.
+	b := &Backend{BackendType: "aws"}
+	sb := &StreamingBackend{Backend: b}
+	w := &streamingWrapper{StreamingBackend: sb, extra: "aws-state"}
+	got := ExtractBackend(w)
+	if got != b {
+		t.Errorf("ExtractBackend(streamingWrapper) = %p; want %p (the deeply-embedded *Backend)", got, b)
+	}
+}
+
+func TestExtractBackend_NoBackend(t *testing.T) {
+	type unrelated struct {
+		Name string
+	}
+	if got := ExtractBackend(&unrelated{Name: "x"}); got != nil {
+		t.Errorf("ExtractBackend(unrelated) = %v; want nil", got)
+	}
+}
+
+func TestExtractBackend_NilEmbeddedPointer(t *testing.T) {
+	w := &directWrapper{Backend: nil, extra: "x"}
+	if got := ExtractBackend(w); got != nil {
+		t.Errorf("ExtractBackend(wrapper with nil *Backend) = %v; want nil", got)
+	}
+}
+
 // TestDocumentPathsWithMountPrefix_RejectsEmptyPrefix guards against silent
 // malformed keys. Passing an empty mount prefix would produce paths like
 // "//config" that conflict across mounts.

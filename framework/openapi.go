@@ -208,6 +208,68 @@ var (
 	wsRe         = regexp.MustCompile(`\s+`)     // Match whitespace, to be compressed during cleaning
 )
 
+// ExtractBackend returns the *framework.Backend embedded in `b`, walking
+// through arbitrary anonymous-field chains to find it. Provider wrappers
+// (e.g. *awsBackend) embed *StreamingBackend, which itself embeds *Backend;
+// auth methods embed *Backend directly; the system backend embeds *Backend.
+// All of these are reachable.
+//
+// Returns nil for values that don't ultimately wrap a *framework.Backend
+// (audit devices, custom logical.Backend implementations).
+//
+// Used by the sys/schema endpoint to document every framework-based mount
+// without forcing every wrapper to implement an extraction method.
+func ExtractBackend(b any) *Backend {
+	if b == nil {
+		return nil
+	}
+	return findBackend(reflect.ValueOf(b))
+}
+
+func findBackend(v reflect.Value) *Backend {
+	if v.Kind() == reflect.Pointer && !v.IsNil() {
+		if fb, ok := v.Interface().(*Backend); ok {
+			return fb
+		}
+	}
+	for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		if !t.Field(i).Anonymous {
+			continue
+		}
+		if fb := findBackend(v.Field(i)); fb != nil {
+			return fb
+		}
+	}
+	return nil
+}
+
+// DocumentMount documents a mounted backend's regular Paths into `doc`,
+// prepending `mountPrefix` to every path key. Accepts any logical.Backend
+// value: provider wrappers, *StreamingBackend, *Backend itself; the
+// framework-level extraction is handled internally.
+//
+// StreamingPaths (e.g. gateway/.* proxies) are intentionally NOT documented:
+// they accept arbitrary HTTP methods, sub-paths, and bodies, so any OAS
+// fragment we'd emit would be fictional and would mislead agents and codegen
+// tooling about what methods are actually supported.
+func DocumentMount(b any, mountPrefix string, doc *OASDocument) error {
+	fb := ExtractBackend(b)
+	if fb == nil {
+		return nil
+	}
+	return DocumentPathsWithMountPrefix(fb, mountPrefix, doc)
+}
+
 // DocumentPathsWithMountPrefix is the warden-facing entry point for assembling
 // a server-wide OAS doc. It documents `backend` into `doc`, prepending
 // `mountPrefix` to every path key so multiple mounts don't collide. The

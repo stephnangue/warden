@@ -24,13 +24,13 @@ import (
 const aggregateIntrospectConcurrency = 10
 
 // pathIntrospectRoles exposes GET /v1/sys/introspect/roles.
-// The endpoint detects the caller's credential type (JWT or cert), finds
+// The endpoint detects the caller's identity type (JWT or cert), finds
 // every auth mount of that type in the caller's namespace, fans out an
 // `introspect/roles` call to each, and aggregates the union.
 //
 // Autonomous agents present their identity vehicle with each request and
 // must specify a role so Warden's transparent auth can resolve a cred
-// spec. Introspection lets an agent discover which roles it may specify
+// spec. Introspection lets an agent discover which roles it may assume
 // without having to distribute role names out-of-band.
 func (b *SystemBackend) pathIntrospectRoles() []*framework.Path {
 	return []*framework.Path{
@@ -39,11 +39,37 @@ func (b *SystemBackend) pathIntrospectRoles() []*framework.Path {
 			Operations: map[logical.Operation]framework.OperationHandler{
 				logical.ReadOperation: &framework.PathOperation{
 					Callback: b.handleIntrospectRoles,
-					Summary:  "Discover roles the presented credential can assume",
+					Summary:  "Discover roles the presented identity can assume",
+					Description: "Returns {roles, warnings}. roles[] is the union of " +
+						"roles the identity can assume across every auth mount of " +
+						"the caller's identity type in the current namespace; each " +
+						"entry is {auth_path, name, description}. warnings[] holds " +
+						"per-mount failure messages — partial-failure mounts " +
+						"surface here rather than failing the whole call. Both " +
+						"arrays are sorted and may be empty.",
+					Responses: map[int][]framework.Response{
+						http.StatusOK: {{
+							Description: "Roles the presented identity can assume, aggregated across the namespace's auth mounts.",
+							MediaType:   "application/json",
+							Fields: map[string]*framework.FieldSchema{
+								"roles": {
+									Type:        framework.TypeSlice,
+									Description: "Roles the identity can assume. Each item: {auth_path, name, description}.",
+								},
+								"warnings": {
+									Type:        framework.TypeStringSlice,
+									Description: "Per-mount failure messages, one entry per mount that errored. Format: `mount \"<auth-path>\": <error>`. Mounts that don't implement introspection are skipped silently and do NOT appear here.",
+								},
+							},
+						}},
+						http.StatusUnauthorized: {{
+							Description: "No JWT bearer token or TLS client certificate was presented.",
+						}},
+					},
 				},
 			},
-			HelpSynopsis:    "Discover roles assumable by the presented credential",
-			HelpDescription: "Fans out to every auth mount of the detected credential type (JWT or cert) in the current namespace and returns the union of roles each mount reports as assumable.",
+			HelpSynopsis:    "Discover roles the presented identity can assume",
+			HelpDescription: "Fans out to every auth mount of the detected identity type (JWT or cert) in the current namespace and returns the union of roles each mount reports the identity can assume.",
 		},
 	}
 }
@@ -200,7 +226,7 @@ func (b *SystemBackend) introspectMount(ctx context.Context, parent *logical.Req
 	return out, nil
 }
 
-// detectIntrospectCredType mirrors the credential-type detection in
+// detectIntrospectCredType mirrors the identity-type detection in
 // performImplicitAuth: client cert takes precedence, then JWT via
 // Authorization: Bearer. Returns "" if neither is present.
 func detectIntrospectCredType(req *logical.Request) string {

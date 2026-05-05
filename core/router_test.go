@@ -68,8 +68,8 @@ func TestRouter_WalkFrameworkBackends_FindsMounts(t *testing.T) {
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	seen := map[string]string{}
-	err := router.WalkFrameworkBackends(ctx, func(prefix string, b *framework.Backend) bool {
-		seen[prefix] = b.BackendType
+	err := router.WalkFrameworkBackends(ctx, func(prefix string, b logical.Backend) bool {
+		seen[prefix] = framework.ExtractBackend(b).BackendType
 		return true
 	})
 	require.NoError(t, err)
@@ -96,7 +96,7 @@ func TestRouter_WalkFrameworkBackends_SkipsNonFramework(t *testing.T) {
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	count := 0
-	err := router.WalkFrameworkBackends(ctx, func(prefix string, b *framework.Backend) bool {
+	err := router.WalkFrameworkBackends(ctx, func(prefix string, b logical.Backend) bool {
 		count++
 		return true
 	})
@@ -122,7 +122,7 @@ func TestRouter_WalkFrameworkBackends_StopEarly(t *testing.T) {
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	count := 0
-	err := router.WalkFrameworkBackends(ctx, func(prefix string, b *framework.Backend) bool {
+	err := router.WalkFrameworkBackends(ctx, func(prefix string, b logical.Backend) bool {
 		count++
 		return false // stop after the first
 	})
@@ -159,8 +159,8 @@ func TestRouter_WalkFrameworkBackends_NamespaceIsolation(t *testing.T) {
 	collect := func(ns *namespace.Namespace) map[string]string {
 		ctx := namespace.ContextWithNamespace(context.Background(), ns)
 		seen := map[string]string{}
-		err := router.WalkFrameworkBackends(ctx, func(prefix string, b *framework.Backend) bool {
-			seen[prefix] = b.BackendType
+		err := router.WalkFrameworkBackends(ctx, func(prefix string, b logical.Backend) bool {
+			seen[prefix] = framework.ExtractBackend(b).BackendType
 			return true
 		})
 		require.NoError(t, err)
@@ -181,7 +181,7 @@ func TestRouter_WalkFrameworkBackends_RequiresNamespaceContext(t *testing.T) {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	router := NewRouter(log)
 
-	err := router.WalkFrameworkBackends(context.Background(), func(_ string, _ *framework.Backend) bool {
+	err := router.WalkFrameworkBackends(context.Background(), func(_ string, _ logical.Backend) bool {
 		t.Fatal("callback should not run when context lacks a namespace")
 		return false
 	})
