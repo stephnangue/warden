@@ -10,6 +10,7 @@ import (
 
 var (
 	updateMetadata map[string]string
+	updateJSON     string
 
 	UpdateCmd = &cobra.Command{
 		Use:           "update <path>",
@@ -19,19 +20,21 @@ var (
 		Long: `
 Usage: warden namespace update <path> [options]
 
-  Updates the custom metadata for an existing namespace. This command allows
-  you to modify the metadata without affecting the namespace's configuration
-  or mounted backends.
+  Update the custom metadata for an existing namespace. The namespace's
+  configuration and mounted backends are not affected. Two input modes:
 
-  Update namespace metadata:
+    Typed flags (human-friendly):
 
-      $ warden namespace update my-team \
-          --metadata=environment=staging \
-          --metadata=team=devops
+      $ warden namespace update my-team --metadata=environment=staging --metadata=team=devops
+      $ warden namespace update my-team --metadata=""        # clear
 
-  Clear all metadata by providing empty values:
+    Full JSON payload (agent-friendly):
 
-      $ warden namespace update my-team --metadata=""
+      $ warden namespace update my-team --json @ns.json
+      $ cat ns.json | warden namespace update my-team --json -
+
+  --json is mutually exclusive with --metadata. Combine with --dry-run to
+  validate the payload locally without modifying the namespace.
 
   For more information about namespaces, please see the documentation.
 `,
@@ -42,7 +45,7 @@ Usage: warden namespace update <path> [options]
 
 func init() {
 	UpdateCmd.Flags().StringToStringVar(&updateMetadata, "metadata", nil, "Custom metadata for the namespace (can be specified multiple times)")
-	UpdateCmd.MarkFlagRequired("metadata")
+	UpdateCmd.Flags().StringVarP(&updateJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with --metadata)")
 }
 
 func runUpdate(cmd *cobra.Command, args []string) error {
@@ -51,10 +54,45 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Create the client
 	c, err := helpers.Client()
 	if err != nil {
 		return err
+	}
+
+	jsonPayload, err := helpers.ResolveJSONInput(updateJSON)
+	if err != nil {
+		return err
+	}
+
+	if jsonPayload != nil {
+		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
+			"--metadata": cmd.Flags().Changed("metadata"),
+		}); err != nil {
+			return err
+		}
+		if helpers.ResolveDryRun() {
+			return helpers.DryRun(c, "PUT", "sys/namespaces/{path}", jsonPayload)
+		}
+		resource, err := c.Operator().Write("sys/namespaces/"+path, jsonPayload)
+		if err != nil {
+			return fmt.Errorf("error updating namespace: %w", err)
+		}
+		data := map[string]any{}
+		var resData map[string]any
+		if resource != nil {
+			resData = resource.Data
+		}
+		helpers.MergeServerResponseInto(data, resData, map[string]any{
+			"path":    path,
+			"updated": true,
+		})
+		return helpers.RenderMap(data, func() {
+			fmt.Printf("Success! Updated namespace: %s\n", path)
+		})
+	}
+
+	if !cmd.Flags().Changed("metadata") {
+		return fmt.Errorf("--metadata is required (or use --json): %w", helpers.ErrUsage)
 	}
 
 	// Build namespace update input

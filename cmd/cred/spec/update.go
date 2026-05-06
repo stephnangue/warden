@@ -14,10 +14,30 @@ var (
 	updateMinTTL         string
 	updateMaxTTL         string
 	updateRotationPeriod string
+	updateJSON           string
 
 	UpdateCmd = &cobra.Command{
-		Use:           "update <name>",
-		Short:         "Update a credential specification",
+		Use:   "update <name>",
+		Short: "Update a credential specification",
+		Long: `
+Usage: warden cred spec update <name> [flags]
+
+  Update an existing credential spec. Two input modes:
+
+    Typed flags (human-friendly):
+
+      $ warden cred spec update developer --max-ttl=4h
+      $ warden cred spec update developer --config=role_arn=arn:...
+
+    Full JSON payload (agent-friendly):
+
+      $ warden cred spec update developer --json @spec.json
+      $ cat spec.json | warden cred spec update developer --json -
+
+  --json is mutually exclusive with --config / --min-ttl / --max-ttl /
+  --rotation-period. Combine with --dry-run to validate the payload locally
+  without modifying the spec.
+`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.ExactArgs(1),
@@ -30,6 +50,7 @@ func init() {
 	UpdateCmd.Flags().StringVar(&updateMinTTL, "min-ttl", "", "Minimum TTL")
 	UpdateCmd.Flags().StringVar(&updateMaxTTL, "max-ttl", "", "Maximum TTL")
 	UpdateCmd.Flags().StringVar(&updateRotationPeriod, "rotation-period", "", "Rotation period for credentials stored in the spec (e.g., '24h', '7d'). Use '0' to disable rotation")
+	UpdateCmd.Flags().StringVarP(&updateJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with the typed flags)")
 }
 
 func runUpdate(cmd *cobra.Command, args []string) error {
@@ -38,14 +59,49 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Require at least one update parameter
-	if len(updateConfig) == 0 && updateMinTTL == "" && updateMaxTTL == "" && updateRotationPeriod == "" {
-		return fmt.Errorf("no update parameters provided (use --config, --min-ttl, --max-ttl, or --rotation-period): %w", helpers.ErrInvalidInput)
-	}
-
 	c, err := helpers.Client()
 	if err != nil {
 		return err
+	}
+
+	jsonPayload, err := helpers.ResolveJSONInput(updateJSON)
+	if err != nil {
+		return err
+	}
+
+	if jsonPayload != nil {
+		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
+			"--config":          len(updateConfig) > 0,
+			"--min-ttl":         updateMinTTL != "",
+			"--max-ttl":         updateMaxTTL != "",
+			"--rotation-period": updateRotationPeriod != "",
+		}); err != nil {
+			return err
+		}
+		if helpers.ResolveDryRun() {
+			return helpers.DryRun(c, "PUT", "sys/cred/specs/{name}", jsonPayload)
+		}
+		resource, err := c.Operator().Write("sys/cred/specs/"+name, jsonPayload)
+		if err != nil {
+			return fmt.Errorf("error updating credential spec: %w", err)
+		}
+		data := map[string]any{}
+		var resData map[string]any
+		if resource != nil {
+			resData = resource.Data
+		}
+		helpers.MergeServerResponseInto(data, resData, map[string]any{
+			"name":    name,
+			"updated": true,
+		})
+		return helpers.RenderMap(data, func() {
+			fmt.Printf("Success! Updated credential spec: %s\n", name)
+		})
+	}
+
+	// Require at least one update parameter
+	if len(updateConfig) == 0 && updateMinTTL == "" && updateMaxTTL == "" && updateRotationPeriod == "" {
+		return fmt.Errorf("no update parameters provided (use --config, --min-ttl, --max-ttl, --rotation-period, or --json): %w", helpers.ErrInvalidInput)
 	}
 
 	resolvedConfig, err := helpers.ResolveFileRefs(updateConfig)
