@@ -66,7 +66,7 @@ ones:
 
 ```yaml
 ---
-name: provider-<name>
+name: <name>
 description: "<one line: what does this provider expose>"
 category: provider-guide
 upstream: "<service name>"
