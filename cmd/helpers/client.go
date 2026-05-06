@@ -47,18 +47,6 @@ func Client() (*api.Client, error) {
 		client.SetHeaders(h)
 	}
 
-	// --dry-run plumbing: stamp the X-Warden-Dry-Run header on every
-	// outbound request and warn (once) that server enforcement hasn't
-	// shipped yet. Agents and humans can wire dry-run into their workflows
-	// today; once PR 7 lands the request will short-circuit server-side
-	// without any client change required.
-	if ResolveDryRun() {
-		h := client.Headers()
-		h.Set("X-Warden-Dry-Run", "true")
-		client.SetHeaders(h)
-		EmitDryRunWarning()
-	}
-
 	c = client
 
 	return client, nil

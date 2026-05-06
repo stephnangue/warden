@@ -59,6 +59,15 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	c, err := helpers.Client()
+	if err != nil {
+		return err
+	}
+
+	if helpers.ResolveDryRun() {
+		return helpers.DryRun(c, "DELETE", "sys/namespaces/{path}", nil)
+	}
+
 	// Confirmation prompt (unless --force is used)
 	if !deleteForce {
 		fmt.Printf("WARNING: This will permanently delete the namespace '%s' and all its contents.\n", path)
@@ -75,12 +84,6 @@ func runDelete(cmd *cobra.Command, args []string) error {
 			fmt.Println("Deletion cancelled.")
 			return nil
 		}
-	}
-
-	// Create the client
-	c, err := helpers.Client()
-	if err != nil {
-		return err
 	}
 
 	// Delete the namespace

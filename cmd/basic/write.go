@@ -115,6 +115,12 @@ func runWrite(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// --dry-run: validate the payload locally against the server's published
+	// schema and stop here. Nothing leaves the process.
+	if helpers.ResolveDryRun() {
+		return helpers.DryRun(c, "POST", path, data)
+	}
+
 	// The Operator().Write method automatically adds /v1/ prefix
 	_, err = c.Operator().Write(path, data)
 	if err != nil {

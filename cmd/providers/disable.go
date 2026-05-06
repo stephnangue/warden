@@ -40,6 +40,10 @@ func runDisable(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if helpers.ResolveDryRun() {
+		return helpers.DryRun(c, "DELETE", "sys/providers/{path}", nil)
+	}
+
 	// Unmount the provider
 	err = c.Sys().Unmount(path)
 	if err != nil {

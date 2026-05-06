@@ -31,6 +31,15 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	c, err := helpers.Client()
+	if err != nil {
+		return err
+	}
+
+	if helpers.ResolveDryRun() {
+		return helpers.DryRun(c, "DELETE", "sys/cred/sources/{name}", nil)
+	}
+
 	if !deleteForce {
 		fmt.Printf("WARNING: This will permanently delete credential source '%s'\n", name)
 		fmt.Println("This will fail if any credential specs reference this source.")
@@ -42,11 +51,6 @@ func runDelete(cmd *cobra.Command, args []string) error {
 			fmt.Println("Deletion cancelled.")
 			return nil
 		}
-	}
-
-	c, err := helpers.Client()
-	if err != nil {
-		return err
 	}
 
 	err = c.Sys().DeleteCredentialSource(name)

@@ -91,6 +91,30 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		input.RotationPeriod = rotationPeriod
 	}
 
+	if helpers.ResolveDryRun() {
+		// Mirror the wire format: durations go out as int64 seconds (see
+		// api.CreateCredentialSpec which builds the request body).
+		payload := map[string]any{
+			"source":  createSource,
+			"min_ttl": int64(minTTL.Seconds()),
+			"max_ttl": int64(maxTTL.Seconds()),
+		}
+		if createType != "" {
+			payload["type"] = createType
+		}
+		if len(resolvedConfig) > 0 {
+			cfg := make(map[string]any, len(resolvedConfig))
+			for k, v := range resolvedConfig {
+				cfg[k] = v
+			}
+			payload["config"] = cfg
+		}
+		if input.RotationPeriod > 0 {
+			payload["rotation_period"] = int64(input.RotationPeriod.Seconds())
+		}
+		return helpers.DryRun(c, "POST", "sys/cred/specs/{name}", payload)
+	}
+
 	output, err := c.Sys().CreateCredentialSpec(name, input)
 	if err != nil {
 		return fmt.Errorf("error creating credential spec: %w", err)

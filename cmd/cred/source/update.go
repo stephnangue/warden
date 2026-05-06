@@ -46,6 +46,14 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		Config: resolvedConfig,
 	}
 
+	if helpers.ResolveDryRun() {
+		payload := map[string]any{}
+		if len(resolvedConfig) > 0 {
+			payload["config"] = mapStringStringToAny(resolvedConfig)
+		}
+		return helpers.DryRun(c, "PUT", "sys/cred/sources/{name}", payload)
+	}
+
 	output, err := c.Sys().UpdateCredentialSource(name, input)
 	if err != nil {
 		return fmt.Errorf("error updating credential source: %w", err)

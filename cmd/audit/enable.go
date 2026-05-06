@@ -91,6 +91,17 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		Config:      config,
 	}
 
+	if helpers.ResolveDryRun() {
+		payload := map[string]any{"type": enableType}
+		if enableDescription != "" {
+			payload["description"] = enableDescription
+		}
+		if len(config) > 0 {
+			payload["config"] = config
+		}
+		return helpers.DryRun(c, "POST", "sys/audit/{path}", payload)
+	}
+
 	// Enable the audit device
 	err = c.Sys().EnableAudit(path, auditInput)
 	if err != nil {

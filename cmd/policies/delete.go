@@ -53,6 +53,15 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	c, err := helpers.Client()
+	if err != nil {
+		return err
+	}
+
+	if helpers.ResolveDryRun() {
+		return helpers.DryRun(c, "DELETE", "sys/policies/{name}", nil)
+	}
+
 	// Confirmation prompt (unless --force is used)
 	if !deleteForce {
 		fmt.Printf("Are you sure you want to delete policy '%s'? (yes/no): ", name)
@@ -68,12 +77,6 @@ func runDelete(cmd *cobra.Command, args []string) error {
 			fmt.Println("Deletion cancelled.")
 			return nil
 		}
-	}
-
-	// Create the client
-	c, err := helpers.Client()
-	if err != nil {
-		return err
 	}
 
 	// Delete the policy

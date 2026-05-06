@@ -98,6 +98,59 @@ func TestOpenAPI_Endpoint_PathProjection_Unknown(t *testing.T) {
 	require.True(t, resp.IsError(), "expected error response for unknown projection path")
 }
 
+// TestProjectOASToPath_TemplateMatching exercises the fallback that lets a
+// concrete path like "sys/cred/sources/my-aws" find the templated entry
+// "/sys/cred/sources/{name}". Without this, agents would have to know the
+// placeholder names to call `warden schema`.
+func TestProjectOASToPath_TemplateMatching(t *testing.T) {
+	doc := framework.NewOASDocument("test")
+	doc.Paths["/sys/cred/sources/{name}"] = &framework.OASPathItem{
+		Description: "manage credential sources",
+	}
+	doc.Paths["/sys/auth"] = &framework.OASPathItem{Description: "list auth"}
+
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"sys/cred/sources/my-aws", "/sys/cred/sources/{name}"},
+		{"/sys/cred/sources/my-aws", "/sys/cred/sources/{name}"},
+		{"sys/cred/sources/my-aws/", "/sys/cred/sources/{name}"},
+		{"sys/auth", "/sys/auth"}, // exact match still wins
+	}
+	for _, tt := range cases {
+		t.Run(tt.input, func(t *testing.T) {
+			out := projectOASToPath(doc, tt.input)
+			require.NotNil(t, out, "expected match for %q", tt.input)
+			require.Len(t, out.Paths, 1)
+			for k := range out.Paths {
+				require.Equal(t, tt.want, k, "matched the wrong template for %q", tt.input)
+			}
+		})
+	}
+}
+
+// TestProjectOASToPath_TemplateNoMatch verifies the matcher doesn't fire for
+// inputs that don't fit the template (extra/missing segments).
+func TestProjectOASToPath_TemplateNoMatch(t *testing.T) {
+	doc := framework.NewOASDocument("test")
+	doc.Paths["/sys/cred/sources/{name}"] = &framework.OASPathItem{}
+
+	cases := []string{
+		"sys/cred/sources",                  // missing {name}
+		"sys/cred/sources/my-aws/extra",     // extra segment
+		"sys/cred/sources/my-aws/sub-thing", // extra segment
+		"completely/wrong/path",
+	}
+	for _, p := range cases {
+		t.Run(p, func(t *testing.T) {
+			if got := projectOASToPath(doc, p); got != nil {
+				t.Errorf("expected no match for %q; got %v", p, pathKeys(got))
+			}
+		})
+	}
+}
+
 // TestOpenAPI_AliasAndCanonicalAreEquivalent verifies that the agent-friendly
 // alias `sys/schema` produces the same content as the canonical path.
 func TestOpenAPI_AliasAndCanonicalAreEquivalent(t *testing.T) {

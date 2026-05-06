@@ -65,6 +65,18 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		CustomMetadata: createMetadata,
 	}
 
+	if helpers.ResolveDryRun() {
+		payload := map[string]any{}
+		if len(createMetadata) > 0 {
+			md := make(map[string]any, len(createMetadata))
+			for k, v := range createMetadata {
+				md[k] = v
+			}
+			payload["custom_metadata"] = md
+		}
+		return helpers.DryRun(c, "POST", "sys/namespaces/{path}", payload)
+	}
+
 	// Create the namespace
 	output, err := c.Sys().CreateNamespace(path, input)
 	if err != nil {

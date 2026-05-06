@@ -78,6 +78,14 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		Description: enableDescription,
 	}
 
+	if helpers.ResolveDryRun() {
+		payload := map[string]any{"type": enableType}
+		if enableDescription != "" {
+			payload["description"] = enableDescription
+		}
+		return helpers.DryRun(c, "POST", "sys/auth/{path}", payload)
+	}
+
 	// Enable the auth method
 	err = c.Sys().EnableAuth(path, authInput)
 	if err != nil {
