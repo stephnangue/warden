@@ -30,6 +30,15 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	c, err := helpers.Client()
+	if err != nil {
+		return err
+	}
+
+	if helpers.ResolveDryRun() {
+		return helpers.DryRun(c, "DELETE", "sys/cred/specs/{name}", nil)
+	}
+
 	if !deleteForce {
 		fmt.Printf("WARNING: This will permanently delete credential spec '%s'\n", name)
 		fmt.Print("Are you sure? (yes/no): ")
@@ -40,11 +49,6 @@ func runDelete(cmd *cobra.Command, args []string) error {
 			fmt.Println("Deletion cancelled.")
 			return nil
 		}
-	}
-
-	c, err := helpers.Client()
-	if err != nil {
-		return err
 	}
 
 	err = c.Sys().DeleteCredentialSpec(name)

@@ -66,6 +66,24 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		input.RotationPeriod = period
 	}
 
+	if helpers.ResolveDryRun() {
+		payload := map[string]any{
+			"type": createType,
+		}
+		if len(resolvedConfig) > 0 {
+			payload["config"] = mapStringStringToAny(resolvedConfig)
+		}
+		// Mirror the wire format produced by api.CreateCredentialSourceInput's
+		// custom MarshalJSON: rotation_period is sent as int64 seconds, not a
+		// duration string, to match TypeDurationSecond on the server. Sending
+		// the string here would make the validator reject a perfectly valid
+		// payload.
+		if input.RotationPeriod > 0 {
+			payload["rotation_period"] = int64(input.RotationPeriod.Seconds())
+		}
+		return helpers.DryRun(c, "POST", "sys/cred/sources/{name}", payload)
+	}
+
 	output, err := c.Sys().CreateCredentialSource(name, input)
 	if err != nil {
 		return fmt.Errorf("error creating credential source: %w", err)
@@ -100,4 +118,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			}
 		}
 	})
+}
+
+func mapStringStringToAny(in map[string]string) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

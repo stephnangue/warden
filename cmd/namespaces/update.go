@@ -62,6 +62,15 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		CustomMetadata: updateMetadata,
 	}
 
+	if helpers.ResolveDryRun() {
+		md := make(map[string]any, len(updateMetadata))
+		for k, v := range updateMetadata {
+			md[k] = v
+		}
+		payload := map[string]any{"custom_metadata": md}
+		return helpers.DryRun(c, "PUT", "sys/namespaces/{path}", payload)
+	}
+
 	// Update the namespace
 	output, err := c.Sys().UpdateNamespace(path, input)
 	if err != nil {

@@ -81,6 +81,29 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		input.RotationPeriod = &rotationPeriod
 	}
 
+	if helpers.ResolveDryRun() {
+		payload := map[string]any{}
+		if len(resolvedConfig) > 0 {
+			cfg := make(map[string]any, len(resolvedConfig))
+			for k, v := range resolvedConfig {
+				cfg[k] = v
+			}
+			payload["config"] = cfg
+		}
+		// Mirror the wire format: durations go out as int64 seconds (see
+		// api.UpdateCredentialSpec which builds the request body).
+		if input.MinTTL != nil {
+			payload["min_ttl"] = int64(input.MinTTL.Seconds())
+		}
+		if input.MaxTTL != nil {
+			payload["max_ttl"] = int64(input.MaxTTL.Seconds())
+		}
+		if input.RotationPeriod != nil {
+			payload["rotation_period"] = int64(input.RotationPeriod.Seconds())
+		}
+		return helpers.DryRun(c, "PUT", "sys/cred/specs/{name}", payload)
+	}
+
 	output, err := c.Sys().UpdateCredentialSpec(name, input)
 	if err != nil {
 		return fmt.Errorf("error updating credential spec: %w", err)

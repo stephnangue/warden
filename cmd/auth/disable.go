@@ -40,6 +40,10 @@ func runDisable(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if helpers.ResolveDryRun() {
+		return helpers.DryRun(c, "DELETE", "sys/auth/{path}", nil)
+	}
+
 	// Disable the auth method
 	err = c.Sys().DisableAuth(path)
 	if err != nil {

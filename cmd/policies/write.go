@@ -77,6 +77,11 @@ func runWrite(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if helpers.ResolveDryRun() {
+		payload := map[string]any{"policy": policyContent}
+		return helpers.DryRun(c, "PUT", "sys/policies/{name}", payload)
+	}
+
 	// Write the policy
 	err = c.Sys().PutPolicy(name, policyContent)
 	if err != nil {

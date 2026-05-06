@@ -57,6 +57,20 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Create the client
+	c, err := helpers.Client()
+	if err != nil {
+		return err
+	}
+
+	// --dry-run: validate the path resolves to a known DELETE-supporting
+	// schema entry and stop before any prompt or HTTP call. Skipping the
+	// confirmation prompt is intentional — a non-mutating preview shouldn't
+	// require interactive consent.
+	if helpers.ResolveDryRun() {
+		return helpers.DryRun(c, "DELETE", path, nil)
+	}
+
 	// Ask for confirmation unless -y flag is used
 	if !deleteForce {
 		fmt.Printf("Are you sure you want to delete '%s'? (yes/no): ", path)
@@ -71,12 +85,6 @@ func runDelete(cmd *cobra.Command, args []string) error {
 			fmt.Println("Delete cancelled")
 			return nil
 		}
-	}
-
-	// Create the client
-	c, err := helpers.Client()
-	if err != nil {
-		return err
 	}
 
 	// Delete at the path

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"github.com/stephnangue/warden/framework"
@@ -104,7 +105,9 @@ func (b *SystemBackend) handleOpenAPI(ctx context.Context, req *logical.Request,
 
 // projectOASToPath returns a new OASDocument containing only the operation
 // matching `path`. Several common spellings are tried (with/without leading or
-// trailing slash) so callers don't have to reason about path normalization.
+// trailing slash) and, as a fallback, OpenAPI-style templated keys
+// (`/foo/{name}`) are matched against concrete inputs (`foo/my-thing`) so
+// callers don't have to know the placeholder names.
 //
 // Component schemas referenced by `$ref` from the path-item are also copied
 // into the projected doc so consumers can resolve request/response bodies
@@ -122,22 +125,54 @@ func projectOASToPath(doc *framework.OASDocument, path string) *framework.OASDoc
 		"/" + strings.TrimPrefix(strings.TrimSuffix(path, "/"), "/"),
 	}
 	for _, c := range candidates {
-		item, ok := doc.Paths[c]
-		if !ok {
+		if item, ok := doc.Paths[c]; ok {
+			return projectSinglePath(doc, c, item)
+		}
+	}
+
+	// Fall back to template matching: a doc path of "/foo/{name}/bar" matches
+	// the concrete input "foo/my-thing/bar". Without this, agents writing
+	// "warden schema sys/cred/sources/my-aws" would 404 because the OAS doc
+	// keys the entry under "/sys/cred/sources/{name}".
+	norm := "/" + strings.TrimPrefix(strings.TrimSuffix(path, "/"), "/")
+	for templ, item := range doc.Paths {
+		if !strings.Contains(templ, "{") {
 			continue
 		}
-		out := framework.NewOASDocument(doc.Info.Version)
-		out.Info = doc.Info
-		out.Paths[c] = item
-
-		// Walk the path-item for $ref strings and copy referenced
-		// component schemas. Without this, agents see body parameters as
-		// opaque "$ref": "#/components/schemas/..." with nowhere to
-		// follow the reference.
-		copyReferencedSchemas(item, doc.Components.Schemas, out.Components.Schemas)
-		return out
+		if templateMatches(templ, norm) {
+			return projectSinglePath(doc, templ, item)
+		}
 	}
 	return nil
+}
+
+// projectSinglePath builds a one-path projection doc, copying the referenced
+// component schemas so $ref-described bodies resolve.
+func projectSinglePath(doc *framework.OASDocument, key string, item *framework.OASPathItem) *framework.OASDocument {
+	out := framework.NewOASDocument(doc.Info.Version)
+	out.Info = doc.Info
+	out.Paths[key] = item
+	copyReferencedSchemas(item, doc.Components.Schemas, out.Components.Schemas)
+	return out
+}
+
+// templateMatches reports whether `concrete` is matched by an OpenAPI-style
+// templated path. `{name}` placeholders accept any non-slash run of characters,
+// matching how warden's router treats path segments.
+func templateMatches(templ, concrete string) bool {
+	parts := strings.Split(templ, "/")
+	for i, p := range parts {
+		if strings.HasPrefix(p, "{") && strings.HasSuffix(p, "}") {
+			parts[i] = `[^/]+`
+		} else {
+			parts[i] = regexp.QuoteMeta(p)
+		}
+	}
+	re, err := regexp.Compile("^" + strings.Join(parts, "/") + "$")
+	if err != nil {
+		return false
+	}
+	return re.MatchString(concrete)
 }
 
 // copyReferencedSchemas walks `item` recursively, finds every `$ref` of the

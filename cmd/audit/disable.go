@@ -46,6 +46,10 @@ func runDisable(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if helpers.ResolveDryRun() {
+		return helpers.DryRun(c, "DELETE", "sys/audit/{path}", nil)
+	}
+
 	// Disable the audit device
 	err = c.Sys().DisableAudit(path)
 	if err != nil {
