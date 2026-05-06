@@ -10,6 +10,7 @@ import (
 
 var (
 	createMetadata map[string]string
+	createJSON     string
 
 	CreateCmd = &cobra.Command{
 		Use:           "create <path>",
@@ -19,23 +20,22 @@ var (
 		Long: `
 Usage: warden namespace create <path> [options]
 
-  Creates a new namespace at the specified path. Namespaces allow you to
-  isolate and organize providers, auth methods, and policies in a multi-tenant
-  environment.
+  Create a namespace at the specified path. Namespaces isolate providers,
+  auth methods, and policies in a multi-tenant environment. Two input modes:
 
-  Create a simple namespace:
+    Typed flags (human-friendly):
 
       $ warden namespace create my-team
-
-  Create a nested namespace:
-
       $ warden namespace create org/engineering
+      $ warden namespace create my-team --metadata=environment=prod --metadata=team=platform
 
-  Create a namespace with custom metadata:
+    Full JSON payload (agent-friendly):
 
-      $ warden namespace create my-team \
-          --metadata=environment=production \
-          --metadata=team=platform
+      $ warden namespace create my-team --json @ns.json
+      $ cat ns.json | warden namespace create my-team --json -
+
+  --json is mutually exclusive with --metadata. Combine with --dry-run to
+  validate the payload locally without creating the namespace.
 
   For more information about namespaces, please see the documentation.
 `,
@@ -46,6 +46,7 @@ Usage: warden namespace create <path> [options]
 
 func init() {
 	CreateCmd.Flags().StringToStringVar(&createMetadata, "metadata", nil, "Custom metadata for the namespace (can be specified multiple times)")
+	CreateCmd.Flags().StringVarP(&createJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with --metadata)")
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
@@ -54,10 +55,41 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Create the client
 	c, err := helpers.Client()
 	if err != nil {
 		return err
+	}
+
+	jsonPayload, err := helpers.ResolveJSONInput(createJSON)
+	if err != nil {
+		return err
+	}
+
+	if jsonPayload != nil {
+		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
+			"--metadata": len(createMetadata) > 0,
+		}); err != nil {
+			return err
+		}
+		if helpers.ResolveDryRun() {
+			return helpers.DryRun(c, "POST", "sys/namespaces/{path}", jsonPayload)
+		}
+		resource, err := c.Operator().Post("sys/namespaces/"+path, jsonPayload)
+		if err != nil {
+			return fmt.Errorf("error creating namespace: %w", err)
+		}
+		data := map[string]any{}
+		var resData map[string]any
+		if resource != nil {
+			resData = resource.Data
+		}
+		helpers.MergeServerResponseInto(data, resData, map[string]any{
+			"path":    path,
+			"created": true,
+		})
+		return helpers.RenderMap(data, func() {
+			fmt.Printf("Success! Created namespace: %s\n", path)
+		})
 	}
 
 	// Build namespace create input

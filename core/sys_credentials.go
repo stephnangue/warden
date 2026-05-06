@@ -340,11 +340,16 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 		}
 	}
 
-	// Create updated source for validation and persistence
+	// Create updated source for validation and persistence. RotationPeriod
+	// is preserved from the existing entry — the typed UpdateCredentialSource
+	// API only carries Config, so dropping it here would (1) fail hvault
+	// validation (rotation_period required) on every update, and (2)
+	// silently strip rotation config from non-hvault sources too.
 	updatedSource := &credential.CredSource{
-		Name:   existingSource.Name,
-		Type:   existingSource.Type,
-		Config: mergedConfig,
+		Name:           existingSource.Name,
+		Type:           existingSource.Type,
+		Config:         mergedConfig,
+		RotationPeriod: existingSource.RotationPeriod,
 	}
 
 	// Update via credential config store (validates and tests connection before persisting)

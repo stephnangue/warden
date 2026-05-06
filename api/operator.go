@@ -138,6 +138,24 @@ func (c *Operator) WriteWithContext(ctx context.Context, path string, data map[s
 	return c.write(ctx, r)
 }
 
+// Post writes via POST instead of PUT. Warden's framework backends route
+// POST to CreateOperation and PUT to UpdateOperation, so create-style
+// callers (e.g. `cred source create --json @file`) need this method to
+// avoid being routed to the Update handler — which returns 404 on
+// non-existent resources.
+func (c *Operator) Post(path string, data map[string]interface{}) (*Resource, error) {
+	return c.PostWithContext(context.Background(), path, data)
+}
+
+// PostWithContext is the context-aware form of Post.
+func (c *Operator) PostWithContext(ctx context.Context, path string, data map[string]interface{}) (*Resource, error) {
+	r := c.c.NewRequest(http.MethodPost, "/v1/"+path)
+	if err := r.SetJSONBody(data); err != nil {
+		return nil, err
+	}
+	return c.write(ctx, r)
+}
+
 func (c *Operator) write(ctx context.Context, request *Request) (*Resource, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
