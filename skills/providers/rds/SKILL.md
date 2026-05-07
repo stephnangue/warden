@@ -26,13 +26,13 @@ a single HTTP call followed by a regular DB connection.
 
 `<mount>` and `<grant-name>` below come from the discovery flow plus
 one extra step:
-- `<mount>` is the chosen provider's path from `warden list sys/providers`
+- `<mount>` is the chosen provider's path from `warden provider list`
   (e.g. `rds/`, `rds-prod/`, `pg-warehouse/`).
 - `<grant-name>` is a pre-configured grant (operator decides which
   RDS instance + DB user + capabilities each grant exposes). List them
   with `warden list <mount>/access` and pick by description.
 
-The role from `warden roles` is implicit here — RDS is transparent-only,
+The role from `warden role list` is implicit here — RDS is transparent-only,
 so the JWT itself selects the role; there's no per-call role flag.
 
 ```bash

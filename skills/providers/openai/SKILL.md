@@ -18,9 +18,9 @@ and forwards. The agent **never holds an API key**.
 ## Configure the CLI/SDK
 
 `<mount>` and `<role>` below come from the discovery flow:
-- `<mount>` is the chosen provider's path from `warden list sys/providers`
+- `<mount>` is the chosen provider's path from `warden provider list`
   (e.g. `openai/`, `openai-prod/`).
-- `<role>` is the role you picked from `warden roles` to perform this
+- `<role>` is the role you picked from `warden role list` to perform this
   task — it goes in the URL path.
 
 ```bash

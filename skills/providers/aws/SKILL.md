@@ -17,16 +17,16 @@ AWS service. **No SDK code changes** — only env vars.
 ## Configure the CLI/SDK
 
 `<mount>` and `<role-name>` below come from the discovery flow:
-- `<mount>` is the chosen provider's path from `warden list sys/providers`
+- `<mount>` is the chosen provider's path from `warden provider list`
   (e.g. `aws/`, `aws-prod/` — whichever your task matches).
-- `<role-name>` is the role you picked from `warden roles` to perform
+- `<role-name>` is the role you picked from `warden role list` to perform
   this task.
 
 The JWT (`$JWT`) is provided to the agent's environment by its
 runtime — see `warden-shared`. Just use it:
 
 ```bash
-export AWS_ACCESS_KEY_ID="<role-name>"          # role from `warden roles`
+export AWS_ACCESS_KEY_ID="<role-name>"          # role from `warden role list`
 export AWS_SECRET_ACCESS_KEY="$JWT"
 export AWS_SESSION_TOKEN="$JWT"                 # Warden detects "eyJ" prefix
 export AWS_ENDPOINT_URL="$WARDEN_ADDR/v1/<mount>/gateway"

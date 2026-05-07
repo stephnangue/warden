@@ -13,7 +13,7 @@ import (
 // TestIntrospectRoles_AggregatorReturnsCallerJWTRoles verifies that
 // GET /v1/sys/introspect/roles, called with a JWT bearer, returns the union
 // of roles bound to the caller's identity across the namespace's auth/jwt/
-// mounts. This is the server-side surface that backs the `warden roles` CLI.
+// mounts. This is the server-side surface that backs the `warden role list` CLI.
 func TestIntrospectRoles_AggregatorReturnsCallerJWTRoles(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	jwt := h.GetDefaultJWT(t)
@@ -77,14 +77,14 @@ func TestRolesCLI_JWTPromotesToBearer(t *testing.T) {
 
 	out, err := h.WardenCLIWithPort(t, port, map[string]string{
 		"WARDEN_TOKEN": jwt,
-	}, "roles", "-o", "json")
+	}, "role", "list", "-o", "json")
 	if err != nil {
-		t.Fatalf("warden roles failed: %v\nOutput:\n%s", err, out)
+		t.Fatalf("warden role list failed: %v\nOutput:\n%s", err, out)
 	}
 
 	var roles []map[string]any
 	if err := json.Unmarshal([]byte(out), &roles); err != nil {
-		t.Fatalf("warden roles -o json output is not a JSON list: %v\nOutput:\n%s", err, out)
+		t.Fatalf("warden role list -o json output is not a JSON list: %v\nOutput:\n%s", err, out)
 	}
 	if len(roles) == 0 {
 		t.Fatalf("expected at least one role in CLI output; got 0\nOutput:\n%s", out)
@@ -108,9 +108,9 @@ func TestRolesCLI_AuthPathFilter(t *testing.T) {
 
 	out, err := h.WardenCLIWithPort(t, port, map[string]string{
 		"WARDEN_TOKEN": jwt,
-	}, "roles", "-o", "json", "--auth-path", "jwt/")
+	}, "role", "list", "-o", "json", "--auth-path", "jwt/")
 	if err != nil {
-		t.Fatalf("warden roles --auth-path failed: %v\nOutput:\n%s", err, out)
+		t.Fatalf("warden role list --auth-path failed: %v\nOutput:\n%s", err, out)
 	}
 
 	var roles []map[string]any

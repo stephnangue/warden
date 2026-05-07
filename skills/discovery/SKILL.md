@@ -34,7 +34,7 @@ If you need a per-call override (unusual for agents), pass
 ## Step 2 — discover assumable roles
 
 ```bash
-warden roles -o json
+warden role list -o json
 ```
 
 Returns one record per role your identity can assume in the current
@@ -55,23 +55,23 @@ match to your task.
 ## Step 3 — list providers in this namespace
 
 ```bash
-warden list sys/providers -o json
+warden provider list -o json
 ```
 
 Returns one record per mounted provider:
 
 ```json
-{
-  "aws/":     {"type": "aws",     "description": "Production AWS account 1234"},
-  "openai/":  {"type": "openai",  "description": "OpenAI API for embeddings + chat"},
-  "rds-pg/":  {"type": "rds",     "description": "RDS PostgreSQL — analytics"},
-  "vault/":   {"type": "vault",   "description": "Internal Vault — secrets/, pki/"}
-}
+[
+  {"path": "aws/",    "type": "aws",    "accessor": "...", "description": "Production AWS account 1234"},
+  {"path": "openai/", "type": "openai", "accessor": "...", "description": "OpenAI API for embeddings + chat"},
+  {"path": "rds-pg/", "type": "rds",    "accessor": "...", "description": "RDS PostgreSQL — analytics"},
+  {"path": "vault/",  "type": "vault",  "accessor": "...", "description": "Internal Vault — secrets/, pki/"}
+]
 ```
 
-Listing and reading providers requires capabilities granted by your
-role's policy — by convention this is included in the namespace's
-default role. If your `roles` list is empty or the list call returns
+Listing providers requires capabilities granted by your role's
+policy — by convention this is included in the namespace's default
+role. If your `roles` list is empty or the list call returns
 `forbidden`, that's an operator-setup problem; surface it instead of
 hard-coding a provider URL.
 

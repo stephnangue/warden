@@ -32,7 +32,7 @@ Symptoms: identity is valid but the policy bound to the chosen role
 doesn't allow the operation.
 
 Action:
-- Re-run `warden roles -o json` and pick a role whose description
+- Re-run `warden role list -o json` and pick a role whose description
   matches the operation.
 - If no role fits, the operator hasn't granted you the capability —
   surface to the user, don't try to escalate.
@@ -45,7 +45,7 @@ Symptoms: path doesn't exist (typo in mount name), or namespace is
 wrong, or resource has been deleted.
 
 Action:
-- Run `warden list sys/providers -o json` to see real mount names.
+- Run `warden provider list -o json` to see real mount names.
 - Check `WARDEN_NAMESPACE` is the one you mean (`-n` overrides per-call).
 - For typed resources: re-list (`warden cred source list`,
   `warden auth list`, `warden namespace list`) before retrying.
@@ -109,10 +109,10 @@ Retry: no — this is a deterministic state, not a transient issue.
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `warden roles` returns `[]` | identity isn't bound to any role on this namespace | ask operator to bind your identity |
-| `warden roles` returns `forbidden` | introspection endpoint not reachable | check `WARDEN_TOKEN`, JWT issuer, namespace |
-| `warden list sys/providers` returns `forbidden` | namespace's default role doesn't grant `read sys/providers/*` | ask operator to add the policy |
-| Provider exists in `list sys/providers` but `path-help` says "no help" | provider has no documented help | use `warden schema <mount>/<path>` and the provider's `README.md` |
+| `warden role list` returns `[]` | identity isn't bound to any role on this namespace | ask operator to bind your identity |
+| `warden role list` returns `forbidden` | introspection endpoint not reachable | check `WARDEN_TOKEN`, JWT issuer, namespace |
+| `warden provider list` returns `forbidden` | namespace's default role doesn't grant `read sys/providers/*` | ask operator to add the policy |
+| Provider exists in `warden provider list` but `path-help` says "no help" | provider has no documented help | use `warden schema <mount>/<path>` and the provider's `README.md` |
 
 ## Sensitive-field handling
 

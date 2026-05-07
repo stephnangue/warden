@@ -107,12 +107,12 @@ func TestProjectRoles_DescriptionOmittedWhenAbsent(t *testing.T) {
 	}
 }
 
-func TestRunRoles_AuthPathFilterValidation(t *testing.T) {
+func TestRunList_AuthPathFilterValidation(t *testing.T) {
 	// Reset between cases so they don't leak.
 	t.Cleanup(func() { authPathFilter = "" })
 
 	authPathFilter = "../etc/passwd"
-	err := runRoles(nil, nil)
+	err := runList(nil, nil)
 	if err == nil {
 		t.Fatal("expected validation error for traversal in --auth-path; got nil")
 	}

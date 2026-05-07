@@ -24,9 +24,9 @@ cares about *one* of the two modes per task.
 
 `<mount>`, `<role>`, and (for S3 mode) `<role-name>` below come from
 the discovery flow:
-- `<mount>` is the chosen provider's path from `warden list sys/providers`
+- `<mount>` is the chosen provider's path from `warden provider list`
   (e.g. `scaleway/`, `scaleway-prod/`).
-- `<role>` / `<role-name>` is the role you picked from `warden roles`
+- `<role>` / `<role-name>` is the role you picked from `warden role list`
   for this task — REST mode puts it in the URL path; S3 mode puts the
   same value in `AWS_ACCESS_KEY_ID`.
 

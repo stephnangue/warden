@@ -51,7 +51,7 @@ func TestIntrospectRoles_PerMountEndpoint(t *testing.T) {
 
 // TestIntrospectRoles_DescriptionSurfaces verifies the role's description
 // (set when the role is created) is returned by the aggregator. This is
-// the load-bearing field for `warden roles` — if it didn't surface, the
+// the load-bearing field for `warden role list` — if it didn't surface, the
 // CLI's table column would be empty.
 func TestIntrospectRoles_DescriptionSurfaces(t *testing.T) {
 	port := h.GetLeaderPort(t)
