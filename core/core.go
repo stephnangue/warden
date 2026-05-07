@@ -198,6 +198,10 @@ type Core struct {
 	// credConfigStore manages credential specs and sources with namespace isolation
 	credConfigStore *CredentialConfigStore
 
+	// skillStore manages the global agent-skill registry (one set, shared
+	// across namespaces; root-only mutations are enforced at the HTTP layer).
+	skillStore *SkillStore
+
 	// policy store is used to manage named CBP policies
 	policyStore *PolicyStore
 
@@ -572,6 +576,9 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 		return nil, fmt.Errorf("failed to create credential config store: %w", err)
 	}
 	c.credConfigStore = credConfigStore
+
+	// Create SkillStore (storage view is wired up at unseal time).
+	c.skillStore = NewSkillStore(c)
 
 	// Initialize global credential type and driver registries
 	c.credentialTypeRegistry = credential.NewTypeRegistry()
@@ -1289,6 +1296,11 @@ func (c *Core) preSeal() error {
 		c.logger.Warn("error tearing down credential config store", logger.Err(err))
 	}
 
+	// Unload skill store caches (records remain in storage for next unseal).
+	if err := c.teardownSkillStore(); err != nil {
+		c.logger.Warn("error tearing down skill store", logger.Err(err))
+	}
+
 	// Stop all credential managers
 	if err := c.teardownCredentialManager(); err != nil {
 		c.logger.Warn("error tearing down credential managers", logger.Err(err))
@@ -1347,6 +1359,9 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 		return err
 	}
 	if err := c.setupCredentialManager(ctx); err != nil {
+		return err
+	}
+	if err := c.setupSkillStore(ctx); err != nil {
 		return err
 	}
 
