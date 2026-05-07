@@ -20,7 +20,7 @@ issue them and don't need to.
 
 | Vehicle | How the agent presents it |
 |---|---|
-| JWT (bearer) | `WARDEN_TOKEN=eyJ…` — the CLI auto-detects the JWT prefix and sends `Authorization: Bearer <jwt>` so identity-introspection endpoints (`warden roles`) work |
+| JWT (bearer) | `WARDEN_TOKEN=eyJ…` — the CLI auto-detects the JWT prefix and sends `Authorization: Bearer <jwt>` so identity-introspection endpoints (`warden role list`) work |
 | mTLS client cert | `WARDEN_CLIENT_CERT=<pem-path>` and `WARDEN_CLIENT_KEY=<pem-path>` |
 
 The Warden server address is `WARDEN_ADDR=https://...` and is
@@ -28,7 +28,7 @@ The Warden server address is `WARDEN_ADDR=https://...` and is
 Read it from the env and use it as a base URL.
 
 Namespace scope is `WARDEN_NAMESPACE=<ns>` (or `-n` per call). All
-introspection calls (`warden roles`, `warden list sys/providers`)
+introspection calls (`warden role list`, `warden provider list`)
 and all provider calls are scoped to this namespace; without it you
 land in the root namespace, which usually has none of the providers
 you need. The operator tells you which namespace to use.
@@ -53,9 +53,9 @@ Live, server-rendered. Prefer these over any cached knowledge.
 
 | Command | Returns |
 |---|---|
-| `warden roles -o json` | `[{name, description, auth_path}]` for every role your identity can assume in the current namespace |
-| `warden list sys/providers -o json` | `{ <mount>: {type, description, accessor, config} }` for every provider in the namespace |
-| `warden read sys/providers/<mount>` | the same record for one mount (config has sensitive fields masked) |
+| `warden role list -o json` | `[{name, description, auth_path}]` for every role your identity can assume in the current namespace |
+| `warden provider list -o json` | `[{path, type, accessor, description}]` — one record per provider in the namespace |
+| `warden provider read <mount>` | the same record for one mount, plus `config` (sensitive fields masked) |
 
 ## Exit codes and error envelopes
 

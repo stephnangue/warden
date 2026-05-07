@@ -18,9 +18,9 @@ The agent **never holds a PAT**.
 ## Configure the CLI/SDK
 
 `<mount>` and `<role>` below come from the discovery flow:
-- `<mount>` is the chosen provider's path from `warden list sys/providers`
+- `<mount>` is the chosen provider's path from `warden provider list`
   (e.g. `github/`, `github-enterprise/`).
-- `<role>` is the role you picked from `warden roles` to perform this
+- `<role>` is the role you picked from `warden role list` to perform this
   task — it goes in the URL path.
 
 ```bash

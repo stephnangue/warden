@@ -24,10 +24,10 @@ for the *consumer* side.
 [ authenticate + set namespace ]
        │
        ▼
-[ warden roles ]                      ← what identities can I assume?
+[ warden role list ]                  ← what identities can I assume?
        │
        ▼
-[ warden list sys/providers ]         ← what is available in this namespace?
+[ warden provider list ]              ← what is available in this namespace?
        │
        ▼
 [ match task → pick provider+role ]   ← read descriptions; choose the fit
