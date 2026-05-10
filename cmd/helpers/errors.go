@@ -210,9 +210,8 @@ func humanMessage(err error) string {
 }
 
 // DefaultHint returns a short recovery suggestion for a category, or "" if
-// there's no generic hint that fits. Auth hint references implicit auth
-// surfaces (env-var token, mTLS cert, bearer JWT); the legacy `warden login`
-// command is being removed in favor of those.
+// there's no generic hint that fits. Auth hint references the implicit auth
+// surfaces (env-var token, mTLS cert, bearer JWT).
 func DefaultHint(code ErrorCode) string {
 	switch code {
 	case CodeAuth:

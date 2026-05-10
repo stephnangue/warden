@@ -195,18 +195,7 @@ EOF
 
 # test legacy streaming 
 
-# test transparent streaming 
-
-# test operation with non root token
-
-export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=client_credentials&client_id=service-client-1&client_secret=service-secret-1-change-this&scope=api:read api:write' \
-  | jq -r '.access_token')
-LOGIN_OUTPUT=$(./warden login --method=jwt --token=$JWT --role=aws-kv)
-export AWS_ACCESS_KEY_ID=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*access_key_id=\([^,]*\).*/\1/')
-export AWS_SECRET_ACCESS_KEY=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*secret_access_key=\([^ |]*\).*/\1/')
-export AWS_ENDPOINT_URL=http://localhost:8400/v1/aws/gateway
+# test transparent streaming
 
 # test in chid namespace
 
@@ -267,15 +256,6 @@ EOF
 ./warden -n PROD/SEC provider enable --type=aws --description="aws provider"
 ./warden -n PROD/SEC write aws/config proxy_domains="localhost,warden"
 
-export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=client_credentials&client_id=service-client-1&client_secret=service-secret-1-change-this&scope=api:read api:write' \
-  | jq -r '.access_token')
-LOGIN_OUTPUT=$(./warden -n PROD/SEC login --method=jwt --token=$JWT --role=aws-kv)
-export AWS_ACCESS_KEY_ID=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*access_key_id=\([^,]*\).*/\1/')
-export AWS_SECRET_ACCESS_KEY=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*secret_access_key=\([^ |]*\).*/\1/')
-export AWS_ENDPOINT_URL=http://localhost:8400/v1/PROD/SEC/aws/gateway
-
 # test vault streaming
 
 ./warden -n PROD/SEC policy write vault-streaming - <<EOF
@@ -334,14 +314,6 @@ EOF
 
   ./warden -n PROD/SEC provider enable --type=vault --description="vault provider"
   ./warden -n PROD/SEC write vault/config vault_address="http://127.0.0.1:8200" tls_skip_verify=true
-
-export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
-  | jq -r '.access_token')
-LOGIN_OUTPUT=$(./warden -n PROD/SEC login --method=jwt --token=$JWT --role=terraform)
-export VAULT_TOKEN=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*token=\([^ ]*\).*/\1/')
-export VAULT_ADDR=http://localhost:8400/v1/PROD/SEC/vault/gateway
 
 # test vault streaming in transparent mode
 
@@ -461,15 +433,6 @@ export VAULT_ADDR=http://localhost:8400/v1/PROD/DEV/vault-auto/role/provisionner
 
 ./warden -n PROD/DEV provider enable --type=aws --description="aws provider"
 ./warden -n PROD/DEV write aws/config proxy_domains="localhost,warden"
-
-export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
-  | jq -r '.access_token')
-LOGIN_OUTPUT=$(./warden -n PROD/DEV login --method=jwt --token=$JWT --role=aws-streamer)
-export AWS_ACCESS_KEY_ID=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*access_key_id=\([^,]*\).*/\1/')
-export AWS_SECRET_ACCESS_KEY=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*secret_access_key=\([^ |]*\).*/\1/')
-export AWS_ENDPOINT_URL=http://localhost:8400/v1/PROD/DEV/aws/gateway
 
 ./warden -n PROD/DEV cred source create vault \
   --type hvault \
