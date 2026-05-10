@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/stephnangue/warden/audit"
@@ -25,6 +26,98 @@ func generateHMACSalt() (string, error) {
 
 // pathAudit returns the paths for audit device operations
 func (b *SystemBackend) pathAudit() []*framework.Path {
+	auditDeviceFields := map[string]*framework.FieldSchema{
+		"type": {
+			Type:        framework.TypeString,
+			Description: "Audit device type (e.g., `file`).",
+		},
+		"path": {
+			Type:        framework.TypeString,
+			Description: "Mount path of the audit device, including the trailing slash.",
+		},
+		"description": {
+			Type:        framework.TypeString,
+			Description: "Human-readable description supplied at enable time. Empty if none was provided.",
+		},
+		"accessor": {
+			Type:        framework.TypeString,
+			Description: "Stable mount accessor assigned by Warden. Useful for correlating audit log entries with this device.",
+		},
+		"config": {
+			Type: framework.TypeMap,
+			Description: "Audit device-specific configuration. " +
+				"`hmac_key` (the device's HMAC salt, generated at enable time if not supplied) is masked as `" + maskMountConfigValue + "` and never returned in plaintext; " +
+				"use the `audit-hash/{path}` endpoint to compare a value against this device's salted HMAC.",
+		},
+	}
+
+	listExampleResponse := &logical.Response{
+		StatusCode: http.StatusOK,
+		Data: map[string]any{
+			"file/": map[string]any{
+				"type":        "file",
+				"description": "Primary audit log",
+				"accessor":    "audit_file_abc123",
+				"config": map[string]any{
+					"file_path": "/var/log/warden/audit.log",
+					"hmac_key":  maskMountConfigValue,
+				},
+			},
+			"secondary/": map[string]any{
+				"type":        "file",
+				"description": "Secondary audit log",
+				"accessor":    "audit_file_def456",
+				"config": map[string]any{
+					"file_path": "/var/log/warden/audit-2.log",
+					"hmac_key":  maskMountConfigValue,
+				},
+			},
+		},
+	}
+
+	createResponses := map[int][]framework.Response{
+		http.StatusCreated: {{
+			Description: "Audit device enabled successfully.",
+			MediaType:   "application/json",
+			Fields: map[string]*framework.FieldSchema{
+				"accessor": {
+					Type:        framework.TypeString,
+					Description: "Stable mount accessor assigned to the new audit device.",
+				},
+				"path": {
+					Type:        framework.TypeString,
+					Description: "Mount path of the audit device, including the trailing slash.",
+				},
+				"message": {
+					Type:        framework.TypeString,
+					Description: "Human-readable confirmation message.",
+				},
+			},
+			Example: &logical.Response{
+				StatusCode: http.StatusCreated,
+				Data: map[string]any{
+					"accessor": "audit_file_abc123",
+					"path":     "file/",
+					"message":  "Successfully enabled file audit device at file/",
+				},
+			},
+		}},
+		http.StatusBadRequest: {{
+			Description: "Invalid request — missing or unknown audit `type`, malformed `config`, or path conflict with an existing mount.",
+		}},
+	}
+
+	createExamples := []framework.RequestExample{{
+		Description: "Enable a file audit device at `file/` writing to `/var/log/warden/audit.log`. `hmac_key` is omitted so Warden generates a per-device salt.",
+		Data: map[string]any{
+			"type":        "file",
+			"description": "Primary audit log",
+			"config": map[string]any{
+				"file_path": "/var/log/warden/audit.log",
+			},
+		},
+	}}
+
 	return []*framework.Path{
 		{
 			Pattern: "audit/" + framework.MatchAllRegex("path"),
@@ -52,18 +145,86 @@ func (b *SystemBackend) pathAudit() []*framework.Path {
 				logical.CreateOperation: &framework.PathOperation{
 					Callback: b.handleAuditCreate,
 					Summary:  "Enable an audit device at the specified path",
+					Description: "Enables an audit device of the given `type` at `path`. " +
+						"If `config.hmac_key` is omitted, Warden generates a 32-byte random salt and stores it on this device — " +
+						"used by `audit-hash/{path}` to verify whether a plaintext value appears in *this device's* audit logs. " +
+						"Warden runs fail-closed: at least one audit device must remain enabled at all times.",
+					Responses: createResponses,
+					Examples:  createExamples,
 				},
 				logical.UpdateOperation: &framework.PathOperation{
 					Callback: b.handleAuditCreate,
 					Summary:  "Enable an audit device at the specified path",
+					Description: "Same handler as create: PUT and POST both call into the enable path. " +
+						"Re-submitting against an already-enabled path is rejected with 400 `path already in use` — " +
+						"to change an audit device's configuration, disable it and enable a new one.",
+					Responses: createResponses,
+					Examples:  createExamples,
 				},
 				logical.ReadOperation: &framework.PathOperation{
 					Callback: b.handleAuditRead,
 					Summary:  "Get audit device information",
+					Description: "Returns the configuration of the audit device at `path`. " +
+						"`config.hmac_key` is masked in the response — Warden never returns the raw HMAC salt over the API. " +
+						"The input path is normalized to end with `/`.",
+					Responses: map[int][]framework.Response{
+						http.StatusOK: {{
+							Description: "Audit device configuration. `config.hmac_key` is masked.",
+							MediaType:   "application/json",
+							Fields:      auditDeviceFields,
+							Example: &logical.Response{
+								StatusCode: http.StatusOK,
+								Data: map[string]any{
+									"type":        "file",
+									"path":        "file/",
+									"description": "Primary audit log",
+									"accessor":    "audit_file_abc123",
+									"config": map[string]any{
+										"file_path": "/var/log/warden/audit.log",
+										"hmac_key":  maskMountConfigValue,
+									},
+								},
+							},
+						}},
+						http.StatusNotFound: {{
+							Description: "No audit device is enabled at the given path.",
+						}},
+					},
+					Examples: []framework.RequestExample{{
+						Description: "Read the audit device enabled at `file/`.",
+						Data:        map[string]any{},
+					}},
 				},
 				logical.DeleteOperation: &framework.PathOperation{
 					Callback: b.handleAuditDelete,
 					Summary:  "Disable an audit device",
+					Description: "Disables (unmounts) the audit device at `path`. " +
+						"Disabling the last enabled audit device returns 400 — Warden requires at least one audit device to operate (fail-closed mode).",
+					Responses: map[int][]framework.Response{
+						http.StatusOK: {{
+							Description: "Audit device disabled successfully.",
+							MediaType:   "application/json",
+							Fields: map[string]*framework.FieldSchema{
+								"message": {
+									Type:        framework.TypeString,
+									Description: "Human-readable confirmation message.",
+								},
+							},
+							Example: &logical.Response{
+								StatusCode: http.StatusOK,
+								Data: map[string]any{
+									"message": "Successfully disabled audit device at secondary/",
+								},
+							},
+						}},
+						http.StatusBadRequest: {{
+							Description: "Cannot disable the last audit device (fail-closed mode), or the underlying disable operation failed.",
+						}},
+					},
+					Examples: []framework.RequestExample{{
+						Description: "Disable the audit device at `secondary/`.",
+						Data:        map[string]any{},
+					}},
 				},
 			},
 			HelpSynopsis:    "Manage audit devices",
@@ -81,10 +242,46 @@ func (b *SystemBackend) pathAudit() []*framework.Path {
 				logical.ListOperation: &framework.PathOperation{
 					Callback: b.handleAuditList,
 					Summary:  "List all audit devices",
+					Description: "Returns a map of audit-device path → device metadata. " +
+						"Each entry is `{type, path, description, accessor, config}`. " +
+						"`config.hmac_key` is masked. " +
+						"The response body is the device map itself — there is no top-level wrapper key.",
+					Responses: map[int][]framework.Response{
+						http.StatusOK: {{
+							Description: "Map of all enabled audit devices, keyed by mount path. " +
+								"Each value is `{type, path, description, accessor, config}`; `config.hmac_key` is masked. " +
+								"See `Example` for the concrete shape.",
+							MediaType: "application/json",
+							Example:   listExampleResponse,
+						}},
+					},
+					Examples: []framework.RequestExample{{
+						Description: "List all enabled audit devices.",
+						Data:        map[string]any{},
+					}},
 				},
 				logical.ReadOperation: &framework.PathOperation{
 					Callback: b.handleAuditListOrRead,
 					Summary:  "List all audit devices (with warden-list=true query param)",
+					Description: "Warden-specific GET-as-list shim: when called with `?warden-list=true`, behaves identically to the LIST operation. " +
+						"Without the flag, returns 400 — reads of individual devices use the path-scoped `audit/{path}` endpoint.",
+					Responses: map[int][]framework.Response{
+						http.StatusOK: {{
+							Description: "Map of all enabled audit devices, keyed by mount path. Same shape as the LIST response. " +
+								"See `Example` for the concrete shape.",
+							MediaType: "application/json",
+							Example:   listExampleResponse,
+						}},
+						http.StatusBadRequest: {{
+							Description: "`warden-list=true` query parameter is required for GET-as-list; use the path-scoped read for individual devices.",
+						}},
+					},
+					Examples: []framework.RequestExample{{
+						Description: "List all enabled audit devices via GET with the `warden-list=true` query parameter.",
+						Data: map[string]any{
+							"warden-list": true,
+						},
+					}},
 				},
 			},
 			HelpSynopsis:    "List audit devices",
