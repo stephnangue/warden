@@ -35,6 +35,10 @@ All notable changes to Warden are documented in this file.
 - **Global `--fields` / `-F` flag for context-window discipline.** Comma-separated dot-paths project structured output to only the requested fields — for example `warden read sys/policies/admin --fields name,rules.*.path`. Path syntax: dot for nesting, `*` for "every key/element at this level." Missing paths are silently omitted. Honors `WARDEN_FIELDS`. Useful for keeping AI agent context windows small.
 - **Structured JSON errors and stable exit codes.** Every CLI failure now produces a category-specific exit code and, in `--output json|ndjson` modes, a `{"error": {code, message, hint}}` envelope on stderr. Agents branch on the stable `code` string (`auth_required`, `forbidden`, `not_found`, `network`, `server`, `conflict`, `invalid_input`, `usage`, `unknown`) and exit code (`0` ok, `1` unknown, `2` usage, `3` invalid_input, `4` auth, `5` forbidden, `6` not_found, `7` network, `8` server, `9` conflict). The classifier maps `*api.ResponseError` HTTP status codes, sentinel errors wrapped via `helpers.ErrXxx`, network/transport errors (`*url.Error`, `net.Error`), and Cobra usage errors (unknown flag, wrong arg count) to the right category. Table/text mode keeps the existing human-readable stderr message.
 
+### Removed
+
+- **`warden login` CLI command.** Deleted along with its `cmd/login` package and the JWT/cert subcommand handlers. The server-side `/auth/jwt/login` and `/auth/cert/login` endpoints have returned `400 Bad Request` since v0.6.0, so the CLI command had been failing at runtime; clients have authenticated implicitly (env-var `WARDEN_TOKEN`, mTLS via `WARDEN_CLIENT_CERT`/`WARDEN_CLIENT_KEY`, or `Authorization: Bearer` JWT) since then. The lower-level `api/auth/jwt` and `api/auth/cert` packages remain — they back the server's implicit-auth path as well as role introspection and e2e helpers.
+
 ## [v0.11.0] — 2026-04-20
 
 ### New Features
