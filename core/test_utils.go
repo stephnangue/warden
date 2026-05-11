@@ -570,6 +570,10 @@ func createTestCore(t *testing.T) *Core {
 	// Initialize credential manager (required for source/spec operations)
 	_ = core.setupCredentialManager(ctx)
 
+	// Initialize skill store
+	core.skillStore = NewSkillStore(core)
+	core.skillStore.storage = NewBarrierView(barrier, skillStorePath)
+
 	// Initialize policy store
 	core.policyStore, _ = NewPolicyStore(ctx, core, log)
 
