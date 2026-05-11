@@ -314,13 +314,23 @@ func (s *SkillStore) load(ctx context.Context, name string) (*Skill, error) {
 }
 
 // setupSkillStore is called during unseal to wire the SkillStore's
-// storage view to the unsealed barrier. PR 1 only loads; the seed step
-// lands in PR 2.
+// storage view to the unsealed barrier and seed the foundation skills
+// on first run. Provider-type skills follow a different lifecycle
+// (seeded at provider mount time) and are not handled here.
 func (c *Core) setupSkillStore(ctx context.Context) error {
 	if c.skillStore == nil {
 		return fmt.Errorf("skill store not initialized")
 	}
-	return c.skillStore.LoadFromStorage(ctx)
+	if err := c.skillStore.LoadFromStorage(ctx); err != nil {
+		return err
+	}
+	if err := c.skillStore.SeedFoundation(ctx); err != nil {
+		// Seed failures must not block unseal: agents can still operate
+		// without the foundation catalog (the markdown is also embedded
+		// in the binary). Log and continue.
+		c.logger.Warn("failed to seed foundation skills", logger.Err(err))
+	}
+	return nil
 }
 
 // teardownSkillStore is the seal-time inverse of setupSkillStore.
