@@ -66,6 +66,9 @@ func (b *SystemBackend) paths() []*framework.Path {
 	// Credential paths
 	paths = append(paths, b.pathCredentials()...)
 
+	// Skill registry paths
+	paths = append(paths, b.pathSkills()...)
+
 	// Policy paths
 	paths = append(paths, b.pathPolicies()...)
 
