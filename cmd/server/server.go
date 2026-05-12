@@ -157,6 +157,21 @@ Usage: warden server [options]
 		"sentry":        sentry.Factory,
 	}
 
+	// providerSkills maps provider type → agent-facing skill markdown,
+	// shipped alongside each provider's Go code under provider/<type>/skill.md.
+	// Only provider packages that ship a skill.md appear here; on first mount
+	// of one of these types, the markdown is seeded into the global skill
+	// registry. Operator edits to a seeded skill are preserved on subsequent
+	// mounts (SkillStore.SeedProviderSkill is a no-op when the name exists).
+	providerSkills = map[string]string{
+		"aws":      aws.Skill(),
+		"github":   github.Skill(),
+		"openai":   openai.Skill(),
+		"rds":      rds.Skill(),
+		"scaleway": scaleway.Skill(),
+		"vault":    vault.Skill(),
+	}
+
 	authMethods = map[string]wardenlogical.Factory{
 		"jwt":  jwt.Factory,
 		"cert": cert.Factory,
@@ -762,6 +777,7 @@ func createCoreConfig(logger *log.GatedLogger, conf *config.Config, backend phy.
 		UnwrapSeal:         unwrapSeal,
 		AuditDevices:       auditDevices,
 		Providers:          providers,
+		ProviderSkills:     providerSkills,
 		AuthMethods:        authMethods,
 		Logger:             logger,
 		SecureRandomReader: secureRandomReader,

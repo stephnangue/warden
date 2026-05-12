@@ -60,6 +60,38 @@ func TestSkill_FoundationSkillsArePresent(t *testing.T) {
 	}
 }
 
+// TestSkill_ProviderSkillSeededOnMount verifies that mounting a provider
+// type seeds the type's skill into the global catalog. The e2e setup
+// mounts a vault provider as part of step 9, so by the time tests run,
+// the "vault" skill must already be present.
+func TestSkill_ProviderSkillSeededOnMount(t *testing.T) {
+	port := h.GetLeaderPort(t)
+	names := skillNames(listSkills(t, port))
+
+	if !names["vault"] {
+		t.Fatalf("provider skill \"vault\" missing — seed-on-mount did not fire (got %v)", names)
+	}
+
+	// Confirm the record has the right provenance.
+	status, body := h.APIRequest(t, "GET", "sys/skills/vault", port, "")
+	if status != 200 {
+		t.Fatalf("read vault skill: status %d, body %s", status, string(body))
+	}
+	var rd readResp
+	if err := json.Unmarshal(body, &rd); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if rd.Data["origin"] != "seed" {
+		t.Errorf("vault origin = %v, want \"seed\"", rd.Data["origin"])
+	}
+	if rd.Data["provider"] != "vault" {
+		t.Errorf("vault provider field = %v, want \"vault\"", rd.Data["provider"])
+	}
+	if rd.Data["category"] != "provider-guide" {
+		t.Errorf("vault category = %v, want \"provider-guide\"", rd.Data["category"])
+	}
+}
+
 // TestSkill_ReadFoundationSkillReturnsBody verifies that a known foundation
 // skill comes back with its full markdown body via the read endpoint.
 func TestSkill_ReadFoundationSkillReturnsBody(t *testing.T) {

@@ -26,13 +26,56 @@ const (
 	seededMarkerKey = "_meta/seeded"
 )
 
+// SeedProviderSkill installs a provider-type skill into the registry,
+// idempotently. Called by the provider-mount handler with the markdown
+// shipped alongside the provider's Go code.
+//
+// providerType is the mount type the caller is registering (e.g., "aws").
+// The frontmatter's `name` field MUST equal providerType — this guards
+// against wiring errors where a provider's skill markdown gets mapped to
+// the wrong type in CoreConfig.ProviderSkills.
+//
+// Behavior:
+//   - If the skill name already exists (operator edit OR previous mount
+//     of the same type), this is a no-op. The operator's edits are
+//     preserved.
+//   - If the name is absent (never seeded, or operator deleted), the
+//     markdown is parsed and persisted with Origin="seed".
+//   - A bad markdown payload OR name/type mismatch returns an error so
+//     the caller can log; the mount itself must not fail because of a
+//     skill error.
+//
+// Unlike SeedFoundation, this method does not use a marker — each
+// provider type carries its own existence check via the registry.
+func (s *SkillStore) SeedProviderSkill(ctx context.Context, providerType, markdown string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return ErrSkillStoreClosed
+	}
+	if s.storage == nil {
+		return errors.New("skill store storage not initialized")
+	}
+
+	skill, err := parseSkillMarkdown([]byte(markdown))
+	if err != nil {
+		return fmt.Errorf("parse provider skill: %w", err)
+	}
+	if skill.Name != providerType {
+		return fmt.Errorf("provider skill name %q does not match provider type %q (likely a wiring error in CoreConfig.ProviderSkills)", skill.Name, providerType)
+	}
+	return s.seedOne(ctx, skill)
+}
+
 // SeedFoundation writes the embedded foundation skills (discovery,
 // warden-shared, troubleshooting) into the registry on first call.
 // Subsequent calls are no-ops thanks to the seeded marker. Operator
 // deletions of seeded skills are not reverted.
 //
 // Provider-type skills follow a different lifecycle (seeded at provider
-// mount time) and are intentionally not handled here.
+// mount time, see SeedProviderSkill) and are intentionally not handled
+// here.
 func (s *SkillStore) SeedFoundation(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
