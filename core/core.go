@@ -232,6 +232,11 @@ type Core struct {
 
 	providers map[string]logical.Factory
 
+	// providerSkills maps provider type → agent-facing markdown.
+	// Populated from CoreConfig.ProviderSkills; consumed by the mount
+	// handler to seed the skill registry on first mount of each type.
+	providerSkills map[string]string
+
 	auditManager audit.AuditManager
 
 	audit *MountTable
@@ -334,6 +339,14 @@ type CoreConfig struct {
 	AuthMethods map[string]logical.Factory
 
 	Providers map[string]logical.Factory
+
+	// ProviderSkills maps provider type → agent-facing skill markdown.
+	// Entries are populated by the server wiring (cmd/server) for every
+	// provider package that ships a skill.md. On first mount of each
+	// type, the markdown is parsed and seeded into the SkillStore via
+	// SeedProviderSkill. Types absent from this map simply don't appear
+	// in the agent skill catalog until an operator creates one manually.
+	ProviderSkills map[string]string
 
 	// TokenStore has been moved to core package and is created internally
 	// Deprecated: Remove this field, TokenStore is now created in NewCore
@@ -598,6 +611,7 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 
 	// Provider backends
 	c.configureProvider(conf.Providers)
+	c.configureProviderSkills(conf.ProviderSkills)
 
 	// Auth backends
 	c.configureAuthMethods(conf.AuthMethods)
@@ -621,6 +635,12 @@ func (c *Core) configureProvider(backends map[string]logical.Factory) {
 	providers := make(map[string]logical.Factory, len(backends))
 	maps.Copy(providers, backends)
 	c.providers = providers
+}
+
+func (c *Core) configureProviderSkills(skills map[string]string) {
+	out := make(map[string]string, len(skills))
+	maps.Copy(out, skills)
+	c.providerSkills = out
 }
 
 func (c *Core) configureAuthMethods(backends map[string]logical.Factory) {

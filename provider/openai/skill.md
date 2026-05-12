@@ -2,6 +2,7 @@
 name: openai
 description: "Call the OpenAI API through Warden — chat, embeddings, moderation — without holding an OpenAI API key."
 category: provider-guide
+provider: openai
 upstream: OpenAI REST API (api.openai.com)
 ---
 

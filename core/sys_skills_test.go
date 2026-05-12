@@ -336,6 +336,38 @@ func TestSystemBackend_HandleSkillRead_AllowsAnyNamespace(t *testing.T) {
 	assert.Equal(t, "publicly-visible", resp.Data["name"])
 }
 
+func TestSystemBackend_MaybeSeedProviderSkill_SeedsWhenRegistered(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	core.providerSkills = map[string]string{"testprov": providerSkillMD}
+
+	backend.maybeSeedProviderSkill(ctx, "testprov")
+
+	got, err := core.skillStore.Get(ctx, "testprov")
+	require.NoError(t, err)
+	assert.Equal(t, SkillOriginSeed, got.Origin)
+	assert.Equal(t, "testprov", got.Provider)
+}
+
+func TestSystemBackend_MaybeSeedProviderSkill_NoOpWhenUnregistered(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	// providerSkills has no "unmapped" entry.
+
+	backend.maybeSeedProviderSkill(ctx, "unmapped")
+
+	_, err := core.skillStore.Get(ctx, "unmapped")
+	assert.ErrorIs(t, err, ErrSkillNotFound)
+}
+
+func TestSystemBackend_MaybeSeedProviderSkill_NoOpWhenStoreNil(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	core.skillStore = nil
+	core.providerSkills = map[string]string{"testprov": providerSkillMD}
+
+	// Must not panic, must not error out — the cluster runs fine without
+	// the skill catalog.
+	backend.maybeSeedProviderSkill(ctx, "testprov")
+}
+
 func TestSystemBackend_HandleSkillList_AllowsAnyNamespace(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 	crudSchema, listSchema := skillPathSchemas(backend)

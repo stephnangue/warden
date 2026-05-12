@@ -2,6 +2,7 @@
 name: aws
 description: "Call AWS services (S3, EC2, Lambda, DynamoDB, STS, …) through Warden's SigV4 gateway."
 category: provider-guide
+provider: aws
 upstream: AWS
 ---
 

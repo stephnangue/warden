@@ -328,6 +328,170 @@ func TestSkillStore_SeedFoundation_ClosedStoreReturnsError(t *testing.T) {
 	}
 }
 
+// providerSkillMD is the canonical fixture for SeedProviderSkill tests.
+const providerSkillMD = `---
+name: testprov
+description: "fixture skill for tests"
+category: provider-guide
+provider: testprov
+---
+
+# Testprov
+
+body content
+`
+
+func TestSkillStore_SeedProviderSkill_WritesSkillOnFirstCall(t *testing.T) {
+	store, ctx := setupTestSkillStore(t)
+
+	if err := store.SeedProviderSkill(ctx, "testprov", providerSkillMD); err != nil {
+		t.Fatalf("SeedProviderSkill: %v", err)
+	}
+
+	got, err := store.Get(ctx, "testprov")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Origin != SkillOriginSeed {
+		t.Errorf("Origin = %q, want seed", got.Origin)
+	}
+	if got.Category != SkillCategoryProviderGuide {
+		t.Errorf("Category = %q, want provider-guide", got.Category)
+	}
+	if got.Provider != "testprov" {
+		t.Errorf("Provider = %q, want testprov", got.Provider)
+	}
+	if !strings.Contains(got.Body, "body content") {
+		t.Errorf("Body missing fixture text: %q", got.Body)
+	}
+}
+
+func TestSkillStore_SeedProviderSkill_IdempotentOnReMount(t *testing.T) {
+	store, ctx := setupTestSkillStore(t)
+
+	if err := store.SeedProviderSkill(ctx, "testprov", providerSkillMD); err != nil {
+		t.Fatalf("first SeedProviderSkill: %v", err)
+	}
+	first, err := store.Get(ctx, "testprov")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	if err := store.SeedProviderSkill(ctx, "testprov", providerSkillMD); err != nil {
+		t.Fatalf("second SeedProviderSkill: %v", err)
+	}
+	second, err := store.Get(ctx, "testprov")
+	if err != nil {
+		t.Fatalf("Get (second): %v", err)
+	}
+	if first.Version != second.Version {
+		t.Errorf("Version changed across re-seed: %d -> %d", first.Version, second.Version)
+	}
+	if !first.UpdatedAt.Equal(second.UpdatedAt) {
+		t.Errorf("UpdatedAt changed across re-seed: %v -> %v", first.UpdatedAt, second.UpdatedAt)
+	}
+}
+
+func TestSkillStore_SeedProviderSkill_PreservesOperatorEdits(t *testing.T) {
+	store, ctx := setupTestSkillStore(t)
+
+	if err := store.SeedProviderSkill(ctx, "testprov", providerSkillMD); err != nil {
+		t.Fatalf("SeedProviderSkill: %v", err)
+	}
+	if _, err := store.Update(ctx, "testprov", &Skill{Description: "operator override"}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Re-mount of same provider type must not clobber the operator's edit.
+	if err := store.SeedProviderSkill(ctx, "testprov", providerSkillMD); err != nil {
+		t.Fatalf("second SeedProviderSkill: %v", err)
+	}
+	got, err := store.Get(ctx, "testprov")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Description != "operator override" {
+		t.Errorf("Description = %q, operator edit lost", got.Description)
+	}
+}
+
+func TestSkillStore_SeedProviderSkill_ReSeedsAfterDeletion(t *testing.T) {
+	store, ctx := setupTestSkillStore(t)
+
+	if err := store.SeedProviderSkill(ctx, "testprov", providerSkillMD); err != nil {
+		t.Fatalf("first SeedProviderSkill: %v", err)
+	}
+	if err := store.Delete(ctx, "testprov"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	// Deletion + new mount of same provider type re-seeds the skill.
+	// (Unlike foundation skills, provider seeding has no sticky marker.)
+	if err := store.SeedProviderSkill(ctx, "testprov", providerSkillMD); err != nil {
+		t.Fatalf("second SeedProviderSkill: %v", err)
+	}
+	got, err := store.Get(ctx, "testprov")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Name != "testprov" {
+		t.Errorf("Name = %q, want testprov", got.Name)
+	}
+}
+
+func TestSkillStore_SeedProviderSkill_RejectsInvalidMarkdown(t *testing.T) {
+	store, ctx := setupTestSkillStore(t)
+
+	cases := []struct {
+		name     string
+		provType string
+		md       string
+	}{
+		{"missing opening delimiter", "foo", "name: foo\ndescription: bar\ncategory: shared\n"},
+		{"missing closing delimiter", "foo", "---\nname: foo\ndescription: bar\ncategory: shared\n"},
+		{"missing body", "ok", "---\nname: ok\ndescription: bar\ncategory: shared\n---\n"},
+		{"provider-guide without provider", "gw", "---\nname: gw\ndescription: bar\ncategory: provider-guide\n---\n\nbody\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := store.SeedProviderSkill(ctx, tc.provType, tc.md)
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+		})
+	}
+}
+
+// TestSkillStore_SeedProviderSkill_RejectsNameMismatch verifies the new
+// providerType-vs-skill.Name guard catches wire-up errors where the
+// markdown's declared name does not match the registered provider type.
+func TestSkillStore_SeedProviderSkill_RejectsNameMismatch(t *testing.T) {
+	store, ctx := setupTestSkillStore(t)
+
+	// providerSkillMD declares `name: testprov` — pass a different type.
+	err := store.SeedProviderSkill(ctx, "wronglabel", providerSkillMD)
+	if err == nil {
+		t.Fatalf("expected name-mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not match provider type") {
+		t.Errorf("error %q does not mention mismatch", err.Error())
+	}
+	// And no skill should have been persisted.
+	if _, err := store.Get(ctx, "testprov"); !errors.Is(err, ErrSkillNotFound) {
+		t.Errorf("Get after rejected seed: got %v, want ErrSkillNotFound", err)
+	}
+}
+
+func TestSkillStore_SeedProviderSkill_ClosedStoreReturnsError(t *testing.T) {
+	store, ctx := setupTestSkillStore(t)
+	_ = store.Close()
+
+	err := store.SeedProviderSkill(ctx, "testprov", providerSkillMD)
+	if !errors.Is(err, ErrSkillStoreClosed) {
+		t.Errorf("err = %v, want ErrSkillStoreClosed", err)
+	}
+}
+
 func equalStringSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

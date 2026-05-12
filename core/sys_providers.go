@@ -8,6 +8,7 @@ import (
 
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -94,11 +95,37 @@ func (b *SystemBackend) handleProviderCreate(ctx context.Context, req *logical.R
 		return logical.ErrorResponse(err), nil
 	}
 
+	// Seed the agent-facing skill for this provider type, if one ships
+	// with the package. First mount of a given type registers the skill;
+	// later mounts of the same type are no-ops. Operator edits to a
+	// previously seeded skill are preserved. Skill failures never block
+	// the mount — the cluster is functional without the catalog entry.
+	b.maybeSeedProviderSkill(ctx, providerType)
+
 	return b.respondCreated(map[string]any{
 		"accessor": entry.Accessor,
 		"path":     entry.Path,
 		"message":  fmt.Sprintf("Successfully mounted %s provider at %s", providerType, path),
 	}), nil
+}
+
+// maybeSeedProviderSkill seeds the agent skill for providerType when both
+// the wired-up markdown and the SkillStore are available. Errors are
+// logged but do not propagate — see handleProviderCreate.
+func (b *SystemBackend) maybeSeedProviderSkill(ctx context.Context, providerType string) {
+	if b.core.skillStore == nil {
+		return
+	}
+	md, ok := b.core.providerSkills[providerType]
+	if !ok || md == "" {
+		return
+	}
+	if err := b.core.skillStore.SeedProviderSkill(ctx, providerType, md); err != nil {
+		b.logger.Warn("failed to seed provider skill",
+			logger.String("type", providerType),
+			logger.Err(err),
+		)
+	}
 }
 
 // handleProviderRead handles GET /sys/providers/{path}
