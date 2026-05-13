@@ -116,12 +116,12 @@ Warden also secures non-agent workloads — CI/CD pipelines, microservices, deve
 
 Warden supports multiple methods for verifying caller identity.
 
-| Method | Identity Source | Best For |
-|--------|----------------|----------|
-| **JWT** | Signed JWT token or SPIFFE JWT-SVID | AI agents, MCP servers, agentic frameworks, any workload with an OIDC/JWT issuer or SPIFFE runtime |
-| **TLS Certificate** | X.509 client certificate or SPIFFE X.509-SVID | Agents in service mesh environments, Kubernetes pods, VMs with machine certificates |
+| Method | Identity Source | How the agent presents the credential to its SDK |
+|--------|----------------|----|
+| **JWT** | Signed JWT token or SPIFFE JWT-SVID | The **same JWT** goes in whichever credential slot the upstream SDK natively expects (`AWS_SECRET_ACCESS_KEY`, `OPENAI_API_KEY`, `X-Vault-Token`, `Authorization: Bearer`, …). Warden detects it, validates the identity, and swaps in the real upstream credential. Existing SDK code keeps working — only the base URL changes. |
+| **TLS Certificate** | X.509 client certificate or SPIFFE X.509-SVID | Identity is proven at the TLS handshake (or forwarded by a TLS-terminating proxy via `X-SSL-Client-Cert`). The SDK's credential slot is filled with any placeholder value — Warden ignores it once cert auth has proven the identity. Role selection follows the same per-provider conventions as JWT mode. |
 
-SPIFFE is supported in both methods — JWT-SVIDs via JWT auth and X.509-SVIDs via certificate auth. Both methods produce the same internal session. Once authenticated, the caller interacts with Warden identically regardless of how they proved their identity.
+This is the design property that makes Warden a *drop-in* layer rather than a rewrite tax: a pre-existing boto3, openai-python, Vault CLI, or curl-against-GitHub script becomes Warden-mediated by setting the base URL to Warden and putting the JWT where the secret used to go. It also separates Warden from MCP (which adds a protocol the agent host must speak) and from dedicated auth proxies (which typically require client libraries).
 
 ## Tutorial: one identity, three systems, zero credentials
 

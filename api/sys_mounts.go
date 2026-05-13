@@ -192,4 +192,9 @@ type MountOutput struct {
 	Description string         `json:"description"`
 	Accessor    string         `json:"accessor"`
 	Config      map[string]any `json:"config" mapstructure:"config"`
+	// MountURL is the relative URL path that resolves to this mount.
+	// Agents append it to $WARDEN_ADDR plus the per-provider suffix
+	// (e.g. "gateway", "role/<role>/gateway", "access/<grant>") to reach
+	// the upstream. Has the namespace and mount path already baked in.
+	MountURL string `json:"mount_url" mapstructure:"mount_url"`
 }

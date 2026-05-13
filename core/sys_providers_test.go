@@ -5,10 +5,51 @@ import (
 	"testing"
 
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMountURL(t *testing.T) {
+	cases := []struct {
+		name      string
+		ns        *namespace.Namespace
+		mountPath string
+		want      string
+	}{
+		{
+			name:      "root namespace",
+			ns:        namespace.RootNamespace,
+			mountPath: "aws/",
+			want:      "/v1/aws/",
+		},
+		{
+			name:      "sub-namespace",
+			ns:        &namespace.Namespace{Path: "team-data/"},
+			mountPath: "aws/",
+			want:      "/v1/team-data/aws/",
+		},
+		{
+			name:      "nested namespace",
+			ns:        &namespace.Namespace{Path: "team-data/sub-team/"},
+			mountPath: "vault/",
+			want:      "/v1/team-data/sub-team/vault/",
+		},
+		{
+			name:      "nil namespace falls back to no prefix",
+			ns:        nil,
+			mountPath: "aws/",
+			want:      "/v1/aws/",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mountURL(tc.ns, tc.mountPath)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
 
 func TestSystemBackend_PathProviders(t *testing.T) {
 	backend, _, _ := setupTestSystemBackend(t)
@@ -100,6 +141,9 @@ func TestSystemBackend_HandleProviderRead(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "mock", resp.Data["type"])
 	assert.Equal(t, "test-provider/", resp.Data["path"])
+	// The agent-facing URL must come back with the namespace baked in so
+	// agents don't have to do string surgery on $WARDEN_NAMESPACE + path.
+	assert.Equal(t, "/v1/test-provider/", resp.Data["mount_url"])
 }
 
 func TestSystemBackend_HandleProviderRead_NotFound(t *testing.T) {
@@ -186,4 +230,13 @@ func TestSystemBackend_HandleProviderList(t *testing.T) {
 	mounts, ok := resp.Data["mounts"].(map[string]any)
 	require.True(t, ok)
 	assert.Len(t, mounts, 2)
+
+	// Every entry must carry a mount_url that agents can prepend
+	// $WARDEN_ADDR to without further string manipulation.
+	for path, entry := range mounts {
+		em, ok := entry.(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "/v1/"+path, em["mount_url"],
+			"mount_url for %q should be /v1/%s", path, path)
+	}
 }

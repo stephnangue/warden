@@ -128,6 +128,27 @@ func (b *SystemBackend) maybeSeedProviderSkill(ctx context.Context, providerType
 	}
 }
 
+// mountURL builds the agent-facing relative URL path for a mount. The
+// return value is what an agent appends to $WARDEN_ADDR to reach the
+// mount's root; the agent then appends the per-provider suffix
+// (e.g. "gateway", "role/<role>/gateway", "access/<grant>") taken from
+// the matching skill.
+//
+// Examples:
+//
+//	root namespace, mount "aws/"        → "/v1/aws/"
+//	namespace "team-data/", mount "aws/" → "/v1/team-data/aws/"
+//
+// The format mirrors how the request router resolves mounts internally
+// (ns.Path + mount + req.Path in core/router.go), so the value is
+// guaranteed to match the route an agent's HTTP call would hit.
+func mountURL(ns *namespace.Namespace, mountPath string) string {
+	if ns == nil {
+		return "/v1/" + mountPath
+	}
+	return "/v1/" + ns.Path + mountPath
+}
+
 // handleProviderRead handles GET /sys/providers/{path}
 func (b *SystemBackend) handleProviderRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	path := d.Get("path").(string)
@@ -163,6 +184,7 @@ func (b *SystemBackend) handleProviderRead(ctx context.Context, req *logical.Req
 		"description": entry.Description,
 		"accessor":    entry.Accessor,
 		"config":      maskedConfig,
+		"mount_url":   mountURL(entry.Namespace(), entry.Path),
 	}), nil
 }
 
@@ -212,6 +234,7 @@ func (b *SystemBackend) handleProviderList(ctx context.Context, req *logical.Req
 			"description": entry.Description,
 			"accessor":    entry.Accessor,
 			"config":      maskedConfig,
+			"mount_url":   mountURL(ns, entry.Path),
 		}
 	}
 

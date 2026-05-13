@@ -19,47 +19,48 @@ The agent **never holds a PAT**.
 
 ## Configure the CLI/SDK
 
-`<mount>` and `<role>` below come from the discovery flow:
-- `<mount>` is the chosen provider's path from `warden provider list`
-  (e.g. `github/`, `github-enterprise/`).
+`<mount-url>` and `<role>` below come from the discovery flow:
+- `<mount-url>` is the chosen provider's `mount_url` from
+  `warden provider list` (e.g. `/v1/github/`, `/v1/team-data/github-enterprise/`).
+  Warden has already baked the namespace + mount path in.
 - `<role>` is the role you picked from `warden role list` to perform this
   task — it goes in the URL path.
 
 ```bash
-URL pattern : $WARDEN_ADDR/v1/<mount>/role/<role>/gateway/<github-api-path>
-Auth header : Authorization: Bearer <JWT>
+URL pattern : $WARDEN_ADDR<mount-url>role/<role>/gateway/<github-api-path>
+Auth header : Authorization: Bearer $WARDEN_TOKEN
 ```
 
 For `curl` or any HTTP client: rewrite the GitHub host to
-`<warden>/v1/<mount>/role/<role>/gateway` and add the bearer JWT.
+`$WARDEN_ADDR<mount-url>role/<role>/gateway` and add the bearer token.
 
 ## Examples
 
-(All examples assume mount `github/` and role `repo-reader`;
+(All examples assume `mount_url = /v1/github/` and role `repo-reader`;
 substitute yours.)
 
 List your authenticated user's repos:
 ```bash
-curl -H "Authorization: Bearer $JWT" \
+curl -H "Authorization: Bearer $WARDEN_TOKEN" \
   $WARDEN_ADDR/v1/github/role/repo-reader/gateway/user/repos
 ```
 
 Read a specific repo's issues:
 ```bash
-curl -H "Authorization: Bearer $JWT" \
+curl -H "Authorization: Bearer $WARDEN_TOKEN" \
   $WARDEN_ADDR/v1/github/role/repo-reader/gateway/repos/myorg/myrepo/issues
 ```
 
 Open an issue (operator must grant a write-capable role):
 ```bash
-curl -X POST -H "Authorization: Bearer $JWT" \
+curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
   -H "Accept: application/vnd.github+json" \
   -d '{"title":"Bug","body":"..."}' \
   $WARDEN_ADDR/v1/github/role/issue-writer/gateway/repos/myorg/myrepo/issues
 ```
 
 For the Octokit JS / PyGithub clients: configure the `baseUrl` /
-`base_url` to `$WARDEN_ADDR/v1/<mount>/role/<role>/gateway`
+`base_url` to `$WARDEN_ADDR<mount-url>role/<role>/gateway`
 and supply your JWT as the auth token.
 
 ## Quirks
