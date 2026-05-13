@@ -19,17 +19,18 @@ The agent **never holds a Vault token**.
 
 ## Configure the CLI/SDK
 
-`<mount>` and `<role>` below come from the discovery flow:
-- `<mount>` is the chosen provider's path from `warden provider list`
-  (e.g. `vault/`, `secrets-prod/`).
+`<mount-url>` and `<role>` below come from the discovery flow:
+- `<mount-url>` is the chosen provider's `mount_url` from
+  `warden provider list` (e.g. `/v1/vault/`, `/v1/team-data/secrets-prod/`).
+  Warden has already baked the namespace + mount path in.
 - `<role>` is the role you picked from `warden role list` to perform this
   task — it goes in the URL path.
 
 Auth is your JWT:
 
 ```bash
-URL pattern : $WARDEN_ADDR/v1/<mount>/role/<role>/gateway/<vault-api-path>
-Auth header : Authorization: Bearer <JWT>     # OR X-Vault-Token: <JWT>
+URL pattern : $WARDEN_ADDR<mount-url>role/<role>/gateway/<vault-api-path>
+Auth header : Authorization: Bearer $WARDEN_TOKEN  # OR X-Vault-Token: $WARDEN_TOKEN
 ```
 
 ### Vault CLI
@@ -39,8 +40,8 @@ Warden gateway and use the JWT as the Vault token. Warden detects
 the JWT prefix in `X-Vault-Token` and treats it as identity.
 
 ```bash
-export VAULT_ADDR="$WARDEN_ADDR/v1/<mount>/role/<role>/gateway"
-export VAULT_TOKEN="$JWT"
+export VAULT_ADDR="$WARDEN_ADDR<mount-url>role/<role>/gateway"
+export VAULT_TOKEN="$WARDEN_TOKEN"
 
 vault kv get secret/myapp/config
 vault kv put secret/myapp/config foo=bar
@@ -53,19 +54,19 @@ The agent never holds a real Vault token; the JWT is the identity.
 ### Vault SDK
 
 For the official Go / Python / Node Vault SDKs, the same shape: set
-the client's `Address` to `$WARDEN_ADDR/v1/<mount>/role/<role>/gateway`
+the client's `Address` to `$WARDEN_ADDR<mount-url>role/<role>/gateway`
 and its `Token` to the JWT.
 
 ### Raw HTTP (curl)
 
 ```bash
-curl -H "Authorization: Bearer $JWT" \
-  $WARDEN_ADDR/v1/<mount>/role/<role>/gateway/v1/secret/data/myapp/config
+curl -H "Authorization: Bearer $WARDEN_TOKEN" \
+  "$WARDEN_ADDR<mount-url>role/<role>/gateway/v1/secret/data/myapp/config"
 ```
 
 ## Examples
 
-(All examples assume mount `vault/` and role `secrets-reader`;
+(All examples assume `mount_url = /v1/vault/` and role `secrets-reader`;
 substitute yours. `VAULT_ADDR` and `VAULT_TOKEN` are exported as
 shown above.)
 
@@ -93,7 +94,7 @@ vault write pki/sign/server-tpl csr=@./req.csr
 
 Same operations via raw HTTP for scripting:
 ```bash
-curl -H "Authorization: Bearer $JWT" \
+curl -H "Authorization: Bearer $WARDEN_TOKEN" \
   $WARDEN_ADDR/v1/vault/role/secrets-reader/gateway/v1/secret/data/app/db
 ```
 

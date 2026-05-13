@@ -93,22 +93,29 @@ and matches them to the task — it does not memorize role names.
 ### Step 3 — List providers in this namespace
 
 ```bash
-warden provider list -o json -F path,type,description
+warden provider list -o json -F type,description,mount_url
 ```
 
 Hits `GET /v1/sys/providers?warden-list=true`. The wire payload also
-carries an `accessor` per mount (a server-internal opaque ID); the
-`-F path,type,description` projection drops it because the agent never
-uses it. `path` becomes the gateway URL component, `type` is the lookup
-key for the matching provider skill, `description` is what the agent
-matches the task against.
+carries `path` (the bare mount slug like `aws/`) and `accessor` (a
+server-internal opaque ID); the projection drops both because the
+agent has everything it needs in `mount_url`. Three fields the agent
+keeps:
+
+- `type` — the lookup key for the matching provider skill.
+- `description` — what the agent matches the task against.
+- `mount_url` — the relative URL path with namespace + mount baked in.
+  The agent appends `$WARDEN_ADDR` plus the per-provider suffix (e.g.
+  `gateway`, `role/<role>/gateway`, `access/<grant>`) from the
+  provider's skill to construct the upstream URL. No string surgery
+  on `$WARDEN_NAMESPACE`.
 
 ```json
 [
-  {"path": "aws/",    "type": "aws",    "description": "Production AWS account 1234"},
-  {"path": "openai/", "type": "openai", "description": "OpenAI API for embeddings + chat"},
-  {"path": "rds-pg/", "type": "rds",    "description": "RDS PostgreSQL — analytics"},
-  {"path": "vault/",  "type": "vault",  "description": "Internal Vault — secrets/, pki/"}
+  {"type": "aws",    "description": "Production AWS account 1234",     "mount_url": "/v1/team-data/aws/"},
+  {"type": "openai", "description": "OpenAI API for embeddings + chat", "mount_url": "/v1/team-data/openai/"},
+  {"type": "rds",    "description": "RDS PostgreSQL — analytics",      "mount_url": "/v1/team-data/rds-pg/"},
+  {"type": "vault",  "description": "Internal Vault — secrets/, pki/", "mount_url": "/v1/team-data/vault/"}
 ]
 ```
 
@@ -161,7 +168,7 @@ User asks: *"Show me the keys in the staging-events S3 bucket."*
 
 1. **Session check** — env vars present. ✓
 2. **`warden role list -o json -F name,description`** — finds `data-reader` ("Read-only access to data warehouses").
-3. **`warden provider list -o json -F path,type,description`** — finds `aws/` ("Production AWS account 1234") plus an unrelated `openai/`.
+3. **`warden provider list -o json -F type,description,mount_url`** — finds an `aws` provider ("Production AWS account 1234", `mount_url=/v1/team-data/aws/`) plus an unrelated `openai`.
 4. **Match** — `data-reader` + `aws/` fit the task. No ambiguity.
 5. **`warden skill read aws --raw`** — gets the recipe:
 
@@ -169,16 +176,16 @@ User asks: *"Show me the keys in the staging-events S3 bucket."*
    export AWS_ACCESS_KEY_ID="<role-name>"
    export AWS_SECRET_ACCESS_KEY="$WARDEN_TOKEN"
    export AWS_SESSION_TOKEN="$WARDEN_TOKEN"
-   export AWS_ENDPOINT_URL="$WARDEN_ADDR/v1/<mount>/gateway"
+   export AWS_ENDPOINT_URL="$WARDEN_ADDR<mount-url>gateway"
    ```
 
-6. **Substitute and run:**
+6. **Substitute and run** (using `mount_url=/v1/team-data/aws/` from step 3):
 
    ```bash
    export AWS_ACCESS_KEY_ID=data-reader
    export AWS_SECRET_ACCESS_KEY=$WARDEN_TOKEN
    export AWS_SESSION_TOKEN=$WARDEN_TOKEN
-   export AWS_ENDPOINT_URL=https://warden.example.com/v1/aws/gateway
+   export AWS_ENDPOINT_URL=https://warden.example.com/v1/team-data/aws/gateway
    aws s3 ls s3://staging-events
    ```
 
@@ -196,12 +203,12 @@ Step 1–4 of the discovery loop are universal. Step 5's recipe varies
 by provider type. The skill registry surfaces the exact recipe for
 each type:
 
-| Provider type | Recipe shape |
-|---|---|
-| `aws`, `scaleway` | SDK env vars (`AWS_ACCESS_KEY_ID` carries the role name, JWT in the secret/session slot, endpoint pointed at the gateway). |
-| `openai`, `anthropic`, `github`, etc. | API key replaced with the JWT; base URL pointed at `…/<mount>/gateway`. |
-| `vault` | API call to `…/<mount>/gateway/v1/<vault-path>` with `X-Vault-Token: $WARDEN_TOKEN`. |
-| `rds` | One-shot API call to mint a short-lived JDBC/PSQL connection string with an embedded IAM auth token; the agent then connects directly to the DB (no proxy in the data path). |
+| Provider type | Recipe shape | How role is passed |
+|---|---|---|
+| `aws`, `scaleway` | SDK env vars (`AWS_ACCESS_KEY_ID` carries the role name, JWT in the secret/session slot, endpoint pointed at the gateway). | Role embedded in `AWS_ACCESS_KEY_ID` (extracted by Warden from the SigV4 header). |
+| `openai`, `anthropic`, `github`, etc. | API key replaced with the JWT; base URL pointed at `<mount_url>role/<role>/gateway`. | URL path segment: `…/role/<role>/gateway/…`. |
+| `vault` | API call to `<mount_url>role/<role>/gateway/v1/<vault-path>` with `X-Vault-Token: $WARDEN_TOKEN`. | URL path segment, same as the other HTTP gateways. |
+| `rds` | One-shot API call to mint a short-lived JDBC/PSQL connection string with an embedded IAM auth token; the agent then connects directly to the DB (no proxy in the data path). | Query parameter: `…/access/<grant>?role=<role>` (access backends, not gateways, so role lives in the query string). |
 
 The skill body for each type explains the exact substitution, the quirks
 (e.g. AWS wildcard DNS for S3 virtual-hosted buckets, JWT-expiry

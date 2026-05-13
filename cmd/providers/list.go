@@ -58,6 +58,7 @@ func runList(cmd *cobra.Command, args []string) error {
 			"type":        mount.Type,
 			"accessor":    mount.Accessor,
 			"description": mount.Description,
+			"mount_url":   mount.MountURL,
 		})
 	}
 

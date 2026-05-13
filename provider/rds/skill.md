@@ -26,30 +26,34 @@ The Warden call returns a *connection string* you feed to your
 PostgreSQL or MySQL client unchanged. There's no SDK setup; this is
 a single HTTP call followed by a regular DB connection.
 
-`<mount>` and `<grant-name>` below come from the discovery flow plus
-one extra step:
-- `<mount>` is the chosen provider's path from `warden provider list`
-  (e.g. `rds/`, `rds-prod/`, `pg-warehouse/`).
+`<mount-url>`, `<grant-name>`, and `<role>` below come from the discovery
+flow plus one extra step:
+- `<mount-url>` is the chosen provider's `mount_url` from
+  `warden provider list` (e.g. `/v1/rds/`, `/v1/team-data/rds-prod/`).
+  Warden has already baked the namespace + mount path in.
 - `<grant-name>` is a pre-configured grant (operator decides which
   RDS instance + DB user + capabilities each grant exposes). List them
-  with `warden list <mount>/access` and pick by description.
-
-The role from `warden role list` is implicit here — RDS is transparent-only,
-so the JWT itself selects the role; there's no per-call role flag.
+  with `warden list <mount-url>access` and pick by description.
+- `<role>` is the role you picked from `warden role list`. Access
+  backends take the role as a **query parameter** on the access URL
+  (gateway providers take it as a path segment — different shape).
 
 ```bash
-URL pattern : $WARDEN_ADDR/v1/<mount>/access/<grant-name>
-Auth header : Authorization: Bearer <JWT>
+URL pattern : $WARDEN_ADDR<mount-url>access/<grant-name>?role=<role>
+Auth header : Authorization: Bearer $WARDEN_TOKEN
 ```
+
+If the operator has set a `default_role` on the auth method, omitting
+`?role=` falls back to that default.
 
 ## Examples
 
-(All examples assume mount `rds-prod/`; substitute yours.)
+(All examples assume `mount_url = /v1/rds-prod/`; substitute yours.)
 
 ```bash
-# Mint a connection string
-RESP=$(curl -sH "Authorization: Bearer $JWT" \
-  $WARDEN_ADDR/v1/rds-prod/access/analytics-reader)
+# Mint a connection string (role passed as query param)
+RESP=$(curl -sH "Authorization: Bearer $WARDEN_TOKEN" \
+  "$WARDEN_ADDR/v1/rds-prod/access/analytics-reader?role=analytics-ro")
 
 # {"connection_string":"host=db.example.com port=5432 dbname=analytics user=ro_user password=eyJ...IAM-TOKEN... sslmode=require","lease_duration":900}
 
@@ -98,6 +102,10 @@ to get a fresh token-bearing connection string.
 - **`rds_iam_token` is the underlying mint method.** RDS instances
   must have IAM database authentication enabled and the DB user
   pre-created with `rds_iam` group membership.
+- **Role selection** is via `?role=<name>` query parameter on the
+  access URL — distinct from gateway providers, which take the role as
+  a path segment (`/role/<name>/gateway/...`). Falls back to the auth
+  method's `default_role` when omitted.
 - **Connection failures are not Warden's responsibility.** A
   successful mint followed by a connection error means the DB
   endpoint, security group, or DB user is misconfigured — diagnose

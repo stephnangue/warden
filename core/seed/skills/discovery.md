@@ -55,19 +55,24 @@ match to your task.
 ## Step 3 — list providers in this namespace
 
 ```bash
-warden provider list -o json -F path,type,description
+warden provider list -o json -F type,description,mount_url
 ```
 
 Returns one record per mounted provider:
 
 ```json
 [
-  {"path": "aws/",    "type": "aws",    "description": "Production AWS account 1234"},
-  {"path": "openai/", "type": "openai", "description": "OpenAI API for embeddings + chat"},
-  {"path": "rds-pg/", "type": "rds",    "description": "RDS PostgreSQL — analytics"},
-  {"path": "vault/",  "type": "vault",  "description": "Internal Vault — secrets/, pki/"}
+  {"type": "aws",    "description": "Production AWS account 1234",     "mount_url": "/v1/team-data/aws/"},
+  {"type": "openai", "description": "OpenAI API for embeddings + chat", "mount_url": "/v1/team-data/openai/"},
+  {"type": "rds",    "description": "RDS PostgreSQL — analytics",      "mount_url": "/v1/team-data/rds-pg/"},
+  {"type": "vault",  "description": "Internal Vault — secrets/, pki/", "mount_url": "/v1/team-data/vault/"}
 ]
 ```
+
+`mount_url` is the relative URL path with the namespace and mount path
+already baked in — append `$WARDEN_ADDR` plus the per-provider suffix
+(e.g. `gateway`, `role/<role>/gateway`, `access/<grant>`) from the
+provider's skill to build the full upstream URL.
 
 Listing providers requires capabilities granted by your role's
 policy — by convention this is included in the namespace's default

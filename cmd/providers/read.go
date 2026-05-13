@@ -47,6 +47,7 @@ func runRead(cmd *cobra.Command, args []string) error {
 		"type":        mountInfo.Type,
 		"accessor":    mountInfo.Accessor,
 		"description": mountInfo.Description,
+		"mount_url":   mountInfo.MountURL,
 	}
 	if len(mountInfo.Config) > 0 {
 		cfg := make(map[string]any, len(mountInfo.Config))

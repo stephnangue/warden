@@ -24,10 +24,11 @@ cares about *one* of the two modes per task.
 
 ## Configure the CLI/SDK
 
-`<mount>`, `<role>`, and (for S3 mode) `<role-name>` below come from
+`<mount-url>`, `<role>`, and (for S3 mode) `<role-name>` below come from
 the discovery flow:
-- `<mount>` is the chosen provider's path from `warden provider list`
-  (e.g. `scaleway/`, `scaleway-prod/`).
+- `<mount-url>` is the chosen provider's `mount_url` from
+  `warden provider list` (e.g. `/v1/scaleway/`, `/v1/team-data/scaleway-prod/`).
+  Warden has already baked the namespace + mount path in.
 - `<role>` / `<role-name>` is the role you picked from `warden role list`
   for this task — REST mode puts it in the URL path; S3 mode puts the
   same value in `AWS_ACCESS_KEY_ID`.
@@ -35,8 +36,8 @@ the discovery flow:
 ### REST API (HTTP, Bearer-style)
 
 ```bash
-URL pattern : $WARDEN_ADDR/v1/<mount>/role/<role>/gateway/<scaleway-api-path>
-Auth header : Authorization: Bearer <JWT>
+URL pattern : $WARDEN_ADDR<mount-url>role/<role>/gateway/<scaleway-api-path>
+Auth header : Authorization: Bearer $WARDEN_TOKEN
 ```
 
 The official Scaleway CLI (`scw`) authenticates via `X-Auth-Token`
@@ -49,7 +50,7 @@ header.
 
 `curl`:
 ```bash
-curl -H "Authorization: Bearer $JWT" \
+curl -H "Authorization: Bearer $WARDEN_TOKEN" \
   $WARDEN_ADDR/v1/scaleway/role/cloud-reader/gateway/instance/v1/zones/fr-par-1/servers
 ```
 
@@ -59,7 +60,7 @@ import os, requests
 base = f"{os.environ['WARDEN_ADDR']}/v1/scaleway/role/cloud-reader/gateway"
 r = requests.get(
     f"{base}/instance/v1/zones/fr-par-1/servers",
-    headers={"Authorization": f"Bearer {os.environ['JWT']}"},
+    headers={"Authorization": f"Bearer {os.environ['WARDEN_TOKEN']}"},
 )
 r.raise_for_status()
 servers = r.json()["servers"]
@@ -72,9 +73,9 @@ provider but pointing at this mount:
 
 ```bash
 export AWS_ACCESS_KEY_ID="<role-name>"
-export AWS_SECRET_ACCESS_KEY="$JWT"
-export AWS_SESSION_TOKEN="$JWT"
-export AWS_ENDPOINT_URL="$WARDEN_ADDR/v1/<mount>/role/<role>/gateway"
+export AWS_SECRET_ACCESS_KEY="$WARDEN_TOKEN"
+export AWS_SESSION_TOKEN="$WARDEN_TOKEN"
+export AWS_ENDPOINT_URL="$WARDEN_ADDR<mount-url>role/<role>/gateway"
 ```
 
 Then any AWS S3-compatible CLI/SDK works:
@@ -89,17 +90,17 @@ keys.
 
 ## Examples
 
-(All examples assume mount `scaleway/`; substitute yours.)
+(All examples assume `mount_url = /v1/scaleway/`; substitute yours.)
 
 Read your IAM users (REST):
 ```bash
-curl -H "Authorization: Bearer $JWT" \
+curl -H "Authorization: Bearer $WARDEN_TOKEN" \
   $WARDEN_ADDR/v1/scaleway/role/iam-reader/gateway/iam/v1alpha1/users
 ```
 
 List instances in a zone (REST):
 ```bash
-curl -H "Authorization: Bearer $JWT" \
+curl -H "Authorization: Bearer $WARDEN_TOKEN" \
   $WARDEN_ADDR/v1/scaleway/role/compute/gateway/instance/v1/zones/fr-par-1/servers
 ```
 

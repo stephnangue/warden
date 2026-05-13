@@ -19,15 +19,17 @@ and forwards. The agent **never holds an API key**.
 
 ## Configure the CLI/SDK
 
-`<mount>` and `<role>` below come from the discovery flow:
-- `<mount>` is the chosen provider's path from `warden provider list`
-  (e.g. `openai/`, `openai-prod/`).
+`<mount-url>` and `<role>` below come from the discovery flow:
+- `<mount-url>` is the chosen provider's `mount_url` from
+  `warden provider list` (e.g. `/v1/openai/`, `/v1/team-data/openai-prod/`).
+  Warden has already baked the namespace + mount path in — append
+  `role/<role>/gateway/<openai-api-path>` for transparent mode.
 - `<role>` is the role you picked from `warden role list` to perform this
   task — it goes in the URL path.
 
 ```bash
-URL pattern : $WARDEN_ADDR/v1/<mount>/role/<role>/gateway/<openai-api-path>
-Auth header : Authorization: Bearer <JWT>
+URL pattern : $WARDEN_ADDR<mount-url>role/<role>/gateway/<openai-api-path>
+Auth header : Authorization: Bearer $WARDEN_TOKEN
 ```
 
 The same shape as upstream OpenAI requests, just with the host swapped
@@ -38,8 +40,8 @@ out and a JWT instead of an API key.
 ```python
 from openai import OpenAI
 client = OpenAI(
-    base_url="$WARDEN_ADDR/v1/<mount>/role/llm-app/gateway",
-    api_key=JWT,                           # JWT, not an OpenAI key
+    base_url=f"{WARDEN_ADDR}{MOUNT_URL}role/llm-app/gateway",
+    api_key=WARDEN_TOKEN,                  # JWT, not an OpenAI key
 )
 ```
 
@@ -48,18 +50,18 @@ client = OpenAI(
 ```js
 import OpenAI from "openai";
 const client = new OpenAI({
-  baseURL: "$WARDEN_ADDR/v1/<mount>/role/llm-app/gateway",
-  apiKey: process.env.JWT,
+  baseURL: `${process.env.WARDEN_ADDR}${MOUNT_URL}role/llm-app/gateway`,
+  apiKey: process.env.WARDEN_TOKEN,
 });
 ```
 
 ## Examples
 
-(All examples assume mount `openai/`; substitute yours.)
+(All examples assume `mount_url = /v1/openai/`; substitute yours.)
 
 Chat completion via `curl`:
 ```bash
-curl -H "Authorization: Bearer $JWT" \
+curl -H "Authorization: Bearer $WARDEN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hi"}]}' \
   $WARDEN_ADDR/v1/openai/role/llm-app/gateway/chat/completions
@@ -67,7 +69,7 @@ curl -H "Authorization: Bearer $JWT" \
 
 Embeddings:
 ```bash
-curl -H "Authorization: Bearer $JWT" \
+curl -H "Authorization: Bearer $WARDEN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"model":"text-embedding-3-small","input":"some text"}' \
   $WARDEN_ADDR/v1/openai/role/embeddings/gateway/embeddings
@@ -75,7 +77,7 @@ curl -H "Authorization: Bearer $JWT" \
 
 List models:
 ```bash
-curl -H "Authorization: Bearer $JWT" \
+curl -H "Authorization: Bearer $WARDEN_TOKEN" \
   $WARDEN_ADDR/v1/openai/role/llm-app/gateway/models
 ```
 
