@@ -8,20 +8,30 @@ for the *consumer* side.
 
 ## Where to start
 
-1. **`skills/warden-shared/SKILL.md`** — global flags, env vars, exit
-   codes, output framework. Read this first.
-2. **`skills/discovery/SKILL.md`** — how to introspect which roles you
-   can assume and which providers are available, then match the task at
-   hand to a provider + role.
-3. **`skills/providers/<name>/SKILL.md`** — once you know which provider
-   you want, this tells you how to point your CLI/SDK at it.
-4. **`skills/troubleshooting/SKILL.md`** — when something fails:
+Skills are served by the cluster at `/v1/sys/skills`, not from this
+filesystem. Read them in order via the CLI:
+
+1. **`warden skill read foundation --raw`** — global flags, env vars,
+   exit codes, output framework. Read this first.
+2. **`warden skill read discovery --raw`** — how to introspect which
+   roles you can assume and which providers are available, then match
+   the task at hand to a provider + role.
+3. **`warden skill read <provider-type> --raw`** — once you know which
+   provider type you want (`aws`, `vault`, `openai`, …), this tells you
+   how to point your CLI/SDK at it.
+4. **`warden skill read troubleshooting --raw`** — when something fails:
    classified errors, what to retry, what means "ask the operator".
+
+To browse what's in the catalog:
+
+```bash
+warden skill list -F name,description
+```
 
 ## The agent loop
 
 ```
-[ authenticate + set namespace ]
+[ authenticate + set namespace ]      ← runtime sets env vars
        │
        ▼
 [ warden role list ]                  ← what identities can I assume?
@@ -33,42 +43,48 @@ for the *consumer* side.
 [ match task → pick provider+role ]   ← read descriptions; choose the fit
        │
        ▼
-[ read skills/providers/<type>/SKILL.md ]
-       │                              ← the per-provider recipe
+[ warden skill read <type> --raw ]    ← the per-provider recipe
+       │
        ▼
 [ call CLI or SDK with chosen role ]
 ```
 
-Each step is a one-liner; `skills/discovery/` walks through the
-variants.
+The `discovery` skill walks through each step in full.
 
 ## Provider skills available today
 
-| Provider | Skill | Pattern |
+Skills for the six providers below are seeded into the registry the
+first time the corresponding provider type is mounted in the cluster:
+
+| Provider | Skill name | Pattern |
 |---|---|---|
-| AWS | `skills/providers/aws/SKILL.md` | SigV4 gateway |
-| Vault / OpenBao | `skills/providers/vault/SKILL.md` | HTTP gateway |
-| GitHub | `skills/providers/github/SKILL.md` | HTTP gateway |
-| OpenAI | `skills/providers/openai/SKILL.md` | HTTP gateway |
-| Scaleway | `skills/providers/scaleway/SKILL.md` | Dual REST + S3 |
-| RDS | `skills/providers/rds/SKILL.md` | DB credential mint |
+| AWS | `aws` | SigV4 gateway |
+| Vault / OpenBao | `vault` | HTTP gateway |
+| GitHub | `github` | HTTP gateway |
+| OpenAI | `openai` | HTTP gateway |
+| Scaleway | `scaleway` | Dual REST + S3 |
+| RDS | `rds` | DB credential mint |
 
 Other providers (`azure`, `gcp`, `cloudflare`, `datadog`, `sentry`,
 `grafana`, `kubernetes`, `slack`, `tfe`, …) follow the same patterns
-but don't yet have dedicated skills. Until they do, the closest
-existing skill plus the provider's `README.md` is your best reference.
+but don't yet ship skills. Until they do, the closest existing skill
+plus the provider's `README.md` is your best reference.
 
 ## Adding a skill for a new provider
 
 When a new provider lands under `provider/<name>/`, ship a matching
-`skills/providers/<name>/SKILL.md` with the same shape as the existing
-ones:
+`provider/<name>/skill.md` with the same shape as the existing ones,
+and add `<name>.Skill()` to the `providerSkills` map in
+`cmd/server/server.go`. The skill is seeded into the registry on the
+first mount of that provider type.
 
 ```yaml
 ---
 name: <name>
 description: "<one line: what does this provider expose>"
 category: provider-guide
+provider: <name>
+requires: [foundation, discovery]
 upstream: "<service name>"
 ---
 ```

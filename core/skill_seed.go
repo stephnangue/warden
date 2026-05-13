@@ -69,7 +69,7 @@ func (s *SkillStore) SeedProviderSkill(ctx context.Context, providerType, markdo
 }
 
 // SeedFoundation writes the embedded foundation skills (discovery,
-// warden-shared, troubleshooting) into the registry on first call.
+// foundation, troubleshooting) into the registry on first call.
 // Subsequent calls are no-ops thanks to the seeded marker. Operator
 // deletions of seeded skills are not reverted.
 //
@@ -178,7 +178,7 @@ func loadEmbeddedFoundationSkills() ([]*Skill, error) {
 //	name: discovery
 //	description: "..."
 //	category: agent-flow
-//	requires: [warden-shared]
+//	requires: [foundation]
 //	upstream: github.com/foo
 //	---
 //	<body>

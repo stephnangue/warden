@@ -3,6 +3,7 @@ name: scaleway
 description: "Call the Scaleway REST API and Scaleway Object Storage (S3-compatible) through Warden — one provider, two patterns auto-detected."
 category: provider-guide
 provider: scaleway
+requires: [foundation, discovery]
 upstream: Scaleway REST API + Object Storage
 ---
 

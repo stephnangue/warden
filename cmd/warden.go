@@ -16,6 +16,7 @@ import (
 	"github.com/stephnangue/warden/cmd/roles"
 	"github.com/stephnangue/warden/cmd/schema"
 	"github.com/stephnangue/warden/cmd/server"
+	"github.com/stephnangue/warden/cmd/skills"
 )
 
 var (
@@ -74,6 +75,7 @@ func init() {
 	wardenCmd.AddCommand(cred.CredCmd)
 	wardenCmd.AddCommand(schema.SchemaCmd)
 	wardenCmd.AddCommand(roles.RolesCmd)
+	wardenCmd.AddCommand(skills.SkillsCmd)
 	wardenCmd.AddCommand(basic.WriteCmd)
 	wardenCmd.AddCommand(basic.ReadCmd)
 	wardenCmd.AddCommand(basic.ListCmd)
