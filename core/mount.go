@@ -1183,19 +1183,39 @@ func (c *Core) persistMounts(ctx context.Context, barrier sdklogical.Storage, ta
 			}
 
 			if mount != "" && !found {
-				// Delete this component if it exists. This signifies that
-				// we're removing this mount. We don't know which namespace
-				// this entry could belong to, so remove it from all.
-				allNamespaces, err := c.ListNamespaces(ctx)
-				if err != nil {
-					return -1, fmt.Errorf("failed to list namespaces: %w", err)
-				}
-
-				for nsIndex, ns := range allNamespaces {
+				// We're removing a single mount. The caller's ctx is scoped
+				// to the namespace the mount lived in (see callers in
+				// mount() and removeMountEntry()), so target that namespace
+				// directly instead of listing all namespaces.
+				//
+				// This avoids a latent AB-BA deadlock: persistMounts is
+				// always invoked with c.mountsLock held, and ListNamespaces
+				// acquires the NamespaceStore lock. Concurrent CreateNamespace
+				// takes the opposite order (NamespaceStore lock then
+				// mountsLock during pushToMounts), so any overlap can deadlock.
+				// Rapid namespace create/delete cycles (e.g. the skill e2e
+				// suite) hit this in practice.
+				//
+				// If ctx happens to have no namespace (unusual for this
+				// path), fall back to the original "delete from all"
+				// behavior so legacy data still gets cleaned up.
+				if ns, nsErr := namespace.FromContext(ctx); nsErr == nil {
 					view := NamespaceView(barrier, ns)
-					path := path.Join(prefix, mount)
-					if err := view.Delete(ctx, path); err != nil {
-						return -1, fmt.Errorf("requested removal of a mount from namespace %v (%v) but failed: %w", ns.ID, nsIndex, err)
+					p := path.Join(prefix, mount)
+					if err := view.Delete(ctx, p); err != nil {
+						return -1, fmt.Errorf("requested removal of a mount from namespace %v but failed: %w", ns.ID, err)
+					}
+				} else {
+					allNamespaces, err := c.ListNamespaces(ctx)
+					if err != nil {
+						return -1, fmt.Errorf("failed to list namespaces: %w", err)
+					}
+					for nsIndex, ns := range allNamespaces {
+						view := NamespaceView(barrier, ns)
+						p := path.Join(prefix, mount)
+						if err := view.Delete(ctx, p); err != nil {
+							return -1, fmt.Errorf("requested removal of a mount from namespace %v (%v) but failed: %w", ns.ID, nsIndex, err)
+						}
 					}
 				}
 			}

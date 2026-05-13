@@ -2,13 +2,13 @@
 name: troubleshooting
 description: "Common agent failures: classified errors, what to retry, what means 'ask the operator'."
 category: shared
-requires: [warden-shared]
+requires: [foundation]
 ---
 
 # Troubleshooting
 
 Every Warden CLI call exits with one of nine codes (see
-`warden-shared`). Branch on `code` from the JSON envelope; don't grep
+`foundation`). Branch on `code` from the JSON envelope; don't grep
 the human message.
 
 ## `auth_required` (exit 4)

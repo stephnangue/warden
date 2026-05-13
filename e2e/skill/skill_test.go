@@ -46,14 +46,14 @@ func skillNames(skills []map[string]interface{}) map[string]bool {
 	return names
 }
 
-// TestSkill_FoundationSkillsArePresent verifies the discovery, warden-shared,
+// TestSkill_FoundationSkillsArePresent verifies the discovery, foundation,
 // and troubleshooting skills are seeded at first unseal and visible via the
 // list endpoint.
 func TestSkill_FoundationSkillsArePresent(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	names := skillNames(listSkills(t, port))
 
-	for _, want := range []string{"discovery", "warden-shared", "troubleshooting"} {
+	for _, want := range []string{"discovery", "foundation", "troubleshooting"} {
 		if !names[want] {
 			t.Errorf("foundation skill %q missing from /v1/sys/skills (got %v)", want, names)
 		}
@@ -300,7 +300,7 @@ func TestSkill_GlobalReadFromSubNamespace(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	names := skillNames(lr.Data.Skills)
-	for _, want := range []string{"discovery", "warden-shared", "troubleshooting"} {
+	for _, want := range []string{"discovery", "foundation", "troubleshooting"} {
 		if !names[want] {
 			t.Errorf("foundation skill %q missing from sub-namespace list", want)
 		}

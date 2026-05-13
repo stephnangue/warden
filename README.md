@@ -60,7 +60,13 @@ Warden closes the gap by sitting in the path: the agent identifies itself, Warde
                                     • Audit ✓
 ```
 
-**Discover.** The agent presents its identity — a JWT or TLS client certificate — and asks Warden which roles it is permitted to assume. Warden answers with the set of roles open to that exact identity, each with a human-readable description. The agent learns what it can do without anyone shipping a config file or distributing role names out of band.
+**Discover.** The agent presents its identity — a JWT or TLS client certificate — and runs three introspection calls against Warden:
+
+1. `warden role list` — which roles is this identity permitted to assume in this namespace?
+2. `warden provider list` — which upstream systems are mounted here?
+3. `warden skill read <type>` — for the chosen system, fetch the agent-facing recipe (env vars, endpoint URL, role-selection idiom).
+
+Each response is human-readable JSON or markdown. The agent matches the task to a role and provider by reading operator-set descriptions — no config files, no role names distributed out of band, no SDK to rebuild when a new provider is mounted.
 
 **Connect.** The agent picks a role and points at Warden as if it were the upstream. Warden authenticates the identity, applies the role's policy at request time, and attaches the upstream credential before forwarding — or vends a scoped grant directly, such as a database auth token or a pre-signed URL. The credential belongs to Warden, never to the agent — and is ephemeral wherever the upstream supports it.
 
@@ -69,25 +75,26 @@ Warden closes the gap by sitting in the path: the agent identifies itself, Warde
 What an enterprise gets from putting Warden in the path:
 
 - **Discovery** — identity-scoped introspection. Agents learn which systems and roles are open to them; nothing has to be pre-loaded into the agent's environment.
+- **Self-describing capabilities** — every provider type ships a runtime recipe (an agent skill) that the cluster serves alongside the gateway. The catalog reflects what's currently mounted; adding a provider makes it instantly discoverable, removing one makes it instantly gone. No agent rebuild, no SDK update.
 - **Fine-grained access policy** — per-action capabilities and parameter filters, evaluated at request time against caller IP, time of day, and day of week.
-- **Identity-bound access** — JWT (including SPIFFE JWT-SVID) or TLS client certificate (including SPIFFE X.509-SVID); every grant scoped to the actual caller, not a pooled credential.
+- **Identity-bound access** — JWT (including SPIFFE JWT-SVID) or TLS client certificate (including SPIFFE X.509-SVID); the same identity reaches every upstream the policy permits — no per-system credential sprawl, no API keys handed to agents, nothing to rotate per integration.
 - **Audit** — every request tied to the original identity, the role used, and the upstream called.
-- **Credentials never leave Warden** — a prompt-injected agent has nothing to leak; there is no credential in its environment to exfiltrate.
+- **Compromise-resilient** — a prompt-injected, jailbroken, or otherwise compromised agent has nothing upstream to exfiltrate. The blast radius is bounded by Warden's policy at request time, not by what happens to be in the agent's memory or chat history.
 
 ## Supported systems
 
 33 systems across LLMs, cloud, code-hosting, observability, ITSM, Kubernetes, secrets, and databases. Follow any link below to configure your first endpoint, or see [docs/providers.md](docs/providers.md) for the full list.
 
-| Category | Providers | Warden does | Status |
-|---|---|---|---|
-| LLM APIs | [Anthropic](provider/anthropic/README.md), [OpenAI](provider/openai/README.md), [Mistral](provider/mistral/README.md), [Cohere](provider/cohere/README.md) | Injects API key | ✅ |
-| Cloud infrastructure | [AWS](provider/aws/README.md), [Azure](provider/azure/README.md), [GCP](provider/gcp/README.md), [Alicloud](provider/alicloud/README.md), [IBM Cloud](provider/ibmcloud/README.md), [OVH](provider/ovh/README.md), [Scaleway](provider/scaleway/README.md), [Cloudflare](provider/cloudflare/README.md) | Temporary credentials / Bearer tokens | ✅ |
-| Code hosting & CI/CD | [GitHub](provider/github/README.md), [GitLab](provider/gitlab/README.md), [Atlassian](provider/atlassian/README.md), [Ansible Tower](provider/ansible_tower/README.md), [Terraform Enterprise](provider/tfe/README.md) | Injects App token, PAT, or Bearer token | ✅ |
-| Observability | [Datadog](provider/datadog/README.md), [Dynatrace](provider/dynatrace/README.md), [Elastic](provider/elastic/README.md), [Grafana](provider/grafana/README.md), [Honeycomb](provider/honeycomb/README.md), [New Relic](provider/newrelic/README.md), [Prometheus](provider/prometheus/README.md), [Sentry](provider/sentry/README.md), [Splunk](provider/splunk/README.md) | Injects API key / proxies metrics | ✅ |
-| Incident & ITSM | [PagerDuty](provider/pagerduty/README.md), [ServiceNow](provider/servicenow/README.md), [Slack](provider/slack/README.md) | Injects Bearer token | ✅ |
-| Kubernetes | [Kubernetes](provider/kubernetes/README.md) | Injects service account token | ✅ |
-| Secrets backend | [HashiCorp Vault / OpenBao](provider/vault/README.md) | Mints short-lived tokens | ✅ |
-| Databases | [AWS RDS / Aurora](provider/rds/README.md), [AWS Redshift](provider/redshift/README.md) | Issues IAM database auth token | ✅ |
+| Category | Providers | Warden does |
+|---|---|---|
+| LLM APIs | [Anthropic](provider/anthropic/README.md), [OpenAI](provider/openai/README.md), [Mistral](provider/mistral/README.md), [Cohere](provider/cohere/README.md) | Injects API key |
+| Cloud infrastructure | [AWS](provider/aws/README.md), [Azure](provider/azure/README.md), [GCP](provider/gcp/README.md), [Alicloud](provider/alicloud/README.md), [IBM Cloud](provider/ibmcloud/README.md), [OVH](provider/ovh/README.md), [Scaleway](provider/scaleway/README.md), [Cloudflare](provider/cloudflare/README.md) | Temporary credentials / Bearer tokens |
+| Code hosting & CI/CD | [GitHub](provider/github/README.md), [GitLab](provider/gitlab/README.md), [Atlassian](provider/atlassian/README.md), [Ansible Tower](provider/ansible_tower/README.md), [Terraform Enterprise](provider/tfe/README.md) | Injects App token, PAT, or Bearer token |
+| Observability | [Datadog](provider/datadog/README.md), [Dynatrace](provider/dynatrace/README.md), [Elastic](provider/elastic/README.md), [Grafana](provider/grafana/README.md), [Honeycomb](provider/honeycomb/README.md), [New Relic](provider/newrelic/README.md), [Prometheus](provider/prometheus/README.md), [Sentry](provider/sentry/README.md), [Splunk](provider/splunk/README.md) | Injects API key / proxies metrics |
+| Incident & ITSM | [PagerDuty](provider/pagerduty/README.md), [ServiceNow](provider/servicenow/README.md), [Slack](provider/slack/README.md) | Injects Bearer token |
+| Kubernetes | [Kubernetes](provider/kubernetes/README.md) | Injects service account token |
+| Secrets backend | [HashiCorp Vault / OpenBao](provider/vault/README.md) | Mints short-lived tokens |
+| Databases | [AWS RDS / Aurora](provider/rds/README.md), [AWS Redshift](provider/redshift/README.md) | Issues IAM database auth token |
 
 ## Use cases
 
@@ -126,6 +133,8 @@ A walk-through of the discover-then-connect model end to end:
 - The agent holds zero credentials.
 
 See [docs/tutorials/vault-policy-hygiene/README.md](docs/tutorials/vault-policy-hygiene/README.md) for the full walk-through.
+
+For the system-side reference describing how an agent uses Warden end-to-end — the runtime contract, the five-step discovery loop, error handling, caching strategy — see [docs/agent-flow.md](docs/agent-flow.md).
 
 ## Architecture
 

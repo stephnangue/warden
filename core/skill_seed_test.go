@@ -39,7 +39,7 @@ func TestParseSkillMarkdown_WithList(t *testing.T) {
 name: foo
 description: "bar"
 category: custom
-requires: [warden-shared, troubleshooting]
+requires: [foundation, troubleshooting]
 upstream: example.com
 ---
 body
@@ -51,7 +51,7 @@ body
 	if len(skill.Requires) != 2 {
 		t.Fatalf("Requires len = %d, want 2", len(skill.Requires))
 	}
-	if skill.Requires[0] != "warden-shared" || skill.Requires[1] != "troubleshooting" {
+	if skill.Requires[0] != "foundation" || skill.Requires[1] != "troubleshooting" {
 		t.Errorf("Requires = %v", skill.Requires)
 	}
 	if skill.Upstream != "example.com" {
@@ -194,7 +194,7 @@ func TestLoadEmbeddedFoundationSkills_ParsesAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	// Expected foundation set: discovery, warden-shared, troubleshooting.
+	// Expected foundation set: discovery, foundation, troubleshooting.
 	names := make([]string, 0, len(skills))
 	for _, s := range skills {
 		names = append(names, s.Name)
@@ -203,7 +203,7 @@ func TestLoadEmbeddedFoundationSkills_ParsesAll(t *testing.T) {
 		}
 	}
 	sort.Strings(names)
-	want := []string{"discovery", "troubleshooting", "warden-shared"}
+	want := []string{"discovery", "foundation", "troubleshooting"}
 	if !equalStringSlices(names, want) {
 		t.Errorf("foundation skill names = %v, want %v", names, want)
 	}
@@ -230,7 +230,7 @@ func TestSkillStore_SeedFoundation_WritesAllSkills(t *testing.T) {
 			t.Errorf("Body of %q is empty", s.Name)
 		}
 	}
-	for _, want := range []string{"discovery", "warden-shared", "troubleshooting"} {
+	for _, want := range []string{"discovery", "foundation", "troubleshooting"} {
 		if origin, ok := got[want]; !ok {
 			t.Errorf("missing seeded skill %q", want)
 		} else if origin != SkillOriginSeed {

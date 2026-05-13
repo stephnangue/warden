@@ -1,5 +1,5 @@
 ---
-name: warden-shared
+name: foundation
 description: "Foundation: auth env vars, global CLI flags, output framework, exit codes, and the introspection commands every agent uses."
 category: shared
 ---
@@ -56,6 +56,11 @@ Live, server-rendered. Prefer these over any cached knowledge.
 | `warden role list -o json` | `[{name, description, auth_path}]` for every role your identity can assume in the current namespace |
 | `warden provider list -o json` | `[{path, type, accessor, description}]` — one record per provider in the namespace |
 | `warden provider read <mount>` | the same record for one mount, plus `config` (sensitive fields masked) |
+| `warden skill list -o json` | `[{name, description, category, origin, ...}]` — the agent skill catalog (foundation flow plus one record per provider type) |
+| `warden skill read <name> --raw` | the full markdown body for one skill — use this for the provider recipe in step 5 of the discovery flow |
+
+Skills have a `version` field bumped on every update; agents that cache
+skill content can re-fetch only when the version changes.
 
 ## Exit codes and error envelopes
 

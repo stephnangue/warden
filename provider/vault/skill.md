@@ -3,6 +3,7 @@ name: vault
 description: "Call HashiCorp Vault / OpenBao through Warden — read secrets, sign, encrypt, manage PKI — without ever holding a Vault token."
 category: provider-guide
 provider: vault
+requires: [foundation, discovery]
 upstream: HashiCorp Vault / OpenBao
 ---
 

@@ -3,6 +3,7 @@ name: rds
 description: "Get a short-lived database connection string for AWS RDS through Warden — agent connects to the DB directly with a 15-min IAM auth token."
 category: provider-guide
 provider: rds
+requires: [foundation, discovery]
 upstream: AWS RDS (PostgreSQL, MySQL)
 ---
 

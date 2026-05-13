@@ -3,6 +3,7 @@ name: aws
 description: "Call AWS services (S3, EC2, Lambda, DynamoDB, STS, …) through Warden's SigV4 gateway."
 category: provider-guide
 provider: aws
+requires: [foundation, discovery]
 upstream: AWS
 ---
 
@@ -24,7 +25,7 @@ AWS service. **No SDK code changes** — only env vars.
   this task.
 
 The JWT (`$JWT`) is provided to the agent's environment by its
-runtime — see `warden-shared`. Just use it:
+runtime — see `foundation`. Just use it:
 
 ```bash
 export AWS_ACCESS_KEY_ID="<role-name>"          # role from `warden role list`

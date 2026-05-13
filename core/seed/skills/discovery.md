@@ -2,13 +2,13 @@
 name: discovery
 description: "The agent loop: authenticate, introspect roles, list providers, match the task, pick a role, learn how to call the chosen provider."
 category: agent-flow
-requires: [warden-shared]
+requires: [foundation]
 ---
 
 # Discovering what you can do
 
 Before sending any request to an upstream service, an agent on Warden
-runs four steps. Each one returns structured JSON; chain them
+runs five steps. Each one returns structured JSON; chain them
 deterministically.
 
 ## Step 1 — confirm the session
@@ -19,7 +19,7 @@ them; just confirm they're set:
 
 | Env var | Purpose |
 |---|---|
-| `WARDEN_TOKEN` | JWT bearer — sent automatically as both `X-Warden-Token` and `Authorization: Bearer <jwt>` |
+| `WARDEN_TOKEN` | JWT bearer — the CLI auto-detects the JWT prefix and sends `Authorization: Bearer <jwt>` |
 | `WARDEN_CLIENT_CERT` / `WARDEN_CLIENT_KEY` | (alternative to JWT) PEM paths for mTLS |
 | `WARDEN_ADDR` | the Warden server URL |
 | `WARDEN_NAMESPACE` | the namespace to scope every call to |
@@ -34,7 +34,7 @@ If you need a per-call override (unusual for agents), pass
 ## Step 2 — discover assumable roles
 
 ```bash
-warden role list -o json
+warden role list -o json -F name,description
 ```
 
 Returns one record per role your identity can assume in the current
@@ -42,9 +42,9 @@ namespace:
 
 ```json
 [
-  {"name": "data-reader",      "description": "Read-only access to data warehouses",     "auth_path": "jwt/"},
-  {"name": "deploy-bot",       "description": "Deploy via TFE; full access to staging", "auth_path": "jwt/"},
-  {"name": "vault-secrets-ro", "description": "Read app-config secrets from Vault",      "auth_path": "jwt/"}
+  {"name": "data-reader",      "description": "Read-only access to data warehouses"},
+  {"name": "deploy-bot",       "description": "Deploy via TFE; full access to staging"},
+  {"name": "vault-secrets-ro", "description": "Read app-config secrets from Vault"}
 ]
 ```
 
@@ -55,17 +55,17 @@ match to your task.
 ## Step 3 — list providers in this namespace
 
 ```bash
-warden provider list -o json
+warden provider list -o json -F path,type,description
 ```
 
 Returns one record per mounted provider:
 
 ```json
 [
-  {"path": "aws/",    "type": "aws",    "accessor": "...", "description": "Production AWS account 1234"},
-  {"path": "openai/", "type": "openai", "accessor": "...", "description": "OpenAI API for embeddings + chat"},
-  {"path": "rds-pg/", "type": "rds",    "accessor": "...", "description": "RDS PostgreSQL — analytics"},
-  {"path": "vault/",  "type": "vault",  "accessor": "...", "description": "Internal Vault — secrets/, pki/"}
+  {"path": "aws/",    "type": "aws",    "description": "Production AWS account 1234"},
+  {"path": "openai/", "type": "openai", "description": "OpenAI API for embeddings + chat"},
+  {"path": "rds-pg/", "type": "rds",    "description": "RDS PostgreSQL — analytics"},
+  {"path": "vault/",  "type": "vault",  "description": "Internal Vault — secrets/, pki/"}
 ]
 ```
 
@@ -92,8 +92,16 @@ staging). When unsure:
 
 ## Step 5 — call the provider
 
-Read `skills/providers/<type>/SKILL.md` for the chosen provider —
-that's the self-contained recipe: endpoint URL, env vars / auth
-headers, role-selection mechanic, copy-paste examples. Follow it.
+```bash
+warden skill read <type> --raw
+```
 
+Returns the provider's self-contained recipe in markdown: endpoint URL,
+env vars / auth headers, role-selection mechanic, copy-paste examples.
+Follow it.
+
+Provider skills are seeded into the registry the first time a provider
+of that type is mounted; if `warden skill read aws` returns 404, the
+operator hasn't enabled an AWS provider in this cluster — surface to
+the user instead of fabricating an endpoint.
 

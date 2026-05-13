@@ -3,6 +3,7 @@ name: github
 description: "Call the GitHub REST API through Warden — read repos, manage issues, push releases — without holding a GitHub PAT."
 category: provider-guide
 provider: github
+requires: [foundation, discovery]
 upstream: GitHub REST API (api.github.com or GHE)
 ---
 
