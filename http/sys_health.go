@@ -75,29 +75,43 @@ func handleSysHealth(c *core.Core, log *logger.GatedLogger) http.Handler {
 
 // parseHealthStatusOverrides checks query parameters for status code overrides.
 // This is useful for load balancers that need specific codes for routing.
+//
+// Overrides are applied in severity order: uninitialized > sealed > standby.
+// A more severe condition wins over a less severe override — in particular
+// ?standbyok=true does NOT return 200 for a sealed or uninitialized node,
+// because a sealed node naturally has standby=true (it can never acquire
+// the HA lock), and Kubernetes readiness probes relying on ?standbyok=true
+// would otherwise route traffic to pods that cannot serve.
+//
+// A return of 0 means "no override applies" — the caller should use the
+// base status code computed by the switch in handleSysHealth.
 func parseHealthStatusOverrides(r *http.Request, initialized, sealed, standby bool) int {
 	q := r.URL.Query()
 
-	// ?standbyok makes standby nodes return 200
-	if standby && q.Get("standbyok") == "true" {
-		return http.StatusOK
+	if !initialized {
+		return parseCustomCode(q.Get("uninitcode"))
 	}
-
-	if v := q.Get("standbycode"); v != "" && standby {
-		if code, err := strconv.Atoi(v); err == nil && code >= 100 && code < 600 {
-			return code
+	if sealed {
+		return parseCustomCode(q.Get("sealedcode"))
+	}
+	if standby {
+		if q.Get("standbyok") == "true" {
+			return http.StatusOK
 		}
+		return parseCustomCode(q.Get("standbycode"))
 	}
-	if v := q.Get("sealedcode"); v != "" && sealed {
-		if code, err := strconv.Atoi(v); err == nil && code >= 100 && code < 600 {
-			return code
-		}
-	}
-	if v := q.Get("uninitcode"); v != "" && !initialized {
-		if code, err := strconv.Atoi(v); err == nil && code >= 100 && code < 600 {
-			return code
-		}
-	}
-
 	return 0
+}
+
+// parseCustomCode parses a query-parameter value as an HTTP status code,
+// returning 0 (no override) for empty, unparseable, or out-of-range values.
+func parseCustomCode(v string) int {
+	if v == "" {
+		return 0
+	}
+	code, err := strconv.Atoi(v)
+	if err != nil || code < 100 || code >= 600 {
+		return 0
+	}
+	return code
 }

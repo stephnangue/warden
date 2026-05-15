@@ -24,54 +24,137 @@ func TestParseHealthStatusOverrides(t *testing.T) {
 		standby     bool
 		wantCode    int
 	}{
+		// Baseline: an active node with no overrides returns 0 (no override).
 		{
-			name:     "no overrides",
-			query:    "",
-			standby:  true,
-			wantCode: 0,
+			name:        "no overrides on active",
+			query:       "",
+			initialized: true,
+			wantCode:    0,
 		},
 		{
-			name:     "standbyok makes standby return 200",
-			query:    "standbyok=true",
-			standby:  true,
-			wantCode: http.StatusOK,
+			name:        "no overrides on standby",
+			query:       "",
+			initialized: true,
+			standby:     true,
+			wantCode:    0,
+		},
+
+		// standbyok: applies only to running standbys (initialized, unsealed).
+		{
+			name:        "standbyok on standby returns 200",
+			query:       "standbyok=true",
+			initialized: true,
+			standby:     true,
+			wantCode:    http.StatusOK,
 		},
 		{
-			name:     "standbyok ignored when not standby",
-			query:    "standbyok=true",
-			standby:  false,
-			wantCode: 0,
+			name:        "standbyok ignored on active",
+			query:       "standbyok=true",
+			initialized: true,
+			wantCode:    0,
 		},
+
+		// standbycode: applies only to running standbys.
 		{
-			name:     "custom standby code",
-			query:    "standbycode=200",
-			standby:  true,
-			wantCode: 200,
+			name:        "standbycode on standby",
+			query:       "standbycode=200",
+			initialized: true,
+			standby:     true,
+			wantCode:    200,
 		},
+
+		// sealedcode: applies only when sealed AND initialized.
 		{
-			name:        "custom sealed code",
+			name:        "sealedcode on sealed",
 			query:       "sealedcode=200",
 			initialized: true,
 			sealed:      true,
+			standby:     true, // sealed nodes are always standby
 			wantCode:    200,
 		},
+
+		// uninitcode: applies only when not initialized.
 		{
-			name:        "custom uninit code",
-			query:       "uninitcode=200",
+			name:     "uninitcode on uninit",
+			query:    "uninitcode=200",
+			sealed:   true, // uninit nodes are always sealed
+			standby:  true, // and always standby
+			wantCode: 200,
+		},
+
+		// Severity ordering (the bug PR 2 fixes): a more severe condition
+		// must win over a less severe override. Without this ordering, K8s
+		// readiness probes using ?standbyok=true would route traffic to
+		// sealed or uninitialized pods because those pods naturally have
+		// standby=true.
+		{
+			name:        "standbyok does NOT mask sealed",
+			query:       "standbyok=true",
+			initialized: true,
+			sealed:      true,
+			standby:     true,
+			wantCode:    0,
+		},
+		{
+			name:     "standbyok does NOT mask uninit",
+			query:    "standbyok=true",
+			sealed:   true,
+			standby:  true,
+			wantCode: 0,
+		},
+		{
+			name:        "standbycode does NOT mask sealed",
+			query:       "standbycode=200",
+			initialized: true,
+			sealed:      true,
+			standby:     true,
+			wantCode:    0,
+		},
+		{
+			name:     "sealedcode does NOT mask uninit",
+			query:    "sealedcode=200",
+			sealed:   true,
+			standby:  true,
+			wantCode: 0,
+		},
+		{
+			name:        "uninitcode + sealedcode: uninit wins",
+			query:       "uninitcode=200&sealedcode=503",
 			initialized: false,
+			sealed:      true,
+			standby:     true,
 			wantCode:    200,
 		},
 		{
-			name:     "invalid code ignored",
-			query:    "standbycode=abc",
-			standby:  true,
-			wantCode: 0,
+			name:        "sealedcode + standbyok: sealed wins",
+			query:       "sealedcode=503&standbyok=true",
+			initialized: true,
+			sealed:      true,
+			standby:     true,
+			wantCode:    503,
+		},
+
+		// Invalid override values must be ignored (treated as "no override").
+		{
+			name:        "non-numeric code ignored",
+			query:       "standbycode=abc",
+			initialized: true,
+			standby:     true,
+			wantCode:    0,
 		},
 		{
-			name:     "out of range code ignored",
-			query:    "standbycode=999",
-			standby:  true,
-			wantCode: 0,
+			name:        "out of range code ignored",
+			query:       "standbycode=999",
+			initialized: true,
+			standby:     true,
+			wantCode:    0,
+		},
+		{
+			name:        "negative code ignored",
+			query:       "sealedcode=-1",
+			initialized: true,
+			sealed:      true,
+			wantCode:    0,
 		},
 	}
 
@@ -466,11 +549,11 @@ func TestHandleSysHealth_SealedCode(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	// sealedcode applies when sealed; the core is both not-init and sealed,
-	// but not-init check comes first. If sealedcode=200 is set and the node
-	// happens to match the sealed condition too, override may apply.
-	// Just verify the endpoint responds without error.
-	assert.True(t, w.Code >= 200 && w.Code < 600)
+	// The test core is uninitialized AND sealed. Per the documented
+	// severity ordering (uninit > sealed > standby), the uninit state
+	// wins and sealedcode does not apply — so the response is 501, the
+	// base uninit code, not the 200 override.
+	assert.Equal(t, http.StatusNotImplemented, w.Code)
 }
 
 // =============================================================================
