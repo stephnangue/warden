@@ -1,6 +1,15 @@
 log_format  = "standard"
 log_level   = "trace"
 
+# Config values may reference environment variables using Go template syntax,
+# e.g. {{ env "POD_NAME" }}. Missing variables expand to the empty string.
+# This is useful in Kubernetes where each pod advertises a unique address:
+#
+#   api_addr     = "https://{{ env "POD_NAME" }}.warden-headless.{{ env "POD_NAMESPACE" }}.svc.cluster.local:8400"
+#   cluster_addr = "https://{{ env "POD_NAME" }}.warden-headless.{{ env "POD_NAMESPACE" }}.svc.cluster.local:8401"
+#
+# HCL's own ${...} interpolation syntax is left untouched.
+
 # api_addr is the address advertised to clients for API requests.
 # Required when ha_enabled = "true".
 # api_addr = "https://warden.example.com:8400"
