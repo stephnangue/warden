@@ -4,6 +4,40 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
+## [v0.13.0] — 2026-05-16
+
+### New Features
+
+- **First-party Helm chart for Kubernetes deployments.** New chart at `deploy/helm/warden/` deploys a 3-replica HA cluster as a `StatefulSet` with `podManagementPolicy: Parallel`, a ClusterIP API Service plus a `publishNotReadyAddresses: true` headless Service for per-pod DNS resolution of `api_addr` / `cluster_addr` and operator access pre-init, a dedicated `ServiceAccount` with `automountServiceAccountToken: false`, a `PodDisruptionBudget` with `maxUnavailable: 1`, topology spread across zones, and the Pod Security Standards "restricted" profile (`runAsNonRoot`, `readOnlyRootFilesystem`, `seccompProfile: RuntimeDefault`, all capabilities dropped). Production-leaning defaults plus a `values-dev.yaml` quickstart profile for kind / minikube. (#206)
+
+- **OCI chart publishing on every release tag.** The release workflow now packages the chart, pins its `appVersion` to the git tag, pushes the OCI artifact to `oci://ghcr.io/stephnangue/charts`, and attaches the same tarball to the GitHub Release for air-gapped users. Refuses to publish a chart version that already exists in the registry. End users install with `helm install warden oci://ghcr.io/stephnangue/charts/warden --version 0.1.0` — no `helm repo add`, no source checkout. (#206)
+
+- **`--config-dir` flag on `warden server`.** Merges every `*.hcl` file in a directory in lexical order, with later files overriding earlier ones. Enables a Kubernetes ConfigMap + Secret split where each owns a disjoint subset of HCL blocks without sacrificing single-file simplicity. Mutually exclusive with `--config` and `--dev`. (#204)
+
+- **Environment-variable interpolation in HCL config files.** Config files are pre-processed through a Go-template pass exposing a single `env` function — `{{ env "POD_NAME" }}` resolves at load time from `os.Getenv`. Missing variables expand to the empty string (matches shell semantics). HCL's native `${...}` interpolation syntax is intentionally left untouched. (#204)
+
+- **Helm-chart preflight validation.** `helm install` and `helm template` fail at template-render time with actionable messages when `tls.existingSecret`, the postgres connection URL, the Vault Transit address / keyName / token, or the static seal Secret is missing — instead of producing manifests that crash-loop at pod startup. (#206)
+
+### Bug Fixes
+
+- **`/v1/sys/health` query-parameter overrides are now applied in severity order (uninit > sealed > standby).** Previously, `?standbyok=true` returned 200 unconditionally for any standby pod — including sealed pods, which naturally have `standby=true` because they cannot acquire the HA lock. Kubernetes readiness probes using `?standbyok=true` would silently mark sealed pods Ready and route traffic to them. The duplicated parsing / range-check logic across overrides was also extracted into a single helper. (#205)
+
+- **Anchored the `warden` binary `.gitignore` rule to the repo root.** The previous unanchored `warden` pattern was matching the `deploy/helm/warden/` chart directory in addition to the intended root binary, hiding the entire chart from version control. Changed to `/warden`. (#206)
+
+### Documentation
+
+- **Kubernetes deployment guide** at `docs/deployment/kubernetes.md`. Architecture overview, prerequisites, three install methods (OCI registry, release tarball, source repo), dev quickstart on kind, production install with Vault Transit auto-unseal, PostgreSQL options (Bitnami subchart, CloudNativePG cluster, managed Postgres), first-time `/v1/sys/init` runbook, rolling-upgrade and seal-token-rotation procedures, and troubleshooting for the common failure modes. README gets a short Kubernetes section pointing at the guide. (#206)
+
+- **`{{ env "VAR" }}` interpolation example** added to the commented HCL at `deploy/config/warden.hcl`. (#204)
+
+### Testing
+
+- **Filled in the previously-empty `config` package test surface** — `LoadConfig` validation rules (rotation-period bounds, `ip_binding_policy`, listener TLS, `cluster_addr` URL format, cluster-tuning duration fields), `DevConfig` defaults, `GetListenerByType`, `StorageBlock.Config` and `KMS.Config` map serialization, `KMS.IsDisabled` semantics, and direct `mergeConfig` behavior (scalar override, pointer / slice replace-wholesale, bool one-way, int non-zero override). Package coverage went from 0 % to 75 %. (#204)
+
+- **`TestParseHealthStatusOverrides` grew from 8 to 16 sub-cases**, with the new ones covering the precedence pairs that the bug fix introduces (`standbyok` no longer masks sealed, `sealedcode` no longer masks uninit, etc.). (#205)
+
+- **Helm-chart lint job in CI** running `helm lint` and `helm template ... | kubeconform -strict` against both the production and dev value profiles. Path-filter-gated so Go-only changes do not trigger it. (#206)
+
 ## [v0.12.0] — 2026-05-13
 
 ### Breaking Changes
