@@ -87,6 +87,7 @@ const (
 
 var (
 	configPath string
+	configDir  string
 
 	flagDev          bool
 	flagDevRootToken string
@@ -103,10 +104,19 @@ var (
 		Long: `
 Usage: warden server [options]
 
-  This command starts a Warden server that responds to API requests. By default,
-  Start a server with a configuration file:
+  This command starts a Warden server that responds to API requests.
+
+  Start a server with a single configuration file:
 
       $ warden server --config=/etc/warden/config.hcl
+
+  Or merge multiple HCL files from a directory (lexical order, later files
+  override earlier ones — useful for splitting a ConfigMap and a Secret in
+  Kubernetes):
+
+      $ warden server --config-dir=/etc/warden/conf.d
+
+  Config files may reference environment variables via {{ env "VAR_NAME" }}.
 
   For a full list of examples, please see the documentation.
   `,
@@ -186,6 +196,7 @@ Usage: warden server [options]
 
 func init() {
 	ServerCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to configuration file (e.g., path/to/warden.hcl)")
+	ServerCmd.Flags().StringVar(&configDir, "config-dir", "", "Path to a directory of .hcl configuration files, merged in lexical order")
 	ServerCmd.Flags().BoolVar(&flagDev, "dev", false, "Enable dev mode: inmem storage, auto-init, auto-unseal")
 	ServerCmd.Flags().StringVar(&flagDevRootToken, "dev-root-token", "", "Custom root token for dev mode (any string)")
 	ServerCmd.Flags().BoolVar(&flagDevTLS, "dev-tls", false, "Enable TLS for dev mode listener (auto-generates self-signed cert)")
@@ -202,6 +213,12 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	if flagDev && configPath != "" {
 		return fmt.Errorf("--config cannot be used with --dev (dev mode always uses inmem storage)")
+	}
+	if flagDev && configDir != "" {
+		return fmt.Errorf("--config-dir cannot be used with --dev (dev mode always uses inmem storage)")
+	}
+	if configPath != "" && configDir != "" {
+		return fmt.Errorf("--config and --config-dir are mutually exclusive")
 	}
 
 	// Infer --dev-tls from explicit cert file flags
@@ -227,14 +244,18 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--dev-tls-require-client-cert requires --dev-tls-ca-cert-file")
 	}
 
-	// Load configuration: dev mode builds defaults, otherwise requires config file
+	// Load configuration: dev mode builds defaults, otherwise requires config file or dir
 	var conf *config.Config
-	if flagDev {
+	switch {
+	case flagDev:
 		conf = config.DevConfig()
-	} else {
-		if configPath == "" {
-			return fmt.Errorf("config file path is required. Use -c or --config flag")
+	case configDir != "":
+		var err error
+		conf, err = config.LoadConfigDir(configDir)
+		if err != nil {
+			return fmt.Errorf("failed to load config dir: %w", err)
 		}
+	case configPath != "":
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
 			return fmt.Errorf("config file not found: %s", configPath)
 		}
@@ -243,6 +264,8 @@ func run(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
+	default:
+		return fmt.Errorf("a config file path or config dir is required. Use -c/--config or --config-dir")
 	}
 
 	// Configure TLS for dev mode

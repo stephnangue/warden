@@ -1,9 +1,14 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/hashicorp/hcl/v2/hclsimple"
@@ -422,37 +427,134 @@ type ListenerBlock struct {
 	TrustedProxies       []string `hcl:"trusted_proxies,optional"`         // CIDR ranges for LB cert forwarding
 }
 
+// LoadConfig reads a single HCL config file and returns a validated *Config.
+// File contents are pre-processed through a Go-template pass with an `env`
+// function (see InterpolateEnv) so configs may reference environment
+// variables via {{ env "VAR_NAME" }} placeholders.
 func LoadConfig(configFile string) (*Config, error) {
-	var config Config
-
-	// Load HCL using HashiCorp's hclsimple (easiest method)
-	err := hclsimple.DecodeFile(configFile, nil, &config)
+	cfg, err := loadConfigFile(configFile)
 	if err != nil {
 		return nil, err
 	}
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
 
+// LoadConfigDir reads every *.hcl file at the top level of dir in lexical
+// order (no recursion into subdirectories), merges them (later files
+// override earlier ones, slice/pointer blocks are replaced wholesale),
+// and returns a validated *Config. This lets operators split config
+// across multiple sources — e.g. a Kubernetes ConfigMap with non-secret
+// blocks plus a Secret containing the storage credentials and seal
+// block — without losing single-file simplicity.
+func LoadConfigDir(dir string) (*Config, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("config dir %q: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("config dir %q is not a directory", dir)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read config dir %q: %w", dir, err)
+	}
+
+	var files []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".hcl") {
+			files = append(files, filepath.Join(dir, e.Name()))
+		}
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("config dir %q contains no .hcl files", dir)
+	}
+	sort.Strings(files)
+
+	merged := &Config{}
+	for _, f := range files {
+		cfg, err := loadConfigFile(f)
+		if err != nil {
+			return nil, err
+		}
+		mergeConfig(merged, cfg)
+	}
+	if err := validateConfig(merged); err != nil {
+		return nil, err
+	}
+	return merged, nil
+}
+
+// loadConfigFile reads a single HCL file, runs the env-var template pass,
+// and decodes into a *Config without running validation.
+func loadConfigFile(configFile string) (*Config, error) {
+	src, err := os.ReadFile(configFile)
+	if err != nil {
+		return nil, fmt.Errorf("read config %q: %w", configFile, err)
+	}
+	rendered, err := InterpolateEnv(src)
+	if err != nil {
+		return nil, fmt.Errorf("interpolate env vars in %q: %w", configFile, err)
+	}
+	var cfg Config
+	if err := hclsimple.Decode(configFile, rendered, nil, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// InterpolateEnv runs the given config bytes through a Go-template pass
+// exposing a single `env` function that returns os.Getenv. The template
+// syntax ({{ env "VAR" }}) is used in preference to ${VAR} so it does not
+// collide with HCL's native ${...} interpolation. Missing env vars expand
+// to the empty string, matching shell semantics.
+func InterpolateEnv(src []byte) ([]byte, error) {
+	tmpl, err := template.New("warden-config").
+		Funcs(template.FuncMap{"env": os.Getenv}).
+		Parse(string(src))
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, nil); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// validateConfig checks the cross-field invariants on a Config. Split out
+// of LoadConfig so LoadConfigDir can validate the merged result once,
+// rather than validating each partial file independently.
+func validateConfig(config *Config) error {
 	// Validate rotation period bounds if set
 	var minDur, maxDur time.Duration
+	var err error
 	if config.MinCredSourceRotationPeriod != "" {
 		minDur, err = time.ParseDuration(config.MinCredSourceRotationPeriod)
 		if err != nil {
-			return nil, fmt.Errorf("invalid min_cred_source_rotation_period %q: %w", config.MinCredSourceRotationPeriod, err)
+			return fmt.Errorf("invalid min_cred_source_rotation_period %q: %w", config.MinCredSourceRotationPeriod, err)
 		}
 		if minDur <= 0 {
-			return nil, fmt.Errorf("min_cred_source_rotation_period must be positive, got %s", minDur)
+			return fmt.Errorf("min_cred_source_rotation_period must be positive, got %s", minDur)
 		}
 	}
 	if config.MaxCredSourceRotationPeriod != "" {
 		maxDur, err = time.ParseDuration(config.MaxCredSourceRotationPeriod)
 		if err != nil {
-			return nil, fmt.Errorf("invalid max_cred_source_rotation_period %q: %w", config.MaxCredSourceRotationPeriod, err)
+			return fmt.Errorf("invalid max_cred_source_rotation_period %q: %w", config.MaxCredSourceRotationPeriod, err)
 		}
 		if maxDur <= 0 {
-			return nil, fmt.Errorf("max_cred_source_rotation_period must be positive, got %s", maxDur)
+			return fmt.Errorf("max_cred_source_rotation_period must be positive, got %s", maxDur)
 		}
 	}
 	if minDur > 0 && maxDur > 0 && minDur > maxDur {
-		return nil, fmt.Errorf("min_cred_source_rotation_period (%s) must be <= max_cred_source_rotation_period (%s)", minDur, maxDur)
+		return fmt.Errorf("min_cred_source_rotation_period (%s) must be <= max_cred_source_rotation_period (%s)", minDur, maxDur)
 	}
 
 	// Validate spec rotation period bounds if set
@@ -460,23 +562,23 @@ func LoadConfig(configFile string) (*Config, error) {
 	if config.MinCredSpecRotationPeriod != "" {
 		minSpecDur, err = time.ParseDuration(config.MinCredSpecRotationPeriod)
 		if err != nil {
-			return nil, fmt.Errorf("invalid min_cred_spec_rotation_period %q: %w", config.MinCredSpecRotationPeriod, err)
+			return fmt.Errorf("invalid min_cred_spec_rotation_period %q: %w", config.MinCredSpecRotationPeriod, err)
 		}
 		if minSpecDur <= 0 {
-			return nil, fmt.Errorf("min_cred_spec_rotation_period must be positive, got %s", minSpecDur)
+			return fmt.Errorf("min_cred_spec_rotation_period must be positive, got %s", minSpecDur)
 		}
 	}
 	if config.MaxCredSpecRotationPeriod != "" {
 		maxSpecDur, err = time.ParseDuration(config.MaxCredSpecRotationPeriod)
 		if err != nil {
-			return nil, fmt.Errorf("invalid max_cred_spec_rotation_period %q: %w", config.MaxCredSpecRotationPeriod, err)
+			return fmt.Errorf("invalid max_cred_spec_rotation_period %q: %w", config.MaxCredSpecRotationPeriod, err)
 		}
 		if maxSpecDur <= 0 {
-			return nil, fmt.Errorf("max_cred_spec_rotation_period must be positive, got %s", maxSpecDur)
+			return fmt.Errorf("max_cred_spec_rotation_period must be positive, got %s", maxSpecDur)
 		}
 	}
 	if minSpecDur > 0 && maxSpecDur > 0 && minSpecDur > maxSpecDur {
-		return nil, fmt.Errorf("min_cred_spec_rotation_period (%s) must be <= max_cred_spec_rotation_period (%s)", minSpecDur, maxSpecDur)
+		return fmt.Errorf("min_cred_spec_rotation_period (%s) must be <= max_cred_spec_rotation_period (%s)", minSpecDur, maxSpecDur)
 	}
 
 	// Validate ip_binding_policy if set
@@ -485,14 +587,14 @@ func LoadConfig(configFile string) (*Config, error) {
 		case "disabled", "optional", "required":
 			// valid
 		default:
-			return nil, fmt.Errorf("invalid ip_binding_policy %q: must be one of: disabled, optional, required", config.IPBindingPolicy)
+			return fmt.Errorf("invalid ip_binding_policy %q: must be one of: disabled, optional, required", config.IPBindingPolicy)
 		}
 	}
 
 	// Validate listener TLS config
 	for i, ln := range config.Listeners {
 		if ln.TLSEnabled && (ln.TLSCertFile == "" || ln.TLSKeyFile == "") {
-			return nil, fmt.Errorf("listener[%d]: tls_enabled requires both tls_cert_file and tls_key_file", i)
+			return fmt.Errorf("listener[%d]: tls_enabled requires both tls_cert_file and tls_key_file", i)
 		}
 	}
 
@@ -517,10 +619,10 @@ func LoadConfig(configFile string) (*Config, error) {
 		}
 		d, err := time.ParseDuration(f.value)
 		if err != nil {
-			return nil, fmt.Errorf("invalid %s %q: %w", f.name, f.value, err)
+			return fmt.Errorf("invalid %s %q: %w", f.name, f.value, err)
 		}
 		if d < 0 {
-			return nil, fmt.Errorf("%s must not be negative, got %s", f.name, d)
+			return fmt.Errorf("%s must not be negative, got %s", f.name, d)
 		}
 	}
 
@@ -528,17 +630,17 @@ func LoadConfig(configFile string) (*Config, error) {
 	if config.ClusterAddr != "" {
 		u, err := url.Parse(config.ClusterAddr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid cluster_addr %q: %w", config.ClusterAddr, err)
+			return fmt.Errorf("invalid cluster_addr %q: %w", config.ClusterAddr, err)
 		}
 		if !strings.EqualFold(u.Scheme, "https") {
-			return nil, fmt.Errorf("cluster_addr must use https:// scheme, got %q", config.ClusterAddr)
+			return fmt.Errorf("cluster_addr must use https:// scheme, got %q", config.ClusterAddr)
 		}
 		if u.Host == "" {
-			return nil, fmt.Errorf("cluster_addr must include a host, got %q", config.ClusterAddr)
+			return fmt.Errorf("cluster_addr must include a host, got %q", config.ClusterAddr)
 		}
 	}
 
-	return &config, nil
+	return nil
 }
 
 // DevConfig returns a default configuration suitable for dev mode.
