@@ -140,6 +140,12 @@ For the system-side reference describing how an agent uses Warden end-to-end —
 
 See [docs/architecture.md](docs/architecture.md) for Warden's design decisions, high availability model, and deployment configuration.
 
+## Kubernetes
+
+A first-party Helm chart deploys Warden as a 3-replica HA cluster on any Kubernetes 1.27+ cluster — bring your own Postgres, your own TLS certificate, and either a Vault Transit endpoint for auto-unseal or a static seal key for development. The chart ships production-leaning defaults; a quickstart values file shrinks the install to a single replica for kind or minikube.
+
+See [docs/deployment/kubernetes.md](docs/deployment/kubernetes.md) for the full guide.
+
 ## Contributing
 
 We welcome contributions! See the [contributing guide](CONTRIBUTING.md) for setup instructions, build commands, testing conventions, and submission guidelines.

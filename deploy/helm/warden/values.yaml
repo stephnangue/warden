@@ -1,0 +1,156 @@
+# Default values for the Warden Helm chart.
+#
+# These defaults target a production HA deployment. For a one-command
+# local quickstart, install with -f values-dev.yaml from the chart
+# directory.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/stephnangue/warden
+  # tag defaults to .Chart.AppVersion when unset
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Replica count. Warden's HA election runs on PostgreSQL advisory locks;
+# any odd or even number works. Three is a common default.
+replicaCount: 3
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podLabels: {}
+podAnnotations: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+# Pod-level securityContext. The distroless base already runs as
+# nonroot (UID 65532).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+
+podDisruptionBudget:
+  enabled: true
+  # maxUnavailable: 1 (default; tolerates one pod down at a time)
+  maxUnavailable: 1
+
+# TLS for the API listener. Warden requires TLS, so an existingSecret
+# must be provided. Create a Kubernetes Secret of type kubernetes.io/tls
+# (with optional ca.crt for client-cert validation) and reference its
+# name here.
+tls:
+  existingSecret: ""
+  # Field names within the Secret. Defaults match a kubernetes.io/tls
+  # Secret plus the conventional ca.crt for the CA bundle.
+  certKey: tls.crt
+  keyKey: tls.key
+  caKey: ca.crt
+  # Require client certificates signed by caKey. Off by default.
+  requireClientCert: false
+
+# Storage backend (PostgreSQL is the only supported backend for HA).
+# Provide either storage.existingSecret (recommended) or a literal
+# storage.connectionUrl. The chart never bundles PostgreSQL — bring
+# your own (Bitnami postgresql, CloudNativePG, RDS, …).
+storage:
+  table: warden_kv_store
+  haEnabled: "true"
+  haTable: warden_ha_locks
+
+  # Recommended: reference an existing Secret containing the full
+  # postgres:// connection URL.
+  existingSecret: ""
+  connectionUrlKey: connection_url
+
+  # Or pass a literal URL (chart will create a Secret of its own).
+  # Avoid in production — values files are rarely encrypted.
+  connectionUrl: ""
+
+# Seal configuration. Auto-unseal is strongly recommended for
+# production — pods restart frequently in Kubernetes and a static seal
+# requires manual unseal on each restart.
+seal:
+  # type: transit | static
+  type: transit
+
+  transit:
+    address: ""               # e.g. https://vault.example.com:8200
+    keyName: ""               # transit key used for unsealing
+    mountPath: "transit/"
+    namespace: ""
+
+    # Vault token. Reference an existing Secret (recommended) or pass
+    # a literal token (chart creates a Secret).
+    existingSecret: ""
+    tokenKey: token
+    token: ""
+
+  static:
+    # Used only when seal.type=static. Reference a Secret whose
+    # named key contains the raw seal-key bytes. The chart projects
+    # that Secret as a file at /seal/key and points the HCL at it
+    # via current_key = "file:///seal/key".
+    existingSecret: ""
+    keyId: ""
+    currentKeyKey: current_key
+
+# Logging
+logLevel: info
+logFormat: json
+
+# IP-binding policy: disabled | optional | required
+ipBindingPolicy: optional
+
+probes:
+  startup:
+    failureThreshold: 30
+    periodSeconds: 5
+  liveness:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 3
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+
+service:
+  type: ClusterIP
+  port: 8400
+  annotations: {}
+
+# Extra environment variables passed to the warden container.
+# Useful for advanced cases where the HCL needs additional
+# {{ env "..." }} placeholders.
+extraEnv: []

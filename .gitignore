@@ -6,7 +6,10 @@
 *.dylib
 mysql-proxy
 covenant
-warden
+# Anchored to the repo root so the deploy/helm/warden/ chart directory
+# stays tracked. `warden` (no slash) would otherwise match any path
+# component named "warden" anywhere in the tree.
+/warden
 
 # Test binary
 *.test

@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      helm: ${{ steps.filter.outputs.helm }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v4
@@ -26,6 +27,9 @@ jobs:
               - 'go.mod'
               - 'go.sum'
               - 'e2e/**'
+            helm:
+              - 'deploy/helm/**'
+              - '.github/workflows/ci.yml'
 
   unit:
     needs: [changes]
@@ -52,6 +56,67 @@ jobs:
 
       - name: Build
         run: go build -o warden .
+
+  helm:
+    name: helm-lint
+    needs: [changes]
+    if: needs.changes.outputs.helm == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Install kubeconform
+        run: |
+          curl -L -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz
+          tar -xzf kubeconform.tar.gz
+          sudo install -m 0755 kubeconform /usr/local/bin/
+
+      - name: helm lint (production values)
+        run: |
+          helm lint deploy/helm/warden \
+            --set tls.existingSecret=warden-tls \
+            --set storage.existingSecret=warden-db \
+            --set seal.transit.address=https://vault.example.com:8200 \
+            --set seal.transit.keyName=warden-unseal \
+            --set seal.transit.existingSecret=warden-seal
+
+      - name: helm lint (dev values)
+        run: |
+          helm lint deploy/helm/warden \
+            -f deploy/helm/warden/values-dev.yaml \
+            --set tls.existingSecret=warden-tls \
+            --set storage.connectionUrl='postgres://example' \
+            --set seal.static.existingSecret=warden-seal \
+            --set seal.static.keyId=dev
+
+      - name: kubeconform (production values)
+        run: |
+          helm template warden deploy/helm/warden \
+            --namespace warden \
+            --set tls.existingSecret=warden-tls \
+            --set storage.existingSecret=warden-db \
+            --set seal.transit.address=https://vault.example.com:8200 \
+            --set seal.transit.keyName=warden-unseal \
+            --set seal.transit.existingSecret=warden-seal \
+            | kubeconform -strict -summary -verbose
+
+      - name: kubeconform (dev values)
+        run: |
+          helm template warden deploy/helm/warden \
+            --namespace warden \
+            -f deploy/helm/warden/values-dev.yaml \
+            --set tls.existingSecret=warden-tls \
+            --set storage.connectionUrl='postgres://example' \
+            --set seal.static.existingSecret=warden-seal \
+            --set seal.static.keyId=dev \
+            | kubeconform -strict -summary -verbose
 
   e2e:
     runs-on: ubuntu-latest

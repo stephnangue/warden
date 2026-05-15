@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "warden.headlessName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "warden.labels" . | nindent 4 }}
+spec:
+  # Headless: each pod gets a DNS A record at
+  #   pod-name.<service>.<namespace>.svc.cluster.local
+  # The HCL `api_addr` and `cluster_addr` resolve against this.
+  clusterIP: None
+  # Expose unready pods on the headless Service so the operator can
+  # reach Warden during the uninitialized window (readiness fails 501
+  # until /v1/sys/init runs) and so standby->active mTLS forwarding
+  # works across pod restarts.
+  publishNotReadyAddresses: true
+  ports:
+    - name: api
+      port: 8400
+      targetPort: api
+      protocol: TCP
+    - name: cluster
+      port: 8401
+      targetPort: cluster
+      protocol: TCP
+  selector:
+    {{- include "warden.selectorLabels" . | nindent 4 }}

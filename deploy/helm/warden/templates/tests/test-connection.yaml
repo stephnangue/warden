@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "warden.fullname" . }}-test-connection
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "warden.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: curlimages/curl:8.10.1
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          URL="https://{{ include "warden.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200"
+          echo "GET $URL"
+          # The sealedcode and uninitcode overrides force a 200 for those
+          # states so that even unhealthy-but-running pods pass the smoke
+          # test — this validates the listener, not cluster initialization.
+          # If the API Service has no endpoints (e.g. all pods are NotReady
+          # because /v1/sys/init has not been run yet), curl will fail to
+          # connect and the test will exit non-zero — see NOTES.txt for
+          # the init runbook.
+          CODE=$(curl -sk -o /tmp/body -w '%{http_code}' "$URL" || echo "connect_failed")
+          echo "HTTP $CODE"
+          cat /tmp/body 2>/dev/null || true
+          echo
+          case "$CODE" in
+            2*) exit 0 ;;
+            *)  exit 1 ;;
+          esac
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
