@@ -1,0 +1,48 @@
+# Quickstart overrides for local development on kind / minikube / k3s.
+#
+#   helm install warden ./deploy/helm/warden \
+#     -n warden --create-namespace \
+#     -f ./deploy/helm/warden/values-dev.yaml \
+#     --set tls.existingSecret=warden-tls \
+#     --set storage.connectionUrl='postgres://warden:warden@warden-postgres:5432/warden?sslmode=disable' \
+#     --set seal.static.existingSecret=warden-seal \
+#     --set seal.static.keyId=dev-2026-05-15
+#
+# WARNING: these defaults shrink the cluster to a single replica and
+# switch to a static seal key for unattended unsealing. They are
+# explicitly NOT safe for production — see deploy/helm/warden/values.yaml
+# for the production baseline.
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+
+logLevel: debug
+logFormat: standard
+
+# Static seal: a single shared key carried in a Secret. Convenient
+# for kind clusters; never use this layout outside of dev or CI.
+seal:
+  type: static
+
+# A single replica's PDB would block voluntary evictions entirely;
+# disable for the dev profile.
+podDisruptionBudget:
+  enabled: false
+
+# Topology spread across zones makes no sense for a 1-pod kind cluster.
+topologySpreadConstraints: []
+
+probes:
+  startup:
+    failureThreshold: 60
+    periodSeconds: 2
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+  readiness:
+    initialDelaySeconds: 2
+    periodSeconds: 5

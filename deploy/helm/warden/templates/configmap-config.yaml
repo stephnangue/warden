@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "warden.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "warden.labels" . | nindent 4 }}
+data:
+  # Single base HCL file consumed by `warden server --config-dir /config`.
+  # Sensitive values (postgres connection_url, seal token, static seal key)
+  # are pulled in at boot from env vars via the warden binary's
+  # env-interpolation pass (see config/config.go).
+  00-base.hcl: |
+    log_format = {{ .Values.logFormat | quote }}
+    log_level  = {{ .Values.logLevel | quote }}
+
+    api_addr     = {{ include "warden.apiAddrTemplate" . | quote }}
+    cluster_addr = {{ include "warden.clusterAddrTemplate" . | quote }}
+
+    ip_binding_policy = {{ .Values.ipBindingPolicy | quote }}
+
+    storage "postgres" {
+      connection_url = "{{`{{ env "WARDEN_POSTGRES_URL" }}`}}"
+      table          = {{ .Values.storage.table | quote }}
+      ha_enabled     = {{ .Values.storage.haEnabled | quote }}
+      ha_table       = {{ .Values.storage.haTable | quote }}
+    }
+
+    listener "tcp" {
+      address                 = "0.0.0.0:8400"
+      tls_enabled             = true
+      tls_cert_file           = "/certs/{{ .Values.tls.certKey }}"
+      tls_key_file            = "/certs/{{ .Values.tls.keyKey }}"
+      tls_client_ca_file      = "/certs/{{ .Values.tls.caKey }}"
+      tls_require_client_cert = {{ .Values.tls.requireClientCert }}
+    }
+
+  {{- if eq .Values.seal.type "transit" }}
+  10-seal.hcl: |
+    seal "transit" {
+      address    = {{ .Values.seal.transit.address | quote }}
+      token      = "{{`{{ env "WARDEN_SEAL_TOKEN" }}`}}"
+      key_name   = {{ .Values.seal.transit.keyName | quote }}
+      mount_path = {{ .Values.seal.transit.mountPath | quote }}
+      {{- with .Values.seal.transit.namespace }}
+      namespace  = {{ . | quote }}
+      {{- end }}
+    }
+  {{- else if eq .Values.seal.type "static" }}
+  10-seal.hcl: |
+    seal "static" {
+      {{- with .Values.seal.static.keyId }}
+      current_key_id = {{ . | quote }}
+      {{- end }}
+      # The Secret named in seal.static.existingSecret is projected at
+      # /seal/key by the StatefulSet's seal volume mount.
+      current_key    = "file:///seal/key"
+    }
+  {{- end }}

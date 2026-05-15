@@ -1,0 +1,32 @@
+Warden {{ .Chart.AppVersion }} has been installed as release "{{ .Release.Name }}".
+
+API service:
+  {{ include "warden.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+Headless service (per-pod DNS for inter-node cluster comms and direct
+operator access while pods are NotReady):
+  pod-name.{{ include "warden.headlessName" . }}.{{ .Release.Namespace }}.svc.cluster.local
+
+NEXT STEP — first-time initialization
+=====================================
+On a fresh install the pods come up uninitialized: readiness fails
+with 501 and they are excluded from the {{ include "warden.fullname" . }}
+Service. Initialize the cluster manually:
+
+  kubectl -n {{ .Release.Namespace }} port-forward pod/{{ include "warden.fullname" . }}-0 8400:8400 &
+
+  curl -k -X POST https://127.0.0.1:8400/v1/sys/init \
+    -H 'Content-Type: application/json' \
+    -d '{"secret_shares": 1, "secret_threshold": 1}'
+
+Store the returned root_token and unseal_keys_b64 securely — you
+cannot recover them later. Once one pod is initialized the rest will
+auto-unseal{{ if eq .Values.seal.type "transit" }} via the Transit
+seal at {{ .Values.seal.transit.address | quote }}{{ else }} using the
+shared static seal key{{ end }} and become Ready within ~30 seconds.
+
+{{- if eq .Values.seal.type "static" }}
+
+WARNING: seal.type=static — this profile is meant for development and
+CI only. Production deployments should use Transit or KMS auto-unseal.
+{{- end }}
