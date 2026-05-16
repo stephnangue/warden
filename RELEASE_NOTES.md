@@ -1,24 +1,33 @@
-## Warden v0.12.0
+## Warden v0.13.0
 
 **Warden is the secure gateway connecting AI agents to the enterprise systems they need to do real work.** Agents discover what they're allowed to access, Warden brokers every connection, and operators get one control plane for identity, policy, and audit — across every cloud, code-host, observability stack, database, and SaaS the agent reaches. No upstream credentials ever reach the agent: Warden authenticates the caller (JWT or TLS certificate), evaluates fine-grained policy at request time, and injects short-lived credentials before forwarding — or vends scoped grants like database auth tokens directly.
 
+This release makes Warden a first-class Kubernetes citizen. The platform team's deployment workflow now ends at a single `helm install` command.
+
 ### What's New
 
-**Skill registry — agent-facing capability catalog served by the cluster.** New `/v1/sys/skills` API and `warden skill {list, read, create, update, delete}` CLI. Foundation skills (`discovery`, `foundation`, `troubleshooting`) seed at first unseal; per-provider skills (aws, vault, openai, github, rds, scaleway) seed the first time a provider of that type is mounted — the catalog reflects what the cluster actually exposes, and agents discover it at runtime instead of having it shipped out-of-band. Reads are open to any namespace token; writes are root-only.
+**First-party Helm chart with HA defaults.** A new chart at `deploy/helm/warden/` deploys a 3-replica active/standby cluster — `StatefulSet` with parallel pod startup, a ClusterIP API Service that gates sealed and uninitialized pods out of its endpoints, a headless Service for inter-node mTLS forwarding and operator access pre-init, dedicated ServiceAccount with the auto-mount token suppressed, `PodDisruptionBudget`, topology spread across zones, and the Pod Security Standards "restricted" profile out of the box. Bring your own PostgreSQL (Bitnami, CloudNativePG, or managed); bring your own TLS Secret; bring your own Vault Transit endpoint for auto-unseal. Preflight validation refuses to render manifests until the required values are set — install errors point at the missing flag, not at a crash-looping pod.
 
-**`mount_url` field on `/v1/sys/providers` responses.** Returns the relative URL path with namespace and mount baked in (e.g., `/v1/team-data/aws/`). Agents prepend `$WARDEN_ADDR` plus the per-provider suffix from the matching skill (`gateway`, `role/<role>/gateway`, `access/<grant>`) — no string surgery on `$WARDEN_NAMESPACE`.
+**Install from an OCI registry — no source checkout needed.** Every release tag now publishes the chart to `oci://ghcr.io/stephnangue/charts/warden`, with the `appVersion` pinned to the tag and the same tarball attached to the GitHub Release for air-gapped clusters. End users install with one command:
 
-**Agent CLI ergonomics.** A consistent surface for agents and scripts: `--json` payloads on every mutating typed command (literal, `@file`, or `-` for stdin); `--dry-run` for local schema validation with "did you mean" hints, no server round-trip; `--output` with TTY autodetect (`table` on a terminal, `json` when piped); `--fields` for context-window discipline; structured JSON error envelopes with stable exit codes. Three new agent-facing commands: `warden role list`, `warden schema`, and `warden path-help` (now honors the output framework).
+```bash
+helm install warden oci://ghcr.io/stephnangue/charts/warden \
+  --version 0.1.0 \
+  -n warden --create-namespace \
+  -f your-values.yaml
+```
 
-**Server-side OpenAPI 3.0 schema endpoint** at `GET /v1/sys/schema` and the Vault-compatible alias `GET /v1/sys/internal/specs/openapi`. Returns a namespace-scoped document covering `sys/*` plus every framework-based mount in the caller's namespace; `?path=<path>` projects to a single operation.
+The release workflow refuses to publish a chart version that already exists in the registry, so a Warden binary release that does not bump the chart cannot silently clobber a previously published chart artifact.
 
-**Bug fix.** Resolved an AB-BA deadlock in the namespace deletion path where concurrent create + cleanup could wedge a node. `persistMounts` now reads the namespace from `ctx` instead of calling `ListNamespaces` while holding `mountsLock`.
+**`--config-dir` flag on `warden server`.** Merges every `*.hcl` file in a directory in lexical order, later files overriding earlier ones. The Helm chart uses it to drop in a base file (listener, storage shape, HA tuning) and a conditional seal-overlay file. Operators can stack their own overlays without rebuilding the chart.
 
-### Breaking Changes
+**Environment-variable interpolation in HCL.** Config files pass through a Go-template stage exposing a single `env` function — `{{ env "POD_NAME" }}` resolves at load time. The Helm chart uses this to template per-pod `api_addr` / `cluster_addr` from the downward API, and to source the postgres connection URL and Vault Transit token from Kubernetes Secrets without baking them into the rendered ConfigMap. HCL's native `${...}` syntax is intentionally left untouched.
 
-- `--format` / `-f` replaced by the global `--output` / `-o`.
-- CLI success and empty-list messages are now JSON envelopes in non-table modes (`-o table` keeps the human form).
-- Top-level `skills/` directory removed — fetch skills via the runtime registry (`warden skill read <name> --raw` or `GET /v1/sys/skills/<name>`).
+**Bug fix — `/v1/sys/health` override precedence.** The `?standbyok=true` query parameter — the standard knob for telling load balancers and readiness probes that "standby is fine" — used to return 200 even when the pod was sealed or uninitialized. Sealed pods carry `standby=true` because they cannot acquire the HA lock, so a Kubernetes readiness probe with `?standbyok=true` would silently mark sealed pods Ready and route traffic to them. Overrides are now applied in severity order (uninit > sealed > standby), and a more severe condition cannot be masked by a less severe override.
+
+### Kubernetes deployment guide
+
+See [docs/deployment/kubernetes.md](https://github.com/stephnangue/warden/blob/main/docs/deployment/kubernetes.md) for the end-to-end story: three install methods (OCI registry, release tarball, source repo), dev quickstart on kind in under five minutes, production install with Vault Transit auto-unseal, PostgreSQL recipes for Bitnami and CloudNativePG, the first-time initialization runbook (init is intentionally not auto-run — auto-storing the root token in etcd is a footgun), rolling upgrade procedure, seal-token rotation, and troubleshooting for the common failure modes.
 
 ### Providers
 
@@ -62,7 +71,7 @@
 - **Dual-mode providers** auto-detect between REST API proxying and S3-compatible object storage on a per-request basis.
 - **Access providers** vend credentials directly (database auth tokens, pre-signed URLs).
 
-### Getting Started
+### Getting Started — Local Quickstart
 
 You need two things: the **Warden binary** (from the assets below) and the **quick start compose file** (starts an identity provider with pre-configured OAuth2 clients).
 
@@ -101,6 +110,21 @@ Follow any [provider README](https://github.com/stephnangue/warden#providers) to
 | `my-admin` | `admin-secret` | Admin / operator |
 
 To stop and clean up: `docker compose -f docker-compose.quickstart.yml down -v`
+
+### Getting Started — Kubernetes
+
+```bash
+helm install warden oci://ghcr.io/stephnangue/charts/warden \
+  --version 0.1.0 \
+  -n warden --create-namespace \
+  --set tls.existingSecret=warden-tls \
+  --set storage.existingSecret=warden-db \
+  --set seal.transit.address=https://vault.internal:8200 \
+  --set seal.transit.keyName=warden-unseal \
+  --set seal.transit.existingSecret=warden-seal-token
+```
+
+See [docs/deployment/kubernetes.md](https://github.com/stephnangue/warden/blob/main/docs/deployment/kubernetes.md) for the full guide, including the dev quickstart on kind, PostgreSQL recipes, and the first-time initialization runbook.
 
 See the [README](https://github.com/stephnangue/warden#readme) for full documentation and provider guides.
 
