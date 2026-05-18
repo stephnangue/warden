@@ -1,33 +1,26 @@
-## Warden v0.13.0
+## Warden v0.13.1
 
 **Warden is the secure gateway connecting AI agents to the enterprise systems they need to do real work.** Agents discover what they're allowed to access, Warden brokers every connection, and operators get one control plane for identity, policy, and audit — across every cloud, code-host, observability stack, database, and SaaS the agent reaches. No upstream credentials ever reach the agent: Warden authenticates the caller (JWT or TLS certificate), evaluates fine-grained policy at request time, and injects short-lived credentials before forwarding — or vends scoped grants like database auth tokens directly.
 
-This release makes Warden a first-class Kubernetes citizen. The platform team's deployment workflow now ends at a single `helm install` command.
+A patch release focused on the Kubernetes path. The 0.13.0 Helm chart shipped with three template defects that surfaced the first time anyone tried to install it on a clean cluster — none of them caught by `helm lint` or `helm template`, all of them only visible once a pod actually tried to run. v0.13.1 fixes the chart and ships it as `0.1.1`.
 
-### What's New
+### Bug Fixes — Helm chart
 
-**First-party Helm chart with HA defaults.** A new chart at `deploy/helm/warden/` deploys a 3-replica active/standby cluster — `StatefulSet` with parallel pod startup, a ClusterIP API Service that gates sealed and uninitialized pods out of its endpoints, a headless Service for inter-node mTLS forwarding and operator access pre-init, dedicated ServiceAccount with the auto-mount token suppressed, `PodDisruptionBudget`, topology spread across zones, and the Pod Security Standards "restricted" profile out of the box. Bring your own PostgreSQL (Bitnami, CloudNativePG, or managed); bring your own TLS Secret; bring your own Vault Transit endpoint for auto-unseal. Preflight validation refuses to render manifests until the required values are set — install errors point at the missing flag, not at a crash-looping pod.
+- **Default image tag now resolves to a published image.** The release workflow strips the leading `v` from `appVersion` while `.goreleaser.yaml` publishes Docker tags as `v{{ .Version }}`. The chart's default tag derivation therefore resolved to `ghcr.io/stephnangue/warden:0.13.0` — `ImagePullBackOff`. The default is now `v` + `.Chart.AppVersion`, aligning with the existing tag convention without churning any historical tags.
 
-**Install from an OCI registry — no source checkout needed.** Every release tag now publishes the chart to `oci://ghcr.io/stephnangue/charts/warden`, with the `appVersion` pinned to the tag and the same tarball attached to the GitHub Release for air-gapped clusters. End users install with one command:
+- **HCL env-interpolation no longer crashes on boot.** `api_addr` and `cluster_addr` were rendered through Helm's `| quote`, which backslash-escaped the inner double quotes of `{{ env "POD_NAME" }}` and produced HCL the warden binary's env-interpolation pass rejected (`unexpected "\" in operand`). The strings are now hand-quoted, matching the pattern already used for `WARDEN_POSTGRES_URL`.
+
+- **First-time init can create the default audit device under `readOnlyRootFilesystem: true`.** Warden's core registers a default file audit device at the relative path `warden-audit.log`, which resolved against the container's `/app` working directory — read-only when the chart's restricted security context is in effect, so init failed with `failed to create default audit backend: failed to open file: open warden-audit.log: read-only file system`. The container now runs from `/tmp` (writable emptyDir) with an explicit `command: [/app/warden]` so the relative-path entrypoint still finds the binary. Audit logs in `/tmp` are ephemeral by design; operators who need durable auditing should mount a PVC and create an explicit audit device after init.
+
+### Upgrading
 
 ```bash
-helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.1.0 \
-  -n warden --create-namespace \
-  -f your-values.yaml
+helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
+  --version 0.1.1 \
+  -n warden --reuse-values
 ```
 
-The release workflow refuses to publish a chart version that already exists in the registry, so a Warden binary release that does not bump the chart cannot silently clobber a previously published chart artifact.
-
-**`--config-dir` flag on `warden server`.** Merges every `*.hcl` file in a directory in lexical order, later files overriding earlier ones. The Helm chart uses it to drop in a base file (listener, storage shape, HA tuning) and a conditional seal-overlay file. Operators can stack their own overlays without rebuilding the chart.
-
-**Environment-variable interpolation in HCL.** Config files pass through a Go-template stage exposing a single `env` function — `{{ env "POD_NAME" }}` resolves at load time. The Helm chart uses this to template per-pod `api_addr` / `cluster_addr` from the downward API, and to source the postgres connection URL and Vault Transit token from Kubernetes Secrets without baking them into the rendered ConfigMap. HCL's native `${...}` syntax is intentionally left untouched.
-
-**Bug fix — `/v1/sys/health` override precedence.** The `?standbyok=true` query parameter — the standard knob for telling load balancers and readiness probes that "standby is fine" — used to return 200 even when the pod was sealed or uninitialized. Sealed pods carry `standby=true` because they cannot acquire the HA lock, so a Kubernetes readiness probe with `?standbyok=true` would silently mark sealed pods Ready and route traffic to them. Overrides are now applied in severity order (uninit > sealed > standby), and a more severe condition cannot be masked by a less severe override.
-
-### Kubernetes deployment guide
-
-See [docs/deployment/kubernetes.md](https://github.com/stephnangue/warden/blob/main/docs/deployment/kubernetes.md) for the end-to-end story: three install methods (OCI registry, release tarball, source repo), dev quickstart on kind in under five minutes, production install with Vault Transit auto-unseal, PostgreSQL recipes for Bitnami and CloudNativePG, the first-time initialization runbook (init is intentionally not auto-run — auto-storing the root token in etcd is a footgun), rolling upgrade procedure, seal-token rotation, and troubleshooting for the common failure modes.
+The chart's value surface is unchanged from 0.1.0; existing values files apply as-is.
 
 ### Providers
 
@@ -115,7 +108,7 @@ To stop and clean up: `docker compose -f docker-compose.quickstart.yml down -v`
 
 ```bash
 helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.1.0 \
+  --version 0.1.1 \
   -n warden --create-namespace \
   --set tls.existingSecret=warden-tls \
   --set storage.existingSecret=warden-db \
