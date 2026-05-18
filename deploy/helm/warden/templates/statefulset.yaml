@@ -171,7 +171,7 @@ spec:
             name: {{ include "warden.fullname" . }}-config
         - name: certs
           secret:
-            secretName: {{ .Values.tls.existingSecret }}
+            secretName: {{ include "warden.tlsSecretName" . }}
         - name: tmp
           emptyDir: {}
         {{- if eq .Values.seal.type "static" }}

@@ -65,10 +65,10 @@ podDisruptionBudget:
   # maxUnavailable: 1 (default; tolerates one pod down at a time)
   maxUnavailable: 1
 
-# TLS for the API listener. Warden requires TLS, so an existingSecret
-# must be provided. Create a Kubernetes Secret of type kubernetes.io/tls
-# (with optional ca.crt for client-cert validation) and reference its
-# name here.
+# TLS for the API listener. Warden requires TLS. Either supply a
+# pre-existing Secret via tls.existingSecret, or set tls.certManager.
+# enabled=true to have cert-manager issue and rotate the Secret for
+# you. Exactly one path must be active.
 tls:
   existingSecret: ""
   # Field names within the Secret. Defaults match a kubernetes.io/tls
@@ -78,6 +78,32 @@ tls:
   caKey: ca.crt
   # Require client certificates signed by caKey. Off by default.
   requireClientCert: false
+  # Opt-in: have cert-manager issue and rotate the chart's TLS Secret
+  # instead of supplying tls.existingSecret. Mutually exclusive with
+  # tls.existingSecret; enabling both fails preflight.
+  certManager:
+    enabled: false
+    # Name of the kubernetes.io/tls Secret cert-manager will write.
+    # Defaults to "{fullname}-tls".
+    secretName: ""
+    # Required when enabled=true. The Issuer/ClusterIssuer must exist
+    # in the cluster; the chart does NOT create it.
+    issuerRef:
+      name: ""
+      kind: Issuer          # or ClusterIssuer
+      group: cert-manager.io
+    # SANs on the cert. Empty => chart derives the four service DNS
+    # names (fullname, fullname.ns.svc, .svc.cluster.local, and the
+    # headless wildcard). Override to add external hostnames.
+    dnsNames: []
+    duration: 2160h          # 90d
+    renewBefore: 360h        # 15d
+    privateKey:
+      algorithm: ECDSA       # ECDSA | RSA
+      size: 256              # 256/384 for ECDSA, 2048/3072/4096 for RSA
+      rotationPolicy: Always
+    labels: {}
+    annotations: {}
 
 # Storage backend (PostgreSQL is the only supported backend for HA).
 # Provide either storage.existingSecret (recommended) or a literal

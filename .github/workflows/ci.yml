@@ -133,6 +133,20 @@ jobs:
             --set seal.static.keyId=dev \
             | kubeconform -strict -summary -verbose
 
+      - name: kubeconform (cert-manager values)
+        run: |
+          helm template warden deploy/helm/warden \
+            --namespace warden \
+            --set tls.certManager.enabled=true \
+            --set tls.certManager.issuerRef.name=warden-ca \
+            --set storage.existingSecret=warden-db \
+            --set seal.transit.address=https://vault.example.com:8200 \
+            --set seal.transit.keyName=warden-unseal \
+            --set seal.transit.existingSecret=warden-seal \
+            | kubeconform -strict -summary -verbose \
+                -schema-location default \
+                -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+
   e2e:
     runs-on: ubuntu-latest
     needs: [unit, changes]

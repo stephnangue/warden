@@ -83,8 +83,18 @@ helm install / helm template fail with an actionable message instead of
 producing manifests that crash-loop at pod startup.
 */}}
 {{- define "warden.preflight" -}}
+{{- $cmEnabled := .Values.tls.certManager.enabled -}}
+{{- if and $cmEnabled .Values.tls.existingSecret -}}
+{{- fail "tls.existingSecret and tls.certManager.enabled are mutually exclusive — pick one" -}}
+{{- end -}}
+{{- if $cmEnabled -}}
+{{- if not .Values.tls.certManager.issuerRef.name -}}
+{{- fail "tls.certManager.issuerRef.name is required when tls.certManager.enabled=true" -}}
+{{- end -}}
+{{- else -}}
 {{- if not .Values.tls.existingSecret -}}
-{{- fail "tls.existingSecret is required: create a kubernetes.io/tls Secret and pass --set tls.existingSecret=<name>" -}}
+{{- fail "tls.existingSecret is required (or set tls.certManager.enabled=true): create a kubernetes.io/tls Secret and pass --set tls.existingSecret=<name>" -}}
+{{- end -}}
 {{- end -}}
 {{- if not (or .Values.storage.existingSecret .Values.storage.connectionUrl) -}}
 {{- fail "Either storage.existingSecret or storage.connectionUrl must be set so the postgres connection URL can be sourced" -}}
@@ -115,6 +125,22 @@ warden boot through the env-interpolation pass added in PR 1, so
 two outer {{`...`}} keep the inner braces literal in the rendered
 ConfigMap.
 */}}
+{{/*
+warden.tlsSecretName resolves the Secret the StatefulSet mounts at
+/certs. Priority:
+  1. tls.certManager.enabled with tls.certManager.secretName set
+  2. tls.certManager.enabled (derives "{fullname}-tls")
+  3. tls.existingSecret (legacy path)
+Preflight enforces that exactly one branch is reachable.
+*/}}
+{{- define "warden.tlsSecretName" -}}
+{{- if .Values.tls.certManager.enabled -}}
+{{- default (printf "%s-tls" (include "warden.fullname" .)) .Values.tls.certManager.secretName -}}
+{{- else -}}
+{{- .Values.tls.existingSecret -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "warden.apiAddrTemplate" -}}
 https://{{`{{ env "POD_NAME" }}`}}.{{ include "warden.headlessName" . }}.{{ .Release.Namespace }}.svc.cluster.local:8400
 {{- end -}}
