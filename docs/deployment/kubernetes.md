@@ -18,6 +18,7 @@ seal key for quick local testing on kind or minikube.
 - [First-time initialization](#first-time-initialization)
 - [Upgrades](#upgrades)
 - [Operations](#operations)
+- [Cleanup](#cleanup)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -537,6 +538,94 @@ helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
 
 New pods join the cluster as standbys after auto-unseal. No data
 migration needed — everything is in Postgres.
+
+---
+
+## Cleanup
+
+Tearing down a Warden install in the right order matters: the release
+owns only the resources the chart rendered, while databases, TLS
+Secrets, seal-token Secrets, and operator-created namespaces are
+deliberately outside that scope so they survive `helm uninstall`. Deleting
+them on purpose is straightforward; deleting them by accident is not
+recoverable — especially the Postgres data and the seal token.
+
+### Uninstalling the release
+
+`helm uninstall` removes only the chart-rendered objects (StatefulSet,
+Services, ConfigMap, ServiceAccount, PDB, and — when literal credentials
+were passed via values — the chart-managed credentials Secret). The
+namespace, operator-managed Secrets, and PostgreSQL are intentionally
+left alone:
+
+```bash
+helm uninstall warden -n warden
+```
+
+Run `helm list -n warden` to confirm the release is gone. The
+`warden-tls`, `warden-db` / `warden-postgres-creds`, and
+`warden-seal-token` / `warden-seal` Secrets remain in the namespace.
+That is intentional — reinstalling the chart against the same Postgres
+and seal will pick the cluster back up without re-running `sys/init`.
+
+### Dev cleanup (kind quickstart)
+
+If you followed [Dev quickstart on kind](#dev-quickstart-on-kind), the
+fastest reset is to delete the entire namespace and then the kind
+cluster. There is no data worth keeping.
+
+```bash
+# Drops the release-owned resources, the dev Postgres StatefulSet and
+# Service, every Secret (TLS, seal key, postgres creds), and any PVCs.
+kubectl delete namespace warden
+
+# Delete the kind cluster itself.
+kind delete cluster --name warden
+
+# Local files generated during the walkthrough.
+rm -rf /tmp/warden-tls /tmp/warden-seal.key
+```
+
+Verify nothing is left:
+
+```bash
+kind get clusters       # should not list "warden"
+kubectl config current-context  # may say "current-context is not set" — expected
+```
+
+### Production cleanup
+
+For a production deployment the safe order is: uninstall the release,
+**then** decide explicitly what stays:
+
+```bash
+helm uninstall warden -n warden
+```
+
+| Resource | Delete when… | How |
+|---|---|---|
+| `Secret/warden-tls` | retiring the listener cert | `kubectl -n warden delete secret warden-tls` |
+| `Secret/warden-db` | retiring the Postgres database | `kubectl -n warden delete secret warden-db` |
+| `Secret/warden-seal-token` | retiring the Transit unseal key. Deleting this without first re-keying via `sys/rekey` makes the data in Postgres permanently unreadable. | `kubectl -n warden delete secret warden-seal-token` |
+| PostgreSQL database / instance | tearing down the install for good | Per your Postgres provider — `helm uninstall warden-db -n warden` for Bitnami, `kubectl delete cluster.postgresql.cnpg.io warden-db -n warden` for CloudNativePG, or your managed-database console. |
+| Vault Transit unseal key | retiring the Transit key. Same data-loss caveat as the seal token. | `vault delete transit/keys/warden-unseal` (after a rotation/rekey, or as part of full decommission). |
+| `Namespace/warden` | nothing else lives in this namespace | `kubectl delete namespace warden` |
+
+If you want to redeploy later against the same data, stop after
+`helm uninstall` and keep the Secrets and Postgres in place.
+
+### Rolling back without uninstalling
+
+To undo a chart upgrade without losing any state, use `helm rollback`:
+
+```bash
+helm history warden -n warden
+helm rollback warden <revision> -n warden
+```
+
+This re-renders the previous chart values and triggers a rolling
+restart bounded by the PDB. The cluster does not need to be sealed,
+re-initialized, or re-keyed.
 
 ---
 
