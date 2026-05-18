@@ -15,6 +15,7 @@ seal key for quick local testing on kind or minikube.
 - [Dev quickstart on kind](#dev-quickstart-on-kind)
 - [Production install](#production-install)
 - [PostgreSQL options](#postgresql-options)
+- [Streamlined TLS with cert-manager](#streamlined-tls-with-cert-manager)
 - [First-time initialization](#first-time-initialization)
 - [Upgrades](#upgrades)
 - [Operations](#operations)
@@ -50,13 +51,18 @@ On leader failure, a standby acquires the lock within ~10s. See the
   `publishNotReadyAddresses` on headless Services.
 - **PostgreSQL** — bring your own. The chart never bundles a database.
   See [PostgreSQL options](#postgresql-options) for examples.
-- **TLS certificate** — Warden requires TLS on the API listener. Provide
-  a Kubernetes Secret of type `kubernetes.io/tls`, with optional `ca.crt`
-  for client-cert validation.
+- **TLS certificate** — Warden requires TLS on the API listener. Either
+  provide a Kubernetes Secret of type `kubernetes.io/tls` (with optional
+  `ca.crt` for client-cert validation) or set `tls.certManager.enabled=true`
+  to have cert-manager issue and rotate it. See
+  [Streamlined TLS with cert-manager](#streamlined-tls-with-cert-manager).
 - **Seal infrastructure** — for production, a Vault server with a Transit
   key configured for auto-unseal. For dev, a single shared static seal
   key carried in a Secret.
 - **`helm` 3.16+** and **`kubectl`** locally.
+- **cert-manager (optional)** — required only when `tls.certManager.enabled=true`.
+  Any v1.x install works; the chart references whatever `Issuer` or
+  `ClusterIssuer` you point it at.
 
 ---
 
@@ -383,6 +389,107 @@ string. Set `storage.existingSecret=warden-db-app` and
 Create a Secret out-of-band with the full connection URL and reference it
 via `--set storage.existingSecret=<name>`. Use `sslmode=require` (or
 stricter) on production databases.
+
+---
+
+## Streamlined TLS with cert-manager
+
+If [cert-manager](https://cert-manager.io) is installed in the cluster,
+setting `tls.certManager.enabled=true` replaces the
+"openssl + `kubectl create secret`" dance with a single chart-rendered
+`Certificate` resource. cert-manager issues the cert against an `Issuer`
+or `ClusterIssuer` you already trust, writes the `kubernetes.io/tls`
+Secret the StatefulSet mounts, and renews automatically before expiry.
+
+`tls.existingSecret` and `tls.certManager.enabled` are mutually
+exclusive — preflight rejects both.
+
+### Defaults you get out of the box
+
+| Field | Default |
+|---|---|
+| `secretName` | `{fullname}-tls` (override with `tls.certManager.secretName`) |
+| `dnsNames` | `{fullname}`, `{fullname}.{ns}.svc`, `{fullname}.{ns}.svc.cluster.local`, `*.{fullname}-headless.{ns}.svc.cluster.local` |
+| `duration` / `renewBefore` | `2160h` (90d) / `360h` (15d) |
+| `privateKey` | ECDSA P-256, `rotationPolicy: Always` |
+| `usages` | `[server auth]`, plus `client auth` when `tls.requireClientCert=true` |
+
+Required input: `tls.certManager.issuerRef.name`. The chart does **not**
+create the Issuer — that is environment policy and typically lives in a
+different namespace.
+
+### Production: Vault PKI or internal CA
+
+```bash
+helm install warden oci://ghcr.io/stephnangue/charts/warden \
+  --version 0.2.0 \
+  -n warden --create-namespace \
+  --set tls.certManager.enabled=true \
+  --set tls.certManager.issuerRef.name=warden-pki \
+  --set tls.certManager.issuerRef.kind=ClusterIssuer \
+  --set storage.existingSecret=warden-db \
+  --set seal.transit.address=https://vault.internal:8200 \
+  --set seal.transit.keyName=warden-unseal \
+  --set seal.transit.existingSecret=warden-seal-token
+```
+
+### Dev: self-signed `ClusterIssuer` on kind
+
+The dev quickstart [Step 3 (TLS Secret)](#3-create-the-tls-secret) can be
+replaced with cert-manager. Install cert-manager once per cluster, apply a
+self-signed `ClusterIssuer`, and let the chart handle the rest:
+
+```bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.15.0/cert-manager.yaml
+kubectl -n cert-manager wait --for=condition=Available deployment --all --timeout=2m
+
+kubectl apply -f - <<'EOF'
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata: { name: selfsigned }
+spec: { selfSigned: {} }
+EOF
+```
+
+Then in [Step 5 (Install the chart)](#5-install-the-chart), drop the
+`tls.existingSecret` flag and pass the cert-manager flags instead:
+
+```bash
+helm install warden ./deploy/helm/warden \
+  -n warden \
+  --set replicaCount=1 \
+  --set seal.type=static \
+  --set podDisruptionBudget.enabled=false \
+  --set tls.certManager.enabled=true \
+  --set tls.certManager.issuerRef.kind=ClusterIssuer \
+  --set tls.certManager.issuerRef.name=selfsigned \
+  --set storage.connectionUrl='postgres://warden:warden@warden-postgres:5432/warden?sslmode=disable' \
+  --set seal.static.existingSecret=warden-seal \
+  --set seal.static.keyId=dev-$(date +%Y%m%d)
+```
+
+### Rotation
+
+cert-manager rotates the Secret in place before the cert expires. Warden
+does **not** hot-reload TLS, so the new cert is not picked up until the
+pod restarts. Trigger a rolling restart manually after each renewal:
+
+```bash
+kubectl rollout restart statefulset/warden -n warden
+```
+
+A future Warden release may add `SIGHUP`/fsnotify-based reload; until
+then this step is unavoidable.
+
+### Pod-startup race
+
+When `tls.certManager.enabled=true`, the Certificate and StatefulSet are
+created together. cert-manager typically writes the Secret within a few
+seconds for in-cluster issuers (self-signed, CA, Vault PKI), low minutes
+for ACME-HTTP01. The chart's startup probe gives 150s
+(`failureThreshold: 30 × periodSeconds: 5`) before declaring the pod
+failed, which absorbs the race for every issuer type we've tested. If
+your issuer needs longer, bump `probes.startup.failureThreshold`.
 
 ---
 

@@ -1,0 +1,53 @@
+{{- if .Values.tls.certManager.enabled -}}
+{{- $fullname := include "warden.fullname" . -}}
+{{- $headless := include "warden.headlessName" . -}}
+{{- $ns := .Release.Namespace -}}
+{{- $secretName := include "warden.tlsSecretName" . -}}
+{{- $usages := list "server auth" -}}
+{{- if .Values.tls.requireClientCert -}}
+{{- $usages = append $usages "client auth" -}}
+{{- end -}}
+{{- $defaultDns := list
+      $fullname
+      (printf "%s.%s.svc" $fullname $ns)
+      (printf "%s.%s.svc.cluster.local" $fullname $ns)
+      (printf "*.%s.%s.svc.cluster.local" $headless $ns) -}}
+{{- $dnsNames := default $defaultDns .Values.tls.certManager.dnsNames -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "warden.labels" . | nindent 4 }}
+    {{- with .Values.tls.certManager.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.tls.certManager.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  secretName: {{ $secretName }}
+  secretTemplate:
+    labels:
+      {{- include "warden.labels" . | nindent 6 }}
+  duration: {{ .Values.tls.certManager.duration }}
+  renewBefore: {{ .Values.tls.certManager.renewBefore }}
+  privateKey:
+    algorithm: {{ .Values.tls.certManager.privateKey.algorithm }}
+    size: {{ .Values.tls.certManager.privateKey.size }}
+    rotationPolicy: {{ .Values.tls.certManager.privateKey.rotationPolicy }}
+  usages:
+    {{- range $usages }}
+    - {{ . }}
+    {{- end }}
+  dnsNames:
+    {{- range $dnsNames }}
+    - {{ . | quote }}
+    {{- end }}
+  issuerRef:
+    name: {{ required "tls.certManager.issuerRef.name is required when tls.certManager.enabled=true" .Values.tls.certManager.issuerRef.name }}
+    kind: {{ .Values.tls.certManager.issuerRef.kind }}
+    group: {{ .Values.tls.certManager.issuerRef.group }}
+{{- end -}}
