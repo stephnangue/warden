@@ -4,6 +4,16 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
+## [v0.13.1] — 2026-05-18
+
+### Bug Fixes
+
+- **Helm chart can now bring up a fresh deployment cleanly.** Three template defects in chart 0.1.0 prevented `helm install` from reaching a working pod on a clean cluster. (1) The chart's default image tag derivation produced `ghcr.io/stephnangue/warden:0.13.0` — `ImagePullBackOff` — because the release workflow strips the leading `v` from `appVersion` while `.goreleaser.yaml` publishes Docker tags as `v{{ .Version }}`. The default now resolves to `v` + `.Chart.AppVersion`, lining up with the published tag convention without touching any existing image tags. (2) `api_addr` and `cluster_addr` were rendered through Helm's `| quote`, which backslash-escaped the inner double quotes of `{{ env "POD_NAME" }}` and crashed the warden binary's env-interpolation pass at boot with `unexpected "\" in operand`. The strings are now hand-quoted, matching the working pattern already used for `WARDEN_POSTGRES_URL`. (3) The default file audit device created on first init writes the relative path `warden-audit.log`, which resolved against the container's `/app` working directory — read-only under `readOnlyRootFilesystem: true`, so init failed with `read-only file system`. The container now runs from `/tmp` (writable emptyDir) with an explicit `command: [/app/warden]` so the relative-path entrypoint still finds the binary. (#208)
+
+### Chart
+
+- Chart version bumped `0.1.0` → `0.1.1`. No app/binary or template-API changes beyond the three bug fixes above; configuration values are fully backward-compatible.
+
 ## [v0.13.0] — 2026-05-16
 
 ### New Features
