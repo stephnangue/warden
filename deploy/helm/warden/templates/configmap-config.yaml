@@ -14,8 +14,8 @@ data:
     log_format = {{ .Values.logFormat | quote }}
     log_level  = {{ .Values.logLevel | quote }}
 
-    api_addr     = {{ include "warden.apiAddrTemplate" . | quote }}
-    cluster_addr = {{ include "warden.clusterAddrTemplate" . | quote }}
+    api_addr     = "{{ include "warden.apiAddrTemplate" . }}"
+    cluster_addr = "{{ include "warden.clusterAddrTemplate" . }}"
 
     ip_binding_policy = {{ .Values.ipBindingPolicy | quote }}
 

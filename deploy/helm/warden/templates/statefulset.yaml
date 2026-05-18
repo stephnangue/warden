@@ -70,12 +70,23 @@ spec:
       {{- end }}
       containers:
         - name: warden
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default (printf "v%s" .Chart.AppVersion) }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          # Warden's default audit device writes the relative path
+          # "warden-audit.log", which resolves against the container's
+          # working directory. The distroless image sets WORKDIR=/app,
+          # which is read-only when readOnlyRootFilesystem=true.
+          # Run from /tmp (writable emptyDir) so init can create the
+          # default audit log. The explicit command sidesteps the
+          # image's relative-path ENTRYPOINT (./warden), which would
+          # otherwise fail once we change the working directory.
+          workingDir: /tmp
+          command:
+            - /app/warden
           args:
             - server
             - --config-dir
