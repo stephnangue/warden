@@ -14,12 +14,18 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      code: ${{ steps.filter.outputs.code }}
-      helm: ${{ steps.filter.outputs.helm }}
+      code: ${{ steps.decide.outputs.code }}
+      helm: ${{ steps.decide.outputs.helm }}
     steps:
       - uses: actions/checkout@v6
+      # On release-tag pushes, the tag is placed on the same commit as
+      # main, so a main...tag diff sees zero changed files and every
+      # filter returns false. That would skip unit, helm-lint, and e2e
+      # on the only ref where we most want them to run. Bypass the
+      # filter for tag refs and force every downstream job to run.
       - uses: dorny/paths-filter@v4
         id: filter
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
           filters: |
             code:
@@ -30,6 +36,15 @@ jobs:
             helm:
               - 'deploy/helm/**'
               - '.github/workflows/ci.yml'
+      - id: decide
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "code=true"  >> "$GITHUB_OUTPUT"
+            echo "helm=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "code=${{ steps.filter.outputs.code }}" >> "$GITHUB_OUTPUT"
+            echo "helm=${{ steps.filter.outputs.helm }}" >> "$GITHUB_OUTPUT"
+          fi
 
   unit:
     needs: [changes]
