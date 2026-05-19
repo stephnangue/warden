@@ -35,16 +35,19 @@ func Client() (*api.Client, error) {
 		client.SetMaxRetries(0)
 	}
 
-	// If WARDEN_TOKEN is a JWT, also send it as `Authorization: Bearer` so
-	// identity-introspection endpoints (sys/introspect/roles, the AWS
-	// gateway, etc.) can read the JWT directly. The "eyJ" prefix is the
-	// base64 of `{"`, the start of every JWT header — the same heuristic
-	// used server-side by provider/aws to detect JWT-shaped tokens.
-	// X-Warden-Token is still set; this is additive.
+	// If WARDEN_TOKEN is a JWT, send it as `Authorization: Bearer` and
+	// strip X-Warden-Token. The server's transparent-auth gate fires only
+	// when X-Warden-Token is empty (a JWT is not a Warden session token
+	// and would fail token-store lookup); routing the credential through
+	// the Authorization header lets implicit auth resolve it against the
+	// namespace's auto_auth_path. The "eyJ" prefix is the base64 of `{"`,
+	// the start of every JWT header — the same heuristic used server-side
+	// by provider/aws to detect JWT-shaped tokens.
 	if token := client.Token(); strings.HasPrefix(token, "eyJ") {
 		h := client.Headers()
 		h.Set("Authorization", "Bearer "+token)
 		client.SetHeaders(h)
+		client.ClearToken()
 	}
 
 	c = client
