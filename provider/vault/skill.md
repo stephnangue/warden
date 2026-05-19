@@ -33,20 +33,35 @@ URL pattern : $WARDEN_ADDR<mount-url>role/<role>/gateway/<vault-api-path>
 Auth header : Authorization: Bearer $WARDEN_TOKEN  # OR X-Vault-Token: $WARDEN_TOKEN
 ```
 
-### Vault CLI
+### Vault / OpenBao CLI
 
 The Vault CLI works against Warden unchanged — point it at the
 Warden gateway and use the JWT as the Vault token. Warden detects
 the JWT prefix in `X-Vault-Token` and treats it as identity.
 
+**Use whichever binary the environment has.** OpenBao ships its CLI
+as `bao` (a fork of `vault`); some environments install one, some
+the other, some both. The two are command-compatible — pick the one
+on `PATH`. Probe order:
+
+```bash
+if command -v vault >/dev/null; then CLI=vault
+elif command -v bao >/dev/null; then CLI=bao
+else echo "neither vault nor bao is installed" >&2; exit 1
+fi
+```
+
+Both honour `VAULT_ADDR` + `VAULT_TOKEN` (yes, `bao` reads
+`VAULT_*` env vars too):
+
 ```bash
 export VAULT_ADDR="$WARDEN_ADDR<mount-url>role/<role>/gateway"
 export VAULT_TOKEN="$WARDEN_TOKEN"
 
-vault kv get secret/myapp/config
-vault kv put secret/myapp/config foo=bar
-vault list secret/myapp/
-vault write pki/sign/server-tpl csr=@./req.csr
+$CLI kv get secret/myapp/config
+$CLI kv put secret/myapp/config foo=bar
+$CLI list secret/myapp/
+$CLI write pki/sign/server-tpl csr=@./req.csr
 ```
 
 The agent never holds a real Vault token; the JWT is the identity.

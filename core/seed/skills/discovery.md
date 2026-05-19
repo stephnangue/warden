@@ -74,6 +74,12 @@ already baked in — append `$WARDEN_ADDR` plus the per-provider suffix
 (e.g. `gateway`, `role/<role>/gateway`, `access/<grant>`) from the
 provider's skill to build the full upstream URL.
 
+**Do not re-prefix the namespace.** `mount_url` already starts with
+`/v1/<namespace>/<mount>/`; the full URL is `$WARDEN_ADDR<mount_url>...`.
+Concatenating `$WARDEN_NAMESPACE` separately produces a double-
+namespaced path that doesn't route (e.g.
+`/v1/tutorial/tutorial/vault/...` → `no route found`).
+
 Listing providers requires capabilities granted by your role's
 policy — by convention this is included in the namespace's default
 role. If your `roles` list is empty or the list call returns
@@ -109,4 +115,22 @@ Provider skills are seeded into the registry the first time a provider
 of that type is mounted; if `warden skill read aws` returns 404, the
 operator hasn't enabled an AWS provider in this cluster — surface to
 the user instead of fabricating an endpoint.
+
+## If a call fails
+
+Don't loop blindly. The CLI returns structured error envelopes whose
+`code` field maps deterministically to a recovery action — read the
+`troubleshooting` skill before retrying:
+
+```bash
+warden skill read troubleshooting --raw
+```
+
+In short: `auth_required` → refresh the token; `forbidden` → re-run
+`warden role list` and pick a more-scoped role (usually the *right*
+role for the task you didn't read carefully enough the first time —
+descriptions are operator-set free text, read them); `not_found` →
+re-list providers (the namespace's mounts may have changed);
+`network`/`server` → bounded backoff. Surface the rest to the user
+rather than retrying.
 
