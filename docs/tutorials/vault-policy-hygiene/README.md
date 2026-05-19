@@ -9,39 +9,63 @@ for inspection, the Anthropic API for inference, and (optionally) Slack to
 deliver the final report — exclusively through Warden. The agent holds zero
 credentials: no OpenBao token, no Anthropic key, no Slack bot token.
 
-This is the first in a series of tutorials. One planned follow-up covers an
-audit-log-driven **least-privilege proposer** (an AWS IAM Access Analyzer-style
-agent that narrows policies based on what tokens actually used) — it reuses
-the identical Warden + Goose plumbing built here.
+What makes this tutorial worth reading is **how the agent finds its way
+around Warden**. The recipe contains no provider URLs, no role names, and
+no channel IDs. The agent reads two seeded skills (`foundation`,
+`discovery`), introspects its identity, lists the providers in the
+namespace, picks the right role + provider by reading operator-set
+descriptions, then fetches each provider's `skill.md` recipe for the
+exact call shape. This is the **discover-and-connect** pattern documented
+in [docs/agent-flow.md](../../agent-flow.md), demonstrated end-to-end
+against three real upstreams.
+
+This is the first in a series. A planned follow-up covers an audit-log-driven
+**least-privilege proposer** — it reuses the identical Warden + Goose
+plumbing (and the same `tutorial/` namespace) built here.
 
 Versions pinned in this tutorial: OpenBao **2.5.3**, Forgejo **15.x**,
-Forgejo Runner **12.8.0**, Goose **1.32.0**. Forgejo 15+ and Runner 12.5+
-are required for the per-job OIDC token feature this tutorial relies on.
-The JWKS path discovery in section 3 will handle Forgejo version drift
-within the 15.x line automatically.
+Forgejo Runner **12.8.0**, Goose **1.32.0**, Warden **0.13.1**. Forgejo
+15+ and Runner 12.5+ are required for the per-job OIDC token feature
+this tutorial relies on. The JWKS path discovery in section 3 will
+handle Forgejo version drift within the 15.x line automatically.
 
 ---
 
 ## 1. What you'll build
 
-![Architecture: a Forgejo-hosted AI agent in the centre of the Warden boundary calls outward with a Forgejo-signed JWT on three legs; Warden's Vault gateway swaps the JWT for an OpenBao token, the Anthropic gateway swaps it for the real Claude API key, and the Slack gateway swaps it for a Slack bot token to deliver the final report.](../images/policy-hygiene-architecture.png)
+![Architecture: a Forgejo-hosted AI agent in the centre of the Warden boundary calls outward with a Forgejo-signed JWT on three legs; Warden's Vault gateway swaps the JWT for an OpenBao token, the Anthropic gateway swaps it for the real Claude API key, and the Slack gateway swaps it for a Slack bot token to deliver the final report. The agent learns which role and provider to use for each leg by reading Warden's introspection endpoints and per-provider skill catalog at runtime — none of those URLs are baked into the recipe.](../images/policy-hygiene-architecture.png)
 
 The **same Forgejo-signed JWT** — minted per Actions job by curling
-`$ACTIONS_ID_TOKEN_REQUEST_URL`, auto-expired when the job ends — is used on
-all three legs. It rides in the Vault CLI's `X-Vault-Token` header on the
-OpenBao leg, the Anthropic SDK's `x-api-key` header on the inference leg,
-and an `Authorization: Bearer` header on the Slack delivery leg. The role
-the agent wants to assume is **named directly in the URL** —
-`…/vault/role/policy-scanner/…`, `…/anthropic/role/anthropic-ops/…`, or
-`…/slack/role/slack-ops/…`. Warden validates the JWT against Forgejo's
-JWKS, then checks that the JWT's claims satisfy the `bound_claims`
-configured on that role; if yes, it checks the access policy, substitutes
-the real upstream credential (an OpenBao token, the Anthropic API key, or
-the Slack bot token), and forwards. The agent never sees any of those
-credentials, and there is no separate "dev JWT" story to maintain.
+`$ACTIONS_ID_TOKEN_REQUEST_URL`, auto-expired when the job ends — is the
+identity vehicle on every leg. The runtime sets three env vars before
+spawning the agent: `WARDEN_ADDR`, `WARDEN_NAMESPACE=tutorial`,
+`WARDEN_TOKEN=<jwt>`. **Nothing else is pre-configured for the agent.**
 
-The reader's iteration loop is: edit the recipe, push to Forgejo, watch the
-workflow, download the report. Production is a URL swap; section 9 covers it.
+At runtime the agent:
+
+1. Reads the `foundation` and `discovery` skills from `/v1/sys/skills/...`.
+2. Calls `warden role list` — Warden's `sys/introspect/roles` introspects
+   the JWT and returns every role the identity may assume in the
+   `tutorial/` namespace, with operator-set descriptions.
+3. Calls `warden provider list` — returns every provider mounted in the
+   namespace, each with its `mount_url` and description.
+4. Picks a (role, provider) pair for each leg by reading descriptions —
+   not by name and not by hardcoded URL. The operator-set descriptions
+   embed the upstream binding (mount_url, Slack channel) so the agent
+   doesn't need any out-of-band knowledge.
+5. Calls `warden skill read <type>` for each chosen provider — gets the
+   exact CLI/SDK recipe for that provider (env vars to set, URL shape).
+6. Executes the audit and publishes the report, following the recipes.
+
+Warden validates the JWT against Forgejo's JWKS on every call, applies
+the policy attached to the resolved role, swaps the JWT for the real
+upstream credential (OpenBao token, Anthropic key, Slack bot token), and
+forwards. The agent never sees any of those credentials, and there is no
+separate "dev JWT" story to maintain.
+
+The reader's iteration loop is: edit the recipe, push to Forgejo, watch
+the workflow, download the report. Production is a URL swap; section 10
+covers it.
 
 ## 2. Prerequisites
 
@@ -53,19 +77,21 @@ workflow, download the report. Production is a URL swap; section 9 covers it.
   **DeepSeek's** Anthropic-compat endpoint (`https://api.deepseek.com/anthropic`)
   by default — cheaper and a useful demo of how Warden's `anthropic`
   provider works against any Anthropic-API-compatible upstream. To use
-  Anthropic itself, swap the URL in section 5c. **The key goes into
+  Anthropic itself, swap the URL in section 5e. **The key goes into
   Warden's credential store, not into any CI variable.** You paste it once
   during section 5 and never again.
 - (Optional, for Slack delivery) A Slack workspace, a [bot user OAuth token](https://api.slack.com/authentication/token-types#bot)
   (`xoxb-...`) with the `canvases:write`, `channels:read`, and `chat:write`
   scopes (the report is published as a channel canvas, not a file upload),
   and a channel ID (e.g. `C0123456789`) the bot is a member of. Same rule:
-  the token goes into Warden, never into a CI variable. Skip this if you
-  only want the Forgejo-Actions artefact and don't care about Slack
-  delivery.
+  the token goes into Warden, never into a CI variable. The channel ID
+  and name are passed to `warden-init.sh` and embedded into the
+  `slack-ops` role description — the agent reads them from there, not
+  from a `SLACK_CHANNEL` env var. Skip this if you only want the
+  Forgejo-Actions artefact and don't care about Slack delivery.
 
-The `bao` and `goose` CLIs are installed inside the Actions job's container
-— you do not run them on the host.
+The `bao`, `goose`, and `warden` CLIs are installed inside the Actions
+job's container — you do not run them on the host.
 
 ## 3. Bring up the stack with Docker Compose
 
@@ -159,7 +185,7 @@ volumes:
 
 `bao-init.sh` provisions the AppRole, ACL, and token role Warden uses to
 auth against OpenBao, and writes `ROLE_ID`/`SECRET_ID` to
-`bao-out/creds.env` for section 5b to source:
+`bao-out/creds.env` for section 5d to source:
 
 ```sh
 #!/bin/sh
@@ -234,7 +260,7 @@ Then:
    ```bash
    curl -sf http://forgejo.local:3000/api/healthz
    ```
-   `bao-init` writes `bao-out/creds.env` (used in section 5b);
+   `bao-init` writes `bao-out/creds.env` (used in section 5d);
    `bao-seed` writes the five test policies + the `anchor-user` entity that
    the audit will inspect (see "Seed OpenBao" below for what each policy
    demonstrates); `forgejo-init` provisions the `siteowner` admin.
@@ -331,8 +357,9 @@ export WARDEN_ADDR=http://127.0.0.1:8400
 export WARDEN_TOKEN=dev-warden-root
 ```
 
-The root token is used only to configure providers, the JWT auth method, and
-the access policy. After section 5 it is no longer needed.
+The root token is used only to configure the namespace, providers, the
+JWT auth method, and the access policies. After section 5 it is no
+longer needed.
 
 Confirm Warden can reach Forgejo's JWKS — this is the URL Warden calls on
 every JWT validation:
@@ -348,47 +375,114 @@ curl -sf "$JWKS_URI" | jq '.keys | length'   # should print >= 1
 Warden auto-creates a default file audit device on first start — no
 `audit enable` command needed. It writes to `warden-audit.log` in the
 directory you launched `warden server` from, mounted at the `file/` accessor.
-Section 8 will tail it to confirm every agent request flows through Warden
+Section 9 will tail it to confirm every agent request flows through Warden
 with attributable identity.
 
 The log is line-delimited JSON, one entry per request and one per response.
 Sensitive headers (the JWT itself, upstream tokens) are HMAC-redacted before
 they hit disk.
 
-## 5. Wire Warden: JWT auth, three providers, three policies
+## 5. Wire Warden: namespace, JWT auth, three providers, descriptions
 
-All three providers (Vault, Anthropic, and the optional Slack) expose the
-same `role/<name>/gateway/...` URL shape, so callers see a uniform
-interface — but the implementations are separate. Anthropic and Slack are
-built on Warden's shared HTTP-proxy framework, while Vault has its own
-gateway. **The JWT auth method is shared across all three** — one
-identity, up to three egress paths (Slack is skipped if you don't pass
-`--slack-token` to `warden-init.sh`).
-
-This whole section is automated by [`warden-init.sh`](warden-init.sh) (next
-to this README). From the directory where `bao-out/creds.env` lives, in the
-admin shell with `WARDEN_ADDR` and `WARDEN_TOKEN` exported:
+The entire section is automated by [`warden-init.sh`](warden-init.sh)
+(next to this README). From the directory where `bao-out/creds.env`
+lives, in the admin shell with `WARDEN_ADDR` and `WARDEN_TOKEN` exported:
 
 ```bash
-./warden-init.sh --anthropic-key=sk-ant-... [--slack-token=xoxb-...]
+./warden-init.sh \
+    --anthropic-key=sk-... \
+    [--slack-token=xoxb-...] \
+    [--slack-channel-id=C0123456789 --slack-channel-name='#sec-hygiene']
 ```
 
-`--slack-token` is optional; without it, the Slack provider/role/policy are
-skipped and the agent's Slack-canvas step at the end of the run will fail
-loudly (the report is still recoverable from Forgejo's `actions/upload-artifact`).
+`--slack-token` is optional; without it, the Slack provider/role/policy
+are skipped. When passed, both `--slack-channel-id` and
+`--slack-channel-name` are required: they're embedded into the
+`slack-ops` role's `description` so the agent extracts the channel from
+discovery rather than an env var.
 
 The subsections below describe what the script does so you can read or
 adapt it. Skim to understand, run the script to apply.
 
-### 5a. JWT auth pointed at Forgejo
+### 5a. Create the tutorial namespace
 
-Enable the JWT auth method and configure it against Forgejo's Actions OIDC
-endpoints (the ones discovered in section 3, step 5 — `/api/actions/...`,
-not the user-login OIDC). `default_audience=http://warden.local` is an
-arbitrary identifier that both Warden and the Forgejo workflow will agree
-on; Warden uses it to reject tokens minted for the wrong system.
+```bash
+warden namespace create tutorial --metadata=auto_auth_path=auth/jwt/
+```
 
-### 5b. Vault provider → OpenBao
+The discovery flow relies on two namespace-scoped mechanisms:
+
+1. **`auto_auth_path` custom_metadata** — tells Warden which auth mount
+   to use for *implicit* JWT authentication on `sys/*` paths. When the
+   agent calls `/v1/sys/introspect/roles` with just a bearer JWT (no
+   Warden session token, no role segment in the URL), the request
+   handler reads `ns.CustomMetadata["auto_auth_path"]` and routes the
+   JWT through that mount. Without this metadata, every `sys/*` call
+   returns 401 because there's no identity to apply policy against.
+2. **`default_role` on the JWT auth method** (configured in 5b) — the
+   role-resolution fallback once implicit auth picks the mount.
+
+Root namespace can't carry `custom_metadata`, so the tutorial *must*
+create a dedicated namespace. We use `tutorial/` rather than
+`policy-hygiene/` so the next tutorial in this series reuses the same
+namespace.
+
+All subsequent operator setup happens within this namespace. The
+script exports `WARDEN_NAMESPACE=tutorial` and every `warden write`
+/ `warden auth enable` / `warden provider enable` lands there.
+
+### 5b. JWT auth pointed at Forgejo
+
+Enable the JWT auth method and configure it against Forgejo's Actions
+OIDC endpoints (the ones discovered in section 3, step 5 —
+`/api/actions/...`, not the user-login OIDC).
+
+```bash
+warden auth enable --type=jwt
+warden write auth/jwt/config \
+    jwks_url=http://forgejo.local:3000/api/actions/.well-known/keys \
+    bound_issuer=http://forgejo.local:3000/api/actions \
+    default_audience=http://warden.local \
+    default_role=discovery-baseline
+```
+
+`default_role=discovery-baseline` is the key field: it names the role
+Warden falls back to when the URL carries no role segment (i.e.
+`/v1/sys/*` calls). Role-resolution precedence top-to-bottom is:
+URL-embedded role → `X-Warden-Role` header → `?role=` query param →
+provider `default_role` → **auth method `default_role`**. Discovery
+calls hit the bottom of that ladder.
+
+### 5c. discovery-baseline role + policy
+
+```bash
+warden write auth/jwt/role/discovery-baseline \
+    description="Baseline namespace identity for any authenticated agent. Grants read on sys/introspect/roles, sys/providers, and sys/skills/*. No upstream credentials are minted by this role." \
+    bound_audiences=http://warden.local \
+    bound_claims='{"repository":"siteowner/policy-hygiene"}' \
+    user_claim=sub \
+    token_policies=discovery-baseline
+```
+
+```hcl
+# discovery-baseline — minimal policy for the sys/* paths the agent's
+# discovery loop touches. `warden provider list` and `warden skill list`
+# send GET ?warden-list=true, which Warden classifies as LIST (not READ),
+# so both capabilities are needed on the listing endpoints.
+path "sys/introspect/roles" { capabilities = ["read"] }
+path "sys/providers"        { capabilities = ["read", "list"] }
+path "sys/providers/*"      { capabilities = ["read"] }
+path "sys/skills"           { capabilities = ["read", "list"] }
+path "sys/skills/*"         { capabilities = ["read"] }
+```
+
+The role has no `cred_spec_name` — it does not mint upstream credentials.
+It exists only so the auth layer can resolve a policy when the agent
+has no role in the URL. The agent's task-specific roles
+(`policy-scanner`, `slack-ops`) keep their own narrow gateway stanzas
+in 5g; they don't need to carry discovery paths.
+
+### 5d. Vault provider + policy-scanner role
 
 `bao-init` (from section 3) already provisioned the AppRole, ACL policy,
 and token role Warden needs, and wrote `ROLE_ID`/`SECRET_ID` to
@@ -398,74 +492,100 @@ method `hvault` accepts — static tokens are not supported by design). The
 cred spec mints OpenBao tokens via the `policy-reader` token role;
 `rotation_period=24h` rotates the AppRole's `secret_id` automatically.
 
-The JWT role `policy-scanner` is bound to the Forgejo repo's main branch
-via `bound_claims` and attaches the `vault-readonly` policy described in 5d.
+```bash
+warden provider enable --type=vault \
+    --description="Internal OpenBao cluster — ACL policies, mounts, identity (read-mostly)" \
+    vault
+```
 
-### 5c. Anthropic-compatible LLM provider → DeepSeek (default) or Anthropic
+```bash
+warden write auth/jwt/role/policy-scanner \
+    description="Read-only ACL policy hygiene auditing against OpenBao at /v1/tutorial/vault/. Reads policies, mounts, and entity bindings; no writes." \
+    bound_claims='{"repository":"siteowner/policy-hygiene","ref":"refs/heads/main","ref_type":"branch"}' \
+    cred_spec_name=policy-scanner \
+    token_policies=vault-readonly
+```
 
-The `anthropic` provider in Warden speaks the Anthropic Messages API but the
-upstream URL is configurable. The tutorial points it at
+The role's `description` is dense on purpose: it embeds the upstream
+binding (`/v1/tutorial/vault/`) and the task scope ("policy hygiene
+auditing"). When the agent runs `warden role list`, this string is what
+it pattern-matches against the audit task — no role-name memorisation
+required.
+
+### 5e. Anthropic provider + anthropic-ops role
+
+The `anthropic` provider in Warden speaks the Anthropic Messages API but
+the upstream URL is configurable. The tutorial points it at
 `https://api.deepseek.com/anthropic` (DeepSeek's Anthropic-compatible
 endpoint) by default — change `anthropic_url` in `warden-init.sh` to
 `https://api.anthropic.com` if you want Claude itself.
 
-The credential source holds the LLM API key (DeepSeek `sk-…` or Anthropic
-`sk-ant-…`) — it's **only entered here**, passed once via
-`--anthropic-key=sk-...`. Warden's Anthropic provider strips any incoming
-`x-api-key` and `anthropic-version` headers from agent requests and
-substitutes its own stored values, so what the agent sends in those headers
-is irrelevant. SSE streaming passes through unbuffered.
+```bash
+warden provider enable --type=anthropic \
+    --description="Anthropic-compatible LLM endpoint (default: DeepSeek). Internal — used by Goose runtime, not chosen by agents." \
+    anthropic
+```
 
-The JWT role `anthropic-ops` shares the same `bound_claims` as
-`policy-scanner` (same identity, two roles) and attaches the `anthropic-ops`
-policy described in 5d.
+Note the description: it tells any agent that reads it that this leg is
+**not part of the discovery flow**. The LLM upstream is wired by the
+runtime (Goose's `ANTHROPIC_HOST`), not chosen by the agent at task
+time, because Goose's own SDK is initialised before the recipe runs.
+This matches the runtime contract documented in
+[docs/agent-flow.md §1](../../agent-flow.md): the runtime injects the
+identity vehicle and the LLM upstream, the agent discovers everything
+else.
 
-### 5d. Two access policies, one per role — fine-grained
+### 5f. Slack provider + slack-ops role (optional)
 
-The whole point of this tutorial is policy hygiene, so the agent's own access
-policies practice what they preach: **only the exact paths and capabilities
-the recipe needs, nothing more.** A wildcard like
-`vault/role/policy-scanner/gateway/*` with full CRUD would let the agent
-*modify or delete* OpenBao policies — exactly the `least_privilege_smell` the
-recipe is meant to flag.
+If you passed `--slack-token=xoxb-...`, a third egress leg is wired up.
+The bot token lives only in Warden — agents send `$WARDEN_JWT` and
+Warden swaps it for `Authorization: Bearer xoxb-...` at the gateway.
 
-**One policy per role, not one bundled across both.** A combined policy
-attached to both JWT roles would let a Vault-side token also call Anthropic
-(and vice versa) — extra authority neither role needs, since each role's
-`cred_spec_name` only mints credentials for one upstream. Splitting by
-capability keeps each token's reach equal to what it can actually use.
+```bash
+warden write auth/jwt/role/slack-ops \
+    description="Post hygiene reports as Slack canvas in channel #sec-hygiene (C0123456789) via the Slack provider at /v1/tutorial/slack/." \
+    bound_claims='{"repository":"siteowner/policy-hygiene","ref":"refs/heads/main","ref_type":"branch"}' \
+    cred_spec_name=slack-ops \
+    token_policies=slack-ops
+```
 
-The agent's full call inventory:
+The channel ID and name are embedded in the description by
+`warden-init.sh` from the `--slack-channel-id` and `--slack-channel-name`
+flags. The agent extracts both from the role description — there is no
+`SLACK_CHANNEL` env var on the runtime side.
 
-| Recipe step | Upstream HTTP | CBP capability needed |
+The recipe and call shape (canvas check/delete/create, chat
+notification) are documented in the `slack` provider skill, which the
+agent fetches via `warden skill read slack --raw`.
+
+### 5g. Decoy roles — prove the agent matches by description
+
+To show that role selection is description-driven (not name-driven or
+provider-typed), `warden-init.sh` also creates two **decoy roles** that
+share the same JWT identity but describe wrong-for-this-task bindings:
+
+| Decoy role | Description | Why it's wrong |
 |---|---|---|
-| `bao policy list` | `GET /v1/sys/policies/acl?list=true` | `read` on `…/v1/sys/policies/acl` |
-| `bao policy read <name>` | `GET /v1/sys/policies/acl/<name>` | `read` on `…/v1/sys/policies/acl/*` |
-| `bao secrets list` | `GET /v1/sys/mounts` | `read` on `…/v1/sys/mounts` |
-| `bao auth list` | `GET /v1/sys/auth` | `read` on `…/v1/sys/auth` |
-| `bao list identity/entity/id` | `GET /v1/identity/entity/id?list=true` | `read` on `…/v1/identity/entity/id` |
-| `bao read identity/entity/id/<id>` | `GET /v1/identity/entity/id/<id>` | `read` on `…/v1/identity/entity/id/*` |
-| Goose Anthropic SDK | `POST /v1/messages` | `create` on `…/v1/messages` |
-| Pre-flight check (Anthropic) | `GET /v1/models` | `read` on `…/v1/models` |
-| Slack canvas — check existing | `GET /api/conversations.info` | `read` on `…/conversations.info` |
-| Slack canvas — delete prior | `POST /api/canvases.delete` | `create` on `…/canvases.delete` |
-| Slack canvas — create | `POST /api/conversations.canvases.create` | `create` on `…/conversations.canvases.create` |
-| Slack chat notification | `POST /api/chat.postMessage` | `create` on `…/chat.postMessage` |
-| Pre-flight check (Slack) | `POST /api/auth.test` | `create` on `…/auth.test` |
+| `kv-secrets-reader` | "Read application secrets from KV-v2 at /v1/tutorial/vault/ (e.g. secret/data/app/*). Not for policy or identity reads." | Same provider as `policy-scanner`, but scoped to KV secrets — not policy-hygiene work. |
+| `slack-alert-poster` | "Post short alert notifications to #oncall-pings (C9876543210) via the Slack provider at /v1/tutorial/slack/. One-line messages only — not for hygiene reports." | Same provider as `slack-ops`, but described for short alerts and a different channel. |
 
-Note: bao CLI list operations send `GET ?list=true`. Warden classifies every
-gateway GET as a READ at the policy layer (only `?warden-list=true` maps to
-LIST), so the capability needed is `read` — the upstream OpenBao still
-receives `?list=true` downstream and returns the listing.
+Both decoys carry the same `bound_claims` as the real roles and only the
+`discovery-baseline` policy — so the JWT *could* assume them, but they
+wouldn't be authorised to do anything useful even if the agent did pick
+them. Section 9 will tail the audit log and confirm `auth.role_name` is
+`policy-scanner` and `slack-ops`, never a decoy.
 
-Note the doubled `/v1/`: Warden's CBP policy operates on logical paths
-(without the leading `/v1/` of the Warden URL), but the proxied OpenBao /
-Anthropic path *itself* starts with `v1/`. So policy stanzas read
-`vault/role/policy-scanner/gateway/v1/sys/policies/acl`, not
-`vault/role/policy-scanner/gateway/sys/policies/acl`.
+### 5h. Access policies (gateway stanzas) — one per task role
 
-The policies that `warden-init.sh` writes (the third, `slack-ops`, is only
-written when `--slack-token` is passed):
+The whole point of this tutorial is policy hygiene, so the agent's own
+access policies practice what they preach: **only the exact paths and
+capabilities the recipe needs, nothing more.** A wildcard like
+`vault/role/policy-scanner/gateway/*` with full CRUD would let the agent
+*modify or delete* OpenBao policies — exactly the `least_privilege_smell`
+the recipe is meant to flag.
+
+The policies that `warden-init.sh` writes (the third, `slack-ops`, is
+only written when `--slack-token` is passed):
 
 ```hcl
 # vault-readonly — attached to the policy-scanner JWT role only
@@ -484,74 +604,130 @@ path "anthropic/role/anthropic-ops/gateway/v1/models"   { capabilities = ["read"
 ```
 
 ```hcl
-# slack-ops — attached to the slack-ops JWT role only (optional)
-path "slack/role/slack-ops/gateway/conversations.info"            { capabilities = ["read"] }
+# slack-ops — attached to the slack-ops JWT role only (optional).
+# Slack's Web API is all POST (no REST verbs), so every method maps to
+# `create` at Warden's policy layer — including read-style ones.
+path "slack/role/slack-ops/gateway/conversations.info"            { capabilities = ["create"] }
 path "slack/role/slack-ops/gateway/conversations.canvases.create" { capabilities = ["create"] }
 path "slack/role/slack-ops/gateway/canvases.delete"               { capabilities = ["create"] }
 path "slack/role/slack-ops/gateway/chat.postMessage"              { capabilities = ["create"] }
 path "slack/role/slack-ops/gateway/auth.test"                     { capabilities = ["create"] }
 ```
 
-### 5e. Slack provider → slack.com/api (optional)
+These are what enforcement looks like end-to-end: even if the LLM
+hallucinates a `bao policy delete` or a curl to `/v1/admin-api-keys`,
+Warden returns 403. Each token's authority is bounded by exactly what
+its role's recipe step requires — not by what its credentials happen to
+allow, and not by what the *other* role on the same JWT identity is
+doing.
 
-If you passed `--slack-token=xoxb-...` to `warden-init.sh`, a third egress
-leg is wired up: same JWT, same `bound_claims`, a third role
-(`slack-ops`) with the `slack-ops` policy above. The bot token lives only in
-Warden — agents send the same `$WARDEN_JWT` and Warden swaps it for
-`Authorization: Bearer xoxb-...` at the gateway.
+If you discover Warden 403s on a path you legitimately need (e.g. you
+extend the recipe to read group bindings), tail Warden's audit log to
+see the exact path being denied, then add the minimal stanza. The CBP
+capabilities are: `create`, `read`, `update`, `delete`, `list`, `patch`.
 
-The agent **builds `hygiene-report.md` incrementally** (one shell-tool
-`cat >>` per policy) and publishes it at the end as the channel's Slack
-**Canvas**, which renders Markdown natively (a plain `.md` file upload
-appears as a download blob with no formatting). Slack permits at most
-one canvas per channel, so the recipe replaces any prior run's canvas:
+## 6. How the agent discovers Warden
 
-1. `GET /conversations.info?channel=$SLACK_CHANNEL` — read
-   `.channel.properties.canvas.file_id` to find any existing canvas.
-2. `POST /canvases.delete` — if one exists, delete it.
-3. `POST /conversations.canvases.create` with
-   `{channel_id, document_content:{type:"markdown", markdown:<file>}}` —
-   create the new channel canvas. The file body is piped through
-   `jq --rawfile` so the model never reads it back into context.
-4. `POST /chat.postMessage` — short notification so members see it in
-   chat (the canvas itself is also pinned in the channel header).
+Once section 5 is done, the agent has everything it needs to find its
+own way around — through five live introspection calls. This section is
+the prose walkthrough; the canonical reference is
+[docs/agent-flow.md](../../agent-flow.md).
 
-Every call goes through Warden (`Authorization: Bearer $WARDEN_JWT`).
-Building incrementally (rather than holding the full Markdown in the
-model's context) keeps each LLM turn small. With DeepSeek-chat (Flash
-non-thinking) this is reliable; if you swap in a model + provider that
-fights long contexts, consider streaming `chat.postMessage` per finding
-instead.
+### Step 1 — Confirm the runtime contract
 
-The Slack app backing `--slack-token` needs the `canvases:write`,
-`channels:read`, and `chat:write` scopes (in addition to `auth:read`
-for the pre-flight). `canvases:write` is the new one — older bots
-typically don't have it.
+The runtime injects three env vars before spawning the agent:
 
-This is the demonstration of the Warden value prop in full: **one JWT
-identity, three upstream services, three independently-scoped policies, no
-long-lived credentials anywhere on the agent's side.**
+```
+WARDEN_ADDR=http://host.docker.internal:8400
+WARDEN_NAMESPACE=tutorial
+WARDEN_TOKEN=<the Forgejo OIDC JWT for this job>
+```
 
-These policies are what enforcement looks like end-to-end: even if the LLM
-hallucinates a `bao policy delete` or a curl to `/v1/admin-api-keys`, Warden
-returns 403. Each token's authority is bounded by exactly what its role's
-recipe step requires — not by what its credentials happen to allow, and not
-by what the *other* role on the same JWT identity is doing.
+That's it. No provider URL, no role name, no Slack channel.
 
-If you discover Warden 403s on a path you legitimately need (e.g. you extend
-the recipe to read group bindings), tail Warden's audit log to see the
-exact path being denied, then add the minimal stanza. The CBP capabilities
-are: `create`, `read`, `update`, `delete`, `list`, `patch`.
+### Step 2 — `warden role list`
 
-The `auth/jwt/role/*` definitions in 5b and 5c each attach their own policy
-(`vault-readonly` for `policy-scanner`, `anthropic-ops` for `anthropic-ops`)
-via `token_policies`, so each JWT that satisfies the `bound_claims` gets
-exactly the access its role needs — no more, no less.
+```bash
+warden role list -o json -F name,description
+```
 
-## 6. The Goose recipe
+Hits `GET /v1/sys/introspect/roles`. Returns every role the JWT can
+assume in the `tutorial/` namespace. With the operator setup from
+section 5, the response is:
 
-The recipe is staged at [`policy-hygiene.yaml`](policy-hygiene.yaml) in this
-folder — copy it into your cloned `siteowner/policy-hygiene` repo:
+```json
+[
+  {"name": "discovery-baseline",  "description": "Baseline namespace identity for any authenticated agent..."},
+  {"name": "policy-scanner",      "description": "Read-only ACL policy hygiene auditing against OpenBao at /v1/tutorial/vault/..."},
+  {"name": "anthropic-ops",       "description": "LLM inference for the hygiene auditor agent..."},
+  {"name": "slack-ops",           "description": "Post hygiene reports as Slack canvas in channel #sec-hygiene (C0123456789) via the Slack provider at /v1/tutorial/slack/."},
+  {"name": "kv-secrets-reader",   "description": "Read application secrets from KV-v2... Not for policy or identity reads."},
+  {"name": "slack-alert-poster",  "description": "Post short alert notifications to #oncall-pings... not for hygiene reports."}
+]
+```
+
+Each description is operator-set free text. The agent reads them and
+filters by task vocabulary. For "policy hygiene audit", `policy-scanner`
+matches; `kv-secrets-reader` is rejected because it explicitly says "not
+for policy or identity reads". For "publish hygiene report to Slack",
+`slack-ops` matches; `slack-alert-poster` is rejected because it says
+"one-line messages only — not for hygiene reports".
+
+### Step 3 — `warden provider list`
+
+```bash
+warden provider list -o json -F type,description,mount_url
+```
+
+Hits `GET /v1/sys/providers?warden-list=true`. Returns every provider
+mount in the namespace:
+
+```json
+[
+  {"type": "vault",     "description": "Internal OpenBao cluster...",         "mount_url": "/v1/tutorial/vault/"},
+  {"type": "anthropic", "description": "Anthropic-compatible LLM endpoint...","mount_url": "/v1/tutorial/anthropic/"},
+  {"type": "slack",     "description": "Slack workspace for security-team...","mount_url": "/v1/tutorial/slack/"}
+]
+```
+
+Note that role descriptions already named the mount URL — `mount_url`
+here is the same string the descriptions embed. Either source works;
+the agent has both available for cross-checks.
+
+### Step 4 — `warden skill read <type>` for each chosen provider
+
+```bash
+warden skill read vault --raw
+warden skill read slack --raw
+```
+
+Hits `GET /v1/sys/skills/<name>`. Returns the per-provider recipe in
+markdown — exact env vars to set, exact URL shape to use, exact CLI/SDK
+quirks. Example for `vault`:
+
+```
+URL pattern : $WARDEN_ADDR<mount-url>role/<role>/gateway/<vault-api-path>
+Auth header : Authorization: Bearer $WARDEN_TOKEN  # OR X-Vault-Token: $WARDEN_TOKEN
+```
+
+The agent substitutes `<mount-url>` (from step 3) and `<role>` (from
+step 2), exports `VAULT_ADDR` + `VAULT_TOKEN`, and runs `bao` unchanged.
+
+### Step 5 — Execute
+
+The audit is the same `bao policy list` / `bao policy read` loop as
+before; the Slack canvas publish is the same four-call sequence. What's
+new is that **the agent never wrote down any of those URLs in its
+recipe** — every concrete string came from a live introspection call.
+
+This makes the recipe portable: rename the role from `policy-scanner`
+to `bao-auditor`, move the namespace from `tutorial/` to `prod-audit/`,
+swap DeepSeek for real Anthropic — the recipe does not change.
+
+## 7. The Goose recipe
+
+The recipe is staged at [`policy-hygiene.yaml`](policy-hygiene.yaml) in
+this folder — copy it into your cloned `siteowner/policy-hygiene` repo:
 
 ```bash
 cp <path-to>/docs/tutorials/vault-policy-hygiene/policy-hygiene.yaml siteowner/policy-hygiene/
@@ -559,262 +735,84 @@ cp <path-to>/docs/tutorials/vault-policy-hygiene/policy-hygiene.yaml siteowner/p
 
 It uses the recipe schema documented in
 [Goose's `recipe-reference`](https://goose-docs.ai/docs/guides/recipes/recipe-reference).
-Reproduced inline below for reading.
 
-```yaml
-version: "1.0.0"
-title: "OpenBao policy hygiene audit"
-description: "Audit every ACL policy on an OpenBao cluster via Warden for dead-mount references, orphan bindings, duplicates, and least-privilege smells."
+The whole recipe is **task semantics** — what an audit is, what the four
+finding categories are, how severity is derived, what the deliverable
+looks like. The only line that mentions Warden is the one-sentence
+bootstrap at the top of `instructions:` that points the agent at the
+`foundation` and `discovery` skills. The agent learns everything else —
+how to authenticate, which role to pick, how to call Vault and Slack —
+from those skills and the per-provider skills it fetches at runtime.
 
-parameters:
-  - key: warden_role
-    input_type: string
-    requirement: optional
-    default: policy-scanner
-    description: "Warden Vault-provider role whose spec mints a read-only OpenBao token"
-  - key: warden_addr
-    input_type: string
-    requirement: optional
-    default: "http://127.0.0.1:8400"
-    description: "Warden HTTP listener"
+Notable consequences:
 
-instructions: |
-  You are a security auditor performing a HYGIENE REVIEW of every ACL policy on
-  this OpenBao cluster. The `bao` CLI in your shell is already pointed at Warden —
-  **do not log in, do not set a token, and do not modify `VAULT_ADDR` or
-  `VAULT_TOKEN`**. They are pre-set to the Warden gateway URL and a per-job
-  JWT respectively. Just call `bao` directly; the existing env routes through
-  Warden.
+- **The recipe has no `parameters:` block.** Nothing is parameterised
+  because nothing is recipe-author-tunable: role names, provider URLs,
+  and channel IDs all come from discovery.
+- **The recipe has no `$VAULT_ADDR`, `$SLACK_HOST`, or `$SLACK_CHANNEL`
+  references.** The agent exports those itself after step 4, following
+  the per-provider skill recipes.
+- **The four-category audit rubric is preserved verbatim** — that's the
+  *task*, and it's identical whether the agent runs against
+  `tutorial/vault` or `prod-audit/vault`.
 
-  Collect the ground truth first. **Always pipe verbose JSON through `jq`
-  to extract only the fields you need** — raw `bao …list -format=json`
-  outputs are big and accumulate in context across turns, eating into the
-  Anthropic input-token rate limit. Use these exact extractions:
-    - `bao policy list`                                              → policy names
-    - `bao secrets list -format=json | jq -r 'keys[]'`               → secret-mount paths only
-    - `bao auth list    -format=json | jq -r 'keys[]'`               → auth-mount paths only
-    - `bao list -format=json identity/entity/id | jq -r '.[]'`       → entity IDs only
-    - For each entity, extract just name + policies:
-        bao read -format=json identity/entity/id/<id> \
-          | jq -c '{name: .data.name, policies: .data.policies}'
-      Build a map { policy_name -> [entity_names_binding_it] } from those.
+The `developer` extension is the single Goose extension needed — its
+`shell` + `text-editor` tools run `warden`, `bao`, and `curl`. No
+custom MCP shim is required because Warden is a transparent HTTP proxy:
+once the agent has set `VAULT_ADDR` per the vault skill, `bao` calls
+flow through Warden unchanged.
 
-  Policy bodies (`bao policy read <name>`) DO need to be read in full —
-  that is what you analyse for the four findings.
-
-  Then, for each policy (`bao policy read NAME`), emit findings in exactly
-  these four categories. Do not invent others. Cite the HCL line excerpt.
-
-    1. dead_mount_reference
-       A `path "<prefix>/*"` whose prefix does NOT match any mount from
-       `bao secrets list` or `bao auth list`. Remediation: remove the stanza
-       or restore the mount.
-
-    2. orphan_binding
-       The policy is attached to zero live entities (not found in the map built
-       above) AND is not a built-in (`default`, `root`). Remediation: delete or
-       document its purpose.
-
-    3. duplicate_or_contradictory_path
-       Same `path "X"` declared twice in one policy, especially with differing
-       capabilities. Remediation: merge into a single stanza.
-
-    4. least_privilege_smell
-       Any of:
-         - `capabilities` list contains "sudo"
-         - `path "*"` or `path "sys/*"` at top level
-         - `create`/`update`/`delete`/`patch` on a glob path without
-           `allowed_parameters` narrowing
-       Remediation: narrow path, drop sudo, add allowed_parameters.
-
-  Do NOT score policies 0–100 — that's subjective. Instead, for each policy
-  report the finding list, and derive a deterministic severity:
-    - critical: any least_privilege_smell with "sudo" OR path "*"
-    - warning:  any other finding
-    - ok:       no findings
-
-prompt: |
-  Run the full hygiene audit against Warden role {{ warden_role }} at
-  {{ warden_addr }}, then publish the report as the Slack channel canvas
-  on `$SLACK_CHANNEL`. **Build the Markdown file incrementally** with
-  shell tool calls — do NOT compose the full report as a single final
-  assistant message.
-
-  Sequence: (1) gather ground-truth via the jq-extracted commands from
-  instructions; (2) start the file with `printf '# OpenBao policy
-  hygiene\n\n' > hygiene-report.md`; (3) for each policy, read + analyse
-  + APPEND a section to the file in one shell call (heredoc) — drop prior
-  findings from your context, the file is the source of truth; (4) append
-  a summary section; (5) publish as the channel canvas: GET
-  `conversations.info` to find any existing canvas, POST
-  `canvases.delete` if one exists, POST `conversations.canvases.create`
-  with the file piped via `jq --rawfile` (so the markdown body never
-  enters your context), then POST `chat.postMessage` to notify the
-  channel — every call uses `Authorization: Bearer $WARDEN_JWT` against
-  `$SLACK_HOST`. (6) Final assistant message: one short line.
-
-  Do NOT skip the canvas publish even if findings are zero.
-
-extensions:
-  - type: builtin
-    name: developer
-    description: "Shell + file tools so the agent can run the bao CLI"
-
-settings:
-  goose_provider: anthropic
-  goose_model: deepseek-chat   # = Flash non-thinking; swap to claude-sonnet-4-6 for native Anthropic
-```
-
-A few notes on the recipe:
-
-- `parameters` are Jinja-rendered into `instructions` and `prompt` at run
-  time using `{{ key }}` syntax.
-- `extensions: builtin developer` is the single extension Goose needs — its
-  `shell` tool runs `bao` directly. No custom MCP shim is required because
-  Warden is a transparent HTTP proxy: pointing `VAULT_ADDR` at the Warden
-  gateway URL is enough.
-- `settings.goose_provider: anthropic` plus the `ANTHROPIC_HOST` env var set
-  by the workflow tells Goose's Anthropic SDK where to send requests.
-
-## 7. The Forgejo Actions workflow
+## 8. The Forgejo Actions workflow
 
 The workflow is staged at
-[`.forgejo/workflows/hygiene.yaml`](.forgejo/workflows/hygiene.yaml) in this
-folder — copy the whole `.forgejo/` directory into your cloned repo:
+[`.forgejo/workflows/hygiene.yaml`](.forgejo/workflows/hygiene.yaml) in
+this folder — copy the whole `.forgejo/` directory into your cloned repo:
 
 ```bash
 cp -r <path-to>/docs/tutorials/vault-policy-hygiene/.forgejo siteowner/policy-hygiene/
 ```
 
-Reproduced inline below for reading. The workflow
-explicitly fetches an OIDC JWT — Forgejo's `enable-openid-connect: true`
-(GitHub Actions's equivalent: `permissions: id-token: write`) unlocks
-`$ACTIONS_ID_TOKEN_REQUEST_URL` plus `$ACTIONS_ID_TOKEN_REQUEST_TOKEN` —
-copies it into both `VAULT_TOKEN` and `ANTHROPIC_API_KEY`, and runs Goose.
+The workflow's env block is short — the runtime contract from
+[docs/agent-flow.md §1](../../agent-flow.md) plus the one LLM-leg
+override:
 
 ```yaml
-name: policy-hygiene
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-
-enable-openid-connect: true   # Forgejo's equivalent of GitHub's `permissions: id-token: write`
-
-jobs:
-  hygiene:
-    runs-on: docker
-    container:
-      image: node:20-bookworm-slim
-    env:
-      WARDEN_ADDR:    http://host.docker.internal:8400
-      VAULT_ADDR:     http://host.docker.internal:8400/v1/vault/role/policy-scanner/gateway
-      ANTHROPIC_HOST: http://host.docker.internal:8400/v1/anthropic/role/anthropic-ops/gateway
-      SLACK_HOST:     http://host.docker.internal:8400/v1/slack/role/slack-ops/gateway
-      SLACK_CHANNEL:  C0123456789   # ← replace with your channel ID
-    steps:
-      - name: Install git (so actions/checkout uses git clone, not REST)
-        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
-
-      - uses: actions/checkout@v4
-
-      - name: Install bao + goose CLIs
-        run: |
-          set -euo pipefail
-          apt-get install -y --no-install-recommends curl jq bash bzip2 libgomp1 libxcb1 libdbus-1-3
-          case "$(uname -m)" in
-            aarch64|arm64) BAO_ARCH=arm64 ;;
-            x86_64|amd64)  BAO_ARCH=x86_64 ;;
-          esac
-          curl --retry 3 --retry-delay 5 -fsSL \
-            "https://github.com/openbao/openbao/releases/download/v2.5.3/bao_2.5.3_Linux_${BAO_ARCH}.tar.gz" \
-            | tar xz -C /usr/local/bin
-          # Pin goose to v1.32.0 — the upstream `latest` release tag is
-          # currently unmarked (v2 release candidates exist but none is
-          # "latest"), so /releases/latest/download/... returns 404.
-          curl --retry 3 --retry-delay 5 -fsSL \
-            https://github.com/aaif-goose/goose/releases/download/v1.32.0/download_cli.sh \
-            | CONFIGURE=false bash
-          mv /root/.local/bin/goose /usr/local/bin/
-
-      - name: Mint Warden JWT from Forgejo OIDC
-        shell: bash
-        run: |
-          set -euo pipefail
-          RESPONSE=$(curl -sSL \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=http://warden.local")
-          WARDEN_JWT=$(echo "$RESPONSE" | jq -r .value)
-          if [ -z "$WARDEN_JWT" ] || [ "$WARDEN_JWT" = "null" ]; then
-            echo "Failed to mint JWT. OIDC response was:"
-            echo "$RESPONSE"
-            exit 1
-          fi
-          if [[ "$WARDEN_JWT" != eyJ* ]]; then
-            echo "JWT doesn't look like a JWT (got ${WARDEN_JWT:0:20}...)"
-            exit 1
-          fi
-          # Print claims (public — signed but not encrypted) so bound_claims mismatches are visible
-          PAYLOAD=$(echo "$WARDEN_JWT" | cut -d. -f2)
-          while [ $(( ${#PAYLOAD} % 4 )) -ne 0 ]; do PAYLOAD="${PAYLOAD}="; done
-          echo "JWT claims:"
-          echo "$PAYLOAD" | tr '_-' '/+' | base64 -d 2>/dev/null | jq .
-          echo "::add-mask::$WARDEN_JWT"
-          echo "WARDEN_JWT=$WARDEN_JWT" >> $GITHUB_ENV
-
-      - name: Pre-flight all three Warden legs
-        run: |
-          export VAULT_TOKEN="$WARDEN_JWT"
-          bao policy list > /dev/null \
-            || { echo "Warden->OpenBao leg broken"; exit 1; }
-          # /v1/models isn't exposed on every Anthropic-compatible upstream
-          # (DeepSeek's compat layer omits it). Only treat 401/403 as a
-          # failure — any other status proves Warden auth + policy worked.
-          status=$(curl -s -o /dev/null -w "%{http_code}" \
-                       -H "x-api-key: $WARDEN_JWT" -H "anthropic-version: 2023-06-01" \
-                       "$ANTHROPIC_HOST/v1/models")
-          case "$status" in 401|403) echo "Warden->Anthropic leg broken (status $status)"; exit 1 ;; esac
-          curl -sf -X POST -H "Authorization: Bearer $WARDEN_JWT" \
-               "$SLACK_HOST/auth.test" > /dev/null \
-            || { echo "Warden->Slack leg broken"; exit 1; }
-
-      - name: Run Goose hygiene audit
-        env:
-          GOOSE_STREAM_TIMEOUT: "300"   # default 30s is too short for the structured output
-        run: |
-          export VAULT_TOKEN="$WARDEN_JWT"
-          export ANTHROPIC_API_KEY="$WARDEN_JWT"
-          goose run --debug --recipe policy-hygiene.yaml \
-              --params warden_role=policy-scanner \
-              --params warden_addr=$WARDEN_ADDR
-
-      - uses: actions/upload-artifact@v3
-        if: always()
-        with:
-          name: hygiene-report
-          path: hygiene-report.md     # built incrementally by the agent; recoverable even if Slack delivery fails
+env:
+  WARDEN_ADDR:      http://host.docker.internal:8400
+  WARDEN_NAMESPACE: tutorial
+  ANTHROPIC_HOST:   http://host.docker.internal:8400/v1/tutorial/anthropic/role/anthropic-ops/gateway
 ```
 
-A few notes on the workflow:
+`VAULT_ADDR`, `VAULT_TOKEN`, `SLACK_HOST`, and `SLACK_CHANNEL` are
+**not set** — the agent discovers and exports them.
 
-- `enable-openid-connect: true` is the key on Forgejo (GitHub Actions uses
-  `permissions: id-token: write` instead) — without it,
+The workflow does four things:
+
+1. Install `bao`, `goose`, and `warden` CLIs.
+2. Mint a per-job OIDC JWT from Forgejo and export it as `WARDEN_JWT`.
+3. **Pre-flight discovery** — make a bare-JWT call to `warden role
+   list`, `warden provider list`, and `warden skill read discovery
+   --raw`. If any of these fails, the agent's first discovery call
+   would too — surface here, before burning LLM tokens.
+4. Run Goose with the recipe; export the JWT into `WARDEN_TOKEN` (for
+   `warden`) and `ANTHROPIC_API_KEY` (for Goose's Anthropic SDK).
+
+A few notes:
+
+- `enable-openid-connect: true` is the key on Forgejo (GitHub Actions
+  uses `permissions: id-token: write` instead) — without it,
   `$ACTIONS_ID_TOKEN_REQUEST_URL` is unset and the JWT fetch returns 404.
 - `audience=http://warden.local` in the request URL must equal
-  `default_audience` from Warden's `auth/jwt/config` in 5a.
+  `default_audience` from Warden's `auth/jwt/config` in 5b.
 - `echo "::add-mask::$WARDEN_JWT"` redacts the JWT from subsequent log
-  output. Even though it expires with the job, it's a bearer credential for
-  Warden while live — treat it like one.
-- `host.docker.internal` lets the job container reach Warden on the host. On
-  Docker Desktop this works out of the box; on Linux the `host-gateway`
-  mapping in the runner service from section 3 provides the same.
-- The pre-flight step catches configuration drift (wrong `bound_claims`,
-  expired audience, missing JWKS reachability) before burning Anthropic
-  quota on a failed Goose run.
-- The JWT's lifetime equals the step's duration. There is no rotation logic
-  on the agent side.
+  output. Even though it expires with the job, it's a bearer credential
+  for Warden while live — treat it like one.
+- `host.docker.internal` lets the job container reach Warden on the
+  host. On Docker Desktop this works out of the box; on Linux the
+  `host-gateway` mapping in the runner service from section 3 provides
+  the same.
 
-## 8. Run it: push, watch, inspect
+## 9. Run it: push, watch, inspect
 
 ```bash
 cd policy-hygiene/                      # the repo cloned from local Forgejo
@@ -826,171 +824,110 @@ git commit -m "hygiene audit recipe"
 git push origin main
 ```
 
-Open `http://forgejo.local:3000/siteowner/policy-hygiene/actions` and watch the
-`policy-hygiene` workflow. When it finishes, the report is in two places:
-the channel canvas on Slack (if Slack delivery was wired up in 5e), and the
-`hygiene-report.md` artifact on the workflow run. Pull it via API:
+Open `http://forgejo.local:3000/siteowner/policy-hygiene/actions` and
+watch the `policy-hygiene` workflow. The pre-flight step prints the JSON
+the agent will see — role list, provider list, discovery skill — so you
+can verify discovery works before the LLM run begins. When it finishes,
+the report is in two places: the channel canvas on Slack (if Slack
+delivery was wired up in 5f), and the `hygiene-report.md` artifact on
+the workflow run.
 
-```bash
-curl -H "Authorization: token <PAT>" \
-     "http://forgejo.local:3000/api/v1/repos/siteowner/policy-hygiene/actions/artifacts/<id>/zip" \
-     -o hygiene-report.zip
-unzip hygiene-report.zip
-cat hygiene-report.md
-```
-
-Expected output across the seven analysed policies (the five seed policies
-in `bao-seed.sh` plus `policy-reader-acl` and `warden-vault-source` from
-`bao-init.sh` — built-ins `default` and `root` are skipped):
+Expected output across the seven analysed policies (the five seed
+policies in `bao-seed.sh` plus `policy-reader-acl` and
+`warden-vault-source` from `bao-init.sh` — built-ins `default` and
+`root` are skipped):
 
 - `clean` — severity `ok`, bound to `anchor-user`, no findings.
-- `root-ish` — severity `critical`, finding `least_privilege_smell` citing
-  the `sudo` line plus `path "*"` at top level.
-- `dead-mount` — severity `warning`, finding `dead_mount_reference` citing
-  `kv-legacy/*` and `aws-prod/creds/admin`, remediation "remove stanza or
-  restore the mount".
+- `root-ish` — severity `critical`, finding `least_privilege_smell`
+  citing the `sudo` line plus `path "*"` at top level.
+- `dead-mount` — severity `warning`, finding `dead_mount_reference`
+  citing `kv-legacy/*` and `aws-prod/creds/admin`.
 - `duplicates` — severity `warning`, finding
   `duplicate_or_contradictory_path` on `secret/data/app/*`.
 - `orphan` — severity `warning`, zero bound entities, finding
   `orphan_binding`.
-- `policy-reader-acl` — severity `warning`, `orphan_binding` (it's bound
-  to a token role, not an entity, which is invisible to the audit's entity
-  scan).
-- `warden-vault-source` — severity `warning`, `orphan_binding` (bound to
-  the AppRole, same caveat).
-
-Every finding is concrete, verifiable, and maps to a specific remediation.
-The agent does not write 0–100 risk scores or design opinions — those would
-be subjective; these findings are not.
-
-The dev loop is: edit `policy-hygiene.yaml`, commit, push, wait ~60–90 s
-(dominated by `apk add` and the LLM call), download report, repeat.
+- `policy-reader-acl` — severity `warning`, `orphan_binding`.
+- `warden-vault-source` — severity `warning`, `orphan_binding`.
 
 ### Inspect the Warden audit trail
 
-The hygiene report is the agent's view; the audit log is **Warden's** view of
-what the agent did. Every request to either gateway is logged with the
-caller's resolved identity, the policy that authorized it, the upstream URL,
-and the response status. Tail it during the run, or query it after:
+Every request to Warden — discovery calls *and* gateway calls — is
+logged with the caller's resolved identity, the policy that authorized
+it, the upstream URL, and the response status. Tail it after the run:
 
 ```bash
-# How many requests did the agent make through each gateway?
-jq -r 'select(.type == "request") | .request.mount_point' warden-audit.log \
-  | sort | uniq -c
-#       6 anthropic/        (LLM turns + 1 pre-flight)
-#      12 vault/            (5 policies + secrets/auth list + entity reads + pre-flight)
-
-# What did the JWT actually grant?
-jq -r 'select(.type == "request") | [.auth.principal_id, .auth.role_name, .request.path] | @tsv' \
-  warden-audit.log | sort -u | head
+# What roles did Warden resolve, and on which paths?
+jq -r 'select(.type=="request") |
+       [.auth.role_name // "-", .request.path] | @tsv' \
+  warden-audit.log | sort -u
 ```
 
-A single representative entry — what Warden sees when the agent reads one
-policy through the Vault gateway:
+Expect three clusters:
 
-```json
-{
-  "type": "request",
-  "timestamp": "2026-04-25T14:32:11.412Z",
-  "request": {
-    "id": "01H…",
-    "operation": "read",
-    "path": "vault/role/policy-scanner/gateway/v1/sys/policies/acl/orphan",
-    "mount_point": "vault/",
-    "mount_type": "vault",
-    "mount_class": "provider",
-    "method": "GET",
-    "client_ip": "172.17.0.4",
-    "transparent": true
-  },
-  "auth": {
-    "principal_id": "repo:siteowner/policy-hygiene:ref:refs/heads/main",
-    "role_name": "policy-scanner",
-    "policies": ["vault-readonly"],
-    "policy_results": {
-      "granting_policies": ["vault-readonly"]
-    }
-  }
-}
-```
+1. **Discovery calls** — `sys/introspect/roles`, `sys/providers`,
+   `sys/skills/foundation`, `sys/skills/discovery`, `sys/skills/vault`,
+   `sys/skills/slack` — all with `auth.role_name = discovery-baseline`.
+   This is the `default_role` fallback firing: the URL had no role
+   segment, so Warden resolved the JWT against the auth method's
+   default.
+2. **Vault gateway calls** — `vault/role/policy-scanner/gateway/v1/...`
+   with `auth.role_name = policy-scanner`. The agent chose this role
+   from the role list and used it explicitly in the URL.
+3. **Slack gateway calls** — `slack/role/slack-ops/gateway/...` with
+   `auth.role_name = slack-ops`.
 
-Three things to verify here:
-
-1. **`auth.principal_id`** is derived from Forgejo's JWT claims (`repository`,
-   `ref`) — proof that the identity comes from the OIDC token, not a stored
-   token in the agent's environment.
-2. **`auth.policy_results.granting_policies`** names `vault-readonly` — proof
-   that the fine-grained access stanzas from section 5d are what authorized
-   the call. If the agent had tried `bao policy delete orphan`, this entry
-   would carry `error: "permission denied"` and a `403` response status,
-   because no stanza in `vault-readonly` grants `delete` on
-   `/v1/sys/policies/acl/*`.
-3. **`request.transparent: true`** marks calls that came in via the
-   `role/*/gateway/*` path — i.e., that Warden authenticated the client via
-   JWT in a header rather than a Warden session token. This is how you spot
-   agentic traffic in a busy log.
-
-## 9. Moving to production
-
-Because dev already uses a standard OIDC JWT issuer, production works with
-**any** OIDC-capable forge or CI — Forgejo at scale, GitHub Actions, GitLab,
-Jenkins with the OIDC plugin, CircleCI, Buildkite. Warden does not care
-which. The change set is small and localized to three places.
-
-### 9a. Repoint Warden at the production issuer
-
-Discover URLs from the issuer's `/.well-known/openid-configuration`, then:
+The decoy roles **must not appear** in `auth.role_name`:
 
 ```bash
-warden write auth/jwt/config \
-     mode=jwt \
-     jwks_url=<issuer>/<jwks path> \
-     bound_issuer=<issuer URL> \
-     default_audience=https://warden.example.com
+jq -r 'select(.type=="request") | .auth.role_name // empty' \
+  warden-audit.log | sort -u
+# discovery-baseline
+# policy-scanner
+# slack-ops
 ```
 
-### 9b. Update `bound_claims` to the production repo
+If `kv-secrets-reader` or `slack-alert-poster` shows up here, the agent
+matched by provider type instead of by description — the recipe needs
+tightening or the descriptions need to be more discriminating.
 
-The claim names differ slightly across issuers. Three concrete examples:
+## 10. Moving to production
 
-- **Forgejo**:
-  `{"repository":"acme/policy-hygiene","ref":"refs/heads/main","ref_type":"branch"}`
-- **GitHub Actions**:
-  `{"repository":"acme/policy-hygiene","ref":"refs/heads/main","workflow_ref":"acme/policy-hygiene/.github/workflows/hygiene.yaml@refs/heads/main"}`
-- **GitLab**:
-  `{"project_path":"acme/policy-hygiene","ref":"main","ref_type":"branch"}`
+Production works with any OIDC-capable forge or CI — GitHub Actions,
+GitLab, Jenkins with the OIDC plugin, CircleCI, Buildkite. The change
+set is small:
 
-### 9c. Update the workflow file
+1. **Repoint Warden at the production issuer.** Discover URLs from the
+   issuer's `/.well-known/openid-configuration`, then update
+   `auth/jwt/config` in the production namespace.
+2. **Update `bound_claims` on each role** to the production repo. Claim
+   names differ slightly across issuers (Forgejo uses `repository`,
+   GitHub Actions uses `repository` + `workflow_ref`, GitLab uses
+   `project_path`).
+3. **Update the workflow's `audience`** to match the new `default_audience`,
+   and `WARDEN_ADDR`/`WARDEN_NAMESPACE` to the production values.
+4. **Re-run `warden-init.sh` against the production namespace** with the
+   production Slack channel + token, and the production Anthropic key.
 
-Change the `audience` to match the new `default_audience`, and `WARDEN_ADDR`
-to the production Warden URL. The OIDC-enablement syntax differs by host:
-Forgejo uses `enable-openid-connect: true`, GitHub Actions uses
-`permissions: id-token: write`, and GitLab auto-injects via `id_tokens:` —
-identical mechanism, three slightly different one-liners. The rest of the
-workflow (the curl to `$ACTIONS_ID_TOKEN_REQUEST_URL`, the Goose run, the
-artifact upload) is unchanged across all three.
-
-That's it. The recipe is unchanged, the Goose code path is unchanged, and
-the OpenBao/Anthropic provider configuration in Warden is unchanged.
-Production inherits the full audit trail: every request in Warden's log
-carries the CI's full run provenance — repo, branch, workflow ref, job id,
-actor.
+That's it. The recipe is unchanged, the Goose code path is unchanged,
+and even the per-provider skills are unchanged — the entire delta lives
+in operator-side configuration. Production inherits the full audit
+trail: every request in Warden's log carries the CI's full run
+provenance — repo, branch, workflow ref, job id, actor.
 
 Three operational adjustments worth making explicit in production:
 
 - The dev AppRole is already minimally scoped (only `update` on
-  `auth/token/create/policy-reader`). For production, also bind it to a CIDR
-  via `bound_cidr_list`, wrap secret_id issuance with `-wrap-ttl=60s`, and
-  shorten the policy-reader token role's `period` to the agent's actual job
-  duration.
-- Rotate the LLM API key (DeepSeek or Anthropic) by updating the spec in
-  Warden. The CI job is unaffected — it still authenticates with its JWT.
-- Replace the default file audit device with a socket or syslog one to ship
-  to a SIEM (Splunk, Elastic, Datadog): `warden audit disable file && warden
-  audit enable --type=socket --address=siem:9514` (or `--type=syslog`). The
-  JSON shape is the same as in section 8.
+  `auth/token/create/policy-reader`). For production, also bind it to a
+  CIDR via `bound_cidr_list`, wrap secret_id issuance with
+  `-wrap-ttl=60s`, and shorten the policy-reader token role's `period`
+  to the agent's actual job duration.
+- Rotate the LLM API key (DeepSeek or Anthropic) by updating the spec
+  in Warden. The CI job is unaffected — it still authenticates with its
+  JWT.
+- Replace the default file audit device with a socket or syslog one to
+  ship to a SIEM (Splunk, Elastic, Datadog).
 
-## 10. Cleanup
+## 11. Cleanup
 
 When you're done experimenting, tear the dev stack down:
 
@@ -1000,9 +937,9 @@ docker compose down -v          # stop containers + drop named volumes (forgejo-
 rm -rf bao-out runner-config    # local artefacts: AppRole creds + runner registration
 ```
 
-Stop Warden (`Ctrl-C` in its shell — `--dev` mode is in-memory, so nothing to
-clean up on disk besides the audit log), and optionally remove the host
-mapping:
+Stop Warden (`Ctrl-C` in its shell — `--dev` mode is in-memory, so
+nothing to clean up on disk besides the audit log), and optionally
+remove the host mapping:
 
 ```bash
 sudo sed -i '' '/forgejo.local/d' /etc/hosts   # macOS
@@ -1011,22 +948,24 @@ sudo sed -i '' '/forgejo.local/d' /etc/hosts   # macOS
 
 To rerun from a clean slate, just `docker compose up -d openbao forgejo &&
 docker compose up bao-init forgejo-init` again — the init scripts are
-idempotent.
+idempotent, and `warden-init.sh` is too (it reuses the `tutorial/`
+namespace if it already exists).
 
-## 11. What's next
+## 12. What's next
 
-This tutorial's agent does **static** hygiene analysis — it inspects policy
-HCL and live cluster state (mounts, entities). It cannot tell you which
-capabilities a policy *grants but nobody has used in six months*.
+This tutorial's agent does **static** hygiene analysis — it inspects
+policy HCL and live cluster state (mounts, entities). It cannot tell
+you which capabilities a policy *grants but nobody has used in six
+months*.
 
-The next tutorial picks that up: a Goose agent that reads OpenBao's audit
-log through Warden, computes the effective set of (path, capability) pairs
-each token actually exercised, diffs it against the granted set, and
-proposes a narrowed HCL policy — same shape as AWS IAM Access Analyzer's
-"generate policy from CloudTrail" feature. It reuses the Warden + Forgejo
-Actions + Anthropic-through-Warden plumbing built here; the only new piece
-is `audit/` read access on the Warden access policy and a log-window
-parameter in the recipe.
+The next tutorial picks that up: a Goose agent that reads OpenBao's
+audit log through Warden, computes the effective set of (path,
+capability) pairs each token actually exercised, diffs it against the
+granted set, and proposes a narrowed HCL policy — same shape as AWS IAM
+Access Analyzer's "generate policy from CloudTrail" feature. It reuses
+the same `tutorial/` namespace, the same Forgejo + Goose plumbing, and
+the same discovery pattern — only the recipe and one new gateway stanza
+on `vault-readonly` change.
 
 Forward link: [vault-policy-least-privilege.md](vault-policy-least-privilege.md)
 (coming soon — sibling tutorial, not part of this PR).

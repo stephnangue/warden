@@ -12,27 +12,34 @@ jobs:
     container:
       image: node:20-bookworm-slim
     env:
-      WARDEN_ADDR:    http://host.docker.internal:8400
-      VAULT_ADDR:     http://host.docker.internal:8400/v1/vault/role/policy-scanner/gateway
-      ANTHROPIC_HOST: http://host.docker.internal:8400/v1/anthropic/role/anthropic-ops/gateway
-      SLACK_HOST:     http://host.docker.internal:8400/v1/slack/role/slack-ops/gateway
-      SLACK_CHANNEL:  C0123456789   # ← replace with your channel ID
+      # Runtime contract (see docs/agent-flow.md §1):
+      #   WARDEN_ADDR + WARDEN_NAMESPACE + WARDEN_TOKEN bootstrap the agent.
+      #   Everything else (provider URLs, role names, Slack channel) is
+      #   discovered at runtime via `warden role list` / `warden provider list`
+      #   / `warden skill read <type>`.
+      #
+      # ANTHROPIC_HOST is the one exception: Goose's own Anthropic SDK is
+      # configured by the runtime before the agent process starts, so the
+      # LLM leg is wired through Warden but not via the discovery loop.
+      WARDEN_ADDR:      http://host.docker.internal:8400
+      WARDEN_NAMESPACE: tutorial
+      ANTHROPIC_HOST:   http://host.docker.internal:8400/v1/tutorial/anthropic/role/anthropic-ops/gateway
     steps:
       - name: Install git (so actions/checkout uses git clone, not REST)
         run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
 
       - uses: actions/checkout@v4
 
-      - name: Install bao + goose CLIs
+      - name: Install bao + goose + warden CLIs
         run: |
           set -euo pipefail
           apt-get install -y --no-install-recommends curl jq bash bzip2 libgomp1 libxcb1 libdbus-1-3
           case "$(uname -m)" in
-            aarch64|arm64) BAO_ARCH=arm64 ;;
-            x86_64|amd64)  BAO_ARCH=x86_64 ;;
+            aarch64|arm64) ARCH=arm64 ;;
+            x86_64|amd64)  ARCH=x86_64 ;;
           esac
           curl --retry 3 --retry-delay 5 -fsSL \
-            "https://github.com/openbao/openbao/releases/download/v2.5.3/bao_2.5.3_Linux_${BAO_ARCH}.tar.gz" \
+            "https://github.com/openbao/openbao/releases/download/v2.5.3/bao_2.5.3_Linux_${ARCH}.tar.gz" \
             | tar xz -C /usr/local/bin
           # Pin goose to v1.32.0 — the upstream `latest` release tag is
           # currently unmarked (v2 release candidates exist but none is
@@ -41,6 +48,11 @@ jobs:
             https://github.com/aaif-goose/goose/releases/download/v1.32.0/download_cli.sh \
             | CONFIGURE=false bash
           mv /root/.local/bin/goose /usr/local/bin/
+          # Warden CLI — the agent uses this for the discovery loop
+          # (warden role list / provider list / skill read).
+          curl --retry 3 --retry-delay 5 -fsSL \
+            "https://github.com/stephnangue/warden/releases/download/v0.13.1/warden_0.13.1_linux_${ARCH}.tar.gz" \
+            | tar xz -C /usr/local/bin warden
 
       - name: Mint Warden JWT from Forgejo OIDC
         shell: bash
@@ -67,31 +79,33 @@ jobs:
           echo "::add-mask::$WARDEN_JWT"
           echo "WARDEN_JWT=$WARDEN_JWT" >> $GITHUB_ENV
 
-      - name: Pre-flight all three Warden legs
+      - name: Pre-flight discovery
+        # Confirms the runtime contract works end-to-end before burning
+        # LLM tokens: bare-JWT call to /v1/sys/* gets implicit auth via
+        # the namespace's auto_auth_path metadata + JWT default_role.
+        # If this step fails, the agent's first discovery call would
+        # too — surface it here, with a clean error.
         run: |
-          export VAULT_TOKEN="$WARDEN_JWT"
-          bao policy list > /dev/null \
-            || { echo "Warden->OpenBao leg broken"; exit 1; }
-          # /v1/models isn't exposed on every Anthropic-compatible upstream
-          # (DeepSeek's compat layer omits it). Only treat 401/403 as a
-          # failure — any other status proves Warden auth + policy worked.
-          status=$(curl -s -o /dev/null -w "%{http_code}" \
-                       -H "x-api-key: $WARDEN_JWT" -H "anthropic-version: 2023-06-01" \
-                       "$ANTHROPIC_HOST/v1/models")
-          case "$status" in 401|403) echo "Warden->Anthropic leg broken (status $status)"; exit 1 ;; esac
-          curl -sf -X POST -H "Authorization: Bearer $WARDEN_JWT" \
-               "$SLACK_HOST/auth.test" > /dev/null \
-            || { echo "Warden->Slack leg broken"; exit 1; }
+          set -euo pipefail
+          export WARDEN_TOKEN="$WARDEN_JWT"
+          echo "--- roles assumable by this identity ---"
+          warden role list -o json -F name,description | jq .
+          echo "--- providers in the namespace ---"
+          warden provider list -o json -F type,description,mount_url | jq .
+          echo "--- discovery skill (head) ---"
+          warden skill read discovery --raw | head -20
 
       - name: Run Goose hygiene audit
         env:
           GOOSE_STREAM_TIMEOUT: "300"   # default 30s is too short for the structured output
         run: |
-          export VAULT_TOKEN="$WARDEN_JWT"
+          export WARDEN_TOKEN="$WARDEN_JWT"
           export ANTHROPIC_API_KEY="$WARDEN_JWT"
-          goose run --debug --recipe policy-hygiene.yaml \
-              --params warden_role=policy-scanner \
-              --params warden_addr=$WARDEN_ADDR
+          # --max-turns caps runaway loops. Healthy runs against the seed
+          # corpus complete in ~25–40 turns (5 seed policies + 2 init
+          # policies + ground-truth gathering + canvas publish). 80 leaves
+          # headroom for one round of fumbling, then kills the job.
+          goose run --debug --max-turns 80 --recipe policy-hygiene.yaml
 
       - uses: actions/upload-artifact@v3
         if: always()
