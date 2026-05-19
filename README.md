@@ -125,16 +125,20 @@ This is the design property that makes Warden a *drop-in* layer rather than a re
 
 ## Tutorial: one identity, three systems, zero credentials
 
-A walk-through of the discover-then-connect model end to end:
+The flagship discover-and-connect demo. A Goose AI agent audits
+OpenBao ACL policies, reasons over them with an Anthropic-compatible
+LLM, and publishes the report to Slack — all under one Forgejo OIDC
+JWT, all through Warden.
 
-- A Goose AI agent audits OpenBao ACL policies for hygiene — dead-mount references, orphan bindings, duplicates, least-privilege smells.
-- Three egress legs: OpenBao (read), an Anthropic-compatible LLM (reason), Slack (deliver as a channel canvas).
-- One Forgejo OIDC JWT covers all three legs, with three independently scoped Warden policies governing what each leg may do.
-- The agent holds zero credentials.
+The agent's recipe contains no URLs, no role names, no channel IDs.
+The runtime hands it three env vars and a JWT; the agent asks Warden
+what's wired up for its identity and picks the right combination for
+each step by reading the operator's descriptions. Rename a role,
+swap the LLM, move to a different cluster — the recipe doesn't change.
 
-See [docs/tutorials/vault-policy-hygiene/README.md](docs/tutorials/vault-policy-hygiene/README.md) for the full walk-through.
-
-For the system-side reference describing how an agent uses Warden end-to-end — the runtime contract, the five-step discovery loop, error handling, caching strategy — see [docs/agent-flow.md](docs/agent-flow.md).
+See [the walk-through](docs/tutorials/vault-policy-hygiene/README.md).
+For the system-side reference — the runtime contract, the discovery
+loop, error handling — see [docs/agent-flow.md](docs/agent-flow.md).
 
 ## Architecture
 
