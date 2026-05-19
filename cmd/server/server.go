@@ -179,6 +179,7 @@ Usage: warden server [options]
 		"openai":   openai.Skill(),
 		"rds":      rds.Skill(),
 		"scaleway": scaleway.Skill(),
+		"slack":    slack.Skill(),
 		"vault":    vault.Skill(),
 	}
 
