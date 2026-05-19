@@ -69,6 +69,63 @@ curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
   $WARDEN_ADDR/v1/slack/role/slack-user/gateway/auth.test
 ```
 
+### Publishing a channel canvas
+
+A canvas is the right format for long, formatted text published to a
+channel (a `.md` file upload renders as a download blob with no
+formatting; a canvas renders Markdown natively). A channel can hold
+at most one canvas, so replace any prior one. Four calls in order:
+
+1. **Check for an existing canvas** — `conversations.info` reads
+   `.channel.properties.canvas.file_id`:
+   ```bash
+   EXISTING=$(curl -sSf -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"channel":"C01ABC123"}' \
+        $WARDEN_ADDR/v1/slack/role/slack-user/gateway/conversations.info \
+     | jq -r '.channel.properties.canvas.file_id // empty')
+   ```
+
+2. **Delete the prior canvas** (if any) — `canvases.delete`:
+   ```bash
+   if [ -n "$EXISTING" ]; then
+     jq -n --arg id "$EXISTING" '{canvas_id:$id}' \
+       | curl -sSf -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+              -H "Content-Type: application/json" --data @- \
+              $WARDEN_ADDR/v1/slack/role/slack-user/gateway/canvases.delete
+   fi
+   ```
+
+3. **Create the new canvas** — `conversations.canvases.create`. Pipe
+   the report body via `jq --rawfile` so the markdown never
+   re-enters the agent's context:
+   ```bash
+   jq -n --arg ch "C01ABC123" \
+         --arg title "Report — $(date -u +%Y-%m-%d)" \
+         --rawfile md report.md \
+         '{channel_id:$ch, title:$title,
+           document_content:{type:"markdown", markdown:$md}}' \
+     | curl -sSf -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+            -H "Content-Type: application/json" --data @- \
+            $WARDEN_ADDR/v1/slack/role/slack-user/gateway/conversations.canvases.create
+   ```
+
+4. **Notify the channel** — `chat.postMessage`. The canvas is pinned
+   in the channel header but a short message draws attention:
+   ```bash
+   jq -n --arg ch "C01ABC123" '{channel:$ch, text:"Report updated."}' \
+     | curl -sSf -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+            -H "Content-Type: application/json" --data @- \
+            $WARDEN_ADDR/v1/slack/role/slack-user/gateway/chat.postMessage
+   ```
+
+The Slack app's bot needs the `canvases:write`, `channels:read`, and
+`chat:write` scopes for this sequence. **Do not invent shortcut method
+names** like `canvas.set` or `canvas.update` — they don't exist on the
+Slack Web API. The four above are the real ones.
+
+### Using SDK clients
+
 For the `@slack/web-api` (Node) or `slack_sdk` (Python) clients:
 point the `slackApiUrl` / `base_url` at
 `$WARDEN_ADDR<mount-url>role/<role>/gateway` and supply your JWT as the
