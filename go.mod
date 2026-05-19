@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.16
 	github.com/aws/aws-sdk-go-v2/feature/rds/auth v1.6.23
 	github.com/aws/aws-sdk-go-v2/service/iam v1.53.10
-	github.com/aws/aws-sdk-go-v2/service/redshift v1.62.7
+	github.com/aws/aws-sdk-go-v2/service/redshift v1.62.8
 	github.com/aws/aws-sdk-go-v2/service/redshiftserverless v1.34.6
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.7
 	github.com/aws/aws-sdk-go-v2/service/sts v1.42.1
