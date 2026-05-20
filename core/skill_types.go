@@ -51,7 +51,7 @@ const (
 	maxSkillDescription = 1024
 )
 
-var skillNameRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,63}$`)
+var skillNameRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,63}$`)
 
 var skillCategories = map[string]struct{}{
 	SkillCategoryAgentFlow:       {},

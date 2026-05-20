@@ -56,7 +56,7 @@ Usage: warden skill create [NAME] [options]
 
 func init() {
 	CreateCmd.Flags().StringVar(&createName, "name", "",
-		"Skill name (unique slug, [a-z0-9-]{2,64}); required unless --json supplies one")
+		"Skill name (unique slug, [a-z0-9_-]{2,64}); required unless --json supplies one")
 	CreateCmd.Flags().StringVar(&createDescription, "description", "",
 		"Human-readable one-line summary; required unless --json")
 	CreateCmd.Flags().StringVar(&createCategory, "category", "",
