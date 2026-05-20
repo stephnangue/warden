@@ -175,6 +175,7 @@ Usage: warden server [options]
 	// mounts (SkillStore.SeedProviderSkill is a no-op when the name exists).
 	providerSkills = map[string]string{
 		"ansible_tower": ansible_tower.Skill(),
+		"atlassian":     atlassian.Skill(),
 		"aws":           aws.Skill(),
 		"github":        github.Skill(),
 		"openai":        openai.Skill(),
