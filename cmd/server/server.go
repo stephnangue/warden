@@ -50,11 +50,11 @@ import (
 	"github.com/stephnangue/warden/provider/dynatrace"
 	"github.com/stephnangue/warden/provider/elastic"
 	"github.com/stephnangue/warden/provider/gcp"
-	"github.com/stephnangue/warden/provider/grafana"
-	"github.com/stephnangue/warden/provider/ibmcloud"
-	"github.com/stephnangue/warden/provider/honeycomb"
 	"github.com/stephnangue/warden/provider/github"
 	"github.com/stephnangue/warden/provider/gitlab"
+	"github.com/stephnangue/warden/provider/grafana"
+	"github.com/stephnangue/warden/provider/honeycomb"
+	"github.com/stephnangue/warden/provider/ibmcloud"
 	"github.com/stephnangue/warden/provider/kubernetes"
 	"github.com/stephnangue/warden/provider/mistral"
 	"github.com/stephnangue/warden/provider/newrelic"
@@ -174,13 +174,14 @@ Usage: warden server [options]
 	// registry. Operator edits to a seeded skill are preserved on subsequent
 	// mounts (SkillStore.SeedProviderSkill is a no-op when the name exists).
 	providerSkills = map[string]string{
-		"aws":      aws.Skill(),
-		"github":   github.Skill(),
-		"openai":   openai.Skill(),
-		"rds":      rds.Skill(),
-		"scaleway": scaleway.Skill(),
-		"slack":    slack.Skill(),
-		"vault":    vault.Skill(),
+		"ansible_tower": ansible_tower.Skill(),
+		"aws":           aws.Skill(),
+		"github":        github.Skill(),
+		"openai":        openai.Skill(),
+		"rds":           rds.Skill(),
+		"scaleway":      scaleway.Skill(),
+		"slack":         slack.Skill(),
+		"vault":         vault.Skill(),
 	}
 
 	authMethods = map[string]wardenlogical.Factory{
