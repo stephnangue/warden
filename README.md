@@ -74,12 +74,12 @@ Each response is human-readable JSON or markdown. The agent matches the task to 
 
 What an enterprise gets from putting Warden in the path:
 
-- **Discovery** — identity-scoped introspection. Agents learn which systems and roles are open to them; nothing has to be pre-loaded into the agent's environment.
-- **Self-describing capabilities** — every provider type ships a runtime recipe (an agent skill) that the cluster serves alongside the gateway. The catalog reflects what's currently mounted; adding a provider makes it instantly discoverable, removing one makes it instantly gone. No agent rebuild, no SDK update.
+- **Per-call least privilege** — the agent asks Warden what systems and roles are open to it, then **switches roles mid-task**, picking the narrowest fit for each operation by reading operator-set descriptions. A read-scoped role for reads, a write-scoped role only when a write is intended — the agent's posture changes step by step, not session by session.
+- **Hallucination containment** — LLMs make routine mistakes, and a single mistake under a broad credential can cause real damage. Per-call role binding constrains what the agent can do at every step; a hallucinated request that exceeds the role's scope is denied upstream — observable in the audit log, with no state change. LLM errors become recoverable instead of catastrophic.
+- **Compromise containment** — because Warden holds the upstream credentials and the agent never does, a prompt-injected, jailbroken, or otherwise compromised agent has nothing to exfiltrate. Any call it does issue is still bounded by Warden's policy at request time — regardless of what's in the agent's memory or chat history.
 - **Fine-grained access policy** — per-action capabilities and parameter filters, evaluated at request time against caller IP, time of day, and day of week.
 - **Identity-bound access** — JWT (including SPIFFE JWT-SVID) or TLS client certificate (including SPIFFE X.509-SVID); the same identity reaches every upstream the policy permits — no per-system credential sprawl, no API keys handed to agents, nothing to rotate per integration.
 - **Audit** — every request tied to the original identity, the role used, and the upstream called.
-- **Compromise-resilient** — a prompt-injected, jailbroken, or otherwise compromised agent has nothing upstream to exfiltrate. The blast radius is bounded by Warden's policy at request time, not by what happens to be in the agent's memory or chat history.
 
 ## Supported systems
 
