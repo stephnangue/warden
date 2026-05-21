@@ -1,6 +1,6 @@
 # AWS Access Hygiene Audit with Goose, the AWS CLI, and Warden
 
-> **Status:** operator setup is complete (Forgejo + runner stack and the AWS / Warden / Slack wiring); the Goose recipe, the CI workflow, the conceptual narrative, and the audit-log walkthrough arrive in follow-up PRs.
+> **Status:** runnable end-to-end (operator setup + the Goose recipe + the Forgejo Actions workflow). The conceptual narrative for §6 and the audit-log walkthrough for §10 arrive in the next PR.
 
 This tutorial stands up an AI agent that audits a sandbox AWS account's IAM
 through **four read-only lenses** — inventory, recent usage, external
@@ -75,10 +75,24 @@ the workflow, inspect Security Hub and Slack. Production is a URL swap.
   binary on PATH.
 - An AWS sandbox account and the **AWS CLI v2** authenticated as a
   principal that can create IAM users, IAM roles, and access keys. The
-  audit also calls Security Hub, so **Security Hub must be enabled in
-  the chosen region** (default `us-east-1`). The credentials you use to
-  run `aws-init.sh` are only used to bootstrap the broker; they never
-  enter Warden or the agent's environment.
+  audit also calls Security Hub and Access Analyzer, so both must be
+  enabled in the chosen region (default `us-east-1`):
+  ```bash
+  aws securityhub enable-security-hub
+  aws accessanalyzer create-analyzer \
+      --analyzer-name tutorial-analyzer --type ACCOUNT
+  ```
+  Access Analyzer findings for the seeded external-trust target may
+  take a few minutes to appear after `seed-aws.sh` runs. The
+  credentials you use here only bootstrap the broker user and the
+  audit targets; they never enter Warden or the agent's environment.
+- An API key for an Anthropic-compatible LLM endpoint, used by Goose
+  itself. The tutorial defaults to DeepSeek's Anthropic-compatible
+  endpoint (`https://api.deepseek.com/anthropic`). To switch to
+  Anthropic-proper, change `anthropic_url` in `warden-init.sh` §5e.
+  **The key goes into Warden's credential store, not into any CI
+  variable.** You paste it once during §5 (`--anthropic-key=...`)
+  and never again.
 - (Optional, for Slack delivery) A Slack workspace, a [bot user OAuth token](https://api.slack.com/authentication/token-types#bot)
   (`xoxb-...`) with the `canvases:write`, `channels:read`, and
   `chat:write` scopes, and a channel ID the bot is a member of. The
@@ -89,15 +103,16 @@ the workflow, inspect Security Hub and Slack. Production is a URL swap.
   delivery.
 
 The `aws`, `goose`, and `warden` CLIs are installed inside the Actions
-job's container in PR 3; you do not run them on the host beyond the
-operator setup steps below.
+job's container; you do not run them on the host beyond the operator
+setup steps below.
 
 ## 3. Bring up the stack with Docker Compose
 
 The files we'll use (`docker-compose.yml`, `forgejo-init.sh`,
-`aws-init.sh`, `warden-init.sh`) are alongside this README. Either `cd`
-into this folder to run them in place, or copy them to a fresh working
-directory.
+`aws-init.sh`, `warden-init.sh`, `seed-aws.sh`, `access-hygiene.yaml`,
+and `.forgejo/workflows/access-audit.yaml`) are alongside this README.
+Either `cd` into this folder to run them in place, or copy them to a
+fresh working directory.
 
 `docker-compose.yml` runs Forgejo, the Forgejo runner, and a one-shot
 init service that bootstraps the `siteowner` admin user:
@@ -321,11 +336,17 @@ With Warden running (§4) and `aws-out/creds.env` populated:
 
 ```bash
 chmod +x warden-init.sh
-./warden-init.sh                                                      # AWS only
-./warden-init.sh --slack-token=xoxb-... \
+./warden-init.sh --anthropic-key=sk-...                               # AWS + Anthropic only
+./warden-init.sh --anthropic-key=sk-... \
+                 --slack-token=xoxb-... \
                  --slack-channel-id=C0XXXXXXX \
                  --slack-channel-name='#access-audits'                # + Slack
 ```
+
+`--anthropic-key` is required — it's the LLM key Goose uses to drive
+the audit, held by Warden and proxied at runtime; it never enters
+the agent's environment. If you use Anthropic directly rather than
+DeepSeek, change `anthropic_url` in `warden-init.sh` §5e.
 
 What it provisions, in order:
 
@@ -402,7 +423,15 @@ What it provisions, in order:
    path "aws/gateway/*" { capabilities = ["read", "create", "list"] }
    ```
    Per-lens least-privilege is enforced *at AWS*, not by this policy.
-10. **Slack provider** (only when `--slack-token` is given) plus its
+10. **Anthropic provider** for Goose's LLM leg — `--type=anthropic`
+    against an Anthropic-compatible endpoint (DeepSeek by default).
+    One source (the key passed via `--anthropic-key`), one spec, and
+    an `anthropic-ops` role marked *Internal — used by Goose runtime,
+    not chosen by agents.* The workflow exports
+    `ANTHROPIC_HOST=$WARDEN_ADDR/v1/tutorial-aws/anthropic/role/anthropic-ops/gateway`
+    before starting Goose so the LLM round-trip flows through Warden
+    too.
+11. **Slack provider** (only when `--slack-token` is given) plus its
     source, spec, the active `hygiene-poster` role (channel embedded
     in the description), and a `slack-hygiene-poster` policy granting
     `create` on the Slack Web API methods the agent will call. A
@@ -456,11 +485,203 @@ the broker's `sts:AssumeRole` policy is wrong, the call fails — fix
 `aws-init.sh` or re-run with `--rotate-key`.
 
 The end-to-end Warden → AWS test (which requires a Forgejo-signed JWT)
-runs as part of PR 3's first agent invocation.
+runs as part of §9's first workflow invocation.
+
+### 5d. Seed AWS audit targets
+
+`seed-aws.sh` provisions five demo IAM roles in the same sandbox
+account that exhibit specific access-hygiene smells the audit will
+flag. These targets are deliberately distinct from the broker user and
+the five AssumeRole-backed roles `aws-init.sh` set up — the targets
+exist purely so the audit has something interesting to find:
+
+| Target role                                 | Smell                                              | Lens that flags it    |
+|---------------------------------------------|----------------------------------------------------|-----------------------|
+| `tutorial-target-clean-role`                | None — narrow read scope. Baseline for contrast.   | (no findings)         |
+| `tutorial-target-wildcard-role`             | Attached `iam:*` on `*`                            | inventory             |
+| `tutorial-target-stale-role`                | `LastUsed` is null (never assumed)                 | recent_usage          |
+| `tutorial-target-external-trust-role`       | Trust policy admits a non-self account             | external_exposure     |
+| `tutorial-target-under-described-role`      | Description says "read-only S3" but policy is `s3:*`| effective_access     |
+
+```bash
+chmod +x seed-aws.sh
+./seed-aws.sh                                              # default external account 999999999999
+./seed-aws.sh --external-account-id=222222222222           # or pick another
+./seed-aws.sh --teardown                                   # remove all five targets
+```
+
+Access Analyzer findings for the external-trust target typically
+appear within a few minutes of seeding; the analyzer was created in
+§2.
+
+## 6. The within-provider dimension: per-call role selection
+
+*(arrives in PR 4 — the conceptual narrative covering role-as-deterministic-intent, hallucination containment, and the read/write split)*
+
+## 7. How Goose discovers Warden
+
+Three workflow env vars bootstrap the agent:
+
+```
+WARDEN_ADDR=http://host.docker.internal:8400
+WARDEN_NAMESPACE=tutorial-aws
+WARDEN_TOKEN=<Forgejo-minted OIDC JWT, per workflow §9>
+```
+
+Everything else — the AWS account ID being audited, the region, the
+Slack channel for canvas delivery, the AssumeRole target each lens
+uses, even the names of the AWS lens roles — comes from Warden at
+runtime via three introspection calls the agent makes against
+`/v1/sys/*`. Those four `sys/*` paths are exactly what the
+`discovery-baseline` policy from §5c grants the agent.
+
+The agent's loop, per `docs/agent-flow.md`:
+
+1. **Read the bootstrap skills.**
+   ```bash
+   warden skill read foundation --raw   # the runtime contract: env vars, exit codes, list/raw flags
+   warden skill read discovery  --raw   # the 5-step loop itself
+   ```
+   These are seeded into every Warden cluster; the agent fetches
+   them on first run.
+
+2. **List the roles the JWT can assume in this namespace.**
+   ```bash
+   warden role list -o json -F name,description
+   ```
+   Returns the ten roles `warden-init.sh` provisioned —
+   `discovery-baseline` + 5 active AWS + 3 decoy AWS +
+   `hygiene-poster` (if Slack on) + `alert-poster` decoy. The agent
+   reads descriptions, not names: each active role's description
+   spells out which lens it serves, what region's data it covers,
+   and what it is *not* for. Decoys' descriptions explicitly warn
+   they are destructive — the agent rejects them.
+
+3. **List the providers mounted in the namespace.**
+   ```bash
+   warden provider list -o json -F type,description,mount_url
+   ```
+   Returns `aws` and (optionally) `slack` mounts. The AWS provider's
+   description embeds the audited **account ID** (set by `warden-init.sh`
+   from `WARDEN_AWS_ACCOUNT_ID`); the Slack role description embeds
+   the channel ID and name. The agent reads both straight from the
+   discovery output — no env var carries either, by design.
+
+4. **Fetch the provider skill for each provider it will use.**
+   ```bash
+   warden skill read aws --raw    # SigV4 env-var contract, gateway URL pattern, quirks
+   warden skill read slack --raw  # Slack Web API call shape
+   ```
+   The aws skill tells the agent that the role name goes in
+   `AWS_ACCESS_KEY_ID`, the JWT goes in `AWS_SECRET_ACCESS_KEY` and
+   `AWS_SESSION_TOKEN`, and the endpoint URL is composed from
+   `WARDEN_ADDR` plus the AWS provider's `mount_url`. The recipe in
+   §8 contains none of this — the agent reads it fresh.
+
+5. **Execute the audit.** Between AWS calls, the agent re-exports
+   `AWS_ACCESS_KEY_ID` with the next lens's role — a sequence
+   visible in §10's audit log walkthrough as distinct
+   `auth.role_name` values under one `auth.token_hmac`.
+
+The workflow runs a **pre-flight discovery** step (§9) that performs
+steps 1–4 outside of Goose, before any LLM tokens are spent. If
+discovery fails — a wrong issuer, a bad `bound_claims`, a missing
+namespace — the workflow surfaces it as a clean error rather than as
+a confused agent.
+
+## 8. The Goose recipe
+
+`access-hygiene.yaml` describes the task in pure semantics — four
+analytical lenses, severity logic, two deliverables — and **does not
+hardcode any Warden role names, provider URLs, or AWS env-var
+contracts**. It bootstraps the agent with one line pointing at the
+`foundation` and `discovery` skills; everything else the agent learns
+at runtime, per §7.
+
+The four lenses (full definitions in the recipe):
+
+| Lens               | What it inspects                                                                   | AWS calls used                                          |
+|--------------------|------------------------------------------------------------------------------------|---------------------------------------------------------|
+| `inventory`        | Permissions held: wildcards, missing MFA conditions                                | `iam:ListRoles`, `GetRole`, `GetPolicyVersion`, etc.    |
+| `recent_usage`     | When the principal last exercised its permissions                                  | `iam:ListRoles` (`RoleLastUsed`), `cloudtrail:LookupEvents` |
+| `external_exposure`| Trust policies admitting external/anonymous principals                             | `access-analyzer:ListAnalyzers`, `ListFindings`         |
+| `effective_access` | What the principal *could* do, accounting for the union of all attached policies   | `iam:SimulatePrincipalPolicy`                            |
+
+Severity is deterministic: 3+ lenses → CRITICAL; 2 lenses → HIGH;
+1 lens → MEDIUM. The simulator flagging a delete-style or
+`AssumeRole` action also forces CRITICAL.
+
+Deliverables, in this order:
+
+(a) Security Hub findings, one per flagged principal, in ASFF format
+   (SchemaVersion `2018-10-08`). The recipe spells out the required
+   ASFF fields and the `ProductArn` shape (the default
+   custom-integration ARN); the agent builds `findings.json`
+   incrementally with `jq '.Findings += [...]'` so the JSON never
+   re-enters its context across turns.
+
+(b) Slack channel canvas summarizing the same findings grouped by
+   severity, posted as one POST to the slack gateway with the body
+   passed via `jq --rawfile`.
+
+The recipe also instructs the agent to skip AWS service-linked
+roles (names starting with `AWSServiceRole`) and to emit empty
+deliverables (`{"Findings": []}` and a canvas saying "No findings")
+even when zero principals are flagged — so absence is observable.
+
+## 9. The Forgejo Actions workflow
+
+`.forgejo/workflows/access-audit.yaml` is what triggers the audit on
+push to `main`. The workflow mirrors `vault-policy-hygiene`'s shape
+(same OIDC JWT mint, same pre-flight discovery, same runner-config
+host-mapping hack so the job container can resolve
+`forgejo.local`) — the differences are which CLIs it installs and
+which env vars it sets.
+
+```yaml
+env:
+  WARDEN_ADDR:      http://host.docker.internal:8400
+  WARDEN_NAMESPACE: tutorial-aws
+  ANTHROPIC_HOST:   http://host.docker.internal:8400/v1/tutorial-aws/anthropic/role/anthropic-ops/gateway
+```
+
+Three env vars are *not* set: `AWS_ENDPOINT_URL`, `AWS_REGION`, and
+anything Slack-related. The agent discovers all of those.
+
+The four job steps:
+
+1. **Install CLIs** — AWS CLI v2 (the bundled binary; the apt
+   package is v1 with weaker `AWS_ENDPOINT_URL` support), Goose
+   v1.32.0 (matching `vault-policy-hygiene`'s pin and its rationale),
+   and Warden v0.13.2.
+
+2. **Mint Warden JWT from Forgejo OIDC.** Curls
+   `$ACTIONS_ID_TOKEN_REQUEST_URL&audience=http://warden.local` with
+   the Forgejo-supplied bearer token, parses the response, prints
+   the JWT claims for visibility, redacts the JWT in subsequent log
+   output, and exports it as `$WARDEN_JWT` for later steps.
+
+3. **Pre-flight discovery.** Runs the discovery loop's first four
+   steps (§7) outside of Goose. If `bound_claims` doesn't match, if
+   the JWT issuer is wrong, or if `auto_auth_path` metadata is
+   missing on the namespace, this step fails — cleanly — before any
+   LLM tokens are spent.
+
+4. **Run Goose.** Exports `WARDEN_TOKEN=$WARDEN_JWT` and
+   `ANTHROPIC_API_KEY=$WARDEN_JWT` (Goose's Anthropic SDK reads it
+   as the bearer for the proxied LLM URL), then invokes
+   `goose run --recipe access-hygiene.yaml --max-turns 100`. The
+   max-turn ceiling caps runaway loops; the seed-target corpus
+   typically completes in ~50–70 turns.
+
+On any exit (success or failure) the workflow uploads
+`findings.json` and `canvas.md` as the `access-hygiene-output`
+artifact — recoverable for inspection even if the Security Hub
+publish or Slack canvas delivery fails on the last step.
 
 ---
 
-> The remaining sections — the within-provider role-switching narrative
-> (§6), Goose's discovery loop (§7), the recipe (§8), the Forgejo Actions
-> workflow (§9), the audit-log walkthrough (§10), and production /
-> cleanup / next steps (§11–13) — arrive in follow-up PRs.
+> The remaining sections — the within-provider role-switching
+> narrative (§6, expanded), the audit-log walkthrough (§10), and
+> production / cleanup / next steps (§11–13) — arrive in the
+> follow-up PR.

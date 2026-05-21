@@ -1,0 +1,162 @@
+version: "1.0.0"
+title: "AWS access hygiene audit"
+description: "Audit IAM principals in the connected AWS account through four read-only lenses (inventory, recent usage, external exposure, effective access). Emits findings to Security Hub and a Slack channel canvas."
+
+instructions: |
+  You operate on Warden. To learn how, run
+
+      warden skill read foundation --raw
+      warden skill read discovery  --raw
+
+  Browse the full catalog with `warden skill list -F name,description`.
+
+  TASK — AWS access hygiene audit
+
+  Audit every IAM principal (role, user, group) in the AWS account
+  you reach via Warden. The audit examines each principal through
+  four lenses; for each principal that any lens flags, emit one
+  finding. Do not invent other lenses.
+
+    1. inventory
+       What permissions does the principal hold across attached and
+       inline policies? Flag wildcard actions (e.g. `iam:*`, `s3:*`),
+       wildcard resources combined with broad actions, and absence of
+       MFA conditions on sensitive (Delete/Detach/Put) operations.
+
+    2. recent_usage
+       When did the principal last exercise its permissions? Flag
+       principals whose `LastUsed` is null OR older than 90 days
+       from now. CloudTrail `LookupEvents` corroborates this.
+
+    3. external_exposure
+       Does the principal's trust policy admit external accounts,
+       anonymous principals, or overly broad service principals?
+       Access Analyzer findings are the authoritative source.
+
+    4. effective_access
+       What can the principal actually do today, accounting for the
+       union of attached and group-inherited policies? Use
+       `SimulatePrincipalPolicy` to dry-run sensitive actions against
+       the principal (delete-style operations on s3 / iam / kms,
+       cross-account `sts:AssumeRole`). Flag where the simulator
+       returns `allowed` for an action that the role's declared
+       description suggests it should not be able to perform.
+
+  Severity is deterministic, not subjective:
+    - critical: flagged by THREE or more lenses, OR flagged by the
+      effective_access lens for any delete-style or AssumeRole action.
+    - high:     flagged by TWO lenses.
+    - medium:   flagged by ONE lens.
+    - ok:       no findings (do not emit a finding for ok principals).
+
+  Skip AWS service-linked roles (names starting with `AWSServiceRole`)
+  and AWS-managed administrative principals — they are not in scope.
+
+  DELIVERABLES — in this order
+
+  (a) Security Hub findings, one per flagged principal, emitted via
+      `securityhub:BatchImportFindings`. Use the ASFF schema
+      (SchemaVersion "2018-10-08"). Required fields the agent must
+      populate: a stable Id per principal, GeneratorId set to
+      "warden-tutorial/access-hygiene", ProductArn set to the audited
+      account's default custom-integration ARN
+      (`arn:aws:securityhub:<region>:<account>:product/<account>/default`),
+      AwsAccountId, Types ["Software and Configuration Checks/AWS
+      Security Best Practices"], CreatedAt and UpdatedAt (ISO-8601),
+      Severity {Label: "CRITICAL"|"HIGH"|"MEDIUM"}, Title (short,
+      principal-specific), Description (which lenses flagged it and
+      the evidence), and a Resources array citing the principal's
+      ARN and region. Build the findings array incrementally in a
+      file; do not compose the full JSON in a single assistant
+      message.
+
+  (b) Slack channel canvas summarizing the same findings grouped by
+      severity, with a one-line count summary at top. A channel
+      carries at most one canvas, so replace any prior one. Pass an
+      explicit `title` (e.g. "AWS access hygiene — $(date -u +%Y-%m-%d)")
+      so the canvas does not inherit the channel name.
+
+  EFFICIENCY
+
+  Pipe verbose JSON through `jq` to extract only the fields you need.
+  Raw list outputs are large and accumulate across LLM turns, eating
+  into the input-token rate limit.
+
+prompt: |
+  Run the audit and publish both deliverables. Build the findings
+  file and the canvas markdown incrementally with shell calls — do
+  NOT compose the full report in a single final assistant message.
+  Your final message should be one short line confirming counts.
+
+  Sequence:
+
+    1. Bootstrap. Read foundation + discovery skills. Then
+       `warden role list` and `warden provider list`. Identify the
+       roles for each of the four read lenses and for the Security
+       Hub write and Slack canvas publish steps by reading their
+       descriptions. Do not assume role names — extract them from
+       discovery output.
+
+    2. Read the `aws` provider skill (`warden skill read aws --raw`)
+       and the slack provider skill if present. Follow the call-shape
+       contracts they define — do not invent endpoints or
+       authentication mechanisms.
+
+    3. Gather ground truth per lens. For each lens, switch to that
+       lens's role and run the appropriate calls. Output to per-lens
+       jq-filtered JSON files; do not let full raw responses re-enter
+       your context.
+
+         inventory:         list roles / attached + inline policies / policy documents
+         recent_usage:      list roles + RoleLastUsed + CloudTrail LookupEvents
+         external_exposure: Access Analyzer ListAnalyzers + ListFindings
+         effective_access:  per principal, SimulatePrincipalPolicy on
+                            the sensitive-action probe set
+
+    4. Synthesize. For each principal, count lens hits, derive
+       severity, and append one ASFF finding object to findings.json
+       using a one-shell-call append so the JSON never re-enters your
+       context. Initialize once with `printf '{"Findings": []}\n' > findings.json`,
+       then for each principal compose the finding JSON in a tmp
+       variable and append:
+
+           jq --argjson new "$FINDING_JSON" '.Findings += [$new]' \
+             findings.json > tmp && mv tmp findings.json
+
+       Drop per-principal evidence from your context once written —
+       the file is the source of truth.
+
+    5. Publish to Security Hub. Switch to the finding-publication
+       role and call `aws securityhub batch-import-findings` with
+       findings.json. That role's IAM scope at AWS permits exactly
+       this one action — accidental reads or other writes will fail.
+
+    6. Build the canvas markdown incrementally:
+         printf '# AWS access hygiene\n\n' > canvas.md
+         For each severity (CRITICAL → HIGH → MEDIUM):
+           printf '## %s\n' "$sev" >> canvas.md
+           Append one bullet per finding citing principal ARN and
+           the lens(es) that flagged it.
+       Then append a Summary section with counts per severity.
+
+    7. Publish the canvas through the slack gateway, piping canvas.md
+       through `jq --rawfile` so the body does not enter your
+       context. Use the channel embedded in the slack role's
+       description.
+
+    8. Final assistant message — one short line, e.g.
+       "Audit complete: 23 principals; 2 critical, 5 high, 4 medium.
+       Security Hub + canvas updated."
+
+  Do NOT skip either publish even when findings are zero. Emit an
+  empty findings.json with `{"Findings": []}` (BatchImportFindings
+  accepts it) and publish a canvas that says "No findings."
+
+extensions:
+  - type: builtin
+    name: developer
+    description: "Shell + file tools so the agent can run CLIs, curl, and jq"
+
+settings:
+  goose_provider: anthropic
+  goose_model: deepseek-chat
