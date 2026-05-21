@@ -123,20 +123,36 @@ Warden supports multiple methods for verifying caller identity.
 
 This is the design property that makes Warden a *drop-in* layer rather than a rewrite tax: a pre-existing boto3, openai-python, Vault CLI, or curl-against-GitHub script becomes Warden-mediated by setting the base URL to Warden and putting the JWT where the secret used to go. It also separates Warden from MCP (which adds a protocol the agent host must speak) and from dedicated auth proxies (which typically require client libraries).
 
-## Tutorial: one identity, three systems, zero credentials
+## Tutorials
 
-The flagship discover-and-connect demo. A Goose AI agent audits
-OpenBao ACL policies, reasons over them with an Anthropic-compatible
-LLM, and publishes the report to Slack — all under one Forgejo OIDC
-JWT, all through Warden.
+**AWS access hygiene — per-call least privilege, mid-task.** A
+Goose agent audits IAM in a sandbox AWS account through four
+read-only lenses (inventory, recent usage, external exposure,
+effective access) and publishes findings to Security Hub and a
+Slack canvas — switching Warden roles between every call so each
+operation runs under exactly the role it needs and nothing more. A
+hallucinated `securityhub:BatchImportFindings` attempted under the
+read intent is denied at AWS by the assumed role's narrow IAM
+policy — not by Warden — and surfaces in the audit log as the
+declared intent on a mismatched action. See
+[the walk-through](docs/tutorials/aws-access-hygiene/README.md).
 
-The agent's recipe contains no URLs, no role names, no channel IDs.
-The runtime hands it three env vars and a JWT; the agent asks Warden
-what's wired up for its identity and picks the right combination for
-each step by reading the operator's descriptions. Rename a role,
-swap the LLM, move to a different cluster — the recipe doesn't change.
+**Vault policy hygiene — one identity, three systems, zero
+credentials.** A Goose agent audits OpenBao ACL policies, reasons
+over them with an Anthropic-compatible LLM, and publishes the
+report to Slack — all under one Forgejo OIDC JWT, all through
+Warden. Sibling demo of the same discover-and-connect pattern,
+exercising the *across-providers* axis (one Vault role for the
+audit, one Slack role for delivery). See
+[the walk-through](docs/tutorials/vault-policy-hygiene/README.md).
 
-See [the walk-through](docs/tutorials/vault-policy-hygiene/README.md).
+In both tutorials the agent's recipe contains no URLs, no role
+names, no channel IDs, no account IDs. The runtime hands it three
+env vars and a JWT; the agent asks Warden what's wired up for its
+identity and picks the right combination by reading operator-set
+descriptions. Rename a role, swap the LLM, move to a different
+cluster — the recipe doesn't change.
+
 For the system-side reference — the runtime contract, the discovery
 loop, error handling — see [docs/agent-flow.md](docs/agent-flow.md).
 

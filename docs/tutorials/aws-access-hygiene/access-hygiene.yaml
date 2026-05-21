@@ -25,8 +25,12 @@ instructions: |
 
     2. recent_usage
        When did the principal last exercise its permissions? Flag
-       principals whose `LastUsed` is null OR older than 90 days
-       from now. CloudTrail `LookupEvents` corroborates this.
+       principals whose `RoleLastUsed.LastUsedDate` is older than 90
+       days from now. Principals with no `LastUsedDate` at all are
+       flagged only if their `CreateDate` is also older than 90 days
+       (otherwise they are recently created and not yet exercised,
+       which is not the same as stale). CloudTrail `LookupEvents`
+       corroborates this.
 
     3. external_exposure
        Does the principal's trust policy admit external accounts,

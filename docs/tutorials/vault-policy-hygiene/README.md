@@ -969,3 +969,8 @@ on `vault-readonly` change.
 
 Forward link: [vault-policy-least-privilege.md](vault-policy-least-privilege.md)
 (coming soon — sibling tutorial, not part of this PR).
+
+For a sibling tutorial that exercises the *within-provider* axis of
+discover-and-connect — same Forgejo + Goose + Warden plumbing, but
+the agent switches roles between calls within a single AWS provider
+mount — see [aws-access-hygiene](../aws-access-hygiene/README.md).
