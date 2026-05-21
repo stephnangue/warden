@@ -4,6 +4,33 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
+## [v0.13.2] — 2026-05-21
+
+### New Features
+
+- **Three new agent-facing provider skills wired into the registry.** Slack — URL pattern, bearer auth, POST-only convention, the `ok`-field error handling that Slack uses instead of HTTP status codes, body-parsing policies, static-token rotation (#215). Ansible Tower — registered behind a tightened slug-validation rule that now accepts underscores so `ansible_tower` validates (#219). Atlassian — one provider type covering Jira Cloud, Confluence Cloud v2, and Bitbucket Cloud, with the agent told to disambiguate via the operator-set mount description and the gotchas each product reliably trips on (Jira v3 ADF descriptions, Confluence v2 numeric `spaceId`, the `GET /search` → `POST /search/jql` deprecation, per-product pagination shapes) (#220). All three follow the existing seed-on-first-mount pattern.
+
+- **Opt-in cert-manager integration for the Helm chart's TLS listener.** Setting `tls.certManager.enabled=true` renders a `cert-manager.io/v1` `Certificate` that produces the Secret the StatefulSet already mounts. Defaults are production-leaning: ECDSA P-256 with `rotationPolicy: Always`, 90-day duration / 15-day `renewBefore`, dnsNames auto-derived from the API and headless Service names, and `usages: [server auth]` (plus client auth when `tls.requireClientCert=true`). The Issuer/ClusterIssuer must already exist — the chart deliberately does not render one. Existing `tls.existingSecret` installs are unaffected; preflight validation rejects setting both `tls.existingSecret` and `tls.certManager.enabled` at once, and rejects `certManager` enabled with an empty `issuerRef.name`. Chart version `0.1.1` → `0.2.0`. (#214)
+
+### Bug Fixes
+
+- **CLI sends JWTs only via `Authorization: Bearer`, never as `X-Warden-Token`.** When `WARDEN_TOKEN` held a JWT, the CLI was setting both headers. The server's transparent-auth gate only fires when `X-Warden-Token` is empty, so implicit JWT auth was being skipped for every `sys/*` call: the JWT was treated as a Warden session token, failed the token-store lookup, and left `sys/*` requests without an identity. Affected `warden role list`, `warden provider list`, and `warden skill read <name>` — i.e. every agent discovery call. Gateway URLs (`<mount>/role/<role>/gateway/...`) went through the streaming branch and were unaffected. The fix detects the `eyJ` JWT prefix, sets `Authorization`, and calls `client.ClearToken()` so `X-Warden-Token` is never sent. (#216)
+
+- **CI now runs the full check suite on release-tag pushes.** On a tag push, the tag sits on the same commit as `main`, so `dorny/paths-filter` computed `main...refs/tags/vX.Y.Z` as zero changed files and every filter returned false. `unit`, `helm-lint`, and `e2e` were then skipped via their `needs.changes.outputs.* == 'true'` gates — on the one ref where the full suite matters most. The `changes` job now force-emits `code=true` and `helm=true` for any ref under `refs/tags/*` before the filter runs. Non-tag pushes and pull requests keep the existing path-based gating intact. (#210)
+
+### Documentation
+
+- **Vault-policy-hygiene tutorial rewritten around the discover-and-connect model.** The mechanics are unchanged — a Goose agent audits OpenBao ACL policies, runs inference against an Anthropic-compatible LLM, and publishes the report to a Slack channel canvas, all under one Forgejo OIDC JWT — but the recipe now contains no URLs, role names, or channel IDs. The workflow exports three env vars (`WARDEN_ADDR`, `WARDEN_NAMESPACE`, `WARDEN_TOKEN`) plus an `ANTHROPIC_HOST`; the agent then asks Warden which roles its JWT can assume, which upstreams are mounted, picks the right combination for each step by reading operator-set descriptions, and fetches each upstream's skill for the exact call shape. (#218)
+
+- **Skill catalog refinements driven by the tutorial rewrite.** `discovery.md` documents the `mount_url` no-re-prefix contract (with the failing-URL example agents tend to construct, `/v1/<ns>/<ns>/<mount>/...`) and adds an "If a call fails" recovery section with one-line summaries per error code, short-circuiting the runaway-retry loop. The Vault skill teaches "use whichever of `vault` or `bao` is on PATH" with a probe snippet, since some environments install one and some the other (both honour `VAULT_*` env vars). The Slack skill ships a full worked example for publishing a channel canvas. (#217)
+
+- **Kubernetes deployment guide gains a Cleanup section.** Three concrete teardown flows: `helm uninstall` and what it does and does not delete (the chart owns its rendered objects; the namespace, operator-managed Secrets, and PostgreSQL are deliberately outside that scope so a reinstall picks the cluster back up without re-running `sys/init`); dev cleanup for the kind quickstart; production cleanup as a per-resource decision table calling out the data-loss risk of deleting the Transit unseal key or seal token without rekeying first. Also documents `helm rollback` as the way to undo a chart upgrade without touching state. (#211)
+
+### Dependencies
+
+- `azure/setup-helm` 4 → 5 in CI workflows. (#212)
+- `github.com/aws/aws-sdk-go-v2/service/redshift` 1.62.7 → 1.62.8. (#213)
+
 ## [v0.13.1] — 2026-05-18
 
 ### Bug Fixes

@@ -24,7 +24,7 @@ This is the first in a series. A planned follow-up covers an audit-log-driven
 plumbing (and the same `tutorial/` namespace) built here.
 
 Versions pinned in this tutorial: OpenBao **2.5.3**, Forgejo **15.x**,
-Forgejo Runner **12.8.0**, Goose **1.32.0**, Warden **0.13.1**. Forgejo
+Forgejo Runner **12.8.0**, Goose **1.32.0**, Warden **0.13.2**. Forgejo
 15+ and Runner 12.5+ are required for the per-job OIDC token feature
 this tutorial relies on. The JWKS path discovery in section 3 will
 handle Forgejo version drift within the 15.x line automatically.

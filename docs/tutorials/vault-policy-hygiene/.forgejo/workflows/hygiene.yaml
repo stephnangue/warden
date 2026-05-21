@@ -51,7 +51,7 @@ jobs:
           # Warden CLI — the agent uses this for the discovery loop
           # (warden role list / provider list / skill read).
           curl --retry 3 --retry-delay 5 -fsSL \
-            "https://github.com/stephnangue/warden/releases/download/v0.13.1/warden_0.13.1_linux_${ARCH}.tar.gz" \
+            "https://github.com/stephnangue/warden/releases/download/v0.13.2/warden_0.13.2_linux_${ARCH}.tar.gz" \
             | tar xz -C /usr/local/bin warden
 
       - name: Mint Warden JWT from Forgejo OIDC
