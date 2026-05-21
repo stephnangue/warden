@@ -27,17 +27,23 @@
 #   - aws-out/creds.env populated by aws-init.sh.
 #
 # Usage:
-#   ./warden-init.sh
-#   ./warden-init.sh --slack-token=xoxb-... \
+#   ./warden-init.sh --anthropic-key=sk-...
+#   ./warden-init.sh --anthropic-key=sk-... \
+#                    --slack-token=xoxb-... \
 #                    --slack-channel-id=C0XXXXXXX \
 #                    --slack-channel-name='#access-audits' \
 #                    --repo=siteowner/aws-access-hygiene
+#
+# --anthropic-key is required (the LLM key Warden hands to Goose at
+# runtime; it never enters the agent's environment). It can also be
+# passed via the ANTHROPIC_API_KEY env var.
 #
 # --slack-token is optional; without it the Slack provider/role/spec
 # are skipped (the agent will fail the canvas post but Goose's audit
 # still produces Security Hub findings).
 set -euo pipefail
 
+ANTHROPIC_KEY="${ANTHROPIC_API_KEY:-}"
 SLACK_TOKEN="${SLACK_TOKEN:-}"
 SLACK_CHANNEL_ID="${SLACK_CHANNEL_ID:-}"
 SLACK_CHANNEL_NAME="${SLACK_CHANNEL_NAME:-}"
@@ -45,6 +51,7 @@ REPO="siteowner/aws-access-hygiene"
 
 for arg in "$@"; do
   case $arg in
+    --anthropic-key=*)       ANTHROPIC_KEY="${arg#--anthropic-key=}" ;;
     --slack-token=*)         SLACK_TOKEN="${arg#--slack-token=}" ;;
     --slack-channel-id=*)    SLACK_CHANNEL_ID="${arg#--slack-channel-id=}" ;;
     --slack-channel-name=*)  SLACK_CHANNEL_NAME="${arg#--slack-channel-name=}" ;;
@@ -52,6 +59,12 @@ for arg in "$@"; do
     *) echo "unknown arg: $arg" >&2; exit 1 ;;
   esac
 done
+
+if [ -z "$ANTHROPIC_KEY" ]; then
+  echo "ERROR: pass --anthropic-key=sk-... or set ANTHROPIC_API_KEY" >&2
+  echo "       (this is the LLM key Warden hands to Goose at runtime; never enters the agent env)" >&2
+  exit 1
+fi
 
 if [ -n "$SLACK_TOKEN" ] && { [ -z "$SLACK_CHANNEL_ID" ] || [ -z "$SLACK_CHANNEL_NAME" ]; }; then
   echo "ERROR: --slack-token requires --slack-channel-id=C... and --slack-channel-name=#..." >&2
@@ -117,7 +130,7 @@ $WARDEN write auth/jwt/role/discovery-baseline \
 # here: it is only consulted by the S3 processors for virtual-hosted
 # bucket URL rewriting, and this tutorial uses no S3 calls.
 $WARDEN provider enable --type=aws \
-    --description="AWS sandbox account proxied via the warden-aws-tutorial-broker IAM user — five lenses for IAM/CloudTrail/AccessAnalyzer/PolicySimulator/SecurityHub" \
+    --description="AWS sandbox account ${WARDEN_AWS_ACCOUNT_ID} proxied via the warden-aws-tutorial-broker IAM user — five lenses for IAM/CloudTrail/AccessAnalyzer/PolicySimulator/SecurityHub" \
     aws 2>/dev/null || true
 $WARDEN write aws/config \
     auto_auth_path=auth/jwt/
@@ -238,7 +251,46 @@ path "aws/gateway/*" { capabilities = ["read", "create", "list"] }
 EOF
 $WARDEN policy write aws-gateway-access /tmp/aws-tut-aws-gateway-access.hcl
 
-# 5e. Slack provider (optional).
+# 5e. Anthropic provider — Goose's LLM leg.
+#
+# Goose's Anthropic SDK is configured by the runtime (ANTHROPIC_HOST +
+# ANTHROPIC_API_KEY=<JWT>) before the agent process starts. This is
+# not part of the agent's discovery loop — it's wired in for the
+# Goose runtime itself. The role is marked "Internal" so an agent
+# does not pick it for a task.
+$WARDEN provider enable --type=anthropic \
+    --description="Anthropic-compatible LLM endpoint (default: DeepSeek). Internal — used by Goose runtime, not chosen by agents." \
+    anthropic 2>/dev/null || true
+$WARDEN write anthropic/config \
+    anthropic_url=https://api.deepseek.com/anthropic \
+    auto_auth_path=auth/jwt/ \
+    timeout=120s
+
+$WARDEN cred spec delete -f anthropic-ops 2>/dev/null || true
+$WARDEN cred source delete -f anthropic-src 2>/dev/null || true
+$WARDEN cred source create anthropic-src --type=apikey \
+    --rotation-period=0 \
+    --config=api_url=https://api.deepseek.com \
+    --config=verify_endpoint=/v1/models \
+    --config=auth_header_type=custom_header \
+    --config=auth_header_name=x-api-key \
+    --config=extra_headers=anthropic-version:2023-06-01
+$WARDEN cred spec create anthropic-ops --source anthropic-src \
+    --config api_key="$ANTHROPIC_KEY"
+
+$WARDEN write auth/jwt/role/anthropic-ops \
+    description="LLM inference for the access-hygiene auditor agent. Used internally by Goose — agents do not call this role directly." \
+    bound_claims="$BOUND_CLAIMS_FULL" \
+    cred_spec_name=anthropic-ops \
+    token_policies=anthropic-ops
+
+cat > /tmp/aws-tut-anthropic-ops.hcl <<'EOF'
+path "anthropic/role/anthropic-ops/gateway/v1/messages" { capabilities = ["create"] }
+path "anthropic/role/anthropic-ops/gateway/v1/models"   { capabilities = ["read"] }
+EOF
+$WARDEN policy write anthropic-ops /tmp/aws-tut-anthropic-ops.hcl
+
+# 5f. Slack provider (optional).
 if [ -n "$SLACK_TOKEN" ]; then
   $WARDEN provider enable --type=slack \
       --description="Slack workspace for access-audit canvas reports — channel embedded in the hygiene-poster role description" \
