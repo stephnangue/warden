@@ -1,7 +1,5 @@
 # AWS Access Hygiene Audit with Goose, the AWS CLI, and Warden
 
-> **Status:** runnable end-to-end (operator setup + the Goose recipe + the Forgejo Actions workflow). The conceptual narrative for §6 and the audit-log walkthrough for §10 arrive in the next PR.
-
 This tutorial stands up an AI agent that audits a sandbox AWS account's IAM
 through **four read-only lenses** — inventory, recent usage, external
 exposure, effective access — and publishes findings to Security Hub and a
@@ -390,9 +388,12 @@ What it provisions, in order:
    ```
 7. **Five active AWS Warden roles**, each bound to one spec. Role
    descriptions are dense and operator-set — the agent reads them
-   verbatim from `warden role list` and matches each one to a lens by
-   what data it can access, what region's resources it covers (for
-   regional services), and what it is *not* for. The call-shape
+   verbatim from `warden role list` and matches each one to a lens
+   by what data it can access, which **AWS account** the assumed IAM
+   role lives in, what region's resources it covers (for regional
+   services), and what it is *not* for. Account binding lives at the
+   role layer (since the credential spec's `role_arn` is what binds
+   to a specific account), not at the provider layer. The call-shape
    contract (env vars, URL pattern) is *not* in the role description
    — it lives in the AWS provider's skill (`warden skill read aws`):
    - **`iam-reader`** — read-only IAM inventory (global service)
@@ -516,7 +517,114 @@ appear within a few minutes of seeding; the analyzer was created in
 
 ## 6. The within-provider dimension: per-call role selection
 
-*(arrives in PR 4 — the conceptual narrative covering role-as-deterministic-intent, hallucination containment, and the read/write split)*
+The companion tutorial [vault-policy-hygiene](../vault-policy-hygiene/README.md)
+shows the agent picking *one role per provider* — a Vault role for
+the audit, a Slack role for delivery. That's the *across* axis of
+discover-and-connect. This tutorial demonstrates the *within* axis:
+the agent picks a different role for every call against the **same**
+AWS provider, with the audit log recording each switch.
+
+The framing that makes the design legible:
+
+### Role as deterministic intent
+
+A Warden role on this tutorial's AWS provider does double duty:
+
+- *Identity-side*: it names a credential spec; when the role is
+  used, Warden assumes a specific IAM role at AWS via
+  `sts:AssumeRole` and resigns the call.
+- *Agent-side*: it is the agent's **declaration of intent** at the
+  moment of every call. Setting `AWS_ACCESS_KEY_ID=iam-reader` is
+  the agent saying "I am about to do an IAM inventory read." Short,
+  categorical, machine-readable; the audit log records it as
+  `auth.role_name`.
+
+The agent's reasoning is probabilistic — every LLM step is a sample
+from a distribution shaped by context, prior turns, and prompt
+structure. The role declaration is the **deterministic projection**
+of that reasoning into a categorical handle that crosses the
+LLM↔system boundary. Once the declaration is made, everything
+downstream is deterministic:
+
+1. Warden looks up the spec bound to that role.
+2. The spec assumes a specific IAM role at AWS via `sts:AssumeRole`.
+3. AWS evaluates the assumed role's permission policy against the
+   requested action.
+4. Allow/deny is fully determined by (role, action). No inference,
+   no probability.
+
+### Benefits
+
+- **Verified intent.** Declaration is not self-assertion: AWS
+  enforces what the declared role's IAM policy permits. Claimed
+  intent the agent isn't entitled to → `AccessDenied`. Intent that
+  matches policy → call goes through. The agent cannot bluff its way
+  past the boundary.
+
+- **Observable intent, per call.** Every audit-log line carries
+  `auth.role_name`. *"What did this agent do under
+  `securityhub-writer` intent?"* is one query. Without an intent
+  layer you'd reason from API paths back to intent — an ambiguous
+  mapping for any provider exposing many operations.
+
+- **Mismatch is the primary anomaly signal — and it covers
+  hallucination, not just adversarial cases.** LLMs hallucinate
+  routinely: a Goose agent reasoning through a multi-step audit can
+  type the wrong API verb (`DeleteRole` instead of `GetRole`),
+  confuse two service names, drift in its mental model of which
+  phase it is in, or invoke a previous step's tool inappropriately.
+  None of this requires a malicious user — it's the ambient cost of
+  LLM-driven workflows. With per-call role binding, the declared
+  intent and the call shape have to agree at AWS; any mismatch is
+  denied. A `securityhub:BatchImportFindings` call attempted under
+  `iam-reader` intent fails because `tutorial-iam-reader-role` has
+  zero `securityhub:*` grant. Wrong-verb, wrong-service, and
+  phase-confusion hallucinations all collapse into the same
+  outcome: a denied call, observable in both Warden's audit log and
+  CloudTrail, with the declared intent right there as the anomaly
+  signature. The same mechanism handles adversarial cases (prompt
+  injection trying to coerce a write during a read phase), but the
+  security-positive frame for this design is everyday LLM behavior,
+  not threat modeling.
+
+- **Operator-side vocabulary.** Operators define the set of intents
+  the system supports (Warden roles + their specs + their
+  descriptions). The agent can only declare intents that exist; it
+  cannot invent new ones at runtime. Adding an operation means
+  adding a role.
+
+- **Compositional auditability.** A workflow run is a sequence of
+  declared intents. The legitimate shape for this audit is `read,
+  read, read, read, write, deliver`. Anything else — a write during
+  a read phase, an unexpected intent, a repeat of one that already
+  ran — is structurally detectable without needing to know which
+  API path goes with which intent.
+
+- **Decouples LLM probabilism from system enforcement.** Even when
+  the model is wrong, the system's response to a declared intent is
+  sharp. The boundary is robust to model behavior in a way that
+  pure self-reported logs (e.g., "I'm now in the publish phase")
+  are not.
+
+### Concrete shape in this tutorial
+
+The audit decomposes into read lenses (inventory, recent usage,
+external exposure, effective access) and a publication step (post
+each finding to Security Hub via `BatchImportFindings`). Each phase
+requires a different Warden role. The four read roles' specs assume
+IAM roles with no write permissions at all; the publication role's
+spec assumes an IAM role whose only AWS-side grant is
+`securityhub:BatchImportFindings`. The shift between phases is
+observable in two places: Warden's audit log records the
+`auth.role_name` change at the moment the agent swaps
+`AWS_ACCESS_KEY_ID`, and CloudTrail records a new assumed-role
+identity. Both signals are available for alerting on phase-violation
+patterns or on hallucination patterns (e.g., `BatchImportFindings`
+attempted under any non-writer role).
+
+The control lives at the AssumeRole chain, not at Warden's policy
+layer (which for the AWS gateway can only enforce path-level
+access — see §5). §10 walks the audit log of a real run.
 
 ## 7. How Goose discovers Warden
 
@@ -562,10 +670,15 @@ The agent's loop, per `docs/agent-flow.md`:
    warden provider list -o json -F type,description,mount_url
    ```
    Returns `aws` and (optionally) `slack` mounts. The AWS provider's
-   description embeds the audited **account ID** (set by `warden-init.sh`
-   from `WARDEN_AWS_ACCOUNT_ID`); the Slack role description embeds
-   the channel ID and name. The agent reads both straight from the
-   discovery output — no env var carries either, by design.
+   description identifies the broker user in front of the gateway
+   and the lens menu it offers, but **does not name the account** —
+   account binding lives at the role layer, since each role's
+   credential spec targets a specific IAM role ARN that carries the
+   account. Each AWS role description names its target AWS account
+   (and, for regional services, the region). The Slack role
+   description embeds the channel ID and name. The agent reads all
+   of these straight from discovery output — no env var carries any
+   of them, by design.
 
 4. **Fetch the provider skill for each provider it will use.**
    ```bash
@@ -679,9 +792,277 @@ On any exit (success or failure) the workflow uploads
 artifact — recoverable for inspection even if the Security Hub
 publish or Slack canvas delivery fails on the last step.
 
----
+## 10. Run it: push, watch, inspect
 
-> The remaining sections — the within-provider role-switching
-> narrative (§6, expanded), the audit-log walkthrough (§10), and
-> production / cleanup / next steps (§11–13) — arrive in the
-> follow-up PR.
+```bash
+cd aws-access-hygiene/                          # the repo cloned from local Forgejo
+cp /path/to/access-hygiene.yaml .
+mkdir -p .forgejo/workflows
+cp /path/to/access-audit.yaml .forgejo/workflows/
+git add .
+git commit -m "AWS access hygiene audit recipe"
+git push origin main
+```
+
+Open `http://forgejo.local:3000/siteowner/aws-access-hygiene/actions`
+and watch the `access-audit` workflow. The pre-flight step prints
+the JSON the agent will see — roles, providers, head of the AWS
+skill — so you can verify discovery works before the LLM run
+begins.
+
+When the workflow finishes, the findings live in three places:
+
+- **Security Hub** in the audited account's chosen region —
+  ```bash
+  aws securityhub get-findings \
+      --filters '{"GeneratorId":[{"Value":"warden-tutorial/access-hygiene","Comparison":"EQUALS"}]}'
+  ```
+  surfaces just what this audit emitted (filtering by the
+  `GeneratorId` the recipe sets).
+- **Slack** — the canvas posted to the channel in
+  `hygiene-poster`'s description (if Slack delivery was wired up in
+  §5).
+- **Forgejo Actions artifacts** — `findings.json` (the ASFF JSON the
+  agent built) and `canvas.md` (the markdown source for the canvas).
+
+Expected output against the five seeded targets from §5d (real
+sandboxes will surface more findings on top — anything the agent
+finds in the wild is fair game):
+
+- `tutorial-target-clean-role` — no finding emitted.
+- `tutorial-target-wildcard-role` — severity `CRITICAL`, flagged by
+  `inventory` (wildcard `iam:*` on `*`) **and** by `effective_access`
+  (simulator returns `allowed` for `iam:DeleteRole` and other
+  delete-style actions — the recipe's critical rule fires whenever
+  `effective_access` flags a delete-style or `AssumeRole` action).
+- `tutorial-target-stale-role` — **no finding in a fresh sandbox.**
+  Its `LastUsedDate` is null because it was never assumed, but its
+  `CreateDate` is also recent, so the `recent_usage` lens correctly
+  treats it as "too new to call stale." In a production sandbox
+  with roles older than 90 days, this is where the lens would
+  differentiate genuinely stale roles from newly-created ones.
+- `tutorial-target-external-trust-role` — severity `MEDIUM`, flagged
+  by `external_exposure` (Access Analyzer flagged the cross-account
+  trust). May take a few minutes after `seed-aws.sh` ran for the
+  Access Analyzer finding to materialize.
+- `tutorial-target-under-described-role` — severity `CRITICAL`,
+  flagged by `effective_access` (simulator returns `allowed` for
+  `s3:DeleteObject`, a delete-style action, which the role's
+  declared description ("read-only S3 bucket inventory") doesn't
+  imply).
+
+The decoy roles (`iam-admin`, `securityhub-admin`,
+`account-root-bridge`, `alert-poster`) must not appear in the agent's
+calls. They have no credential spec — invoking one fails at credential
+minting, which is also visible in the audit log.
+
+### Inspect the Warden audit trail
+
+Every request to Warden — discovery calls *and* gateway calls — is
+logged with the caller's resolved identity, the role under which it
+was made, the upstream URL, and the response status. Tail it after
+the run:
+
+```bash
+# What roles did Warden resolve, and on which paths?
+jq -r 'select(.type=="request") |
+       [.auth.role_name // "-", .request.path] | @tsv' \
+  warden-audit.log | sort -u
+```
+
+Expect six clusters of calls, in roughly this temporal order:
+
+1. **Discovery** — `sys/introspect/roles`, `sys/providers`,
+   `sys/skills/foundation`, `sys/skills/discovery`,
+   `sys/skills/aws`, `sys/skills/slack` — all with
+   `auth.role_name = discovery-baseline`. The `default_role`
+   fallback firing: the URL had no role segment, so Warden resolved
+   the JWT against the auth method's default.
+2. **AWS — inventory lens** — `aws/gateway` calls with
+   `auth.role_name = iam-reader` (or whatever the operator named
+   that role). The agent declared `iam-reader` intent.
+3. **AWS — recent-usage lens** —  `aws/gateway` calls with
+   `auth.role_name = cloudtrail-reader`.
+4. **AWS — external-exposure lens** — `aws/gateway` calls with
+   `auth.role_name = access-analyzer-reader`.
+5. **AWS — effective-access lens** — `aws/gateway` calls with
+   `auth.role_name = policy-simulator-runner`.
+6. **AWS — publish** + **Slack — deliver** — `aws/gateway` with
+   `auth.role_name = securityhub-writer` (exactly one call:
+   `BatchImportFindings`), then `slack/role/hygiene-poster/gateway/...`
+   for the canvas. Plus Anthropic gateway calls with
+   `auth.role_name = anthropic-ops` interleaved through the whole run
+   (the LLM round-trips).
+
+A one-liner to confirm decoys never authorized a call:
+
+```bash
+jq -r 'select(.type=="request") | .auth.role_name // empty' \
+  warden-audit.log | sort -u
+# Expected:
+#   anthropic-ops
+#   discovery-baseline
+#   iam-reader
+#   cloudtrail-reader
+#   access-analyzer-reader
+#   policy-simulator-runner
+#   securityhub-writer
+#   hygiene-poster        (only if Slack was wired up)
+```
+
+If `iam-admin`, `securityhub-admin`, `account-root-bridge`, or
+`alert-poster` shows up there, the agent picked a role by name or
+provider type rather than by description — the recipe needs
+tightening or the role descriptions need to be more discriminating.
+
+### Per-call assumed identity at AWS
+
+Warden re-signs every AWS call with the assumed IAM role's temporary
+credentials. Inspecting the SigV4 trail:
+
+```bash
+jq -r 'select(.type=="request" and (.request.path | startswith("aws/gateway"))) |
+       [.auth.role_name, .response.status, .upstream.signing_principal // "-"] | @tsv' \
+  warden-audit.log | sort -u
+```
+
+You should see `iam-reader` → `tutorial-iam-reader-role` assumed
+ARN, `cloudtrail-reader` → `tutorial-cloudtrail-reader-role`, and so
+on — each Warden role paired with its AWS-side assumed role.
+
+### Negative test — simulate a hallucinated write
+
+Try any Security Hub call (read or write) with
+`AWS_ACCESS_KEY_ID=iam-reader` instead of `securityhub-writer`.
+The assumed IAM role `tutorial-iam-reader-role` has no
+`securityhub:*` grant, so the call is denied at AWS regardless of
+the verb:
+
+```bash
+export AWS_ENDPOINT_URL="$WARDEN_ADDR/v1/tutorial-aws/aws/gateway"
+export AWS_ACCESS_KEY_ID="iam-reader"
+export AWS_SECRET_ACCESS_KEY="$WARDEN_JWT"
+export AWS_SESSION_TOKEN="$WARDEN_JWT"
+export AWS_REGION="us-east-1"
+
+aws securityhub describe-hub
+# An error occurred (AccessDeniedException) when calling the
+# DescribeHub operation: User: arn:aws:sts::<account>:assumed-role/tutorial-iam-reader-role/...
+# is not authorized to perform: securityhub:DescribeHub
+```
+
+A hallucinated `BatchImportFindings` during a read phase produces
+the same denial (`securityhub:BatchImportFindings` is just another
+`securityhub:*` action the assumed role lacks). Warden
+authenticates the call and forwards — path-level policy permits the
+gateway path; Warden cannot see it's a Security Hub call. AWS
+enforces the boundary. The denial appears in Warden's audit log
+under `auth.role_name = iam-reader` on a securityhub-shaped path —
+the anomaly signature you'd alert on in production. The mechanism
+catches hallucinated writes during read phases without anything
+state-changing reaching AWS.
+
+## 11. Moving to production
+
+The same Warden setup works against any OIDC-capable forge or
+CI — GitHub Actions, GitLab, Jenkins with the OIDC plugin,
+CircleCI, Buildkite. The change set is small:
+
+1. **Repoint Warden at the production OIDC issuer.** Discover URLs
+   from the issuer's `/.well-known/openid-configuration`, then update
+   `auth/jwt/config` in the production namespace.
+2. **Update `bound_claims` on each role** to the production repo /
+   org. Claim names vary slightly across issuers (Forgejo uses
+   `repository`, GitHub Actions uses `repository` + `workflow_ref`,
+   GitLab uses `project_path`).
+3. **Update the workflow's `audience`** to match the new
+   `default_audience`, and `WARDEN_ADDR` + `WARDEN_NAMESPACE` to the
+   production values.
+4. **Re-run `aws-init.sh` and `warden-init.sh` against the production
+   account and namespace.** The broker IAM user and the five
+   narrowly-scoped IAM roles get created in the production account;
+   Warden gets a new source + five new AssumeRole specs.
+
+That's it. The recipe is unchanged, the Goose code path is
+unchanged, and the per-provider skills are unchanged — the entire
+delta is operator-side configuration. Production inherits the full
+audit trail: every request in Warden's log carries the CI's run
+provenance (repo, branch, workflow ref, job id, actor).
+
+Three operational adjustments worth making explicit in production:
+
+- The broker IAM user's static keys are the longest-lived secret in
+  the chain. Rotate them on a schedule via `aws-init.sh --rotate-key`
+  and re-run `warden-init.sh` to update the source. The assumed-role
+  temporary credentials Warden mints per call are short-lived (1 h
+  by default) and need no rotation.
+- Rotate the LLM API key (DeepSeek or Anthropic) by updating the
+  Anthropic spec in Warden. The CI job is unaffected — it still
+  authenticates with its JWT.
+- Replace the default file audit device with a socket or syslog one
+  to ship to a SIEM (Splunk, Elastic, Datadog). The audit log is
+  where phase-violation alerts live.
+
+## 12. Cleanup
+
+When you're done experimenting, tear the dev stack down:
+
+```bash
+# From the directory where you ran docker compose
+docker compose down -v          # stop containers + drop named volumes (forgejo-data)
+rm -rf aws-out runner-config    # local artefacts: broker keys + runner registration
+```
+
+Stop Warden (`Ctrl-C` in its shell — `--dev` mode is in-memory, so
+nothing to clean up on disk besides the audit log), and optionally
+remove the host mapping:
+
+```bash
+sudo sed -i '' '/forgejo.local/d' /etc/hosts   # macOS
+# sudo sed -i '/forgejo.local/d' /etc/hosts    # Linux
+```
+
+The AWS sandbox side has its own cleanup. Remove the seeded audit
+targets and (optionally) the broker + lens IAM roles:
+
+```bash
+./seed-aws.sh --teardown                         # the five audit-target roles
+# Manual: delete the broker IAM user, its access keys, its policy,
+# and the five tutorial-*-role IAM roles. Or use a CloudFormation
+# stack if you prefer one-shot teardown.
+
+# Optional: turn off Security Hub and Access Analyzer if you
+# enabled them just for the tutorial.
+aws securityhub disable-security-hub
+aws accessanalyzer delete-analyzer --analyzer-name tutorial-analyzer
+```
+
+To rerun from a clean slate, just `docker compose up -d forgejo &&
+docker compose up forgejo-init && ./aws-init.sh && warden-init.sh --anthropic-key=...`
+again — every script in the tutorial is idempotent.
+
+## 13. What's next
+
+This tutorial's agent does access-hygiene auditing through four
+lenses scoped to IAM and the services with first-class IAM
+integration (CloudTrail, Access Analyzer, Security Hub). The same
+within-provider role-switching pattern extends naturally:
+
+- **KMS key-policy hygiene** — add `kms-policy-reader` and
+  `kms-grant-reader` lenses to audit key trust boundaries and
+  in-flight grants. Useful for accounts where KMS protects data at
+  rest across many services.
+- **S3 bucket-policy hygiene** — add `s3-policy-reader` and
+  `s3-acl-reader` lenses to find public-by-accident buckets or
+  overly broad `Principal: *` grants. Pairs well with the
+  `external_exposure` lens.
+- **Multi-account audit** — bind a single Warden namespace to a
+  broker user in the audit/security tooling account that holds
+  cross-account `sts:AssumeRole` rights into N target accounts. The
+  recipe stays unchanged; only the spec count grows.
+
+A separate follow-up — not a tutorial but a methodology piece —
+will compare this CLI-driven pattern with off-the-shelf MCP
+servers, since the within-provider role-switching mechanic is
+structurally hard for an MCP-launched-with-one-role server to
+preserve.

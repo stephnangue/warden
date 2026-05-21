@@ -4,6 +4,12 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- **AWS access hygiene tutorial added.** End-to-end demo of the *within-provider* dimension of discover-and-connect: a Goose agent audits IAM in a sandbox AWS account through four read-only lenses (inventory, recent usage, external exposure, effective access), publishes findings to Security Hub as ASFF, and posts a summary canvas to Slack — switching Warden roles between calls within a single AWS mount, with each role assuming a distinct narrowly-scoped IAM role via STS. Warden holds only the broker IAM user's static keys; the agent declares per-call intent via `AWS_ACCESS_KEY_ID`, and the audit log records each declared intent as `auth.role_name`. A hallucinated cross-role write — e.g. `BatchImportFindings` under the `iam-reader` intent — is denied at AWS by the assumed role's narrow IAM policy, not by Warden's gateway policy, and surfaces as an anomaly signature in the audit log. Tutorial ships as a four-script setup (`aws-init.sh`, `warden-init.sh`, `seed-aws.sh`, plus a Forgejo Actions workflow that runs Goose under a per-job OIDC JWT) with a thirteen-section README covering the operator setup, the discovery loop, the lens-based recipe, and a `jq`-driven audit-log walkthrough including a negative test. (#222, #223, #225, this PR)
+
+- **Root-README enterprise-control-plane bullets reworked.** Replaced "Discovery" with "Per-call least privilege" (the actual headline benefit — the agent picks a different role for every call). Renamed "Compromise-resilient" → "Compromise containment" with the WHY now upfront (Warden holds the upstream credentials, the agent never does). Added "Hallucination containment" between Audit and Compromise containment to cover the ambient-LLM-mistake case the original list didn't. Dropped "Self-describing capabilities" — its load-bearing claim (no SDK rebuild) is implicit in the per-call framing. (#224)
+
 ## [v0.13.2] — 2026-05-21
 
 ### New Features

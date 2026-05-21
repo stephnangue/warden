@@ -130,7 +130,7 @@ $WARDEN write auth/jwt/role/discovery-baseline \
 # here: it is only consulted by the S3 processors for virtual-hosted
 # bucket URL rewriting, and this tutorial uses no S3 calls.
 $WARDEN provider enable --type=aws \
-    --description="AWS sandbox account ${WARDEN_AWS_ACCOUNT_ID} proxied via the warden-aws-tutorial-broker IAM user — five lenses for IAM/CloudTrail/AccessAnalyzer/PolicySimulator/SecurityHub" \
+    --description="AWS gateway proxied via the warden-aws-tutorial-broker IAM user — five lenses across IAM, CloudTrail, Access Analyzer, IAM Policy Simulator, and Security Hub. Each role's description names the AWS account its assumed IAM role lives in." \
     aws 2>/dev/null || true
 $WARDEN write aws/config \
     auto_auth_path=auth/jwt/
@@ -185,31 +185,31 @@ $WARDEN cred spec create securityhub-writer-spec --source demo-aws-source \
 # for. The call-shape contract (env vars, URL pattern) lives in the AWS
 # provider skill (warden skill read aws), not here.
 $WARDEN write auth/jwt/role/iam-reader \
-    description="Read-only IAM inventory: list roles, users, groups; read attached/inline policy documents, trust policies, and last-accessed data. IAM is a global service — applies account-wide. Not for STS AssumeRole into other accounts, not for IAM writes, not for CloudTrail or Access Analyzer." \
+    description="Read-only IAM inventory in AWS account ${WARDEN_AWS_ACCOUNT_ID}: list roles, users, groups; read attached/inline policy documents, trust policies, and last-accessed data. IAM is a global service — applies account-wide. Not for STS AssumeRole into other accounts, not for IAM writes, not for CloudTrail or Access Analyzer." \
     bound_claims="$BOUND_CLAIMS_FULL" \
     cred_spec_name=iam-reader-spec \
     token_policies=aws-gateway-access
 
 $WARDEN write auth/jwt/role/cloudtrail-reader \
-    description="Read CloudTrail management-event history via LookupEvents in region ${WARDEN_AWS_REGION}. Not for trail configuration, not for data events, not for IAM data or Access Analyzer. Use when correlating IAM principals with actual API usage windows." \
+    description="Read CloudTrail management-event history via LookupEvents in AWS account ${WARDEN_AWS_ACCOUNT_ID}, region ${WARDEN_AWS_REGION}. Not for trail configuration, not for data events, not for IAM data or Access Analyzer. Use when correlating IAM principals with actual API usage windows." \
     bound_claims="$BOUND_CLAIMS_FULL" \
     cred_spec_name=cloudtrail-reader-spec \
     token_policies=aws-gateway-access
 
 $WARDEN write auth/jwt/role/access-analyzer-reader \
-    description="Read IAM Access Analyzer external-trust findings (ListAnalyzers, ListFindings) in region ${WARDEN_AWS_REGION}. Not for archiving or resolving findings, not for analyzer configuration. Use when surfacing trust policies that allow external accounts or anonymous principals." \
+    description="Read IAM Access Analyzer external-trust findings (ListAnalyzers, ListFindings) in AWS account ${WARDEN_AWS_ACCOUNT_ID}, region ${WARDEN_AWS_REGION}. Not for archiving or resolving findings, not for analyzer configuration. Use when surfacing trust policies that allow external accounts or anonymous principals." \
     bound_claims="$BOUND_CLAIMS_FULL" \
     cred_spec_name=access-analyzer-reader-spec \
     token_policies=aws-gateway-access
 
 $WARDEN write auth/jwt/role/policy-simulator-runner \
-    description="Run IAM policy simulator (SimulatePrincipalPolicy) — read-only dry-run of effective access. IAM simulator is a global service — applies account-wide. Not for IAM data inventory or for live calls; use only to verify what a principal could do, not what it has done." \
+    description="Run IAM policy simulator (SimulatePrincipalPolicy) in AWS account ${WARDEN_AWS_ACCOUNT_ID} — read-only dry-run of effective access. IAM simulator is a global service — applies account-wide. Not for IAM data inventory or for live calls; use only to verify what a principal could do, not what it has done." \
     bound_claims="$BOUND_CLAIMS_FULL" \
     cred_spec_name=policy-simulator-spec \
     token_policies=aws-gateway-access
 
 $WARDEN write auth/jwt/role/securityhub-writer \
-    description="Write structured findings into AWS Security Hub via BatchImportFindings in region ${WARDEN_AWS_REGION}. Cannot read findings, cannot disable controls, cannot delete; ingest only. Use only after audit analysis is complete and findings are formatted to ASFF. Not for read-side audit work." \
+    description="Write structured findings into AWS Security Hub via BatchImportFindings in AWS account ${WARDEN_AWS_ACCOUNT_ID}, region ${WARDEN_AWS_REGION}. Cannot read findings, cannot disable controls, cannot delete; ingest only. Use only after audit analysis is complete and findings are formatted to ASFF. Not for read-side audit work." \
     bound_claims="$BOUND_CLAIMS_FULL" \
     cred_spec_name=securityhub-writer-spec \
     token_policies=aws-gateway-access
