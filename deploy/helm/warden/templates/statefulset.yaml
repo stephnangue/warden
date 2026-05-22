@@ -76,19 +76,11 @@ spec:
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          # Warden's default audit device writes the relative path
-          # "warden-audit.log", which resolves against the container's
-          # working directory. The distroless image sets WORKDIR=/app,
-          # which is read-only when readOnlyRootFilesystem=true.
-          # Run from /tmp (writable emptyDir) so init can create the
-          # default audit log. The explicit command sidesteps the
-          # image's relative-path ENTRYPOINT (./warden), which would
-          # otherwise fail once we change the working directory.
-          workingDir: /tmp
-          command:
-            - /app/warden
+          # Override the image's default --config (single file) with
+          # --config-dir so the chart-rendered ConfigMap can ship more
+          # than one HCL file if needed. The image ENTRYPOINT supplies
+          # `./warden server`.
           args:
-            - server
             - --config-dir
             - /config
           ports:
@@ -160,6 +152,14 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            # Bootstrap audit device defaults to /var/log/warden/audit.log.
+            # With readOnlyRootFilesystem=true, that path needs an explicit
+            # writable mount or init falls back to skip-with-warning and
+            # the cluster comes up without a default audit device.
+            # Swap this emptyDir for a PVC if you need persistent audit
+            # logs across pod restarts.
+            - name: audit
+              mountPath: /var/log/warden
             {{- if eq .Values.seal.type "static" }}
             - name: seal
               mountPath: /seal
@@ -173,6 +173,8 @@ spec:
           secret:
             secretName: {{ include "warden.tlsSecretName" . }}
         - name: tmp
+          emptyDir: {}
+        - name: audit
           emptyDir: {}
         {{- if eq .Values.seal.type "static" }}
         - name: seal

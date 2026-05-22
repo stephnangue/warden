@@ -1,10 +1,14 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -548,6 +552,92 @@ func TestEnableDisableAudit_Concurrent(t *testing.T) {
 
 	// Verify all audits are removed
 	assert.Nil(t, core.audit.Entries)
+}
+
+func TestLoadAuditsDefaultDevice(t *testing.T) {
+	t.Run("default constant is the documented absolute path", func(t *testing.T) {
+		assert.Equal(t, "/var/log/warden/audit.log", defaultAuditFilePath)
+		assert.Equal(t, "WARDEN_DEFAULT_AUDIT_PATH", envDefaultAuditPath)
+	})
+
+	t.Run("env var override is honoured and the audit file is created", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		auditPath := filepath.Join(tmpDir, "audit.log")
+		t.Setenv(envDefaultAuditPath, auditPath)
+
+		core := newCoreForLoadAuditsTest(t, nil)
+		ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+		require.NoError(t, core.loadAudits(ctx))
+
+		require.Len(t, core.audit.Entries, 1, "exactly one default entry should be registered")
+		assert.Equal(t, auditPath, core.audit.Entries[0].Config["file_path"])
+		assert.Equal(t, "file/", core.audit.Entries[0].Path)
+
+		info, err := os.Stat(auditPath)
+		require.NoError(t, err, "audit file must exist on disk")
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+
+		stored, err := core.barrier.Get(ctx, coreAuditConfigPath)
+		require.NoError(t, err)
+		require.NotNil(t, stored, "audit table should be persisted")
+	})
+
+	t.Run("unwritable path skips with warning instead of failing unseal", func(t *testing.T) {
+		// Place the audit path under a regular file so MkdirAll inside
+		// NewFileSink returns ENOTDIR — portable across macOS and Linux,
+		// no root or special FS required.
+		tmpDir := t.TempDir()
+		blocker := filepath.Join(tmpDir, "blocker")
+		require.NoError(t, os.WriteFile(blocker, []byte("not a dir"), 0o600))
+		unwritable := filepath.Join(blocker, "audit.log")
+		t.Setenv(envDefaultAuditPath, unwritable)
+
+		var logBuf bytes.Buffer
+		core := newCoreForLoadAuditsTest(t, &logBuf)
+		ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+		// loadAudits must NOT return an error here: a returned error fails
+		// unseal and leaves the barrier initialized-but-corrupted without
+		// exposing the root token.
+		require.NoError(t, core.loadAudits(ctx))
+
+		assert.Empty(t, core.audit.Entries, "no default device should be registered")
+
+		stored, err := core.barrier.Get(ctx, coreAuditConfigPath)
+		require.NoError(t, err)
+		assert.Nil(t, stored, "audit table should not be persisted")
+
+		assert.Contains(t, logBuf.String(), "continuing without default audit",
+			"should log a warning explaining why no default audit was registered")
+	})
+}
+
+// newCoreForLoadAuditsTest builds a real-barrier Core wired with the real
+// file audit factory so loadAudits' default-creation branch can be exercised
+// end-to-end. If logSink is non-nil, the core's logger is rewired to write
+// there so the test can assert on warning output.
+func newCoreForLoadAuditsTest(t *testing.T, logSink io.Writer) *Core {
+	t.Helper()
+
+	core := createTestCore(t)
+
+	if logSink != nil {
+		cfg := logger.DefaultConfig()
+		cfg.Outputs = []io.Writer{logSink}
+		core.logger, _ = logger.NewGatedLogger(cfg, logger.GatedWriterConfig{
+			Underlying:   logSink,
+			InitialState: logger.GateOpen,
+		})
+	}
+
+	core.audit = NewMountTable()
+	fileFactory := &audit.FileDeviceFactory{}
+	_ = fileFactory.Initialize(core.logger)
+	core.auditDevices = map[string]audit.Factory{
+		"file": fileFactory,
+	}
+	return core
 }
 
 // =============================================================================

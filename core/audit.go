@@ -4,12 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/openbao/openbao/sdk/v2/helper/jsonutil"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
@@ -25,6 +25,18 @@ const (
 	// auditBarrierPrefix is the prefix to the UUID used in the
 	// barrier view for the audit backends.
 	auditBarrierPrefix = "audit/"
+
+	// defaultAuditFilePath is where the bootstrap-created file audit device
+	// writes when no audit table is found in storage. Operators can override
+	// by setting envDefaultAuditPath before first unseal.
+	defaultAuditFilePath = "/var/log/warden/audit.log"
+
+	// envDefaultAuditPath overrides defaultAuditFilePath at runtime.
+	envDefaultAuditPath = "WARDEN_DEFAULT_AUDIT_PATH"
+
+	// defaultAuditRemediation is appended to skip-with-warning messages so
+	// the operator sees the fix without having to grep source.
+	defaultAuditRemediation = "set WARDEN_DEFAULT_AUDIT_PATH to a writable path or enable an audit device explicitly via sys/audit/{path}"
 )
 
 // generateAuditHMACSalt generates a cryptographically secure random salt for HMAC operations.
@@ -96,13 +108,18 @@ func (c *Core) loadAudits(ctx context.Context) error {
 		return fmt.Errorf("failed to generate HMAC salt for default audit device: %w", err)
 	}
 
+	auditPath := defaultAuditFilePath
+	if v := api.ReadWardenVariable(envDefaultAuditPath); v != "" {
+		auditPath = v
+	}
+
 	defaultEntry := &MountEntry{
 		Class:       mountClassAudit,
 		Type:        "file",
 		Path:        "file/",
 		Description: "default file audit device",
 		Config: map[string]any{
-			"file_path": "warden-audit.log",
+			"file_path": auditPath,
 			"hmac_key":  salt,
 		},
 	}
@@ -118,19 +135,35 @@ func (c *Core) loadAudits(ctx context.Context) error {
 	}
 	defaultEntry.Accessor = accessor
 
-	// Create the backend
+	// Create the backend. If this fails (e.g. /var/log/warden/ unwritable on a
+	// hardened or read-only-rootfs deployment), skip-with-warning rather than
+	// failing unseal — the operator can EnableAudit an explicit device later
+	// without contending with a half-registered default.
 	backend, err := c.newAuditBackend(ctx, defaultEntry)
 	if err != nil {
-		return fmt.Errorf("failed to create default audit backend: %w", err)
+		c.logger.Warn("default audit device could not be created; continuing without default audit",
+			logger.String("path", auditPath),
+			logger.String("remediation", defaultAuditRemediation),
+			logger.Err(err),
+		)
+		return nil
 	}
 	if backend == nil {
-		return errors.New("nil backend returned for default audit device")
+		c.logger.Warn("nil backend returned for default audit device; continuing without default audit",
+			logger.String("path", auditPath),
+			logger.String("remediation", defaultAuditRemediation),
+		)
+		return nil
 	}
 
 	// Test the device
 	if err := backend.LogTestRequest(ctx); err != nil {
-		c.logger.Error("default audit backend failed test", logger.Err(err))
-		return fmt.Errorf("default audit device failed test: %w", err)
+		c.logger.Warn("default audit backend failed write test; continuing without default audit",
+			logger.String("path", auditPath),
+			logger.String("remediation", defaultAuditRemediation),
+			logger.Err(err),
+		)
+		return nil
 	}
 
 	// Add to table and register
