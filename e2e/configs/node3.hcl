@@ -30,3 +30,10 @@ listener "tcp" {
     tls_require_client_cert = false
     trusted_proxies         = ["127.0.0.1/32", "172.16.0.0/12", "192.168.0.0/16"]
 }
+
+audit "file" "default" {
+  description = "e2e node 3 file audit"
+  options = {
+    file_path = "../.logs/node3-audit.log"
+  }
+}

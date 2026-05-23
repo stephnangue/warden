@@ -2,7 +2,7 @@ apiVersion: v2
 name: warden
 description: Identity-aware egress proxy for AI agents — Helm chart for Kubernetes deployments.
 type: application
-version: 0.2.0
+version: 0.3.0
 appVersion: "0.13.2"
 kubeVersion: ">=1.27.0-0"
 home: https://github.com/stephnangue/warden

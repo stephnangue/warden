@@ -793,22 +793,45 @@ func createCoreConfig(logger *log.GatedLogger, conf *config.Config, backend phy.
 	clusterAddr := conf.ClusterAddr
 
 	coreConfig := &core.CoreConfig{
-		RawConfig:          conf,
-		Physical:           backend,
-		RedirectAddr:       conf.APIAddr,
-		ClusterAddr:        clusterAddr,
-		StorageType:        conf.Storage.Type,
-		HAPhysical:         haPhysical,
-		Seal:               barrierSeal,
-		UnwrapSeal:         unwrapSeal,
-		AuditDevices:       auditDevices,
-		Providers:          providers,
-		ProviderSkills:     providerSkills,
-		AuthMethods:        authMethods,
-		Logger:             logger,
-		SecureRandomReader: secureRandomReader,
+		RawConfig:              conf,
+		Physical:               backend,
+		RedirectAddr:           conf.APIAddr,
+		ClusterAddr:            clusterAddr,
+		StorageType:            conf.Storage.Type,
+		HAPhysical:             haPhysical,
+		Seal:                   barrierSeal,
+		UnwrapSeal:             unwrapSeal,
+		AuditDevices:           auditDevices,
+		DeclarativeAuditDevices: auditConfigToMountEntries(conf.Audits),
+		Providers:              providers,
+		ProviderSkills:         providerSkills,
+		AuthMethods:            authMethods,
+		Logger:                 logger,
+		SecureRandomReader:     secureRandomReader,
 	}
 	return *coreConfig
+}
+
+// auditConfigToMountEntries translates HCL audit blocks into the MountEntry
+// shape Core operates on. Accessor, namespace, and per-device defaults
+// (HMAC salt) are filled in by Core.loadAudits — this function only does
+// the mechanical translation.
+func auditConfigToMountEntries(blocks []config.AuditBlock) []*core.MountEntry {
+	if len(blocks) == 0 {
+		return nil
+	}
+	out := make([]*core.MountEntry, 0, len(blocks))
+	for i := range blocks {
+		b := &blocks[i]
+		out = append(out, &core.MountEntry{
+			Type:        b.Type,
+			Path:        b.Path,
+			Description: b.Description,
+			Config:      b.Config(),
+			Declarative: true,
+		})
+	}
+	return out
 }
 
 func runUnseal(cmdContext context.Context, c *core.Core, ctx context.Context) {

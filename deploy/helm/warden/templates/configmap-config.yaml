@@ -35,8 +35,24 @@ data:
       tls_require_client_cert = {{ .Values.tls.requireClientCert }}
     }
 
+  {{- if .Values.audit.enabled }}
+  10-audit.hcl: |
+    # AuditBlock.Options is map[string]string today, so only string-valued
+    # options can be declared here. Operators wanting non-default rotation
+    # knobs (rotate_size, rotate_daily, max_backups) should enable via the
+    # sys/audit/{path} API instead, which accepts typed values.
+    audit {{ .Values.audit.type | quote }} {{ .Values.audit.name | quote }} {
+      {{- with .Values.audit.description }}
+      description = {{ . | quote }}
+      {{- end }}
+      options = {
+        file_path = {{ .Values.audit.filePath | quote }}
+      }
+    }
+  {{- end }}
+
   {{- if eq .Values.seal.type "transit" }}
-  10-seal.hcl: |
+  20-seal.hcl: |
     seal "transit" {
       address    = {{ .Values.seal.transit.address | quote }}
       token      = "{{`{{ env "WARDEN_SEAL_TOKEN" }}`}}"
@@ -47,7 +63,7 @@ data:
       {{- end }}
     }
   {{- else if eq .Values.seal.type "static" }}
-  10-seal.hcl: |
+  20-seal.hcl: |
     seal "static" {
       {{- with .Values.seal.static.keyId }}
       current_key_id = {{ . | quote }}

@@ -239,10 +239,12 @@ In a new shell:
 warden server --dev --dev-root-token=dev-warden-root
 ```
 
-Dev mode persists everything to an ephemeral in-memory store and writes
-an audit log to `warden-audit.log` in the current directory — convenient
-for the demo and disposable. For the admin shell that runs the wiring
-script in §5, export:
+Dev mode persists everything to an ephemeral in-memory store. The
+`warden-init.sh` wiring script in §5 enables a file audit device at
+`./warden-audit.log` as its first step — convenient for the demo and
+disposable. (Dev mode itself ships zero audit; the broker fail-opens at
+zero so the cluster runs unaudited until the script enables one.) For
+the admin shell that runs the wiring script in §5, export:
 
 ```bash
 export WARDEN_ADDR=http://127.0.0.1:8400

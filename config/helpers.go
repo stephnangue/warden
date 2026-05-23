@@ -38,6 +38,9 @@ func mergeConfig(dst, src *Config) {
 	if len(src.Seals) > 0 {
 		dst.Seals = src.Seals
 	}
+	if len(src.Audits) > 0 {
+		dst.Audits = src.Audits
+	}
 	if src.APIAddr != "" {
 		dst.APIAddr = src.APIAddr
 	}

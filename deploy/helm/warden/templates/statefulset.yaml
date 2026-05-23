@@ -76,19 +76,11 @@ spec:
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          # Warden's default audit device writes the relative path
-          # "warden-audit.log", which resolves against the container's
-          # working directory. The distroless image sets WORKDIR=/app,
-          # which is read-only when readOnlyRootFilesystem=true.
-          # Run from /tmp (writable emptyDir) so init can create the
-          # default audit log. The explicit command sidesteps the
-          # image's relative-path ENTRYPOINT (./warden), which would
-          # otherwise fail once we change the working directory.
-          workingDir: /tmp
-          command:
-            - /app/warden
+          # Override the image's default --config (single file) with
+          # --config-dir so the chart-rendered ConfigMap can ship multiple
+          # HCL files (base, audit, seal). The image's ENTRYPOINT supplies
+          # `./warden server`; we only need to extend the args.
           args:
-            - server
             - --config-dir
             - /config
           ports:
@@ -160,6 +152,13 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.audit.enabled }}
+            # Writable mount backing the chart-rendered audit "file" block.
+            # Swap this emptyDir for a PVC if you need audit logs to
+            # survive pod restarts.
+            - name: audit
+              mountPath: /var/log/warden
+            {{- end }}
             {{- if eq .Values.seal.type "static" }}
             - name: seal
               mountPath: /seal
@@ -174,6 +173,10 @@ spec:
             secretName: {{ include "warden.tlsSecretName" . }}
         - name: tmp
           emptyDir: {}
+        {{- if .Values.audit.enabled }}
+        - name: audit
+          emptyDir: {}
+        {{- end }}
         {{- if eq .Values.seal.type "static" }}
         - name: seal
           secret:

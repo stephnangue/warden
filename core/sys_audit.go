@@ -409,25 +409,20 @@ func (b *SystemBackend) handleAuditRead(ctx context.Context, req *logical.Reques
 		"description": entry.Description,
 		"accessor":    entry.Accessor,
 		"config":      config,
+		"declarative": entry.Declarative,
 	}), nil
 }
 
-// handleAuditDelete handles DELETE /sys/audit/{path}
+// handleAuditDelete handles DELETE /sys/audit/{path}.
+// No last-device guard: the broker fail-opens at zero registered devices,
+// so an operator who disables the last device intentionally enters the
+// bootstrap state (unaudited, but able to re-enable via sys/audit/{path}).
+// HCL-declared devices are still protected — Core.DisableAudit rejects
+// those with the "owned by an HCL audit declaration" error.
 func (b *SystemBackend) handleAuditDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	path := d.Get("path").(string)
 
 	b.logger.Info("disabling audit device", logger.String("path", path))
-
-	// CRITICAL SAFETY CHECK: Prevent disabling the last audit device
-	// This enforces fail-closed audit compliance
-	b.core.auditLock.RLock()
-	deviceCount := len(b.core.audit.Entries)
-	b.core.auditLock.RUnlock()
-
-	if deviceCount <= 1 {
-		return logical.ErrorResponse(logical.ErrBadRequest(
-			"cannot disable the last audit device: Warden requires at least one audit device to operate (fail-closed mode)")), nil
-	}
 
 	// Disable via Core
 	_, err := b.core.DisableAudit(ctx, path, true)
@@ -463,6 +458,7 @@ func (b *SystemBackend) handleAuditList(ctx context.Context, req *logical.Reques
 			"description": entry.Description,
 			"accessor":    entry.Accessor,
 			"config":      config,
+			"declarative": entry.Declarative,
 		}
 	}
 

@@ -42,7 +42,6 @@ $DOCKER_COMPOSE -f "$SCRIPT_DIR/docker-compose.yml" down -v 2>/dev/null || true
 echo ""
 echo "Cleaning up generated files..."
 rm -f "$SCRIPT_DIR/configs/seal.key"
-rm -f "$SCRIPT_DIR/configs/warden-audit.log"
 rm -f "$SCRIPT_DIR/.root_token"
 rm -f "$SCRIPT_DIR/.logs"/*.log
 rm -rf "$SCRIPT_DIR/loadbalancer/certs"

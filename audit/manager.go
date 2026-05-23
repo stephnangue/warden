@@ -128,14 +128,19 @@ func (m *manager) LogResponse(ctx context.Context, entry *LogEntry) (bool, error
 	return m.logToDevices(ctx, entry, false)
 }
 
-// logToDevices is a shared implementation for logging to all enabled devices
-// Returns (continue, error) where continue is true if at least one device succeeded
+// logToDevices is a shared implementation for logging to all enabled devices.
+// Returns (continue, error) where continue is true if at least one device
+// succeeded — OR if no devices are registered at all. The zero-devices
+// case fails open so a freshly-installed cluster can serve sys/audit/{path}
+// long enough for the operator to bootstrap one. Once any device is
+// registered the broker becomes fail-closed (at least one device must
+// succeed per request).
 func (m *manager) logToDevices(ctx context.Context, entry *LogEntry, isRequest bool) (bool, error) {
 	// Get enabled devices with minimal lock time
 	m.mu.RLock()
 	if len(m.devices) == 0 {
 		m.mu.RUnlock()
-		return false, nil
+		return true, nil
 	}
 
 	devices := make([]Device, 0, len(m.devices))
@@ -147,6 +152,10 @@ func (m *manager) logToDevices(ctx context.Context, entry *LogEntry, isRequest b
 	}
 	m.mu.RUnlock()
 
+	// Devices are registered but all currently disabled. Treat as
+	// fail-closed (the operator explicitly disabled them; we should
+	// not pretend audit happened). Distinct from the zero-registered
+	// case above, which fails open for bootstrap.
 	if len(devices) == 0 {
 		return false, nil
 	}

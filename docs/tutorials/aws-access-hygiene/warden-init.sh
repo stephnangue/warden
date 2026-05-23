@@ -81,6 +81,14 @@ WARDEN="${WARDEN:-warden}"
 command -v "$WARDEN" >/dev/null 2>&1 || { [ -x ./warden ] && WARDEN=./warden; } \
   || { echo "ERROR: warden binary not found. Set WARDEN=/path/to/warden" >&2; exit 1; }
 
+# Bootstrap a file audit device. The dev server ships zero audit by
+# default — the broker fail-opens at zero, so the cluster runs unaudited
+# until we enable one. §10 of the README tails this file to verify
+# per-call role attribution; without this step the file never exists.
+if ! "$WARDEN" audit list 2>/dev/null | grep -q "^audit-default/"; then
+  "$WARDEN" audit enable --type=file --file-path=./warden-audit.log audit-default
+fi
+
 BOUND_CLAIMS_FULL=$(printf '{"repository":"%s","ref":"refs/heads/main","ref_type":"branch"}' "$REPO")
 BOUND_CLAIMS_REPO=$(printf '{"repository":"%s"}' "$REPO")
 

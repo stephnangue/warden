@@ -154,6 +154,10 @@ func TestManagerSingleDeviceOptimization(t *testing.T) {
 }
 
 func TestManagerEmptyDevices(t *testing.T) {
+	// Fail-open at zero devices: the broker should return (true, nil)
+	// so the request handler doesn't block traffic on a cluster with no
+	// configured audit. Operators can then bootstrap their first audit
+	// device via sys/audit/{path} on a freshly-installed cluster.
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	manager := NewAuditManager(log)
 	defer manager.Close()
@@ -170,21 +174,20 @@ func TestManagerEmptyDevices(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Should handle empty device list gracefully
 	continued, err := manager.LogRequest(ctx, entry)
 	if err != nil {
 		t.Errorf("LogRequest with no devices should not error: %v", err)
 	}
-	if continued {
-		t.Error("Expected continue=false with no devices but got true")
+	if !continued {
+		t.Error("Expected continue=true with no devices (fail-open) but got false")
 	}
 
 	continued, err = manager.LogResponse(ctx, entry)
 	if err != nil {
 		t.Errorf("LogResponse with no devices should not error: %v", err)
 	}
-	if continued {
-		t.Error("Expected continue=false with no devices but got true")
+	if !continued {
+		t.Error("Expected continue=true with no devices (fail-open) but got false")
 	}
 }
 

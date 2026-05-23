@@ -53,7 +53,6 @@ echo "Cleaning up local state..."
 rm -f "$SCRIPT_DIR/.root_token"
 rm -f "$SCRIPT_DIR/.logs"/*.log
 rm -f "$SCRIPT_DIR/configs/seal.key"
-rm -f "$SCRIPT_DIR/configs/warden-audit.log"
 
 echo ""
 echo "Full reset complete. Run 'bash e2e/setup.sh' to start fresh."
