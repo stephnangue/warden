@@ -553,10 +553,10 @@ kubectl -n warden get pods
 kubectl -n warden get endpoints warden
 # Should list all pod IPs.
 
-# Verify exactly one pod reports is_self=true:
+# Verify exactly one pod reports is_leader=true:
 for i in 0 1 2; do
   kubectl -n warden exec warden-$i -- \
-    curl -sk https://localhost:8400/v1/sys/leader | grep -o '"is_self":[a-z]*'
+    curl -sk https://localhost:8400/v1/sys/leader | grep -o '"is_leader":[a-z]*'
 done
 ```
 

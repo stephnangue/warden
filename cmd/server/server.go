@@ -85,6 +85,17 @@ const (
 	listenerTypeUnix = "unix"
 )
 
+// buildVersion is the binary version surfaced in /v1/sys/health. Set by
+// cmd/warden.SetVersion before the server starts so the value flows into
+// http.HandlerProperties below.
+var buildVersion string
+
+// SetBuildVersion records the binary version for inclusion in the health
+// response. Called from cmd.SetVersion.
+func SetBuildVersion(v string) {
+	buildVersion = v
+}
+
 var (
 	configPath string
 	configDir  string
@@ -420,6 +431,7 @@ func run(cmd *cobra.Command, args []string) error {
 	httpHandler := wardenhttp.Handler(&wardenhttp.HandlerProperties{
 		Core:                 newCore,
 		Logger:               logger,
+		Version:              buildVersion,
 		ClusterTLSConfigFunc: newCore.ClusterTLSConfig,
 		ForwardingTimeout:    newCore.ClusterConfig().ForwardingTimeout,
 	})

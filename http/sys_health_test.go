@@ -172,7 +172,12 @@ func TestHealthResponse_JSON(t *testing.T) {
 		Initialized:   true,
 		Sealed:        false,
 		Standby:       false,
-		ServerTimeUTC: 1234567890,
+		HAEnabled:     true,
+		IsLeader:      true,
+		LeaderAddress: "https://leader:8200",
+		ActiveTime:    "2026-05-22T18:03:11Z",
+		Version:       "0.4.2",
+		ServerTime:    "2026-05-23T14:34:22Z",
 	}
 
 	data, err := json.Marshal(resp)
@@ -185,13 +190,40 @@ func TestHealthResponse_JSON(t *testing.T) {
 	assert.Equal(t, resp.Initialized, decoded.Initialized)
 	assert.Equal(t, resp.Sealed, decoded.Sealed)
 	assert.Equal(t, resp.Standby, decoded.Standby)
-	assert.Equal(t, resp.ServerTimeUTC, decoded.ServerTimeUTC)
+	assert.Equal(t, resp.HAEnabled, decoded.HAEnabled)
+	assert.Equal(t, resp.IsLeader, decoded.IsLeader)
+	assert.Equal(t, resp.LeaderAddress, decoded.LeaderAddress)
+	assert.Equal(t, resp.ActiveTime, decoded.ActiveTime)
+	assert.Equal(t, resp.Version, decoded.Version)
+	assert.Equal(t, resp.ServerTime, decoded.ServerTime)
+}
+
+func TestHealthResponse_OmitsEmptyHAFields(t *testing.T) {
+	resp := &HealthResponse{
+		Initialized: true,
+		Sealed:      false,
+		Standby:     false,
+		HAEnabled:   false,
+		ServerTime:  "2026-05-23T14:34:22Z",
+	}
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+	s := string(data)
+	// is_leader is NOT omitempty: a standby legitimately reports
+	// `"is_leader": false`, and dropping false would collapse "standby with
+	// HA on" and "no HA at all" into the same JSON shape. Always emit.
+	assert.Contains(t, s, `"is_leader":false`)
+	assert.NotContains(t, s, "leader_address")
+	assert.NotContains(t, s, "active_time")
+	assert.NotContains(t, s, "version")
+	assert.Contains(t, s, `"ha_enabled":false`)
+	assert.Contains(t, s, `"server_time":"2026-05-23T14:34:22Z"`)
 }
 
 func TestLeaderResponse_JSON(t *testing.T) {
 	resp := LeaderResponse{
 		HAEnabled:     true,
-		IsSelf:        true,
+		IsLeader:      true,
 		LeaderAddress: "https://leader:8200",
 		ActiveTime:    "2026-01-01T00:00:00Z",
 	}
@@ -207,7 +239,7 @@ func TestLeaderResponse_JSON(t *testing.T) {
 func TestLeaderResponse_OmitsEmptyActiveTime(t *testing.T) {
 	resp := LeaderResponse{
 		HAEnabled:     true,
-		IsSelf:        false,
+		IsLeader:      false,
 		LeaderAddress: "https://leader:8200",
 	}
 
@@ -273,7 +305,7 @@ func createTestCoreForHTTP(t *testing.T) (*core.Core, *logger.GatedLogger) {
 
 func TestHandleSysHealth_SealedNode(t *testing.T) {
 	c, log := createTestCoreForHTTP(t)
-	handler := handleSysHealth(c, log)
+	handler := handleSysHealth(c, log, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/sys/health", nil)
 	w := httptest.NewRecorder()
@@ -291,7 +323,7 @@ func TestHandleSysHealth_SealedNode(t *testing.T) {
 
 func TestHandleSysHealth_MethodNotAllowed(t *testing.T) {
 	c, log := createTestCoreForHTTP(t)
-	handler := handleSysHealth(c, log)
+	handler := handleSysHealth(c, log, "")
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/sys/health", nil)
 	w := httptest.NewRecorder()
@@ -302,7 +334,7 @@ func TestHandleSysHealth_MethodNotAllowed(t *testing.T) {
 
 func TestHandleSysHealth_HEAD(t *testing.T) {
 	c, log := createTestCoreForHTTP(t)
-	handler := handleSysHealth(c, log)
+	handler := handleSysHealth(c, log, "")
 
 	req := httptest.NewRequest(http.MethodHead, "/v1/sys/health", nil)
 	w := httptest.NewRecorder()
@@ -315,7 +347,7 @@ func TestHandleSysHealth_HEAD(t *testing.T) {
 
 func TestHandleSysHealth_WithOverrides(t *testing.T) {
 	c, log := createTestCoreForHTTP(t)
-	handler := handleSysHealth(c, log)
+	handler := handleSysHealth(c, log, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/sys/health?uninitcode=200", nil)
 	w := httptest.NewRecorder()
@@ -474,7 +506,7 @@ func TestHandleSysHealth_InitializedButSealed(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// Now test health - should return 503 (sealed)
-	healthHandler := handleSysHealth(c, log)
+	healthHandler := handleSysHealth(c, log, "")
 	req2 := httptest.NewRequest(http.MethodGet, "/v1/sys/health", nil)
 	w2 := httptest.NewRecorder()
 	healthHandler.ServeHTTP(w2, req2)
@@ -543,7 +575,7 @@ func TestHandleSysLeader_AfterInit(t *testing.T) {
 
 func TestHandleSysHealth_SealedCode(t *testing.T) {
 	c, log := createTestCoreForHTTP(t)
-	handler := handleSysHealth(c, log)
+	handler := handleSysHealth(c, log, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/sys/health?sealedcode=200", nil)
 	w := httptest.NewRecorder()

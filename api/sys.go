@@ -164,6 +164,49 @@ func (c *Sys) InitWithRequestAndContext(ctx context.Context, initReq *InitReques
 	return initResp, nil
 }
 
+// HealthResponse mirrors the server's /v1/sys/health JSON shape. StatusCode is
+// lifted from the HTTP response and is not part of the wire body — callers
+// can use it to distinguish active (200) / standby (429) / sealed (503) /
+// uninitialized (501) without re-deriving from Sealed/Initialized flags.
+type HealthResponse struct {
+	Initialized   bool   `json:"initialized"`
+	Sealed        bool   `json:"sealed"`
+	Standby       bool   `json:"standby"`
+	HAEnabled     bool   `json:"ha_enabled"`
+	IsLeader      bool   `json:"is_leader"`
+	LeaderAddress string `json:"leader_address,omitempty"`
+	ActiveTime    string `json:"active_time,omitempty"`
+	Version       string `json:"version,omitempty"`
+	ServerTime    string `json:"server_time"`
+	StatusCode    int    `json:"-"`
+}
+
+// Health queries /v1/sys/health.
+func (c *Sys) Health() (*HealthResponse, error) {
+	return c.HealthWithContext(context.Background())
+}
+
+// HealthWithContext queries /v1/sys/health with a caller-supplied context.
+// 429/501/503 are not errors here — they are decoded into the response just
+// like 200, so callers can render sealed/standby/uninitialized states uniformly.
+func (c *Sys) HealthWithContext(ctx context.Context) (*HealthResponse, error) {
+	ctx, cancel := c.c.withConfiguredTimeout(ctx)
+	defer cancel()
+
+	r := c.c.NewRequest(http.MethodGet, "/v1/sys/health")
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	out := &HealthResponse{StatusCode: resp.StatusCode}
+	if err := resp.DecodeJSON(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RevokeRootToken revokes the current root token.
 func (c *Sys) RevokeRootToken() error {
 	return c.RevokeRootTokenWithContext(context.Background())

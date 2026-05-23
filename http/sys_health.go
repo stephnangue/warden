@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -11,11 +12,21 @@ import (
 )
 
 // HealthResponse represents the response from the health endpoint.
+//
+// Fields beyond {initialized, sealed, standby, server_time} are populated
+// when the corresponding feature is available: ha_enabled/is_leader/
+// leader_address/active_time come from the HA backend, version from the
+// build-time version passed in via HandlerProperties.
 type HealthResponse struct {
-	Initialized   bool  `json:"initialized"`
-	Sealed        bool  `json:"sealed"`
-	Standby       bool  `json:"standby"`
-	ServerTimeUTC int64 `json:"server_time_utc"`
+	Initialized   bool   `json:"initialized"`
+	Sealed        bool   `json:"sealed"`
+	Standby       bool   `json:"standby"`
+	HAEnabled     bool   `json:"ha_enabled"`
+	IsLeader      bool   `json:"is_leader"`
+	LeaderAddress string `json:"leader_address,omitempty"`
+	ActiveTime    string `json:"active_time,omitempty"`
+	Version       string `json:"version,omitempty"`
+	ServerTime    string `json:"server_time"`
 }
 
 // handleSysHealth returns an HTTP handler for the /v1/sys/health endpoint.
@@ -24,7 +35,7 @@ type HealthResponse struct {
 //   - 429: standby node (unsealed but not active)
 //   - 501: not initialized
 //   - 503: sealed
-func handleSysHealth(c *core.Core, log *logger.GatedLogger) http.Handler {
+func handleSysHealth(c *core.Core, log *logger.GatedLogger, version string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			respondError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -58,10 +69,28 @@ func handleSysHealth(c *core.Core, log *logger.GatedLogger) http.Handler {
 		}
 
 		resp := &HealthResponse{
-			Initialized:   initialized,
-			Sealed:        sealed,
-			Standby:       standby,
-			ServerTimeUTC: time.Now().UTC().Unix(),
+			Initialized: initialized,
+			Sealed:      sealed,
+			Standby:     standby,
+			HAEnabled:   c.HAEnabled(),
+			Version:     version,
+			ServerTime:  time.Now().UTC().Format(time.RFC3339),
+		}
+
+		// Leader lookup is only meaningful when HA is configured AND the node
+		// is unsealed. A sealed node's c.Leader() returns consts.ErrSealed,
+		// which we don't want to log on every k8s probe.
+		if resp.HAEnabled && !sealed {
+			isLeader, leaderAddr, _, err := c.Leader()
+			if err != nil && !errors.Is(err, core.ErrHANotEnabled) {
+				log.Warn("failed to read HA leader state for /sys/health", logger.Err(err))
+			} else if err == nil {
+				resp.IsLeader = isLeader
+				resp.LeaderAddress = leaderAddr
+				if isLeader {
+					resp.ActiveTime = c.ActiveTime().Format(time.RFC3339)
+				}
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")

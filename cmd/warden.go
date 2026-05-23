@@ -17,6 +17,7 @@ import (
 	"github.com/stephnangue/warden/cmd/schema"
 	"github.com/stephnangue/warden/cmd/server"
 	"github.com/stephnangue/warden/cmd/skills"
+	"github.com/stephnangue/warden/cmd/status"
 )
 
 var (
@@ -66,6 +67,7 @@ func init() {
 	wardenCmd.PersistentFlags().BoolVarP(helpers.DryRunFlagPtr(), "dry-run", "D", false, "Send X-Warden-Dry-Run on every request so the server validates without mutating. Honors WARDEN_DRY_RUN. Server enforcement is not yet shipped — see CHANGELOG.")
 
 	wardenCmd.AddCommand(server.ServerCmd)
+	wardenCmd.AddCommand(status.StatusCmd)
 	wardenCmd.AddCommand(operator.OperatorCmd)
 	wardenCmd.AddCommand(providers.ProvidersCmd)
 	wardenCmd.AddCommand(auth.AuthCmd)
@@ -83,10 +85,22 @@ func init() {
 	wardenCmd.AddCommand(basic.PathHelpCmd)
 }
 
+// serverVersion holds the binary's build version once SetVersion has been
+// called. It's read by cmd/server when constructing the HTTP handler so the
+// /v1/sys/health response can surface it.
+var serverVersion string
+
 // SetVersion sets the version string on the root command.
 // Called from main with the value injected via ldflags.
 func SetVersion(v string) {
 	wardenCmd.Version = v
+	serverVersion = v
+	server.SetBuildVersion(v)
+}
+
+// Version returns the build version previously set via SetVersion.
+func Version() string {
+	return serverVersion
 }
 
 // Namespace returns the currently configured namespace from the flag

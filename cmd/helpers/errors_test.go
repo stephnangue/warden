@@ -66,6 +66,7 @@ func TestClassify_Sentinels(t *testing.T) {
 		{"network", ErrNetwork, CodeNetwork, ExitNetwork},
 		{"server", ErrServer, CodeServer, ExitServer},
 		{"conflict", ErrConflict, CodeConflict, ExitConflict},
+		{"sealed", ErrSealed, CodeSealed, ExitSealed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -214,7 +215,7 @@ func TestHumanMessage_PrefersAPIErrorList(t *testing.T) {
 
 func TestDefaultHint_PerCategory(t *testing.T) {
 	// At minimum, the categories with non-empty defaults should produce text.
-	for _, code := range []ErrorCode{CodeAuth, CodeForbidden, CodeNetwork, CodeServer, CodeConflict, CodeUsage} {
+	for _, code := range []ErrorCode{CodeAuth, CodeForbidden, CodeNetwork, CodeServer, CodeConflict, CodeSealed, CodeUsage} {
 		if DefaultHint(code) == "" {
 			t.Errorf("DefaultHint(%q) returned empty; want non-empty hint", code)
 		}
