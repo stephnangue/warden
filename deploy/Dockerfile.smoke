@@ -1,0 +1,30 @@
+# Self-contained multi-stage build for the CI helm-smoke job.
+# Designed for `docker buildx build` on the GitHub ubuntu-latest
+# runner (16 GB RAM, buildx preinstalled). Local devs with smaller
+# Docker Desktop memory caps may OOM on the AWS SDK compile — see
+# ci/smoke.sh for the alternative host-build pattern.
+#
+# Base / WORKDIR / ENTRYPOINT match Dockerfile.goreleaser so the
+# chart exercises the same surface as the production image.
+FROM golang:1.26-bookworm AS build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -o /out/warden .
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+WORKDIR /app
+
+COPY --from=build /out/warden ./warden
+
+EXPOSE 8400
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["./warden", "server"]
+CMD ["--config", "/config/warden.hcl"]

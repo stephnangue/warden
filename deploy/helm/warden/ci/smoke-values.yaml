@@ -1,0 +1,42 @@
+# Helm value overrides for the helm-smoke CI job.
+# Combined with the secrets created by seal-key.sh and tls-cert.sh
+# alongside the postgres.yaml manifest in this directory, this should
+# bring a single-replica warden up against a real kind cluster.
+# Mirrors values-dev.yaml's shape (single replica, static seal, no
+# topology spread) but pins the image to the locally-built smoke tag.
+
+image:
+  repository: warden
+  tag: smoke
+  pullPolicy: Never        # kind load handles the image; never pull
+
+replicaCount: 1
+
+topologySpreadConstraints: []
+podDisruptionBudget:
+  enabled: false
+
+storage:
+  existingSecret: warden-postgres
+  haEnabled: "true"
+
+tls:
+  existingSecret: warden-tls
+
+seal:
+  type: static
+  static:
+    existingSecret: warden-seal
+    keyId: smoke-1
+    currentKeyKey: current_key
+
+# Smoke test asserts the chart-provisioned audit device is registered
+# with declarative=true and that its file lands at /var/log/warden/.
+# These are all chart defaults; restating here to make the smoke
+# contract explicit (the assertion in smoke.sh requires audit.enabled).
+audit:
+  enabled: true
+  type: file
+  name: default
+  description: chart-provisioned smoke-test audit
+  filePath: /var/log/warden/audit.log
