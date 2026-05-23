@@ -1,0 +1,77 @@
+# Ephemeral PostgreSQL for the helm-smoke CI job. Uses emptyDir
+# storage on purpose — every smoke run gets a fresh DB. Not for
+# production use; the chart's values.yaml deliberately positions
+# postgres as a BYO dependency.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: warden-postgres
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: warden-smoke
+type: Opaque
+stringData:
+  POSTGRES_USER: warden
+  POSTGRES_PASSWORD: smoke-password
+  POSTGRES_DB: warden
+  # Connection URL consumed by warden via WARDEN_POSTGRES_URL.
+  connection_url: postgres://warden:smoke-password@warden-postgres:5432/warden?sslmode=disable
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: warden-postgres
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: warden-smoke
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: warden-smoke
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: warden-postgres
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: warden-smoke
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+      app.kubernetes.io/part-of: warden-smoke
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/part-of: warden-smoke
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: warden-postgres
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "warden", "-d", "warden"]
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            timeoutSeconds: 2
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          emptyDir: {}
