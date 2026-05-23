@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -170,5 +171,64 @@ func TestResponse_Error_HealthStandby429(t *testing.T) {
 	}
 	if err := resp.Error(); err != nil {
 		t.Errorf("expected no error for 429 on health endpoint, got %v", err)
+	}
+}
+
+// /v1/sys/health is special-cased: 429/501/503 are legitimate operational
+// states (standby / uninitialized / sealed) and carry a JSON body the caller
+// wants to decode. Treat them as non-errors so Health() can return a populated
+// *HealthResponse.
+func TestResponse_Error_HealthAllowedStatusCodes(t *testing.T) {
+	for _, code := range []int{429, 501, 503} {
+		t.Run(fmt.Sprintf("code_%d", code), func(t *testing.T) {
+			url, _ := http.NewRequest("GET", "http://example.com/v1/sys/health", nil)
+			resp := &Response{
+				Response: &http.Response{
+					StatusCode: code,
+					Body:       io.NopCloser(strings.NewReader("")),
+					Request:    url,
+				},
+			}
+			if err := resp.Error(); err != nil {
+				t.Errorf("expected no error for %d on /v1/sys/health, got %v", code, err)
+			}
+		})
+	}
+}
+
+// The /v1/sys/health allow-list MUST be path-scoped. 429/501/503 on any other
+// URL is a real error (rate limit, not-implemented, service unavailable) and
+// must still surface as *ResponseError.
+func TestResponse_Error_NonHealthPathStillErrors(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		code int
+	}{
+		{"/v1/sys/seal-status", 429},
+		{"/v1/sys/init", 503},
+		{"/v1/providers/aws/config", 501},
+		{"/v1/sys/healthz", 429}, // close-but-not-the-same path: must NOT match
+	} {
+		t.Run(fmt.Sprintf("%s_%d", tc.path, tc.code), func(t *testing.T) {
+			url, _ := http.NewRequest("GET", "http://example.com"+tc.path, nil)
+			resp := &Response{
+				Response: &http.Response{
+					StatusCode: tc.code,
+					Body:       io.NopCloser(strings.NewReader(`{"errors":["nope"]}`)),
+					Request:    url,
+				},
+			}
+			err := resp.Error()
+			if err == nil {
+				t.Fatalf("expected error for %d on %s, got nil", tc.code, tc.path)
+			}
+			respErr, ok := err.(*ResponseError)
+			if !ok {
+				t.Fatalf("expected *ResponseError, got %T", err)
+			}
+			if respErr.StatusCode != tc.code {
+				t.Errorf("StatusCode = %d; want %d", respErr.StatusCode, tc.code)
+			}
+		})
 	}
 }

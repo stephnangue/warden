@@ -12,7 +12,7 @@ import (
 // LeaderResponse represents the response from the leader endpoint.
 type LeaderResponse struct {
 	HAEnabled     bool   `json:"ha_enabled"`
-	IsSelf        bool   `json:"is_self"`
+	IsLeader      bool   `json:"is_leader"`
 	LeaderAddress string `json:"leader_address"`
 	ActiveTime    string `json:"active_time,omitempty"`
 }
@@ -37,7 +37,7 @@ func handleSysLeader(c *core.Core, log *logger.GatedLogger) http.Handler {
 
 		resp := &LeaderResponse{
 			HAEnabled:     true,
-			IsSelf:        isLeader,
+			IsLeader:      isLeader,
 			LeaderAddress: leaderAddr,
 		}
 

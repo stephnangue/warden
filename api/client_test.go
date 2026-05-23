@@ -762,6 +762,42 @@ func TestDefaultRetryPolicy(t *testing.T) {
 			t.Error("expected retry to be false for 404 status")
 		}
 	})
+
+	// 429/501/503 on /v1/sys/health are deterministic operational states
+	// (standby / uninitialized / sealed). Retrying just delays the answer.
+	t.Run("does not retry health operational states", func(t *testing.T) {
+		for _, code := range []int{429, 501, 503} {
+			req, _ := http.NewRequest(http.MethodGet, "http://example.com/v1/sys/health", nil)
+			resp := &http.Response{
+				StatusCode: code,
+				Request:    req,
+			}
+			retry, err := DefaultRetryPolicy(ctx, resp, nil)
+			if err != nil {
+				t.Fatalf("unexpected error for code %d: %v", code, err)
+			}
+			if retry {
+				t.Errorf("expected retry=false for /v1/sys/health %d, got true", code)
+			}
+		}
+	})
+
+	// The health no-retry exemption MUST be path-scoped: 503 on a different
+	// URL still follows the default-policy (retry 5xx).
+	t.Run("503 on non-health path still retries", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodGet, "http://example.com/v1/sys/seal-status", nil)
+		resp := &http.Response{
+			StatusCode: 503,
+			Request:    req,
+		}
+		retry, err := DefaultRetryPolicy(ctx, resp, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !retry {
+			t.Error("expected retry=true for 503 on /v1/sys/seal-status, got false")
+		}
+	})
 }
 
 func TestClient_RawRequestWithContext(t *testing.T) {

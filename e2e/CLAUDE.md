@@ -84,7 +84,7 @@ You can also use raw `curl` commands for more control.
 | Method | Path | Response Codes |
 |--------|------|----------------|
 | GET | `/v1/sys/health` | 200=active, 429=standby, 503=sealed, 501=uninitialized |
-| GET | `/v1/sys/leader` | `{ha_enabled, is_self, leader_address, active_time}` |
+| GET | `/v1/sys/leader` | `{ha_enabled, is_leader, leader_address, active_time}` |
 | PUT | `/v1/sys/step-down` | Forces leadership step-down |
 | GET | `/v1/sys/seal-status` | Seal status |
 
@@ -211,7 +211,7 @@ Also report INFO-level findings for successful resilience observations worth not
 
 ### Category 7: Split-Brain Detection
 - After every failover, check ALL nodes' `/v1/sys/leader` response
-- Verify NEVER more than 1 node reports `is_self=true`
+- Verify NEVER more than 1 node reports `is_leader=true`
 - Check during rapid step-down cycles
 
 ### Category 8: CRUD During HA Events
@@ -244,7 +244,7 @@ Also report INFO-level findings for successful resilience observations worth not
 **HIGH severity** (report immediately):
 - Process crash or panic (check logs for `panic:`, `runtime error:`)
 - Data loss (resource existed but disappeared after failover)
-- Split-brain (two nodes both report `is_self=true`)
+- Split-brain (two nodes both report `is_leader=true`)
 - Request hangs indefinitely (>60s with no response)
 - Authentication bypass (request without token succeeds on protected endpoint)
 - Vault token leaked in error response or logs (check for `hvs.` tokens)

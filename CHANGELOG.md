@@ -6,6 +6,16 @@ All notable changes to Warden are documented in this file.
 
 ### New Features
 
+- **`warden status` subcommand.** New top-level CLI command that reports server health (initialized, sealed, standby, HA cluster role, leader address, active-since timestamp, server version) by wrapping `GET /v1/sys/health`. Honours the existing `--output table|json|ndjson|text` and `--fields` flags. Exit code is `0` on a healthy unsealed node (active or standby), `7` on a transport error, and `10` when the server reports sealed or uninitialized — scriptable so `if warden status; then ...` works in operator playbooks. The matching `(*api.Sys).Health` / `HealthWithContext` methods are added for SDK callers; the client allow-list now treats `429/501/503` from `/v1/sys/health` as decodable operational states instead of HTTP errors. (this PR)
+
+- **`/v1/sys/health` now returns cluster-aware fields.** The response body grows additively to include `ha_enabled`, `is_leader`, `leader_address`, `active_time` (RFC3339, only set on the active leader), and `version` (server build, surfaced through a new `HandlerProperties.Version` plumbed from `cmd.SetVersion`). Operators no longer need three round-trips (`/sys/health`, `/sys/leader`, `/sys/seal-status`) to assemble a status view. Leader lookup is gated on `!sealed && ha_enabled`, so a sealed HA node no longer logs an error on every k8s probe. (this PR)
+
+### Breaking Changes
+
+- **`/v1/sys/health` and `/v1/sys/leader`: `is_self` is renamed to `is_leader`.** The Vault legacy name was confusing in isolation ("self relative to what?") and the new name is symmetric across both endpoints. Any external script that grepped for `"is_self":` against these endpoints needs to be updated. (this PR)
+
+- **`/v1/sys/health`: `server_time_utc` (int64 Unix seconds) is replaced with `server_time` (RFC3339 string).** The new format is human-readable and sortable as text. The old integer field is gone, not aliased. (this PR)
+
 - **Audit devices declared in the HCL server config.** New `audit "TYPE" "PATH" { description = "..." options = { ... } }` block, parsed alongside `listener`, `storage`, and `seal`. Devices declared this way are registered during unseal *before the API listener accepts traffic* — a misconfigured sink (unwritable path, missing parent directory, permission denied) is a hard startup error, not a half-initialized cluster. Declarative (HCL) and imperative (API-enabled) devices coexist at different paths; an HCL block colliding with an API-enabled path refuses to start, and declarative devices cannot be modified or deleted via `sys/audit/{path}` (operators edit HCL and restart instead). The reconciler on every unseal handles add / refresh-options / drop-from-config transitions, preserving each entry's accessor and HMAC salt across restarts so audit-log HMACs stay stable. `GET /v1/sys/audit` and `GET /v1/sys/audit/{path}` responses now expose a `declarative` boolean so operators can tell the two origins apart. The auto-create-default-on-first-unseal logic is **removed** — the Helm chart ships a working `audit "file"` block by default, dev mode (`warden server -dev`) intentionally ships no audit, and bare-binary operators add a one-line block to their HCL (or accept zero-audit + bootstrap via API). (this PR)
 
 ### Bug Fixes

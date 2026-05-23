@@ -31,6 +31,10 @@ type HandlerProperties struct {
 	Core   *core.Core
 	Logger *logger.GatedLogger
 
+	// Version is the server build version surfaced in /v1/sys/health.
+	// Empty means the version field is omitted from the response.
+	Version string
+
 	// ClusterTLSConfigFunc returns the current cluster mTLS config for
 	// forwarding requests from standby to active. When nil, forwarding
 	// uses plain HTTP (backward compatible).
@@ -59,7 +63,7 @@ func Handler(props *HandlerProperties) http.Handler {
 
 	// HA endpoints — must work on standby and sealed nodes.
 	// Register before the /v1/sys/ catch-all.
-	mux.Handle("/v1/sys/health", handleSysHealth(core, log))
+	mux.Handle("/v1/sys/health", handleSysHealth(core, log, props.Version))
 	mux.Handle("/v1/sys/ready", handleSysReady(core, log))
 	mux.Handle("/v1/sys/leader", handleSysLeader(core, log))
 	mux.Handle("/v1/sys/step-down", handleSysStepDown(core, log))

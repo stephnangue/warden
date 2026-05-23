@@ -24,6 +24,7 @@ const (
 	ExitNetwork      ExitCode = 7
 	ExitServer       ExitCode = 8
 	ExitConflict     ExitCode = 9
+	ExitSealed       ExitCode = 10
 )
 
 // ErrorCode is the stable string identifier surfaced in JSON envelopes.
@@ -40,6 +41,7 @@ const (
 	CodeNetwork      ErrorCode = "network"
 	CodeServer       ErrorCode = "server"
 	CodeConflict     ErrorCode = "conflict"
+	CodeSealed       ErrorCode = "sealed"
 )
 
 // Sentinel errors. Wrap with fmt.Errorf("context: %w", helpers.ErrXxx) so the
@@ -53,6 +55,7 @@ var (
 	ErrNetwork      = errors.New("network error")
 	ErrServer       = errors.New("server error")
 	ErrConflict     = errors.New("conflict")
+	ErrSealed       = errors.New("warden is sealed or uninitialized")
 )
 
 // WardenError is the JSON envelope emitted on stderr when --output is json or
@@ -110,6 +113,8 @@ func classify(err error) (ErrorCode, ExitCode) {
 		return CodeServer, ExitServer
 	case errors.Is(err, ErrConflict):
 		return CodeConflict, ExitConflict
+	case errors.Is(err, ErrSealed):
+		return CodeSealed, ExitSealed
 	}
 
 	// 3. Network/transport errors (DNS, connection refused, timeout, TLS).
@@ -224,6 +229,8 @@ func DefaultHint(code ErrorCode) string {
 		return "The warden server returned an internal error; check server logs"
 	case CodeConflict:
 		return "The resource already exists or has been modified concurrently"
+	case CodeSealed:
+		return "Unseal warden with `warden operator unseal` (or initialize it with `warden operator init`)"
 	case CodeUsage:
 		return "Run with --help for usage"
 	default:

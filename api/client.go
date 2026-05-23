@@ -1195,6 +1195,15 @@ func (c *Client) withConfiguredTimeout(ctx context.Context) (context.Context, co
 // It is the same as retryablehttp.DefaultRetryPolicy except that it also retries
 // 412 requests, and explicitly does NOT retry 4xx client errors (except 429)
 func DefaultRetryPolicy(ctx context.Context, resp *http.Response, err error) (bool, error) {
+	// /v1/sys/health surfaces 429/501/503 as deterministic operational states
+	// (standby / uninitialized / sealed). Retrying just delays the answer.
+	if resp != nil && resp.Request != nil && resp.Request.URL.Path == "/v1/sys/health" {
+		switch resp.StatusCode {
+		case 429, 501, 503:
+			return false, nil
+		}
+	}
+
 	// Don't retry on client errors (4xx) except for specific cases
 	if resp != nil {
 		// Never retry validation errors and other client errors
