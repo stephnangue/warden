@@ -215,6 +215,7 @@ type MountEntry struct {
 	Config                map[string]any `json:"config"`                            // Config options for this mount
 	SealWrap              bool           `json:"seal_wrap"`                         // Whether to wrap CSPs
 	NamespaceID           string         `json:"namespace_id"`
+	Declarative           bool           `json:"declarative,omitempty"`             // True for audit devices declared in the HCL server config (vs. imperatively created via sys/audit/{path}). Declarative entries can only be modified via HCL+restart.
 
 	// namespace contains the populated namespace
 	namespace *namespace.Namespace `json:"-"`

@@ -26,6 +26,7 @@ type Config struct {
 	Listeners []ListenerBlock `hcl:"listener,block"`
 	Storage   *StorageBlock   `hcl:"storage,block"`
 	Seals     []KMS           `hcl:"seal,block"`
+	Audits    []AuditBlock    `hcl:"audit,block"`
 
 	// APIAddr is the address advertised to clients for API requests.
 	// In HA mode, standby nodes redirect clients to this address on the active node.
@@ -416,6 +417,21 @@ func (s *StorageBlock) Config() map[string]string {
 	return config
 }
 
+type AuditBlock struct {
+	Type        string            `hcl:"type,label"`
+	Path        string            `hcl:"path,label"`
+	Description string            `hcl:"description,optional"`
+	Options     map[string]string `hcl:"options,optional"`
+}
+
+func (a *AuditBlock) Config() map[string]any {
+	out := make(map[string]any, len(a.Options))
+	for k, v := range a.Options {
+		out[k] = v
+	}
+	return out
+}
+
 type ListenerBlock struct {
 	Type                 string   `hcl:"type,label"` // "tcp", "unix", etc.
 	Address              string   `hcl:"address"`
@@ -624,6 +640,25 @@ func validateConfig(config *Config) error {
 		if d < 0 {
 			return fmt.Errorf("%s must not be negative, got %s", f.name, d)
 		}
+	}
+
+	// Validate audit blocks
+	auditSeen := make(map[string]int, len(config.Audits))
+	for i, a := range config.Audits {
+		if a.Type == "" {
+			return fmt.Errorf("audit[%d]: type label is required", i)
+		}
+		if a.Path == "" {
+			return fmt.Errorf("audit[%d]: path label is required", i)
+		}
+		if strings.ContainsAny(a.Path, "/ ") {
+			return fmt.Errorf("audit[%d]: path %q must not contain slashes or spaces", i, a.Path)
+		}
+		key := a.Type + "/" + a.Path
+		if prev, ok := auditSeen[key]; ok {
+			return fmt.Errorf("audit[%d]: duplicate (type=%q, path=%q) already declared at audit[%d]", i, a.Type, a.Path, prev)
+		}
+		auditSeen[key] = i
 	}
 
 	// Validate cluster_addr format if set

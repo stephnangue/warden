@@ -231,16 +231,17 @@ func TestSystemBackend_HandleAuditDelete(t *testing.T) {
 	assert.Contains(t, resp.Data["message"], "Successfully disabled")
 }
 
-func TestSystemBackend_HandleAuditDelete_BlocksLastDevice(t *testing.T) {
+// Disabling the last audit device is allowed — the broker fail-opens at
+// zero registered devices, so the operator can intentionally enter the
+// unaudited bootstrap state and re-enable later via sys/audit/{path}.
+func TestSystemBackend_HandleAuditDelete_AllowsLastDevice(t *testing.T) {
 	backend, ctx, core := setupTestSystemBackend(t)
 
-	// Initialize audit components
 	core.auditDevices = make(map[string]audit.Factory)
 	core.auditDevices["mock"] = &mockAuditFactory{}
 	core.audit = NewMountTable()
 	core.auditManager = newMockAuditManagerFull()
 
-	// Create only one audit device
 	entry := &MountEntry{
 		Class:       mountClassAudit,
 		Type:        "mock",
@@ -252,25 +253,17 @@ func TestSystemBackend_HandleAuditDelete_BlocksLastDevice(t *testing.T) {
 	}
 	require.NoError(t, core.EnableAudit(ctx, entry, false))
 
-	// Try to delete it - should fail
 	schema := backend.pathAudit()[0].Fields
-	raw := map[string]interface{}{
-		"path": "only-audit",
-	}
-
+	raw := map[string]interface{}{"path": "only-audit"}
 	req := createTestRequest(logical.DeleteOperation, "audit/only-audit", raw)
 	fieldData := createFieldData(schema, raw)
 
 	resp, err := backend.handleAuditDelete(ctx, req, fieldData)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.NotNil(t, resp.Err)
-	assert.Contains(t, resp.Err.Error(), "cannot disable the last audit device")
-	assert.Contains(t, resp.Err.Error(), "fail-closed")
-
-	// Verify the device is still there
-	assert.Len(t, core.audit.Entries, 1)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Nil(t, resp.Err)
+	assert.Empty(t, core.audit.Entries, "last device should be removable")
 }
 
 func TestSystemBackend_HandleAuditDelete_AllowsWithMultipleDevices(t *testing.T) {
@@ -321,16 +314,17 @@ func TestSystemBackend_HandleAuditDelete_AllowsWithMultipleDevices(t *testing.T)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Len(t, core.audit.Entries, 1)
 
-	// Try to delete last device - should fail
+	// Delete the last remaining device — also succeeds. The broker
+	// fail-opens at zero, so going to an unaudited state is a valid
+	// operator choice (see TestSystemBackend_HandleAuditDelete_AllowsLastDevice).
 	raw["path"] = "audit3"
 	fieldData = createFieldData(schema, raw)
 	req = createTestRequest(logical.DeleteOperation, "audit/audit3", raw)
 
 	resp, err = backend.handleAuditDelete(ctx, req, fieldData)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.NotNil(t, resp.Err)
-	assert.Contains(t, resp.Err.Error(), "cannot disable the last audit device")
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Empty(t, core.audit.Entries)
 }
 
 func TestSystemBackend_HandleAuditList(t *testing.T) {

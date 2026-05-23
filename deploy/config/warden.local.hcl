@@ -33,3 +33,15 @@ listener "tcp" {
     tls_enabled             = false
 }
 
+# Audit "TYPE" "NAME" — registered at startup, before the listener accepts
+# traffic. Uncomment for a local file sink, or leave off and let the broker
+# fail-open (zero declared = no audit; `warden audit enable file ...`
+# bootstraps one over the API).
+
+# audit "file" "local" {
+#   description = "local-dev file audit"
+#   options = {
+#     file_path = "./warden-audit.log"
+#   }
+# }
+

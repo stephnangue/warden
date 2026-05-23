@@ -151,6 +151,24 @@ seal:
     keyId: ""
     currentKeyKey: current_key
 
+# Audit. Renders as an `audit "TYPE" "NAME" { options = { ... } }` block
+# in the server HCL config. Devices declared here are registered at
+# startup, before the listener accepts traffic; failed audit setup is a
+# startup error, not a half-initialized cluster.
+#
+# Set audit.enabled=false to ship zero audit declarations. The broker
+# fail-opens at zero devices (Vault parity), so the cluster comes up
+# unaudited and the operator bootstraps via `warden audit enable file ...`.
+audit:
+  enabled: true
+  type: file
+  name: default
+  description: chart-provisioned file audit
+  # filePath must be writable from the warden container. The StatefulSet
+  # mounts an emptyDir at /var/log/warden — swap for a PVC if you need
+  # audit logs to survive pod restarts.
+  filePath: /var/log/warden/audit.log
+
 # Logging
 logLevel: info
 logFormat: json

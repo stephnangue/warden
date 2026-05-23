@@ -228,6 +228,11 @@ type Core struct {
 
 	auditDevices map[string]audit.Factory
 
+	// auditConfigDeclarations holds the HCL-declared audit devices passed
+	// in via CoreConfig.DeclarativeAuditDevices. loadAudits reconciles
+	// these against persisted entries on every unseal.
+	auditConfigDeclarations []*MountEntry
+
 	authMethods map[string]logical.Factory
 
 	providers map[string]logical.Factory
@@ -335,6 +340,13 @@ type CoreConfig struct {
 	RawConfig *config.Config
 
 	AuditDevices map[string]audit.Factory
+
+	// DeclarativeAuditDevices is the set of audit devices declared in the
+	// HCL server config (audit "TYPE" "PATH" { ... } blocks). Translated
+	// from config.AuditBlock by the cmd/server wiring. These are
+	// reconciled in loadAudits on every unseal; the operator updates them
+	// by editing HCL and restarting.
+	DeclarativeAuditDevices []*MountEntry
 
 	AuthMethods map[string]logical.Factory
 
@@ -618,6 +630,7 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 
 	// Audit backends
 	c.configureAuditDevices(conf.AuditDevices)
+	c.auditConfigDeclarations = conf.DeclarativeAuditDevices
 
 	err = c.adjustForSealMigration(conf.UnwrapSeal)
 	if err != nil {

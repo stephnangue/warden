@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -37,7 +36,28 @@ func generateAuditHMACSalt() (string, error) {
 	return hex.EncodeToString(salt), nil
 }
 
-// loadAudits is invoked as part of postUnseal to load the audit table from storage
+// normalizeAuditPath returns the path with a trailing slash, matching the
+// router convention used elsewhere for audit mount paths.
+func normalizeAuditPath(p string) string {
+	if !strings.HasSuffix(p, "/") {
+		return p + "/"
+	}
+	return p
+}
+
+// loadAudits is invoked as part of postUnseal. It loads any persisted audit
+// table from storage, then reconciles it against the HCL-declared audit
+// devices (c.auditConfigDeclarations):
+//
+//   - HCL-declared (Declarative=true) and API-enabled (Declarative=false)
+//     entries coexist at different paths.
+//   - HCL adds: register, persist with Declarative=true.
+//   - HCL updates an existing Declarative entry: refresh Description/Config,
+//     re-register, persist. Accessor, UUID and HMAC salt are preserved.
+//   - HCL drops a previously-declared Declarative entry: disable, remove
+//     from storage.
+//   - HCL declares a path that collides with an API-enabled entry: refuse
+//     to start.
 func (c *Core) loadAudits(ctx context.Context) error {
 	c.auditLock.Lock()
 	defer c.auditLock.Unlock()
@@ -49,105 +69,206 @@ func (c *Core) loadAudits(ctx context.Context) error {
 	}
 
 	c.audit = NewMountTable()
-
 	if raw != nil {
-		// Decode the stored audit table
 		if err := jsonutil.DecodeJSON(raw.Value, c.audit); err != nil {
 			c.logger.Error("failed to decode audit table", logger.Err(err))
 			return fmt.Errorf("failed to decode audit table: %w", err)
 		}
-
 		c.logger.Info("loaded audit table from storage", logger.Int("count", len(c.audit.Entries)))
+	}
 
-		// Re-create and register all audit backends
-		for _, entry := range c.audit.Entries {
-			// Audit devices are only supported in the root namespace
-			entry.NamespaceID = namespace.RootNamespaceID
-			entry.namespace = namespace.RootNamespace
+	// Index stored entries by path so the reconcile can do O(1) lookups.
+	stored := make(map[string]*MountEntry, len(c.audit.Entries))
+	for _, entry := range c.audit.Entries {
+		entry.NamespaceID = namespace.RootNamespaceID
+		entry.namespace = namespace.RootNamespace
+		stored[entry.Path] = entry
+	}
 
-			backend, err := c.newAuditBackend(ctx, entry)
+	// Reconcile HCL declarations against stored entries.
+	declaredPaths := make(map[string]struct{}, len(c.auditConfigDeclarations))
+	tableMutated := false
+	for _, decl := range c.auditConfigDeclarations {
+		path := normalizeAuditPath(decl.Path)
+		declaredPaths[path] = struct{}{}
+
+		existing, ok := stored[path]
+		switch {
+		case !ok:
+			// New HCL device: assign accessor + HMAC salt, persist.
+			entry, err := c.buildConfigAuditEntry(decl, path)
 			if err != nil {
-				c.logger.Error("failed to create audit backend during load",
-					logger.String("path", entry.Path),
-					logger.String("type", entry.Type),
-					logger.Err(err),
-				)
-				return fmt.Errorf("failed to create audit backend %s: %w", entry.Path, err)
+				return fmt.Errorf("audit %q: %w", path, err)
 			}
+			c.audit.Entries = append(c.audit.Entries, entry)
+			stored[path] = entry
+			tableMutated = true
+			c.logger.Info("registering new HCL-declared audit device",
+				logger.String("path", path),
+				logger.String("type", entry.Type),
+			)
 
-			if backend != nil {
-				c.auditManager.RegisterDevice(entry.Path, backend)
-				c.logger.Info("registered audit device",
-					logger.String("path", entry.Path),
-					logger.String("type", entry.Type),
+		case !existing.Declarative:
+			// API-created device already lives here. Refuse to come up
+			// rather than silently overwrite operator state.
+			return fmt.Errorf("audit %q: HCL declaration collides with an API-enabled device at the same path; rename one or remove the other", path)
+
+		default:
+			// Existing HCL device: refresh mutable fields, keep accessor/salt/UUID stable.
+			if existing.Type != decl.Type {
+				return fmt.Errorf("audit %q: HCL type changed (%q → %q); rename the path to migrate", path, existing.Type, decl.Type)
+			}
+			newConfig := mergeAuditConfig(decl.Config, existing.Config)
+			if existing.Description != decl.Description || !auditConfigEqual(existing.Config, newConfig) {
+				existing.Description = decl.Description
+				existing.Config = newConfig
+				tableMutated = true
+				c.logger.Info("refreshing HCL-declared audit device",
+					logger.String("path", path),
 				)
 			}
 		}
-
-		return nil
 	}
 
-	// No stored audit table - create default file audit device
-	c.logger.Info("no audit table in storage; creating default audit device")
-
-	// Generate a secure HMAC salt for the default device
-	salt, err := generateAuditHMACSalt()
-	if err != nil {
-		return fmt.Errorf("failed to generate HMAC salt for default audit device: %w", err)
+	// Drop Declarative entries no longer present in the HCL.
+	if len(c.audit.Entries) > 0 {
+		kept := c.audit.Entries[:0]
+		for _, entry := range c.audit.Entries {
+			if entry.Declarative {
+				if _, stillDeclared := declaredPaths[entry.Path]; !stillDeclared {
+					c.logger.Info("removing HCL-declared audit device no longer in config",
+						logger.String("path", entry.Path),
+					)
+					tableMutated = true
+					continue
+				}
+			}
+			kept = append(kept, entry)
+		}
+		c.audit.Entries = kept
 	}
 
-	defaultEntry := &MountEntry{
-		Class:       mountClassAudit,
-		Type:        "file",
-		Path:        "file/",
-		Description: "default file audit device",
-		Config: map[string]any{
-			"file_path": "warden-audit.log",
-			"hmac_key":  salt,
-		},
+	// Register every surviving entry with the audit manager. Backend
+	// creation failure is fatal — for HCL devices the operator opted in
+	// and silent skips would hide breakage; for API devices the entry was
+	// persisted while it worked, so a reload failure indicates real drift.
+	for _, entry := range c.audit.Entries {
+		backend, err := c.newAuditBackend(ctx, entry)
+		if err != nil {
+			c.logger.Error("failed to create audit backend during load",
+				logger.String("path", entry.Path),
+				logger.String("type", entry.Type),
+				logger.Err(err),
+			)
+			return fmt.Errorf("failed to create audit backend %s: %w", entry.Path, err)
+		}
+		if backend == nil {
+			return fmt.Errorf("nil backend returned for audit device %q", entry.Path)
+		}
+
+		// Run a probe so a misconfigured sink fails startup rather than
+		// the next request. Honour skip_test for tests that don't set up
+		// a real fs.
+		if entry.Config["skip_test"] != "true" {
+			if err := backend.LogTestRequest(ctx); err != nil {
+				return fmt.Errorf("audit device %q failed test message: %w", entry.Path, err)
+			}
+		}
+
+		c.auditManager.RegisterDevice(entry.Path, backend)
+		c.logger.Info("registered audit device",
+			logger.String("path", entry.Path),
+			logger.String("type", entry.Type),
+			logger.String("origin", auditOriginLabel(entry)),
+		)
 	}
 
-	// Audit devices are only supported in the root namespace
-	defaultEntry.NamespaceID = namespace.RootNamespaceID
-	defaultEntry.namespace = namespace.RootNamespace
-
-	// Generate accessor
-	accessor, err := c.generateMountAccessor("audit_file")
-	if err != nil {
-		return fmt.Errorf("failed to generate accessor for default audit device: %w", err)
+	if tableMutated {
+		if err := c.persistAuditsLocked(ctx); err != nil {
+			return fmt.Errorf("failed to persist audit table: %w", err)
+		}
 	}
-	defaultEntry.Accessor = accessor
-
-	// Create the backend
-	backend, err := c.newAuditBackend(ctx, defaultEntry)
-	if err != nil {
-		return fmt.Errorf("failed to create default audit backend: %w", err)
-	}
-	if backend == nil {
-		return errors.New("nil backend returned for default audit device")
-	}
-
-	// Test the device
-	if err := backend.LogTestRequest(ctx); err != nil {
-		c.logger.Error("default audit backend failed test", logger.Err(err))
-		return fmt.Errorf("default audit device failed test: %w", err)
-	}
-
-	// Add to table and register
-	c.audit.Entries = append(c.audit.Entries, defaultEntry)
-	c.auditManager.RegisterDevice(defaultEntry.Path, backend)
-
-	// Persist the new table
-	if err := c.persistAuditsLocked(ctx); err != nil {
-		return fmt.Errorf("failed to persist default audit table: %w", err)
-	}
-
-	c.logger.Info("created and persisted default audit device",
-		logger.String("path", defaultEntry.Path),
-		logger.String("type", defaultEntry.Type),
-	)
 
 	return nil
+}
+
+// buildConfigAuditEntry promotes a CoreConfig declaration into a full
+// MountEntry — assigns a stable accessor and generates an HMAC salt if the
+// operator didn't supply one. Called only the first time an HCL device
+// appears (subsequent reconciles keep the existing entry's accessor/salt).
+func (c *Core) buildConfigAuditEntry(decl *MountEntry, normalizedPath string) (*MountEntry, error) {
+	cfg := make(map[string]any, len(decl.Config)+1)
+	for k, v := range decl.Config {
+		cfg[k] = v
+	}
+	if _, ok := cfg["hmac_key"]; !ok {
+		salt, err := generateAuditHMACSalt()
+		if err != nil {
+			return nil, fmt.Errorf("generate HMAC salt: %w", err)
+		}
+		cfg["hmac_key"] = salt
+	}
+	accessor, err := c.generateMountAccessor("audit_" + decl.Type)
+	if err != nil {
+		return nil, fmt.Errorf("generate accessor: %w", err)
+	}
+	return &MountEntry{
+		Class:       mountClassAudit,
+		Type:        decl.Type,
+		Path:        normalizedPath,
+		Description: decl.Description,
+		Accessor:    accessor,
+		Config:      cfg,
+		Declarative:  true,
+		NamespaceID: namespace.RootNamespaceID,
+		namespace:   namespace.RootNamespace,
+	}, nil
+}
+
+// mergeAuditConfig takes the new HCL-declared options and the previously-
+// stored config, returning a fresh map that preserves the generated
+// hmac_key from the stored config (so audit-log HMACs stay stable across
+// restarts) but otherwise reflects the HCL values.
+func mergeAuditConfig(declared, stored map[string]any) map[string]any {
+	out := make(map[string]any, len(declared)+1)
+	for k, v := range declared {
+		out[k] = v
+	}
+	if _, ok := out["hmac_key"]; !ok {
+		if salt, hadSalt := stored["hmac_key"]; hadSalt {
+			out["hmac_key"] = salt
+		}
+	}
+	return out
+}
+
+// auditConfigEqual compares two audit Config maps for equality. Used by
+// the reconcile to decide whether persisted state has drifted from HCL.
+// Safe because AuditBlock.Options is map[string]string, so HCL-sourced
+// values arrive as strings on both sides of the compare; if a future
+// code path stores typed values (int rotate_size, bool rotate_daily),
+// this needs a proper deep-equal that respects types.
+func auditConfigEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok {
+			return false
+		}
+		if fmt.Sprint(va) != fmt.Sprint(vb) {
+			return false
+		}
+	}
+	return true
+}
+
+func auditOriginLabel(entry *MountEntry) string {
+	if entry.Declarative {
+		return "config"
+	}
+	return "api"
 }
 
 // persistAudits saves the audit table to storage
@@ -215,6 +336,9 @@ func (c *Core) EnableAudit(ctx context.Context, entry *MountEntry, updateStorage
 		case strings.HasPrefix(ent.Path, entry.Path):
 			fallthrough
 		case strings.HasPrefix(entry.Path, ent.Path):
+			if ent.Declarative {
+				return logical.ErrBadRequest(fmt.Sprintf("path %q is owned by an HCL audit declaration; edit the server config and restart instead", ent.Path))
+			}
 			return logical.ErrBadRequest("path already in use")
 		}
 	}
@@ -313,6 +437,13 @@ func (c *Core) DisableAudit(ctx context.Context, path string, updateStorage bool
 	// Remove the entry from the mount table
 	c.auditLock.Lock()
 	defer c.auditLock.Unlock()
+
+	// Reject API disable for HCL-declared devices.
+	for _, ent := range c.audit.Entries {
+		if ent.Path == path && ent.Declarative {
+			return false, logical.ErrBadRequest(fmt.Sprintf("path %q is owned by an HCL audit declaration; remove the block from the server config and restart instead", path))
+		}
+	}
 
 	newTable := c.audit.shallowClone()
 	entry, err := newTable.remove(ctx, path)

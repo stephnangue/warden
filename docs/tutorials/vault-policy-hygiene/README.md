@@ -370,13 +370,16 @@ JWKS_URI=$(curl -sf http://forgejo.local:3000/.well-known/openid-configuration \
 curl -sf "$JWKS_URI" | jq '.keys | length'   # should print >= 1
 ```
 
-### Audit log: already running
+### Audit log
 
-Warden auto-creates a default file audit device on first start — no
-`audit enable` command needed. It writes to `warden-audit.log` in the
-directory you launched `warden server` from, mounted at the `file/` accessor.
-Section 9 will tail it to confirm every agent request flows through Warden
-with attributable identity.
+The `warden server --dev` instance ships with zero audit devices — the
+broker fail-opens at zero, so the cluster runs unaudited until one is
+enabled. The §5 wiring script (`warden-init.sh`) calls
+`warden audit enable --type=file --file-path=./warden-audit.log audit-default`
+as its first step, which writes the log to `warden-audit.log` in the
+directory you launched `warden server` from. Section 9 tails it to
+confirm every agent request flows through Warden with attributable
+identity.
 
 The log is line-delimited JSON, one entry per request and one per response.
 Sensitive headers (the JWT itself, upstream tokens) are HMAC-redacted before

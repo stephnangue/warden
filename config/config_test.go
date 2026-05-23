@@ -233,3 +233,107 @@ listener "tcp" {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ip_binding_policy")
 }
+
+// TestLoadConfig_AuditBlock exercises the two-label audit block syntax:
+// `audit "TYPE" "PATH" { options = { ... } }`. The block flows through
+// HCL decode → validateConfig → Config.Audits, and the Options map is
+// preserved verbatim for the audit factory to consume.
+func TestLoadConfig_AuditBlock(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "00-base.hcl", `
+ip_binding_policy = "optional"
+
+storage "postgres" {
+  connection_url = "postgres://x/db"
+}
+
+listener "tcp" {
+  address = ":8400"
+}
+
+audit "file" "default" {
+  description = "primary file audit"
+  options = {
+    file_path = "/var/log/warden/audit.log"
+  }
+}
+
+audit "file" "stdout" {
+  options = {
+    file_path = "/dev/stdout"
+  }
+}
+`)
+	cfg, err := LoadConfigDir(dir)
+	require.NoError(t, err)
+	require.Len(t, cfg.Audits, 2)
+
+	assert.Equal(t, "file", cfg.Audits[0].Type)
+	assert.Equal(t, "default", cfg.Audits[0].Path)
+	assert.Equal(t, "primary file audit", cfg.Audits[0].Description)
+	assert.Equal(t, "/var/log/warden/audit.log", cfg.Audits[0].Options["file_path"])
+
+	assert.Equal(t, "stdout", cfg.Audits[1].Path)
+	assert.Equal(t, "/dev/stdout", cfg.Audits[1].Options["file_path"])
+
+	// .Config() returns the options as map[string]any (the shape Core consumes)
+	cfgMap := cfg.Audits[0].Config()
+	assert.Equal(t, "/var/log/warden/audit.log", cfgMap["file_path"])
+}
+
+func TestValidateConfig_AuditBlock(t *testing.T) {
+	base := `
+ip_binding_policy = "optional"
+storage "postgres" { connection_url = "postgres://x/db" }
+listener "tcp" { address = ":8400" }
+`
+
+	t.Run("duplicate type+path rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "00.hcl", base+`
+audit "file" "default" { options = { file_path = "/a" } }
+audit "file" "default" { options = { file_path = "/b" } }
+`)
+		_, err := LoadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate")
+	})
+
+	t.Run("path containing slash rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "00.hcl", base+`
+audit "file" "nested/path" { options = { file_path = "/a" } }
+`)
+		_, err := LoadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must not contain slashes")
+	})
+}
+
+// TestMergeConfig_Audits verifies the same "last-file-wins, block
+// replaced wholesale" semantics already used for Seals/Listeners.
+func TestMergeConfig_Audits(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "00-base.hcl", `
+storage "postgres" { connection_url = "postgres://x/db" }
+listener "tcp" { address = ":8400" }
+
+audit "file" "from-base" { options = { file_path = "/base" } }
+`)
+	writeFile(t, dir, "10-override.hcl", `
+audit "file" "from-override" { options = { file_path = "/override" } }
+`)
+	cfg, err := LoadConfigDir(dir)
+	require.NoError(t, err)
+	require.Len(t, cfg.Audits, 1, "override file should replace audit block wholesale")
+	assert.Equal(t, "from-override", cfg.Audits[0].Path)
+}
+
+// Dev mode deliberately ships zero audit declarations. The broker
+// fail-opens at zero, so `warden server -dev` runs unaudited (audit
+// noise isn't useful for local hacking) and the operator can still
+// `warden audit enable file ...` to opt in.
+func TestDevConfig_HasNoAudit(t *testing.T) {
+	cfg := DevConfig()
+	assert.Empty(t, cfg.Audits)
+}

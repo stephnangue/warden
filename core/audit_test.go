@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -548,6 +550,308 @@ func TestEnableDisableAudit_Concurrent(t *testing.T) {
 
 	// Verify all audits are removed
 	assert.Nil(t, core.audit.Entries)
+}
+
+// TestLoadAuditsReconcile covers the HCL-vs-storage reconcile loop in
+// loadAudits. The fixture builds a real-barrier Core with the real file
+// audit factory so audit log files actually land on disk.
+func TestLoadAuditsReconcile(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	t.Run("zero declarations and empty barrier leaves zero entries", func(t *testing.T) {
+		core := newCoreForLoadAuditsTest(t)
+		require.NoError(t, core.loadAudits(ctx))
+		assert.Empty(t, core.audit.Entries, "no auto-default should be registered any more")
+	})
+
+	t.Run("HCL declares a new device — registered, file created, persisted as Declarative", func(t *testing.T) {
+		tmp := t.TempDir()
+		auditPath := filepath.Join(tmp, "audit.log")
+
+		core := newCoreForLoadAuditsTest(t)
+		core.auditConfigDeclarations = []*MountEntry{{
+			Type:        "file",
+			Path:        "default",
+			Description: "primary",
+			Config:      map[string]any{"file_path": auditPath},
+			Declarative:  true,
+		}}
+
+		require.NoError(t, core.loadAudits(ctx))
+
+		require.Len(t, core.audit.Entries, 1)
+		entry := core.audit.Entries[0]
+		assert.Equal(t, "default/", entry.Path, "path should have been normalized with trailing slash")
+		assert.True(t, entry.Declarative)
+		assert.Equal(t, "primary", entry.Description)
+		assert.NotEmpty(t, entry.Accessor)
+		assert.NotEmpty(t, entry.Config["hmac_key"], "HMAC salt should auto-generate when operator omits it")
+
+		_, err := os.Stat(auditPath)
+		require.NoError(t, err, "audit file should exist on disk")
+
+		stored, err := core.barrier.Get(ctx, coreAuditConfigPath)
+		require.NoError(t, err)
+		require.NotNil(t, stored, "audit table should be persisted")
+	})
+
+	t.Run("HCL refresh preserves accessor and hmac_key", func(t *testing.T) {
+		tmp := t.TempDir()
+		auditPath := filepath.Join(tmp, "audit.log")
+
+		core := newCoreForLoadAuditsTest(t)
+		core.auditConfigDeclarations = []*MountEntry{{
+			Type:   "file",
+			Path:   "default",
+			Config: map[string]any{"file_path": auditPath},
+		}}
+		require.NoError(t, core.loadAudits(ctx))
+
+		originalAccessor := core.audit.Entries[0].Accessor
+		originalSalt := core.audit.Entries[0].Config["hmac_key"]
+
+		// Operator edits the description in HCL and restarts.
+		core.auditManager = newMockAuditManagerFull() // simulate fresh process
+		core.auditConfigDeclarations = []*MountEntry{{
+			Type:        "file",
+			Path:        "default",
+			Description: "renamed",
+			Config:      map[string]any{"file_path": auditPath},
+		}}
+		require.NoError(t, core.loadAudits(ctx))
+
+		require.Len(t, core.audit.Entries, 1)
+		assert.Equal(t, "renamed", core.audit.Entries[0].Description)
+		assert.Equal(t, originalAccessor, core.audit.Entries[0].Accessor, "accessor should be preserved across reconciles")
+		assert.Equal(t, originalSalt, core.audit.Entries[0].Config["hmac_key"], "HMAC salt should be preserved across reconciles")
+	})
+
+	t.Run("HCL drops a previously-declared device — disabled and removed", func(t *testing.T) {
+		tmp := t.TempDir()
+		auditPath := filepath.Join(tmp, "audit.log")
+
+		core := newCoreForLoadAuditsTest(t)
+		core.auditConfigDeclarations = []*MountEntry{{
+			Type:   "file",
+			Path:   "default",
+			Config: map[string]any{"file_path": auditPath},
+		}}
+		require.NoError(t, core.loadAudits(ctx))
+		require.Len(t, core.audit.Entries, 1)
+
+		// Next restart: operator removed the block.
+		core.auditManager = newMockAuditManagerFull()
+		core.auditConfigDeclarations = nil
+		require.NoError(t, core.loadAudits(ctx))
+		assert.Empty(t, core.audit.Entries, "device should be removed when its HCL block disappears")
+
+		stored, err := core.barrier.Get(ctx, coreAuditConfigPath)
+		require.NoError(t, err)
+		// table is re-persisted but contains no entries
+		require.NotNil(t, stored)
+	})
+
+	t.Run("HCL description-only change re-persists the table", func(t *testing.T) {
+		tmp := t.TempDir()
+		auditPath := filepath.Join(tmp, "audit.log")
+
+		core := newCoreForLoadAuditsTest(t)
+		core.auditConfigDeclarations = []*MountEntry{{
+			Type:        "file",
+			Path:        "default",
+			Description: "original",
+			Config:      map[string]any{"file_path": auditPath},
+		}}
+		require.NoError(t, core.loadAudits(ctx))
+
+		// Reload with a new description, otherwise identical.
+		core.auditManager = newMockAuditManagerFull()
+		core.auditConfigDeclarations[0].Description = "renamed"
+		require.NoError(t, core.loadAudits(ctx))
+
+		require.Len(t, core.audit.Entries, 1)
+		assert.Equal(t, "renamed", core.audit.Entries[0].Description)
+
+		// The new description should hit storage too, not just memory.
+		stored, err := core.barrier.Get(ctx, coreAuditConfigPath)
+		require.NoError(t, err)
+		require.NotNil(t, stored)
+		assert.Contains(t, string(stored.Value), `"description":"renamed"`)
+	})
+
+	t.Run("HCL type change at the same path errors with rename hint", func(t *testing.T) {
+		tmp := t.TempDir()
+
+		core := newCoreForLoadAuditsTest(t)
+		// Pre-seed a stored config-origin entry of type "file".
+		core.audit.Entries = []*MountEntry{{
+			Class:       mountClassAudit,
+			Type:        "file",
+			Path:        "default/",
+			Accessor:    "audit_file_seed",
+			Config:      map[string]any{"file_path": filepath.Join(tmp, "audit.log"), "hmac_key": "x"},
+			Declarative:  true,
+			NamespaceID: namespace.RootNamespaceID,
+		}}
+		require.NoError(t, core.persistAudits(ctx))
+
+		// HCL declares the same path but as a different type.
+		core.auditManager = newMockAuditManagerFull()
+		core.auditConfigDeclarations = []*MountEntry{{
+			Type:   "syslog",
+			Path:   "default",
+			Config: map[string]any{},
+		}}
+		err := core.loadAudits(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "HCL type changed")
+		assert.Contains(t, err.Error(), "rename the path")
+	})
+
+	t.Run("HCL and API devices coexist at different paths", func(t *testing.T) {
+		tmp := t.TempDir()
+		apiPath := filepath.Join(tmp, "api.log")
+		hclPath := filepath.Join(tmp, "hcl.log")
+
+		core := newCoreForLoadAuditsTest(t)
+		// Pre-seed an API-enabled device at "api-mount/".
+		core.audit.Entries = []*MountEntry{{
+			Class:       mountClassAudit,
+			Type:        "file",
+			Path:        "api-mount/",
+			Accessor:    "audit_file_apiseed",
+			Config:      map[string]any{"file_path": apiPath, "hmac_key": "x"},
+			Declarative:  false,
+			NamespaceID: namespace.RootNamespaceID,
+		}}
+		require.NoError(t, core.persistAudits(ctx))
+
+		// HCL declares a separate device at "hcl-mount/".
+		core.auditManager = newMockAuditManagerFull()
+		core.auditConfigDeclarations = []*MountEntry{{
+			Type:   "file",
+			Path:   "hcl-mount",
+			Config: map[string]any{"file_path": hclPath},
+		}}
+		require.NoError(t, core.loadAudits(ctx))
+
+		// Both entries should survive and be registered side-by-side.
+		require.Len(t, core.audit.Entries, 2)
+		paths := map[string]bool{
+			core.audit.Entries[0].Path: core.audit.Entries[0].Declarative,
+			core.audit.Entries[1].Path: core.audit.Entries[1].Declarative,
+		}
+		assert.Equal(t, false, paths["api-mount/"], "API entry stays Declarative=false")
+		assert.Equal(t, true, paths["hcl-mount/"], "HCL entry is Declarative=true")
+	})
+
+	t.Run("HCL conflict with API-origin device refuses to start", func(t *testing.T) {
+		tmp := t.TempDir()
+		core := newCoreForLoadAuditsTest(t)
+
+		// Simulate a prior API-enabled device at path "shared/".
+		core.audit.Entries = []*MountEntry{{
+			Class:       mountClassAudit,
+			Type:        "file",
+			Path:        "shared/",
+			Accessor:    "audit_file_apipre",
+			Config:      map[string]any{"file_path": filepath.Join(tmp, "api.log"), "hmac_key": "x"},
+			Declarative:  false,
+			NamespaceID: namespace.RootNamespaceID,
+		}}
+		require.NoError(t, core.persistAudits(ctx))
+
+		// HCL now declares the same path → must error.
+		core.auditConfigDeclarations = []*MountEntry{{
+			Type:   "file",
+			Path:   "shared",
+			Config: map[string]any{"file_path": filepath.Join(tmp, "hcl.log")},
+		}}
+		err := core.loadAudits(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "collides")
+	})
+}
+
+func TestEnableAudit_ConfigOriginProtection(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core := createMockCoreForAudit()
+	core.auditDevices["mock"] = &mockAuditFactory{}
+
+	// Pre-seat a config-origin entry as if loadAudits had registered it.
+	core.audit.Entries = []*MountEntry{{
+		Class:      mountClassAudit,
+		Type:       "mock",
+		Path:       "owned/",
+		Declarative: true,
+	}}
+
+	err := core.EnableAudit(ctx, &MountEntry{
+		Class:  mountClassAudit,
+		Type:   "mock",
+		Path:   "owned/",
+		Config: map[string]any{"skip_test": "true"},
+	}, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HCL audit declaration")
+}
+
+func TestDisableAudit_ConfigOriginProtection(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core := createMockCoreForAudit()
+
+	core.audit.Entries = []*MountEntry{{
+		Class:      mountClassAudit,
+		Type:       "mock",
+		Path:       "owned/",
+		Declarative: true,
+	}}
+
+	ok, err := core.DisableAudit(ctx, "owned", false)
+	require.Error(t, err)
+	assert.False(t, ok)
+	assert.Contains(t, err.Error(), "HCL audit declaration")
+}
+
+// TestMergeAuditConfig pins the salt-preservation contract that keeps
+// audit-log HMACs stable across restarts: HCL declarations don't carry
+// hmac_key, so the merge has to copy it from the previously-stored entry.
+func TestMergeAuditConfig(t *testing.T) {
+	t.Run("preserves hmac_key from stored when HCL omits it", func(t *testing.T) {
+		declared := map[string]any{"file_path": "/var/log/x.log"}
+		stored := map[string]any{"file_path": "/old/path.log", "hmac_key": "stable-salt-abc"}
+		out := mergeAuditConfig(declared, stored)
+		assert.Equal(t, "/var/log/x.log", out["file_path"], "HCL value wins for non-secret fields")
+		assert.Equal(t, "stable-salt-abc", out["hmac_key"], "stored salt must survive the merge")
+	})
+
+	t.Run("HCL-supplied hmac_key overrides stored", func(t *testing.T) {
+		declared := map[string]any{"file_path": "/x", "hmac_key": "from-hcl"}
+		stored := map[string]any{"file_path": "/x", "hmac_key": "from-storage"}
+		out := mergeAuditConfig(declared, stored)
+		assert.Equal(t, "from-hcl", out["hmac_key"])
+	})
+
+	t.Run("missing both leaves hmac_key absent", func(t *testing.T) {
+		declared := map[string]any{"file_path": "/x"}
+		stored := map[string]any{"file_path": "/x"}
+		out := mergeAuditConfig(declared, stored)
+		_, has := out["hmac_key"]
+		assert.False(t, has, "no salt anywhere → none in output (buildConfigAuditEntry generates on first-register)")
+	})
+}
+
+// newCoreForLoadAuditsTest builds a real-barrier Core wired with the real
+// file audit factory so loadAudits' reconcile + register path can be
+// exercised end-to-end with files actually landing on disk.
+func newCoreForLoadAuditsTest(t *testing.T) *Core {
+	t.Helper()
+	core := createTestCore(t)
+	core.audit = NewMountTable()
+	fileFactory := &audit.FileDeviceFactory{}
+	_ = fileFactory.Initialize(core.logger)
+	core.auditDevices = map[string]audit.Factory{"file": fileFactory}
+	return core
 }
 
 // =============================================================================

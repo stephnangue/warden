@@ -33,6 +33,34 @@ listener "tcp" {
     tls_enabled        = true
 }
 
+# Audit devices are declared with the two-label syntax:
+#   audit "TYPE" "NAME" { description = "..." options = { ... } }
+#
+# Devices declared here are registered at startup BEFORE the API
+# listener accepts traffic. A misconfigured sink (unwritable path,
+# missing parent directory, permission denied) fails startup instead
+# of leaving a half-initialized cluster.
+#
+# Declared and API-enabled (via sys/audit/{path}) devices coexist at
+# different paths. A device declared here cannot be modified or
+# deleted via the API — edit this file and restart instead.
+#
+# With zero audit devices the broker fail-opens (so a fresh cluster
+# can serve sys/audit/{path} long enough to bootstrap one), but ≥ 2
+# devices are recommended in production to avoid lockout if a single
+# sink wedges.
+#
+# All values inside `options = { ... }` are strings (HCL limitation
+# in this version). Non-string knobs like rotate_size and rotate_daily
+# should be tuned through the sys/audit/{path} API for now.
+
+# audit "file" "default" {
+#   description = "primary file audit"
+#   options = {
+#     file_path = "/var/log/warden/audit.log"
+#   }
+# }
+
 # IP binding policy controls how client IP validation is enforced for tokens.
 # Options:
 #   - "disabled": No IP binding checks
