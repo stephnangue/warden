@@ -16,11 +16,12 @@ import (
 // Headers to remove before proxying
 var headersToRemove = []string{
 	// Security headers (will be replaced with real values)
-	"Authorization",   // Remove Warden auth token to prevent leakage
-	"X-Vault-Token",   // Will be replaced with real Vault token
-	"X-Vault-Request", // Internal Vault header
-	"X-Warden-Token",  // Warden-specific auth header
-	"X-Warden-Role",   // Warden role header
+	"Authorization",         // Remove Warden auth token to prevent leakage
+	"X-Vault-Token",         // Will be replaced with real Vault token
+	"X-Vault-Request",       // Internal Vault header
+	"X-Warden-Token",        // Warden-specific auth header
+	"X-Warden-Role",         // Warden role header
+	"X-Warden-On-Behalf-Of", // Warden audit-propagation header — internal-only
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",

@@ -156,7 +156,29 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 		}
 	}
 
+	// Per-request actors (header) win over token-bound actors (jwt act)
+	// so a concentrator reusing one transparent JWT for many agents still
+	// gets correct per-call audit attribution.
+	if auth != nil && len(auth.Actors) > 0 {
+		auditAuth.Actors = toAuditActors(auth.Actors)
+	} else if te != nil && len(te.Actors) > 0 {
+		auditAuth.Actors = toAuditActors(te.Actors)
+	}
+
 	return auditAuth
+}
+
+// toAuditActors translates the on-behalf-of chain from the logical layer
+// into its audit-layer shape.
+func toAuditActors(actors []logical.ActorRef) []audit.ActorRef {
+	if len(actors) == 0 {
+		return nil
+	}
+	out := make([]audit.ActorRef, len(actors))
+	for i, a := range actors {
+		out[i] = audit.ActorRef{Subject: a.Subject, Verified: a.Verified}
+	}
+	return out
 }
 
 // buildAuditAuthResult converts logical.Auth (from login response) to audit.AuthResult

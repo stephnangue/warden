@@ -1653,3 +1653,33 @@ func TestHandleNonLoginRequest_StreamingWithoutBodyParsing(t *testing.T) {
 		assert.Nil(t, req.Data)
 	})
 }
+
+func TestValidActorSubject(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"empty rejected", "", false},
+		{"simple alpha", "agent-alpha", true},
+		{"namespaced path", "agents/alpha", true},
+		{"email-ish", "alpha@pod-xyz", true},
+		{"colon ok", "kind:agent-alpha", true},
+		{"plus ok", "alpha+test", true},
+		{"dot ok", "alpha.bot", true},
+		{"underscore ok", "agent_alpha", true},
+		{"comma rejected (single-actor enforcement)", "alpha,beta", false},
+		{"space rejected", "alpha beta", false},
+		{"CR rejected", "alpha\rinjected", false},
+		{"LF rejected", "alpha\ninjected", false},
+		{"tab rejected", "alpha\tbeta", false},
+		{"unicode rejected", "agent-α", false},
+		{"at-256-bytes accepted", strings.Repeat("a", 256), true},
+		{"over-256-bytes rejected", strings.Repeat("a", 257), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, validActorSubject(tc.input))
+		})
+	}
+}
