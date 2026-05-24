@@ -54,6 +54,7 @@ safe operations, and complete visibility.`,
 )
 
 func Execute() {
+	wardenCmd.SetArgs(helpers.NormalizeSingleDashFlags(wardenCmd, os.Args[1:]))
 	if err := wardenCmd.Execute(); err != nil {
 		os.Exit(int(helpers.RenderError(err)))
 	}
@@ -64,7 +65,7 @@ func init() {
 	wardenCmd.PersistentFlags().StringVarP(&flagRole, "role", "r", "", "Warden role to use for the command (can also use WARDEN_ROLE env var)")
 	wardenCmd.PersistentFlags().StringVarP(helpers.OutputFlagPtr(), "output", "o", "", "Output format: table, json, ndjson, text. Defaults to table on a TTY, json otherwise. Honors WARDEN_OUTPUT.")
 	wardenCmd.PersistentFlags().StringVarP(helpers.FieldsFlagPtr(), "fields", "F", "", "Comma-separated dot-paths to project from structured output (e.g. name,metadata.created_at,tokens.*.id). Honors WARDEN_FIELDS.")
-	wardenCmd.PersistentFlags().BoolVarP(helpers.DryRunFlagPtr(), "dry-run", "D", false, "Send X-Warden-Dry-Run on every request so the server validates without mutating. Honors WARDEN_DRY_RUN. Server enforcement is not yet shipped — see CHANGELOG.")
+	wardenCmd.PersistentFlags().BoolVarP(helpers.DryRunFlagPtr(), "dry-run", "D", false, "Validate the payload locally against the server's schema and exit without sending the request. Catches hallucinated parameters before they hit the wire. Honors WARDEN_DRY_RUN.")
 
 	wardenCmd.AddCommand(server.ServerCmd)
 	wardenCmd.AddCommand(status.StatusCmd)
