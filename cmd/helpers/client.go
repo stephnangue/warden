@@ -11,6 +11,10 @@ var (
 	c *api.Client
 )
 
+// SetTestClient installs an api.Client that Client() returns instead of
+// constructing one from the environment. Pass nil to clear. Intended for tests.
+func SetTestClient(client *api.Client) { c = client }
+
 // Construct the HTTP API client
 func Client() (*api.Client, error) {
 	// Read the test client if present
