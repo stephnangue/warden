@@ -54,6 +54,7 @@ safe operations, and complete visibility.`,
 )
 
 func Execute() {
+	wardenCmd.SetArgs(helpers.NormalizeSingleDashFlags(wardenCmd, os.Args[1:]))
 	if err := wardenCmd.Execute(); err != nil {
 		os.Exit(int(helpers.RenderError(err)))
 	}
