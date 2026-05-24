@@ -193,7 +193,7 @@ echo "  Node reachable (health: $HEALTH_CODE)"
 
 if [ "$HEALTH_CODE" = "501" ]; then
   echo "  Cluster not initialized. Running operator init..."
-  INIT_OUTPUT=$("$BIN_DIR/warden" operator init --secret-shares=1 --secret-threshold=1 2>&1)
+  INIT_OUTPUT=$("$BIN_DIR/warden" operator init -o table --secret-shares=1 --secret-threshold=1 2>&1)
   echo "$INIT_OUTPUT"
 
   # Extract root token from init output
