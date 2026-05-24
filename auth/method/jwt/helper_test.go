@@ -13,6 +13,7 @@ import (
 	"github.com/stephnangue/warden/auth/helper"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 )
 
 // =============================================================================
@@ -592,5 +593,109 @@ func TestVerifyOIDCDiscoveryURLReachable(t *testing.T) {
 }
 
 // =============================================================================
-// handleConfigWrite with storage persistence
+// extractActChain Tests (RFC 8693 §4.1 "act" claim)
 // =============================================================================
+
+func TestExtractActChain_NoActClaim(t *testing.T) {
+	claims := map[string]interface{}{"sub": "mcp-github"}
+	assert.Nil(t, extractActChain(claims))
+}
+
+func TestExtractActChain_SingleHop(t *testing.T) {
+	claims := map[string]interface{}{
+		"sub": "mcp-github",
+		"act": map[string]interface{}{"sub": "agents/alpha"},
+	}
+	got := extractActChain(claims)
+	require.Len(t, got, 1)
+	assert.Equal(t, "agents/alpha", got[0].Subject)
+	assert.True(t, got[0].Verified)
+}
+
+func TestExtractActChain_NestedChain(t *testing.T) {
+	claims := map[string]interface{}{
+		"sub": "mcp-github",
+		"act": map[string]interface{}{
+			"sub": "broker-beta",
+			"act": map[string]interface{}{
+				"sub": "agents/alpha",
+			},
+		},
+	}
+	got := extractActChain(claims)
+	require.Len(t, got, 2)
+	assert.Equal(t, "broker-beta", got[0].Subject)
+	assert.Equal(t, "agents/alpha", got[1].Subject)
+	for _, a := range got {
+		assert.True(t, a.Verified, "all act-claim actors are verified")
+	}
+}
+
+func TestExtractActChain_NonObjectAct(t *testing.T) {
+	// "act" must be a JSON object; a string here is malformed and ends the walk.
+	claims := map[string]interface{}{
+		"sub": "mcp-github",
+		"act": "agents/alpha",
+	}
+	assert.Empty(t, extractActChain(claims))
+}
+
+func TestExtractActChain_MissingSubInLayer(t *testing.T) {
+	// Inner layer has no sub → walk terminates without recording.
+	claims := map[string]interface{}{
+		"sub": "mcp-github",
+		"act": map[string]interface{}{
+			"act": map[string]interface{}{"sub": "agents/alpha"},
+		},
+	}
+	assert.Empty(t, extractActChain(claims))
+}
+
+func TestExtractActChain_NonStringSub(t *testing.T) {
+	// sub must be a string; a number here is malformed.
+	claims := map[string]interface{}{
+		"sub": "mcp-github",
+		"act": map[string]interface{}{"sub": 42},
+	}
+	assert.Empty(t, extractActChain(claims))
+}
+
+func TestExtractActChain_EmptyStringSub(t *testing.T) {
+	claims := map[string]interface{}{
+		"sub": "mcp-github",
+		"act": map[string]interface{}{"sub": ""},
+	}
+	assert.Empty(t, extractActChain(claims))
+}
+
+func TestExtractActChain_DepthCap(t *testing.T) {
+	// Build a chain deeper than maxActChainDepth (4). The walk should stop
+	// after 4 layers, retaining the layers CLOSEST to the principal (not
+	// the innermost ones) — i.e. the first 4 entries when walking outward.
+	innermost := map[string]interface{}{"sub": "layer-6"}
+	chain := innermost
+	for i := 5; i >= 1; i-- {
+		chain = map[string]interface{}{
+			"sub": strconv.Itoa(i),
+			"act": chain,
+		}
+	}
+	// Re-assign subs as "layer-N" once nesting is built, so we can assert order.
+	walk := chain
+	for i := 1; i <= 5; i++ {
+		walk["sub"] = "layer-" + strconv.Itoa(i)
+		next, ok := walk["act"].(map[string]interface{})
+		if !ok {
+			break
+		}
+		walk = next
+	}
+	claims := map[string]interface{}{"sub": "principal", "act": chain}
+
+	got := extractActChain(claims)
+	require.Len(t, got, maxActChainDepth)
+	assert.Equal(t, "layer-1", got[0].Subject, "outermost act layer must come first")
+	assert.Equal(t, "layer-2", got[1].Subject)
+	assert.Equal(t, "layer-3", got[2].Subject)
+	assert.Equal(t, "layer-4", got[3].Subject)
+}
