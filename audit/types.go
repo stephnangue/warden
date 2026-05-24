@@ -106,6 +106,21 @@ type Auth struct {
 
 	// Creation context
 	CreatedByIP string `json:"created_by_ip,omitempty"`
+
+	// Actor chain — subjects this request was made on behalf of.
+	// Sources: X-Warden-On-Behalf-Of header (verified=false) and
+	// JWT "act" claim per RFC 8693 §4.1 (verified=true).
+	Actors []ActorRef `json:"actors,omitempty"`
+}
+
+// ActorRef identifies a subject in the on-behalf-of chain alongside
+// the authenticated principal. The Verified flag tells audit readers
+// whether the actor was cryptographically attested (true, e.g. JWT
+// "act" claim) or self-reported by the authenticated principal (false,
+// e.g. X-Warden-On-Behalf-Of header).
+type ActorRef struct {
+	Subject  string `json:"subject"`
+	Verified bool   `json:"verified"`
 }
 
 // PolicyResults captures which policies granted access
@@ -276,6 +291,10 @@ func (e *LogEntry) Clone() *LogEntry {
 				clone.Auth.PolicyResults.GrantingPolicies = make([]string, len(e.Auth.PolicyResults.GrantingPolicies))
 				copy(clone.Auth.PolicyResults.GrantingPolicies, e.Auth.PolicyResults.GrantingPolicies)
 			}
+		}
+		if e.Auth.Actors != nil {
+			clone.Auth.Actors = make([]ActorRef, len(e.Auth.Actors))
+			copy(clone.Auth.Actors, e.Auth.Actors)
 		}
 	}
 

@@ -13,7 +13,9 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -751,6 +753,43 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		}
 	}
 
+	// On-behalf-of header (X-Warden-On-Behalf-Of): an authenticated
+	// principal — typically an MCP concentrator — names the upstream
+	// caller it is acting for so per-agent attribution survives the
+	// concentrator hop. Recorded with verified=false; the strip-list
+	// keeps the header from leaking upstream.
+	//
+	// Gated on te != nil so an unauthenticated caller on a stream-
+	// unauthenticated path can't plant an actor into the response
+	// audit entry (which is emitted unconditionally upstream in
+	// handleCancelableRequest).
+	if te != nil && req.HTTPRequest != nil {
+		if obo := strings.TrimSpace(req.HTTPRequest.Header.Get("X-Warden-On-Behalf-Of")); obo != "" {
+			if !validActorSubject(obo) {
+				// Truncate the offending value so the warn log isn't a vehicle
+				// for an attacker-controlled string of arbitrary length. Quote
+				// for safe rendering since the input may contain non-ASCII or
+				// control bytes that would otherwise corrupt the log.
+				logged := obo
+				if len(logged) > 64 {
+					logged = logged[:64] + "..."
+				}
+				c.logger.Warn("dropped X-Warden-On-Behalf-Of: invalid subject",
+					logger.String("actor", strconv.Quote(logged)),
+					logger.String("path", req.Path),
+				)
+			} else {
+				if auth == nil {
+					auth = &logical.Auth{}
+				}
+				auth.Actors = append(auth.Actors, logical.ActorRef{
+					Subject:  obo,
+					Verified: false,
+				})
+			}
+		}
+	}
+
 	// Create an audit trail of the request.
 	// Skip for unauthenticated streaming paths (e.g., public PKI certificates) because:
 	// 1. No authentication context exists - no token, principal, or policies to audit
@@ -1036,6 +1075,18 @@ func extractToken(r *http.Request) string {
 		return authHeader[7:]
 	}
 	return ""
+}
+
+// actorSubjectPattern enforces the wire-format of X-Warden-On-Behalf-Of
+// values: ASCII alphanumerics plus a small punctuation set, 1-256 bytes.
+// Comma is deliberately excluded so the header carries a single actor.
+var actorSubjectPattern = regexp.MustCompile(`^[A-Za-z0-9._:@/+\-]{1,256}$`)
+
+// validActorSubject reports whether s is acceptable as an on-behalf-of
+// actor subject. Rejects empty strings, oversized values, control bytes,
+// and any character outside the allowed set.
+func validActorSubject(s string) bool {
+	return actorSubjectPattern.MatchString(s)
 }
 
 // isTransparentRequest checks if this request needs implicit authentication.

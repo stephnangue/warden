@@ -81,6 +81,10 @@ func TestCloneFull(t *testing.T) {
 			NamespaceID:   "ns1",
 			NamespacePath: "root/",
 			CreatedByIP:   "10.0.0.1",
+			Actors: []ActorRef{
+				{Subject: "agent-alpha@pod-xyz", Verified: false},
+				{Subject: "broker-beta", Verified: true},
+			},
 		},
 	}
 
@@ -120,6 +124,17 @@ func TestCloneFull(t *testing.T) {
 	entry.Response.AuthResult.Policies[0] = "modified"
 	if clone.Response.AuthResult.Policies[0] == "modified" {
 		t.Error("clone auth result policies should be independent")
+	}
+
+	entry.Auth.Actors[0].Subject = "modified"
+	if clone.Auth.Actors[0].Subject == "modified" {
+		t.Error("clone auth actors should be independent")
+	}
+	if len(clone.Auth.Actors) != 2 {
+		t.Errorf("clone auth actors should have 2 entries, got %d", len(clone.Auth.Actors))
+	}
+	if !clone.Auth.Actors[1].Verified || clone.Auth.Actors[1].Subject != "broker-beta" {
+		t.Errorf("clone auth actors[1] mismatch: %+v", clone.Auth.Actors[1])
 	}
 }
 

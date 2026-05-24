@@ -45,6 +45,21 @@ type Auth struct {
 	NamespacePath string // Namespace path
 
 	ClientIP string
+
+	// Actors is the on-behalf-of chain attached by ingestion paths
+	// (X-Warden-On-Behalf-Of header or JWT "act" claim). Flows
+	// through buildAuditAuth into the audit log; not used for policy
+	// decisions.
+	Actors []ActorRef
+}
+
+// ActorRef identifies a subject in the on-behalf-of chain. Verified
+// is true when the actor was cryptographically attested by an IdP
+// (e.g. JWT "act" claim per RFC 8693 §4.1) and false for self-reported
+// subjects from request headers.
+type ActorRef struct {
+	Subject  string
+	Verified bool
 }
 
 // AuthData contains the authentication data used to generate a token.
