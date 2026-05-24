@@ -71,4 +71,9 @@ type AuthData struct {
 	Policies       []string
 	ClientIP       string
 	TokenValue     string // External token value (e.g., JWT for transparent mode)
+
+	// Actors carries the verified on-behalf-of chain extracted at login
+	// (e.g. JWT "act" claim) so it can be persisted onto the issued
+	// TokenEntry for transparent-mode cache reuse.
+	Actors []ActorRef
 }

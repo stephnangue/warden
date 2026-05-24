@@ -543,6 +543,7 @@ func (c *Core) LoginCreateToken(ctx context.Context, resp *logical.Response) (*l
 		Policies:       auth.Policies,
 		ClientIP:       auth.ClientIP,
 		TokenValue:     auth.ClientToken,
+		Actors:         auth.Actors,
 	}
 
 	tokenValue, err := c.tokenStore.GenerateToken(ctx, auth.TokenType, &authData)

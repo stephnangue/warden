@@ -249,6 +249,10 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 		}
 	}
 
+	// On-behalf-of chain attested by the IdP via RFC 8693 §4.1 "act"
+	// claim. Recorded with verified=true; flows through to audit.
+	actors := extractActChain(claims)
+
 	// Return auth response using role configuration.
 	// ClientToken carries the raw JWT so that LoginCreateToken can pass it to
 	// JWTRoleTokenType.Generate(), which hashes jwt+role to compute the
@@ -264,6 +268,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 			TokenTTL:       effectiveTTL,
 			ClientIP:       req.ClientIP,
 			ClientToken:    jwtToken,
+			Actors:         actors,
 		},
 		Data: map[string]any{
 			"principal_id": principalID,

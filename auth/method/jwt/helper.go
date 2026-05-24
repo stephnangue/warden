@@ -3,7 +3,14 @@ package jwt
 import (
 	"fmt"
 	"strings"
+
+	"github.com/stephnangue/warden/logical"
 )
+
+// maxActChainDepth bounds the depth of nested "act" claims walked by
+// extractActChain. RFC 8693 §4.1 allows arbitrary nesting; this cap
+// protects against IdP misconfiguration or pathological tokens.
+const maxActChainDepth = 4
 
 // errAuthFailed is a generic error returned for all authentication failures
 // to prevent information leakage about which specific check failed.
@@ -99,6 +106,41 @@ func extractClaim(claims map[string]interface{}, claimName string) string {
 		}
 	}
 	return ""
+}
+
+// extractActChain walks the RFC 8693 §4.1 "act" claim chain into a
+// flat verified actor list. Returns nil when no "act" claim is present.
+// Terminates without erroring on malformed layers (non-object, missing
+// "sub", non-string "sub") and on chains deeper than maxActChainDepth.
+//
+// Example input:
+//
+//	{"act": {"sub": "broker-beta", "act": {"sub": "agents/alpha"}}}
+//
+// Example output:
+//
+//	[{Subject: "broker-beta", Verified: true},
+//	 {Subject: "agents/alpha", Verified: true}]
+func extractActChain(claims map[string]interface{}) []logical.ActorRef {
+	var actors []logical.ActorRef
+	current := claims
+	for depth := 0; depth < maxActChainDepth; depth++ {
+		raw, ok := current["act"]
+		if !ok {
+			break
+		}
+		act, ok := raw.(map[string]interface{})
+		if !ok {
+			break // malformed: act must be a JSON object
+		}
+		sub, ok := act["sub"].(string)
+		if !ok || sub == "" {
+			break // malformed: layer must carry a non-empty string sub
+		}
+		actors = append(actors, logical.ActorRef{Subject: sub, Verified: true})
+		current = act
+	}
+	return actors
 }
 
 // extractGroupsClaim extracts a string slice from a JWT claim.
