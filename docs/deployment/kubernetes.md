@@ -92,7 +92,7 @@ To pin to a specific Warden binary version against the same chart:
 ```bash
 helm install warden oci://ghcr.io/stephnangue/charts/warden \
   --version 0.1.0 \
-  --set image.tag=0.12.0 \
+  --set image.tag=v0.12.0 \
   -n warden --create-namespace \
   -f your-values.yaml
 ```
@@ -587,7 +587,7 @@ Bump `image.tag` (or upgrade the chart whose `appVersion` advances):
 helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
   --version 0.1.0 \
   -n warden --reuse-values \
-  --set image.tag=0.13.0
+  --set image.tag=v0.13.0
 ```
 
 Same rolling-restart mechanics. Check release notes for any
@@ -787,6 +787,33 @@ kubectl -n warden run dns-debug --rm -it --restart=Never \
 
 If DNS fails, the `publishNotReadyAddresses` and per-pod-hostname behavior
 of StatefulSets may be misconfigured by a cluster-wide DNS policy.
+
+### Debugging inside the Warden container itself
+
+When you need to inspect state *inside* a Warden pod — config files
+mounted into `/config`, the working directory, the binary's view of
+the filesystem — the production `nonroot` image is intentionally too
+spare to help. Every release also publishes a sibling debug variant
+at the same repository with a `-debug` suffix (and a moving `debug`
+tag), built from the same binary on a base that bundles a BusyBox
+shell. UID, GID, entrypoint, and the `/config` mount contract are
+identical, so swapping in the debug tag is a pure image change with
+no other values to adjust:
+
+```bash
+helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
+  --version 0.1.0 \
+  -n warden --reuse-values \
+  --set image.tag=v0.13.0-debug
+
+kubectl -n warden exec warden-0 -- sh -c 'ls /config && id'
+```
+
+Roll back to the production tag (`--set image.tag=v0.13.0`, or
+`--set image.tag=""` to fall back to the chart's `appVersion`)
+once the investigation is done. The debug variant is meant for short-lived
+diagnostic windows, not steady-state operation — it carries a
+larger attack surface than the production image by design.
 
 ### `helm test` fails with connection_refused
 

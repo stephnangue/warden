@@ -1,0 +1,14 @@
+FROM gcr.io/distroless/static-debian12:debug-nonroot
+
+ARG TARGETPLATFORM
+
+WORKDIR /app
+
+COPY ${TARGETPLATFORM}/warden ./warden
+
+EXPOSE 8400
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["./warden", "server"]
+CMD ["--config", "/config/warden.hcl"]

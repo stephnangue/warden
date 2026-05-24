@@ -42,12 +42,20 @@ changelog:
       - "^chore:"
 
 dockers_v2:
-  - images:
+  - id: warden
+    images:
       - "ghcr.io/stephnangue/warden"
     tags:
       - "v{{ .Version }}"
       - latest
     dockerfile: deploy/Dockerfile.goreleaser
+  - id: warden-debug
+    images:
+      - "ghcr.io/stephnangue/warden"
+    tags:
+      - "v{{ .Version }}-debug"
+      - debug
+    dockerfile: deploy/Dockerfile.goreleaser.debug
 
 release:
   github:
