@@ -8,23 +8,29 @@ import (
 	"github.com/stephnangue/warden/cmd/helpers"
 )
 
-var ListCmd = &cobra.Command{
-	Use:           "list",
-	SilenceUsage:  true,
-	SilenceErrors: true,
-	Short:         "List data from a path",
-	Long: `
-Usage: warden list PATH
+var (
+	listPath string
 
-  List data from the given path. The path should be in the format
-  "provider_mount/resource" or "auth/auth_mount/resource" or "sys/path/to/resource"
-  and will be converted to the appropriate API path.
+	ListCmd = &cobra.Command{
+		Use:           "list",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "List data from a path",
+		Long: `
+Usage: warden list [PATH]
+
+  List data from the given path. The PATH may be supplied either
+  positionally or via --path (pick one — combining both is rejected).
+  The path should be in the format "provider_mount/resource" or
+  "auth/auth_mount/resource" or "sys/path/to/resource" and will be
+  converted to the appropriate API path.
 
   Examples:
 
     List JWT auth roles:
 
       $ warden list auth/jwt/role
+      $ warden list --path=auth/jwt/role
 
     List providers:
 
@@ -34,12 +40,20 @@ Usage: warden list PATH
 
       $ warden list sys/namespaces
 `,
-	Args: cobra.ExactArgs(1),
-	RunE: runList,
+		Args: cobra.MaximumNArgs(1),
+		RunE: runList,
+	}
+)
+
+func init() {
+	ListCmd.Flags().StringVar(&listPath, "path", "", "API path (alternative to the positional PATH argument)")
 }
 
 func runList(cmd *cobra.Command, args []string) error {
-	path := args[0]
+	path, err := helpers.RequirePath(args, listPath)
+	if err != nil {
+		return err
+	}
 	if err := helpers.ValidatePath(path); err != nil {
 		return err
 	}

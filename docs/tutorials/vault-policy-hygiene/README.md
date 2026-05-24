@@ -498,8 +498,12 @@ cred spec mints OpenBao tokens via the `policy-reader` token role;
 ```bash
 warden provider enable --type=vault \
     --description="Internal OpenBao cluster — ACL policies, mounts, identity (read-mostly)" \
-    vault
+    --path=vault
 ```
+
+The mount path can be supplied either positionally or via `--path` —
+both forms work and Vault-style single-dash long flags (`-path=vault`)
+are accepted too.
 
 ```bash
 warden write auth/jwt/role/policy-scanner \

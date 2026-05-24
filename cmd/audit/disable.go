@@ -8,16 +8,18 @@ import (
 )
 
 var (
+	disablePath string
+
 	DisableCmd = &cobra.Command{
-		Use:           "disable PATH",
+		Use:           "disable [PATH]",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Short:         "This command disables an audit device.",
 		Long: `
-Usage: warden audit disable PATH
+Usage: warden audit disable [PATH]
 
-  Disables an audit device at the given PATH. The argument corresponds to
-  the enabled PATH of the audit device.
+  Disables an audit device at the given PATH. The PATH may be supplied
+  either positionally or via --path (pick one — combining both is rejected).
 
   WARNING: Warden operates in fail-closed mode. You cannot disable the last
   remaining audit device. Attempting to do so will result in an error.
@@ -29,20 +31,28 @@ Usage: warden audit disable PATH
   Disable the audit device enabled at file/:
 
       $ warden audit disable file/
+      $ warden audit disable --path=file/
 `,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: runDisable,
 	}
 )
 
+func init() {
+	DisableCmd.Flags().StringVar(&disablePath, "path", "", "Mount path (alternative to the positional PATH argument)")
+}
+
 func runDisable(cmd *cobra.Command, args []string) error {
-	c, err := helpers.Client()
+	path, err := helpers.RequirePath(args, disablePath)
 	if err != nil {
 		return err
 	}
-
-	path := args[0]
 	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
+
+	c, err := helpers.Client()
+	if err != nil {
 		return err
 	}
 

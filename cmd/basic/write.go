@@ -13,18 +13,23 @@ import (
 )
 
 var (
+	writePath string
+
 	WriteCmd = &cobra.Command{
 		Use:           "write",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Short:         "Write data to a path",
 		Long: `
-Usage: warden write PATH [DATA]
+Usage: warden write [PATH] [DATA]
 
-  Write data to the given path. The data can be provided as JSON via stdin,
-  as JSON arguments, or as key=value pairs. The path should be in the format
-  "provider_mount/resource" or "auth/auth_mount/resource" or "sys/path/to/resource"
-  and will be converted to the appropriate API path.
+  Write data to the given path. The PATH may be supplied either positionally
+  or via --path (pick one — combining both is rejected). When --path is used,
+  all remaining positional arguments are treated as DATA. The data can be
+  provided as JSON via stdin, as JSON arguments, or as key=value pairs. The
+  path should be in the format "provider_mount/resource" or
+  "auth/auth_mount/resource" or "sys/path/to/resource" and will be converted
+  to the appropriate API path.
 
   Write configuration using JSON via stdin:
 
@@ -39,18 +44,35 @@ Usage: warden write PATH [DATA]
   Write configuration using key=value format:
 
       $ warden write aws/config token_ttl=1h proxy_domains='["localhost","warden"]'
+      $ warden write --path=aws/config token_ttl=1h
 
   Use @file to read a value from a file (useful for PEM certificates, large payloads, etc.):
 
       $ warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem default_role=my-role
 `,
-		Args: cobra.MinimumNArgs(1),
 		RunE: runWrite,
 	}
 )
 
+func init() {
+	WriteCmd.Flags().StringVar(&writePath, "path", "", "API path (alternative to the positional PATH argument)")
+}
+
 func runWrite(cmd *cobra.Command, args []string) error {
-	path := args[0]
+	// --path frees args[0] for DATA; without --path, args[0] is the PATH.
+	var path string
+	var dataArgs []string
+	if writePath != "" {
+		path = writePath
+		dataArgs = args
+	} else {
+		p, err := helpers.RequirePath(args, "")
+		if err != nil {
+			return err
+		}
+		path = p
+		dataArgs = args[1:]
+	}
 	if err := helpers.ValidatePath(path); err != nil {
 		return err
 	}
@@ -78,14 +100,14 @@ func runWrite(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("failed to parse JSON: %w", err)
 			}
 		}
-	} else if len(args) > 1 {
+	} else if len(dataArgs) > 0 {
 		// Try to parse remaining args as key=value pairs or JSON
 		data = make(map[string]interface{})
 
 		// Check if first arg looks like key=value format
-		if strings.Contains(args[1], "=") {
+		if strings.Contains(dataArgs[0], "=") {
 			// Parse as key=value pairs with type inference
-			for _, arg := range args[1:] {
+			for _, arg := range dataArgs {
 				parts := strings.SplitN(arg, "=", 2)
 				if len(parts) != 2 {
 					return fmt.Errorf("invalid key=value format %q: %w", arg, helpers.ErrInvalidInput)
@@ -108,7 +130,7 @@ func runWrite(cmd *cobra.Command, args []string) error {
 			}
 		} else {
 			// Try to parse as JSON
-			jsonStr := strings.Join(args[1:], " ")
+			jsonStr := strings.Join(dataArgs, " ")
 			if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
 				return fmt.Errorf("failed to parse JSON from arguments: %w", err)
 			}

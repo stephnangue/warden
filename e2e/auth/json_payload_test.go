@@ -50,6 +50,58 @@ func TestJSON_AuthEnableWithJSON(t *testing.T) {
 	}
 }
 
+// TestJSON_AuthEnableWithPathFlag verifies that -path works as an
+// alternative to the positional PATH argument. Uses Vault-style single-dash
+// long flags so this test also exercises the flag-normalization layer
+// against the newly-added -path flag.
+func TestJSON_AuthEnableWithPathFlag(t *testing.T) {
+	port := h.GetLeaderPort(t)
+
+	const path = "e2e-pathflag-auth"
+	h.APIRequest(t, "DELETE", "sys/auth/"+path, port, "")
+	t.Cleanup(func() {
+		h.APIRequest(t, "DELETE", "sys/auth/"+path, port, "")
+	})
+
+	out, err := h.WardenCLIWithPort(t, port, map[string]string{
+		"WARDEN_TOKEN": h.RootToken(t),
+	}, "auth", "enable",
+		"-type", "jwt",
+		"-path", path,
+		"-o", "json")
+	if err != nil {
+		t.Fatalf("auth enable -path failed: %v\nOutput:\n%s", err, out)
+	}
+
+	var resp map[string]any
+	if jsonErr := json.Unmarshal([]byte(out), &resp); jsonErr != nil {
+		t.Fatalf("output not JSON: %v\n%s", jsonErr, out)
+	}
+	if resp["enabled"] != true {
+		t.Errorf("expected enabled=true marker; got %v", resp)
+	}
+	if resp["path"] != path+"/" {
+		t.Errorf("expected path %q in response; got %v", path+"/", resp["path"])
+	}
+}
+
+// TestJSON_AuthEnableRejectsPathAndPositionalConflict pins the conflict
+// rule: supplying both -path and a positional PATH must fail with a
+// usage error (not silently prefer one).
+func TestJSON_AuthEnableRejectsPathAndPositionalConflict(t *testing.T) {
+	port := h.GetLeaderPort(t)
+
+	out, err := h.WardenCLIWithPort(t, port, map[string]string{
+		"WARDEN_TOKEN": h.RootToken(t),
+	}, "auth", "enable", "positional-path",
+		"-type", "jwt",
+		"-path", "flag-path",
+		"-o", "json")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for -path + positional PATH; got success.\nOutput:\n%s", out)
+	}
+}
+
 // TestJSON_AuthEnableDerivesPathFromPayloadType verifies the no-positional-arg
 // path-resolution: when the agent omits the positional PATH, the mount
 // path is derived from payload["type"] (e.g. "jwt" → "jwt/").

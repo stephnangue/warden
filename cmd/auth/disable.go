@@ -8,35 +8,44 @@ import (
 )
 
 var (
+	disablePath string
+
 	DisableCmd = &cobra.Command{
-		Use:           "disable PATH",
+		Use:           "disable [PATH]",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Short:         "This command disables an auth method.",
 		Long: `
-Usage: warden auth disable PATH
+Usage: warden auth disable [PATH]
 
-  Disables an auth method at the given PATH. The argument corresponds to
-  the enabled PATH of the auth method.
+  Disables an auth method at the given PATH. The PATH may be supplied
+  either positionally or via --path (pick one — combining both is rejected).
 
   Disable the auth method enabled at jwt/:
 
       $ warden auth disable jwt/
+      $ warden auth disable --path=jwt/
 `,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: runDisable,
 	}
 )
 
+func init() {
+	DisableCmd.Flags().StringVar(&disablePath, "path", "", "Mount path (alternative to the positional PATH argument)")
+}
+
 func runDisable(cmd *cobra.Command, args []string) error {
-	// Create the client
-	c, err := helpers.Client()
+	path, err := helpers.RequirePath(args, disablePath)
 	if err != nil {
 		return err
 	}
-
-	path := args[0]
 	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
+
+	c, err := helpers.Client()
+	if err != nil {
 		return err
 	}
 

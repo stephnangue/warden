@@ -17,11 +17,13 @@ var (
 		SilenceErrors: true,
 		Short:         "Delete data at a path",
 		Long: `
-Usage: warden delete PATH [flags]
+Usage: warden delete [PATH] [flags]
 
-  Delete data at the given path. The path should be in the format
-  "provider_mount/resource" or "auth/auth_mount/resource" or "sys/path/to/resource"
-  and will be converted to the appropriate API path.
+  Delete data at the given path. The PATH may be supplied either
+  positionally or via --path (pick one — combining both is rejected).
+  The path should be in the format "provider_mount/resource" or
+  "auth/auth_mount/resource" or "sys/path/to/resource" and will be
+  converted to the appropriate API path.
 
   By default, this command will ask for confirmation before deleting.
   Use the -f/--force flag to skip the confirmation prompt.
@@ -31,6 +33,7 @@ Usage: warden delete PATH [flags]
     Delete a JWT auth role (with confirmation):
 
       $ warden delete auth/jwt/role/developer
+      $ warden delete --path=auth/jwt/role/developer
 
     Delete a provider (skip confirmation):
 
@@ -40,19 +43,24 @@ Usage: warden delete PATH [flags]
 
       $ warden delete sys/namespaces/test
 `,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: runDelete,
 	}
 
 	deleteForce bool
+	deletePath  string
 )
 
 func init() {
 	DeleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Skip confirmation prompt")
+	DeleteCmd.Flags().StringVar(&deletePath, "path", "", "API path (alternative to the positional PATH argument)")
 }
 
 func runDelete(cmd *cobra.Command, args []string) error {
-	path := args[0]
+	path, err := helpers.RequirePath(args, deletePath)
+	if err != nil {
+		return err
+	}
 	if err := helpers.ValidatePath(path); err != nil {
 		return err
 	}

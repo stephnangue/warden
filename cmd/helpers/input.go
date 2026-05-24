@@ -92,10 +92,44 @@ func RejectFlagsWithJSON(jsonProvided bool, flags map[string]bool) error {
 		strings.Join(conflicting, ", "), ErrUsage)
 }
 
+// ResolvePath returns the explicit path from either the positional
+// argument or the --path flag, with a usage error when both are
+// supplied. Returns "" when neither is set — callers may then fall
+// back to deriving the path (e.g. from --type or from a JSON payload's
+// "type" field), or treat empty as a usage error.
+func ResolvePath(args []string, pathFlag string) (string, error) {
+	if len(args) > 0 && pathFlag != "" {
+		return "", fmt.Errorf(
+			"cannot specify both --path=%q and positional PATH %q: %w",
+			pathFlag, args[0], ErrUsage)
+	}
+	if len(args) > 0 {
+		return args[0], nil
+	}
+	return pathFlag, nil
+}
+
+// RequirePath is ResolvePath plus a usage error when neither source
+// supplied a value. Use this in commands where PATH is mandatory
+// (disable, read, etc.). Commands that fall back to deriving the path
+// from --type or a JSON payload should call ResolvePath directly and
+// handle the empty case themselves.
+func RequirePath(args []string, pathFlag string) (string, error) {
+	path, err := ResolvePath(args, pathFlag)
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", fmt.Errorf("PATH is required (provide positionally or via --path): %w", ErrUsage)
+	}
+	return path, nil
+}
+
 // MountPathFromArgOrPayload resolves the mount path for `enable` commands
-// that accept either an explicit positional path OR a `--json` payload
-// containing a "type" field. The positional argument wins when present;
-// otherwise we derive the path from the payload's "type" (e.g. "jwt" → "jwt/").
+// that accept either an explicit path (already resolved from positional
+// or --path via ResolvePath) OR a `--json` payload containing a "type"
+// field. The explicit path wins when present; otherwise we derive the
+// path from the payload's "type" (e.g. "jwt" → "jwt/").
 //
 // Returns "" when neither source supplies a value — callers should error
 // out with a clear "cannot determine mount path" message rather than
@@ -103,12 +137,12 @@ func RejectFlagsWithJSON(jsonProvided bool, flags map[string]bool) error {
 // surface a misleading "absolute path" error.
 //
 // A non-empty result always has a trailing slash.
-func MountPathFromArgOrPayload(args []string, payload map[string]any) string {
-	var path string
-	if len(args) > 0 {
-		path = args[0]
-	} else if t, ok := payload["type"].(string); ok && t != "" {
-		path = t + "/"
+func MountPathFromArgOrPayload(explicitPath string, payload map[string]any) string {
+	path := explicitPath
+	if path == "" {
+		if t, ok := payload["type"].(string); ok && t != "" {
+			path = t + "/"
+		}
 	}
 	if path == "" {
 		return ""
