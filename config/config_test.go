@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -74,7 +75,8 @@ storage "postgres" {
 }
 
 listener "tcp" {
-  address = ":8400"
+  address     = ":8400"
+  tls_disable = true
 }
 `
 	p := writeFile(t, dir, "warden.hcl", hcl)
@@ -100,7 +102,8 @@ storage "postgres" {
 }
 
 listener "tcp" {
-  address = ":8400"
+  address     = ":8400"
+  tls_disable = true
 }
 `)
 
@@ -136,7 +139,8 @@ func TestLoadConfigDir_EnvInterpolation(t *testing.T) {
 api_addr = "https://{{ env "WARDEN_TEST_API_HOST" }}:8400"
 
 listener "tcp" {
-  address = ":8400"
+  address     = ":8400"
+  tls_disable = true
 }
 `)
 	writeFile(t, dir, "10-secrets.hcl", `
@@ -162,7 +166,8 @@ storage "postgres" {
 }
 
 listener "tcp" {
-  address = ":8400"
+  address     = ":8400"
+  tls_disable = true
 }
 `)
 	writeFile(t, dir, "README.md", "not a config file")
@@ -205,7 +210,8 @@ storage "postgres" {
 }
 
 listener "tcp" {
-  address = ":8400"
+  address     = ":8400"
+  tls_disable = true
 }
 `)
 	writeFile(t, dir, "10-overlay.hcl", `
@@ -226,7 +232,8 @@ storage "postgres" {
 }
 
 listener "tcp" {
-  address = ":8400"
+  address     = ":8400"
+  tls_disable = true
 }
 `)
 	_, err := LoadConfigDir(dir)
@@ -248,7 +255,8 @@ storage "postgres" {
 }
 
 listener "tcp" {
-  address = ":8400"
+  address     = ":8400"
+  tls_disable = true
 }
 
 audit "file" "default" {
@@ -285,7 +293,10 @@ func TestValidateConfig_AuditBlock(t *testing.T) {
 	base := `
 ip_binding_policy = "optional"
 storage "postgres" { connection_url = "postgres://x/db" }
-listener "tcp" { address = ":8400" }
+listener "tcp" {
+  address     = ":8400"
+  tls_disable = true
+}
 `
 
 	t.Run("duplicate type+path rejected", func(t *testing.T) {
@@ -316,7 +327,10 @@ func TestMergeConfig_Audits(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "00-base.hcl", `
 storage "postgres" { connection_url = "postgres://x/db" }
-listener "tcp" { address = ":8400" }
+listener "tcp" {
+  address     = ":8400"
+  tls_disable = true
+}
 
 audit "file" "from-base" { options = { file_path = "/base" } }
 `)
@@ -336,4 +350,68 @@ audit "file" "from-override" { options = { file_path = "/override" } }
 func TestDevConfig_HasNoAudit(t *testing.T) {
 	cfg := DevConfig()
 	assert.Empty(t, cfg.Audits)
+}
+
+// collectingWarner captures warnings for assertion. Implements Warner.
+type collectingWarner struct{ msgs []string }
+
+func (c *collectingWarner) Warn(msg string) { c.msgs = append(c.msgs, msg) }
+
+// TestLoadConfig_IgnoresUnknownStanzas verifies that warden parses a
+// foreign-style HCL config — unknown top-level attributes and blocks
+// (e.g. `ui`, `cluster_name`, `service_registration`), and unknown attrs
+// inside a known block — without erroring. Each removal is reported
+// through the Warner so operators can diagnose stale or typo'd keys.
+func TestLoadConfig_IgnoresUnknownStanzas(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "warden.hcl", `
+ui            = true
+cluster_name  = "some-cluster"
+log_level     = "info"
+
+storage "postgres" {
+  connection_url = "postgres://u:p@db:5432/warden"
+  unknown_attr   = "ignored"
+}
+
+listener "tcp" {
+  address          = ":8400"
+  tls_disable      = true
+  tls_min_version  = "tls13"
+}
+
+seal "static" {
+  current_key_id  = "k1"
+  current_key     = "file:///k"
+  bogus_seal_attr = "x"
+}
+
+service_registration "consul" {
+  address = "127.0.0.1:8500"
+}
+`)
+	w := &collectingWarner{}
+	cfg, err := LoadConfigWithLogger(p, w)
+	require.NoError(t, err)
+	assert.Equal(t, "info", cfg.LogLevel)
+	require.NotNil(t, cfg.Storage)
+	assert.Equal(t, "postgres://u:p@db:5432/warden", cfg.Storage.ConnectionUrl)
+	require.Len(t, cfg.Listeners, 1)
+	assert.True(t, cfg.Listeners[0].TLSDisable)
+
+	require.Len(t, cfg.Seals, 1)
+	assert.Equal(t, "static", cfg.Seals[0].Type)
+	assert.Equal(t, "k1", cfg.Seals[0].CurrentKeyID)
+
+	joined := strings.Join(w.msgs, "\n")
+	for _, want := range []string{
+		`unknown attribute "ui"`,
+		`unknown attribute "cluster_name"`,
+		`unknown attribute "unknown_attr"`,
+		`unknown attribute "tls_min_version"`,
+		`unknown attribute "bogus_seal_attr"`,
+		`unknown block "service_registration"`,
+	} {
+		assert.Contains(t, joined, want, "expected warning for %s", want)
+	}
 }

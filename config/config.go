@@ -10,8 +10,6 @@ import (
 	"strings"
 	"text/template"
 	"time"
-
-	"github.com/hashicorp/hcl/v2/hclsimple"
 )
 
 // Config is the configuration for warden server.
@@ -438,7 +436,7 @@ type ListenerBlock struct {
 	TLSCertFile          string   `hcl:"tls_cert_file,optional"`
 	TLSKeyFile           string   `hcl:"tls_key_file,optional"`
 	TLSClientCAFile      string   `hcl:"tls_client_ca_file,optional"`
-	TLSEnabled           bool     `hcl:"tls_enabled,optional"`
+	TLSDisable           bool     `hcl:"tls_disable,optional"`             // default false => TLS on; requires tls_cert_file + tls_key_file
 	TLSRequireClientCert *bool    `hcl:"tls_require_client_cert,optional"` // nil = default (true when tls_client_ca_file set)
 	TrustedProxies       []string `hcl:"trusted_proxies,optional"`         // CIDR ranges for LB cert forwarding
 }
@@ -446,9 +444,17 @@ type ListenerBlock struct {
 // LoadConfig reads a single HCL config file and returns a validated *Config.
 // File contents are pre-processed through a Go-template pass with an `env`
 // function (see InterpolateEnv) so configs may reference environment
-// variables via {{ env "VAR_NAME" }} placeholders.
+// variables via {{ env "VAR_NAME" }} placeholders. Unknown HCL attributes
+// and blocks are silently dropped; use LoadConfigWithLogger to surface
+// them as warnings.
 func LoadConfig(configFile string) (*Config, error) {
-	cfg, err := loadConfigFile(configFile)
+	return LoadConfigWithLogger(configFile, nil)
+}
+
+// LoadConfigWithLogger is LoadConfig with a logger for warnings about
+// unknown HCL attributes and blocks. nil disables warnings.
+func LoadConfigWithLogger(configFile string, warner Warner) (*Config, error) {
+	cfg, err := loadConfigFile(configFile, warner)
 	if err != nil {
 		return nil, err
 	}
@@ -464,8 +470,16 @@ func LoadConfig(configFile string) (*Config, error) {
 // and returns a validated *Config. This lets operators split config
 // across multiple sources — e.g. a Kubernetes ConfigMap with non-secret
 // blocks plus a Secret containing the storage credentials and seal
-// block — without losing single-file simplicity.
+// block — without losing single-file simplicity. Unknown HCL attributes
+// and blocks are silently dropped; use LoadConfigDirWithLogger to surface
+// them as warnings.
 func LoadConfigDir(dir string) (*Config, error) {
+	return LoadConfigDirWithLogger(dir, nil)
+}
+
+// LoadConfigDirWithLogger is LoadConfigDir with a logger for warnings
+// about unknown HCL attributes and blocks. nil disables warnings.
+func LoadConfigDirWithLogger(dir string, warner Warner) (*Config, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		return nil, fmt.Errorf("config dir %q: %w", dir, err)
@@ -495,7 +509,7 @@ func LoadConfigDir(dir string) (*Config, error) {
 
 	merged := &Config{}
 	for _, f := range files {
-		cfg, err := loadConfigFile(f)
+		cfg, err := loadConfigFile(f, warner)
 		if err != nil {
 			return nil, err
 		}
@@ -508,8 +522,10 @@ func LoadConfigDir(dir string) (*Config, error) {
 }
 
 // loadConfigFile reads a single HCL file, runs the env-var template pass,
-// and decodes into a *Config without running validation.
-func loadConfigFile(configFile string) (*Config, error) {
+// and decodes into a *Config without running validation. Unknown HCL
+// attributes and blocks are dropped; if warner is non-nil it receives one
+// Warn() call per removal with source position.
+func loadConfigFile(configFile string, warner Warner) (*Config, error) {
 	src, err := os.ReadFile(configFile)
 	if err != nil {
 		return nil, fmt.Errorf("read config %q: %w", configFile, err)
@@ -518,11 +534,7 @@ func loadConfigFile(configFile string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("interpolate env vars in %q: %w", configFile, err)
 	}
-	var cfg Config
-	if err := hclsimple.Decode(configFile, rendered, nil, &cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
+	return decodeConfig(configFile, rendered, warner)
 }
 
 // InterpolateEnv runs the given config bytes through a Go-template pass
@@ -607,10 +619,10 @@ func validateConfig(config *Config) error {
 		}
 	}
 
-	// Validate listener TLS config
+	// Validate listener TLS config. TLS is on by default; opt out with tls_disable.
 	for i, ln := range config.Listeners {
-		if ln.TLSEnabled && (ln.TLSCertFile == "" || ln.TLSKeyFile == "") {
-			return fmt.Errorf("listener[%d]: tls_enabled requires both tls_cert_file and tls_key_file", i)
+		if !ln.TLSDisable && (ln.TLSCertFile == "" || ln.TLSKeyFile == "") {
+			return fmt.Errorf("listener[%d]: TLS is on by default; set tls_disable = true or provide both tls_cert_file and tls_key_file", i)
 		}
 	}
 
@@ -679,7 +691,8 @@ func validateConfig(config *Config) error {
 }
 
 // DevConfig returns a default configuration suitable for dev mode.
-// It uses in-memory storage and a TCP listener on 127.0.0.1:8400.
+// It uses in-memory storage and a TCP listener on 127.0.0.1:8400 with
+// TLS disabled so the loopback API is reachable without certificates.
 func DevConfig() *Config {
 	return &Config{
 		LogLevel: "trace",
@@ -688,8 +701,9 @@ func DevConfig() *Config {
 		},
 		Listeners: []ListenerBlock{
 			{
-				Type:    "tcp",
-				Address: "127.0.0.1:8400",
+				Type:       "tcp",
+				Address:    "127.0.0.1:8400",
+				TLSDisable: true,
 			},
 		},
 		IPBindingPolicy: "disabled",

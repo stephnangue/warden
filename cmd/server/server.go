@@ -265,7 +265,7 @@ func run(cmd *cobra.Command, args []string) error {
 		conf = config.DevConfig()
 	case configDir != "":
 		var err error
-		conf, err = config.LoadConfigDir(configDir)
+		conf, err = config.LoadConfigDirWithLogger(configDir, config.StderrWarner{})
 		if err != nil {
 			return fmt.Errorf("failed to load config dir: %w", err)
 		}
@@ -274,7 +274,7 @@ func run(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("config file not found: %s", configPath)
 		}
 		var err error
-		conf, err = config.LoadConfig(configPath)
+		conf, err = config.LoadConfigWithLogger(configPath, config.StderrWarner{})
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
@@ -299,7 +299,7 @@ func run(cmd *cobra.Command, args []string) error {
 				}
 			}()
 		}
-		conf.Listeners[0].TLSEnabled = true
+		conf.Listeners[0].TLSDisable = false
 		conf.Listeners[0].TLSCertFile = certFile
 		conf.Listeners[0].TLSKeyFile = keyFile
 		if flagDevTLSCACertFile != "" {
@@ -653,7 +653,7 @@ func initListeners(httpHandler http.Handler, c *core.Core, conf *config.Config, 
 				TLSCertFile:          lnConfig.TLSCertFile,
 				TLSKeyFile:           lnConfig.TLSKeyFile,
 				TLSClientCAFile:      lnConfig.TLSClientCAFile,
-				TLSEnabled:           lnConfig.TLSEnabled,
+				TLSDisable:           lnConfig.TLSDisable,
 				TLSRequireClientCert: lnConfig.TLSRequireClientCert,
 				TrustedProxies:       lnConfig.TrustedProxies,
 			}, httpHandler)

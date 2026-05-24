@@ -23,7 +23,6 @@ storage "postgres" {
 
 listener "tcp" {
     address                 = "0.0.0.0:8510"
-    tls_enabled             = true
     tls_cert_file           = "../.certs/server.crt"
     tls_key_file            = "../.certs/server.key"
     tls_client_ca_file      = "../.certs/client-ca.crt"

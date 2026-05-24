@@ -25,12 +25,11 @@ listener "tcp" {
     tls_key_file            = "./certs/warden/warden-key.pem"
     tls_client_ca_file      = "./certs/warden/ca.pem"
     tls_require_client_cert = false
-    tls_enabled             = true
 }
 
 listener "tcp" {
-    address                 = "127.0.0.1:8500"
-    tls_enabled             = false
+    address     = "127.0.0.1:8500"
+    tls_disable = true
 }
 
 # Audit "TYPE" "NAME" — registered at startup, before the listener accepts

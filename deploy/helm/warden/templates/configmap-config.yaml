@@ -28,7 +28,6 @@ data:
 
     listener "tcp" {
       address                 = "0.0.0.0:8400"
-      tls_enabled             = true
       tls_cert_file           = "/certs/{{ .Values.tls.certKey }}"
       tls_key_file            = "/certs/{{ .Values.tls.keyKey }}"
       tls_client_ca_file      = "/certs/{{ .Values.tls.caKey }}"

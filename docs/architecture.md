@@ -33,10 +33,14 @@ storage "postgres" {
 
 listener "tcp" {
   address     = "0.0.0.0:8400"
-  tls_enabled = false
+  tls_disable = true
 }
 ```
 
 ## Configuration
 
 Warden uses HCL configuration files. See `deploy/config/warden.local.hcl` for a full example covering storage backend, listener, providers, and auth methods.
+
+The listener stanza follows the `tls_disable` convention: TLS is on by default and the listener requires both `tls_cert_file` and `tls_key_file`. Set `tls_disable = true` to run plain HTTP (intended for loopback dev work).
+
+Unknown top-level attributes and blocks — and unknown attributes inside known blocks — are dropped at parse time with a startup warning on stderr rather than rejected. This lets operators drop in a foreign-style config (`ui = true`, `cluster_name = "..."`, `service_registration "consul" { ... }`, and similar) without manual cleanup; the warning surfaces typos so they do not pass silently.
