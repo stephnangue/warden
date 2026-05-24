@@ -12,6 +12,7 @@ import (
 var (
 	enableType        string
 	enableDescription string
+	enablePath        string
 	enableJSON        string
 
 	EnableCmd = &cobra.Command{
@@ -23,12 +24,14 @@ var (
 Usage: warden provider enable [options] [PATH]
 
   Enable a provider. By default the mount path matches the TYPE, but a
-  custom path can be supplied as a positional argument. Two input modes:
+  custom path can be supplied either positionally or via --path. Two input
+  modes:
 
     Typed flags (human-friendly):
 
       $ warden provider enable --type=aws
       $ warden provider enable --type=azure azure-prod
+      $ warden provider enable --type=azure --path=azure-prod
       $ warden provider enable --type=aws --description="Production AWS"
 
     Full JSON payload (agent-friendly):
@@ -37,9 +40,10 @@ Usage: warden provider enable [options] [PATH]
       $ cat provider-aws.json | warden provider enable aws --json -
 
   --json is mutually exclusive with --type / --description. The mount path
-  is the positional argument when given, otherwise derived from the
-  payload's "type" field. Combine with --dry-run to validate the payload
-  locally without enabling the provider.
+  may be provided positionally or via --path (pick one — combining both is
+  rejected). When neither is set, the path is derived from --type or from
+  the JSON payload's "type" field. Combine with --dry-run to validate the
+  payload locally without enabling the provider.
 
   For a full list of providers and examples, please see the documentation.
 `,
@@ -50,10 +54,16 @@ Usage: warden provider enable [options] [PATH]
 func init() {
 	EnableCmd.Flags().StringVar(&enableType, "type", "", "Type of the provider (e.g., aws, azure, gcp) (required unless --json)")
 	EnableCmd.Flags().StringVar(&enableDescription, "description", "", "Human-friendly description of the provider")
+	EnableCmd.Flags().StringVar(&enablePath, "path", "", "Mount path (alternative to the positional PATH argument)")
 	EnableCmd.Flags().StringVarP(&enableJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with --type/--description)")
 }
 
 func runEnable(cmd *cobra.Command, args []string) error {
+	explicitPath, err := helpers.ResolvePath(args, enablePath)
+	if err != nil {
+		return err
+	}
+
 	c, err := helpers.Client()
 	if err != nil {
 		return err
@@ -71,9 +81,9 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		}); err != nil {
 			return err
 		}
-		path := helpers.MountPathFromArgOrPayload(args, jsonPayload)
+		path := helpers.MountPathFromArgOrPayload(explicitPath, jsonPayload)
 		if path == "" {
-			return fmt.Errorf("--json without a positional PATH and without a 'type' field in the payload: cannot determine mount path: %w", helpers.ErrUsage)
+			return fmt.Errorf("--json without a PATH (positional or --path) and without a 'type' field in the payload: cannot determine mount path: %w", helpers.ErrUsage)
 		}
 		if err := helpers.ValidatePath(path); err != nil {
 			return err
@@ -103,15 +113,12 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--type is required (or use --json): %w", helpers.ErrUsage)
 	}
 
-	// Determine path from positional argument or use type as default
 	var path string
-	if len(args) > 0 {
-		path = args[0]
+	if explicitPath != "" {
+		path = explicitPath
 	} else {
 		path = enableType + "/"
 	}
-
-	// Ensure path ends with /
 	if !strings.HasSuffix(path, "/") {
 		path = path + "/"
 	}

@@ -14,6 +14,7 @@ var (
 	enableDescription string
 	enableFilePath    string
 	enableFormat      string
+	enablePath        string
 	enableJSON        string
 
 	EnableCmd = &cobra.Command{
@@ -25,14 +26,16 @@ var (
 Usage: warden audit enable [options] [PATH]
 
   Enable an audit device. By default the mount path matches the TYPE, but a
-  custom path can be supplied as a positional argument. Each device gets a
-  unique HMAC salt for log hashing — generated on enable, lost on disable.
-  Two input modes:
+  custom path can be supplied either positionally or via --path. Each device
+  gets a unique HMAC salt for log hashing — generated on enable, lost on
+  disable. Note: --path is the device's mount path, while --file-path is the
+  audit log file location — they are distinct. Two input modes:
 
     Typed flags (human-friendly):
 
       $ warden audit enable --type=file --file-path=/var/log/warden-audit.log
       $ warden audit enable --type=file --file-path=/var/log/audit.log prod-audit
+      $ warden audit enable --type=file --file-path=/var/log/audit.log --path=prod-audit
 
     Full JSON payload (agent-friendly):
 
@@ -40,9 +43,10 @@ Usage: warden audit enable [options] [PATH]
       $ cat audit-file.json | warden audit enable file --json -
 
   --json is mutually exclusive with --type / --description / --file-path /
-  --format. The mount path is the positional argument when given, otherwise
-  derived from the payload's "type" field. Combine with --dry-run to validate
-  the payload locally without enabling the device.
+  --format. The mount path may be provided positionally or via --path (pick
+  one — combining both is rejected). When neither is set, the path is
+  derived from --type or from the JSON payload's "type" field. Combine with
+  --dry-run to validate the payload locally without enabling the device.
 
   For a full list of audit device types and examples, please see the documentation.
 `,
@@ -55,10 +59,16 @@ func init() {
 	EnableCmd.Flags().StringVar(&enableDescription, "description", "", "Human-friendly description of the audit device")
 	EnableCmd.Flags().StringVar(&enableFilePath, "file-path", "", "Path to the audit log file (required for file type)")
 	EnableCmd.Flags().StringVar(&enableFormat, "format", "json", "Log format (currently only 'json' is supported)")
+	EnableCmd.Flags().StringVar(&enablePath, "path", "", "Mount path (alternative to the positional PATH argument)")
 	EnableCmd.Flags().StringVarP(&enableJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with the typed flags)")
 }
 
 func runEnable(cmd *cobra.Command, args []string) error {
+	explicitPath, err := helpers.ResolvePath(args, enablePath)
+	if err != nil {
+		return err
+	}
+
 	c, err := helpers.Client()
 	if err != nil {
 		return err
@@ -78,9 +88,9 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		}); err != nil {
 			return err
 		}
-		path := helpers.MountPathFromArgOrPayload(args, jsonPayload)
+		path := helpers.MountPathFromArgOrPayload(explicitPath, jsonPayload)
 		if path == "" {
-			return fmt.Errorf("--json without a positional PATH and without a 'type' field in the payload: cannot determine mount path: %w", helpers.ErrUsage)
+			return fmt.Errorf("--json without a PATH (positional or --path) and without a 'type' field in the payload: cannot determine mount path: %w", helpers.ErrUsage)
 		}
 		if err := helpers.ValidatePath(path); err != nil {
 			return err
@@ -106,15 +116,12 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	// Determine path from positional argument or use type as default
 	var path string
-	if len(args) > 0 {
-		path = args[0]
+	if explicitPath != "" {
+		path = explicitPath
 	} else {
 		path = enableType + "/"
 	}
-
-	// Ensure path ends with /
 	if !strings.HasSuffix(path, "/") {
 		path = path + "/"
 	}

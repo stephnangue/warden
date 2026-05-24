@@ -210,45 +210,149 @@ func TestRejectFlagsWithJSON_DeterministicOrder(t *testing.T) {
 
 func TestMountPathFromArgOrPayload(t *testing.T) {
 	cases := []struct {
-		name    string
-		args    []string
-		payload map[string]any
-		want    string
+		name         string
+		explicitPath string
+		payload      map[string]any
+		want         string
 	}{
 		{
-			name: "positional arg wins",
-			args: []string{"custom-mount"},
-			payload: map[string]any{"type": "jwt"},
-			want: "custom-mount/",
+			name:         "explicit path wins",
+			explicitPath: "custom-mount",
+			payload:      map[string]any{"type": "jwt"},
+			want:         "custom-mount/",
 		},
 		{
-			name: "no arg, derive from payload type",
-			args: nil,
-			payload: map[string]any{"type": "jwt"},
-			want: "jwt/",
+			name:         "no explicit path, derive from payload type",
+			explicitPath: "",
+			payload:      map[string]any{"type": "jwt"},
+			want:         "jwt/",
 		},
 		{
-			name: "no arg, no type → empty",
-			args: nil,
-			payload: map[string]any{},
-			want: "",
+			name:         "no explicit path, no type → empty",
+			explicitPath: "",
+			payload:      map[string]any{},
+			want:         "",
 		},
 		{
-			name: "no arg, nil payload → empty",
-			args: nil,
-			payload: nil,
-			want: "",
+			name:         "no explicit path, nil payload → empty",
+			explicitPath: "",
+			payload:      nil,
+			want:         "",
 		},
 		{
-			name: "trailing slash preserved",
-			args: []string{"already-slashed/"},
-			payload: nil,
-			want: "already-slashed/",
+			name:         "trailing slash preserved",
+			explicitPath: "already-slashed/",
+			payload:      nil,
+			want:         "already-slashed/",
 		},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := MountPathFromArgOrPayload(tt.args, tt.payload); got != tt.want {
+			if got := MountPathFromArgOrPayload(tt.explicitPath, tt.payload); got != tt.want {
+				t.Errorf("got %q; want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRequirePath(t *testing.T) {
+	t.Run("positional only", func(t *testing.T) {
+		got, err := RequirePath([]string{"jwt/"}, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "jwt/" {
+			t.Errorf("got %q; want %q", got, "jwt/")
+		}
+	})
+	t.Run("flag only", func(t *testing.T) {
+		got, err := RequirePath(nil, "jwt/")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "jwt/" {
+			t.Errorf("got %q; want %q", got, "jwt/")
+		}
+	})
+	t.Run("both → conflict error", func(t *testing.T) {
+		_, err := RequirePath([]string{"a"}, "b")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !errors.Is(err, ErrUsage) {
+			t.Errorf("expected ErrUsage; got %v", err)
+		}
+	})
+	t.Run("neither → required error", func(t *testing.T) {
+		_, err := RequirePath(nil, "")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !errors.Is(err, ErrUsage) {
+			t.Errorf("expected ErrUsage; got %v", err)
+		}
+		if !strings.Contains(err.Error(), "PATH is required") {
+			t.Errorf("expected 'PATH is required' in error; got %q", err.Error())
+		}
+	})
+}
+
+func TestResolvePath(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      []string
+		pathFlag  string
+		want      string
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name: "positional only",
+			args: []string{"jwt-X"},
+			want: "jwt-X",
+		},
+		{
+			name:     "flag only",
+			pathFlag: "jwt-X",
+			want:     "jwt-X",
+		},
+		{
+			name:      "both set → error",
+			args:      []string{"pos"},
+			pathFlag:  "flag",
+			wantErr:   true,
+			errSubstr: "cannot specify both",
+		},
+		{
+			name: "neither → empty, no error",
+			want: "",
+		},
+		{
+			name:     "empty positional slice, flag set",
+			args:     []string{},
+			pathFlag: "jwt-X",
+			want:     "jwt-X",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolvePath(tt.args, tt.pathFlag)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error; got nil")
+				}
+				if !errors.Is(err, ErrUsage) {
+					t.Errorf("expected ErrUsage; got %v", err)
+				}
+				if tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Errorf("expected error to contain %q; got %q", tt.errSubstr, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
 				t.Errorf("got %q; want %q", got, tt.want)
 			}
 		})

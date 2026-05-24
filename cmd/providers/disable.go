@@ -8,35 +8,44 @@ import (
 )
 
 var (
+	disablePath string
+
 	DisableCmd = &cobra.Command{
-		Use:           "disable PATH",
+		Use:           "disable [PATH]",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Short:         "This command disable a provider.",
 		Long: `
-Usage: warden provider disable PATH
+Usage: warden provider disable [PATH]
 
-  Disables a provider at the given PATH. The argument corresponds to
-  the enabled PATH of the provider.
+  Disables a provider at the given PATH. The PATH may be supplied either
+  positionally or via --path (pick one — combining both is rejected).
 
   Disable the provider enabled at aws/:
 
       $ warden provider disable aws/
+      $ warden provider disable --path=aws/
 `,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: runDisable,
 	}
 )
 
+func init() {
+	DisableCmd.Flags().StringVar(&disablePath, "path", "", "Mount path (alternative to the positional PATH argument)")
+}
+
 func runDisable(cmd *cobra.Command, args []string) error {
-	// Create the client
-	c, err := helpers.Client()
+	path, err := helpers.RequirePath(args, disablePath)
 	if err != nil {
 		return err
 	}
-
-	path := args[0]
 	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
+
+	c, err := helpers.Client()
+	if err != nil {
 		return err
 	}
 

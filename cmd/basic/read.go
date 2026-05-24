@@ -8,23 +8,29 @@ import (
 	"github.com/stephnangue/warden/cmd/helpers"
 )
 
-var ReadCmd = &cobra.Command{
-	Use:           "read",
-	SilenceUsage:  true,
-	SilenceErrors: true,
-	Short:         "Read data from a path",
-	Long: `
-Usage: warden read PATH
+var (
+	readPath string
 
-  Read data from the given path. The path should be in the format
-  "provider_mount/resource" or "auth/auth_mount/resource" or "sys/path/to/resource"
-  and will be converted to the appropriate API path.
+	ReadCmd = &cobra.Command{
+		Use:           "read",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "Read data from a path",
+		Long: `
+Usage: warden read [PATH]
+
+  Read data from the given path. The PATH may be supplied either
+  positionally or via --path (pick one — combining both is rejected).
+  The path should be in the format "provider_mount/resource" or
+  "auth/auth_mount/resource" or "sys/path/to/resource" and will be
+  converted to the appropriate API path.
 
   Examples:
 
     Read AWS provider configuration:
 
       $ warden read aws/config
+      $ warden read --path=aws/config
 
     Read JWT auth configuration:
 
@@ -38,12 +44,20 @@ Usage: warden read PATH
 
       $ warden read aws/config --fields proxy_domains,timeout
 `,
-	Args: cobra.ExactArgs(1),
-	RunE: runRead,
+		Args: cobra.MaximumNArgs(1),
+		RunE: runRead,
+	}
+)
+
+func init() {
+	ReadCmd.Flags().StringVar(&readPath, "path", "", "API path (alternative to the positional PATH argument)")
 }
 
 func runRead(cmd *cobra.Command, args []string) error {
-	path := args[0]
+	path, err := helpers.RequirePath(args, readPath)
+	if err != nil {
+		return err
+	}
 	if err := helpers.ValidatePath(path); err != nil {
 		return err
 	}

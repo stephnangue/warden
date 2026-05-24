@@ -8,32 +8,46 @@ import (
 	"github.com/stephnangue/warden/cmd/helpers"
 )
 
-var ReadCmd = &cobra.Command{
-	Use:           "read PATH",
-	SilenceUsage:  true,
-	SilenceErrors: true,
-	Short:         "Show information on a provider",
-	Long: `
-Usage: warden provider read PATH
+var (
+	readPath string
 
-  Show information on a provider enabled on the provided PATH.
+	ReadCmd = &cobra.Command{
+		Use:           "read [PATH]",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "Show information on a provider",
+		Long: `
+Usage: warden provider read [PATH]
+
+  Show information on a provider enabled on the provided PATH. The PATH
+  may be supplied either positionally or via --path (pick one — combining
+  both is rejected).
 
   Read the provider enabled at aws/:
 
       $ warden provider read aws/
+      $ warden provider read --path=aws/
 `,
-	Args: cobra.ExactArgs(1),
-	RunE: runRead,
+		Args: cobra.MaximumNArgs(1),
+		RunE: runRead,
+	}
+)
+
+func init() {
+	ReadCmd.Flags().StringVar(&readPath, "path", "", "Mount path (alternative to the positional PATH argument)")
 }
 
 func runRead(cmd *cobra.Command, args []string) error {
-	c, err := helpers.Client()
+	path, err := helpers.RequirePath(args, readPath)
 	if err != nil {
 		return err
 	}
-
-	path := args[0]
 	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
+
+	c, err := helpers.Client()
+	if err != nil {
 		return err
 	}
 
