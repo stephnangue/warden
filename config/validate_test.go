@@ -11,14 +11,16 @@ import (
 
 // minimalConfigHCL is a valid HCL config used as the base for tests that
 // then write one additional offending field. Lets each test focus on the
-// invariant being checked instead of restating boilerplate.
+// invariant being checked instead of restating boilerplate. The listener
+// sets tls_disable = true so a cert/key is not required.
 const minimalConfigHCL = `
 storage "postgres" {
   connection_url = "postgres://u:p@db:5432/warden"
 }
 
 listener "tcp" {
-  address = ":8400"
+  address     = ":8400"
+  tls_disable = true
 }
 `
 
@@ -45,7 +47,7 @@ func TestLoadConfig_IPBindingPolicy(t *testing.T) {
 		policy  string
 		wantErr bool
 	}{
-		{"", false},          // unset is fine; downstream picks default
+		{"", false}, // unset is fine; downstream picks default
 		{"disabled", false},
 		{"optional", false},
 		{"required", false},
@@ -129,18 +131,17 @@ func TestLoadConfig_ListenerTLSRequiresCertAndKey(t *testing.T) {
 			name: "tls disabled, no cert/key — ok",
 			extra: `
 listener "tcp" {
-  address = ":8410"
-  tls_enabled = false
+  address     = ":8410"
+  tls_disable = true
 }
 `,
 			wantErr: false,
 		},
 		{
-			name: "tls enabled with both cert and key — ok",
+			name: "tls on (default) with both cert and key — ok",
 			extra: `
 listener "tcp" {
-  address     = ":8420"
-  tls_enabled = true
+  address       = ":8420"
   tls_cert_file = "/c.pem"
   tls_key_file  = "/k.pem"
 }
@@ -148,22 +149,29 @@ listener "tcp" {
 			wantErr: false,
 		},
 		{
-			name: "tls enabled, missing cert — error",
+			name: "tls on (default), no cert/key — error",
 			extra: `
 listener "tcp" {
-  address     = ":8430"
-  tls_enabled = true
+  address = ":8425"
+}
+`,
+			wantErr: true,
+		},
+		{
+			name: "tls on, missing cert — error",
+			extra: `
+listener "tcp" {
+  address      = ":8430"
   tls_key_file = "/k.pem"
 }
 `,
 			wantErr: true,
 		},
 		{
-			name: "tls enabled, missing key — error",
+			name: "tls on, missing key — error",
 			extra: `
 listener "tcp" {
-  address     = ":8440"
-  tls_enabled = true
+  address       = ":8440"
   tls_cert_file = "/c.pem"
 }
 `,
@@ -175,7 +183,7 @@ listener "tcp" {
 			_, err := loadFromHCL(t, minimalConfigHCL+tt.extra)
 			if tt.wantErr {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "tls_enabled")
+				assert.Contains(t, err.Error(), "tls_disable")
 			} else {
 				require.NoError(t, err)
 			}
@@ -249,7 +257,7 @@ func TestDevConfig_Defaults(t *testing.T) {
 	require.Len(t, cfg.Listeners, 1)
 	assert.Equal(t, "tcp", cfg.Listeners[0].Type)
 	assert.Equal(t, "127.0.0.1:8400", cfg.Listeners[0].Address)
-	assert.False(t, cfg.Listeners[0].TLSEnabled)
+	assert.True(t, cfg.Listeners[0].TLSDisable)
 	assert.Equal(t, "disabled", cfg.IPBindingPolicy)
 }
 

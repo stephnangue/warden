@@ -18,7 +18,7 @@ import (
 type ApiListener struct {
 	logger      *logger.GatedLogger
 	server      *http.Server
-	tlsEnabled  bool
+	tlsDisable  bool
 	tlsCertFile string
 	tlsKeyFile  string
 	stopped     atomic.Bool
@@ -30,7 +30,7 @@ type ApiListenerConfig struct {
 	TLSCertFile          string
 	TLSKeyFile           string
 	TLSClientCAFile      string
-	TLSEnabled           bool
+	TLSDisable           bool     // default false => TLS on; requires TLSCertFile + TLSKeyFile
 	TLSRequireClientCert *bool    // nil = default (true when TLSClientCAFile set)
 	TrustedProxies       []string // CIDR ranges for LB cert forwarding
 }
@@ -55,9 +55,9 @@ func NewApiListener(cfg ApiListenerConfig, httpHandler http.Handler) (*ApiListen
 		WriteTimeout: 10 * time.Second,
 	}
 
-	if cfg.TLSEnabled {
+	if !cfg.TLSDisable {
 		if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
-			return nil, fmt.Errorf("tls_enabled requires both tls_cert_file and tls_key_file")
+			return nil, fmt.Errorf("TLS is on by default; set tls_disable = true or provide both tls_cert_file and tls_key_file")
 		}
 
 		tlsCfg := &tls.Config{
@@ -88,7 +88,7 @@ func NewApiListener(cfg ApiListenerConfig, httpHandler http.Handler) (*ApiListen
 	return &ApiListener{
 		logger:      cfg.Logger,
 		server:      server,
-		tlsEnabled:  cfg.TLSEnabled,
+		tlsDisable:  cfg.TLSDisable,
 		tlsCertFile: cfg.TLSCertFile,
 		tlsKeyFile:  cfg.TLSKeyFile,
 	}, nil
@@ -109,12 +109,12 @@ func (l *ApiListener) Start(ctx context.Context) error {
 	errChan := make(chan error, 1)
 	go func() {
 		var err error
-		if l.tlsEnabled {
-			l.logger.Info("starting HTTPS server", logger.String("address", l.server.Addr))
-			err = l.server.ListenAndServeTLS(l.tlsCertFile, l.tlsKeyFile)
-		} else {
+		if l.tlsDisable {
 			l.logger.Info("starting HTTP server", logger.String("address", l.server.Addr))
 			err = l.server.ListenAndServe()
+		} else {
+			l.logger.Info("starting HTTPS server", logger.String("address", l.server.Addr))
+			err = l.server.ListenAndServeTLS(l.tlsCertFile, l.tlsKeyFile)
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- err

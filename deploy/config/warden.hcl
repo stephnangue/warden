@@ -30,7 +30,6 @@ listener "tcp" {
     tls_key_file       = "/certs/warden-key.pem"
     tls_client_ca_file = "/certs/ca.pem"
     tls_require_client_cert = false
-    tls_enabled        = true
 }
 
 # Audit devices are declared with the two-label syntax:

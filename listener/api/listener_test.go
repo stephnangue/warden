@@ -32,15 +32,16 @@ func TestNewApiListener_PlainHTTP(t *testing.T) {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 
 	ln, err := NewApiListener(ApiListenerConfig{
-		Logger:  log,
-		Address: "127.0.0.1:0",
+		Logger:     log,
+		Address:    "127.0.0.1:0",
+		TLSDisable: true,
 	}, http.DefaultServeMux)
 
 	require.NoError(t, err)
 	require.NotNil(t, ln)
 	assert.Equal(t, "127.0.0.1:0", ln.Addr())
 	assert.Equal(t, "api", ln.Type())
-	assert.False(t, ln.tlsEnabled)
+	assert.True(t, ln.tlsDisable)
 }
 
 func TestNewApiListener_TLSEnabled(t *testing.T) {
@@ -50,14 +51,13 @@ func TestNewApiListener_TLSEnabled(t *testing.T) {
 	ln, err := NewApiListener(ApiListenerConfig{
 		Logger:      log,
 		Address:     "127.0.0.1:0",
-		TLSEnabled:  true,
 		TLSCertFile: certFile,
 		TLSKeyFile:  keyFile,
 	}, http.DefaultServeMux)
 
 	require.NoError(t, err)
 	require.NotNil(t, ln)
-	assert.True(t, ln.tlsEnabled)
+	assert.False(t, ln.tlsDisable)
 	assert.NotNil(t, ln.server.TLSConfig)
 	assert.Equal(t, uint16(tls.VersionTLS12), ln.server.TLSConfig.MinVersion)
 }
@@ -68,7 +68,6 @@ func TestNewApiListener_TLSEnabled_MissingCertFile(t *testing.T) {
 	ln, err := NewApiListener(ApiListenerConfig{
 		Logger:     log,
 		Address:    "127.0.0.1:0",
-		TLSEnabled: true,
 		TLSKeyFile: "/some/key.pem",
 	}, http.DefaultServeMux)
 
@@ -83,7 +82,6 @@ func TestNewApiListener_TLSEnabled_MissingKeyFile(t *testing.T) {
 	ln, err := NewApiListener(ApiListenerConfig{
 		Logger:      log,
 		Address:     "127.0.0.1:0",
-		TLSEnabled:  true,
 		TLSCertFile: "/some/cert.pem",
 	}, http.DefaultServeMux)
 
@@ -99,7 +97,6 @@ func TestNewApiListener_TLSWithClientCA(t *testing.T) {
 	ln, err := NewApiListener(ApiListenerConfig{
 		Logger:          log,
 		Address:         "127.0.0.1:0",
-		TLSEnabled:      true,
 		TLSCertFile:     certFile,
 		TLSKeyFile:      keyFile,
 		TLSClientCAFile: caFile,
@@ -122,7 +119,6 @@ func TestNewApiListener_TLSWithInvalidClientCA(t *testing.T) {
 	ln, err := NewApiListener(ApiListenerConfig{
 		Logger:          log,
 		Address:         "127.0.0.1:0",
-		TLSEnabled:      true,
 		TLSCertFile:     certFile,
 		TLSKeyFile:      keyFile,
 		TLSClientCAFile: badCA,
@@ -140,7 +136,6 @@ func TestNewApiListener_TLSWithMissingClientCAFile(t *testing.T) {
 	ln, err := NewApiListener(ApiListenerConfig{
 		Logger:          log,
 		Address:         "127.0.0.1:0",
-		TLSEnabled:      true,
 		TLSCertFile:     certFile,
 		TLSKeyFile:      keyFile,
 		TLSClientCAFile: "/nonexistent/ca.pem",
@@ -170,7 +165,6 @@ func TestApiListener_HTTPS_AcceptsConnection(t *testing.T) {
 	ln, err := NewApiListener(ApiListenerConfig{
 		Logger:      log,
 		Address:     addr,
-		TLSEnabled:  true,
 		TLSCertFile: certFile,
 		TLSKeyFile:  keyFile,
 	}, handler)
@@ -220,7 +214,6 @@ func TestApiListener_HTTPS_RejectsPlainHTTP(t *testing.T) {
 	ln, err := NewApiListener(ApiListenerConfig{
 		Logger:      log,
 		Address:     addr,
-		TLSEnabled:  true,
 		TLSCertFile: certFile,
 		TLSKeyFile:  keyFile,
 	}, handler)
@@ -260,7 +253,6 @@ func TestApiListener_mTLS_AcceptsValidClientCert(t *testing.T) {
 	ln, err := NewApiListener(ApiListenerConfig{
 		Logger:          log,
 		Address:         addr,
-		TLSEnabled:      true,
 		TLSCertFile:     certFile,
 		TLSKeyFile:      keyFile,
 		TLSClientCAFile: caFile,
@@ -314,7 +306,6 @@ func TestApiListener_mTLS_RejectsNoClientCert(t *testing.T) {
 	ln, err := NewApiListener(ApiListenerConfig{
 		Logger:          log,
 		Address:         addr,
-		TLSEnabled:      true,
 		TLSCertFile:     certFile,
 		TLSKeyFile:      keyFile,
 		TLSClientCAFile: caFile,
@@ -359,7 +350,6 @@ func TestApiListener_StopIdempotent(t *testing.T) {
 	ln, err := NewApiListener(ApiListenerConfig{
 		Logger:      log,
 		Address:     addr,
-		TLSEnabled:  true,
 		TLSCertFile: certFile,
 		TLSKeyFile:  keyFile,
 	}, http.DefaultServeMux)
@@ -391,8 +381,9 @@ func TestApiListener_PlainHTTP_Serves(t *testing.T) {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	ln, err := NewApiListener(ApiListenerConfig{
-		Logger:  log,
-		Address: addr,
+		Logger:     log,
+		Address:    addr,
+		TLSDisable: true,
 	}, handler)
 	require.NoError(t, err)
 
