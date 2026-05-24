@@ -51,6 +51,9 @@ Usage:
   # Initialize with PGP-encrypted root token
   $ warden operator init --root-token-pgp-key="keybase:admin"
 
+  # Emit machine-readable JSON for IaC scripts
+  $ warden operator init -o json
+
 IMPORTANT: The unseal keys and root token are displayed only once. Store them securely.
 You will need the threshold number of unseal keys to unseal Warden after restart.
 `,
@@ -99,54 +102,69 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initialization failed: %w", err)
 	}
 
-	// Display initialization results
-	fmt.Println()
-	fmt.Println("=========================================")
-	fmt.Println("   WARDEN INITIALIZATION COMPLETE")
-	fmt.Println("=========================================")
-	fmt.Println()
-
-	// Display unseal keys
-	if len(initResp.Keys) > 0 {
-		fmt.Println("Unseal Keys:")
-		for i, key := range initResp.Keys {
-			fmt.Printf("Unseal Key %d: %s\n", i+1, key)
+	// Coerce nil slices to empty slices so JSON serializes them as `[]` rather
+	// than `null` — consumers can rely on a stable schema regardless of Shamir
+	// vs auto-unseal mode.
+	emptyIfNil := func(s []string) []string {
+		if s == nil {
+			return []string{}
 		}
+		return s
+	}
+	data := map[string]any{
+		"unseal_keys":          emptyIfNil(initResp.Keys),
+		"unseal_keys_base64":   emptyIfNil(initResp.KeysBase64),
+		"recovery_keys":        emptyIfNil(initResp.RecoveryKeys),
+		"recovery_keys_base64": emptyIfNil(initResp.RecoveryKeysBase64),
+		"root_token":           initResp.RootToken,
+	}
+
+	tableFn := func() {
+		fmt.Println()
+		fmt.Println("=========================================")
+		fmt.Println("   WARDEN INITIALIZATION COMPLETE")
+		fmt.Println("=========================================")
+		fmt.Println()
+
+		if len(initResp.Keys) > 0 {
+			fmt.Println("Unseal Keys:")
+			for i, key := range initResp.Keys {
+				fmt.Printf("Unseal Key %d: %s\n", i+1, key)
+			}
+			fmt.Println()
+		}
+
+		if len(initResp.RecoveryKeys) > 0 {
+			fmt.Println("Recovery Keys:")
+			for i, key := range initResp.RecoveryKeys {
+				fmt.Printf("Recovery Key %d: %s\n", i+1, key)
+			}
+			fmt.Println()
+		}
+
+		fmt.Println("Root Token:")
+		fmt.Println(initResp.RootToken)
+		fmt.Println()
+
+		fmt.Println("IMPORTANT: These keys will not be shown again!")
+		fmt.Println("Store them securely. You will need:")
+		if len(initResp.Keys) > 0 {
+			fmt.Printf("  - %d of %d unseal keys to unseal Warden\n", secretThreshold, secretShares)
+		}
+		fmt.Println("  - The root token for system administration")
+		fmt.Println()
+
+		fmt.Println("The root token can be used to:")
+		fmt.Println("  - Mount/unmount auth methods")
+		fmt.Println("  - Mount/unmount providers")
+		fmt.Println("  - Perform system administration")
+		fmt.Println()
+
+		fmt.Println("Export root token to environment:")
+		fmt.Printf("  export WARDEN_TOKEN=%s\n", initResp.RootToken)
+		fmt.Println("=========================================")
 		fmt.Println()
 	}
 
-	// Display recovery keys (if auto-unseal)
-	if len(initResp.RecoveryKeys) > 0 {
-		fmt.Println("Recovery Keys:")
-		for i, key := range initResp.RecoveryKeys {
-			fmt.Printf("Recovery Key %d: %s\n", i+1, key)
-		}
-		fmt.Println()
-	}
-
-	// Display root token
-	fmt.Println("Root Token:")
-	fmt.Println(initResp.RootToken)
-	fmt.Println()
-
-	fmt.Println("IMPORTANT: These keys will not be shown again!")
-	fmt.Println("Store them securely. You will need:")
-	if len(initResp.Keys) > 0 {
-		fmt.Printf("  - %d of %d unseal keys to unseal Warden\n", secretThreshold, secretShares)
-	}
-	fmt.Println("  - The root token for system administration")
-	fmt.Println()
-
-	fmt.Println("The root token can be used to:")
-	fmt.Println("  - Mount/unmount auth methods")
-	fmt.Println("  - Mount/unmount providers")
-	fmt.Println("  - Perform system administration")
-	fmt.Println()
-
-	fmt.Println("Export root token to environment:")
-	fmt.Printf("  export WARDEN_TOKEN=%s\n", initResp.RootToken)
-	fmt.Println("=========================================")
-	fmt.Println()
-
-	return nil
+	return helpers.RenderMap(data, tableFn)
 }
