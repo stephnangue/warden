@@ -43,13 +43,13 @@ Usage:
   $ warden operator init
 
   # Initialize with custom shares and threshold
-  $ warden operator init --secret-shares=7 --secret-threshold=4
+  $ warden operator init -secret-shares=7 -secret-threshold=4
 
   # Initialize with PGP encryption for unseal keys
-  $ warden operator init --pgp-keys="keybase:user1,keybase:user2,keybase:user3,keybase:user4,keybase:user5"
+  $ warden operator init -pgp-keys="keybase:user1,keybase:user2,keybase:user3,keybase:user4,keybase:user5"
 
   # Initialize with PGP-encrypted root token
-  $ warden operator init --root-token-pgp-key="keybase:admin"
+  $ warden operator init -root-token-pgp-key="keybase:admin"
 
   # Emit machine-readable JSON for IaC scripts
   $ warden operator init -o json

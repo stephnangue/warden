@@ -58,7 +58,7 @@ var (
 	ErrSealed       = errors.New("warden is sealed or uninitialized")
 )
 
-// WardenError is the JSON envelope emitted on stderr when --output is json or
+// WardenError is the JSON envelope emitted on stderr when -output is json or
 // ndjson. Agents key off Code (stable string) for branching; Message is
 // human-readable; Hint is an optional recovery suggestion.
 type WardenError struct {

@@ -60,7 +60,7 @@ All permissions are **read-only**. No write operations are performed on the OVH 
 
 ### OVH Credential Setup
 
-The OVH provider uses an OVH source (`--type=ovh`) with an OAuth2 service account to automatically mint bearer tokens and S3 credentials.
+The OVH provider uses an OVH source (`-type=ovh`) with an OAuth2 service account to automatically mint bearer tokens and S3 credentials.
 
 | Field | Purpose | How to Obtain |
 |-------|---------|---------------|
@@ -154,7 +154,7 @@ docker compose -f deploy/docker-compose.quickstart.yml up -d
 ### 2. Start Warden (dev mode)
 
 ```bash
-warden server --dev --dev-root-token=root
+warden server -dev -dev-root-token=root
 ```
 
 ### 3. Configure Warden
@@ -164,7 +164,7 @@ export WARDEN_ADDR="http://127.0.0.1:8400"
 export WARDEN_TOKEN="root"
 
 # Enable JWT auth
-warden auth enable --type=jwt
+warden auth enable jwt
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create role
@@ -174,7 +174,7 @@ warden write auth/jwt/role/ovh-user \
     cred_spec_name=ovh-ops
 
 # Enable OVH provider
-warden provider enable --type=ovh
+warden provider enable ovh
 
 # Configure provider
 warden write ovh/config <<EOF
@@ -189,18 +189,18 @@ EOF
 ```bash
 # Create OVH credential source with OAuth2 service account
 warden cred source create ovh-src \
-  --type=ovh \
-  --config client_id=<your-client-id> \
-  --config client_secret=<your-client-secret> \
-  --config ovh_endpoint=ovh-eu \
-  --config project_id=<your-cloud-project-id> \
-  --config user_id=<your-cloud-user-id>
+  -type=ovh \
+  -config client_id=<your-client-id> \
+  -config client_secret=<your-client-secret> \
+  -config ovh_endpoint=ovh-eu \
+  -config project_id=<your-cloud-project-id> \
+  -config user_id=<your-cloud-user-id>
 
 # Create credential spec — dual mode (auto-minted API token + dynamic S3 keys)
 warden cred spec create ovh-ops \
-  --source ovh-src \
-  --type=ovh_keys \
-  --config mint_method=oauth2_token_and_s3
+  -source ovh-src \
+  -type=ovh_keys \
+  -config mint_method=oauth2_token_and_s3
 ```
 
 Other mint methods: `oauth2_token` (API only), `dynamic_s3` (S3 only).

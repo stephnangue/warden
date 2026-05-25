@@ -5,8 +5,8 @@ description: "Audit every ACL policy on an OpenBao cluster via Warden for dead-m
 instructions: |
   You operate on Warden. To learn how, run
 
-      warden skill read foundation --raw
-      warden skill read discovery  --raw
+      warden skill read foundation -raw
+      warden skill read discovery  -raw
 
   Browse the full catalog with `warden skill list -F name,description`.
 

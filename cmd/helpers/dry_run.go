@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// Persistent --dry-run flag value, populated by cmd/warden.go via the pointer
+// Persistent -dry-run flag value, populated by cmd/warden.go via the pointer
 // accessor. Read once per command invocation through ResolveDryRun.
 var dryRunFlag bool
 
@@ -16,7 +16,7 @@ func DryRunFlagPtr() *bool { return &dryRunFlag }
 func SetDryRun(v bool) { dryRunFlag = v }
 
 // ResolveDryRun returns true when the user has requested dry-run mode via
-// the --dry-run flag or the WARDEN_DRY_RUN env var. Any value of
+// the -dry-run flag or the WARDEN_DRY_RUN env var. Any value of
 // WARDEN_DRY_RUN other than "" / "0" / "false" / "no" / "off" (case
 // insensitive) is treated as true.
 //

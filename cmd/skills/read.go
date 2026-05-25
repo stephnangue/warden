@@ -20,12 +20,12 @@ var (
 Usage: warden skill read NAME [options]
 
   Read a single skill by name. The response includes the full markdown
-  body so agents can act on the recipe directly. Use --raw to emit
+  body so agents can act on the recipe directly. Use -raw to emit
   just the markdown (no JSON wrapper) — convenient for piping into a
   pager or rendering with another tool.
 
-  Output honors the global --output flag (table, json, ndjson, text).
-  --raw overrides --output and always emits plain markdown to stdout.
+  Output honors the global -output flag (table, json, ndjson, text).
+  -raw overrides -output and always emits plain markdown to stdout.
 
   Examples:
 
@@ -35,7 +35,7 @@ Usage: warden skill read NAME [options]
 
     Get the raw markdown to pipe into a renderer:
 
-      $ warden skill read aws --raw | glow -
+      $ warden skill read aws -raw | glow -
 `,
 		Args: cobra.ExactArgs(1),
 		RunE: runRead,
@@ -44,7 +44,7 @@ Usage: warden skill read NAME [options]
 
 func init() {
 	ReadCmd.Flags().BoolVar(&readRaw, "raw", false,
-		"Emit only the markdown body, bypassing --output and the JSON envelope")
+		"Emit only the markdown body, bypassing -output and the JSON envelope")
 }
 
 func runRead(cmd *cobra.Command, args []string) error {

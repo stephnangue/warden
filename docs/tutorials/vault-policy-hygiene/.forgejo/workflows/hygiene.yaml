@@ -93,7 +93,7 @@ jobs:
           echo "--- providers in the namespace ---"
           warden provider list -o json -F type,description,mount_url | jq .
           echo "--- discovery skill (head) ---"
-          warden skill read discovery --raw | head -20
+          warden skill read discovery -raw | head -20
 
       - name: Run Goose hygiene audit
         env:

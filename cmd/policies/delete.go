@@ -26,7 +26,7 @@ Usage: warden policy delete <name> [flags]
   WARNING: This is a destructive operation and cannot be undone!
 
   By default, this command will ask for confirmation before deleting.
-  Use the -f/--force flag to skip the confirmation prompt.
+  Use the -f/-force flag to skip the confirmation prompt.
 
   Examples:
 
@@ -62,7 +62,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return helpers.DryRun(c, "DELETE", "sys/policies/{name}", nil)
 	}
 
-	// Confirmation prompt (unless --force is used)
+	// Confirmation prompt (unless -force is used)
 	if !deleteForce {
 		fmt.Printf("Are you sure you want to delete policy '%s'? (yes/no): ", name)
 

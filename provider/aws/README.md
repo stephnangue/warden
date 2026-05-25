@@ -54,7 +54,7 @@ The AWS provider enables proxied access to AWS services through Warden. Clients 
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -155,7 +155,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -172,13 +172,13 @@ warden write auth/jwt/role/aws-user \
 Enable the AWS provider at a path of your choice:
 
 ```bash
-warden provider enable --type=aws
+warden provider enable aws
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=aws aws-prod
+warden provider enable -path=aws-prod aws
 ```
 
 Verify the provider is enabled:
@@ -218,14 +218,14 @@ The credential source tells Warden how to authenticate to AWS and where the base
 
 ```bash
 warden cred source create my-aws-source \
-  --type aws \
-  --rotation-period 24h \
-  --config access_key_id=<AccessKeyId> \
-  --config secret_access_key=<SecretAccessKey> \
-  --config region=us-east-1
+  -type aws \
+  -rotation-period 24h \
+  -config access_key_id=<AccessKeyId> \
+  -config secret_access_key=<SecretAccessKey> \
+  -config region=us-east-1
 ```
 
-The `--rotation-period` controls how often Warden rotates the base IAM access keys. Since the IAM user can only manage its own keys and assume roles (no direct resource access), longer periods are acceptable (e.g., `720h` / 30 days). For stricter environments, use shorter periods (e.g., `12h`-`24h`).
+The `-rotation-period` controls how often Warden rotates the base IAM access keys. Since the IAM user can only manage its own keys and assume roles (no direct resource access), longer periods are acceptable (e.g., `720h` / 30 days). For stricter environments, use shorter periods (e.g., `12h`-`24h`).
 
 Verify:
 
@@ -238,30 +238,30 @@ A credential spec defines what temporary credentials Warden mints for consumers.
 ```bash
 # Spec for developers — read-only access, short TTL
 warden cred spec create developer \
-  --source my-aws-source \
-  --config mint_method=sts_assume_role \
-  --config role_arn=arn:aws:iam::<ACCOUNT_ID>:role/devops-readonly-role \
-  --config ttl=1h \
-  --min-ttl 600s \
-  --max-ttl 2h
+  -source my-aws-source \
+  -config mint_method=sts_assume_role \
+  -config role_arn=arn:aws:iam::<ACCOUNT_ID>:role/devops-readonly-role \
+  -config ttl=1h \
+  -min-ttl 600s \
+  -max-ttl 2h
 
 # Spec for CI/CD pipelines — deploy permissions
 warden cred spec create deployer \
-  --source my-aws-source \
-  --config mint_method=sts_assume_role \
-  --config role_arn=arn:aws:iam::<ACCOUNT_ID>:role/devops-deploy-role \
-  --config ttl=30m \
-  --min-ttl 600s \
-  --max-ttl 1h
+  -source my-aws-source \
+  -config mint_method=sts_assume_role \
+  -config role_arn=arn:aws:iam::<ACCOUNT_ID>:role/devops-deploy-role \
+  -config ttl=30m \
+  -min-ttl 600s \
+  -max-ttl 1h
 
 # Spec for operators — full access, longer TTL
 warden cred spec create operator \
-  --source my-aws-source \
-  --config mint_method=sts_assume_role \
-  --config role_arn=arn:aws:iam::<ACCOUNT_ID>:role/devops-operator-role \
-  --config ttl=2h \
-  --min-ttl 600s \
-  --max-ttl 4h
+  -source my-aws-source \
+  -config mint_method=sts_assume_role \
+  -config role_arn=arn:aws:iam::<ACCOUNT_ID>:role/devops-operator-role \
+  -config ttl=2h \
+  -min-ttl 600s \
+  -max-ttl 4h
 ```
 
 Each spec points to a different `role_arn`, so the IAM user's `AssumeRoles` policy must allow assuming all of them (the `devops-*` wildcard in the [AssumeRoles policy](#attach-iam-policies) covers this).
@@ -277,14 +277,14 @@ Instead of storing AWS credentials directly in Warden, you can store them in a V
 ```bash
 # Create a Vault credential source
 warden cred source create aws-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=<role-id> \
-  --config=secret_id=<secret-id> \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=<role-id> \
+  -config=secret_id=<secret-id> \
+  -config=approle_mount=approle \
+  -config=role_name=warden-role \
+  -rotation-period=24h
 ```
 
 #### static_aws — fetch static credentials from KV v2
@@ -293,12 +293,12 @@ The KV v2 secret must contain `access_key_id` and `secret_access_key` fields.
 
 ```bash
 warden cred spec create developer \
-  --source aws-vault-src \
-  --config mint_method=static_aws \
-  --config kv2_mount=secret \
-  --config secret_path=aws/creds \
-  --min-ttl 600s \
-  --max-ttl 2h
+  -source aws-vault-src \
+  -config mint_method=static_aws \
+  -config kv2_mount=secret \
+  -config secret_path=aws/creds \
+  -min-ttl 600s \
+  -max-ttl 2h
 ```
 
 #### dynamic_aws — generate credentials via Vault AWS secrets engine
@@ -307,13 +307,13 @@ Vault generates temporary AWS credentials using its [AWS secrets engine](https:/
 
 ```bash
 warden cred spec create developer \
-  --source aws-vault-src \
-  --config mint_method=dynamic_aws \
-  --config aws_mount=aws \
-  --config role_name=my-vault-aws-role \
-  --config ttl=1h \
-  --min-ttl 600s \
-  --max-ttl 2h
+  -source aws-vault-src \
+  -config mint_method=dynamic_aws \
+  -config aws_mount=aws \
+  -config role_name=my-vault-aws-role \
+  -config ttl=1h \
+  -min-ttl 600s \
+  -max-ttl 2h
 ```
 
 ## Step 4: Create a Policy
@@ -404,7 +404,7 @@ Warden detects the JWT in the `X-Amz-Security-Token` header, authenticates it ag
 
 For workloads that already have X.509 certificates (Kubernetes pods with cert-manager, VMs with machine certificates, SPIFFE X.509-SVIDs), Warden can authenticate using TLS client certificates instead of JWTs.
 
-> **Prerequisite:** TLS must be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** TLS must be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 #### Set up cert auth and configure the provider
 
@@ -412,7 +412,7 @@ Replace Step 1 with cert auth setup, and update the provider's `auto_auth_path`:
 
 ```bash
 # Enable cert auth
-warden auth enable --type=cert
+warden auth enable cert
 
 # Configure trusted CA
 warden write auth/cert/config \
@@ -651,8 +651,8 @@ For HTTPS, you'll need a **wildcard SSL certificate** (`*.warden.yourdomain.com`
 
 ### TTL Bounds
 
-- `--min-ttl`: Minimum credential TTL. Requests for shorter TTLs are clamped up.
-- `--max-ttl`: Maximum credential TTL. Requests for longer TTLs are clamped down.
+- `-min-ttl`: Minimum credential TTL. Requests for shorter TTLs are clamped up.
+- `-max-ttl`: Maximum credential TTL. Requests for longer TTLs are clamped down.
 
 ## Supported AWS Services
 

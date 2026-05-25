@@ -35,7 +35,7 @@ Usage: warden schema PATH        # describe a single path
   By default, "warden schema PATH" returns a friendly shape:
     { path, methods, description, parameters, response_schema, auth_required }
 
-  Pass --raw to emit the underlying OpenAPI fragment instead. This is
+  Pass -raw to emit the underlying OpenAPI fragment instead. This is
   useful for consumers that already speak OpenAPI (Stainless, openapi-typescript,
   oapi-codegen, etc.).
 
@@ -51,9 +51,9 @@ Usage: warden schema PATH        # describe a single path
 
     Get the raw OpenAPI fragment for tooling consumption:
 
-      $ warden schema sys/auth --raw
+      $ warden schema sys/auth -raw
 
-  The endpoint is namespace-scoped: --namespace (or WARDEN_NAMESPACE)
+  The endpoint is namespace-scoped: -namespace (or WARDEN_NAMESPACE)
   controls which mounts are visible, so a tenant cannot enumerate other
   tenants' backends. Authentication is required (set WARDEN_TOKEN, an mTLS
   client cert, or pass an Authorization: Bearer JWT).
@@ -114,7 +114,7 @@ func runSingle(path string) error {
 			"path":    key,
 			"openapi": item,
 		}, func() {
-			// In table mode --raw still prints valid JSON so the output
+			// In table mode -raw still prints valid JSON so the output
 			// stays useful for tools like Stainless / openapi-typescript
 			// that consume schema fragments via shell pipes.
 			b, err := json.MarshalIndent(map[string]any{key: item}, "", "  ")

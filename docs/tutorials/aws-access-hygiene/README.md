@@ -78,7 +78,7 @@ the workflow, inspect Security Hub and Slack. Production is a URL swap.
   ```bash
   aws securityhub enable-security-hub
   aws accessanalyzer create-analyzer \
-      --analyzer-name tutorial-analyzer --type ACCOUNT
+      --analyzer-name tutorial-analyzer -type ACCOUNT
   ```
   Access Analyzer findings for the seeded external-trust target may
   take a few minutes to appear after `seed-aws.sh` runs. The
@@ -89,7 +89,7 @@ the workflow, inspect Security Hub and Slack. Production is a URL swap.
   endpoint (`https://api.deepseek.com/anthropic`). To switch to
   Anthropic-proper, change `anthropic_url` in `warden-init.sh` §5e.
   **The key goes into Warden's credential store, not into any CI
-  variable.** You paste it once during §5 (`--anthropic-key=...`)
+  variable.** You paste it once during §5 (`-anthropic-key=...`)
   and never again.
 - (Optional, for Slack delivery) A Slack workspace, a [bot user OAuth token](https://api.slack.com/authentication/token-types#bot)
   (`xoxb-...`) with the `canvases:write`, `channels:read`, and
@@ -163,7 +163,7 @@ volumes:
 #!/bin/sh
 set -eu
 
-FORGEJO="forgejo --config /data/gitea/conf/app.ini"
+FORGEJO="forgejo -config /data/gitea/conf/app.ini"
 
 if $FORGEJO admin user list 2>/dev/null | awk '{print $2}' | grep -qx siteowner; then
   exit 0
@@ -205,7 +205,7 @@ Then:
      --no-interactive \
      --instance http://forgejo.local:3000 \
      --token <REGISTRATION_TOKEN> \
-     --name local-runner \
+     -name local-runner \
      --labels "docker:docker://node:20-bookworm-slim"
    ```
    Create a runner config so spawned job containers can resolve
@@ -236,7 +236,7 @@ Then:
 In a new shell:
 
 ```bash
-warden server --dev --dev-root-token=dev-warden-root
+warden server -dev -dev-root-token=dev-warden-root
 ```
 
 Dev mode persists everything to an ephemeral in-memory store. The
@@ -336,14 +336,14 @@ With Warden running (§4) and `aws-out/creds.env` populated:
 
 ```bash
 chmod +x warden-init.sh
-./warden-init.sh --anthropic-key=sk-...                               # AWS + Anthropic only
-./warden-init.sh --anthropic-key=sk-... \
-                 --slack-token=xoxb-... \
-                 --slack-channel-id=C0XXXXXXX \
-                 --slack-channel-name='#access-audits'                # + Slack
+./warden-init.sh -anthropic-key=sk-...                               # AWS + Anthropic only
+./warden-init.sh -anthropic-key=sk-... \
+                 -slack-token=xoxb-... \
+                 -slack-channel-id=C0XXXXXXX \
+                 -slack-channel-name='#access-audits'                # + Slack
 ```
 
-`--anthropic-key` is required — it's the LLM key Goose uses to drive
+`-anthropic-key` is required — it's the LLM key Goose uses to drive
 the audit, held by Warden and proxied at runtime; it never enters
 the agent's environment. If you use Anthropic directly rather than
 DeepSeek, change `anthropic_url` in `warden-init.sh` §5e.
@@ -380,11 +380,11 @@ What it provisions, in order:
    resigns the request, and forwards. Each call therefore lands at
    AWS as a *narrow, temporary, lens-specific* identity:
    ```bash
-   warden cred spec create iam-reader-spec --source demo-aws-source \
-       --config mint_method=sts_assume_role \
-       --config role_arn="$WARDEN_AWS_ROLE_IAM_READER_ARN" \
-       --config session_name=warden-iam-reader \
-       --config ttl=1h
+   warden cred spec create iam-reader-spec -source demo-aws-source \
+       -config mint_method=sts_assume_role \
+       -config role_arn="$WARDEN_AWS_ROLE_IAM_READER_ARN" \
+       -config session_name=warden-iam-reader \
+       -config ttl=1h
    # ...repeated for cloudtrail-reader-spec, access-analyzer-reader-spec,
    # policy-simulator-spec, securityhub-writer-spec.
    ```
@@ -426,15 +426,15 @@ What it provisions, in order:
    path "aws/gateway/*" { capabilities = ["read", "create", "list"] }
    ```
    Per-lens least-privilege is enforced *at AWS*, not by this policy.
-10. **Anthropic provider** for Goose's LLM leg — `--type=anthropic`
+10. **Anthropic provider** for Goose's LLM leg — `-type=anthropic`
     against an Anthropic-compatible endpoint (DeepSeek by default).
-    One source (the key passed via `--anthropic-key`), one spec, and
+    One source (the key passed via `-anthropic-key`), one spec, and
     an `anthropic-ops` role marked *Internal — used by Goose runtime,
     not chosen by agents.* The workflow exports
     `ANTHROPIC_HOST=$WARDEN_ADDR/v1/tutorial-aws/anthropic/role/anthropic-ops/gateway`
     before starting Goose so the LLM round-trip flows through Warden
     too.
-11. **Slack provider** (only when `--slack-token` is given) plus its
+11. **Slack provider** (only when `-slack-token` is given) plus its
     source, spec, the active `hygiene-poster` role (channel embedded
     in the description), and a `slack-hygiene-poster` policy granting
     `create` on the Slack Web API methods the agent will call. A
@@ -476,9 +476,9 @@ for arn in "$WARDEN_AWS_ROLE_IAM_READER_ARN" \
   AWS_ACCESS_KEY_ID="$WARDEN_AWS_BROKER_ACCESS_KEY_ID" \
   AWS_SECRET_ACCESS_KEY="$WARDEN_AWS_BROKER_SECRET_ACCESS_KEY" \
   aws sts assume-role \
-    --role-arn "$arn" \
-    --role-session-name "smoke-$(basename "$arn")" \
-    --query 'AssumedRoleUser.Arn' --output text
+    -role-arn "$arn" \
+    -role-session-name "smoke-$(basename "$arn")" \
+    --query 'AssumedRoleUser.Arn' -output text
 done
 ```
 
@@ -649,8 +649,8 @@ The agent's loop, per `docs/agent-flow.md`:
 
 1. **Read the bootstrap skills.**
    ```bash
-   warden skill read foundation --raw   # the runtime contract: env vars, exit codes, list/raw flags
-   warden skill read discovery  --raw   # the 5-step loop itself
+   warden skill read foundation -raw   # the runtime contract: env vars, exit codes, list/raw flags
+   warden skill read discovery  -raw   # the 5-step loop itself
    ```
    These are seeded into every Warden cluster; the agent fetches
    them on first run.
@@ -684,8 +684,8 @@ The agent's loop, per `docs/agent-flow.md`:
 
 4. **Fetch the provider skill for each provider it will use.**
    ```bash
-   warden skill read aws --raw    # SigV4 env-var contract, gateway URL pattern, quirks
-   warden skill read slack --raw  # Slack Web API call shape
+   warden skill read aws -raw    # SigV4 env-var contract, gateway URL pattern, quirks
+   warden skill read slack -raw  # Slack Web API call shape
    ```
    The aws skill tells the agent that the role name goes in
    `AWS_ACCESS_KEY_ID`, the JWT goes in `AWS_SECRET_ACCESS_KEY` and
@@ -1015,7 +1015,7 @@ docker compose down -v          # stop containers + drop named volumes (forgejo-
 rm -rf aws-out runner-config    # local artefacts: broker keys + runner registration
 ```
 
-Stop Warden (`Ctrl-C` in its shell — `--dev` mode is in-memory, so
+Stop Warden (`Ctrl-C` in its shell — `-dev` mode is in-memory, so
 nothing to clean up on disk besides the audit log), and optionally
 remove the host mapping:
 
@@ -1040,7 +1040,7 @@ aws accessanalyzer delete-analyzer --analyzer-name tutorial-analyzer
 ```
 
 To rerun from a clean slate, just `docker compose up -d forgejo &&
-docker compose up forgejo-init && ./aws-init.sh && warden-init.sh --anthropic-key=...`
+docker compose up forgejo-init && ./aws-init.sh && warden-init.sh -anthropic-key=...`
 again — every script in the tutorial is idempotent.
 
 ## 13. What's next

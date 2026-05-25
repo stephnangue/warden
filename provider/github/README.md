@@ -52,7 +52,7 @@ The GitHub provider enables proxied access to the GitHub REST API through Warden
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -70,7 +70,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -87,13 +87,13 @@ warden write auth/jwt/role/github-user \
 Enable the GitHub provider at a path of your choice:
 
 ```bash
-warden provider enable --type=github
+warden provider enable github
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=github github-prod
+warden provider enable -path=github-prod github
 ```
 
 Verify the provider is enabled:
@@ -127,9 +127,9 @@ The credential source holds only connection info. Auth credentials (PAT, App pri
 
 ```bash
 warden cred source create github-src \
-  --type=github \
-  --rotation-period=0 \
-  --config=github_url=https://api.github.com
+  -type=github \
+  -rotation-period=0 \
+  -config=github_url=https://api.github.com
 ```
 
 Verify the source was created:
@@ -149,20 +149,20 @@ Create a credential spec that references the credential source. The spec carries
 
 ```bash
 warden cred spec create github-ops \
-  --source github-src \
-  --config auth_method=app \
-  --config app_id=<your-app-id> \
-  --config private_key=@/path/to/private-key.pem \
-  --config installation_id=<your-installation-id>
+  -source github-src \
+  -config auth_method=app \
+  -config app_id=<your-app-id> \
+  -config private_key=@/path/to/private-key.pem \
+  -config installation_id=<your-installation-id>
 ```
 
 ### Option B: Personal Access Token
 
 ```bash
 warden cred spec create github-ops \
-  --source github-src \
-  --config auth_method=pat \
-  --config token=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  -source github-src \
+  -config auth_method=pat \
+  -config token=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 Verify:
@@ -338,14 +338,14 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA

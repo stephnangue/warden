@@ -146,6 +146,30 @@ make brd-fast
 
 ## Code Style Guidelines
 
+### CLI flag style in docs
+
+Document warden CLI flags with a single dash (`-config`, `-type`, `-path`),
+matching the Vault muscle memory the binary's flag normalizer is built for
+(see `NormalizeSingleDashFlags` in [cmd/warden.go](cmd/warden.go)). Flag
+registrations in code stay `--foo` (cobra/pflag canonical), so `warden
+--help` still prints `--`, but operator-facing docs, tutorials, and cobra
+Long/Example help text use `-foo`. The binary accepts both forms.
+
+Never rewrite flags belonging to other tools — `curl --cert`, `aws iam
+--user-name`, `helm install --set`, `kubectl --namespace`, `openssl req
+-subj`, `docker run --name` keep their native style.
+
+For `enable` commands (auth/provider/audit), follow Vault's exact form:
+TYPE is a required positional, and `-path=<mount>` overrides the default
+(which equals TYPE).
+
+```bash
+warden auth     enable jwt                            # mount at auth/jwt/
+warden auth     enable -path=jwt-prod jwt             # mount at auth/jwt-prod/
+warden provider enable -path=aws-staging aws          # mount at aws-staging/
+warden audit    enable -file-path=/var/log/audit.log file
+```
+
 ### Formatting
 
 - Use Go standard formatting: `go fmt ./...`

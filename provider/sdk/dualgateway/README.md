@@ -78,7 +78,7 @@ providers = map[string]wardenlogical.Factory{
 
 That's it. Your provider supports:
 
-- `warden provider enable --type=myprovider`
+- `warden provider enable myprovider`
 - `warden write myprovider/config myprovider_url=https://api.myprovider.com auto_auth_path=auth/jwt/`
 - API mode: `POST /v1/myprovider/gateway/some/api/path` (header injected, request forwarded)
 - API mode with role: `POST /v1/myprovider/role/{role}/gateway/some/api/path`

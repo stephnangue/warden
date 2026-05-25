@@ -29,18 +29,18 @@ Usage: warden cred spec create <name> [flags]
     Typed flags (human-friendly):
 
       $ warden cred spec create developer \
-          --source=my-aws \
-          --config=mint_method=sts_assume_role \
-          --config=role_arn=arn:aws:iam::1234:role/dev \
-          --min-ttl=1h --max-ttl=24h
+          -source=my-aws \
+          -config=mint_method=sts_assume_role \
+          -config=role_arn=arn:aws:iam::1234:role/dev \
+          -min-ttl=1h -max-ttl=24h
 
     Full JSON payload (agent-friendly):
 
-      $ warden cred spec create developer --json @spec.json
-      $ cat spec.json | warden cred spec create developer --json -
+      $ warden cred spec create developer -json @spec.json
+      $ cat spec.json | warden cred spec create developer -json -
 
-  --json is mutually exclusive with --type / --source / --config /
-  --min-ttl / --max-ttl / --rotation-period. Combine with --dry-run to
+  -json is mutually exclusive with -type / -source / -config /
+  -min-ttl / -max-ttl / -rotation-period. Combine with -dry-run to
   validate the payload locally without creating the spec.
 `,
 		SilenceUsage:  true,
@@ -52,7 +52,7 @@ Usage: warden cred spec create <name> [flags]
 
 func init() {
 	CreateCmd.Flags().StringVar(&createType, "type", "", "Credential type (optional — inferred from source when omitted)")
-	CreateCmd.Flags().StringVar(&createSource, "source", "", "Source name (required unless --json)")
+	CreateCmd.Flags().StringVar(&createSource, "source", "", "Source name (required unless -json)")
 	CreateCmd.Flags().StringToStringVar(&createConfig, "config", nil, "Type-specific configuration (key=value)")
 	CreateCmd.Flags().StringVar(&createMinTTL, "min-ttl", "1h", "Minimum TTL")
 	CreateCmd.Flags().StringVar(&createMaxTTL, "max-ttl", "24h", "Maximum TTL")
@@ -78,12 +78,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"--type":            createType != "",
-			"--source":          createSource != "",
-			"--config":          len(createConfig) > 0,
-			"--min-ttl":         cmd.Flags().Changed("min-ttl"),
-			"--max-ttl":         cmd.Flags().Changed("max-ttl"),
-			"--rotation-period": createRotationPeriod != "",
+			"-type":            createType != "",
+			"-source":          createSource != "",
+			"-config":          len(createConfig) > 0,
+			"-min-ttl":         cmd.Flags().Changed("min-ttl"),
+			"-max-ttl":         cmd.Flags().Changed("max-ttl"),
+			"-rotation-period": createRotationPeriod != "",
 		}); err != nil {
 			return err
 		}
@@ -109,10 +109,10 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	if createSource == "" {
-		return fmt.Errorf("--source is required (or use --json): %w", helpers.ErrUsage)
+		return fmt.Errorf("-source is required (or use -json): %w", helpers.ErrUsage)
 	}
 	if createType != "" {
-		if err := helpers.ValidateIdentifier("--type", createType); err != nil {
+		if err := helpers.ValidateIdentifier("-type", createType); err != nil {
 			return err
 		}
 	}

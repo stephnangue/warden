@@ -52,7 +52,7 @@ The Atlassian provider enables proxied access to all Atlassian Cloud and Data Ce
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -70,7 +70,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -87,7 +87,7 @@ warden write auth/jwt/role/atlassian-user \
 Enable the Atlassian provider at a path of your choice:
 
 ```bash
-warden provider enable --type=atlassian jira
+warden provider enable -path=jira atlassian
 ```
 
 Verify the provider is enabled:
@@ -125,19 +125,19 @@ Generate an API token at [id.atlassian.com/manage-profile/security/api-tokens](h
 
 ```bash
 warden cred source create atlassian-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=display_name=Atlassian \
-  --config=optional_metadata=email
+  -type=apikey \
+  -rotation-period=0 \
+  -config=display_name=Atlassian \
+  -config=optional_metadata=email
 ```
 
 Create a credential spec with both `email` and `api_key`:
 
 ```bash
 warden cred spec create atlassian-ops \
-  --source atlassian-src \
-  --config email=fred@example.com \
-  --config api_key=ATATT3xFfGF0your-api-token
+  -source atlassian-src \
+  -config email=fred@example.com \
+  -config api_key=ATATT3xFfGF0your-api-token
 ```
 
 ### Option B: Personal Access Token (Data Center)
@@ -146,17 +146,17 @@ Atlassian Data Center (Jira DC 8.14+, Confluence DC 7.9+, Bitbucket DC 5.5+) sup
 
 ```bash
 warden cred source create atlassian-dc-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=display_name=AtlassianDC
+  -type=apikey \
+  -rotation-period=0 \
+  -config=display_name=AtlassianDC
 ```
 
 Create a credential spec with only `api_key`:
 
 ```bash
 warden cred spec create atlassian-ops \
-  --source atlassian-dc-src \
-  --config api_key=your-personal-access-token
+  -source atlassian-dc-src \
+  -config api_key=your-personal-access-token
 ```
 
 For older Data Center versions without PAT support, fall back to Basic Auth by adding `optional_metadata=email` to the source and including both `email` and `api_key` (the account password) on the spec.
@@ -184,20 +184,20 @@ Then create the Warden credential source and spec:
 
 ```bash
 warden cred source create atlassian-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=your-role-id \
-  --config=secret_id=your-secret-id \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=your-role-id \
+  -config=secret_id=your-secret-id \
+  -config=approle_mount=approle \
+  -config=role_name=warden-role \
+  -rotation-period=24h
 
 warden cred spec create atlassian-ops \
-  --source atlassian-vault-src \
-  --config mint_method=static_apikey \
-  --config kv2_mount=secret \
-  --config secret_path=atlassian/ops
+  -source atlassian-vault-src \
+  -config mint_method=static_apikey \
+  -config kv2_mount=secret \
+  -config secret_path=atlassian/ops
 ```
 
 Warden reads all keys from the KV secret and populates credential data directly. For Cloud, the `email` key triggers Basic Auth injection automatically — no `optional_metadata` config is needed on the Vault source.
@@ -294,7 +294,7 @@ Mount one instance of the Atlassian provider per product. Each product has its o
 ### Confluence
 
 ```bash
-warden provider enable --type=atlassian confluence
+warden provider enable -path=confluence atlassian
 
 warden write confluence/config <<EOF
 {
@@ -331,7 +331,7 @@ curl -s -X POST "${CONFLUENCE_ENDPOINT}/pages" \
 ### Jira Service Management
 
 ```bash
-warden provider enable --type=atlassian jira-servicedesk
+warden provider enable -path=jira-servicedesk atlassian
 
 warden write jira-servicedesk/config <<EOF
 {
@@ -365,7 +365,7 @@ curl -s -X POST "${JSM_ENDPOINT}/request" \
 Bitbucket Cloud uses **app passwords** instead of personal API tokens. Create one at [bitbucket.org/account/settings/app-passwords](https://bitbucket.org/account/settings/app-passwords). Use your Bitbucket username as `email` and the app password as `api_key`.
 
 ```bash
-warden provider enable --type=atlassian bitbucket
+warden provider enable -path=bitbucket atlassian
 
 warden write bitbucket/config <<EOF
 {
@@ -376,15 +376,15 @@ warden write bitbucket/config <<EOF
 EOF
 
 warden cred source create bitbucket-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=display_name=Bitbucket \
-  --config=optional_metadata=email
+  -type=apikey \
+  -rotation-period=0 \
+  -config=display_name=Bitbucket \
+  -config=optional_metadata=email
 
 warden cred spec create bitbucket-ops \
-  --source bitbucket-src \
-  --config email=your-bitbucket-username \
-  --config api_key=your-app-password
+  -source bitbucket-src \
+  -config email=your-bitbucket-username \
+  -config api_key=your-app-password
 ```
 
 ```bash
@@ -404,7 +404,7 @@ curl -s "${BITBUCKET_ENDPOINT}/repositories/your-workspace" \
 The Admin API uses **org API keys** (not personal tokens), which are injected as Bearer tokens. Generate one at [admin.atlassian.com](https://admin.atlassian.com) under **Settings > API keys**. No `email` field is needed.
 
 ```bash
-warden provider enable --type=atlassian atlassian-admin
+warden provider enable -path=atlassian-admin atlassian
 
 warden write atlassian-admin/config <<EOF
 {
@@ -415,13 +415,13 @@ warden write atlassian-admin/config <<EOF
 EOF
 
 warden cred source create atlassian-admin-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=display_name=AtlassianAdmin
+  -type=apikey \
+  -rotation-period=0 \
+  -config=display_name=AtlassianAdmin
 
 warden cred spec create atlassian-admin-ops \
-  --source atlassian-admin-src \
-  --config api_key=your-org-api-key
+  -source atlassian-admin-src \
+  -config api_key=your-org-api-key
 ```
 
 ## Data Center and Self-Hosted
@@ -429,7 +429,7 @@ warden cred spec create atlassian-admin-ops \
 Atlassian Data Center (Jira DC 8.14+, Confluence DC 7.9+, Bitbucket DC 5.5+) supports **Personal Access Tokens (PATs)** as Bearer tokens. The credential source and spec setup follows [Option B in Step 3](#option-b-personal-access-token-data-center). Only the provider mount and URL differ:
 
 ```bash
-warden provider enable --type=atlassian jira-dc
+warden provider enable -path=jira-dc atlassian
 
 warden write jira-dc/config <<EOF
 {
@@ -446,12 +446,12 @@ For older Data Center versions without PAT support, use Basic Auth the same way 
 
 Steps 1 and 5 use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. Steps 2-4 (provider, credential, and policy setup) are identical regardless of the auth method.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener. In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener. In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA

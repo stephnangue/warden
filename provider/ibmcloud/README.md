@@ -81,7 +81,7 @@ Only hosts matching the `allowed_host_suffixes` list (default: `.cloud.ibm.com`,
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -99,7 +99,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -116,13 +116,13 @@ warden write auth/jwt/role/ibmcloud-user \
 Enable the IBM Cloud provider at a path of your choice:
 
 ```bash
-warden provider enable --type=ibmcloud
+warden provider enable ibmcloud
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=ibmcloud ibmcloud-prod
+warden provider enable -path=ibmcloud-prod ibmcloud
 ```
 
 Verify the provider is enabled:
@@ -175,24 +175,24 @@ The IBM driver exchanges your API key for a short-lived IAM token and combines i
 
 ```bash
 warden cred source create ibmcloud-src \
-  --type=ibm \
-  --config=api_key=your-ibm-api-key
+  -type=ibm \
+  -config=api_key=your-ibm-api-key
 
 warden cred spec create ibmcloud-ops \
-  --source ibmcloud-src \
-  --type=ibmcloud_keys \
-  --config mint_method=iam_with_cos \
-  --config access_key_id=your-cos-access-key-id \
-  --config secret_access_key=your-cos-secret-access-key
+  -source ibmcloud-src \
+  -type=ibmcloud_keys \
+  -config mint_method=iam_with_cos \
+  -config access_key_id=your-cos-access-key-id \
+  -config secret_access_key=your-cos-secret-access-key
 ```
 
 **API-only (no COS):**
 
 ```bash
 warden cred spec create ibmcloud-api-only \
-  --source ibmcloud-src \
-  --type=ibmcloud_keys \
-  --config mint_method=iam_with_cos
+  -source ibmcloud-src \
+  -type=ibmcloud_keys \
+  -config mint_method=iam_with_cos
 ```
 
 ### Option B: Vault/OpenBao — Dynamic IBM Secrets Engine
@@ -201,23 +201,23 @@ Use Vault's IBM secrets engine to generate dynamic API keys with automatic lease
 
 ```bash
 warden cred source create ibmcloud-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=your-role-id \
-  --config=secret_id=your-secret-id \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=your-role-id \
+  -config=secret_id=your-secret-id \
+  -config=approle_mount=approle \
+  -config=role_name=warden-role \
+  -rotation-period=24h
 
 warden cred spec create ibmcloud-ops \
-  --source ibmcloud-vault-src \
-  --type=ibmcloud_keys \
-  --config mint_method=dynamic_ibm \
-  --config ibm_mount=ibmcloud \
-  --config role_name=my-ibm-role \
-  --config access_key_id=your-cos-access-key-id \
-  --config secret_access_key=your-cos-secret-access-key
+  -source ibmcloud-vault-src \
+  -type=ibmcloud_keys \
+  -config mint_method=dynamic_ibm \
+  -config ibm_mount=ibmcloud \
+  -config role_name=my-ibm-role \
+  -config access_key_id=your-cos-access-key-id \
+  -config secret_access_key=your-cos-secret-access-key
 ```
 
 Warden calls the Vault IBM secrets engine to get a dynamic API key, exchanges it for an IAM token, and optionally merges static COS HMAC keys from the spec config.
@@ -517,7 +517,7 @@ Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA

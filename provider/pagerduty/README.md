@@ -51,7 +51,7 @@ The PagerDuty provider enables proxied access to the PagerDuty REST API v2 throu
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -69,7 +69,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -86,13 +86,13 @@ warden write auth/jwt/role/pagerduty-user \
 Enable the PagerDuty provider at a path of your choice:
 
 ```bash
-warden provider enable --type=pagerduty
+warden provider enable pagerduty
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=pagerduty pagerduty-prod
+warden provider enable -path=pagerduty-prod pagerduty
 ```
 
 Verify the provider is enabled:
@@ -128,19 +128,19 @@ The credential source holds only connection info (`api_url`). The API token is s
 
 ```bash
 warden cred source create pagerduty-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=api_url=https://api.pagerduty.com \
-  --config=verify_endpoint=/users/me \
-  --config=display_name=PagerDuty
+  -type=apikey \
+  -rotation-period=0 \
+  -config=api_url=https://api.pagerduty.com \
+  -config=verify_endpoint=/users/me \
+  -config=display_name=PagerDuty
 ```
 
 Create a credential spec that references the credential source. The spec carries the API token and gets associated with tokens at login time.
 
 ```bash
 warden cred spec create pagerduty-ops \
-  --source pagerduty-src \
-  --config api_key=your-pagerduty-api-token
+  -source pagerduty-src \
+  -config api_key=your-pagerduty-api-token
 ```
 
 The API token is validated at creation time via a `GET /users/me` call to the PagerDuty API (SpecVerifier). If the token is invalid, spec creation will fail.
@@ -160,24 +160,24 @@ Instead of storing the API token directly in Warden, you can store it in a Vault
 ```bash
 # Create a Vault credential source
 warden cred source create pagerduty-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=your-role-id \
-  --config=secret_id=your-secret-id \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=your-role-id \
+  -config=secret_id=your-secret-id \
+  -config=approle_mount=approle \
+  -config=role_name=warden-role \
+  -rotation-period=24h
 ```
 
 Create a credential spec using the `static_apikey` mint method:
 
 ```bash
 warden cred spec create pagerduty-ops \
-  --source pagerduty-vault-src \
-  --config mint_method=static_apikey \
-  --config kv2_mount=secret \
-  --config secret_path=pagerduty/ops
+  -source pagerduty-vault-src \
+  -config mint_method=static_apikey \
+  -config kv2_mount=secret \
+  -config secret_path=pagerduty/ops
 ```
 
 The KV v2 secret at `secret/pagerduty/ops` should contain at minimum an `api_key` field. Warden fetches the secret from Vault on each credential request.
@@ -186,10 +186,10 @@ You can also use the `oauth2` mint method if you have an OAuth2 plugin (openbao-
 
 ```bash
 warden cred spec create pagerduty-ops \
-  --source pagerduty-vault-src \
-  --config mint_method=oauth2 \
-  --config oauth2_mount=oauth2 \
-  --config credential_name=pagerduty
+  -source pagerduty-vault-src \
+  -config mint_method=oauth2 \
+  -config oauth2_mount=oauth2 \
+  -config credential_name=pagerduty
 ```
 
 Verify:
@@ -358,13 +358,13 @@ The source holds the OAuth2 app credentials (`client_id`, `client_secret`). Toke
 
 ```bash
 warden cred source create pagerduty-oauth-src \
-  --type=oauth2 \
-  --rotation-period=0 \
-  --config=client_id=your-client-id \
-  --config=client_secret=your-client-secret \
-  --config=token_url=https://identity.pagerduty.com/oauth/token \
-  --config=verify_url=https://api.pagerduty.com/users/me \
-  --config=display_name=PagerDuty
+  -type=oauth2 \
+  -rotation-period=0 \
+  -config=client_id=your-client-id \
+  -config=client_secret=your-client-secret \
+  -config=token_url=https://identity.pagerduty.com/oauth/token \
+  -config=verify_url=https://api.pagerduty.com/users/me \
+  -config=display_name=PagerDuty
 ```
 
 ### Create an OAuth2 Credential Spec
@@ -373,8 +373,8 @@ The spec optionally specifies the OAuth2 scope. If omitted, the default scope fr
 
 ```bash
 warden cred spec create pagerduty-ops \
-  --source pagerduty-oauth-src \
-  --config scope="read write"
+  -source pagerduty-oauth-src \
+  -config scope="read write"
 ```
 
 The spec is validated at creation time: Warden mints a test token and verifies it by calling `GET /users/me` on the PagerDuty API. If the credentials are invalid, spec creation will fail.
@@ -396,14 +396,14 @@ All gateway requests work identically — Warden transparently injects the minte
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA
@@ -546,7 +546,7 @@ curl --cert client.pem --key client-key.pem \
 2. Update the credential spec:
    ```bash
    warden cred spec update pagerduty-ops \
-     --config api_key=your-new-api-token
+     -config api_key=your-new-api-token
    ```
 3. Revoke the old token in PagerDuty
 
@@ -567,7 +567,7 @@ Bearer tokens are minted on demand and cached for their TTL. When a token expire
 2. Update the credential source:
    ```bash
    warden cred source update pagerduty-oauth-src \
-     --config=client_id=new-client-id \
-     --config=client_secret=new-client-secret
+     -config=client_id=new-client-id \
+     -config=client_secret=new-client-secret
    ```
 3. Revoke the old credentials in PagerDuty

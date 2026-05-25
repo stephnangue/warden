@@ -27,14 +27,14 @@ Usage: warden namespace create <path> [options]
 
       $ warden namespace create my-team
       $ warden namespace create org/engineering
-      $ warden namespace create my-team --metadata=environment=prod --metadata=team=platform
+      $ warden namespace create my-team -metadata=environment=prod -metadata=team=platform
 
     Full JSON payload (agent-friendly):
 
-      $ warden namespace create my-team --json @ns.json
-      $ cat ns.json | warden namespace create my-team --json -
+      $ warden namespace create my-team -json @ns.json
+      $ cat ns.json | warden namespace create my-team -json -
 
-  --json is mutually exclusive with --metadata. Combine with --dry-run to
+  -json is mutually exclusive with -metadata. Combine with -dry-run to
   validate the payload locally without creating the namespace.
 
   For more information about namespaces, please see the documentation.
@@ -46,7 +46,7 @@ Usage: warden namespace create <path> [options]
 
 func init() {
 	CreateCmd.Flags().StringToStringVar(&createMetadata, "metadata", nil, "Custom metadata for the namespace (can be specified multiple times)")
-	CreateCmd.Flags().StringVarP(&createJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with --metadata)")
+	CreateCmd.Flags().StringVarP(&createJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with -metadata)")
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
@@ -67,7 +67,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"--metadata": len(createMetadata) > 0,
+			"-metadata": len(createMetadata) > 0,
 		}); err != nil {
 			return err
 		}

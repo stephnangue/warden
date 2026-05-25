@@ -4,9 +4,15 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **`auth enable`, `provider enable`, `audit enable` take TYPE as a positional, like Vault.** The `-type` flag is gone; pass the type as the trailing argument (`warden auth enable jwt`, `warden provider enable aws`, `warden audit enable file`). The mount path still defaults to TYPE; override it with `-path=<mount>` (Vault's exact form). Migration: `-type=jwt jwt-prod` → `-path=jwt-prod jwt`; `-type=aws` → `aws`. In `-json` mode, if the payload carries a `type` field it must match the TYPE positional or the CLI rejects with a usage error. (this PR)
+
+- **All operator-facing documentation switched to single-dash long flags.** READMEs, the CHANGELOG, tutorial scripts, provider docs, and cobra help text now consistently spell flags as `-config`, `-output`, `-path`, etc. — matching the Vault muscle memory the binary's flag normalizer ([cmd/warden.go](cmd/warden.go)) was built for. Flag *registrations* in code remain `--foo` (cobra/pflag canonical), so `warden --help` still prints `--`. The binary already accepts both forms; this is a docs/UX cleanup, not a behavior change. (this PR)
+
 ### New Features
 
-- **`warden status` subcommand.** New top-level CLI command that reports server health (initialized, sealed, standby, HA cluster role, leader address, active-since timestamp, server version) by wrapping `GET /v1/sys/health`. Honours the existing `--output table|json|ndjson|text` and `--fields` flags. Exit code is `0` on a healthy unsealed node (active or standby), `7` on a transport error, and `10` when the server reports sealed or uninitialized — scriptable so `if warden status; then ...` works in operator playbooks. The matching `(*api.Sys).Health` / `HealthWithContext` methods are added for SDK callers; the client allow-list now treats `429/501/503` from `/v1/sys/health` as decodable operational states instead of HTTP errors. (this PR)
+- **`warden status` subcommand.** New top-level CLI command that reports server health (initialized, sealed, standby, HA cluster role, leader address, active-since timestamp, server version) by wrapping `GET /v1/sys/health`. Honours the existing `-output table|json|ndjson|text` and `-fields` flags. Exit code is `0` on a healthy unsealed node (active or standby), `7` on a transport error, and `10` when the server reports sealed or uninitialized — scriptable so `if warden status; then ...` works in operator playbooks. The matching `(*api.Sys).Health` / `HealthWithContext` methods are added for SDK callers; the client allow-list now treats `429/501/503` from `/v1/sys/health` as decodable operational states instead of HTTP errors. (this PR)
 
 - **`/v1/sys/health` now returns cluster-aware fields.** The response body grows additively to include `ha_enabled`, `is_leader`, `leader_address`, `active_time` (RFC3339, only set on the active leader), and `version` (server build, surfaced through a new `HandlerProperties.Version` plumbed from `cmd.SetVersion`). Operators no longer need three round-trips (`/sys/health`, `/sys/leader`, `/sys/seal-status`) to assemble a status view. Leader lookup is gated on `!sealed && ha_enabled`, so a sealed HA node no longer logs an error on every k8s probe. (this PR)
 
@@ -37,7 +43,7 @@ All notable changes to Warden are documented in this file.
 
 ### Documentation
 
-- **Tutorials updated for the audit-config redesign.** Both [vault-policy-hygiene](docs/tutorials/vault-policy-hygiene/README.md) and [aws-access-hygiene](docs/tutorials/aws-access-hygiene/README.md) used to rely on the auto-default audit device that's gone in this PR. Their `warden-init.sh` wiring scripts now call `warden audit enable --type=file --file-path=./warden-audit.log audit-default` as their first step (idempotent, no-op on re-runs), and the README prose was rewritten to explain the broker fail-open posture instead of "no audit enable command needed." Existing `jq` walkthroughs that tail `warden-audit.log` continue to work unchanged. (this PR)
+- **Tutorials updated for the audit-config redesign.** Both [vault-policy-hygiene](docs/tutorials/vault-policy-hygiene/README.md) and [aws-access-hygiene](docs/tutorials/aws-access-hygiene/README.md) used to rely on the auto-default audit device that's gone in this PR. Their `warden-init.sh` wiring scripts now call `warden audit enable -file-path=./warden-audit.log -path=audit-default file` as their first step (idempotent, no-op on re-runs), and the README prose was rewritten to explain the broker fail-open posture instead of "no audit enable command needed." Existing `jq` walkthroughs that tail `warden-audit.log` continue to work unchanged. (this PR)
 
 - **AWS access hygiene tutorial added.** End-to-end demo of the *within-provider* dimension of discover-and-connect: a Goose agent audits IAM in a sandbox AWS account through four read-only lenses (inventory, recent usage, external exposure, effective access), publishes findings to Security Hub as ASFF, and posts a summary canvas to Slack — switching Warden roles between calls within a single AWS mount, with each role assuming a distinct narrowly-scoped IAM role via STS. Warden holds only the broker IAM user's static keys; the agent declares per-call intent via `AWS_ACCESS_KEY_ID`, and the audit log records each declared intent as `auth.role_name`. A hallucinated cross-role write — e.g. `BatchImportFindings` under the `iam-reader` intent — is denied at AWS by the assumed role's narrow IAM policy, not by Warden's gateway policy, and surfaces as an anomaly signature in the audit log. Tutorial ships as a four-script setup (`aws-init.sh`, `warden-init.sh`, `seed-aws.sh`, plus a Forgejo Actions workflow that runs Goose under a per-job OIDC JWT) with a thirteen-section README covering the operator setup, the discovery loop, the lens-based recipe, and a `jq`-driven audit-log walkthrough including a negative test. (#222, #223, #225, this PR)
 
@@ -88,7 +94,7 @@ All notable changes to Warden are documented in this file.
 
 - **OCI chart publishing on every release tag.** The release workflow now packages the chart, pins its `appVersion` to the git tag, pushes the OCI artifact to `oci://ghcr.io/stephnangue/charts`, and attaches the same tarball to the GitHub Release for air-gapped users. Refuses to publish a chart version that already exists in the registry. End users install with `helm install warden oci://ghcr.io/stephnangue/charts/warden --version 0.1.0` — no `helm repo add`, no source checkout. (#206)
 
-- **`--config-dir` flag on `warden server`.** Merges every `*.hcl` file in a directory in lexical order, with later files overriding earlier ones. Enables a Kubernetes ConfigMap + Secret split where each owns a disjoint subset of HCL blocks without sacrificing single-file simplicity. Mutually exclusive with `--config` and `--dev`. (#204)
+- **`-config-dir` flag on `warden server`.** Merges every `*.hcl` file in a directory in lexical order, with later files overriding earlier ones. Enables a Kubernetes ConfigMap + Secret split where each owns a disjoint subset of HCL blocks without sacrificing single-file simplicity. Mutually exclusive with `-config` and `-dev`. (#204)
 
 - **Environment-variable interpolation in HCL config files.** Config files are pre-processed through a Go-template pass exposing a single `env` function — `{{ env "POD_NAME" }}` resolves at load time from `os.Getenv`. Missing variables expand to the empty string (matches shell semantics). HCL's native `${...}` interpolation syntax is intentionally left untouched. (#204)
 
@@ -118,23 +124,23 @@ All notable changes to Warden are documented in this file.
 
 ### Breaking Changes
 
-- **`--format` / `-f` flag removed.** Replaced by a global persistent `--output` / `-o` flag (`table`, `json`, `ndjson`, `text`). Autodetects `table` on a TTY, `json` when piped or redirected. Honors `WARDEN_OUTPUT`.
+- **`-format` / `-f` flag removed.** Replaced by a global persistent `-output` / `-o` flag (`table`, `json`, `ndjson`, `text`). Autodetects `table` on a TTY, `json` when piped or redirected. Honors `WARDEN_OUTPUT`.
 - **CLI success and empty-list messages are now JSON in non-table modes.** Plain-text strings like `Success! Enabled ...`, `Successfully deleted ...`, and `No providers enabled` become structured envelopes (`{"path": "...", "enabled": true}`, `{"deleted": true}`, `[]`). Scripts that grep the human strings need to update; agents already parse JSON. Pass `-o table` to keep the human form.
-- **Top-level `skills/` directory removed.** Foundation skills moved to embedded seed data; provider skills moved into their owning provider package (`provider/<type>/skill.md`). Agents fetch skills from the runtime registry — `warden skill read <name> --raw` or `GET /v1/sys/skills/<name>` — rather than reading them from a repo checkout. `AGENTS.md` was rewritten to point at the new surface.
+- **Top-level `skills/` directory removed.** Foundation skills moved to embedded seed data; provider skills moved into their owning provider package (`provider/<type>/skill.md`). Agents fetch skills from the runtime registry — `warden skill read <name> -raw` or `GET /v1/sys/skills/<name>` — rather than reading them from a repo checkout. `AGENTS.md` was rewritten to point at the new surface.
 
 ### New Features
 
 - **Skill registry — agent-facing capability catalog served by the cluster.** New `/v1/sys/skills` API and `warden skill {list, read, create, update, delete}` CLI. Foundation skills (`discovery`, `foundation`, `troubleshooting`) seed at first unseal; per-provider skills (`aws`, `vault`, `openai`, `github`, `rds`, `scaleway`) seed the first time a provider of that type is mounted — the catalog reflects what the cluster actually exposes. Reads are open to any namespace token; writes are root-only. Operator edits and deletions are sticky across restarts.
 - **`mount_url` field on `/v1/sys/providers` responses.** Returns the relative URL path with namespace and mount baked in (e.g., `/v1/team-data/aws/`). Agents prepend `$WARDEN_ADDR` plus the per-provider suffix from the skill (`gateway`, `role/<role>/gateway`, `access/<grant>`) — no string surgery on `$WARDEN_NAMESPACE`. Surfaced on `MountOutput.MountURL` and through `warden provider list` / `read`.
-- **`--json` payload on every mutating typed command.** Accepts a JSON literal, `@file.json`, or `-` (stdin) on `cred source create/update`, `cred spec create/update`, `auth enable`, `audit enable`, `namespace create/update`, `provider enable`. Mutually exclusive with the typed flags (combining errors with exit `2`). Composes with `--dry-run`.
-- **Global `--dry-run` / `-D` flag — local schema validation, no server round-trip.** Fetches the operation's schema from `/v1/sys/schema?path=<path>`, validates the payload structurally (required fields, unknown-field detection with "did you mean" hints, type and enum checks), and exits without sending the request. Catches hallucinated parameters before they hit the wire. Honors `WARDEN_DRY_RUN`. Wired into every mutating CLI command.
-- **`warden role list` CLI command.** Agent-facing role introspection over `/v1/sys/introspect/roles`. Lists `{name, description, auth_path}` for every role the caller's identity (JWT or TLS client cert) can assume in the namespace. Composes with `--output` and `--fields`; per-mount failures surface on stderr without changing the exit code.
-- **`warden schema` CLI command.** Agent-facing OpenAPI projection. Three modes: `warden schema PATH` (single path, friendly shape with merged body fields and `sensitive` flags); `warden schema --list` (every path in the namespace, NDJSON-friendly); `warden schema PATH --raw` (raw OpenAPI fragment for codegen tools).
-- **`warden path-help` honors the `--output` framework.** Returns `{"help": "..."}` in `json`/`ndjson`/`text` modes; prose in `table` mode. Missing help exits `6` (`not_found`) instead of silently exiting `0`.
+- **`-json` payload on every mutating typed command.** Accepts a JSON literal, `@file.json`, or `-` (stdin) on `cred source create/update`, `cred spec create/update`, `auth enable`, `audit enable`, `namespace create/update`, `provider enable`. Mutually exclusive with the typed flags (combining errors with exit `2`). Composes with `-dry-run`.
+- **Global `-dry-run` / `-D` flag — local schema validation, no server round-trip.** Fetches the operation's schema from `/v1/sys/schema?path=<path>`, validates the payload structurally (required fields, unknown-field detection with "did you mean" hints, type and enum checks), and exits without sending the request. Catches hallucinated parameters before they hit the wire. Honors `WARDEN_DRY_RUN`. Wired into every mutating CLI command.
+- **`warden role list` CLI command.** Agent-facing role introspection over `/v1/sys/introspect/roles`. Lists `{name, description, auth_path}` for every role the caller's identity (JWT or TLS client cert) can assume in the namespace. Composes with `-output` and `-fields`; per-mount failures surface on stderr without changing the exit code.
+- **`warden schema` CLI command.** Agent-facing OpenAPI projection. Three modes: `warden schema PATH` (single path, friendly shape with merged body fields and `sensitive` flags); `warden schema --list` (every path in the namespace, NDJSON-friendly); `warden schema PATH -raw` (raw OpenAPI fragment for codegen tools).
+- **`warden path-help` honors the `-output` framework.** Returns `{"help": "..."}` in `json`/`ndjson`/`text` modes; prose in `table` mode. Missing help exits `6` (`not_found`) instead of silently exiting `0`.
 - **Server-side OpenAPI 3.0 schema endpoint** at `GET /v1/sys/schema` (and the Vault-compatible alias `GET /v1/sys/internal/specs/openapi`). Returns a namespace-scoped document covering `sys/*` plus every framework-based mount reachable in the caller's namespace. `?path=<path>` projects to a single operation.
-- **Input hardening at the CLI boundary.** Three validators in `cmd/helpers/path.go` reject malformed inputs before any HTTP call, classified as exit `3` (`invalid_input`): `ValidatePath` (path traversal, absolute paths, control bytes, `?`/`#`/`%`); `ValidateHeaderValue` (CR/LF injection in `--namespace` / `--role`); `ValidateIdentifier` (`--type` on cred-source/spec create).
-- **Global `--output` / `-o` flag with TTY autodetect.** Persistent flag for `table`, `json`, `ndjson`, `text`. Defaults to `table` on a terminal, `json` when piped — agents and scripts get machine-readable output without configuration.
-- **Global `--fields` / `-F` flag for context-window discipline.** Comma-separated dot-paths project structured output to only the requested fields (e.g., `--fields name,rules.*.path`; `*` matches every key/element at a level). Honors `WARDEN_FIELDS`. Keeps agent context windows small.
+- **Input hardening at the CLI boundary.** Three validators in `cmd/helpers/path.go` reject malformed inputs before any HTTP call, classified as exit `3` (`invalid_input`): `ValidatePath` (path traversal, absolute paths, control bytes, `?`/`#`/`%`); `ValidateHeaderValue` (CR/LF injection in `-namespace` / `-role`); `ValidateIdentifier` (`-type` on cred-source/spec create).
+- **Global `-output` / `-o` flag with TTY autodetect.** Persistent flag for `table`, `json`, `ndjson`, `text`. Defaults to `table` on a terminal, `json` when piped — agents and scripts get machine-readable output without configuration.
+- **Global `-fields` / `-F` flag for context-window discipline.** Comma-separated dot-paths project structured output to only the requested fields (e.g., `-fields name,rules.*.path`; `*` matches every key/element at a level). Honors `WARDEN_FIELDS`. Keeps agent context windows small.
 - **Structured JSON errors and stable exit codes.** Every CLI failure produces a category-specific exit code and (in JSON/NDJSON modes) a `{"error": {code, message, hint}}` envelope on stderr. Stable codes: `usage` (2), `invalid_input` (3), `auth_required` (4), `forbidden` (5), `not_found` (6), `network` (7), `server` (8), `conflict` (9), `unknown` (1).
 
 ### Bug Fixes
@@ -258,7 +264,7 @@ All notable changes to Warden are documented in this file.
 
 ### Bug Fixes
 
-- **`--type` flag no longer required on `cred spec create`** — The CLI enforced `--type` as required even though the server can infer the credential type from the source driver. The flag is now optional, matching the server-side behavior documented since v0.7.0. (#111)
+- **`-type` flag no longer required on `cred spec create`** — The CLI enforced `-type` as required even though the server can infer the credential type from the source driver. The flag is now optional, matching the server-side behavior documented since v0.7.0. (#111)
 
 ### Documentation
 
@@ -296,7 +302,7 @@ All notable changes to Warden are documented in this file.
 
 ### Breaking Changes
 
-- **`apikey` replaces per-provider source types** — The source types `anthropic`, `openai`, `mistral`, `slack`, and `pagerduty` have been removed. A single `apikey` driver type handles all static API key providers. Existing sources must be recreated with `--type=apikey` and explicit config fields. Source type constants `SourceTypeAnthropic`, `SourceTypeOpenAI`, `SourceTypeMistral`, `SourceTypeSlack`, and `SourceTypePagerDuty` are removed from the Go API.
+- **`apikey` replaces per-provider source types** — The source types `anthropic`, `openai`, `mistral`, `slack`, and `pagerduty` have been removed. A single `apikey` driver type handles all static API key providers. Existing sources must be recreated with `-type=apikey` and explicit config fields. Source type constants `SourceTypeAnthropic`, `SourceTypeOpenAI`, `SourceTypeMistral`, `SourceTypeSlack`, and `SourceTypePagerDuty` are removed from the Go API.
 
 - **`oauth2` replaces `pagerduty_oauth2`** — The `pagerduty_oauth2` source type has been removed. A single `oauth2` driver type handles all OAuth2 client credentials providers. `token_url` is now a required field (no provider-specific defaults). Source type constant `SourceTypePagerDutyOAuth` is removed from the Go API.
 
@@ -328,7 +334,7 @@ All notable changes to Warden are documented in this file.
 
 - **HTTP Proxy Framework** — Extracted a generic `httpproxy` framework from the provider implementations. All streaming providers (Anthropic, GitHub, GitLab, Mistral, OpenAI, PagerDuty, Slack) now share a single `ProviderSpec`-based implementation, reducing per-provider code from ~500 lines to ~30 lines. (#114)
 
-- **Credential Type Inference** — The `--type` flag on `warden cred spec create` is now optional. When omitted, the credential type is inferred from the source driver via `InferCredentialType`. All provider READMEs updated to omit the flag. (#111)
+- **Credential Type Inference** — The `-type` flag on `warden cred spec create` is now optional. When omitted, the credential type is inferred from the source driver via `InferCredentialType`. All provider READMEs updated to omit the flag. (#111)
 
 - **Slack Provider** — New streaming gateway provider for the Slack Web API with body parsing for policy evaluation on request fields (channel, text, user). (#97)
 
@@ -351,7 +357,7 @@ All notable changes to Warden are documented in this file.
 
 ### Documentation
 
-- **Provider READMEs** — Removed `--type` from all `cred spec create` examples (now inferred). Added PagerDuty provider README with full quickstart for both static API token and OAuth2 client credentials modes.
+- **Provider READMEs** — Removed `-type` from all `cred spec create` examples (now inferred). Added PagerDuty provider README with full quickstart for both static API token and OAuth2 client credentials modes.
 
 ## [v0.6.0] — 2026-03-27
 
@@ -369,7 +375,7 @@ All notable changes to Warden are documented in this file.
 
 - **RDS Provider (Access Backend)** — New provider type that vends credentials directly instead of proxying traffic. The RDS provider issues short-lived IAM authentication tokens for PostgreSQL and MySQL on RDS/Aurora. Introduces the access backend framework for credential-vending providers. (#88)
 
-- **TLS in Dev Mode** — New `--dev-tls` and `--dev-tls-san` flags generate a self-signed TLS certificate at startup, enabling HTTPS in development without manual certificate management. (#86)
+- **TLS in Dev Mode** — New `-dev-tls` and `-dev-tls-san` flags generate a self-signed TLS certificate at startup, enabling HTTPS in development without manual certificate management. (#86)
 
 ### Removed
 
@@ -429,9 +435,9 @@ All notable changes to Warden are documented in this file.
 
 - **SPIFFE Support Across Auth Methods** — Both the JWT and cert auth methods now support SPIFFE workload identities. In cert auth, the `spiffe_id` principal claim extracts the SPIFFE URI from X.509 SVIDs, and `allowed_uri_sans` constraints use segment-aware pattern matching (`+` = one segment, `*` = one or more trailing segments, e.g. `spiffe://+/ns/*/sa/*`). In JWT auth, new `bound_uri_patterns` and `uri_claim` role fields validate SPIFFE JWT-SVIDs using the same pattern syntax.
 
-- **Certificate Auth CLI Client** — The `warden login` command now supports certificate-based login via the `cert` method. Flags: `--cert` and `--key` (or env vars `WARDEN_CLIENT_CERT` / `WARDEN_CLIENT_KEY`). Custom mount path via `--mount` / `--path`.
+- **Certificate Auth CLI Client** — The `warden login` command now supports certificate-based login via the `cert` method. Flags: `--cert` and `--key` (or env vars `WARDEN_CLIENT_CERT` / `WARDEN_CLIENT_KEY`). Custom mount path via `--mount` / `-path`.
 
-- **`WARDEN_ROLE` Environment Variable** — The role used by all `warden` CLI commands can now be set via the `WARDEN_ROLE` environment variable (or the global `--role` / `-r` flag). The flag sets the env var internally, so any sub-command automatically picks it up without repeating it per invocation.
+- **`WARDEN_ROLE` Environment Variable** — The role used by all `warden` CLI commands can now be set via the `WARDEN_ROLE` environment variable (or the global `-role` / `-r` flag). The flag sets the env var internally, so any sub-command automatically picks it up without repeating it per invocation.
 
 - **X-Warden-Role Header** — Clients can now specify their auth role via the `X-Warden-Role` HTTP header. Role resolution precedence (highest to lowest): URL-embedded role path → `X-Warden-Role` header → provider `default_role` → auth method `default_role`. The header is stripped before the request is proxied upstream.
 
@@ -528,7 +534,7 @@ All notable changes to Warden are documented in this file.
 
 ### Bug Fix
 
-- **fix: handle custom dev root tokens in LookupToken** — `LookupToken` failed with `"failed to detect token type"` when using `--dev-root-token` with a custom value that lacks a standard prefix. Added the same dev-mode fallback that `ResolveToken` already had. (#33)
+- **fix: handle custom dev root tokens in LookupToken** — `LookupToken` failed with `"failed to detect token type"` when using `-dev-root-token` with a custom value that lacks a standard prefix. Added the same dev-mode fallback that `ResolveToken` already had. (#33)
 
 ## [v0.1.0] — 2025-12-21
 

@@ -31,7 +31,7 @@ func ValidatePath(p string) error {
 			return fmt.Errorf("path %q contains control character (byte 0x%02x at position %d): %w", p, b, i, ErrInvalidInput)
 		}
 		if b == '?' || b == '#' {
-			return fmt.Errorf("path %q contains URL-reserved character %q (use --output / --fields for query-like behavior): %w", p, b, ErrInvalidInput)
+			return fmt.Errorf("path %q contains URL-reserved character %q (use -output / -fields for query-like behavior): %w", p, b, ErrInvalidInput)
 		}
 	}
 
@@ -45,7 +45,7 @@ func ValidatePath(p string) error {
 }
 
 // ValidateHeaderValue checks that v is safe to send as an HTTP header value
-// (used for `--namespace`/`--role` which become X-Warden-Namespace and
+// (used for `-namespace`/`-role` which become X-Warden-Namespace and
 // X-Warden-Role headers). Rejects CR/LF (header injection), other control
 // characters, and leading/trailing whitespace. Empty is allowed since callers
 // treat it as "absent."
@@ -66,7 +66,7 @@ func ValidateHeaderValue(name, v string) error {
 }
 
 // ValidateIdentifier checks that v is a well-formed single-segment identifier
-// (used for `--type` flag values that go into JSON bodies or URL segments).
+// (used for `-type` flag values that go into JSON bodies or URL segments).
 // Rejects empty, whitespace, slashes (use ValidatePath for multi-segment), and
 // the same control/percent-encoding hazards as ValidatePath.
 func ValidateIdentifier(name, v string) error {

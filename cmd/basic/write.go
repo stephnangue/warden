@@ -24,7 +24,7 @@ var (
 Usage: warden write [PATH] [DATA]
 
   Write data to the given path. The PATH may be supplied either positionally
-  or via --path (pick one — combining both is rejected). When --path is used,
+  or via -path (pick one — combining both is rejected). When -path is used,
   all remaining positional arguments are treated as DATA. The data can be
   provided as JSON via stdin, as JSON arguments, or as key=value pairs. The
   path should be in the format "provider_mount/resource" or
@@ -44,7 +44,7 @@ Usage: warden write [PATH] [DATA]
   Write configuration using key=value format:
 
       $ warden write aws/config token_ttl=1h proxy_domains='["localhost","warden"]'
-      $ warden write --path=aws/config token_ttl=1h
+      $ warden write -path=aws/config token_ttl=1h
 
   Use @file to read a value from a file (useful for PEM certificates, large payloads, etc.):
 
@@ -59,7 +59,7 @@ func init() {
 }
 
 func runWrite(cmd *cobra.Command, args []string) error {
-	// --path frees args[0] for DATA; without --path, args[0] is the PATH.
+	// -path frees args[0] for DATA; without -path, args[0] is the PATH.
 	var path string
 	var dataArgs []string
 	if writePath != "" {
@@ -137,7 +137,7 @@ func runWrite(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// --dry-run: validate the payload locally against the server's published
+	// -dry-run: validate the payload locally against the server's published
 	// schema and stop here. Nothing leaves the process.
 	if helpers.ResolveDryRun() {
 		return helpers.DryRun(c, "POST", path, data)

@@ -22,7 +22,7 @@ Usage: warden path-help PATH
   If it points to a specific path (e.g., "aws/config"), returns help for
   that path.
 
-  Output honors the global --output flag: in TTY/table mode the help text
+  Output honors the global -output flag: in TTY/table mode the help text
   is printed verbatim, in JSON/NDJSON/text the response is returned as
   {"help": "..."} so agents can pipe it into jq.
 

@@ -75,11 +75,11 @@ The Vault provider enables proxied access to HashiCorp Vault (or OpenBao) throug
 >
 > **4. Start the Warden server** in dev mode with TLS and mTLS:
 > ```bash
-> warden server --dev --dev-root-token=root \
->     --dev-tls-cert-file=$CERT_DIR/server.pem \
->     --dev-tls-key-file=$CERT_DIR/server.key \
->     --dev-tls-ca-cert-file=$CERT_DIR/ca.pem \
->     --dev-tls-require-client-cert
+> warden server -dev -dev-root-token=root \
+>     -dev-tls-cert-file=$CERT_DIR/server.pem \
+>     -dev-tls-key-file=$CERT_DIR/server.key \
+>     -dev-tls-ca-cert-file=$CERT_DIR/ca.pem \
+>     -dev-tls-require-client-cert
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -200,7 +200,7 @@ Set up a TLS certificate auth method and create a role that binds the credential
 
 ```bash
 # Enable cert auth
-warden auth enable --type=cert
+warden auth enable cert
 
 # Configure with the CA that signs client certificates
 warden write auth/cert/config \
@@ -221,13 +221,13 @@ The `allowed_common_names` field supports glob patterns. The client certificate 
 Enable the Vault provider at a path of your choice:
 
 ```bash
-warden provider enable --type=vault
+warden provider enable vault
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=vault vault-prod
+warden provider enable -path=vault-prod vault
 ```
 
 Verify the provider is enabled:
@@ -261,34 +261,34 @@ The credential source tells Warden how to authenticate to Vault using the AppRol
 
 ```bash
 warden cred source create vault-prod \
-  --type hvault \
-  --rotation-period 24h \
-  --config vault_address=http://127.0.0.1:8200 \
-  --config auth_method=approle \
-  --config role_id=<role-id> \
-  --config secret_id=<secret-id> \
-  --config secret_id_accessor=<accessor> \
-  --config approle_mount=warden_approle \
-  --config role_name=warden-source
+  -type hvault \
+  -rotation-period 24h \
+  -config vault_address=http://127.0.0.1:8200 \
+  -config auth_method=approle \
+  -config role_id=<role-id> \
+  -config secret_id=<secret-id> \
+  -config secret_id_accessor=<accessor> \
+  -config approle_mount=warden_approle \
+  -config role_name=warden-source
 ```
 
 For Vault Enterprise/HCP Vault with namespaces or OpenBao, add `vault_namespace` to scope all Warden API calls (AppRole auth, credential minting) to that namespace:
 
 ```bash
 warden cred source create vault-prod \
-  --type hvault \
-  --rotation-period 24h \
-  --config vault_address=https://vault.example.com:8200 \
-  --config auth_method=approle \
-  --config role_id=<role-id> \
-  --config secret_id=<secret-id> \
-  --config secret_id_accessor=<accessor> \
-  --config approle_mount=warden_approle \
-  --config role_name=warden-source \
-  --config vault_namespace=admin/team-a
+  -type hvault \
+  -rotation-period 24h \
+  -config vault_address=https://vault.example.com:8200 \
+  -config auth_method=approle \
+  -config role_id=<role-id> \
+  -config secret_id=<secret-id> \
+  -config secret_id_accessor=<accessor> \
+  -config approle_mount=warden_approle \
+  -config role_name=warden-source \
+  -config vault_namespace=admin/team-a
 ```
 
-The `--rotation-period` controls how often Warden rotates the AppRole `secret_id`. During rotation, Warden generates a new `secret_id`, verifies it works, persists the new config, then destroys the old one. Both credentials remain valid during the transition — there is no downtime.
+The `-rotation-period` controls how often Warden rotates the AppRole `secret_id`. During rotation, Warden generates a new `secret_id`, verifies it works, persists the new config, then destroys the old one. Both credentials remain valid during the transition — there is no downtime.
 
 Set to `0` to disable rotation (not recommended for production).
 
@@ -303,20 +303,20 @@ The Vault provider gateway requires a credential spec of type `vault_token`. War
 ```bash
 # Read-only Vault token
 warden cred spec create vault-reader \
-  --source vault-prod \
-  --config mint_method=vault_token \
-  --config token_role=reader \
-  --min-ttl 600s \
-  --max-ttl 2h
+  -source vault-prod \
+  -config mint_method=vault_token \
+  -config token_role=reader \
+  -min-ttl 600s \
+  -max-ttl 2h
 
 # Admin Vault token with custom TTL
 warden cred spec create vault-admin \
-  --source vault-prod \
-  --config mint_method=vault_token \
-  --config token_role=admin \
-  --config ttl=4h \
-  --min-ttl 1h \
-  --max-ttl 8h
+  -source vault-prod \
+  -config mint_method=vault_token \
+  -config token_role=admin \
+  -config ttl=4h \
+  -min-ttl 1h \
+  -max-ttl 8h
 ```
 
 ## Step 5: Create a Policy
@@ -548,7 +548,7 @@ Steps 1, 3-5 (provider setup) are identical. Replace Steps 2 and 6 with the foll
 
 ```bash
 # Enable JWT auth
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with the identity provider's JWKS endpoint
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -695,8 +695,8 @@ docker compose -f docker-compose.quickstart.yml down -v
 
 ### TTL Bounds
 
-- `--min-ttl`: Minimum credential TTL. Requests for shorter TTLs are clamped up.
-- `--max-ttl`: Maximum credential TTL. Requests for longer TTLs are clamped down.
+- `-min-ttl`: Minimum credential TTL. Requests for shorter TTLs are clamped up.
+- `-max-ttl`: Maximum credential TTL. Requests for longer TTLs are clamped down.
 
 ### Cert Auth Config
 

@@ -20,13 +20,13 @@ var (
 Usage: warden provider read [PATH]
 
   Show information on a provider enabled on the provided PATH. The PATH
-  may be supplied either positionally or via --path (pick one — combining
+  may be supplied either positionally or via -path (pick one — combining
   both is rejected).
 
   Read the provider enabled at aws/:
 
       $ warden provider read aws/
-      $ warden provider read --path=aws/
+      $ warden provider read -path=aws/
 `,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runRead,

@@ -20,20 +20,20 @@ var (
 Usage: warden delete [PATH] [flags]
 
   Delete data at the given path. The PATH may be supplied either
-  positionally or via --path (pick one — combining both is rejected).
+  positionally or via -path (pick one — combining both is rejected).
   The path should be in the format "provider_mount/resource" or
   "auth/auth_mount/resource" or "sys/path/to/resource" and will be
   converted to the appropriate API path.
 
   By default, this command will ask for confirmation before deleting.
-  Use the -f/--force flag to skip the confirmation prompt.
+  Use the -f/-force flag to skip the confirmation prompt.
 
   Examples:
 
     Delete a JWT auth role (with confirmation):
 
       $ warden delete auth/jwt/role/developer
-      $ warden delete --path=auth/jwt/role/developer
+      $ warden delete -path=auth/jwt/role/developer
 
     Delete a provider (skip confirmation):
 
@@ -71,7 +71,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// --dry-run: validate the path resolves to a known DELETE-supporting
+	// -dry-run: validate the path resolves to a known DELETE-supporting
 	// schema entry and stop before any prompt or HTTP call. Skipping the
 	// confirmation prompt is intentional — a non-mutating preview shouldn't
 	// require interactive consent.

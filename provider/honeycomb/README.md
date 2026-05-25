@@ -52,7 +52,7 @@ The Honeycomb provider enables proxied access to the Honeycomb API through Warde
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -70,7 +70,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -87,13 +87,13 @@ warden write auth/jwt/role/honeycomb-user \
 Enable the Honeycomb provider at a path of your choice:
 
 ```bash
-warden provider enable --type=honeycomb
+warden provider enable honeycomb
 ```
 
 To mount at a custom path (e.g., for the EU region):
 
 ```bash
-warden provider enable --type=honeycomb honeycomb-eu
+warden provider enable -path=honeycomb-eu honeycomb
 ```
 
 Verify the provider is enabled:
@@ -141,18 +141,18 @@ Use this when you already have a Honeycomb ingest or configuration key and want 
 
 ```bash
 warden cred source create honeycomb-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=api_url=https://api.honeycomb.io \
-  --config=display_name=Honeycomb
+  -type=apikey \
+  -rotation-period=0 \
+  -config=api_url=https://api.honeycomb.io \
+  -config=display_name=Honeycomb
 ```
 
 Create a credential spec with your API key:
 
 ```bash
 warden cred spec create honeycomb-ops \
-  --source honeycomb-src \
-  --config api_key=your-honeycomb-api-key
+  -source honeycomb-src \
+  -config api_key=your-honeycomb-api-key
 ```
 
 ### Option B: Dynamic API Keys (Honeycomb Source Driver)
@@ -168,35 +168,35 @@ Create a credential source backed by the Honeycomb API:
 
 ```bash
 warden cred source create honeycomb-src \
-  --type=honeycomb \
-  --rotation-period=24h \
-  --config=management_key_id=hcxmk_01abc123 \
-  --config=management_key_secret=your-management-key-secret \
-  --config=team_slug=my-team \
-  --config=honeycomb_url=https://api.honeycomb.io
+  -type=honeycomb \
+  -rotation-period=24h \
+  -config=management_key_id=hcxmk_01abc123 \
+  -config=management_key_secret=your-management-key-secret \
+  -config=team_slug=my-team \
+  -config=honeycomb_url=https://api.honeycomb.io
 ```
 
 Create a credential spec that mints ingest keys:
 
 ```bash
 warden cred spec create honeycomb-ops \
-  --source honeycomb-src \
-  --config environment_id=your-environment-id \
-  --config key_type=ingest \
-  --config key_name_prefix=warden- \
-  --config key_ttl=24h
+  -source honeycomb-src \
+  -config environment_id=your-environment-id \
+  -config key_type=ingest \
+  -config key_name_prefix=warden- \
+  -config key_ttl=24h
 ```
 
 For configuration keys with specific permissions:
 
 ```bash
 warden cred spec create honeycomb-config \
-  --source honeycomb-src \
-  --config environment_id=your-environment-id \
-  --config key_type=configuration \
-  --config key_name_prefix=warden- \
-  --config key_ttl=24h \
-  --config 'permissions={"send_events":true,"create_datasets":true,"run_queries":true}'
+  -source honeycomb-src \
+  -config environment_id=your-environment-id \
+  -config key_type=configuration \
+  -config key_name_prefix=warden- \
+  -config key_ttl=24h \
+  -config 'permissions={"send_events":true,"create_datasets":true,"run_queries":true}'
 ```
 
 ### Option C: Vault/OpenBao as Credential Source
@@ -210,24 +210,24 @@ Instead of storing the API key directly in Warden, you can store it in a Vault/O
 ```bash
 # Create a Vault credential source
 warden cred source create honeycomb-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=your-role-id \
-  --config=secret_id=your-secret-id \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=your-role-id \
+  -config=secret_id=your-secret-id \
+  -config=approle_mount=approle \
+  -config=role_name=warden-role \
+  -rotation-period=24h
 ```
 
 Create a credential spec using the `static_apikey` mint method:
 
 ```bash
 warden cred spec create honeycomb-ops \
-  --source honeycomb-vault-src \
-  --config mint_method=static_apikey \
-  --config kv2_mount=secret \
-  --config secret_path=honeycomb/ops
+  -source honeycomb-vault-src \
+  -config mint_method=static_apikey \
+  -config kv2_mount=secret \
+  -config secret_path=honeycomb/ops
 ```
 
 The KV v2 secret at `secret/honeycomb/ops` must contain an `api_key` field with your Honeycomb ingest or configuration key.
@@ -381,14 +381,14 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 Steps 1-4 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA
@@ -524,7 +524,7 @@ curl --cert client.pem --key client-key.pem \
 2. Update the credential spec:
    ```bash
    warden cred spec update honeycomb-ops \
-     --config api_key=your-new-api-key
+     -config api_key=your-new-api-key
    ```
 3. Delete the old key in Honeycomb
 
@@ -534,7 +534,7 @@ curl --cert client.pem --key client-key.pem \
 2. Update the credential source:
    ```bash
    warden cred source update honeycomb-src \
-     --config management_key_id=new-key-id \
-     --config management_key_secret=new-key-secret
+     -config management_key_id=new-key-id \
+     -config management_key_secret=new-key-secret
    ```
 3. Delete the old management key in Honeycomb

@@ -30,9 +30,9 @@ Usage: warden skill delete NAME [options]
 
   Mutations require a root namespace token; sub-namespace tokens get 403.
 
-  On a TTY without --force the command prompts for confirmation. In
+  On a TTY without -force the command prompts for confirmation. In
   scripts or pipes (stdin not a TTY), confirmation is skipped because
-  there is no one to answer the prompt — use --force in scripts to
+  there is no one to answer the prompt — use -force in scripts to
   make the intent explicit.
 
   Examples:
@@ -43,7 +43,7 @@ Usage: warden skill delete NAME [options]
 
     Scripted delete:
 
-      $ warden skill delete my-runbook --force
+      $ warden skill delete my-runbook -force
 `,
 		Args: cobra.ExactArgs(1),
 		RunE: runDelete,

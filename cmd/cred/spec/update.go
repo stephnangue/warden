@@ -26,16 +26,16 @@ Usage: warden cred spec update <name> [flags]
 
     Typed flags (human-friendly):
 
-      $ warden cred spec update developer --max-ttl=4h
-      $ warden cred spec update developer --config=role_arn=arn:...
+      $ warden cred spec update developer -max-ttl=4h
+      $ warden cred spec update developer -config=role_arn=arn:...
 
     Full JSON payload (agent-friendly):
 
-      $ warden cred spec update developer --json @spec.json
-      $ cat spec.json | warden cred spec update developer --json -
+      $ warden cred spec update developer -json @spec.json
+      $ cat spec.json | warden cred spec update developer -json -
 
-  --json is mutually exclusive with --config / --min-ttl / --max-ttl /
-  --rotation-period. Combine with --dry-run to validate the payload locally
+  -json is mutually exclusive with -config / -min-ttl / -max-ttl /
+  -rotation-period. Combine with -dry-run to validate the payload locally
   without modifying the spec.
 `,
 		SilenceUsage:  true,
@@ -71,10 +71,10 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"--config":          len(updateConfig) > 0,
-			"--min-ttl":         updateMinTTL != "",
-			"--max-ttl":         updateMaxTTL != "",
-			"--rotation-period": updateRotationPeriod != "",
+			"-config":          len(updateConfig) > 0,
+			"-min-ttl":         updateMinTTL != "",
+			"-max-ttl":         updateMaxTTL != "",
+			"-rotation-period": updateRotationPeriod != "",
 		}); err != nil {
 			return err
 		}
@@ -101,7 +101,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	// Require at least one update parameter
 	if len(updateConfig) == 0 && updateMinTTL == "" && updateMaxTTL == "" && updateRotationPeriod == "" {
-		return fmt.Errorf("no update parameters provided (use --config, --min-ttl, --max-ttl, --rotation-period, or --json): %w", helpers.ErrInvalidInput)
+		return fmt.Errorf("no update parameters provided (use -config, -min-ttl, -max-ttl, -rotation-period, or -json): %w", helpers.ErrInvalidInput)
 	}
 
 	resolvedConfig, err := helpers.ResolveFileRefs(updateConfig)

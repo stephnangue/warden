@@ -26,7 +26,7 @@ Examples:
 
   $ warden status
   $ warden status -o json
-  $ warden status -o json --fields sealed,is_leader,leader_address
+  $ warden status -o json -fields sealed,is_leader,leader_address
 `,
 	RunE: runStatus,
 }

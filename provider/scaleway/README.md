@@ -54,7 +54,7 @@ The Scaleway provider enables proxied access to Scaleway APIs through Warden. It
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -72,7 +72,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -89,13 +89,13 @@ warden write auth/jwt/role/scaleway-user \
 Enable the Scaleway provider at a path of your choice:
 
 ```bash
-warden provider enable --type=scaleway
+warden provider enable scaleway
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=scaleway scaleway-prod
+warden provider enable -path=scaleway-prod scaleway
 ```
 
 Verify the provider is enabled:
@@ -131,21 +131,21 @@ Create a Scaleway credential source and spec with your API key pair. The spec is
 
 ```bash
 warden cred source create scaleway-src \
-  --type=scaleway \
-  --config=scaleway_url=https://api.scaleway.com
+  -type=scaleway \
+  -config=scaleway_url=https://api.scaleway.com
 
 warden cred spec create scaleway-ops \
-  --source scaleway-src \
-  --config mint_method=static_keys \
-  --config access_key=SCWXXXXXXXXXXXXXXXXX \
-  --config secret_key=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  -source scaleway-src \
+  -config mint_method=static_keys \
+  -config access_key=SCWXXXXXXXXXXXXXXXXX \
+  -config secret_key=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
 ### Option B: Dynamic API Keys (Recommended)
 
 Have Warden create short-lived API keys on demand via the Scaleway IAM API. Keys are automatically revoked when they expire. No long-lived secrets are stored in credential specs.
 
-> **Note:** The Scaleway IAM API is currently `v1alpha1`. While it has been stable in practice (used by the CLI, Terraform, and all SDKs), Scaleway may introduce breaking changes without a deprecation period. If the API version changes, update the `iam_api_path` config on the credential source (e.g., `--config=iam_api_path=/iam/v2`). No code changes required.
+> **Note:** The Scaleway IAM API is currently `v1alpha1`. While it has been stable in practice (used by the CLI, Terraform, and all SDKs), Scaleway may introduce breaking changes without a deprecation period. If the API version changes, update the `iam_api_path` config on the credential source (e.g., `-config=iam_api_path=/iam/v2`). No code changes required.
 
 **Prerequisites:**
 - A **management API key** with IAM permissions to create and delete API keys
@@ -153,19 +153,19 @@ Have Warden create short-lived API keys on demand via the Scaleway IAM API. Keys
 
 ```bash
 warden cred source create scaleway-dynamic-src \
-  --type=scaleway \
-  --rotation-period=24h \
-  --config=scaleway_url=https://api.scaleway.com \
-  --config=management_secret_key=your-management-secret-key \
-  --config=management_access_key=SCWXXXXXXXXXXXXXXXXX
+  -type=scaleway \
+  -rotation-period=24h \
+  -config=scaleway_url=https://api.scaleway.com \
+  -config=management_secret_key=your-management-secret-key \
+  -config=management_access_key=SCWXXXXXXXXXXXXXXXXX
 
 warden cred spec create scaleway-ops \
-  --source scaleway-dynamic-src \
-  --config mint_method=dynamic_keys \
-  --config application_id=your-iam-application-id \
-  --config default_project_id=your-project-id \
-  --config ttl=1h \
-  --config description=warden-managed
+  -source scaleway-dynamic-src \
+  -config mint_method=dynamic_keys \
+  -config application_id=your-iam-application-id \
+  -config default_project_id=your-project-id \
+  -config ttl=1h \
+  -config description=warden-managed
 ```
 
 Each credential request creates a fresh API key via `POST /iam/v1alpha1/api-keys` with the configured TTL. When the lease expires, Warden revokes the key via `DELETE /iam/v1alpha1/api-keys/{access_key}`.
@@ -180,21 +180,21 @@ Store your Scaleway keys in a Vault/OpenBao KV v2 secret engine and have Warden 
 
 ```bash
 warden cred source create scaleway-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=your-role-id \
-  --config=secret_id=your-secret-id \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=your-role-id \
+  -config=secret_id=your-secret-id \
+  -config=approle_mount=approle \
+  -config=role_name=warden-role \
+  -rotation-period=24h
 
 warden cred spec create scaleway-ops \
-  --source scaleway-vault-src \
-  --type=scaleway_keys \
-  --config mint_method=static_scaleway \
-  --config kv2_mount=secret \
-  --config secret_path=scaleway/prod
+  -source scaleway-vault-src \
+  -type=scaleway_keys \
+  -config mint_method=static_scaleway \
+  -config kv2_mount=secret \
+  -config secret_path=scaleway/prod
 ```
 
 The KV v2 secret at `secret/scaleway/prod` should contain `access_key` and `secret_key` fields.
@@ -413,14 +413,14 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA
@@ -558,8 +558,8 @@ aws s3 ls s3://my-bucket/ \
 2. Update the credential spec:
    ```bash
    warden cred spec update scaleway-ops \
-     --config access_key=SCWNEWKEYXXXXXXXXXX \
-     --config secret_key=new-uuid-secret-key
+     -config access_key=SCWNEWKEYXXXXXXXXXX \
+     -config secret_key=new-uuid-secret-key
    ```
 3. Delete the old API key in Scaleway Console
 
@@ -579,11 +579,11 @@ When both `management_secret_key` and `management_access_key` are configured on 
 
 ```bash
 warden cred source create scaleway-dynamic-src \
-  --type=scaleway \
-  --rotation-period=24h \
-  --config=scaleway_url=https://api.scaleway.com \
-  --config=management_secret_key=your-management-secret-key \
-  --config=management_access_key=SCWXXXXXXXXXXXXXXXXX
+  -type=scaleway \
+  -rotation-period=24h \
+  -config=scaleway_url=https://api.scaleway.com \
+  -config=management_secret_key=your-management-secret-key \
+  -config=management_access_key=SCWXXXXXXXXXXXXXXXXX
 ```
 
 The rotation flow:
@@ -602,7 +602,7 @@ If automatic rotation is not configured, rotate manually:
 2. Update the credential source:
    ```bash
    warden cred source update scaleway-dynamic-src \
-     --config=management_secret_key=new-management-secret-key \
-     --config=management_access_key=SCWNEWKEYXXXXXXXXXX
+     -config=management_secret_key=new-management-secret-key \
+     -config=management_access_key=SCWNEWKEYXXXXXXXXXX
    ```
 3. Delete the old management API key in Scaleway Console

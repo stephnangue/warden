@@ -20,13 +20,13 @@ var (
 Usage: warden audit read [PATH]
 
   Show information on an audit device enabled on the provided PATH. The
-  PATH may be supplied either positionally or via --path (pick one —
+  PATH may be supplied either positionally or via -path (pick one —
   combining both is rejected).
 
   Read the audit device enabled at file/:
 
       $ warden audit read file/
-      $ warden audit read --path=file/
+      $ warden audit read -path=file/
 `,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runRead,

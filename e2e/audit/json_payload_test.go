@@ -9,8 +9,8 @@ import (
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
 
-// TestJSON_AuditEnableDryRun exercises `warden audit enable --json` with
-// --dry-run. We dry-run instead of really enabling because:
+// TestJSON_AuditEnableDryRun exercises `warden audit enable -json` with
+// -dry-run. We dry-run instead of really enabling because:
 //
 //   - audit-enable opens a file handle on the configured path and the
 //     node's filesystem won't necessarily allow that under the e2e
@@ -23,7 +23,8 @@ func TestJSON_AuditEnableDryRun(t *testing.T) {
 
 	out, err := h.WardenCLIWithPort(t, port, map[string]string{
 		"WARDEN_TOKEN": h.RootToken(t),
-	}, "audit", "enable", "e2e-json-audit",
+	}, "audit", "enable", "file",
+		"-path", "e2e-json-audit",
 		"--json", `{"type":"file","description":"e2e --json audit","config":{"file_path":"/tmp/e2e-json-audit.log","format":"json"}}`,
 		"--dry-run",
 		"-o", "json")

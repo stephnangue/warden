@@ -50,7 +50,7 @@ The Slack provider enables proxied access to the Slack Web API through Warden. I
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -68,7 +68,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -85,13 +85,13 @@ warden write auth/jwt/role/slack-user \
 Enable the Slack provider at a path of your choice:
 
 ```bash
-warden provider enable --type=slack
+warden provider enable slack
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=slack slack-prod
+warden provider enable -path=slack-prod slack
 ```
 
 Verify the provider is enabled:
@@ -125,12 +125,12 @@ The credential source holds only connection info (`api_url`). The bot token is s
 
 ```bash
 warden cred source create slack-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=api_url=https://slack.com/api \
-  --config=verify_endpoint=/auth.test \
-  --config=verify_method=POST \
-  --config=display_name=Slack
+  -type=apikey \
+  -rotation-period=0 \
+  -config=api_url=https://slack.com/api \
+  -config=verify_endpoint=/auth.test \
+  -config=verify_method=POST \
+  -config=display_name=Slack
 ```
 
 Verify the source was created:
@@ -143,8 +143,8 @@ Create a credential spec that references the credential source. The spec carries
 
 ```bash
 warden cred spec create slack-ops \
-  --source slack-src \
-  --config api_key=xoxb-your-bot-token
+  -source slack-src \
+  -config api_key=xoxb-your-bot-token
 ```
 
 The bot token is validated at creation time via a `POST /auth.test` call to the Slack API (SpecVerifier). If the token is invalid, spec creation will fail.
@@ -166,21 +166,21 @@ Instead of storing the bot token directly in Warden, you can store it in a Vault
 ```bash
 # Create a Vault credential source
 warden cred source create slack-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=your-role-id \
-  --config=secret_id=your-secret-id \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=your-role-id \
+  -config=secret_id=your-secret-id \
+  -config=approle_mount=approle \
+  -config=role_name=warden-role \
+  -rotation-period=24h
 
 # Create a credential spec using the static_apikey mint method
 warden cred spec create slack-ops \
-  --source slack-vault-src \
-  --config mint_method=static_apikey \
-  --config kv2_mount=secret \
-  --config secret_path=slack/ops
+  -source slack-vault-src \
+  -config mint_method=static_apikey \
+  -config kv2_mount=secret \
+  -config secret_path=slack/ops
 ```
 
 The KV v2 secret at `secret/slack/ops` should contain at minimum an `api_key` field. Warden fetches the secret from Vault on each credential request.
@@ -390,14 +390,14 @@ This allows operators to enforce policies such as:
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA
@@ -503,6 +503,6 @@ curl --cert client.pem --key client-key.pem \
 2. Update the credential spec:
    ```bash
    warden cred spec update slack-ops \
-     --config api_key=xoxb-new-bot-token
+     -config api_key=xoxb-new-bot-token
    ```
 3. Revoke the old token from the Slack App settings if needed

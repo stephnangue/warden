@@ -84,7 +84,7 @@ providers = map[string]wardenlogical.Factory{
 
 That's it. Your provider supports:
 
-- `warden provider enable --type=myprovider`
+- `warden provider enable myprovider`
 - `warden write myprovider/config auto_auth_path=auth/jwt/`
 - `warden write myprovider/grants/analytics credential_spec=prod-readonly db_name=analytics`
 - `warden read myprovider/access/analytics` — returns the formatted connection string

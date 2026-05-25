@@ -38,7 +38,7 @@ from the environment and never sees an upstream API key.
 
 The runtime injects **one sentence** into the agent's system prompt:
 
-> *"To learn how to operate on Warden, run `warden skill read discovery --raw`. Use `warden skill list -F name,description` to browse the catalog of available skills."*
+> *"To learn how to operate on Warden, run `warden skill read discovery -raw`. Use `warden skill list -F name,description` to browse the catalog of available skills."*
 
 Everything else — the discovery loop, the env-var conventions, the
 provider recipes — the agent learns by reading skills at runtime. No
@@ -140,7 +140,7 @@ When ambiguous (multi-tenant, regional, prod-vs-staging):
 ### Step 5 — Read the provider skill, call the provider
 
 ```bash
-warden skill read <type> --raw
+warden skill read <type> -raw
 ```
 
 Hits `GET /v1/sys/skills/<type>`. Returns the agent-facing recipe in
@@ -170,7 +170,7 @@ User asks: *"Show me the keys in the staging-events S3 bucket."*
 2. **`warden role list -o json -F name,description`** — finds `data-reader` ("Read-only access to data warehouses").
 3. **`warden provider list -o json -F type,description,mount_url`** — finds an `aws` provider ("Production AWS account 1234", `mount_url=/v1/team-data/aws/`) plus an unrelated `openai`.
 4. **Match** — `data-reader` + `aws/` fit the task. No ambiguity.
-5. **`warden skill read aws --raw`** — gets the recipe:
+5. **`warden skill read aws -raw`** — gets the recipe:
 
    ```bash
    export AWS_ACCESS_KEY_ID="<role-name>"
@@ -325,7 +325,7 @@ for the duration of the proxied request.
 
 ## 10. Where to go next
 
-- The seeded skills themselves — `warden skill list`, `warden skill read <name> --raw` — are the authoritative agent-facing source. This doc is the system view of the same contract.
+- The seeded skills themselves — `warden skill list`, `warden skill read <name> -raw` — are the authoritative agent-facing source. This doc is the system view of the same contract.
 - For a worked tutorial that wires Goose into Warden against three upstreams in parallel, see [tutorials/vault-policy-hygiene/](tutorials/vault-policy-hygiene/).
 - For the proxy/gateway internals (how Warden re-signs SigV4, validates JWTs against the OIDC issuer, etc.), see [architecture.md](architecture.md).
 - For the per-provider catalog (what each type supports and how it's configured), see [providers.md](providers.md).

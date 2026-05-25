@@ -23,12 +23,12 @@ Usage: warden skill <subcommand> [options]
 
   Read one skill's full markdown body:
 
-      $ warden skill read aws --raw
+      $ warden skill read aws -raw
 
   Create a custom skill (root namespace only):
 
-      $ warden skill create --name=my-runbook --category=custom \
-          --description="ops on-call" --body-file=./runbook.md
+      $ warden skill create -name=my-runbook -category=custom \
+          -description="ops on-call" -body-file=./runbook.md
 
   Please see the individual subcommand help for detailed usage information.
 `,

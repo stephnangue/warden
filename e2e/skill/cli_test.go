@@ -189,7 +189,7 @@ func TestCLI_SkillCreate_JSONFlagsExclusivity(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for --name + --json, got success.\noutput: %s", out)
 	}
-	if !strings.Contains(out, "--json cannot be combined with") {
+	if !strings.Contains(out, "-json cannot be combined with") {
 		t.Errorf("output does not mention the exclusivity error; got:\n%s", out)
 	}
 }

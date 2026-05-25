@@ -68,7 +68,7 @@ providers = map[string]wardenlogical.Factory{
 ```
 
 That's it. Your provider supports:
-- `warden provider enable --type=myprovider`
+- `warden provider enable myprovider`
 - `warden write myprovider/config myprovider_url=... auto_auth_path=auth/jwt/`
 - `POST /myprovider/gateway/v1/some/endpoint` (role provided via `X-Warden-Role` header)
 - `POST /myprovider/role/{role}/gateway/v1/some/endpoint` (role embedded in URL path)
