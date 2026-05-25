@@ -82,7 +82,7 @@ export WARDEN_TOKEN="root"
 
 # Enable JWT auth
 warden auth enable --type=jwt
-warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create role
 warden write auth/jwt/role/cloudflare-user \

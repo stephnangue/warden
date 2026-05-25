@@ -103,7 +103,6 @@ export WARDEN_NAMESPACE=tutorial
 # for the agent to run the discovery loop.
 $WARDEN auth enable --type=jwt 2>/dev/null || true
 $WARDEN write auth/jwt/config \
-    mode=jwt \
     jwks_url=http://forgejo.local:3000/api/actions/.well-known/keys \
     bound_issuer=http://forgejo.local:3000/api/actions \
     default_audience=http://warden.local \

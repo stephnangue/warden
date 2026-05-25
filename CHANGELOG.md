@@ -18,6 +18,8 @@ All notable changes to Warden are documented in this file.
 
 ### Breaking Changes
 
+- **JWT auth: `mode` field removed from `auth/{mount}/config` schema.** `mode=jwt|oidc` was redundant with the three mutually-exclusive key-source fields (`oidc_discovery_url`, `jwks_url`, `jwt_validation_pubkeys`) — the backend can derive everything it needs from which one is set. The schema field is gone; exactly one of those three key sources must now be provided, and the write returns `exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys must be set (got N)` otherwise. Existing scripts passing `mode=jwt` / `mode=oidc` will emit a framework warning ("unknown field 'mode'") but continue to succeed — the framework treats unknown fields as non-fatal. The `mode` key is also no longer returned by `warden read auth/{mount}/config`. Drop the `mode=...` argument from any wrapping scripts. (this PR)
+
 - **`X-Warden-Role` header now overrides any role embedded in the URL.** Previously a role in `role/<role>/gateway/...` URL took priority over the header; now the header wins unconditionally in both header-routing mode and path-routing mode. The change aligns `X-Warden-Role` precedence with the brand-new `X-Warden-Provider` so the two headers obey one rule: header beats URL, URL beats default. `req.Path` and `HTTPRequest.URL.Path` are rewritten so the streaming backend's role parser sees the same role the auth resolver chooses. The skills shipped in-tree, the Helm chart, and the CLI never produce the URL-role + header-role combination, so the affected surface is likely zero — but any caller that today relied on URL-role winning over a stray `X-Warden-Role` header must drop the header or align it with the URL. (this PR)
 
 

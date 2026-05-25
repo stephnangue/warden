@@ -143,10 +143,10 @@ EOF
 # test auth methods managment
 
 ./warden auth enable --type=jwt --description="jwt test auth method"
-./warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+./warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 ./warden read auth/jwt/config
 ./warden auth enable --type=jwt test-jwt --description="test auth method"
-./warden write auth/test-jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+./warden write auth/test-jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 ./warden read auth/test-jwt/config
 ./warden auth disable test-jwt
 
@@ -238,7 +238,7 @@ EOF
   --max-ttl 8h
 
 ./warden -n PROD/SEC auth enable --type=jwt --description="jwt test auth method"
-./warden -n PROD/SEC write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+./warden -n PROD/SEC write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 ./warden -n PROD/SEC write auth/jwt/role/aws-streamer \
     token_type=aws_access_keys \
@@ -384,7 +384,7 @@ path "+/role/+/gateway*" {
 EOF
 
 ./warden -n PROD/DEV auth enable --type=jwt --description="jwt test auth method"
-./warden -n PROD/DEV write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+./warden -n PROD/DEV write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 ./warden -n PROD/DEV cred spec create provisionner \
   --type vault_token \

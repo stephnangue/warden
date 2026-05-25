@@ -158,7 +158,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 warden auth enable --type=jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
-warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role
 warden write auth/jwt/role/aws-user \

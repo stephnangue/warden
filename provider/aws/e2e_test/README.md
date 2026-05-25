@@ -83,7 +83,7 @@ EOF
 
 # Enable JWT authentication
 ./warden -n PROD/SEC auth enable --type=jwt --description="jwt test auth method"
-./warden -n PROD/SEC write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+./warden -n PROD/SEC write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create JWT roles
 ./warden -n PROD/SEC write auth/jwt/role/aws-streamer \

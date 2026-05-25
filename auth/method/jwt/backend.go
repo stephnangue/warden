@@ -19,10 +19,10 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// JWTAuthConfig represents JWT/OIDC authentication configuration
+// JWTAuthConfig represents JWT authentication configuration. Exactly one
+// of OIDCDiscoveryURL, JWKSURL, or JWTValidationPubKeys must be set; the
+// chosen field determines how token signatures are verified.
 type JWTAuthConfig struct {
-	Mode string `json:"mode"` // "jwt" or "oidc" (required)
-
 	// OIDC Discovery
 	OIDCDiscoveryURL string `json:"oidc_discovery_url,omitempty"`
 	OIDCDiscoveryCA  string `json:"oidc_discovery_ca_pem,omitempty"`
@@ -120,21 +120,28 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 		config.UserClaim = "sub"
 	}
 
-	// Validate mode is specified
-	if config.Mode == "" {
-		return fmt.Errorf("mode is required: must be 'jwt' or 'oidc'")
+	// Exactly one of the three key sources must be set; the chosen field
+	// determines how token signatures are verified.
+	hasOIDC := config.OIDCDiscoveryURL != ""
+	hasJWKS := config.JWKSURL != ""
+	hasPubKeys := len(config.JWTValidationPubKeys) > 0
+
+	sourcesSet := 0
+	if hasOIDC {
+		sourcesSet++
+	}
+	if hasJWKS {
+		sourcesSet++
+	}
+	if hasPubKeys {
+		sourcesSet++
+	}
+	if sourcesSet != 1 {
+		return fmt.Errorf("exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys must be set (got %d)", sourcesSet)
 	}
 
-	// Initialize KeySet based on Mode
-	switch config.Mode {
-	case "oidc":
-		if config.OIDCDiscoveryURL == "" {
-			return fmt.Errorf("oidc_discovery_url is required for OIDC mode")
-		}
-		if config.JWKSURL != "" {
-			return fmt.Errorf("jwks_url cannot be used with OIDC mode; use oidc_discovery_url instead")
-		}
-		// Verify OIDC discovery URL is reachable before persisting config
+	switch {
+	case hasOIDC:
 		if err := verifyOIDCDiscoveryURLReachable(ctx, config.OIDCDiscoveryURL, config.OIDCDiscoveryCA); err != nil {
 			return fmt.Errorf("oidc_discovery_url is not reachable: %v", err)
 		}
@@ -142,42 +149,27 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 		if err != nil {
 			return fmt.Errorf("failed to create OIDC discovery keyset: %v", err)
 		}
-
-	case "jwt":
-		if config.OIDCDiscoveryURL != "" {
-			return fmt.Errorf("oidc_discovery_url cannot be used with JWT mode; use jwks_url or jwt_validation_pubkeys instead")
+	case hasJWKS:
+		if err := verifyJWKSURLReachable(ctx, config.JWKSURL, config.JWKSCA); err != nil {
+			return fmt.Errorf("jwks_url is not reachable: %v", err)
 		}
-		if config.JWKSURL != "" && len(config.JWTValidationPubKeys) > 0 {
-			return fmt.Errorf("jwks_url and jwt_validation_pubkeys are mutually exclusive")
+		keySet, err = jwt.NewJSONWebKeySet(ctx, config.JWKSURL, config.JWKSCA)
+		if err != nil {
+			return fmt.Errorf("failed to create JWKS keyset: %v", err)
 		}
-		switch {
-		case config.JWKSURL != "":
-			if err := verifyJWKSURLReachable(ctx, config.JWKSURL, config.JWKSCA); err != nil {
-				return fmt.Errorf("jwks_url is not reachable: %v", err)
-			}
-			keySet, err = jwt.NewJSONWebKeySet(ctx, config.JWKSURL, config.JWKSCA)
+	case hasPubKeys:
+		pubKeys := make([]crypto.PublicKey, 0, len(config.JWTValidationPubKeys))
+		for i, pemStr := range config.JWTValidationPubKeys {
+			pubKey, err := jwt.ParsePublicKeyPEM([]byte(pemStr))
 			if err != nil {
-				return fmt.Errorf("failed to create JWKS keyset: %v", err)
+				return fmt.Errorf("jwt_validation_pubkeys[%d]: failed to parse PEM: %v", i, err)
 			}
-		case len(config.JWTValidationPubKeys) > 0:
-			pubKeys := make([]crypto.PublicKey, 0, len(config.JWTValidationPubKeys))
-			for i, pemStr := range config.JWTValidationPubKeys {
-				pubKey, err := jwt.ParsePublicKeyPEM([]byte(pemStr))
-				if err != nil {
-					return fmt.Errorf("jwt_validation_pubkeys[%d]: failed to parse PEM: %v", i, err)
-				}
-				pubKeys = append(pubKeys, pubKey)
-			}
-			keySet, err = jwt.NewStaticKeySet(pubKeys)
-			if err != nil {
-				return fmt.Errorf("failed to create static keyset: %v", err)
-			}
-		default:
-			return fmt.Errorf("one of jwks_url or jwt_validation_pubkeys is required for JWT mode")
+			pubKeys = append(pubKeys, pubKey)
 		}
-
-	default:
-		return fmt.Errorf("invalid mode: must be 'jwt' or 'oidc'")
+		keySet, err = jwt.NewStaticKeySet(pubKeys)
+		if err != nil {
+			return fmt.Errorf("failed to create static keyset: %v", err)
+		}
 	}
 
 	config.keySet = keySet

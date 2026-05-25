@@ -15,14 +15,9 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 	return &framework.Path{
 		Pattern: "config",
 		Fields: map[string]*framework.FieldSchema{
-			"mode": {
-				Type:        framework.TypeString,
-				Description: "Authentication mode: 'jwt' or 'oidc' (required)",
-				Required:    true,
-			},
 			"oidc_discovery_url": {
 				Type:        framework.TypeString,
-				Description: "OIDC Discovery URL (required for OIDC mode, mutually exclusive with jwks_url)",
+				Description: "OIDC Discovery URL. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
 			},
 			"oidc_discovery_ca_pem": {
 				Type:        framework.TypeString,
@@ -30,7 +25,7 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			},
 			"jwks_url": {
 				Type:        framework.TypeString,
-				Description: "JWKS URL (required for JWT mode, mutually exclusive with oidc_discovery_url)",
+				Description: "JWKS URL. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
 			},
 			"jwks_ca_pem": {
 				Type:        framework.TypeString,
@@ -58,7 +53,7 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			},
 			"jwt_validation_pubkeys": {
 				Type:        framework.TypeCommaStringSlice,
-				Description: "List of PEM-encoded public keys for JWT validation (alternative to jwks_url)",
+				Description: "PEM-encoded RSA or ECDSA public keys for static JWT validation. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
 			},
 			"user_claim": {
 				Type:        framework.TypeString,
@@ -94,11 +89,11 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			},
 		},
 		HelpSynopsis: "Configure JWT authentication",
-		HelpDescription: `This endpoint configures the JWT/OIDC authentication method.
+		HelpDescription: `This endpoint configures the JWT authentication method.
 
-Set 'mode' to 'jwt' with a 'jwks_url' or 'jwt_validation_pubkeys' for static
-key validation, or to 'oidc' with an 'oidc_discovery_url' for auto-discovered
-key rotation.
+Set exactly one of 'oidc_discovery_url' (OIDC discovery), 'jwks_url' (JWKS
+endpoint), or 'jwt_validation_pubkeys' (static PEM-encoded RSA/ECDSA keys)
+to configure how token signatures are verified.
 
 Use 'bound_issuer', 'bound_audiences', 'bound_subject', and 'bound_claims'
 to constrain which tokens are accepted. Use 'claim_mappings' to copy JWT
@@ -121,7 +116,6 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"mode":                   b.config.Mode,
 			"oidc_discovery_url":     b.config.OIDCDiscoveryURL,
 			"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
 			"jwks_url":               b.config.JWKSURL,
@@ -149,7 +143,6 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 	// Copy existing config if present (under lock to avoid data race)
 	b.configMu.RLock()
 	if b.config != nil {
-		conf["mode"] = b.config.Mode
 		conf["oidc_discovery_url"] = b.config.OIDCDiscoveryURL
 		conf["oidc_discovery_ca_pem"] = b.config.OIDCDiscoveryCA
 		conf["jwks_url"] = b.config.JWKSURL
@@ -189,7 +182,6 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 	if b.storageView != nil {
 		b.configMu.RLock()
 		normalized := map[string]any{
-			"mode":                   b.config.Mode,
 			"oidc_discovery_url":     b.config.OIDCDiscoveryURL,
 			"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
 			"jwks_url":               b.config.JWKSURL,
@@ -235,20 +227,24 @@ const jwtAuthHelp = `
 The JWT auth method authenticates users by validating JSON Web Tokens
 signed by a trusted identity provider.
 
-Two modes are supported:
+Three key sources are supported; exactly one must be configured per mount:
 
-  jwt   - Validates tokens using a JWKS endpoint or static public keys.
-          Suitable for service-to-service auth and CI/CD pipelines.
-
-  oidc  - Validates tokens using OIDC Discovery (/.well-known/openid-configuration).
-          Suitable for SSO with providers like Okta, Auth0, or Azure AD.
+  oidc_discovery_url     - OIDC Discovery (/.well-known/openid-configuration).
+                           Suitable for SSO with providers like Okta, Auth0,
+                           or Azure AD.
+  jwks_url               - JWKS endpoint. Suitable for service-to-service
+                           auth and CI/CD pipelines with a reachable JWKS
+                           server.
+  jwt_validation_pubkeys - Static PEM-encoded RSA or ECDSA public keys.
+                           Suitable for air-gapped clusters and fixed-issuer
+                           workloads where no JWKS endpoint is reachable.
 
 Tokens are validated against configurable bound claims (issuer, audience,
 subject, custom claims). The user_claim field (default: sub) determines the
 authenticated principal identity.
 
 Configuration:
-  POST /auth/{mount}/config   - Configure mode, key source, and claim bindings
+  POST /auth/{mount}/config   - Configure key source and claim bindings
   GET  /auth/{mount}/config   - Read current configuration
   POST /auth/{mount}/role/:name - Create roles with per-role claim constraints
 `
