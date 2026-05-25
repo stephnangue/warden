@@ -450,9 +450,9 @@ warden write auth/jwt/config \
 ```
 
 `default_role=discovery-baseline` is the key field: it names the role
-Warden falls back to when the URL carries no role segment (i.e.
-`/v1/sys/*` calls). Role-resolution precedence top-to-bottom is:
-URL-embedded role → `X-Warden-Role` header → `?role=` query param →
+Warden falls back to when no other role is in scope (i.e. `/v1/sys/*`
+calls without a header). Role-resolution precedence top-to-bottom is:
+`X-Warden-Role` header → URL-embedded role → `?role=` query param →
 provider `default_role` → **auth method `default_role`**. Discovery
 calls hit the bottom of that ladder.
 

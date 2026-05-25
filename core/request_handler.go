@@ -327,18 +327,37 @@ func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logica
 		}
 	}(activeCtx, ctx)
 
-	// Header-routing mode: when X-Warden-Provider is present, the request URL
-	// is treated as the literal upstream API path and the canonical
-	// <provider>/role/<role>/gateway/<api> shape is synthesized before mount
-	// lookup. The header is never honored against the system backend. The
-	// underlying HTTPRequest.URL.Path is also realigned so providers that
-	// read URL.Path directly see the same shape as a path-routed request.
+	// Header-based routing has two cases driven by which X-Warden-* headers
+	// are present:
+	//
+	//   X-Warden-Provider present (header-routing mode):
+	//     Treat the request URL as the literal upstream API path. Synthesize
+	//     the canonical <provider>/role/<role>/gateway/<api> shape before
+	//     mount lookup. Reject against the system backend (the header isn't
+	//     a routing override for system endpoints) and against SigV4-signed
+	//     requests (mutating the URL would invalidate the client signature
+	//     and the failure would look like an authentication bug).
+	//
+	//   X-Warden-Provider absent, X-Warden-Role present:
+	//     Path-routing mode where the role header overrides any role baked
+	//     into the URL. Rewrite the role segment in req.Path so the
+	//     streaming backend's role parser sees the same role the auth
+	//     resolver chooses (see isTransparentRequest).
+	//
+	// In both cases HTTPRequest.URL.Path is realigned with req.Path so
+	// providers that read URL.Path directly see a consistent shape.
 	if req.HTTPRequest != nil {
-		if provider := req.HTTPRequest.Header.Get("X-Warden-Provider"); provider != "" {
+		provider := req.HTTPRequest.Header.Get("X-Warden-Provider")
+		headerRole := req.HTTPRequest.Header.Get("X-Warden-Role")
+
+		switch {
+		case provider != "":
 			if strings.HasPrefix(req.Path, "sys/") {
 				return logical.ErrorResponse(logical.ErrBadRequest("X-Warden-Provider is not honored on system backend paths")), nil
 			}
-			headerRole := req.HTTPRequest.Header.Get("X-Warden-Role")
+			if isSigV4Authorization(req.HTTPRequest.Header.Get("Authorization")) {
+				return logical.ErrorResponse(logical.ErrBadRequest("X-Warden-Provider is not compatible with SigV4 authentication; use the path-routed /v1/<mount>/role/<role>/gateway/<api> form instead")), nil
+			}
 			synthesized, err := synthesizeGatewayPath(provider, headerRole, req.Path)
 			if err != nil {
 				return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
@@ -346,6 +365,14 @@ func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logica
 			req.Path = synthesized
 			req.HTTPRequest.URL.Path = "/v1/" + synthesized
 			req.HTTPRequest.URL.RawPath = ""
+
+		case headerRole != "":
+			rewritten := applyRoleHeader(req.Path, headerRole)
+			if rewritten != req.Path {
+				req.Path = rewritten
+				req.HTTPRequest.URL.Path = "/v1/" + rewritten
+				req.HTTPRequest.URL.RawPath = ""
+			}
 		}
 	}
 
@@ -371,6 +398,49 @@ func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logica
 	resp, err := c.handleCancelableRequest(ctx, req)
 	req.SetTokenEntry(nil)
 	return resp, err
+}
+
+// sigV4AuthorizationPrefixes enumerates the SigV4 dialects whose canonical
+// request includes the URL path. If any of these appears as the Authorization
+// scheme, the header-routing path mutation would invalidate the client's
+// signature — so we reject the request loudly instead of letting it fail as
+// a confusing 401.
+var sigV4AuthorizationPrefixes = []string{
+	"AWS4-HMAC-SHA256",
+	"ACS3-HMAC-SHA256",
+}
+
+// isSigV4Authorization reports whether the Authorization header value looks
+// like a SigV4-family signature.
+func isSigV4Authorization(authz string) bool {
+	for _, prefix := range sigV4AuthorizationPrefixes {
+		if strings.HasPrefix(authz, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// roleSegmentPattern matches the canonical role/<role>/gateway/ segment that
+// appears between the mount prefix and the upstream API path in path-routed
+// requests. Only the leftmost occurrence is rewritten by applyRoleHeader.
+var roleSegmentPattern = regexp.MustCompile(`role/[^/]+/gateway/`)
+
+// applyRoleHeader rewrites the leftmost role/<role>/gateway/ segment in the
+// path to match the given role. Idempotent for paths that don't carry such a
+// segment (returned unchanged). Mount prefixes cannot contain a "role" or
+// "gateway" segment (rejected at mount-create time), so the leftmost match
+// is guaranteed to be the gateway-role segment, not part of the upstream API
+// path.
+func applyRoleHeader(path, role string) string {
+	if role == "" {
+		return path
+	}
+	loc := roleSegmentPattern.FindStringIndex(path)
+	if loc == nil {
+		return path
+	}
+	return path[:loc[0]] + "role/" + role + "/gateway/" + path[loc[1]:]
 }
 
 // synthesizeGatewayPath builds the canonical gateway path from a provider
@@ -1199,9 +1269,12 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 		}
 	}
 
-	// X-Warden-Role header takes priority over DefaultAuthRole but not over URL-embedded role.
-	// If the path doesn't start with "role/", any role value came from DefaultAuthRole, not the URL.
-	if !strings.HasPrefix(relativePath, "role/") && req.HTTPRequest != nil {
+	// X-Warden-Role header overrides any role parsed from the path or chosen
+	// by the backend's default-role fallback. HandleRequest also rewrites the
+	// role segment of req.Path to match (see applyRoleHeader), so the auth
+	// resolver and the streaming backend always agree on which role is in
+	// force.
+	if req.HTTPRequest != nil {
 		if headerRole := req.HTTPRequest.Header.Get("X-Warden-Role"); headerRole != "" {
 			authRole = headerRole
 		}
@@ -1235,8 +1308,8 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 //	  - Operations: namespace auto_auth_path metadata
 //
 //	Auth role (first match wins):
-//	  1. URL path /role/{name}/gateway/... (gateway only)
-//	  2. X-Warden-Role header
+//	  1. X-Warden-Role header
+//	  2. URL path /role/{name}/gateway/... (gateway only)
 //	  3. Provider default_role config (gateway only)
 //	  4. Auth method default_role config (login-time fallback)
 //
