@@ -78,15 +78,37 @@ func TestNSVaultTransparentHeaderRole(t *testing.T) {
 		t.Fatalf("header role: expected 200, got %d", status)
 	}
 
-	// URL role should take precedence over header role
-	// Use valid URL role + invalid header role — should succeed because URL wins
+	// URL-routed transparent ops still work without any X-Warden-Role header
+	// (role is read from the URL path). This is the path-routing fallback
+	// when the header is absent; precedence-when-both-present is covered
+	// by core/request_handler_test.go.
 	status2, _ := h.NSVaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", h.NSVaultNS, leader, jwt)
 	if status2 != 200 {
-		t.Fatalf("URL role precedence: expected 200, got %d", status2)
+		t.Fatalf("URL-routed: expected 200, got %d", status2)
 	}
 
 	// Teardown
 	h.TeardownNSVaultEnv(t, leader)
+}
+
+// TestNSVaultRoleHeaderOverridesURLRole exercises the new precedence: when
+// both a URL-embedded role and an X-Warden-Role header are present, the
+// header wins. The URL carries a bogus role; if the header overrides it,
+// the request succeeds (200) because the real role is in the header. If
+// the old URL-wins behavior persists, the bogus URL role causes the auth
+// flow to reject with 4xx.
+func TestNSVaultRoleHeaderOverridesURLRole(t *testing.T) {
+	leader := h.GetLeaderPort(t)
+
+	h.SetupNSVaultEnv(t, leader)
+	defer h.TeardownNSVaultEnv(t, leader)
+
+	jwt := h.GetDefaultJWT(t)
+
+	status, _ := h.NSVaultTransparentRequestWithHeaderRole(t, "GET", "secret/data/e2e/app-config", "nonexistent-role-in-url", "e2e-reader", h.NSVaultNS, leader, jwt)
+	if status != 200 {
+		t.Fatalf("header role should override URL role: expected 200, got %d", status)
+	}
 }
 
 // TestNSVaultTransparentProviderHeader verifies that a request carrying

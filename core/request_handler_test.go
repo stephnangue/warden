@@ -305,6 +305,116 @@ func TestHandleRequest_ProviderHeader_NoSuchMount(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
+// TestHandleRequest_ProviderHeader_SigV4Rejected verifies that combining
+// X-Warden-Provider with a SigV4-shaped Authorization header is rejected
+// with 400. The synthesis rewrites URL.Path, which would silently invalidate
+// the client's signature under SigV4 — better to fail loudly with a clear
+// error than to surface as a confusing 401.
+func TestHandleRequest_ProviderHeader_SigV4Rejected(t *testing.T) {
+	core := createTestCore(t)
+
+	cases := []struct{ name, authz string }{
+		{"AWS SigV4", "AWS4-HMAC-SHA256 Credential=anything/20260101/us-east-1/sts/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef"},
+		{"Alicloud ACS3", "ACS3-HMAC-SHA256 Credential=anything,SignedHeaders=host,Signature=deadbeef"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			httpReq := httptest.NewRequest(http.MethodPost, "/v1/sts/", nil)
+			httpReq.Header.Set("X-Warden-Provider", "aws")
+			httpReq.Header.Set("Authorization", tc.authz)
+
+			req := &logical.Request{
+				Path:        "sts/",
+				Operation:   logical.CreateOperation,
+				HTTPRequest: httpReq,
+			}
+
+			resp, err := core.HandleRequest(context.Background(), req)
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		})
+	}
+}
+
+// TestApplyRoleHeader covers the role-segment rewrite used in path-routing
+// mode when X-Warden-Role is set.
+func TestApplyRoleHeader(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		role string
+		want string
+	}{
+		{"rewrites mount-level role segment", "vault/role/old/gateway/v1/secret", "new", "vault/role/new/gateway/v1/secret"},
+		{"multi-segment mount path", "gitlab/prod/role/old/gateway/api/v4/projects", "new", "gitlab/prod/role/new/gateway/api/v4/projects"},
+		{"no role segment is a no-op", "vault/gateway/v1/secret", "new", "vault/gateway/v1/secret"},
+		{"empty role is a no-op", "vault/role/old/gateway/v1/secret", "", "vault/role/old/gateway/v1/secret"},
+		{"only the leftmost segment is rewritten", "vault/role/old/gateway/role/embedded/gateway/api", "new", "vault/role/new/gateway/role/embedded/gateway/api"},
+		{"role without /gateway/ suffix is a no-op", "vault/role/whatever/other", "new", "vault/role/whatever/other"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := applyRoleHeader(tc.path, tc.role)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestHandleRequest_RoleHeaderRewritesPath verifies that in path-routing
+// mode (no X-Warden-Provider), an X-Warden-Role header rewrites the role
+// segment of req.Path AND the underlying HTTPRequest.URL.Path so the
+// streaming backend's path-based role parser sees the same role the auth
+// resolver chooses.
+func TestHandleRequest_RoleHeaderRewritesPath(t *testing.T) {
+	core := createTestCore(t)
+
+	httpReq := httptest.NewRequest(http.MethodGet, "/v1/somemount/role/old-role/gateway/v1/secret/data/foo", nil)
+	httpReq.Header.Set("X-Warden-Role", "new-role")
+
+	req := &logical.Request{
+		Path:        "somemount/role/old-role/gateway/v1/secret/data/foo",
+		Operation:   logical.ReadOperation,
+		HTTPRequest: httpReq,
+	}
+
+	// We only care that the path rewrite occurred; the mount doesn't exist so
+	// the request lands on the 404 path, but req.Path / URL.Path are mutated
+	// before the lookup.
+	_, _ = core.HandleRequest(context.Background(), req)
+
+	assert.Equal(t, "somemount/role/new-role/gateway/v1/secret/data/foo", req.Path,
+		"req.Path should carry the header role after rewrite")
+	assert.Equal(t, "/v1/somemount/role/new-role/gateway/v1/secret/data/foo", req.HTTPRequest.URL.Path,
+		"HTTPRequest.URL.Path should be realigned with req.Path")
+}
+
+// TestHandleRequest_RoleHeader_NoOpWhenPathHasNoRoleSegment confirms that
+// the rewrite is idempotent: when the URL has no role/<x>/gateway/ segment,
+// req.Path and URL.Path are left untouched and the header role flows
+// through the auth resolver instead.
+func TestHandleRequest_RoleHeader_NoOpWhenPathHasNoRoleSegment(t *testing.T) {
+	core := createTestCore(t)
+
+	httpReq := httptest.NewRequest(http.MethodGet, "/v1/somemount/gateway/v1/secret/data/foo", nil)
+	httpReq.Header.Set("X-Warden-Role", "new-role")
+
+	req := &logical.Request{
+		Path:        "somemount/gateway/v1/secret/data/foo",
+		Operation:   logical.ReadOperation,
+		HTTPRequest: httpReq,
+	}
+
+	_, _ = core.HandleRequest(context.Background(), req)
+
+	assert.Equal(t, "somemount/gateway/v1/secret/data/foo", req.Path,
+		"req.Path should be unchanged when there is no role segment to rewrite")
+	assert.Equal(t, "/v1/somemount/gateway/v1/secret/data/foo", req.HTTPRequest.URL.Path,
+		"URL.Path should be unchanged when there is no role segment to rewrite")
+}
+
 // TestParseRequestBody tests the parseRequestBody function
 func TestParseRequestBody(t *testing.T) {
 	core := createTestCore(t)
@@ -1034,7 +1144,10 @@ func TestIsTransparentRequest(t *testing.T) {
 		assert.Equal(t, "terraform", role)
 	})
 
-	t.Run("URL role takes precedence over header role", func(t *testing.T) {
+	t.Run("header role overrides URL role", func(t *testing.T) {
+		// This is a behavior change from earlier versions: X-Warden-Role
+		// previously yielded to a role embedded in the URL. The two headers
+		// (provider, role) now obey the same rule — header wins.
 		backend := &mockTransparentModeProvider{
 			transparentMode: true,
 			autoAuthPath:    "auth/jwt/",
@@ -1048,7 +1161,7 @@ func TestIsTransparentRequest(t *testing.T) {
 
 		isTransparent, role := core.isTransparentRequest(req, backend)
 		assert.True(t, isTransparent)
-		assert.Equal(t, "terraform", role)
+		assert.Equal(t, "operator", role)
 	})
 
 	t.Run("header role takes precedence over default role", func(t *testing.T) {

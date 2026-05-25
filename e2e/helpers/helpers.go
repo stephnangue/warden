@@ -386,6 +386,21 @@ func NSVaultTransparentHeaderRequest(t *testing.T, method, vaultPath, role, name
 	return DoRequest(t, method, u, headers, "")
 }
 
+// NSVaultTransparentRequestWithHeaderRole sends a path-routed transparent
+// request that carries one role in the URL and a different role in the
+// X-Warden-Role header. Used to verify header-overrides-URL precedence:
+// after this change, the header wins.
+func NSVaultTransparentRequestWithHeaderRole(t *testing.T, method, vaultPath, urlRole, headerRole, namespace string, port int, jwt string) (int, []byte) {
+	t.Helper()
+	u := fmt.Sprintf("%s/v1/vault/role/%s/gateway/v1/%s", NodeURL(port), urlRole, vaultPath)
+	headers := map[string]string{
+		"Authorization":      "Bearer " + jwt,
+		"X-Warden-Namespace": namespace,
+		"X-Warden-Role":      headerRole,
+	}
+	return DoRequest(t, method, u, headers, "")
+}
+
 // NSVaultTransparentProviderRequest makes a namespace-scoped transparent Vault
 // gateway request using X-Warden-Provider for mount routing and X-Warden-Role
 // for the auth role. The URL carries only the literal upstream Vault API path
