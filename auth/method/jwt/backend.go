@@ -2,6 +2,7 @@ package jwt
 
 import (
 	"context"
+	"crypto"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -144,10 +145,13 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 
 	case "jwt":
 		if config.OIDCDiscoveryURL != "" {
-			return fmt.Errorf("oidc_discovery_url cannot be used with JWT mode; use jwks_url instead")
+			return fmt.Errorf("oidc_discovery_url cannot be used with JWT mode; use jwks_url or jwt_validation_pubkeys instead")
 		}
-		if config.JWKSURL != "" {
-			// Verify JWKS URL is reachable before persisting config
+		if config.JWKSURL != "" && len(config.JWTValidationPubKeys) > 0 {
+			return fmt.Errorf("jwks_url and jwt_validation_pubkeys are mutually exclusive")
+		}
+		switch {
+		case config.JWKSURL != "":
 			if err := verifyJWKSURLReachable(ctx, config.JWKSURL, config.JWKSCA); err != nil {
 				return fmt.Errorf("jwks_url is not reachable: %v", err)
 			}
@@ -155,10 +159,21 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 			if err != nil {
 				return fmt.Errorf("failed to create JWKS keyset: %v", err)
 			}
-		} else if len(config.JWTValidationPubKeys) > 0 {
-			return fmt.Errorf("static public keys not yet implemented, use jwks_url")
-		} else {
-			return fmt.Errorf("jwks_url is required for JWT mode")
+		case len(config.JWTValidationPubKeys) > 0:
+			pubKeys := make([]crypto.PublicKey, 0, len(config.JWTValidationPubKeys))
+			for i, pemStr := range config.JWTValidationPubKeys {
+				pubKey, err := jwt.ParsePublicKeyPEM([]byte(pemStr))
+				if err != nil {
+					return fmt.Errorf("jwt_validation_pubkeys[%d]: failed to parse PEM: %v", i, err)
+				}
+				pubKeys = append(pubKeys, pubKey)
+			}
+			keySet, err = jwt.NewStaticKeySet(pubKeys)
+			if err != nil {
+				return fmt.Errorf("failed to create static keyset: %v", err)
+			}
+		default:
+			return fmt.Errorf("one of jwks_url or jwt_validation_pubkeys is required for JWT mode")
 		}
 
 	default:
@@ -203,13 +218,11 @@ func (b *jwtAuthBackend) Initialize(ctx context.Context) error {
 	return nil
 }
 
-// SensitiveConfigFields returns the list of config fields that should be masked in output
+// SensitiveConfigFields returns the list of config fields that should be masked in output.
+// All current JWT auth config fields are public material — CA certs validate TLS servers
+// during the handshake, and static public keys are public by definition — so nothing is masked.
 func (b *jwtAuthBackend) SensitiveConfigFields() []string {
-	return []string{
-		"oidc_discovery_ca_pem",
-		"jwks_ca_pem",
-		"jwt_validation_pubkeys",
-	}
+	return nil
 }
 
 // verifyURLReachable checks that a URL is reachable and returns HTTP 200
