@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -16,7 +17,6 @@ import (
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
-	"net/http/httptest"
 )
 
 // testLoggerConfig creates a logger for tests that discards output
@@ -207,7 +207,6 @@ func TestHandleConfigRead_WithConfig(t *testing.T) {
 
 	b := backend.(*jwtAuthBackend)
 	b.config = &JWTAuthConfig{
-		Mode:           "jwt",
 		JWKSURL:        "https://example.com/.well-known/jwks.json",
 		BoundIssuer:    "https://issuer.example.com",
 		BoundAudiences: []string{"aud1", "aud2"},
@@ -228,7 +227,6 @@ func TestHandleConfigRead_WithConfig(t *testing.T) {
 	require.NotNil(t, resp)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, "jwt", resp.Data["mode"])
 	assert.Equal(t, "https://example.com/.well-known/jwks.json", resp.Data["jwks_url"])
 	assert.Equal(t, "https://issuer.example.com", resp.Data["bound_issuer"])
 	assert.Equal(t, []string{"aud1", "aud2"}, resp.Data["bound_audiences"])
@@ -238,7 +236,7 @@ func TestHandleConfigRead_WithConfig(t *testing.T) {
 	assert.Equal(t, "2h0m0s", resp.Data["token_ttl"])
 }
 
-func TestHandleConfigRead_OIDCMode(t *testing.T) {
+func TestHandleConfigRead_OIDC(t *testing.T) {
 	ctx := context.Background()
 	conf := &logical.BackendConfig{
 		Logger: testLoggerConfig(),
@@ -249,7 +247,6 @@ func TestHandleConfigRead_OIDCMode(t *testing.T) {
 
 	b := backend.(*jwtAuthBackend)
 	b.config = &JWTAuthConfig{
-		Mode:             "oidc",
 		OIDCDiscoveryURL: "https://issuer.example.com/.well-known/openid-configuration",
 		UserClaim:        "sub",
 		GroupsClaim:      "groups",
@@ -267,7 +264,6 @@ func TestHandleConfigRead_OIDCMode(t *testing.T) {
 	require.NotNil(t, resp)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, "oidc", resp.Data["mode"])
 	assert.Equal(t, "https://issuer.example.com/.well-known/openid-configuration", resp.Data["oidc_discovery_url"])
 }
 
@@ -275,7 +271,7 @@ func TestHandleConfigRead_OIDCMode(t *testing.T) {
 // handleConfigWrite Tests
 // =============================================================================
 
-func TestHandleConfigWrite_MissingRequiredFields(t *testing.T) {
+func TestHandleConfigWrite_NoKeySource(t *testing.T) {
 	ctx := context.Background()
 	conf := &logical.BackendConfig{
 		Logger: testLoggerConfig(),
@@ -289,64 +285,6 @@ func TestHandleConfigWrite_MissingRequiredFields(t *testing.T) {
 	req := &logical.Request{}
 	d := &framework.FieldData{
 		Raw: map[string]any{
-			"mode": "jwt",
-			// Missing jwks_url
-		},
-		Schema: b.pathConfig().Fields,
-	}
-
-	resp, err := b.handleConfigWrite(ctx, req, d)
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-
-	// Should fail because jwks_url is required for JWT mode
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	assert.NotNil(t, resp.Err)
-}
-
-func TestHandleConfigWrite_InvalidMode(t *testing.T) {
-	ctx := context.Background()
-	conf := &logical.BackendConfig{
-		Logger: testLoggerConfig(),
-	}
-
-	backend, err := Factory(ctx, conf)
-	require.NoError(t, err)
-
-	b := backend.(*jwtAuthBackend)
-
-	req := &logical.Request{}
-	d := &framework.FieldData{
-		Raw: map[string]any{
-			"mode": "invalid",
-		},
-		Schema: b.pathConfig().Fields,
-	}
-
-	resp, err := b.handleConfigWrite(ctx, req, d)
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	assert.NotNil(t, resp.Err)
-	assert.Contains(t, resp.Err.Error(), "invalid mode")
-}
-
-func TestHandleConfigWrite_NoModeNoDiscoveryNoJWKS(t *testing.T) {
-	ctx := context.Background()
-	conf := &logical.BackendConfig{
-		Logger: testLoggerConfig(),
-	}
-
-	backend, err := Factory(ctx, conf)
-	require.NoError(t, err)
-
-	b := backend.(*jwtAuthBackend)
-
-	req := &logical.Request{}
-	d := &framework.FieldData{
-		Raw: map[string]any{
-			// Mode is required but not provided
 			"user_claim": "email",
 		},
 		Schema: b.pathConfig().Fields,
@@ -356,10 +294,9 @@ func TestHandleConfigWrite_NoModeNoDiscoveryNoJWKS(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// Should fail because mode is required
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.NotNil(t, resp.Err)
-	assert.Contains(t, resp.Err.Error(), "mode is required")
+	assert.Contains(t, resp.Err.Error(), "exactly one of")
 }
 
 // =============================================================================
@@ -415,7 +352,6 @@ func TestHandleConfigWrite_PersistsToStorage(t *testing.T) {
 
 	d := &framework.FieldData{
 		Raw: map[string]any{
-			"mode":     "jwt",
 			"jwks_url": srv.URL,
 		},
 		Schema: b.pathConfig().Fields,
@@ -447,7 +383,6 @@ func TestHandleConfigWrite_MergesExisting(t *testing.T) {
 	// First write
 	d := &framework.FieldData{
 		Raw: map[string]any{
-			"mode":     "jwt",
 			"jwks_url": srv.URL,
 		},
 		Schema: b.pathConfig().Fields,
@@ -476,7 +411,6 @@ func TestHandleConfigWrite_MergesExisting(t *testing.T) {
 func TestHandleConfigRead_WithDefaultRole(t *testing.T) {
 	b, _ := createTestBackendWithStorage(t)
 	b.config = &JWTAuthConfig{
-		Mode:        "jwt",
 		JWKSURL:     "https://example.com/jwks",
 		DefaultRole: "auto-role",
 		UserClaim:   "sub",

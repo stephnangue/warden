@@ -129,26 +129,22 @@ func TestFactory_SpecialPaths(t *testing.T) {
 
 func TestJWTAuthConfig_Defaults(t *testing.T) {
 	config := &JWTAuthConfig{}
-	assert.Empty(t, config.Mode)
 	assert.Empty(t, config.JWKSURL)
 	assert.Empty(t, config.OIDCDiscoveryURL)
+	assert.Empty(t, config.JWTValidationPubKeys)
 }
 
-func TestJWTAuthConfig_ModeJWT(t *testing.T) {
+func TestJWTAuthConfig_JWKSURL(t *testing.T) {
 	config := &JWTAuthConfig{
-		Mode:    "jwt",
 		JWKSURL: "https://example.com/.well-known/jwks.json",
 	}
-	assert.Equal(t, "jwt", config.Mode)
 	assert.Equal(t, "https://example.com/.well-known/jwks.json", config.JWKSURL)
 }
 
-func TestJWTAuthConfig_ModeOIDC(t *testing.T) {
+func TestJWTAuthConfig_OIDCDiscoveryURL(t *testing.T) {
 	config := &JWTAuthConfig{
-		Mode:             "oidc",
 		OIDCDiscoveryURL: "https://issuer.example.com/.well-known/openid-configuration",
 	}
-	assert.Equal(t, "oidc", config.Mode)
 	assert.Equal(t, "https://issuer.example.com/.well-known/openid-configuration", config.OIDCDiscoveryURL)
 }
 
@@ -185,7 +181,7 @@ func TestJWTAuthConfig_ClaimMappings(t *testing.T) {
 // setupJWTConfig Tests
 // =============================================================================
 
-func TestSetupJWTConfig_InvalidMode(t *testing.T) {
+func TestSetupJWTConfig_NoKeySource(t *testing.T) {
 	ctx := context.Background()
 	conf := &logical.BackendConfig{
 		Logger: testLogger(),
@@ -195,14 +191,12 @@ func TestSetupJWTConfig_InvalidMode(t *testing.T) {
 	require.NoError(t, err)
 
 	b := backend.(*jwtAuthBackend)
-	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode": "invalid",
-	})
+	err = b.setupJWTConfig(ctx, map[string]any{})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid mode")
+	assert.Contains(t, err.Error(), "exactly one of")
 }
 
-func TestSetupJWTConfig_OIDCMissingDiscoveryURL(t *testing.T) {
+func TestSetupJWTConfig_MultipleKeySources(t *testing.T) {
 	ctx := context.Background()
 	conf := &logical.BackendConfig{
 		Logger: testLogger(),
@@ -213,82 +207,11 @@ func TestSetupJWTConfig_OIDCMissingDiscoveryURL(t *testing.T) {
 
 	b := backend.(*jwtAuthBackend)
 	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode": "oidc",
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "oidc_discovery_url is required")
-}
-
-func TestSetupJWTConfig_JWTMissingKeySource(t *testing.T) {
-	ctx := context.Background()
-	conf := &logical.BackendConfig{
-		Logger: testLogger(),
-	}
-
-	backend, err := Factory(ctx, conf)
-	require.NoError(t, err)
-
-	b := backend.(*jwtAuthBackend)
-	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode": "jwt",
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "one of jwks_url or jwt_validation_pubkeys is required")
-}
-
-func TestSetupJWTConfig_MissingMode(t *testing.T) {
-	ctx := context.Background()
-	conf := &logical.BackendConfig{
-		Logger: testLogger(),
-	}
-
-	backend, err := Factory(ctx, conf)
-	require.NoError(t, err)
-
-	b := backend.(*jwtAuthBackend)
-	err = b.setupJWTConfig(ctx, map[string]any{
-		"jwks_url": "https://example.com/.well-known/jwks.json",
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "mode is required")
-}
-
-func TestSetupJWTConfig_JWTModeWithOIDCDiscoveryURL(t *testing.T) {
-	ctx := context.Background()
-	conf := &logical.BackendConfig{
-		Logger: testLogger(),
-	}
-
-	backend, err := Factory(ctx, conf)
-	require.NoError(t, err)
-
-	b := backend.(*jwtAuthBackend)
-	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":               "jwt",
 		"jwks_url":           "https://example.com/.well-known/jwks.json",
 		"oidc_discovery_url": "https://issuer.example.com/.well-known/openid-configuration",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "oidc_discovery_url cannot be used with JWT mode")
-}
-
-func TestSetupJWTConfig_OIDCModeWithJWKSURL(t *testing.T) {
-	ctx := context.Background()
-	conf := &logical.BackendConfig{
-		Logger: testLogger(),
-	}
-
-	backend, err := Factory(ctx, conf)
-	require.NoError(t, err)
-
-	b := backend.(*jwtAuthBackend)
-	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":               "oidc",
-		"oidc_discovery_url": "https://issuer.example.com/.well-known/openid-configuration",
-		"jwks_url":           "https://example.com/.well-known/jwks.json",
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "jwks_url cannot be used with OIDC mode")
+	assert.Contains(t, err.Error(), "exactly one of")
 }
 
 func TestSetupJWTConfig_StaticPubKeys_ValidRSA(t *testing.T) {
@@ -301,7 +224,6 @@ func TestSetupJWTConfig_StaticPubKeys_ValidRSA(t *testing.T) {
 	_, pemStr := genTestPubKeyPEM(t, "RSA")
 
 	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":                   "jwt",
 		"jwt_validation_pubkeys": []string{pemStr},
 	})
 	require.NoError(t, err)
@@ -321,7 +243,6 @@ func TestSetupJWTConfig_StaticPubKeys_ValidECDSA(t *testing.T) {
 	_, pemStr := genTestPubKeyPEM(t, "ECDSA")
 
 	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":                   "jwt",
 		"jwt_validation_pubkeys": []string{pemStr},
 	})
 	require.NoError(t, err)
@@ -340,7 +261,6 @@ func TestSetupJWTConfig_StaticPubKeys_MultipleKeys(t *testing.T) {
 	_, pem2 := genTestPubKeyPEM(t, "ECDSA")
 
 	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":                   "jwt",
 		"jwt_validation_pubkeys": []string{pem1, pem2},
 	})
 	require.NoError(t, err)
@@ -356,7 +276,6 @@ func TestSetupJWTConfig_StaticPubKeys_InvalidPEM(t *testing.T) {
 	b := backend.(*jwtAuthBackend)
 
 	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":                   "jwt",
 		"jwt_validation_pubkeys": []string{"not a pem"},
 	})
 	require.Error(t, err)
@@ -364,7 +283,7 @@ func TestSetupJWTConfig_StaticPubKeys_InvalidPEM(t *testing.T) {
 	assert.Contains(t, err.Error(), "jwt_validation_pubkeys[0]")
 }
 
-func TestSetupJWTConfig_StaticPubKeys_MutuallyExclusiveWithJWKS(t *testing.T) {
+func TestSetupJWTConfig_MultipleKeySources_JWKSAndPubKeys(t *testing.T) {
 	ctx := context.Background()
 	conf := &logical.BackendConfig{Logger: testLogger()}
 	backend, err := Factory(ctx, conf)
@@ -374,12 +293,11 @@ func TestSetupJWTConfig_StaticPubKeys_MutuallyExclusiveWithJWKS(t *testing.T) {
 	_, pemStr := genTestPubKeyPEM(t, "RSA")
 
 	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":                   "jwt",
 		"jwks_url":               "https://example.com/.well-known/jwks.json",
 		"jwt_validation_pubkeys": []string{pemStr},
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "mutually exclusive")
+	assert.Contains(t, err.Error(), "exactly one of")
 }
 
 func TestSetupJWTConfig_StaticPubKeys_StorageRoundTrip(t *testing.T) {
@@ -387,7 +305,6 @@ func TestSetupJWTConfig_StaticPubKeys_StorageRoundTrip(t *testing.T) {
 
 	_, pemStr := genTestPubKeyPEM(t, "RSA")
 	cfg := map[string]any{
-		"mode":                   "jwt",
 		"jwt_validation_pubkeys": []string{pemStr},
 	}
 
@@ -421,7 +338,6 @@ func TestSetupJWTConfig_JWKSURLNotReachable(t *testing.T) {
 
 	b := backend.(*jwtAuthBackend)
 	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":     "jwt",
 		"jwks_url": "http://localhost:99999/.well-known/jwks.json",
 	})
 	require.Error(t, err)
@@ -439,7 +355,6 @@ func TestSetupJWTConfig_OIDCDiscoveryURLNotReachable(t *testing.T) {
 
 	b := backend.(*jwtAuthBackend)
 	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":               "oidc",
 		"oidc_discovery_url": "http://localhost:99999/.well-known/openid-configuration",
 	})
 	require.Error(t, err)
@@ -556,7 +471,6 @@ func TestInitialize_WithPersistedConfig(t *testing.T) {
 
 	// Store a config that will fail (no reachable JWKS) - to verify Initialize tries
 	configMap := map[string]any{
-		"mode":     "jwt",
 		"jwks_url": "http://localhost:1/.well-known/jwks.json",
 	}
 	entry, err := sdklogical.StorageEntryJSON("config", configMap)
@@ -620,7 +534,6 @@ func TestStaticPubKeys_SignAndVerify(t *testing.T) {
 	b := backend.(*jwtAuthBackend)
 
 	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":                   "jwt",
 		"jwt_validation_pubkeys": []string{pemStr},
 	})
 	require.NoError(t, err)
@@ -669,7 +582,6 @@ func TestStaticPubKeys_SignAndVerify_TamperedPayload(t *testing.T) {
 	b := backend.(*jwtAuthBackend)
 
 	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":                   "jwt",
 		"jwt_validation_pubkeys": []string{pemStr},
 	})
 	require.NoError(t, err)
@@ -706,7 +618,6 @@ func TestStaticPubKeys_SignAndVerify_WrongKey(t *testing.T) {
 	b := backend.(*jwtAuthBackend)
 
 	err = b.setupJWTConfig(ctx, map[string]any{
-		"mode":                   "jwt",
 		"jwt_validation_pubkeys": []string{otherPEM},
 	})
 	require.NoError(t, err)

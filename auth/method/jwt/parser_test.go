@@ -15,35 +15,30 @@ import (
 // mapToJWTAuthConfig Tests
 // =============================================================================
 
-func TestMapToJWTAuthConfig_BasicJWTMode(t *testing.T) {
+func TestMapToJWTAuthConfig_BasicJWKS(t *testing.T) {
 	data := map[string]any{
-		"mode":     "jwt",
 		"jwks_url": "https://example.com/.well-known/jwks.json",
 	}
 
 	config, err := mapToJWTAuthConfig(data)
 	require.NoError(t, err)
 
-	assert.Equal(t, "jwt", config.Mode)
 	assert.Equal(t, "https://example.com/.well-known/jwks.json", config.JWKSURL)
 }
 
-func TestMapToJWTAuthConfig_BasicOIDCMode(t *testing.T) {
+func TestMapToJWTAuthConfig_BasicOIDC(t *testing.T) {
 	data := map[string]any{
-		"mode":               "oidc",
 		"oidc_discovery_url": "https://issuer.example.com/.well-known/openid-configuration",
 	}
 
 	config, err := mapToJWTAuthConfig(data)
 	require.NoError(t, err)
 
-	assert.Equal(t, "oidc", config.Mode)
 	assert.Equal(t, "https://issuer.example.com/.well-known/openid-configuration", config.OIDCDiscoveryURL)
 }
 
 func TestMapToJWTAuthConfig_DefaultValues(t *testing.T) {
 	data := map[string]any{
-		"mode":     "jwt",
 		"jwks_url": "https://example.com/.well-known/jwks.json",
 	}
 
@@ -57,7 +52,6 @@ func TestMapToJWTAuthConfig_DefaultValues(t *testing.T) {
 
 func TestMapToJWTAuthConfig_CustomTokenTTL(t *testing.T) {
 	data := map[string]any{
-		"mode":      "jwt",
 		"jwks_url":  "https://example.com/.well-known/jwks.json",
 		"token_ttl": "2h",
 	}
@@ -70,7 +64,6 @@ func TestMapToJWTAuthConfig_CustomTokenTTL(t *testing.T) {
 
 func TestMapToJWTAuthConfig_CustomUserClaim(t *testing.T) {
 	data := map[string]any{
-		"mode":       "jwt",
 		"jwks_url":   "https://example.com/.well-known/jwks.json",
 		"user_claim": "email",
 	}
@@ -83,7 +76,6 @@ func TestMapToJWTAuthConfig_CustomUserClaim(t *testing.T) {
 
 func TestMapToJWTAuthConfig_BoundIssuer(t *testing.T) {
 	data := map[string]any{
-		"mode":         "jwt",
 		"jwks_url":     "https://example.com/.well-known/jwks.json",
 		"bound_issuer": "https://issuer.example.com",
 	}
@@ -96,7 +88,6 @@ func TestMapToJWTAuthConfig_BoundIssuer(t *testing.T) {
 
 func TestMapToJWTAuthConfig_BoundAudiences(t *testing.T) {
 	data := map[string]any{
-		"mode":            "jwt",
 		"jwks_url":        "https://example.com/.well-known/jwks.json",
 		"bound_audiences": []string{"aud1", "aud2", "aud3"},
 	}
@@ -109,7 +100,6 @@ func TestMapToJWTAuthConfig_BoundAudiences(t *testing.T) {
 
 func TestMapToJWTAuthConfig_BoundSubject(t *testing.T) {
 	data := map[string]any{
-		"mode":          "jwt",
 		"jwks_url":      "https://example.com/.well-known/jwks.json",
 		"bound_subject": "expected-subject",
 	}
@@ -122,7 +112,6 @@ func TestMapToJWTAuthConfig_BoundSubject(t *testing.T) {
 
 func TestMapToJWTAuthConfig_BoundClaims(t *testing.T) {
 	data := map[string]any{
-		"mode":     "jwt",
 		"jwks_url": "https://example.com/.well-known/jwks.json",
 		"bound_claims": map[string]any{
 			"tenant": "acme",
@@ -140,7 +129,6 @@ func TestMapToJWTAuthConfig_BoundClaims(t *testing.T) {
 
 func TestMapToJWTAuthConfig_ClaimMappings(t *testing.T) {
 	data := map[string]any{
-		"mode":     "jwt",
 		"jwks_url": "https://example.com/.well-known/jwks.json",
 		"claim_mappings": map[string]string{
 			"preferred_username": "username",
@@ -158,7 +146,6 @@ func TestMapToJWTAuthConfig_ClaimMappings(t *testing.T) {
 
 func TestMapToJWTAuthConfig_GroupsClaim(t *testing.T) {
 	data := map[string]any{
-		"mode":         "jwt",
 		"jwks_url":     "https://example.com/.well-known/jwks.json",
 		"groups_claim": "roles",
 	}
@@ -171,7 +158,6 @@ func TestMapToJWTAuthConfig_GroupsClaim(t *testing.T) {
 
 func TestMapToJWTAuthConfig_WithCACerts(t *testing.T) {
 	data := map[string]any{
-		"mode":                  "oidc",
 		"oidc_discovery_url":    "https://issuer.example.com/.well-known/openid-configuration",
 		"oidc_discovery_ca_pem": "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----",
 	}
@@ -184,7 +170,6 @@ func TestMapToJWTAuthConfig_WithCACerts(t *testing.T) {
 
 func TestMapToJWTAuthConfig_JWKSWithCA(t *testing.T) {
 	data := map[string]any{
-		"mode":        "jwt",
 		"jwks_url":    "https://example.com/.well-known/jwks.json",
 		"jwks_ca_pem": "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----",
 	}
@@ -208,7 +193,6 @@ func TestMapToJWTAuthConfig_EmptyMap(t *testing.T) {
 
 func TestMapToJWTAuthConfig_AllFields(t *testing.T) {
 	data := map[string]any{
-		"mode":            "jwt",
 		"jwks_url":        "https://example.com/.well-known/jwks.json",
 		"jwks_ca_pem":     "cert-content",
 		"bound_issuer":    "https://issuer.example.com",
@@ -224,7 +208,6 @@ func TestMapToJWTAuthConfig_AllFields(t *testing.T) {
 	config, err := mapToJWTAuthConfig(data)
 	require.NoError(t, err)
 
-	assert.Equal(t, "jwt", config.Mode)
 	assert.Equal(t, "https://example.com/.well-known/jwks.json", config.JWKSURL)
 	assert.Equal(t, "cert-content", config.JWKSCA)
 	assert.Equal(t, "https://issuer.example.com", config.BoundIssuer)
@@ -257,7 +240,6 @@ func TestMapToJWTAuthConfig_DurationParsing(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			data := map[string]any{
-				"mode":      "jwt",
 				"jwks_url":  "https://example.com/.well-known/jwks.json",
 				"token_ttl": tc.tokenTTL,
 			}
@@ -272,7 +254,6 @@ func TestMapToJWTAuthConfig_DurationParsing(t *testing.T) {
 func TestMapToJWTAuthConfig_DurationAsNumber(t *testing.T) {
 	// Duration passed as number (nanoseconds in Go)
 	data := map[string]any{
-		"mode":      "jwt",
 		"jwks_url":  "https://example.com/.well-known/jwks.json",
 		"token_ttl": time.Hour, // duration directly
 	}
@@ -289,27 +270,9 @@ func TestMapToJWTAuthConfig_DurationAsNumber(t *testing.T) {
 func TestMapToJWTAuthConfig_InvalidJSON(t *testing.T) {
 	// Create an unmarshallable value
 	data := map[string]any{
-		"mode":     "jwt",
 		"jwks_url": func() {}, // Functions can't be marshaled to JSON
 	}
 
 	_, err := mapToJWTAuthConfig(data)
 	assert.Error(t, err)
-}
-
-// =============================================================================
-// Mode Inference Tests
-// =============================================================================
-
-func TestMapToJWTAuthConfig_ModeRequired(t *testing.T) {
-	// Mode is no longer inferred - it must be explicitly specified
-	// The validation happens in setupJWTConfig, not mapToJWTAuthConfig
-	data := map[string]any{
-		"mode":     "jwt",
-		"jwks_url": "https://example.com/jwks",
-	}
-
-	config, err := mapToJWTAuthConfig(data)
-	require.NoError(t, err)
-	assert.Equal(t, "jwt", config.Mode)
 }

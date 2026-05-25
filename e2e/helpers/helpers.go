@@ -449,7 +449,7 @@ func SetupNSVaultEnv(t *testing.T, port int) {
 	// JWT auth method
 	NSAPIRequest(t, "POST", "sys/auth/jwt", ns, port, `{"type":"jwt"}`)
 	NSAPIRequest(t, "PUT", "auth/jwt/config", ns, port,
-		`{"mode":"oidc","oidc_discovery_url":"http://localhost:4444","bound_issuer":"http://localhost:4444"}`)
+		`{"oidc_discovery_url":"http://localhost:4444","bound_issuer":"http://localhost:4444"}`)
 
 	// JWT role
 	NSAPIRequest(t, "POST", "auth/jwt/role/e2e-reader", ns, port,

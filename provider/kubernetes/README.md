@@ -46,7 +46,6 @@ warden auth enable --type=jwt --path=auth/jwt/
 
 # Configure JWT auth with your OIDC provider
 warden write auth/jwt/config \
-  mode=jwt \
   jwks_url="http://localhost:4444/.well-known/jwks.json" \
   default_role="k8s-user"
 

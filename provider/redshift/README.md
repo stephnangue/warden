@@ -158,7 +158,6 @@ Set up JWT auth for workload authentication. The auth role does **not** need a `
 warden auth enable --type=jwt
 
 warden write auth/jwt/config \
-    mode=jwt \
     jwks_url=http://localhost:4444/.well-known/jwks.json \
     default_role=db-user
 

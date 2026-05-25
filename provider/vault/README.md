@@ -551,7 +551,7 @@ Steps 1, 3-5 (provider setup) are identical. Replace Steps 2 and 6 with the foll
 warden auth enable --type=jwt
 
 # Configure JWT with the identity provider's JWKS endpoint
-warden write auth/jwt/config mode=jwt jwks_url=http://localhost:4444/.well-known/jwks.json
+warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role that binds the credential spec and policy
 warden write auth/jwt/role/vault-user \
