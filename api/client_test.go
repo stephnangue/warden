@@ -1188,6 +1188,45 @@ func TestClient_WithRole(t *testing.T) {
 	}
 }
 
+func TestClient_ProviderOperations(t *testing.T) {
+	config := DefaultConfig()
+	client, _ := NewClient(config)
+
+	if p := client.Provider(); p != "" {
+		t.Errorf("expected empty provider, got %q", p)
+	}
+
+	client.SetProvider("github")
+	if p := client.Provider(); p != "github" {
+		t.Errorf("expected github, got %q", p)
+	}
+
+	client.ClearProvider()
+	if p := client.Provider(); p != "" {
+		t.Errorf("expected empty after clear, got %q", p)
+	}
+}
+
+func TestClient_WithProvider(t *testing.T) {
+	config := DefaultConfig()
+	client, _ := NewClient(config)
+
+	client.SetProvider("github")
+
+	c2 := client.WithProvider("gitlab")
+	if c2.Provider() != "gitlab" {
+		t.Errorf("expected gitlab, got %q", c2.Provider())
+	}
+	if client.Provider() != "github" {
+		t.Errorf("expected github unchanged, got %q", client.Provider())
+	}
+
+	c3 := client.WithProvider("")
+	if c3.Provider() != "" {
+		t.Errorf("expected empty, got %q", c3.Provider())
+	}
+}
+
 func TestClient_Headers(t *testing.T) {
 	config := DefaultConfig()
 	client, _ := NewClient(config)

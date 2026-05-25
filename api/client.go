@@ -48,6 +48,12 @@ const (
 	// RoleHeaderName is the header name used to specify the role
 	RoleHeaderName = "X-Warden-Role"
 
+	// ProviderHeaderName is the header name used to specify the provider mount.
+	// When set, the server treats the request URL as a literal upstream API path
+	// and synthesises the canonical /<provider>/role/<role>/gateway/<api-path>
+	// shape before mount lookup.
+	ProviderHeaderName = "X-Warden-Provider"
+
 	TLSErrorString = "This error usually means that the server is running with TLS disabled\n" +
 		"but the client is configured to use TLS. Please either enable TLS\n" +
 		"on the server or run the client with -address set to an address\n" +
@@ -1018,6 +1024,60 @@ func (c *Client) WithRole(role string) *Client {
 		c2.ClearRole()
 	} else {
 		c2.SetRole(role)
+	}
+	return &c2
+}
+
+// SetProvider sets the provider mount on the client headers. Subsequent
+// requests will be routed to that mount by the server; the request URL
+// is treated as the literal upstream API path.
+func (c *Client) SetProvider(provider string) {
+	c.modifyLock.Lock()
+	defer c.modifyLock.Unlock()
+	c.setProvider(provider)
+}
+
+// setProvider sets the provider in the client headers. This method requires
+// that the caller hold the client's modifyLock.
+func (c *Client) setProvider(provider string) {
+	if c.headers == nil {
+		c.headers = make(http.Header)
+	}
+
+	c.headers.Set(ProviderHeaderName, provider)
+}
+
+// ClearProvider removes the provider header from the client if it exists.
+func (c *Client) ClearProvider() {
+	c.modifyLock.Lock()
+	defer c.modifyLock.Unlock()
+	if c.headers != nil {
+		c.headers.Del(ProviderHeaderName)
+	}
+}
+
+// Provider returns the provider currently set in this client. It will
+// return an empty string if there is no provider set.
+func (c *Client) Provider() string {
+	c.modifyLock.Lock()
+	defer c.modifyLock.Unlock()
+	if c.headers == nil {
+		return ""
+	}
+	return c.headers.Get(ProviderHeaderName)
+}
+
+// WithProvider makes a shallow copy of Client, modifies it to use
+// the given provider, and returns it. Passing an empty string will
+// temporarily unset the provider.
+func (c *Client) WithProvider(provider string) *Client {
+	c2 := *c
+	c2.modifyLock = sync.RWMutex{}
+	c2.headers = c.Headers()
+	if provider == "" {
+		c2.ClearProvider()
+	} else {
+		c2.SetProvider(provider)
 	}
 	return &c2
 }

@@ -327,6 +327,28 @@ func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logica
 		}
 	}(activeCtx, ctx)
 
+	// Header-routing mode: when X-Warden-Provider is present, the request URL
+	// is treated as the literal upstream API path and the canonical
+	// <provider>/role/<role>/gateway/<api> shape is synthesized before mount
+	// lookup. The header is never honored against the system backend. The
+	// underlying HTTPRequest.URL.Path is also realigned so providers that
+	// read URL.Path directly see the same shape as a path-routed request.
+	if req.HTTPRequest != nil {
+		if provider := req.HTTPRequest.Header.Get("X-Warden-Provider"); provider != "" {
+			if strings.HasPrefix(req.Path, "sys/") {
+				return logical.ErrorResponse(logical.ErrBadRequest("X-Warden-Provider is not honored on system backend paths")), nil
+			}
+			headerRole := req.HTTPRequest.Header.Get("X-Warden-Role")
+			synthesized, err := synthesizeGatewayPath(provider, headerRole, req.Path)
+			if err != nil {
+				return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
+			}
+			req.Path = synthesized
+			req.HTTPRequest.URL.Path = "/v1/" + synthesized
+			req.HTTPRequest.URL.RawPath = ""
+		}
+	}
+
 	// For help operations, mount-root paths (e.g., "azure") may arrive without
 	// a trailing slash because path.Join in the API client strips them.
 	// Use the silent MatchingMount to probe with a trailing slash first,
@@ -349,6 +371,47 @@ func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logica
 	resp, err := c.handleCancelableRequest(ctx, req)
 	req.SetTokenEntry(nil)
 	return resp, err
+}
+
+// synthesizeGatewayPath builds the canonical gateway path from a provider
+// mount value and optional role. The result matches the shape the router
+// and streaming backend expect:
+//
+//	role present: <provider>/role/<role>/gateway/<api>
+//	role empty:   <provider>/gateway/<api>
+//
+// One leading and one trailing slash on the provider value are tolerated
+// and stripped. Empty path segments and bare ".." segments are rejected.
+// Whether the resolved mount exists is the caller's concern (the router's
+// existing 404 path handles that).
+func synthesizeGatewayPath(provider, role, apiPath string) (string, error) {
+	provider = strings.TrimSuffix(provider, "/")
+	provider = strings.TrimPrefix(provider, "/")
+	if provider == "" {
+		return "", fmt.Errorf("X-Warden-Provider value is empty")
+	}
+	for _, seg := range strings.Split(provider, "/") {
+		if seg == "" {
+			return "", fmt.Errorf("X-Warden-Provider value contains an empty path segment")
+		}
+		if seg == ".." {
+			return "", fmt.Errorf("X-Warden-Provider value contains a path-traversal segment")
+		}
+	}
+
+	apiPath = strings.TrimPrefix(apiPath, "/")
+
+	var b strings.Builder
+	b.WriteString(provider)
+	b.WriteString("/")
+	if role != "" {
+		b.WriteString("role/")
+		b.WriteString(role)
+		b.WriteString("/")
+	}
+	b.WriteString("gateway/")
+	b.WriteString(apiPath)
+	return b.String(), nil
 }
 
 func (c *Core) handleCancelableRequest(ctx context.Context, req *logical.Request) (resp *logical.Response, err error) {
