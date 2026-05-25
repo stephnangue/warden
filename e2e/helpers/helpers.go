@@ -386,6 +386,23 @@ func NSVaultTransparentHeaderRequest(t *testing.T, method, vaultPath, role, name
 	return DoRequest(t, method, u, headers, "")
 }
 
+// NSVaultTransparentProviderRequest makes a namespace-scoped transparent Vault
+// gateway request using X-Warden-Provider for mount routing and X-Warden-Role
+// for the auth role. The URL carries only the literal upstream Vault API path
+// (e.g. v1/secret/data/foo), so the on-the-wire URL ends up /v1/v1/<vault-path>:
+// the outer /v1/ is Warden's prefix, the inner v1/<...> is Vault's API path.
+func NSVaultTransparentProviderRequest(t *testing.T, method, vaultPath, role, namespace string, port int, jwt string) (int, []byte) {
+	t.Helper()
+	u := fmt.Sprintf("%s/v1/v1/%s", NodeURL(port), vaultPath)
+	headers := map[string]string{
+		"Authorization":      "Bearer " + jwt,
+		"X-Warden-Namespace": namespace,
+		"X-Warden-Provider":  "vault",
+		"X-Warden-Role":      role,
+	}
+	return DoRequest(t, method, u, headers, "")
+}
+
 // --- Namespace Setup/Teardown ---
 
 const NSVaultNS = "e2e-ci-ns-gw"

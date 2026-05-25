@@ -88,3 +88,23 @@ func TestNSVaultTransparentHeaderRole(t *testing.T) {
 	// Teardown
 	h.TeardownNSVaultEnv(t, leader)
 }
+
+// TestNSVaultTransparentProviderHeader verifies that a request carrying
+// X-Warden-Provider (and X-Warden-Role) reaches the same Vault gateway
+// backend as the path-routed equivalent. The URL is the literal upstream
+// API path (v1/secret/data/...); the mount and role come from headers.
+func TestNSVaultTransparentProviderHeader(t *testing.T) {
+	leader := h.GetLeaderPort(t)
+
+	h.SetupNSVaultEnv(t, leader)
+	defer h.TeardownNSVaultEnv(t, leader)
+
+	jwt := h.GetDefaultJWT(t)
+
+	// Header-routing mode: provider in header, role in header, URL is the
+	// literal Vault path. Same upstream call as the path-routed test above.
+	status, _ := h.NSVaultTransparentProviderRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", h.NSVaultNS, leader, jwt)
+	if status != 200 {
+		t.Fatalf("provider header: expected 200, got %d", status)
+	}
+}

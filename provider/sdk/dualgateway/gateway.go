@@ -128,7 +128,7 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 	}
 
 	headersToRemove := []string{
-		"X-Warden-Token", "X-Warden-Role", "X-Warden-On-Behalf-Of",
+		"X-Warden-Token", "X-Warden-Role", "X-Warden-Provider", "X-Warden-On-Behalf-Of",
 		"Connection", "Keep-Alive", "Transfer-Encoding", "Upgrade",
 		"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
 		"X-Forwarded-Port", "X-Real-Ip", "Forwarded",

@@ -170,6 +170,141 @@ func TestHandleRequest_NamespaceHeader(t *testing.T) {
 	_ = err // err may contain permission denied
 }
 
+// TestSynthesizeGatewayPath covers the normalization rules for the
+// X-Warden-Provider header value and the role-empty / role-present
+// branches of the path-synthesis helper.
+func TestSynthesizeGatewayPath(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider string
+		role     string
+		apiPath  string
+		want     string
+		wantErr  bool
+	}{
+		// Successful normalisations.
+		{"single segment", "github", "repo-reader", "repos/org/repo", "github/role/repo-reader/gateway/repos/org/repo", false},
+		{"trailing slash stripped", "github/", "repo-reader", "repos/org/repo", "github/role/repo-reader/gateway/repos/org/repo", false},
+		{"leading slash stripped", "/github", "repo-reader", "repos/org/repo", "github/role/repo-reader/gateway/repos/org/repo", false},
+		{"multi-segment mount", "gitlab/prod", "ci", "api/v4/projects/1", "gitlab/prod/role/ci/gateway/api/v4/projects/1", false},
+		{"multi-segment with trailing slash", "gitlab/prod/", "ci", "api/v4/projects/1", "gitlab/prod/role/ci/gateway/api/v4/projects/1", false},
+		{"role empty", "github", "", "repos/org/repo", "github/gateway/repos/org/repo", false},
+		{"api path with leading slash", "github", "r", "/repos/org/repo", "github/role/r/gateway/repos/org/repo", false},
+		{"double-dot infix is OK", "gitlab/..eu-west", "r", "p", "gitlab/..eu-west/role/r/gateway/p", false},
+
+		// Malformed values that must error.
+		{"empty provider", "", "r", "p", "", true},
+		{"slash only", "/", "r", "p", "", true},
+		{"empty middle segment", "gitlab//prod", "r", "p", "", true},
+		{"bare double-dot", "..", "r", "p", "", true},
+		{"trailing double-dot", "gitlab/..", "r", "p", "", true},
+		{"whitespace only passes synthesis", "   ", "r", "p", "   /role/r/gateway/p", false},
+	}
+	// Whitespace is not stripped or rejected per-segment; the helper trusts
+	// that no real mount has whitespace-only names, so the request lands on
+	// the existing 404 path rather than 400. The case above documents that.
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := synthesizeGatewayPath(tc.provider, tc.role, tc.apiPath)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestHandleRequest_ProviderHeader_SysRejected verifies that a request
+// carrying X-Warden-Provider against a /v1/sys/... URL is rejected with
+// 400, regardless of whether the named mount exists.
+func TestHandleRequest_ProviderHeader_SysRejected(t *testing.T) {
+	core := createTestCore(t)
+
+	httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/mounts", nil)
+	httpReq.Header.Set("X-Warden-Provider", "github")
+
+	req := &logical.Request{
+		Path:        "sys/mounts",
+		Operation:   logical.ReadOperation,
+		HTTPRequest: httpReq,
+	}
+
+	resp, err := core.HandleRequest(context.Background(), req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestHandleRequest_ProviderHeader_SysRejected_WithNamespace confirms the
+// sys-backend exclusion fires after namespace strip, not just when the raw
+// URL begins with /v1/sys/.
+func TestHandleRequest_ProviderHeader_SysRejected_WithNamespace(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	childNs := &namespace.Namespace{Path: "tenant-a/"}
+	require.NoError(t, core.namespaceStore.SetNamespace(ctx, childNs))
+
+	httpReq := httptest.NewRequest(http.MethodGet, "/v1/tenant-a/sys/mounts", nil)
+	httpReq.Header.Set("X-Warden-Provider", "github")
+
+	req := &logical.Request{
+		Path:        "tenant-a/sys/mounts",
+		Operation:   logical.ReadOperation,
+		HTTPRequest: httpReq,
+	}
+
+	resp, err := core.HandleRequest(context.Background(), req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestHandleRequest_ProviderHeader_Malformed verifies that a structurally
+// malformed X-Warden-Provider value returns 400 (not 404).
+func TestHandleRequest_ProviderHeader_Malformed(t *testing.T) {
+	core := createTestCore(t)
+
+	httpReq := httptest.NewRequest(http.MethodGet, "/v1/repos/org/repo", nil)
+	httpReq.Header.Set("X-Warden-Provider", "gitlab/..")
+
+	req := &logical.Request{
+		Path:        "repos/org/repo",
+		Operation:   logical.ReadOperation,
+		HTTPRequest: httpReq,
+	}
+
+	resp, err := core.HandleRequest(context.Background(), req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestHandleRequest_ProviderHeader_NoSuchMount verifies that a well-formed
+// X-Warden-Provider value naming an unmounted provider returns 404, not 400.
+// This is the error-class split: 400 = malformed header, 404 = unknown mount.
+func TestHandleRequest_ProviderHeader_NoSuchMount(t *testing.T) {
+	core := createTestCore(t)
+
+	httpReq := httptest.NewRequest(http.MethodGet, "/v1/repos/org/repo", nil)
+	httpReq.Header.Set("X-Warden-Provider", "doesnotexist")
+
+	req := &logical.Request{
+		Path:        "repos/org/repo",
+		Operation:   logical.ReadOperation,
+		HTTPRequest: httpReq,
+	}
+
+	resp, err := core.HandleRequest(context.Background(), req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
 // TestParseRequestBody tests the parseRequestBody function
 func TestParseRequestBody(t *testing.T) {
 	core := createTestCore(t)
