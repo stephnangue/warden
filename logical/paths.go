@@ -16,7 +16,7 @@ type Paths struct {
 	// Stream is a list of paths that handle streaming requests.
 	// For these paths, the core does two things during processing:
 	//  1) does NOT parse request body into req.Data, unless the backend
-	//     implements StreamBodyParser and returns true from ShouldParseStreamBody().
+	//     implements StreamBodyParser and returns true from ShouldParseStreamBody.
 	//     In that case, JSON and form-urlencoded bodies are parsed and restored
 	//     for the streaming handler to re-read.
 	//  2) mints and injects credential into logical request

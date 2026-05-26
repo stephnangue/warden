@@ -1,6 +1,7 @@
 package framework
 
 import (
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -456,11 +457,13 @@ func BenchmarkIsUnauthenticatedPath_NoMatch(b *testing.B) {
 }
 
 func TestShouldParseStreamBody(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/test/gateway/foo", nil)
+
 	t.Run("returns false by default", func(t *testing.T) {
 		b := &StreamingBackend{
 			Backend: &Backend{BackendType: "test"},
 		}
-		assert.False(t, b.ShouldParseStreamBody())
+		assert.False(t, b.ShouldParseStreamBody(r))
 	})
 
 	t.Run("returns true when enabled", func(t *testing.T) {
@@ -468,6 +471,15 @@ func TestShouldParseStreamBody(t *testing.T) {
 			ParseStreamBody: true,
 			Backend:         &Backend{BackendType: "test"},
 		}
-		assert.True(t, b.ShouldParseStreamBody())
+		assert.True(t, b.ShouldParseStreamBody(r))
+	})
+
+	t.Run("ignores request shape", func(t *testing.T) {
+		b := &StreamingBackend{
+			ParseStreamBody: true,
+			Backend:         &Backend{BackendType: "test"},
+		}
+		// Per-request behaviour belongs in subtypes that override the method.
+		assert.True(t, b.ShouldParseStreamBody(httptest.NewRequest("GET", "/v1/test/gateway/anything.bin", nil)))
 	})
 }

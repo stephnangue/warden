@@ -1427,7 +1427,7 @@ type mockStreamBodyParserBackend struct {
 	parseStreamBody bool
 }
 
-func (m *mockStreamBodyParserBackend) ShouldParseStreamBody() bool {
+func (m *mockStreamBodyParserBackend) ShouldParseStreamBody(_ *http.Request) bool {
 	return m.parseStreamBody
 }
 

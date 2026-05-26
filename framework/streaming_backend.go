@@ -652,8 +652,9 @@ func (b *StreamingBackend) IsUnauthenticatedPath(path string) bool {
 	return false
 }
 
-// ShouldParseStreamBody implements logical.StreamBodyParser.
-func (b *StreamingBackend) ShouldParseStreamBody() bool {
+// ShouldParseStreamBody implements logical.StreamBodyParser. Subtypes may
+// override to inspect the request.
+func (b *StreamingBackend) ShouldParseStreamBody(_ *http.Request) bool {
 	return b.ParseStreamBody
 }
 
