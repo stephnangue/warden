@@ -19,12 +19,12 @@ var (
 Usage: warden auth disable [PATH]
 
   Disables an auth method at the given PATH. The PATH may be supplied
-  either positionally or via --path (pick one — combining both is rejected).
+  either positionally or via -path (pick one — combining both is rejected).
 
   Disable the auth method enabled at jwt/:
 
       $ warden auth disable jwt/
-      $ warden auth disable --path=jwt/
+      $ warden auth disable -path=jwt/
 `,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runDisable,

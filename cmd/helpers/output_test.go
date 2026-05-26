@@ -289,9 +289,9 @@ func TestRenderMap_FieldsInTableModeBypassesTableFnAndWarns(t *testing.T) {
 		t.Fatalf("RenderMap: %v", err)
 	}
 	if called {
-		t.Error("tableFn should be bypassed when --fields is set in table mode")
+		t.Error("tableFn should be bypassed when -fields is set in table mode")
 	}
-	if !strings.Contains(stderr.String(), "warning: --fields with table output") {
+	if !strings.Contains(stderr.String(), "warning: -fields with table output") {
 		t.Errorf("expected stderr warning, got: %q", stderr.String())
 	}
 }
@@ -311,9 +311,9 @@ func TestRenderList_FieldsInTableModeBypassesTableFnAndWarns(t *testing.T) {
 		t.Fatalf("RenderList: %v", err)
 	}
 	if called {
-		t.Error("tableFn should be bypassed when --fields is set in table mode")
+		t.Error("tableFn should be bypassed when -fields is set in table mode")
 	}
-	if !strings.Contains(stderr.String(), "warning: --fields with table output") {
+	if !strings.Contains(stderr.String(), "warning: -fields with table output") {
 		t.Errorf("expected stderr warning, got: %q", stderr.String())
 	}
 }

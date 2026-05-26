@@ -50,7 +50,7 @@ The GCP provider enables proxied access to Google Cloud Platform APIs through Wa
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -81,7 +81,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -98,13 +98,13 @@ warden write auth/jwt/role/gcp-user \
 Enable the GCP provider at a path of your choice:
 
 ```bash
-warden provider enable --type=gcp
+warden provider enable gcp
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=gcp gcp-prod
+warden provider enable -path=gcp-prod gcp
 ```
 
 Verify the provider is enabled:
@@ -137,10 +137,10 @@ The credential source holds the service account key used to authenticate with GC
 
 ```bash
 warden cred source create gcp-sa \
-  --type=gcp_access_token \
-  --rotation-period=720h \
-  --config=source=gcp \
-  --config=service_account_key=@/path/to/service-account-key.json
+  -type=gcp_access_token \
+  -rotation-period=720h \
+  -config=source=gcp \
+  -config=service_account_key=@/path/to/service-account-key.json
 ```
 
 The `@` prefix reads the file contents into the config value.
@@ -159,11 +159,11 @@ Mint OAuth2 access tokens using the source service account directly:
 
 ```bash
 warden cred spec create gcp-cloud-platform \
-  --source=gcp-sa \
-  --min-ttl=5m \
-  --max-ttl=1h \
-  --config=mint_method=access_token \
-  --config=scopes=https://www.googleapis.com/auth/cloud-platform
+  -source=gcp-sa \
+  -min-ttl=5m \
+  -max-ttl=1h \
+  -config=mint_method=access_token \
+  -config=scopes=https://www.googleapis.com/auth/cloud-platform
 ```
 
 ### Option B: Impersonated Access Token
@@ -172,13 +172,13 @@ Mint tokens on behalf of another service account:
 
 ```bash
 warden cred spec create gcp-impersonated \
-  --source=gcp-sa \
-  --min-ttl=5m \
-  --max-ttl=1h \
-  --config=mint_method=impersonated_access_token \
-  --config=target_service_account=target@my-project.iam.gserviceaccount.com \
-  --config=scopes=https://www.googleapis.com/auth/cloud-platform \
-  --config=lifetime=3600s
+  -source=gcp-sa \
+  -min-ttl=5m \
+  -max-ttl=1h \
+  -config=mint_method=impersonated_access_token \
+  -config=target_service_account=target@my-project.iam.gserviceaccount.com \
+  -config=scopes=https://www.googleapis.com/auth/cloud-platform \
+  -config=lifetime=3600s
 ```
 
 ### Option C: Vault/OpenBao GCP Secret Engine
@@ -192,29 +192,29 @@ Instead of storing a service account key in Warden, you can use the Vault GCP se
 ```bash
 # Create a Vault credential source
 warden cred source create gcp-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=your-role-id \
-  --config=secret_id=your-secret-id \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=your-role-id \
+  -config=secret_id=your-secret-id \
+  -config=approle_mount=approle \
+  -config=role_name=warden-role \
+  -rotation-period=24h
 
 # Create a credential spec using the dynamic_gcp mint method (roleset)
 warden cred spec create gcp-cloud-platform \
-  --source gcp-vault-src \
-  --config mint_method=dynamic_gcp \
-  --config gcp_mount=gcp \
-  --config role_name=my-roleset
+  -source gcp-vault-src \
+  -config mint_method=dynamic_gcp \
+  -config gcp_mount=gcp \
+  -config role_name=my-roleset
 
 # Or using a static account instead of a roleset
 warden cred spec create gcp-static \
-  --source gcp-vault-src \
-  --config mint_method=dynamic_gcp \
-  --config gcp_mount=gcp \
-  --config role_name=my-static-account \
-  --config role_type=static-account
+  -source gcp-vault-src \
+  -config mint_method=dynamic_gcp \
+  -config gcp_mount=gcp \
+  -config role_name=my-static-account \
+  -config role_type=static-account
 ```
 
 Verify:
@@ -379,14 +379,14 @@ When the source key rotates, all credential specs sharing that source automatica
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA

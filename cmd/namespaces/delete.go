@@ -28,7 +28,7 @@ Usage: warden namespace delete <path> [options]
   WARNING: This is a destructive operation and cannot be undone!
 
   By default, this command will ask for confirmation before deleting.
-  Use the -f/--force flag to skip the confirmation prompt.
+  Use the -f/-force flag to skip the confirmation prompt.
 
   Delete a namespace (with confirmation):
 
@@ -68,7 +68,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return helpers.DryRun(c, "DELETE", "sys/namespaces/{path}", nil)
 	}
 
-	// Confirmation prompt (unless --force is used)
+	// Confirmation prompt (unless -force is used)
 	if !deleteForce {
 		fmt.Printf("WARNING: This will permanently delete the namespace '%s' and all its contents.\n", path)
 		fmt.Print("Are you sure you want to continue? (yes/no): ")

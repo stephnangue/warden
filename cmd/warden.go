@@ -36,10 +36,10 @@ safe operations, and complete visibility.`,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if err := helpers.ValidateHeaderValue("--namespace", flagNamespace); err != nil {
+			if err := helpers.ValidateHeaderValue("-namespace", flagNamespace); err != nil {
 				return err
 			}
-			if err := helpers.ValidateHeaderValue("--role", flagRole); err != nil {
+			if err := helpers.ValidateHeaderValue("-role", flagRole); err != nil {
 				return err
 			}
 			if flagNamespace != "" {

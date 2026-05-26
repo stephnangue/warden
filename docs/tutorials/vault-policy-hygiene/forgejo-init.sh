@@ -3,7 +3,7 @@
 # Creates the 'siteowner' admin if it doesn't already exist.
 set -eu
 
-FORGEJO="forgejo --config /data/gitea/conf/app.ini"
+FORGEJO="forgejo -config /data/gitea/conf/app.ini"
 
 if $FORGEJO admin user list 2>/dev/null | awk '{print $2}' | grep -qx siteowner; then
   echo "forgejo-init: 'siteowner' already exists"

@@ -5,8 +5,8 @@ description: "Audit IAM principals in the connected AWS account through four rea
 instructions: |
   You operate on Warden. To learn how, run
 
-      warden skill read foundation --raw
-      warden skill read discovery  --raw
+      warden skill read foundation -raw
+      warden skill read discovery  -raw
 
   Browse the full catalog with `warden skill list -F name,description`.
 
@@ -101,7 +101,7 @@ prompt: |
        descriptions. Do not assume role names — extract them from
        discovery output.
 
-    2. Read the `aws` provider skill (`warden skill read aws --raw`)
+    2. Read the `aws` provider skill (`warden skill read aws -raw`)
        and the slack provider skill if present. Follow the call-shape
        contracts they define — do not invent endpoints or
        authentication mechanisms.

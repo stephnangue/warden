@@ -10,41 +10,39 @@ import (
 )
 
 var (
-	enableType        string
 	enableDescription string
 	enablePath        string
 	enableJSON        string
 
 	EnableCmd = &cobra.Command{
-		Use:           "enable [PATH]",
+		Use:           "enable TYPE",
+		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Short:         "This command enables an auth method.",
 		Long: `
-Usage: warden auth enable [options] [PATH]
+Usage: warden auth enable [options] TYPE
 
-  Enable an auth method. By default the mount path matches the TYPE, but a
-  custom path can be supplied either positionally or via --path. Two input
-  modes:
+  Enable an auth method. TYPE is the auth method to enable (e.g. jwt, oidc).
+  By default the mount path matches TYPE; pass -path to mount at a custom
+  location. Two input modes:
 
     Typed flags (human-friendly):
 
-      $ warden auth enable --type=jwt
-      $ warden auth enable --type=oidc oidc-prod
-      $ warden auth enable --type=oidc --path=oidc-prod
-      $ warden auth enable --type=jwt --description="Hydra OIDC"
+      $ warden auth enable jwt
+      $ warden auth enable -path=jwt-prod jwt
+      $ warden auth enable -description="Hydra OIDC" jwt
 
     Full JSON payload (agent-friendly):
 
-      $ warden auth enable jwt --json @auth-jwt.json
-      $ warden auth enable jwt --json '{"type":"jwt","description":"..."}'
-      $ cat auth-jwt.json | warden auth enable jwt --json -
+      $ warden auth enable jwt -json @auth-jwt.json
+      $ warden auth enable jwt -json '{"type":"jwt","description":"..."}'
+      $ cat auth-jwt.json | warden auth enable jwt -json -
 
-  --json is mutually exclusive with --type / --description. The mount path
-  may be provided positionally or via --path (pick one — combining both is
-  rejected). When neither is set, the path is derived from --type or from
-  the JSON payload's "type" field (e.g. type "jwt" → mount "jwt/"). Combine
-  with --dry-run to validate the payload locally without enabling the mount.
+  -json is mutually exclusive with -description. The mount path defaults to
+  TYPE; override it with -path. If the JSON payload includes a "type" field,
+  it must match TYPE. Combine with -dry-run to validate the payload locally
+  without enabling the mount.
 
   For a full list of auth methods and examples, please see the documentation.
 `,
@@ -53,17 +51,13 @@ Usage: warden auth enable [options] [PATH]
 )
 
 func init() {
-	EnableCmd.Flags().StringVar(&enableType, "type", "", "Type of the auth method (e.g., jwt, oidc, ldap) (required unless --json)")
 	EnableCmd.Flags().StringVar(&enableDescription, "description", "", "Human-friendly description of the auth method")
-	EnableCmd.Flags().StringVar(&enablePath, "path", "", "Mount path (alternative to the positional PATH argument)")
-	EnableCmd.Flags().StringVarP(&enableJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with --type/--description)")
+	EnableCmd.Flags().StringVar(&enablePath, "path", "", "Custom mount path (default: TYPE)")
+	EnableCmd.Flags().StringVarP(&enableJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with -description)")
 }
 
 func runEnable(cmd *cobra.Command, args []string) error {
-	explicitPath, err := helpers.ResolvePath(args, enablePath)
-	if err != nil {
-		return err
-	}
+	enableType := strings.TrimSuffix(args[0], "/")
 
 	c, err := helpers.Client()
 	if err != nil {
@@ -75,21 +69,27 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	path := enablePath
+	if path == "" {
+		path = enableType
+	}
+	if !strings.HasSuffix(path, "/") {
+		path = path + "/"
+	}
+	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
+
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"--type":        enableType != "",
-			"--description": enableDescription != "",
+			"-description": enableDescription != "",
 		}); err != nil {
 			return err
 		}
-		// --json mode still needs a path — use the explicit path (positional
-		// or --path) or derive it from the payload's "type" field.
-		path := helpers.MountPathFromArgOrPayload(explicitPath, jsonPayload)
-		if path == "" {
-			return fmt.Errorf("--json without a PATH (positional or --path) and without a 'type' field in the payload: cannot determine mount path: %w", helpers.ErrUsage)
-		}
-		if err := helpers.ValidatePath(path); err != nil {
-			return err
+		if payloadType, ok := jsonPayload["type"].(string); ok && payloadType != "" && payloadType != enableType {
+			return fmt.Errorf(
+				"TYPE positional %q disagrees with -json payload \"type\":%q: %w",
+				enableType, payloadType, helpers.ErrUsage)
 		}
 		if helpers.ResolveDryRun() {
 			return helpers.DryRun(c, "POST", "sys/auth/{path}", jsonPayload)
@@ -112,25 +112,6 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	if enableType == "" {
-		return fmt.Errorf("--type is required (or use --json): %w", helpers.ErrUsage)
-	}
-
-	var path string
-	if explicitPath != "" {
-		path = explicitPath
-	} else {
-		path = enableType + "/"
-	}
-	if !strings.HasSuffix(path, "/") {
-		path = path + "/"
-	}
-
-	if err := helpers.ValidatePath(path); err != nil {
-		return err
-	}
-
-	// Build auth mount input
 	authInput := &api.AuthMountInput{
 		Type:        enableType,
 		Description: enableDescription,
@@ -144,7 +125,6 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		return helpers.DryRun(c, "POST", "sys/auth/{path}", payload)
 	}
 
-	// Enable the auth method
 	err = c.Sys().EnableAuth(path, authInput)
 	if err != nil {
 		return fmt.Errorf("error enabling auth method: %w", err)
@@ -154,4 +134,3 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Success! Enabled %s auth method at: %s\n", enableType, path)
 	})
 }
-

@@ -56,7 +56,7 @@ The OVH provider enables proxied access to OVHcloud APIs through Warden. It supp
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -74,7 +74,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -91,13 +91,13 @@ warden write auth/jwt/role/ovh-user \
 Enable the OVH provider at a path of your choice:
 
 ```bash
-warden provider enable --type=ovh
+warden provider enable ovh
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=ovh ovh-prod
+warden provider enable -path=ovh-prod ovh
 ```
 
 Verify the provider is enabled:
@@ -133,12 +133,12 @@ Create an OVH credential source using an OAuth2 service account. Warden automati
 
 ```bash
 warden cred source create ovh-src \
-  --type=ovh \
-  --config client_id=your-client-id \
-  --config client_secret=your-client-secret \
-  --config ovh_endpoint=ovh-eu \
-  --config project_id=your-cloud-project-id \
-  --config user_id=your-cloud-user-id
+  -type=ovh \
+  -config client_id=your-client-id \
+  -config client_secret=your-client-secret \
+  -config ovh_endpoint=ovh-eu \
+  -config project_id=your-cloud-project-id \
+  -config user_id=your-cloud-user-id
 ```
 
 The `project_id` and `user_id` are only needed for S3 credential management (`dynamic_s3` and `oauth2_token_and_s3` mint methods). They can be omitted if you only need API tokens, or overridden per-spec for multi-tenant S3 access.
@@ -147,27 +147,27 @@ The `project_id` and `user_id` are only needed for S3 credential management (`dy
 
 ```bash
 warden cred spec create ovh-api \
-  --source ovh-src \
-  --type=ovh_keys \
-  --config mint_method=oauth2_token
+  -source ovh-src \
+  -type=ovh_keys \
+  -config mint_method=oauth2_token
 ```
 
 **S3-only mode** (dynamic S3 credentials, ~1h TTL, revoked and re-created on expiry):
 
 ```bash
 warden cred spec create ovh-s3 \
-  --source ovh-src \
-  --type=ovh_keys \
-  --config mint_method=dynamic_s3
+  -source ovh-src \
+  -type=ovh_keys \
+  -config mint_method=dynamic_s3
 ```
 
 **Dual mode** (OAuth2 token + S3 credentials):
 
 ```bash
 warden cred spec create ovh-dual \
-  --source ovh-src \
-  --type=ovh_keys \
-  --config mint_method=oauth2_token_and_s3
+  -source ovh-src \
+  -type=ovh_keys \
+  -config mint_method=oauth2_token_and_s3
 ```
 
 **Multi-tenant S3 access** — override `project_id` and `user_id` per-spec to target different S3 users:
@@ -175,19 +175,19 @@ warden cred spec create ovh-dual \
 ```bash
 # Read-only S3 user
 warden cred spec create ovh-s3-reader \
-  --source ovh-src \
-  --type=ovh_keys \
-  --config mint_method=dynamic_s3 \
-  --config project_id=my-project \
-  --config user_id=reader-user-id
+  -source ovh-src \
+  -type=ovh_keys \
+  -config mint_method=dynamic_s3 \
+  -config project_id=my-project \
+  -config user_id=reader-user-id
 
 # Read-write S3 user
 warden cred spec create ovh-s3-writer \
-  --source ovh-src \
-  --type=ovh_keys \
-  --config mint_method=dynamic_s3 \
-  --config project_id=my-project \
-  --config user_id=writer-user-id
+  -source ovh-src \
+  -type=ovh_keys \
+  -config mint_method=dynamic_s3 \
+  -config project_id=my-project \
+  -config user_id=writer-user-id
 ```
 
 Verify:
@@ -403,14 +403,14 @@ S3 Object Storage regions are independent of the API region and are auto-detecte
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA
@@ -528,7 +528,7 @@ aws s3 ls s3://my-bucket/ \
 2. Update the credential source:
    ```bash
    warden cred source update ovh-src \
-     --config client_id=new-client-id \
-     --config client_secret=new-client-secret
+     -config client_id=new-client-id \
+     -config client_secret=new-client-secret
    ```
 3. Revoke the old service account in OVHcloud IAM

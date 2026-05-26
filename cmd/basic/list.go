@@ -20,7 +20,7 @@ var (
 Usage: warden list [PATH]
 
   List data from the given path. The PATH may be supplied either
-  positionally or via --path (pick one — combining both is rejected).
+  positionally or via -path (pick one — combining both is rejected).
   The path should be in the format "provider_mount/resource" or
   "auth/auth_mount/resource" or "sys/path/to/resource" and will be
   converted to the appropriate API path.
@@ -30,7 +30,7 @@ Usage: warden list [PATH]
     List JWT auth roles:
 
       $ warden list auth/jwt/role
-      $ warden list --path=auth/jwt/role
+      $ warden list -path=auth/jwt/role
 
     List providers:
 
@@ -76,7 +76,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	keys := extractKeys(resource.Data)
 
 	// Table mode keeps the existing "Keys\n  key1\n  key2" layout. Other
-	// formats render via the shared helper, which honors --fields.
+	// formats render via the shared helper, which honors -fields.
 	if helpers.ResolveFormat() == helpers.FormatTable {
 		printKeys(keys)
 		return nil

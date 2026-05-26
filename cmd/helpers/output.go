@@ -55,7 +55,7 @@ func ResetWriters() {
 }
 
 // ResolveFormat returns the effective output format. Resolution order:
-// explicit --output flag, then $WARDEN_OUTPUT, then TTY autodetect (table on
+// explicit -output flag, then $WARDEN_OUTPUT, then TTY autodetect (table on
 // terminal, json otherwise).
 func ResolveFormat() Format {
 	if outputFlag != "" {
@@ -70,7 +70,7 @@ func ResolveFormat() Format {
 	return FormatJSON
 }
 
-// ResolveFields returns the parsed list of dot-paths from --fields or
+// ResolveFields returns the parsed list of dot-paths from -fields or
 // $WARDEN_FIELDS. Returns nil when no projection is requested.
 func ResolveFields() []string {
 	raw := fieldsFlag
@@ -105,7 +105,7 @@ func ValidateFormat(f Format) error {
 
 // RenderMap emits a single map at the resolved format. tableFn renders the
 // table form; pass nil to fall back to PrintMapAsTable. Field projection is
-// applied to all non-table formats; in table mode with --fields set, the
+// applied to all non-table formats; in table mode with -fields set, the
 // bespoke tableFn is bypassed in favor of a generic projected key/value table.
 func RenderMap(data map[string]any, tableFn func()) error {
 	format := ResolveFormat()
@@ -117,7 +117,7 @@ func RenderMap(data map[string]any, tableFn func()) error {
 
 	if format == FormatTable {
 		if fields != nil {
-			fmt.Fprintln(errWriter, "warning: --fields with table output uses a generic key/value layout; use -o json for the structured form")
+			fmt.Fprintln(errWriter, "warning: -fields with table output uses a generic key/value layout; use -o json for the structured form")
 			PrintMapAsTable(ProjectMap(data, fields))
 			return nil
 		}
@@ -147,7 +147,7 @@ func RenderMap(data map[string]any, tableFn func()) error {
 // RenderList emits a slice of records at the resolved format. tableFn renders
 // the table form (and is responsible for any "no items" message in table mode
 // when items is empty). Field projection is applied to non-table formats; in
-// table mode with --fields set, the bespoke tableFn is bypassed in favor of a
+// table mode with -fields set, the bespoke tableFn is bypassed in favor of a
 // projected per-column table.
 func RenderList(items []map[string]any, tableFn func()) error {
 	format := ResolveFormat()
@@ -159,7 +159,7 @@ func RenderList(items []map[string]any, tableFn func()) error {
 
 	if format == FormatTable {
 		if fields != nil {
-			fmt.Fprintln(errWriter, "warning: --fields with table output uses a generic projected layout; use -o json for the structured form")
+			fmt.Fprintln(errWriter, "warning: -fields with table output uses a generic projected layout; use -o json for the structured form")
 			renderProjectedListTable(items, fields)
 			return nil
 		}
@@ -204,7 +204,7 @@ func RenderList(items []map[string]any, tableFn func()) error {
 }
 
 // RenderStrings emits a list of plain strings (e.g. policy names, list keys)
-// at the resolved format. tableFn renders the table form. --fields is ignored
+// at the resolved format. tableFn renders the table form. -fields is ignored
 // since strings have no fields to project.
 func RenderStrings(items []string, tableFn func()) error {
 	format := ResolveFormat()
@@ -310,7 +310,7 @@ func needsQuoting(s string) bool {
 }
 
 // renderProjectedListTable prints a table with one column per requested field
-// and one row per record, used when --fields is set in table mode.
+// and one row per record, used when -fields is set in table mode.
 func renderProjectedListTable(items []map[string]any, fields []string) {
 	if len(items) == 0 {
 		fmt.Fprintln(outWriter, "No data to display")

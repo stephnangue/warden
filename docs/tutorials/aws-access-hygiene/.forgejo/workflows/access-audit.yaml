@@ -96,7 +96,7 @@ jobs:
           echo "--- providers in the namespace (account-id and region are in descriptions) ---"
           warden provider list -o json -F type,description,mount_url | jq .
           echo "--- aws skill (head) ---"
-          warden skill read aws --raw | head -30
+          warden skill read aws -raw | head -30
 
       - name: Run Goose access-hygiene audit
         env:

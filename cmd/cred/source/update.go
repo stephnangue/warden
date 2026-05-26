@@ -22,14 +22,14 @@ Usage: warden cred source update <name> [flags]
 
     Typed flags (human-friendly):
 
-      $ warden cred source update my-aws --config=region=eu-west-1
+      $ warden cred source update my-aws -config=region=eu-west-1
 
     Full JSON payload (agent-friendly):
 
-      $ warden cred source update my-aws --json @aws-source.json
-      $ cat aws-source.json | warden cred source update my-aws --json -
+      $ warden cred source update my-aws -json @aws-source.json
+      $ cat aws-source.json | warden cred source update my-aws -json -
 
-  --json is mutually exclusive with --config. Combine with --dry-run to
+  -json is mutually exclusive with -config. Combine with -dry-run to
   validate the payload locally without modifying the source.
 `,
 		SilenceUsage:  true,
@@ -41,7 +41,7 @@ Usage: warden cred source update <name> [flags]
 
 func init() {
 	UpdateCmd.Flags().StringToStringVar(&updateConfig, "config", nil, "Source configuration (key=value)")
-	UpdateCmd.Flags().StringVarP(&updateJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with --config)")
+	UpdateCmd.Flags().StringVarP(&updateJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with -config)")
 }
 
 func runUpdate(cmd *cobra.Command, args []string) error {
@@ -62,7 +62,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"--config": len(updateConfig) > 0,
+			"-config": len(updateConfig) > 0,
 		}); err != nil {
 			return err
 		}
@@ -88,7 +88,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(updateConfig) == 0 {
-		return fmt.Errorf("--config is required (or use --json): %w", helpers.ErrUsage)
+		return fmt.Errorf("-config is required (or use -json): %w", helpers.ErrUsage)
 	}
 
 	resolvedConfig, err := helpers.ResolveFileRefs(updateConfig)

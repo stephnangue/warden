@@ -19,7 +19,7 @@ var (
 Usage: warden audit disable [PATH]
 
   Disables an audit device at the given PATH. The PATH may be supplied
-  either positionally or via --path (pick one — combining both is rejected).
+  either positionally or via -path (pick one — combining both is rejected).
 
   WARNING: Warden operates in fail-closed mode. You cannot disable the last
   remaining audit device. Attempting to do so will result in an error.
@@ -31,7 +31,7 @@ Usage: warden audit disable [PATH]
   Disable the audit device enabled at file/:
 
       $ warden audit disable file/
-      $ warden audit disable --path=file/
+      $ warden audit disable -path=file/
 `,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runDisable,

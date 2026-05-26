@@ -208,53 +208,6 @@ func TestRejectFlagsWithJSON_DeterministicOrder(t *testing.T) {
 	}
 }
 
-func TestMountPathFromArgOrPayload(t *testing.T) {
-	cases := []struct {
-		name         string
-		explicitPath string
-		payload      map[string]any
-		want         string
-	}{
-		{
-			name:         "explicit path wins",
-			explicitPath: "custom-mount",
-			payload:      map[string]any{"type": "jwt"},
-			want:         "custom-mount/",
-		},
-		{
-			name:         "no explicit path, derive from payload type",
-			explicitPath: "",
-			payload:      map[string]any{"type": "jwt"},
-			want:         "jwt/",
-		},
-		{
-			name:         "no explicit path, no type → empty",
-			explicitPath: "",
-			payload:      map[string]any{},
-			want:         "",
-		},
-		{
-			name:         "no explicit path, nil payload → empty",
-			explicitPath: "",
-			payload:      nil,
-			want:         "",
-		},
-		{
-			name:         "trailing slash preserved",
-			explicitPath: "already-slashed/",
-			payload:      nil,
-			want:         "already-slashed/",
-		},
-	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := MountPathFromArgOrPayload(tt.explicitPath, tt.payload); got != tt.want {
-				t.Errorf("got %q; want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestRequirePath(t *testing.T) {
 	t.Run("positional only", func(t *testing.T) {
 		got, err := RequirePath([]string{"jwt/"}, "")

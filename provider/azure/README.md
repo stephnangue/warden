@@ -51,7 +51,7 @@ The Azure provider enables proxied access to Azure APIs through Warden. It manag
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -116,7 +116,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -133,13 +133,13 @@ warden write auth/jwt/role/azure-user \
 Enable the Azure provider at a path of your choice:
 
 ```bash
-warden provider enable --type=azure
+warden provider enable azure
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=azure azure-prod
+warden provider enable -path=azure-prod azure
 ```
 
 Verify the provider is enabled:
@@ -172,12 +172,12 @@ The credential source holds the Microsoft Entra ID service principal credentials
 
 ```bash
 warden cred source create azure-src \
-  --type=azure \
-  --rotation-period=720h \
-  --config=tenant_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
-  --config=client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
-  --config=client_secret=your-client-secret \
-  --config=subscription_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  -type=azure \
+  -rotation-period=720h \
+  -config=tenant_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  -config=client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  -config=client_secret=your-client-secret \
+  -config=subscription_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
 Verify the source was created:
@@ -194,11 +194,11 @@ Mints an Microsoft Entra ID Bearer token using the client credentials flow:
 
 ```bash
 warden cred spec create azure-ops \
-  --source azure-src \
-  --config auth_method=bearer_token \
-  --config client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
-  --config client_secret=workload-sp-client-secret \
-  --config resource_uri=https://management.azure.com/
+  -source azure-src \
+  -config auth_method=bearer_token \
+  -config client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  -config client_secret=workload-sp-client-secret \
+  -config resource_uri=https://management.azure.com/
 ```
 
 ### Option B: Key Vault Secret
@@ -207,12 +207,12 @@ Fetches a secret directly from Azure Key Vault:
 
 ```bash
 warden cred spec create azure-kv \
-  --source azure-src \
-  --config auth_method=key_vault_secret \
-  --config client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
-  --config client_secret=workload-sp-client-secret \
-  --config vault_name=my-key-vault \
-  --config secret_name=my-secret
+  -source azure-src \
+  -config auth_method=key_vault_secret \
+  -config client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  -config client_secret=workload-sp-client-secret \
+  -config vault_name=my-key-vault \
+  -config secret_name=my-secret
 ```
 
 Verify:
@@ -371,14 +371,14 @@ Warden supports automatic rotation of Azure service principal credentials via th
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA

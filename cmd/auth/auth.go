@@ -19,7 +19,7 @@ Usage: warden auth <subcommand> [options]
 
   Enable a new auth method:
 
-      $ warden auth enable --type=jwt
+      $ warden auth enable jwt
 
   Please see the individual subcommand help for detailed usage information.
 `,

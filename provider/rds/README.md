@@ -152,7 +152,7 @@ Each database user name must match the `db_user` in its corresponding credential
 Set up JWT auth for workload authentication. The auth role does **not** need a `cred_spec_name` — the RDS provider resolves credentials via path-based provider grants instead.
 
 ```bash
-warden auth enable --type=jwt
+warden auth enable jwt
 
 warden write auth/jwt/config \
     jwks_url=http://localhost:4444/.well-known/jwks.json \
@@ -197,7 +197,7 @@ Setting `default_role=db-user` means workloads don't need to pass `?role=` — t
 ## Step 2: Mount and Configure the RDS Provider
 
 ```bash
-warden provider enable --type=rds
+warden provider enable rds
 ```
 
 Workloads authenticate with their JWT directly — no explicit Warden login required:
@@ -220,62 +220,62 @@ Create an AWS credential source with the service user's access keys and automati
 
 ```bash
 warden cred source create aws-prod \
-  --type=aws \
-  --rotation-period=24h \
-  --config access_key_id=<SERVICE_USER_ACCESS_KEY_ID> \
-  --config secret_access_key=<SERVICE_USER_SECRET_ACCESS_KEY> \
-  --config region=us-east-1
+  -type=aws \
+  -rotation-period=24h \
+  -config access_key_id=<SERVICE_USER_ACCESS_KEY_ID> \
+  -config secret_access_key=<SERVICE_USER_SECRET_ACCESS_KEY> \
+  -config region=us-east-1
 ```
 
-> Set `--rotation-period=0` to disable rotation (not recommended for production). The IAM permissions for rotation are included in the prerequisite policy on the service user.
+> Set `-rotation-period=0` to disable rotation (not recommended for production). The IAM permissions for rotation are included in the prerequisite policy on the service user.
 
 Create credential specs for each database user / permission level. The `role_arn` points to the database IAM role from the prerequisites:
 
 ```bash
 # Read-only spec
 warden cred spec create rds-readonly \
-  --source aws-prod \
-  --config mint_method=rds_iam_token \
-  --config db_endpoint=mydb.abc123.us-east-1.rds.amazonaws.com \
-  --config db_user=app_readonly \
-  --config db_engine=postgres \
-  --config region=us-east-1 \
-  --config role_arn=arn:aws:iam::123456789:role/warden-rds-connect
+  -source aws-prod \
+  -config mint_method=rds_iam_token \
+  -config db_endpoint=mydb.abc123.us-east-1.rds.amazonaws.com \
+  -config db_user=app_readonly \
+  -config db_engine=postgres \
+  -config region=us-east-1 \
+  -config role_arn=arn:aws:iam::123456789:role/warden-rds-connect
 
 # Read-write spec
 warden cred spec create rds-readwrite \
-  --source aws-prod \
-  --config mint_method=rds_iam_token \
-  --config db_endpoint=mydb.abc123.us-east-1.rds.amazonaws.com \
-  --config db_user=app_readwrite \
-  --config db_engine=postgres \
-  --config region=us-east-1 \
-  --config role_arn=arn:aws:iam::123456789:role/warden-rds-connect
+  -source aws-prod \
+  -config mint_method=rds_iam_token \
+  -config db_endpoint=mydb.abc123.us-east-1.rds.amazonaws.com \
+  -config db_user=app_readwrite \
+  -config db_engine=postgres \
+  -config region=us-east-1 \
+  -config role_arn=arn:aws:iam::123456789:role/warden-rds-connect
 ```
 
 For Aurora, use the cluster or reader endpoint:
 
 ```bash
 warden cred spec create aurora-readonly \
-  --source aws-prod \
-  --config mint_method=rds_iam_token \
-  --config db_endpoint=mydb.cluster-ro-abc123.us-east-1.rds.amazonaws.com \
-  --config db_user=app_readonly \
-  --config db_engine=postgres \
-  --config region=us-east-1
+  -source aws-prod \
+  -config mint_method=rds_iam_token \
+  -config db_endpoint=mydb.cluster-ro-abc123.us-east-1.rds.amazonaws.com \
+  -config db_user=app_readonly \
+  -config db_engine=postgres \
+  -config region=us-east-1
 ```
 
 For cross-account access, add `role_arn`:
 
 ```bash
 warden cred spec create rds-cross-account \
-  --source aws-prod \
-  --config mint_method=rds_iam_token \
-  --config db_endpoint=mydb.xyz789.eu-west-1.rds.amazonaws.com \
-  --config db_user=app_readonly \
-  --config db_engine=postgres \
-  --config region=eu-west-1 \
-  --config role_arn=arn:aws:iam::987654321:role/rds-cross-account
+  -source aws-prod \
+  -config mint_method=rds_iam_token \
+  -config db_endpoint=mydb.xyz789.eu-west-1.rds.amazonaws.com \
+  -config db_user=app_readonly \
+  -config db_engine=postgres \
+  -config region=eu-west-1 \
+  -config role_arn=arn:aws:iam::987654321:role/rds-cross-account
 ```
 
 ## Step 4: Create Grants on the Provider

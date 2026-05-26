@@ -24,19 +24,19 @@
 # Requires:
 #   - WARDEN_ADDR + WARDEN_TOKEN exported (admin shell setup from section 4)
 #   - bao-out/creds.env populated by bao-init.sh (ROLE_ID + SECRET_ID)
-#   - Anthropic API key passed via --anthropic-key=sk-... or $ANTHROPIC_API_KEY
+#   - Anthropic API key passed via -anthropic-key=sk-... or $ANTHROPIC_API_KEY
 #
 # Usage:
-#   ./warden-init.sh --anthropic-key=sk-ant-... \
-#                    [--slack-token=xoxb-...] \
-#                    [--slack-channel-id=C0123456789] \
-#                    [--slack-channel-name='#sec-hygiene']
+#   ./warden-init.sh -anthropic-key=sk-ant-... \
+#                    [-slack-token=xoxb-...] \
+#                    [-slack-channel-id=C0123456789] \
+#                    [-slack-channel-name='#sec-hygiene']
 #
-# --slack-token is optional; without it, the Slack provider/role/policy
+# -slack-token is optional; without it, the Slack provider/role/policy
 # are skipped (the agent will fail the Slack upload, but Goose's hygiene
 # work and Forgejo's actions/upload-artifact still produce the report).
-# --slack-channel-id and --slack-channel-name are required when
-# --slack-token is given; they end up in the slack-ops role's description
+# -slack-channel-id and -slack-channel-name are required when
+# -slack-token is given; they end up in the slack-ops role's description
 # so the agent extracts the channel from discovery, not from env vars.
 set -euo pipefail
 
@@ -46,21 +46,21 @@ SLACK_CHANNEL_ID="${SLACK_CHANNEL_ID:-}"
 SLACK_CHANNEL_NAME="${SLACK_CHANNEL_NAME:-}"
 for arg in "$@"; do
   case $arg in
-    --anthropic-key=*)       ANTHROPIC_KEY="${arg#--anthropic-key=}" ;;
-    --slack-token=*)         SLACK_TOKEN="${arg#--slack-token=}" ;;
-    --slack-channel-id=*)    SLACK_CHANNEL_ID="${arg#--slack-channel-id=}" ;;
-    --slack-channel-name=*)  SLACK_CHANNEL_NAME="${arg#--slack-channel-name=}" ;;
+    --anthropic-key=*|-anthropic-key=*)           ANTHROPIC_KEY="${arg#*=}" ;;
+    --slack-token=*|-slack-token=*)               SLACK_TOKEN="${arg#*=}" ;;
+    --slack-channel-id=*|-slack-channel-id=*)     SLACK_CHANNEL_ID="${arg#*=}" ;;
+    --slack-channel-name=*|-slack-channel-name=*) SLACK_CHANNEL_NAME="${arg#*=}" ;;
     *) echo "unknown arg: $arg" >&2; exit 1 ;;
   esac
 done
 
 if [ -z "$ANTHROPIC_KEY" ]; then
-  echo "ERROR: pass --anthropic-key=sk-... or set ANTHROPIC_API_KEY" >&2
+  echo "ERROR: pass -anthropic-key=sk-... or set ANTHROPIC_API_KEY" >&2
   exit 1
 fi
 
 if [ -n "$SLACK_TOKEN" ] && { [ -z "$SLACK_CHANNEL_ID" ] || [ -z "$SLACK_CHANNEL_NAME" ]; }; then
-  echo "ERROR: --slack-token requires --slack-channel-id=C... and --slack-channel-name=#..." >&2
+  echo "ERROR: -slack-token requires -slack-channel-id=C... and -slack-channel-name=#..." >&2
   exit 1
 fi
 
@@ -81,7 +81,7 @@ command -v "$WARDEN" >/dev/null 2>&1 || { [ -x ./warden ] && WARDEN=./warden; } 
 # README tails this file to verify identity-attribution; without this
 # step the file never exists.
 if ! "$WARDEN" audit list 2>/dev/null | grep -q "^audit-default/"; then
-  "$WARDEN" audit enable --type=file --file-path=./warden-audit.log audit-default
+  "$WARDEN" audit enable -file-path=./warden-audit.log -path=audit-default file
 fi
 
 # 5a. Create the shared tutorial namespace.
@@ -93,7 +93,7 @@ fi
 # which auth mount to use for implicit authentication on those calls;
 # without it, every sys/* call returns 401. Idempotent — future
 # tutorials reuse this namespace rather than each creating their own.
-$WARDEN namespace create tutorial --metadata=auto_auth_path=auth/jwt/ 2>/dev/null || true
+$WARDEN namespace create tutorial -metadata=auto_auth_path=auth/jwt/ 2>/dev/null || true
 export WARDEN_NAMESPACE=tutorial
 
 # 5b. JWT auth pointed at Forgejo's Actions OIDC.
@@ -101,7 +101,7 @@ export WARDEN_NAMESPACE=tutorial
 # default_role=discovery-baseline is the fallback when the URL has no
 # role segment (i.e. /v1/sys/* calls). It carries just enough policy
 # for the agent to run the discovery loop.
-$WARDEN auth enable --type=jwt 2>/dev/null || true
+$WARDEN auth enable jwt 2>/dev/null || true
 $WARDEN write auth/jwt/config \
     jwks_url=http://forgejo.local:3000/api/actions/.well-known/keys \
     bound_issuer=http://forgejo.local:3000/api/actions \
@@ -139,9 +139,9 @@ $WARDEN write auth/jwt/role/discovery-baseline \
     token_policies=discovery-baseline
 
 # 5d. Vault provider → OpenBao (AppRole login via the bao-init creds).
-$WARDEN provider enable --type=vault \
-    --description="Internal OpenBao cluster — ACL policies, mounts, identity (read-mostly)" \
-    vault 2>/dev/null || true
+$WARDEN provider enable \
+    -description="Internal OpenBao cluster — ACL policies, mounts, identity (read-mostly)" \
+    -path=vault vault 2>/dev/null || true
 $WARDEN write vault/config \
     vault_address=http://127.0.0.1:8200 \
     auto_auth_path=auth/jwt/
@@ -149,18 +149,18 @@ $WARDEN write vault/config \
 # Order matters: delete spec before source (spec depends on source).
 $WARDEN cred spec delete -f policy-scanner 2>/dev/null || true
 $WARDEN cred source delete -f openbao-root 2>/dev/null || true
-$WARDEN cred source create openbao-root --type=hvault \
-    --rotation-period=24h \
-    --config=vault_address=http://127.0.0.1:8200 \
-    --config=auth_method=approle \
-    --config=approle_mount=approle/ \
-    --config=role_name=warden-policy-scanner \
-    --config=role_id="$ROLE_ID" \
-    --config=secret_id="$SECRET_ID"
-$WARDEN cred spec create policy-scanner --source openbao-root \
-    --config mint_method=vault_token \
-    --config token_role=policy-reader \
-    --config ttl=1h
+$WARDEN cred source create openbao-root -type=hvault \
+    -rotation-period=24h \
+    -config=vault_address=http://127.0.0.1:8200 \
+    -config=auth_method=approle \
+    -config=approle_mount=approle/ \
+    -config=role_name=warden-policy-scanner \
+    -config=role_id="$ROLE_ID" \
+    -config=secret_id="$SECRET_ID"
+$WARDEN cred spec create policy-scanner -source openbao-root \
+    -config mint_method=vault_token \
+    -config token_role=policy-reader \
+    -config ttl=1h
 
 # policy-scanner role — dense description embedding the upstream mount.
 # The agent reads this verbatim from `warden role list` and pairs it
@@ -177,9 +177,9 @@ $WARDEN write auth/jwt/role/policy-scanner \
 # (configured via ANTHROPIC_HOST + ANTHROPIC_API_KEY in the workflow).
 # The agent does not "discover" this leg — the runtime wires it
 # in before the agent starts. See docs/agent-flow.md §1.
-$WARDEN provider enable --type=anthropic \
-    --description="Anthropic-compatible LLM endpoint (default: DeepSeek). Internal — used by Goose runtime, not chosen by agents." \
-    anthropic 2>/dev/null || true
+$WARDEN provider enable \
+    -description="Anthropic-compatible LLM endpoint (default: DeepSeek). Internal — used by Goose runtime, not chosen by agents." \
+    -path=anthropic anthropic 2>/dev/null || true
 $WARDEN write anthropic/config \
     anthropic_url=https://api.deepseek.com/anthropic \
     auto_auth_path=auth/jwt/ \
@@ -187,15 +187,15 @@ $WARDEN write anthropic/config \
 
 $WARDEN cred spec delete -f anthropic-ops 2>/dev/null || true
 $WARDEN cred source delete -f anthropic-src 2>/dev/null || true
-$WARDEN cred source create anthropic-src --type=apikey \
-    --rotation-period=0 \
-    --config=api_url=https://api.deepseek.com \
-    --config=verify_endpoint=/v1/models \
-    --config=auth_header_type=custom_header \
-    --config=auth_header_name=x-api-key \
-    --config=extra_headers=anthropic-version:2023-06-01
-$WARDEN cred spec create anthropic-ops --source anthropic-src \
-    --config api_key="$ANTHROPIC_KEY"
+$WARDEN cred source create anthropic-src -type=apikey \
+    -rotation-period=0 \
+    -config=api_url=https://api.deepseek.com \
+    -config=verify_endpoint=/v1/models \
+    -config=auth_header_type=custom_header \
+    -config=auth_header_name=x-api-key \
+    -config=extra_headers=anthropic-version:2023-06-01
+$WARDEN cred spec create anthropic-ops -source anthropic-src \
+    -config api_key="$ANTHROPIC_KEY"
 
 $WARDEN write auth/jwt/role/anthropic-ops \
     description="LLM inference for the hygiene auditor agent. Used internally by Goose — agents do not call this role directly." \
@@ -234,22 +234,22 @@ path "anthropic/role/anthropic-ops/gateway/v1/models"   { capabilities = ["read"
 EOF
 $WARDEN policy write anthropic-ops /tmp/anthropic-ops.hcl
 
-# 5h. Slack provider → slack.com/api (optional — skip if no --slack-token).
+# 5h. Slack provider → slack.com/api (optional — skip if no -slack-token).
 if [ -n "$SLACK_TOKEN" ]; then
-  $WARDEN provider enable --type=slack \
-      --description="Slack workspace for security-team notifications and canvas reports" \
-      slack 2>/dev/null || true
+  $WARDEN provider enable \
+      -description="Slack workspace for security-team notifications and canvas reports" \
+      -path=slack slack 2>/dev/null || true
   $WARDEN write slack/config slack_url=https://slack.com/api auto_auth_path=auth/jwt/
 
   $WARDEN cred spec delete -f slack-ops 2>/dev/null || true
   $WARDEN cred source delete -f slack-src 2>/dev/null || true
-  $WARDEN cred source create slack-src --type=apikey \
-      --rotation-period=0 \
-      --config=api_url=https://slack.com/api \
-      --config=verify_endpoint=/auth.test \
-      --config=verify_method=POST
-  $WARDEN cred spec create slack-ops --source slack-src \
-      --config api_key="$SLACK_TOKEN"
+  $WARDEN cred source create slack-src -type=apikey \
+      -rotation-period=0 \
+      -config=api_url=https://slack.com/api \
+      -config=verify_endpoint=/auth.test \
+      -config=verify_method=POST
+  $WARDEN cred spec create slack-ops -source slack-src \
+      -config api_key="$SLACK_TOKEN"
 
   # slack-ops role description embeds the destination channel (name + id)
   # so the agent extracts them from discovery rather than from env vars.
@@ -287,5 +287,5 @@ EOF
 
   echo "warden-init: section 5 complete (namespace=tutorial, Slack delivery enabled)"
 else
-  echo "warden-init: section 5 complete (namespace=tutorial, Slack delivery skipped — no --slack-token given)"
+  echo "warden-init: section 5 complete (namespace=tutorial, Slack delivery skipped — no -slack-token given)"
 fi

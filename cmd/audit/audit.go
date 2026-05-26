@@ -23,7 +23,7 @@ Usage: warden audit <subcommand> [options]
 
   Enable a new audit device:
 
-      $ warden audit enable --type=file --file-path=/var/log/warden-audit.log
+      $ warden audit enable file -file-path=/var/log/warden-audit.log
 
   Read audit device details:
 

@@ -50,7 +50,7 @@ The Mistral provider enables proxied access to the Mistral AI API through Warden
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -68,7 +68,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -85,13 +85,13 @@ warden write auth/jwt/role/mistral-user \
 Enable the Mistral provider at a path of your choice:
 
 ```bash
-warden provider enable --type=mistral
+warden provider enable mistral
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=mistral mistral-prod
+warden provider enable -path=mistral-prod mistral
 ```
 
 Verify the provider is enabled:
@@ -125,12 +125,12 @@ The credential source holds only connection info (`api_url`). The API key is sto
 
 ```bash
 warden cred source create mistral-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=api_url=https://api.mistral.ai \
-  --config=verify_endpoint=/v1/models \
-  --config=optional_metadata=organization_id \
-  --config=display_name=Mistral
+  -type=apikey \
+  -rotation-period=0 \
+  -config=api_url=https://api.mistral.ai \
+  -config=verify_endpoint=/v1/models \
+  -config=optional_metadata=organization_id \
+  -config=display_name=Mistral
 ```
 
 Verify the source was created:
@@ -143,17 +143,17 @@ Create a credential spec that references the credential source. The spec carries
 
 ```bash
 warden cred spec create mistral-ops \
-  --source mistral-src \
-  --config api_key=<your-mistral-api-key>
+  -source mistral-src \
+  -config api_key=<your-mistral-api-key>
 ```
 
 Optionally include an organization ID:
 
 ```bash
 warden cred spec create mistral-ops \
-  --source mistral-src \
-  --config api_key=<your-mistral-api-key> \
-  --config organization_id=<your-org-id>
+  -source mistral-src \
+  -config api_key=<your-mistral-api-key> \
+  -config organization_id=<your-org-id>
 ```
 
 The API key is validated at creation time via a `GET /v1/models` call to the Mistral API (SpecVerifier). If the key is invalid, spec creation will fail.
@@ -175,21 +175,21 @@ Instead of storing the API key directly in Warden, you can store it in a Vault/O
 ```bash
 # Create a Vault credential source
 warden cred source create mistral-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=your-role-id \
-  --config=secret_id=your-secret-id \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=your-role-id \
+  -config=secret_id=your-secret-id \
+  -config=approle_mount=approle \
+  -config=role_name=warden-role \
+  -rotation-period=24h
 
 # Create a credential spec using the static_apikey mint method
 warden cred spec create mistral-ops \
-  --source mistral-vault-src \
-  --config mint_method=static_apikey \
-  --config kv2_mount=secret \
-  --config secret_path=mistral/ops
+  -source mistral-vault-src \
+  -config mint_method=static_apikey \
+  -config kv2_mount=secret \
+  -config secret_path=mistral/ops
 ```
 
 The KV v2 secret at `secret/mistral/ops` should contain at minimum an `api_key` field. Warden fetches the secret from Vault on each credential request.
@@ -358,14 +358,14 @@ This allows operators to enforce policies such as:
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA
@@ -472,6 +472,6 @@ curl --cert client.pem --key client-key.pem \
 2. Update the credential spec:
    ```bash
    warden cred spec update mistral-ops \
-     --config api_key=<new-api-key>
+     -config api_key=<new-api-key>
    ```
 3. Delete the old key from the Mistral console

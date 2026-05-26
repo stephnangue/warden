@@ -8,7 +8,7 @@ import (
 
 // ResolveFileRefs processes a config map and replaces values prefixed with "@"
 // with the contents of the referenced file. This allows CLI users to pass file
-// contents via --config=key=@/path/to/file (similar to curl's @ syntax).
+// contents via -config=key=@/path/to/file (similar to curl's @ syntax).
 func ResolveFileRefs(config map[string]string) (map[string]string, error) {
 	for key, value := range config {
 		if strings.HasPrefix(value, "@") {

@@ -90,11 +90,11 @@ func TestJSON_RejectsCombiningWithTypedFlags(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit when --type and --json both set; got success.\nOutput:\n%s", out)
 	}
-	if !strings.Contains(out, "--json") {
-		t.Errorf("expected error to mention --json; got:\n%s", out)
+	if !strings.Contains(out, "-json") {
+		t.Errorf("expected error to mention -json; got:\n%s", out)
 	}
-	if !strings.Contains(out, "--type") {
-		t.Errorf("expected error to mention --type; got:\n%s", out)
+	if !strings.Contains(out, "-type") {
+		t.Errorf("expected error to mention -type; got:\n%s", out)
 	}
 }
 

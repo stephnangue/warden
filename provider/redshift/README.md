@@ -155,7 +155,7 @@ Warden controls which workload gets a token for which IAM identity; Redshift con
 Set up JWT auth for workload authentication. The auth role does **not** need a `cred_spec_name` — the Redshift provider resolves credentials via path-based provider grants instead.
 
 ```bash
-warden auth enable --type=jwt
+warden auth enable jwt
 
 warden write auth/jwt/config \
     jwks_url=http://localhost:4444/.well-known/jwks.json \
@@ -169,7 +169,7 @@ warden write auth/jwt/role/db-user \
 ## Step 2: Mount and Configure the Redshift Provider
 
 ```bash
-warden provider enable --type=redshift
+warden provider enable redshift
 
 warden write redshift/config \
     auto_auth_path=auth/jwt/
@@ -190,12 +190,12 @@ Create an AWS credential source with the service user's access keys and automati
 
 ```bash
 warden cred source create aws-prod \
-  --type=aws \
-  --rotation-period=24h \
-  --config access_key_id=<SERVICE_USER_ACCESS_KEY_ID> \
-  --config secret_access_key=<SERVICE_USER_SECRET_ACCESS_KEY> \
-  --config region=us-east-1 \
-  --config assume_role_arn=arn:aws:iam::123456789:role/warden-redshift-connect
+  -type=aws \
+  -rotation-period=24h \
+  -config access_key_id=<SERVICE_USER_ACCESS_KEY_ID> \
+  -config secret_access_key=<SERVICE_USER_SECRET_ACCESS_KEY> \
+  -config region=us-east-1 \
+  -config assume_role_arn=arn:aws:iam::123456789:role/warden-redshift-connect
 ```
 
 > The `assume_role_arn` on the source is what makes Warden call AWS as the database role rather than as the service user. Without it, the service user itself needs `redshift:GetClusterCredentialsWithIAM` permission.
@@ -204,24 +204,24 @@ warden cred source create aws-prod \
 
 ```bash
 warden cred spec create redshift-readonly \
-  --source aws-prod \
-  --config mint_method=redshift_iam_token \
-  --config cluster_identifier=my-redshift-cluster \
-  --config db_endpoint=my-redshift-cluster.abc123.us-east-1.redshift.amazonaws.com \
-  --config db_name=analytics \
-  --config region=us-east-1
+  -source aws-prod \
+  -config mint_method=redshift_iam_token \
+  -config cluster_identifier=my-redshift-cluster \
+  -config db_endpoint=my-redshift-cluster.abc123.us-east-1.redshift.amazonaws.com \
+  -config db_name=analytics \
+  -config region=us-east-1
 ```
 
 ### Serverless workgroup spec
 
 ```bash
 warden cred spec create redshift-serverless-readonly \
-  --source aws-prod \
-  --config mint_method=redshift_iam_token \
-  --config workgroup_name=my-workgroup \
-  --config db_endpoint=my-workgroup.123456789.us-east-1.redshift-serverless.amazonaws.com \
-  --config db_name=analytics \
-  --config region=us-east-1
+  -source aws-prod \
+  -config mint_method=redshift_iam_token \
+  -config workgroup_name=my-workgroup \
+  -config db_endpoint=my-workgroup.123456789.us-east-1.redshift-serverless.amazonaws.com \
+  -config db_name=analytics \
+  -config region=us-east-1
 ```
 
 ### Longer token TTL
@@ -230,13 +230,13 @@ The default token TTL is 900 seconds (15 minutes). To extend it up to 3600 secon
 
 ```bash
 warden cred spec create redshift-long-running \
-  --source aws-prod \
-  --config mint_method=redshift_iam_token \
-  --config cluster_identifier=my-redshift-cluster \
-  --config db_endpoint=my-redshift-cluster.abc123.us-east-1.redshift.amazonaws.com \
-  --config db_name=analytics \
-  --config region=us-east-1 \
-  --config duration_seconds=3600
+  -source aws-prod \
+  -config mint_method=redshift_iam_token \
+  -config cluster_identifier=my-redshift-cluster \
+  -config db_endpoint=my-redshift-cluster.abc123.us-east-1.redshift.amazonaws.com \
+  -config db_name=analytics \
+  -config region=us-east-1 \
+  -config duration_seconds=3600
 ```
 
 ## Step 4: Create Grants on the Provider

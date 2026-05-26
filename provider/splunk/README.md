@@ -51,7 +51,7 @@ The Splunk provider enables proxied access to the Splunk REST API through Warden
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -69,7 +69,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -86,13 +86,13 @@ warden write auth/jwt/role/splunk-user \
 Enable the Splunk provider at a path of your choice:
 
 ```bash
-warden provider enable --type=splunk
+warden provider enable splunk
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=splunk splunk-prod
+warden provider enable -path=splunk-prod splunk
 ```
 
 Verify the provider is enabled:
@@ -149,20 +149,20 @@ Save the token from the response, then create the Warden credential source and s
 
 ```bash
 warden cred source create splunk-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=api_url=https://splunk.example.com:8089 \
-  --config=verify_endpoint=/services/server/info \
-  --config=auth_header_type=bearer \
-  --config=display_name=Splunk
+  -type=apikey \
+  -rotation-period=0 \
+  -config=api_url=https://splunk.example.com:8089 \
+  -config=verify_endpoint=/services/server/info \
+  -config=auth_header_type=bearer \
+  -config=display_name=Splunk
 ```
 
 Create a credential spec that references the credential source. The spec carries the bearer token and gets associated with tokens at login time.
 
 ```bash
 warden cred spec create splunk-ops \
-  --source splunk-src \
-  --config api_key=your-splunk-bearer-token
+  -source splunk-src \
+  -config api_key=your-splunk-bearer-token
 ```
 
 The bearer token is validated at creation time via a `GET /services/server/info` call to the Splunk API (SpecVerifier). If the token is invalid, spec creation will fail.
@@ -178,24 +178,24 @@ Instead of storing bearer tokens directly in Warden, you can store them in a Vau
 ```bash
 # Create a Vault credential source
 warden cred source create splunk-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=your-role-id \
-  --config=secret_id=your-secret-id \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=your-role-id \
+  -config=secret_id=your-secret-id \
+  -config=approle_mount=approle \
+  -config=role_name=warden-role \
+  -rotation-period=24h
 ```
 
 Create a credential spec using the `static_apikey` mint method:
 
 ```bash
 warden cred spec create splunk-ops \
-  --source splunk-vault-src \
-  --config mint_method=static_apikey \
-  --config kv2_mount=secret \
-  --config secret_path=splunk/ops
+  -source splunk-vault-src \
+  -config mint_method=static_apikey \
+  -config kv2_mount=secret \
+  -config secret_path=splunk/ops
 ```
 
 The KV v2 secret at `secret/splunk/ops` should contain an `api_key` field with the Splunk bearer token. Warden fetches the secret from Vault on each credential request.
@@ -372,14 +372,14 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA
@@ -542,7 +542,7 @@ curl -k -u admin:password -X POST \
 2. Update the credential spec:
    ```bash
    warden cred spec update splunk-ops \
-     --config api_key=your-new-bearer-token
+     -config api_key=your-new-bearer-token
    ```
 3. Delete the old token in Splunk:
    ```bash

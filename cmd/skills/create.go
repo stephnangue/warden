@@ -34,18 +34,18 @@ Usage: warden skill create [NAME] [options]
 
     Typed flags (human-friendly):
 
-      $ warden skill create --name=my-runbook --category=custom \
-          --description="ops on-call" --body-file=./runbook.md
+      $ warden skill create -name=my-runbook -category=custom \
+          -description="ops on-call" -body-file=./runbook.md
 
     Full JSON payload (agent-friendly):
 
-      $ warden skill create my-runbook --json @skill.json
-      $ cat skill.json | warden skill create my-runbook --json -
+      $ warden skill create my-runbook -json @skill.json
+      $ cat skill.json | warden skill create my-runbook -json -
 
-  --json is mutually exclusive with --name / --description / --category
-  / --requires / --upstream / --provider / --body-file. The skill name
+  -json is mutually exclusive with -name / -description / -category
+  / -requires / -upstream / -provider / -body-file. The skill name
   is taken from the positional argument when given, otherwise from
-  --name or the payload's "name" field.
+  -name or the payload's "name" field.
 
   Required fields (typed or via payload): name, description, category,
   body. provider-guide skills also require a "provider" field.
@@ -56,9 +56,9 @@ Usage: warden skill create [NAME] [options]
 
 func init() {
 	CreateCmd.Flags().StringVar(&createName, "name", "",
-		"Skill name (unique slug, [a-z0-9_-]{2,64}); required unless --json supplies one")
+		"Skill name (unique slug, [a-z0-9_-]{2,64}); required unless -json supplies one")
 	CreateCmd.Flags().StringVar(&createDescription, "description", "",
-		"Human-readable one-line summary; required unless --json")
+		"Human-readable one-line summary; required unless -json")
 	CreateCmd.Flags().StringVar(&createCategory, "category", "",
 		"agent-flow | shared | provider-guide | troubleshooting | custom")
 	CreateCmd.Flags().StringSliceVar(&createRequires, "requires", nil,
@@ -86,19 +86,19 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"--name":        createName != "",
-			"--description": createDescription != "",
-			"--category":    createCategory != "",
-			"--requires":    len(createRequires) > 0,
-			"--upstream":    createUpstream != "",
-			"--provider":    createProvider != "",
-			"--body-file":   createBodyFile != "",
+			"-name":        createName != "",
+			"-description": createDescription != "",
+			"-category":    createCategory != "",
+			"-requires":    len(createRequires) > 0,
+			"-upstream":    createUpstream != "",
+			"-provider":    createProvider != "",
+			"-body-file":   createBodyFile != "",
 		}); err != nil {
 			return err
 		}
 		name := skillNameFromArgOrPayload(args, jsonPayload)
 		if name == "" {
-			return fmt.Errorf("--json without a positional NAME and without a 'name' field in the payload: cannot determine skill name: %w", helpers.ErrUsage)
+			return fmt.Errorf("-json without a positional NAME and without a 'name' field in the payload: cannot determine skill name: %w", helpers.ErrUsage)
 		}
 		if helpers.ResolveDryRun() {
 			return helpers.DryRun(c, "POST", "sys/skills/{name}", jsonPayload)
@@ -127,20 +127,20 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		name = args[0]
 	}
 	if name == "" {
-		return fmt.Errorf("either a positional NAME, --name, or --json is required: %w", helpers.ErrUsage)
+		return fmt.Errorf("either a positional NAME, -name, or -json is required: %w", helpers.ErrUsage)
 	}
 	if createDescription == "" {
-		return fmt.Errorf("--description is required (or use --json): %w", helpers.ErrUsage)
+		return fmt.Errorf("-description is required (or use -json): %w", helpers.ErrUsage)
 	}
 	if createCategory == "" {
-		return fmt.Errorf("--category is required (or use --json): %w", helpers.ErrUsage)
+		return fmt.Errorf("-category is required (or use -json): %w", helpers.ErrUsage)
 	}
 	if createBodyFile == "" {
-		return fmt.Errorf("--body-file is required (or use --json): %w", helpers.ErrUsage)
+		return fmt.Errorf("-body-file is required (or use -json): %w", helpers.ErrUsage)
 	}
 	bodyBytes, err := os.ReadFile(createBodyFile)
 	if err != nil {
-		return fmt.Errorf("--body-file %s: %w", createBodyFile, err)
+		return fmt.Errorf("-body-file %s: %w", createBodyFile, err)
 	}
 
 	payload := map[string]any{
@@ -181,9 +181,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	})
 }
 
-// skillNameFromArgOrPayload mirrors helpers.MountPathFromArgOrPayload but
-// reads the payload's "name" field instead of "type", and does not
-// suffix with a trailing slash (skills are name-keyed, not path-keyed).
+// skillNameFromArgOrPayload returns the positional argument if present, else
+// the payload's "name" field. Skills are name-keyed, not path-keyed, so no
+// trailing slash is appended.
 func skillNameFromArgOrPayload(args []string, payload map[string]any) string {
 	if len(args) > 0 && args[0] != "" {
 		return args[0]

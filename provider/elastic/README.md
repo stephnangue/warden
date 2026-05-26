@@ -50,7 +50,7 @@ The Elastic provider enables proxied access to Elasticsearch REST APIs through W
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -68,7 +68,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -85,13 +85,13 @@ warden write auth/jwt/role/elastic-user \
 Enable the Elastic provider at a path of your choice:
 
 ```bash
-warden provider enable --type=elastic
+warden provider enable elastic
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=elastic elastic-prod
+warden provider enable -path=elastic-prod elastic
 ```
 
 Verify the provider is enabled:
@@ -131,21 +131,21 @@ Elasticsearch API keys use the format `base64(id:api_key)`. When you create an A
 
 ```bash
 warden cred source create elastic-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=api_url=https://my-cluster.es.us-east-1.aws.cloud.es.io \
-  --config=verify_endpoint=/ \
-  --config=auth_header_type=custom_header \
-  --config=auth_header_name=Authorization \
-  --config=display_name=Elastic
+  -type=apikey \
+  -rotation-period=0 \
+  -config=api_url=https://my-cluster.es.us-east-1.aws.cloud.es.io \
+  -config=verify_endpoint=/ \
+  -config=auth_header_type=custom_header \
+  -config=auth_header_name=Authorization \
+  -config=display_name=Elastic
 ```
 
 Create a credential spec that references the credential source. The spec carries the pre-encoded API key.
 
 ```bash
 warden cred spec create elastic-ops \
-  --source elastic-src \
-  --config api_key=your-base64-encoded-api-key
+  -source elastic-src \
+  -config api_key=your-base64-encoded-api-key
 ```
 
 > **Tip:** To get the encoded API key from Elasticsearch:
@@ -162,10 +162,10 @@ The Elasticsearch driver creates API keys programmatically via `POST /_security/
 
 ```bash
 warden cred source create elastic-src \
-  --type=elastic \
-  --config=elastic_url=https://my-cluster.es.us-east-1.aws.cloud.es.io \
-  --config=api_key=your-base64-encoded-source-api-key \
-  --rotation-period=72h
+  -type=elastic \
+  -config=elastic_url=https://my-cluster.es.us-east-1.aws.cloud.es.io \
+  -config=api_key=your-base64-encoded-source-api-key \
+  -rotation-period=72h
 ```
 
 The source API key must have sufficient privileges to create and invalidate API keys. To create such a key:
@@ -188,23 +188,23 @@ Create a credential spec. The driver mints a new API key for each spec:
 
 ```bash
 warden cred spec create elastic-ops \
-  --source elastic-src
+  -source elastic-src
 ```
 
 Optionally restrict the minted key's permissions via `role_descriptors`:
 
 ```bash
 warden cred spec create elastic-readonly \
-  --source elastic-src \
-  --config 'role_descriptors={"reader":{"indices":[{"names":["my-index-*"],"privileges":["read"]}]}}'
+  -source elastic-src \
+  -config 'role_descriptors={"reader":{"indices":[{"names":["my-index-*"],"privileges":["read"]}]}}'
 ```
 
 Set an expiration on minted keys:
 
 ```bash
 warden cred spec create elastic-temp \
-  --source elastic-src \
-  --config expiration=1h
+  -source elastic-src \
+  -config expiration=1h
 ```
 
 ### Option C: Vault/OpenBao as Credential Source
@@ -218,24 +218,24 @@ Store the Elasticsearch API key in a Vault/OpenBao KV v2 secret and have Warden 
 ```bash
 # Create a Vault credential source
 warden cred source create elastic-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=your-role-id \
-  --config=secret_id=your-secret-id \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=your-role-id \
+  -config=secret_id=your-secret-id \
+  -config=approle_mount=approle \
+  -config=role_name=warden-role \
+  -rotation-period=24h
 ```
 
 Create a credential spec using the `static_apikey` mint method:
 
 ```bash
 warden cred spec create elastic-ops \
-  --source elastic-vault-src \
-  --config mint_method=static_apikey \
-  --config kv2_mount=secret \
-  --config secret_path=elastic/ops
+  -source elastic-vault-src \
+  -config mint_method=static_apikey \
+  -config kv2_mount=secret \
+  -config secret_path=elastic/ops
 ```
 
 Verify:
@@ -380,14 +380,14 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA
@@ -520,7 +520,7 @@ curl --cert client.pem --key client-key.pem \
 2. Update the credential spec:
    ```bash
    warden cred spec update elastic-ops \
-     --config api_key=your-new-base64-encoded-api-key
+     -config api_key=your-new-base64-encoded-api-key
    ```
 3. Invalidate the old key in Elasticsearch:
    ```bash

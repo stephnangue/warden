@@ -10,40 +10,38 @@ import (
 )
 
 var (
-	enableType        string
 	enableDescription string
 	enablePath        string
 	enableJSON        string
 
 	EnableCmd = &cobra.Command{
-		Use:           "enable [PATH]",
+		Use:           "enable TYPE",
+		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Short:         "This command enable a provider.",
+		Short:         "This command enables a provider.",
 		Long: `
-Usage: warden provider enable [options] [PATH]
+Usage: warden provider enable [options] TYPE
 
-  Enable a provider. By default the mount path matches the TYPE, but a
-  custom path can be supplied either positionally or via --path. Two input
-  modes:
+  Enable a provider. TYPE is the provider to enable (e.g. aws, azure, gcp).
+  By default the mount path matches TYPE; pass -path to mount at a custom
+  location. Two input modes:
 
     Typed flags (human-friendly):
 
-      $ warden provider enable --type=aws
-      $ warden provider enable --type=azure azure-prod
-      $ warden provider enable --type=azure --path=azure-prod
-      $ warden provider enable --type=aws --description="Production AWS"
+      $ warden provider enable aws
+      $ warden provider enable -path=azure-prod azure
+      $ warden provider enable -description="Production AWS" aws
 
     Full JSON payload (agent-friendly):
 
-      $ warden provider enable aws --json @provider-aws.json
-      $ cat provider-aws.json | warden provider enable aws --json -
+      $ warden provider enable aws -json @provider-aws.json
+      $ cat provider-aws.json | warden provider enable aws -json -
 
-  --json is mutually exclusive with --type / --description. The mount path
-  may be provided positionally or via --path (pick one — combining both is
-  rejected). When neither is set, the path is derived from --type or from
-  the JSON payload's "type" field. Combine with --dry-run to validate the
-  payload locally without enabling the provider.
+  -json is mutually exclusive with -description. The mount path defaults to
+  TYPE; override it with -path. If the JSON payload includes a "type" field,
+  it must match TYPE. Combine with -dry-run to validate the payload locally
+  without enabling the provider.
 
   For a full list of providers and examples, please see the documentation.
 `,
@@ -52,17 +50,13 @@ Usage: warden provider enable [options] [PATH]
 )
 
 func init() {
-	EnableCmd.Flags().StringVar(&enableType, "type", "", "Type of the provider (e.g., aws, azure, gcp) (required unless --json)")
 	EnableCmd.Flags().StringVar(&enableDescription, "description", "", "Human-friendly description of the provider")
-	EnableCmd.Flags().StringVar(&enablePath, "path", "", "Mount path (alternative to the positional PATH argument)")
-	EnableCmd.Flags().StringVarP(&enableJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with --type/--description)")
+	EnableCmd.Flags().StringVar(&enablePath, "path", "", "Custom mount path (default: TYPE)")
+	EnableCmd.Flags().StringVarP(&enableJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with -description)")
 }
 
 func runEnable(cmd *cobra.Command, args []string) error {
-	explicitPath, err := helpers.ResolvePath(args, enablePath)
-	if err != nil {
-		return err
-	}
+	enableType := strings.TrimSuffix(args[0], "/")
 
 	c, err := helpers.Client()
 	if err != nil {
@@ -74,19 +68,27 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	path := enablePath
+	if path == "" {
+		path = enableType
+	}
+	if !strings.HasSuffix(path, "/") {
+		path = path + "/"
+	}
+	if err := helpers.ValidatePath(path); err != nil {
+		return err
+	}
+
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"--type":        enableType != "",
-			"--description": enableDescription != "",
+			"-description": enableDescription != "",
 		}); err != nil {
 			return err
 		}
-		path := helpers.MountPathFromArgOrPayload(explicitPath, jsonPayload)
-		if path == "" {
-			return fmt.Errorf("--json without a PATH (positional or --path) and without a 'type' field in the payload: cannot determine mount path: %w", helpers.ErrUsage)
-		}
-		if err := helpers.ValidatePath(path); err != nil {
-			return err
+		if payloadType, ok := jsonPayload["type"].(string); ok && payloadType != "" && payloadType != enableType {
+			return fmt.Errorf(
+				"TYPE positional %q disagrees with -json payload \"type\":%q: %w",
+				enableType, payloadType, helpers.ErrUsage)
 		}
 		if helpers.ResolveDryRun() {
 			return helpers.DryRun(c, "POST", "sys/providers/{path}", jsonPayload)
@@ -109,25 +111,6 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	if enableType == "" {
-		return fmt.Errorf("--type is required (or use --json): %w", helpers.ErrUsage)
-	}
-
-	var path string
-	if explicitPath != "" {
-		path = explicitPath
-	} else {
-		path = enableType + "/"
-	}
-	if !strings.HasSuffix(path, "/") {
-		path = path + "/"
-	}
-
-	if err := helpers.ValidatePath(path); err != nil {
-		return err
-	}
-
-	// Build mount input
 	mountInput := &api.MountInput{
 		Type:        enableType,
 		Description: enableDescription,
@@ -141,7 +124,6 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		return helpers.DryRun(c, "POST", "sys/providers/{path}", payload)
 	}
 
-	// Mount the provider
 	err = c.Sys().Mount(path, mountInput)
 	if err != nil {
 		return fmt.Errorf("error enabling provider: %w", err)
@@ -151,4 +133,3 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Success! Enabled %s provider at: %s\n", enableType, path)
 	})
 }
-

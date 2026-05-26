@@ -35,22 +35,22 @@ Usage: warden skill update NAME [options]
 
     Typed flags (human-friendly):
 
-      $ warden skill update aws --description="our local override"
+      $ warden skill update aws -description="our local override"
 
     Full JSON payload (agent-friendly):
 
-      $ warden skill update aws --json @patch.json
-      $ cat patch.json | warden skill update aws --json -
+      $ warden skill update aws -json @patch.json
+      $ cat patch.json | warden skill update aws -json -
 
-  --json is mutually exclusive with the typed --description / --category
-  / --requires / --upstream / --provider / --body-file flags.
+  -json is mutually exclusive with the typed -description / -category
+  / -requires / -upstream / -provider / -body-file flags.
 
-  To update the body, point --body-file at a markdown file on disk;
+  To update the body, point -body-file at a markdown file on disk;
   the file's content is sent as the new body verbatim.
 
   Empty values are treated as "don't change" — to clear an optional
-  field (e.g. requires, upstream) use --json with the explicit empty
-  value, e.g. --json '{"requires":[]}'.
+  field (e.g. requires, upstream) use -json with the explicit empty
+  value, e.g. -json '{"requires":[]}'.
 `,
 		Args: cobra.ExactArgs(1),
 		RunE: runUpdate,
@@ -89,12 +89,12 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	var payload map[string]any
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"--description": updateDescription != "",
-			"--category":    updateCategory != "",
-			"--requires":    len(updateRequires) > 0,
-			"--upstream":    updateUpstream != "",
-			"--provider":    updateProvider != "",
-			"--body-file":   updateBodyFile != "",
+			"-description": updateDescription != "",
+			"-category":    updateCategory != "",
+			"-requires":    len(updateRequires) > 0,
+			"-upstream":    updateUpstream != "",
+			"-provider":    updateProvider != "",
+			"-body-file":   updateBodyFile != "",
 		}); err != nil {
 			return err
 		}
@@ -120,12 +120,12 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		if updateBodyFile != "" {
 			bodyBytes, err := os.ReadFile(updateBodyFile)
 			if err != nil {
-				return fmt.Errorf("--body-file %s: %w", updateBodyFile, err)
+				return fmt.Errorf("-body-file %s: %w", updateBodyFile, err)
 			}
 			payload["body"] = string(bodyBytes)
 		}
 		if len(payload) == 0 {
-			return fmt.Errorf("no fields to update: pass at least one flag or use --json: %w", helpers.ErrUsage)
+			return fmt.Errorf("no fields to update: pass at least one flag or use -json: %w", helpers.ErrUsage)
 		}
 	}
 

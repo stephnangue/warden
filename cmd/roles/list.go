@@ -25,13 +25,13 @@ Usage: warden role list
   certificate the request was made with — Warden never needs the role names
   to be distributed out-of-band.
 
-  Output honors the global --output flag:
+  Output honors the global -output flag:
     table    one row per role (default for TTY)
     json     [{"name", "description", "auth_path"}, ...]
     ndjson   one role per line, agent-friendly for piping into jq
     text     key=value lines per role
 
-  Composes with --fields, e.g. --fields name,auth_path to project to just
+  Composes with -fields, e.g. -fields name,auth_path to project to just
   those two fields per record.
 
   Mounts that fail introspection are reported as warnings on stderr; the
@@ -50,7 +50,7 @@ Usage: warden role list
 
     Filter to a specific auth mount:
 
-      $ warden role list --auth-path auth/jwt/
+      $ warden role list -auth-path auth/jwt/
 
     Pipe just the names into jq:
 

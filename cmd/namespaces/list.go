@@ -32,7 +32,7 @@ Usage: warden namespace list [options]
 
   List namespaces including the parent:
 
-      $ warden namespace list --include-parent
+      $ warden namespace list -include-parent
 
   Output as JSON:
 

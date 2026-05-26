@@ -119,13 +119,13 @@ Usage: warden server [options]
 
   Start a server with a single configuration file:
 
-      $ warden server --config=/etc/warden/config.hcl
+      $ warden server -config=/etc/warden/config.hcl
 
   Or merge multiple HCL files from a directory (lexical order, later files
   override earlier ones — useful for splitting a ConfigMap and a Secret in
   Kubernetes):
 
-      $ warden server --config-dir=/etc/warden/conf.d
+      $ warden server -config-dir=/etc/warden/conf.d
 
   Config files may reference environment variables via {{ env "VAR_NAME" }}.
 
@@ -223,39 +223,39 @@ func init() {
 func run(cmd *cobra.Command, args []string) error {
 	// Validate flag combinations
 	if flagDevRootToken != "" && !flagDev {
-		return fmt.Errorf("--dev-root-token can only be used with --dev")
+		return fmt.Errorf("-dev-root-token can only be used with -dev")
 	}
 	if flagDev && configPath != "" {
-		return fmt.Errorf("--config cannot be used with --dev (dev mode always uses inmem storage)")
+		return fmt.Errorf("-config cannot be used with -dev (dev mode always uses inmem storage)")
 	}
 	if flagDev && configDir != "" {
-		return fmt.Errorf("--config-dir cannot be used with --dev (dev mode always uses inmem storage)")
+		return fmt.Errorf("-config-dir cannot be used with -dev (dev mode always uses inmem storage)")
 	}
 	if configPath != "" && configDir != "" {
-		return fmt.Errorf("--config and --config-dir are mutually exclusive")
+		return fmt.Errorf("-config and -config-dir are mutually exclusive")
 	}
 
-	// Infer --dev-tls from explicit cert file flags
+	// Infer -dev-tls from explicit cert file flags
 	if flagDevTLSCertFile != "" || flagDevTLSKeyFile != "" || flagDevTLSCACertFile != "" {
 		flagDevTLS = true
 	}
 
-	// Validate dev-tls flags require --dev
+	// Validate dev-tls flags require -dev
 	if flagDevTLS && !flagDev {
-		return fmt.Errorf("--dev-tls can only be used with --dev")
+		return fmt.Errorf("-dev-tls can only be used with -dev")
 	}
 	if flagDevTLSRequireClientCert && !flagDev {
-		return fmt.Errorf("--dev-tls-require-client-cert can only be used with --dev")
+		return fmt.Errorf("-dev-tls-require-client-cert can only be used with -dev")
 	}
 
 	// Validate cert and key must be provided together
 	if (flagDevTLSCertFile != "") != (flagDevTLSKeyFile != "") {
-		return fmt.Errorf("--dev-tls-cert-file and --dev-tls-key-file must be provided together")
+		return fmt.Errorf("-dev-tls-cert-file and -dev-tls-key-file must be provided together")
 	}
 
 	// Validate require-client-cert needs a CA cert
 	if flagDevTLSRequireClientCert && flagDevTLSCACertFile == "" {
-		return fmt.Errorf("--dev-tls-require-client-cert requires --dev-tls-ca-cert-file")
+		return fmt.Errorf("-dev-tls-require-client-cert requires -dev-tls-ca-cert-file")
 	}
 
 	// Load configuration: dev mode builds defaults, otherwise requires config file or dir
@@ -279,7 +279,7 @@ func run(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 	default:
-		return fmt.Errorf("a config file path or config dir is required. Use -c/--config or --config-dir")
+		return fmt.Errorf("a config file path or config dir is required. Use -c/-config or -config-dir")
 	}
 
 	// Configure TLS for dev mode

@@ -19,7 +19,7 @@ Usage: warden provider <subcommand> [options]
 
   Enable a new provider:
 
-      $ warden provider enable --type=aws
+      $ warden provider enable aws
 
   Please see the individual subcommand help for detailed usage information.
 `,

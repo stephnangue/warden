@@ -54,7 +54,7 @@ The GitLab provider enables proxied access to the GitLab REST API through Warden
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -72,7 +72,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -89,13 +89,13 @@ warden write auth/jwt/role/gitlab-user \
 Enable the GitLab provider at a path of your choice:
 
 ```bash
-warden provider enable --type=gitlab
+warden provider enable gitlab
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=gitlab gitlab-prod
+warden provider enable -path=gitlab-prod gitlab
 ```
 
 Verify the provider is enabled:
@@ -134,12 +134,12 @@ The credential source holds the connection info and auth credentials for GitLab.
 
 ```bash
 warden cred source create gitlab-oauth \
-  --type=gitlab \
-  --rotation-period=720h \
-  --config=gitlab_address=https://gitlab.com \
-  --config=auth_method=oauth2 \
-  --config=application_id=<your-application-id> \
-  --config=application_secret=<your-application-secret>
+  -type=gitlab \
+  -rotation-period=720h \
+  -config=gitlab_address=https://gitlab.com \
+  -config=auth_method=oauth2 \
+  -config=application_id=<your-application-id> \
+  -config=application_secret=<your-application-secret>
 ```
 
 ### Option B: Personal Access Token
@@ -149,11 +149,11 @@ warden cred source create gitlab-oauth \
 
 ```bash
 warden cred source create gitlab-pat \
-  --type=gitlab \
-  --rotation-period=720h \
-  --config=gitlab_address=https://gitlab.com \
-  --config=auth_method=pat \
-  --config=personal_access_token=glpat-xxxxxxxxxxxxxxxxxxxx
+  -type=gitlab \
+  -rotation-period=720h \
+  -config=gitlab_address=https://gitlab.com \
+  -config=auth_method=pat \
+  -config=personal_access_token=glpat-xxxxxxxxxxxxxxxxxxxx
 ```
 
 Verify the source was created:
@@ -168,28 +168,28 @@ Create a credential spec that references the credential source. The spec defines
 
 ```bash
 warden cred spec create gitlab-project-token \
-  --source=gitlab-pat \
-  --min-ttl=1h \
-  --max-ttl=24h \
-  --config=mint_method=project_access_token \
-  --config=project_id=123 \
-  --config=token_name=warden-minted \
-  --config=scopes=api,read_api \
-  --config=access_level=30
+  -source=gitlab-pat \
+  -min-ttl=1h \
+  -max-ttl=24h \
+  -config=mint_method=project_access_token \
+  -config=project_id=123 \
+  -config=token_name=warden-minted \
+  -config=scopes=api,read_api \
+  -config=access_level=30
 ```
 
 ### Group Access Token
 
 ```bash
 warden cred spec create gitlab-group-token \
-  --source=gitlab-pat \
-  --min-ttl=1h \
-  --max-ttl=24h \
-  --config=mint_method=group_access_token \
-  --config=group_id=79644309 \
-  --config=token_name=warden-minted \
-  --config=scopes=api \
-  --config=access_level=30
+  -source=gitlab-pat \
+  -min-ttl=1h \
+  -max-ttl=24h \
+  -config=mint_method=group_access_token \
+  -config=group_id=79644309 \
+  -config=token_name=warden-minted \
+  -config=scopes=api \
+  -config=access_level=30
 ```
 
 Verify:
@@ -364,14 +364,14 @@ The default activation delay is **1 minute** (configurable via `activation_delay
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA

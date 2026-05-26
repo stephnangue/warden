@@ -38,7 +38,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -55,13 +55,13 @@ warden write auth/jwt/role/alicloud-user \
 Enable the Alicloud provider at the default path:
 
 ```bash
-warden provider enable --type=alicloud
+warden provider enable alicloud
 ```
 
 To mount at a custom path:
 
 ```bash
-warden provider enable --type=alicloud alicloud-prod
+warden provider enable -path=alicloud-prod alicloud
 ```
 
 Verify the provider is enabled:
@@ -102,23 +102,23 @@ The `alicloud` source requires a *management* access key that Warden uses to cal
 
 Create an `alicloud` source holding a *management* access key with permissions to call `sts:AssumeRole`. Warden calls Alicloud's STS API per request and hands clients short-lived credentials, so even a compromised session window is bounded.
 
-The example below also enables [management key rotation](#management-key-rotation) via `--rotation-period=720h` (30 days). The `management_user_name` config key is the RAM user that owns the management key — required for rotation to work.
+The example below also enables [management key rotation](#management-key-rotation) via `-rotation-period=720h` (30 days). The `management_user_name` config key is the RAM user that owns the management key — required for rotation to work.
 
 ```bash
 warden cred source create alicloud-src \
-  --type=alicloud \
-  --rotation-period=720h \
-  --config access_key_id=LTAI-mgmt-key \
-  --config access_key_secret=mgmt-secret \
-  --config management_user_name=warden-management
+  -type=alicloud \
+  -rotation-period=720h \
+  -config access_key_id=LTAI-mgmt-key \
+  -config access_key_secret=mgmt-secret \
+  -config management_user_name=warden-management
 
 warden cred spec create alicloud-ops \
-  --source alicloud-src \
-  --type=alicloud_keys \
-  --config mint_method=assume_role \
-  --config role_arn=acs:ram::123456789012:role/warden-ops \
-  --config role_session_name=warden-session \
-  --config duration_seconds=1h
+  -source alicloud-src \
+  -type=alicloud_keys \
+  -config mint_method=assume_role \
+  -config role_arn=acs:ram::123456789012:role/warden-ops \
+  -config role_session_name=warden-session \
+  -config duration_seconds=1h
 ```
 
 The RAM role's trust policy must allow the management user to assume it, and the source's management key needs `AliyunSTSAssumeRoleAccess` (or an equivalent custom policy). See [Alicloud: Use STS to grant an access to a RAM role](https://www.alibabacloud.com/help/en/ram/user-guide/use-sts-tokens-to-access-resources) for setup.
@@ -127,12 +127,12 @@ Optionally pass an inline `policy` to further restrict the issued session:
 
 ```bash
 warden cred spec create alicloud-readonly \
-  --source alicloud-src \
-  --type=alicloud_keys \
-  --config mint_method=assume_role \
-  --config role_arn=acs:ram::123456789012:role/warden-ops \
-  --config duration_seconds=15m \
-  --config 'policy={"Version":"1","Statement":[{"Effect":"Allow","Action":"ecs:Describe*","Resource":"*"}]}'
+  -source alicloud-src \
+  -type=alicloud_keys \
+  -config mint_method=assume_role \
+  -config role_arn=acs:ram::123456789012:role/warden-ops \
+  -config duration_seconds=15m \
+  -config 'policy={"Version":"1","Statement":[{"Effect":"Allow","Action":"ecs:Describe*","Resource":"*"}]}'
 ```
 
 ### Option B: Vault/OpenBao KV v2 source
@@ -147,21 +147,21 @@ The `hvault` source also supports rotation — it rotates its own AppRole `secre
 
 ```bash
 warden cred source create alicloud-vault-src \
-  --type=hvault \
-  --rotation-period=24h \
-  --config vault_address=https://vault.example.com \
-  --config auth_method=approle \
-  --config role_id=your-role-id \
-  --config secret_id=your-secret-id \
-  --config approle_mount=approle \
-  --config role_name=warden-role
+  -type=hvault \
+  -rotation-period=24h \
+  -config vault_address=https://vault.example.com \
+  -config auth_method=approle \
+  -config role_id=your-role-id \
+  -config secret_id=your-secret-id \
+  -config approle_mount=approle \
+  -config role_name=warden-role
 
 warden cred spec create alicloud-ops \
-  --source alicloud-vault-src \
-  --type=alicloud_keys \
-  --config mint_method=static_alicloud \
-  --config kv2_mount=secret \
-  --config secret_path=alicloud/prod/keys
+  -source alicloud-vault-src \
+  -type=alicloud_keys \
+  -config mint_method=static_alicloud \
+  -config kv2_mount=secret \
+  -config secret_path=alicloud/prod/keys
 ```
 
 The KV v2 secret at `secret/alicloud/prod/keys` must contain `access_key_id` and `access_key_secret` fields.
@@ -347,14 +347,14 @@ Warden extracts the JWT from `X-Amz-Security-Token` (it starts with `eyJ`), auth
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA
@@ -434,7 +434,7 @@ The `alicloud` source supports only dynamic mint methods. When the keys already 
 
 ### Alicloud source configuration
 
-Fields on the `alicloud` source, passed as `--config key=value` to `warden cred source create`:
+Fields on the `alicloud` source, passed as `-config key=value` to `warden cred source create`:
 
 | Key | Default | Description |
 |---|---|---|
@@ -447,16 +447,16 @@ Fields on the `alicloud` source, passed as `--config key=value` to `warden cred 
 | `ca_data` | — | Base64-encoded PEM CA bundle for custom/self-signed CAs. |
 | `tls_skip_verify` | false | Skip TLS verification (development only). |
 
-In addition to `--config` fields, `warden cred source create` accepts two top-level flags that are **not** part of the driver's config map:
+In addition to `-config` fields, `warden cred source create` accepts two top-level flags that are **not** part of the driver's config map:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--rotation-period` | — (rotation disabled) | How often Warden rotates the source's management access key. Requires `management_user_name` to also be set. Example: `--rotation-period=720h` (30 days). See [Management key rotation](#management-key-rotation). |
-| `--type` | — | Driver type. Use `--type=alicloud`. |
+| `-rotation-period` | — (rotation disabled) | How often Warden rotates the source's management access key. Requires `management_user_name` to also be set. Example: `-rotation-period=720h` (30 days). See [Management key rotation](#management-key-rotation). |
+| `-type` | — | Driver type. Use `-type=alicloud`. |
 
 ### Spec configuration
 
-Fields on the `alicloud_keys` spec (passed as `--config key=value` to `warden cred spec create`):
+Fields on the `alicloud_keys` spec (passed as `-config key=value` to `warden cred spec create`):
 
 | Key | Mint methods | Description |
 |---|---|---|
@@ -469,21 +469,21 @@ Fields on the `alicloud_keys` spec (passed as `--config key=value` to `warden cr
 
 ### Management key rotation
 
-The `alicloud` source implements Warden's `Rotatable` interface, so the management access key stored on the source can be rotated automatically without downtime. Rotation is driven by the source's `--rotation-period` flag and runs through Warden's rotation manager.
+The `alicloud` source implements Warden's `Rotatable` interface, so the management access key stored on the source can be rotated automatically without downtime. Rotation is driven by the source's `-rotation-period` flag and runs through Warden's rotation manager.
 
 **Enable rotation** with two pieces:
 
-- `--rotation-period` on `warden cred source create` — tells Warden's rotation manager how often to rotate (e.g., `720h` for 30 days). Without this flag the source is never rotated, even if everything else is configured.
-- `--config management_user_name=<ram-user>` — the RAM user that owns the management access key. Without it, `SupportsRotation()` returns false and the rotation manager skips the source even when `--rotation-period` is set.
+- `-rotation-period` on `warden cred source create` — tells Warden's rotation manager how often to rotate (e.g., `720h` for 30 days). Without this flag the source is never rotated, even if everything else is configured.
+- `-config management_user_name=<ram-user>` — the RAM user that owns the management access key. Without it, `SupportsRotation()` returns false and the rotation manager skips the source even when `-rotation-period` is set.
 
 ```bash
 warden cred source create alicloud-src \
-  --type=alicloud \
-  --rotation-period=720h \
-  --config access_key_id=LTAI-mgmt-key \
-  --config access_key_secret=mgmt-secret \
-  --config management_user_name=warden-management \
-  --config activation_delay=5m
+  -type=alicloud \
+  -rotation-period=720h \
+  -config access_key_id=LTAI-mgmt-key \
+  -config access_key_secret=mgmt-secret \
+  -config management_user_name=warden-management \
+  -config activation_delay=5m
 ```
 
 `activation_delay` is optional (defaults to 5 minutes) — the wait between minting the new key and using it, to let RAM eventual consistency propagate.

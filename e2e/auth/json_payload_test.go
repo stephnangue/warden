@@ -9,10 +9,9 @@ import (
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
 
-// TestJSON_AuthEnableWithJSON covers `warden auth enable --json` end-to-end.
-// Mounts a JWT auth method at a unique path with a payload-derived path
-// (no positional argument), then verifies via the API that the mount
-// landed.
+// TestJSON_AuthEnableWithJSON covers `warden auth enable -json` end-to-end.
+// Mounts a JWT auth method at a custom path (via -path) with a JSON payload,
+// then verifies via the API that the mount landed.
 func TestJSON_AuthEnableWithJSON(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
@@ -24,8 +23,9 @@ func TestJSON_AuthEnableWithJSON(t *testing.T) {
 
 	out, err := h.WardenCLIWithPort(t, port, map[string]string{
 		"WARDEN_TOKEN": h.RootToken(t),
-	}, "auth", "enable", path,
-		"--json", `{"type":"jwt","description":"e2e --json auth enable"}`,
+	}, "auth", "enable", "jwt",
+		"-path", path,
+		"-json", `{"type":"jwt","description":"e2e -json auth enable"}`,
 		"-o", "json")
 	if err != nil {
 		t.Fatalf("auth enable --json failed: %v\nOutput:\n%s", err, out)
@@ -50,10 +50,9 @@ func TestJSON_AuthEnableWithJSON(t *testing.T) {
 	}
 }
 
-// TestJSON_AuthEnableWithPathFlag verifies that -path works as an
-// alternative to the positional PATH argument. Uses Vault-style single-dash
-// long flags so this test also exercises the flag-normalization layer
-// against the newly-added -path flag.
+// TestJSON_AuthEnableWithPathFlag verifies that -path overrides the default
+// mount path (which defaults to TYPE). Uses Vault-style single-dash long
+// flags throughout to exercise the flag-normalization layer.
 func TestJSON_AuthEnableWithPathFlag(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
@@ -66,9 +65,9 @@ func TestJSON_AuthEnableWithPathFlag(t *testing.T) {
 	out, err := h.WardenCLIWithPort(t, port, map[string]string{
 		"WARDEN_TOKEN": h.RootToken(t),
 	}, "auth", "enable",
-		"-type", "jwt",
 		"-path", path,
-		"-o", "json")
+		"-o", "json",
+		"jwt")
 	if err != nil {
 		t.Fatalf("auth enable -path failed: %v\nOutput:\n%s", err, out)
 	}
@@ -85,39 +84,41 @@ func TestJSON_AuthEnableWithPathFlag(t *testing.T) {
 	}
 }
 
-// TestJSON_AuthEnableRejectsPathAndPositionalConflict pins the conflict
-// rule: supplying both -path and a positional PATH must fail with a
-// usage error (not silently prefer one).
-func TestJSON_AuthEnableRejectsPathAndPositionalConflict(t *testing.T) {
+// TestJSON_AuthEnableRejectsPayloadTypeMismatch pins the conflict rule:
+// when the JSON payload's "type" field disagrees with the TYPE positional,
+// the CLI must fail with a usage error.
+func TestJSON_AuthEnableRejectsPayloadTypeMismatch(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
 	out, err := h.WardenCLIWithPort(t, port, map[string]string{
 		"WARDEN_TOKEN": h.RootToken(t),
-	}, "auth", "enable", "positional-path",
-		"-type", "jwt",
-		"-path", "flag-path",
+	}, "auth", "enable", "jwt",
+		"-json", `{"type":"oidc"}`,
 		"-o", "json")
 	if err == nil {
-		t.Fatalf("expected non-zero exit for -path + positional PATH; got success.\nOutput:\n%s", out)
+		t.Fatalf("expected non-zero exit for TYPE/payload mismatch; got success.\nOutput:\n%s", out)
 	}
 }
 
-// TestJSON_AuthEnableDerivesPathFromPayloadType verifies the no-positional-arg
-// path-resolution: when the agent omits the positional PATH, the mount
-// path is derived from payload["type"] (e.g. "jwt" → "jwt/").
-func TestJSON_AuthEnableDerivesPathFromPayloadType(t *testing.T) {
+// TestJSON_AuthEnableDryRunWithMatchingType pins the happy path: TYPE
+// positional + a -json payload whose "type" field matches, plus -dry-run.
+// Dry-run is needed because "jwt" is already mounted by setup.sh; the test
+// confirms the CLI plumbing (cobra arg parsing, type-mismatch check, schema
+// fetch, payload validation) all wire together without actually mounting.
+// The dry-run envelope reports the path TEMPLATE (sys/auth/{path}) rather
+// than the resolved mount path, so we verify the template — a regression
+// in the template would surface here.
+func TestJSON_AuthEnableDryRunWithMatchingType(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
-	// "jwt" is already mounted by setup.sh, so we use a custom path that
-	// matches the type. Using --dry-run avoids the conflict.
 	out, err := h.WardenCLIWithPort(t, port, map[string]string{
 		"WARDEN_TOKEN": h.RootToken(t),
-	}, "auth", "enable",
-		"--json", `{"type":"jwt"}`,
-		"--dry-run",
+	}, "auth", "enable", "jwt",
+		"-json", `{"type":"jwt"}`,
+		"-dry-run",
 		"-o", "json")
 	if err != nil {
-		t.Fatalf("auth enable --json --dry-run failed: %v\nOutput:\n%s", err, out)
+		t.Fatalf("auth enable -json -dry-run failed: %v\nOutput:\n%s", err, out)
 	}
 
 	var resp map[string]any
@@ -126,5 +127,8 @@ func TestJSON_AuthEnableDerivesPathFromPayloadType(t *testing.T) {
 	}
 	if resp["dry_run"] != true || resp["validated"] != true {
 		t.Errorf("expected dry_run=true and validated=true; got %v", resp)
+	}
+	if resp["path"] != "sys/auth/{path}" {
+		t.Errorf("expected path template sys/auth/{path}; got %v", resp["path"])
 	}
 }

@@ -231,7 +231,7 @@ EOF
 #!/bin/sh
 set -eu
 
-FORGEJO="forgejo --config /data/gitea/conf/app.ini"
+FORGEJO="forgejo -config /data/gitea/conf/app.ini"
 
 if $FORGEJO admin user list 2>/dev/null | awk '{print $2}' | grep -qx siteowner; then
   exit 0
@@ -276,7 +276,7 @@ Then:
      --no-interactive \
      --instance http://forgejo.local:3000 \
      --token <REGISTRATION_TOKEN> \
-     --name local-runner \
+     -name local-runner \
      --labels "docker:docker://node:20-bookworm-slim"
    ```
    Create a runner config so spawned job containers can resolve
@@ -344,7 +344,7 @@ finding the hygiene agent should surface.
 In a new shell:
 
 ```bash
-warden server --dev --dev-root-token=dev-warden-root
+warden server -dev -dev-root-token=dev-warden-root
 ```
 
 The dev listener is hard-coded to `127.0.0.1:8400`.
@@ -372,10 +372,10 @@ curl -sf "$JWKS_URI" | jq '.keys | length'   # should print >= 1
 
 ### Audit log
 
-The `warden server --dev` instance ships with zero audit devices — the
+The `warden server -dev` instance ships with zero audit devices — the
 broker fail-opens at zero, so the cluster runs unaudited until one is
 enabled. The §5 wiring script (`warden-init.sh`) calls
-`warden audit enable --type=file --file-path=./warden-audit.log audit-default`
+`warden audit enable -file-path=./warden-audit.log -path=audit-default file`
 as its first step, which writes the log to `warden-audit.log` in the
 directory you launched `warden server` from. Section 9 tails it to
 confirm every agent request flows through Warden with attributable
@@ -393,14 +393,14 @@ lives, in the admin shell with `WARDEN_ADDR` and `WARDEN_TOKEN` exported:
 
 ```bash
 ./warden-init.sh \
-    --anthropic-key=sk-... \
-    [--slack-token=xoxb-...] \
-    [--slack-channel-id=C0123456789 --slack-channel-name='#sec-hygiene']
+    -anthropic-key=sk-... \
+    [-slack-token=xoxb-...] \
+    [-slack-channel-id=C0123456789 -slack-channel-name='#sec-hygiene']
 ```
 
-`--slack-token` is optional; without it, the Slack provider/role/policy
-are skipped. When passed, both `--slack-channel-id` and
-`--slack-channel-name` are required: they're embedded into the
+`-slack-token` is optional; without it, the Slack provider/role/policy
+are skipped. When passed, both `-slack-channel-id` and
+`-slack-channel-name` are required: they're embedded into the
 `slack-ops` role's `description` so the agent extracts the channel from
 discovery rather than an env var.
 
@@ -410,7 +410,7 @@ adapt it. Skim to understand, run the script to apply.
 ### 5a. Create the tutorial namespace
 
 ```bash
-warden namespace create tutorial --metadata=auto_auth_path=auth/jwt/
+warden namespace create tutorial -metadata=auto_auth_path=auth/jwt/
 ```
 
 The discovery flow relies on two namespace-scoped mechanisms:
@@ -441,7 +441,7 @@ OIDC endpoints (the ones discovered in section 3, step 5 —
 `/api/actions/...`, not the user-login OIDC).
 
 ```bash
-warden auth enable --type=jwt
+warden auth enable jwt
 warden write auth/jwt/config \
     jwks_url=http://forgejo.local:3000/api/actions/.well-known/keys \
     bound_issuer=http://forgejo.local:3000/api/actions \
@@ -496,12 +496,12 @@ cred spec mints OpenBao tokens via the `policy-reader` token role;
 `rotation_period=24h` rotates the AppRole's `secret_id` automatically.
 
 ```bash
-warden provider enable --type=vault \
-    --description="Internal OpenBao cluster — ACL policies, mounts, identity (read-mostly)" \
-    --path=vault
+warden provider enable vault \
+    -description="Internal OpenBao cluster — ACL policies, mounts, identity (read-mostly)" \
+    -path=vault
 ```
 
-The mount path can be supplied either positionally or via `--path` —
+The mount path can be supplied either positionally or via `-path` —
 both forms work and Vault-style single-dash long flags (`-path=vault`)
 are accepted too.
 
@@ -528,9 +528,9 @@ endpoint) by default — change `anthropic_url` in `warden-init.sh` to
 `https://api.anthropic.com` if you want Claude itself.
 
 ```bash
-warden provider enable --type=anthropic \
-    --description="Anthropic-compatible LLM endpoint (default: DeepSeek). Internal — used by Goose runtime, not chosen by agents." \
-    anthropic
+warden provider enable \
+    -description="Anthropic-compatible LLM endpoint (default: DeepSeek). Internal — used by Goose runtime, not chosen by agents." \
+    -path=anthropic anthropic
 ```
 
 Note the description: it tells any agent that reads it that this leg is
@@ -544,7 +544,7 @@ else.
 
 ### 5f. Slack provider + slack-ops role (optional)
 
-If you passed `--slack-token=xoxb-...`, a third egress leg is wired up.
+If you passed `-slack-token=xoxb-...`, a third egress leg is wired up.
 The bot token lives only in Warden — agents send `$WARDEN_JWT` and
 Warden swaps it for `Authorization: Bearer xoxb-...` at the gateway.
 
@@ -557,13 +557,13 @@ warden write auth/jwt/role/slack-ops \
 ```
 
 The channel ID and name are embedded in the description by
-`warden-init.sh` from the `--slack-channel-id` and `--slack-channel-name`
+`warden-init.sh` from the `-slack-channel-id` and `-slack-channel-name`
 flags. The agent extracts both from the role description — there is no
 `SLACK_CHANNEL` env var on the runtime side.
 
 The recipe and call shape (canvas check/delete/create, chat
 notification) are documented in the `slack` provider skill, which the
-agent fetches via `warden skill read slack --raw`.
+agent fetches via `warden skill read slack -raw`.
 
 ### 5g. Decoy roles — prove the agent matches by description
 
@@ -592,7 +592,7 @@ capabilities the recipe needs, nothing more.** A wildcard like
 the recipe is meant to flag.
 
 The policies that `warden-init.sh` writes (the third, `slack-ops`, is
-only written when `--slack-token` is passed):
+only written when `-slack-token` is passed):
 
 ```hcl
 # vault-readonly — attached to the policy-scanner JWT role only
@@ -704,8 +704,8 @@ the agent has both available for cross-checks.
 ### Step 4 — `warden skill read <type>` for each chosen provider
 
 ```bash
-warden skill read vault --raw
-warden skill read slack --raw
+warden skill read vault -raw
+warden skill read slack -raw
 ```
 
 Hits `GET /v1/sys/skills/<name>`. Returns the per-provider recipe in
@@ -944,7 +944,7 @@ docker compose down -v          # stop containers + drop named volumes (forgejo-
 rm -rf bao-out runner-config    # local artefacts: AppRole creds + runner registration
 ```
 
-Stop Warden (`Ctrl-C` in its shell — `--dev` mode is in-memory, so
+Stop Warden (`Ctrl-C` in its shell — `-dev` mode is in-memory, so
 nothing to clean up on disk besides the audit log), and optionally
 remove the host mapping:
 

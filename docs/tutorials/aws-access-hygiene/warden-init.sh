@@ -14,7 +14,7 @@
 #      Warden role, each targeting a distinct narrowly-scoped IAM role).
 #      The 3 AWS decoy roles deliberately have no credential spec, so
 #      invoking one fails at credential minting.
-#   5. Slack provider (optional, --slack-token=...) + 1 source + 1 spec
+#   5. Slack provider (optional, -slack-token=...) + 1 source + 1 spec
 #      for the canvas-posting role; 1 decoy without a spec.
 #   6. Per-role access policies. The AWS policy is uniform across all
 #      five active AWS roles: read/create/list on path "aws/gateway" and
@@ -27,18 +27,18 @@
 #   - aws-out/creds.env populated by aws-init.sh.
 #
 # Usage:
-#   ./warden-init.sh --anthropic-key=sk-...
-#   ./warden-init.sh --anthropic-key=sk-... \
-#                    --slack-token=xoxb-... \
-#                    --slack-channel-id=C0XXXXXXX \
-#                    --slack-channel-name='#access-audits' \
-#                    --repo=siteowner/aws-access-hygiene
+#   ./warden-init.sh -anthropic-key=sk-...
+#   ./warden-init.sh -anthropic-key=sk-... \
+#                    -slack-token=xoxb-... \
+#                    -slack-channel-id=C0XXXXXXX \
+#                    -slack-channel-name='#access-audits' \
+#                    -repo=siteowner/aws-access-hygiene
 #
-# --anthropic-key is required (the LLM key Warden hands to Goose at
+# -anthropic-key is required (the LLM key Warden hands to Goose at
 # runtime; it never enters the agent's environment). It can also be
 # passed via the ANTHROPIC_API_KEY env var.
 #
-# --slack-token is optional; without it the Slack provider/role/spec
+# -slack-token is optional; without it the Slack provider/role/spec
 # are skipped (the agent will fail the canvas post but Goose's audit
 # still produces Security Hub findings).
 set -euo pipefail
@@ -51,23 +51,23 @@ REPO="siteowner/aws-access-hygiene"
 
 for arg in "$@"; do
   case $arg in
-    --anthropic-key=*)       ANTHROPIC_KEY="${arg#--anthropic-key=}" ;;
-    --slack-token=*)         SLACK_TOKEN="${arg#--slack-token=}" ;;
-    --slack-channel-id=*)    SLACK_CHANNEL_ID="${arg#--slack-channel-id=}" ;;
-    --slack-channel-name=*)  SLACK_CHANNEL_NAME="${arg#--slack-channel-name=}" ;;
-    --repo=*)                REPO="${arg#--repo=}" ;;
+    --anthropic-key=*|-anthropic-key=*)           ANTHROPIC_KEY="${arg#*=}" ;;
+    --slack-token=*|-slack-token=*)               SLACK_TOKEN="${arg#*=}" ;;
+    --slack-channel-id=*|-slack-channel-id=*)     SLACK_CHANNEL_ID="${arg#*=}" ;;
+    --slack-channel-name=*|-slack-channel-name=*) SLACK_CHANNEL_NAME="${arg#*=}" ;;
+    --repo=*|-repo=*)                             REPO="${arg#*=}" ;;
     *) echo "unknown arg: $arg" >&2; exit 1 ;;
   esac
 done
 
 if [ -z "$ANTHROPIC_KEY" ]; then
-  echo "ERROR: pass --anthropic-key=sk-... or set ANTHROPIC_API_KEY" >&2
+  echo "ERROR: pass -anthropic-key=sk-... or set ANTHROPIC_API_KEY" >&2
   echo "       (this is the LLM key Warden hands to Goose at runtime; never enters the agent env)" >&2
   exit 1
 fi
 
 if [ -n "$SLACK_TOKEN" ] && { [ -z "$SLACK_CHANNEL_ID" ] || [ -z "$SLACK_CHANNEL_NAME" ]; }; then
-  echo "ERROR: --slack-token requires --slack-channel-id=C... and --slack-channel-name=#..." >&2
+  echo "ERROR: -slack-token requires -slack-channel-id=C... and -slack-channel-name=#..." >&2
   exit 1
 fi
 
@@ -86,7 +86,7 @@ command -v "$WARDEN" >/dev/null 2>&1 || { [ -x ./warden ] && WARDEN=./warden; } 
 # until we enable one. §10 of the README tails this file to verify
 # per-call role attribution; without this step the file never exists.
 if ! "$WARDEN" audit list 2>/dev/null | grep -q "^audit-default/"; then
-  "$WARDEN" audit enable --type=file --file-path=./warden-audit.log audit-default
+  "$WARDEN" audit enable -file-path=./warden-audit.log -path=audit-default file
 fi
 
 BOUND_CLAIMS_FULL=$(printf '{"repository":"%s","ref":"refs/heads/main","ref_type":"branch"}' "$REPO")
@@ -97,11 +97,11 @@ BOUND_CLAIMS_REPO=$(printf '{"repository":"%s"}' "$REPO")
 # The discovery loop hits /v1/sys/* as a bare JWT (no Warden session,
 # no role segment in the URL). auto_auth_path tells Warden which auth
 # mount to resolve those calls against.
-$WARDEN namespace create tutorial-aws --metadata=auto_auth_path=auth/jwt/ 2>/dev/null || true
+$WARDEN namespace create tutorial-aws -metadata=auto_auth_path=auth/jwt/ 2>/dev/null || true
 export WARDEN_NAMESPACE=tutorial-aws
 
 # 5b. JWT auth pointed at Forgejo's Actions OIDC.
-$WARDEN auth enable --type=jwt 2>/dev/null || true
+$WARDEN auth enable jwt 2>/dev/null || true
 $WARDEN write auth/jwt/config \
     jwks_url=http://forgejo.local:3000/api/actions/.well-known/keys \
     bound_issuer=http://forgejo.local:3000/api/actions \
@@ -136,9 +136,9 @@ $WARDEN write auth/jwt/role/discovery-baseline \
 # vault provider where it's optional metadata. proxy_domains is not set
 # here: it is only consulted by the S3 processors for virtual-hosted
 # bucket URL rewriting, and this tutorial uses no S3 calls.
-$WARDEN provider enable --type=aws \
-    --description="AWS gateway proxied via the warden-aws-tutorial-broker IAM user — five lenses across IAM, CloudTrail, Access Analyzer, IAM Policy Simulator, and Security Hub. Each role's description names the AWS account its assumed IAM role lives in." \
-    aws 2>/dev/null || true
+$WARDEN provider enable \
+    -description="AWS gateway proxied via the warden-aws-tutorial-broker IAM user — five lenses across IAM, CloudTrail, Access Analyzer, IAM Policy Simulator, and Security Hub. Each role's description names the AWS account its assumed IAM role lives in." \
+    -path=aws aws 2>/dev/null || true
 $WARDEN write aws/config \
     auto_auth_path=auth/jwt/
 
@@ -148,43 +148,43 @@ for spec in iam-reader-spec cloudtrail-reader-spec access-analyzer-reader-spec p
 done
 $WARDEN cred source delete -f demo-aws-source 2>/dev/null || true
 
-$WARDEN cred source create demo-aws-source --type=aws \
-    --rotation-period=0 \
-    --config=access_key_id="$WARDEN_AWS_BROKER_ACCESS_KEY_ID" \
-    --config=secret_access_key="$WARDEN_AWS_BROKER_SECRET_ACCESS_KEY" \
-    --config=region="$WARDEN_AWS_REGION"
+$WARDEN cred source create demo-aws-source -type=aws \
+    -rotation-period=0 \
+    -config=access_key_id="$WARDEN_AWS_BROKER_ACCESS_KEY_ID" \
+    -config=secret_access_key="$WARDEN_AWS_BROKER_SECRET_ACCESS_KEY" \
+    -config=region="$WARDEN_AWS_REGION"
 
 # Five specs, one per active Warden role. The source is shared; the
 # differentiator is the target IAM role ARN each spec assumes.
-$WARDEN cred spec create iam-reader-spec --source demo-aws-source \
-    --config mint_method=sts_assume_role \
-    --config role_arn="$WARDEN_AWS_ROLE_IAM_READER_ARN" \
-    --config session_name=warden-iam-reader \
-    --config ttl=1h
+$WARDEN cred spec create iam-reader-spec -source demo-aws-source \
+    -config mint_method=sts_assume_role \
+    -config role_arn="$WARDEN_AWS_ROLE_IAM_READER_ARN" \
+    -config session_name=warden-iam-reader \
+    -config ttl=1h
 
-$WARDEN cred spec create cloudtrail-reader-spec --source demo-aws-source \
-    --config mint_method=sts_assume_role \
-    --config role_arn="$WARDEN_AWS_ROLE_CLOUDTRAIL_READER_ARN" \
-    --config session_name=warden-cloudtrail-reader \
-    --config ttl=1h
+$WARDEN cred spec create cloudtrail-reader-spec -source demo-aws-source \
+    -config mint_method=sts_assume_role \
+    -config role_arn="$WARDEN_AWS_ROLE_CLOUDTRAIL_READER_ARN" \
+    -config session_name=warden-cloudtrail-reader \
+    -config ttl=1h
 
-$WARDEN cred spec create access-analyzer-reader-spec --source demo-aws-source \
-    --config mint_method=sts_assume_role \
-    --config role_arn="$WARDEN_AWS_ROLE_ACCESS_ANALYZER_ARN" \
-    --config session_name=warden-access-analyzer \
-    --config ttl=1h
+$WARDEN cred spec create access-analyzer-reader-spec -source demo-aws-source \
+    -config mint_method=sts_assume_role \
+    -config role_arn="$WARDEN_AWS_ROLE_ACCESS_ANALYZER_ARN" \
+    -config session_name=warden-access-analyzer \
+    -config ttl=1h
 
-$WARDEN cred spec create policy-simulator-spec --source demo-aws-source \
-    --config mint_method=sts_assume_role \
-    --config role_arn="$WARDEN_AWS_ROLE_POLICY_SIMULATOR_ARN" \
-    --config session_name=warden-policy-simulator \
-    --config ttl=1h
+$WARDEN cred spec create policy-simulator-spec -source demo-aws-source \
+    -config mint_method=sts_assume_role \
+    -config role_arn="$WARDEN_AWS_ROLE_POLICY_SIMULATOR_ARN" \
+    -config session_name=warden-policy-simulator \
+    -config ttl=1h
 
-$WARDEN cred spec create securityhub-writer-spec --source demo-aws-source \
-    --config mint_method=sts_assume_role \
-    --config role_arn="$WARDEN_AWS_ROLE_SECURITYHUB_WRITER_ARN" \
-    --config session_name=warden-securityhub-writer \
-    --config ttl=1h
+$WARDEN cred spec create securityhub-writer-spec -source demo-aws-source \
+    -config mint_method=sts_assume_role \
+    -config role_arn="$WARDEN_AWS_ROLE_SECURITYHUB_WRITER_ARN" \
+    -config session_name=warden-securityhub-writer \
+    -config ttl=1h
 
 # Five active Warden roles — each pointing at one spec. Descriptions
 # carry what the agent needs to pick the right role per lens: what data
@@ -265,9 +265,9 @@ $WARDEN policy write aws-gateway-access /tmp/aws-tut-aws-gateway-access.hcl
 # not part of the agent's discovery loop — it's wired in for the
 # Goose runtime itself. The role is marked "Internal" so an agent
 # does not pick it for a task.
-$WARDEN provider enable --type=anthropic \
-    --description="Anthropic-compatible LLM endpoint (default: DeepSeek). Internal — used by Goose runtime, not chosen by agents." \
-    anthropic 2>/dev/null || true
+$WARDEN provider enable \
+    -description="Anthropic-compatible LLM endpoint (default: DeepSeek). Internal — used by Goose runtime, not chosen by agents." \
+    -path=anthropic anthropic 2>/dev/null || true
 $WARDEN write anthropic/config \
     anthropic_url=https://api.deepseek.com/anthropic \
     auto_auth_path=auth/jwt/ \
@@ -275,15 +275,15 @@ $WARDEN write anthropic/config \
 
 $WARDEN cred spec delete -f anthropic-ops 2>/dev/null || true
 $WARDEN cred source delete -f anthropic-src 2>/dev/null || true
-$WARDEN cred source create anthropic-src --type=apikey \
-    --rotation-period=0 \
-    --config=api_url=https://api.deepseek.com \
-    --config=verify_endpoint=/v1/models \
-    --config=auth_header_type=custom_header \
-    --config=auth_header_name=x-api-key \
-    --config=extra_headers=anthropic-version:2023-06-01
-$WARDEN cred spec create anthropic-ops --source anthropic-src \
-    --config api_key="$ANTHROPIC_KEY"
+$WARDEN cred source create anthropic-src -type=apikey \
+    -rotation-period=0 \
+    -config=api_url=https://api.deepseek.com \
+    -config=verify_endpoint=/v1/models \
+    -config=auth_header_type=custom_header \
+    -config=auth_header_name=x-api-key \
+    -config=extra_headers=anthropic-version:2023-06-01
+$WARDEN cred spec create anthropic-ops -source anthropic-src \
+    -config api_key="$ANTHROPIC_KEY"
 
 $WARDEN write auth/jwt/role/anthropic-ops \
     description="LLM inference for the access-hygiene auditor agent. Used internally by Goose — agents do not call this role directly." \
@@ -299,20 +299,20 @@ $WARDEN policy write anthropic-ops /tmp/aws-tut-anthropic-ops.hcl
 
 # 5f. Slack provider (optional).
 if [ -n "$SLACK_TOKEN" ]; then
-  $WARDEN provider enable --type=slack \
-      --description="Slack workspace for access-audit canvas reports — channel embedded in the hygiene-poster role description" \
-      slack 2>/dev/null || true
+  $WARDEN provider enable \
+      -description="Slack workspace for access-audit canvas reports — channel embedded in the hygiene-poster role description" \
+      -path=slack slack 2>/dev/null || true
   $WARDEN write slack/config slack_url=https://slack.com/api auto_auth_path=auth/jwt/
 
   $WARDEN cred spec delete -f hygiene-poster-spec 2>/dev/null || true
   $WARDEN cred source delete -f demo-slack-source 2>/dev/null || true
-  $WARDEN cred source create demo-slack-source --type=apikey \
-      --rotation-period=0 \
-      --config=api_url=https://slack.com/api \
-      --config=verify_endpoint=/auth.test \
-      --config=verify_method=POST
-  $WARDEN cred spec create hygiene-poster-spec --source demo-slack-source \
-      --config api_key="$SLACK_TOKEN"
+  $WARDEN cred source create demo-slack-source -type=apikey \
+      -rotation-period=0 \
+      -config=api_url=https://slack.com/api \
+      -config=verify_endpoint=/auth.test \
+      -config=verify_method=POST
+  $WARDEN cred spec create hygiene-poster-spec -source demo-slack-source \
+      -config api_key="$SLACK_TOKEN"
 
   $WARDEN write auth/jwt/role/hygiene-poster \
       description="Post hygiene canvases to ${SLACK_CHANNEL_NAME} (${SLACK_CHANNEL_ID}) via the Slack provider at /v1/tutorial-aws/slack/. Canvas create/update + one-line notify. Not for alerts or incident dispatch." \
@@ -340,5 +340,5 @@ EOF
 
   echo "warden-init: section 5 complete (namespace=tutorial-aws, Slack delivery enabled)"
 else
-  echo "warden-init: section 5 complete (namespace=tutorial-aws, Slack delivery skipped — no --slack-token given)"
+  echo "warden-init: section 5 complete (namespace=tutorial-aws, Slack delivery skipped — no -slack-token given)"
 fi

@@ -77,7 +77,7 @@ docker compose -f deploy/docker-compose.quickstart.yml up -d
 ### 2. Start Warden (dev mode)
 
 ```bash
-warden server --dev --dev-root-token=root
+warden server -dev -dev-root-token=root
 ```
 
 ### 3. Configure Warden
@@ -87,7 +87,7 @@ export WARDEN_ADDR="http://127.0.0.1:8400"
 export WARDEN_TOKEN="root"
 
 # Enable JWT auth
-warden auth enable --type=jwt
+warden auth enable jwt
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create role
@@ -97,7 +97,7 @@ warden write auth/jwt/role/scaleway-user \
     cred_spec_name=scaleway-ops
 
 # Enable Scaleway provider
-warden provider enable --type=scaleway
+warden provider enable scaleway
 
 # Configure provider
 warden write scaleway/config <<EOF
@@ -110,18 +110,18 @@ EOF
 
 # Create credential source with management app keys (Application 1)
 warden cred source create scaleway-src \
-  --type=scaleway \
-  --rotation-period=24h \
-  --config=management_secret_key=<warden-management-secret-key> \
-  --config=management_access_key=<warden-management-access-key>
+  -type=scaleway \
+  -rotation-period=24h \
+  -config=management_secret_key=<warden-management-secret-key> \
+  -config=management_access_key=<warden-management-access-key>
 
 # Create credential spec pointing to workload app (Application 2)
 warden cred spec create scaleway-ops \
-  --source scaleway-src \
-  --config mint_method=dynamic_keys \
-  --config application_id=<warden-workload-application-id> \
-  --config default_project_id=<your-project-id> \
-  --config ttl=1h
+  -source scaleway-src \
+  -config mint_method=dynamic_keys \
+  -config application_id=<warden-workload-application-id> \
+  -config default_project_id=<your-project-id> \
+  -config ttl=1h
 
 # Create policy
 warden policy write scaleway-access - <<EOF

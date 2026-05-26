@@ -33,7 +33,7 @@ The Kubernetes provider enables proxied access to Kubernetes API servers through
 >
 > **2. Start Warden in dev mode:**
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 
 ## Step 1: Configure JWT Auth and Create a Role
@@ -42,7 +42,7 @@ Enable JWT auth and create a role bound to a Warden policy:
 
 ```bash
 # Enable JWT auth (if not already enabled)
-warden auth enable --type=jwt --path=auth/jwt/
+warden auth enable jwt -path=auth/jwt/
 
 # Configure JWT auth with your OIDC provider
 warden write auth/jwt/config \
@@ -60,7 +60,7 @@ warden write auth/jwt/role/k8s-user \
 
 ```bash
 # Enable the Kubernetes provider
-warden provider enable --type=kubernetes
+warden provider enable kubernetes
 
 # Configure the provider with your cluster's API server URL
 warden write kubernetes/config \
@@ -101,28 +101,28 @@ SOURCE_TOKEN=$(kubectl create token warden-token-creator -n warden --duration=24
 
 # Create the credential source with automatic token rotation
 warden cred source create k8s-source \
-  --type=kubernetes \
-  --rotation-period=12h \
-  --config=kubernetes_url=https://my-cluster.example.com:6443 \
-  --config=token=$SOURCE_TOKEN \
-  --config=ca_data=$CA_DATA \
-  --config=source_service_account=warden-token-creator \
-  --config=source_namespace=warden \
-  --config=source_token_ttl=24h
+  -type=kubernetes \
+  -rotation-period=12h \
+  -config=kubernetes_url=https://my-cluster.example.com:6443 \
+  -config=token=$SOURCE_TOKEN \
+  -config=ca_data=$CA_DATA \
+  -config=source_service_account=warden-token-creator \
+  -config=source_namespace=warden \
+  -config=source_token_ttl=24h
 ```
 
 For development clusters with self-signed certificates:
 
 ```bash
 warden cred source create k8s-source-dev \
-  --type=kubernetes \
-  --rotation-period=12h \
-  --config=kubernetes_url=https://localhost:6443 \
-  --config=token=$SOURCE_TOKEN \
-  --config=tls_skip_verify=true \
-  --config=source_service_account=warden-token-creator \
-  --config=source_namespace=warden \
-  --config=source_token_ttl=24h
+  -type=kubernetes \
+  -rotation-period=12h \
+  -config=kubernetes_url=https://localhost:6443 \
+  -config=token=$SOURCE_TOKEN \
+  -config=tls_skip_verify=true \
+  -config=source_service_account=warden-token-creator \
+  -config=source_namespace=warden \
+  -config=source_token_ttl=24h
 ```
 
 > **How rotation works:** `source_service_account` and `source_namespace` tell the driver
@@ -152,11 +152,11 @@ kubectl wait --for=jsonpath='{.data.token}' secret/warden-token-creator-token -n
 SOURCE_TOKEN=$(kubectl get secret warden-token-creator-token -n warden -o jsonpath='{.data.token}' | base64 -d)
 
 warden cred source create k8s-source \
-  --type=kubernetes \
-  --rotation-period=0 \
-  --config=kubernetes_url=https://my-cluster.example.com:6443 \
-  --config=token=$SOURCE_TOKEN \
-  --config=ca_data=$CA_DATA
+  -type=kubernetes \
+  -rotation-period=0 \
+  -config=kubernetes_url=https://my-cluster.example.com:6443 \
+  -config=token=$SOURCE_TOKEN \
+  -config=ca_data=$CA_DATA
 ```
 
 </details>
@@ -202,30 +202,30 @@ roleRef:
 ```bash
 # Read-only spec — tokens inherit the "pod-reader" Role
 warden cred spec create k8s-app-reader \
-  --source k8s-source \
-  --config service_account=app-reader \
-  --config namespace=default \
-  --config ttl=1h
+  -source k8s-source \
+  -config service_account=app-reader \
+  -config namespace=default \
+  -config ttl=1h
 ```
 
 ```bash
 # Different spec for a different access level (e.g., an admin SA with broader permissions)
 warden cred spec create k8s-app-admin \
-  --source k8s-source \
-  --config service_account=app-admin \
-  --config namespace=default \
-  --config ttl=30m
+  -source k8s-source \
+  -config service_account=app-admin \
+  -config namespace=default \
+  -config ttl=30m
 ```
 
 With custom audiences:
 
 ```bash
 warden cred spec create k8s-api-consumer \
-  --source k8s-source \
-  --config service_account=api-consumer \
-  --config namespace=production \
-  --config audiences=https://my-app.example.com,https://api.example.com \
-  --config ttl=30m
+  -source k8s-source \
+  -config service_account=api-consumer \
+  -config namespace=production \
+  -config audiences=https://my-app.example.com,https://api.example.com \
+  -config ttl=30m
 ```
 
 ## Step 4: Create a Policy
@@ -402,10 +402,10 @@ If rotation is not configured (no `source_service_account`/`source_namespace`), 
 ```bash
 SOURCE_TOKEN=$(kubectl create token warden-token-creator -n warden --duration=24h)
 warden cred source create k8s-source \
-  --type=kubernetes \
-  --rotation-period=0 \
-  --config=kubernetes_url=https://my-cluster.example.com:6443 \
-  --config=token=$SOURCE_TOKEN
+  -type=kubernetes \
+  -rotation-period=0 \
+  -config=kubernetes_url=https://my-cluster.example.com:6443 \
+  -config=token=$SOURCE_TOKEN
 ```
 
 ## Troubleshooting

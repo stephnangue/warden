@@ -20,13 +20,13 @@ var (
 Usage: warden auth read [PATH]
 
   Show information on an auth method enabled on the provided PATH. The
-  PATH may be supplied either positionally or via --path (pick one —
+  PATH may be supplied either positionally or via -path (pick one —
   combining both is rejected).
 
   Read the auth method enabled at jwt/:
 
       $ warden auth read jwt/
-      $ warden auth read --path=jwt/
+      $ warden auth read -path=jwt/
 `,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runRead,

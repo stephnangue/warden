@@ -52,7 +52,7 @@ The Prometheus provider enables proxied access to the Prometheus HTTP API throug
 >
 > **4. Start the Warden server** in dev mode:
 > ```bash
-> warden server --dev --dev-root-token=root
+> warden server -dev -dev-root-token=root
 > ```
 >
 > **5. In another terminal window**, export the environment variables for the CLI:
@@ -70,7 +70,7 @@ Set up a JWT auth method and create a role that binds the credential spec and po
 
 ```bash
 # Enable JWT auth if not already enabled
-warden auth enable --type=jwt
+warden auth enable jwt
 
 # Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
@@ -87,13 +87,13 @@ warden write auth/jwt/role/prometheus-user \
 Enable the Prometheus provider at a path of your choice:
 
 ```bash
-warden provider enable --type=prometheus
+warden provider enable prometheus
 ```
 
 To mount at a custom path (e.g., for a specific cluster or environment):
 
 ```bash
-warden provider enable --type=prometheus prometheus-prod
+warden provider enable -path=prometheus-prod prometheus
 ```
 
 Verify the provider is enabled:
@@ -129,18 +129,18 @@ Use this for Grafana Mimir, Amazon Managed Prometheus, Thanos, Cortex, or Victor
 
 ```bash
 warden cred source create prometheus-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=api_url=https://prometheus.example.com \
-  --config=display_name=Prometheus
+  -type=apikey \
+  -rotation-period=0 \
+  -config=api_url=https://prometheus.example.com \
+  -config=display_name=Prometheus
 ```
 
 Create a credential spec with your bearer token:
 
 ```bash
 warden cred spec create prometheus-ops \
-  --source prometheus-src \
-  --config api_key=your-bearer-token
+  -source prometheus-src \
+  -config api_key=your-bearer-token
 ```
 
 ### Option B: Basic Auth (Self-hosted Prometheus)
@@ -158,20 +158,20 @@ Create a credential source with `optional_metadata=auth_type` to allow the auth 
 
 ```bash
 warden cred source create prometheus-src \
-  --type=apikey \
-  --rotation-period=0 \
-  --config=api_url=https://prometheus.example.com \
-  --config=optional_metadata=auth_type \
-  --config=display_name=Prometheus
+  -type=apikey \
+  -rotation-period=0 \
+  -config=api_url=https://prometheus.example.com \
+  -config=optional_metadata=auth_type \
+  -config=display_name=Prometheus
 ```
 
 Create a credential spec with the base64-encoded credentials and `auth_type=basic`:
 
 ```bash
 warden cred spec create prometheus-ops \
-  --source prometheus-src \
-  --config api_key=${ENCODED} \
-  --config auth_type=basic
+  -source prometheus-src \
+  -config api_key=${ENCODED} \
+  -config auth_type=basic
 ```
 
 ### Option C: Vault/OpenBao as Credential Source
@@ -185,24 +185,24 @@ Instead of storing the token directly in Warden, you can store it in a Vault/Ope
 ```bash
 # Create a Vault credential source
 warden cred source create prometheus-vault-src \
-  --type=hvault \
-  --config=vault_address=https://vault.example.com \
-  --config=auth_method=approle \
-  --config=role_id=your-role-id \
-  --config=secret_id=your-secret-id \
-  --config=approle_mount=approle \
-  --config=role_name=warden-role \
-  --rotation-period=24h
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=your-role-id \
+  -config=secret_id=your-secret-id \
+  -config=approle_mount=approle \
+  -config=role_name=warden-role \
+  -rotation-period=24h
 ```
 
 Create a credential spec using the `static_apikey` mint method:
 
 ```bash
 warden cred spec create prometheus-ops \
-  --source prometheus-vault-src \
-  --config mint_method=static_apikey \
-  --config kv2_mount=secret \
-  --config secret_path=prometheus/ops
+  -source prometheus-vault-src \
+  -config mint_method=static_apikey \
+  -config kv2_mount=secret \
+  -config secret_path=prometheus/ops
 ```
 
 The KV v2 secret at `secret/prometheus/ops` must contain at minimum an `api_key` field. For basic auth, also include `auth_type=basic`.
@@ -372,14 +372,14 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 Steps 1–4 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `--dev-tls` to enable TLS with auto-generated certificates, or provide your own with `--dev-tls-cert-file`, `--dev-tls-key-file`, and `--dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
 
 Steps 1–3 (provider setup) are identical. Replace Steps 4–5 with the following.
 
 ### Enable Cert Auth
 
 ```bash
-warden auth enable --type=cert
+warden auth enable cert
 ```
 
 ### Configure Trusted CA
@@ -500,5 +500,5 @@ curl --cert client.pem --key client-key.pem \
 3. Update the credential spec:
    ```bash
    warden cred spec update prometheus-ops \
-     --config api_key=${ENCODED}
+     -config api_key=${ENCODED}
    ```

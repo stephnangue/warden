@@ -25,13 +25,13 @@ Usage: warden skill list [options]
   records (no markdown body) to keep the response cheap; agents that need
   full content fetch each name via 'warden skill read NAME'.
 
-  Output honors the global --output flag:
+  Output honors the global -output flag:
     table    one row per skill (default for TTY)
     json     [{"name", "description", "category", "origin", ...}, ...]
     ndjson   one skill per line, agent-friendly for piping into jq
     text     key=value lines per record
 
-  Composes with --fields, e.g. --fields name,category to project per record.
+  Composes with -fields, e.g. -fields name,category to project per record.
 
   Examples:
 
@@ -41,11 +41,11 @@ Usage: warden skill list [options]
 
     Only provider-guide skills, JSON for agents:
 
-      $ warden skill list --category=provider-guide -o json
+      $ warden skill list -category=provider-guide -o json
 
     Only operator-created skills:
 
-      $ warden skill list --origin=user
+      $ warden skill list -origin=user
 `,
 		Args: cobra.NoArgs,
 		RunE: runList,

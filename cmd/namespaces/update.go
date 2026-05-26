@@ -25,15 +25,15 @@ Usage: warden namespace update <path> [options]
 
     Typed flags (human-friendly):
 
-      $ warden namespace update my-team --metadata=environment=staging --metadata=team=devops
-      $ warden namespace update my-team --metadata=""        # clear
+      $ warden namespace update my-team -metadata=environment=staging -metadata=team=devops
+      $ warden namespace update my-team -metadata=""        # clear
 
     Full JSON payload (agent-friendly):
 
-      $ warden namespace update my-team --json @ns.json
-      $ cat ns.json | warden namespace update my-team --json -
+      $ warden namespace update my-team -json @ns.json
+      $ cat ns.json | warden namespace update my-team -json -
 
-  --json is mutually exclusive with --metadata. Combine with --dry-run to
+  -json is mutually exclusive with -metadata. Combine with -dry-run to
   validate the payload locally without modifying the namespace.
 
   For more information about namespaces, please see the documentation.
@@ -45,7 +45,7 @@ Usage: warden namespace update <path> [options]
 
 func init() {
 	UpdateCmd.Flags().StringToStringVar(&updateMetadata, "metadata", nil, "Custom metadata for the namespace (can be specified multiple times)")
-	UpdateCmd.Flags().StringVarP(&updateJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with --metadata)")
+	UpdateCmd.Flags().StringVarP(&updateJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with -metadata)")
 }
 
 func runUpdate(cmd *cobra.Command, args []string) error {
@@ -66,7 +66,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"--metadata": cmd.Flags().Changed("metadata"),
+			"-metadata": cmd.Flags().Changed("metadata"),
 		}); err != nil {
 			return err
 		}
@@ -92,7 +92,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	if !cmd.Flags().Changed("metadata") {
-		return fmt.Errorf("--metadata is required (or use --json): %w", helpers.ErrUsage)
+		return fmt.Errorf("-metadata is required (or use -json): %w", helpers.ErrUsage)
 	}
 
 	// Build namespace update input

@@ -71,7 +71,7 @@ docker compose -f deploy/docker-compose.quickstart.yml up -d
 ### 2. Start Warden (dev mode)
 
 ```bash
-warden server --dev --dev-root-token=root
+warden server -dev -dev-root-token=root
 ```
 
 ### 3. Configure Warden
@@ -81,7 +81,7 @@ export WARDEN_ADDR="http://127.0.0.1:8400"
 export WARDEN_TOKEN="root"
 
 # Enable JWT auth
-warden auth enable --type=jwt
+warden auth enable jwt
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create role
@@ -91,7 +91,7 @@ warden write auth/jwt/role/cloudflare-user \
     cred_spec_name=cloudflare-ops
 
 # Enable Cloudflare provider
-warden provider enable --type=cloudflare
+warden provider enable cloudflare
 
 # Configure provider (account_id required for R2)
 warden write cloudflare/config <<EOF
@@ -105,16 +105,16 @@ EOF
 
 # Create credential source
 warden cred source create cloudflare-src \
-  --type=local
+  -type=local
 
 # Create credential spec with Cloudflare keys (dual-mode)
 warden cred spec create cloudflare-ops \
-  --source cloudflare-src \
-  --type=cloudflare_keys \
-  --config mint_method=static_keys \
-  --config access_key_id=<your-r2-access-key-id> \
-  --config secret_access_key=<your-r2-secret-access-key> \
-  --config api_token=<your-cloudflare-api-token>
+  -source cloudflare-src \
+  -type=cloudflare_keys \
+  -config mint_method=static_keys \
+  -config access_key_id=<your-r2-access-key-id> \
+  -config secret_access_key=<your-r2-secret-access-key> \
+  -config api_token=<your-cloudflare-api-token>
 
 # Create policy
 warden policy write cloudflare-access - <<EOF

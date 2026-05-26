@@ -26,20 +26,20 @@ Usage: warden cred source create <name> [flags]
     Typed flags (human-friendly):
 
       $ warden cred source create my-aws \
-          --type=aws \
-          --config=access_key_id=... \
-          --config=secret_access_key=... \
-          --config=region=us-east-1 \
-          --rotation-period=24h
+          -type=aws \
+          -config=access_key_id=... \
+          -config=secret_access_key=... \
+          -config=region=us-east-1 \
+          -rotation-period=24h
 
     Full JSON payload (agent-friendly):
 
-      $ warden cred source create my-aws --json @aws-source.json
-      $ warden cred source create my-aws --json '{"type":"aws", ...}'
-      $ cat aws-source.json | warden cred source create my-aws --json -
+      $ warden cred source create my-aws -json @aws-source.json
+      $ warden cred source create my-aws -json '{"type":"aws", ...}'
+      $ cat aws-source.json | warden cred source create my-aws -json -
 
-  --json is mutually exclusive with --type / --config / --rotation-period.
-  Combine with --dry-run to validate the payload locally without creating
+  -json is mutually exclusive with -type / -config / -rotation-period.
+  Combine with -dry-run to validate the payload locally without creating
   the resource.
 `,
 		SilenceUsage:  true,
@@ -50,10 +50,10 @@ Usage: warden cred source create <name> [flags]
 )
 
 func init() {
-	CreateCmd.Flags().StringVar(&createType, "type", "", "Source type (required unless --json)")
+	CreateCmd.Flags().StringVar(&createType, "type", "", "Source type (required unless -json)")
 	CreateCmd.Flags().StringToStringVar(&createConfig, "config", nil, "Source configuration (key=value)")
-	CreateCmd.Flags().StringVar(&createRotationPeriod, "rotation-period", "", "Rotation period for credential source (e.g., 24h, 30m) (required unless --json)")
-	CreateCmd.Flags().StringVarP(&createJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with --type/--config/--rotation-period)")
+	CreateCmd.Flags().StringVar(&createRotationPeriod, "rotation-period", "", "Rotation period for credential source (e.g., 24h, 30m) (required unless -json)")
+	CreateCmd.Flags().StringVarP(&createJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with -type/-config/-rotation-period)")
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
@@ -74,24 +74,24 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"--type":            createType != "",
-			"--config":          len(createConfig) > 0,
-			"--rotation-period": createRotationPeriod != "",
+			"-type":            createType != "",
+			"-config":          len(createConfig) > 0,
+			"-rotation-period": createRotationPeriod != "",
 		}); err != nil {
 			return err
 		}
 		return runCreateWithJSON(c, name, jsonPayload)
 	}
 
-	// Typed-flag path: required-flag validation moves here so --json can
+	// Typed-flag path: required-flag validation moves here so -json can
 	// satisfy them without tripping cobra's MarkFlagRequired.
 	if createType == "" {
-		return fmt.Errorf("--type is required (or use --json): %w", helpers.ErrUsage)
+		return fmt.Errorf("-type is required (or use -json): %w", helpers.ErrUsage)
 	}
 	if createRotationPeriod == "" {
-		return fmt.Errorf("--rotation-period is required (or use --json): %w", helpers.ErrUsage)
+		return fmt.Errorf("-rotation-period is required (or use -json): %w", helpers.ErrUsage)
 	}
-	if err := helpers.ValidateIdentifier("--type", createType); err != nil {
+	if err := helpers.ValidateIdentifier("-type", createType); err != nil {
 		return err
 	}
 
