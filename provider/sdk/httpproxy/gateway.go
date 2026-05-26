@@ -12,6 +12,10 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
+// defaultAcceptJSON is the Accept value injected when no spec or dispatch
+// override is in force and Accept defaulting is not suppressed.
+const defaultAcceptJSON = "application/json"
+
 func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Snapshot mutable fields under read lock to avoid races with config writes
 	b.mu.RLock()
@@ -20,6 +24,23 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	providerURL := b.providerURL
 	proxy := b.Proxy
 	b.mu.RUnlock()
+
+	credExtractor := b.spec.ExtractCredentials
+	var dispatch Dispatch
+	if b.spec.ResolveUpstream != nil {
+		if d, ok := b.spec.ResolveUpstream(req.HTTPRequest, providerURL); ok {
+			dispatch = d
+			if d.UpstreamURL != "" {
+				providerURL = d.UpstreamURL
+			}
+			if d.ExtractCredentials != nil {
+				credExtractor = d.ExtractCredentials
+			}
+			if d.MaxBodySize > 0 {
+				maxBody = d.MaxBodySize
+			}
+		}
+	}
 
 	// Apply timeout if configured
 	if timeout > 0 {
@@ -36,7 +57,7 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	req.HTTPRequest.Body = http.MaxBytesReader(req.ResponseWriter, req.HTTPRequest.Body, maxBody)
 
 	// Extract credentials using provider-specific extractor
-	credHeaders, err := b.spec.ExtractCredentials(req)
+	credHeaders, err := credExtractor(req)
 	if err != nil {
 		b.Logger.Warn("Failed to get credentials", logger.Err(err))
 		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
@@ -64,7 +85,7 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	r.RequestURI = "" // Required for outgoing requests
 
 	// Clean headers and inject credentials
-	b.prepareHeaders(r, credHeaders)
+	b.prepareHeaders(r, credHeaders, dispatch)
 
 	b.Logger.Trace("Proxying request",
 		logger.String("provider", b.spec.Name),
@@ -95,8 +116,31 @@ func buildTargetURL(providerURL, path, rawQuery string) (string, error) {
 	return providerURL + apiPath, nil
 }
 
+// resolveAcceptDefault returns the Accept value to inject when the client did
+// not set one. Empty string means "do not inject anything."
+//
+// Precedence:
+//  1. dispatch.Accept (non-empty) wins.
+//  2. Otherwise, if dispatch.SkipDefaultAccept is set, suppress.
+//  3. Otherwise, fall through to specDefault, defaulting to defaultAcceptJSON
+//     when specDefault is empty.
+func resolveAcceptDefault(specDefault string, dispatch Dispatch) string {
+	if dispatch.Accept != "" {
+		return dispatch.Accept
+	}
+	if dispatch.SkipDefaultAccept {
+		return ""
+	}
+	if specDefault != "" {
+		return specDefault
+	}
+	return defaultAcceptJSON
+}
+
 // prepareHeaders removes unwanted headers and injects credential + provider headers.
-func (b *proxyBackend) prepareHeaders(r *http.Request, credHeaders map[string]string) {
+// The dispatch carries per-request overrides for Accept defaulting and dynamic-header
+// injection; zero values mean "use the spec defaults."
+func (b *proxyBackend) prepareHeaders(r *http.Request, credHeaders map[string]string, dispatch Dispatch) {
 	// Read Connection header before removing it
 	conn := r.Header.Get("Connection")
 
@@ -131,8 +175,8 @@ func (b *proxyBackend) prepareHeaders(r *http.Request, credHeaders map[string]st
 
 	// Inject dynamic headers as fallbacks — only set if the client didn't already
 	// provide them. This differs from DefaultHeaders and credential headers which
-	// always override.
-	if b.spec.DynamicHeaders != nil {
+	// always override. SkipDynamicHeaders lets per-request dispatches opt out.
+	if b.spec.DynamicHeaders != nil && !dispatch.SkipDynamicHeaders {
 		b.mu.RLock()
 		state := b.extraState
 		b.mu.RUnlock()
@@ -143,13 +187,10 @@ func (b *proxyBackend) prepareHeaders(r *http.Request, credHeaders map[string]st
 		}
 	}
 
-	// Set Accept header if not already set
-	accept := "application/json"
-	if b.spec.DefaultAccept != "" {
-		accept = b.spec.DefaultAccept
-	}
 	if r.Header.Get("Accept") == "" {
-		r.Header.Set("Accept", accept)
+		if accept := resolveAcceptDefault(b.spec.DefaultAccept, dispatch); accept != "" {
+			r.Header.Set("Accept", accept)
+		}
 	}
 
 	// Set User-Agent if not already set

@@ -2,6 +2,7 @@ package httpproxy
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -857,7 +858,7 @@ func TestPrepareHeaders(t *testing.T) {
 		req.Header.Set("X-Custom-Remove", "should-go")
 		req.Header.Set("X-Keep", "keep-me")
 
-		pb.prepareHeaders(req, map[string]string{"Authorization": "Bearer real-key"})
+		pb.prepareHeaders(req, map[string]string{"Authorization": "Bearer real-key"}, Dispatch{})
 
 		assert.Equal(t, "Bearer real-key", req.Header.Get("Authorization"))
 		assert.Empty(t, req.Header.Get("X-Warden-Token"))
@@ -867,7 +868,7 @@ func TestPrepareHeaders(t *testing.T) {
 
 	t.Run("sets default and static headers", func(t *testing.T) {
 		req, _ := http.NewRequest("POST", "https://api.test.com/v1/chat", nil)
-		pb.prepareHeaders(req, map[string]string{"Authorization": "Bearer key"})
+		pb.prepareHeaders(req, map[string]string{"Authorization": "Bearer key"}, Dispatch{})
 
 		assert.Equal(t, "val", req.Header.Get("X-Default"))
 		assert.Equal(t, "text/plain", req.Header.Get("Accept"))
@@ -877,7 +878,7 @@ func TestPrepareHeaders(t *testing.T) {
 	t.Run("preserves client-set Accept", func(t *testing.T) {
 		req, _ := http.NewRequest("POST", "https://api.test.com/v1/chat", nil)
 		req.Header.Set("Accept", "text/event-stream")
-		pb.prepareHeaders(req, map[string]string{})
+		pb.prepareHeaders(req, map[string]string{}, Dispatch{})
 		assert.Equal(t, "text/event-stream", req.Header.Get("Accept"))
 	})
 
@@ -886,7 +887,7 @@ func TestPrepareHeaders(t *testing.T) {
 		req.Header.Set("Connection", "keep-alive")
 		req.Header.Set("Transfer-Encoding", "chunked")
 		req.Header.Set("Proxy-Authorization", "Basic abc")
-		pb.prepareHeaders(req, map[string]string{})
+		pb.prepareHeaders(req, map[string]string{}, Dispatch{})
 		assert.Empty(t, req.Header.Get("Connection"))
 		assert.Empty(t, req.Header.Get("Transfer-Encoding"))
 		assert.Empty(t, req.Header.Get("Proxy-Authorization"))
@@ -896,7 +897,7 @@ func TestPrepareHeaders(t *testing.T) {
 		req, _ := http.NewRequest("POST", "https://api.test.com/v1/chat", nil)
 		req.Header.Set("Connection", "X-Custom-Hop")
 		req.Header.Set("X-Custom-Hop", "should-be-removed")
-		pb.prepareHeaders(req, map[string]string{})
+		pb.prepareHeaders(req, map[string]string{}, Dispatch{})
 		assert.Empty(t, req.Header.Get("X-Custom-Hop"))
 	})
 
@@ -905,7 +906,7 @@ func TestPrepareHeaders(t *testing.T) {
 		req.Header.Set("X-Forwarded-For", "10.0.0.1")
 		req.Header.Set("X-Real-Ip", "10.0.0.1")
 		req.Header.Set("Forwarded", "for=10.0.0.1")
-		pb.prepareHeaders(req, map[string]string{})
+		pb.prepareHeaders(req, map[string]string{}, Dispatch{})
 		assert.Empty(t, req.Header.Get("X-Forwarded-For"))
 		assert.Empty(t, req.Header.Get("X-Real-Ip"))
 		assert.Empty(t, req.Header.Get("Forwarded"))
@@ -927,7 +928,7 @@ func TestPrepareHeaders_DynamicHeaders(t *testing.T) {
 	pb.extraState["version"] = "v2"
 
 	req, _ := http.NewRequest("POST", "https://api.test.com/v1/chat", nil)
-	pb.prepareHeaders(req, map[string]string{})
+	pb.prepareHeaders(req, map[string]string{}, Dispatch{})
 	assert.Equal(t, "v2", req.Header.Get("X-Api-Version"))
 }
 
@@ -942,7 +943,7 @@ func TestPrepareHeaders_DynamicHeaders_NotOverrideClient(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", "https://api.test.com/v1/chat", nil)
 	req.Header.Set("X-Api-Version", "client-v1")
-	pb.prepareHeaders(req, map[string]string{})
+	pb.prepareHeaders(req, map[string]string{}, Dispatch{})
 	assert.Equal(t, "client-v1", req.Header.Get("X-Api-Version"))
 }
 
@@ -954,6 +955,304 @@ func TestPrepareHeaders_DefaultUserAgent(t *testing.T) {
 	pb := b.(*proxyBackend)
 
 	req, _ := http.NewRequest("POST", "https://api.test.com/v1/chat", nil)
-	pb.prepareHeaders(req, map[string]string{})
+	pb.prepareHeaders(req, map[string]string{}, Dispatch{})
 	assert.Equal(t, "warden-testprovider-proxy", req.Header.Get("User-Agent"))
+}
+
+// --- Dispatch tests (per-request override hooks) ---
+
+func TestPrepareHeaders_Dispatch_SkipDynamicHeaders(t *testing.T) {
+	spec := testSpec()
+	spec.DynamicHeaders = func(state map[string]any) map[string]string {
+		return map[string]string{"X-Api-Version": "v2"}
+	}
+
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+
+	req, _ := http.NewRequest("POST", "https://api.test.com/v1/chat", nil)
+	pb.prepareHeaders(req, map[string]string{}, Dispatch{SkipDynamicHeaders: true})
+	assert.Empty(t, req.Header.Get("X-Api-Version"),
+		"dynamic headers must not be injected when dispatch.SkipDynamicHeaders is set")
+}
+
+func TestPrepareHeaders_Dispatch_AcceptOverride(t *testing.T) {
+	spec := testSpec()
+	spec.DefaultAccept = "text/plain"
+
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+
+	req, _ := http.NewRequest("POST", "https://api.test.com/v1/chat", nil)
+	pb.prepareHeaders(req, map[string]string{}, Dispatch{Accept: "application/x-git-upload-pack-result"})
+	assert.Equal(t, "application/x-git-upload-pack-result", req.Header.Get("Accept"),
+		"dispatch.Accept must override spec.DefaultAccept")
+}
+
+func TestPrepareHeaders_Dispatch_SkipDefaultAccept(t *testing.T) {
+	// SkipDefaultAccept + empty dispatch.Accept = "do not inject any Accept default."
+	// Required for protocols that negotiate their own Accept.
+	spec := testSpec()
+	spec.DefaultAccept = "application/json"
+
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+
+	req, _ := http.NewRequest("POST", "https://api.test.com/v1/chat", nil)
+	pb.prepareHeaders(req, map[string]string{}, Dispatch{SkipDefaultAccept: true})
+	assert.Empty(t, req.Header.Get("Accept"),
+		"Accept must not be injected when dispatch.SkipDefaultAccept is set with empty dispatch.Accept")
+}
+
+func TestPrepareHeaders_Dispatch_SkipDynamicHeaders_KeepsAcceptDefault(t *testing.T) {
+	// SkipDynamicHeaders alone must NOT suppress Accept defaulting — that's
+	// SkipDefaultAccept's job. The two fields are independent.
+	spec := testSpec()
+	spec.DefaultAccept = "application/json"
+
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+
+	req, _ := http.NewRequest("POST", "https://api.test.com/v1/chat", nil)
+	pb.prepareHeaders(req, map[string]string{}, Dispatch{SkipDynamicHeaders: true})
+	assert.Equal(t, "application/json", req.Header.Get("Accept"),
+		"SkipDynamicHeaders must not affect Accept defaulting")
+}
+
+func TestPrepareHeaders_Dispatch_Zero_PreservesSpecDefaults(t *testing.T) {
+	// A zero Dispatch{} must produce identical behaviour to the pre-Dispatch
+	// world: spec.DefaultAccept applies, spec.DynamicHeaders injects.
+	spec := testSpec()
+	spec.DefaultAccept = "text/plain"
+	spec.DynamicHeaders = func(state map[string]any) map[string]string {
+		return map[string]string{"X-Api-Version": "v2"}
+	}
+
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+
+	req, _ := http.NewRequest("POST", "https://api.test.com/v1/chat", nil)
+	pb.prepareHeaders(req, map[string]string{}, Dispatch{})
+	assert.Equal(t, "text/plain", req.Header.Get("Accept"))
+	assert.Equal(t, "v2", req.Header.Get("X-Api-Version"))
+}
+
+// --- TransparentAuthRoleExtractor delegation tests ---
+
+func TestGetAuthRoleFromRequest_HookNil_DefaultsTransparentEmpty(t *testing.T) {
+	spec := testSpec() // no GetAuthRoleFromRequest set
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+
+	role, ok := pb.GetAuthRoleFromRequest(httptest.NewRequest("GET", "/", nil))
+	assert.Equal(t, "", role)
+	assert.True(t, ok,
+		"with hook unset, proxyBackend must report transparent=true / role=empty so the core flow falls back to default_role")
+}
+
+func TestGetAuthRoleFromRequest_HookReturnsRole(t *testing.T) {
+	spec := testSpec()
+	spec.GetAuthRoleFromRequest = func(r *http.Request) (string, bool) {
+		return "from-hook", true
+	}
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+
+	role, ok := pb.GetAuthRoleFromRequest(httptest.NewRequest("GET", "/", nil))
+	assert.Equal(t, "from-hook", role)
+	assert.True(t, ok)
+}
+
+func TestGetAuthRoleFromRequest_HookReturnsNonTransparent(t *testing.T) {
+	spec := testSpec()
+	spec.GetAuthRoleFromRequest = func(r *http.Request) (string, bool) {
+		return "", false
+	}
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+
+	role, ok := pb.GetAuthRoleFromRequest(httptest.NewRequest("GET", "/", nil))
+	assert.Equal(t, "", role)
+	assert.False(t, ok,
+		"hook returning ok=false signals non-transparent — core flow should fall back to explicit auth")
+}
+
+// --- ResolveUpstream tests (via handleGateway) ---
+
+func TestHandleGateway_ResolveUpstream_OverridesUpstreamURL(t *testing.T) {
+	// Stand up two upstream servers; one is the spec default, the other is what
+	// ResolveUpstream returns. Assert the request lands on the override.
+	defaultUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Hit", "default")
+		w.WriteHeader(200)
+	}))
+	defer defaultUpstream.Close()
+
+	overrideUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Hit", "override")
+		w.WriteHeader(200)
+	}))
+	defer overrideUpstream.Close()
+
+	spec := testSpec()
+	spec.DefaultURL = defaultUpstream.URL
+	spec.ExtractCredentials = func(req *logical.Request) (map[string]string, error) {
+		return map[string]string{"Authorization": "Bearer test"}, nil
+	}
+	spec.ResolveUpstream = func(r *http.Request, providerURL string) (Dispatch, bool) {
+		return Dispatch{UpstreamURL: overrideUpstream.URL}, true
+	}
+
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+	pb.providerURL = defaultUpstream.URL
+
+	rec := httptest.NewRecorder()
+	httpReq := httptest.NewRequest("GET", "/v1/test/gateway/foo", nil)
+
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest:    httpReq,
+		ResponseWriter: rec,
+	})
+
+	assert.Equal(t, "override", rec.Header().Get("X-Hit"),
+		"request should land on the override upstream, not the spec default")
+}
+
+func TestHandleGateway_ResolveUpstream_OverridesCredentialExtractor(t *testing.T) {
+	// Default extractor returns one Authorization; override returns another.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Got-Auth", r.Header.Get("Authorization"))
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	spec := testSpec()
+	spec.DefaultURL = upstream.URL
+	spec.ExtractCredentials = func(req *logical.Request) (map[string]string, error) {
+		return map[string]string{"Authorization": "Bearer default-cred"}, nil
+	}
+	spec.ResolveUpstream = func(r *http.Request, providerURL string) (Dispatch, bool) {
+		return Dispatch{
+			ExtractCredentials: func(req *logical.Request) (map[string]string, error) {
+				return map[string]string{"Authorization": "Basic override-cred"}, nil
+			},
+		}, true
+	}
+
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+	pb.providerURL = upstream.URL
+
+	rec := httptest.NewRecorder()
+	httpReq := httptest.NewRequest("GET", "/v1/test/gateway/foo", nil)
+
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest:    httpReq,
+		ResponseWriter: rec,
+	})
+
+	assert.Equal(t, "Basic override-cred", rec.Header().Get("X-Got-Auth"))
+}
+
+func TestHandleGateway_ResolveUpstream_MaxBodySizeOverride(t *testing.T) {
+	// Cap is enforced by http.MaxBytesReader — sending body > cap fails the read.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("X-Got-Bytes", fmt.Sprintf("%d", len(body)))
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	spec := testSpec()
+	spec.DefaultURL = upstream.URL
+	spec.ExtractCredentials = func(req *logical.Request) (map[string]string, error) {
+		return map[string]string{"Authorization": "Bearer test"}, nil
+	}
+	spec.ResolveUpstream = func(r *http.Request, providerURL string) (Dispatch, bool) {
+		return Dispatch{MaxBodySize: 1024}, true // tight cap for this request
+	}
+
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+	pb.providerURL = upstream.URL
+	pb.MaxBodySize = 10 * 1024 * 1024 // 10MB default
+
+	// Body of 100 bytes — under the dispatch cap, should reach upstream.
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(strings.Repeat("x", 100))
+	httpReq := httptest.NewRequest("POST", "/v1/test/gateway/foo", body)
+
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest:    httpReq,
+		ResponseWriter: rec,
+	})
+
+	assert.Equal(t, "100", rec.Header().Get("X-Got-Bytes"))
+}
+
+func TestHandleGateway_ResolveUpstream_FallthroughOnFalse(t *testing.T) {
+	// When ResolveUpstream returns ok=false, all spec defaults must apply.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Got-Auth", r.Header.Get("Authorization"))
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	spec := testSpec()
+	spec.DefaultURL = upstream.URL
+	spec.ExtractCredentials = func(req *logical.Request) (map[string]string, error) {
+		return map[string]string{"Authorization": "Bearer default-cred"}, nil
+	}
+	resolveCalled := false
+	spec.ResolveUpstream = func(r *http.Request, providerURL string) (Dispatch, bool) {
+		resolveCalled = true
+		return Dispatch{}, false
+	}
+
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+	pb.providerURL = upstream.URL
+
+	rec := httptest.NewRecorder()
+	httpReq := httptest.NewRequest("GET", "/v1/test/gateway/foo", nil)
+
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest:    httpReq,
+		ResponseWriter: rec,
+	})
+
+	assert.True(t, resolveCalled, "ResolveUpstream should have been consulted")
+	assert.Equal(t, "Bearer default-cred", rec.Header().Get("X-Got-Auth"),
+		"with ok=false, default credentials must be used")
+}
+
+func TestHandleGateway_NoResolveUpstream_UsesDefaults(t *testing.T) {
+	// Existing providers (no ResolveUpstream set) must behave exactly as before.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Got-Auth", r.Header.Get("Authorization"))
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	spec := testSpec()
+	spec.DefaultURL = upstream.URL
+	spec.ExtractCredentials = func(req *logical.Request) (map[string]string, error) {
+		return map[string]string{"Authorization": "Bearer default-cred"}, nil
+	}
+	// spec.ResolveUpstream intentionally nil
+
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+	pb.providerURL = upstream.URL
+
+	rec := httptest.NewRecorder()
+	httpReq := httptest.NewRequest("GET", "/v1/test/gateway/foo", nil)
+
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest:    httpReq,
+		ResponseWriter: rec,
+	})
+
+	assert.Equal(t, "Bearer default-cred", rec.Header().Get("X-Got-Auth"))
 }

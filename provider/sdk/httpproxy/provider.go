@@ -17,6 +17,38 @@ import (
 // TokenExtractorFunc extracts the Warden session token from an incoming HTTP request.
 type TokenExtractorFunc func(r *http.Request) string
 
+// Dispatch carries per-request overrides returned by ProviderSpec.ResolveUpstream.
+// Zero values mean "fall through to the spec/mount default." Used by providers
+// that carry multiple protocols on the same mount and need different upstreams,
+// credential formats, header policies, or size caps depending on the path.
+type Dispatch struct {
+	// UpstreamURL overrides providerURL for this request.
+	UpstreamURL string
+
+	// ExtractCredentials overrides Spec.ExtractCredentials for this request.
+	ExtractCredentials CredentialExtractor
+
+	// Accept overrides Spec.DefaultAccept for this request. When empty, the
+	// spec default applies unless SkipDefaultAccept is also set.
+	Accept string
+
+	// SkipDefaultAccept suppresses Accept injection entirely when Accept is
+	// empty: no header is set and the client's own Accept negotiation is
+	// preserved. Required for protocols whose clients negotiate their own
+	// Accept and would be broken by a JSON default.
+	SkipDefaultAccept bool
+
+	// SkipDynamicHeaders disables Spec.DynamicHeaders injection for this
+	// request. Used when the request targets a surface where the dynamic
+	// headers are irrelevant or harmful.
+	SkipDynamicHeaders bool
+
+	// MaxBodySize overrides the per-mount max_body_size for this request when > 0.
+	// Used by protocols that legitimately need larger caps than the REST default
+	// (e.g. uploading large binary payloads). When 0, falls through to b.MaxBodySize.
+	MaxBodySize int64
+}
+
 // ProviderSpec fully describes an HTTP proxy provider.
 // All shared behavior is handled by the httpproxy package; only provider-specific
 // differences are captured here.
@@ -87,6 +119,27 @@ type ProviderSpec struct {
 	// Returns the transport and a shutdown function.
 	// If nil, DefaultNewTransport is used.
 	NewTransport func() (*http.Transport, func())
+
+	// ResolveUpstream optionally returns per-request overrides for upstream
+	// URL, credential extraction, header policy, and body cap. When nil — or
+	// when the call returns ok=false — the spec/mount defaults apply unchanged.
+	// Used by providers that carry multiple protocols on the same mount and
+	// need to route a subset of paths to a different upstream surface.
+	ResolveUpstream func(r *http.Request, providerURL string) (Dispatch, bool)
+
+	// GetAuthRoleFromRequest optionally extracts the auth role from request
+	// context. The shared httpproxy backend wires this into the core's
+	// TransparentAuthRoleExtractor flow, so the spec hook is consulted only
+	// when the path-based role lookup is empty and BEFORE the X-Warden-Role
+	// header override.
+	//
+	// Return ("", true) for "transparent yes, no role contribution — fall back
+	// to default_role"; this is also the default behaviour when the hook is
+	// unset. Return (role, true) to supply a role. Return ("", false) only if
+	// the provider wants to mark the request as non-transparent (rare; used by
+	// providers whose transparent auth requires a specific authorization
+	// scheme that is absent on this request).
+	GetAuthRoleFromRequest func(r *http.Request) (string, bool)
 }
 
 // proxyBackend is the concrete backend type created by NewFactory.
@@ -357,4 +410,20 @@ func (b *proxyBackend) handleTransparentGatewayStreaming(ctx context.Context, re
 // SensitiveConfigFields returns the list of config fields that should be masked in output.
 func (b *proxyBackend) SensitiveConfigFields() []string {
 	return []string{"ca_data"}
+}
+
+// Compile-time assertion that proxyBackend satisfies the role-extractor
+// interface. The implementation delegates to spec.GetAuthRoleFromRequest;
+// providers that leave the hook nil get ("", true) — observationally
+// equivalent to not implementing the interface, since the core's
+// transparent-auth flow only acts on isTransparent==false or a non-empty role.
+var _ logical.TransparentAuthRoleExtractor = (*proxyBackend)(nil)
+
+// GetAuthRoleFromRequest delegates to the optional spec hook. See
+// ProviderSpec.GetAuthRoleFromRequest for the contract.
+func (b *proxyBackend) GetAuthRoleFromRequest(r *http.Request) (string, bool) {
+	if b.spec.GetAuthRoleFromRequest == nil {
+		return "", true
+	}
+	return b.spec.GetAuthRoleFromRequest(r)
 }
