@@ -787,7 +787,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// Backends that implement StreamBodyParser and return true get req.Data
 		// populated before policy evaluation. The body is restored after parsing
 		// so the streaming handler can still read it.
-		if parser, ok := matchingBackend.(logical.StreamBodyParser); ok && parser.ShouldParseStreamBody() {
+		if parser, ok := matchingBackend.(logical.StreamBodyParser); ok && parser.ShouldParseStreamBody(req.HTTPRequest) {
 			if err := c.parseRequestBody(req); err != nil {
 				return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil, err
 			}

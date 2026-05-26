@@ -147,9 +147,15 @@ type TransparentAuthRoleExtractor interface {
 // buffering large payloads. Backends that need req.Data for ACL/policy checks
 // (e.g., Vault) should implement this interface and return true.
 //
+// The request is passed so backends carrying multiple protocols on the same
+// mount can inspect the path/headers and disable parsing for the subset of
+// requests where parsing would be wasteful or harmful (e.g. binary upload
+// protocols). Implementations that don't need per-request behaviour ignore
+// the argument and return a static per-backend value.
+//
 // When enabled, the core parses application/json and application/x-www-form-urlencoded
 // bodies (up to maxRequestBodySize), restores the body for the provider to re-read,
 // and populates req.Data before CheckToken runs.
 type StreamBodyParser interface {
-	ShouldParseStreamBody() bool
+	ShouldParseStreamBody(r *http.Request) bool
 }
