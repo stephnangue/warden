@@ -231,6 +231,7 @@ func (b *SystemBackend) handleProviderList(ctx context.Context, req *logical.Req
 
 		mounts[entry.Path] = map[string]any{
 			"type":        entry.Type,
+			"path":        entry.Path,
 			"description": entry.Description,
 			"accessor":    entry.Accessor,
 			"config":      maskedConfig,

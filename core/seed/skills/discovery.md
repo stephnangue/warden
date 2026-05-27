@@ -55,17 +55,17 @@ match to your task.
 ## Step 3 — list providers in this namespace
 
 ```bash
-warden provider list -o json -F type,description,mount_url
+warden provider list -o json -F type,path,description,mount_url
 ```
 
 Returns one record per mounted provider:
 
 ```json
 [
-  {"type": "aws",    "description": "Production AWS account 1234",     "mount_url": "/v1/team-data/aws/"},
-  {"type": "openai", "description": "OpenAI API for embeddings + chat", "mount_url": "/v1/team-data/openai/"},
-  {"type": "rds",    "description": "RDS PostgreSQL — analytics",      "mount_url": "/v1/team-data/rds-pg/"},
-  {"type": "vault",  "description": "Internal Vault — secrets/, pki/", "mount_url": "/v1/team-data/vault/"}
+  {"type": "aws",    "path": "aws/",    "description": "Production AWS account 1234",     "mount_url": "/v1/team-data/aws/"},
+  {"type": "openai", "path": "openai/", "description": "OpenAI API for embeddings + chat", "mount_url": "/v1/team-data/openai/"},
+  {"type": "rds",    "path": "rds-pg/", "description": "RDS PostgreSQL — analytics",      "mount_url": "/v1/team-data/rds-pg/"},
+  {"type": "vault",  "path": "vault/",  "description": "Internal Vault — secrets/, pki/", "mount_url": "/v1/team-data/vault/"}
 ]
 ```
 
@@ -79,6 +79,10 @@ provider's skill to build the full upstream URL.
 Concatenating `$WARDEN_NAMESPACE` separately produces a double-
 namespaced path that doesn't route (e.g.
 `/v1/tutorial/tutorial/vault/...` → `no route found`).
+
+`path` is the bare mount path (with trailing slash). Some provider
+skills tell agents to pass it as `X-Warden-Provider` for header-routed
+calls — follow the per-provider skill for when that applies.
 
 Listing providers requires capabilities granted by your role's
 policy — by convention this is included in the namespace's default
