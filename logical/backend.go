@@ -115,11 +115,18 @@ type TransparentModeProvider interface {
 	// GetAutoAuthPath returns the auth mount path for implicit authentication (e.g., "auth/jwt/")
 	GetAutoAuthPath() string
 
-	// GetAuthRole extracts the auth role name for implicit login.
-	// Streaming backends extract the role from the path (e.g., /role/{role}/gateway/*).
-	// Access backends read the "role" query parameter from req.Data.
-	// Returns empty string if no role is found.
+	// GetAuthRole returns the role encoded in this request by the client —
+	// typically a URL path segment (streaming backends) or a query parameter
+	// (access backends). Excludes the X-Warden-Role header (which the caller
+	// applies as a uniform override across all transparent providers) and the
+	// mount-level default_role (returned by GetDefaultAuthRole). Returns ""
+	// if the client did not encode a role.
 	GetAuthRole(path string, req *Request) string
+
+	// GetDefaultAuthRole returns the mount-level default_role config value.
+	// Applied by core role-resolution only when GetAuthRole and any
+	// TransparentAuthRoleExtractor hook both returned "". Returns "" if unset.
+	GetDefaultAuthRole() string
 
 	// IsUnauthenticatedPath checks if a path can be accessed without authentication.
 	// Used for read-only endpoints that clients may access
@@ -133,12 +140,14 @@ type TransparentModeProvider interface {
 }
 
 // TransparentAuthRoleExtractor can be implemented by providers that extract
-// the auth role from protocol-specific request headers rather than the URL path.
-// Used by SigV4-compatible providers (AWS, Alibaba Cloud, Scaleway) where the
-// role is embedded in the Authorization header's Credential field.
-// Returns (role, true) for transparent requests, ("", false) to skip transparent auth.
+// the auth role from protocol-specific request data (Authorization headers,
+// Basic Auth username, etc.) rather than the URL path. Used by SigV4-compatible
+// providers (AWS, Alibaba Cloud) where the role is embedded in the Authorization
+// header's Credential field, and by Git-over-HTTPS where the role is the Basic
+// Auth username. Returns the extracted role, or "" if the request carries no
+// extractable role (caller falls back to default_role).
 type TransparentAuthRoleExtractor interface {
-	GetAuthRoleFromRequest(r *http.Request) (role string, ok bool)
+	GetAuthRoleFromRequest(r *http.Request) string
 }
 
 // StreamBodyParser can be implemented by streaming backends that want the core

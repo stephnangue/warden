@@ -114,6 +114,11 @@ func TestAccessBackend_GetAuthRole(t *testing.T) {
 	})
 }
 
+func TestAccessBackend_GetDefaultAuthRole(t *testing.T) {
+	b := setupAccessBackend(t)
+	assert.Equal(t, "", b.GetDefaultAuthRole(), "AccessBackend has no mount-level default_role")
+}
+
 func TestAccessBackend_IsTransparentPath(t *testing.T) {
 	b := setupAccessBackend(t)
 

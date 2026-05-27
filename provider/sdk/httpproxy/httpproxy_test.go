@@ -1040,42 +1040,39 @@ func TestPrepareHeaders_Dispatch_Zero_PreservesSpecDefaults(t *testing.T) {
 
 // --- TransparentAuthRoleExtractor delegation tests ---
 
-func TestGetAuthRoleFromRequest_HookNil_DefaultsTransparentEmpty(t *testing.T) {
+func TestGetAuthRoleFromRequest_HookNil_ReturnsEmpty(t *testing.T) {
 	spec := testSpec() // no GetAuthRoleFromRequest set
 	b := setupBackend(t, spec)
 	pb := b.(*proxyBackend)
 
-	role, ok := pb.GetAuthRoleFromRequest(httptest.NewRequest("GET", "/", nil))
-	assert.Equal(t, "", role)
-	assert.True(t, ok,
-		"with hook unset, proxyBackend must report transparent=true / role=empty so the core flow falls back to default_role")
+	role := pb.GetAuthRoleFromRequest(httptest.NewRequest("GET", "/", nil))
+	assert.Equal(t, "", role,
+		"with hook unset, proxyBackend must return empty so the core flow falls back to default_role")
 }
 
 func TestGetAuthRoleFromRequest_HookReturnsRole(t *testing.T) {
 	spec := testSpec()
-	spec.GetAuthRoleFromRequest = func(r *http.Request) (string, bool) {
-		return "from-hook", true
+	spec.GetAuthRoleFromRequest = func(r *http.Request) string {
+		return "from-hook"
 	}
 	b := setupBackend(t, spec)
 	pb := b.(*proxyBackend)
 
-	role, ok := pb.GetAuthRoleFromRequest(httptest.NewRequest("GET", "/", nil))
+	role := pb.GetAuthRoleFromRequest(httptest.NewRequest("GET", "/", nil))
 	assert.Equal(t, "from-hook", role)
-	assert.True(t, ok)
 }
 
-func TestGetAuthRoleFromRequest_HookReturnsNonTransparent(t *testing.T) {
+func TestGetAuthRoleFromRequest_HookReturnsEmpty(t *testing.T) {
 	spec := testSpec()
-	spec.GetAuthRoleFromRequest = func(r *http.Request) (string, bool) {
-		return "", false
+	spec.GetAuthRoleFromRequest = func(r *http.Request) string {
+		return ""
 	}
 	b := setupBackend(t, spec)
 	pb := b.(*proxyBackend)
 
-	role, ok := pb.GetAuthRoleFromRequest(httptest.NewRequest("GET", "/", nil))
-	assert.Equal(t, "", role)
-	assert.False(t, ok,
-		"hook returning ok=false signals non-transparent — core flow should fall back to explicit auth")
+	role := pb.GetAuthRoleFromRequest(httptest.NewRequest("GET", "/", nil))
+	assert.Equal(t, "", role,
+		"hook returning empty string signals no role contribution — core flow falls back to default_role")
 }
 
 // --- ResolveUpstream tests (via handleGateway) ---

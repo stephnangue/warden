@@ -146,15 +146,12 @@ type ProviderSpec struct {
 	// context. The shared httpproxy backend wires this into the core's
 	// TransparentAuthRoleExtractor flow, so the spec hook is consulted only
 	// when the path-based role lookup is empty and BEFORE the X-Warden-Role
-	// header override.
+	// header override but BEFORE the mount's default_role fallback.
 	//
-	// Return ("", true) for "transparent yes, no role contribution — fall back
-	// to default_role"; this is also the default behaviour when the hook is
-	// unset. Return (role, true) to supply a role. Return ("", false) only if
-	// the provider wants to mark the request as non-transparent (rare; used by
-	// providers whose transparent auth requires a specific authorization
-	// scheme that is absent on this request).
-	GetAuthRoleFromRequest func(r *http.Request) (string, bool)
+	// Return "" for "no role contribution — caller falls back to default_role";
+	// this is also the default behaviour when the hook is unset. Return a
+	// non-empty role to supply a role for this request.
+	GetAuthRoleFromRequest func(r *http.Request) string
 }
 
 // proxyBackend is the concrete backend type created by NewFactory.
@@ -422,16 +419,15 @@ func (b *proxyBackend) SensitiveConfigFields() []string {
 
 // Compile-time assertion that proxyBackend satisfies the role-extractor
 // interface. The implementation delegates to spec.GetAuthRoleFromRequest;
-// providers that leave the hook nil get ("", true) — observationally
-// equivalent to not implementing the interface, since the core's
-// transparent-auth flow only acts on isTransparent==false or a non-empty role.
+// providers that leave the hook nil get "" — observationally equivalent to
+// not implementing the interface.
 var _ logical.TransparentAuthRoleExtractor = (*proxyBackend)(nil)
 
 // GetAuthRoleFromRequest delegates to the optional spec hook. See
 // ProviderSpec.GetAuthRoleFromRequest for the contract.
-func (b *proxyBackend) GetAuthRoleFromRequest(r *http.Request) (string, bool) {
+func (b *proxyBackend) GetAuthRoleFromRequest(r *http.Request) string {
 	if b.spec.GetAuthRoleFromRequest == nil {
-		return "", true
+		return ""
 	}
 	return b.spec.GetAuthRoleFromRequest(r)
 }

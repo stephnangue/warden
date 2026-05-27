@@ -1043,6 +1043,10 @@ func (m *mockTransparentModeProvider) GetAuthRole(path string, _ *logical.Reques
 			return parts[1]
 		}
 	}
+	return ""
+}
+
+func (m *mockTransparentModeProvider) GetDefaultAuthRole() string {
 	return m.defaultAuthRole
 }
 
@@ -1061,6 +1065,18 @@ func (m *mockTransparentModeProvider) SpecialPaths() *logical.Paths {
 			"role/*/gateway/*",
 		},
 	}
+}
+
+// mockExtractorBackend adds TransparentAuthRoleExtractor to the base
+// mockTransparentModeProvider so role-precedence tests can exercise the
+// extractor branch.
+type mockExtractorBackend struct {
+	mockTransparentModeProvider
+	extractedRole string
+}
+
+func (m *mockExtractorBackend) GetAuthRoleFromRequest(_ *http.Request) string {
+	return m.extractedRole
 }
 
 // TestIsTransparentRequest tests the isTransparentRequest function
@@ -1180,6 +1196,175 @@ func TestIsTransparentRequest(t *testing.T) {
 		isTransparent, role := core.isTransparentRequest(req, backend)
 		assert.True(t, isTransparent)
 		assert.Equal(t, "terraform", role)
+	})
+
+	t.Run("extractor role takes precedence over default role", func(t *testing.T) {
+		// Key behavioural guard for the role-precedence fix: when a provider's
+		// transparent extractor returns a role, it must win over the mount's
+		// default_role. Pre-fix, default_role won via GetAuthRole's internal
+		// fallback before the extractor was ever consulted.
+		backend := &mockExtractorBackend{
+			mockTransparentModeProvider: mockTransparentModeProvider{
+				transparentMode: true,
+				autoAuthPath:    "auth/jwt/",
+				defaultAuthRole: "from-default",
+			},
+			extractedRole: "from-extractor",
+		}
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/vault/gateway/v1/secret", nil)
+		req := &logical.Request{
+			Path:        "gateway/v1/secret",
+			HTTPRequest: httpReq,
+		}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "from-extractor", role, "extractor must win over default_role")
+	})
+
+	t.Run("default role used when extractor returns empty", func(t *testing.T) {
+		backend := &mockExtractorBackend{
+			mockTransparentModeProvider: mockTransparentModeProvider{
+				transparentMode: true,
+				autoAuthPath:    "auth/jwt/",
+				defaultAuthRole: "from-default",
+			},
+			extractedRole: "",
+		}
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/vault/gateway/v1/secret", nil)
+		req := &logical.Request{
+			Path:        "gateway/v1/secret",
+			HTTPRequest: httpReq,
+		}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "from-default", role)
+	})
+
+	t.Run("path role wins over extractor", func(t *testing.T) {
+		backend := &mockExtractorBackend{
+			mockTransparentModeProvider: mockTransparentModeProvider{
+				transparentMode: true,
+				autoAuthPath:    "auth/jwt/",
+				defaultAuthRole: "from-default",
+			},
+			extractedRole: "from-extractor",
+		}
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/vault/role/from-path/gateway/v1/secret", nil)
+		req := &logical.Request{
+			Path:        "role/from-path/gateway/v1/secret",
+			HTTPRequest: httpReq,
+		}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "from-path", role)
+	})
+
+	t.Run("X-Warden-Role header wins over extractor", func(t *testing.T) {
+		backend := &mockExtractorBackend{
+			mockTransparentModeProvider: mockTransparentModeProvider{
+				transparentMode: true,
+				autoAuthPath:    "auth/jwt/",
+			},
+			extractedRole: "from-extractor",
+		}
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/vault/gateway/v1/secret", nil)
+		httpReq.Header.Set("X-Warden-Role", "from-header")
+		req := &logical.Request{
+			Path:        "gateway/v1/secret",
+			HTTPRequest: httpReq,
+		}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "from-header", role)
+	})
+
+	t.Run("path role wins over default role", func(t *testing.T) {
+		backend := &mockTransparentModeProvider{
+			transparentMode: true,
+			autoAuthPath:    "auth/jwt/",
+			defaultAuthRole: "from-default",
+		}
+		req := &logical.Request{Path: "role/from-path/gateway/v1/secret"}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "from-path", role)
+	})
+
+	t.Run("full precedence chain: header > path > extractor > default_role", func(t *testing.T) {
+		// All four sources populated simultaneously. Walk the chain by
+		// removing the highest-precedence source each iteration and assert
+		// the next one takes over.
+		backend := &mockExtractorBackend{
+			mockTransparentModeProvider: mockTransparentModeProvider{
+				transparentMode: true,
+				autoAuthPath:    "auth/jwt/",
+				defaultAuthRole: "from-default",
+			},
+			extractedRole: "from-extractor",
+		}
+
+		// All four set → header wins
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/vault/role/from-path/gateway/v1/secret", nil)
+		httpReq.Header.Set("X-Warden-Role", "from-header")
+		req := &logical.Request{
+			Path:        "role/from-path/gateway/v1/secret",
+			HTTPRequest: httpReq,
+		}
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "from-header", role, "header should win when all four are set")
+
+		// Drop header → path wins
+		httpReq.Header.Del("X-Warden-Role")
+		isTransparent, role = core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "from-path", role, "path should win once header is removed")
+
+		// Drop path → extractor wins
+		req.Path = "gateway/v1/secret"
+		httpReq = httptest.NewRequest(http.MethodGet, "/v1/vault/gateway/v1/secret", nil)
+		req.HTTPRequest = httpReq
+		isTransparent, role = core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "from-extractor", role, "extractor should win once path is removed")
+
+		// Drop extractor → default_role wins
+		backend.extractedRole = ""
+		isTransparent, role = core.isTransparentRequest(req, backend)
+		assert.True(t, isTransparent)
+		assert.Equal(t, "from-default", role, "default_role should win once extractor is removed")
+	})
+
+	t.Run("X-Warden-Token presence skips transparent auth", func(t *testing.T) {
+		// Operators may hit a gateway mount with an explicit Warden token
+		// (X-Warden-Token) instead of the protocol's transparent credential.
+		// The transparent-auth flow must yield so the standard token-
+		// validation path can run; otherwise providers whose extractor can't
+		// contribute a role (AWS without SigV4, etc.) would fall into "no
+		// valid credential" inside performImplicitAuth.
+		backend := &mockExtractorBackend{
+			mockTransparentModeProvider: mockTransparentModeProvider{
+				transparentMode: true,
+				autoAuthPath:    "auth/jwt/",
+				defaultAuthRole: "from-default",
+			},
+			extractedRole: "",
+		}
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/vault/gateway/v1/secret", nil)
+		httpReq.Header.Set("X-Warden-Token", "cvs.some-warden-token")
+		req := &logical.Request{
+			Path:        "gateway/v1/secret",
+			HTTPRequest: httpReq,
+		}
+
+		isTransparent, role := core.isTransparentRequest(req, backend)
+		assert.False(t, isTransparent, "X-Warden-Token must short-circuit transparent auth")
+		assert.Empty(t, role)
 	})
 }
 

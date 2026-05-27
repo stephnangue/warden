@@ -53,15 +53,11 @@ func extractToken(r *http.Request) string {
 // Compile-time interface assertion
 var _ logical.TransparentAuthRoleExtractor = (*awsBackend)(nil)
 
-// GetAuthRoleFromRequest extracts the auth role from the SigV4 Authorization header.
-// Returns (role, true) when access_key_id is present (used as the role name).
-// Returns ("", false) when no Authorization header is present.
-func (b *awsBackend) GetAuthRoleFromRequest(r *http.Request) (string, bool) {
-	accessKeyID := sigv4.ExtractAccessKeyID(r.Header.Get("Authorization"))
-	if accessKeyID == "" {
-		return "", false
-	}
-	return accessKeyID, true
+// GetAuthRoleFromRequest extracts the auth role from the SigV4 Authorization
+// header. Returns the access_key_id (used as the role name) when present, or
+// "" when no SigV4 header is on the request.
+func (b *awsBackend) GetAuthRoleFromRequest(r *http.Request) string {
+	return sigv4.ExtractAccessKeyID(r.Header.Get("Authorization"))
 }
 
 // Factory creates a new AWS provider backend using the logical.Factory pattern

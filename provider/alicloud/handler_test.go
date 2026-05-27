@@ -328,8 +328,7 @@ func TestGetAuthRoleFromRequest(t *testing.T) {
 	t.Run("role from ACS3 Credential (cert flow)", func(t *testing.T) {
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set(HeaderAuthorization, "ACS3-HMAC-SHA256 Credential=my-role,SignedHeaders=host,Signature=s")
-		role, ok := b.GetAuthRoleFromRequest(r)
-		assert.True(t, ok)
+		role := b.GetAuthRoleFromRequest(r)
 		assert.Equal(t, "my-role", role)
 	})
 
@@ -340,9 +339,8 @@ func TestGetAuthRoleFromRequest(t *testing.T) {
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set(HeaderAuthorization, "ACS3-HMAC-SHA256 Credential=readonly,SignedHeaders=host,Signature=s")
 		r.Header.Set(HeaderACSSecurityToken, "eyJabc.payload.sig") // JWT lives here, not in access_key_id
-		role, ok := b.GetAuthRoleFromRequest(r)
-		assert.True(t, ok, "role must resolve even when a JWT is present in x-acs-security-token")
-		assert.Equal(t, "readonly", role)
+		role := b.GetAuthRoleFromRequest(r)
+		assert.Equal(t, "readonly", role, "role must resolve even when a JWT is present in x-acs-security-token")
 	})
 
 	t.Run("JWT misplaced in access_key_id is rejected", func(t *testing.T) {
@@ -350,15 +348,15 @@ func TestGetAuthRoleFromRequest(t *testing.T) {
 		// of in x-acs-security-token, we refuse to treat it as a role name.
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set(HeaderAuthorization, "ACS3-HMAC-SHA256 Credential=eyJabc,SignedHeaders=host,Signature=s")
-		_, ok := b.GetAuthRoleFromRequest(r)
-		assert.False(t, ok)
+		role := b.GetAuthRoleFromRequest(r)
+		assert.Empty(t, role)
 	})
 
 	t.Run("non-ACS3 request", func(t *testing.T) {
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set(HeaderAuthorization, "Bearer abc")
-		_, ok := b.GetAuthRoleFromRequest(r)
-		assert.False(t, ok)
+		role := b.GetAuthRoleFromRequest(r)
+		assert.Empty(t, role)
 	})
 }
 

@@ -67,14 +67,16 @@ func TestGetAuthRole_ViaStreamingBackend(t *testing.T) {
 			expectedRole: "ci-runner",
 		},
 		{
-			name:         "returns default role for non-matching path",
+			// GetAuthRole returns the path-encoded role only; the mount-level
+			// default_role is returned separately by GetDefaultAuthRole.
+			name:         "non-matching path returns empty (default lives in GetDefaultAuthRole)",
 			path:         "gateway/v1/secret/data/foo",
-			expectedRole: "default-role",
+			expectedRole: "",
 		},
 		{
-			name:         "returns default role for config path",
+			name:         "config path returns empty",
 			path:         "config",
-			expectedRole: "default-role",
+			expectedRole: "",
 		},
 		{
 			name:         "handles role with underscores",
@@ -227,7 +229,7 @@ func TestSetTransparentConfig(t *testing.T) {
 	// Now should be enabled
 	assert.True(t, sb.IsTransparentMode())
 	assert.Equal(t, "auth/oidc/", sb.GetAutoAuthPath())
-	assert.Equal(t, "admin", sb.GetAuthRole("config", nil))
+	assert.Equal(t, "admin", sb.GetDefaultAuthRole())
 }
 
 func TestExtractToken(t *testing.T) {

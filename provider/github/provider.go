@@ -186,10 +186,10 @@ For GitHub Enterprise Server:
   automatically (e.g., https://github.example.com) unless overridden.
 
 The role can be provided via the X-Warden-Role header, embedded in
-the URL path (/github/role/{role}/gateway/{api-path}), defaulted by
-default_role, or — for Git smart-HTTP requests only — carried in the
-Basic Auth username. Precedence: X-Warden-Role > path role >
-default_role > Basic Auth username.
+the URL path (/github/role/{role}/gateway/{api-path}), carried in
+the Basic Auth username (Git smart-HTTP requests only), or defaulted
+by default_role. Precedence: X-Warden-Role > path role > Basic Auth
+username > default_role.
 
 Header-routed alternative: clients that want a URL without the
 /v1/github/gateway/ prefix can send X-Warden-Provider: github (and

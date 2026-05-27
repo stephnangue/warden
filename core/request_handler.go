@@ -1253,25 +1253,38 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 		return false, ""
 	}
 
-	// Extract auth role from path (may return default auth role or empty string)
+	// Explicit X-Warden-Token means the client wants explicit auth — skip
+	// transparent auth entirely so the standard token-validation path runs.
+	// Mirrors the same short-circuit on the transparent-ops path at line 743.
+	if req.HTTPRequest != nil && req.HTTPRequest.Header.Get("X-Warden-Token") != "" {
+		return false, ""
+	}
+
+	// Role resolution precedence (highest wins):
+	//   1. X-Warden-Role header
+	//   2. Request-encoded role (URL path segment, query param)
+	//   3. Provider transparent extractor (SigV4 access key, Basic Auth user)
+	//   4. Mount-level default_role
+	//
+	// Request-encoded role: path segment for streaming backends, query param
+	// for access backends. The provider decides what counts.
 	authRole := tmp.GetAuthRole(relativePath, req)
 
-	// Fallback: extract role from protocol-specific request headers.
-	// Used by SigV4-compatible providers (AWS, Alibaba Cloud, Scaleway) where
-	// the role is embedded in the Authorization header's Credential field.
-	if authRole == "" {
-		if ext, ok := backend.(logical.TransparentAuthRoleExtractor); ok && req.HTTPRequest != nil {
-			role, isTransparent := ext.GetAuthRoleFromRequest(req.HTTPRequest)
-			if !isTransparent {
-				return false, "" // Not a transparent request (e.g., explicit auth with Warden token)
-			}
-			authRole = role
+	// Provider transparent extractor: SigV4 Authorization header (AWS,
+	// Alibaba Cloud), Basic Auth username (Git smart-HTTP), etc.
+	if authRole == "" && req.HTTPRequest != nil {
+		if ext, ok := backend.(logical.TransparentAuthRoleExtractor); ok {
+			authRole = ext.GetAuthRoleFromRequest(req.HTTPRequest)
 		}
 	}
 
-	// X-Warden-Role header overrides any role parsed from the path or chosen
-	// by the backend's default-role fallback. HandleRequest also rewrites the
-	// role segment of req.Path to match (see applyRoleHeader), so the auth
+	// Mount-level default_role.
+	if authRole == "" {
+		authRole = tmp.GetDefaultAuthRole()
+	}
+
+	// X-Warden-Role header overrides everything. HandleRequest also rewrites
+	// the role segment of req.Path to match (see applyRoleHeader), so the auth
 	// resolver and the streaming backend always agree on which role is in
 	// force.
 	if req.HTTPRequest != nil {
@@ -1309,9 +1322,12 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 //
 //	Auth role (first match wins):
 //	  1. X-Warden-Role header
-//	  2. URL path /role/{name}/gateway/... (gateway only)
-//	  3. Provider default_role config (gateway only)
-//	  4. Auth method default_role config (login-time fallback)
+//	  2. Request-encoded role: URL path /role/{name}/gateway/... (streaming
+//	     backends) or ?role= query param (access backends)
+//	  3. Provider transparent extractor (e.g. SigV4 access key, Basic Auth
+//	     username for Git smart-HTTP)
+//	  4. Provider default_role config
+//	  5. Auth method default_role config (login-time fallback)
 //
 // Uses singleflight to prevent duplicate token creation when concurrent requests
 // arrive with the same credential+authRole combination.

@@ -121,9 +121,9 @@ header carries through to follow-up operations automatically.
 ### Quirks
 
 - **Role precedence**: `X-Warden-Role` header > path-embedded
-  `/role/<r>/` > `default_role` > Basic Auth username. If the operator
-  set `default_role`, the username in the clone URL is ignored — leave
-  `default_role` unset to enable per-clone role selection.
+  `/role/<r>/` > Basic Auth username (Git smart-HTTP only) >
+  `default_role`. Per-clone role selection via the username works even
+  when a mount-level `default_role` is set.
 - **Cert-auth clients** still need a non-empty Basic Auth password
   (Git protocol requirement). Any placeholder works; the placeholder is
   never sent to the JWT validator when `X-SSL-Client-Cert` is present.

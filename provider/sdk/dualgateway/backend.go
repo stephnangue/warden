@@ -31,19 +31,16 @@ var _ logical.TransparentAuthRoleExtractor = (*dualgatewayBackend)(nil)
 // GetAuthRoleFromRequest extracts the auth role from the SigV4 Authorization header.
 // For S3 requests, the access_key_id is used as the role name (cert transparent auth).
 // For JWT transparent auth, the JWT is the access_key_id and role comes from the path or X-Warden-Role.
-func (b *dualgatewayBackend) GetAuthRoleFromRequest(r *http.Request) (string, bool) {
+func (b *dualgatewayBackend) GetAuthRoleFromRequest(r *http.Request) string {
 	if !sigv4.IsSigV4Request(r) {
-		return "", false
+		return ""
 	}
 	accessKeyID := sigv4.ExtractAccessKeyID(r.Header.Get("Authorization"))
-	if accessKeyID == "" {
-		return "", false
-	}
 	// JWT tokens start with "eyJ" — they carry auth identity, not the role name
 	if strings.HasPrefix(accessKeyID, "eyJ") {
-		return "", false
+		return ""
 	}
-	return accessKeyID, true
+	return accessKeyID
 }
 
 // NewFactory returns a logical.Factory that creates a dual-mode gateway backend

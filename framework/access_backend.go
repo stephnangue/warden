@@ -81,6 +81,12 @@ func (b *AccessBackend) GetAuthRole(_ string, req *logical.Request) string {
 	return ""
 }
 
+// GetDefaultAuthRole returns "" — AccessBackend has no mount-level default_role
+// concept today. The auth method's default_role provides the fallback.
+func (b *AccessBackend) GetDefaultAuthRole() string {
+	return ""
+}
+
 // IsTransparentPath checks if the given path should trigger transparent authentication.
 // Matches paths starting with the configured access path prefix (default "access/").
 func (b *AccessBackend) IsTransparentPath(path string) bool {
