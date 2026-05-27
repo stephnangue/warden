@@ -138,8 +138,9 @@ var Spec = &httpproxy.ProviderSpec{
 		}
 		return state
 	},
-	ResolveUpstream:        resolveGitUpstream,
-	GetAuthRoleFromRequest: roleFromBasicAuthUser,
+	ResolveUpstream:          resolveGitUpstream,
+	GetAuthRoleFromRequest:   roleFromBasicAuthUser,
+	IsUnauthenticatedRequest: isUnauthenticatedGitProbe,
 }
 
 // Factory creates a new GitHub provider backend.
