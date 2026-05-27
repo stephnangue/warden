@@ -504,13 +504,14 @@ func (b *StreamingBackend) GetAutoAuthPath() string {
 	return b.TransparentConfig.AutoAuthPath
 }
 
-// GetAuthRole extracts the auth role name from the request path for implicit login.
+// GetAuthRole extracts the auth role name from the request path. Returns
+// "" when the path does not encode a role; the mount-level default_role
+// is returned separately by GetDefaultAuthRole.
 func (b *StreamingBackend) GetAuthRole(path string, _ *logical.Request) string {
 	if b.TransparentConfig == nil {
 		return ""
 	}
 
-	// Use custom pattern or default
 	pattern := b.TransparentConfig.AuthRolePattern
 	if pattern == nil {
 		pattern = DefaultAuthRolePattern
@@ -518,7 +519,15 @@ func (b *StreamingBackend) GetAuthRole(path string, _ *logical.Request) string {
 
 	matches := pattern.FindStringSubmatch(path)
 	if len(matches) > 1 {
-		return matches[1] // First capture group is the auth role
+		return matches[1]
+	}
+	return ""
+}
+
+// GetDefaultAuthRole returns the mount-level default_role config value.
+func (b *StreamingBackend) GetDefaultAuthRole() string {
+	if b.TransparentConfig == nil {
+		return ""
 	}
 	return b.TransparentConfig.DefaultAuthRole
 }

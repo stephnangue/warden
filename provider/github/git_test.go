@@ -169,24 +169,18 @@ func TestRoleFromBasicAuthUser(t *testing.T) {
 	t.Run("git path with Basic Auth user → returns role", func(t *testing.T) {
 		r := httptest.NewRequest("GET", "/v1/github/gateway/owner/repo.git/info/refs", nil)
 		r.SetBasicAuth("contributor", "jwt-or-placeholder")
-		role, ok := roleFromBasicAuthUser(r)
-		assert.Equal(t, "contributor", role)
-		assert.True(t, ok)
+		assert.Equal(t, "contributor", roleFromBasicAuthUser(r))
 	})
 
-	t.Run("git path without Basic Auth → defers to default_role", func(t *testing.T) {
+	t.Run("git path without Basic Auth → empty (caller falls back to default_role)", func(t *testing.T) {
 		r := httptest.NewRequest("GET", "/v1/github/gateway/owner/repo.git/info/refs", nil)
-		role, ok := roleFromBasicAuthUser(r)
-		assert.Empty(t, role)
-		assert.True(t, ok)
+		assert.Empty(t, roleFromBasicAuthUser(r))
 	})
 
-	t.Run("git path with empty Basic Auth user → defers to default_role", func(t *testing.T) {
+	t.Run("git path with empty Basic Auth user → empty (caller falls back to default_role)", func(t *testing.T) {
 		r := httptest.NewRequest("GET", "/v1/github/gateway/owner/repo.git/info/refs", nil)
 		r.SetBasicAuth("", "jwt")
-		role, ok := roleFromBasicAuthUser(r)
-		assert.Empty(t, role)
-		assert.True(t, ok)
+		assert.Empty(t, roleFromBasicAuthUser(r))
 	})
 
 	t.Run("REST path with Basic Auth user → username NOT consumed", func(t *testing.T) {
@@ -195,9 +189,7 @@ func TestRoleFromBasicAuthUser(t *testing.T) {
 		// behaviour.
 		r := httptest.NewRequest("GET", "/v1/github/gateway/user", nil)
 		r.SetBasicAuth("contributor", "jwt")
-		role, ok := roleFromBasicAuthUser(r)
-		assert.Empty(t, role)
-		assert.True(t, ok)
+		assert.Empty(t, roleFromBasicAuthUser(r))
 	})
 }
 

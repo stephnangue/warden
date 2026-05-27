@@ -121,31 +121,26 @@ func TestGetAuthRoleFromRequest(t *testing.T) {
 		name       string
 		authHeader string
 		wantRole   string
-		wantOK     bool
 	}{
 		{
 			name:       "cert transparent - role name",
 			authHeader: "AWS4-HMAC-SHA256 Credential=admin-role/20260410/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc",
 			wantRole:   "admin-role",
-			wantOK:     true,
 		},
 		{
 			name:       "JWT transparent - no role",
 			authHeader: "AWS4-HMAC-SHA256 Credential=eyJhbGciOiJSUzI1NiJ9/20260410/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc",
 			wantRole:   "",
-			wantOK:     false,
 		},
 		{
 			name:       "non-SigV4",
 			authHeader: "Bearer some-token",
 			wantRole:   "",
-			wantOK:     false,
 		},
 		{
 			name:       "empty header",
 			authHeader: "",
 			wantRole:   "",
-			wantOK:     false,
 		},
 	}
 	for _, tt := range tests {
@@ -154,9 +149,8 @@ func TestGetAuthRoleFromRequest(t *testing.T) {
 			if tt.authHeader != "" {
 				r.Header.Set("Authorization", tt.authHeader)
 			}
-			role, ok := b.GetAuthRoleFromRequest(r)
+			role := b.GetAuthRoleFromRequest(r)
 			assert.Equal(t, tt.wantRole, role)
-			assert.Equal(t, tt.wantOK, ok)
 		})
 	}
 }

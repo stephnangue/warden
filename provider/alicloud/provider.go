@@ -76,7 +76,7 @@ func extractToken(r *http.Request) string {
 // GetAuthRoleFromRequest extracts the auth role from the ACS3 or SigV4
 // Authorization header. For cert transparent auth, the access_key_id is the
 // role name. For JWT transparent auth, returns "" (role comes from path).
-func (b *alicloudBackend) GetAuthRoleFromRequest(r *http.Request) (string, bool) {
+func (b *alicloudBackend) GetAuthRoleFromRequest(r *http.Request) string {
 	var accessKeyID string
 	authHeader := r.Header.Get(HeaderAuthorization)
 	switch {
@@ -85,16 +85,13 @@ func (b *alicloudBackend) GetAuthRoleFromRequest(r *http.Request) (string, bool)
 	case sigv4.IsSigV4Request(r):
 		accessKeyID = sigv4.ExtractAccessKeyID(authHeader)
 	default:
-		return "", false
-	}
-	if accessKeyID == "" {
-		return "", false
+		return ""
 	}
 	// JWT tokens start with "eyJ" — they carry auth identity, not the role name
 	if strings.HasPrefix(accessKeyID, "eyJ") {
-		return "", false
+		return ""
 	}
-	return accessKeyID, true
+	return accessKeyID
 }
 
 // Factory creates a new Alicloud provider backend.

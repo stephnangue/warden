@@ -57,10 +57,7 @@ func TestGetAuthRoleFromRequest_RoleName(t *testing.T) {
 	r, _ := http.NewRequest("GET", "/", nil)
 	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=my-role/20260326/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc")
 
-	role, ok := b.GetAuthRoleFromRequest(r)
-	if !ok {
-		t.Fatal("expected ok=true for role name")
-	}
+	role := b.GetAuthRoleFromRequest(r)
 	if role != "my-role" {
 		t.Errorf("expected role 'my-role', got %q", role)
 	}
@@ -73,10 +70,7 @@ func TestGetAuthRoleFromRequest_ASIAPrefix(t *testing.T) {
 	r, _ := http.NewRequest("GET", "/", nil)
 	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=ASIAIOSFODNN7EXAMPLE/20260326/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc")
 
-	role, ok := b.GetAuthRoleFromRequest(r)
-	if !ok {
-		t.Fatal("expected ok=true for ASIA prefix (not AKIA)")
-	}
+	role := b.GetAuthRoleFromRequest(r)
 	if role != "ASIAIOSFODNN7EXAMPLE" {
 		t.Errorf("expected role 'ASIAIOSFODNN7EXAMPLE', got %q", role)
 	}
@@ -87,9 +81,8 @@ func TestGetAuthRoleFromRequest_NoAuthHeader(t *testing.T) {
 
 	r, _ := http.NewRequest("GET", "/", nil)
 
-	_, ok := b.GetAuthRoleFromRequest(r)
-	if ok {
-		t.Fatal("expected ok=false for missing auth header")
+	if role := b.GetAuthRoleFromRequest(r); role != "" {
+		t.Fatalf("expected empty role for missing auth header, got %q", role)
 	}
 }
 

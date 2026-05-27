@@ -130,16 +130,12 @@ func resolveGitUpstream(r *http.Request, providerURL string, state map[string]an
 
 // roleFromBasicAuthUser is the Spec.GetAuthRoleFromRequest hook. On Git
 // smart-HTTP paths, the Basic Auth username carries the Warden role. On
-// non-Git paths, returns ("", true) — "transparent yes, no role from me"
-// — so the existing default_role / path role / X-Warden-Role flow is
-// untouched for REST callers.
-func roleFromBasicAuthUser(r *http.Request) (string, bool) {
+// non-Git paths (REST), returns "" — caller falls back to default_role /
+// X-Warden-Role.
+func roleFromBasicAuthUser(r *http.Request) string {
 	if !isGitSmartHTTPPath(pathAfterGateway(r.URL.Path)) {
-		return "", true
+		return ""
 	}
-	user, _, ok := r.BasicAuth()
-	if !ok || user == "" {
-		return "", true
-	}
-	return user, true
+	user, _, _ := r.BasicAuth()
+	return user
 }

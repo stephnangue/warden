@@ -234,14 +234,31 @@ func TestStreamingBackend_GetAuthRole(t *testing.T) {
 		assert.Equal(t, "admin", role)
 	})
 
-	t.Run("falls back to default", func(t *testing.T) {
+	t.Run("path without role segment returns empty (default lives in GetDefaultAuthRole)", func(t *testing.T) {
 		role := sb.GetAuthRole("gateway/v1/messages", nil)
-		assert.Equal(t, "default", role)
+		assert.Equal(t, "", role)
 	})
 
 	t.Run("nil config", func(t *testing.T) {
 		sb2 := &StreamingBackend{}
 		assert.Equal(t, "", sb2.GetAuthRole("role/x/gateway", nil))
+	})
+}
+
+func TestStreamingBackend_GetDefaultAuthRole(t *testing.T) {
+	t.Run("returns configured default", func(t *testing.T) {
+		sb := testStreamingBackend()
+		assert.Equal(t, "default", sb.GetDefaultAuthRole())
+	})
+
+	t.Run("nil config returns empty", func(t *testing.T) {
+		sb := &StreamingBackend{}
+		assert.Equal(t, "", sb.GetDefaultAuthRole())
+	})
+
+	t.Run("empty default returns empty", func(t *testing.T) {
+		sb := &StreamingBackend{TransparentConfig: &TransparentConfig{}}
+		assert.Equal(t, "", sb.GetDefaultAuthRole())
 	})
 }
 

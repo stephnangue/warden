@@ -357,14 +357,14 @@ Mixing a malformed cert with a valid JWT in the Basic Auth password is intention
 
 ### Role precedence
 
-Role resolution follows the existing core ordering. The Basic Auth username is consulted only when no higher-precedence source is set:
+Role resolution follows core ordering, with the Basic Auth username consulted after path/header roles but before `default_role`:
 
 1. `X-Warden-Role` header
 2. Path-embedded role (`/v1/github/role/<role>/gateway/...`)
-3. `default_role` from the mount config
-4. **Basic Auth username** (Git)
+3. **Basic Auth username** (Git smart-HTTP only)
+4. `default_role` from the mount config
 
-This means an operator who sets `default_role: shared` will see all Git clones resolve to `shared` regardless of the username in the clone URL. Operators who want client-chosen roles via the username should leave `default_role` unset.
+So `git clone https://<role>:$JWT@<host>/...` resolves to the username even when a mount-level `default_role` is configured; the default is used only when none of the higher-precedence sources contribute. REST callers are unaffected — the Basic Auth username is consulted only on Git smart-HTTP paths.
 
 ### Sizing `git_max_body_size` and `timeout`
 
