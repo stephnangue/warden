@@ -300,10 +300,55 @@ func (f *standbyForwarder) currentServerName() string {
 }
 
 // wrapGenericHandler wraps the main handler with cross-cutting concerns:
+//   - X-Warden-Provider /v1/ exemption (rewrite-then-validate)
 //   - Path validation
 //   - Standby request forwarding via reverse proxy with mTLS
+//
+// The X-Warden-Provider exemption lets clients (notably git clients
+// using http.extraheader) send requests at the literal upstream path
+// shape (e.g. /<owner>/<repo>.git/...) without the /v1/ prefix. The
+// middleware prepends /v1/ so the downstream validation, mux, and core
+// synthesis at core/request_handler.go:354-367 all see the canonical
+// shape. Requests that already include /v1/ are passed through
+// unchanged (idempotent).
+//
+// sys/-targeted requests are rejected up-front with 400, matching the
+// existing core rejection at core/request_handler.go:355-357. Without
+// this, /sys/health + X-Warden-Provider would rewrite to /v1/sys/health
+// and reach handleSysHealth (which bypasses handleLogical), silently
+// serving the health endpoint instead of rejecting the malformed
+// routing intent.
+//
+// No SigV4 rejection here: core's existing check at
+// request_handler.go:358-360 catches SigV4 + X-Warden-Provider
+// combinations after the rewrite, and nothing between this middleware
+// and that check observes the mutated URL in any persistent state.
 func wrapGenericHandler(c *core.Core, handler http.Handler, log *logger.GatedLogger, forwarder *standbyForwarder) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// X-Warden-Provider /v1/ exemption. Only rewrites when the
+		// header is non-empty AND the path is missing /v1/. Empty
+		// header values (Header.Get returns "" for both absent and
+		// present-but-empty) are treated as absent — the request
+		// flows through to the /v1/ validation below, which is the
+		// correct error.
+		if provider := r.Header.Get("X-Warden-Provider"); provider != "" && !strings.HasPrefix(r.URL.Path, "/v1/") {
+			// Reject sys/ targets before the rewrite. Without this,
+			// /sys/health (with X-Warden-Provider) would rewrite to
+			// /v1/sys/health and reach handleSysHealth — never hitting
+			// core's sys/ rejection at request_handler.go:355-357.
+			trimmed := strings.TrimPrefix(r.URL.Path, "/")
+			if strings.HasPrefix(trimmed, "sys/") || trimmed == "sys" {
+				respondError(w, http.StatusBadRequest, "X-Warden-Provider is not honored on system backend paths")
+				return
+			}
+			// Rewrite. Clear RawPath: once Path is rewritten the
+			// cached encoded form is stale and net/url will re-encode
+			// on demand from the decoded Path. Same precaution as
+			// core/request_handler.go:367.
+			r.URL.Path = "/v1" + r.URL.Path
+			r.URL.RawPath = ""
+		}
+
 		// Validate request path
 		if !strings.HasPrefix(r.URL.Path, "/v1/") {
 			respondError(w, http.StatusNotFound, "path must begin with /v1/")
