@@ -155,6 +155,181 @@ func TestWrapGenericHandler_ErrorResponse_Format(t *testing.T) {
 }
 
 // =============================================================================
+// X-Warden-Provider /v1/ exemption Tests
+// =============================================================================
+
+func TestWrapGenericHandler_ProviderHeader_RewritesPath(t *testing.T) {
+	var seenPath string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/stephnangue/hcp-resources.git/info/refs", nil)
+	req.Header.Set("X-Warden-Provider", "github")
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "/v1/stephnangue/hcp-resources.git/info/refs", seenPath)
+}
+
+func TestWrapGenericHandler_ProviderHeader_Idempotent(t *testing.T) {
+	// Path already includes /v1/ — rewrite must not stack a second prefix.
+	var seenPath string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/stephnangue/hcp-resources.git/info/refs", nil)
+	req.Header.Set("X-Warden-Provider", "github")
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "/v1/stephnangue/hcp-resources.git/info/refs", seenPath,
+		"path must not be double-prefixed when /v1/ is already present")
+}
+
+func TestWrapGenericHandler_ProviderHeader_Absent_StillRejects(t *testing.T) {
+	// No X-Warden-Provider: existing /v1/ validation must still fire.
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("inner handler must not be called")
+	})
+
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/stephnangue/hcp-resources.git", nil)
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "path must begin with /v1/")
+}
+
+func TestWrapGenericHandler_ProviderHeader_Empty_StillRejects(t *testing.T) {
+	// X-Warden-Provider: "" — treat as absent, fall through to /v1/ 404.
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("inner handler must not be called")
+	})
+
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/foo/bar", nil)
+	req.Header.Set("X-Warden-Provider", "")
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "path must begin with /v1/")
+}
+
+func TestWrapGenericHandler_ProviderHeader_SysPath_Rejected(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("inner handler must not be called")
+	})
+
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
+
+	cases := []string{"/sys/health", "/sys/init", "/sys/mounts", "/sys"}
+	for _, p := range cases {
+		t.Run(p, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, p, nil)
+			req.Header.Set("X-Warden-Provider", "github")
+			w := httptest.NewRecorder()
+			wrapped.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Contains(t, w.Body.String(),
+				"X-Warden-Provider is not honored on system backend paths")
+		})
+	}
+}
+
+func TestWrapGenericHandler_ProviderHeader_RootPath(t *testing.T) {
+	// Today / returns 404 (see TestWrapGenericHandler_InvalidPath_RootPath).
+	// With X-Warden-Provider, / rewrites to /v1/ and reaches the inner
+	// handler — same as a direct hit on /v1/ today
+	// (see TestWrapGenericHandler_JustV1).
+	var seenPath string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Warden-Provider", "github")
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "/v1/", seenPath)
+}
+
+func TestWrapGenericHandler_ProviderHeader_ClearsRawPath(t *testing.T) {
+	// Regression guard: RawPath must be cleared after rewrite, matching
+	// the core synthesis at core/request_handler.go:367. Without the
+	// clear, r.URL.EscapedPath() would return the stale pre-rewrite
+	// encoded form instead of re-encoding canonically from the new Path.
+	var seenRawPath string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenRawPath = r.URL.RawPath
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/owner/repo.git/info/refs", nil)
+	req.Header.Set("X-Warden-Provider", "github")
+	// Force a non-empty RawPath so we can assert the middleware clears it.
+	// (httptest.NewRequest leaves RawPath empty when the encoded and
+	// decoded forms are identical, which is the common case.)
+	req.URL.RawPath = "/owner/repo.git/info/refs"
+	assert.NotEmpty(t, req.URL.RawPath, "test precondition: RawPath manually populated")
+
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, seenRawPath, "RawPath must be cleared after rewrite")
+}
+
+func TestWrapGenericHandler_ProviderHeader_README_GitCloneShape(t *testing.T) {
+	// Documents that the exact form in provider/github/README.md:343 and
+	// in skill.md actually works after this change. If someone moves the
+	// /v1/ exemption later in the chain and breaks the README example,
+	// this test catches it.
+	var seenPath, seenProvider, seenNamespace string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenProvider = r.Header.Get("X-Warden-Provider")
+		seenNamespace = r.Header.Get("X-Warden-Namespace")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := wrapGenericHandler(nil, inner, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/stephnangue/hcp-resources.git/info/refs?service=git-upload-pack", nil)
+	req.Header.Set("X-Warden-Provider", "github")
+	req.Header.Set("X-Warden-Namespace", "tuto")
+	req.SetBasicAuth("github-user", "jwt-placeholder")
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "/v1/stephnangue/hcp-resources.git/info/refs", seenPath)
+	assert.Equal(t, "github", seenProvider)
+	assert.Equal(t, "tuto", seenNamespace)
+}
+
+// =============================================================================
 // Path Pattern Tests
 // =============================================================================
 
