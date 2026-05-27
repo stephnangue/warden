@@ -116,22 +116,24 @@ git config --global credential.helper "cache --timeout=900"
 ### Header-routed alternative
 
 If you prefer a clone URL that looks like a real Git URL, pass the
-mount path as `X-Warden-Provider` via `http.extraheader` instead. Use
-the `path` field from `warden provider list` (trailing-slash form;
-the server accepts either):
+mount path as `X-Warden-Provider` and the namespace as
+`X-Warden-Namespace` via `http.extraheader` instead. `path` comes
+from `warden provider list`; `$WARDEN_NAMESPACE` is in your
+environment:
 
 ```bash
-path=$(warden provider list -o json | jq -r '.[] | select(.type=="github") | .path')
+path=$(warden provider list -o json | jq -r '.[] | select(.type=="github") | .path' | head -1)
 git -c http.extraheader="X-Warden-Provider: $path" \
+    -c http.extraheader="X-Warden-Namespace: $WARDEN_NAMESPACE" \
     clone "${WARDEN_ADDR%%://*}://<role>:${WARDEN_TOKEN}@${WARDEN_ADDR#*://}/<owner>/<repo>.git"
 ```
 
-When more than one `github` mount exists, pick the entry whose
-`description` matches the upstream you want — `path` alone doesn't
-tell you which GitHub host or org the mount fronts.
+When more than one `github` mount exists, replace `head -1` with a
+`select(.description=="...")` matching the upstream you want — `path`
+alone doesn't tell you which GitHub host or org the mount fronts.
 
-`http.extraheader` persists into `.git/config` at clone time, so the
-header carries through to follow-up operations automatically.
+`http.extraheader` persists into `.git/config` at clone time, so both
+headers carry through to follow-up operations automatically.
 
 ### Quirks
 
