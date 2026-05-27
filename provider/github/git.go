@@ -139,3 +139,40 @@ func roleFromBasicAuthUser(r *http.Request) string {
 	user, _, _ := r.BasicAuth()
 	return user
 }
+
+// isUnauthenticatedGitProbe is the Spec.IsUnauthenticatedRequest hook.
+// It reports whether r is a Git smart-HTTP probe that should pass
+// through to github.com without Warden authentication.
+//
+// Git's smart-HTTP protocol always probes <repo>.git/info/refs once
+// without an Authorization header; it requires the server's
+// WWW-Authenticate response to know that it must retry with Basic Auth.
+// A bare 401 from Warden breaks the negotiation because clients never
+// learn what credential scheme to use. Letting the probe reach github
+// lets github return its own WWW-Authenticate: Basic challenge; git
+// then retries with <role>:<JWT>, which lands on the second-pass code
+// path where extractToken pulls the JWT from the Basic password slot
+// and normal Warden auth runs.
+//
+// Returns false (so normal auth runs) when r is nil, when r carries any
+// Authorization header, or when the path is not a Git smart-HTTP
+// endpoint. Cert-auth clients (X-SSL-Client-Cert) typically also have
+// no Authorization header on the probe; the retry's cert flow handles
+// credential resolution.
+//
+// The Authorization-header check looks redundant — core only consults
+// IsUnauthenticatedPath when ClientToken == "", which already implies
+// extractToken found no usable credential. But several edge cases reach
+// here with Authorization set yet ClientToken empty: malformed Bearer
+// ("Bearer " with no token), Basic with an empty password slot,
+// Negotiate (Kerberos) and other unrecognised schemes, and Basic when
+// X-SSL-Client-Cert is also present (extractToken deliberately skips
+// Basic in that case). Without this guard those all silently get
+// probe-passthrough; with it they fall through to implicit-auth-fail
+// → 401, which is the honest answer.
+func isUnauthenticatedGitProbe(r *http.Request, path string) bool {
+	if r == nil || r.Header.Get("Authorization") != "" {
+		return false
+	}
+	return isGitSmartHTTPPath(pathAfterGateway(path))
+}

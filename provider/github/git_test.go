@@ -193,6 +193,55 @@ func TestRoleFromBasicAuthUser(t *testing.T) {
 	})
 }
 
+func TestIsUnauthenticatedGitProbe(t *testing.T) {
+	// Production callers pass mount-relative paths.
+	gitPath := "gateway/owner/repo.git/info/refs"
+	roleGitPath := "role/admin/gateway/owner/repo.git/info/refs"
+
+	t.Run("mount-relative git path without Authorization → true", func(t *testing.T) {
+		assert.True(t, isUnauthenticatedGitProbe(httptest.NewRequest("GET", "/"+gitPath, nil), gitPath))
+	})
+	t.Run("mount-relative role/X/gateway git path without Authorization → true", func(t *testing.T) {
+		assert.True(t, isUnauthenticatedGitProbe(httptest.NewRequest("GET", "/"+roleGitPath, nil), roleGitPath))
+	})
+	t.Run("git path with Basic Authorization → false (retry, not probe)", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/"+gitPath, nil)
+		r.SetBasicAuth("role", "jwt")
+		assert.False(t, isUnauthenticatedGitProbe(r, gitPath))
+	})
+	t.Run("git path with Bearer → false", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/"+gitPath, nil)
+		r.Header.Set("Authorization", "Bearer xyz")
+		assert.False(t, isUnauthenticatedGitProbe(r, gitPath))
+	})
+	t.Run("git path with empty Basic password → false (edge case)", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/"+gitPath, nil)
+		r.SetBasicAuth("role", "") // extractToken returns "" yet Authorization is set
+		assert.False(t, isUnauthenticatedGitProbe(r, gitPath))
+	})
+	t.Run("non-git mount-relative path → false", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/gateway/user", nil)
+		assert.False(t, isUnauthenticatedGitProbe(r, "gateway/user"))
+	})
+	t.Run("nil request → false", func(t *testing.T) {
+		assert.False(t, isUnauthenticatedGitProbe(nil, gitPath))
+	})
+	t.Run("git-upload-pack endpoint → true", func(t *testing.T) {
+		p := "gateway/owner/repo.git/git-upload-pack"
+		assert.True(t, isUnauthenticatedGitProbe(httptest.NewRequest("POST", "/"+p, nil), p))
+	})
+	t.Run("git-receive-pack endpoint → true", func(t *testing.T) {
+		p := "gateway/owner/repo.git/git-receive-pack"
+		assert.True(t, isUnauthenticatedGitProbe(httptest.NewRequest("POST", "/"+p, nil), p))
+	})
+	t.Run("URL-shape path also works (shape-robust)", func(t *testing.T) {
+		// Not how callers invoke us, but the helper must not regress if a future
+		// caller passes a URL-shaped path. Documents the suffix check's robustness.
+		urlPath := "/v1/github/gateway/owner/repo.git/info/refs"
+		assert.True(t, isUnauthenticatedGitProbe(httptest.NewRequest("GET", urlPath, nil), urlPath))
+	})
+}
+
 func TestResolveGitUpstream(t *testing.T) {
 	state := map[string]any{
 		"git_max_body_size": int64(3 * 1024 * 1024 * 1024), // 3 GiB
@@ -266,10 +315,11 @@ func TestResolveGitUpstream_DispatchExtractorRoundTrip(t *testing.T) {
 	assert.Equal(t, "x-access-token:ghp_test", string(decoded))
 }
 
-// Compile-time sanity: spec wires both hooks.
+// Compile-time sanity: spec wires all three git-related hooks.
 func TestSpec_WiringSanity(t *testing.T) {
 	assert.NotNil(t, Spec.ResolveUpstream, "Spec.ResolveUpstream must be set so git smart-HTTP can dispatch")
 	assert.NotNil(t, Spec.GetAuthRoleFromRequest, "Spec.GetAuthRoleFromRequest must be set so Basic Auth user becomes role")
+	assert.NotNil(t, Spec.IsUnauthenticatedRequest, "Spec.IsUnauthenticatedRequest must be set so the first Git smart-HTTP probe bypasses auth")
 	// Sanity: the dispatch returned for a non-git path must be ok=false so REST
 	// callers see no behaviour change.
 	r := httptest.NewRequest("GET", "/v1/github/gateway/user", nil)
