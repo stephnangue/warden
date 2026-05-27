@@ -54,7 +54,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	for _, path := range paths {
 		mount := mounts[path]
 		items = append(items, map[string]any{
-			"path":        path,
+			"path":        mount.Path,
 			"type":        mount.Type,
 			"accessor":    mount.Accessor,
 			"description": mount.Description,

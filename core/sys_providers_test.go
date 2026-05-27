@@ -232,11 +232,15 @@ func TestSystemBackend_HandleProviderList(t *testing.T) {
 	assert.Len(t, mounts, 2)
 
 	// Every entry must carry a mount_url that agents can prepend
-	// $WARDEN_ADDR to without further string manipulation.
+	// $WARDEN_ADDR to without further string manipulation, and a
+	// `path` field that mirrors the map key so JSON-streaming
+	// consumers can hand it straight to X-Warden-Provider.
 	for path, entry := range mounts {
 		em, ok := entry.(map[string]any)
 		require.True(t, ok)
 		assert.Equal(t, "/v1/"+path, em["mount_url"],
 			"mount_url for %q should be /v1/%s", path, path)
+		assert.Equal(t, path, em["path"],
+			"path field for %q should equal the map key", path)
 	}
 }

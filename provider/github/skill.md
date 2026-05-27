@@ -86,13 +86,21 @@ dispatches per-request based on path shape — `.git/info/refs`,
 `.git/git-upload-pack`, and `.git/git-receive-pack` route to the Git
 host with HTTP Basic Auth instead of the REST `Authorization: token`.
 
+(All examples below assume `mount_url = /v1/github/`; substitute yours
+from `warden provider list`.)
+
 ### Clone
 
 The clone URL carries the Warden role as the Basic Auth username and
 the Warden JWT as the password. Substitute `<role>` and the mount URL:
 
+Git embeds Basic Auth between scheme and host in the clone URL, so
+split `$WARDEN_ADDR` (the canonical env var from the `foundation`
+skill) — `${WARDEN_ADDR%%://*}` is the scheme, `${WARDEN_ADDR#*://}`
+is the host (and port if present):
+
 ```bash
-git clone "https://<role>:${WARDEN_TOKEN}@$WARDEN_HOST/v1/github/gateway/<owner>/<repo>.git"
+git clone "${WARDEN_ADDR%%://*}://<role>:${WARDEN_TOKEN}@${WARDEN_ADDR#*://}/v1/github/gateway/<owner>/<repo>.git"
 ```
 
 Git's credential helpers cache on URL+username, so each role gets a
@@ -107,13 +115,20 @@ git config --global credential.helper "cache --timeout=900"
 
 ### Header-routed alternative
 
-If you prefer a clone URL that looks like a real Git URL, set
-`X-Warden-Provider: github` via `http.extraheader` instead:
+If you prefer a clone URL that looks like a real Git URL, pass the
+mount path as `X-Warden-Provider` via `http.extraheader` instead. Use
+the `path` field from `warden provider list` (trailing-slash form;
+the server accepts either):
 
 ```bash
-git -c http.extraheader="X-Warden-Provider: github" \
-    clone "https://<role>:${WARDEN_TOKEN}@$WARDEN_HOST/<owner>/<repo>.git"
+path=$(warden provider list -o json | jq -r '.[] | select(.type=="github") | .path')
+git -c http.extraheader="X-Warden-Provider: $path" \
+    clone "${WARDEN_ADDR%%://*}://<role>:${WARDEN_TOKEN}@${WARDEN_ADDR#*://}/<owner>/<repo>.git"
 ```
+
+When more than one `github` mount exists, pick the entry whose
+`description` matches the upstream you want — `path` alone doesn't
+tell you which GitHub host or org the mount fronts.
 
 `http.extraheader` persists into `.git/config` at clone time, so the
 header carries through to follow-up operations automatically.

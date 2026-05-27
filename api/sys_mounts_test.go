@@ -25,6 +25,7 @@ func TestSys_ListMounts(t *testing.T) {
 				"mounts": {
 					"secret/": {
 						"type": "kv",
+						"path": "secret/",
 						"description": "Key-Value secrets engine",
 						"accessor": "kv_accessor_123",
 						"config": {
@@ -35,6 +36,7 @@ func TestSys_ListMounts(t *testing.T) {
 					},
 					"database/": {
 						"type": "database",
+						"path": "database/",
 						"description": "Database secrets engine",
 						"accessor": "database_accessor_456",
 						"config": {
@@ -83,6 +85,10 @@ func TestSys_ListMounts(t *testing.T) {
 
 		if secretMount.Accessor != "kv_accessor_123" {
 			t.Errorf("expected accessor kv_accessor_123, got %s", secretMount.Accessor)
+		}
+
+		if secretMount.Path != "secret/" {
+			t.Errorf("expected path secret/, got %s", secretMount.Path)
 		}
 
 		databaseMount, ok := mounts["database/"]
@@ -221,6 +227,7 @@ func TestSys_ListMountsWithContext(t *testing.T) {
 				"mounts": {
 					"secret/": {
 						"type": "kv",
+						"path": "secret/",
 						"description": "Key-Value secrets engine",
 						"accessor": "kv_accessor_123"
 					}

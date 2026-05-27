@@ -188,7 +188,11 @@ type MountInput struct {
 }
 
 type MountOutput struct {
-	Type        string         `json:"type"`
+	Type string `json:"type"`
+	// Path is the mount path with trailing slash (e.g. "github/"). Agents
+	// pass it as X-Warden-Provider for header-routed calls; see the
+	// per-provider skill for when that applies.
+	Path        string         `json:"path" mapstructure:"path"`
 	Description string         `json:"description"`
 	Accessor    string         `json:"accessor"`
 	Config      map[string]any `json:"config" mapstructure:"config"`
