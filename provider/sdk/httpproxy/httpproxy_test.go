@@ -2,6 +2,7 @@ package httpproxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -1099,7 +1100,7 @@ func TestHandleGateway_ResolveUpstream_OverridesUpstreamURL(t *testing.T) {
 	spec.ExtractCredentials = func(req *logical.Request) (map[string]string, error) {
 		return map[string]string{"Authorization": "Bearer test"}, nil
 	}
-	spec.ResolveUpstream = func(r *http.Request, providerURL string) (Dispatch, bool) {
+	spec.ResolveUpstream = func(r *http.Request, providerURL string, _ map[string]any) (Dispatch, bool) {
 		return Dispatch{UpstreamURL: overrideUpstream.URL}, true
 	}
 
@@ -1132,7 +1133,7 @@ func TestHandleGateway_ResolveUpstream_OverridesCredentialExtractor(t *testing.T
 	spec.ExtractCredentials = func(req *logical.Request) (map[string]string, error) {
 		return map[string]string{"Authorization": "Bearer default-cred"}, nil
 	}
-	spec.ResolveUpstream = func(r *http.Request, providerURL string) (Dispatch, bool) {
+	spec.ResolveUpstream = func(r *http.Request, providerURL string, _ map[string]any) (Dispatch, bool) {
 		return Dispatch{
 			ExtractCredentials: func(req *logical.Request) (map[string]string, error) {
 				return map[string]string{"Authorization": "Basic override-cred"}, nil
@@ -1169,7 +1170,7 @@ func TestHandleGateway_ResolveUpstream_MaxBodySizeOverride(t *testing.T) {
 	spec.ExtractCredentials = func(req *logical.Request) (map[string]string, error) {
 		return map[string]string{"Authorization": "Bearer test"}, nil
 	}
-	spec.ResolveUpstream = func(r *http.Request, providerURL string) (Dispatch, bool) {
+	spec.ResolveUpstream = func(r *http.Request, providerURL string, _ map[string]any) (Dispatch, bool) {
 		return Dispatch{MaxBodySize: 1024}, true // tight cap for this request
 	}
 
@@ -1205,7 +1206,7 @@ func TestHandleGateway_ResolveUpstream_FallthroughOnFalse(t *testing.T) {
 		return map[string]string{"Authorization": "Bearer default-cred"}, nil
 	}
 	resolveCalled := false
-	spec.ResolveUpstream = func(r *http.Request, providerURL string) (Dispatch, bool) {
+	spec.ResolveUpstream = func(r *http.Request, providerURL string, _ map[string]any) (Dispatch, bool) {
 		resolveCalled = true
 		return Dispatch{}, false
 	}
@@ -1255,4 +1256,59 @@ func TestHandleGateway_NoResolveUpstream_UsesDefaults(t *testing.T) {
 	})
 
 	assert.Equal(t, "Bearer default-cred", rec.Header().Get("X-Got-Auth"))
+}
+
+// --- ReadInt64Config tests ---
+
+func TestReadInt64Config(t *testing.T) {
+	t.Run("int64", func(t *testing.T) {
+		v, ok := ReadInt64Config(int64(1024 * 1024 * 100))
+		assert.True(t, ok)
+		assert.Equal(t, int64(1024*1024*100), v)
+	})
+	t.Run("float64 (JSON round-trip)", func(t *testing.T) {
+		v, ok := ReadInt64Config(float64(2147483648))
+		assert.True(t, ok)
+		assert.Equal(t, int64(2147483648), v)
+	})
+	t.Run("json.Number", func(t *testing.T) {
+		v, ok := ReadInt64Config(json.Number("1073741824"))
+		assert.True(t, ok)
+		assert.Equal(t, int64(1073741824), v)
+	})
+	t.Run("malformed json.Number rejected", func(t *testing.T) {
+		_, ok := ReadInt64Config(json.Number("not a number"))
+		assert.False(t, ok)
+	})
+	t.Run("zero rejected", func(t *testing.T) {
+		_, ok := ReadInt64Config(int64(0))
+		assert.False(t, ok)
+	})
+	t.Run("negative rejected", func(t *testing.T) {
+		_, ok := ReadInt64Config(int64(-1))
+		assert.False(t, ok)
+	})
+	t.Run("string rejected", func(t *testing.T) {
+		_, ok := ReadInt64Config("not a number")
+		assert.False(t, ok)
+	})
+	t.Run("nil rejected", func(t *testing.T) {
+		_, ok := ReadInt64Config(nil)
+		assert.False(t, ok)
+	})
+}
+
+func TestCloneExtraState(t *testing.T) {
+	t.Run("nil input", func(t *testing.T) {
+		assert.Nil(t, cloneExtraState(nil))
+	})
+	t.Run("mutation of clone does not affect original", func(t *testing.T) {
+		src := map[string]any{"a": int64(1), "b": "two"}
+		dst := cloneExtraState(src)
+		dst["a"] = int64(99)
+		dst["c"] = "added"
+		assert.Equal(t, int64(1), src["a"], "original must not be mutated")
+		_, hasC := src["c"]
+		assert.False(t, hasC, "original must not gain new keys")
+	})
 }

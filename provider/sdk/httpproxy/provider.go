@@ -47,6 +47,14 @@ type Dispatch struct {
 	// Used by protocols that legitimately need larger caps than the REST default
 	// (e.g. uploading large binary payloads). When 0, falls through to b.MaxBodySize.
 	MaxBodySize int64
+
+	// BypassBodyParsing suppresses the framework's request-body parsing step for
+	// this request even when the backend has ParseStreamBody=true. Used by
+	// protocols whose request bodies are binary (and would be wasteful or
+	// harmful to parse as JSON / form-urlencoded). Honoured via the proxy
+	// backend's request-aware ShouldParseStreamBody implementation, which
+	// consults ResolveUpstream and inspects this field.
+	BypassBodyParsing bool
 }
 
 // ProviderSpec fully describes an HTTP proxy provider.
@@ -125,7 +133,14 @@ type ProviderSpec struct {
 	// when the call returns ok=false — the spec/mount defaults apply unchanged.
 	// Used by providers that carry multiple protocols on the same mount and
 	// need to route a subset of paths to a different upstream surface.
-	ResolveUpstream func(r *http.Request, providerURL string) (Dispatch, bool)
+	//
+	// state is the backend's extraState — the same map populated by
+	// OnInitialize/OnConfigWrite and read by DynamicHeaders. The reference is
+	// handed off after a read-lock snapshot; the closure must NOT mutate the
+	// map (concurrent writers replace the reference under the write lock, so
+	// in-place mutation here would race). Reads are safe because OnConfigWrite
+	// receives a clone, so the live map is never mutated in place.
+	ResolveUpstream func(r *http.Request, providerURL string, state map[string]any) (Dispatch, bool)
 
 	// GetAuthRoleFromRequest optionally extracts the auth role from request
 	// context. The shared httpproxy backend wires this into the core's
@@ -306,15 +321,8 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 
 		// Parse max_body_size from persisted config
 		if maxSize, ok := config["max_body_size"]; ok {
-			switch v := maxSize.(type) {
-			case float64:
-				b.MaxBodySize = int64(v)
-			case int64:
-				b.MaxBodySize = v
-			case json.Number:
-				if parsed, err := v.Int64(); err == nil {
-					b.MaxBodySize = parsed
-				}
+			if size, parsed := ReadInt64Config(maxSize); parsed {
+				b.MaxBodySize = size
 			}
 		}
 
@@ -426,4 +434,59 @@ func (b *proxyBackend) GetAuthRoleFromRequest(r *http.Request) (string, bool) {
 		return "", true
 	}
 	return b.spec.GetAuthRoleFromRequest(r)
+}
+
+// cloneExtraState returns a shallow copy of the given extraState map. Used
+// by OnConfigWrite call sites so the hook can mutate the input safely while
+// concurrent gateway reads see a stable snapshot until the new state is
+// swapped in under the write lock.
+func cloneExtraState(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+// ReadInt64Config coerces a persisted config value to int64. Storage and
+// JSON round-trip numeric values as float64 or json.Number depending on the
+// decode path, so a value written as int64 may come back differently typed
+// during OnInitialize / Initialize. Returns (value, true) on a successful
+// coercion to a positive int64; (0, false) otherwise.
+func ReadInt64Config(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, n > 0
+	case float64:
+		size := int64(n)
+		return size, size > 0
+	case json.Number:
+		size, err := n.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return size, size > 0
+	}
+	return 0, false
+}
+
+// ShouldParseStreamBody overrides the embedded StreamingBackend's default to
+// consult ResolveUpstream for a per-request BypassBodyParsing signal. Falls
+// back to the static ParseStreamBody flag when no hook is set, when the hook
+// returns ok=false, or when the returned Dispatch does not set
+// BypassBodyParsing.
+func (b *proxyBackend) ShouldParseStreamBody(r *http.Request) bool {
+	if b.spec.ResolveUpstream != nil && r != nil {
+		b.mu.RLock()
+		providerURL := b.providerURL
+		state := b.extraState
+		b.mu.RUnlock()
+		if d, ok := b.spec.ResolveUpstream(r, providerURL, state); ok && d.BypassBodyParsing {
+			return false
+		}
+	}
+	return b.ParseStreamBody
 }

@@ -232,9 +232,12 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 
 	b.StreamingBackend.SetTransparentConfig(tc)
 
-	// Process extra config fields
+	// Process extra config fields. Pass a clone of extraState so OnConfigWrite
+	// implementations can safely mutate the input in place — the live map is
+	// concurrently read by gateway-path code (DynamicHeaders, ResolveUpstream)
+	// and must not be mutated under any other than the write lock.
 	if b.spec.OnConfigWrite != nil {
-		newState, err := b.spec.OnConfigWrite(d, b.extraState)
+		newState, err := b.spec.OnConfigWrite(d, cloneExtraState(b.extraState))
 		if err != nil {
 			b.mu.Unlock()
 			return &logical.Response{

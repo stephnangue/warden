@@ -1,10 +1,10 @@
 ---
 name: github
-description: "Call the GitHub REST API through Warden — read repos, manage issues, push releases — without holding a GitHub PAT."
+description: "Call the GitHub REST API or clone/push Git repos through Warden — without holding a GitHub PAT. Covers REST (read repos, manage issues, push releases) and Git smart-HTTP (clone, fetch, push)."
 category: provider-guide
 provider: github
 requires: [foundation, discovery]
-upstream: GitHub REST API (api.github.com or GHE)
+upstream: GitHub REST API (api.github.com or GHE) and Git smart-HTTP (github.com or GHE)
 ---
 
 # GitHub through Warden
@@ -76,4 +76,60 @@ and supply your JWT as the auth token.
   `warden read github/config` to confirm which.
 - **Rate limits propagate from GitHub**. Warden does not retry; back
   off when you see `403 rate limit exceeded` headers.
+
+## Git
+
+The same mount also proxies Git smart-HTTP (`git clone`, `fetch`, `push`)
+to the Git host (`github.com` by default; for GHE the host of `github_url`
+with `/api/v3` stripped). REST and Git share the mount; the provider
+dispatches per-request based on path shape — `.git/info/refs`,
+`.git/git-upload-pack`, and `.git/git-receive-pack` route to the Git
+host with HTTP Basic Auth instead of the REST `Authorization: token`.
+
+### Clone
+
+The clone URL carries the Warden role as the Basic Auth username and
+the Warden JWT as the password. Substitute `<role>` and the mount URL:
+
+```bash
+git clone "https://<role>:${WARDEN_TOKEN}@$WARDEN_HOST/v1/github/gateway/<owner>/<repo>.git"
+```
+
+Git's credential helpers cache on URL+username, so each role gets a
+distinct cache entry — switching roles does not invalidate the other's
+cache. Subsequent `pull`/`push` against the cloned remote re-use the
+same role automatically.
+
+To keep the JWT out of shell history and `.git/config`:
+```bash
+git config --global credential.helper "cache --timeout=900"
+```
+
+### Header-routed alternative
+
+If you prefer a clone URL that looks like a real Git URL, set
+`X-Warden-Provider: github` via `http.extraheader` instead:
+
+```bash
+git -c http.extraheader="X-Warden-Provider: github" \
+    clone "https://<role>:${WARDEN_TOKEN}@$WARDEN_HOST/<owner>/<repo>.git"
+```
+
+`http.extraheader` persists into `.git/config` at clone time, so the
+header carries through to follow-up operations automatically.
+
+### Quirks
+
+- **Role precedence**: `X-Warden-Role` header > path-embedded
+  `/role/<r>/` > `default_role` > Basic Auth username. If the operator
+  set `default_role`, the username in the clone URL is ignored — leave
+  `default_role` unset to enable per-clone role selection.
+- **Cert-auth clients** still need a non-empty Basic Auth password
+  (Git protocol requirement). Any placeholder works; the placeholder is
+  never sent to the JWT validator when `X-SSL-Client-Cert` is present.
+- **Body size**: large pushes need `git_max_body_size` raised on the
+  mount (default 2 GiB, max 10 GiB), and the mount `timeout` raised to
+  match. See the provider README for sizing guidance.
+- **Not in scope**: LFS, partial clone, submodules with embedded
+  credentials.
 

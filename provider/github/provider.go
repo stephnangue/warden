@@ -1,6 +1,7 @@
 package github
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -15,7 +16,16 @@ const DefaultGitHubURL = "https://api.github.com"
 // DefaultAPIVersion is the default GitHub REST API version
 const DefaultAPIVersion = "2022-11-28"
 
-// extractToken extracts Warden token from Authorization: Bearer or X-Warden-Token headers.
+// extractToken extracts the Warden token from one of:
+//  1. X-Warden-Token header
+//  2. Authorization: Bearer <token>
+//  3. HTTP Basic Auth password (Git smart-HTTP carries the JWT this way)
+//
+// The Basic Auth branch is suppressed when X-SSL-Client-Cert is present:
+// cert-based implicit auth takes precedence in the core flow, and the Git
+// protocol requires a placeholder password slot that the JWT validator
+// would otherwise reject. Reading the placeholder would actively harm
+// correctness for cert-authenticated clients.
 func extractToken(r *http.Request) string {
 	if token := r.Header.Get("X-Warden-Token"); token != "" {
 		return token
@@ -23,6 +33,11 @@ func extractToken(r *http.Request) string {
 	authHeader := r.Header.Get("Authorization")
 	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
 		return authHeader[7:]
+	}
+	if r.Header.Get("X-SSL-Client-Cert") == "" {
+		if _, pwd, ok := r.BasicAuth(); ok && pwd != "" {
+			return pwd
+		}
 	}
 	return ""
 }
@@ -45,6 +60,15 @@ var Spec = &httpproxy.ProviderSpec{
 			Description: "GitHub REST API version for X-GitHub-Api-Version header (default: 2022-11-28)",
 			Default:     DefaultAPIVersion,
 		},
+		"git_url": {
+			Type:        framework.TypeString,
+			Description: "Git host URL for smart-HTTP clone/push (default: derived from github_url, e.g. https://api.github.com -> https://github.com)",
+		},
+		"git_max_body_size": {
+			Type:        framework.TypeInt64,
+			Description: "Maximum request body size for Git smart-HTTP requests in bytes (default: 2 GiB, min: 1 MiB, max: 10 GiB)",
+			Default:     DefaultGitMaxBodySize,
+		},
 	},
 	DynamicHeaders: func(state map[string]any) map[string]string {
 		ver, _ := state["api_version"].(string)
@@ -58,14 +82,43 @@ var Spec = &httpproxy.ProviderSpec{
 		if ver == "" {
 			ver = DefaultAPIVersion
 		}
-		return map[string]any{"api_version": ver}
+		gitURL, _ := state["git_url"].(string)
+		gitMaxBody, _ := state["git_max_body_size"].(int64)
+		if gitMaxBody <= 0 {
+			gitMaxBody = DefaultGitMaxBodySize
+		}
+		return map[string]any{
+			"api_version":       ver,
+			"git_url":           gitURL,
+			"git_max_body_size": gitMaxBody,
+		}
 	},
 	OnConfigWrite: func(d *framework.FieldData, state map[string]any) (map[string]any, error) {
+		// Validate before mutating so a rejected write leaves no partial
+		// state for the caller to observe.
+		var size int64
+		var hasSize bool
+		if val, ok := d.GetOk("git_max_body_size"); ok {
+			size = val.(int64)
+			hasSize = true
+			if size < MinGitMaxBodySize {
+				return nil, fmt.Errorf("git_max_body_size must be at least %d bytes (1 MiB)", MinGitMaxBodySize)
+			}
+			if size > MaxGitMaxBodySize {
+				return nil, fmt.Errorf("git_max_body_size must not exceed %d bytes (10 GiB)", MaxGitMaxBodySize)
+			}
+		}
 		if val, ok := d.GetOk("api_version"); ok {
 			ver := val.(string)
 			if ver != "" {
 				state["api_version"] = ver
 			}
+		}
+		if val, ok := d.GetOk("git_url"); ok {
+			state["git_url"] = val.(string)
+		}
+		if hasSize {
+			state["git_max_body_size"] = size
 		}
 		return state, nil
 	},
@@ -75,29 +128,41 @@ var Spec = &httpproxy.ProviderSpec{
 		} else {
 			state["api_version"] = DefaultAPIVersion
 		}
+		if gitURL, ok := config["git_url"].(string); ok && gitURL != "" {
+			state["git_url"] = gitURL
+		}
+		if size, ok := httpproxy.ReadInt64Config(config["git_max_body_size"]); ok {
+			state["git_max_body_size"] = size
+		} else {
+			state["git_max_body_size"] = DefaultGitMaxBodySize
+		}
 		return state
 	},
+	ResolveUpstream:        resolveGitUpstream,
+	GetAuthRoleFromRequest: roleFromBasicAuthUser,
 }
 
 // Factory creates a new GitHub provider backend.
 var Factory = httpproxy.NewFactory(Spec)
 
 const githubBackendHelp = `
-The GitHub provider enables proxying requests to the GitHub REST API with
-automatic credential management and token injection.
+The GitHub provider proxies both the GitHub REST API and Git smart-HTTP
+(clone/fetch/push) with automatic credential management. The mount
+dispatches per-request based on path shape:
+
+  REST paths (/repos, /user, /orgs, ...) → api.github.com with
+    Authorization: token <PAT>.
+
+  Git smart-HTTP paths (<owner>/<repo>.git/info/refs,
+    .git/git-upload-pack, .git/git-receive-pack) → github.com (or the
+    GHE host derived from github_url) with HTTP Basic Auth carrying
+    x-access-token:<PAT> as the credential.
 
 Warden performs implicit authentication on every request and obtains a
-GitHub token from the credential manager, injecting it into the proxied
-request's Authorization header. This allows Warden to broker GitHub API
-access without exposing personal access tokens or app credentials to clients.
+GitHub token from the credential manager. Clients never hold a PAT.
 
-The gateway path format is:
+The REST gateway path format is:
   /github/gateway/{api-path}
-
-Unlike cloud providers (AWS, Azure, GCP) that proxy to different hostnames,
-the GitHub provider always proxies to a single API base URL (api.github.com
-by default, or a configured GitHub Enterprise Server endpoint). The
-{api-path} maps directly to the GitHub REST API path.
 
 Examples:
   /github/gateway/repos/owner/repo
@@ -105,18 +170,51 @@ Examples:
   /github/gateway/orgs/myorg/repos
   /github/gateway/repos/owner/repo/pulls?state=open
 
+The Git clone URL carries the Warden role in the Basic Auth username
+and the Warden JWT in the password:
+
+  git clone https://<role>:$JWT@<warden-addr>/v1/github/gateway/<owner>/<repo>.git
+
+Git's credential helpers cache on URL + username, so each role gets a
+distinct credential entry. Cert-auth clients pass any placeholder in
+the password slot; the token extractor skips the placeholder when
+X-SSL-Client-Cert is present.
+
 For GitHub Enterprise Server:
   Configure github_url to point to your GHE instance API endpoint
-  (e.g., https://github.example.com/api/v3).
+  (e.g., https://github.example.com/api/v3). git_url is derived
+  automatically (e.g., https://github.example.com) unless overridden.
 
-The role can be provided via the X-Warden-Role header, or embedded in
-the URL path:
-  /github/role/{role}/gateway/{api-path}
+The role can be provided via the X-Warden-Role header, embedded in
+the URL path (/github/role/{role}/gateway/{api-path}), defaulted by
+default_role, or — for Git smart-HTTP requests only — carried in the
+Basic Auth username. Precedence: X-Warden-Role > path role >
+default_role > Basic Auth username.
+
+Header-routed alternative: clients that want a URL without the
+/v1/github/gateway/ prefix can send X-Warden-Provider: github (and
+optionally X-Warden-Role) and let Warden synthesise the canonical
+path from the literal upstream path. For Git, set both via
+http.extraheader at clone time:
+
+  git -c http.extraheader="X-Warden-Provider: github" \
+      clone https://<role>:$JWT@<warden-addr>/<owner>/<repo>.git
+
+http.extraheader persists into .git/config, so subsequent fetch/pull/push
+carry the header automatically.
 
 Configuration:
 - github_url: GitHub API base URL (default: https://api.github.com)
-- max_body_size: Maximum request body size (default: 10MB, max: 100MB)
-- timeout: Request timeout duration (e.g., '30s', '5m')
-- auto_auth_path: Auth mount path for implicit authentication (e.g., 'auth/jwt/')
-- default_role: Fallback role when not specified in the URL path
+- api_version: GitHub REST API version header (default: 2022-11-28)
+- git_url: Git host URL for smart-HTTP (default: derived from github_url)
+- git_max_body_size: Cap on Git request bodies in bytes
+    (default: 2 GiB, range: 1 MiB to 10 GiB)
+- max_body_size: Cap on REST request bodies (default: 10MB, max: 100MB).
+    Do not raise to accommodate Git pushes — git_max_body_size is the
+    knob for that.
+- timeout: Request timeout duration (e.g., '30s', '5m'). Tune up for
+    large Git pushes.
+- auto_auth_path: Auth mount path for implicit authentication (e.g.,
+    'auth/jwt/')
+- default_role: Fallback role when not specified by header or URL path
 `
