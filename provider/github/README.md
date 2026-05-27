@@ -10,6 +10,7 @@ The GitHub provider enables proxied access to the GitHub REST API through Warden
 - [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
 - [Step 4: Create a Policy](#step-4-create-a-policy)
 - [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
+- [Git over HTTPS](#git-over-https)
 - [Authentication Methods](#authentication-methods)
 - [Configuration Reference](#configuration-reference)
 - [GitHub Enterprise Server](#github-enterprise-server)
@@ -308,6 +309,73 @@ curl "${GITHUB_ENDPOINT}/repos/owner/repo-name/pulls?state=open" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
+## Git over HTTPS
+
+The same `github/` mount also proxies Git smart-HTTP (`git clone`, `fetch`, `push`) to the Git host (`github.com` by default; the corresponding host for GHE). REST paths continue to proxy to `api.github.com` unchanged — the provider dispatches per-request based on the path shape, so no separate mount or configuration is needed.
+
+### Clone, fetch, push (path-routed form)
+
+The clone URL carries the Warden role as the HTTP Basic Auth **username** and the Warden JWT as the **password**:
+
+```bash
+git clone "https://<role>:${JWT_TOKEN}@${WARDEN_HOST}/v1/github/gateway/<owner>/<repo>.git"
+cd <repo>
+git pull
+git push
+```
+
+The Git credential helpers on macOS (`osxkeychain`), Linux (`libsecret`), and Windows (`git-credential-manager`) key cached credentials on **URL + username**, so two roles cloning the same repo land in distinct cache entries — switching roles does not invalidate the other's cache. Subsequent `pull`/`push` against the cloned remote re-use the same role automatically.
+
+To avoid putting the JWT in shell history or `.git/config`, use a credential helper that prompts on demand:
+
+```bash
+git config --global credential.helper "store"
+# or, better, a short-lived in-memory cache:
+git config --global credential.helper "cache --timeout=900"
+```
+
+### Header-routed form (`X-Warden-Provider`)
+
+Operators who want a clone URL that looks like a real Git URL (no Warden-specific path prefix) can use header routing instead. Set `X-Warden-Provider: github` via Git's `http.extraheader` config:
+
+```bash
+git -c http.extraheader="X-Warden-Provider: github" \
+    clone "https://<role>:${JWT_TOKEN}@${WARDEN_HOST}/<owner>/<repo>.git"
+```
+
+`http.extraheader` persists into `.git/config` at clone time, so follow-up `pull`/`push` against the cloned remote carry the header automatically. Warden synthesises the canonical `github/gateway/<owner>/<repo>.git/...` path before mount lookup, so the dispatch and credential flows behave identically to the path-routed form.
+
+### Cert-auth clients
+
+Cert-auth clients (mTLS or `X-SSL-Client-Cert` from a TLS-terminating proxy) still need to populate Git's password slot because the Git protocol requires it. Any placeholder works — the github provider's token extractor skips the Basic Auth password when `X-SSL-Client-Cert` is set, so the placeholder is never sent to the JWT validator:
+
+```bash
+git clone "https://<role>:cert@${WARDEN_HOST}/v1/github/gateway/<owner>/<repo>.git"
+```
+
+Mixing a malformed cert with a valid JWT in the Basic Auth password is intentionally not a fallback path: if cert auth fails the request fails with a clear cert-auth error rather than silently switching schemes.
+
+### Role precedence
+
+Role resolution follows the existing core ordering. The Basic Auth username is consulted only when no higher-precedence source is set:
+
+1. `X-Warden-Role` header
+2. Path-embedded role (`/v1/github/role/<role>/gateway/...`)
+3. `default_role` from the mount config
+4. **Basic Auth username** (Git)
+
+This means an operator who sets `default_role: shared` will see all Git clones resolve to `shared` regardless of the username in the clone URL. Operators who want client-chosen roles via the username should leave `default_role` unset.
+
+### Sizing `git_max_body_size` and `timeout`
+
+- **`git_max_body_size`** caps Git request bodies in bytes. Default 2 GiB; valid range 1 MiB to 10 GiB. The existing `max_body_size` field controls REST POST bodies separately (default 10 MiB, 100 MiB ceiling) — do not raise `max_body_size` to accommodate Git pushes, that is what `git_max_body_size` is for.
+- **Do not crank `git_max_body_size` to the 10 GiB ceiling reflexively.** The ceiling is a sanity cap, not a recommended value. Bodies stream through Warden chunk-by-chunk so memory is fine, but each accepted request pins one goroutine, one outbound socket, and 2× the body's bandwidth (ingress + egress to the Git host) for the duration of the transfer. Size to your actual largest expected push, not the maximum theoretical push.
+- **Tune `timeout` for the longest expected push.** The mount-level `timeout` controls how long Warden will wait for the full request/response cycle. The default suits REST API calls, not multi-minute Git pushes. Rough heuristic: `timeout ≥ (git_max_body_size / smallest expected client bandwidth) × 2`, rounded up generously. Example: a 2 GiB cap with clients on a 100 Mbps link needs at least 320 s — set `timeout = 600s`. Too-tight `timeout` shows up as half-uploaded pushes that fail at the same byte count, which is a confusing failure mode.
+
+### GHE: deriving the Git host
+
+For GitHub Enterprise Server, the Git host is derived from the REST URL: `https://ghe.example.com/api/v3` → `https://ghe.example.com`. Setting `github_url` alone is sufficient for both REST and Git. To override the derivation (custom layout, separate Git host), set `git_url` explicitly.
+
 ## Cleanup
 
 To stop Warden and the identity provider:
@@ -408,8 +476,10 @@ curl --cert client.pem --key client-key.pem \
 |-------|------|---------|-------------|
 | `github_url` | string | `https://api.github.com` | GitHub API base URL (must be HTTPS) |
 | `api_version` | string | `2022-11-28` | GitHub REST API version header (latest: `2026-03-10`) |
-| `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
-| `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
+| `git_url` | string | derived from `github_url` | Git host URL for smart-HTTP clone/push (e.g., `https://github.com`; for GHE, the host of `github_url` with `/api/v3` stripped) |
+| `git_max_body_size` | int | 2147483648 (2 GiB) | Maximum request body size for Git smart-HTTP requests in bytes (range: 1 MiB to 10 GiB) |
+| `max_body_size` | int | 10485760 (10 MB) | Maximum request body size for REST requests in bytes (max 100 MB) |
+| `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`); raise for large Git pushes — see [Git over HTTPS](#git-over-https) |
 | `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 

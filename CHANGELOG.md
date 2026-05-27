@@ -4,6 +4,14 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
+### New Features
+
+- **`github` provider now proxies Git smart-HTTP (`git clone`, `fetch`, `push`)** to `github.com` (or the corresponding host for GitHub Enterprise Server) on the same mount that already proxies the REST API to `api.github.com`. The provider dispatches per-request: paths ending in `.git/info/refs`, `.git/git-upload-pack`, or `.git/git-receive-pack` route to the Git host with HTTP Basic Auth carrying `x-access-token:<PAT>` as the credential; everything else continues to route to the REST API with `Authorization: token <PAT>` unchanged. Clone URLs carry the Warden role as the Basic Auth username and the Warden JWT as the password — `git clone https://<role>:$WARDEN_TOKEN@<warden-addr>/v1/github/gateway/<owner>/<repo>.git` — so Git's credential helpers cache cleanly per role. Cert-auth clients pass any placeholder in the password slot (the token extractor skips it when `X-SSL-Client-Cert` is set). Two new config fields on the mount: `git_url` (default derived from `github_url`) overrides the Git host explicitly; `git_max_body_size` (default 2 GiB, range 1 MiB to 10 GiB) caps Git request bodies separately from the existing REST `max_body_size`. Header-routed clones (`X-Warden-Provider: github` via `http.extraheader` with a literal `/<owner>/<repo>.git` URL) work too. LFS, partial clone, and submodules-with-creds are out of scope.
+
+- **`httpproxy` SDK: `ResolveUpstream` and `GetAuthRoleFromRequest` hooks on `ProviderSpec`.** Providers that carry multiple protocols on the same mount can now opt into per-request upstream URL, credential extractor, header policy, and body-cap overrides (via a new `Dispatch` struct), and contribute the auth role from request context (HTTP Basic Auth username, custom header, etc.). The hooks compose with the existing role-resolution flow — `X-Warden-Role` header still wins, path-embedded role still wins over the hook, `default_role` still wins over the hook — so providers that leave the hooks unset behave exactly as before. `ResolveUpstream` is the first consumer that adds `MaxBodySize` and `BypassBodyParsing` (the latter wired through a request-aware `StreamBodyParser.ShouldParseStreamBody`) to the dispatch shape, enabling protocols whose request bodies are binary or larger than the REST cap. (#247, #248)
+
+- **`StreamBodyParser.ShouldParseStreamBody` now takes the request.** The signature changed from `ShouldParseStreamBody() bool` to `ShouldParseStreamBody(r *http.Request) bool` so backends carrying multiple protocols on the same mount can decide per-request whether to parse the body. The default `framework.StreamingBackend` implementation ignores the new argument and returns the static `ParseStreamBody` flag — every existing backend behaves exactly as before. (#248)
+
 ## [v0.14.0] — 2026-05-26
 
 ### Breaking Changes

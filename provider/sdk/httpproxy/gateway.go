@@ -28,7 +28,10 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	credExtractor := b.spec.ExtractCredentials
 	var dispatch Dispatch
 	if b.spec.ResolveUpstream != nil {
-		if d, ok := b.spec.ResolveUpstream(req.HTTPRequest, providerURL); ok {
+		b.mu.RLock()
+		state := b.extraState
+		b.mu.RUnlock()
+		if d, ok := b.spec.ResolveUpstream(req.HTTPRequest, providerURL, state); ok {
 			dispatch = d
 			if d.UpstreamURL != "" {
 				providerURL = d.UpstreamURL
@@ -99,14 +102,11 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 
 // buildTargetURL constructs the target URL from the gateway path.
 func buildTargetURL(providerURL, path, rawQuery string) (string, error) {
-	gatewayIdx := strings.Index(path, "/gateway")
-	if gatewayIdx == -1 {
+	apiPath, ok := PathAfterGateway(path)
+	if !ok {
 		return "", fmt.Errorf("invalid gateway path: %s", path)
 	}
-
-	// Extract path after "/gateway"
-	apiPath := path[gatewayIdx+8:] // len("/gateway") = 8
-	if apiPath == "" || apiPath == "/" {
+	if apiPath == "" {
 		apiPath = "/"
 	}
 
@@ -114,6 +114,19 @@ func buildTargetURL(providerURL, path, rawQuery string) (string, error) {
 		return providerURL + apiPath + "?" + rawQuery, nil
 	}
 	return providerURL + apiPath, nil
+}
+
+// PathAfterGateway returns the portion of path that follows the first
+// "/gateway" segment, with that segment stripped. Returns ok=false when no
+// "/gateway" segment is present in the path. Exposed so providers
+// implementing ResolveUpstream can extract the API-shaped path slice from
+// req.URL.Path without re-implementing the strip rule.
+func PathAfterGateway(path string) (string, bool) {
+	idx := strings.Index(path, "/gateway")
+	if idx == -1 {
+		return "", false
+	}
+	return path[idx+len("/gateway"):], true
 }
 
 // resolveAcceptDefault returns the Accept value to inject when the client did
