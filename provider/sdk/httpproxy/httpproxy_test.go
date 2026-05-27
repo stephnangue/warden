@@ -741,6 +741,94 @@ func TestHandleGateway_NoCredential(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
+func TestHandleGateway_StreamUnauthenticated_BypassesCredExtractor(t *testing.T) {
+	var sawAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		w.Header().Set("WWW-Authenticate", "Basic realm=upstream")
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	spec := testSpec()
+	spec.ExtractCredentials = func(req *logical.Request) (map[string]string, error) {
+		t.Fatal("credential extractor must not be called on StreamUnauthenticated requests")
+		return nil, nil
+	}
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+	pb.providerURL = upstream.URL
+	pb.StreamingBackend.InitProxy(upstream.Client().Transport)
+
+	rec := httptest.NewRecorder()
+	httpReq := httptest.NewRequest("GET", "/test/gateway/owner/repo.git/info/refs", nil)
+	httpReq.URL, _ = url.Parse(upstream.URL + "/test/gateway/owner/repo.git/info/refs")
+
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest:           httpReq,
+		ResponseWriter:        rec,
+		StreamUnauthenticated: true,
+	})
+
+	assert.Empty(t, sawAuth, "no Authorization may be injected on unauthenticated pass-through")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, "Basic realm=upstream", rec.Header().Get("WWW-Authenticate"),
+		"upstream's WWW-Authenticate must propagate so the client knows to retry")
+}
+
+func TestProxyBackend_IsUnauthenticatedPath_ConsultsSpecHook(t *testing.T) {
+	spec := testSpec()
+	spec.IsUnauthenticatedRequest = func(r *http.Request, path string) bool {
+		return r != nil && r.Header.Get("X-Probe") == "1"
+	}
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+
+	r := httptest.NewRequest("GET", "/v1/test/gateway/foo", nil)
+	r.Header.Set("X-Probe", "1")
+	assert.True(t, pb.IsUnauthenticatedPath(r, "gateway/foo"),
+		"spec hook returning true short-circuits to true")
+
+	r2 := httptest.NewRequest("GET", "/v1/test/gateway/foo", nil)
+	assert.False(t, pb.IsUnauthenticatedPath(r2, "gateway/foo"),
+		"spec hook returning false does NOT veto — falls through to (empty) static list")
+}
+
+func TestProxyBackend_IsUnauthenticatedPath_FallsThroughToStaticList(t *testing.T) {
+	spec := testSpec()
+	spec.IsUnauthenticatedRequest = func(r *http.Request, path string) bool { return false }
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+	pb.StreamingBackend.UnauthenticatedPaths = []string{"v1/+/ca/pem"}
+	pb.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{}) // resets cache
+
+	r := httptest.NewRequest("GET", "/v1/test/gateway/v1/pki/ca/pem", nil)
+	assert.True(t, pb.IsUnauthenticatedPath(r, "gateway/v1/pki/ca/pem"),
+		"hook=false must fall through to static list — both mechanisms compose")
+}
+
+func TestProxyBackend_IsUnauthenticatedPath_NoHook_UsesStaticList(t *testing.T) {
+	spec := testSpec() // IsUnauthenticatedRequest intentionally nil
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+	pb.StreamingBackend.UnauthenticatedPaths = []string{"v1/+/ca/pem"}
+	pb.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{})
+
+	r := httptest.NewRequest("GET", "/v1/test/gateway/v1/pki/ca/pem", nil)
+	assert.True(t, pb.IsUnauthenticatedPath(r, "gateway/v1/pki/ca/pem"))
+	assert.False(t, pb.IsUnauthenticatedPath(r, "gateway/v1/secret/data/k"))
+}
+
+func TestProxyBackend_IsUnauthenticatedPath_HookFalse_NoMatchInList(t *testing.T) {
+	spec := testSpec()
+	spec.IsUnauthenticatedRequest = func(r *http.Request, path string) bool { return false }
+	b := setupBackend(t, spec)
+	pb := b.(*proxyBackend)
+	// No UnauthenticatedPaths set
+	r := httptest.NewRequest("GET", "/v1/test/gateway/foo", nil)
+	assert.False(t, pb.IsUnauthenticatedPath(r, "gateway/foo"))
+}
+
 func TestHandleGateway_InvalidGatewayPath(t *testing.T) {
 	spec := testSpec()
 	b := setupBackend(t, spec)

@@ -59,12 +59,21 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	}
 	req.HTTPRequest.Body = http.MaxBytesReader(req.ResponseWriter, req.HTTPRequest.Body, maxBody)
 
-	// Extract credentials using provider-specific extractor
-	credHeaders, err := credExtractor(req)
-	if err != nil {
-		b.Logger.Warn("Failed to get credentials", logger.Err(err))
-		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
-		return
+	// Extract credentials using provider-specific extractor.
+	// Skip on stream-unauthenticated requests: core skipped credential
+	// minting, so req.Credential is nil — the extractor would 401 a probe
+	// that the backend has explicitly cleared for upstream pass-through
+	// (e.g. Git smart-HTTP first probe → upstream WWW-Authenticate →
+	// client retry with Basic Auth).
+	var credHeaders map[string]string
+	if !req.StreamUnauthenticated {
+		var err error
+		credHeaders, err = credExtractor(req)
+		if err != nil {
+			b.Logger.Warn("Failed to get credentials", logger.Err(err))
+			http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	// Build target URL

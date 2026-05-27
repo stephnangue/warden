@@ -100,10 +100,20 @@ type Request struct {
 	// requests are cache-only, not persisted to storage.
 	Transparent bool `json:"-"`
 
-	// StreamUnauthenticated indicates this streaming request is accessing
-	// an unauthenticated path (e.g., PKI certificate PEM files for Vault provider)
-	// and should be allowed without a token. This works regardless of whether
-	// transparent mode is enabled.
+	// StreamUnauthenticated marks this streaming request for upstream
+	// pass-through without Warden authentication. Set by core when a
+	// TransparentModeProvider's IsUnauthenticatedPath returns true —
+	// either path-only (the static UnauthenticatedPaths list, e.g. Vault
+	// PKI certificate PEM files) or request-aware (a provider hook that
+	// inspects headers, e.g. Git smart-HTTP's first probe with no
+	// Authorization header). Works regardless of whether transparent
+	// mode is enabled.
+	//
+	// When true the core skips CheckToken, audit emission, credential
+	// minting, and implicit auth. The streaming handler still runs but
+	// receives req.Credential == nil, so handlers that previously assumed
+	// a credential is always present must guard accordingly (see e.g.
+	// the httpproxy gateway handler's StreamUnauthenticated guard).
 	StreamUnauthenticated bool `json:"-"`
 
 	// AuditPath is the normalized path used for audit logging. For streaming requests,
