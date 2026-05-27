@@ -1,6 +1,6 @@
 # GitHub Provider
 
-The GitHub provider enables proxied access to the GitHub REST API through Warden. It supports both **GitHub App** and **Personal Access Token (PAT)** authentication, and works with GitHub.com and GitHub Enterprise Server.
+The GitHub provider enables proxied access to both the GitHub REST API and Git smart-HTTP (clone, fetch, push) through Warden. It supports both **GitHub App** and **Personal Access Token (PAT)** authentication, and works with GitHub.com and GitHub Enterprise Server.
 
 ## Table of Contents
 
@@ -178,7 +178,17 @@ Create a policy that grants access to the GitHub provider gateway. Note that thi
 
 ```bash
 warden policy write github-access - <<EOF
+# Role taken from the URL path (/v1/github/role/<role>/gateway/...).
+# Used when callers pin the role per request via the URL.
 path "github/role/+/gateway*" {
+  capabilities = ["create", "read", "update", "delete", "patch"]
+}
+
+# Role taken from the Basic Auth username (git clone), the X-Warden-Role
+# header, or the mount's default_role. URL has no /role/<role>/ segment.
+# Both REST and Git smart-HTTP can land on either rule — the distinction
+# is the URL shape, not the protocol.
+path "github/gateway/*" {
   capabilities = ["create", "read", "update", "delete", "patch"]
 }
 EOF
