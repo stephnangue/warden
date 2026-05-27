@@ -138,8 +138,8 @@ func TestAccessBackend_IsTransparentPath_CustomPrefix(t *testing.T) {
 
 func TestAccessBackend_IsUnauthenticatedPath(t *testing.T) {
 	b := setupAccessBackend(t)
-	assert.False(t, b.IsUnauthenticatedPath("access/readonly"))
-	assert.False(t, b.IsUnauthenticatedPath("config"))
+	assert.False(t, b.IsUnauthenticatedPath(nil, "access/readonly"))
+	assert.False(t, b.IsUnauthenticatedPath(nil, "config"))
 }
 
 func TestAccessBackend_ConfigPersistence(t *testing.T) {

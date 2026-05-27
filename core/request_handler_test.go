@@ -1054,7 +1054,7 @@ func (m *mockTransparentModeProvider) IsTransparentPath(path string) bool {
 	return strings.HasPrefix(path, "gateway") || strings.Contains(path, "/gateway")
 }
 
-func (m *mockTransparentModeProvider) IsUnauthenticatedPath(path string) bool {
+func (m *mockTransparentModeProvider) IsUnauthenticatedPath(_ *http.Request, _ string) bool {
 	return false
 }
 

@@ -209,8 +209,8 @@ func TestTransparentModeProvider(t *testing.T) {
 	})
 
 	t.Run("IsUnauthenticatedPath always false", func(t *testing.T) {
-		assert.False(t, b.IsUnauthenticatedPath("access/readonly"))
-		assert.False(t, b.IsUnauthenticatedPath("config"))
+		assert.False(t, b.IsUnauthenticatedPath(nil, "access/readonly"))
+		assert.False(t, b.IsUnauthenticatedPath(nil, "config"))
 	})
 }
 

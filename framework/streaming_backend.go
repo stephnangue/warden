@@ -619,8 +619,9 @@ func (b *StreamingBackend) IsTransparentPath(path string) bool {
 }
 
 // IsUnauthenticatedPath checks if the path matches an unauthenticated pattern.
-// Uses radix tree for O(log n) lookup with wildcard fallback.
-func (b *StreamingBackend) IsUnauthenticatedPath(path string) bool {
+// Uses radix tree for O(log n) lookup with wildcard fallback. Subtypes may
+// override to inspect the request.
+func (b *StreamingBackend) IsUnauthenticatedPath(_ *http.Request, path string) bool {
 	b.unauthPathsOnce.Do(b.initUnauthPaths)
 
 	if b.unauthPaths == nil {
