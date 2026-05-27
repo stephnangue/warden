@@ -11,6 +11,7 @@ The `httpproxy` package provides a configuration-driven framework for building W
 - Header sanitization (security, hop-by-hop, proxy headers)
 - HTTP/2 transport with connection pooling and lazy initialization
 - Config validation (URL, timeout, max_body_size, auto_auth_path, default_role)
+- Optional per-request dispatch for multi-protocol providers (different upstream, credentials, header policy, or body cap per request)
 
 ## Quick start: simple API-key provider
 
@@ -92,19 +93,21 @@ Both paths perform implicit authentication and credential injection. The only di
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `ParseStreamBody` | `false` | Enable request body parsing for policy evaluation. When `true`, the framework extracts fields like `model` and `max_tokens` from the JSON request body so access control policies can enforce per-model or per-parameter rules. Set `true` for AI providers (OpenAI, Anthropic, etc.), `false` for REST APIs. |
+| `ParseStreamBody` | `false` | Enable request body parsing for policy evaluation. When `true`, the framework extracts fields like `model` and `max_tokens` from the JSON request body so access control policies can enforce per-model or per-parameter rules. Set `true` for AI providers (OpenAI, Anthropic, etc.), `false` for REST APIs. Providers carrying a non-JSON protocol on the side can set `true` and suppress parsing per request via `Dispatch.BypassBodyParsing` returned from `ResolveUpstream`. |
 | `UserAgent` | `"warden-{Name}-proxy"` | User-Agent header on proxied requests. |
 | `ExtractToken` | `DefaultTokenExtractor` | Override how the Warden session token is extracted from incoming requests. |
 | `ExtraHeadersToRemove` | `[]` | Provider-specific headers to strip beyond the [base set](#base-headers-removed). |
 | `DefaultHeaders` | `nil` | Static headers always set on proxied requests (e.g., `{"anthropic-version": "2023-06-01"}`). |
-| `DynamicHeaders` | `nil` | Function returning headers derived from config state. Called on every request. |
-| `DefaultAccept` | `"application/json"` | Override the default Accept header. |
+| `DynamicHeaders` | `nil` | Function returning headers derived from config state. Called on every request. Per-request dispatches can opt out via `Dispatch.SkipDynamicHeaders`. |
+| `DefaultAccept` | `"application/json"` | Override the default Accept header. Per-request overrides are available via `Dispatch.Accept` and `Dispatch.SkipDefaultAccept`. |
 | `ExtraConfigFields` | `nil` | Additional config fields beyond the standard five. |
 | `OnConfigRead` | `nil` | Add extra fields to config read response from provider state. |
 | `OnConfigWrite` | `nil` | Process extra config fields during config write. |
 | `OnInitialize` | `nil` | Load extra fields from persisted config during initialization. |
 | `ValidateExtraConfig` | `nil` | Custom validation for provider-specific config fields. |
 | `NewTransport` | `DefaultNewTransport` | Factory returning `(*http.Transport, func())`. Called lazily on first instantiation. Override for custom transport settings. |
+| `ResolveUpstream` | `nil` | Per-request override hook for upstream URL, credential extractor, Accept header, dynamic headers, body cap, and body parsing. Used by providers carrying multiple protocols on one mount. See [Per-request dispatch](#per-request-dispatch). |
+| `GetAuthRoleFromRequest` | `nil` | Optional hook to derive the auth role from the HTTP request (e.g., Basic Auth username for Git smart-HTTP). Consulted after URL-path role lookup; `X-Warden-Role` header always wins. See [Custom role extraction](#custom-role-extraction). |
 
 ## Credential extractors
 
@@ -249,6 +252,116 @@ var Spec = &httpproxy.ProviderSpec{
 }
 ```
 
+## Per-request dispatch
+
+A provider that serves a single protocol on a single upstream URL needs nothing here. A provider that carries **multiple protocols on the same mount** — e.g., GitHub's REST API and Git smart-HTTP, both rooted at `/github/gateway/...` — can route a subset of paths to a different upstream, with different credential formatting, header policy, and body cap, via `ResolveUpstream`.
+
+`ResolveUpstream` is consulted once per gateway request, after the framework takes a read-lock snapshot of the mutable backend state and before credentials are extracted. The hook returns a `Dispatch` (the per-request override carrier) and a boolean. When the boolean is `false` — or when the hook is unset — the spec/mount defaults apply unchanged.
+
+```go
+type Dispatch struct {
+    UpstreamURL        string              // overrides providerURL when non-empty
+    ExtractCredentials CredentialExtractor // overrides Spec.ExtractCredentials when non-nil
+    Accept             string              // overrides Spec.DefaultAccept when non-empty
+    SkipDefaultAccept  bool                // suppress Accept injection entirely
+    SkipDynamicHeaders bool                // disable Spec.DynamicHeaders for this request
+    MaxBodySize        int64               // overrides per-mount max_body_size when > 0
+    BypassBodyParsing  bool                // suppress request-body parsing for this request
+}
+
+ResolveUpstream func(r *http.Request, providerURL string, state map[string]any) (Dispatch, bool)
+```
+
+Every field of `Dispatch` is opt-in: zero values fall through to the spec/mount default. Returning `(Dispatch{}, false)` is the explicit "use defaults for this request" signal — REST callers in a multi-protocol provider should hit this branch so REST behaviour is unchanged.
+
+**State contract.** The `state` map passed to the hook is the backend's `extraState` map after a read-lock snapshot — the same map populated by `OnInitialize`/`OnConfigWrite` and read by `DynamicHeaders`. The closure **must not** mutate it: concurrent writers replace the reference under the write lock, so in-place mutation here would race. `OnConfigWrite` writes against a clone, so reads from the live map are safe.
+
+**`PathAfterGateway` helper.** Most dispatch logic inspects the path *after* the `gateway/` segment. The SDK exports `PathAfterGateway(path string) (string, bool)` to avoid re-implementing the strip rule:
+
+```go
+api, ok := httpproxy.PathAfterGateway(r.URL.Path)
+if !ok {
+    // input contained no /gateway segment — caller-defined fallback
+}
+```
+
+**Example: GitHub Git smart-HTTP.** The GitHub provider's mount serves both the REST API (proxied to `api.github.com` with a Bearer token) and Git smart-HTTP clone/fetch/push (proxied to `github.com` with HTTP Basic Auth carrying the PAT as the password). REST and Git request shapes are dispatched per-request:
+
+```go
+func resolveGitUpstream(r *http.Request, providerURL string, state map[string]any) (httpproxy.Dispatch, bool) {
+    api, _ := httpproxy.PathAfterGateway(r.URL.Path)
+    if !isGitSmartHTTPPath(api) {
+        return httpproxy.Dispatch{}, false // REST → spec defaults apply
+    }
+    maxBody, ok := state["git_max_body_size"].(int64)
+    if !ok || maxBody <= 0 {
+        maxBody = DefaultGitMaxBodySize
+    }
+    return httpproxy.Dispatch{
+        UpstreamURL:        deriveGitURL(providerURL), // api.github.com → github.com
+        ExtractCredentials: gitCredentialExtractor,    // Basic x-access-token:<PAT> on the upstream call to github.com
+        SkipDefaultAccept:  true,                      // Git negotiates its own content types
+        SkipDynamicHeaders: true,                      // X-GitHub-Api-Version is irrelevant for Git
+        MaxBodySize:        maxBody,                   // raised for push payloads (default 2 GiB)
+        BypassBodyParsing:  true,                      // binary pack-files, don't parse as JSON
+    }, true
+}
+
+var Spec = &httpproxy.ProviderSpec{
+    // ...
+    ResolveUpstream: resolveGitUpstream,
+}
+```
+
+`BypassBodyParsing` is honoured by the framework's request-aware body-parsing decision, which consults `ResolveUpstream` on every request before deciding whether to parse — so spec authors set `ParseStreamBody: true` on the spec and selectively suppress parsing per request via `Dispatch`.
+
+See `provider/github/git.go` for the full implementation.
+
+## Custom role extraction
+
+Warden resolves the auth role for every gateway request from up to four sources. By default the framework consults the URL path (`/role/{name}/gateway/...`) and the mount's `default_role` config; providers that want to derive the role from somewhere else — e.g., an HTTP Basic Auth username carried by a non-Warden client — set `GetAuthRoleFromRequest`:
+
+```go
+GetAuthRoleFromRequest func(r *http.Request) string
+```
+
+The hook returns the resolved role, or `""` for "no contribution — fall through to the next source." Returning `""` is also the implicit behaviour when the hook is unset.
+
+**Precedence (highest wins):**
+
+1. `X-Warden-Role` HTTP header — unconditional override.
+2. URL-path role segment (`/role/{name}/gateway/...`).
+3. `GetAuthRoleFromRequest` hook.
+4. Mount-level `default_role` config.
+
+`X-Warden-Role` is applied *after* every other source has been consulted — it is the unconditional override, not an early-return.
+
+**Example: GitHub Git smart-HTTP.** Git clients carry credentials as HTTP Basic Auth; the GitHub provider uses the username slot to carry the Warden role and the password slot to carry the Warden JWT:
+
+```bash
+git clone https://<role>:$JWT@<warden-addr>/v1/github/gateway/<owner>/<repo>.git
+```
+
+The hook extracts the role from the Basic Auth username, but only on Git smart-HTTP paths — REST callers are unaffected:
+
+```go
+func roleFromBasicAuthUser(r *http.Request) string {
+    api, _ := httpproxy.PathAfterGateway(r.URL.Path)
+    if !isGitSmartHTTPPath(api) {
+        return "" // REST: fall through to default_role
+    }
+    user, _, _ := r.BasicAuth()
+    return user
+}
+
+var Spec = &httpproxy.ProviderSpec{
+    // ...
+    GetAuthRoleFromRequest: roleFromBasicAuthUser,
+}
+```
+
+See `provider/github/git.go` for the full implementation.
+
 ## Custom URL validation
 
 By default, URLs are validated to require `https://` scheme. If your provider needs different validation (e.g., GitLab allows HTTP for development instances), use `ValidateExtraConfig`:
@@ -305,7 +418,7 @@ These providers have fundamentally different request handling and should remain 
 | Datadog | `MultiFieldAPIKeyExtractor` | No | No |
 | Dynatrace | Custom | No | No |
 | Elastic | Custom | Yes | Yes |
-| GitHub | `TypedTokenExtractor` | Yes | Yes |
+| GitHub | `TypedTokenExtractor` (REST) + custom Basic (Git) | Yes | Yes |
 | GitLab | `TypedTokenExtractor` | Yes | No |
 | Kubernetes | `TypedTokenExtractor` | Yes | No |
 | Mistral | `BearerAPIKeyExtractor` | No | No |
