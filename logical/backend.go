@@ -128,10 +128,26 @@ type TransparentModeProvider interface {
 	// TransparentAuthRoleExtractor hook both returned "". Returns "" if unset.
 	GetDefaultAuthRole() string
 
-	// IsUnauthenticatedPath checks if a path can be accessed without authentication.
-	// Used for read-only endpoints that clients may access
-	// without sending tokens (e.g., PKI certificate PEM files).
-	IsUnauthenticatedPath(path string) bool
+	// IsUnauthenticatedPath checks if a request can be served without
+	// authentication. Used for read-only endpoints that clients may access
+	// without sending tokens (e.g., PKI certificate PEM files) and for
+	// protocol probes that need to reach the upstream to negotiate auth
+	// (e.g., Git smart-HTTP's initial /info/refs request, which expects the
+	// upstream's WWW-Authenticate header so the client knows to retry with
+	// credentials).
+	//
+	// The request is passed so backends carrying multiple protocols on the
+	// same mount can inspect headers (e.g., presence of Authorization) and
+	// decide per-request whether to bypass auth, rather than only per-path.
+	// Implementations that don't need per-request behaviour ignore the
+	// argument and return a static path-based decision.
+	//
+	// When this returns true the core sets req.StreamUnauthenticated, which
+	// short-circuits CheckToken, audit emission, credential minting, and
+	// implicit auth. The request reaches the streaming handler with
+	// req.Credential == nil — handlers that previously assumed a credential
+	// is always present must guard accordingly.
+	IsUnauthenticatedPath(r *http.Request, path string) bool
 
 	// IsTransparentPath checks if the given path (relative to mount) should trigger
 	// transparent authentication. Streaming backends match gateway paths;

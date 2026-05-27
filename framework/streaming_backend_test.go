@@ -129,7 +129,7 @@ func TestIsUnauthenticatedPath(t *testing.T) {
 				UnauthenticatedPaths: tt.paths,
 			}
 
-			result := b.IsUnauthenticatedPath(tt.testPath)
+			result := b.IsUnauthenticatedPath(nil, tt.testPath)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -264,7 +264,7 @@ func TestIsUnauthenticatedPath_PathsContainingKeywords(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := b.IsUnauthenticatedPath(tt.path)
+			result := b.IsUnauthenticatedPath(nil, tt.path)
 			assert.Equal(t, tt.expected, result, "path: %s", tt.path)
 		})
 	}
@@ -318,10 +318,24 @@ func TestIsUnauthenticatedPath_VaultPKIPaths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			result := b.IsUnauthenticatedPath(tt.path)
+			result := b.IsUnauthenticatedPath(nil, tt.path)
 			assert.Equal(t, tt.expected, result, "path: %s", tt.path)
 		})
 	}
+}
+
+func TestIsUnauthenticatedPath_IgnoresRequestShape(t *testing.T) {
+	b := &StreamingBackend{UnauthenticatedPaths: []string{"v1/+/ca/pem"}}
+	path := "role/test/gateway/v1/pki/ca/pem"
+
+	// Default impl is path-only; request is plumbed for subtypes that override.
+	assert.True(t, b.IsUnauthenticatedPath(httptest.NewRequest("GET", "/"+path, nil), path))
+	assert.True(t, b.IsUnauthenticatedPath(httptest.NewRequest("POST", "/"+path, nil), path))
+	r := httptest.NewRequest("GET", "/"+path, nil)
+	r.Header.Set("Authorization", "Bearer xyz")
+	assert.True(t, b.IsUnauthenticatedPath(r, path))
+	assert.True(t, b.IsUnauthenticatedPath(nil, path),
+		"default impl tolerates nil request — subtypes opt in to using it")
 }
 
 func TestMatchWildcardSegments(t *testing.T) {
@@ -390,11 +404,11 @@ func TestSetUnauthenticatedPaths_ResetsCache(t *testing.T) {
 	}
 
 	// Initialize the unauthPaths by calling IsUnauthenticatedPath
-	result1 := b.IsUnauthenticatedPath("role/test/gateway/v1/pki/ca/pem")
+	result1 := b.IsUnauthenticatedPath(nil, "role/test/gateway/v1/pki/ca/pem")
 	assert.True(t, result1, "should match initial pattern")
 
 	// This should NOT match with the initial config
-	result2 := b.IsUnauthenticatedPath("role/test/gateway/v1/pki/issuer/abc/pem")
+	result2 := b.IsUnauthenticatedPath(nil, "role/test/gateway/v1/pki/issuer/abc/pem")
 	assert.False(t, result2, "should not match issuer pattern initially")
 
 	// Now update UnauthenticatedPaths directly and call SetTransparentConfig to reset cache
@@ -402,7 +416,7 @@ func TestSetUnauthenticatedPaths_ResetsCache(t *testing.T) {
 	b.SetTransparentConfig(&TransparentConfig{}) // This resets the unauthPaths cache
 
 	// The issuer pattern should now match
-	result3 := b.IsUnauthenticatedPath("role/test/gateway/v1/pki/issuer/abc/pem")
+	result3 := b.IsUnauthenticatedPath(nil, "role/test/gateway/v1/pki/issuer/abc/pem")
 	assert.True(t, result3, "should match issuer pattern after config update")
 }
 
@@ -423,11 +437,11 @@ func BenchmarkIsUnauthenticatedPath(b *testing.B) {
 	}
 
 	// Initialize
-	backend.IsUnauthenticatedPath("warmup")
+	backend.IsUnauthenticatedPath(nil, "warmup")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		backend.IsUnauthenticatedPath("role/provisionner/gateway/v1/pki/issuer/abc123/pem")
+		backend.IsUnauthenticatedPath(nil, "role/provisionner/gateway/v1/pki/issuer/abc123/pem")
 	}
 }
 
@@ -448,11 +462,11 @@ func BenchmarkIsUnauthenticatedPath_NoMatch(b *testing.B) {
 	}
 
 	// Initialize
-	backend.IsUnauthenticatedPath("warmup")
+	backend.IsUnauthenticatedPath(nil, "warmup")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		backend.IsUnauthenticatedPath("role/provisionner/gateway/v1/secret/data/mykey")
+		backend.IsUnauthenticatedPath(nil, "role/provisionner/gateway/v1/secret/data/mykey")
 	}
 }
 

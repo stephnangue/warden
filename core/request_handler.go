@@ -802,7 +802,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 				if req.MountPoint != "" {
 					relativePath = strings.TrimPrefix(req.Path, req.MountPoint)
 				}
-				if tmp.IsUnauthenticatedPath(relativePath) {
+				if tmp.IsUnauthenticatedPath(req.HTTPRequest, relativePath) {
 					req.StreamUnauthenticated = true
 					c.logger.Trace("unauthenticated streaming request",
 						logger.String("path", req.Path),

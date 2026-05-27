@@ -3,6 +3,7 @@ package framework
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
@@ -98,7 +99,7 @@ func (b *AccessBackend) IsTransparentPath(path string) bool {
 }
 
 // IsUnauthenticatedPath returns false — all access paths require authentication.
-func (b *AccessBackend) IsUnauthenticatedPath(path string) bool {
+func (b *AccessBackend) IsUnauthenticatedPath(_ *http.Request, _ string) bool {
 	return false
 }
 
