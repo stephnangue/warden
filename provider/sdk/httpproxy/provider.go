@@ -152,6 +152,27 @@ type ProviderSpec struct {
 	// this is also the default behaviour when the hook is unset. Return a
 	// non-empty role to supply a role for this request.
 	GetAuthRoleFromRequest func(r *http.Request) string
+
+	// IsUnauthenticatedRequest optionally lets the provider declare that a
+	// specific request should bypass authentication and pass through to the
+	// upstream. Consulted by the shared httpproxy backend's
+	// IsUnauthenticatedPath implementation; if the hook returns true the
+	// request is treated as unauthenticated. If it returns false (or the hook
+	// is unset), the static StreamingBackend.UnauthenticatedPaths list still
+	// applies as a fallback — providers can rely on both mechanisms.
+	//
+	// Used by providers whose mount carries a protocol that probes for auth
+	// (Git smart-HTTP first probe → upstream WWW-Authenticate → client retry
+	// with Basic Auth) where the same path is "unauth" on the probe and
+	// "auth-required" on the retry. The hook receives the parsed HTTP
+	// request and the mount-relative path so it can correlate headers and
+	// path shape.
+	//
+	// The handler still runs for unauthenticated requests; req.Credential
+	// will be nil, so providers must ensure their gateway path is safe to
+	// invoke without minted credentials (see gateway.go's
+	// StreamUnauthenticated guard).
+	IsUnauthenticatedRequest func(r *http.Request, path string) bool
 }
 
 // proxyBackend is the concrete backend type created by NewFactory.
@@ -423,6 +444,13 @@ func (b *proxyBackend) SensitiveConfigFields() []string {
 // not implementing the interface.
 var _ logical.TransparentAuthRoleExtractor = (*proxyBackend)(nil)
 
+// Compile-time assertion that proxyBackend satisfies TransparentModeProvider.
+// Satisfaction is inherited from the embedded StreamingBackend, but the
+// override on IsUnauthenticatedPath shadows the embedded method — this
+// assertion catches regressions where someone changes the override
+// signature in a way that breaks interface satisfaction.
+var _ logical.TransparentModeProvider = (*proxyBackend)(nil)
+
 // GetAuthRoleFromRequest delegates to the optional spec hook. See
 // ProviderSpec.GetAuthRoleFromRequest for the contract.
 func (b *proxyBackend) GetAuthRoleFromRequest(r *http.Request) string {
@@ -430,6 +458,19 @@ func (b *proxyBackend) GetAuthRoleFromRequest(r *http.Request) string {
 		return ""
 	}
 	return b.spec.GetAuthRoleFromRequest(r)
+}
+
+// IsUnauthenticatedPath consults the spec's IsUnauthenticatedRequest hook
+// (request-aware) before falling through to the static UnauthenticatedPaths
+// list on the embedded StreamingBackend. Both mechanisms compose: a
+// request that the hook declines (false) can still match the static list,
+// preserving the invariant that any path in UnauthenticatedPaths is always
+// unauth-passable.
+func (b *proxyBackend) IsUnauthenticatedPath(r *http.Request, path string) bool {
+	if b.spec.IsUnauthenticatedRequest != nil && b.spec.IsUnauthenticatedRequest(r, path) {
+		return true
+	}
+	return b.StreamingBackend.IsUnauthenticatedPath(r, path)
 }
 
 // cloneExtraState returns a shallow copy of the given extraState map. Used
