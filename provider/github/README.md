@@ -384,7 +384,7 @@ So `git clone https://<role>:$JWT@<host>/...` resolves to the username even when
 
 ### GHE: deriving the Git host
 
-For GitHub Enterprise Server, the Git host is derived from the REST URL: `https://ghe.example.com/api/v3` → `https://ghe.example.com`. Setting `github_url` alone is sufficient for both REST and Git. To override the derivation (custom layout, separate Git host), set `git_url` explicitly.
+For GitHub Enterprise Server, the Git host is derived from the REST URL: `https://ghe.example.com/api/v3` → `https://ghe.example.com`. Setting `github_url` alone is sufficient for both REST and Git.
 
 ## Cleanup
 
@@ -486,7 +486,6 @@ curl --cert client.pem --key client-key.pem \
 |-------|------|---------|-------------|
 | `github_url` | string | `https://api.github.com` | GitHub API base URL (must be HTTPS) |
 | `api_version` | string | `2022-11-28` | GitHub REST API version header (latest: `2026-03-10`) |
-| `git_url` | string | derived from `github_url` | Git host URL for smart-HTTP clone/push (e.g., `https://github.com`; for GHE, the host of `github_url` with `/api/v3` stripped) |
 | `git_max_body_size` | int | 2147483648 (2 GiB) | Maximum request body size for Git smart-HTTP requests in bytes (range: 1 MiB to 10 GiB) |
 | `max_body_size` | int | 10485760 (10 MB) | Maximum request body size for REST requests in bytes (max 100 MB) |
 | `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`); raise for large Git pushes — see [Git over HTTPS](#git-over-https) |

@@ -1,14 +1,10 @@
 package github
 
 import (
-	"encoding/base64"
-	"fmt"
-	"net/http"
 	"strings"
 
 	"github.com/stephnangue/warden/credential"
-	"github.com/stephnangue/warden/logical"
-	"github.com/stephnangue/warden/provider/sdk/httpproxy"
+	"github.com/stephnangue/warden/provider/sdk/githttp"
 )
 
 // Git smart-HTTP support: the github provider mount carries two protocols
@@ -17,54 +13,9 @@ import (
 // .git/git-upload-pack, .git/git-receive-pack) proxy to github.com with
 // HTTP Basic Auth carrying the PAT as the password.
 //
-// The dispatch is driven by ResolveUpstream + GetAuthRoleFromRequest on
-// Spec, so REST behaviour is unchanged for callers that don't hit a
-// Git-shaped path.
-
-// DefaultGitMaxBodySize is the default cap on Git request bodies (2 GiB).
-// Big enough for most pushes; operators with larger repos bump it via the
-// git_max_body_size config field.
-const DefaultGitMaxBodySize int64 = 2 * 1024 * 1024 * 1024
-
-// MinGitMaxBodySize is the lower bound for git_max_body_size validation.
-// Below this, Git clones of even trivial repos start failing.
-const MinGitMaxBodySize int64 = 1 * 1024 * 1024 // 1 MiB
-
-// MaxGitMaxBodySize is the upper bound for git_max_body_size validation.
-// Repos larger than this should be using LFS-aware infrastructure rather
-// than the gateway.
-const MaxGitMaxBodySize int64 = 10 * 1024 * 1024 * 1024 // 10 GiB
-
-// gitSmartHTTPSuffixes are the smart-HTTP endpoint suffixes that identify a
-// Git-protocol request inside the gateway path.
-var gitSmartHTTPSuffixes = []string{
-	".git/info/refs",
-	".git/git-upload-pack",
-	".git/git-receive-pack",
-}
-
-// isGitSmartHTTPPath reports whether apiPath (the portion of the URL after
-// "/gateway") is a Git smart-HTTP endpoint.
-func isGitSmartHTTPPath(apiPath string) bool {
-	for _, suffix := range gitSmartHTTPSuffixes {
-		if strings.HasSuffix(apiPath, suffix) {
-			return true
-		}
-	}
-	return false
-}
-
-// pathAfterGateway extracts the API-shaped path slice from a routed gateway
-// request URL. Wraps the SDK helper with a fall-back to the input when no
-// "/gateway" segment is present (defensive — routed gateway requests always
-// contain one, but ResolveUpstream is also called from ShouldParseStreamBody
-// before the streaming layer parses the path).
-func pathAfterGateway(path string) string {
-	if api, ok := httpproxy.PathAfterGateway(path); ok {
-		return api
-	}
-	return path
-}
+// All git-protocol scaffolding lives in provider/sdk/githttp; this file
+// holds only the GitHub-specific URL derivation and the wiring that binds
+// that derivation plus the GitHub credential type into the shared hooks.
 
 // deriveGitURL derives the Git host URL from the configured REST API URL.
 //
@@ -84,95 +35,14 @@ func deriveGitURL(apiURL string) string {
 	return apiURL
 }
 
-// gitCredentialExtractor formats the GitHub PAT as HTTP Basic Auth using
-// "x-access-token" as the username — the credential helper convention
-// GitHub publishes for both PATs and App installation tokens.
-func gitCredentialExtractor(req *logical.Request) (map[string]string, error) {
-	if req.Credential == nil {
-		return nil, fmt.Errorf("no credential available")
-	}
-	if req.Credential.Type != credential.TypeGitHubToken {
-		return nil, fmt.Errorf("unsupported credential type: %s", req.Credential.Type)
-	}
-	tok := req.Credential.Data["token"]
-	if tok == "" {
-		return nil, fmt.Errorf("credential missing %s field", "token")
-	}
-	basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + tok))
-	return map[string]string{"Authorization": "Basic " + basic}, nil
-}
-
-// resolveGitUpstream is the Spec.ResolveUpstream hook. It returns a Dispatch
-// that routes Git smart-HTTP paths to the Git host with Basic Auth, raises
-// the body cap to the configured git_max_body_size, suppresses dynamic
-// header injection (X-GitHub-Api-Version is irrelevant for Git endpoints),
-// and bypasses body parsing (binary pack-files would be wasteful to parse).
-//
-// For non-Git paths, returns ok=false so the spec defaults apply unchanged
-// — REST callers see no behavioural change.
-func resolveGitUpstream(r *http.Request, providerURL string, state map[string]any) (httpproxy.Dispatch, bool) {
-	if !isGitSmartHTTPPath(pathAfterGateway(r.URL.Path)) {
-		return httpproxy.Dispatch{}, false
-	}
-	maxBody, ok := state["git_max_body_size"].(int64)
-	if !ok || maxBody <= 0 {
-		maxBody = DefaultGitMaxBodySize
-	}
-	return httpproxy.Dispatch{
-		UpstreamURL:        deriveGitURL(providerURL),
-		ExtractCredentials: gitCredentialExtractor,
-		SkipDefaultAccept:  true,
-		SkipDynamicHeaders: true,
-		MaxBodySize:        maxBody,
-		BypassBodyParsing:  true,
-	}, true
-}
-
-// roleFromBasicAuthUser is the Spec.GetAuthRoleFromRequest hook. On Git
-// smart-HTTP paths, the Basic Auth username carries the Warden role. On
-// non-Git paths (REST), returns "" — caller falls back to default_role /
-// X-Warden-Role.
-func roleFromBasicAuthUser(r *http.Request) string {
-	if !isGitSmartHTTPPath(pathAfterGateway(r.URL.Path)) {
-		return ""
-	}
-	user, _, _ := r.BasicAuth()
-	return user
-}
-
-// isUnauthenticatedGitProbe is the Spec.IsUnauthenticatedRequest hook.
-// It reports whether r is a Git smart-HTTP probe that should pass
-// through to github.com without Warden authentication.
-//
-// Git's smart-HTTP protocol always probes <repo>.git/info/refs once
-// without an Authorization header; it requires the server's
-// WWW-Authenticate response to know that it must retry with Basic Auth.
-// A bare 401 from Warden breaks the negotiation because clients never
-// learn what credential scheme to use. Letting the probe reach github
-// lets github return its own WWW-Authenticate: Basic challenge; git
-// then retries with <role>:<JWT>, which lands on the second-pass code
-// path where extractToken pulls the JWT from the Basic password slot
-// and normal Warden auth runs.
-//
-// Returns false (so normal auth runs) when r is nil, when r carries any
-// Authorization header, or when the path is not a Git smart-HTTP
-// endpoint. Cert-auth clients (X-SSL-Client-Cert) typically also have
-// no Authorization header on the probe; the retry's cert flow handles
-// credential resolution.
-//
-// The Authorization-header check looks redundant — core only consults
-// IsUnauthenticatedPath when ClientToken == "", which already implies
-// extractToken found no usable credential. But several edge cases reach
-// here with Authorization set yet ClientToken empty: malformed Bearer
-// ("Bearer " with no token), Basic with an empty password slot,
-// Negotiate (Kerberos) and other unrecognised schemes, and Basic when
-// X-SSL-Client-Cert is also present (extractToken deliberately skips
-// Basic in that case). Without this guard those all silently get
-// probe-passthrough; with it they fall through to implicit-auth-fail
-// → 401, which is the honest answer.
-func isUnauthenticatedGitProbe(r *http.Request, path string) bool {
-	if r == nil || r.Header.Get("Authorization") != "" {
-		return false
-	}
-	return isGitSmartHTTPPath(pathAfterGateway(path))
-}
+// gitHooks bundles the three ProviderSpec hooks the mount wires for git
+// smart-HTTP. The shared githttp SDK provides the dispatch, credential
+// formatting (Basic x-access-token:<PAT>), role extraction from the Basic
+// Auth username, and the unauthenticated-probe gate; this provider supplies
+// only the host-specific URL derivation and credential type.
+var gitHooks = githttp.BuildHooks(githttp.Options{
+	BasicAuthUsername: "x-access-token",
+	CredentialType:    credential.TypeGitHubToken,
+	TokenField:        "token",
+	DeriveGitURL:      deriveGitURL,
+})
