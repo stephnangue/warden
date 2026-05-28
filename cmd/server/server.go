@@ -189,6 +189,7 @@ Usage: warden server [options]
 		"atlassian":     atlassian.Skill(),
 		"aws":           aws.Skill(),
 		"github":        github.Skill(),
+		"gitlab":        gitlab.Skill(),
 		"openai":        openai.Skill(),
 		"rds":           rds.Skill(),
 		"scaleway":      scaleway.Skill(),

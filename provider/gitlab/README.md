@@ -10,6 +10,7 @@ The GitLab provider enables proxied access to the GitLab REST API through Warden
 - [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
 - [Step 4: Create a Policy](#step-4-create-a-policy)
 - [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
+- [Git over HTTPS](#git-over-https)
 - [Minting Project and Group Access Tokens](#minting-project-and-group-access-tokens)
 - [Authentication Methods](#authentication-methods)
 - [Credential Rotation](#credential-rotation)
@@ -311,6 +312,74 @@ curl "${GITLAB_ENDPOINT}/api/v4/projects/123/repository/branches" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
+## Git over HTTPS
+
+The same mount also proxies Git smart-HTTP (`clone`, `fetch`, `push`) to the configured `gitlab_address` — no separate config field needed, since GitLab serves both REST (`/api/v4/...`) and Git (`/<group>/<repo>.git/...`) off the same host root. The provider dispatches per-request: paths ending in `.git/info/refs`, `.git/git-upload-pack`, or `.git/git-receive-pack` route to GitLab with HTTP Basic Auth carrying `oauth2:<access-token>` as the credential; everything else continues to route as REST with the existing `Authorization: Bearer` flow.
+
+### Clone, fetch, push (path-routed form)
+
+The clone URL carries the Warden role as the Basic Auth username and the Warden JWT as the password. Git's credential helpers cache on URL + username, so each role gets a distinct cache entry — switching roles does not invalidate the other's cache. Subsequent `pull`/`push` against the cloned remote re-use the same role automatically.
+
+```bash
+git clone "https://<role>:${JWT_TOKEN}@${WARDEN_HOST}/v1/gitlab/gateway/<group>/<repo>.git"
+```
+
+Note the path shape: `/v1/gitlab/gateway/<group>/<repo>.git`. Unlike REST (which goes under `/v1/gitlab/gateway/api/v4/...`), Git smart-HTTP paths sit directly under `gateway/` — no `/api/v4` prefix, since Git and REST are separate protocols on the same mount.
+
+To keep the JWT out of shell history and `.git/config`:
+
+```bash
+git config --global credential.helper "store"
+# or, better, a short-lived in-memory cache:
+git config --global credential.helper "cache --timeout=900"
+```
+
+### Header-routed form (`X-Warden-Provider` + `X-Warden-Namespace`)
+
+Operators who want a clone URL that looks like a real Git URL (no Warden-specific path prefix) can use header routing instead. Set `X-Warden-Provider` via Git's `http.extraheader` config, carrying the mount path from `warden provider list`:
+
+```bash
+git -c http.extraheader="X-Warden-Provider: gitlab" \
+    clone "https://<role>:${JWT_TOKEN}@${WARDEN_HOST}/<group>/<repo>.git"
+```
+
+For mounts in a non-root namespace, add `X-Warden-Namespace` as a second `http.extraheader` carrying the namespace path (the same value used in `WARDEN_NAMESPACE`):
+
+```bash
+git -c http.extraheader="X-Warden-Provider: gitlab" \
+    -c http.extraheader="X-Warden-Namespace: team-a/data" \
+    clone "https://<role>:${JWT_TOKEN}@${WARDEN_HOST}/<group>/<repo>.git"
+```
+
+Both headers persist into `.git/config` at clone time, so follow-up `pull`/`push` against the cloned remote carry them automatically. Warden synthesises the canonical `gitlab/gateway/<group>/<repo>.git/...` path under the resolved namespace before mount lookup, so the dispatch and credential flows behave identically to the path-routed form.
+
+### Cert-auth clients
+
+Cert-auth clients (mTLS or `X-SSL-Client-Cert` from a TLS-terminating proxy) still need to populate Git's password slot because the Git protocol requires it. Any placeholder works — the gitlab provider's token extractor skips the Basic Auth password when `X-SSL-Client-Cert` is set, so the placeholder is never sent to the JWT validator:
+
+```bash
+git clone "https://<role>:cert@${WARDEN_HOST}/v1/gitlab/gateway/<group>/<repo>.git"
+```
+
+Mixing a malformed cert with a valid JWT in the Basic Auth password is intentionally not a fallback path: if cert auth fails the request fails with a clear cert-auth error rather than silently switching schemes.
+
+### Role precedence
+
+Role resolution follows core ordering, with the Basic Auth username consulted after path/header roles but before `default_role`:
+
+1. `X-Warden-Role` header
+2. Path-embedded role (`/v1/gitlab/role/<role>/gateway/...`)
+3. **Basic Auth username** (Git smart-HTTP only)
+4. `default_role` from the mount config
+
+So `git clone https://<role>:$JWT@<host>/...` resolves to the username even when a mount-level `default_role` is configured; the default is used only when none of the higher-precedence sources contribute. REST callers are unaffected — the Basic Auth username is consulted only on Git smart-HTTP paths.
+
+### Sizing `git_max_body_size` and `timeout`
+
+- **`git_max_body_size`** caps Git request bodies in bytes. Default 2 GiB; valid range 1 MiB to 10 GiB. The existing `max_body_size` field controls REST POST bodies separately (default 10 MiB, 100 MiB ceiling) — do not raise `max_body_size` to accommodate Git pushes, that is what `git_max_body_size` is for.
+- **Do not crank `git_max_body_size` to the 10 GiB ceiling reflexively.** The ceiling is a sanity cap, not a recommended value. Bodies stream through Warden chunk-by-chunk so memory is fine, but each accepted request pins one goroutine, one outbound socket, and 2× the body's bandwidth (ingress + egress to the Git host) for the duration of the transfer. Size to your actual largest expected push, not the maximum theoretical push.
+- **Tune `timeout` for the longest expected push.** The mount-level `timeout` controls how long Warden will wait for the full request/response cycle. The default suits REST API calls, not multi-minute Git pushes. Rough heuristic: `timeout ≥ (git_max_body_size / smallest expected client bandwidth) × 2`, rounded up generously. Example: a 2 GiB cap with clients on a 100 Mbps link needs at least 320 s — set `timeout = 600s`. Too-tight `timeout` shows up as half-uploaded pushes that fail at the same byte count, which is a confusing failure mode.
+
 ## Cleanup
 
 To stop Warden and the identity provider:
@@ -433,8 +502,9 @@ curl --cert client.pem --key client-key.pem \
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `gitlab_address` | string | — | GitLab instance URL (required, e.g., `https://gitlab.com`) |
-| `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
-| `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
+| `git_max_body_size` | int | 2147483648 (2 GiB) | Maximum request body size for Git smart-HTTP requests in bytes (range: 1 MiB to 10 GiB) |
+| `max_body_size` | int | 10485760 (10 MB) | Maximum request body size for REST requests in bytes (max 100 MB) |
+| `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`); raise for large Git pushes — see [Git over HTTPS](#git-over-https) |
 | `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
 | `default_role` | string | — | Fallback role when not specified in URL |
 
