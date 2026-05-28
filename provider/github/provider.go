@@ -1,12 +1,12 @@
 package github
 
 import (
-	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/provider/sdk/githttp"
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
@@ -60,15 +60,7 @@ var Spec = &httpproxy.ProviderSpec{
 			Description: "GitHub REST API version for X-GitHub-Api-Version header (default: 2022-11-28)",
 			Default:     DefaultAPIVersion,
 		},
-		"git_url": {
-			Type:        framework.TypeString,
-			Description: "Git host URL for smart-HTTP clone/push (default: derived from github_url, e.g. https://api.github.com -> https://github.com)",
-		},
-		"git_max_body_size": {
-			Type:        framework.TypeInt64,
-			Description: "Maximum request body size for Git smart-HTTP requests in bytes (default: 2 GiB, min: 1 MiB, max: 10 GiB)",
-			Default:     DefaultGitMaxBodySize,
-		},
+		"git_max_body_size": githttp.MaxBodySizeField(),
 	},
 	DynamicHeaders: func(state map[string]any) map[string]string {
 		ver, _ := state["api_version"].(string)
@@ -82,43 +74,22 @@ var Spec = &httpproxy.ProviderSpec{
 		if ver == "" {
 			ver = DefaultAPIVersion
 		}
-		gitURL, _ := state["git_url"].(string)
-		gitMaxBody, _ := state["git_max_body_size"].(int64)
-		if gitMaxBody <= 0 {
-			gitMaxBody = DefaultGitMaxBodySize
-		}
 		return map[string]any{
 			"api_version":       ver,
-			"git_url":           gitURL,
-			"git_max_body_size": gitMaxBody,
+			"git_max_body_size": githttp.ReadMaxBodySize(state),
 		}
 	},
 	OnConfigWrite: func(d *framework.FieldData, state map[string]any) (map[string]any, error) {
 		// Validate before mutating so a rejected write leaves no partial
 		// state for the caller to observe.
-		var size int64
-		var hasSize bool
-		if val, ok := d.GetOk("git_max_body_size"); ok {
-			size = val.(int64)
-			hasSize = true
-			if size < MinGitMaxBodySize {
-				return nil, fmt.Errorf("git_max_body_size must be at least %d bytes (1 MiB)", MinGitMaxBodySize)
-			}
-			if size > MaxGitMaxBodySize {
-				return nil, fmt.Errorf("git_max_body_size must not exceed %d bytes (10 GiB)", MaxGitMaxBodySize)
-			}
+		if err := githttp.WriteMaxBodySize(d, state); err != nil {
+			return nil, err
 		}
 		if val, ok := d.GetOk("api_version"); ok {
 			ver := val.(string)
 			if ver != "" {
 				state["api_version"] = ver
 			}
-		}
-		if val, ok := d.GetOk("git_url"); ok {
-			state["git_url"] = val.(string)
-		}
-		if hasSize {
-			state["git_max_body_size"] = size
 		}
 		return state, nil
 	},
@@ -128,19 +99,12 @@ var Spec = &httpproxy.ProviderSpec{
 		} else {
 			state["api_version"] = DefaultAPIVersion
 		}
-		if gitURL, ok := config["git_url"].(string); ok && gitURL != "" {
-			state["git_url"] = gitURL
-		}
-		if size, ok := httpproxy.ReadInt64Config(config["git_max_body_size"]); ok {
-			state["git_max_body_size"] = size
-		} else {
-			state["git_max_body_size"] = DefaultGitMaxBodySize
-		}
+		githttp.InitializeMaxBodySize(config, state)
 		return state
 	},
-	ResolveUpstream:          resolveGitUpstream,
-	GetAuthRoleFromRequest:   roleFromBasicAuthUser,
-	IsUnauthenticatedRequest: isUnauthenticatedGitProbe,
+	ResolveUpstream:          gitHooks.ResolveUpstream,
+	GetAuthRoleFromRequest:   gitHooks.GetAuthRoleFromRequest,
+	IsUnauthenticatedRequest: gitHooks.IsUnauthenticatedRequest,
 }
 
 // Factory creates a new GitHub provider backend.
@@ -183,8 +147,8 @@ X-SSL-Client-Cert is present.
 
 For GitHub Enterprise Server:
   Configure github_url to point to your GHE instance API endpoint
-  (e.g., https://github.example.com/api/v3). git_url is derived
-  automatically (e.g., https://github.example.com) unless overridden.
+  (e.g., https://github.example.com/api/v3). The Git host is derived
+  automatically (e.g., https://github.example.com).
 
 The role can be provided via the X-Warden-Role header, embedded in
 the URL path (/github/role/{role}/gateway/{api-path}), carried in
@@ -207,7 +171,6 @@ carry the header automatically.
 Configuration:
 - github_url: GitHub API base URL (default: https://api.github.com)
 - api_version: GitHub REST API version header (default: 2022-11-28)
-- git_url: Git host URL for smart-HTTP (default: derived from github_url)
 - git_max_body_size: Cap on Git request bodies in bytes
     (default: 2 GiB, range: 1 MiB to 10 GiB)
 - max_body_size: Cap on REST request bodies (default: 10MB, max: 100MB).

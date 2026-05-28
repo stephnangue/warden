@@ -108,6 +108,7 @@ Both paths perform implicit authentication and credential injection. The only di
 | `NewTransport` | `DefaultNewTransport` | Factory returning `(*http.Transport, func())`. Called lazily on first instantiation. Override for custom transport settings. |
 | `ResolveUpstream` | `nil` | Per-request override hook for upstream URL, credential extractor, Accept header, dynamic headers, body cap, and body parsing. Used by providers carrying multiple protocols on one mount. See [Per-request dispatch](#per-request-dispatch). |
 | `GetAuthRoleFromRequest` | `nil` | Optional hook to derive the auth role from the HTTP request (e.g., Basic Auth username for Git smart-HTTP). Consulted after URL-path role lookup; `X-Warden-Role` header always wins. See [Custom role extraction](#custom-role-extraction). |
+| `IsUnauthenticatedRequest` | `nil` | Optional hook to declare that a specific request should bypass authentication and pass through to the upstream. Used by protocols that probe for auth (e.g., Git smart-HTTP first probe → upstream `WWW-Authenticate` → client retry with Basic Auth). The static `UnauthenticatedPaths` list still applies as a fallback when the hook is unset or returns `false`. The handler runs with `req.Credential == nil` for unauthenticated requests — see the `StreamUnauthenticated` guard in `gateway.go`. |
 
 ## Credential extractors
 
@@ -285,37 +286,25 @@ if !ok {
 }
 ```
 
-**Example: GitHub Git smart-HTTP.** The GitHub provider's mount serves both the REST API (proxied to `api.github.com` with a Bearer token) and Git smart-HTTP clone/fetch/push (proxied to `github.com` with HTTP Basic Auth carrying the PAT as the password). REST and Git request shapes are dispatched per-request:
+**Example: Git smart-HTTP.** Providers that proxy both a REST API and Git smart-HTTP (clone/fetch/push) on the same mount route per-request: REST paths fall through to the spec defaults, Git paths get a `Dispatch` that points at the Git host with HTTP Basic Auth, raises the body cap for pushes, suppresses Accept/dynamic-header injection (Git negotiates its own content types), and bypasses body parsing (pack-files are binary). The `provider/sdk/githttp` SDK factors this out — providers call `githttp.BuildHooks(Options{...})` and wire the returned `ResolveUpstream` onto their spec:
 
 ```go
-func resolveGitUpstream(r *http.Request, providerURL string, state map[string]any) (httpproxy.Dispatch, bool) {
-    api, _ := httpproxy.PathAfterGateway(r.URL.Path)
-    if !isGitSmartHTTPPath(api) {
-        return httpproxy.Dispatch{}, false // REST → spec defaults apply
-    }
-    maxBody, ok := state["git_max_body_size"].(int64)
-    if !ok || maxBody <= 0 {
-        maxBody = DefaultGitMaxBodySize
-    }
-    return httpproxy.Dispatch{
-        UpstreamURL:        deriveGitURL(providerURL), // api.github.com → github.com
-        ExtractCredentials: gitCredentialExtractor,    // Basic x-access-token:<PAT> on the upstream call to github.com
-        SkipDefaultAccept:  true,                      // Git negotiates its own content types
-        SkipDynamicHeaders: true,                      // X-GitHub-Api-Version is irrelevant for Git
-        MaxBodySize:        maxBody,                   // raised for push payloads (default 2 GiB)
-        BypassBodyParsing:  true,                      // binary pack-files, don't parse as JSON
-    }, true
-}
+var gitHooks = githttp.BuildHooks(githttp.Options{
+    BasicAuthUsername: "x-access-token",                  // host-specific (GitLab uses "oauth2")
+    CredentialType:    credential.TypeGitHubToken,        // host-specific
+    TokenField:        "token",                           // host-specific
+    DeriveGitURL:      deriveGitURL,                      // host-specific (api.github.com → github.com)
+})
 
 var Spec = &httpproxy.ProviderSpec{
     // ...
-    ResolveUpstream: resolveGitUpstream,
+    ResolveUpstream: gitHooks.ResolveUpstream,
 }
 ```
 
 `BypassBodyParsing` is honoured by the framework's request-aware body-parsing decision, which consults `ResolveUpstream` on every request before deciding whether to parse — so spec authors set `ParseStreamBody: true` on the spec and selectively suppress parsing per request via `Dispatch`.
 
-See `provider/github/git.go` for the full implementation.
+See `provider/sdk/githttp` for the SDK and `provider/github/git.go` for a consumer's host-specific wiring.
 
 ## Custom role extraction
 
@@ -336,31 +325,29 @@ The hook returns the resolved role, or `""` for "no contribution — fall throug
 
 `X-Warden-Role` is applied *after* every other source has been consulted — it is the unconditional override, not an early-return.
 
-**Example: GitHub Git smart-HTTP.** Git clients carry credentials as HTTP Basic Auth; the GitHub provider uses the username slot to carry the Warden role and the password slot to carry the Warden JWT:
-
-```bash
-git clone https://<role>:$JWT@<warden-addr>/v1/github/gateway/<owner>/<repo>.git
-```
-
-The hook extracts the role from the Basic Auth username, but only on Git smart-HTTP paths — REST callers are unaffected:
+**Example: role from a custom header.** A provider that wants to honour a non-Warden client convention (e.g., a partner system that already sends `X-Tenant-Role`) writes a hook that reads the header and returns its value, or `""` to fall through:
 
 ```go
-func roleFromBasicAuthUser(r *http.Request) string {
-    api, _ := httpproxy.PathAfterGateway(r.URL.Path)
-    if !isGitSmartHTTPPath(api) {
-        return "" // REST: fall through to default_role
-    }
-    user, _, _ := r.BasicAuth()
-    return user
+func roleFromTenantHeader(r *http.Request) string {
+    return r.Header.Get("X-Tenant-Role") // "" falls through to default_role
 }
 
 var Spec = &httpproxy.ProviderSpec{
     // ...
-    GetAuthRoleFromRequest: roleFromBasicAuthUser,
+    GetAuthRoleFromRequest: roleFromTenantHeader,
 }
 ```
 
-See `provider/github/git.go` for the full implementation.
+The hook can also discriminate on path shape — e.g., only return a role on paths that match the alternate protocol, and `""` on REST paths so REST callers keep their default behaviour. The `provider/sdk/githttp` SDK does exactly that for Git smart-HTTP (Basic Auth username on `.git/...` paths; `""` elsewhere) — wire it via:
+
+```go
+var Spec = &httpproxy.ProviderSpec{
+    // ...
+    GetAuthRoleFromRequest: gitHooks.GetAuthRoleFromRequest,
+}
+```
+
+See `provider/sdk/githttp` for the SDK and `provider/github/git.go` for a consumer's host-specific wiring.
 
 ## Custom URL validation
 
