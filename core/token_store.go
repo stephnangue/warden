@@ -319,6 +319,21 @@ func (s *TokenStore) registerBuiltinTypes() error {
 	return nil
 }
 
+// IsTransparentType reports whether the named token type is registered as
+// a transparent (implicit-auth) type. Thin wrapper over the registry so
+// callers don't need direct registry access.
+func (s *TokenStore) IsTransparentType(name string) bool {
+	return s.registry.IsTransparent(name)
+}
+
+// GetTransparentTokenTypeForAuthMethod returns the TransparentTokenType
+// registered to serve mounts of the given auth method type (e.g. "jwt",
+// "cert", "kubernetes"). Returns nil if no transparent type serves that
+// mount type. Thin wrapper over the registry.
+func (s *TokenStore) GetTransparentTokenTypeForAuthMethod(mountType string) TransparentTokenType {
+	return s.registry.GetTransparentTokenTypeForAuthMethod(mountType)
+}
+
 // GenerateToken creates a new namespace-aware token
 func (s *TokenStore) GenerateToken(ctx context.Context, tokenTypeName string, authData *AuthData) (*TokenEntry, error) {
 	s.mu.Lock()
@@ -408,10 +423,11 @@ func (s *TokenStore) generateWithCollisionDetection(
 
 		// Check for existing token with same ID
 		if existingEntry, found := s.byID.Get(entry.ID); found {
-			// For JWT and cert tokens, the ID is deterministic (based on credential:role hash).
-			// Finding an existing token means this credential+role already has a valid token.
-			// Return the existing token instead of treating it as a collision.
-			if meta.Name == TypeJWTRole || meta.Name == TypeCertRole {
+			// Transparent token types use a deterministic ID (hash of credential
+			// + mountAccessor + role). Finding an existing token means this
+			// credential+mount+role already has a valid cache entry — return it
+			// instead of treating it as a collision.
+			if s.registry.IsTransparent(meta.Name) {
 				return existingEntry, nil
 			}
 
@@ -451,10 +467,10 @@ func (s *TokenStore) generateWithCollisionDetection(
 			// Don't fail the operation, token is in cache
 		}
 
-		// Register token with expiration manager for timer-based TTL enforcement
-		// Self-contained tokens (JWT, cert) are cache-only, so don't persist their expiration entries
+		// Register token with expiration manager for timer-based TTL enforcement.
+		// Transparent token types are cache-only, so don't persist their expiration entries.
 		if expMgr := s.core.GetExpirationManager(); expMgr != nil && ttl > 0 {
-			persist := entry.Type != TypeJWTRole && entry.Type != TypeCertRole
+			persist := !s.registry.IsTransparent(entry.Type)
 			if err := expMgr.RegisterToken(ctx, entry.ID, ttl, persist); err != nil {
 				s.logger.Warn("failed to register token with expiration manager",
 					logger.String("token_id", entry.ID),
@@ -1016,8 +1032,8 @@ func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
 // Uses a transaction to ensure atomicity: both token and accessor are stored together
 // or neither is stored if any operation fails
 func (s *TokenStore) persistToken(entry *TokenEntry) error {
-	// Skip persistence for self-contained tokens - they are cache-only
-	if entry.Type == TypeJWTRole || entry.Type == TypeCertRole {
+	// Skip persistence for transparent token types — they are cache-only.
+	if s.registry.IsTransparent(entry.Type) {
 		return nil
 	}
 
@@ -1283,8 +1299,8 @@ func (s *TokenStore) loadTokenByAccessor(accessor string) (*TokenEntry, error) {
 // Uses a transaction to ensure atomicity: both token and accessor are deleted together
 // or neither is deleted if any operation fails
 func (s *TokenStore) deleteToken(entry *TokenEntry) error {
-	// Skip storage operations for self-contained tokens - they are cache-only
-	if entry.Type == TypeJWTRole || entry.Type == TypeCertRole {
+	// Skip storage operations for transparent token types — they are cache-only.
+	if s.registry.IsTransparent(entry.Type) {
 		return nil
 	}
 
@@ -1479,15 +1495,22 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	return &entryCopy, nil
 }
 
-// LookupJWTTokenWithRole looks up a JWT token using both the JWT and role.
-// This is used for implicit auth where the same JWT with different roles
-// should produce different tokens. The composite "jwt:role" value is used
-// for ID computation and validation.
-func (c *Core) LookupJWTTokenWithRole(ctx context.Context, jwt string, role string) (*TokenEntry, error) {
+// LookupTransparentTokenWithRole looks up a cached transparent-auth token
+// keyed by (credential, mountAccessor, role). Used by performImplicitAuth
+// for both the cache-check and post-login resolution paths.
+//
+// The cache hash uses tokenType.LookupValue, so each TransparentTokenType
+// controls how its credential collapses into a deterministic cache key.
+// Mount accessor is included so two mounts of the same auth type with
+// overlapping role names + the same credential cannot share an entry.
+//
+// Returns ErrTokenNotFound on cache miss, ErrTokenNamespaceMismatch on
+// namespace boundary violation, ErrTokenExpired on TTL exhaustion,
+// ErrOriginViolation on IP binding violation.
+func (c *Core) LookupTransparentTokenWithRole(ctx context.Context, tokenType TransparentTokenType, credential, mountAccessor, role string) (*TokenEntry, error) {
 	if c.Sealed() {
 		return nil, fmt.Errorf("the core is sealed")
 	}
-
 	if c.tokenStore == nil {
 		return nil, nil
 	}
@@ -1501,22 +1524,19 @@ func (c *Core) LookupJWTTokenWithRole(ctx context.Context, jwt string, role stri
 	}
 	s.mu.RUnlock()
 
-	// Extract namespace from context
 	ns, err := namespace.FromContext(ctx)
 	if err != nil || ns == nil {
 		return nil, errors.New("namespace not found in context")
 	}
 
-	// Get JWT token type
-	jwtType := &JWTRoleTokenType{}
+	typeName := tokenType.Metadata().Name
 
-	// Compute hash of "jwt:role" - this matches what's stored in entry.Data["jwt"]
-	jwtHash := jwtType.ComputeData(jwt, role)
-	// Token ID is computed from the hash
-	tokenID := jwtType.ComputeID(jwtHash)
+	// Hash of (mountAccessor, credential, role) — matches what Generate stored.
+	lookupHash := tokenType.LookupValue(credential, mountAccessor, role)
+	tokenID := tokenType.ComputeID(lookupHash)
 
-	// Lookup token in cache only - JWT tokens are not persisted to storage
-	// On cache miss, the caller should perform implicit auth to create a new token
+	// Lookup token in cache only — transparent tokens are not persisted to storage.
+	// On cache miss the caller performs implicit auth to create a new token.
 	entry, found := s.byID.Get(tokenID)
 	if !found {
 		if s.config.EnableMetrics {
@@ -1524,7 +1544,6 @@ func (c *Core) LookupJWTTokenWithRole(ctx context.Context, jwt string, role stri
 		}
 		return nil, ErrTokenNotFound
 	}
-
 	if s.config.EnableMetrics {
 		s.metrics.IncrementCacheHits()
 	}
@@ -1532,7 +1551,8 @@ func (c *Core) LookupJWTTokenWithRole(ctx context.Context, jwt string, role stri
 	// Validate namespace binding
 	tokenNs, err := c.namespaceStore.GetNamespaceByAccessor(ctx, entry.NamespaceID)
 	if err != nil || tokenNs == nil {
-		s.logger.Warn("JWT token namespace not found",
+		s.logger.Warn("transparent token namespace not found",
+			logger.String("token_type", typeName),
 			logger.String("token_id", tokenID),
 			logger.String("token_namespace_id", entry.NamespaceID))
 		return nil, ErrTokenNamespaceMismatch
@@ -1543,133 +1563,29 @@ func (c *Core) LookupJWTTokenWithRole(ctx context.Context, jwt string, role stri
 		if s.config.EnableMetrics {
 			s.metrics.IncrementNamespaceMismatches()
 		}
-		s.logger.Warn("JWT token namespace mismatch",
+		s.logger.Warn("transparent token namespace mismatch",
+			logger.String("token_type", typeName),
 			logger.String("token_id", tokenID),
 			logger.String("token_namespace", tokenNs.Path),
 			logger.String("request_namespace", ns.Path))
 		return nil, ErrTokenNamespaceMismatch
 	}
 
-	// Validate token value matches (comparing hashes, not raw JWT)
-	// entry.Data["jwt"] stores the SHA-256 hash of the composite "jwt:role" value
-	lookupKey := jwtType.LookupKey()
+	// Validate stored hash matches recomputed hash (constant-time compare to
+	// prevent timing attacks). The stored hash lives under the type's
+	// declared LookupKey in entry.Data.
+	lookupKey := tokenType.LookupKey()
 	expectedHash, ok := entry.Data[lookupKey]
 	if !ok {
-		s.logger.Error("JWT token lookup key not found",
+		s.logger.Error("transparent token lookup key not found",
+			logger.String("token_type", typeName),
 			logger.String("token_id", tokenID),
 			logger.String("lookup_key", lookupKey))
 		return nil, ErrTokenNotFound
 	}
-	// Compare stored hash with computed hash using constant-time comparison
-	// to prevent timing attacks
-	if subtle.ConstantTimeCompare([]byte(expectedHash), []byte(jwtHash)) != 1 {
-		s.logger.Error("JWT token value mismatch",
-			logger.String("token_id", tokenID),
-			logger.String("lookup_key", lookupKey))
-		return nil, ErrTokenNotFound
-	}
-
-	// Validate expiration
-	if !entry.ExpireAt.IsZero() && time.Now().After(entry.ExpireAt) {
-		if s.config.EnableMetrics {
-			s.metrics.IncrementTokensExpired()
-		}
-		return nil, ErrTokenExpired
-	}
-
-	// Validate same-origin policy (IP binding)
-	if err := s.validateIPBinding(ctx, tokenID, entry); err != nil {
-		return nil, err
-	}
-
-	if s.config.EnableMetrics {
-		s.metrics.IncrementTokensResolved()
-	}
-
-	entryCopy := *entry
-	return &entryCopy, nil
-}
-
-// LookupCertTokenWithRole looks up a cert token using both the fingerprint and role.
-// This is used for implicit auth where the same cert with different roles
-// should produce different tokens. The composite "fingerprint:role" value is used
-// for ID computation and validation.
-func (c *Core) LookupCertTokenWithRole(ctx context.Context, certFingerprint string, role string) (*TokenEntry, error) {
-	if c.Sealed() {
-		return nil, fmt.Errorf("the core is sealed")
-	}
-
-	if c.tokenStore == nil {
-		return nil, nil
-	}
-
-	s := c.tokenStore
-
-	s.mu.RLock()
-	if s.closed {
-		s.mu.RUnlock()
-		return nil, ErrStoreClosed
-	}
-	s.mu.RUnlock()
-
-	// Extract namespace from context
-	ns, err := namespace.FromContext(ctx)
-	if err != nil || ns == nil {
-		return nil, errors.New("namespace not found in context")
-	}
-
-	certType := &CertRoleTokenType{}
-
-	// Compute hash of "fingerprint:role" - this matches what's stored in entry.Data["cert_fingerprint"]
-	certHash := certType.ComputeData(certFingerprint, role)
-	// Token ID is computed from the hash
-	tokenID := certType.ComputeID(certHash)
-
-	// Lookup token in cache only - cert tokens are not persisted to storage
-	entry, found := s.byID.Get(tokenID)
-	if !found {
-		if s.config.EnableMetrics {
-			s.metrics.IncrementCacheMisses()
-		}
-		return nil, ErrTokenNotFound
-	}
-
-	if s.config.EnableMetrics {
-		s.metrics.IncrementCacheHits()
-	}
-
-	// Validate namespace binding
-	tokenNs, err := c.namespaceStore.GetNamespaceByAccessor(ctx, entry.NamespaceID)
-	if err != nil || tokenNs == nil {
-		s.logger.Warn("cert token namespace not found",
-			logger.String("token_id", tokenID),
-			logger.String("token_namespace_id", entry.NamespaceID))
-		return nil, ErrTokenNamespaceMismatch
-	}
-
-	isValidNamespace := ns.UUID == tokenNs.UUID || ns.HasParent(tokenNs)
-	if !isValidNamespace {
-		if s.config.EnableMetrics {
-			s.metrics.IncrementNamespaceMismatches()
-		}
-		s.logger.Warn("cert token namespace mismatch",
-			logger.String("token_id", tokenID),
-			logger.String("token_namespace", tokenNs.Path),
-			logger.String("request_namespace", ns.Path))
-		return nil, ErrTokenNamespaceMismatch
-	}
-
-	// Validate token value matches (comparing hashes, not raw fingerprint)
-	lookupKey := certType.LookupKey()
-	expectedHash, ok := entry.Data[lookupKey]
-	if !ok {
-		s.logger.Error("cert token lookup key not found",
-			logger.String("token_id", tokenID),
-			logger.String("lookup_key", lookupKey))
-		return nil, ErrTokenNotFound
-	}
-	if subtle.ConstantTimeCompare([]byte(expectedHash), []byte(certHash)) != 1 {
-		s.logger.Error("cert token value mismatch",
+	if subtle.ConstantTimeCompare([]byte(expectedHash), []byte(lookupHash)) != 1 {
+		s.logger.Error("transparent token value mismatch",
+			logger.String("token_type", typeName),
 			logger.String("token_id", tokenID),
 			logger.String("lookup_key", lookupKey))
 		return nil, ErrTokenNotFound

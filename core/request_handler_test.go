@@ -843,7 +843,7 @@ func TestLoginCreateToken(t *testing.T) {
 				Policies: []string{"root"},
 			},
 		}
-		result, err := core.LoginCreateToken(ctx, resp)
+		result, err := core.LoginCreateToken(ctx, nil, resp)
 		require.Error(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, http.StatusForbidden, result.StatusCode)
@@ -855,7 +855,7 @@ func TestLoginCreateToken(t *testing.T) {
 				Policies: []string{"response-wrapping"},
 			},
 		}
-		result, err := core.LoginCreateToken(ctx, resp)
+		result, err := core.LoginCreateToken(ctx, nil, resp)
 		require.Error(t, err)
 		require.NotNil(t, result)
 		// Should be forbidden (403) for policy rejection
@@ -1569,40 +1569,49 @@ func TestHandleTransparentAuth_JWTDifferentRoles(t *testing.T) {
 		assert.NotEqual(t, id1, id2, "Same JWT with different roles should have different token IDs")
 	})
 
-	t.Run("LookupJWTTokenWithRole returns error for non-existent token", func(t *testing.T) {
+	t.Run("LookupTransparentTokenWithRole returns error for non-existent JWT token", func(t *testing.T) {
 		sampleJWT2 := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.test"
+		jwtType := &JWTRoleTokenType{}
 
 		// Looking up a token that doesn't exist should return an error
-		_, err := core.LookupJWTTokenWithRole(ctx, sampleJWT2, "terraform")
+		_, err := core.LookupTransparentTokenWithRole(ctx, jwtType, sampleJWT2, "test-accessor", "terraform")
 		assert.Error(t, err, "Looking up non-existent JWT token should return error")
 
 		// Looking up with different role should also fail
-		_, err = core.LookupJWTTokenWithRole(ctx, sampleJWT2, "different-role")
+		_, err = core.LookupTransparentTokenWithRole(ctx, jwtType, sampleJWT2, "test-accessor", "different-role")
 		assert.Error(t, err, "Looking up with different role should not find the token")
 	})
 
-	t.Run("ComputeData and ComputeID match token creation ID", func(t *testing.T) {
+	t.Run("LookupValue and ComputeID match token creation ID", func(t *testing.T) {
 		jwtType := &JWTRoleTokenType{}
 
-		// Simulate token creation: Generate stores hash of JWT+role in entry.Data["jwt"]
+		// Simulate token creation: Generate stores hash of (accessor, JWT, role) in entry.Data["jwt"]
 		entry := &TokenEntry{
 			Data: map[string]string{},
 		}
-		authData := &AuthData{TokenValue: sampleJWT, RoleName: "terraform"}
+		authData := &AuthData{TokenValue: sampleJWT, MountAccessor: "acc1", RoleName: "terraform"}
 		jwtType.Generate(context.Background(), authData, entry)
 
-		// Verify the stored value is a hash of JWT+role (not raw value)
-		expectedHash := sha256.Sum256([]byte(sampleJWT + ":terraform"))
+		// Verify the stored value is a hash of (accessor, JWT, role) — not raw value
+		expectedHash := sha256.Sum256([]byte("acc1:" + sampleJWT + ":terraform"))
 		assert.Equal(t, hex.EncodeToString(expectedHash[:]), entry.Data["jwt"])
 
 		// Token ID is computed from the stored hash
 		tokenID := jwtType.ComputeID(entry.Data["jwt"])
 
 		// Lookup: hash first, then compute ID - should match
-		lookupHash := jwtType.ComputeData(sampleJWT, "terraform")
+		lookupHash := jwtType.LookupValue(sampleJWT, "acc1", "terraform")
 		lookupID := jwtType.ComputeID(lookupHash)
 
 		assert.Equal(t, tokenID, lookupID, "Token creation and lookup should produce same ID")
+	})
+
+	t.Run("same JWT + role on different mounts produces different token IDs", func(t *testing.T) {
+		jwtType := &JWTRoleTokenType{}
+		hashA := jwtType.LookupValue(sampleJWT, "accessor-A", "deploy")
+		hashB := jwtType.LookupValue(sampleJWT, "accessor-B", "deploy")
+		assert.NotEqual(t, hashA, hashB, "Same JWT + role on two mounts must not share a cache entry")
+		assert.NotEqual(t, jwtType.ComputeID(hashA), jwtType.ComputeID(hashB))
 	})
 }
 

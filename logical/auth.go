@@ -72,6 +72,12 @@ type AuthData struct {
 	ClientIP       string
 	TokenValue     string // External token value (e.g., JWT for transparent mode)
 
+	// MountAccessor is the stable identifier of the auth mount that
+	// issued this login. Transparent token types include it in the cache
+	// key so two mounts of the same auth type with overlapping role
+	// names + the same credential cannot share a cache entry.
+	MountAccessor string
+
 	// Actors carries the verified on-behalf-of chain extracted at login
 	// (e.g. JWT "act" claim) so it can be persisted onto the issued
 	// TokenEntry for transparent-mode cache reuse.
