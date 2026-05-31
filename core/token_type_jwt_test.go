@@ -145,11 +145,11 @@ func TestJWTRoleTokenType_Generate(t *testing.T) {
 			Data: map[string]string{},
 		}
 
-		authData := &AuthData{TokenValue: sampleJWT, RoleName: ""}
+		authData := &AuthData{TokenValue: sampleJWT, MountAccessor: "acc1", RoleName: ""}
 		result, err := jwtType.Generate(context.Background(), authData, entry)
 		require.NoError(t, err)
-		// JWT should be stored as hash (not raw value) for security
-		expectedHash := sha256.Sum256([]byte(sampleJWT))
+		// JWT should be stored as hash of (accessor, JWT, role) for security
+		expectedHash := sha256.Sum256([]byte("acc1:" + sampleJWT + ":"))
 		assert.Equal(t, hex.EncodeToString(expectedHash[:]), result["jwt"])
 	})
 
@@ -158,37 +158,37 @@ func TestJWTRoleTokenType_Generate(t *testing.T) {
 			Data: map[string]string{},
 		}
 
-		authData := &AuthData{TokenValue: sampleJWT, RoleName: "terraform"}
+		authData := &AuthData{TokenValue: sampleJWT, MountAccessor: "acc1", RoleName: "terraform"}
 		result, err := jwtType.Generate(context.Background(), authData, entry)
 		require.NoError(t, err)
-		// JWT+role composite should be stored as hash for security
-		expectedHash := sha256.Sum256([]byte(sampleJWT + ":terraform"))
+		// (accessor, JWT, role) composite should be stored as hash for security
+		expectedHash := sha256.Sum256([]byte("acc1:" + sampleJWT + ":terraform"))
 		assert.Equal(t, hex.EncodeToString(expectedHash[:]), result["jwt"])
 	})
 }
 
-func TestJWTRoleTokenType_ComputeData(t *testing.T) {
+func TestJWTRoleTokenType_LookupValue(t *testing.T) {
 	jwtType := &JWTRoleTokenType{}
 
 	t.Run("same JWT different roles produce different hashes", func(t *testing.T) {
-		hash1 := jwtType.ComputeData(sampleJWT, "role1")
-		hash2 := jwtType.ComputeData(sampleJWT, "role2")
+		hash1 := jwtType.LookupValue(sampleJWT, "acc1", "role1")
+		hash2 := jwtType.LookupValue(sampleJWT, "acc1", "role2")
 
 		assert.NotEqual(t, hash1, hash2, "Same JWT with different roles should have different hashes")
 	})
 
-	t.Run("same JWT same role produces same hash", func(t *testing.T) {
-		hash1 := jwtType.ComputeData(sampleJWT, "terraform")
-		hash2 := jwtType.ComputeData(sampleJWT, "terraform")
+	t.Run("same JWT same role same mount produces same hash", func(t *testing.T) {
+		hash1 := jwtType.LookupValue(sampleJWT, "acc1", "terraform")
+		hash2 := jwtType.LookupValue(sampleJWT, "acc1", "terraform")
 
-		assert.Equal(t, hash1, hash2, "Same JWT with same role should have same hash")
+		assert.Equal(t, hash1, hash2, "Same inputs should produce same hash")
 	})
 
-	t.Run("empty role uses JWT only", func(t *testing.T) {
-		hashWithEmptyRole := jwtType.ComputeData(sampleJWT, "")
-		expectedHash := sha256.Sum256([]byte(sampleJWT))
+	t.Run("same JWT same role different mounts produce different hashes", func(t *testing.T) {
+		hashA := jwtType.LookupValue(sampleJWT, "accA", "deploy")
+		hashB := jwtType.LookupValue(sampleJWT, "accB", "deploy")
 
-		assert.Equal(t, hex.EncodeToString(expectedHash[:]), hashWithEmptyRole)
+		assert.NotEqual(t, hashA, hashB, "Mount accessor must namespace the cache key")
 	})
 
 	t.Run("hash and ComputeID produce consistent token IDs", func(t *testing.T) {
@@ -196,22 +196,28 @@ func TestJWTRoleTokenType_ComputeData(t *testing.T) {
 		entry := &TokenEntry{
 			Data: map[string]string{},
 		}
-		authData := &AuthData{TokenValue: sampleJWT, RoleName: "myapp"}
+		authData := &AuthData{TokenValue: sampleJWT, MountAccessor: "acc1", RoleName: "myapp"}
 		jwtType.Generate(context.Background(), authData, entry)
 
-		// The stored hash should match ComputeData
-		expectedHash := jwtType.ComputeData(sampleJWT, "myapp")
+		// The stored hash should match LookupValue
+		expectedHash := jwtType.LookupValue(sampleJWT, "acc1", "myapp")
 		assert.Equal(t, expectedHash, entry.Data["jwt"])
 
 		// Token ID is computed from the hash
 		tokenID := jwtType.ComputeID(entry.Data["jwt"])
 
 		// Lookup should compute the same ID: hash first, then ComputeID
-		lookupHash := jwtType.ComputeData(sampleJWT, "myapp")
+		lookupHash := jwtType.LookupValue(sampleJWT, "acc1", "myapp")
 		lookupID := jwtType.ComputeID(lookupHash)
 
 		assert.Equal(t, tokenID, lookupID, "Token creation and lookup should produce same ID")
 		assert.True(t, strings.HasPrefix(tokenID, "jwtr_"))
+	})
+
+	t.Run("implements TransparentTokenType", func(t *testing.T) {
+		assert.True(t, jwtType.IsTransparent())
+		assert.Equal(t, "jwt", jwtType.CredentialFormat())
+		assert.Equal(t, "jwt", jwtType.Metadata().AuthMethodType)
 	})
 }
 

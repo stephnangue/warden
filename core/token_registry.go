@@ -18,8 +18,9 @@ var (
 // TokenTypeRegistry manages registered token types
 type TokenTypeRegistry struct {
 	mu           sync.RWMutex
-	types        map[string]TokenType // name -> TokenType
-	prefixToType map[string]TokenType // valuePrefix -> TokenType
+	types        map[string]TokenType            // name -> TokenType
+	prefixToType map[string]TokenType            // valuePrefix -> TokenType
+	authMethod   map[string]TransparentTokenType // AuthMethodType -> TransparentTokenType
 }
 
 // NewTokenTypeRegistry creates a new registry
@@ -27,6 +28,7 @@ func NewTokenTypeRegistry() *TokenTypeRegistry {
 	return &TokenTypeRegistry{
 		types:        make(map[string]TokenType),
 		prefixToType: make(map[string]TokenType),
+		authMethod:   make(map[string]TransparentTokenType),
 	}
 }
 
@@ -49,7 +51,44 @@ func (r *TokenTypeRegistry) Register(tokenType TokenType) error {
 		r.prefixToType[meta.ValuePrefix] = tokenType
 	}
 
+	// Index transparent token types by AuthMethodType so callers (the
+	// implicit-auth dispatcher, the system-introspect aggregator, the
+	// explicit-login guard) can ask "what TokenType serves mounts of
+	// type X?" without a hardcoded switch.
+	if meta.AuthMethodType != "" {
+		if tt, ok := tokenType.(TransparentTokenType); ok {
+			r.authMethod[meta.AuthMethodType] = tt
+		}
+	}
+
 	return nil
+}
+
+// IsTransparent returns true if the named token type implements
+// TransparentTokenType and self-reports as transparent. Returns false for
+// unknown types and for non-transparent types (e.g. warden_token).
+func (r *TokenTypeRegistry) IsTransparent(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	tokenType, ok := r.types[name]
+	if !ok {
+		return false
+	}
+	tt, ok := tokenType.(TransparentTokenType)
+	if !ok {
+		return false
+	}
+	return tt.IsTransparent()
+}
+
+// GetTransparentTokenTypeForAuthMethod returns the TransparentTokenType
+// registered to serve mounts whose entry.Type equals the given mountType.
+// Returns nil if no transparent type is registered for that mount type.
+func (r *TokenTypeRegistry) GetTransparentTokenTypeForAuthMethod(mountType string) TransparentTokenType {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.authMethod[mountType]
 }
 
 // GetByName retrieves a token type by its name

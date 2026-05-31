@@ -632,13 +632,15 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request, isI
 	resp, routeErr := c.doRouting(ctx, req)
 
 	// If the response generated an authentication, then generate the token.
-	// Transparent token types (jwt_role, cert_role) are reserved for the
-	// internal gateway auth flow — reject explicit login attempts early.
+	// Transparent token types are reserved for the internal gateway auth flow
+	// — reject explicit login attempts early. The set of transparent types is
+	// determined by the registry rather than a hardcoded list so adding a new
+	// transparent auth method does not require touching this guard.
 	if resp != nil && resp.Auth != nil {
-		if !isInternalLogin && (resp.Auth.TokenType == "jwt_role" || resp.Auth.TokenType == "cert_role") {
+		if !isInternalLogin && c.tokenStore.IsTransparentType(resp.Auth.TokenType) {
 			return logical.ErrorResponse(logical.ErrBadRequest("explicit login is not supported for roles with token_type=transparent; clients authenticate implicitly via gateway requests")), nil, nil
 		} else {
-			respTokenCreate, errCreateToken := c.LoginCreateToken(ctx, resp)
+			respTokenCreate, errCreateToken := c.LoginCreateToken(ctx, req, resp)
 			if errCreateToken != nil {
 				return respTokenCreate, nil, errCreateToken
 			}
@@ -654,7 +656,7 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request, isI
 	return resp, auth, routeErr
 }
 
-func (c *Core) LoginCreateToken(ctx context.Context, resp *logical.Response) (*logical.Response, error) {
+func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp *logical.Response) (*logical.Response, error) {
 	auth := resp.Auth
 
 	// Prevent internal policies from being assigned to tokens.
@@ -667,6 +669,16 @@ func (c *Core) LoginCreateToken(ctx context.Context, resp *logical.Response) (*l
 		}
 	}
 
+	// req.MountAccessor is populated by handleLoginRequest from the routed
+	// mount entry. Carry it through so transparent token types can fold it
+	// into their cache key (prevents cross-mount cache contamination when
+	// two mounts of the same auth type have overlapping role names + the
+	// same credential).
+	var mountAccessor string
+	if req != nil {
+		mountAccessor = req.MountAccessor
+	}
+
 	now := time.Now()
 	authData := logical.AuthData{
 		PrincipalID:    auth.PrincipalID,
@@ -676,6 +688,7 @@ func (c *Core) LoginCreateToken(ctx context.Context, resp *logical.Response) (*l
 		Policies:       auth.Policies,
 		ClientIP:       auth.ClientIP,
 		TokenValue:     auth.ClientToken,
+		MountAccessor:  mountAccessor,
 		Actors:         auth.Actors,
 	}
 
@@ -688,7 +701,7 @@ func (c *Core) LoginCreateToken(ctx context.Context, resp *logical.Response) (*l
 	}
 
 	data := map[string]any{
-		"token_type":     authhelper.DisplayTokenType(tokenValue.Type),
+		"token_type":     authhelper.DisplayTokenType(tokenValue.Type, c.tokenStore.IsTransparentType(tokenValue.Type)),
 		"expire_at":      tokenValue.ExpireAt,
 		"bound_ip":       tokenValue.CreatedByIP,
 		"token_id":       tokenValue.ID,
@@ -1345,40 +1358,56 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		ctx = context.WithValue(ctx, logical.ClientIPKey, req.ClientIP)
 	}
 
+	// Resolve the auth mount once so transparent token types can fold the
+	// stable mount accessor into their cache key. Without this, two mounts
+	// of the same auth type with overlapping role names + the same credential
+	// would silently share a cache entry.
+	authMountEntry := c.router.MatchingMountEntry(ctx, autoAuthPath)
+	var mountAccessor string
+	if authMountEntry != nil {
+		mountAccessor = authMountEntry.Accessor
+	}
+
 	// Detect credential type: client certificate or JWT bearer token
 	var singleflightKey string
 	var lookupFunc func() (*TokenEntry, error)
 	var loginData map[string]any
-	var credType string // "cert" or "jwt" — used for post-login lookup with resolved role
-	var credKey string  // fingerprint or JWT — used for post-login lookup with resolved role
+	var credKey string // fingerprint or JWT — used for post-login lookup with resolved role
 
 	// Check for client certificate first (forwarded from LB or direct TLS)
 	clientCert := extractTransparentClientCert(req)
+
+	// Per-credential TransparentTokenType: cert credentials are served by
+	// CertRoleTokenType, JWT-bearer credentials by JWTRoleTokenType. PR2
+	// will replace this credential-format sniff with a registry lookup on
+	// mountEntry.Type so adding a new transparent auth method does not
+	// require touching this switch.
+	var ttype TransparentTokenType
 
 	switch {
 	case clientCert != nil:
 		// Certificate-based transparent auth
 		hash := sha256.Sum256(clientCert.Raw)
 		fingerprint := hex.EncodeToString(hash[:])
-		sfHash := sha256.Sum256([]byte("cert:" + fingerprint + ":" + authRole))
+		ttype = &CertRoleTokenType{}
+		sfHash := sha256.Sum256([]byte("cert:" + mountAccessor + ":" + fingerprint + ":" + authRole))
 		singleflightKey = hex.EncodeToString(sfHash[:])
 		loginData = map[string]any{"role": authRole}
-		credType = "cert"
 		credKey = fingerprint
 		lookupFunc = func() (*TokenEntry, error) {
-			return c.LookupCertTokenWithRole(ctx, fingerprint, authRole)
+			return c.LookupTransparentTokenWithRole(ctx, ttype, fingerprint, mountAccessor, authRole)
 		}
 
 	case strings.HasPrefix(req.ClientToken, "eyJ"):
 		// JWT-based transparent auth
 		clientToken := req.ClientToken
-		jwtHash := sha256.Sum256([]byte(clientToken + ":" + authRole))
+		ttype = &JWTRoleTokenType{}
+		jwtHash := sha256.Sum256([]byte("jwt:" + mountAccessor + ":" + clientToken + ":" + authRole))
 		singleflightKey = hex.EncodeToString(jwtHash[:])
 		loginData = map[string]any{"jwt": clientToken, "role": authRole}
-		credType = "jwt"
 		credKey = clientToken
 		lookupFunc = func() (*TokenEntry, error) {
-			return c.LookupJWTTokenWithRole(ctx, clientToken, authRole)
+			return c.LookupTransparentTokenWithRole(ctx, ttype, clientToken, mountAccessor, authRole)
 		}
 
 	default:
@@ -1451,12 +1480,7 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		resolvedRole := loginResp.Auth.RoleName
 		var newTE *TokenEntry
 		var postErr error
-		switch credType {
-		case "cert":
-			newTE, postErr = c.LookupCertTokenWithRole(ctx, credKey, resolvedRole)
-		case "jwt":
-			newTE, postErr = c.LookupJWTTokenWithRole(ctx, credKey, resolvedRole)
-		}
+		newTE, postErr = c.LookupTransparentTokenWithRole(ctx, ttype, credKey, mountAccessor, resolvedRole)
 		if postErr != nil {
 			return nil, fmt.Errorf("failed to lookup created token: %w", postErr)
 		}

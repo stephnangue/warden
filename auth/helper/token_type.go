@@ -15,12 +15,13 @@ func DefaultTokenType(backend string) string {
 }
 
 // DisplayTokenType maps an internal token type name to its user-facing alias.
-// Unknown values pass through unchanged.
-func DisplayTokenType(internal string) string {
-	switch internal {
-	case "jwt_role", "cert_role":
+// Pass isTransparent=true (as reported by the TokenStore registry) to alias
+// transparent-family token types to "transparent". This keeps auth/helper
+// decoupled from the core token registry: callers consult the registry once
+// and hand the boolean here.
+func DisplayTokenType(internal string, isTransparent bool) string {
+	if isTransparent {
 		return "transparent"
-	default:
-		return internal
 	}
+	return internal
 }

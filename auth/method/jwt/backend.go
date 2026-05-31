@@ -62,6 +62,8 @@ type jwtAuthBackend struct {
 	storageView sdklogical.Storage
 }
 
+var _ logical.Factory = Factory
+
 // Factory creates a new JWT auth backend using the logical.Factory pattern
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
 	b := &jwtAuthBackend{

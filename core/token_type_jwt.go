@@ -12,16 +12,19 @@ import (
 // This token type is used for implicit authentication, where clients
 // send requests with JWTs directly and Warden performs implicit authentication.
 // JWTs are recognized by their "eyJ" prefix (base64 encoded '{"').
-// The JWT+role combination is used as the lookup value, and its hash becomes the token ID.
+// The (mountAccessor, JWT, role) tuple is used as the lookup value, and its
+// hash becomes the token ID — mountAccessor prevents cache contamination
+// across two JWT mounts that share a role name and a credential.
 type JWTRoleTokenType struct{}
 
 func (t *JWTRoleTokenType) Metadata() TokenTypeMetadata {
 	return TokenTypeMetadata{
-		Name:        "jwt_role",
-		IDPrefix:    "jwtr_",
-		ValuePrefix: "eyJ", // Base64 encoded '{"' - JWT header start
-		Description: "JWT bearer token with role binding",
-		DefaultTTL:  1 * time.Hour,
+		Name:           "jwt_role",
+		IDPrefix:       "jwtr_",
+		ValuePrefix:    "eyJ", // Base64 encoded '{"' - JWT header start
+		Description:    "JWT bearer token with role binding",
+		DefaultTTL:     1 * time.Hour,
+		AuthMethodType: "jwt",
 	}
 }
 
@@ -29,12 +32,13 @@ func (t *JWTRoleTokenType) Generate(_ context.Context, authData *AuthData, entry
 	// For JWT tokens, we don't generate - the JWT comes from an external IdP.
 	// The JWT is passed via authData.TokenValue for implicit auth.
 	//
-	// We store a hash of the composite "jwt:role" value (not the raw JWT) for:
+	// We store a hash of the composite (mountAccessor, jwt, role) value (not
+	// the raw JWT) for:
 	// - Security: raw JWTs may contain sensitive claims
 	// - ID computation: ComputeID() uses this to derive the token ID
-	// The role is included because:
-	// - Same JWT with different roles should produce different tokens
-	// - Each role may have different policies and credential specs
+	// The role + mountAccessor are included so:
+	// - Same JWT with different roles produces different tokens
+	// - Same JWT + role on two different mounts produces different tokens
 	if authData == nil {
 		return entry.Data, nil
 	}
@@ -44,8 +48,7 @@ func (t *JWTRoleTokenType) Generate(_ context.Context, authData *AuthData, entry
 		return entry.Data, nil
 	}
 
-	// Store hash of composite "jwt:role" value using ComputeData
-	entry.Data["jwt"] = t.ComputeData(jwt, authData.RoleName)
+	entry.Data["jwt"] = t.LookupValue(jwt, authData.MountAccessor, authData.RoleName)
 
 	return entry.Data, nil
 }
@@ -71,15 +74,23 @@ func (t *JWTRoleTokenType) LookupKey() string {
 	return "jwt"
 }
 
-// ComputeData computes a SHA-256 hash of the composite "jwt:role" value.
-// This hash is stored in entry.Data["jwt"] and used for both ID computation
-// and validation. Hashing provides security (no raw JWT in storage) and
-// ensures consistent ID computation across token creation and lookup.
-func (t *JWTRoleTokenType) ComputeData(jwt, role string) string {
-	lookupValue := jwt
-	if role != "" {
-		lookupValue = jwt + ":" + role
-	}
-	h := sha256.Sum256([]byte(lookupValue))
+// LookupValue computes the SHA-256 hash of (mountAccessor, jwt, role) that
+// ComputeID hashes into the byID-cache key. Including mountAccessor
+// prevents cache contamination across two JWT mounts with overlapping role
+// names + the same credential. Satisfies TransparentTokenType.
+func (t *JWTRoleTokenType) LookupValue(jwt, mountAccessor, role string) string {
+	h := sha256.Sum256([]byte(mountAccessor + ":" + jwt + ":" + role))
 	return hex.EncodeToString(h[:])
 }
+
+// IsTransparent always returns true; opts JWTRoleTokenType into the
+// transparent-auth family behaviors via the registry.
+func (t *JWTRoleTokenType) IsTransparent() bool { return true }
+
+// CredentialFormat reports "jwt" — generic JWT bearer tokens validated
+// by JWKS/OIDC discovery. Kubernetes SA JWTs use the distinct
+// "k8s_sa_jwt" subtype so the introspect aggregator can route them only
+// to kubernetes mounts.
+func (t *JWTRoleTokenType) CredentialFormat() string { return "jwt" }
+
+var _ TransparentTokenType = (*JWTRoleTokenType)(nil)

@@ -40,6 +40,8 @@ type certAuthBackend struct {
 	revocationChecker *revocationChecker
 }
 
+var _ logical.Factory = Factory
+
 // Factory creates a new certificate auth backend
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
 	b := &certAuthBackend{
