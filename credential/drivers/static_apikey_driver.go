@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -218,7 +219,7 @@ func (d *StaticAPIKeyDriver) VerifySpec(ctx context.Context, spec *credential.Cr
 	method := credential.GetString(d.credSource.Config, "verify_method", http.MethodGet)
 	headers := buildAPIKeyAuthHeaders(d.credSource.Config, apiKey)
 
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       apiKeyMaxRetryAttempts,
 		MaxBodySize:       apiKeyMaxResponseBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
@@ -226,13 +227,13 @@ func (d *StaticAPIKeyDriver) VerifySpec(ctx context.Context, spec *credential.Cr
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method:  method,
 		URL:     apiURL,
 		Headers: headers,
 	}
 
-	_, _, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	_, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
 		return fmt.Errorf("%s API key verification failed: %w", name, err)
 	}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -203,7 +204,7 @@ func (d *OVHDriver) fetchOAuth2Token(ctx context.Context) (accessToken string, t
 		"client_secret": {clientSecret},
 	}
 
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       ovhMaxRetryAttempts,
 		MaxBodySize:       ovhMaxResponseBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500, 503},
@@ -211,7 +212,7 @@ func (d *OVHDriver) fetchOAuth2Token(ctx context.Context) (accessToken string, t
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method: http.MethodPost,
 		URL:    d.tokenURL,
 		Body:   []byte(formData.Encode()),
@@ -221,7 +222,7 @@ func (d *OVHDriver) fetchOAuth2Token(ctx context.Context) (accessToken string, t
 		},
 	}
 
-	respBody, _, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
 		return "", 0, fmt.Errorf("OAuth2 token request failed: %w", err)
 	}
@@ -277,7 +278,7 @@ type s3CredentialResult struct {
 func (d *OVHDriver) createS3Credentials(ctx context.Context, token, projectID, userID string) (*s3CredentialResult, error) {
 	apiURL := fmt.Sprintf("%s/cloud/project/%s/user/%s/s3Credentials", d.apiURL, projectID, userID)
 
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       ovhMaxRetryAttempts,
 		MaxBodySize:       ovhMaxResponseBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500, 503},
@@ -285,7 +286,7 @@ func (d *OVHDriver) createS3Credentials(ctx context.Context, token, projectID, u
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method: http.MethodPost,
 		URL:    apiURL,
 		Headers: map[string]string{
@@ -295,7 +296,7 @@ func (d *OVHDriver) createS3Credentials(ctx context.Context, token, projectID, u
 		},
 	}
 
-	respBody, _, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OVH S3 credentials: %w", err)
 	}
@@ -406,7 +407,7 @@ func (d *OVHDriver) Revoke(ctx context.Context, leaseID string) error {
 
 	apiURL := fmt.Sprintf("%s/cloud/project/%s/user/%s/s3Credentials/%s", d.apiURL, projectID, userID, accessKeyID)
 
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       ovhMaxRetryAttempts,
 		MaxBodySize:       ovhMaxResponseBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500, 503},
@@ -414,7 +415,7 @@ func (d *OVHDriver) Revoke(ctx context.Context, leaseID string) error {
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method: http.MethodDelete,
 		URL:    apiURL,
 		Headers: map[string]string{
@@ -424,7 +425,7 @@ func (d *OVHDriver) Revoke(ctx context.Context, leaseID string) error {
 		OKStatuses: []int{http.StatusNoContent, http.StatusOK, http.StatusNotFound},
 	}
 
-	_, _, err = ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	_, _, err = httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
 		return fmt.Errorf("failed to revoke OVH S3 credentials %s: %w", accessKeyID, err)
 	}

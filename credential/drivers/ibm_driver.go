@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -462,7 +463,7 @@ func (d *IBMDriver) discoverAPIKeyDetailsLocked(ctx context.Context) error {
 		return fmt.Errorf("failed to marshal API key details request: %w", err)
 	}
 
-	respBody, _, err := ExecuteWithRetry(ctx, d.httpClient, HTTPRequest{
+	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httputil.HTTPRequest{
 		Method: "POST",
 		URL:    iamEndpoint + "/v1/apikeys/details",
 		Body:   reqBody,
@@ -523,7 +524,7 @@ func (d *IBMDriver) createAPIKey(ctx context.Context, iamToken string) (string, 
 		return "", "", fmt.Errorf("failed to marshal create API key request: %w", err)
 	}
 
-	respBody, _, err := ExecuteWithRetry(ctx, d.httpClient, HTTPRequest{
+	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httputil.HTTPRequest{
 		Method: "POST",
 		URL:    iamEndpoint + "/v1/apikeys",
 		Body:   reqBody,
@@ -556,7 +557,7 @@ func (d *IBMDriver) createAPIKey(ctx context.Context, iamToken string) (string, 
 func (d *IBMDriver) deleteAPIKey(ctx context.Context, iamToken, apiKeyID string) error {
 	iamEndpoint := d.getIAMEndpoint()
 
-	_, _, err := ExecuteWithRetry(ctx, d.httpClient, HTTPRequest{
+	_, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httputil.HTTPRequest{
 		Method: "DELETE",
 		URL:    fmt.Sprintf("%s/v1/apikeys/%s", iamEndpoint, url.PathEscape(apiKeyID)),
 		Headers: map[string]string{
@@ -577,11 +578,11 @@ func (d *IBMDriver) getIAMEndpoint() string {
 }
 
 // defaultIBMRetryConfig returns the standard retry configuration for IBM Cloud API calls.
-func defaultIBMRetryConfig() HTTPRetryConfig {
-	return HTTPRetryConfig{
+func defaultIBMRetryConfig() httputil.HTTPRetryConfig {
+	return httputil.HTTPRetryConfig{
 		MaxAttempts:       3,
 		MaxBodySize:       ibmMaxResponseBodySize,
-		RetryableStatuses: []int{429, 500}, // 500 = wildcard for all 5xx (see ExecuteWithRetry)
+		RetryableStatuses: []int{429, 500}, // 500 = wildcard for all 5xx (see httputil.ExecuteWithRetry)
 		BaseBackoff:       1 * time.Second,
 		JitterPercent:     20,
 	}

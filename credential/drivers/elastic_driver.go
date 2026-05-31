@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -481,7 +482,7 @@ func (d *ElasticDriver) doElasticRequest(ctx context.Context, method, path strin
 		headers["Content-Type"] = "application/json"
 	}
 
-	return ExecuteWithRetry(ctx, d.httpClient, HTTPRequest{
+	return httputil.ExecuteWithRetry(ctx, d.httpClient, httputil.HTTPRequest{
 		Method:  method,
 		URL:     elasticURL + path,
 		Body:    body,
@@ -490,11 +491,11 @@ func (d *ElasticDriver) doElasticRequest(ctx context.Context, method, path strin
 }
 
 // defaultElasticRetryConfig returns the standard retry configuration for Elasticsearch API calls.
-func defaultElasticRetryConfig() HTTPRetryConfig {
-	return HTTPRetryConfig{
+func defaultElasticRetryConfig() httputil.HTTPRetryConfig {
+	return httputil.HTTPRetryConfig{
 		MaxAttempts:       3,
 		MaxBodySize:       elasticMaxResponseBodySize,
-		RetryableStatuses: []int{429, 500}, // 500 = wildcard for all 5xx (see ExecuteWithRetry)
+		RetryableStatuses: []int{429, 500}, // 500 = wildcard for all 5xx (see httputil.ExecuteWithRetry)
 		BaseBackoff:       1 * time.Second,
 		JitterPercent:     20,
 	}

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/stephnangue/warden/helper/httputil"
 )
 
 // ibmIAMTokenResponse represents the IBM Cloud IAM token endpoint response.
@@ -40,7 +42,7 @@ func exchangeIBMAPIKeyForIAMToken(ctx context.Context, httpClient *http.Client, 
 		"apikey":     {apiKey},
 	}
 
-	respBody, _, err := ExecuteWithRetry(ctx, httpClient, HTTPRequest{
+	respBody, _, err := httputil.ExecuteWithRetry(ctx, httpClient, httputil.HTTPRequest{
 		Method: "POST",
 		URL:    iamEndpoint + "/identity/token",
 		Body:   []byte(form.Encode()),

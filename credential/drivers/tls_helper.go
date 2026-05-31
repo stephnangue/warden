@@ -1,7 +1,6 @@
 package drivers
 
 import (
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
@@ -9,49 +8,35 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 )
 
-// BuildHTTPClient creates an *http.Client with optional TLS configuration.
-// It reads "ca_data" and "tls_skip_verify" from the config map.
-// If neither is set, returns a plain client with the given timeout.
+// BuildHTTPClient is the credential-driver-facing adapter over
+// httputil.BuildHTTPClient. It reads "ca_data" (base64-encoded PEM) and
+// "tls_skip_verify" from the driver's config map and delegates to the
+// generic helper. Kept as a shim so existing drivers don't need to
+// change call sites; new consumers (auth methods, future drivers) can
+// use httputil.BuildHTTPClient directly with raw PEM.
 func BuildHTTPClient(config map[string]string, timeout time.Duration) (*http.Client, error) {
 	caData := credential.GetString(config, "ca_data", "")
 	skipVerify := credential.GetBool(config, "tls_skip_verify", false)
 
-	if caData == "" && !skipVerify {
-		return &http.Client{Timeout: timeout}, nil
-	}
-
-	tlsConfig := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-	}
-
-	if skipVerify {
-		tlsConfig.InsecureSkipVerify = true
-	}
-
+	var caPEM []byte
 	if caData != "" {
-		pemBytes, err := base64.StdEncoding.DecodeString(caData)
+		decoded, err := base64.StdEncoding.DecodeString(caData)
 		if err != nil {
 			return nil, fmt.Errorf("ca_data is not valid base64: %w", err)
 		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pemBytes) {
-			return nil, fmt.Errorf("ca_data contains no valid PEM certificates")
-		}
-		tlsConfig.RootCAs = pool
+		caPEM = decoded
 	}
 
-	return &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			TLSClientConfig: tlsConfig,
-		},
-	}, nil
+	return httputil.BuildHTTPClient(caPEM, skipVerify, timeout)
 }
 
 // ValidateCAData validates that a ca_data value is valid base64-encoded PEM.
-// Intended for use as a credential.StringField().Custom() validator.
+// Intended for use as a credential.StringField().Custom() validator. Stays in
+// credential/drivers because it's tied to the driver-schema field convention
+// (base64-encoded transport form); raw-PEM validators belong elsewhere.
 func ValidateCAData(v string) error {
 	if v == "" {
 		return nil

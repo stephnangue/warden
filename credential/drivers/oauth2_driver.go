@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -213,15 +214,15 @@ func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.Cred
 		form.Set(k, v)
 	}
 
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       oauth2MaxRetryAttempts,
-		MaxBodySize:       DefaultMaxBodySize,
+		MaxBodySize:       httputil.DefaultMaxBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
 		BaseBackoff:       1 * time.Second,
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method: http.MethodPost,
 		URL:    credential.GetString(config, "token_url", ""),
 		Body:   []byte(form.Encode()),
@@ -231,7 +232,7 @@ func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.Cred
 		},
 	}
 
-	body, _, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	body, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
 		return nil, 0, "", fmt.Errorf("%s OAuth2 token exchange failed: %w", name, err)
 	}
@@ -299,21 +300,21 @@ func (d *OAuth2Driver) VerifySpec(ctx context.Context, spec *credential.CredSpec
 
 	method := credential.GetString(d.credSource.Config, "verify_method", http.MethodGet)
 
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       oauth2MaxRetryAttempts,
-		MaxBodySize:       DefaultMaxBodySize,
+		MaxBodySize:       httputil.DefaultMaxBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
 		BaseBackoff:       1 * time.Second,
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method:  method,
 		URL:     verifyURL,
 		Headers: headers,
 	}
 
-	_, _, err = ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	_, _, err = httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
 		return fmt.Errorf("%s OAuth2 token verification failed: %w", name, err)
 	}

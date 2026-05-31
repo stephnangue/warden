@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -588,7 +589,7 @@ func (d *GitLabDriver) doGitLabRequest(ctx context.Context, method, path string,
 	}
 
 	// Configure retry behavior (only retry on rate limiting)
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       gitlabMaxRetryAttempts,
 		MaxBodySize:       gitlabMaxResponseBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests}, // 429 only
@@ -596,14 +597,14 @@ func (d *GitLabDriver) doGitLabRequest(ctx context.Context, method, path string,
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method:  method,
 		URL:     apiURL,
 		Body:    body,
 		Headers: headers,
 	}
 
-	respBody, _, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil && d.logger != nil {
 		d.logger.Warn("GitLab API request failed", logger.String("error", err.Error()))
 	}

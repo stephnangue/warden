@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -229,7 +230,7 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 
 	apiURL := d.iamURL("/api-keys")
 
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       scalewayMaxRetryAttempts,
 		MaxBodySize:       scalewayMaxResponseBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
@@ -237,7 +238,7 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method: http.MethodPost,
 		URL:    apiURL,
 		Body:   bodyJSON,
@@ -248,7 +249,7 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 		},
 	}
 
-	respBody, _, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
 		return nil, 0, "", fmt.Errorf("failed to create Scaleway API key: %w", err)
 	}
@@ -303,7 +304,7 @@ func (d *ScalewayDriver) Revoke(ctx context.Context, leaseID string) error {
 
 	apiURL := d.iamURL("/api-keys/" + leaseID)
 
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       scalewayMaxRetryAttempts,
 		MaxBodySize:       scalewayMaxResponseBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
@@ -311,7 +312,7 @@ func (d *ScalewayDriver) Revoke(ctx context.Context, leaseID string) error {
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method: http.MethodDelete,
 		URL:    apiURL,
 		Headers: map[string]string{
@@ -321,7 +322,7 @@ func (d *ScalewayDriver) Revoke(ctx context.Context, leaseID string) error {
 		OKStatuses: []int{http.StatusNoContent, http.StatusOK, http.StatusNotFound},
 	}
 
-	_, _, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	_, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
 		return fmt.Errorf("failed to revoke Scaleway API key %s: %w", leaseID, err)
 	}
@@ -369,7 +370,7 @@ func (d *ScalewayDriver) PrepareRotation(ctx context.Context) (map[string]string
 		return nil, nil, 0, fmt.Errorf("management_access_key is required for rotation")
 	}
 
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       scalewayMaxRetryAttempts,
 		MaxBodySize:       scalewayMaxResponseBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
@@ -379,13 +380,13 @@ func (d *ScalewayDriver) PrepareRotation(ctx context.Context) (map[string]string
 
 	// Look up the current key to find its bearer (application_id or user_id)
 	getURL := d.iamURL("/api-keys/" + managementAccessKey)
-	getReq := HTTPRequest{
+	getReq := httputil.HTTPRequest{
 		Method:  http.MethodGet,
 		URL:     getURL,
 		Headers: map[string]string{"X-Auth-Token": managementKey, "Accept": "application/json"},
 	}
 
-	respBody, _, err := ExecuteWithRetry(ctx, d.httpClient, getReq, retryConfig)
+	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, getReq, retryConfig)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to look up current management key: %w", err)
 	}
@@ -416,14 +417,14 @@ func (d *ScalewayDriver) PrepareRotation(ctx context.Context) (map[string]string
 	}
 
 	createURL := d.iamURL("/api-keys")
-	createReq := HTTPRequest{
+	createReq := httputil.HTTPRequest{
 		Method:  http.MethodPost,
 		URL:     createURL,
 		Body:    bodyJSON,
 		Headers: map[string]string{"X-Auth-Token": managementKey, "Content-Type": "application/json", "Accept": "application/json"},
 	}
 
-	respBody, _, err = ExecuteWithRetry(ctx, d.httpClient, createReq, retryConfig)
+	respBody, _, err = httputil.ExecuteWithRetry(ctx, d.httpClient, createReq, retryConfig)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to create new management key: %w", err)
 	}
@@ -488,7 +489,7 @@ func (d *ScalewayDriver) CleanupRotation(ctx context.Context, cleanupConfig map[
 	}
 
 	deleteURL := d.iamURL("/api-keys/" + oldAccessKey)
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       scalewayMaxRetryAttempts,
 		MaxBodySize:       scalewayMaxResponseBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
@@ -496,14 +497,14 @@ func (d *ScalewayDriver) CleanupRotation(ctx context.Context, cleanupConfig map[
 		JitterPercent:     20,
 	}
 
-	deleteReq := HTTPRequest{
+	deleteReq := httputil.HTTPRequest{
 		Method:     http.MethodDelete,
 		URL:        deleteURL,
 		Headers:    map[string]string{"X-Auth-Token": managementKey, "Accept": "application/json"},
 		OKStatuses: []int{http.StatusNoContent, http.StatusOK, http.StatusNotFound},
 	}
 
-	_, _, err := ExecuteWithRetry(ctx, d.httpClient, deleteReq, retryConfig)
+	_, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, deleteReq, retryConfig)
 	if err != nil {
 		d.logger.Warn("failed to delete old management key during cleanup",
 			logger.Err(err),
@@ -548,7 +549,7 @@ func (d *ScalewayDriver) verifyStaticKeys(ctx context.Context, spec *credential.
 	// Verify the key works by calling a lightweight IAM endpoint
 	apiURL := d.iamURL("/api-keys/" + accessKey)
 
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       scalewayMaxRetryAttempts,
 		MaxBodySize:       scalewayMaxResponseBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
@@ -556,7 +557,7 @@ func (d *ScalewayDriver) verifyStaticKeys(ctx context.Context, spec *credential.
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method: http.MethodGet,
 		URL:    apiURL,
 		Headers: map[string]string{
@@ -565,7 +566,7 @@ func (d *ScalewayDriver) verifyStaticKeys(ctx context.Context, spec *credential.
 		},
 	}
 
-	_, _, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	_, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
 		return fmt.Errorf("Scaleway API key verification failed: %w", err)
 	}

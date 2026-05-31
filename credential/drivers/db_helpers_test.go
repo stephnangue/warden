@@ -1,14 +1,16 @@
 package drivers
 
 import (
-	"testing"
-
 	"context"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
+	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/stephnangue/warden/helper/httputil"
 )
 
 func TestDefaultPortForEngine(t *testing.T) {
@@ -28,20 +30,20 @@ func TestReadLimitedBody(t *testing.T) {
 }
 
 // =============================================================================
-// HTTPRetryConfig Tests
+// httputil.HTTPRetryConfig Tests
 // =============================================================================
 
 func TestDefaultHTTPRetryConfig(t *testing.T) {
-	cfg := DefaultHTTPRetryConfig()
+	cfg := httputil.DefaultHTTPRetryConfig()
 	assert.Equal(t, 3, cfg.MaxAttempts)
-	assert.Equal(t, int64(DefaultMaxBodySize), cfg.MaxBodySize)
+	assert.Equal(t, int64(httputil.DefaultMaxBodySize), cfg.MaxBodySize)
 	assert.Contains(t, cfg.RetryableStatuses, 429)
 	assert.Equal(t, 1*time.Second, cfg.BaseBackoff)
 	assert.Equal(t, 20, cfg.JitterPercent)
 }
 
 // =============================================================================
-// ExecuteWithRetry Tests
+// httputil.ExecuteWithRetry Tests
 // =============================================================================
 
 func TestExecuteWithRetry_Success(t *testing.T) {
@@ -51,11 +53,11 @@ func TestExecuteWithRetry_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, status, err := ExecuteWithRetry(
+	body, status, err := httputil.ExecuteWithRetry(
 		context.Background(),
 		srv.Client(),
-		HTTPRequest{Method: "GET", URL: srv.URL},
-		DefaultHTTPRetryConfig(),
+		httputil.HTTPRequest{Method: "GET", URL: srv.URL},
+		httputil.DefaultHTTPRetryConfig(),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, status)
@@ -69,11 +71,11 @@ func TestExecuteWithRetry_NonRetryableError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, status, err := ExecuteWithRetry(
+	_, status, err := httputil.ExecuteWithRetry(
 		context.Background(),
 		srv.Client(),
-		HTTPRequest{Method: "GET", URL: srv.URL},
-		DefaultHTTPRetryConfig(),
+		httputil.HTTPRequest{Method: "GET", URL: srv.URL},
+		httputil.DefaultHTTPRetryConfig(),
 	)
 	assert.Error(t, err)
 	assert.Equal(t, http.StatusForbidden, status)
@@ -86,15 +88,15 @@ func TestExecuteWithRetry_WithExplicitOKStatuses(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, status, err := ExecuteWithRetry(
+	body, status, err := httputil.ExecuteWithRetry(
 		context.Background(),
 		srv.Client(),
-		HTTPRequest{
+		httputil.HTTPRequest{
 			Method:     "POST",
 			URL:        srv.URL,
 			OKStatuses: []int{http.StatusCreated},
 		},
-		DefaultHTTPRetryConfig(),
+		httputil.DefaultHTTPRetryConfig(),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusCreated, status)
@@ -105,13 +107,13 @@ func TestExecuteWithRetry_ContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	_, _, err := ExecuteWithRetry(
+	_, _, err := httputil.ExecuteWithRetry(
 		ctx,
 		&http.Client{},
-		HTTPRequest{Method: "GET", URL: "http://localhost:1"},
-		HTTPRetryConfig{
+		httputil.HTTPRequest{Method: "GET", URL: "http://localhost:1"},
+		httputil.HTTPRetryConfig{
 			MaxAttempts:       3,
-			MaxBodySize:       DefaultMaxBodySize,
+			MaxBodySize:       httputil.DefaultMaxBodySize,
 			RetryableStatuses: []int{429},
 			BaseBackoff:       1 * time.Millisecond,
 			JitterPercent:     20,
@@ -134,13 +136,13 @@ func TestExecuteWithRetry_RetryOn5xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, status, err := ExecuteWithRetry(
+	body, status, err := httputil.ExecuteWithRetry(
 		context.Background(),
 		srv.Client(),
-		HTTPRequest{Method: "GET", URL: srv.URL},
-		HTTPRetryConfig{
+		httputil.HTTPRequest{Method: "GET", URL: srv.URL},
+		httputil.HTTPRetryConfig{
 			MaxAttempts:       3,
-			MaxBodySize:       DefaultMaxBodySize,
+			MaxBodySize:       httputil.DefaultMaxBodySize,
 			RetryableStatuses: []int{500}, // 500 means all 5xx
 			BaseBackoff:       1 * time.Millisecond,
 			JitterPercent:     10,
@@ -162,17 +164,17 @@ func TestExecuteWithRetry_WithHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, status, err := ExecuteWithRetry(
+	_, status, err := httputil.ExecuteWithRetry(
 		context.Background(),
 		srv.Client(),
-		HTTPRequest{
+		httputil.HTTPRequest{
 			Method: "GET",
 			URL:    srv.URL,
 			Headers: map[string]string{
 				"Authorization": "Bearer test-token",
 			},
 		},
-		DefaultHTTPRetryConfig(),
+		httputil.DefaultHTTPRetryConfig(),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, status)
@@ -184,15 +186,15 @@ func TestExecuteWithRetry_WithBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, status, err := ExecuteWithRetry(
+	_, status, err := httputil.ExecuteWithRetry(
 		context.Background(),
 		srv.Client(),
-		HTTPRequest{
+		httputil.HTTPRequest{
 			Method: "POST",
 			URL:    srv.URL,
 			Body:   []byte(`{"key":"value"}`),
 		},
-		DefaultHTTPRetryConfig(),
+		httputil.DefaultHTTPRetryConfig(),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, status)
