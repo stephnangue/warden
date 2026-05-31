@@ -11,8 +11,11 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/hashicorp/go-uuid"
 	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/openbao/openbao/sdk/v2/physical/inmem"
+	"github.com/stretchr/testify/require"
+
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
@@ -585,4 +588,55 @@ func createTestCore(t *testing.T) *Core {
 	_ = core.setupMounts(ctx)
 
 	return core
+}
+
+// mountStubAuthMethod registers a stub auth mount at the given mountPath
+// (e.g. "jwt/") with the given mountType (e.g. "jwt", "cert") in the root
+// namespace. See mountStubAuthMethodInNamespace for non-root mounts.
+//
+// The mount has no backend — it exists only so router lookups
+// (MatchingMountEntry) succeed and tests can exercise code paths that
+// need a real MountEntry (mount accessor, entry.Type) without spinning
+// up the full auth-method factory. Returns the created MountEntry.
+//
+// The router path becomes authRoutePrefix + mountPath ("auth/jwt/"). Pass
+// the same value to tests that drive performImplicitAuth via autoAuthPath.
+func mountStubAuthMethod(t *testing.T, c *Core, mountPath, mountType string) *MountEntry {
+	t.Helper()
+	return mountStubAuthMethodInNamespace(t, c, mountPath, mountType, namespace.RootNamespace)
+}
+
+// mountStubAuthMethodInNamespace is the namespace-aware variant of
+// mountStubAuthMethod. The router prefix becomes ns.Path + "auth/" + mountPath
+// so MatchingMountEntry called with a request context in the same namespace
+// will resolve it.
+func mountStubAuthMethodInNamespace(t *testing.T, c *Core, mountPath, mountType string, ns *namespace.Namespace) *MountEntry {
+	t.Helper()
+
+	accessor, err := c.generateMountAccessor(mountType)
+	require.NoError(t, err)
+	backendUUID, err := uuid.GenerateUUID()
+	require.NoError(t, err)
+	mountUUID, err := uuid.GenerateUUID()
+	require.NoError(t, err)
+
+	entry := &MountEntry{
+		Class:            mountClassAuth,
+		Path:             mountPath,
+		Type:             mountType,
+		UUID:             mountUUID,
+		Accessor:         accessor,
+		BackendAwareUUID: backendUUID,
+		NamespaceID:      ns.ID,
+		namespace:        ns,
+	}
+
+	view := NewBarrierView(c.barrier, "auth/"+entry.UUID+"/")
+	require.NoError(t, c.router.Mount(authRoutePrefix+mountPath, nil, entry, view))
+
+	c.mountsLock.Lock()
+	c.mounts.Entries = append(c.mounts.Entries, entry)
+	c.mountsLock.Unlock()
+
+	return entry
 }

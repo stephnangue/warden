@@ -1318,22 +1318,33 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 	return c.performImplicitAuth(ctx, req, autoAuthPath, authRole)
 }
 
-// performImplicitAuth performs implicit authentication by detecting the credential type
-// (JWT bearer token or TLS client certificate), looking up cached tokens, and performing
-// login if needed. Used by both gateway requests and transparent operations.
+// performImplicitAuth performs implicit authentication by routing through the
+// auth mount the caller's namespace/provider points at, looking up cached
+// tokens, and performing login if needed. Used by both gateway requests and
+// transparent operations.
 //
 // Transparent mode precedence rules:
 //
-//	Credential (first match wins):
-//	  1. X-Warden-Token header → explicit auth, implicit auth skipped entirely
-//	  2. TLS client certificate (via X-SSL-Client-Cert) → implicit cert auth
-//	  3. Authorization: Bearer eyJ... → implicit JWT auth
+//	Outer (handled before this function):
+//	  - X-Warden-Token header → explicit auth, implicit auth skipped entirely.
 //
-//	Auth path (config only, no per-request override):
+//	Auth path (config only, no per-request override — resolved before calling):
 //	  - Gateway: provider auto_auth_path config
 //	  - Operations: namespace auto_auth_path metadata
 //
-//	Auth role (first match wins):
+//	Inside this function:
+//	  1. Resolve the mount at autoAuthPath. Reject if no mount is registered.
+//	  2. Look up the TransparentTokenType registered for that mount's type
+//	     (via the TokenStore registry). Reject if no transparent type serves
+//	     this mount type — that means the mount doesn't support implicit auth.
+//	  3. Dispatch on the TokenType's CredentialFormat() to extract the
+//	     credential the mount expects (TLS client cert vs JWT bearer). Reject
+//	     with a specific error if the caller didn't present that credential.
+//	  4. Compute a deterministic cache key from (mountAccessor + credential
+//	     + role) via the TokenType's LookupValue, look up the cached token,
+//	     fall through to an internal login on miss.
+//
+//	Auth role (first match wins, resolved before calling):
 //	  1. X-Warden-Role header
 //	  2. Request-encoded role: URL path /role/{name}/gateway/... (streaming
 //	     backends) or ?role= query param (access backends)
@@ -1358,38 +1369,44 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		ctx = context.WithValue(ctx, logical.ClientIPKey, req.ClientIP)
 	}
 
-	// Resolve the auth mount once so transparent token types can fold the
-	// stable mount accessor into their cache key. Without this, two mounts
-	// of the same auth type with overlapping role names + the same credential
-	// would silently share a cache entry.
+	// Resolve the auth mount once. mountEntry tells us which TransparentTokenType
+	// serves this mount (via the registry) and supplies the stable mount accessor
+	// that transparent types fold into their cache key.
 	authMountEntry := c.router.MatchingMountEntry(ctx, autoAuthPath)
-	var mountAccessor string
-	if authMountEntry != nil {
-		mountAccessor = authMountEntry.Accessor
+	if authMountEntry == nil {
+		return fmt.Errorf("no auth mount registered at %q for implicit auth", autoAuthPath)
+	}
+	mountAccessor := authMountEntry.Accessor
+
+	// Look up the TransparentTokenType registered for this mount type. If the
+	// mount type isn't a transparent auth method (or isn't registered at all),
+	// reject the request explicitly rather than silently falling back to
+	// credential-format sniffing.
+	ttype := c.tokenStore.GetTransparentTokenTypeForAuthMethod(authMountEntry.Type)
+	if ttype == nil {
+		return fmt.Errorf("auth method %q at %q does not support implicit auth", authMountEntry.Type, autoAuthPath)
 	}
 
-	// Detect credential type: client certificate or JWT bearer token
 	var singleflightKey string
 	var lookupFunc func() (*TokenEntry, error)
 	var loginData map[string]any
 	var credKey string // fingerprint or JWT — used for post-login lookup with resolved role
 
-	// Check for client certificate first (forwarded from LB or direct TLS)
-	clientCert := extractTransparentClientCert(req)
-
-	// Per-credential TransparentTokenType: cert credentials are served by
-	// CertRoleTokenType, JWT-bearer credentials by JWTRoleTokenType. PR2
-	// will replace this credential-format sniff with a registry lookup on
-	// mountEntry.Type so adding a new transparent auth method does not
-	// require touching this switch.
-	var ttype TransparentTokenType
-
-	switch {
-	case clientCert != nil:
-		// Certificate-based transparent auth
+	// Dispatch by the credential's wire-extraction shape. Cases group by what
+	// the credential looks like on the wire (cert vs JWT bearer), not by the
+	// discovery-level CredentialFormat subtype — JWTRoleTokenType ("jwt") and
+	// KubernetesRoleTokenType ("k8s_sa_jwt") both arrive as JWTs in the
+	// Authorization header and share the same parse path. The right TokenType
+	// is selected upstream via mountEntry.Type, so the cache key remains
+	// type-specific even when two formats share an extraction case.
+	switch ttype.CredentialFormat() {
+	case "cert":
+		clientCert := extractTransparentClientCert(req)
+		if clientCert == nil {
+			return fmt.Errorf("auth method %q at %q requires a TLS client certificate", authMountEntry.Type, autoAuthPath)
+		}
 		hash := sha256.Sum256(clientCert.Raw)
 		fingerprint := hex.EncodeToString(hash[:])
-		ttype = &CertRoleTokenType{}
 		sfHash := sha256.Sum256([]byte("cert:" + mountAccessor + ":" + fingerprint + ":" + authRole))
 		singleflightKey = hex.EncodeToString(sfHash[:])
 		loginData = map[string]any{"role": authRole}
@@ -1398,12 +1415,13 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 			return c.LookupTransparentTokenWithRole(ctx, ttype, fingerprint, mountAccessor, authRole)
 		}
 
-	case strings.HasPrefix(req.ClientToken, "eyJ"):
-		// JWT-based transparent auth
+	case "jwt", "k8s_sa_jwt":
 		clientToken := req.ClientToken
-		ttype = &JWTRoleTokenType{}
-		jwtHash := sha256.Sum256([]byte("jwt:" + mountAccessor + ":" + clientToken + ":" + authRole))
-		singleflightKey = hex.EncodeToString(jwtHash[:])
+		if !strings.HasPrefix(clientToken, "eyJ") {
+			return fmt.Errorf("auth method %q at %q requires a JWT bearer token", authMountEntry.Type, autoAuthPath)
+		}
+		sfHash := sha256.Sum256([]byte("jwt:" + mountAccessor + ":" + clientToken + ":" + authRole))
+		singleflightKey = hex.EncodeToString(sfHash[:])
 		loginData = map[string]any{"jwt": clientToken, "role": authRole}
 		credKey = clientToken
 		lookupFunc = func() (*TokenEntry, error) {
@@ -1411,7 +1429,7 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		}
 
 	default:
-		return fmt.Errorf("no valid credential for implicit auth (need JWT bearer token or TLS client certificate)")
+		return fmt.Errorf("auth method %q has unsupported credential format %q for implicit auth", authMountEntry.Type, ttype.CredentialFormat())
 	}
 
 	// Step 1: Try cached lookup

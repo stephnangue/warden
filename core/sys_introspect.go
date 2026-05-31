@@ -12,6 +12,7 @@ import (
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"golang.org/x/sync/errgroup"
 
+	authhelper "github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
@@ -24,9 +25,15 @@ import (
 const aggregateIntrospectConcurrency = 10
 
 // pathIntrospectRoles exposes GET /v1/sys/introspect/roles.
-// The endpoint detects the caller's identity type (JWT or cert), finds
-// every auth mount of that type in the caller's namespace, fans out an
-// `introspect/roles` call to each, and aggregates the union.
+// The endpoint detects the caller's credential format (TLS client cert,
+// generic JWT, or Kubernetes SA JWT) and fans out an `introspect/roles`
+// call to every auth mount in the caller's namespace whose registered
+// TokenType reports a matching CredentialFormat. Results are merged into
+// a single roles[] union, with per-mount failures collected into warnings[].
+//
+// Exact-match filtering is deliberate: a generic JWT never fans out to
+// kubernetes mounts (which would burn a TokenReview round-trip the spoke
+// cannot satisfy), and a K8s SA token never fans out to generic JWT mounts.
 //
 // Autonomous agents present their identity vehicle with each request and
 // must specify a role so Warden's transparent auth can resolve a cred
@@ -69,7 +76,7 @@ func (b *SystemBackend) pathIntrospectRoles() []*framework.Path {
 				},
 			},
 			HelpSynopsis:    "Discover roles the presented identity can assume",
-			HelpDescription: "Fans out to every auth mount of the detected identity type (JWT or cert) in the current namespace and returns the union of roles each mount reports the identity can assume.",
+			HelpDescription: "Fans out to every auth mount in the current namespace whose registered TokenType matches the caller's credential format (cert, jwt, or k8s_sa_jwt) and returns the union of roles each mount reports the identity can assume.",
 		},
 	}
 }
@@ -83,8 +90,8 @@ type aggregatedRole struct {
 }
 
 func (b *SystemBackend) handleIntrospectRoles(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	credType := detectIntrospectCredType(req)
-	if credType == "" {
+	credFormat := detectIntrospectCredentialFormat(req)
+	if credFormat == "" {
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
 			Err:        fmt.Errorf("introspection requires a JWT bearer token or TLS client certificate"),
@@ -98,11 +105,19 @@ func (b *SystemBackend) handleIntrospectRoles(ctx context.Context, req *logical.
 
 	// Snapshot matching mount entries under the lock, then release before
 	// dispatching so that concurrent mount writes are not blocked on our
-	// in-process fan-out.
+	// in-process fan-out. The filter asks the registry "what TokenType
+	// serves this mount, and does its CredentialFormat exactly match what
+	// the caller presented?" — exact-match so a generic JWT never fans out
+	// to a kubernetes mount (which would burn a TokenReview round-trip)
+	// and vice versa.
 	b.core.mountsLock.RLock()
 	matching := make([]*MountEntry, 0)
 	for _, entry := range b.core.mounts.Entries {
-		if entry.Class != mountClassAuth || entry.NamespaceID != ns.ID || entry.Type != credType {
+		if entry.Class != mountClassAuth || entry.NamespaceID != ns.ID {
+			continue
+		}
+		tt := b.core.tokenStore.GetTransparentTokenTypeForAuthMethod(entry.Type)
+		if tt == nil || tt.CredentialFormat() != credFormat {
 			continue
 		}
 		matching = append(matching, entry)
@@ -226,18 +241,33 @@ func (b *SystemBackend) introspectMount(ctx context.Context, parent *logical.Req
 	return out, nil
 }
 
-// detectIntrospectCredType mirrors the identity-type detection in
-// performImplicitAuth: client cert takes precedence, then JWT via
-// Authorization: Bearer. Returns "" if neither is present.
-func detectIntrospectCredType(req *logical.Request) string {
+// detectIntrospectCredentialFormat returns the discovery-level credential
+// kind the caller presented: "cert" for a forwarded TLS client certificate,
+// "k8s_sa_jwt" for a Kubernetes service-account JWT (recognized by its
+// mandatory `sub: system:serviceaccount:*` claim), or "jwt" for any other
+// JWT bearer token. Returns "" if neither cert nor bearer JWT was sent.
+//
+// The K8s subtype is detected via an unverified claims parse — signature
+// validation happens later, inside the mount that the aggregator fans out
+// to. Using the subtype here lets the aggregator route K8s SA tokens only
+// to kubernetes mounts and avoid burning a TokenReview round-trip against
+// the spoke for a token it cannot authenticate.
+func detectIntrospectCredentialFormat(req *logical.Request) string {
 	if req.HTTPRequest == nil {
 		return ""
 	}
 	if cert := listener.ForwardedClientCert(req.HTTPRequest.Context()); cert != nil {
 		return "cert"
 	}
-	if auth := req.HTTPRequest.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		return "jwt"
+	auth := req.HTTPRequest.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return ""
 	}
-	return ""
+	jwt := strings.TrimPrefix(auth, "Bearer ")
+	if claims, err := authhelper.ParseJWTClaimsUnverified(jwt); err == nil {
+		if sub, _ := claims["sub"].(string); strings.HasPrefix(sub, "system:serviceaccount:") {
+			return "k8s_sa_jwt"
+		}
+	}
+	return "jwt"
 }

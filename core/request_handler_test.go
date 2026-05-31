@@ -1372,6 +1372,7 @@ func TestIsTransparentRequest(t *testing.T) {
 func TestHandleTransparentAuth(t *testing.T) {
 	core := createTestCore(t)
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	jwtMount := mountStubAuthMethod(t, core, "jwt/", "jwt")
 
 	t.Run("returns error when no credential provided", func(t *testing.T) {
 		backend := &mockTransparentModeProvider{
@@ -1384,7 +1385,7 @@ func TestHandleTransparentAuth(t *testing.T) {
 
 		err := core.handleTransparentAuth(ctx, req, backend, "terraform")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no valid credential")
+		assert.Contains(t, err.Error(), "requires a JWT bearer token")
 	})
 
 	t.Run("returns error for non-JWT non-cert token", func(t *testing.T) {
@@ -1398,15 +1399,18 @@ func TestHandleTransparentAuth(t *testing.T) {
 
 		err := core.handleTransparentAuth(ctx, req, backend, "terraform")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no valid credential")
+		assert.Contains(t, err.Error(), "requires a JWT bearer token")
 	})
 
 	t.Run("uses existing JWT token when found in cache", func(t *testing.T) {
-		// Create a JWT token using GenerateToken with the jwt_role type
+		// Create a JWT token using GenerateToken with the jwt_role type.
+		// MountAccessor must match the mount's accessor so the cache write and
+		// the subsequent transparent-auth lookup hash to the same key.
 		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXVzZXIifQ.test-sig"
 
 		authData := &AuthData{
 			TokenValue:     sampleJWT,
+			MountAccessor:  jwtMount.Accessor,
 			RoleName:       "terraform",
 			PrincipalID:    "test-user",
 			ExpireAt:       time.Now().Add(24 * time.Hour),
@@ -1431,10 +1435,10 @@ func TestHandleTransparentAuth(t *testing.T) {
 		assert.Equal(t, te.ID, req.TokenEntry().ID)
 	})
 
-	t.Run("returns error when implicit auth fails - auth backend not mounted", func(t *testing.T) {
+	t.Run("returns error when implicit auth fails - unmounted auth path", func(t *testing.T) {
 		backend := &mockTransparentModeProvider{
 			transparentMode: true,
-			autoAuthPath:    "auth/jwt/",
+			autoAuthPath:    "auth/never-mounted/",
 		}
 		// Use a JWT that won't be found in the token store
 		req := &logical.Request{
@@ -1443,8 +1447,9 @@ func TestHandleTransparentAuth(t *testing.T) {
 		}
 
 		err := core.handleTransparentAuth(ctx, req, backend, "terraform")
-		// Should fail because the auth backend is not mounted
+		// Should fail with the new mount-existence guard
 		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no auth mount registered")
 	})
 }
 
@@ -1453,12 +1458,15 @@ func TestHandleTransparentAuth(t *testing.T) {
 func TestHandleTransparentAuth_Singleflight(t *testing.T) {
 	core := createTestCore(t)
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	jwtMount := mountStubAuthMethod(t, core, "jwt/", "jwt")
 
-	// Create a JWT token using GenerateToken
+	// Create a JWT token using GenerateToken. Must use the mount's accessor
+	// so the cache key matches what the transparent-auth lookup will compute.
 	sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzaW5nbGVmbGlnaHQtdXNlciJ9.test-sig"
 
 	authData := &AuthData{
 		TokenValue:     sampleJWT,
+		MountAccessor:  jwtMount.Accessor,
 		RoleName:       "terraform",
 		PrincipalID:    "test-user-singleflight",
 		ExpireAt:       time.Now().Add(24 * time.Hour),
@@ -1811,6 +1819,8 @@ func TestHandleRequest_ConcurrentWithRootToken(t *testing.T) {
 func TestTransparentOps_NonStreamingPath(t *testing.T) {
 	core := createTestCore(t)
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	jwtMount := mountStubAuthMethod(t, core, "jwt/", "jwt")
+	_ = mountStubAuthMethod(t, core, "cert/", "cert")
 
 	t.Run("X-Warden-Token skips transparent ops", func(t *testing.T) {
 		// When X-Warden-Token is set, transparent ops should be skipped entirely,
@@ -1887,10 +1897,12 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 
 	t.Run("JWT transparent ops with cached token succeeds", func(t *testing.T) {
 		// Pre-create a cached token in root namespace, then verify transparent ops finds it.
+		// The cache must be populated with the mount's accessor so the lookup hash matches.
 		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjYWNoZWQtdXNlciJ9.cached-sig"
 
 		authData := &AuthData{
 			TokenValue:     sampleJWT,
+			MountAccessor:  jwtMount.Accessor,
 			RoleName:       "ops-reader",
 			PrincipalID:    "cached-user",
 			ExpireAt:       time.Now().Add(24 * time.Hour),
@@ -1927,7 +1939,9 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 	})
 
 	t.Run("no credential with auto_auth_path returns auth error", func(t *testing.T) {
-		// No JWT, no cert — namespace has auto_auth_path but no credential
+		// No JWT, no cert — namespace points at a mounted cert auth method
+		// but no client cert was forwarded, so transparent-auth bails with
+		// the credential-mismatch error from the mount-type-keyed dispatch.
 		ns := &namespace.Namespace{
 			ID:   "test-ns-nocred",
 			Path: "nocred/",
@@ -1936,6 +1950,7 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 			},
 		}
 		nsCtx := namespace.ContextWithNamespace(context.Background(), ns)
+		_ = mountStubAuthMethodInNamespace(t, core, "cert/", "cert", ns)
 
 		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/cred/sources", nil)
 		httpReq.Header.Set("X-Warden-Role", "agent")
@@ -1949,7 +1964,7 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 		require.NotNil(t, resp)
 		assert.True(t, req.Transparent)
 		assert.NotNil(t, resp.Err)
-		assert.Contains(t, resp.Err.Error(), "no valid credential")
+		assert.Contains(t, resp.Err.Error(), "requires a TLS client certificate")
 	})
 
 	t.Run("namespace auto_auth_path triggers transparent ops", func(t *testing.T) {
@@ -1981,10 +1996,26 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 	t.Run("role query param takes precedence over X-Warden-Role header", func(t *testing.T) {
 		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJwcmVjLXVzZXIifQ.prec-sig"
 
-		// Pre-create cached tokens for both roles
+		// Use a non-root namespace with auto_auth_path metadata + mount the
+		// jwt auth method in that namespace so the router resolves it.
+		ns := &namespace.Namespace{
+			ID:   "test-ns-prec",
+			Path: "prec/",
+			CustomMetadata: map[string]string{
+				"auto_auth_path": "auth/jwt/",
+			},
+		}
+		nsCtx := namespace.ContextWithNamespace(context.Background(), ns)
+		precMount := mountStubAuthMethodInNamespace(t, core, "jwt/", "jwt", ns)
+
+		// Pre-create cached tokens for both roles. Token namespace is root
+		// (the fake `prec/` namespace isn't in the namespace store, so token
+		// resolution would fail), but the cache key uses the per-mount
+		// accessor — which is what performImplicitAuth threads in.
 		for _, roleName := range []string{"from-query", "from-header"} {
 			authData := &AuthData{
 				TokenValue:     sampleJWT,
+				MountAccessor:  precMount.Accessor,
 				RoleName:       roleName,
 				PrincipalID:    "prec-user",
 				ExpireAt:       time.Now().Add(24 * time.Hour),
@@ -1994,15 +2025,6 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 			_, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
 			require.NoError(t, err)
 		}
-
-		ns := &namespace.Namespace{
-			ID:   "test-ns-prec",
-			Path: "prec/",
-			CustomMetadata: map[string]string{
-				"auto_auth_path": "auth/jwt/",
-			},
-		}
-		nsCtx := namespace.ContextWithNamespace(context.Background(), ns)
 
 		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/cred/sources?role=from-query", nil)
 		httpReq.Header.Set("Authorization", "Bearer "+sampleJWT)
@@ -2022,17 +2044,6 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 	t.Run("X-Warden-Role header used when no role query param", func(t *testing.T) {
 		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWxsYmFjay11c2VyIn0.fallback-sig"
 
-		authData := &AuthData{
-			TokenValue:     sampleJWT,
-			RoleName:       "from-header",
-			PrincipalID:    "fallback-user",
-			ExpireAt:       time.Now().Add(24 * time.Hour),
-			Policies:       []string{"default"},
-			CredentialSpec: "test-spec",
-		}
-		_, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
-		require.NoError(t, err)
-
 		ns := &namespace.Namespace{
 			ID:   "test-ns-fallback",
 			Path: "fallback/",
@@ -2041,6 +2052,21 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 			},
 		}
 		nsCtx := namespace.ContextWithNamespace(context.Background(), ns)
+		fallbackMount := mountStubAuthMethodInNamespace(t, core, "jwt/", "jwt", ns)
+
+		authData := &AuthData{
+			TokenValue:     sampleJWT,
+			MountAccessor:  fallbackMount.Accessor,
+			RoleName:       "from-header",
+			PrincipalID:    "fallback-user",
+			ExpireAt:       time.Now().Add(24 * time.Hour),
+			Policies:       []string{"default"},
+			CredentialSpec: "test-spec",
+		}
+		// Token namespace is root (the fake `fallback/` namespace isn't in
+		// the namespace store); cache key uses the per-mount accessor.
+		_, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+		require.NoError(t, err)
 
 		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/cred/sources", nil)
 		httpReq.Header.Set("Authorization", "Bearer "+sampleJWT)

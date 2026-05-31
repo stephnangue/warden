@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -88,7 +89,7 @@ func (b *introspectMockBackend) SpecialPaths() *logical.Paths        { return ni
 func (b *introspectMockBackend) ExtractToken(r *http.Request) string { return "" }
 
 // jwtRequest builds a system-backend request with an Authorization: Bearer
-// header, which the aggregator interprets as credType = "jwt".
+// header, which the aggregator interprets as CredentialFormat = "jwt".
 func jwtRequest(t *testing.T) *logical.Request {
 	t.Helper()
 	httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/introspect/roles", nil)
@@ -102,7 +103,7 @@ func jwtRequest(t *testing.T) *logical.Request {
 
 // certRequest builds a system-backend request carrying a forwarded
 // client certificate in the HTTP request context, which the aggregator
-// interprets as credType = "cert".
+// interprets as CredentialFormat = "cert".
 func certRequest(t *testing.T) *logical.Request {
 	t.Helper()
 	cert := &x509.Certificate{
@@ -119,19 +120,31 @@ func certRequest(t *testing.T) *logical.Request {
 	}
 }
 
-func TestDetectIntrospectCredType(t *testing.T) {
+func TestDetectIntrospectCredentialFormat(t *testing.T) {
 	t.Run("no HTTP request returns empty", func(t *testing.T) {
-		assert.Equal(t, "", detectIntrospectCredType(&logical.Request{}))
+		assert.Equal(t, "", detectIntrospectCredentialFormat(&logical.Request{}))
 	})
-	t.Run("Authorization: Bearer returns jwt", func(t *testing.T) {
+	t.Run("Authorization: Bearer with non-parseable JWT returns jwt (default)", func(t *testing.T) {
 		httpReq := httptest.NewRequest(http.MethodGet, "/x", nil)
 		httpReq.Header.Set("Authorization", "Bearer eyJ.abc.def")
-		assert.Equal(t, "jwt", detectIntrospectCredType(&logical.Request{HTTPRequest: httpReq}))
+		assert.Equal(t, "jwt", detectIntrospectCredentialFormat(&logical.Request{HTTPRequest: httpReq}))
+	})
+	t.Run("generic JWT (sub is opaque) returns jwt", func(t *testing.T) {
+		jwt := mintK8sJWT(`{"iss":"https://accounts.google.com","sub":"1234567890"}`)
+		httpReq := httptest.NewRequest(http.MethodGet, "/x", nil)
+		httpReq.Header.Set("Authorization", "Bearer "+jwt)
+		assert.Equal(t, "jwt", detectIntrospectCredentialFormat(&logical.Request{HTTPRequest: httpReq}))
+	})
+	t.Run("K8s SA token (sub starts with system:serviceaccount:) returns k8s_sa_jwt", func(t *testing.T) {
+		jwt := mintK8sJWT(`{"iss":"https://kubernetes.default.svc","sub":"system:serviceaccount:default:myapp"}`)
+		httpReq := httptest.NewRequest(http.MethodGet, "/x", nil)
+		httpReq.Header.Set("Authorization", "Bearer "+jwt)
+		assert.Equal(t, "k8s_sa_jwt", detectIntrospectCredentialFormat(&logical.Request{HTTPRequest: httpReq}))
 	})
 	t.Run("no Bearer prefix returns empty", func(t *testing.T) {
 		httpReq := httptest.NewRequest(http.MethodGet, "/x", nil)
 		httpReq.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
-		assert.Equal(t, "", detectIntrospectCredType(&logical.Request{HTTPRequest: httpReq}))
+		assert.Equal(t, "", detectIntrospectCredentialFormat(&logical.Request{HTTPRequest: httpReq}))
 	})
 	t.Run("forwarded client cert returns cert (takes precedence over JWT)", func(t *testing.T) {
 		cert := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "c"}}
@@ -139,8 +152,17 @@ func TestDetectIntrospectCredType(t *testing.T) {
 		httpReq.Header.Set("Authorization", "Bearer eyJ.abc.def")
 		ctx := listener.WithForwardedClientCert(httpReq.Context(), cert)
 		httpReq = httpReq.WithContext(ctx)
-		assert.Equal(t, "cert", detectIntrospectCredType(&logical.Request{HTTPRequest: httpReq}))
+		assert.Equal(t, "cert", detectIntrospectCredentialFormat(&logical.Request{HTTPRequest: httpReq}))
 	})
+}
+
+// mintK8sJWT returns a well-formed (but unsigned) JWT with the given payload.
+// Used by the format-detection tests to exercise the unverified claims-parse path.
+func mintK8sJWT(payloadJSON string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(payloadJSON))
+	signature := base64.RawURLEncoding.EncodeToString([]byte("not-a-real-signature"))
+	return header + "." + payload + "." + signature
 }
 
 func TestSystemBackend_Introspect_Unauthenticated(t *testing.T) {
@@ -233,6 +255,41 @@ func TestSystemBackend_Introspect_FilterByCredType(t *testing.T) {
 	require.Len(t, roles, 1)
 	assert.Equal(t, "cert-role", roles[0].Name)
 	assert.Equal(t, "cert-mount/", roles[0].AuthPath)
+}
+
+// TestSystemBackend_Introspect_K8sSAToken_DoesNotFanOutToJWTMounts pins the
+// granular CredentialFormat behavior introduced with PR2: a Kubernetes SA
+// JWT (sub starts with system:serviceaccount:) is detected as "k8s_sa_jwt"
+// and must NOT fan out to generic JWT mounts (whose CredentialFormat is
+// "jwt"). Without this, a workload presenting an EKS SA token would force
+// every JWT mount in the namespace to do a JWKS validation against a token
+// it cannot authenticate.
+//
+// The mirror case (k8s_sa_jwt → kubernetes mounts) lands with PR3 when
+// KubernetesRoleTokenType is registered with AuthMethodType="kubernetes"
+// and CredentialFormat="k8s_sa_jwt".
+func TestSystemBackend_Introspect_K8sSAToken_DoesNotFanOutToJWTMounts(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	ctrl := newIntrospectMock()
+
+	core.authMethods["jwt"] = ctrl.factory()
+	require.NoError(t, core.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "jwt", Path: "jwt-mount/"}))
+	ctrl.rolesByMount["auth/jwt-mount/"] = []map[string]any{{"name": "jwt-role"}}
+
+	// Build a request carrying a Kubernetes SA JWT.
+	k8sJWT := mintK8sJWT(`{"iss":"https://kubernetes.default.svc","sub":"system:serviceaccount:default:myapp"}`)
+	httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/introspect/roles", nil)
+	httpReq.Header.Set("Authorization", "Bearer "+k8sJWT)
+	req := &logical.Request{
+		Operation:   logical.ReadOperation,
+		Path:        "introspect/roles",
+		HTTPRequest: httpReq,
+	}
+
+	resp, err := backend.handleIntrospectRoles(ctx, req, nil)
+	require.NoError(t, err)
+	roles := resp.Data["roles"].([]aggregatedRole)
+	assert.Empty(t, roles, "K8s SA token must not fan out to generic JWT mounts")
 }
 
 func TestSystemBackend_Introspect_MountError_AppearsInWarnings(t *testing.T) {
