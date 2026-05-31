@@ -1,17 +1,23 @@
 package helper
 
-// BackendJWT and BackendCert identify the auth backend type for token type resolution.
+// BackendJWT, BackendCert, BackendKubernetes identify the auth backend type
+// for token type resolution.
 const (
-	BackendJWT  = "jwt"
-	BackendCert = "cert"
+	BackendJWT        = "jwt"
+	BackendCert       = "cert"
+	BackendKubernetes = "kubernetes"
 )
 
 // DefaultTokenType returns the default token type for the given auth backend.
 func DefaultTokenType(backend string) string {
-	if backend == BackendCert {
+	switch backend {
+	case BackendCert:
 		return "cert_role"
+	case BackendKubernetes:
+		return "kubernetes_role"
+	default:
+		return "jwt_role"
 	}
-	return "jwt_role"
 }
 
 // DisplayTokenType maps an internal token type name to its user-facing alias.

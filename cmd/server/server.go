@@ -26,6 +26,7 @@ import (
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/auth/method/cert"
 	"github.com/stephnangue/warden/auth/method/jwt"
+	authk8s "github.com/stephnangue/warden/auth/method/kubernetes"
 	"github.com/stephnangue/warden/config"
 	"github.com/stephnangue/warden/core"
 	wardenseal "github.com/stephnangue/warden/core/seal"
@@ -201,8 +202,9 @@ Usage: warden server [options]
 	}
 
 	authMethods = map[string]wardenlogical.Factory{
-		"jwt":  jwt.Factory,
-		"cert": cert.Factory,
+		"jwt":        jwt.Factory,
+		"cert":       cert.Factory,
+		"kubernetes": authk8s.Factory,
 	}
 
 	storageBackends = map[string]physical.Factory{
