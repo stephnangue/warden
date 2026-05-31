@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -325,7 +326,7 @@ func (d *HoneycombDriver) VerifySpec(ctx context.Context, spec *credential.CredS
 // --- HTTP helpers ---
 
 // honeycombRetryConfig is the shared retry configuration for all Honeycomb API calls.
-var honeycombRetryConfig = HTTPRetryConfig{
+var honeycombRetryConfig = httputil.HTTPRetryConfig{
 	MaxAttempts:       honeycombMaxRetryAttempts,
 	MaxBodySize:       honeycombMaxResponseBodySize,
 	RetryableStatuses: []int{http.StatusTooManyRequests, 500},
@@ -347,7 +348,7 @@ func (d *HoneycombDriver) doHoneycombRequest(ctx context.Context, method, path s
 		headers["Content-Type"] = honeycombContentType
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method:     method,
 		URL:        apiURL,
 		Body:       body,
@@ -355,7 +356,7 @@ func (d *HoneycombDriver) doHoneycombRequest(ctx context.Context, method, path s
 		OKStatuses: okStatuses,
 	}
 
-	respBody, status, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, honeycombRetryConfig)
+	respBody, status, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, honeycombRetryConfig)
 	if err != nil && d.logger != nil {
 		d.logger.Warn("Honeycomb API request failed",
 			logger.String("method", method),

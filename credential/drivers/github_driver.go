@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -329,7 +330,7 @@ func (d *GitHubDriver) doGitHubRequest(ctx context.Context, method, path string,
 	}
 
 	// Configure retry behavior (retry on 429 and 5xx)
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       githubMaxRetryAttempts,
 		MaxBodySize:       githubMaxResponseBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500}, // 429 and all 5xx
@@ -337,14 +338,14 @@ func (d *GitHubDriver) doGitHubRequest(ctx context.Context, method, path string,
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method:  method,
 		URL:     apiURL,
 		Body:    body,
 		Headers: headers,
 	}
 
-	respBody, _, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil && d.logger != nil {
 		d.logger.Warn("GitHub API request failed", logger.String("error", err.Error()))
 	}

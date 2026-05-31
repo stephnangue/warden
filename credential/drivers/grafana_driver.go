@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -279,7 +280,7 @@ func (d *GrafanaDriver) doGrafanaRequest(ctx context.Context, method, path strin
 		headers["X-Grafana-Org-Id"] = orgID
 	}
 
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       grafanaMaxRetryAttempts,
 		MaxBodySize:       grafanaMaxResponseBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
@@ -287,14 +288,14 @@ func (d *GrafanaDriver) doGrafanaRequest(ctx context.Context, method, path strin
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method:  method,
 		URL:     apiURL,
 		Body:    body,
 		Headers: headers,
 	}
 
-	respBody, status, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	respBody, status, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil && d.logger != nil {
 		d.logger.Warn("Grafana API request failed",
 			logger.String("method", method),

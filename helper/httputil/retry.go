@@ -1,4 +1,4 @@
-package drivers
+package httputil
 
 import (
 	"bytes"
@@ -11,11 +11,11 @@ import (
 )
 
 const (
-	// DefaultMaxBodySize is the default maximum response body size (1MB)
+	// DefaultMaxBodySize is the default maximum response body size (1MB).
 	DefaultMaxBodySize = 1 << 20
 )
 
-// HTTPRetryConfig configures HTTP retry behavior
+// HTTPRetryConfig configures HTTP retry behavior.
 type HTTPRetryConfig struct {
 	// MaxAttempts is the maximum number of attempts (including the initial request)
 	MaxAttempts int
@@ -23,8 +23,8 @@ type HTTPRetryConfig struct {
 	// MaxBodySize is the maximum response body size to read
 	MaxBodySize int64
 
-	// RetryableStatuses are HTTP status codes that should be retried
-	// Special value 500 matches all 5xx errors (500-599)
+	// RetryableStatuses are HTTP status codes that should be retried.
+	// Special value 500 matches all 5xx errors (500-599).
 	RetryableStatuses []int
 
 	// BaseBackoff is the base backoff duration (exponential: 1s, 2s, 4s, 8s...)
@@ -34,8 +34,8 @@ type HTTPRetryConfig struct {
 	JitterPercent int
 }
 
-// DefaultHTTPRetryConfig returns sensible defaults for API calls
-// Retries only on rate limiting (429)
+// DefaultHTTPRetryConfig returns sensible defaults for API calls.
+// Retries only on rate limiting (429).
 func DefaultHTTPRetryConfig() HTTPRetryConfig {
 	return HTTPRetryConfig{
 		MaxAttempts:       3,
@@ -46,7 +46,7 @@ func DefaultHTTPRetryConfig() HTTPRetryConfig {
 	}
 }
 
-// HTTPRequest represents a prepared HTTP request
+// HTTPRequest represents a prepared HTTP request.
 type HTTPRequest struct {
 	// Method is the HTTP method (GET, POST, etc.)
 	Method string
@@ -64,8 +64,8 @@ type HTTPRequest struct {
 	OKStatuses []int
 }
 
-// ExecuteWithRetry executes an HTTP request with exponential backoff retry
-// Returns response body, status code, and error
+// ExecuteWithRetry executes an HTTP request with exponential backoff retry.
+// Returns response body, status code, and error.
 func ExecuteWithRetry(
 	ctx context.Context,
 	client *http.Client,

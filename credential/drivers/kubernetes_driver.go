@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -501,7 +502,7 @@ func (d *KubernetesDriver) doK8sRequestWith(ctx context.Context, k8sURL, token, 
 		headers["Content-Type"] = "application/json"
 	}
 
-	return ExecuteWithRetry(ctx, d.httpClient, HTTPRequest{
+	return httputil.ExecuteWithRetry(ctx, d.httpClient, httputil.HTTPRequest{
 		Method:  method,
 		URL:     k8sURL + path,
 		Body:    body,
@@ -510,8 +511,8 @@ func (d *KubernetesDriver) doK8sRequestWith(ctx context.Context, k8sURL, token, 
 }
 
 // defaultK8sRetryConfig returns the standard retry configuration for Kubernetes API calls.
-func defaultK8sRetryConfig() HTTPRetryConfig {
-	return HTTPRetryConfig{
+func defaultK8sRetryConfig() httputil.HTTPRetryConfig {
+	return httputil.HTTPRetryConfig{
 		MaxAttempts:       3,
 		MaxBodySize:       k8sMaxResponseBodySize,
 		RetryableStatuses: []int{429, 500},

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -369,7 +370,7 @@ func (d *AlicloudDriver) callSignedJSON(
 	var lastErr error
 	for attempt := 0; attempt < alicloudMaxRetryAttempts; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff + 20% jitter, mirrors ExecuteWithRetry's math.
+			// Exponential backoff + 20% jitter, mirrors httputil.ExecuteWithRetry's math.
 			backoff := time.Second * time.Duration(1<<uint(attempt-1))
 			jitter := time.Duration(rand.Int63n(int64(backoff) / 5))
 			select {
@@ -412,7 +413,7 @@ func (d *AlicloudDriver) callSignedJSON(
 		// back as readable bodies (which the helper would otherwise drop) and
 		// can be classified by Code: EntityNotExist.* on 404, NoPermission on
 		// 403, Throttling/InvalidParameter on 400.
-		httpReq := HTTPRequest{
+		httpReq := httputil.HTTPRequest{
 			Method:  method,
 			URL:     u.String(),
 			Headers: headers,
@@ -423,12 +424,12 @@ func (d *AlicloudDriver) callSignedJSON(
 				http.StatusNotFound,
 			},
 		}
-		retry := HTTPRetryConfig{
+		retry := httputil.HTTPRetryConfig{
 			MaxAttempts: 1,
 			MaxBodySize: alicloudMaxResponseBodySize,
 		}
 
-		respBody, status, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retry)
+		respBody, status, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retry)
 		if err != nil {
 			// Transport error or non-OK HTTP status. Retry on transient HTTP
 			// codes (429 and 5xx); surface anything else immediately.

@@ -13,6 +13,7 @@ import (
 	"golang.org/x/oauth2/google"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -515,7 +516,7 @@ func (d *GCPDriver) doGCPRequest(ctx context.Context, apiReq gcpAPIRequest, maxA
 	}
 
 	// Configure retry behavior (no automatic retries by default)
-	retryConfig := HTTPRetryConfig{
+	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       maxAttempts,
 		MaxBodySize:       gcpMaxResponseBodySize,
 		RetryableStatuses: []int{}, // GCP doesn't retry by default
@@ -523,7 +524,7 @@ func (d *GCPDriver) doGCPRequest(ctx context.Context, apiReq gcpAPIRequest, maxA
 		JitterPercent:     20,
 	}
 
-	httpReq := HTTPRequest{
+	httpReq := httputil.HTTPRequest{
 		Method:     apiReq.method,
 		URL:        apiReq.url,
 		Body:       apiReq.body,
@@ -531,7 +532,7 @@ func (d *GCPDriver) doGCPRequest(ctx context.Context, apiReq gcpAPIRequest, maxA
 		OKStatuses: apiReq.okStatuses,
 	}
 
-	respBody, _, err := ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", apiReq.operation, err)
 	}
