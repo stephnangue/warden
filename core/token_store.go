@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	TypeWardenToken = "warden_token"
-	TypeJWTRole     = "jwt_role"
-	TypeCertRole    = "cert_role"
+	TypeWardenToken    = "warden_token"
+	TypeJWTRole        = "jwt_role"
+	TypeCertRole       = "cert_role"
+	TypeKubernetesRole = "kubernetes_role"
 )
 
 // Storage path constants for token store organization
@@ -308,6 +309,7 @@ func (s *TokenStore) registerBuiltinTypes() error {
 		&WardenTokenType{},
 		&JWTRoleTokenType{},
 		&CertRoleTokenType{},
+		&KubernetesRoleTokenType{},
 	}
 
 	for _, tokenType := range builtinTypes {
