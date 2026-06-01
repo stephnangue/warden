@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -315,6 +317,97 @@ func TestErrorResponse_NilErrors(t *testing.T) {
 
 	// Nil slice is marshaled as null in JSON
 	assert.Contains(t, string(data), `"errors":null`)
+}
+
+// =============================================================================
+// respondMCPDeny Tests
+// =============================================================================
+
+func TestRespondMCPDeny_DeniedTools(t *testing.T) {
+	w := httptest.NewRecorder()
+	d := &logical.MCPDecision{
+		Method:      "tools/call",
+		Name:        "delete_repository",
+		Decision:    "deny",
+		MatchedRule: "delete_*",
+		RuleType:    "denied_tools",
+	}
+
+	respondMCPDeny(w, http.StatusForbidden, d)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+
+	auth := w.Header().Get("WWW-Authenticate")
+	assert.Contains(t, auth, `Bearer error="insufficient_permissions"`)
+	assert.Contains(t, auth, `error_description="Tool 'delete_repository' not allowed."`)
+	assert.NotContains(t, auth, "scope=", "no scope= attribute per deliberate non-disclosure design")
+	assert.NotContains(t, auth, "delete_*", "matched_rule must not leak into the client-visible WWW-Authenticate")
+	assert.NotContains(t, auth, "denied_tools", "rule_type must not leak into the client-visible WWW-Authenticate")
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "insufficient_permissions", body["error"])
+	assert.Equal(t, "Tool 'delete_repository' not allowed.", body["error_description"])
+	assert.NotContains(t, body, "jsonrpc", "no JSON-RPC envelope")
+	assert.NotContains(t, body, "id", "no JSON-RPC id field")
+	assert.NotContains(t, body, "matched_rule", "matched_rule stays audit-only")
+	assert.NotContains(t, body, "rule_type", "rule_type stays audit-only")
+}
+
+func TestRespondMCPDeny_DescriptionMatchesHeaderAndBody(t *testing.T) {
+	// Invariant: the error_description text in the WWW-Authenticate
+	// header and the JSON body must be byte-identical so SDKs that
+	// surface one or the other show the same message to the agent.
+	cases := []*logical.MCPDecision{
+		{Method: "tools/call", Name: "x", Decision: "deny", RuleType: "denied_tools"},
+		{Method: "tools/call", Name: "y", Decision: "deny", RuleType: "allowed_tools"},
+		{Method: "resources/read", Name: "uri", Decision: "deny", RuleType: "allowed_resources"},
+		{RuleType: "missing_method_header", Decision: "deny"},
+		{ParamName: "path", ParamValue: ".env", RuleType: "denied_params", Decision: "deny"},
+		{ParamName: "region", RuleType: "allowed_params", Decision: "deny"},
+	}
+	for _, d := range cases {
+		t.Run(d.RuleType, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			respondMCPDeny(w, http.StatusForbidden, d)
+
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			bodyDesc, _ := body["error_description"].(string)
+			require.NotEmpty(t, bodyDesc)
+
+			// Extract the header's error_description value (between
+			// the first `error_description="` and the closing `"`).
+			auth := w.Header().Get("WWW-Authenticate")
+			const marker = `error_description="`
+			start := strings.Index(auth, marker)
+			require.GreaterOrEqual(t, start, 0, "header should contain error_description")
+			headerDesc := auth[start+len(marker) : len(auth)-1] // strip trailing "
+
+			assert.Equal(t, bodyDesc, headerDesc, "header and body descriptions must be byte-identical")
+		})
+	}
+}
+
+func TestRespondMCPDeny_DeniedAndAllowedToolsProduceIdenticalResponse(t *testing.T) {
+	// Disclosure-resistance invariant from the policy plan: a deny
+	// from denied_tools and a deny from allowed_tools-no-match for
+	// the same tool name must produce byte-identical responses so
+	// the client can't fingerprint operator policy shape.
+	w1 := httptest.NewRecorder()
+	w2 := httptest.NewRecorder()
+	respondMCPDeny(w1, http.StatusForbidden, &logical.MCPDecision{
+		Method: "tools/call", Name: "delete_repository", Decision: "deny", RuleType: "denied_tools", MatchedRule: "delete_*",
+	})
+	respondMCPDeny(w2, http.StatusForbidden, &logical.MCPDecision{
+		Method: "tools/call", Name: "delete_repository", Decision: "deny", RuleType: "allowed_tools",
+	})
+
+	assert.Equal(t, w1.Body.String(), w2.Body.String(),
+		"deny-vs-not-in-allow indistinguishable in response body")
+	assert.Equal(t, w1.Header().Get("WWW-Authenticate"), w2.Header().Get("WWW-Authenticate"),
+		"deny-vs-not-in-allow indistinguishable in WWW-Authenticate")
 }
 
 // =============================================================================

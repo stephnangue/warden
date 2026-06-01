@@ -375,20 +375,22 @@ func mcpDenyRank(ruleType string) int {
 	return 0
 }
 
-// buildMCPDenyDescription renders the operator-facing single-sentence
+// BuildMCPDenyDescription renders the operator-facing single-sentence
 // message returned in the 403 body's error_description field and in
-// the WWW-Authenticate header. Per the policy plan Semantics, the
-// templates deliberately omit matched_rule and rule_type from the
-// client-visible string — disclosure of those stays in the audit log
-// only, and the denied/allowed cases for the same name produce
-// identical strings so the client can't fingerprint operator policy
-// shape from the response.
+// the WWW-Authenticate header. Exported so the HTTP response layer
+// (http package) can consume it without duplicating the template
+// table. Per the policy plan Semantics, the templates deliberately
+// omit matched_rule and rule_type from the client-visible string —
+// disclosure of those stays in the audit log only, and the
+// denied/allowed cases for the same name produce identical strings
+// so the client can't fingerprint operator policy shape from the
+// response.
 //
 // Strips ASCII control characters from interpolated values defensively
 // — MCP headers shouldn't contain CTLs but RFC 7235 disallows them in
 // the WWW-Authenticate quoted-string and a malformed header is worse
 // than a sanitised one.
-func buildMCPDenyDescription(d *logical.MCPDecision) string {
+func BuildMCPDenyDescription(d *logical.MCPDecision) string {
 	if d == nil {
 		return "Request denied by policy."
 	}

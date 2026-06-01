@@ -729,17 +729,17 @@ func TestBuildMCPDenyDescription_PerRuleType(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.ruleType, func(t *testing.T) {
-			assert.Equal(t, c.want, buildMCPDenyDescription(c.decision))
+			assert.Equal(t, c.want, BuildMCPDenyDescription(c.decision))
 		})
 	}
 
 	// Identical-message invariant: denied_tools and allowed_tools-no-match
 	// for the same tool name must produce identical strings. Prevents
 	// client-side enumeration of policy shape from the response.
-	deniedToolsMsg := buildMCPDenyDescription(&logical.MCPDecision{
+	deniedToolsMsg := BuildMCPDenyDescription(&logical.MCPDecision{
 		Name: "x", RuleType: mcpRuleTypeDeniedTools,
 	})
-	allowedToolsMsg := buildMCPDenyDescription(&logical.MCPDecision{
+	allowedToolsMsg := BuildMCPDenyDescription(&logical.MCPDecision{
 		Name: "x", RuleType: mcpRuleTypeAllowedTools,
 	})
 	assert.Equal(t, deniedToolsMsg, allowedToolsMsg,
@@ -751,14 +751,14 @@ func TestBuildMCPDenyDescription_StripsCTLs(t *testing.T) {
 		Name:     "evil\x00name\x1f\r\n",
 		RuleType: mcpRuleTypeDeniedTools,
 	}
-	got := buildMCPDenyDescription(d)
+	got := BuildMCPDenyDescription(d)
 	assert.Equal(t, "Tool 'evilname' not allowed.", got,
 		"CTL bytes stripped before interpolation")
 }
 
 func TestBuildMCPDenyDescription_UnknownRuleType_GenericFallback(t *testing.T) {
 	d := &logical.MCPDecision{RuleType: "future_unknown_gate"}
-	assert.Equal(t, "Request denied by policy.", buildMCPDenyDescription(d))
+	assert.Equal(t, "Request denied by policy.", BuildMCPDenyDescription(d))
 }
 
 // =============================================================================
