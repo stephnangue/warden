@@ -603,3 +603,155 @@ func TestCore_MountEntryView(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+// mixedClassTable builds a MountTable containing entries of every class so the
+// accessor tests can confirm the filter is correct in both directions
+// (returns the right entries; doesn't return the wrong ones).
+func mixedClassTable(t *testing.T) *MountTable {
+	t.Helper()
+	table := NewMountTable()
+	table.Entries = []*MountEntry{
+		{
+			Path: "jwt/", Type: "jwt", Class: mountClassAuth, UUID: "auth-1",
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		},
+		{
+			Path: "cert/", Type: "cert", Class: mountClassAuth, UUID: "auth-2",
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		},
+		{
+			Path: "vault/", Type: "vault", Class: mountClassProvider, UUID: "prov-1",
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		},
+		{
+			Path: "aws/", Type: "aws", Class: mountClassProvider, UUID: "prov-2",
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		},
+		{
+			Path: "sys/", Type: "system", Class: mountClassSystem, UUID: "sys-1",
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		},
+	}
+	return table
+}
+
+func TestMountTable_findAllAuthMountsInNamespace_returnsAuthOnly(t *testing.T) {
+	table := mixedClassTable(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	got, err := table.findAllAuthMountsInNamespace(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+
+	// Order matches insertion order; assert by UUID for stability.
+	assert.Equal(t, "auth-1", got[0].UUID)
+	assert.Equal(t, "auth-2", got[1].UUID)
+	for _, e := range got {
+		assert.Equal(t, mountClassAuth, e.Class,
+			"accessor must return only auth-class entries (got %s)", e.Class)
+	}
+}
+
+func TestMountTable_findAllAuthMountsInNamespace_namespaceFiltered(t *testing.T) {
+	otherNs := &namespace.Namespace{ID: "ns-other", Path: "other/"}
+	table := NewMountTable()
+	table.Entries = []*MountEntry{
+		{
+			Path: "jwt/", Type: "jwt", Class: mountClassAuth, UUID: "root-auth",
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		},
+		{
+			Path: "jwt/", Type: "jwt", Class: mountClassAuth, UUID: "other-auth",
+			NamespaceID: otherNs.ID, namespace: otherNs,
+		},
+	}
+
+	rootCtx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	got, err := table.findAllAuthMountsInNamespace(rootCtx)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "root namespace should see only its own auth mount")
+	assert.Equal(t, "root-auth", got[0].UUID)
+
+	otherCtx := namespace.ContextWithNamespace(context.Background(), otherNs)
+	got, err = table.findAllAuthMountsInNamespace(otherCtx)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "other namespace should see only its own auth mount")
+	assert.Equal(t, "other-auth", got[0].UUID)
+}
+
+func TestMountTable_findAllAuthMountsInNamespace_emptyResult(t *testing.T) {
+	// Table holds provider + system entries only; auth accessor returns empty.
+	table := NewMountTable()
+	table.Entries = []*MountEntry{
+		{
+			Path: "vault/", Class: mountClassProvider, UUID: "prov-1",
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		},
+		{
+			Path: "sys/", Class: mountClassSystem, UUID: "sys-1",
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		},
+	}
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	got, err := table.findAllAuthMountsInNamespace(ctx)
+	require.NoError(t, err)
+	assert.NotNil(t, got, "must return non-nil empty slice (callers may JSON-marshal)")
+	assert.Empty(t, got)
+}
+
+func TestMountTable_findAllAuthMountsInNamespace_emptyTable(t *testing.T) {
+	table := NewMountTable()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	got, err := table.findAllAuthMountsInNamespace(ctx)
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+	assert.Empty(t, got)
+}
+
+func TestMountTable_findAllAuthMountsInNamespace_missingNamespaceContext(t *testing.T) {
+	table := mixedClassTable(t)
+	// Background context carries no namespace — accessor surfaces the
+	// namespace-extraction error.
+	_, err := table.findAllAuthMountsInNamespace(context.Background())
+	assert.Error(t, err)
+}
+
+func TestMountTable_findAllProviderMountsInNamespace_returnsProviderOnly(t *testing.T) {
+	table := mixedClassTable(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	got, err := table.findAllProviderMountsInNamespace(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, "prov-1", got[0].UUID)
+	assert.Equal(t, "prov-2", got[1].UUID)
+	for _, e := range got {
+		assert.Equal(t, mountClassProvider, e.Class)
+	}
+}
+
+func TestMountTable_findAllProviderMountsInNamespace_doesNotReturnAuth(t *testing.T) {
+	// Defense in depth: even with paths that look like they could collide
+	// (jwt/ as both an auth method and a hypothetical provider mount name),
+	// the provider accessor must never return auth entries.
+	table := NewMountTable()
+	table.Entries = []*MountEntry{
+		{
+			Path: "jwt/", Class: mountClassAuth, UUID: "auth-1",
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		},
+		{
+			Path: "jwt/", Class: mountClassProvider, UUID: "prov-1",
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		},
+	}
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	got, err := table.findAllProviderMountsInNamespace(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "prov-1", got[0].UUID)
+	assert.Equal(t, mountClassProvider, got[0].Class)
+}

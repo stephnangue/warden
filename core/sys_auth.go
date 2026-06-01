@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -206,19 +205,13 @@ func (b *SystemBackend) handleAuthList(ctx context.Context, req *logical.Request
 	b.core.mountsLock.RLock()
 	defer b.core.mountsLock.RUnlock()
 
-	mounts := make(map[string]any)
-
-	ns, err := namespace.FromContext(ctx)
+	entries, err := b.core.mounts.findAllAuthMountsInNamespace(ctx)
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
 	}
 
-	for _, entry := range b.core.mounts.Entries {
-		// Only return entries of class auth in the specified namespace
-		if entry.Class != mountClassAuth || entry.NamespaceID != ns.ID {
-			continue
-		}
-
+	mounts := make(map[string]any, len(entries))
+	for _, entry := range entries {
 		// Deep copy config
 		entry.configMu.RLock()
 		config := make(map[string]any)
