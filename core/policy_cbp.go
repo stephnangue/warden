@@ -57,6 +57,18 @@ type CBPResults struct {
 	CapabilitiesBitmap     uint32
 	GrantingPolicies       []sdklogical.PolicyInfo
 	ResponseKeysFilterPath string
+
+	// MCPDecision is populated whenever an mcp { } rule-set was
+	// consulted during AllowOperation, on every branch (allow and
+	// deny) so the audit and deny-response layers can render the
+	// decision unconditionally. Nil when no rule-set applied (the
+	// vast majority of requests — every non-MCP provider).
+	//
+	// Invariant: when MCPDecision.Decision == "deny", Allowed is
+	// false. The reverse (Allowed=false with Decision="allow") is
+	// possible — the MCP gate runs between conditions and the
+	// parameter check, so a later check can deny after MCP allows.
+	MCPDecision *logical.MCPDecision
 }
 
 const limitParameterName = "limit"
@@ -252,6 +264,19 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 						existingPerms.ConditionSets,
 						pc.Permissions.ConditionSets...,
 					)
+				}
+			}
+
+			// MCP rule-set merging: additive OR across policies. Unlike
+			// conditions, an absent mcp block in one source does NOT
+			// disable enforcement contributed by another source — each
+			// stanza's mcp { } adds one entry to the slice and the
+			// per-set OR in evaluateMCP means more entries can only
+			// admit more requests (never fewer). The clone protects
+			// against later mutation of the shared underlying slices.
+			if len(pc.Permissions.MCP) > 0 {
+				for _, m := range pc.Permissions.MCP {
+					existingPerms.MCP = append(existingPerms.MCP, m.Clone())
 				}
 			}
 
@@ -457,6 +482,19 @@ CHECK:
 			}
 		}
 		if !conditionsMet {
+			return ret
+		}
+	}
+
+	// MCP rule-set evaluation. Runs after conditions (so source-IP /
+	// time gates apply first) and before parameter validation (so
+	// MCP-specific gates short-circuit the request before generic
+	// parameter rules run). Populates ret.MCPDecision on every branch
+	// when an mcp block was consulted, so the audit layer sees the
+	// decision whether the request was allowed or denied.
+	if len(permissions.MCP) > 0 {
+		ret.MCPDecision = evaluateMCP(permissions.MCP, req)
+		if ret.MCPDecision != nil && ret.MCPDecision.Decision == "deny" {
 			return ret
 		}
 	}
