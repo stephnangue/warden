@@ -49,6 +49,21 @@ func handleLogical(c *core.Core, log *logger.GatedLogger, forwarder *standbyForw
 			}
 
 			statusCode := errorToStatusCode(err)
+
+			// MCP-flavoured policy denials carry the structured
+			// MCPDecision via a typed error wrapper from
+			// core/request_handler.go. Render the OAuth-shaped 403
+			// body and the WWW-Authenticate header. Non-MCP denials
+			// (and every other error category) fall through to the
+			// generic Warden error body unchanged. The typed error
+			// Unwraps to sdklogical.ErrPermissionDenied so the status
+			// code is still 403 from errorToStatusCode above.
+			var mcpErr *core.ErrMCPPolicyDenied
+			if errors.As(err, &mcpErr) {
+				respondMCPDeny(w, statusCode, mcpErr.Decision)
+				return
+			}
+
 			respondError(w, statusCode, err.Error())
 			return
 		}
