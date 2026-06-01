@@ -141,30 +141,71 @@ warden cred spec read github-ops
 
 ## Step 4: Create a Policy
 
-The `mcp_github` provider runs in opaque pass-through mode — request bodies are not parsed for policy evaluation. This is by design: MCP traffic is JSON-RPC, and tool-level authorization belongs in the PAT's scopes rather than Warden policy. Grant access to the gateway and rely on the PAT's GitHub scopes for fine-grained authorization:
+MCP traffic passes through two complementary layers of authorization. The minted GitHub token is the security boundary — its scopes bound what the agent can actually do at GitHub regardless of what Warden lets through. On top of that, Warden's CBP policies support an `mcp { }` block for governance-style restrictions enforced at the gateway: allow- and deny-lists for JSON-RPC methods, tool names, resource URIs, prompt names, and (where the upstream tool author opted in) selected tool arguments. Enforcement is header-based; the allow path does no request-body parsing.
+
+> **Important — MCP draft 2026-07-28 dependency.** The `mcp { }` block relies on the next MCP protocol revision (draft dated 2026-07-28), which mirrors the JSON-RPC method and selected fields into HTTP headers so intermediaries can inspect without parsing the body. Until your MCP client adopts the draft, those headers are absent — and a policy with an `mcp { }` block bound to its path will **deny every request** from a pre-draft client. For mixed fleets, stage the rollout: start with the gateway-only policy below, verify clients send the new headers, then promote roles to policies with the `mcp { }` block. Policies without an `mcp { }` block continue to behave exactly as today.
+>
+> Tool-argument constraints (`allowed_params` / `denied_params`) carry an additional dependency: the upstream tool author has to opt into the per-argument header mirror via `x-mcp-header` in the tool's input schema. Until GitHub's MCP server ships that opt-in, `allowed_params` rules silently no-op for those tools and the PAT scopes remain the only argument-level guard.
+
+All examples below use `capabilities = ["update"]`. MCP traffic is HTTP POST and Warden maps POST to the `update` operation; the 2026-07-28 draft removed the GET stream endpoint entirely, so no other capabilities are needed.
+
+The simplest policy grants the gateway and leans on PAT scopes for everything:
 
 ```bash
 warden policy write mcp-github-access - <<EOF
 path "mcp_github/role/+/gateway*" {
-  capabilities = ["create", "read", "update", "delete", "patch"]
+  capabilities = ["update"]
 }
 EOF
 ```
 
-For coarser control over which roles can reach the MCP gateway at all, combine with runtime conditions:
+A policy that restricts the agent to a vetted set of GitHub tools (requires draft-2026-07-28 clients — see disclaimer above):
+
+```bash
+warden policy write mcp-github-readonly - <<EOF
+path "mcp_github/role/+/gateway*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/list", "tools/call", "resources/list", "resources/read"]
+    allowed_tools   = ["get_repository", "get_pull_request", "list_issues", "search_code"]
+  }
+}
+EOF
+```
+
+A complementary deny-list shape — permissive by default, blocks dangerous tools:
+
+```bash
+warden policy write mcp-github-safe - <<EOF
+path "mcp_github/role/+/gateway*" {
+  capabilities = ["update"]
+  mcp {
+    denied_tools = ["delete_*", "force_*", "merge_pull_request"]
+  }
+}
+EOF
+```
+
+The `mcp { }` block composes with runtime conditions so you can layer environment guards on top of tool-level restrictions:
 
 ```bash
 warden policy write mcp-github-business-hours - <<EOF
 path "mcp_github/role/+/gateway*" {
-  capabilities = ["create", "read", "update", "delete", "patch"]
+  capabilities = ["update"]
   conditions {
     source_ip   = ["10.0.0.0/8"]
     time_window = ["08:00-18:00 UTC"]
     day_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri"]
   }
+  mcp {
+    allowed_methods = ["tools/list", "tools/call"]
+    allowed_tools   = ["get_*", "list_*", "create_issue_comment"]
+  }
 }
 EOF
 ```
+
+When a request hits the `mcp { }` gate and is denied, Warden returns HTTP 403 with a structured JSON body and an RFC 6750 `WWW-Authenticate` header; MCP client SDKs surface this to the agent as a tool-call failure with an actionable message. The audit log records the matched rule and the offending tool/parameter so operators can debug policy decisions centrally. Policies that omit the `mcp { }` block keep today's behaviour: Warden passes the request through to GitHub unchanged and the PAT's scopes alone enforce authorization.
 
 ## Step 5: Point an MCP Client at Warden
 
