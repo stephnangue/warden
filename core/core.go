@@ -252,11 +252,23 @@ type Core struct {
 
 	router *Router
 
+	// LOCK ORDERING: when a code path needs more than one mount-table lock,
+	// acquire them in this order: mountsLock → authLock → auditLock.
+	// The reverse is forbidden and will deadlock under contention.
+
 	mounts *MountTable
 
-	// mountsLock is used to ensure that the mounts table does not
-	// change underneath a calling function
+	// mountsLock guards the provider + system mount table (c.mounts).
 	mountsLock locking.DeadlockRWMutex
+
+	// auth holds the auth-method mount table. Separate from c.mounts so
+	// callers that only need one class never block on the other, and so
+	// missed class checks become impossible (a provider entry physically
+	// cannot live in c.auth and vice versa).
+	auth *MountTable
+
+	// authLock guards the auth-method mount table (c.auth).
+	authLock locking.DeadlockRWMutex
 
 	// initialized tracks whether warden init has been called
 	initialized bool
@@ -509,6 +521,7 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 		auditManager:            audit.NewAuditManager(conf.Logger.WithSystem("audit")),
 		router:                  NewRouter(conf.Logger.WithSystem("router")),
 		mounts:                  NewMountTable(),
+		auth:                    NewMountTable(),
 		audit:                   NewMountTable(),
 		sealed:                  new(uint32),
 		standbyStopCh:           new(atomic.Value),
@@ -1305,6 +1318,14 @@ func (c *Core) preSeal() error {
 		result = multierror.Append(result, fmt.Errorf("error tearing down policy store: %w", err))
 	}
 
+	// Unload auth BEFORE mounts: c.unloadMounts resets the router and clears
+	// c.systemBarrierView (shared global state), and auth backends need to
+	// run their Cleanup() against a still-populated router.
+	if err := c.unloadAuth(context.Background()); err != nil {
+		c.logger.Error("error unloading auth methods", logger.Err(err))
+		return fmt.Errorf("error unloading auth methods: %w", err)
+	}
+
 	if err := c.unloadMounts(context.Background()); err != nil {
 		c.logger.Error("error unloading mounts", logger.Err(err))
 		return fmt.Errorf("error unloading mounts: %w", err)
@@ -1421,6 +1442,16 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 		return err
 	}
 	if err := c.setupMounts(ctx); err != nil {
+		return err
+	}
+
+	// Auth methods are loaded after the provider/system mounts so the router
+	// and system backend are live before any auth backend's Initialize()
+	// runs. Mirrors OpenBao's postUnseal ordering.
+	if err := c.loadAuth(ctx); err != nil {
+		return err
+	}
+	if err := c.setupAuth(ctx); err != nil {
 		return err
 	}
 

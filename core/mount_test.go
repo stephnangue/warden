@@ -755,3 +755,239 @@ func TestMountTable_findAllProviderMountsInNamespace_doesNotReturnAuth(t *testin
 	assert.Equal(t, "prov-1", got[0].UUID)
 	assert.Equal(t, mountClassProvider, got[0].Class)
 }
+
+// ----------------------------------------------------------------------------
+// Mount-table split tests (c.mounts / c.auth)
+// ----------------------------------------------------------------------------
+
+func TestCore_AuthTable_InitializedAtConstruction(t *testing.T) {
+	core := createTestCore(t)
+	require.NotNil(t, core.auth, "createTestCore must initialize c.auth alongside c.mounts")
+	assert.NotNil(t, core.auth.Entries, "c.auth.Entries must be a non-nil empty slice")
+	assert.Empty(t, core.auth.Entries, "fresh c.auth must hold zero entries")
+}
+
+func TestBackfillEntryFields_FillsMissing(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	entry := &MountEntry{
+		Path:  "test-jwt/",
+		Type:  "jwt",
+		Class: mountClassAuth,
+		// Accessor, BackendAwareUUID, NamespaceID, namespace all empty.
+	}
+
+	changed, err := core.backfillEntryFields(ctx, entry)
+	require.NoError(t, err)
+	assert.True(t, changed, "helper must report changed=true when fields were filled")
+	assert.NotEmpty(t, entry.Accessor, "Accessor must be filled")
+	assert.NotEmpty(t, entry.BackendAwareUUID, "BackendAwareUUID must be filled")
+	assert.Equal(t, namespace.RootNamespaceID, entry.NamespaceID, "missing NamespaceID defaults to root")
+	require.NotNil(t, entry.namespace, "namespace pointer must be resolved")
+	assert.Equal(t, namespace.RootNamespaceID, entry.namespace.ID)
+}
+
+func TestBackfillEntryFields_NoOpWhenComplete(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	entry := &MountEntry{
+		Path:             "complete/",
+		Type:             "jwt",
+		Class:            mountClassAuth,
+		UUID:             "fixed-uuid",
+		Accessor:         "mock_12345678",
+		BackendAwareUUID: "fixed-backend-uuid",
+		NamespaceID:      namespace.RootNamespaceID,
+		namespace:        namespace.RootNamespace,
+	}
+
+	changed, err := core.backfillEntryFields(ctx, entry)
+	require.NoError(t, err)
+	assert.False(t, changed, "helper must report changed=false when nothing was filled")
+	// Idempotence: the entry should be byte-identical.
+	assert.Equal(t, "mock_12345678", entry.Accessor)
+	assert.Equal(t, "fixed-backend-uuid", entry.BackendAwareUUID)
+}
+
+func TestCore_Mount_AuthClass_RoutesToAuthTable(t *testing.T) {
+	core := createTestCore(t)
+	core.authMethods["mock"] = MockProviderFactory
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	entry := &MountEntry{
+		Path:  "test-auth",
+		Type:  "mock",
+		Class: mountClassAuth,
+	}
+
+	require.NoError(t, core.mount(ctx, entry))
+
+	// Entry must land in c.auth, NOT c.mounts.
+	core.authLock.RLock()
+	found := false
+	for _, e := range core.auth.Entries {
+		if e.UUID == entry.UUID {
+			found = true
+			break
+		}
+	}
+	core.authLock.RUnlock()
+	assert.True(t, found, "auth-class entry must appear in c.auth after mount()")
+
+	core.mountsLock.RLock()
+	for _, e := range core.mounts.Entries {
+		assert.NotEqual(t, entry.UUID, e.UUID, "auth-class entry must NOT appear in c.mounts")
+		assert.NotEqual(t, mountClassAuth, e.Class, "c.mounts must not hold any auth-class entries after the split")
+	}
+	core.mountsLock.RUnlock()
+}
+
+func TestCore_Mount_ProviderClass_RoutesToMountsTable(t *testing.T) {
+	core := createTestCore(t)
+	core.providers["mock"] = MockProviderFactory
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	entry := &MountEntry{
+		Path:  "test-provider",
+		Type:  "mock",
+		Class: mountClassProvider,
+	}
+
+	require.NoError(t, core.mount(ctx, entry))
+
+	core.mountsLock.RLock()
+	found := false
+	for _, e := range core.mounts.Entries {
+		if e.UUID == entry.UUID {
+			found = true
+			break
+		}
+	}
+	core.mountsLock.RUnlock()
+	assert.True(t, found, "provider-class entry must appear in c.mounts after mount()")
+
+	core.authLock.RLock()
+	for _, e := range core.auth.Entries {
+		assert.NotEqual(t, entry.UUID, e.UUID, "provider-class entry must NOT appear in c.auth")
+	}
+	core.authLock.RUnlock()
+}
+
+func TestCore_Mount_AuditClass_Panics(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	entry := &MountEntry{
+		Path:  "test-audit",
+		Type:  "file",
+		Class: mountClassAudit,
+	}
+
+	// mount() must defensively panic for audit-class entries — audit goes
+	// through EnableAudit, not the mount dispatcher.
+	assert.Panics(t, func() {
+		_ = core.mount(ctx, entry)
+	}, "mount() with audit class must panic; audit must go through EnableAudit")
+}
+
+func TestCore_Unmount_AuthClass_DispatchesToAuthTable(t *testing.T) {
+	core := createTestCore(t)
+	core.authMethods["mock"] = MockProviderFactory
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	entry := &MountEntry{Path: "to-unmount", Type: "mock", Class: mountClassAuth}
+	require.NoError(t, core.mount(ctx, entry))
+
+	// Snapshot c.mounts.Entries length pre-unmount so we can confirm the
+	// unmount doesn't accidentally touch the wrong table.
+	core.mountsLock.RLock()
+	mountsLenBefore := len(core.mounts.Entries)
+	core.mountsLock.RUnlock()
+
+	// User passes the path WITHOUT the auth/ prefix (handleAuthDelete sends
+	// "to-unmount/" — unmountInternal detects auth via the checkMatch fallback).
+	require.NoError(t, core.unmount(ctx, "to-unmount/"))
+
+	// Entry gone from c.auth.
+	core.authLock.RLock()
+	for _, e := range core.auth.Entries {
+		assert.NotEqual(t, entry.UUID, e.UUID, "auth entry must be removed from c.auth after unmount")
+	}
+	core.authLock.RUnlock()
+
+	// c.mounts.Entries length is unchanged — we didn't accidentally touch
+	// the wrong table.
+	core.mountsLock.RLock()
+	mountsLenAfter := len(core.mounts.Entries)
+	core.mountsLock.RUnlock()
+	assert.Equal(t, mountsLenBefore, mountsLenAfter, "unmount of auth entry must not modify c.mounts")
+}
+
+func TestCore_Unmount_ProviderClass_DispatchesToMountsTable(t *testing.T) {
+	core := createTestCore(t)
+	core.providers["mock"] = MockProviderFactory
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	entry := &MountEntry{Path: "to-unmount", Type: "mock", Class: mountClassProvider}
+	require.NoError(t, core.mount(ctx, entry))
+
+	core.authLock.RLock()
+	authLenBefore := len(core.auth.Entries)
+	core.authLock.RUnlock()
+
+	require.NoError(t, core.unmount(ctx, "to-unmount/"))
+
+	core.mountsLock.RLock()
+	for _, e := range core.mounts.Entries {
+		assert.NotEqual(t, entry.UUID, e.UUID, "provider entry must be removed from c.mounts after unmount")
+	}
+	core.mountsLock.RUnlock()
+
+	core.authLock.RLock()
+	authLenAfter := len(core.auth.Entries)
+	core.authLock.RUnlock()
+	assert.Equal(t, authLenBefore, authLenAfter, "unmount of provider entry must not modify c.auth")
+}
+
+// TestCore_Unmount_PrecedenceIsProviderFirst regresses against a future
+// refactor accidentally swapping the unmountInternal checkMatch order. The
+// rule: if both a provider mount at "jwt/" and an auth mount at "jwt/" exist
+// (which they can — different router prefixes: "jwt/" vs "auth/jwt/"), a bare
+// `c.unmount(ctx, "jwt/")` MUST hit the provider, not the auth mount.
+func TestCore_Unmount_PrecedenceIsProviderFirst(t *testing.T) {
+	core := createTestCore(t)
+	core.providers["mock"] = MockProviderFactory
+	core.authMethods["mock"] = MockProviderFactory
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	provider := &MountEntry{Path: "jwt", Type: "mock", Class: mountClassProvider}
+	require.NoError(t, core.mount(ctx, provider))
+
+	auth := &MountEntry{Path: "jwt", Type: "mock", Class: mountClassAuth}
+	require.NoError(t, core.mount(ctx, auth))
+
+	require.NoError(t, core.unmount(ctx, "jwt/"))
+
+	// Provider should be gone from c.mounts.
+	core.mountsLock.RLock()
+	for _, e := range core.mounts.Entries {
+		assert.NotEqual(t, provider.UUID, e.UUID, "provider 'jwt/' must be removed (precedence is provider-first)")
+	}
+	core.mountsLock.RUnlock()
+
+	// Auth should still be present in c.auth — precedence rule says
+	// the auth mount is NOT touched by a bare 'jwt/' unmount when a
+	// provider at the same name exists.
+	core.authLock.RLock()
+	found := false
+	for _, e := range core.auth.Entries {
+		if e.UUID == auth.UUID {
+			found = true
+			break
+		}
+	}
+	core.authLock.RUnlock()
+	assert.True(t, found, "auth 'jwt/' must still exist after unmount('jwt/') hit the provider first")
+}

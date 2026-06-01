@@ -97,17 +97,17 @@ func (b *SystemBackend) handleIntrospectRoles(ctx context.Context, req *logical.
 		}, nil
 	}
 
-	// Snapshot matching mount entries under the lock, then release before
-	// dispatching so that concurrent mount writes are not blocked on our
-	// in-process fan-out. The filter asks the registry "what TokenType
+	// Snapshot matching auth-mount entries under the lock, then release
+	// before dispatching so that concurrent mount writes are not blocked on
+	// our in-process fan-out. The filter asks the registry "what TokenType
 	// serves this mount, and does its CredentialFormat exactly match what
 	// the caller presented?" — exact-match so a generic JWT never fans out
 	// to a kubernetes mount (which would burn a TokenReview round-trip)
 	// and vice versa.
-	b.core.mountsLock.RLock()
-	authMounts, err := b.core.mounts.findAllAuthMountsInNamespace(ctx)
+	b.core.authLock.RLock()
+	authMounts, err := b.core.auth.findAllNamespaceMounts(ctx)
 	if err != nil {
-		b.core.mountsLock.RUnlock()
+		b.core.authLock.RUnlock()
 		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
 	}
 	matching := make([]*MountEntry, 0, len(authMounts))
@@ -118,7 +118,7 @@ func (b *SystemBackend) handleIntrospectRoles(ctx context.Context, req *logical.
 		}
 		matching = append(matching, entry)
 	}
-	b.core.mountsLock.RUnlock()
+	b.core.authLock.RUnlock()
 
 	if len(matching) == 0 {
 		return b.respondSuccess(map[string]any{

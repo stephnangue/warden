@@ -145,15 +145,15 @@ func (b *SystemBackend) handleAuthCreate(ctx context.Context, req *logical.Reque
 func (b *SystemBackend) handleAuthRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	path := d.Get("path").(string)
 
-	b.core.mountsLock.RLock()
-	defer b.core.mountsLock.RUnlock()
+	b.core.authLock.RLock()
+	defer b.core.authLock.RUnlock()
 
 	// Normalize path
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
 	}
 
-	entry, err := b.core.mounts.findByPath(ctx, path)
+	entry, err := b.core.auth.findByPath(ctx, path)
 	if err != nil {
 		return logical.ErrorResponse(err), nil
 	}
@@ -161,7 +161,8 @@ func (b *SystemBackend) handleAuthRead(ctx context.Context, req *logical.Request
 		return logical.ErrorResponse(logical.ErrNotFound("auth method mount not found")), nil
 	}
 
-	// Verify it's an auth mount
+	// Defense-in-depth: c.auth is class-pure post-split, but verify so a
+	// stray entry (test fixture bug, etc.) doesn't leak as an auth method.
 	if entry.Class != mountClassAuth {
 		return logical.ErrorResponse(logical.ErrNotFound("auth method mount not found")), nil
 	}
@@ -202,10 +203,12 @@ func (b *SystemBackend) handleAuthDelete(ctx context.Context, req *logical.Reque
 
 // handleAuthList handles GET /sys/auth
 func (b *SystemBackend) handleAuthList(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	b.core.mountsLock.RLock()
-	defer b.core.mountsLock.RUnlock()
+	b.core.authLock.RLock()
+	defer b.core.authLock.RUnlock()
 
-	entries, err := b.core.mounts.findAllAuthMountsInNamespace(ctx)
+	// c.auth is class-pure (only auth-class entries), so the namespace-only
+	// accessor is sufficient — no class filter needed.
+	entries, err := b.core.auth.findAllNamespaceMounts(ctx)
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
 	}

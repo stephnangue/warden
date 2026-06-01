@@ -535,6 +535,8 @@ func createTestCore(t *testing.T) *Core {
 		router:        router,
 		mounts:        NewMountTable(),
 		mountsLock:    locking.DeadlockRWMutex{},
+		auth:          NewMountTable(),
+		authLock:      locking.DeadlockRWMutex{},
 		authMethods:   make(map[string]logical.Factory),
 		providers:     make(map[string]logical.Factory),
 		auditManager:  &mockAuditManager{},
@@ -634,9 +636,10 @@ func mountStubAuthMethodInNamespace(t *testing.T, c *Core, mountPath, mountType 
 	view := NewBarrierView(c.barrier, "auth/"+entry.UUID+"/")
 	require.NoError(t, c.router.Mount(authRoutePrefix+mountPath, nil, entry, view))
 
-	c.mountsLock.Lock()
-	c.mounts.Entries = append(c.mounts.Entries, entry)
-	c.mountsLock.Unlock()
+	// Post-split: auth-class entries live in c.auth, NOT c.mounts.
+	c.authLock.Lock()
+	c.auth.Entries = append(c.auth.Entries, entry)
+	c.authLock.Unlock()
 
 	return entry
 }

@@ -624,42 +624,70 @@ func (ns *NamespaceStore) createMounts(ctx context.Context, storage logical.Stor
 func (ns *NamespaceStore) undoCreateMounts(nsCtx context.Context, namespaceToDelete *namespace.Namespace) bool {
 	success := true
 
-	// clear mounts
+	// Snapshot entries from BOTH tables under the canonical lock order
+	// (mountsLock before authLock) so we can release the locks before
+	// calling unmountInternal — unmountInternal re-acquires the appropriate
+	// per-table lock internally based on whether the path is auth- or
+	// provider-classed.
 	ns.core.mountsLock.Lock()
-	mountEntries, err := ns.core.mounts.findAllNamespaceMounts(nsCtx)
+	mountEntries, mErr := ns.core.mounts.findAllNamespaceMounts(nsCtx)
 	ns.core.mountsLock.Unlock()
-	if err != nil {
+
+	ns.core.authLock.Lock()
+	authEntries, aErr := ns.core.auth.findAllNamespaceMounts(nsCtx)
+	ns.core.authLock.Unlock()
+
+	if mErr != nil {
 		ns.logger.Error("failed to retrieve namespace mounts",
 			logger.String("namespace", namespaceToDelete.Path),
-			logger.Err(err))
+			logger.Err(mErr))
 		success = false
-	} else {
-		for _, me := range mountEntries {
-			err := ns.core.unmountInternal(nsCtx, me.Path, false)
-			if err != nil {
-				if errors.Is(err, errNoMatchingMount) {
-					continue
-				}
-				ns.logger.Error(fmt.Sprintf("failed to unmount %q", me.Path),
-					logger.String("namespace", namespaceToDelete.Path),
-					logger.Err(err))
-				success = false
+	}
+	if aErr != nil {
+		ns.logger.Error("failed to retrieve namespace auth mounts",
+			logger.String("namespace", namespaceToDelete.Path),
+			logger.Err(aErr))
+		success = false
+	}
+
+	allEntries := append(mountEntries, authEntries...)
+	for _, me := range allEntries {
+		err := ns.core.unmountInternal(nsCtx, me.Path, false)
+		if err != nil {
+			if errors.Is(err, errNoMatchingMount) {
 				continue
 			}
+			ns.logger.Error(fmt.Sprintf("failed to unmount %q", me.Path),
+				logger.String("namespace", namespaceToDelete.Path),
+				logger.Err(err))
+			success = false
+			continue
 		}
 	}
 	return success
 }
 
 func (ns *NamespaceStore) pushToMounts(ctx context.Context, entry *namespace.Namespace) error {
+	// Both tables can carry entries that belong to this namespace.
+	// Acquire in canonical order (mountsLock → authLock); release in
+	// reverse via the defer stack so unlock order matches the safety
+	// convention.
 	ns.core.mountsLock.Lock()
 	defer ns.core.mountsLock.Unlock()
+	ns.core.authLock.Lock()
+	defer ns.core.authLock.Unlock()
 
 	for _, mount := range ns.core.mounts.Entries {
 		if mount.NamespaceID != entry.ID {
 			continue
 		}
+		mount.namespace = entry
+	}
 
+	for _, mount := range ns.core.auth.Entries {
+		if mount.NamespaceID != entry.ID {
+			continue
+		}
 		mount.namespace = entry
 	}
 
@@ -977,7 +1005,10 @@ func (ns *NamespaceStore) clearNamespaceResources(nsCtx context.Context, namespa
 		}
 	}
 
-	// clear mounts
+	// Snapshot entries from BOTH tables under the canonical lock order
+	// (mountsLock before authLock), then release before calling
+	// unmountInternal — it re-acquires the per-table lock internally based
+	// on the path-class detection.
 	ns.core.mountsLock.Lock()
 	mountEntries, err := ns.core.mounts.findAllNamespaceMounts(nsCtx)
 	ns.core.mountsLock.Unlock()
@@ -985,7 +1016,15 @@ func (ns *NamespaceStore) clearNamespaceResources(nsCtx context.Context, namespa
 		return fmt.Errorf("failed to retrieve namespace mounts: %w", err)
 	}
 
-	for _, me := range mountEntries {
+	ns.core.authLock.Lock()
+	authEntries, err := ns.core.auth.findAllNamespaceMounts(nsCtx)
+	ns.core.authLock.Unlock()
+	if err != nil {
+		return fmt.Errorf("failed to retrieve namespace auth mounts: %w", err)
+	}
+
+	allEntries := append(mountEntries, authEntries...)
+	for _, me := range allEntries {
 		err := ns.core.unmountInternal(nsCtx, me.Path, true)
 		if err != nil {
 			if wlogical.IsNotFound(err) {

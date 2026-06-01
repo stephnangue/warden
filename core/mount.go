@@ -21,10 +21,16 @@ import (
 )
 
 const (
-	// coreMountConfigPath is used to store the mount configuration.
-	// Mounts are protected within the Warden itself, which means they
-	// can only be viewed or modified after an unseal.
+	// coreMountConfigPath is used to store the provider + system mount
+	// configuration. Mounts are protected within Warden itself, which means
+	// they can only be viewed or modified after an unseal. Auth-method
+	// mounts live under coreAuthConfigPath in their own table.
 	coreMountConfigPath = "core/mounts"
+
+	// coreAuthConfigPath is the auth-table sibling of coreMountConfigPath.
+	// Auth-method MountEntry blobs persist under {nsView}/core/auth/{uuid}
+	// just like provider entries persist under {nsView}/core/mounts/{uuid}.
+	coreAuthConfigPath = "core/auth"
 
 	mountPathSystem = "sys/"
 
@@ -255,7 +261,7 @@ type MountEntry struct {
 	Config                map[string]any `json:"config"`                            // Config options for this mount
 	SealWrap              bool           `json:"seal_wrap"`                         // Whether to wrap CSPs
 	NamespaceID           string         `json:"namespace_id"`
-	Declarative           bool           `json:"declarative,omitempty"`             // True for audit devices declared in the HCL server config (vs. imperatively created via sys/audit/{path}). Declarative entries can only be modified via HCL+restart.
+	Declarative           bool           `json:"declarative,omitempty"` // True for audit devices declared in the HCL server config (vs. imperatively created via sys/audit/{path}). Declarative entries can only be modified via HCL+restart.
 
 	// namespace contains the populated namespace
 	namespace *namespace.Namespace `json:"-"`
@@ -335,15 +341,29 @@ func (c *Core) mount(ctx context.Context, entry *MountEntry) error {
 	return nil
 }
 
+// mountInternal is the class-dispatcher entry point. Routes provider/system
+// mounts to the c.mounts path (under c.mountsLock) and auth mounts to the
+// c.auth path (under c.authLock). Audit mounts must go through EnableAudit;
+// reaching here with an audit entry is a programmer error and panics.
 func (c *Core) mountInternal(ctx context.Context, entry *MountEntry, updateStorage bool) error {
-	c.mountsLock.Lock()
-	defer c.mountsLock.Unlock()
-
-	return c.mountInternalLocked(ctx, entry, updateStorage)
+	switch entry.Class {
+	case mountClassAuth:
+		c.authLock.Lock()
+		defer c.authLock.Unlock()
+		return c.mountAuthInternalLocked(ctx, entry, updateStorage)
+	case mountClassProvider, mountClassSystem, mountClassNSSystem:
+		c.mountsLock.Lock()
+		defer c.mountsLock.Unlock()
+		return c.mountInternalLocked(ctx, entry, updateStorage)
+	case mountClassAudit:
+		panic("mountInternal: audit-class entries must go through EnableAudit, not mount()")
+	default:
+		return fmt.Errorf("mountInternal: unknown mount class %q", entry.Class)
+	}
 }
 
-// mountInternalLocked is the lock-free implementation of mountInternal.
-// The caller must hold c.mountsLock.
+// mountInternalLocked is the lock-free implementation that operates on c.mounts
+// (provider/system/ns_system entries). The caller must hold c.mountsLock.
 func (c *Core) mountInternalLocked(ctx context.Context, entry *MountEntry, updateStorage bool) error {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
@@ -464,6 +484,116 @@ func (c *Core) mountInternalLocked(ctx context.Context, entry *MountEntry, updat
 	return nil
 }
 
+// mountAuthInternalLocked is the auth-table sibling of mountInternalLocked.
+// Operates on c.auth and persists via c.persistAuth. Caller must hold
+// c.authLock. The body intentionally mirrors mountInternalLocked one-for-one
+// so the two paths are easy to diff and any future divergence is obvious in
+// review.
+func (c *Core) mountAuthInternalLocked(ctx context.Context, entry *MountEntry, updateStorage bool) error {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	entry.NamespaceID = ns.ID
+	entry.namespace = ns
+
+	// Within-table path-conflict check. Cross-class conflicts cannot happen
+	// because auth/ is a reserved router prefix (see protectedMounts) and
+	// only auth-class entries live in c.auth — so iterating c.auth here is
+	// strictly sufficient. The router.MountConflict check below catches any
+	// router-level collision that somehow slips through.
+	for _, ent := range c.auth.Entries {
+		if ns.ID == ent.NamespaceID {
+			switch {
+			case strings.HasPrefix(ent.Path, entry.Path):
+				fallthrough
+			case strings.HasPrefix(entry.Path, ent.Path):
+				return logical.ErrConflictf("path is already in use at %s", ent.Path)
+			}
+		}
+	}
+
+	mountPath := authRoutePrefix + entry.Path
+	if match := c.router.MountConflict(ctx, mountPath); match != "" {
+		return logical.ErrConflictf("existing mount at %s", match)
+	}
+
+	if entry.UUID == "" {
+		entryUUID, err := uuid.GenerateUUID()
+		if err != nil {
+			return err
+		}
+		entry.UUID = entryUUID
+	}
+	if entry.BackendAwareUUID == "" {
+		bUUID, err := uuid.GenerateUUID()
+		if err != nil {
+			return err
+		}
+		entry.BackendAwareUUID = bUUID
+	}
+	if entry.Accessor == "" {
+		accessor, err := c.generateMountAccessor(entry.Type)
+		if err != nil {
+			return err
+		}
+		entry.Accessor = accessor
+	}
+
+	view, err := c.mountEntryView(entry)
+	if err != nil {
+		return err
+	}
+
+	origReadOnlyErr := view.GetReadOnlyErr()
+	view.SetReadOnlyErr(sdklogical.ErrSetupReadOnly)
+	defer view.SetReadOnlyErr(origReadOnlyErr)
+
+	backend, err := c.newLogicalBackend(ctx, entry, view)
+	if err != nil {
+		return err
+	}
+	if backend == nil {
+		return fmt.Errorf("nil backend of type %s returned from creation function", entry.Type)
+	}
+
+	c.setCoreBackend(entry, backend, view)
+
+	newTable := c.auth.shallowClone()
+	newTable.Entries = append(newTable.Entries, entry)
+	if updateStorage {
+		if err := c.persistAuth(ctx, nil, newTable, entry.UUID); err != nil {
+			if sdklogical.ShouldForward(err) {
+				return err
+			}
+
+			c.logger.Error("failed to update auth table", logger.Err(err))
+			return logical.ErrInternal("failed to update auth table")
+		}
+	}
+
+	c.auth = newTable
+
+	if err := c.router.Mount(mountPath, backend, entry, view); err != nil {
+		return err
+	}
+
+	view.SetReadOnlyErr(origReadOnlyErr)
+
+	if err := backend.Initialize(c.activeContext); err != nil {
+		return err
+	}
+
+	c.logger.Info("successfully mounted",
+		logger.String("path", entry.Path),
+		logger.String("type", entry.Type),
+		logger.String("class", entry.Class),
+	)
+
+	return nil
+}
+
 // newLogicalBackend is used to create and configure a new logical backend by name.
 func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry, view sdklogical.Storage) (logical.Backend, error) {
 	var backend logical.Backend
@@ -561,13 +691,18 @@ func (c *Core) unmountInternal(ctx context.Context, path string, updateStorage b
 		return match != "" && ns.Path+p == match
 	}
 
-	// first check provider match
+	// First try the path as-is (provider/system). If that misses, retry under
+	// the auth/ prefix (auth mount). Record which one matched so we can
+	// dispatch the table mutations to the correct (table, lock) pair below —
+	// by the time we call taint/remove the auth prefix is stripped again and
+	// intra-function path-prefix detection would be impossible.
+	isAuth := false
 	if !checkMatch(path) {
-		// try auth match instead
 		path = authRoutePrefix + path
 		if !checkMatch(path) {
 			return logical.ErrNotFoundf("no mount found at path %q", strings.TrimPrefix(path, authRoutePrefix))
 		}
+		isAuth = true
 	}
 
 	// Get the view for this backend
@@ -579,8 +714,15 @@ func (c *Core) unmountInternal(ctx context.Context, path string, updateStorage b
 	// Get the backend/mount entry for this path
 	backend := c.router.MatchingBackend(ctx, path)
 
-	// Mark the entry as tainted
-	if err := c.taintMountEntry(ctx, ns.ID, strings.TrimPrefix(path, authRoutePrefix), updateStorage, true); err != nil {
+	mountPath := strings.TrimPrefix(path, authRoutePrefix)
+
+	// Mark the entry as tainted in the correct table.
+	if isAuth {
+		err = c.taintAuthEntry(ctx, ns.ID, mountPath, updateStorage, true)
+	} else {
+		err = c.taintMountEntry(ctx, ns.ID, mountPath, updateStorage, true)
+	}
+	if err != nil {
 		c.logger.Error("failed to taint mount entry for path being unmounted",
 			logger.Err(err),
 			logger.String("namespace", ns.Path),
@@ -602,8 +744,13 @@ func (c *Core) unmountInternal(ctx context.Context, path string, updateStorage b
 		backend.Cleanup(revokeCtx)
 	}
 
-	// Remove the mount table entry
-	if err := c.removeMountEntry(ctx, strings.TrimPrefix(path, authRoutePrefix), updateStorage); err != nil {
+	// Remove the mount table entry from the correct table.
+	if isAuth {
+		err = c.removeAuthEntry(ctx, mountPath, updateStorage)
+	} else {
+		err = c.removeMountEntry(ctx, mountPath, updateStorage)
+	}
+	if err != nil {
 		c.logger.Error("failed to remove mount entry for path being unmounted",
 			logger.Err(err),
 			logger.String("path", path),
@@ -695,6 +842,74 @@ func (c *Core) removeMountEntry(ctx context.Context, path string, updateStorage 
 	return nil
 }
 
+// taintAuthEntry is the auth-table sibling of taintMountEntry. Operates on
+// c.auth under c.authLock and persists via c.persistAuth.
+func (c *Core) taintAuthEntry(ctx context.Context, nsID, mountPath string, updateStorage bool, unmounting bool) error {
+	c.authLock.Lock()
+	defer c.authLock.Unlock()
+
+	mountState := ""
+	if unmounting {
+		mountState = mountStateUnmounting
+	}
+
+	entry, err := c.auth.setTaint(nsID, mountPath, true, mountState)
+	if err != nil {
+		return err
+	}
+
+	if entry == nil {
+		c.logger.Error("nil entry found tainting entry in auth table",
+			logger.String("path", mountPath),
+		)
+		return fmt.Errorf("failed to taint entry in auth table")
+	}
+
+	if updateStorage {
+		if err := c.persistAuth(ctx, nil, c.auth, entry.UUID); err != nil {
+			c.logger.Error("failed to taint entry in auth table", logger.Err(err))
+			return logical.ErrInternal("failed to taint entry in auth table")
+		}
+	}
+
+	return nil
+}
+
+// removeAuthEntry is the auth-table sibling of removeMountEntry. Operates on
+// c.auth under c.authLock and persists via c.persistAuth.
+func (c *Core) removeAuthEntry(ctx context.Context, path string, updateStorage bool) error {
+	c.authLock.Lock()
+	defer c.authLock.Unlock()
+
+	newTable := c.auth.shallowClone()
+	entry, err := newTable.remove(ctx, path)
+	if err != nil {
+		return err
+	}
+	if entry == nil {
+		c.logger.Error("nil entry found removing entry from auth table",
+			logger.String("path", path),
+		)
+		return fmt.Errorf("failed to remove entry in auth table")
+	}
+
+	// Mirror removeMountEntry: when emptied, nil out the slice so JSON
+	// round-trips through tests don't get tripped by a nil-vs-empty diff.
+	if len(newTable.Entries) == 0 {
+		newTable.Entries = nil
+	}
+
+	if updateStorage {
+		if err := c.persistAuth(ctx, nil, newTable, entry.UUID); err != nil {
+			c.logger.Error("failed to remove entry from auth table", logger.Err(err))
+			return logical.ErrInternal("failed to remove entry from auth table")
+		}
+	}
+
+	c.auth = newTable
+	return nil
+}
+
 // From an input path that has a relative namespace hierarchy followed by a mount point, return the full
 // namespace of the mount point, along with the mount point without the namespace related prefix.
 // For example, in a hierarchy ns1/ns2/ns3/secret-mount, when currNs is ns1 and path is ns2/ns3/secret-mount,
@@ -766,7 +981,7 @@ func (c *Core) loadTransactionalMounts(ctx context.Context, barrier sdklogical.S
 		}
 
 		view := NamespaceView(barrier, ns)
-		mountsListed, err := listTransactionalMountsForNamespace(ctx, view)
+		mountsListed, err := listTransactionalEntriesForNamespace(ctx, view, coreMountConfigPath)
 		if err != nil {
 			c.logger.Error("failed to list mounts for namespace", logger.Err(err), logger.Int("ns_index", index), logger.String("namespace", ns.ID))
 			return err
@@ -792,9 +1007,19 @@ func (c *Core) loadTransactionalMounts(ctx context.Context, barrier sdklogical.S
 					return fmt.Errorf("error loading mount table entry (%v (%v)/%v/%v): %w", ns.ID, nsIndex, index, uuid, err)
 				}
 
-				if entry != nil {
-					c.mounts.Entries = append(c.mounts.Entries, entry)
+				if entry == nil {
+					continue
 				}
+
+				// Per-entry Class validation: the mounts table must hold only
+				// provider/system entries. An auth or audit entry showing up
+				// here means storage was written by a pre-split binary or an
+				// out-of-band tool — fail closed so the operator notices.
+				if entry.Class == mountClassAuth || entry.Class == mountClassAudit {
+					return fmt.Errorf("mounts table contains wrong-class entry %s (class=%s) in namespace %s; wipe storage and re-init", uuid, entry.Class, ns.ID)
+				}
+
+				c.mounts.Entries = append(c.mounts.Entries, entry)
 			}
 		}
 	}
@@ -803,6 +1028,115 @@ func (c *Core) loadTransactionalMounts(ctx context.Context, barrier sdklogical.S
 	if err != nil {
 		c.logger.Error("failed to run legacy mount table upgrades", logger.Err(err))
 		return err
+	}
+
+	return nil
+}
+
+// loadAuth is invoked as part of postUnseal to load the auth-method table.
+// Mirrors loadMounts but against coreAuthConfigPath and c.auth, with no
+// required-mount injection (auth methods are operator-installed, never
+// auto-seeded).
+func (c *Core) loadAuth(ctx context.Context) error {
+	c.authLock.Lock()
+	defer c.authLock.Unlock()
+
+	// Start with an empty auth table.
+	c.auth = nil
+
+	if txnableBarrier, ok := c.barrier.(sdklogical.TransactionalStorage); ok {
+		txn, err := txnableBarrier.BeginTx(ctx)
+		if err != nil {
+			return err
+		}
+		defer txn.Rollback(ctx)
+
+		c.logger.Info("reading auth table")
+		if err := c.loadTransactionalAuth(ctx, txn); err != nil {
+			return fmt.Errorf("failed to load auth table: %w", err)
+		}
+
+		// Finally, persist our changes (only writes if backfill changed
+		// something or upgrades occurred).
+		if err := txn.Commit(ctx); err != nil {
+			return fmt.Errorf("failed to commit auth table changes: %w", err)
+		}
+
+		return nil
+	}
+
+	return fmt.Errorf("failed to create a read transaction on the barrier")
+}
+
+func (c *Core) loadTransactionalAuth(ctx context.Context, barrier sdklogical.Storage) error {
+	allNamespaces, err := c.ListNamespaces(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list namespaces: %w", err)
+	}
+
+	c.auth = NewMountTable()
+
+	authEntries := make(map[string][]string, len(allNamespaces))
+	for index, ns := range allNamespaces {
+		if ns.Tainted {
+			c.logger.Info("skipping loading auth methods for tainted namespace", logger.String("ns", ns.ID))
+			continue
+		}
+
+		view := NamespaceView(barrier, ns)
+		listed, err := listTransactionalEntriesForNamespace(ctx, view, coreAuthConfigPath)
+		if err != nil {
+			c.logger.Error("failed to list auth methods for namespace", logger.Err(err), logger.Int("ns_index", index), logger.String("namespace", ns.ID))
+			return err
+		}
+		if len(listed) > 0 {
+			authEntries[ns.ID] = listed
+		}
+	}
+
+	for nsIndex, ns := range allNamespaces {
+		view := NamespaceView(barrier, ns)
+		for index, uuid := range authEntries[ns.ID] {
+			entry, err := c.fetchAndDecodeMountTableEntry(ctx, view, coreAuthConfigPath, uuid)
+			if err != nil {
+				return fmt.Errorf("error loading auth table entry (%v (%v)/%v/%v): %w", ns.ID, nsIndex, index, uuid, err)
+			}
+
+			if entry == nil {
+				continue
+			}
+
+			// Per-entry Class validation: the auth table must hold ONLY
+			// auth-class entries. A provider/system/audit entry showing up
+			// here means storage was written by a pre-split binary or an
+			// out-of-band tool — fail closed so the operator notices.
+			if entry.Class != mountClassAuth {
+				return fmt.Errorf("auth table contains non-auth entry %s (class=%s) in namespace %s; wipe storage and re-init", uuid, entry.Class, ns.ID)
+			}
+
+			c.auth.Entries = append(c.auth.Entries, entry)
+		}
+	}
+
+	// Backfill missing derived fields on each loaded entry. Auth has no
+	// required-mount injection (no auth method is auto-seeded), so this is
+	// the entire post-load fixup pass.
+	needPersist := false
+	for _, entry := range c.auth.Entries {
+		changed, err := c.backfillEntryFields(ctx, entry)
+		if err != nil {
+			return err
+		}
+		if changed {
+			needPersist = true
+		}
+	}
+
+	if needPersist {
+		if err := c.persistAuth(ctx, barrier, c.auth, ""); err != nil {
+			c.logger.Error("failed to persist auth table after backfill", logger.Err(err))
+			return errLoadMountsFailed
+		}
 	}
 
 	return nil
@@ -835,36 +1169,13 @@ func (c *Core) runMountUpdates(ctx context.Context, barrier sdklogical.Storage, 
 
 	// Upgrade to table-scoped entries
 	for _, entry := range c.mounts.Entries {
-		if entry.Accessor == "" {
-			accessor, err := c.generateMountAccessor(entry.Type)
-			if err != nil {
-				return err
-			}
-			entry.Accessor = accessor
-			needPersist = true
-		}
-		if entry.BackendAwareUUID == "" {
-			bUUID, err := uuid.GenerateUUID()
-			if err != nil {
-				return err
-			}
-			entry.BackendAwareUUID = bUUID
-			needPersist = true
-		}
-
-		if entry.NamespaceID == "" {
-			entry.NamespaceID = namespace.RootNamespaceID
-			needPersist = true
-		}
-
-		ns, err := c.NamespaceByID(ctx, entry.NamespaceID)
+		changed, err := c.backfillEntryFields(ctx, entry)
 		if err != nil {
 			return err
 		}
-		if ns == nil {
-			return namespace.ErrNoNamespace
+		if changed {
+			needPersist = true
 		}
-		entry.namespace = ns
 	}
 	// Done if we have restored the mount table and we don't need
 	// to persist
@@ -879,13 +1190,62 @@ func (c *Core) runMountUpdates(ctx context.Context, barrier sdklogical.Storage, 
 	return nil
 }
 
-func listTransactionalMountsForNamespace(ctx context.Context, barrier sdklogical.Storage) ([]string, error) {
-	globalEntries, err := barrier.List(ctx, coreMountConfigPath+"/")
-	if err != nil {
-		return nil, fmt.Errorf("failed listing core mounts: %w", err)
+// backfillEntryFields ensures a freshly-loaded MountEntry has every derived
+// field populated: Accessor, BackendAwareUUID, NamespaceID, and the
+// `namespace` pointer. Returns whether any field was filled in — the caller
+// uses that to decide whether the table needs to be re-persisted.
+//
+// Used by both runMountUpdates (provider/system table) and loadAuth (auth
+// table). Some of this duplicates fetchAndDecodeMountTableEntry's namespace
+// resolution; that's deliberate so the helper can stand on its own and also
+// upgrade legacy entries that existed before fetchAndDecodeMountTableEntry
+// ever ran (the original runMountUpdates use case).
+func (c *Core) backfillEntryFields(ctx context.Context, entry *MountEntry) (bool, error) {
+	changed := false
+
+	if entry.Accessor == "" {
+		accessor, err := c.generateMountAccessor(entry.Type)
+		if err != nil {
+			return false, err
+		}
+		entry.Accessor = accessor
+		changed = true
+	}
+	if entry.BackendAwareUUID == "" {
+		bUUID, err := uuid.GenerateUUID()
+		if err != nil {
+			return false, err
+		}
+		entry.BackendAwareUUID = bUUID
+		changed = true
+	}
+	if entry.NamespaceID == "" {
+		entry.NamespaceID = namespace.RootNamespaceID
+		changed = true
 	}
 
-	return globalEntries, nil
+	ns, err := c.NamespaceByID(ctx, entry.NamespaceID)
+	if err != nil {
+		return false, err
+	}
+	if ns == nil {
+		return false, namespace.ErrNoNamespace
+	}
+	entry.namespace = ns
+
+	return changed, nil
+}
+
+// listTransactionalEntriesForNamespace lists every UUID stored under the given
+// storage prefix in the caller's namespace view. Parameterized by prefix so it
+// works for both coreMountConfigPath and coreAuthConfigPath.
+func listTransactionalEntriesForNamespace(ctx context.Context, barrier sdklogical.Storage, prefix string) ([]string, error) {
+	entries, err := barrier.List(ctx, prefix+"/")
+	if err != nil {
+		return nil, fmt.Errorf("failed listing entries at %s: %w", prefix, err)
+	}
+
+	return entries, nil
 }
 
 // defaultMountTable creates a default mount table
@@ -1073,8 +1433,77 @@ func (c *Core) setupMounts(ctx context.Context) error {
 	return nil
 }
 
+// setupAuth is the auth-table sibling of setupMounts. Iterates c.auth.Entries,
+// constructs each backend via newLogicalBackend, and registers it with the
+// router under the authRoutePrefix.
+func (c *Core) setupAuth(ctx context.Context) error {
+	c.authLock.Lock()
+	defer c.authLock.Unlock()
+
+	for _, entry := range c.auth.sortEntriesByPathDepth().Entries {
+		view, err := c.mountEntryView(entry)
+		if err != nil {
+			return err
+		}
+
+		origReadOnlyErr := view.GetReadOnlyErr()
+
+		// Mark the view as read-only until the mounting is complete and
+		// ensure that it is reset after. This ensures that there will be no
+		// writes during the construction of the backend.
+		view.SetReadOnlyErr(sdklogical.ErrSetupReadOnly)
+
+		backend, err := c.newLogicalBackend(ctx, entry, view)
+		if err != nil {
+			c.logger.Error("failed to create auth entry", logger.String("path", entry.Path), logger.Err(err))
+			return errLoadMountsFailed
+		}
+		if backend == nil {
+			return fmt.Errorf("created auth entry of type %q is nil", entry.Type)
+		}
+
+		c.setCoreBackend(entry, backend, view)
+
+		// Auth mounts are always served under the auth/ router prefix.
+		mountPath := authRoutePrefix + entry.Path
+
+		if err := c.router.Mount(mountPath, backend, entry, view); err != nil {
+			c.logger.Error("failed to mount auth entry", logger.String("path", mountPath), logger.Err(err))
+			return errLoadMountsFailed
+		}
+
+		localEntry := entry
+		c.postUnsealFuncs = append(c.postUnsealFuncs, func() {
+			postUnsealLogger := c.logger.WithFields(logger.String("type", localEntry.Type)).WithFields(logger.String("path", mountPath))
+			if backend == nil {
+				postUnsealLogger.Error("skipping initialization for nil backend", logger.String("path", mountPath))
+				return
+			}
+			view.SetReadOnlyErr(origReadOnlyErr)
+
+			nsCtx := namespace.ContextWithNamespace(ctx, localEntry.namespace)
+			if err := backend.Initialize(nsCtx); err != nil {
+				postUnsealLogger.Error("failed to initialize auth backend", logger.Err(err))
+			}
+		})
+
+		c.logger.Info("successfully mounted auth", logger.String("type", entry.Type), logger.String("path", entry.Path), logger.String("namespace", entry.Namespace().Path))
+
+		if entry.Tainted {
+			path := entry.Namespace().Path + mountPath
+			c.logger.Debug("tainting an auth mount due to it being marked as tainted in auth table", logger.String("entry.path", mountPath), logger.String("entry.namespace.path", entry.Namespace().Path), logger.String("full_path", path))
+			c.router.Taint(ctx, path)
+		}
+	}
+	return nil
+}
+
 // unloadMounts is used before we seal the vault to reset the mounts to
 // their unloaded state, calling Cleanup if defined. This is reversed by load and setup mounts.
+//
+// IMPORTANT: this also resets the router and clears systemBarrierView, both
+// of which are global (shared with c.auth). Call c.unloadAuth BEFORE this so
+// the auth backends get a chance to clean up against a still-populated router.
 func (c *Core) unloadMounts(ctx context.Context) error {
 	c.mountsLock.Lock()
 	defer c.mountsLock.Unlock()
@@ -1082,6 +1511,10 @@ func (c *Core) unloadMounts(ctx context.Context) error {
 	if c.mounts != nil {
 		mountTable := c.mounts.shallowClone()
 		for _, e := range mountTable.Entries {
+			// Auth-class entries no longer live in c.mounts (post-split),
+			// but the path prefix logic is kept for defense in depth — if
+			// per-entry validation ever lets a stray auth entry slip in,
+			// at least the router lookup will find it.
 			mountPath := e.Path
 			if e.Class == mountClassAuth {
 				mountPath = authRoutePrefix + mountPath
@@ -1096,6 +1529,28 @@ func (c *Core) unloadMounts(ctx context.Context) error {
 	c.mounts = nil
 	c.router.reset()
 	c.systemBarrierView = nil
+	return nil
+}
+
+// unloadAuth is the auth-table sibling of unloadMounts. It cleans up auth
+// backends but does NOT reset the router or systemBarrierView — those are
+// shared global state that c.unloadMounts owns.
+func (c *Core) unloadAuth(ctx context.Context) error {
+	c.authLock.Lock()
+	defer c.authLock.Unlock()
+
+	if c.auth != nil {
+		authTable := c.auth.shallowClone()
+		for _, e := range authTable.Entries {
+			mountPath := authRoutePrefix + e.Path
+			backend := c.router.MatchingBackend(namespace.ContextWithNamespace(ctx, e.namespace), mountPath)
+			if backend != nil {
+				backend.Cleanup(ctx)
+			}
+		}
+	}
+
+	c.auth = nil
 	return nil
 }
 
@@ -1140,8 +1595,27 @@ func (c *Core) namespaceMountEntryView(namespace *namespace.Namespace, prefix st
 	return NamespaceView(c.barrier, namespace).SubView(prefix)
 }
 
-// persistMounts is used to persist the mount table after modification.
+// persistMounts persists the provider + system mount table after modification.
+// Typed wrapper around persistTable so callers can't accidentally pass the auth
+// table to the mounts storage prefix.
 func (c *Core) persistMounts(ctx context.Context, barrier sdklogical.Storage, table *MountTable, mount string) error {
+	return c.persistTable(ctx, barrier, table, coreMountConfigPath, mount)
+}
+
+// persistAuth persists the auth-method mount table after modification. Typed
+// wrapper around persistTable; symmetric with persistMounts.
+func (c *Core) persistAuth(ctx context.Context, barrier sdklogical.Storage, table *MountTable, mount string) error {
+	return c.persistTable(ctx, barrier, table, coreAuthConfigPath, mount)
+}
+
+// persistTable is the shared internal helper behind persistMounts and
+// persistAuth. The only per-table difference is the storage-prefix constant
+// (coreMountConfigPath vs coreAuthConfigPath) — everything else (transactional
+// write semantics, namespace-scoped views, delta-vs-full write modes, legacy
+// blob cleanup) is identical. Keep this unexported and route every caller
+// through one of the typed wrappers so the wrong prefix can't be passed by
+// accident.
+func (c *Core) persistTable(ctx context.Context, barrier sdklogical.Storage, table *MountTable, prefix string, mount string) error {
 	// Sometimes we may not want to explicitly pass barrier; fetch it if
 	// necessary.
 	if barrier == nil {
@@ -1299,7 +1773,7 @@ func (c *Core) persistMounts(ctx context.Context, barrier sdklogical.Storage, ta
 		return fmt.Errorf("failed to create storage transaction")
 	}
 
-	_, err := writeTable(mounts, coreMountConfigPath)
+	_, err := writeTable(mounts, prefix)
 	if err != nil {
 		return err
 	}
