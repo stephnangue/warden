@@ -127,6 +127,12 @@ type ActorRef struct {
 type PolicyResults struct {
 	Allowed          bool     `json:"allowed"`
 	GrantingPolicies []string `json:"granting_policies,omitempty"`
+
+	// MCPDecision carries the MCP-specific policy decision when an
+	// mcp { } block was consulted during CBP evaluation. nil when no
+	// such block applied. The field is omitempty so non-MCP audit
+	// records remain byte-identical to today's output.
+	MCPDecision *logical.MCPDecision `json:"mcp_decision,omitempty"`
 }
 
 // AuthResult contains authentication result from login operations
@@ -285,7 +291,8 @@ func (e *LogEntry) Clone() *LogEntry {
 		}
 		if e.Auth.PolicyResults != nil {
 			clone.Auth.PolicyResults = &PolicyResults{
-				Allowed: e.Auth.PolicyResults.Allowed,
+				Allowed:     e.Auth.PolicyResults.Allowed,
+				MCPDecision: e.Auth.PolicyResults.MCPDecision.Clone(),
 			}
 			if e.Auth.PolicyResults.GrantingPolicies != nil {
 				clone.Auth.PolicyResults.GrantingPolicies = make([]string, len(e.Auth.PolicyResults.GrantingPolicies))

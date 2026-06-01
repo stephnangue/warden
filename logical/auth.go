@@ -34,6 +34,15 @@ type Auth struct {
 	// requesting path.
 	PolicyResults *sdklogical.PolicyResults `json:"policy_results"`
 
+	// MCPDecision carries the MCP-specific policy decision when an mcp { }
+	// block was consulted during CBP evaluation. nil when no such block
+	// applied (every non-MCP request, plus MCP-mount requests whose bound
+	// policies contain no mcp block). Flows through buildAuditAuth into
+	// audit.PolicyResults.MCPDecision and is also consumed by the
+	// deny-response path to populate the WWW-Authenticate header and the
+	// OAuth-shaped 403 body.
+	MCPDecision *MCPDecision
+
 	PrincipalID string
 
 	RoleName string
@@ -51,6 +60,61 @@ type Auth struct {
 	// through buildAuditAuth into the audit log; not used for policy
 	// decisions.
 	Actors []ActorRef
+}
+
+// MCPDecision records the outcome of evaluating an mcp { } policy block
+// against a request. Populated on every branch (allow and deny) so the
+// audit layer can render the decision unconditionally. The JSON tags
+// double as the wire shape exposed in audit records under
+// auth.policy_results.mcp_decision.
+type MCPDecision struct {
+	// Method is the value of the Mcp-Method header on the request.
+	// Empty when the header was missing (paired with
+	// RuleType=missing_method_header).
+	Method string `json:"method"`
+
+	// Name is the value of the Mcp-Name header. Empty for name-less
+	// methods (tools/list, notifications, etc.) and when the request
+	// was rejected before the name gate ran.
+	Name string `json:"name,omitempty"`
+
+	// Decision is "allow" or "deny". Always populated when an mcp { }
+	// block was consulted.
+	Decision string `json:"decision"`
+
+	// MatchedRule is the pattern from the policy (allow- or deny-list
+	// entry) that fired. For a literal match it equals the request's
+	// name/method/param value; for a wildcard match it carries the
+	// pattern (e.g. "delete_*"). Empty when no list entry matched
+	// (deny via not-in-allow-list) and when the deny reason is a
+	// sentinel like missing_method_header.
+	MatchedRule string `json:"matched_rule"`
+
+	// RuleType records which gate produced the decision. Domain:
+	// allowed_methods, denied_methods, allowed_tools, denied_tools,
+	// allowed_resources, allowed_prompts, allowed_params,
+	// denied_params, or the sentinel missing_method_header.
+	RuleType string `json:"rule_type"`
+
+	// ParamName is the Mcp-Param-{Name} header's name (lowercase,
+	// hyphens preserved), populated only when RuleType is
+	// allowed_params or denied_params.
+	ParamName string `json:"param_name,omitempty"`
+
+	// ParamValue is the header value the policy compared against,
+	// base64-decoded if the source header was an RFC 2047
+	// encoded-word. Populated only for param-related decisions.
+	ParamValue string `json:"param_value,omitempty"`
+}
+
+// Clone returns a deep copy of the MCPDecision. Safe to call on a nil
+// receiver (returns nil).
+func (d *MCPDecision) Clone() *MCPDecision {
+	if d == nil {
+		return nil
+	}
+	clone := *d
+	return &clone
 }
 
 // ActorRef identifies a subject in the on-behalf-of chain. Verified
