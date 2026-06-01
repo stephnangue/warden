@@ -119,6 +119,27 @@ type PathRules struct {
 	PaginationLimitHCL        int                 `hcl:"pagination_limit"`
 	ResponseKeysFilterPathHCL string              `hcl:"list_scan_response_keys_filter_path"`
 	ConditionsHCL             map[string][]string `hcl:"conditions"`
+
+	// MCPHCL is the parsed `mcp { }` block. Nil when no such block is
+	// present on this path stanza. Stored on PathRules as the HCL
+	// decode target; the parser then validates it and appends a
+	// CBPMCPRules entry to pc.Permissions.MCP.
+	MCPHCL *MCPRulesHCL `hcl:"mcp"`
+}
+
+// MCPRulesHCL is the HCL decode shape of one `mcp { }` block. Each
+// field corresponds to one operator-facing key inside the block; the
+// parser canonicalises (lowercases) all entries and validates wildcard
+// patterns before populating the internal CBPMCPRules form.
+type MCPRulesHCL struct {
+	AllowedMethods   []string            `hcl:"allowed_methods"`
+	DeniedMethods    []string            `hcl:"denied_methods"`
+	AllowedTools     []string            `hcl:"allowed_tools"`
+	DeniedTools      []string            `hcl:"denied_tools"`
+	AllowedResources []string            `hcl:"allowed_resources"`
+	AllowedPrompts   []string            `hcl:"allowed_prompts"`
+	AllowedParams    map[string][]string `hcl:"allowed_params"`
+	DeniedParams     map[string][]string `hcl:"denied_params"`
 }
 
 type CBPPermissions struct {
@@ -134,6 +155,70 @@ type CBPPermissions struct {
 	// Non-nil: each entry is one policy's conditions; request must satisfy at
 	// least one set (OR between sets, AND within each set's types).
 	ConditionSets []*PolicyConditions
+	// MCP holds mcp { } rule-sets from all merged policies for this path.
+	// nil/empty means no MCP enforcement applies. Non-nil: each entry is one
+	// source stanza's mcp block; a request is allowed if at least one set
+	// allows it (OR between sets), with the strongest-reason audit picked
+	// on full deny. Populated by parsePaths via append per stanza so multiple
+	// `path` blocks at the same path layer naturally into multiple rule-sets.
+	MCP []*CBPMCPRules
+}
+
+// CBPMCPRules holds one merged mcp { } rule-set after validation and
+// canonicalisation. All list entries are lowercased; param-name keys
+// are lowercased and hyphens preserved. Patterns use trailing-`*` only
+// per the policy Semantics; the parser rejects leading or internal `*`
+// before constructing this type.
+type CBPMCPRules struct {
+	AllowedMethods   []string
+	DeniedMethods    []string
+	AllowedTools     []string
+	DeniedTools      []string
+	AllowedResources []string
+	AllowedPrompts   []string
+	AllowedParams    map[string][]string
+	DeniedParams     map[string][]string
+}
+
+// Clone returns a deep copy of the CBPMCPRules. Safe to call on a nil
+// receiver (returns nil). All slices and maps are independently
+// allocated so mutating the clone never affects the original.
+func (m *CBPMCPRules) Clone() *CBPMCPRules {
+	if m == nil {
+		return nil
+	}
+	clone := &CBPMCPRules{}
+	if m.AllowedMethods != nil {
+		clone.AllowedMethods = append([]string(nil), m.AllowedMethods...)
+	}
+	if m.DeniedMethods != nil {
+		clone.DeniedMethods = append([]string(nil), m.DeniedMethods...)
+	}
+	if m.AllowedTools != nil {
+		clone.AllowedTools = append([]string(nil), m.AllowedTools...)
+	}
+	if m.DeniedTools != nil {
+		clone.DeniedTools = append([]string(nil), m.DeniedTools...)
+	}
+	if m.AllowedResources != nil {
+		clone.AllowedResources = append([]string(nil), m.AllowedResources...)
+	}
+	if m.AllowedPrompts != nil {
+		clone.AllowedPrompts = append([]string(nil), m.AllowedPrompts...)
+	}
+	if m.AllowedParams != nil {
+		clone.AllowedParams = make(map[string][]string, len(m.AllowedParams))
+		for k, v := range m.AllowedParams {
+			clone.AllowedParams[k] = append([]string(nil), v...)
+		}
+	}
+	if m.DeniedParams != nil {
+		clone.DeniedParams = make(map[string][]string, len(m.DeniedParams))
+		for k, v := range m.DeniedParams {
+			clone.DeniedParams[k] = append([]string(nil), v...)
+		}
+	}
+	return clone
 }
 
 func (p *CBPPermissions) Clone() (*CBPPermissions, error) {
@@ -188,6 +273,17 @@ func (p *CBPPermissions) Clone() (*CBPPermissions, error) {
 		ret.ConditionSets = make([]*PolicyConditions, len(p.ConditionSets))
 		for i, cs := range p.ConditionSets {
 			ret.ConditionSets[i] = cs.Clone()
+		}
+	}
+
+	switch {
+	case p.MCP == nil:
+	case len(p.MCP) == 0:
+		ret.MCP = make([]*CBPMCPRules, 0)
+	default:
+		ret.MCP = make([]*CBPMCPRules, len(p.MCP))
+		for i, m := range p.MCP {
+			ret.MCP[i] = m.Clone()
 		}
 	}
 
@@ -284,6 +380,7 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			"expiration",
 			"list_scan_response_keys_filter_path",
 			"conditions",
+			"mcp",
 		}
 		if err := hclutil.CheckHCLKeys(item.Val, valid); err != nil {
 			return multierror.Prefix(err, fmt.Sprintf("path %q:", key))
@@ -421,10 +518,96 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			}
 			pc.Permissions.ConditionSets = []*PolicyConditions{conditions}
 		}
+
+		if pc.MCPHCL != nil {
+			rules, err := canonicaliseMCPRules(pc.MCPHCL)
+			if err != nil {
+				return fmt.Errorf("path %q: %w", key, err)
+			}
+			pc.Permissions.MCP = append(pc.Permissions.MCP, rules)
+		}
 	PathFinished:
 		paths = append(paths, &pc)
 	}
 
 	result.Paths = paths
+	return nil
+}
+
+// canonicaliseMCPRules converts a parsed mcp { } HCL block into the
+// internal CBPMCPRules form, validating wildcard patterns and
+// lowercasing all entries so AllowOperation can do case-insensitive
+// equality and prefix matching at request time without re-canonicalising.
+func canonicaliseMCPRules(h *MCPRulesHCL) (*CBPMCPRules, error) {
+	canonList := func(field string, in []string) ([]string, error) {
+		if len(in) == 0 {
+			return nil, nil
+		}
+		out := make([]string, len(in))
+		for i, pat := range in {
+			if err := validateMCPPattern(field, pat); err != nil {
+				return nil, err
+			}
+			out[i] = strings.ToLower(pat)
+		}
+		return out, nil
+	}
+	canonMap := func(field string, in map[string][]string) (map[string][]string, error) {
+		if len(in) == 0 {
+			return nil, nil
+		}
+		out := make(map[string][]string, len(in))
+		for k, vs := range in {
+			canonValues, err := canonList(fmt.Sprintf("%s[%q]", field, k), vs)
+			if err != nil {
+				return nil, err
+			}
+			out[strings.ToLower(k)] = canonValues
+		}
+		return out, nil
+	}
+
+	r := &CBPMCPRules{}
+	var err error
+	if r.AllowedMethods, err = canonList("allowed_methods", h.AllowedMethods); err != nil {
+		return nil, err
+	}
+	if r.DeniedMethods, err = canonList("denied_methods", h.DeniedMethods); err != nil {
+		return nil, err
+	}
+	if r.AllowedTools, err = canonList("allowed_tools", h.AllowedTools); err != nil {
+		return nil, err
+	}
+	if r.DeniedTools, err = canonList("denied_tools", h.DeniedTools); err != nil {
+		return nil, err
+	}
+	if r.AllowedResources, err = canonList("allowed_resources", h.AllowedResources); err != nil {
+		return nil, err
+	}
+	if r.AllowedPrompts, err = canonList("allowed_prompts", h.AllowedPrompts); err != nil {
+		return nil, err
+	}
+	if r.AllowedParams, err = canonMap("allowed_params", h.AllowedParams); err != nil {
+		return nil, err
+	}
+	if r.DeniedParams, err = canonMap("denied_params", h.DeniedParams); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// validateMCPPattern enforces the trailing-`*` glob rule from the policy
+// Semantics: a `*` is allowed only as the final character of the pattern
+// (or as the entire pattern, which is the zero-prefix wildcard matching
+// everything). Leading and internal `*` are rejected with a clear error
+// rather than silently treated as literals.
+func validateMCPPattern(field, pat string) error {
+	idx := strings.IndexByte(pat, '*')
+	if idx == -1 {
+		return nil // literal, no wildcard
+	}
+	if idx != len(pat)-1 {
+		return fmt.Errorf("mcp %s: pattern %q has '*' in a non-trailing position; only trailing '*' wildcards are supported", field, pat)
+	}
 	return nil
 }
