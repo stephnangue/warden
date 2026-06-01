@@ -3,6 +3,8 @@ package audit
 import (
 	"testing"
 	"time"
+
+	"github.com/stephnangue/warden/logical"
 )
 
 func TestCloneNil(t *testing.T) {
@@ -75,6 +77,13 @@ func TestCloneFull(t *testing.T) {
 			PolicyResults: &PolicyResults{
 				Allowed:          true,
 				GrantingPolicies: []string{"gp1"},
+				MCPDecision: &logical.MCPDecision{
+					Method:      "tools/call",
+					Name:        "get_repository",
+					Decision:    "allow",
+					MatchedRule: "get_*",
+					RuleType:    "allowed_tools",
+				},
 			},
 			TokenTTL:      3600,
 			ExpiresAt:     1234567890,
@@ -114,6 +123,11 @@ func TestCloneFull(t *testing.T) {
 	entry.Auth.PolicyResults.GrantingPolicies[0] = "modified"
 	if clone.Auth.PolicyResults.GrantingPolicies[0] == "modified" {
 		t.Error("clone granting policies should be independent")
+	}
+
+	entry.Auth.PolicyResults.MCPDecision.Name = "modified"
+	if clone.Auth.PolicyResults.MCPDecision.Name == "modified" {
+		t.Error("clone MCPDecision should be independent")
 	}
 
 	entry.Response.Warnings[0] = "modified"
