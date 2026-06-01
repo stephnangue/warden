@@ -153,6 +153,13 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 				}
 				auditAuth.PolicyResults.GrantingPolicies = policies
 			}
+			// Surface the MCP decision into the audit record when an
+			// mcp { } rule-set was consulted. The audit's PolicyResults
+			// owns the wire shape; the in-memory MCPDecision flows in
+			// from logical.Auth.MCPDecision via the request handler.
+			if auth.MCPDecision != nil {
+				auditAuth.PolicyResults.MCPDecision = auth.MCPDecision
+			}
 		}
 	}
 

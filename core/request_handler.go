@@ -168,12 +168,29 @@ func (c *Core) CheckToken(ctx context.Context, req *logical.Request, unauth bool
 	auth.PolicyResults = &sdklogical.PolicyResults{
 		Allowed: accessControlResults.Allowed,
 	}
+	// Carry the MCP decision (when an mcp { } rule-set was consulted)
+	// through to buildAuditAuth — that's where it gets surfaced in the
+	// audit record — and to the deny-response path below for the
+	// typed-error wrap.
+	if accessControlResults.CBPResults != nil && accessControlResults.CBPResults.MCPDecision != nil {
+		auth.MCPDecision = accessControlResults.CBPResults.MCPDecision
+	}
 
 	if !accessControlResults.Allowed {
 		retErr := accessControlResults.Error
 
 		if accessControlResults.Error.ErrorOrNil() == nil || accessControlResults.DeniedError {
-			retErr = multierror.Append(retErr, sdklogical.ErrPermissionDenied)
+			// Wrap the permission-denied error with the MCP decision
+			// when the denial came from an mcp { } gate, so the HTTP
+			// layer can render the OAuth-shaped 403 body. Unwrap()
+			// returns ErrPermissionDenied so every existing
+			// errors.Is(err, ErrPermissionDenied) call site keeps
+			// working unchanged.
+			if auth.MCPDecision != nil && auth.MCPDecision.Decision == "deny" {
+				retErr = multierror.Append(retErr, &ErrMCPPolicyDenied{Decision: auth.MCPDecision})
+			} else {
+				retErr = multierror.Append(retErr, sdklogical.ErrPermissionDenied)
+			}
 		}
 		return auth, cbp, te, retErr
 	}
