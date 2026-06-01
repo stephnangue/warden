@@ -167,6 +167,46 @@ func (t *MountTable) findAllNamespaceMounts(ctx context.Context) ([]*MountEntry,
 	return mounts, nil
 }
 
+// findAllAuthMountsInNamespace returns every auth-class mount belonging to the
+// namespace carried in ctx. Caller must hold mountsLock (R or W); the accessor
+// does no locking of its own so it composes inside larger critical sections.
+//
+// Prefer this to raw iteration over Entries when the caller wants only auth-
+// class mounts — the class filter lives in one place instead of every handler
+// having to remember it.
+func (t *MountTable) findAllAuthMountsInNamespace(ctx context.Context) ([]*MountEntry, error) {
+	return t.findAllMountsInNamespaceOfClass(ctx, mountClassAuth)
+}
+
+// findAllProviderMountsInNamespace is the provider-class twin of
+// findAllAuthMountsInNamespace. Same locking and return-shape contract.
+func (t *MountTable) findAllProviderMountsInNamespace(ctx context.Context) ([]*MountEntry, error) {
+	return t.findAllMountsInNamespaceOfClass(ctx, mountClassProvider)
+}
+
+// findAllMountsInNamespaceOfClass is the shared body of the class-specific
+// accessors. Unexported so callers go through the typed wrappers — that keeps
+// the class set a closed enum (adding audit support, for example, lands as a
+// new wrapper, not a generic call against an internal-only class string).
+func (t *MountTable) findAllMountsInNamespaceOfClass(ctx context.Context, class string) ([]*MountEntry, error) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]*MountEntry, 0)
+	for _, entry := range t.Entries {
+		if entry.Class != class {
+			continue
+		}
+		if entry.Namespace().ID != ns.ID {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
 func (t *MountTable) find(ctx context.Context, predicate func(*MountEntry) bool) (*MountEntry, error) {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {

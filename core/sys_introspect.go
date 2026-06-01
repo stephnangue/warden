@@ -14,7 +14,6 @@ import (
 
 	authhelper "github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -98,11 +97,6 @@ func (b *SystemBackend) handleIntrospectRoles(ctx context.Context, req *logical.
 		}, nil
 	}
 
-	ns, err := namespace.FromContext(ctx)
-	if err != nil {
-		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
-	}
-
 	// Snapshot matching mount entries under the lock, then release before
 	// dispatching so that concurrent mount writes are not blocked on our
 	// in-process fan-out. The filter asks the registry "what TokenType
@@ -111,11 +105,13 @@ func (b *SystemBackend) handleIntrospectRoles(ctx context.Context, req *logical.
 	// to a kubernetes mount (which would burn a TokenReview round-trip)
 	// and vice versa.
 	b.core.mountsLock.RLock()
-	matching := make([]*MountEntry, 0)
-	for _, entry := range b.core.mounts.Entries {
-		if entry.Class != mountClassAuth || entry.NamespaceID != ns.ID {
-			continue
-		}
+	authMounts, err := b.core.mounts.findAllAuthMountsInNamespace(ctx)
+	if err != nil {
+		b.core.mountsLock.RUnlock()
+		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
+	}
+	matching := make([]*MountEntry, 0, len(authMounts))
+	for _, entry := range authMounts {
 		tt := b.core.tokenStore.GetTransparentTokenTypeForAuthMethod(entry.Type)
 		if tt == nil || tt.CredentialFormat() != credFormat {
 			continue

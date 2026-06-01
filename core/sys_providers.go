@@ -207,19 +207,18 @@ func (b *SystemBackend) handleProviderList(ctx context.Context, req *logical.Req
 	b.core.mountsLock.RLock()
 	defer b.core.mountsLock.RUnlock()
 
-	mounts := make(map[string]any)
-
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
 	}
 
-	for _, entry := range b.core.mounts.Entries {
-		// Only return entries of class provider in the specified namespace
-		if entry.Class != mountClassProvider || entry.NamespaceID != ns.ID {
-			continue
-		}
+	entries, err := b.core.mounts.findAllProviderMountsInNamespace(ctx)
+	if err != nil {
+		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
+	}
 
+	mounts := make(map[string]any, len(entries))
+	for _, entry := range entries {
 		// Deep copy config
 		entry.configMu.RLock()
 		config := make(map[string]any)
