@@ -75,6 +75,26 @@ provider type — see the skill markdown for the exact command.
 The same TypeGitHubToken credspec used for the github REST provider works
 here unchanged — binding one to a role grants both REST and MCP reach.
 
+Policy:
+Two layers of authorization apply to MCP traffic. The minted GitHub
+token is the security boundary — its scopes bound what the agent can
+actually do at GitHub regardless of what Warden lets through. On top
+of that, Warden's CBP policies support an mcp { } block for
+governance-style restrictions enforced at the gateway: allow- and
+deny-lists for JSON-RPC methods, tool names, resource URIs, prompt
+names, and (where the upstream tool author opted in) selected tool
+arguments. Enforcement is header-based and adds no request-body
+parsing on the allow path. Denied requests return HTTP 403 with an
+RFC 6750 WWW-Authenticate header and a small JSON body the agent
+SDK surfaces as a structured tool-call failure. See the policy
+documentation for the mcp { } block schema and examples.
+
+Important: the mcp { } block depends on the MCP protocol revision
+dated 2026-07-28, which mirrors method/name into HTTP headers so
+intermediaries can enforce without parsing the body. Pre-draft
+clients are denied when bound to a policy with an mcp { } block.
+Policies without an mcp { } block keep today's behaviour unchanged.
+
 Configuration:
 - mcp_github_url: MCP server base URL (default: https://api.githubcopilot.com/mcp)
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)
