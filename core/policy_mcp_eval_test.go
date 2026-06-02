@@ -17,19 +17,73 @@ import (
 )
 
 // newMCPRequest builds a logical.Request with an MCP-shaped HTTPRequest
-// carrying the supplied headers. Mcp-* headers go through net/http's
-// canonical-case normalisation just like real requests would. Accepts
-// testing.TB so the same builder works from both tests and benchmarks.
+// carrying the supplied headers AND a synthesised MCPDescriptor on the
+// request so the production body-authoritative path at policy_cbp.go
+// sees the test's intent. Real production traffic populates the
+// descriptor via the core/request_handler_mcp extractor on streaming
+// MCP backends; tests substitute the same shape via the test-only
+// mcpDescriptorFromTestHeaders helper. Mcp-* headers still go through
+// net/http's canonical-case normalisation just like real requests.
+// Accepts testing.TB so the same builder works from both tests and
+// benchmarks.
 func newMCPRequest(tb testing.TB, path string, headers map[string]string) *logical.Request {
 	tb.Helper()
 	httpReq := httptest.NewRequest(http.MethodPost, "/v1/"+path, nil)
 	for k, v := range headers {
 		httpReq.Header.Set(k, v)
 	}
-	return &logical.Request{
+	req := &logical.Request{
 		Path:        path,
 		Operation:   logical.UpdateOperation, // MCP traffic is POST → update
 		HTTPRequest: httpReq,
+	}
+	req.MCPDescriptor = mcpDescriptorFromTestHeaders(req)
+	return req
+}
+
+// mcpDescriptorFromTestHeaders builds a single-call MCPRequestDescriptor
+// by reading every Mcp-Param-* header off the request. Unlike the
+// removed production header-synthesis adapter it does NOT consult the
+// policy sets to scope param extraction; tests need the descriptor
+// before the CBP is in scope, so the helper eagerly captures every
+// Mcp-Param-* header and lets the matcher decide which keys are
+// relevant. Test-only — production reads the descriptor populated by
+// the request-handler extractor.
+func mcpDescriptorFromTestHeaders(req *logical.Request) *logical.MCPRequestDescriptor {
+	if req == nil || req.HTTPRequest == nil {
+		return nil
+	}
+	method := strings.ToLower(req.HTTPRequest.Header.Get("Mcp-Method"))
+	name := strings.ToLower(req.HTTPRequest.Header.Get("Mcp-Name"))
+
+	var matchArgs map[string]logical.ParamValue
+	if method == "tools/call" {
+		const prefix = "Mcp-Param-"
+		for hdr, vals := range req.HTTPRequest.Header {
+			if !strings.HasPrefix(hdr, prefix) || len(vals) == 0 {
+				continue
+			}
+			raw := decodeMCPParamValue(vals[0])
+			if raw == "" {
+				continue
+			}
+			paramName := strings.ToLower(strings.TrimPrefix(hdr, prefix))
+			if matchArgs == nil {
+				matchArgs = make(map[string]logical.ParamValue)
+			}
+			matchArgs[paramName] = logical.ParamValue{
+				Kind: logical.ParamString,
+				Str:  raw,
+			}
+		}
+	}
+
+	return &logical.MCPRequestDescriptor{
+		Calls: []logical.MCPCall{{
+			Method:    method,
+			Name:      name,
+			MatchArgs: matchArgs,
+		}},
 	}
 }
 
@@ -603,8 +657,8 @@ path "mcp/gateway/*" {
 
 func TestMCPEval_HeaderCaseInsensitive(t *testing.T) {
 	// Operator wrote lowercase in policy; client sends mixed case
-	// header values. Should still match because evaluateMCP
-	// lowercases the request values before comparing.
+	// header values. The matcher lowercases descriptor method/name
+	// once at the boundary so the comparison succeeds.
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -725,7 +779,25 @@ func TestBuildMCPDenyDescription_PerRuleType(t *testing.T) {
 			"Parameter 'region'='ap-south1' not allowed."},
 		{mcpRuleTypeMissingMethod,
 			&logical.MCPDecision{RuleType: mcpRuleTypeMissingMethod},
-			"Mcp-Method header required."},
+			"Request method required."},
+		{mcpRuleTypeMissingBody,
+			&logical.MCPDecision{RuleType: mcpRuleTypeMissingBody},
+			"Request body required."},
+		{mcpRuleTypeMalformedJSONRPC,
+			&logical.MCPDecision{RuleType: mcpRuleTypeMalformedJSONRPC},
+			"Request body is not a valid JSON-RPC request."},
+		{mcpRuleTypeDuplicateKey,
+			&logical.MCPDecision{RuleType: mcpRuleTypeDuplicateKey},
+			"Request body contains duplicate keys."},
+		{mcpRuleTypeOversizedBody,
+			&logical.MCPDecision{RuleType: mcpRuleTypeOversizedBody},
+			"Request body exceeds maximum size."},
+		{mcpRuleTypeBatchEmpty,
+			&logical.MCPDecision{RuleType: mcpRuleTypeBatchEmpty},
+			"Request batch is empty."},
+		{mcpRuleTypeMalformedParams,
+			&logical.MCPDecision{RuleType: mcpRuleTypeMalformedParams},
+			"Request params have unexpected shape."},
 	}
 	for _, c := range cases {
 		t.Run(c.ruleType, func(t *testing.T) {
