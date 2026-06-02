@@ -823,6 +823,14 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 			}
 		}
 
+		// MCP body-authoritative policy enforcement: when the routed
+		// backend opts into logical.MCPPolicyEnforced, buffer the
+		// request body and strict-parse it into a descriptor before
+		// CheckToken runs. The extractor restores the body so the
+		// downstream proxy reads it unchanged. Non-MCP backends fail
+		// the type assertion and skip the extractor entirely.
+		c.extractMCPDescriptor(ctx, req, matchingBackend)
+
 		req.ClientToken = matchingBackend.ExtractToken(req.HTTPRequest)
 
 		// Check for unauthenticated paths on streaming backends

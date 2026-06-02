@@ -125,6 +125,13 @@ type Request struct {
 	// UpstreamURL is the target URL for proxied streaming requests (for audit logging).
 	// Set by streaming handlers before forwarding the request to the upstream service.
 	UpstreamURL string `json:"-"`
+
+	// MCPDescriptor is populated by the core handler when the routed
+	// backend opts into MCPPolicyEnforced and accepts the request for
+	// MCP body-based policy enforcement. Nil for all other requests.
+	// Read-only after extraction; the audit layer treats it as a
+	// deep-copy field via MCPRequestDescriptor.Clone.
+	MCPDescriptor *MCPRequestDescriptor `json:"-"`
 }
 
 func (r *Request) TokenEntry() *TokenEntry {
