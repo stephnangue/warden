@@ -173,6 +173,24 @@ type ProviderSpec struct {
 	// invoke without minted credentials (see gateway.go's
 	// StreamUnauthenticated guard).
 	IsUnauthenticatedRequest func(r *http.Request, path string) bool
+
+	// ShouldEnforceMCPPolicy optionally opts this provider into CBP
+	// `mcp { }` body-authoritative policy enforcement. When set, the
+	// core handler calls this hook on every request matched to this
+	// backend; if it returns true the request body is buffered and
+	// strict-parsed as JSON-RPC before policy evaluation runs. The
+	// shared proxyBackend implements logical.MCPPolicyEnforced by
+	// delegating to this hook.
+	//
+	// Returning true on traffic that is not a JSON-RPC POST will deny
+	// the request at policy eval time (the parser fails closed on
+	// non-JSON or empty bodies). MCP providers should gate on method +
+	// Content-Type to leave SSE GETs and session-close DELETEs alone.
+	//
+	// MCP-enforcing specs MUST set ParseStreamBody: false. Opting into
+	// the framework's stream-body parser would consume the body before
+	// the MCP extractor runs.
+	ShouldEnforceMCPPolicy func(req *logical.Request) bool
 }
 
 // proxyBackend is the concrete backend type created by NewFactory.
@@ -508,6 +526,29 @@ func ReadInt64Config(v any) (int64, bool) {
 		return size, size > 0
 	}
 	return 0, false
+}
+
+// ShouldEnforceMCPPolicy implements logical.MCPPolicyEnforced by
+// delegating to the spec's ShouldEnforceMCPPolicy hook. Returns the
+// mount-configured MaxBodySize as the cap so the core extractor uses
+// the same byte-cap the gateway will enforce at proxy time. Returns
+// enforce=false with cap=0 when the spec did not set the hook — every
+// other httpproxy-backed provider (github, openai, slack, anthropic,
+// …) sees no MCP enforcement.
+func (b *proxyBackend) ShouldEnforceMCPPolicy(req *logical.Request) (bool, int64) {
+	if b.spec.ShouldEnforceMCPPolicy == nil {
+		return false, 0
+	}
+	if !b.spec.ShouldEnforceMCPPolicy(req) {
+		return false, 0
+	}
+	// MaxBodySize lives on the embedded StreamingBackend and is
+	// written under b.mu by Initialize and handleConfigWrite — read
+	// under the read-lock to avoid racing concurrent reconfigure.
+	b.mu.RLock()
+	maxBody := b.MaxBodySize
+	b.mu.RUnlock()
+	return true, maxBody
 }
 
 // ShouldParseStreamBody overrides the embedded StreamingBackend's default to

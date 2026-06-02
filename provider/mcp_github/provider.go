@@ -1,9 +1,12 @@
 package mcp_github
 
 import (
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
@@ -36,6 +39,33 @@ var Spec = &httpproxy.ProviderSpec{
 	// default Accept only when the client sends none; MCP clients always
 	// negotiate ("application/json, text/event-stream"). Forcing a default
 	// here would break one-shot JSON clients.
+	ShouldEnforceMCPPolicy: shouldEnforceMCPPolicy,
+}
+
+// shouldEnforceMCPPolicy opts mcp_github into CBP body-authoritative
+// mcp { } enforcement for the subset of traffic where it is meaningful:
+// JSON-RPC POSTs. GET (SSE reconnect) and DELETE (session close), and
+// any non-JSON Content-Type, decline and pass through under
+// token-scope-only enforcement.
+func shouldEnforceMCPPolicy(req *logical.Request) bool {
+	if req == nil || req.HTTPRequest == nil {
+		return false
+	}
+	r := req.HTTPRequest
+	if r.Method != http.MethodPost {
+		return false
+	}
+	ct := r.Header.Get("Content-Type")
+	if ct == "" {
+		return false
+	}
+	// Trim a charset / boundary parameter (e.g. "application/json; charset=utf-8")
+	// before comparing to the bare media type.
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	ct = strings.TrimSpace(strings.ToLower(ct))
+	return ct == "application/json"
 }
 
 // Factory creates a new mcp_github provider backend.
@@ -82,18 +112,15 @@ actually do at GitHub regardless of what Warden lets through. On top
 of that, Warden's CBP policies support an mcp { } block for
 governance-style restrictions enforced at the gateway: allow- and
 deny-lists for JSON-RPC methods, tool names, resource URIs, prompt
-names, and (where the upstream tool author opted in) selected tool
-arguments. Enforcement is header-based and adds no request-body
-parsing on the allow path. Denied requests return HTTP 403 with an
-RFC 6750 WWW-Authenticate header and a small JSON body the agent
-SDK surfaces as a structured tool-call failure. See the policy
+names, and selected tool arguments. When a policy in scope contains
+an mcp { } block, the gateway strict-parses the JSON-RPC request body
+before authorising the call; denied requests return HTTP 403 with an
+RFC 6750 WWW-Authenticate header and a small JSON body the agent SDK
+surfaces as a structured tool-call failure. See the policy
 documentation for the mcp { } block schema and examples.
 
-Important: the mcp { } block depends on the MCP protocol revision
-dated 2026-07-28, which mirrors method/name into HTTP headers so
-intermediaries can enforce without parsing the body. Pre-draft
-clients are denied when bound to a policy with an mcp { } block.
-Policies without an mcp { } block keep today's behaviour unchanged.
+Policies without an mcp { } block keep today's behaviour unchanged —
+no body parsing is performed on the allow path.
 
 Configuration:
 - mcp_github_url: MCP server base URL (default: https://api.githubcopilot.com/mcp)
