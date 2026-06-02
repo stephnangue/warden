@@ -35,7 +35,9 @@ const (
 	mcpRuleTypeAllowedTools     = "allowed_tools"
 	mcpRuleTypeDeniedTools      = "denied_tools"
 	mcpRuleTypeAllowedResources = "allowed_resources"
+	mcpRuleTypeDeniedResources  = "denied_resources"
 	mcpRuleTypeAllowedPrompts   = "allowed_prompts"
+	mcpRuleTypeDeniedPrompts    = "denied_prompts"
 	mcpRuleTypeAllowedParams    = "allowed_params"
 	mcpRuleTypeDeniedParams     = "denied_params"
 	mcpRuleTypeMissingMethod    = "missing_method_header"
@@ -136,9 +138,9 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 	case mcpMethodToolsCall:
 		return set.DeniedTools, set.AllowedTools
 	case mcpMethodResourcesRead:
-		return nil, set.AllowedResources
+		return set.DeniedResources, set.AllowedResources
 	case mcpMethodPromptsGet:
-		return nil, set.AllowedPrompts
+		return set.DeniedPrompts, set.AllowedPrompts
 	}
 	return nil, nil
 }
@@ -388,15 +390,15 @@ func callMatchArgString(call *logical.MCPCall, paramName string) string {
 }
 
 // mcpDenyRuleTypeForName maps a name-bearing method to its denied_*
-// rule_type string. Only tools/call has a deny-list in v1
-// (resources/read and prompts/get use allow-lists only per the policy
-// schema), so this is the only reachable case at the caller — the
-// fallback is the empty string for forward-compat if a future schema
-// version adds denied_resources or denied_prompts.
+// rule_type string.
 func mcpDenyRuleTypeForName(method string) string {
 	switch method {
 	case mcpMethodToolsCall:
 		return mcpRuleTypeDeniedTools
+	case mcpMethodResourcesRead:
+		return mcpRuleTypeDeniedResources
+	case mcpMethodPromptsGet:
+		return mcpRuleTypeDeniedPrompts
 	}
 	return ""
 }
@@ -442,6 +444,8 @@ func mcpDenyRank(ruleType string) int {
 		return 4
 	case mcpRuleTypeDeniedMethods,
 		mcpRuleTypeDeniedTools,
+		mcpRuleTypeDeniedResources,
+		mcpRuleTypeDeniedPrompts,
 		mcpRuleTypeDeniedParams:
 		return 3
 	case mcpRuleTypeAllowedMethods,
@@ -491,9 +495,9 @@ func BuildMCPDenyDescription(d *logical.MCPDecision) string {
 		return fmt.Sprintf("Method '%s' not allowed.", method)
 	case mcpRuleTypeDeniedTools, mcpRuleTypeAllowedTools:
 		return fmt.Sprintf("Tool '%s' not allowed.", name)
-	case mcpRuleTypeAllowedResources:
+	case mcpRuleTypeDeniedResources, mcpRuleTypeAllowedResources:
 		return fmt.Sprintf("Resource '%s' not allowed.", name)
-	case mcpRuleTypeAllowedPrompts:
+	case mcpRuleTypeDeniedPrompts, mcpRuleTypeAllowedPrompts:
 		return fmt.Sprintf("Prompt '%s' not allowed.", name)
 	case mcpRuleTypeDeniedParams:
 		return fmt.Sprintf("Parameter '%s'='%s' not allowed.", param, value)

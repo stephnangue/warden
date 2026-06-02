@@ -99,8 +99,9 @@ type MCPDecision struct {
 
 	// RuleType records which gate produced the decision. Domain:
 	//   gate-driven: allowed_methods, denied_methods, allowed_tools,
-	//     denied_tools, allowed_resources, allowed_prompts,
-	//     allowed_params, denied_params
+	//     denied_tools, allowed_resources, denied_resources,
+	//     allowed_prompts, denied_prompts, allowed_params,
+	//     denied_params
 	//   structural failure (body could not be evaluated):
 	//     missing_body, malformed_jsonrpc, duplicate_key,
 	//     oversized_body, batch_empty, malformed_params

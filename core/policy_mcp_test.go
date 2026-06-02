@@ -21,7 +21,9 @@ path "mcp_github/gateway/*" {
     allowed_tools     = ["get_repository", "list_issues"]
     denied_tools      = ["delete_*", "force_*"]
     allowed_resources = ["github://repo/*"]
+    denied_resources  = ["github://secrets/*"]
     allowed_prompts   = ["*"]
+    denied_prompts    = ["sudo_*"]
     allowed_params = {
       path = ["docs/*", "specs/*"]
     }
@@ -44,7 +46,9 @@ path "mcp_github/gateway/*" {
 	assert.Equal(t, []string{"get_repository", "list_issues"}, r.AllowedTools)
 	assert.Equal(t, []string{"delete_*", "force_*"}, r.DeniedTools)
 	assert.Equal(t, []string{"github://repo/*"}, r.AllowedResources)
+	assert.Equal(t, []string{"github://secrets/*"}, r.DeniedResources)
 	assert.Equal(t, []string{"*"}, r.AllowedPrompts)
+	assert.Equal(t, []string{"sudo_*"}, r.DeniedPrompts)
 	assert.Equal(t, map[string][]string{"path": {"docs/*", "specs/*"}}, r.AllowedParams)
 	assert.Equal(t, map[string][]string{"env": {"prod", "production"}}, r.DeniedParams)
 }
@@ -73,7 +77,9 @@ path "mcp_github/gateway/*" {
 	assert.Nil(t, r.AllowedTools)
 	assert.Nil(t, r.DeniedTools)
 	assert.Nil(t, r.AllowedResources)
+	assert.Nil(t, r.DeniedResources)
 	assert.Nil(t, r.AllowedPrompts)
+	assert.Nil(t, r.DeniedPrompts)
 	assert.Nil(t, r.AllowedParams)
 	assert.Nil(t, r.DeniedParams)
 }
@@ -239,6 +245,8 @@ func TestCBPMCPRules_Clone_DeepCopy(t *testing.T) {
 		AllowedMethods:   []string{"tools/call"},
 		DeniedTools:      []string{"delete_*"},
 		AllowedResources: []string{"github://repo/A/*"},
+		DeniedResources:  []string{"github://repo/A/secrets/*"},
+		DeniedPrompts:    []string{"sudo_*"},
 		AllowedParams: map[string][]string{
 			"path": {"docs/*", "specs/*"},
 		},
@@ -255,11 +263,15 @@ func TestCBPMCPRules_Clone_DeepCopy(t *testing.T) {
 	clone.AllowedParams["path"][0] = "mutated"
 	clone.AllowedParams["new"] = []string{"x"}
 	clone.DeniedParams["env"][0] = "mutated"
+	clone.DeniedResources[0] = "mutated"
+	clone.DeniedPrompts[0] = "mutated"
 
 	assert.Equal(t, "tools/call", original.AllowedMethods[0])
 	assert.Equal(t, "docs/*", original.AllowedParams["path"][0])
 	assert.NotContains(t, original.AllowedParams, "new")
 	assert.Equal(t, "prod", original.DeniedParams["env"][0])
+	assert.Equal(t, "github://repo/A/secrets/*", original.DeniedResources[0])
+	assert.Equal(t, "sudo_*", original.DeniedPrompts[0])
 }
 
 func TestCBPPermissions_Clone_MCPDeepCopy(t *testing.T) {

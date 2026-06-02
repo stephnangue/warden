@@ -266,6 +266,104 @@ path "mcp/gateway/*" {
 	assert.Equal(t, mcpRuleTypeDeniedTools, res.MCPDecision.RuleType)
 }
 
+func TestMCPEval_DeniedResources_Match(t *testing.T) {
+	// resources/read with a denied_resources pattern that matches the
+	// requested URI → deny with rule_type denied_resources. Mirrors
+	// denied_tools but on the resources/read name gate.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods   = ["resources/read"]
+    denied_resources  = ["github://secrets/*"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
+		"Mcp-Method": "resources/read",
+		"Mcp-Name":   "github://secrets/api-key",
+	})
+	res := cbp.AllowOperation(testContext(), req, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "deny", res.MCPDecision.Decision)
+	assert.Equal(t, "github://secrets/*", res.MCPDecision.MatchedRule)
+	assert.Equal(t, mcpRuleTypeDeniedResources, res.MCPDecision.RuleType)
+}
+
+func TestMCPEval_DeniedPrompts_Match(t *testing.T) {
+	// prompts/get with a denied_prompts pattern that matches → deny
+	// with rule_type denied_prompts.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["prompts/get"]
+    denied_prompts  = ["sudo_*"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
+		"Mcp-Method": "prompts/get",
+		"Mcp-Name":   "sudo_admin",
+	})
+	res := cbp.AllowOperation(testContext(), req, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "deny", res.MCPDecision.Decision)
+	assert.Equal(t, "sudo_*", res.MCPDecision.MatchedRule)
+	assert.Equal(t, mcpRuleTypeDeniedPrompts, res.MCPDecision.RuleType)
+}
+
+// denied_resources alone (no allowed_resources) — a name that does
+// NOT match the deny pattern passes through the name gate.
+// Pre-Phase-5 the matcher returned (nil, allowList) for resources/read
+// so this code path didn't exist; pinning it here.
+func TestMCPEval_DeniedResources_Only_NonMatchingAllowed(t *testing.T) {
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods  = ["resources/read"]
+    denied_resources = ["github://secrets/*"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
+		"Mcp-Method": "resources/read",
+		"Mcp-Name":   "github://repo/readme.md", // does not match denied_resources
+	})
+	res := cbp.AllowOperation(testContext(), req, false)
+
+	assert.True(t, res.Allowed)
+}
+
+// Deny-list precedence on resources/read: when the same name matches
+// both allow and deny lists, the deny wins per evaluateMCPSetForCall
+// step (d) (deny-list scanned before allow-list).
+func TestMCPEval_DeniedResources_BeatsAllowedResources(t *testing.T) {
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods   = ["resources/read"]
+    allowed_resources = ["github://*"]
+    denied_resources  = ["github://secrets/*"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
+		"Mcp-Method": "resources/read",
+		"Mcp-Name":   "github://secrets/api-key",
+	})
+	res := cbp.AllowOperation(testContext(), req, false)
+
+	assert.False(t, res.Allowed)
+	assert.Equal(t, mcpRuleTypeDeniedResources, res.MCPDecision.RuleType)
+}
+
 func TestMCPEval_NameNotRequired_ListMethod(t *testing.T) {
 	// tools/list is name-less; allowed_tools is irrelevant for it
 	// even when configured. The method gate runs, the name gate is
@@ -765,9 +863,15 @@ func TestBuildMCPDenyDescription_PerRuleType(t *testing.T) {
 		{mcpRuleTypeAllowedResources,
 			&logical.MCPDecision{Name: "github://repo/B/x", RuleType: mcpRuleTypeAllowedResources},
 			"Resource 'github://repo/B/x' not allowed."},
+		{mcpRuleTypeDeniedResources,
+			&logical.MCPDecision{Name: "github://secrets/api-key", RuleType: mcpRuleTypeDeniedResources},
+			"Resource 'github://secrets/api-key' not allowed."},
 		{mcpRuleTypeAllowedPrompts,
 			&logical.MCPDecision{Name: "code-review", RuleType: mcpRuleTypeAllowedPrompts},
 			"Prompt 'code-review' not allowed."},
+		{mcpRuleTypeDeniedPrompts,
+			&logical.MCPDecision{Name: "sudo_admin", RuleType: mcpRuleTypeDeniedPrompts},
+			"Prompt 'sudo_admin' not allowed."},
 		{mcpRuleTypeDeniedParams,
 			&logical.MCPDecision{ParamName: "path", ParamValue: ".env", RuleType: mcpRuleTypeDeniedParams},
 			"Parameter 'path'='.env' not allowed."},
