@@ -287,7 +287,7 @@ func TestParseJSONRPCStrict_MethodCasePreserved(t *testing.T) {
 
 // arguments: null is parsed without error and leaves Arguments == nil —
 // indistinguishable from "arguments field absent". Pinning the
-// behaviour as the documented contract for Phase 2's MatchArgs.
+// behaviour as the documented contract for MatchArgs.
 func TestParseJSONRPCStrict_ArgumentsNullEquivalentToAbsent(t *testing.T) {
 	bodyNull := []byte(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"x","arguments":null}}`)
 	reqsNull, perr := ParseJSONRPCStrict(bodyNull)
@@ -378,8 +378,8 @@ func TestParseJSONRPCStrict_UnicodeEscapes(t *testing.T) {
 
 // Fuzz seeds exercise strict-parse against arbitrary bytes. Invariant:
 // ParseJSONRPCStrict never panics regardless of input. This is the
-// panic-safety net the Phase 2 extractor relies on (a panic in the
-// parser would propagate to the goroutine handling the request).
+// panic-safety net the extractor relies on — a parser panic would
+// propagate into the goroutine handling the request.
 func FuzzParseJSONRPCStrict(f *testing.F) {
 	seeds := []string{
 		`{"jsonrpc":"2.0","method":"tools/list"}`,
