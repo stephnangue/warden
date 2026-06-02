@@ -143,7 +143,7 @@ warden cred spec read github-ops
 
 MCP traffic passes through two complementary layers of authorization. The minted GitHub token is the security boundary — its scopes bound what the agent can actually do at GitHub regardless of what Warden lets through. On top of that, Warden's CBP policies support an `mcp { }` block for governance-style restrictions enforced at the gateway: allow- and deny-lists for JSON-RPC methods, tool names, resource URIs, prompt names, and selected tool arguments.
 
-Enforcement is **body-authoritative**. When a policy in scope contains an `mcp { }` block, Warden strict-parses the JSON-RPC request body and matches against the parsed body, never against client-supplied request headers. The parser fails closed on any structural problem and the matcher denies with a specific `rule_type`:
+Enforcement is **body-authoritative**. When a policy in scope contains an `mcp { }` block, Warden strict-parses the JSON-RPC request body and matches against the parsed body. The parser fails closed on any structural problem and the matcher denies with a specific `rule_type`:
 
 | `rule_type` | Trigger |
 |---|---|
