@@ -133,15 +133,20 @@ alone doesn't tell you which PAT or scope set the mount fronts.
   scopes covering the intended toolset; agents that hit scope errors
   should ask the operator to widen the binding, not request a different
   Warden role unless one exists.
-- **Warden policy can gate tools too** (requires MCP draft 2026-07-28
-  on the client side). Operators may bind a policy with an `mcp { }`
-  block that restricts which methods, tool names, resource URIs, or
-  prompt names the role can call. A deny shows up as HTTP 403 with an
-  RFC 6750 `WWW-Authenticate: Bearer error="insufficient_permissions",
+- **Warden policy can gate tools too — body-authoritative.** Operators
+  may bind a policy with an `mcp { }` block that restricts JSON-RPC
+  methods, tool names, resource URIs, prompt names, and `tools/call`
+  arguments. Warden strict-parses the JSON-RPC request body and
+  matches against the parsed body — no client-side opt-in or header
+  mirroring is required. A deny shows up as HTTP 403 with an RFC 6750
+  `WWW-Authenticate: Bearer error="insufficient_permissions",
   error_description="..."` header and a small JSON body of the same
   shape; the description names the offending method/tool/parameter.
   This is independent of PAT scope errors — read the `error_description`
-  to tell the two apart. See the README's "Create a Policy" section.
+  to tell the two apart. The parser also fails closed on structural
+  problems (malformed JSON-RPC, duplicate keys, oversized body, etc.)
+  with a specific `rule_type` in the audit log. See the README's
+  "Create a Policy" section for the full rule_type table.
 - **Streamable HTTP / SSE flows through transparently.** Send
   `Accept: application/json, text/event-stream` and the server's
   choice of framing comes back unchanged. The `Mcp-Session-Id`
