@@ -159,8 +159,6 @@ Enforcement is **body-authoritative**. When a policy in scope contains an `mcp {
 | `batch_empty` | JSON-RPC batch is `[]` |
 | `malformed_params` | A name-bearing method (`tools/call`, `resources/read`, `prompts/get`) has a missing or wrong-shape `params.name` / `params.uri` |
 
-Body parsing runs only for POSTs with `Content-Type: application/json`. Policies without an `mcp { }` block in scope skip the strict parser entirely — no body buffering happens on those paths.
-
 All examples below use `capabilities = ["update"]`. MCP traffic is HTTP POST and Warden maps POST to the `update` operation.
 
 The simplest policy grants the gateway and leans on PAT scopes for everything:
