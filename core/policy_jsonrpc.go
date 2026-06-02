@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"strings"
 )
 
 // maxJSONDepth bounds the recursion of the strict JSON-RPC body walker
@@ -254,11 +255,23 @@ func parseJSONRPCRequest(dec *json.Decoder) (*JSONRPCRequest, *ParseError) {
 }
 
 // extractMethodShape populates Name and (for tools/call) Arguments
-// from RawParams based on the request method. Unrecognised methods
-// leave Name and Arguments zero — the matcher will treat them as
-// name-less.
+// from RawParams based on the request method. Method dispatch is
+// case-insensitive so a body with method "Tools/CALL" routes to the
+// same extractor as "tools/call" — the matcher lowercases for
+// comparison and we want consistent semantics at the parser boundary.
+// Unrecognised methods leave Name and Arguments zero — the matcher
+// will treat them as name-less.
+//
+// Note: the MCP JSON-RPC spec defines method names as case-sensitive,
+// so a body with "Tools/CALL" is technically a different method from
+// "tools/call" at the wire level. Our policy gate is intentionally
+// MORE permissive: by lowercasing, a case-mismatch attack cannot
+// route around the policy. The downstream MCP server still applies
+// its own case-sensitive method dispatch and will typically reject
+// the mixed-case form — so the request denies either at our policy
+// or at the upstream, never silently succeeding.
 func extractMethodShape(req *JSONRPCRequest) *ParseError {
-	switch req.Method {
+	switch strings.ToLower(req.Method) {
 	case "tools/call":
 		return extractToolsCall(req)
 	case "resources/read":
