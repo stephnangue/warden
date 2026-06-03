@@ -242,9 +242,10 @@ path "mcp/gateway/*" {
 }
 
 // Object-typed argument can never match a string pattern; the matcher
-// treats it as missing. For an allow-list this means missing-required
-// (deny); for a deny-list it would skip. Pins the non-scalar contract
-// through the production pipeline.
+// treats it as missing. Under the conditional-allow semantics, missing
+// means "no constraint applies" — the request passes (the operator who
+// wants to forbid non-scalar values must use denied_params or a tighter
+// allowed_tools list, not allowed_params).
 func TestMCPE2E_NonScalarArgumentTreatedAsMissing(t *testing.T) {
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
@@ -271,9 +272,8 @@ path "mcp/gateway/*" {
 
 	res := cbp.AllowOperation(testContext(), req, false)
 
-	assert.False(t, res.Allowed)
-	assert.Equal(t, mcpRuleTypeAllowedParams, res.MCPDecision.RuleType)
-	assert.Equal(t, "cfg", res.MCPDecision.ParamName)
+	assert.True(t, res.Allowed,
+		"non-scalar argument is treated as missing; missing is a conditional skip under the allow-list, not a deny")
 }
 
 func TestMCPE2E_BatchDenyStampsBatchIndex(t *testing.T) {

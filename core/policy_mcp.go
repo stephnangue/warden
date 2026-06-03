@@ -335,11 +335,13 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 		for paramName, patterns := range set.AllowedParams {
 			value := callMatchArgString(call, paramName)
 			if value == "" {
-				// Required param missing — deny with empty MatchedRule.
-				d.Decision = "deny"
-				d.RuleType = mcpRuleTypeAllowedParams
-				d.ParamName = paramName
-				return d
+				// Param not present in the call — no constraint applies.
+				// Matches Vault's allowed_parameters convention: the
+				// gate is "IF present, must match", not "must be
+				// present". Tools that don't take this argument at
+				// all (or for which the agent omitted it) pass through;
+				// tools that do take it get the value-list check.
+				continue
 			}
 			lowerValue := strings.ToLower(value)
 			if m := matchMCPAny(lowerValue, patterns); m == "" {

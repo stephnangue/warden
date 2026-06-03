@@ -65,8 +65,8 @@ func TestEvaluateMCPDescriptor_NumericParamMatches(t *testing.T) {
 }
 
 // Object-typed argument values can never match a string pattern: the
-// matcher treats them as missing for deny-list checks (skip) and as
-// missing-required for allow-list checks (deny). Pins both halves.
+// matcher treats them as missing for both deny-list and allow-list
+// checks, and missing is conditional (skip) for both. Pins both halves.
 func TestEvaluateMCPDescriptor_NonScalarParamTreatedAsMissing(t *testing.T) {
 	t.Run("deny list skips object", func(t *testing.T) {
 		sets := []*CBPMCPRules{{
@@ -90,7 +90,10 @@ func TestEvaluateMCPDescriptor_NonScalarParamTreatedAsMissing(t *testing.T) {
 			t.Fatalf("decision = %+v, want allow (object value skipped by deny gate)", d)
 		}
 	})
-	t.Run("allow list denies object as missing-required", func(t *testing.T) {
+	t.Run("allow list skips object as missing", func(t *testing.T) {
+		// allowed_params is conditional ("IF present, must match"):
+		// a non-scalar argument is treated as missing by the matcher,
+		// and missing means "no constraint applies" — request passes.
 		sets := []*CBPMCPRules{{
 			AllowedMethods: []string{"tools/call"},
 			AllowedTools:   []string{"x"},
@@ -108,11 +111,8 @@ func TestEvaluateMCPDescriptor_NonScalarParamTreatedAsMissing(t *testing.T) {
 			}},
 		}
 		d := evaluateMCPDescriptor(sets, desc)
-		if d == nil || d.Decision != "deny" {
-			t.Fatalf("decision = %+v, want deny (object value can't satisfy allow-list)", d)
-		}
-		if d.RuleType != mcpRuleTypeAllowedParams || d.ParamName != "cfg" {
-			t.Errorf("decision = %+v, want allowed_params cfg", d)
+		if d == nil || d.Decision != "allow" {
+			t.Fatalf("decision = %+v, want allow (object value treated as missing; conditional skip)", d)
 		}
 	})
 }
