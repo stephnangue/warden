@@ -159,14 +159,14 @@ Enforcement is **body-authoritative**. When a policy in scope contains an `mcp {
 | `batch_empty` | JSON-RPC batch is `[]` |
 | `malformed_params` | A name-bearing method (`tools/call`, `resources/read`, `prompts/get`) has a missing or wrong-shape `params.name` / `params.uri` |
 
-All examples below use `capabilities = ["update"]`. MCP traffic is HTTP POST and Warden maps POST to the `update` operation.
+All examples below use `capabilities = ["create"]`. MCP traffic is HTTP POST and Warden maps POST to the `create` operation. Use `["create", "update"]` if your client also issues PUT to the gateway.
 
 The simplest policy grants the gateway and leans on PAT scopes for everything:
 
 ```bash
 warden policy write mcp-github-access - <<EOF
 path "mcp_github/role/+/gateway*" {
-  capabilities = ["update"]
+  capabilities = ["create"]
 }
 EOF
 ```
@@ -176,7 +176,7 @@ A policy that restricts the agent to a vetted set of GitHub tools:
 ```bash
 warden policy write mcp-github-readonly - <<EOF
 path "mcp_github/role/+/gateway*" {
-  capabilities = ["update"]
+  capabilities = ["create"]
   mcp {
     allowed_methods = ["tools/list", "tools/call", "resources/list", "resources/read"]
     allowed_tools   = ["get_repository", "get_pull_request", "list_issues", "search_code"]
@@ -190,7 +190,7 @@ A complementary deny-list shape — permissive by default, blocks dangerous tool
 ```bash
 warden policy write mcp-github-safe - <<EOF
 path "mcp_github/role/+/gateway*" {
-  capabilities = ["update"]
+  capabilities = ["create"]
   mcp {
     denied_tools = ["delete_*", "force_*", "merge_pull_request"]
   }
@@ -203,7 +203,7 @@ Argument-level gates restrict the *values* passed to `tools/call`. Keys in `deni
 ```bash
 warden policy write mcp-github-no-protected-branches - <<EOF
 path "mcp_github/role/+/gateway*" {
-  capabilities = ["update"]
+  capabilities = ["create"]
   mcp {
     allowed_methods = ["tools/call"]
     denied_params = {
@@ -219,7 +219,7 @@ The `mcp { }` block composes with runtime conditions so you can layer environmen
 ```bash
 warden policy write mcp-github-business-hours - <<EOF
 path "mcp_github/role/+/gateway*" {
-  capabilities = ["update"]
+  capabilities = ["create"]
   conditions {
     source_ip   = ["10.0.0.0/8"]
     time_window = ["08:00-18:00 UTC"]
