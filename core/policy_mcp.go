@@ -161,40 +161,87 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 	return nil, nil
 }
 
-// evaluateMCP runs the MCP rule-set slice from CBPPermissions against a
-// request and returns a single MCPDecision. Returns nil when the slice
-// is empty (no enforcement — the caller continues to parameter checks).
+// evaluateMCP runs the MCP rule-set slice from CBPPermissions against
+// a request and returns a single MCPDecision. Returns nil when the
+// slice is empty (no enforcement — the caller continues to parameter
+// checks).
+//
+// Phase 3 retains this signature as the back-compat wrapper called
+// from policy_cbp.go's AllowOperation. The matcher itself runs against
+// a request-shaped MCPRequestDescriptor; here the descriptor is
+// synthesised from the Mcp-* headers via mcpDescriptorFromHeaders so
+// every existing test (which exercises the header path through
+// AllowOperation) sees identical behaviour. Phase 4 swaps the call
+// site to read the body-extracted descriptor from req.MCPDescriptor.
 //
 // Semantics, per the policy plan:
 //   - For each rule-set: short-circuit on the first matching gate
-//     (missing-method, denied_methods, allowed_methods miss, name gate,
-//     param gate). A set that reaches the end without a deny contributes
-//     "allow."
-//   - Across sets: OR semantics. If any set allows, the overall decision
-//     is allow with that set's MCPDecision. If every set denies, the
-//     overall decision is deny with the strongest reason (explicit deny
-//     matches > not-in-allow-list > missing-method-header; ties broken
-//     by source order).
+//     (missing-method, denied_methods, allowed_methods miss, name
+//     gate, param gate). A set that reaches the end without a deny
+//     contributes "allow."
+//   - Across sets: OR semantics. If any set allows, the overall
+//     decision is allow with that set's MCPDecision. If every set
+//     denies, the overall decision is deny with the strongest reason
+//     (explicit deny matches > not-in-allow-list > missing-method-
+//     header; ties broken by source order).
 //
-// All comparisons are lowercase; the patterns were lowercased at parse
-// time and the request values are lowercased here once per set.
+// All comparisons are lowercase; the patterns were lowercased at
+// parse time and the request values are lowercased here once per
+// set.
 func evaluateMCP(sets []*CBPMCPRules, req *logical.Request) *logical.MCPDecision {
 	if len(sets) == 0 {
 		return nil
 	}
+	desc := mcpDescriptorFromHeaders(req, sets)
+	return evaluateMCPDescriptor(sets, desc)
+}
 
-	method := strings.ToLower(mcpHeader(req, mcpHeaderMethod))
-	name := strings.ToLower(mcpHeader(req, mcpHeaderName))
+// evaluateMCPDescriptor is the source-agnostic matcher. Consumes a
+// strictly-parsed (or header-synthesised) descriptor + the policy
+// rule-set slice; returns the MCPDecision. Single-call descriptors
+// return the call's decision directly. Multi-call (batch) descriptors
+// short-circuit at the first denying call; allow only if every call
+// allows — single-fail-all-fail per the policy plan.
+//
+// Returns nil when sets is empty (no enforcement) or when the
+// descriptor carries no calls. Callers handle structural failures
+// (ParseErr non-nil, nil descriptor with mcp{} in scope) before
+// invoking this function — by Phase 3 those checks live in
+// AllowOperation; Phase 4 hoists them to a shared wrapper.
+func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescriptor) *logical.MCPDecision {
+	if len(sets) == 0 {
+		return nil
+	}
+	if desc == nil || len(desc.Calls) == 0 {
+		return nil
+	}
+
+	var lastAllow *logical.MCPDecision
+	for i := range desc.Calls {
+		d := evaluateMCPCall(sets, &desc.Calls[i])
+		if d.Decision == "deny" {
+			return d
+		}
+		lastAllow = d
+	}
+	return lastAllow
+}
+
+// evaluateMCPCall runs all rule-sets against one MCPCall and applies
+// the cross-set OR / strongest-reason-deny semantics. Lowercases
+// method/name once at the boundary so per-set comparisons stay cheap.
+func evaluateMCPCall(sets []*CBPMCPRules, call *logical.MCPCall) *logical.MCPDecision {
+	method := strings.ToLower(call.Method)
+	name := strings.ToLower(call.Name)
 
 	var deny *logical.MCPDecision
 	var denyRank int
 
 	for _, set := range sets {
-		setDecision := evaluateMCPSet(set, method, name, req)
+		setDecision := evaluateMCPSetForCall(set, method, name, call)
 		if setDecision.Decision == "allow" {
 			return setDecision
 		}
-		// Track strongest-reason across deny sets.
 		rank := mcpDenyRank(setDecision.RuleType)
 		if deny == nil || rank > denyRank {
 			deny = setDecision
@@ -204,17 +251,18 @@ func evaluateMCP(sets []*CBPMCPRules, req *logical.Request) *logical.MCPDecision
 	return deny
 }
 
-// evaluateMCPSet runs one rule-set against the canonicalised method,
-// name, and request. Returns the set's MCPDecision (always non-nil) —
-// either an allow with the matching pattern stamped, or a deny with
-// the failing gate and pattern stamped.
-func evaluateMCPSet(set *CBPMCPRules, method, name string, req *logical.Request) *logical.MCPDecision {
+// evaluateMCPSetForCall runs one rule-set against the canonicalised
+// method, name, and call. Returns the set's MCPDecision (always non-
+// nil) — either an allow with the matching pattern stamped, or a
+// deny with the failing gate and pattern stamped. Reads param values
+// from call.MatchArgs so the same logic serves both the header-
+// synthesised and body-extracted descriptors.
+func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.MCPCall) *logical.MCPDecision {
 	d := &logical.MCPDecision{Method: method, Name: name}
 
-	// (a) Missing Mcp-Method header → deny. Done before any list
-	// check because an empty method can't match anything meaningful
-	// and the operator who wrote an mcp{} block wants header-based
-	// enforcement.
+	// (a) Missing method → deny. An empty method cannot match
+	// anything meaningful and the operator who wrote an mcp{} block
+	// wants enforcement — fail closed.
 	if method == "" {
 		d.Decision = "deny"
 		d.RuleType = mcpRuleTypeMissingMethod
@@ -240,8 +288,8 @@ func evaluateMCPSet(set *CBPMCPRules, method, name string, req *logical.Request)
 	}
 
 	// (d) Name gate for name-bearing methods. Skipped entirely when
-	// neither the relevant deny-list nor allow-list is configured for
-	// this method — the rule isn't making a name claim.
+	// neither the relevant deny-list nor allow-list is configured
+	// for this method — the rule isn't making a name claim.
 	if denyList, allowList := nameListForMethod(set, method); len(denyList) > 0 || len(allowList) > 0 {
 		if m := matchMCPAny(name, denyList); m != "" {
 			d.Decision = "deny"
@@ -258,14 +306,17 @@ func evaluateMCPSet(set *CBPMCPRules, method, name string, req *logical.Request)
 		}
 	}
 
-	// (e) Param gate for tools/call only. Each configured key checked
-	// independently — AND across keys, OR within a key's value-list.
+	// (e) Param gate for tools/call only. Each configured key
+	// checked independently — AND across keys, OR within a key's
+	// value-list. Lookup goes through callMatchArgString so non-
+	// scalar argument values (objects, arrays, null) are treated as
+	// missing in both header-synthesised and body-extracted
+	// descriptors.
 	if method == mcpMethodToolsCall {
-		// Deny-list first per precedence.
 		for paramName, patterns := range set.DeniedParams {
-			value := mcpHeaderForParam(req, paramName)
+			value := callMatchArgString(call, paramName)
 			if value == "" {
-				continue // missing header can't match a deny pattern
+				continue // missing can't match a deny pattern
 			}
 			lowerValue := strings.ToLower(value)
 			if m := matchMCPAny(lowerValue, patterns); m != "" {
@@ -278,7 +329,7 @@ func evaluateMCPSet(set *CBPMCPRules, method, name string, req *logical.Request)
 			}
 		}
 		for paramName, patterns := range set.AllowedParams {
-			value := mcpHeaderForParam(req, paramName)
+			value := callMatchArgString(call, paramName)
 			if value == "" {
 				// Required param missing — deny with empty MatchedRule.
 				d.Decision = "deny"
@@ -298,27 +349,111 @@ func evaluateMCPSet(set *CBPMCPRules, method, name string, req *logical.Request)
 	}
 
 	// (f) Nothing denied — this set allows. Record the gate that
-	// authorised the request so audit can show which rule fired. The
-	// method gate is the universal one to record because it always
-	// runs when a set reaches this point.
+	// authorised the request so audit can show which rule fired.
 	d.Decision = "allow"
 	d.RuleType = mcpRuleTypeAllowedMethods
 	if len(set.AllowedMethods) > 0 {
-		// The method matched (we wouldn't have reached step f
-		// otherwise), so re-record the matching pattern.
 		d.MatchedRule = matchMCPAny(method, set.AllowedMethods)
 	} else {
-		// No allow-list — the matching "rule" is the method itself
-		// (the empty allow-list is "allow all").
 		d.MatchedRule = method
 	}
-	// If the name gate also fired and matched an allow-list, the more
-	// specific rule_type is the name gate. Re-derive.
 	if _, allowList := nameListForMethod(set, method); len(allowList) > 0 {
 		d.RuleType = mcpAllowRuleTypeForName(method)
 		d.MatchedRule = matchMCPAny(name, allowList)
 	}
 	return d
+}
+
+// callMatchArgString returns the matcher-comparable string form of a
+// tools/call argument from the descriptor. Returns "" for missing,
+// null, object, and array values so the matcher treats them as
+// missing — matching today's "no Mcp-Param-X header" semantic exactly
+// when invoked through the header adapter, and matching the plan's
+// "non-scalar values can't match a string pattern" semantic for
+// body-extracted descriptors.
+func callMatchArgString(call *logical.MCPCall, paramName string) string {
+	if call == nil || call.MatchArgs == nil {
+		return ""
+	}
+	pv, ok := call.MatchArgs[paramName]
+	if !ok {
+		return ""
+	}
+	switch pv.Kind {
+	case logical.ParamString, logical.ParamNumber, logical.ParamBool:
+		return pv.Str
+	default:
+		return ""
+	}
+}
+
+// mcpDescriptorFromHeaders builds a synthetic single-call descriptor
+// from the Mcp-* request headers. Phase 3 routes the production
+// matcher through this adapter so the existing audit shape is
+// preserved verbatim. Phase 4 swaps the call site at policy_cbp.go to
+// read the body-extracted descriptor from req.MCPDescriptor instead,
+// at which point this adapter is only consumed by back-compat tests.
+//
+// MatchArgs is pre-populated for every param-name the policy gates
+// on (across all sets), so evaluateMCPSetForCall's per-key lookup
+// hits MatchArgs uniformly. Param-names not present as headers are
+// simply not added; callMatchArgString returns "" for missing
+// entries, preserving the original "missing header can't match"
+// semantic. Only tools/call methods read the param gate, so the
+// pre-population is skipped for any other method.
+func mcpDescriptorFromHeaders(req *logical.Request, sets []*CBPMCPRules) *logical.MCPRequestDescriptor {
+	method := strings.ToLower(mcpHeader(req, mcpHeaderMethod))
+	name := strings.ToLower(mcpHeader(req, mcpHeaderName))
+
+	var matchArgs map[string]logical.ParamValue
+	if method == mcpMethodToolsCall {
+		matchArgs = collectHeaderParams(req, sets)
+	}
+
+	return &logical.MCPRequestDescriptor{
+		Calls: []logical.MCPCall{{
+			Method:    method,
+			Name:      name,
+			MatchArgs: matchArgs,
+		}},
+	}
+}
+
+// collectHeaderParams reads each Mcp-Param-<key> header value (decoded
+// via decodeMCPParamValue when wrapped in an RFC 2047 encoded-word)
+// for every key the policy mentions in either AllowedParams or
+// DeniedParams. Header-absent keys are skipped. Returns nil when no
+// header value was populated so MatchArgs stays nil for the common
+// "no param headers sent" path.
+func collectHeaderParams(req *logical.Request, sets []*CBPMCPRules) map[string]logical.ParamValue {
+	var matchArgs map[string]logical.ParamValue
+	add := func(paramName string) {
+		if matchArgs != nil {
+			if _, ok := matchArgs[paramName]; ok {
+				return
+			}
+		}
+		raw := mcpHeaderForParam(req, paramName)
+		if raw == "" {
+			return
+		}
+		if matchArgs == nil {
+			matchArgs = make(map[string]logical.ParamValue)
+		}
+		matchArgs[paramName] = logical.ParamValue{
+			Kind: logical.ParamString,
+			Str:  raw,
+		}
+	}
+	for _, set := range sets {
+		for paramName := range set.DeniedParams {
+			add(paramName)
+		}
+		for paramName := range set.AllowedParams {
+			add(paramName)
+		}
+	}
+	return matchArgs
 }
 
 // mcpDenyRuleTypeForName maps a name-bearing method to its denied_*
