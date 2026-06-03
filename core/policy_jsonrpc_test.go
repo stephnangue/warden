@@ -263,11 +263,12 @@ func TestParseJSONRPCStrict_RawParamsCaptured(t *testing.T) {
 	}
 }
 
-// Method is preserved verbatim (NOT lowercased) on the descriptor;
-// callers lowercase only at match time. This contract matters because
-// MCPDecision.Method in later phases is lowercased once at the matcher
-// boundary, not at the parser boundary — keeping the descriptor faithful
-// to the wire lets reconciliation diagnose case-mismatch attacks.
+// Method is preserved verbatim on the descriptor — callers lowercase
+// only at match time. Name extraction dispatch IS case-insensitive
+// though: a body with method "Tools/Call" still routes through the
+// tools/call extractor so params.name reaches the descriptor. The
+// matcher then lowercases both for comparison, giving consistent
+// semantics from wire to decision.
 func TestParseJSONRPCStrict_MethodCasePreserved(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","method":"Tools/Call","params":{"name":"X"}}`)
 	reqs, perr := ParseJSONRPCStrict(body)
@@ -277,11 +278,10 @@ func TestParseJSONRPCStrict_MethodCasePreserved(t *testing.T) {
 	if reqs[0].Method != "Tools/Call" {
 		t.Errorf("Method = %q, want verbatim Tools/Call", reqs[0].Method)
 	}
-	// The method-specific shape extraction matches verbatim too, so a
-	// capitalised method does NOT trigger the tools/call params.name
-	// requirement: it routes through extractMethodShape's default case.
-	if reqs[0].Name != "" {
-		t.Errorf("Name = %q, want empty (capitalised method is not name-bearing)", reqs[0].Name)
+	// Name extracted via case-insensitive method dispatch — params.name
+	// is the tools/call value regardless of method casing.
+	if reqs[0].Name != "X" {
+		t.Errorf("Name = %q, want X (case-insensitive method dispatch extracts params.name)", reqs[0].Name)
 	}
 }
 

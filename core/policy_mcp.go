@@ -4,7 +4,6 @@
 package core
 
 import (
-	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -103,30 +102,6 @@ func matchMCPAny(value string, patterns []string) string {
 		}
 	}
 	return ""
-}
-
-// decodeMCPParamValue decodes the legacy RFC 2047-style encoded-word
-// envelope used by the pre-body MCP draft for non-ASCII or unsafe
-// Mcp-Param-* values:
-//
-//	=?base64?<base64-encoded UTF-8>?=
-//
-// Returns the decoded string when the envelope is well-formed,
-// otherwise returns the raw input. Retained for test-only descriptor
-// synthesis from headers; not consumed on the body-authoritative
-// production path.
-func decodeMCPParamValue(raw string) string {
-	const prefix = "=?base64?"
-	const suffix = "?="
-	if !strings.HasPrefix(raw, prefix) || !strings.HasSuffix(raw, suffix) {
-		return raw
-	}
-	inner := raw[len(prefix) : len(raw)-len(suffix)]
-	decoded, err := base64.StdEncoding.DecodeString(inner)
-	if err != nil {
-		return raw
-	}
-	return string(decoded)
 }
 
 // nameListForMethod returns the (deny, allow) name-lists that apply to

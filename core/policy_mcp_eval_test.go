@@ -16,75 +16,55 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newMCPRequest builds a logical.Request with an MCP-shaped HTTPRequest
-// carrying the supplied headers AND a synthesised MCPDescriptor on the
-// request so the production body-authoritative path at policy_cbp.go
-// sees the test's intent. Real production traffic populates the
-// descriptor via the core/request_handler_mcp extractor on streaming
-// MCP backends; tests substitute the same shape via the test-only
-// mcpDescriptorFromTestHeaders helper. Mcp-* headers still go through
-// net/http's canonical-case normalisation just like real requests.
+// newMCPRequest builds a logical.Request with a JSON-RPC body and the
+// matching MCPDescriptor produced by running the body through the same
+// pipeline the production extractor uses (ParseJSONRPCStrict +
+// classifyArgs). Every test exercises the strict parser and the matcher
+// together, which is the contract that ships in production.
+//
+// For malformed-body inputs the returned descriptor has ParseErr
+// populated and Calls nil — the matcher / decideMCP / AllowOperation
+// path then sees the same state production would on adversarial input.
 // Accepts testing.TB so the same builder works from both tests and
 // benchmarks.
-func newMCPRequest(tb testing.TB, path string, headers map[string]string) *logical.Request {
+func newMCPRequest(tb testing.TB, path, body string) *logical.Request {
 	tb.Helper()
-	httpReq := httptest.NewRequest(http.MethodPost, "/v1/"+path, nil)
-	for k, v := range headers {
-		httpReq.Header.Set(k, v)
-	}
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/"+path, strings.NewReader(body))
+	httpReq.Header.Set("Content-Type", "application/json")
 	req := &logical.Request{
 		Path:        path,
-		Operation:   logical.UpdateOperation, // MCP traffic is POST → update
+		Operation:   logical.UpdateOperation,
 		HTTPRequest: httpReq,
 	}
-	req.MCPDescriptor = mcpDescriptorFromTestHeaders(req)
+	req.MCPDescriptor = synthesizeMCPDescriptorFromBody([]byte(body))
 	return req
 }
 
-// mcpDescriptorFromTestHeaders builds a single-call MCPRequestDescriptor
-// by reading every Mcp-Param-* header off the request. Unlike the
-// removed production header-synthesis adapter it does NOT consult the
-// policy sets to scope param extraction; tests need the descriptor
-// before the CBP is in scope, so the helper eagerly captures every
-// Mcp-Param-* header and lets the matcher decide which keys are
-// relevant. Test-only — production reads the descriptor populated by
-// the request-handler extractor.
-func mcpDescriptorFromTestHeaders(req *logical.Request) *logical.MCPRequestDescriptor {
-	if req == nil || req.HTTPRequest == nil {
-		return nil
+// synthesizeMCPDescriptorFromBody mirrors what extractMCPDescriptor
+// does on the production streaming branch: strict-parse the body,
+// then map every parsed JSONRPCRequest to an MCPCall. Lives next to
+// the matcher tests so they exercise the real pipeline without
+// dragging in the request_handler extractor's I/O concerns.
+func synthesizeMCPDescriptorFromBody(body []byte) *logical.MCPRequestDescriptor {
+	desc := &logical.MCPRequestDescriptor{}
+	reqs, perr := ParseJSONRPCStrict(body)
+	if perr != nil {
+		desc.ParseErr = &logical.MCPParseError{
+			Kind: string(perr.Kind),
+			Msg:  perr.Msg,
+		}
+		return desc
 	}
-	method := strings.ToLower(req.HTTPRequest.Header.Get("Mcp-Method"))
-	name := strings.ToLower(req.HTTPRequest.Header.Get("Mcp-Name"))
-
-	var matchArgs map[string]logical.ParamValue
-	if method == "tools/call" {
-		const prefix = "Mcp-Param-"
-		for hdr, vals := range req.HTTPRequest.Header {
-			if !strings.HasPrefix(hdr, prefix) || len(vals) == 0 {
-				continue
-			}
-			raw := decodeMCPParamValue(vals[0])
-			if raw == "" {
-				continue
-			}
-			paramName := strings.ToLower(strings.TrimPrefix(hdr, prefix))
-			if matchArgs == nil {
-				matchArgs = make(map[string]logical.ParamValue)
-			}
-			matchArgs[paramName] = logical.ParamValue{
-				Kind: logical.ParamString,
-				Str:  raw,
-			}
+	desc.Calls = make([]logical.MCPCall, len(reqs))
+	for i, r := range reqs {
+		desc.Calls[i] = logical.MCPCall{
+			Method:     r.Method,
+			Name:       r.Name,
+			MatchArgs:  classifyArgs(r.Arguments),
+			BatchIndex: i,
 		}
 	}
-
-	return &logical.MCPRequestDescriptor{
-		Calls: []logical.MCPCall{{
-			Method:    method,
-			Name:      name,
-			MatchArgs: matchArgs,
-		}},
-	}
+	return desc
 }
 
 // mustCBP builds a CBP from raw policy HCL, failing the test on any
@@ -110,7 +90,11 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{"Mcp-Method": "tools/list"})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/list",
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.True(t, res.Allowed)
@@ -130,7 +114,12 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{"Mcp-Method": "tools/call"})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "x"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.False(t, res.Allowed)
@@ -150,7 +139,12 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{"Mcp-Method": "tools/call"})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "x"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.False(t, res.Allowed)
@@ -158,25 +152,6 @@ path "mcp/gateway/*" {
 	assert.Equal(t, "deny", res.MCPDecision.Decision)
 	assert.Equal(t, "tools/call", res.MCPDecision.MatchedRule)
 	assert.Equal(t, mcpRuleTypeDeniedMethods, res.MCPDecision.RuleType)
-}
-
-func TestMCPEval_MissingMethodHeader(t *testing.T) {
-	cbp := mustCBP(t, `
-path "mcp/gateway/*" {
-  capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list"]
-  }
-}
-`)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{}) // no Mcp-Method
-	res := cbp.AllowOperation(testContext(), req, false)
-
-	assert.False(t, res.Allowed)
-	require.NotNil(t, res.MCPDecision)
-	assert.Equal(t, "deny", res.MCPDecision.Decision)
-	assert.Equal(t, "", res.MCPDecision.Method)
-	assert.Equal(t, mcpRuleTypeMissingMethod, res.MCPDecision.RuleType)
 }
 
 func TestMCPEval_NoMCPBlock_PassesThrough(t *testing.T) {
@@ -187,7 +162,11 @@ path "mcp/gateway/*" {
   capabilities = ["update"]
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{}) // no headers at all
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/list",
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.True(t, res.Allowed)
@@ -208,10 +187,12 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "tools/call",
-		"Mcp-Name":   "get_repository",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "get_repository"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.True(t, res.Allowed)
@@ -222,7 +203,7 @@ path "mcp/gateway/*" {
 	assert.Equal(t, mcpRuleTypeAllowedTools, res.MCPDecision.RuleType)
 }
 
-func TestMCPEval_AllowedTools_BareStar(t *testing.T) {
+func TestMCPEval_AllowedPrompts_BareStar(t *testing.T) {
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -232,10 +213,12 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "prompts/get",
-		"Mcp-Name":   "code-review",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "prompts/get",
+		"params":  {"name": "code-review"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.True(t, res.Allowed)
@@ -253,10 +236,12 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "tools/call",
-		"Mcp-Name":   "delete_repository",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "delete_repository"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.False(t, res.Allowed)
@@ -279,10 +264,12 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "resources/read",
-		"Mcp-Name":   "github://secrets/api-key",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "resources/read",
+		"params":  {"uri": "github://secrets/api-key"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.False(t, res.Allowed)
@@ -304,10 +291,12 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "prompts/get",
-		"Mcp-Name":   "sudo_admin",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "prompts/get",
+		"params":  {"name": "sudo_admin"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.False(t, res.Allowed)
@@ -331,10 +320,12 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "resources/read",
-		"Mcp-Name":   "github://repo/readme.md", // does not match denied_resources
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "resources/read",
+		"params":  {"uri": "github://repo/readme.md"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.True(t, res.Allowed)
@@ -354,10 +345,12 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "resources/read",
-		"Mcp-Name":   "github://secrets/api-key",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "resources/read",
+		"params":  {"uri": "github://secrets/api-key"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.False(t, res.Allowed)
@@ -377,54 +370,34 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "tools/list", // no Mcp-Name; name-less method
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/list",
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
-	assert.True(t, res.Allowed, "tools/list passes even without Mcp-Name")
+	assert.True(t, res.Allowed, "tools/list passes — name gate doesn't fire for name-less method")
 	assert.Equal(t, "tools/list", res.MCPDecision.Method)
 	assert.Equal(t, mcpRuleTypeAllowedMethods, res.MCPDecision.RuleType,
 		"name gate didn't fire for name-less method")
 }
 
-func TestMCPEval_NameRequiredButMissing(t *testing.T) {
-	// tools/call with allowed_tools configured and no Mcp-Name →
-	// empty value can't match any allow-list entry → deny.
-	cbp := mustCBP(t, `
-path "mcp/gateway/*" {
-  capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["get_repository"]
-  }
-}
-`)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "tools/call",
-		// no Mcp-Name
-	})
-	res := cbp.AllowOperation(testContext(), req, false)
-
-	assert.False(t, res.Allowed)
-	assert.Equal(t, mcpRuleTypeAllowedTools, res.MCPDecision.RuleType)
-	assert.Equal(t, "", res.MCPDecision.MatchedRule)
-}
-
 func TestMCPEval_EmptyBlock_AllowsAnyMethod(t *testing.T) {
-	// Empty mcp { } block requires Mcp-Method to be present (per
-	// Semantics) but doesn't impose any other restriction. A
-	// tools/call with no Mcp-Name should still pass since the name
-	// gate isn't configured.
+	// Empty mcp { } block doesn't impose any restriction beyond
+	// "body must parse." A tools/call with arguments still passes.
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {}
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "tools/call",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "x"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.True(t, res.Allowed)
@@ -448,11 +421,15 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method":     "tools/call",
-		"Mcp-Name":       "write_file",
-		"Mcp-Param-Path": "docs/api.md",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params": {
+			"name":      "write_file",
+			"arguments": {"path": "docs/api.md"}
+		},
+		"id": 1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.True(t, res.Allowed)
@@ -472,11 +449,15 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method":     "tools/call",
-		"Mcp-Name":       "write_file",
-		"Mcp-Param-Path": ".env.production",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params": {
+			"name":      "write_file",
+			"arguments": {"path": ".env.production"}
+		},
+		"id": 1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.False(t, res.Allowed)
@@ -487,8 +468,10 @@ path "mcp/gateway/*" {
 	assert.Equal(t, ".env*", res.MCPDecision.MatchedRule)
 }
 
-func TestMCPEval_AllowedParams_MissingHeader(t *testing.T) {
-	// allowed_params configured, request omits the header → deny.
+func TestMCPEval_AllowedParams_MissingArgument(t *testing.T) {
+	// allowed_params configured, body's arguments omit the required
+	// key → deny with allowed_params (the matcher's "required param
+	// missing" branch).
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -501,22 +484,26 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "tools/call",
-		"Mcp-Name":   "write_file",
-		// no Mcp-Param-Region
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params": {
+			"name":      "write_file",
+			"arguments": {}
+		},
+		"id": 1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.False(t, res.Allowed)
 	assert.Equal(t, mcpRuleTypeAllowedParams, res.MCPDecision.RuleType)
 	assert.Equal(t, "region", res.MCPDecision.ParamName)
 	assert.Equal(t, "", res.MCPDecision.ParamValue,
-		"missing-header case records empty value")
+		"missing-argument case records empty value")
 }
 
-func TestMCPEval_DeniedParams_MissingHeader_NoDeny(t *testing.T) {
-	// denied_params only, no allow-list: a missing header isn't a
+func TestMCPEval_DeniedParams_MissingArgument_NoDeny(t *testing.T) {
+	// denied_params only, no allow-list: a missing argument isn't a
 	// match (we don't deny something we never saw), so the request
 	// passes.
 	cbp := mustCBP(t, `
@@ -529,68 +516,18 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "tools/call",
-		"Mcp-Name":   "do_thing",
-		// no Mcp-Param-Env
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params": {
+			"name":      "do_thing",
+			"arguments": {}
+		},
+		"id": 1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.True(t, res.Allowed)
-}
-
-func TestMCPEval_ParamValue_Base64Decoded(t *testing.T) {
-	// Mcp-Param-Path: =?base64?ZG9jcy9yZWFkbWUubWQ=?= decodes to
-	// "docs/readme.md" which matches docs/*.
-	cbp := mustCBP(t, `
-path "mcp/gateway/*" {
-  capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["write_file"]
-    allowed_params = {
-      path = ["docs/*"]
-    }
-  }
-}
-`)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method":     "tools/call",
-		"Mcp-Name":       "write_file",
-		"Mcp-Param-Path": "=?base64?ZG9jcy9yZWFkbWUubWQ=?=",
-	})
-	res := cbp.AllowOperation(testContext(), req, false)
-
-	assert.True(t, res.Allowed)
-}
-
-func TestMCPEval_ParamValue_MalformedBase64_FallsBackToLiteral(t *testing.T) {
-	// Malformed envelope (invalid base64 inside the wrapper) falls
-	// back to the raw value. The raw value matches no allow-list
-	// entry, so the request is denied with the raw bytes recorded
-	// (not the decoded ones — there's no decoded form).
-	cbp := mustCBP(t, `
-path "mcp/gateway/*" {
-  capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["write_file"]
-    allowed_params = {
-      path = ["docs/*"]
-    }
-  }
-}
-`)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method":     "tools/call",
-		"Mcp-Name":       "write_file",
-		"Mcp-Param-Path": "=?base64?!!!not_valid_base64!!!?=",
-	})
-	res := cbp.AllowOperation(testContext(), req, false)
-
-	assert.False(t, res.Allowed)
-	assert.Equal(t, "=?base64?!!!not_valid_base64!!!?=", res.MCPDecision.ParamValue,
-		"malformed envelope: raw bytes recorded so audit shows what was actually compared")
 }
 
 func TestMCPEval_MultiKeyParams_AllPass(t *testing.T) {
@@ -607,18 +544,24 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method":     "tools/call",
-		"Mcp-Name":       "write_file",
-		"Mcp-Param-Path": "docs/api.md",
-		"Mcp-Param-Mode": "0644",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params": {
+			"name": "write_file",
+			"arguments": {
+				"path": "docs/api.md",
+				"mode": "0644"
+			}
+		},
+		"id": 1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 	assert.True(t, res.Allowed, "both keys satisfied → allow")
 }
 
 func TestMCPEval_MultiKeyParams_OneFails(t *testing.T) {
-	// Same policy, but mode header carries a disallowed value.
+	// Same policy, but mode argument carries a disallowed value.
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -632,12 +575,18 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method":     "tools/call",
-		"Mcp-Name":       "write_file",
-		"Mcp-Param-Path": "docs/api.md", // passes
-		"Mcp-Param-Mode": "0755",        // fails
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params": {
+			"name": "write_file",
+			"arguments": {
+				"path": "docs/api.md",
+				"mode": "0755"
+			}
+		},
+		"id": 1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.False(t, res.Allowed, "AND across keys: any failing key denies")
@@ -669,10 +618,12 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "tools/call",
-		"Mcp-Name":   "get_repository",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "get_repository"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.True(t, res.Allowed, "set 1 allows, OR wins")
@@ -708,10 +659,12 @@ path "mcp/gateway/*" {
 
 	// Forbidden tool: MCP gate from the first policy denies, the
 	// second policy's silence on MCP doesn't lift the restriction.
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "tools/call",
-		"Mcp-Name":   "delete_repository",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "delete_repository"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 	assert.False(t, res.Allowed, "additive merge: MCP restriction from one policy still applies even with un-mcp'd policy alongside")
 	assert.Equal(t, mcpRuleTypeAllowedTools, res.MCPDecision.RuleType)
@@ -737,10 +690,12 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "tools/call",
-		"Mcp-Name":   "delete_repository",
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "delete_repository"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.False(t, res.Allowed)
@@ -750,13 +705,176 @@ path "mcp/gateway/*" {
 }
 
 // =============================================================================
+// Batch bodies — JSON-RPC array. End-to-end through the strict parser.
+// =============================================================================
+
+func TestMCPEval_Batch_AllAllowed(t *testing.T) {
+	// Three calls in a batch, all pass. Body goes through the real
+	// ParseJSONRPCStrict (producing 3 MCPCalls with BatchIndex 0/1/2)
+	// and then through the matcher; the decision is the last allow
+	// and BatchIndex stays nil because no element denied.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/list", "tools/call"]
+    allowed_tools   = ["search_repos"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `[
+		{"jsonrpc": "2.0", "method": "tools/list", "id": 1},
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_repos"}, "id": 2},
+		{"jsonrpc": "2.0", "method": "tools/list", "id": 3}
+	]`)
+	res := cbp.AllowOperation(testContext(), req, false)
+
+	assert.True(t, res.Allowed, "every batch call must allow → batch allows")
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "allow", res.MCPDecision.Decision)
+	assert.Nil(t, res.MCPDecision.BatchIndex,
+		"BatchIndex stamped only on denies")
+}
+
+func TestMCPEval_Batch_OneDeniedFailsBatch(t *testing.T) {
+	// A batch where the third element denies — the entire batch
+	// denies (single-fail-all-fail) with the denying call's
+	// MCPDecision stamped including BatchIndex.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/list", "tools/call"]
+    allowed_tools   = ["search_repos"]
+    denied_tools    = ["delete_*"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `[
+		{"jsonrpc": "2.0", "method": "tools/list", "id": 1},
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_repos"}, "id": 2},
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "delete_repo"}, "id": 3}
+	]`)
+	res := cbp.AllowOperation(testContext(), req, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "deny", res.MCPDecision.Decision)
+	assert.Equal(t, mcpRuleTypeDeniedTools, res.MCPDecision.RuleType)
+	assert.Equal(t, "delete_repo", res.MCPDecision.Name)
+	require.NotNil(t, res.MCPDecision.BatchIndex,
+		"batch deny stamps BatchIndex")
+	assert.Equal(t, 2, *res.MCPDecision.BatchIndex,
+		"third call (index 2) was the denying one")
+}
+
+func TestMCPEval_Batch_TwoDenies_FirstWins(t *testing.T) {
+	// A batch where elements 1 AND 2 both deny — evaluateMCPDescriptor
+	// short-circuits at the FIRST denying call, so BatchIndex == 1.
+	// Pins the first-deny-wins contract independently from
+	// Batch_OneDeniedFailsBatch (which puts the only deny last).
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/list", "tools/call"]
+    denied_tools    = ["delete_*", "drop_*"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `[
+		{"jsonrpc": "2.0", "method": "tools/list", "id": 1},
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "delete_repo"}, "id": 2},
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "drop_database"}, "id": 3}
+	]`)
+	res := cbp.AllowOperation(testContext(), req, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "deny", res.MCPDecision.Decision)
+	require.NotNil(t, res.MCPDecision.BatchIndex)
+	assert.Equal(t, 1, *res.MCPDecision.BatchIndex,
+		"first denying call (index 1) wins; the third call's deny is never reached")
+	assert.Equal(t, "delete_repo", res.MCPDecision.Name)
+	assert.Equal(t, "delete_*", res.MCPDecision.MatchedRule)
+}
+
+// A JSON-RPC array body with a single element exercises the batch
+// code path BUT doesn't stamp BatchIndex — the matcher only stamps
+// for genuinely batched bodies (len > 1). Pins the boundary.
+func TestMCPEval_Batch_SingleElement_NoBatchIndex(t *testing.T) {
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/list", "tools/call"]
+    denied_tools    = ["delete_*"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `[
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "delete_repo"}, "id": 1}
+	]`)
+	res := cbp.AllowOperation(testContext(), req, false)
+
+	assert.False(t, res.Allowed)
+	assert.Equal(t, "deny", res.MCPDecision.Decision)
+	assert.Equal(t, mcpRuleTypeDeniedTools, res.MCPDecision.RuleType)
+	assert.Nil(t, res.MCPDecision.BatchIndex,
+		"single-element array body is not a batch for BatchIndex purposes")
+}
+
+func TestMCPEval_Batch_Empty_Denies(t *testing.T) {
+	// An empty batch body `[]` is rejected by the strict parser with
+	// batch_empty. The matcher never runs; decideMCP maps the
+	// ParseErr.Kind 1:1 to MCPDecision.RuleType.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/list"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `[]`)
+	res := cbp.AllowOperation(testContext(), req, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "deny", res.MCPDecision.Decision)
+	assert.Equal(t, mcpRuleTypeBatchEmpty, res.MCPDecision.RuleType)
+}
+
+func TestMCPEval_Batch_DuplicateKey_Denies(t *testing.T) {
+	// A batch where one element has a duplicate key fails the WHOLE
+	// batch at parse time (strict-parser single-pass bail).
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/list", "tools/call"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `[
+		{"jsonrpc": "2.0", "method": "tools/list", "id": 1},
+		{"jsonrpc": "2.0", "method": "tools/call", "method": "tools/list", "params": {"name": "x"}, "id": 2}
+	]`)
+	res := cbp.AllowOperation(testContext(), req, false)
+
+	assert.False(t, res.Allowed)
+	assert.Equal(t, mcpRuleTypeDuplicateKey, res.MCPDecision.RuleType)
+}
+
+// =============================================================================
 // Canonicalisation: case-insensitive matching
 // =============================================================================
 
-func TestMCPEval_HeaderCaseInsensitive(t *testing.T) {
-	// Operator wrote lowercase in policy; client sends mixed case
-	// header values. The matcher lowercases descriptor method/name
-	// once at the boundary so the comparison succeeds.
+func TestMCPEval_BodyCaseInsensitive(t *testing.T) {
+	// Operator wrote lowercase in policy; client sends mixed-case
+	// method and tool name in the body. The matcher lowercases
+	// descriptor method/name once at the boundary so the comparison
+	// succeeds and the decision records the lowercased form.
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -766,10 +884,12 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(t, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "Tools/CALL",  // mixed case
-		"Mcp-Name":   "GET_Repository", // mixed case
-	})
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "Tools/CALL",
+		"params":  {"name": "GET_Repository"},
+		"id":      1
+	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
 	assert.True(t, res.Allowed)
@@ -817,27 +937,6 @@ func TestMatchMCPGlob(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.pattern+"_vs_"+c.value, func(t *testing.T) {
 			assert.Equal(t, c.want, matchMCPGlob(c.value, c.pattern))
-		})
-	}
-}
-
-func TestDecodeMCPParamValue(t *testing.T) {
-	cases := []struct {
-		name string
-		raw  string
-		want string
-	}{
-		{"plain ASCII", "docs/readme.md", "docs/readme.md"},
-		{"base64 envelope decodes", "=?base64?ZG9jcy9yZWFkbWUubWQ=?=", "docs/readme.md"},
-		{"malformed base64 inside envelope falls back to raw",
-			"=?base64?!!!?=", "=?base64?!!!?="},
-		{"prefix only without suffix is literal",
-			"=?base64?ZG9jcw==", "=?base64?ZG9jcw=="},
-		{"empty input", "", ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			assert.Equal(t, c.want, decodeMCPParamValue(c.raw))
 		})
 	}
 }
@@ -981,13 +1080,19 @@ path "mcp/gateway/*" {
   }
 }
 `)
-	req := newMCPRequest(b, "mcp/gateway/", map[string]string{
-		"Mcp-Method":       "tools/call",
-		"Mcp-Name":         "get_repository",
-		"Mcp-Param-Path":   "docs/api.md",
-		"Mcp-Param-Mode":   "0644",
-		"Mcp-Param-Region": "us-west1",
-	})
+	req := newMCPRequest(b, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params": {
+			"name": "get_repository",
+			"arguments": {
+				"path":   "docs/api.md",
+				"mode":   "0644",
+				"region": "us-west1"
+			}
+		},
+		"id": 1
+	}`)
 	ctx := testContext()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -1001,10 +1106,12 @@ func BenchmarkAllowOperation_StressMCP(b *testing.B) {
 	// but the bench bounds the cliff.
 	stress := buildStressPolicy(5, 50)
 	cbp := buildBenchCBP(b, stress)
-	req := newMCPRequest(b, "mcp/gateway/", map[string]string{
-		"Mcp-Method": "tools/call",
-		"Mcp-Name":   "get_repository_47", // matches one of the allow patterns
-	})
+	req := newMCPRequest(b, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "get_repository_47"},
+		"id":      1
+	}`)
 	ctx := testContext()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
