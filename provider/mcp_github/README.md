@@ -141,13 +141,25 @@ warden cred spec read github-ops
 
 ## Step 4: Create a Policy
 
-MCP traffic passes through two complementary layers of authorization. The minted GitHub token is the security boundary — its scopes bound what the agent can actually do at GitHub regardless of what Warden lets through. On top of that, Warden's CBP policies support an `mcp { }` block for governance-style restrictions enforced at the gateway: allow- and deny-lists for JSON-RPC methods, tool names, resource URIs, prompt names, and (where the upstream tool author opted in) selected tool arguments. Enforcement is header-based; the allow path does no request-body parsing.
+MCP traffic passes through two complementary layers of authorization. The minted GitHub token is the security boundary — its scopes bound what the agent can actually do at GitHub regardless of what Warden lets through. On top of that, Warden's CBP policies support an `mcp { }` block for governance-style restrictions enforced at the gateway: allow- and deny-lists for JSON-RPC methods, tool names, resource URIs, prompt names, and selected tool arguments.
 
-> **Important — MCP draft 2026-07-28 dependency.** The `mcp { }` block relies on the next MCP protocol revision (draft dated 2026-07-28), which mirrors the JSON-RPC method and selected fields into HTTP headers so intermediaries can inspect without parsing the body. Until your MCP client adopts the draft, those headers are absent — and a policy with an `mcp { }` block bound to its path will **deny every request** from a pre-draft client. For mixed fleets, stage the rollout: start with the gateway-only policy below, verify clients send the new headers, then promote roles to policies with the `mcp { }` block. Policies without an `mcp { }` block continue to behave exactly as today.
->
-> Tool-argument constraints (`allowed_params` / `denied_params`) carry an additional dependency: the upstream tool author has to opt into the per-argument header mirror via `x-mcp-header` in the tool's input schema. Until GitHub's MCP server ships that opt-in, `allowed_params` rules silently no-op for those tools and the PAT scopes remain the only argument-level guard.
+Enforcement is **body-authoritative**. When a policy in scope contains an `mcp { }` block, Warden strict-parses the JSON-RPC request body and matches against the parsed body. The parser fails closed on any structural problem and the matcher denies with a specific `rule_type`:
 
-All examples below use `capabilities = ["update"]`. MCP traffic is HTTP POST and Warden maps POST to the `update` operation; the 2026-07-28 draft removed the GET stream endpoint entirely, so no other capabilities are needed.
+| `rule_type` | Trigger |
+|---|---|
+| `denied_methods` / `allowed_methods` | JSON-RPC `method` matches a deny pattern, or is absent from a configured allow list |
+| `denied_tools` / `allowed_tools` | `tools/call` with a `params.name` matching a deny pattern, or not in the allow list |
+| `denied_resources` / `allowed_resources` | `resources/read` with a `params.uri` matching a deny pattern, or not in the allow list |
+| `denied_prompts` / `allowed_prompts` | `prompts/get` with a `params.name` matching a deny pattern, or not in the allow list |
+| `denied_params` / `allowed_params` | A `tools/call` argument (`params.arguments.<key>`) matches a deny pattern, or fails an allow-list pattern (or is missing when required) |
+| `missing_body` | Request body absent, or routed to a backend that does not opt into MCP enforcement (typically a non-POST request — operators should not bind `mcp { }` to paths that receive non-POST traffic) |
+| `malformed_jsonrpc` | Body is not a well-formed JSON-RPC 2.0 envelope (bad version, missing method, unknown top-level key, UTF-8 BOM, etc.) |
+| `duplicate_key` | Duplicate object key detected anywhere in the body — Warden rejects ambiguity that Go's standard JSON parser silently last-wins-resolves |
+| `oversized_body` | Body exceeds the mount's `max_body_size` |
+| `batch_empty` | JSON-RPC batch is `[]` |
+| `malformed_params` | A name-bearing method (`tools/call`, `resources/read`, `prompts/get`) has a missing or wrong-shape `params.name` / `params.uri` |
+
+All examples below use `capabilities = ["update"]`. MCP traffic is HTTP POST and Warden maps POST to the `update` operation.
 
 The simplest policy grants the gateway and leans on PAT scopes for everything:
 
@@ -159,7 +171,7 @@ path "mcp_github/role/+/gateway*" {
 EOF
 ```
 
-A policy that restricts the agent to a vetted set of GitHub tools (requires draft-2026-07-28 clients — see disclaimer above):
+A policy that restricts the agent to a vetted set of GitHub tools:
 
 ```bash
 warden policy write mcp-github-readonly - <<EOF
@@ -181,6 +193,22 @@ path "mcp_github/role/+/gateway*" {
   capabilities = ["update"]
   mcp {
     denied_tools = ["delete_*", "force_*", "merge_pull_request"]
+  }
+}
+EOF
+```
+
+Argument-level gates restrict the *values* passed to `tools/call`. Keys in `denied_params` / `allowed_params` match against `params.arguments.<key>` from the parsed body. The policy below permits `create_or_update_file` but never on protected branches:
+
+```bash
+warden policy write mcp-github-no-protected-branches - <<EOF
+path "mcp_github/role/+/gateway*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/call"]
+    denied_params = {
+      branch = ["main", "master", "production", "release/*"]
+    }
   }
 }
 EOF
