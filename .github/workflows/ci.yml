@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # Include `edited` so retargeting a stacked PR's base to `main`
+    # triggers CI. Without it, GitHub fires pull_request.edited but the
+    # default subscription ignores that event, leaving the retargeted PR
+    # with no run queued until a force-push or close+reopen.
+    types: [opened, synchronize, reopened, edited]
   workflow_call:
 
 permissions:
