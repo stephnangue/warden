@@ -87,26 +87,31 @@ func TestDecideMCP_DescriptorMatcherAllows(t *testing.T) {
 	assert.Equal(t, "allow", d.Decision)
 }
 
-// Defence in depth: a non-nil descriptor with empty Calls and nil
-// ParseErr violates the extractor's invariant. decideMCP must NOT
-// fail open in that case — it synthesises a missing_body deny rather
-// than returning nil (which would let AllowOperation skip the deny
-// gate and allow the request).
-func TestDecideMCP_DescriptorWithEmptyCallsFailsClosed(t *testing.T) {
+// The empty-but-non-nil descriptor is the deliberate sentinel an
+// MCP-aware backend installs via extractMCPDescriptor when
+// ShouldEnforceMCPPolicy declines for a specific request (typically a
+// non-POST verb on a multi-method MCP endpoint). decideMCP must
+// return nil (skip evaluation) for this shape so the cap-level check
+// can decide — the mcp{} block is body-authoritative and can't
+// meaningfully gate a verb the backend declared body-less.
+//
+// This is what lets MCP Streamable HTTP's GET (notification SSE
+// stream) and DELETE (session terminate) share the same URL as the
+// POST that mcp{} gates without the multi-method path tripping
+// missing_body. The nil-descriptor case (genuine misconfig: mcp{}
+// bound to a non-MCP backend) still fails closed, covered by
+// TestDecideMCP_DescriptorMissingFailsClosed.
+func TestDecideMCP_EmptyDescriptorSkipsEvaluation(t *testing.T) {
 	sets := []*CBPMCPRules{{
 		AllowedMethods: []string{"tools/list"},
 	}}
 	req := &logical.Request{
 		MCPDescriptor: &logical.MCPRequestDescriptor{
-			// Calls explicitly nil; ParseErr nil. Invariant-violating
-			// shape that the production extractor cannot produce, but
-			// decideMCP must still fail closed.
+			// Calls nil, ParseErr nil — the per-request opt-out sentinel.
 		},
 	}
 	d := decideMCP(sets, req)
-	require.NotNil(t, d, "decideMCP must not return nil on invariant-violating descriptor")
-	assert.Equal(t, "deny", d.Decision)
-	assert.Equal(t, mcpRuleTypeMissingBody, d.RuleType)
+	assert.Nil(t, d, "decideMCP must return nil for the per-request opt-out sentinel so the cap-level check decides")
 }
 
 // Empty sets — no mcp{} block in scope — returns nil. The

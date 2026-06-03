@@ -469,9 +469,14 @@ path "mcp/gateway/*" {
 }
 
 func TestMCPEval_AllowedParams_MissingArgument(t *testing.T) {
-	// allowed_params configured, body's arguments omit the required
-	// key → deny with allowed_params (the matcher's "required param
-	// missing" branch).
+	// allowed_params configured, body's arguments omit the gated
+	// key → request passes. allowed_params is a conditional check
+	// ("IF this argument is present, its value must match"), not a
+	// required-argument check. Matches Vault's allowed_parameters
+	// convention and lets one mcp{} block cover a server with
+	// multiple tools that share a JSON-RPC method but take different
+	// argument shapes — a tool that doesn't take `region` at all
+	// shouldn't be blocked because the policy mentions `region`.
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -495,11 +500,8 @@ path "mcp/gateway/*" {
 	}`)
 	res := cbp.AllowOperation(testContext(), req, false)
 
-	assert.False(t, res.Allowed)
-	assert.Equal(t, mcpRuleTypeAllowedParams, res.MCPDecision.RuleType)
-	assert.Equal(t, "region", res.MCPDecision.ParamName)
-	assert.Equal(t, "", res.MCPDecision.ParamValue,
-		"missing-argument case records empty value")
+	assert.True(t, res.Allowed,
+		"missing argument is not a constraint violation under conditional semantics")
 }
 
 func TestMCPEval_DeniedParams_MissingArgument_NoDeny(t *testing.T) {

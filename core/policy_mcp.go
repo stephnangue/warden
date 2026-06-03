@@ -122,17 +122,34 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 
 // decideMCP is the production entry point called from
 // AllowOperation when the matched permissions carry a non-empty
-// mcp { } rule-set slice. It bridges req.MCPDescriptor's three
-// terminal states to MCPDecision:
+// mcp { } rule-set slice. It bridges req.MCPDescriptor's four
+// terminal states to MCPDecision (see extractMCPDescriptor for how
+// each state is produced):
 //
-//   - nil descriptor (backend didn't opt into MCPPolicyEnforced or
-//     declined this request) ⇒ deny missing_body. Bound mcp{} to a
-//     non-MCP path? Fail closed here.
-//   - descriptor.ParseErr non-nil (strict JSON-RPC parse failed) ⇒
-//     deny with the mapped rule_type. The ParseErr.Msg is operator-
-//     facing only and never copied into the decision.
-//   - descriptor.Calls populated ⇒ delegate to evaluateMCPDescriptor
-//     for body-driven gate evaluation.
+//   - Nil descriptor — no MCP-aware backend handled this request.
+//     If an operator bound mcp{} to a non-MCP path, that's a misconfig
+//     and we fail closed with missing_body. This is the safety net.
+//
+//   - Non-nil, empty descriptor (Calls nil, ParseErr nil) — the
+//     backend is MCP-aware but ShouldEnforceMCPPolicy declined for
+//     this request (typically a non-POST verb, or a non-JSON
+//     Content-Type). The mcp{} block is body-authoritative; a verb
+//     with no body cannot be governed by method/tool/param allow-
+//     lists, so we return nil to skip mcp{} evaluation and let the
+//     cap-level check decide. This is what makes MCP Streamable
+//     HTTP's GET (notification SSE stream) and DELETE (session
+//     terminate) work on the same URL that POST gates.
+//
+//   - descriptor.ParseErr non-nil — strict JSON-RPC parse failed.
+//     Deny with the typed rule_type (malformed_jsonrpc, duplicate_key,
+//     oversized_body, etc). ParseErr.Msg is operator-facing only and
+//     never copied into the decision.
+//
+//   - descriptor.Calls populated — body parsed cleanly. Delegate to
+//     evaluateMCPDescriptor for body-driven gate evaluation.
+//
+// A nil return from decideMCP means "this policy layer has no opinion
+// — fall through to the next check". A non-nil deny is binding.
 //
 // Every returned decision passes through sanitizeMCPDecision so
 // adversary-controlled bytes don't leak into audit or response
@@ -149,6 +166,12 @@ func decideMCP(sets []*CBPMCPRules, req *logical.Request) *logical.MCPDecision {
 			Decision: "deny",
 			RuleType: mcpRuleTypeMissingBody,
 		}
+	case desc.Calls == nil && desc.ParseErr == nil:
+		// Backend opted out of MCP enforcement for this specific
+		// request shape (e.g. non-POST verb on a multi-method MCP
+		// endpoint). The mcp{} block doesn't apply to body-less
+		// verbs; return nil so the cap-level check decides.
+		return nil
 	case desc.ParseErr != nil:
 		d = &logical.MCPDecision{
 			Decision: "deny",
@@ -159,10 +182,12 @@ func decideMCP(sets []*CBPMCPRules, req *logical.Request) *logical.MCPDecision {
 		if d == nil {
 			// Defence in depth: evaluateMCPDescriptor returns nil
 			// only for empty sets (handled above) or for a non-nil
-			// descriptor with zero calls. The extractor's invariant
-			// rules the latter out, but decideMCP is the policy-
-			// layer boundary and cannot trust its input. Fail
-			// closed.
+			// descriptor with zero calls (the extractor's invariant
+			// for the "populated" arm rules this out — Calls is
+			// always non-empty when ParseErr is nil and the empty
+			// sentinel is intercepted above). decideMCP is the
+			// policy-layer boundary and cannot trust its input.
+			// Fail closed.
 			d = &logical.MCPDecision{
 				Decision: "deny",
 				RuleType: mcpRuleTypeMissingBody,
@@ -310,11 +335,13 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 		for paramName, patterns := range set.AllowedParams {
 			value := callMatchArgString(call, paramName)
 			if value == "" {
-				// Required param missing — deny with empty MatchedRule.
-				d.Decision = "deny"
-				d.RuleType = mcpRuleTypeAllowedParams
-				d.ParamName = paramName
-				return d
+				// Param not present in the call — no constraint applies.
+				// Matches Vault's allowed_parameters convention: the
+				// gate is "IF present, must match", not "must be
+				// present". Tools that don't take this argument at
+				// all (or for which the agent omitted it) pass through;
+				// tools that do take it get the value-list check.
+				continue
 			}
 			lowerValue := strings.ToLower(value)
 			if m := matchMCPAny(lowerValue, patterns); m == "" {

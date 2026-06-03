@@ -242,9 +242,10 @@ path "mcp/gateway/*" {
 }
 
 // Object-typed argument can never match a string pattern; the matcher
-// treats it as missing. For an allow-list this means missing-required
-// (deny); for a deny-list it would skip. Pins the non-scalar contract
-// through the production pipeline.
+// treats it as missing. Under the conditional-allow semantics, missing
+// means "no constraint applies" — the request passes (the operator who
+// wants to forbid non-scalar values must use denied_params or a tighter
+// allowed_tools list, not allowed_params).
 func TestMCPE2E_NonScalarArgumentTreatedAsMissing(t *testing.T) {
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
@@ -271,9 +272,8 @@ path "mcp/gateway/*" {
 
 	res := cbp.AllowOperation(testContext(), req, false)
 
-	assert.False(t, res.Allowed)
-	assert.Equal(t, mcpRuleTypeAllowedParams, res.MCPDecision.RuleType)
-	assert.Equal(t, "cfg", res.MCPDecision.ParamName)
+	assert.True(t, res.Allowed,
+		"non-scalar argument is treated as missing; missing is a conditional skip under the allow-list, not a deny")
 }
 
 func TestMCPE2E_BatchDenyStampsBatchIndex(t *testing.T) {
@@ -436,11 +436,14 @@ path "mcp/gateway/*" {
 // =============================================================================
 
 // Backend opts out per-request (ShouldEnforceMCPPolicy returns false)
-// and mcp{} is in scope → deny missing_body. The most likely real-
-// world trigger: a non-POST request reaches a path with mcp{} bound,
-// the backend's hook declines, the descriptor stays nil, the matcher
-// fails closed.
-func TestMCPE2E_PerRequestOptOut_WithMCPBlock_DeniesMissingBody(t *testing.T) {
+// and mcp{} is in scope → request passes through. This is the canonical
+// MCP Streamable HTTP shape: GET on the same /gateway URL as the POST
+// that mcp{} gates. The body-authoritative block can't meaningfully
+// apply to a verb the backend declared body-less, so decideMCP skips
+// evaluation and the cap-level check decides. Without this behavior,
+// every MCP-spec-compliant client that opens an SSE notification
+// stream would hit missing_body.
+func TestMCPE2E_PerRequestOptOut_WithMCPBlock_PassesThrough(t *testing.T) {
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -452,18 +455,24 @@ path "mcp/gateway/*" {
 	req := buildE2ERequest(t, `{"jsonrpc":"2.0","method":"tools/list","id":1}`)
 	runExtract(req, &mcpMockBackend{enforce: false, cap: 0})
 
-	require.Nil(t, req.MCPDescriptor,
-		"opt-out leaves descriptor nil")
+	require.NotNil(t, req.MCPDescriptor,
+		"opt-out installs the empty sentinel so decideMCP can distinguish per-request opt-out from misconfig")
+	require.Nil(t, req.MCPDescriptor.Calls,
+		"sentinel descriptor must have Calls nil")
+	require.Nil(t, req.MCPDescriptor.ParseErr,
+		"sentinel descriptor must have ParseErr nil")
 
 	res := cbp.AllowOperation(testContext(), req, false)
 
-	assert.False(t, res.Allowed)
-	assert.Equal(t, mcpRuleTypeMissingBody, res.MCPDecision.RuleType)
+	assert.True(t, res.Allowed)
+	assert.Nil(t, res.MCPDecision,
+		"empty sentinel skips mcp{} evaluation; cap-level check decides")
 }
 
 // Same opt-out, no mcp{} in scope → matcher never runs, request
-// passes through cleanly. Operators who don't bind mcp{} to non-POST
-// paths see no friction.
+// passes through cleanly. Symmetry with the mcp{}-in-scope test: the
+// empty sentinel is installed either way, and decideMCP isn't even
+// called because permissions.MCP is empty.
 func TestMCPE2E_PerRequestOptOut_NoMCPBlock_PassesThrough(t *testing.T) {
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
@@ -473,8 +482,10 @@ path "mcp/gateway/*" {
 	req := buildE2ERequest(t, `{"jsonrpc":"2.0","method":"tools/list","id":1}`)
 	runExtract(req, &mcpMockBackend{enforce: false, cap: 0})
 
-	require.Nil(t, req.MCPDescriptor,
-		"opt-out leaves descriptor nil (symmetry with the mcp{}-in-scope test)")
+	require.NotNil(t, req.MCPDescriptor,
+		"opt-out installs the empty sentinel regardless of whether mcp{} is in scope")
+	require.Nil(t, req.MCPDescriptor.Calls)
+	require.Nil(t, req.MCPDescriptor.ParseErr)
 
 	res := cbp.AllowOperation(testContext(), req, false)
 

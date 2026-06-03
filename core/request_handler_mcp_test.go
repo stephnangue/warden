@@ -64,15 +64,22 @@ func TestExtractMCPDescriptor_NotMCPBackend(t *testing.T) {
 	}
 }
 
-// MCP backend opts out per-request: descriptor stays nil.
+// MCP backend opts out per-request: descriptor is the empty sentinel
+// (non-nil, no Calls, no ParseErr). decideMCP uses this to distinguish
+// "backend declined for this request shape" from "no MCP-aware backend
+// at all", which lets MCP Streamable HTTP's GET/DELETE share the URL
+// with the POST that mcp{} gates.
 func TestExtractMCPDescriptor_OptsOutPerRequest(t *testing.T) {
 	c := &Core{}
 	req := newReq(t, `{"jsonrpc":"2.0","method":"tools/list"}`)
 	b := &mcpBackend{}
 	b.enforced = &fakeMCPHook{enforce: false}
 	c.extractMCPDescriptor(context.Background(), req, b)
-	if req.MCPDescriptor != nil {
-		t.Fatalf("descriptor = %+v, want nil for opted-out request", req.MCPDescriptor)
+	if req.MCPDescriptor == nil {
+		t.Fatalf("descriptor = nil, want empty sentinel for opted-out request")
+	}
+	if req.MCPDescriptor.Calls != nil || req.MCPDescriptor.ParseErr != nil {
+		t.Fatalf("descriptor = %+v, want empty sentinel (Calls nil, ParseErr nil) for opted-out request", req.MCPDescriptor)
 	}
 }
 
