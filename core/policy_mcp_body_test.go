@@ -240,6 +240,8 @@ func TestMCPDenyRank_StructuralFailuresOutrankExplicitDeny(t *testing.T) {
 		{mcpRuleTypeMalformedParams, 4},
 		{mcpRuleTypeDeniedMethods, 3},
 		{mcpRuleTypeDeniedTools, 3},
+		{mcpRuleTypeDeniedResources, 3},
+		{mcpRuleTypeDeniedPrompts, 3},
 		{mcpRuleTypeDeniedParams, 3},
 		{mcpRuleTypeAllowedMethods, 2},
 		{mcpRuleTypeAllowedTools, 2},

@@ -137,7 +137,9 @@ type MCPRulesHCL struct {
 	AllowedTools     []string            `hcl:"allowed_tools"`
 	DeniedTools      []string            `hcl:"denied_tools"`
 	AllowedResources []string            `hcl:"allowed_resources"`
+	DeniedResources  []string            `hcl:"denied_resources"`
 	AllowedPrompts   []string            `hcl:"allowed_prompts"`
+	DeniedPrompts    []string            `hcl:"denied_prompts"`
 	AllowedParams    map[string][]string `hcl:"allowed_params"`
 	DeniedParams     map[string][]string `hcl:"denied_params"`
 }
@@ -175,7 +177,9 @@ type CBPMCPRules struct {
 	AllowedTools     []string
 	DeniedTools      []string
 	AllowedResources []string
+	DeniedResources  []string
 	AllowedPrompts   []string
+	DeniedPrompts    []string
 	AllowedParams    map[string][]string
 	DeniedParams     map[string][]string
 }
@@ -203,8 +207,14 @@ func (m *CBPMCPRules) Clone() *CBPMCPRules {
 	if m.AllowedResources != nil {
 		clone.AllowedResources = append([]string(nil), m.AllowedResources...)
 	}
+	if m.DeniedResources != nil {
+		clone.DeniedResources = append([]string(nil), m.DeniedResources...)
+	}
 	if m.AllowedPrompts != nil {
 		clone.AllowedPrompts = append([]string(nil), m.AllowedPrompts...)
+	}
+	if m.DeniedPrompts != nil {
+		clone.DeniedPrompts = append([]string(nil), m.DeniedPrompts...)
 	}
 	if m.AllowedParams != nil {
 		clone.AllowedParams = make(map[string][]string, len(m.AllowedParams))
@@ -584,7 +594,13 @@ func canonicaliseMCPRules(h *MCPRulesHCL) (*CBPMCPRules, error) {
 	if r.AllowedResources, err = canonList("allowed_resources", h.AllowedResources); err != nil {
 		return nil, err
 	}
+	if r.DeniedResources, err = canonList("denied_resources", h.DeniedResources); err != nil {
+		return nil, err
+	}
 	if r.AllowedPrompts, err = canonList("allowed_prompts", h.AllowedPrompts); err != nil {
+		return nil, err
+	}
+	if r.DeniedPrompts, err = canonList("denied_prompts", h.DeniedPrompts); err != nil {
 		return nil, err
 	}
 	if r.AllowedParams, err = canonMap("allowed_params", h.AllowedParams); err != nil {
