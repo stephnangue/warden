@@ -67,15 +67,23 @@ type Auth struct {
 // audit layer can render the decision unconditionally. The JSON tags
 // double as the wire shape exposed in audit records under
 // auth.policy_results.mcp_decision.
+//
+// All string fields are CTL-stripped by core.sanitizeMCPDecision before
+// the struct leaves the policy layer, so adversary-controlled body
+// bytes cannot inject log content or break the WWW-Authenticate
+// quoted-string.
 type MCPDecision struct {
-	// Method is the value of the Mcp-Method header on the request.
-	// Empty when the header was missing (paired with
-	// RuleType=missing_method_header).
+	// Method is the lowercased JSON-RPC method from the parsed
+	// request body. Empty for structural denies that bail before the
+	// body's method was extracted (missing_body, malformed_jsonrpc,
+	// duplicate_key, oversized_body, batch_empty, malformed_params).
 	Method string `json:"method"`
 
-	// Name is the value of the Mcp-Name header. Empty for name-less
-	// methods (tools/list, notifications, etc.) and when the request
-	// was rejected before the name gate ran.
+	// Name is the lowercased name-bearing field from the JSON-RPC
+	// body — params.name for tools/call and prompts/get, params.uri
+	// for resources/read. Empty for methods without a name
+	// (tools/list, initialize, notifications) and for any deny
+	// produced before the name gate ran.
 	Name string `json:"name,omitempty"`
 
 	// Decision is "allow" or "deny". Always populated when an mcp { }
@@ -86,25 +94,40 @@ type MCPDecision struct {
 	// entry) that fired. For a literal match it equals the request's
 	// name/method/param value; for a wildcard match it carries the
 	// pattern (e.g. "delete_*"). Empty when no list entry matched
-	// (deny via not-in-allow-list) and when the deny reason is a
-	// sentinel like missing_method_header.
+	// (deny via not-in-allow-list) and for structural-failure denies.
 	MatchedRule string `json:"matched_rule"`
 
 	// RuleType records which gate produced the decision. Domain:
-	// allowed_methods, denied_methods, allowed_tools, denied_tools,
-	// allowed_resources, allowed_prompts, allowed_params,
-	// denied_params, or the sentinel missing_method_header.
+	//   gate-driven: allowed_methods, denied_methods, allowed_tools,
+	//     denied_tools, allowed_resources, allowed_prompts,
+	//     allowed_params, denied_params
+	//   structural failure (body could not be evaluated):
+	//     missing_body, malformed_jsonrpc, duplicate_key,
+	//     oversized_body, batch_empty, malformed_params
+	//   legacy sentinel (kept for back-compat with pre-Phase-4
+	//   audit records; never emitted on the production path):
+	//     missing_method_header
 	RuleType string `json:"rule_type"`
 
-	// ParamName is the Mcp-Param-{Name} header's name (lowercase,
-	// hyphens preserved), populated only when RuleType is
-	// allowed_params or denied_params.
+	// ParamName is the tools/call argument key whose value triggered
+	// a param-gate deny. Lowercased, hyphens preserved. Populated
+	// only when RuleType is allowed_params or denied_params.
 	ParamName string `json:"param_name,omitempty"`
 
-	// ParamValue is the header value the policy compared against,
-	// base64-decoded if the source header was an RFC 2047
-	// encoded-word. Populated only for param-related decisions.
+	// ParamValue is the request value the policy compared against —
+	// for body-authoritative enforcement this is the tools/call
+	// argument value rendered to its matcher-comparable string form.
+	// Populated only for param-related decisions.
 	ParamValue string `json:"param_value,omitempty"`
+
+	// BatchIndex stamps the offset of the deciding call within a
+	// JSON-RPC batch body. Nil for single-message bodies and for any
+	// structural deny produced before the body's calls were
+	// evaluated (missing_body / malformed_jsonrpc / duplicate_key /
+	// oversized_body / batch_empty). Purely informational — does
+	// NOT participate in the strongest-reason ranking that selects
+	// which set's deny surfaces on a multi-set deny.
+	BatchIndex *int `json:"batch_index,omitempty"`
 }
 
 // Clone returns a deep copy of the MCPDecision. Safe to call on a nil
@@ -114,6 +137,10 @@ func (d *MCPDecision) Clone() *MCPDecision {
 		return nil
 	}
 	clone := *d
+	if d.BatchIndex != nil {
+		idx := *d.BatchIndex
+		clone.BatchIndex = &idx
+	}
 	return &clone
 }
 

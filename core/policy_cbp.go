@@ -271,9 +271,10 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 			// conditions, an absent mcp block in one source does NOT
 			// disable enforcement contributed by another source — each
 			// stanza's mcp { } adds one entry to the slice and the
-			// per-set OR in evaluateMCP means more entries can only
-			// admit more requests (never fewer). The clone protects
-			// against later mutation of the shared underlying slices.
+			// per-set OR in evaluateMCPDescriptor means more entries
+			// can only admit more requests (never fewer). The clone
+			// protects against later mutation of the shared underlying
+			// slices.
 			if len(pc.Permissions.MCP) > 0 {
 				for _, m := range pc.Permissions.MCP {
 					existingPerms.MCP = append(existingPerms.MCP, m.Clone())
@@ -486,14 +487,19 @@ CHECK:
 		}
 	}
 
-	// MCP rule-set evaluation. Runs after conditions (so source-IP /
-	// time gates apply first) and before parameter validation (so
-	// MCP-specific gates short-circuit the request before generic
-	// parameter rules run). Populates ret.MCPDecision on every branch
+	// MCP rule-set evaluation, body-authoritative. Runs after
+	// conditions (so source-IP / time gates apply first) and before
+	// parameter validation. Populates ret.MCPDecision on every branch
 	// when an mcp block was consulted, so the audit layer sees the
 	// decision whether the request was allowed or denied.
+	//
+	// req.MCPDescriptor is populated by the core/request_handler_mcp
+	// extractor on streaming MCP backends that opt into
+	// logical.MCPPolicyEnforced. A nil descriptor here means either
+	// the routed backend doesn't implement the marker, or it declined
+	// the request (wrong method / Content-Type) — fail closed.
 	if len(permissions.MCP) > 0 {
-		ret.MCPDecision = evaluateMCP(permissions.MCP, req)
+		ret.MCPDecision = decideMCP(permissions.MCP, req)
 		if ret.MCPDecision != nil && ret.MCPDecision.Decision == "deny" {
 			return ret
 		}

@@ -112,15 +112,26 @@ actually do at GitHub regardless of what Warden lets through. On top
 of that, Warden's CBP policies support an mcp { } block for
 governance-style restrictions enforced at the gateway: allow- and
 deny-lists for JSON-RPC methods, tool names, resource URIs, prompt
-names, and selected tool arguments. When a policy in scope contains
-an mcp { } block, the gateway strict-parses the JSON-RPC request body
-before authorising the call; denied requests return HTTP 403 with an
-RFC 6750 WWW-Authenticate header and a small JSON body the agent SDK
-surfaces as a structured tool-call failure. See the policy
-documentation for the mcp { } block schema and examples.
+names, and selected tool arguments. Enforcement is body-authoritative
+— Warden strict-parses the JSON-RPC request body and matches against
+the parsed body, never against client-supplied request headers. The
+parser rejects malformed bodies, duplicate keys at any depth, empty
+batches, and oversized payloads; on any structural failure the
+request denies with a specific rule_type (malformed_jsonrpc,
+duplicate_key, oversized_body, batch_empty, missing_body,
+malformed_params). Denied requests return HTTP 403 with an RFC 6750
+WWW-Authenticate header and a small JSON body the agent SDK surfaces
+as a structured tool-call failure.
 
-Policies without an mcp { } block keep today's behaviour unchanged —
-no body parsing is performed on the allow path.
+Body parsing runs only for POST requests carrying Content-Type
+application/json. Other request shapes do not produce a parsed body
+descriptor: when a policy in scope binds an mcp { } block to a path
+that also receives non-POST or non-JSON traffic, those requests deny
+with rule_type missing_body. Operators scope mcp { } blocks to paths
+they expect to carry JSON-RPC POSTs.
+
+Policies without an mcp { } block in scope skip the strict parser
+entirely — no body buffering or parsing is performed on those paths.
 
 Configuration:
 - mcp_github_url: MCP server base URL (default: https://api.githubcopilot.com/mcp)

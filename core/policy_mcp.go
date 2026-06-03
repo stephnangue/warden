@@ -16,6 +16,19 @@ import (
 // mcp { } block. These strings appear in audit records under
 // auth.policy_results.mcp_decision.rule_type and the response-body
 // renderer keys off them to pick the per-rule-type message template.
+//
+// The structural-failure values (missing_body, malformed_jsonrpc,
+// duplicate_key, oversized_body, batch_empty, malformed_params) fire
+// when the body-authoritative path cannot evaluate the policy at all —
+// no descriptor produced, or descriptor carries a ParseErr from the
+// strict JSON-RPC parser. They rank above explicit-deny matches in
+// mcpDenyRank so a multi-set deny surfaces the structural reason
+// (more informative for operators than "tool not allowed" when the
+// body itself was unparseable).
+//
+// missing_method_header is the legacy header-era sentinel; kept in
+// scope for back-compat with existing audit records but never emitted
+// on the body-authoritative path.
 const (
 	mcpRuleTypeAllowedMethods   = "allowed_methods"
 	mcpRuleTypeDeniedMethods    = "denied_methods"
@@ -26,28 +39,23 @@ const (
 	mcpRuleTypeAllowedParams    = "allowed_params"
 	mcpRuleTypeDeniedParams     = "denied_params"
 	mcpRuleTypeMissingMethod    = "missing_method_header"
+
+	mcpRuleTypeMissingBody       = "missing_body"
+	mcpRuleTypeMalformedJSONRPC  = "malformed_jsonrpc"
+	mcpRuleTypeDuplicateKey      = "duplicate_key"
+	mcpRuleTypeOversizedBody     = "oversized_body"
+	mcpRuleTypeBatchEmpty        = "batch_empty"
+	mcpRuleTypeMalformedParams   = "malformed_params"
 )
 
-// MCP JSON-RPC method names that carry a Mcp-Name header in the
-// 2026-07-28 draft. For these methods the name gate (allowed_tools /
-// denied_tools / allowed_resources / allowed_prompts) runs after the
-// method gate; for any other method the name gate is skipped.
+// MCP JSON-RPC method names that carry name-bearing semantics. For
+// these methods the name gate (allowed_tools / denied_tools /
+// allowed_resources / allowed_prompts) runs after the method gate;
+// for any other method the name gate is skipped.
 const (
-	mcpMethodToolsCall    = "tools/call"
+	mcpMethodToolsCall     = "tools/call"
 	mcpMethodResourcesRead = "resources/read"
-	mcpMethodPromptsGet   = "prompts/get"
-)
-
-// MCP-spec header names. Case-insensitive on the wire per RFC 9110;
-// net/http canonicalises on read so these casings are what
-// http.Header.Get sees regardless of how the client formatted them.
-const (
-	mcpHeaderMethod = "Mcp-Method"
-	mcpHeaderName   = "Mcp-Name"
-	// mcpHeaderParamPrefix names the Mcp-Param-{Name} family. Looking
-	// up a specific param header uses mcpHeaderParamPrefix + param-name
-	// (canonicalised by net/http).
-	mcpHeaderParamPrefix = "Mcp-Param-"
+	mcpMethodPromptsGet    = "prompts/get"
 )
 
 // ErrMCPPolicyDenied carries the MCPDecision that produced a deny so
@@ -95,16 +103,16 @@ func matchMCPAny(value string, patterns []string) string {
 	return ""
 }
 
-// decodeMCPParamValue decodes the RFC 2047-style encoded-word envelope
-// used by the MCP draft for non-ASCII or unsafe Mcp-Param-* values:
+// decodeMCPParamValue decodes the legacy RFC 2047-style encoded-word
+// envelope used by the pre-body MCP draft for non-ASCII or unsafe
+// Mcp-Param-* values:
 //
 //	=?base64?<base64-encoded UTF-8>?=
 //
 // Returns the decoded string when the envelope is well-formed,
-// otherwise returns the raw input. Malformed envelopes deliberately
-// fall back to the raw value so a bad encoding can't be used to evade
-// a deny pattern — the policy still sees what it would have matched
-// against had the encoding been honest.
+// otherwise returns the raw input. Retained for test-only descriptor
+// synthesis from headers; not consumed on the body-authoritative
+// production path.
 func decodeMCPParamValue(raw string) string {
 	const prefix = "=?base64?"
 	const suffix = "?="
@@ -117,32 +125,6 @@ func decodeMCPParamValue(raw string) string {
 		return raw
 	}
 	return string(decoded)
-}
-
-// mcpHeader fetches a header by canonical name from req.HTTPRequest,
-// returning "" when the request or header is absent. Centralising the
-// nil-check lets the evaluation block stay flat.
-func mcpHeader(req *logical.Request, name string) string {
-	if req == nil || req.HTTPRequest == nil {
-		return ""
-	}
-	return req.HTTPRequest.Header.Get(name)
-}
-
-// mcpHeaderForParam fetches the Mcp-Param-{Name} header value, decoded
-// if it was sent as an encoded-word. http.Header.Get already
-// canonicalises the lookup key internally so the operator-supplied
-// lowercase param-name (e.g. "path") finds the header net/http stored
-// as "Mcp-Param-Path".
-func mcpHeaderForParam(req *logical.Request, paramName string) string {
-	if req == nil || req.HTTPRequest == nil {
-		return ""
-	}
-	raw := req.HTTPRequest.Header.Get(mcpHeaderParamPrefix + paramName)
-	if raw == "" {
-		return ""
-	}
-	return decodeMCPParamValue(raw)
 }
 
 // nameListForMethod returns the (deny, allow) name-lists that apply to
@@ -161,53 +143,70 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 	return nil, nil
 }
 
-// evaluateMCP runs the MCP rule-set slice from CBPPermissions against
-// a request and returns a single MCPDecision. Returns nil when the
-// slice is empty (no enforcement — the caller continues to parameter
-// checks).
+// decideMCP is the production entry point called from
+// AllowOperation when the matched permissions carry a non-empty
+// mcp { } rule-set slice. It bridges req.MCPDescriptor's three
+// terminal states to MCPDecision:
 //
-// Phase 3 retains this signature as the back-compat wrapper called
-// from policy_cbp.go's AllowOperation. The matcher itself runs against
-// a request-shaped MCPRequestDescriptor; here the descriptor is
-// synthesised from the Mcp-* headers via mcpDescriptorFromHeaders so
-// every existing test (which exercises the header path through
-// AllowOperation) sees identical behaviour. Phase 4 swaps the call
-// site to read the body-extracted descriptor from req.MCPDescriptor.
+//   - nil descriptor (backend didn't opt into MCPPolicyEnforced or
+//     declined this request) ⇒ deny missing_body. Bound mcp{} to a
+//     non-MCP path? Fail closed here.
+//   - descriptor.ParseErr non-nil (strict JSON-RPC parse failed) ⇒
+//     deny with the mapped rule_type. The ParseErr.Msg is operator-
+//     facing only and never copied into the decision.
+//   - descriptor.Calls populated ⇒ delegate to evaluateMCPDescriptor
+//     for body-driven gate evaluation.
 //
-// Semantics, per the policy plan:
-//   - For each rule-set: short-circuit on the first matching gate
-//     (missing-method, denied_methods, allowed_methods miss, name
-//     gate, param gate). A set that reaches the end without a deny
-//     contributes "allow."
-//   - Across sets: OR semantics. If any set allows, the overall
-//     decision is allow with that set's MCPDecision. If every set
-//     denies, the overall decision is deny with the strongest reason
-//     (explicit deny matches > not-in-allow-list > missing-method-
-//     header; ties broken by source order).
-//
-// All comparisons are lowercase; the patterns were lowercased at
-// parse time and the request values are lowercased here once per
-// set.
-func evaluateMCP(sets []*CBPMCPRules, req *logical.Request) *logical.MCPDecision {
+// Every returned decision passes through sanitizeMCPDecision so
+// adversary-controlled bytes don't leak into audit or response
+// rendering.
+func decideMCP(sets []*CBPMCPRules, req *logical.Request) *logical.MCPDecision {
 	if len(sets) == 0 {
 		return nil
 	}
-	desc := mcpDescriptorFromHeaders(req, sets)
-	return evaluateMCPDescriptor(sets, desc)
+	var d *logical.MCPDecision
+	desc := req.MCPDescriptor
+	switch {
+	case desc == nil:
+		d = &logical.MCPDecision{
+			Decision: "deny",
+			RuleType: mcpRuleTypeMissingBody,
+		}
+	case desc.ParseErr != nil:
+		d = &logical.MCPDecision{
+			Decision: "deny",
+			RuleType: desc.ParseErr.Kind,
+		}
+	default:
+		d = evaluateMCPDescriptor(sets, desc)
+		if d == nil {
+			// Defence in depth: evaluateMCPDescriptor returns nil
+			// only for empty sets (handled above) or for a non-nil
+			// descriptor with zero calls. The extractor's invariant
+			// rules the latter out, but decideMCP is the policy-
+			// layer boundary and cannot trust its input. Fail
+			// closed.
+			d = &logical.MCPDecision{
+				Decision: "deny",
+				RuleType: mcpRuleTypeMissingBody,
+			}
+		}
+	}
+	sanitizeMCPDecision(d)
+	return d
 }
 
-// evaluateMCPDescriptor is the source-agnostic matcher. Consumes a
-// strictly-parsed (or header-synthesised) descriptor + the policy
-// rule-set slice; returns the MCPDecision. Single-call descriptors
-// return the call's decision directly. Multi-call (batch) descriptors
-// short-circuit at the first denying call; allow only if every call
-// allows — single-fail-all-fail per the policy plan.
+// evaluateMCPDescriptor is the body-authoritative matcher. Consumes a
+// strictly-parsed descriptor + the policy rule-set slice; returns the
+// MCPDecision. Single-call descriptors return the call's decision
+// directly. Multi-call (batch) descriptors short-circuit at the first
+// denying call (stamping BatchIndex on the returned decision); allow
+// only if every call allows — single-fail-all-fail per the policy plan.
 //
 // Returns nil when sets is empty (no enforcement) or when the
-// descriptor carries no calls. Callers handle structural failures
-// (ParseErr non-nil, nil descriptor with mcp{} in scope) before
-// invoking this function — by Phase 3 those checks live in
-// AllowOperation; Phase 4 hoists them to a shared wrapper.
+// descriptor carries no calls. The caller in AllowOperation handles
+// structural failures (nil descriptor, ParseErr non-nil) before
+// invoking this function.
 func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescriptor) *logical.MCPDecision {
 	if len(sets) == 0 {
 		return nil
@@ -216,10 +215,15 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 		return nil
 	}
 
+	batch := len(desc.Calls) > 1
 	var lastAllow *logical.MCPDecision
 	for i := range desc.Calls {
 		d := evaluateMCPCall(sets, &desc.Calls[i])
 		if d.Decision == "deny" {
+			if batch {
+				idx := desc.Calls[i].BatchIndex
+				d.BatchIndex = &idx
+			}
 			return d
 		}
 		lastAllow = d
@@ -255,14 +259,14 @@ func evaluateMCPCall(sets []*CBPMCPRules, call *logical.MCPCall) *logical.MCPDec
 // method, name, and call. Returns the set's MCPDecision (always non-
 // nil) — either an allow with the matching pattern stamped, or a
 // deny with the failing gate and pattern stamped. Reads param values
-// from call.MatchArgs so the same logic serves both the header-
-// synthesised and body-extracted descriptors.
+// from call.MatchArgs.
 func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.MCPCall) *logical.MCPDecision {
 	d := &logical.MCPDecision{Method: method, Name: name}
 
-	// (a) Missing method → deny. An empty method cannot match
-	// anything meaningful and the operator who wrote an mcp{} block
-	// wants enforcement — fail closed.
+	// (a) Missing method → deny. The body-authoritative parser
+	// rejects an empty method as malformed_jsonrpc before we get
+	// here, so this branch is now reachable only via test-synthesised
+	// descriptors that intentionally drop method. Fail closed.
 	if method == "" {
 		d.Decision = "deny"
 		d.RuleType = mcpRuleTypeMissingMethod
@@ -308,10 +312,8 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 
 	// (e) Param gate for tools/call only. Each configured key
 	// checked independently — AND across keys, OR within a key's
-	// value-list. Lookup goes through callMatchArgString so non-
-	// scalar argument values (objects, arrays, null) are treated as
-	// missing in both header-synthesised and body-extracted
-	// descriptors.
+	// value-list. Non-scalar argument values (objects, arrays,
+	// null) are treated as missing via callMatchArgString.
 	if method == mcpMethodToolsCall {
 		for paramName, patterns := range set.DeniedParams {
 			value := callMatchArgString(call, paramName)
@@ -366,11 +368,9 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 
 // callMatchArgString returns the matcher-comparable string form of a
 // tools/call argument from the descriptor. Returns "" for missing,
-// null, object, and array values so the matcher treats them as
-// missing — matching today's "no Mcp-Param-X header" semantic exactly
-// when invoked through the header adapter, and matching the plan's
-// "non-scalar values can't match a string pattern" semantic for
-// body-extracted descriptors.
+// null, object, and array values so the matcher treats non-scalars
+// uniformly as missing — matching the plan's "non-scalar values can't
+// match a string pattern" semantic.
 func callMatchArgString(call *logical.MCPCall, paramName string) string {
 	if call == nil || call.MatchArgs == nil {
 		return ""
@@ -385,75 +385,6 @@ func callMatchArgString(call *logical.MCPCall, paramName string) string {
 	default:
 		return ""
 	}
-}
-
-// mcpDescriptorFromHeaders builds a synthetic single-call descriptor
-// from the Mcp-* request headers. Phase 3 routes the production
-// matcher through this adapter so the existing audit shape is
-// preserved verbatim. Phase 4 swaps the call site at policy_cbp.go to
-// read the body-extracted descriptor from req.MCPDescriptor instead,
-// at which point this adapter is only consumed by back-compat tests.
-//
-// MatchArgs is pre-populated for every param-name the policy gates
-// on (across all sets), so evaluateMCPSetForCall's per-key lookup
-// hits MatchArgs uniformly. Param-names not present as headers are
-// simply not added; callMatchArgString returns "" for missing
-// entries, preserving the original "missing header can't match"
-// semantic. Only tools/call methods read the param gate, so the
-// pre-population is skipped for any other method.
-func mcpDescriptorFromHeaders(req *logical.Request, sets []*CBPMCPRules) *logical.MCPRequestDescriptor {
-	method := strings.ToLower(mcpHeader(req, mcpHeaderMethod))
-	name := strings.ToLower(mcpHeader(req, mcpHeaderName))
-
-	var matchArgs map[string]logical.ParamValue
-	if method == mcpMethodToolsCall {
-		matchArgs = collectHeaderParams(req, sets)
-	}
-
-	return &logical.MCPRequestDescriptor{
-		Calls: []logical.MCPCall{{
-			Method:    method,
-			Name:      name,
-			MatchArgs: matchArgs,
-		}},
-	}
-}
-
-// collectHeaderParams reads each Mcp-Param-<key> header value (decoded
-// via decodeMCPParamValue when wrapped in an RFC 2047 encoded-word)
-// for every key the policy mentions in either AllowedParams or
-// DeniedParams. Header-absent keys are skipped. Returns nil when no
-// header value was populated so MatchArgs stays nil for the common
-// "no param headers sent" path.
-func collectHeaderParams(req *logical.Request, sets []*CBPMCPRules) map[string]logical.ParamValue {
-	var matchArgs map[string]logical.ParamValue
-	add := func(paramName string) {
-		if matchArgs != nil {
-			if _, ok := matchArgs[paramName]; ok {
-				return
-			}
-		}
-		raw := mcpHeaderForParam(req, paramName)
-		if raw == "" {
-			return
-		}
-		if matchArgs == nil {
-			matchArgs = make(map[string]logical.ParamValue)
-		}
-		matchArgs[paramName] = logical.ParamValue{
-			Kind: logical.ParamString,
-			Str:  raw,
-		}
-	}
-	for _, set := range sets {
-		for paramName := range set.DeniedParams {
-			add(paramName)
-		}
-		for paramName := range set.AllowedParams {
-			add(paramName)
-		}
-	}
-	return matchArgs
 }
 
 // mcpDenyRuleTypeForName maps a name-bearing method to its denied_*
@@ -486,14 +417,29 @@ func mcpAllowRuleTypeForName(method string) string {
 
 // mcpDenyRank scores deny reasons for the strongest-reason audit
 // selection across multi-set denies. Higher rank wins; ties (same
-// rank, multiple sets) are resolved in source order by the caller's
-// "first wins on ==" branch in evaluateMCP.
+// rank, multiple sets) are resolved in source order by the caller.
 //
+//	structural failure (missing_body etc.)     → 4
 //	explicit deny match (denied_*)             → 3
 //	not-in-allow-list (allowed_*, no match)    → 2
-//	missing_method_header                      → 1
+//	missing_method_header (legacy)             → 1
+//
+// Structural failures outrank explicit deny matches so a multi-set
+// scenario where one set evaluates fine but another encountered a
+// structural problem surfaces the more informative reason. In
+// practice structural failures are produced by AllowOperation BEFORE
+// evaluateMCPDescriptor runs, so cross-set ties between structural
+// and rule-driven denies are unusual; the rank still matters when a
+// future change starts producing them from inside the matcher.
 func mcpDenyRank(ruleType string) int {
 	switch ruleType {
+	case mcpRuleTypeMissingBody,
+		mcpRuleTypeMalformedJSONRPC,
+		mcpRuleTypeDuplicateKey,
+		mcpRuleTypeOversizedBody,
+		mcpRuleTypeBatchEmpty,
+		mcpRuleTypeMalformedParams:
+		return 4
 	case mcpRuleTypeDeniedMethods,
 		mcpRuleTypeDeniedTools,
 		mcpRuleTypeDeniedParams:
@@ -516,15 +462,21 @@ func mcpDenyRank(ruleType string) int {
 // (http package) can consume it without duplicating the template
 // table. Per the policy plan Semantics, the templates deliberately
 // omit matched_rule and rule_type from the client-visible string —
-// disclosure of those stays in the audit log only, and the
-// denied/allowed cases for the same name produce identical strings
-// so the client can't fingerprint operator policy shape from the
-// response.
+// disclosure of those stays in the audit log only, and the denied /
+// allowed cases for the same name produce identical strings so the
+// client can't fingerprint operator policy shape from the response.
 //
-// Strips ASCII control characters from interpolated values defensively
-// — MCP headers shouldn't contain CTLs but RFC 7235 disallows them in
-// the WWW-Authenticate quoted-string and a malformed header is worse
-// than a sanitised one.
+// Structural-failure cases (missing_body, malformed_jsonrpc, etc.)
+// return generic single sentences that intentionally do NOT include
+// the parse error's Msg, the offending JSON-RPC offset, the duplicate
+// key name, or any other body-derived detail — same fingerprint
+// hygiene + no leakage of adversary-controlled body bytes into the
+// client response.
+//
+// All interpolated values are CTL-stripped defensively even though
+// sanitizeMCPDecision already strips them at stamping time, so a
+// directly-constructed MCPDecision (e.g. from tests) still renders
+// cleanly.
 func BuildMCPDenyDescription(d *logical.MCPDecision) string {
 	if d == nil {
 		return "Request denied by policy."
@@ -550,15 +502,47 @@ func BuildMCPDenyDescription(d *logical.MCPDecision) string {
 			return fmt.Sprintf("Parameter '%s' required.", param)
 		}
 		return fmt.Sprintf("Parameter '%s'='%s' not allowed.", param, value)
+	case mcpRuleTypeMissingBody:
+		return "Request body required."
+	case mcpRuleTypeMalformedJSONRPC:
+		return "Request body is not a valid JSON-RPC request."
+	case mcpRuleTypeDuplicateKey:
+		return "Request body contains duplicate keys."
+	case mcpRuleTypeOversizedBody:
+		return "Request body exceeds maximum size."
+	case mcpRuleTypeBatchEmpty:
+		return "Request batch is empty."
+	case mcpRuleTypeMalformedParams:
+		return "Request params have unexpected shape."
 	case mcpRuleTypeMissingMethod:
-		return "Mcp-Method header required."
+		return "Request method required."
 	}
 	return "Request denied by policy."
 }
 
+// sanitizeMCPDecision strips ASCII control characters from every
+// string field on the decision before it leaves the policy layer.
+// Adversary-controlled body bytes (Method, Name, ParamValue) might
+// otherwise propagate into audit logs (log injection) or into the
+// WWW-Authenticate quoted-string. Operator-set values (ParamName,
+// MatchedRule) come from policy HCL and are presumed clean, but
+// stripping them too is cheap defence in depth.
+func sanitizeMCPDecision(d *logical.MCPDecision) {
+	if d == nil {
+		return
+	}
+	d.Method = stripCTL(d.Method)
+	d.Name = stripCTL(d.Name)
+	d.MatchedRule = stripCTL(d.MatchedRule)
+	d.ParamName = stripCTL(d.ParamName)
+	d.ParamValue = stripCTL(d.ParamValue)
+}
+
 // stripCTL removes ASCII control characters (\x00-\x1F, \x7F) from s.
-// Used defensively before interpolating user-supplied values into the
-// WWW-Authenticate header per RFC 7235 quoted-string rules.
+// Used by sanitizeMCPDecision at stamping time and by
+// BuildMCPDenyDescription at render time — the description renderer
+// keeps the strip because directly-constructed MCPDecision values
+// (e.g. from tests) bypass the sanitizer.
 func stripCTL(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7F {
