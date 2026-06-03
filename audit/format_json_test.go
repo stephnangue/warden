@@ -965,6 +965,14 @@ func TestFormatResponseWithSalting(t *testing.T) {
 }
 
 func TestOmitResponseFields(t *testing.T) {
+	// Pin the timestamp so its marshalled string never collides with the
+	// 3-digit sentinel values (e.g. StatusCode 999, 404) the substring
+	// checks below scan for. time.Now() makes the nanosecond fraction
+	// non-deterministic and occasionally produces e.g. ".999Z", which
+	// would match `containsBytes(data, "999")` and fail the test for the
+	// wrong reason.
+	fixedTS := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
 	tests := []struct {
 		name       string
 		omitFields []string
@@ -975,7 +983,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit response.auth_result",
 			omitFields: []string{"response.auth_result"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Response: &Response{
 					StatusCode: 200,
 					AuthResult: &AuthResult{PrincipalID: "user1", RoleName: "admin"},
@@ -991,7 +999,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit response.auth_result sub-fields",
 			omitFields: []string{"response.auth_result.principal_id"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Response: &Response{
 					StatusCode: 200,
 					AuthResult: &AuthResult{PrincipalID: "user1", RoleName: "admin"},
@@ -1010,7 +1018,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit response.status_code",
 			omitFields: []string{"response.status_code"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Response:  &Response{StatusCode: 404, MountClass: "provider"},
 			},
 			check: func(t *testing.T, data []byte) {
@@ -1024,7 +1032,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit response.mount_class",
 			omitFields: []string{"response.mount_class"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Response:  &Response{StatusCode: 200, MountClass: "provider"},
 			},
 			check: func(t *testing.T, data []byte) {
@@ -1037,7 +1045,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit response.warnings",
 			omitFields: []string{"response.warnings"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Response:  &Response{StatusCode: 200, Warnings: []string{"warn1"}},
 			},
 			check: func(t *testing.T, data []byte) {
@@ -1050,7 +1058,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit response.streamed",
 			omitFields: []string{"response.streamed"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Response:  &Response{StatusCode: 200, Streamed: true},
 			},
 			check: func(t *testing.T, data []byte) {
@@ -1061,7 +1069,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit response headers specific",
 			omitFields: []string{"response.headers.X-Secret"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Response: &Response{
 					StatusCode: 200,
 					Headers:    map[string][]string{"X-Secret": {"val"}, "X-Public": {"pub"}},
@@ -1080,7 +1088,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit response data specific key",
 			omitFields: []string{"response.data.secret"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Response: &Response{
 					StatusCode: 200,
 					Data:       map[string]any{"secret": "val", "public": "pub"},
@@ -1096,7 +1104,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit error",
 			omitFields: []string{"error"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Error:     "something went wrong",
 			},
 			check: func(t *testing.T, data []byte) {
@@ -1109,7 +1117,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit entire request",
 			omitFields: []string{"request"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Request:   &Request{ID: "req-1", Path: "/test"},
 			},
 			check: func(t *testing.T, data []byte) {
@@ -1122,7 +1130,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit entire response",
 			omitFields: []string{"response"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Response:  &Response{StatusCode: 999},
 			},
 			check: func(t *testing.T, data []byte) {
@@ -1135,7 +1143,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit auth sub-fields",
 			omitFields: []string{"auth.token_id", "auth.token_accessor", "auth.token_type", "auth.principal_id", "auth.role_name", "auth.policies", "auth.token_ttl", "auth.expires_at", "auth.namespace_id", "auth.namespace_path", "auth.created_by_ip"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Auth: &Auth{
 					TokenID:       "t1",
 					TokenAccessor: "ta1",
@@ -1158,7 +1166,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit auth policy_results",
 			omitFields: []string{"auth.policy_results"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Auth: &Auth{
 					PolicyResults: &PolicyResults{
 						Allowed:          true,
@@ -1176,7 +1184,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit auth policy_results sub-field",
 			omitFields: []string{"auth.policy_results.granting_policies"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Auth: &Auth{
 					PolicyResults: &PolicyResults{
 						Allowed:          true,
@@ -1194,7 +1202,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit request sub-fields",
 			omitFields: []string{"request.id", "request.operation", "request.path", "request.mount_point", "request.mount_type", "request.mount_class", "request.method", "request.client_ip", "request.namespace_id", "request.namespace_path", "request.unauthenticated", "request.streamed", "request.transparent"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Request: &Request{
 					ID:              "r1",
 					Operation:       "read",
@@ -1219,7 +1227,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit request headers specific",
 			omitFields: []string{"request.headers.Authorization"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Request: &Request{
 					ID:      "r1",
 					Headers: map[string][]string{"Authorization": {"Bearer x"}, "Accept": {"*/*"}},
@@ -1235,7 +1243,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit credential sub-fields",
 			omitFields: []string{"response.credential.credential_id", "response.credential.type", "response.credential.category", "response.credential.lease_ttl", "response.credential.lease_id", "response.credential.token_id", "response.credential.source_name", "response.credential.source_type", "response.credential.spec_name", "response.credential.revocable"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Response: &Response{
 					Credential: &Credential{
 						CredentialID: "c1",
@@ -1259,7 +1267,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit credential data specific key",
 			omitFields: []string{"response.credential.data.secret_key"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Response: &Response{
 					Credential: &Credential{
 						CredentialID: "c1",
@@ -1280,7 +1288,7 @@ func TestOmitResponseFields(t *testing.T) {
 			name:       "omit auth result sub-fields",
 			omitFields: []string{"response.auth_result.token_type", "response.auth_result.policies", "response.auth_result.token_ttl", "response.auth_result.credential_spec", "response.auth_result.role_name"},
 			entry: &LogEntry{
-				Timestamp: time.Now(),
+				Timestamp: fixedTS,
 				Response: &Response{
 					AuthResult: &AuthResult{
 						TokenType:      "service",
