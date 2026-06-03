@@ -72,7 +72,7 @@ func configureBackendForUpstream(t *testing.T, b *mcpAWSBackend, srv *httptest.S
 	b.upstreamURL = u
 	b.region = "us-east-1"
 	b.mu.Unlock()
-	b.Proxy.Transport = srv.Client().Transport
+	b.SetTransport(srv.Client().Transport)
 }
 
 // makeMCPRequest builds a *logical.Request as if a Warden bearer-token client
@@ -292,7 +292,7 @@ func TestHandleGateway_ThroughConfigWrite(t *testing.T) {
 	// Point the shared transport at the test server's TLS config so the
 	// upstream URL (which we'll set to the test server URL via config-write)
 	// resolves correctly.
-	b.Proxy.Transport = srv.Client().Transport
+	b.SetTransport(srv.Client().Transport)
 
 	path := b.pathConfig()
 	fd := makeFieldData(path, map[string]any{
@@ -306,7 +306,7 @@ func TestHandleGateway_ThroughConfigWrite(t *testing.T) {
 
 	// Config-write rebuilt the transport via applyParsedConfig. We need to
 	// re-point it at the test server (no TLS overrides → shared transport).
-	b.Proxy.Transport = srv.Client().Transport
+	b.SetTransport(srv.Client().Transport)
 
 	req, rec := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, stsCredential())
 	b.handleGateway(context.Background(), req)
@@ -325,10 +325,10 @@ func TestHandleGateway_AgentCoreServiceInference(t *testing.T) {
 	b.upstreamURL = agentCoreURL
 	b.region = "us-east-1"
 	b.mu.Unlock()
-	b.Proxy.Transport = &redirectTransport{
+	b.SetTransport(&redirectTransport{
 		target: srvURL,
 		inner:  srv.Client().Transport,
-	}
+	})
 
 	req, rec := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, stsCredential())
 	b.handleGateway(context.Background(), req)

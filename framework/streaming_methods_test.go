@@ -35,10 +35,6 @@ func testStreamingBackend() *StreamingBackend {
 				Handler: func(_ context.Context, _ *logical.Request, _ *FieldData) error { return nil },
 			},
 		},
-		TransparentConfig: &TransparentConfig{
-			AutoAuthPath:    "auth/jwt/",
-			DefaultAuthRole: "default",
-		},
 		Backend: &Backend{
 			Help:         "test streaming backend",
 			BackendType:  "test-stream",
@@ -58,6 +54,10 @@ func testStreamingBackend() *StreamingBackend {
 			},
 		},
 	}
+	sb.SetTransparentConfig(&TransparentConfig{
+		AutoAuthPath:    "auth/jwt/",
+		DefaultAuthRole: "default",
+	})
 	return sb
 }
 
@@ -257,7 +257,8 @@ func TestStreamingBackend_GetDefaultAuthRole(t *testing.T) {
 	})
 
 	t.Run("empty default returns empty", func(t *testing.T) {
-		sb := &StreamingBackend{TransparentConfig: &TransparentConfig{}}
+		sb := &StreamingBackend{}
+		sb.SetTransparentConfig(&TransparentConfig{})
 		assert.Equal(t, "", sb.GetDefaultAuthRole())
 	})
 }

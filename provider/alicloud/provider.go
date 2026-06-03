@@ -129,10 +129,6 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				HelpDescription: "Proxies requests to Alibaba Cloud APIs with role embedded in URL path",
 			},
 		},
-		TransparentConfig: &framework.TransparentConfig{
-			AutoAuthPath:    "",
-			DefaultAuthRole: "",
-		},
 		Backend: &framework.Backend{
 			Help:           alicloudBackendHelp,
 			BackendType:    "alicloud",
@@ -145,6 +141,10 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	b.Logger = conf.Logger.WithSubsystem("alicloud")
 	b.StorageView = conf.StorageView
 
+	// Seed an empty transparent config so isTransparentRequest can route
+	// once auto_auth_path is configured via handleConfigWrite.
+	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{})
+
 	initTransport()
 	b.StreamingBackend.InitProxy(sharedTransport)
 
@@ -156,16 +156,16 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		return nil, err
 	}
 
-	b.MaxBodySize = framework.DefaultMaxBodySize
-	b.Timeout = DefaultTimeout
+	b.SetMaxBodySize(framework.DefaultMaxBodySize)
+	b.SetTimeout(DefaultTimeout)
 
 	if len(conf.Config) > 0 {
 		if err := ValidateConfig(conf.Config); err != nil {
 			return nil, fmt.Errorf("invalid configuration: %w", err)
 		}
 		parsed := parseConfig(conf.Config)
-		b.MaxBodySize = parsed.MaxBodySize
-		b.Timeout = parsed.Timeout
+		b.SetMaxBodySize(parsed.MaxBodySize)
+		b.SetTimeout(parsed.Timeout)
 		b.tlsSkipVerify = parsed.TLSSkipVerify
 		b.caData = parsed.CAData
 		b.proxyDomains = parsed.ProxyDomains
@@ -175,7 +175,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			if err != nil {
 				return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 			}
-			b.Proxy.Transport = transport
+			b.SetTransport(transport)
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
@@ -213,14 +213,14 @@ func (b *alicloudBackend) Initialize(ctx context.Context) error {
 
 		b.mu.Lock()
 		if config.MaxBodySize > 0 {
-			b.MaxBodySize = config.MaxBodySize
+			b.SetMaxBodySize(config.MaxBodySize)
 		}
 		b.tlsSkipVerify = config.TLSSkipVerify
 		b.caData = config.CAData
 		b.proxyDomains = config.ProxyDomains
 		if config.Timeout != "" {
 			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
-				b.Timeout = timeout
+				b.SetTimeout(timeout)
 			}
 		}
 		b.mu.Unlock()
@@ -230,7 +230,7 @@ func (b *alicloudBackend) Initialize(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("invalid TLS configuration: %w", err)
 			}
-			b.Proxy.Transport = transport
+			b.SetTransport(transport)
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
@@ -239,10 +239,10 @@ func (b *alicloudBackend) Initialize(ctx context.Context) error {
 		})
 	} else {
 		// Persist defaults on first run
-		tc := b.TransparentConfig
+		tc := b.TransparentConfig()
 		defaultEntry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"max_body_size":   b.MaxBodySize,
-			"timeout":         b.Timeout.String(),
+			"max_body_size":   b.MaxBodySize(),
+			"timeout":         b.Timeout().String(),
 			"tls_skip_verify": b.tlsSkipVerify,
 			"ca_data":         b.caData,
 			"auto_auth_path":  tc.AutoAuthPath,

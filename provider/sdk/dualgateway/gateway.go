@@ -40,7 +40,7 @@ func (b *dualgatewayBackend) snapshotState() requestSnapshot {
 
 	return requestSnapshot{
 		providerURL: b.providerURL,
-		maxBodySize: b.MaxBodySize,
+		maxBodySize: b.MaxBodySize(),
 		extraState:  stateCopy,
 	}
 }
@@ -87,9 +87,9 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 	}
 
 	// Apply timeout for forwarding
-	if b.Timeout > 0 {
+	if t := b.Timeout(); t > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, b.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, t)
 		defer cancel()
 	}
 
@@ -163,7 +163,7 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 	)
 
 	// Forward
-	transport := b.Proxy.Transport
+	transport := b.Transport()
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
@@ -227,9 +227,9 @@ func (b *dualgatewayBackend) handleS3Request(ctx context.Context, req *logical.R
 	}
 
 	// Apply timeout for verification + forwarding
-	if b.Timeout > 0 {
+	if t := b.Timeout(); t > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, b.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, t)
 		defer cancel()
 		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
 	}
@@ -307,7 +307,7 @@ func (b *dualgatewayBackend) handleS3Request(ctx context.Context, req *logical.R
 	}
 
 	// Step 9: Forward directly
-	transport := b.Proxy.Transport
+	transport := b.Transport()
 	if transport == nil {
 		transport = http.DefaultTransport
 	}

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/armon/go-radix"
@@ -97,16 +98,64 @@ type StreamingPath struct {
 	HelpDescription string
 }
 
+// swappableTransport wraps an http.RoundTripper whose underlying transport
+// can be replaced atomically at runtime. ReverseProxy and custom backends
+// hold a pointer to one instance and never need to re-read Transport; the
+// swappable always dispatches to the current underlying transport.
+//
+// Uses atomic.Pointer[http.RoundTripper] (pointer to interface) rather than
+// atomic.Value because Store requires every value to have the same concrete
+// type — providers may swap an *http.Transport for an *rewritingTransport
+// from a test, which atomic.Value rejects with a panic.
+type swappableTransport struct {
+	cur atomic.Pointer[http.RoundTripper]
+}
+
+func newSwappableTransport(initial http.RoundTripper) *swappableTransport {
+	s := &swappableTransport{}
+	if initial != nil {
+		s.cur.Store(&initial)
+	}
+	return s
+}
+
+func (s *swappableTransport) load() http.RoundTripper {
+	p := s.cur.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func (s *swappableTransport) store(t http.RoundTripper) {
+	s.cur.Store(&t)
+}
+
+// RoundTrip satisfies http.RoundTripper by dispatching to the current
+// underlying transport. Falls back to http.DefaultTransport when nothing has
+// been installed yet so callers don't have to nil-check.
+func (s *swappableTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t := s.load()
+	if t == nil {
+		t = http.DefaultTransport
+	}
+	return t.RoundTrip(r)
+}
+
 // StreamingBackend implements logical.Backend for streaming/proxy operations.
 // It combines streaming paths (for proxy operations) with regular framework paths
 // (for configuration and management).
+//
+// Mutable runtime fields (MaxBodySize, Timeout, TransparentConfig, transport)
+// are held in atomic backing storage and exposed via accessor methods. Direct
+// struct-field writes to the legacy names are no longer possible (the fields
+// are unexported); use MaxBodySize() / SetMaxBodySize(), Timeout() / SetTimeout(),
+// TransparentConfig() / SetTransparentConfig(), Transport() / SetTransport().
+// This makes hot-path reads race-detector clean against concurrent config
+// writes without each provider having to coordinate its own RWMutex.
 type StreamingBackend struct {
 	// StreamingPaths are paths that handle streaming operations (e.g., gateway/*)
 	StreamingPaths []*StreamingPath
-
-	// TransparentConfig holds the implicit auth configuration
-	// When set, StreamingBackend implements logical.TransparentModeProvider
-	TransparentConfig *TransparentConfig
 
 	// UnauthenticatedPaths are paths that can be accessed without authentication.
 	// These are hardcoded by the provider for read-only endpoints that some clients
@@ -124,14 +173,10 @@ type StreamingBackend struct {
 	// Backend is the embedded standard framework backend for non-streaming paths
 	*Backend
 
-	// MaxBodySize is the maximum request body size in bytes.
-	MaxBodySize int64
-
-	// Timeout is the request timeout duration.
-	Timeout time.Duration
-
 	// Proxy is the shared reverse proxy for streaming requests.
-	// Initialized via InitProxy with a provider-specific transport.
+	// Initialized via InitProxy with a provider-specific transport. Proxy.Transport
+	// is set to the swappable transport, so subsequent SetTransport calls update
+	// both this Proxy and any custom-backend handler that reads via Transport().
 	Proxy *httputil.ReverseProxy
 
 	// Logger is the provider's scoped logger (set via conf.Logger.WithSubsystem).
@@ -140,13 +185,89 @@ type StreamingBackend struct {
 	// StorageView is the provider's storage backend for persisting configuration.
 	StorageView sdklogical.Storage
 
+	// Atomic backing storage for runtime-mutable fields. Read/write only via
+	// the typed accessor methods below.
+	maxBodySize       atomic.Int64
+	timeout           atomic.Int64 // nanoseconds
+	transparentConfig atomic.Pointer[TransparentConfig]
+	// transport is lazily-initialized via transportOnce so concurrent first
+	// SetTransport / Transport / InitProxy calls don't race on the pointer-
+	// field assignment. The same swappable lives for the lifetime of the
+	// backend; SetTransport mutates its underlying.
+	transport     *swappableTransport
+	transportOnce sync.Once
+
 	// Internal state
 	streamingPathsRe []*regexp.Regexp
 	streamingOnce    sync.Once
 
-	// unauthPaths holds the parsed unauthenticated paths (radix tree + wildcards)
+	// unauthPaths holds the parsed unauthenticated paths (radix tree + wildcards).
+	// unauthMu serializes the reset performed by SetTransparentConfig and the
+	// once-only init performed by initUnauthPaths so concurrent config writes
+	// can't race on the sync.Once or the pointer.
+	// unauthPathsOnce is a *sync.Once (not a value) so the reset in
+	// SetTransparentConfig replaces the pointer rather than copying a value —
+	// avoids go vet's -copylocks complaint about reassigning a sync.Once
+	// after first use.
+	unauthMu        sync.Mutex
 	unauthPaths     *unauthPathsEntry
-	unauthPathsOnce sync.Once
+	unauthPathsOnce *sync.Once
+}
+
+// MaxBodySize returns the maximum request body size in bytes.
+func (b *StreamingBackend) MaxBodySize() int64 { return b.maxBodySize.Load() }
+
+// SetMaxBodySize atomically updates the maximum request body size.
+func (b *StreamingBackend) SetMaxBodySize(v int64) { b.maxBodySize.Store(v) }
+
+// Timeout returns the request timeout duration.
+func (b *StreamingBackend) Timeout() time.Duration { return time.Duration(b.timeout.Load()) }
+
+// SetTimeout atomically updates the request timeout duration.
+func (b *StreamingBackend) SetTimeout(d time.Duration) { b.timeout.Store(int64(d)) }
+
+// emptyTransparentConfig is returned by TransparentConfig() when no config
+// has been installed. Sharing a single pointer avoids per-call allocation
+// on the (rare) cold path; callers must treat the returned value as read-only.
+var emptyTransparentConfig = &TransparentConfig{}
+
+// TransparentConfig returns the current implicit-auth configuration. Never
+// returns nil — when nothing has been installed yet (a freshly-constructed
+// StreamingBackend that hasn't been seeded), returns a shared empty
+// TransparentConfig so callers can safely chain field accesses. Use
+// IsTransparentMode() to distinguish "not configured" from "configured
+// with empty fields".
+func (b *StreamingBackend) TransparentConfig() *TransparentConfig {
+	if tc := b.transparentConfig.Load(); tc != nil {
+		return tc
+	}
+	return emptyTransparentConfig
+}
+
+// ensureTransport lazily initializes the swappable wrapper. Idempotent and
+// concurrency-safe via transportOnce. Callers must use this before reading
+// or writing b.transport.
+func (b *StreamingBackend) ensureTransport() *swappableTransport {
+	b.transportOnce.Do(func() {
+		b.transport = newSwappableTransport(nil)
+	})
+	return b.transport
+}
+
+// Transport returns the framework's swappable transport wrapper. The wrapper
+// itself stays stable for the lifetime of the backend; the underlying
+// http.RoundTripper changes when SetTransport / InitProxy install one. Before
+// any transport is installed, RoundTrip on the wrapper falls back to
+// http.DefaultTransport.
+func (b *StreamingBackend) Transport() http.RoundTripper {
+	return b.ensureTransport()
+}
+
+// SetTransport atomically replaces the upstream transport. The same swappable
+// dispatches for Proxy.Transport and for custom backends reading via Transport(),
+// so a single SetTransport call updates every hot-path reader.
+func (b *StreamingBackend) SetTransport(t http.RoundTripper) {
+	b.ensureTransport().store(t)
 }
 
 // Ensure StreamingBackend implements logical.Backend and logical.StreamBodyParser
@@ -493,26 +614,28 @@ func (b *StreamingBackend) ExtractToken(r *http.Request) string {
 
 // IsTransparentMode returns whether the backend has an auth config set
 func (b *StreamingBackend) IsTransparentMode() bool {
-	return b.TransparentConfig != nil
+	return b.transparentConfig.Load() != nil
 }
 
 // GetAutoAuthPath returns the auth mount path for implicit authentication
 func (b *StreamingBackend) GetAutoAuthPath() string {
-	if b.TransparentConfig == nil {
+	tc := b.transparentConfig.Load()
+	if tc == nil {
 		return ""
 	}
-	return b.TransparentConfig.AutoAuthPath
+	return tc.AutoAuthPath
 }
 
 // GetAuthRole extracts the auth role name from the request path. Returns
 // "" when the path does not encode a role; the mount-level default_role
 // is returned separately by GetDefaultAuthRole.
 func (b *StreamingBackend) GetAuthRole(path string, _ *logical.Request) string {
-	if b.TransparentConfig == nil {
+	tc := b.transparentConfig.Load()
+	if tc == nil {
 		return ""
 	}
 
-	pattern := b.TransparentConfig.AuthRolePattern
+	pattern := tc.AuthRolePattern
 	if pattern == nil {
 		pattern = DefaultAuthRolePattern
 	}
@@ -526,41 +649,57 @@ func (b *StreamingBackend) GetAuthRole(path string, _ *logical.Request) string {
 
 // GetDefaultAuthRole returns the mount-level default_role config value.
 func (b *StreamingBackend) GetDefaultAuthRole() string {
-	if b.TransparentConfig == nil {
+	tc := b.transparentConfig.Load()
+	if tc == nil {
 		return ""
 	}
-	return b.TransparentConfig.DefaultAuthRole
+	return tc.DefaultAuthRole
 }
 
 // RewriteTransparentPath rewrites a transparent path to standard path
 func (b *StreamingBackend) RewriteTransparentPath(path string) string {
-	if b.TransparentConfig == nil {
+	tc := b.transparentConfig.Load()
+	if tc == nil {
 		return path
 	}
 
-	rewriter := b.TransparentConfig.PathRewriter
+	rewriter := tc.PathRewriter
 	if rewriter == nil {
 		rewriter = DefaultPathRewriter
 	}
 	return rewriter(path)
 }
 
-// SetTransparentConfig updates the implicit auth configuration at runtime
+// SetTransparentConfig updates the implicit auth configuration at runtime.
+// The new pointer is installed atomically; readers via GetAutoAuthPath etc
+// observe either the old or new config, never a torn value.
 func (b *StreamingBackend) SetTransparentConfig(config *TransparentConfig) {
-	b.TransparentConfig = config
-	// Reset unauthPaths so it gets re-initialized with new config
-	b.unauthPathsOnce = sync.Once{}
+	b.transparentConfig.Store(config)
+	// Reset unauthPaths so it gets re-initialized with new config. Guarded
+	// by unauthMu against concurrent SetTransparentConfig + initUnauthPaths.
+	b.unauthMu.Lock()
+	b.unauthPathsOnce = &sync.Once{}
 	b.unauthPaths = nil
+	b.unauthMu.Unlock()
 }
 
-// InitProxy creates a standard reverse proxy with the given transport.
+// InitProxy creates a standard reverse proxy backed by the framework's
+// swappable transport. After this call:
+//   - b.Proxy.Transport is the swappable wrapper, so subsequent SetTransport
+//     calls update both this Proxy and any custom-backend handler that reads
+//     via Transport() — no per-provider transport re-assignment needed.
+//   - Transport() returns the same swappable, with the initial transport
+//     installed atomically.
+//
 // The proxy uses an empty Director (providers prepare requests before ServeHTTP)
 // and a standard error handler that logs and returns 502.
 // Logger must be set on the StreamingBackend before calling this method.
 func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
+	swap := b.ensureTransport()
+	swap.store(transport)
 	b.Proxy = &httputil.ReverseProxy{
 		Director:  func(req *http.Request) {},
-		Transport: transport,
+		Transport: swap,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			b.Logger.Error("proxy error",
 				logger.Err(err),
@@ -622,9 +761,17 @@ func (b *StreamingBackend) IsTransparentPath(path string) bool {
 // Uses radix tree for O(log n) lookup with wildcard fallback. Subtypes may
 // override to inspect the request.
 func (b *StreamingBackend) IsUnauthenticatedPath(_ *http.Request, path string) bool {
+	// Both the Once.Do init and the SetTransparentConfig reset serialize
+	// through unauthMu so neither tears the once+pointer pair.
+	b.unauthMu.Lock()
+	if b.unauthPathsOnce == nil {
+		b.unauthPathsOnce = &sync.Once{}
+	}
 	b.unauthPathsOnce.Do(b.initUnauthPaths)
+	paths := b.unauthPaths
+	b.unauthMu.Unlock()
 
-	if b.unauthPaths == nil {
+	if paths == nil {
 		return false
 	}
 
@@ -640,7 +787,7 @@ func (b *StreamingBackend) IsUnauthenticatedPath(_ *http.Request, path string) b
 	path = strings.TrimPrefix(path, "/")
 
 	// Check radix tree (exact and prefix matches)
-	match, raw, ok := b.unauthPaths.paths.LongestPrefix(path)
+	match, raw, ok := paths.paths.LongestPrefix(path)
 	if ok {
 		isPrefix := raw.(bool)
 		if isPrefix {
@@ -653,7 +800,7 @@ func (b *StreamingBackend) IsUnauthenticatedPath(_ *http.Request, path string) b
 
 	// Check wildcard patterns
 	pathParts := strings.Split(path, "/")
-	for _, w := range b.unauthPaths.wildcardPaths {
+	for _, w := range paths.wildcardPaths {
 		if matchWildcardSegments(pathParts, w.segments, w.isPrefix) {
 			return true
 		}

@@ -89,10 +89,6 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 					HelpDescription: "Proxies requests to " + spec.Name + " APIs with role embedded in URL path",
 				},
 			},
-			TransparentConfig: &framework.TransparentConfig{
-				AutoAuthPath:    "",
-				DefaultAuthRole: "",
-			},
 			Backend: &framework.Backend{
 				Help:           spec.HelpText,
 				BackendType:    spec.Name,
@@ -104,6 +100,10 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 
 		b.Logger = conf.Logger.WithSubsystem(spec.Name)
 		b.StorageView = conf.StorageView
+
+		// Seed an empty transparent config so isTransparentRequest can route
+		// once auto_auth_path is configured via handleConfigWrite.
+		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{})
 
 		initTransport()
 		b.StreamingBackend.InitProxy(sharedTransport)
@@ -122,18 +122,18 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 			}
 			parsed := parseConfig(spec, conf.Config)
 			b.providerURL = parsed.ProviderURL
-			b.MaxBodySize = parsed.MaxBodySize
-			b.Timeout = parsed.Timeout
+			b.SetMaxBodySize(parsed.MaxBodySize)
+			b.SetTimeout(parsed.Timeout)
 			if spec.OnConfigParsed != nil {
 				b.extraState = spec.OnConfigParsed(conf.Config)
 			}
 		}
 
-		if b.MaxBodySize <= 0 {
-			b.MaxBodySize = framework.DefaultMaxBodySize
+		if b.MaxBodySize() <= 0 {
+			b.SetMaxBodySize(framework.DefaultMaxBodySize)
 		}
-		if b.Timeout <= 0 {
-			b.Timeout = spec.DefaultTimeout
+		if b.Timeout() <= 0 {
+			b.SetTimeout(spec.DefaultTimeout)
 		}
 
 		return b, nil
@@ -167,12 +167,12 @@ func (b *dualgatewayBackend) Initialize(ctx context.Context) error {
 	}
 
 	if maxSize, ok := config["max_body_size"].(float64); ok && maxSize > 0 {
-		b.MaxBodySize = int64(maxSize)
+		b.SetMaxBodySize(int64(maxSize))
 	}
 
 	if timeoutStr, ok := config["timeout"].(string); ok && timeoutStr != "" {
 		if timeout, err := time.ParseDuration(timeoutStr); err == nil {
-			b.Timeout = timeout
+			b.SetTimeout(timeout)
 		}
 	}
 

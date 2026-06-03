@@ -48,7 +48,7 @@ func TestHandleGateway_SubdomainRewrite(t *testing.T) {
 	defer upstream.Close()
 
 	b := setupBackend(t)
-	b.Proxy.Transport = upstream.Client().Transport
+	b.SetTransport(upstream.Client().Transport)
 	// Configure the proxy domain.
 	b.mu.Lock()
 	b.proxyDomains = []string{"warden.example.com"}
@@ -217,7 +217,7 @@ func TestHandleGateway_ForwardsSignedRequest(t *testing.T) {
 
 	b := setupBackend(t)
 	// Point transport at upstream's TLS (self-signed)
-	b.Proxy.Transport = upstream.Client().Transport
+	b.SetTransport(upstream.Client().Transport)
 
 	// Client signs with its role name (cert transparent)
 	body := `{"instance":"i-123"}`
@@ -266,7 +266,7 @@ func TestHandleGateway_JWTSecurityToken(t *testing.T) {
 	defer upstream.Close()
 
 	b := setupBackend(t)
-	b.Proxy.Transport = upstream.Client().Transport
+	b.SetTransport(upstream.Client().Transport)
 
 	// Client signs using a JWT as both x-acs-security-token and access_key_secret.
 	// access_key_id can be anything.

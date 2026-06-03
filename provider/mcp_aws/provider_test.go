@@ -91,8 +91,8 @@ func TestFactory_Defaults(t *testing.T) {
 	b := setupBackend(t)
 	assert.Equal(t, "mcp_aws", b.Type())
 	assert.Equal(t, logical.ClassProvider, b.Class())
-	assert.Equal(t, DefaultMCPAWSTimeout, b.Timeout)
-	assert.Equal(t, framework.DefaultMaxBodySize, b.MaxBodySize)
+	assert.Equal(t, DefaultMCPAWSTimeout, b.Timeout())
+	assert.Equal(t, framework.DefaultMaxBodySize, b.MaxBodySize())
 	// Default URL yields region via arm 2 of the structured match.
 	assert.Equal(t, "us-east-1", b.region)
 	require.NotNil(t, b.upstreamURL)
@@ -114,9 +114,10 @@ func TestFactory_WithConfig(t *testing.T) {
 	require.NoError(t, err)
 	mb := b.(*mcpAWSBackend)
 	assert.Equal(t, "eu-frankfurt-1", mb.region)
-	assert.Equal(t, 60.0, mb.Timeout.Seconds())
-	assert.Equal(t, "auth/jwt/", mb.TransparentConfig.AutoAuthPath)
-	assert.Equal(t, "reader", mb.TransparentConfig.DefaultAuthRole)
+	assert.Equal(t, 60.0, mb.Timeout().Seconds())
+	tc := mb.TransparentConfig()
+	assert.Equal(t, "auth/jwt/", tc.AutoAuthPath)
+	assert.Equal(t, "reader", tc.DefaultAuthRole)
 }
 
 func TestFactory_RegionRequiredForUnresolvableHost(t *testing.T) {
@@ -189,8 +190,9 @@ func TestInitialize_PersistedConfigReload(t *testing.T) {
 	require.NoError(t, b.Initialize(context.Background()))
 
 	assert.Equal(t, "eu-frankfurt-1", b.region, "region must be repopulated from URL after restart")
-	assert.Equal(t, "auth/cert/", b.TransparentConfig.AutoAuthPath, "AutoAuthPath must come back via SetTransparentConfig")
-	assert.Equal(t, "admin", b.TransparentConfig.DefaultAuthRole)
+	tc := b.TransparentConfig()
+	assert.Equal(t, "auth/cert/", tc.AutoAuthPath, "AutoAuthPath must come back via SetTransparentConfig")
+	assert.Equal(t, "admin", tc.DefaultAuthRole)
 	// GetAutoAuthPath is what core's isTransparentRequest checks.
 	assert.Equal(t, "auth/cert/", b.GetAutoAuthPath())
 }

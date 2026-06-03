@@ -77,7 +77,7 @@ func (b *alicloudBackend) handleGateway(ctx context.Context, req *logical.Reques
 // It verifies the incoming ACS3 signature (using the client's implicit-auth
 // credentials), re-signs with real Alicloud credentials, and forwards.
 func (b *alicloudBackend) handleAPIRequest(ctx context.Context, req *logical.Request) {
-	maxBody := b.MaxBodySize
+	maxBody := b.MaxBodySize()
 	if maxBody <= 0 {
 		maxBody = 10 << 20
 	}
@@ -102,9 +102,9 @@ func (b *alicloudBackend) handleAPIRequest(ctx context.Context, req *logical.Req
 	}
 
 	// Apply timeout for verification + forwarding
-	if b.Timeout > 0 {
+	if b.Timeout() > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, b.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, b.Timeout())
 		defer cancel()
 		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
 	}
@@ -191,7 +191,7 @@ func (b *alicloudBackend) forward(req *logical.Request, body []byte) {
 		r.ContentLength = 0
 	}
 
-	transport := b.Proxy.Transport
+	transport := b.Transport()
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
@@ -233,7 +233,7 @@ func (b *alicloudBackend) forward(req *logical.Request, body []byte) {
 // credentials), re-signs with real Alicloud OSS credentials, and forwards to
 // the target OSS endpoint (oss-{region}.aliyuncs.com).
 func (b *alicloudBackend) handleOSSRequest(ctx context.Context, req *logical.Request) {
-	maxBody := b.MaxBodySize
+	maxBody := b.MaxBodySize()
 	if maxBody <= 0 {
 		maxBody = 10 << 20
 	}
@@ -259,9 +259,9 @@ func (b *alicloudBackend) handleOSSRequest(ctx context.Context, req *logical.Req
 	}
 
 	// Apply timeout for verification + forwarding
-	if b.Timeout > 0 {
+	if b.Timeout() > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, b.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, b.Timeout())
 		defer cancel()
 		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
 	}
@@ -353,7 +353,7 @@ func (b *alicloudBackend) handleOSSRequest(ctx context.Context, req *logical.Req
 	)
 
 	// Step 9: Forward directly
-	transport := b.Proxy.Transport
+	transport := b.Transport()
 	if transport == nil {
 		transport = http.DefaultTransport
 	}

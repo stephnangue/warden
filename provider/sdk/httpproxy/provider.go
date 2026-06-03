@@ -259,10 +259,6 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 				},
 			},
 			ParseStreamBody: spec.ParseStreamBody,
-			TransparentConfig: &framework.TransparentConfig{
-				AutoAuthPath:    "",
-				DefaultAuthRole: "",
-			},
 			Backend: &framework.Backend{
 				Help:           spec.HelpText,
 				BackendType:    spec.Name,
@@ -275,6 +271,10 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 		// Set common fields
 		b.Logger = conf.Logger.WithSubsystem(spec.Name)
 		b.StorageView = conf.StorageView
+
+		// Seed an empty transparent config; SetTransparentConfig below replaces it
+		// if conf.Config carries non-empty values.
+		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{})
 
 		// Initialize reverse proxy with provider-type shared transport
 		b.StreamingBackend.InitProxy(sharedTransport)
@@ -289,8 +289,8 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 		}
 
 		// Set defaults
-		b.MaxBodySize = framework.DefaultMaxBodySize
-		b.Timeout = spec.DefaultTimeout
+		b.SetMaxBodySize(framework.DefaultMaxBodySize)
+		b.SetTimeout(spec.DefaultTimeout)
 		b.providerURL = spec.DefaultURL
 
 		// Apply configuration if provided
@@ -305,8 +305,8 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 			}
 			parsedConfig := ParseConfig(conf.Config, spec.URLConfigKey, spec.DefaultURL, spec.DefaultTimeout)
 			b.providerURL = strings.TrimRight(parsedConfig.ProviderURL, "/")
-			b.MaxBodySize = parsedConfig.MaxBodySize
-			b.Timeout = parsedConfig.Timeout
+			b.SetMaxBodySize(parsedConfig.MaxBodySize)
+			b.SetTimeout(parsedConfig.Timeout)
 
 			b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 				AutoAuthPath:    parsedConfig.AutoAuthPath,
@@ -319,7 +319,7 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 				if err != nil {
 					return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 				}
-				b.Proxy.Transport = transport
+				b.SetTransport(transport)
 				b.tlsSkipVerify = parsedConfig.TLSSkipVerify
 				b.caData = parsedConfig.CAData
 			}
@@ -358,13 +358,13 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 		// Parse max_body_size from persisted config
 		if maxSize, ok := config["max_body_size"]; ok {
 			if size, parsed := ReadInt64Config(maxSize); parsed {
-				b.MaxBodySize = size
+				b.SetMaxBodySize(size)
 			}
 		}
 
 		if timeoutStr, ok := config["timeout"].(string); ok && timeoutStr != "" {
 			if timeout, err := time.ParseDuration(timeoutStr); err == nil {
-				b.Timeout = timeout
+				b.SetTimeout(timeout)
 			}
 		}
 
@@ -384,7 +384,7 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 				b.mu.Unlock()
 				return fmt.Errorf("failed to configure TLS: %w", err)
 			}
-			b.Proxy.Transport = transport
+			b.SetTransport(transport)
 			b.tlsSkipVerify = skipVerify
 			b.caData = caData
 		}
@@ -396,12 +396,12 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 		b.mu.Unlock()
 	} else {
 		// No persisted config — persist defaults
+		tc := b.TransparentConfig()
 		b.mu.RLock()
-		tc := b.TransparentConfig
 		configData := map[string]any{
 			b.spec.URLConfigKey: b.providerURL,
-			"max_body_size":     b.MaxBodySize,
-			"timeout":           b.Timeout.String(),
+			"max_body_size":     b.MaxBodySize(),
+			"timeout":           b.Timeout().String(),
 			"auto_auth_path":    tc.AutoAuthPath,
 			"default_role":      tc.DefaultAuthRole,
 			"tls_skip_verify":   b.tlsSkipVerify,
@@ -542,13 +542,9 @@ func (b *proxyBackend) ShouldEnforceMCPPolicy(req *logical.Request) (bool, int64
 	if !b.spec.ShouldEnforceMCPPolicy(req) {
 		return false, 0
 	}
-	// MaxBodySize lives on the embedded StreamingBackend and is
-	// written under b.mu by Initialize and handleConfigWrite — read
-	// under the read-lock to avoid racing concurrent reconfigure.
-	b.mu.RLock()
-	maxBody := b.MaxBodySize
-	b.mu.RUnlock()
-	return true, maxBody
+	// MaxBodySize is atomic on StreamingBackend — race-detector clean
+	// against concurrent reconfigures without holding b.mu.
+	return true, b.MaxBodySize()
 }
 
 // ShouldParseStreamBody overrides the embedded StreamingBackend's default to

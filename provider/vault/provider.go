@@ -99,10 +99,6 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		},
 		UnauthenticatedPaths: vaultUnauthenticatedPaths,
 		ParseStreamBody:      true,
-		TransparentConfig: &framework.TransparentConfig{
-			AutoAuthPath:    "",
-			DefaultAuthRole: "",
-		},
 		Backend: &framework.Backend{
 			Help:           vaultBackendHelp,
 			BackendType:    "vault",
@@ -115,6 +111,10 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	// Set common fields
 	b.Logger = conf.Logger.WithSubsystem("vault")
 	b.StorageView = conf.StorageView
+
+	// Seed an empty transparent config so isTransparentRequest can route
+	// once auto_auth_path is configured via handleConfigWrite.
+	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{})
 
 	// Initialize reverse proxy with Vault transport (lazily created on first use)
 	initTransport()
@@ -130,15 +130,15 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	}
 
 	// Set defaults
-	b.MaxBodySize = framework.DefaultMaxBodySize
-	b.Timeout = framework.DefaultTimeout
+	b.SetMaxBodySize(framework.DefaultMaxBodySize)
+	b.SetTimeout(framework.DefaultTimeout)
 
 	// Apply configuration if provided
 	if len(conf.Config) > 0 {
 		parsedConfig := parseConfig(conf.Config)
 		b.vaultAddress = parsedConfig.VaultAddress
-		b.MaxBodySize = parsedConfig.MaxBodySize
-		b.Timeout = parsedConfig.Timeout
+		b.SetMaxBodySize(parsedConfig.MaxBodySize)
+		b.SetTimeout(parsedConfig.Timeout)
 		b.tlsSkipVerify = parsedConfig.TLSSkipVerify
 		b.caData = parsedConfig.CAData
 
@@ -148,7 +148,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			if err != nil {
 				return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 			}
-			b.Proxy.Transport = transport
+			b.SetTransport(transport)
 		}
 	}
 
@@ -180,12 +180,12 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 			return fmt.Errorf("failed to decode config: %w", err)
 		}
 		b.vaultAddress = config.VaultAddress
-		b.MaxBodySize = config.MaxBodySize
+		b.SetMaxBodySize(config.MaxBodySize)
 		b.tlsSkipVerify = config.TLSSkipVerify
 		b.caData = config.CAData
 		if config.Timeout != "" {
 			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
-				b.Timeout = timeout
+				b.SetTimeout(timeout)
 			}
 		}
 
@@ -195,7 +195,7 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("invalid TLS configuration: %w", err)
 			}
-			b.Proxy.Transport = transport
+			b.SetTransport(transport)
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{

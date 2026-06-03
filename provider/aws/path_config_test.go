@@ -100,13 +100,12 @@ func TestPathConfig_Schema(t *testing.T) {
 
 func TestHandleConfigRead(t *testing.T) {
 	b := &awsBackend{
-		proxyDomains: []string{"example.com"},
-		StreamingBackend: &framework.StreamingBackend{
-			MaxBodySize:       framework.DefaultMaxBodySize,
-			Timeout:           30 * time.Second,
-			TransparentConfig: &framework.TransparentConfig{AutoAuthPath: "auth/jwt/", DefaultAuthRole: "reader"},
-		},
+		proxyDomains:     []string{"example.com"},
+		StreamingBackend: &framework.StreamingBackend{},
 	}
+	b.SetMaxBodySize(framework.DefaultMaxBodySize)
+	b.SetTimeout(30 * time.Second)
+	b.SetTransparentConfig(&framework.TransparentConfig{AutoAuthPath: "auth/jwt/", DefaultAuthRole: "reader"})
 
 	resp, err := b.handleConfigRead(context.Background(), nil, nil)
 	require.NoError(t, err)
@@ -123,10 +122,10 @@ func TestHandleConfigRead(t *testing.T) {
 func TestHandleConfigWrite(t *testing.T) {
 	b := &awsBackend{
 		StreamingBackend: &framework.StreamingBackend{
-			TransparentConfig: &framework.TransparentConfig{},
-			Logger:            createTestLogger(),
+			Logger: createTestLogger(),
 		},
 	}
+	b.SetTransparentConfig(&framework.TransparentConfig{})
 	path := b.pathConfig()
 
 	t.Run("successful update", func(t *testing.T) {
@@ -314,10 +313,10 @@ func TestInitialize_EmptyStorage(t *testing.T) {
 	storage := newInmemStorage()
 	b := &awsBackend{
 		StreamingBackend: &framework.StreamingBackend{
-			StorageView:       storage,
-			TransparentConfig: &framework.TransparentConfig{},
+			StorageView: storage,
 		},
 	}
+	b.SetTransparentConfig(&framework.TransparentConfig{})
 	err := b.Initialize(context.Background())
 	assert.NoError(t, err)
 }
@@ -335,17 +334,17 @@ func TestInitialize_ExistingConfig(t *testing.T) {
 
 	b := &awsBackend{
 		StreamingBackend: &framework.StreamingBackend{
-			StorageView:       storage,
-			TransparentConfig: &framework.TransparentConfig{},
-			Logger:            createTestLogger(),
+			StorageView: storage,
+			Logger:      createTestLogger(),
 		},
 	}
+	b.SetTransparentConfig(&framework.TransparentConfig{})
 
 	err := b.Initialize(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, []string{"s3.amazonaws.com"}, b.proxyDomains)
-	assert.Equal(t, int64(5242880), b.MaxBodySize)
-	assert.Equal(t, 60*time.Second, b.Timeout)
+	assert.Equal(t, int64(5242880), b.MaxBodySize())
+	assert.Equal(t, 60*time.Second, b.Timeout())
 }
 
 // --- getCredentials tests ---
@@ -578,8 +577,8 @@ func TestFactory(t *testing.T) {
 	ab := b.(*awsBackend)
 	assert.Equal(t, "aws", ab.Type())
 	assert.Equal(t, logical.ClassProvider, ab.Class())
-	assert.Equal(t, framework.DefaultMaxBodySize, ab.MaxBodySize)
-	assert.Equal(t, framework.DefaultTimeout, ab.Timeout)
+	assert.Equal(t, framework.DefaultMaxBodySize, ab.MaxBodySize())
+	assert.Equal(t, framework.DefaultTimeout, ab.Timeout())
 }
 
 func TestFactory_WithConfig(t *testing.T) {
@@ -597,8 +596,8 @@ func TestFactory_WithConfig(t *testing.T) {
 	b, err := Factory(ctx, conf)
 	require.NoError(t, err)
 	ab := b.(*awsBackend)
-	assert.Equal(t, int64(5242880), ab.MaxBodySize)
-	assert.Equal(t, 60*time.Second, ab.Timeout)
+	assert.Equal(t, int64(5242880), ab.MaxBodySize())
+	assert.Equal(t, 60*time.Second, ab.Timeout())
 	assert.Equal(t, []string{"s3.amazonaws.com"}, ab.proxyDomains)
 }
 
@@ -641,10 +640,7 @@ func TestHandleGatewayStreaming(t *testing.T) {
 	// Just test it doesn't panic with minimal setup (no processor registry = error path)
 	b := &awsBackend{
 		StreamingBackend: &framework.StreamingBackend{
-			Logger:            createTestLogger(),
-			TransparentConfig: &framework.TransparentConfig{},
-			MaxBodySize:       framework.DefaultMaxBodySize,
-			Timeout:           30 * time.Second,
+			Logger: createTestLogger(),
 		},
 		signer:   v4.NewSigner(),
 		s3Signer: v4.NewSigner(),
@@ -670,10 +666,7 @@ func TestHandleGatewayStreaming(t *testing.T) {
 func TestProcessRequest_SignatureMismatch(t *testing.T) {
 	b := &awsBackend{
 		StreamingBackend: &framework.StreamingBackend{
-			Logger:            createTestLogger(),
-			TransparentConfig: &framework.TransparentConfig{},
-			MaxBodySize:       framework.DefaultMaxBodySize,
-			Timeout:           30 * time.Second,
+			Logger: createTestLogger(),
 		},
 		signer:   v4.NewSigner(),
 		s3Signer: v4.NewSigner(),
@@ -701,10 +694,7 @@ func TestProcessRequest_SignatureMismatch(t *testing.T) {
 func TestProcessRequest_ValidSignature_NoCredential(t *testing.T) {
 	b := &awsBackend{
 		StreamingBackend: &framework.StreamingBackend{
-			Logger:            createTestLogger(),
-			TransparentConfig: &framework.TransparentConfig{},
-			MaxBodySize:       framework.DefaultMaxBodySize,
-			Timeout:           30 * time.Second,
+			Logger: createTestLogger(),
 		},
 		signer:       v4.NewSigner(),
 		s3Signer:     v4.NewSigner(),
@@ -752,10 +742,7 @@ func TestProcessRequest_ValidSignature_WithCredential(t *testing.T) {
 
 	b := &awsBackend{
 		StreamingBackend: &framework.StreamingBackend{
-			Logger:            createTestLogger(),
-			TransparentConfig: &framework.TransparentConfig{},
-			MaxBodySize:       framework.DefaultMaxBodySize,
-			Timeout:           30 * time.Second,
+			Logger: createTestLogger(),
 		},
 		signer:       v4.NewSigner(),
 		s3Signer:     v4.NewSigner(),
@@ -820,7 +807,7 @@ func TestForwardDirect(t *testing.T) {
 	r.RequestURI = ""
 	rr := httptest.NewRecorder()
 
-	sigv4.ForwardDirect(b.Logger, rr, r, []byte{}, b.Proxy.Transport)
+	sigv4.ForwardDirect(b.Logger, rr, r, []byte{}, b.Transport())
 
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "test", rr.Header().Get("X-Custom"))
@@ -830,13 +817,12 @@ func TestForwardDirect(t *testing.T) {
 func TestProcessRequest_ExpiredSignature(t *testing.T) {
 	b := &awsBackend{
 		StreamingBackend: &framework.StreamingBackend{
-			Logger:            createTestLogger(),
-			TransparentConfig: &framework.TransparentConfig{},
-			MaxBodySize:       framework.DefaultMaxBodySize,
+			Logger: createTestLogger(),
 		},
 		signer:   v4.NewSigner(),
 		s3Signer: v4.NewSigner(),
 	}
+	b.SetMaxBodySize(framework.DefaultMaxBodySize)
 	b.initializeProcessors()
 
 	httpReq := httptest.NewRequest(http.MethodGet, "http://s3.us-east-1.amazonaws.com/gateway/test", nil)

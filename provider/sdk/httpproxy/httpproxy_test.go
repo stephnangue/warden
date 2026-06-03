@@ -380,7 +380,7 @@ func TestNewFactory_WithConfig(t *testing.T) {
 	require.NoError(t, err)
 	pb := b.(*proxyBackend)
 	assert.Equal(t, "https://custom.test.com", pb.providerURL)
-	assert.Equal(t, 60*time.Second, pb.Timeout)
+	assert.Equal(t, 60*time.Second, pb.Timeout())
 }
 
 func TestNewFactory_InvalidConfig(t *testing.T) {
@@ -508,10 +508,11 @@ func TestInitialize_ExistingConfig(t *testing.T) {
 
 	require.NoError(t, pb.Initialize(context.Background()))
 	assert.Equal(t, "https://saved.test.com", pb.providerURL)
-	assert.Equal(t, int64(5242880), pb.MaxBodySize)
-	assert.Equal(t, 45*time.Second, pb.Timeout)
-	assert.Equal(t, "auth/cert/", pb.TransparentConfig.AutoAuthPath)
-	assert.Equal(t, "admin", pb.TransparentConfig.DefaultAuthRole)
+	assert.Equal(t, int64(5242880), pb.MaxBodySize())
+	assert.Equal(t, 45*time.Second, pb.Timeout())
+	tc := pb.TransparentConfig()
+	assert.Equal(t, "auth/cert/", tc.AutoAuthPath)
+	assert.Equal(t, "admin", tc.DefaultAuthRole)
 }
 
 func TestInitialize_WithExtraState(t *testing.T) {
@@ -1262,7 +1263,7 @@ func TestHandleGateway_ResolveUpstream_MaxBodySizeOverride(t *testing.T) {
 	b := setupBackend(t, spec)
 	pb := b.(*proxyBackend)
 	pb.providerURL = upstream.URL
-	pb.MaxBodySize = 10 * 1024 * 1024 // 10MB default
+	pb.SetMaxBodySize(10 * 1024 * 1024) // 10MB default
 
 	// Body of 100 bytes — under the dispatch cap, should reach upstream.
 	rec := httptest.NewRecorder()

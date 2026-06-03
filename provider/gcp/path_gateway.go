@@ -48,15 +48,15 @@ type gcpCredentialInfo struct {
 
 func (b *gcpBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Apply timeout if configured
-	if b.Timeout > 0 {
+	if b.Timeout() > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, b.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, b.Timeout())
 		defer cancel()
 		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
 	}
 
 	// Enforce max body size
-	maxBody := b.MaxBodySize
+	maxBody := b.MaxBodySize()
 	if maxBody <= 0 {
 		maxBody = maxGatewayBodySize
 	}

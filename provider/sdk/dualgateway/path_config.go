@@ -73,12 +73,12 @@ func (b *dualgatewayBackend) pathConfig() *framework.Path {
 
 // handleConfigRead handles reading the provider configuration.
 func (b *dualgatewayBackend) handleConfigRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	tc := b.TransparentConfig()
 	b.mu.RLock()
-	tc := b.TransparentConfig
 	data := map[string]any{
 		b.spec.URLConfigKey: b.providerURL,
-		"max_body_size":     b.MaxBodySize,
-		"timeout":           b.Timeout.String(),
+		"max_body_size":     b.MaxBodySize(),
+		"timeout":           b.Timeout().String(),
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
 	}
@@ -123,13 +123,12 @@ func (b *dualgatewayBackend) handleConfigWrite(ctx context.Context, req *logical
 
 	parsed := parseConfig(b.spec, conf)
 
-	// Read current transparent config under read lock
-	b.mu.RLock()
+	// Read current transparent config — TransparentConfig() is atomic, no lock needed.
+	current := b.TransparentConfig()
 	tc := &framework.TransparentConfig{
-		AutoAuthPath:    b.TransparentConfig.AutoAuthPath,
-		DefaultAuthRole: b.TransparentConfig.DefaultAuthRole,
+		AutoAuthPath:    current.AutoAuthPath,
+		DefaultAuthRole: current.DefaultAuthRole,
 	}
-	b.mu.RUnlock()
 
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -145,11 +144,11 @@ func (b *dualgatewayBackend) handleConfigWrite(ctx context.Context, req *logical
 		}, nil
 	}
 
-	// All validation passed — apply changes under write lock
+	// All validation passed — apply framework-side atomics then provider-local fields under write lock.
+	b.SetMaxBodySize(parsed.MaxBodySize)
+	b.SetTimeout(parsed.Timeout)
 	b.mu.Lock()
 	b.providerURL = parsed.ProviderURL
-	b.MaxBodySize = parsed.MaxBodySize
-	b.Timeout = parsed.Timeout
 	if b.spec.OnConfigParsed != nil {
 		b.extraState = b.spec.OnConfigParsed(conf)
 	}
@@ -162,8 +161,8 @@ func (b *dualgatewayBackend) handleConfigWrite(ctx context.Context, req *logical
 		b.mu.RLock()
 		persistData := map[string]any{
 			b.spec.URLConfigKey: b.providerURL,
-			"max_body_size":     b.MaxBodySize,
-			"timeout":           b.Timeout.String(),
+			"max_body_size":     b.MaxBodySize(),
+			"timeout":           b.Timeout().String(),
 			"auto_auth_path":    tc.AutoAuthPath,
 			"default_role":      tc.DefaultAuthRole,
 		}

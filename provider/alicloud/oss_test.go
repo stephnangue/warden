@@ -75,7 +75,7 @@ func TestHandleOSS_CertTransparent_ForwardsSigned(t *testing.T) {
 
 	b := setupBackend(t)
 	upURL, _ := url.Parse(upstream.URL)
-	b.Proxy.Transport = &rewritingTransport{inner: upstream.Client().Transport, target: upURL}
+	b.SetTransport(&rewritingTransport{inner: upstream.Client().Transport, target: upURL})
 
 	// Cert transparent: client signs using role name as both keys
 	r := signOSSRequest(t, "GET", "https://oss-cn-hangzhou.aliyuncs.com/my-bucket/my-object", "", "role-reader", "role-reader", "", "cn-hangzhou")
@@ -115,7 +115,7 @@ func TestHandleOSS_JWTTransparent_ForwardsSigned(t *testing.T) {
 
 	b := setupBackend(t)
 	upURL, _ := url.Parse(upstream.URL)
-	b.Proxy.Transport = &rewritingTransport{inner: upstream.Client().Transport, target: upURL}
+	b.SetTransport(&rewritingTransport{inner: upstream.Client().Transport, target: upURL})
 
 	jwt := "eyJhbGciOiJIUzI1NiJ9.payload.sig"
 	r := signOSSRequest(t, "GET", "https://oss-cn-hangzhou.aliyuncs.com/my-bucket/key", "", "any-id", jwt, jwt, "cn-hangzhou")

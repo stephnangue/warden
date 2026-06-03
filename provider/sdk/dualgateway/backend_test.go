@@ -76,8 +76,8 @@ func TestNewFactory_InvalidSpec(t *testing.T) {
 func TestNewFactory_Defaults(t *testing.T) {
 	b := createBackend(t, headerAuthSpec)
 	assert.Equal(t, "https://api.test.com", b.providerURL)
-	assert.Equal(t, framework.DefaultMaxBodySize, b.MaxBodySize)
-	assert.Equal(t, 30*time.Second, b.Timeout)
+	assert.Equal(t, framework.DefaultMaxBodySize, b.MaxBodySize())
+	assert.Equal(t, 30*time.Second, b.Timeout())
 	assert.NotNil(t, b.s3Signer)
 	assert.Equal(t, headerAuthSpec, b.spec)
 }
@@ -96,7 +96,7 @@ func TestNewFactory_WithConfig(t *testing.T) {
 	require.NoError(t, err)
 	backend := b.(*dualgatewayBackend)
 	assert.Equal(t, "https://custom.test.com", backend.providerURL)
-	assert.Equal(t, int64(5242880), backend.MaxBodySize)
+	assert.Equal(t, int64(5242880), backend.MaxBodySize())
 }
 
 func TestNewFactory_InvalidConfig(t *testing.T) {

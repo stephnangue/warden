@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httputil"
 	"sync"
 	"testing"
 	"time"
@@ -93,8 +92,8 @@ func TestFactory(t *testing.T) {
 	vb := b.(*vaultBackend)
 	assert.Equal(t, "vault", vb.Type())
 	assert.Equal(t, logical.ClassProvider, vb.Class())
-	assert.Equal(t, framework.DefaultMaxBodySize, vb.MaxBodySize)
-	assert.Equal(t, framework.DefaultTimeout, vb.Timeout)
+	assert.Equal(t, framework.DefaultMaxBodySize, vb.MaxBodySize())
+	assert.Equal(t, framework.DefaultTimeout, vb.Timeout())
 }
 
 func TestFactory_WithConfig(t *testing.T) {
@@ -114,8 +113,8 @@ func TestFactory_WithConfig(t *testing.T) {
 	require.NoError(t, err)
 	vb := b.(*vaultBackend)
 	assert.Equal(t, "https://vault.example.com:8200", vb.vaultAddress)
-	assert.Equal(t, int64(5242880), vb.MaxBodySize)
-	assert.Equal(t, 60*time.Second, vb.Timeout)
+	assert.Equal(t, int64(5242880), vb.MaxBodySize())
+	assert.Equal(t, 60*time.Second, vb.Timeout())
 	assert.True(t, vb.tlsSkipVerify)
 }
 
@@ -150,10 +149,10 @@ func TestInitialize_EmptyStorage(t *testing.T) {
 	storage := newInmemStorage()
 	b := &vaultBackend{
 		StreamingBackend: &framework.StreamingBackend{
-			StorageView:       storage,
-			TransparentConfig: &framework.TransparentConfig{},
+			StorageView: storage,
 		},
 	}
+	b.SetTransparentConfig(&framework.TransparentConfig{})
 	err := b.Initialize(context.Background())
 	assert.NoError(t, err)
 }
@@ -172,17 +171,17 @@ func TestInitialize_ExistingConfig(t *testing.T) {
 
 	b := &vaultBackend{
 		StreamingBackend: &framework.StreamingBackend{
-			StorageView:       storage,
-			TransparentConfig: &framework.TransparentConfig{},
-			Proxy:             &httputil.ReverseProxy{Transport: sharedTransport},
+			StorageView: storage,
 		},
 	}
+	b.SetTransparentConfig(&framework.TransparentConfig{})
+	b.InitProxy(sharedTransport)
 
 	err := b.Initialize(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "https://saved.vault.com:8200", b.vaultAddress)
-	assert.Equal(t, int64(5242880), b.MaxBodySize)
-	assert.Equal(t, 60*time.Second, b.Timeout)
+	assert.Equal(t, int64(5242880), b.MaxBodySize())
+	assert.Equal(t, 60*time.Second, b.Timeout())
 }
 
 func TestInitialize_TLSSkipVerify(t *testing.T) {
@@ -196,17 +195,18 @@ func TestInitialize_TLSSkipVerify(t *testing.T) {
 
 	b := &vaultBackend{
 		StreamingBackend: &framework.StreamingBackend{
-			StorageView:       storage,
-			TransparentConfig: &framework.TransparentConfig{},
-			Proxy:             &httputil.ReverseProxy{Transport: sharedTransport},
+			StorageView: storage,
 		},
 	}
+	b.SetTransparentConfig(&framework.TransparentConfig{})
+	b.InitProxy(sharedTransport)
 
 	err := b.Initialize(context.Background())
 	require.NoError(t, err)
 	assert.True(t, b.tlsSkipVerify)
-	// Transport should be updated
-	assert.NotEqual(t, sharedTransport, b.Proxy.Transport)
+	// Transport should be updated — Proxy.Transport is now the swappable wrapper
+	// (a stable pointer); the underlying transport changed, observed via Transport().
+	assert.NotEqual(t, sharedTransport, b.Transport())
 }
 
 // --- SensitiveConfigFields ---
@@ -268,10 +268,9 @@ func TestValidateVaultAddress(t *testing.T) {
 
 func TestHandleConfigWrite_InvalidAddress(t *testing.T) {
 	b := &vaultBackend{
-		StreamingBackend: &framework.StreamingBackend{
-			TransparentConfig: &framework.TransparentConfig{},
-		},
+		StreamingBackend: &framework.StreamingBackend{},
 	}
+	b.SetTransparentConfig(&framework.TransparentConfig{})
 	path := b.pathConfig()
 	fd := &framework.FieldData{
 		Raw: map[string]interface{}{
@@ -288,10 +287,9 @@ func TestHandleConfigWrite_InvalidAddress(t *testing.T) {
 
 func TestHandleConfigWrite_MissingAutoAuthPath(t *testing.T) {
 	b := &vaultBackend{
-		StreamingBackend: &framework.StreamingBackend{
-			TransparentConfig: &framework.TransparentConfig{},
-		},
+		StreamingBackend: &framework.StreamingBackend{},
 	}
+	b.SetTransparentConfig(&framework.TransparentConfig{})
 	path := b.pathConfig()
 	fd := &framework.FieldData{
 		Raw: map[string]interface{}{
@@ -309,10 +307,10 @@ func TestHandleConfigWrite_PersistsToStorage(t *testing.T) {
 	storage := newInmemStorage()
 	b := &vaultBackend{
 		StreamingBackend: &framework.StreamingBackend{
-			StorageView:       storage,
-			TransparentConfig: &framework.TransparentConfig{},
+			StorageView: storage,
 		},
 	}
+	b.SetTransparentConfig(&framework.TransparentConfig{})
 	path := b.pathConfig()
 	fd := &framework.FieldData{
 		Raw: map[string]interface{}{
@@ -338,10 +336,10 @@ func TestHandleGatewayStreaming_NoAddress(t *testing.T) {
 	b := &vaultBackend{
 		vaultAddress: "",
 		StreamingBackend: &framework.StreamingBackend{
-			Logger:            createTestLogger(),
-			TransparentConfig: &framework.TransparentConfig{},
+			Logger: createTestLogger(),
 		},
 	}
+	b.SetTransparentConfig(&framework.TransparentConfig{})
 
 	httpReq := httptest.NewRequest(http.MethodGet, "/v1/vault/gateway/sys/health", nil)
 	rr := httptest.NewRecorder()

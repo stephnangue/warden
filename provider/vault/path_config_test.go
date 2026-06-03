@@ -3,7 +3,6 @@ package vault
 import (
 	"context"
 	"net/http"
-	"net/http/httputil"
 	"testing"
 	"time"
 
@@ -46,14 +45,13 @@ func TestHandleConfigRead(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b := &vaultBackend{
-				vaultAddress:  tt.vaultAddress,
-				tlsSkipVerify: tt.tlsSkipVerify,
-				StreamingBackend: &framework.StreamingBackend{
-					MaxBodySize:       tt.maxBodySize,
-					Timeout:           tt.timeout,
-					TransparentConfig: &framework.TransparentConfig{},
-				},
+				vaultAddress:     tt.vaultAddress,
+				tlsSkipVerify:    tt.tlsSkipVerify,
+				StreamingBackend: &framework.StreamingBackend{},
 			}
+			b.SetMaxBodySize(tt.maxBodySize)
+			b.SetTimeout(tt.timeout)
+			b.SetTransparentConfig(&framework.TransparentConfig{})
 
 			resp, err := b.handleConfigRead(context.Background(), nil, nil)
 
@@ -151,12 +149,11 @@ func TestHandleConfigWrite(t *testing.T) {
 				vaultAddress:  tt.initialVaultAddress,
 				tlsSkipVerify: tt.initialTLSSkipVerify,
 				// No storage view - config won't be persisted
-				StreamingBackend: &framework.StreamingBackend{
-					MaxBodySize:       tt.initialMaxBodySize,
-					Timeout:           tt.initialTimeout,
-					TransparentConfig: &framework.TransparentConfig{},
-				},
+				StreamingBackend: &framework.StreamingBackend{},
 			}
+			b.SetMaxBodySize(tt.initialMaxBodySize)
+			b.SetTimeout(tt.initialTimeout)
+			b.SetTransparentConfig(&framework.TransparentConfig{})
 
 			// Create field data with schema
 			schema := map[string]*framework.FieldSchema{
@@ -194,8 +191,8 @@ func TestHandleConfigWrite(t *testing.T) {
 
 			// Verify backend state was updated
 			assert.Equal(t, tt.expectedVaultAddress, b.vaultAddress)
-			assert.Equal(t, tt.expectedMaxBodySize, b.MaxBodySize)
-			assert.Equal(t, tt.expectedTimeout, b.Timeout)
+			assert.Equal(t, tt.expectedMaxBodySize, b.MaxBodySize())
+			assert.Equal(t, tt.expectedTimeout, b.Timeout())
 			assert.Equal(t, tt.expectedTLSSkipVerify, b.tlsSkipVerify)
 		})
 	}
@@ -204,18 +201,14 @@ func TestHandleConfigWrite(t *testing.T) {
 func TestHandleConfigWrite_TLSChange(t *testing.T) {
 	// This test verifies that changing tls_skip_verify updates the transport
 	b := &vaultBackend{
-		vaultAddress:  "https://vault.example.com:8200",
-		tlsSkipVerify: false,
-		StreamingBackend: &framework.StreamingBackend{
-			MaxBodySize:       framework.DefaultMaxBodySize,
-			Timeout:           framework.DefaultTimeout,
-			TransparentConfig: &framework.TransparentConfig{},
-			Proxy: &httputil.ReverseProxy{
-				Director:  func(req *http.Request) {},
-				Transport: sharedTransport,
-			},
-		},
+		vaultAddress:     "https://vault.example.com:8200",
+		tlsSkipVerify:    false,
+		StreamingBackend: &framework.StreamingBackend{},
 	}
+	b.SetMaxBodySize(framework.DefaultMaxBodySize)
+	b.SetTimeout(framework.DefaultTimeout)
+	b.SetTransparentConfig(&framework.TransparentConfig{})
+	b.InitProxy(sharedTransport)
 
 	schema := map[string]*framework.FieldSchema{
 		"tls_skip_verify": {
@@ -241,7 +234,10 @@ func TestHandleConfigWrite_TLSChange(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.True(t, b.tlsSkipVerify)
 	// Transport should have been updated (different pointer)
-	assert.True(t, b.Proxy.Transport != sharedTransport, "transport should be a new instance")
+	// The Proxy.Transport now points at a swappable wrapper that stays stable
+	// across reconfigures; the underlying transport changes through SetTransport,
+	// observed via Transport().
+	assert.True(t, b.Transport() != sharedTransport, "transport should be a new instance")
 }
 
 func TestPathConfig_Schema(t *testing.T) {

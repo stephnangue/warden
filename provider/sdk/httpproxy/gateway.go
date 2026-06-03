@@ -17,10 +17,11 @@ import (
 const defaultAcceptJSON = "application/json"
 
 func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) {
-	// Snapshot mutable fields under read lock to avoid races with config writes
+	// Framework-side fields are atomic — read directly.
+	timeout := b.Timeout()
+	maxBody := b.MaxBodySize()
+	// Provider-local fields still need the RLock.
 	b.mu.RLock()
-	timeout := b.Timeout
-	maxBody := b.MaxBodySize
 	providerURL := b.providerURL
 	proxy := b.Proxy
 	b.mu.RUnlock()

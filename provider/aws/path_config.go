@@ -64,13 +64,13 @@ func (b *awsBackend) pathConfig() *framework.Path {
 
 // handleConfigRead handles reading the AWS provider configuration
 func (b *awsBackend) handleConfigRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	tc := b.TransparentConfig
+	tc := b.TransparentConfig()
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
 			"proxy_domains":   b.proxyDomains,
-			"max_body_size":   b.MaxBodySize,
-			"timeout":         b.Timeout.String(),
+			"max_body_size":   b.MaxBodySize(),
+			"timeout":         b.Timeout().String(),
 			"tls_skip_verify": b.tlsSkipVerify,
 			"ca_data":         b.caData,
 			"auto_auth_path":  tc.AutoAuthPath,
@@ -112,8 +112,8 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	// Apply configuration
 	parsedConfig := parseConfig(conf)
 	b.proxyDomains = parsedConfig.ProxyDomains
-	b.MaxBodySize = parsedConfig.MaxBodySize
-	b.Timeout = parsedConfig.Timeout
+	b.SetMaxBodySize(parsedConfig.MaxBodySize)
+	b.SetTimeout(parsedConfig.Timeout)
 
 	// Update transport if TLS settings changed
 	tlsChanged := b.tlsSkipVerify != parsedConfig.TLSSkipVerify || b.caData != parsedConfig.CAData
@@ -128,10 +128,10 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 					Err:        logical.ErrBadRequest(err.Error()),
 				}, nil
 			}
-			b.Proxy.Transport = transport
+			b.SetTransport(transport)
 		} else {
 			initTransport()
-			b.Proxy.Transport = sharedTransport
+			b.SetTransport(sharedTransport)
 		}
 	}
 
@@ -140,8 +140,8 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 
 	// Transparent mode settings — build config from current values + overrides
 	tc := &framework.TransparentConfig{
-		AutoAuthPath:    b.TransparentConfig.AutoAuthPath,
-		DefaultAuthRole: b.TransparentConfig.DefaultAuthRole,
+		AutoAuthPath:    b.TransparentConfig().AutoAuthPath,
+		DefaultAuthRole: b.TransparentConfig().DefaultAuthRole,
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -164,8 +164,8 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
 			"proxy_domains":   b.proxyDomains,
-			"max_body_size":   b.MaxBodySize,
-			"timeout":         b.Timeout.String(),
+			"max_body_size":   b.MaxBodySize(),
+			"timeout":         b.Timeout().String(),
 			"tls_skip_verify": b.tlsSkipVerify,
 			"ca_data":         b.caData,
 			"auto_auth_path":  tc.AutoAuthPath,
