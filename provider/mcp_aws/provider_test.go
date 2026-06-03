@@ -2,6 +2,7 @@ package mcp_aws
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"testing"
 
@@ -241,6 +242,119 @@ func TestConfigWrite_StaleRegionUpdate(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "eu-frankfurt-1", b.region, "region must follow the URL change")
+}
+
+// --- MCPPolicyEnforced opt-in ---
+//
+// The compile-time interface satisfaction is asserted at package scope in
+// provider.go; a duplicate test-side assertion would not catch anything the
+// package-scope one doesn't already catch.
+
+// mustGateReq returns a logical.Request whose HTTPRequest carries the given
+// method and Content-Type. URL and body are arbitrary — the gate only reads
+// method + Content-Type.
+func mustGateReq(method, contentType string) *logical.Request {
+	r, _ := http.NewRequest(method, "https://warden.example.com/v1/mcp_aws/gateway/", nil)
+	if contentType != "" {
+		r.Header.Set("Content-Type", contentType)
+	}
+	return &logical.Request{HTTPRequest: r}
+}
+
+// TestShouldEnforceMCPPolicy_CapReflectsConfiguredMaxBody drives a non-default
+// max_body_size through handleConfigWrite and asserts the cap returned by
+// ShouldEnforceMCPPolicy follows. Catches a refactor that returns a stale
+// snapshot, a default constant, or any value other than the live config.
+func TestShouldEnforceMCPPolicy_CapReflectsConfiguredMaxBody(t *testing.T) {
+	const customMax int64 = 7 * 1024 * 1024
+	b := setupBackend(t)
+	path := b.pathConfig()
+	fd := makeFieldData(path, map[string]any{
+		"mcp_aws_url":    "https://aws-mcp.us-east-1.api.aws/mcp",
+		"auto_auth_path": "auth/jwt/",
+		"max_body_size":  customMax,
+	})
+	resp, err := b.handleConfigWrite(context.Background(), nil, fd)
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode)
+
+	enforce, capBytes := b.ShouldEnforceMCPPolicy(mustGateReq("POST", "application/json"))
+	assert.True(t, enforce)
+	assert.Equal(t, customMax, capBytes, "cap must follow the configured max_body_size, not a snapshotted default")
+}
+
+func TestShouldEnforceMCPPolicy_AcceptsJSONWithCharset(t *testing.T) {
+	b := setupBackend(t)
+	enforce, _ := b.ShouldEnforceMCPPolicy(mustGateReq("POST", "application/json; charset=utf-8"))
+	assert.True(t, enforce, "charset parameter on Content-Type must not disqualify")
+}
+
+func TestShouldEnforceMCPPolicy_DeclinesNonPOST(t *testing.T) {
+	b := setupBackend(t)
+	for _, method := range []string{"GET", "DELETE", "PUT", "PATCH", "HEAD", "OPTIONS"} {
+		t.Run(method, func(t *testing.T) {
+			enforce, capBytes := b.ShouldEnforceMCPPolicy(mustGateReq(method, "application/json"))
+			assert.False(t, enforce)
+			assert.Equal(t, int64(0), capBytes)
+		})
+	}
+}
+
+func TestShouldEnforceMCPPolicy_DeclinesNonJSON(t *testing.T) {
+	b := setupBackend(t)
+	for _, ct := range []string{"", "text/plain", "application/octet-stream", "text/event-stream", "application/x-www-form-urlencoded"} {
+		t.Run(ct, func(t *testing.T) {
+			enforce, capBytes := b.ShouldEnforceMCPPolicy(mustGateReq("POST", ct))
+			assert.False(t, enforce)
+			assert.Equal(t, int64(0), capBytes, "declined requests must return cap=0; a later behavior change that returned MaxBodySize on decline would mislead core")
+		})
+	}
+}
+
+func TestShouldEnforceMCPPolicy_NilSafe(t *testing.T) {
+	b := setupBackend(t)
+	enforce, _ := b.ShouldEnforceMCPPolicy(nil)
+	assert.False(t, enforce, "nil request must not panic, must decline")
+	enforce, _ = b.ShouldEnforceMCPPolicy(&logical.Request{})
+	assert.False(t, enforce, "nil HTTPRequest must not panic, must decline")
+}
+
+// TestShouldEnforceMCPPolicy_ConcurrentReadDuringConfigWrite spins one
+// goroutine calling the gate while another writes config repeatedly. Without
+// -race + the snapshot()-mediated RLock, this would flag tearing the
+// MaxBodySize read. Catches an accidental future drop of the RLock.
+func TestShouldEnforceMCPPolicy_ConcurrentReadDuringConfigWrite(t *testing.T) {
+	b := setupBackend(t)
+	path := b.pathConfig()
+	// Seed with a valid base config so the writer's partial updates have
+	// auto_auth_path already set.
+	{
+		fd := makeFieldData(path, map[string]any{
+			"mcp_aws_url":    "https://aws-mcp.us-east-1.api.aws/mcp",
+			"auto_auth_path": "auth/jwt/",
+		})
+		resp, err := b.handleConfigWrite(context.Background(), nil, fd)
+		require.NoError(t, err)
+		require.Equal(t, 200, resp.StatusCode)
+	}
+
+	const iterations = 200
+	done := make(chan struct{})
+
+	go func() {
+		req := mustGateReq("POST", "application/json")
+		for i := 0; i < iterations; i++ {
+			_, _ = b.ShouldEnforceMCPPolicy(req)
+		}
+		close(done)
+	}()
+
+	for i := 0; i < iterations; i++ {
+		max := int64(1<<20) + int64(i)
+		fd := makeFieldData(path, map[string]any{"max_body_size": max})
+		_, _ = b.handleConfigWrite(context.Background(), nil, fd)
+	}
+	<-done
 }
 
 func TestConfigWrite_ExplicitRegionWins(t *testing.T) {
