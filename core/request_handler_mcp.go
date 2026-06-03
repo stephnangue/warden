@@ -13,31 +13,54 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// extractMCPDescriptor populates req.MCPDescriptor when the routed
-// backend opts into MCP policy enforcement via the
-// logical.MCPPolicyEnforced interface. Non-MCP backends and opted-in
-// backends that decline the request (wrong method, non-JSON Content-
-// Type) leave the descriptor nil. The matcher in decideMCP reads the
-// descriptor and produces an MCPDecision; if the descriptor is nil
-// when an mcp{} block is in scope, the matcher fails closed.
+// extractMCPDescriptor populates req.MCPDescriptor based on whether
+// the routed backend opts into MCP policy enforcement via the
+// logical.MCPPolicyEnforced interface. The descriptor has three
+// terminal shapes consumed by decideMCP — see decideMCP's doc for the
+// tri-state contract:
+//
+//  1. Nil — backend does not implement MCPPolicyEnforced at all. If an
+//     mcp{} block is bound to such a path that's an operator misconfig
+//     and decideMCP fails closed with missing_body.
+//
+//  2. Non-nil, empty (Calls nil, ParseErr nil) — backend implements
+//     the interface but ShouldEnforceMCPPolicy returned enforce=false
+//     for THIS request (typically a non-POST verb on a multi-method
+//     MCP endpoint, or a non-JSON Content-Type). mcp{} is body-
+//     authoritative and cannot meaningfully gate a body-less request,
+//     so decideMCP skips evaluation and lets the cap-level policy
+//     decide. This is the path that lets MCP Streamable HTTP's GET
+//     (notification SSE stream) and DELETE (session terminate) verbs
+//     share the same URL with the POST that carries JSON-RPC.
+//
+//  3. Non-nil with Calls or ParseErr populated — backend opted in and
+//     extraction either succeeded (Calls) or failed in a typed way
+//     (ParseErr). decideMCP runs the body-authoritative matcher.
 //
 // The body is read up to cap+1 bytes via io.LimitReader so an
 // oversize signal is distinguishable from an at-cap read, and
 // restored via io.NopCloser(bytes.NewReader(buf)) so the downstream
-// proxy receives the bytes unchanged. The full function is panic-safe
-// — any panic from the strict parser is recovered and surfaced as a
-// malformed_jsonrpc ParseErr rather than propagating into the request
-// handler.
+// proxy receives the bytes unchanged. The full extraction path is
+// panic-safe — any panic from the strict parser is recovered and
+// surfaced as a malformed_jsonrpc ParseErr rather than propagating
+// into the request handler.
 func (c *Core) extractMCPDescriptor(_ context.Context, req *logical.Request, backend logical.Backend) {
 	if req == nil || backend == nil {
 		return
 	}
 	mcp, ok := backend.(logical.MCPPolicyEnforced)
 	if !ok {
-		return
+		return // Shape 1: leave descriptor nil.
 	}
 	enforce, maxBody := mcp.ShouldEnforceMCPPolicy(req)
 	if !enforce {
+		// Shape 2: install the empty sentinel so decideMCP can tell
+		// "backend declined for this request" apart from "no MCP-aware
+		// backend handled this request at all". Without this branch,
+		// MCP Streamable HTTP's GET/DELETE on the same URL as POST
+		// would deny with missing_body, breaking the SSE notification
+		// stream every spec-compliant MCP client opens.
+		req.MCPDescriptor = &logical.MCPRequestDescriptor{}
 		return
 	}
 	if maxBody <= 0 {
