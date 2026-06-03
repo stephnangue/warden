@@ -75,9 +75,9 @@ type MCPParseError struct {
 }
 
 // MCPParseKind* enumerate the descriptor-level parse failure modes.
-// The string values are the same identifiers Phase 4 will use as
-// MCPDecision rule_type values, so the mapping is identity rather
-// than a per-package translation table.
+// The string values are the same identifiers used as MCPDecision
+// rule_type values, so the mapping is identity rather than a
+// per-package translation table.
 const (
 	MCPParseKindMalformedJSONRPC = "malformed_jsonrpc"
 	MCPParseKindDuplicateKey     = "duplicate_key"

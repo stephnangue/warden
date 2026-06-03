@@ -39,10 +39,9 @@ type JSONRPCRequest struct {
 }
 
 // ParseErrorKind enumerates structural-failure deny reasons. Each kind
-// maps 1:1 to an MCPDecision rule_type when the evaluator denies in a
-// later phase. The matching mcpRuleType* constants in policy_mcp.go are
-// introduced in Phase 4; until then this file is the sole source of
-// truth for these strings.
+// maps 1:1 to an MCPDecision rule_type when the evaluator denies. The
+// string values match the mcpRuleType* constants in policy_mcp.go so
+// the mapping is identity.
 type ParseErrorKind string
 
 const (

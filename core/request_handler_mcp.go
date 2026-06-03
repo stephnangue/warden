@@ -17,8 +17,9 @@ import (
 // backend opts into MCP policy enforcement via the
 // logical.MCPPolicyEnforced interface. Non-MCP backends and opted-in
 // backends that decline the request (wrong method, non-JSON Content-
-// Type) leave the descriptor nil. Phase 2 captures the descriptor
-// dormantly: no consumer reads it until Phase 4 wires the evaluator.
+// Type) leave the descriptor nil. The matcher in decideMCP reads the
+// descriptor and produces an MCPDecision; if the descriptor is nil
+// when an mcp{} block is in scope, the matcher fails closed.
 //
 // The body is read up to cap+1 bytes via io.LimitReader so an
 // oversize signal is distinguishable from an at-cap read, and
@@ -77,8 +78,7 @@ func (c *Core) extractMCPDescriptor(_ context.Context, req *logical.Request, bac
 	_ = req.HTTPRequest.Body.Close()
 	// Body restored (up to maxBody+1 bytes) before any further
 	// decision so the downstream proxy can read it. On oversize, the
-	// matcher denies in Phase 4 so the proxy doesn't run; on parse
-	// error, same.
+	// matcher denies so the proxy doesn't run; on parse error, same.
 	req.HTTPRequest.Body = io.NopCloser(bytes.NewReader(body))
 
 	if int64(len(body)) > maxBody {

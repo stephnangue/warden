@@ -9,9 +9,9 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// Single-call descriptor with a string param matches the same way the
-// header path does — pins the equivalence Phase 4 relies on when the
-// production call site switches from headers to body.
+// Single-call descriptor with a string param matches against a
+// pattern. Pins the matcher's primary positive path for body-source
+// descriptors.
 func TestEvaluateMCPDescriptor_SingleCallParamString(t *testing.T) {
 	sets := []*CBPMCPRules{{
 		AllowedMethods: []string{"tools/call"},
@@ -118,7 +118,7 @@ func TestEvaluateMCPDescriptor_NonScalarParamTreatedAsMissing(t *testing.T) {
 }
 
 // Multi-call batch: a denied second call short-circuits the entire
-// batch decision. Pins the single-fail-all-fail semantic for Phase 4.
+// batch decision. Pins the single-fail-all-fail semantic.
 func TestEvaluateMCPDescriptor_BatchOneDeniedFailsAll(t *testing.T) {
 	sets := []*CBPMCPRules{{
 		AllowedMethods: []string{"tools/list", "tools/call"},
@@ -160,7 +160,7 @@ func TestEvaluateMCPDescriptor_BatchAllAllowed(t *testing.T) {
 
 // Empty descriptor (zero calls) returns nil — the caller is
 // responsible for denying when an mcp{} block is in scope but no body
-// was parseable. Phase 4 handles that in the evaluator wrapper.
+// was parseable. decideMCP handles that in the evaluator wrapper.
 func TestEvaluateMCPDescriptor_NoCallsReturnsNil(t *testing.T) {
 	sets := []*CBPMCPRules{{
 		AllowedMethods: []string{"tools/list"},
