@@ -151,22 +151,24 @@ Enforcement is **body-authoritative**. When a policy in scope contains an `mcp {
 | `denied_tools` / `allowed_tools` | `tools/call` with a `params.name` matching a deny pattern, or not in the allow list |
 | `denied_resources` / `allowed_resources` | `resources/read` with a `params.uri` matching a deny pattern, or not in the allow list |
 | `denied_prompts` / `allowed_prompts` | `prompts/get` with a `params.name` matching a deny pattern, or not in the allow list |
-| `denied_params` / `allowed_params` | A `tools/call` argument (`params.arguments.<key>`) matches a deny pattern, or fails an allow-list pattern (or is missing when required) |
-| `missing_body` | Request body absent, or routed to a backend that does not opt into MCP enforcement (typically a non-POST request — operators should not bind `mcp { }` to paths that receive non-POST traffic) |
+| `denied_params` / `allowed_params` | A `tools/call` argument (`params.arguments.<key>`) matches a deny pattern, or — when present — fails an allow-list pattern. Both rules are conditional on presence: missing arguments don't trigger either, matching Vault's `allowed_parameters` semantics. Tools whose argument shape doesn't include the gated key pass through unaffected. |
+| `missing_body` | Request body absent on a path the backend opted into MCP enforcement for. POST/JSON-RPC traffic that fails to parse triggers this; non-POST verbs (GET for the SSE notification stream, DELETE for session terminate) silently skip `mcp { }` evaluation — the body-authoritative gate doesn't apply to body-less verbs. |
 | `malformed_jsonrpc` | Body is not a well-formed JSON-RPC 2.0 envelope (bad version, missing method, unknown top-level key, UTF-8 BOM, etc.) |
 | `duplicate_key` | Duplicate object key detected anywhere in the body — Warden rejects ambiguity that Go's standard JSON parser silently last-wins-resolves |
 | `oversized_body` | Body exceeds the mount's `max_body_size` |
 | `batch_empty` | JSON-RPC batch is `[]` |
 | `malformed_params` | A name-bearing method (`tools/call`, `resources/read`, `prompts/get`) has a missing or wrong-shape `params.name` / `params.uri` |
 
-All examples below use `capabilities = ["create"]`. MCP traffic is HTTP POST and Warden maps POST to the `create` operation. Use `["create", "update"]` if your client also issues PUT to the gateway.
+All examples below use `capabilities = ["create", "read", "delete"]`. MCP Streamable HTTP uses three HTTP verbs on the same `/gateway/` URL: POST for JSON-RPC requests (mapped by Warden to `create`), GET for the optional server → client SSE notification stream (`read`), and DELETE for session terminate (`delete`). All three need to be in the cap list or off-spec MCP clients fail to connect. The `mcp { }` block only fires on the POST half; GET/DELETE skip body-authoritative evaluation automatically.
+
+The `allowed_methods` examples below list the MCP **protocol** methods every spec-compliant client uses in its handshake — `initialize`, `notifications/initialized`, `ping` — alongside the data-plane methods (`tools/list`, `tools/call`, …). Omitting the lifecycle methods makes `claude mcp list` (and similar client health checks) hang on connect.
 
 The simplest policy grants the gateway and leans on PAT scopes for everything:
 
 ```bash
 warden policy write mcp-github-access - <<EOF
 path "mcp_github/role/+/gateway*" {
-  capabilities = ["create"]
+  capabilities = ["create", "read", "delete"]
 }
 EOF
 ```
@@ -176,9 +178,17 @@ A policy that restricts the agent to a vetted set of GitHub tools:
 ```bash
 warden policy write mcp-github-readonly - <<EOF
 path "mcp_github/role/+/gateway*" {
-  capabilities = ["create"]
+  capabilities = ["create", "read", "delete"]
   mcp {
-    allowed_methods = ["tools/list", "tools/call", "resources/list", "resources/read"]
+    allowed_methods = [
+      "initialize",
+      "notifications/initialized",
+      "tools/list",
+      "tools/call",
+      "resources/list",
+      "resources/read",
+      "ping"
+    ]
     allowed_tools   = ["get_repository", "get_pull_request", "list_issues", "search_code"]
   }
 }
@@ -190,7 +200,7 @@ A complementary deny-list shape — permissive by default, blocks dangerous tool
 ```bash
 warden policy write mcp-github-safe - <<EOF
 path "mcp_github/role/+/gateway*" {
-  capabilities = ["create"]
+  capabilities = ["create", "read", "delete"]
   mcp {
     denied_tools = ["delete_*", "force_*", "merge_pull_request"]
   }
@@ -198,14 +208,19 @@ path "mcp_github/role/+/gateway*" {
 EOF
 ```
 
-Argument-level gates restrict the *values* passed to `tools/call`. Keys in `denied_params` / `allowed_params` match against `params.arguments.<key>` from the parsed body. The policy below permits `create_or_update_file` but never on protected branches:
+Argument-level gates restrict the *values* passed to `tools/call`. Keys in `denied_params` / `allowed_params` match against `params.arguments.<key>` from the parsed body — both rules skip on missing arguments, so a tool that doesn't take `branch` at all isn't affected. The policy below permits `create_or_update_file` but never on protected branches:
 
 ```bash
 warden policy write mcp-github-no-protected-branches - <<EOF
 path "mcp_github/role/+/gateway*" {
-  capabilities = ["create"]
+  capabilities = ["create", "read", "delete"]
   mcp {
-    allowed_methods = ["tools/call"]
+    allowed_methods = [
+      "initialize",
+      "notifications/initialized",
+      "tools/call",
+      "ping"
+    ]
     denied_params = {
       branch = ["main", "master", "production", "release/*"]
     }
@@ -219,14 +234,20 @@ The `mcp { }` block composes with runtime conditions so you can layer environmen
 ```bash
 warden policy write mcp-github-business-hours - <<EOF
 path "mcp_github/role/+/gateway*" {
-  capabilities = ["create"]
+  capabilities = ["create", "read", "delete"]
   conditions {
     source_ip   = ["10.0.0.0/8"]
     time_window = ["08:00-18:00 UTC"]
     day_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri"]
   }
   mcp {
-    allowed_methods = ["tools/list", "tools/call"]
+    allowed_methods = [
+      "initialize",
+      "notifications/initialized",
+      "tools/list",
+      "tools/call",
+      "ping"
+    ]
     allowed_tools   = ["get_*", "list_*", "create_issue_comment"]
   }
 }
