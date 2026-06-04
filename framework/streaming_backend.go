@@ -7,6 +7,7 @@ package framework
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
@@ -701,6 +702,18 @@ func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
 		Director:  func(req *http.Request) {},
 		Transport: swap,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			// Client-side cancellation isn't a Warden error. Common
+			// shapes: MCP Streamable HTTP's GET notification stream
+			// the client opens then disconnects, or a long tool-call
+			// the user cancelled mid-flight. Log at Debug, skip the
+			// 502 — the connection is already gone.
+			if errors.Is(err, context.Canceled) || r.Context().Err() != nil {
+				b.Logger.Debug("proxy aborted: client closed connection",
+					logger.Err(err),
+					logger.String("target_url", r.URL.String()),
+				)
+				return
+			}
 			b.Logger.Error("proxy error",
 				logger.Err(err),
 				logger.String("target_url", r.URL.String()),
