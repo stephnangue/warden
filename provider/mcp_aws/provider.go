@@ -16,6 +16,52 @@ import (
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
+// Compile-time assertion: mcp_aws opts into CBP `mcp { }` body-authoritative
+// policy enforcement. Without this assertion the core's request handler type-
+// asserts to logical.MCPPolicyEnforced, fails silently, skips body extraction,
+// and any mcp { } block bound to an mcp_aws path becomes a no-op. The unit
+// test in provider_test.go also asserts this at the type level so an
+// accidental refactor that drops the method surfaces as a compile error in
+// the test, not as a quiet over-permission at runtime.
+var _ logical.MCPPolicyEnforced = (*mcpAWSBackend)(nil)
+
+// ShouldEnforceMCPPolicy reports whether this request is subject to mcp { }
+// body-authoritative policy enforcement. The gate matches mcp_github exactly:
+// JSON-RPC POSTs only. GET (SSE reconnect) and DELETE (session close), and
+// any non-JSON Content-Type, decline and pass through under credential-scope-
+// only enforcement (IAM here, PAT scopes for mcp_github).
+//
+// The body cap returned is the backend's MaxBodySize as of THIS call, read
+// through snapshot() to match the rest of the hot path. A config-write that
+// lands between this call and the SigV4 read in handleGateway may produce
+// different caps for the same request; both caps lead to the same correct
+// decision under any operator-set value, so the brief inconsistency is
+// harmless. The lock protects against tearing a torn-read of a partial
+// int64 — not against config-write atomicity across the whole request.
+func (b *mcpAWSBackend) ShouldEnforceMCPPolicy(req *logical.Request) (bool, int64) {
+	if req == nil || req.HTTPRequest == nil {
+		return false, 0
+	}
+	r := req.HTTPRequest
+	if r.Method != http.MethodPost {
+		return false, 0
+	}
+	ct := r.Header.Get("Content-Type")
+	if ct == "" {
+		return false, 0
+	}
+	// Strip a charset / boundary parameter (e.g. "application/json; charset=utf-8")
+	// before comparing to the bare media type.
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	ct = strings.TrimSpace(strings.ToLower(ct))
+	if ct != "application/json" {
+		return false, 0
+	}
+	return true, b.snapshot().maxBody
+}
+
 // DefaultMCPAWSURL is the GA endpoint for AWS's hosted MCP Server.
 const DefaultMCPAWSURL = "https://aws-mcp.us-east-1.api.aws/mcp"
 
