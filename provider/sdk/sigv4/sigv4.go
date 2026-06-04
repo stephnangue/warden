@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -472,6 +473,19 @@ func ForwardDirect(log *logger.GatedLogger, w http.ResponseWriter, r *http.Reque
 
 	resp, err := transport.RoundTrip(outReq)
 	if err != nil {
+		// Client-side cancellation (the inbound r.Context was canceled
+		// before the upstream answered) is not a Warden error. Common
+		// shapes: MCP Streamable HTTP's GET notification stream that
+		// the client opens then disconnects, or a tool-call the user
+		// cancelled mid-flight. Log at Debug and don't write 502 —
+		// the connection is gone, no one's reading the response.
+		if errors.Is(err, context.Canceled) || r.Context().Err() != nil {
+			log.Debug("forward aborted: client closed connection",
+				logger.Err(err),
+				logger.String("request_id", middleware.GetReqID(r.Context())),
+			)
+			return
+		}
 		log.Error("direct forward failed", logger.Err(err))
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
