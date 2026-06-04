@@ -93,8 +93,8 @@ func TestFactory(t *testing.T) {
 	b := setupBackend(t)
 	assert.Equal(t, "gcp", b.Type())
 	assert.Equal(t, logical.ClassProvider, b.Class())
-	assert.Equal(t, framework.DefaultTimeout, b.Timeout)
-	assert.Equal(t, framework.DefaultMaxBodySize, b.MaxBodySize)
+	assert.Equal(t, framework.DefaultTimeout, b.Timeout())
+	assert.Equal(t, framework.DefaultMaxBodySize, b.MaxBodySize())
 }
 
 func TestFactory_WithConfig(t *testing.T) {
@@ -112,9 +112,10 @@ func TestFactory_WithConfig(t *testing.T) {
 	b, err := Factory(ctx, conf)
 	require.NoError(t, err)
 	gb := b.(*gcpBackend)
-	assert.Equal(t, 60.0, gb.Timeout.Seconds())
-	assert.Equal(t, "auth/jwt/", gb.TransparentConfig.AutoAuthPath)
-	assert.Equal(t, "reader", gb.TransparentConfig.DefaultAuthRole)
+	assert.Equal(t, 60.0, gb.Timeout().Seconds())
+	tc := gb.TransparentConfig()
+	assert.Equal(t, "auth/jwt/", tc.AutoAuthPath)
+	assert.Equal(t, "reader", tc.DefaultAuthRole)
 }
 
 func TestFactory_InvalidConfig(t *testing.T) {
@@ -172,10 +173,11 @@ func TestInitialize_ExistingConfig(t *testing.T) {
 	err := b.Initialize(context.Background())
 	require.NoError(t, err)
 
-	assert.Equal(t, int64(5242880), b.MaxBodySize)
-	assert.Equal(t, 30.0, b.Timeout.Seconds())
-	assert.Equal(t, "auth/cert/", b.TransparentConfig.AutoAuthPath)
-	assert.Equal(t, "admin", b.TransparentConfig.DefaultAuthRole)
+	assert.Equal(t, int64(5242880), b.MaxBodySize())
+	assert.Equal(t, 30.0, b.Timeout().Seconds())
+	tc := b.TransparentConfig()
+	assert.Equal(t, "auth/cert/", tc.AutoAuthPath)
+	assert.Equal(t, "admin", tc.DefaultAuthRole)
 }
 
 // --- Config CRUD tests ---

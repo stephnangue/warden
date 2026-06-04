@@ -74,12 +74,12 @@ func (b *proxyBackend) pathConfig() *framework.Path {
 
 // handleConfigRead handles reading the provider configuration.
 func (b *proxyBackend) handleConfigRead(_ context.Context, _ *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	tc := b.TransparentConfig()
 	b.mu.RLock()
-	tc := b.TransparentConfig
 	data := map[string]any{
 		b.spec.URLConfigKey: b.providerURL,
-		"max_body_size":     b.MaxBodySize,
-		"timeout":           b.Timeout.String(),
+		"max_body_size":     b.MaxBodySize(),
+		"timeout":           b.Timeout().String(),
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
 		"tls_skip_verify":   b.tlsSkipVerify,
@@ -154,13 +154,12 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		hasTimeout = true
 	}
 
-	// Transparent mode settings
-	b.mu.RLock()
+	// Transparent mode settings — TransparentConfig() is atomic, no lock needed.
+	current := b.TransparentConfig()
 	tc := &framework.TransparentConfig{
-		AutoAuthPath:    b.TransparentConfig.AutoAuthPath,
-		DefaultAuthRole: b.TransparentConfig.DefaultAuthRole,
+		AutoAuthPath:    current.AutoAuthPath,
+		DefaultAuthRole: current.DefaultAuthRole,
 	}
-	b.mu.RUnlock()
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
 	}
@@ -209,25 +208,29 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		}
 	}
 
-	// All validation passed — apply changes under write lock
+	// Apply framework-side fields atomically (no lock).
+	if hasMaxBodySize {
+		b.SetMaxBodySize(newMaxBodySize)
+	} else if b.MaxBodySize() == 0 {
+		b.SetMaxBodySize(framework.DefaultMaxBodySize)
+	}
+	if hasTimeout {
+		b.SetTimeout(newTimeout)
+	} else if b.Timeout() == 0 {
+		b.SetTimeout(b.spec.DefaultTimeout)
+	}
+
+	// Apply provider-local fields under write lock.
 	b.mu.Lock()
 	if newURL != "" {
 		b.providerURL = newURL
 	}
-	if hasMaxBodySize {
-		b.MaxBodySize = newMaxBodySize
-	} else if b.MaxBodySize == 0 {
-		b.MaxBodySize = framework.DefaultMaxBodySize
-	}
-	if hasTimeout {
-		b.Timeout = newTimeout
-	} else if b.Timeout == 0 {
-		b.Timeout = b.spec.DefaultTimeout
-	}
 	if tlsChanged {
 		b.tlsSkipVerify = newSkipVerify
 		b.caData = newCAData
-		b.Proxy.Transport = newTransport
+	}
+	if tlsChanged {
+		b.SetTransport(newTransport)
 	}
 
 	b.StreamingBackend.SetTransparentConfig(tc)
@@ -251,8 +254,8 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 	// Snapshot config for persistence while still holding the lock
 	configData := map[string]any{
 		b.spec.URLConfigKey: b.providerURL,
-		"max_body_size":     b.MaxBodySize,
-		"timeout":           b.Timeout.String(),
+		"max_body_size":     b.MaxBodySize(),
+		"timeout":           b.Timeout().String(),
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
 		"tls_skip_verify":   b.tlsSkipVerify,

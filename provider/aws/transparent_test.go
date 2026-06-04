@@ -99,10 +99,9 @@ func TestValidateConfig_TransparentFields(t *testing.T) {
 
 func TestTransparentConfig_SetAndRead(t *testing.T) {
 	b := &awsBackend{
-		StreamingBackend: &framework.StreamingBackend{
-			TransparentConfig: &framework.TransparentConfig{},
-		},
+		StreamingBackend: &framework.StreamingBackend{},
 	}
+	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{})
 
 	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 		AutoAuthPath:    "auth/jwt/",

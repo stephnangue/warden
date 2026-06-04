@@ -18,9 +18,9 @@ import (
 
 func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Apply timeout if configured
-	if b.Timeout > 0 {
+	if b.Timeout() > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, b.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, b.Timeout())
 		defer cancel()
 		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
 	}
@@ -48,7 +48,7 @@ func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Forward directly via transport, bypassing httputil.ReverseProxy which
 	// modifies headers (hop-by-hop cleanup, header reordering) and breaks
 	// AWS signatures.
-	transport := b.Proxy.Transport
+	transport := b.Transport()
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
@@ -59,7 +59,7 @@ func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 // Returns the prepared request and body bytes to forward.
 func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (*http.Request, []byte, error) {
 	// Step 1: Read and buffer request body
-	bodyBytes, err := sigv4.ReadRequestBody(req.HTTPRequest, b.MaxBodySize)
+	bodyBytes, err := sigv4.ReadRequestBody(req.HTTPRequest, b.MaxBodySize())
 	if err != nil {
 		http.Error(req.ResponseWriter, "Failed to read request body", http.StatusBadRequest)
 		return nil, nil, err

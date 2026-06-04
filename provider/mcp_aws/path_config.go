@@ -68,14 +68,14 @@ func (b *mcpAWSBackend) pathConfig() *framework.Path {
 }
 
 func (b *mcpAWSBackend) handleConfigRead(_ context.Context, _ *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	tc := b.TransparentConfig()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	tc := b.TransparentConfig
 	data := map[string]any{
 		"region":          b.region,
-		"max_body_size":   b.MaxBodySize,
-		"timeout":         b.Timeout.String(),
+		"max_body_size":   b.MaxBodySize(),
+		"timeout":         b.Timeout().String(),
 		"auto_auth_path":  tc.AutoAuthPath,
 		"default_role":    tc.DefaultAuthRole,
 		"tls_skip_verify": b.tlsSkipVerify,
@@ -154,12 +154,12 @@ func (b *mcpAWSBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 // mcp_aws_url correctly re-infers from the new host instead of carrying the
 // stale resolved region forward.
 func (b *mcpAWSBackend) snapshotForMerge() map[string]any {
+	tc := b.TransparentConfig()
 	b.mu.RLock()
-	tc := b.TransparentConfig
 	conf := map[string]any{
 		"region":          b.configRegion,
-		"max_body_size":   b.MaxBodySize,
-		"timeout":         b.Timeout.String(),
+		"max_body_size":   b.MaxBodySize(),
+		"timeout":         b.Timeout().String(),
 		"auto_auth_path":  tc.AutoAuthPath,
 		"default_role":    tc.DefaultAuthRole,
 		"tls_skip_verify": b.tlsSkipVerify,

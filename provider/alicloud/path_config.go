@@ -64,12 +64,12 @@ func (b *alicloudBackend) handleConfigRead(ctx context.Context, req *logical.Req
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	tc := b.TransparentConfig
+	tc := b.TransparentConfig()
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"max_body_size":   b.MaxBodySize,
-			"timeout":         b.Timeout.String(),
+			"max_body_size":   b.MaxBodySize(),
+			"timeout":         b.Timeout().String(),
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 			"tls_skip_verify": b.tlsSkipVerify,
@@ -108,8 +108,8 @@ func (b *alicloudBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 
 	b.mu.RLock()
 	tc := &framework.TransparentConfig{
-		AutoAuthPath:    b.TransparentConfig.AutoAuthPath,
-		DefaultAuthRole: b.TransparentConfig.DefaultAuthRole,
+		AutoAuthPath:    b.TransparentConfig().AutoAuthPath,
+		DefaultAuthRole: b.TransparentConfig().DefaultAuthRole,
 	}
 	b.mu.RUnlock()
 
@@ -128,8 +128,8 @@ func (b *alicloudBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 	}
 
 	b.mu.Lock()
-	b.MaxBodySize = parsed.MaxBodySize
-	b.Timeout = parsed.Timeout
+	b.SetMaxBodySize(parsed.MaxBodySize)
+	b.SetTimeout(parsed.Timeout)
 	b.tlsSkipVerify = parsed.TLSSkipVerify
 	b.caData = parsed.CAData
 	b.proxyDomains = parsed.ProxyDomains
@@ -146,13 +146,13 @@ func (b *alicloudBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 				Err:        err,
 			}, nil
 		}
-		b.Proxy.Transport = transport
+		b.SetTransport(transport)
 	}
 
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"max_body_size":   b.MaxBodySize,
-			"timeout":         b.Timeout.String(),
+			"max_body_size":   b.MaxBodySize(),
+			"timeout":         b.Timeout().String(),
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 			"tls_skip_verify": b.tlsSkipVerify,

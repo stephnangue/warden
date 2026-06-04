@@ -10,12 +10,11 @@ import (
 
 func TestTransparentModeProvider_ViaStreamingBackend(t *testing.T) {
 	// Create a StreamingBackend with TransparentConfig (mimics what vaultBackend uses)
-	sb := &framework.StreamingBackend{
-		TransparentConfig: &framework.TransparentConfig{
-			AutoAuthPath:    "auth/jwt/",
-			DefaultAuthRole: "default-role",
-		},
-	}
+	sb := &framework.StreamingBackend{}
+	sb.SetTransparentConfig(&framework.TransparentConfig{
+		AutoAuthPath:    "auth/jwt/",
+		DefaultAuthRole: "default-role",
+	})
 
 	// Test IsTransparentMode
 	t.Run("IsTransparentMode returns true when enabled", func(t *testing.T) {
@@ -39,12 +38,11 @@ func TestTransparentModeProvider_ViaStreamingBackend(t *testing.T) {
 }
 
 func TestGetAuthRole_ViaStreamingBackend(t *testing.T) {
-	sb := &framework.StreamingBackend{
-		TransparentConfig: &framework.TransparentConfig{
-			AutoAuthPath:    "auth/jwt/",
-			DefaultAuthRole: "default-role",
-		},
-	}
+	sb := &framework.StreamingBackend{}
+	sb.SetTransparentConfig(&framework.TransparentConfig{
+		AutoAuthPath:    "auth/jwt/",
+		DefaultAuthRole: "default-role",
+	})
 
 	tests := []struct {
 		name         string
@@ -99,12 +97,11 @@ func TestGetAuthRole_ViaStreamingBackend(t *testing.T) {
 }
 
 func TestGetAuthRole_NoDefaultAuthRole(t *testing.T) {
-	sb := &framework.StreamingBackend{
-		TransparentConfig: &framework.TransparentConfig{
-			AutoAuthPath:    "auth/jwt/",
-			DefaultAuthRole: "", // No default role
-		},
-	}
+	sb := &framework.StreamingBackend{}
+	sb.SetTransparentConfig(&framework.TransparentConfig{
+		AutoAuthPath:    "auth/jwt/",
+		DefaultAuthRole: "", // No default role
+	})
 
 	t.Run("returns empty for non-matching path without default", func(t *testing.T) {
 		result := sb.GetAuthRole("gateway/v1/secret/data/foo", nil)
@@ -118,9 +115,8 @@ func TestGetAuthRole_NoDefaultAuthRole(t *testing.T) {
 }
 
 func TestRewriteTransparentPath_ViaStreamingBackend(t *testing.T) {
-	sb := &framework.StreamingBackend{
-		TransparentConfig: &framework.TransparentConfig{},
-	}
+	sb := &framework.StreamingBackend{}
+	sb.SetTransparentConfig(&framework.TransparentConfig{})
 
 	tests := []struct {
 		name     string

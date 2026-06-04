@@ -68,10 +68,6 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				HelpDescription: "Proxies requests to Google Cloud APIs with role embedded in URL path",
 			},
 		},
-		TransparentConfig: &framework.TransparentConfig{
-			AutoAuthPath:    "",
-			DefaultAuthRole: "",
-		},
 		Backend: &framework.Backend{
 			Help:           gcpBackendHelp,
 			BackendType:    "gcp",
@@ -84,6 +80,10 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	// Set common fields
 	b.Logger = conf.Logger.WithSubsystem("gcp")
 	b.StorageView = conf.StorageView
+
+	// Seed an empty transparent config so isTransparentRequest can route
+	// once auto_auth_path is configured via handleConfigWrite.
+	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{})
 
 	// Initialize reverse proxy with GCP transport (lazily created on first use)
 	initTransport()
@@ -99,8 +99,8 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	}
 
 	// Set defaults
-	b.MaxBodySize = framework.DefaultMaxBodySize
-	b.Timeout = framework.DefaultTimeout
+	b.SetMaxBodySize(framework.DefaultMaxBodySize)
+	b.SetTimeout(framework.DefaultTimeout)
 
 	// Apply configuration if provided
 	if len(conf.Config) > 0 {
@@ -108,8 +108,8 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			return nil, fmt.Errorf("invalid configuration: %w", err)
 		}
 		parsedConfig := parseConfig(conf.Config)
-		b.MaxBodySize = parsedConfig.MaxBodySize
-		b.Timeout = parsedConfig.Timeout
+		b.SetMaxBodySize(parsedConfig.MaxBodySize)
+		b.SetTimeout(parsedConfig.Timeout)
 		b.tlsSkipVerify = parsedConfig.TLSSkipVerify
 		b.caData = parsedConfig.CAData
 
@@ -118,7 +118,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			if err != nil {
 				return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 			}
-			b.Proxy.Transport = transport
+			b.SetTransport(transport)
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
@@ -153,12 +153,12 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 		if err := entry.DecodeJSON(&config); err != nil {
 			return fmt.Errorf("failed to decode config: %w", err)
 		}
-		b.MaxBodySize = config.MaxBodySize
+		b.SetMaxBodySize(config.MaxBodySize)
 		b.tlsSkipVerify = config.TLSSkipVerify
 		b.caData = config.CAData
 		if config.Timeout != "" {
 			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
-				b.Timeout = timeout
+				b.SetTimeout(timeout)
 			}
 		}
 
@@ -167,7 +167,7 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("invalid TLS configuration: %w", err)
 			}
-			b.Proxy.Transport = transport
+			b.SetTransport(transport)
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
@@ -177,10 +177,10 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 	} else {
 		// No persisted config — persist the defaults so a newly enabled
 		// GCP provider is immediately configured and readable.
-		tc := b.TransparentConfig
+		tc := b.TransparentConfig()
 		defaultEntry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"max_body_size":   b.MaxBodySize,
-			"timeout":         b.Timeout.String(),
+			"max_body_size":   b.MaxBodySize(),
+			"timeout":         b.Timeout().String(),
 			"tls_skip_verify": b.tlsSkipVerify,
 			"ca_data":         b.caData,
 			"auto_auth_path":  tc.AutoAuthPath,

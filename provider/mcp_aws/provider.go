@@ -153,10 +153,6 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				HelpDescription: "Proxies MCP traffic with the role embedded in the URL path.",
 			},
 		},
-		TransparentConfig: &framework.TransparentConfig{
-			AutoAuthPath:    "",
-			DefaultAuthRole: "",
-		},
 		// ParseStreamBody intentionally left at false. MCP-enforcing specs
 		// must not pre-parse the body — the core's MCP extractor reads the
 		// body itself when ShouldEnforceMCPPolicy returns true.
@@ -184,9 +180,13 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		return nil, err
 	}
 
+	// Seed an empty transparent config so isTransparentRequest can route
+	// once auto_auth_path is configured via handleConfigWrite.
+	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{})
+
 	// Defaults until Initialize loads persisted config.
-	b.MaxBodySize = framework.DefaultMaxBodySize
-	b.Timeout = DefaultMCPAWSTimeout
+	b.SetMaxBodySize(framework.DefaultMaxBodySize)
+	b.SetTimeout(DefaultMCPAWSTimeout)
 	if u, err := url.Parse(DefaultMCPAWSURL); err == nil {
 		b.upstreamURL = u
 		_, b.region = serviceAndRegion(u)
@@ -280,10 +280,12 @@ func (b *mcpAWSBackend) applyParsedConfig(conf map[string]any) (map[string]any, 
 	b.region = resolvedRegion
 	b.tlsSkipVerify = parsed.TLSSkipVerify
 	b.caData = parsed.CAData
-	b.MaxBodySize = maxBody
-	b.Timeout = timeout
-	b.Proxy.Transport = newTransport
 	b.mu.Unlock()
+
+	// Framework-side fields are atomic; no lock needed.
+	b.SetMaxBodySize(maxBody)
+	b.SetTimeout(timeout)
+	b.SetTransport(newTransport)
 
 	// SetTransparentConfig is the framework's own writer; it does its own
 	// pointer swap on b.TransparentConfig. Concurrent readers see either the
@@ -342,13 +344,16 @@ type backendSnapshot struct {
 
 func (b *mcpAWSBackend) snapshot() backendSnapshot {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
+	upstream := b.upstreamURL
+	region := b.region
+	b.mu.RUnlock()
+	// Framework-side fields are atomic; no lock needed.
 	return backendSnapshot{
-		upstreamURL: b.upstreamURL,
-		region:      b.region,
-		maxBody:     b.MaxBodySize,
-		timeout:     b.Timeout,
-		transport:   b.Proxy.Transport,
+		upstreamURL: upstream,
+		region:      region,
+		maxBody:     b.MaxBodySize(),
+		timeout:     b.Timeout(),
+		transport:   b.Transport(),
 	}
 }
 

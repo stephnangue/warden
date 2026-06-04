@@ -61,12 +61,12 @@ func (b *gcpBackend) pathConfig() *framework.Path {
 
 // handleConfigRead handles reading the GCP provider configuration
 func (b *gcpBackend) handleConfigRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	tc := b.TransparentConfig
+	tc := b.TransparentConfig()
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"max_body_size":   b.MaxBodySize,
-			"timeout":         b.Timeout.String(),
+			"max_body_size":   b.MaxBodySize(),
+			"timeout":         b.Timeout().String(),
 			"tls_skip_verify": b.tlsSkipVerify,
 			"ca_data":         b.caData,
 			"auto_auth_path":  tc.AutoAuthPath,
@@ -79,17 +79,17 @@ func (b *gcpBackend) handleConfigRead(ctx context.Context, req *logical.Request,
 func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	// For max_body_size: use provided value, or apply default if not yet set
 	if val, ok := d.GetOk("max_body_size"); ok {
-		b.MaxBodySize = val.(int64)
-	} else if b.MaxBodySize == 0 {
-		b.MaxBodySize = framework.DefaultMaxBodySize
+		b.SetMaxBodySize(val.(int64))
+	} else if b.MaxBodySize() == 0 {
+		b.SetMaxBodySize(framework.DefaultMaxBodySize)
 	}
 
 	// For timeout: use provided value, or apply default if not yet set
 	if val, ok := d.GetOk("timeout"); ok {
 		// TypeDurationSecond returns int (seconds)
-		b.Timeout = time.Duration(val.(int)) * time.Second
-	} else if b.Timeout == 0 {
-		b.Timeout = framework.DefaultTimeout
+		b.SetTimeout(time.Duration(val.(int)) * time.Second)
+	} else if b.Timeout() == 0 {
+		b.SetTimeout(framework.DefaultTimeout)
 	}
 
 	// Handle TLS settings
@@ -118,17 +118,17 @@ func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 					Err:        logical.ErrBadRequest(err.Error()),
 				}, nil
 			}
-			b.Proxy.Transport = transport
+			b.SetTransport(transport)
 		} else {
 			initTransport()
-			b.Proxy.Transport = sharedTransport
+			b.SetTransport(sharedTransport)
 		}
 	}
 
 	// Transparent mode settings — build new config from current values + overrides
 	tc := &framework.TransparentConfig{
-		AutoAuthPath:    b.TransparentConfig.AutoAuthPath,
-		DefaultAuthRole: b.TransparentConfig.DefaultAuthRole,
+		AutoAuthPath:    b.TransparentConfig().AutoAuthPath,
+		DefaultAuthRole: b.TransparentConfig().DefaultAuthRole,
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -150,8 +150,8 @@ func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"max_body_size":   b.MaxBodySize,
-			"timeout":         b.Timeout.String(),
+			"max_body_size":   b.MaxBodySize(),
+			"timeout":         b.Timeout().String(),
 			"tls_skip_verify": b.tlsSkipVerify,
 			"ca_data":         b.caData,
 			"auto_auth_path":  tc.AutoAuthPath,
