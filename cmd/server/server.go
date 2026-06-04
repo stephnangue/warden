@@ -58,6 +58,7 @@ import (
 	"github.com/stephnangue/warden/provider/ibmcloud"
 	"github.com/stephnangue/warden/provider/kubernetes"
 	mcp_aws "github.com/stephnangue/warden/provider/mcp_aws"
+	mcp_gcp "github.com/stephnangue/warden/provider/mcp_gcp"
 	mcp_github "github.com/stephnangue/warden/provider/mcp_github"
 	"github.com/stephnangue/warden/provider/mistral"
 	"github.com/stephnangue/warden/provider/newrelic"
@@ -165,6 +166,7 @@ Usage: warden server [options]
 		"github":        github.Factory,
 		"gitlab":        gitlab.Factory,
 		"mcp_aws":       mcp_aws.Factory,
+		"mcp_gcp":       mcp_gcp.Factory,
 		"mcp_github":    mcp_github.Factory,
 		"mistral":       mistral.Factory,
 		"newrelic":      newrelic.Factory,
@@ -196,6 +198,7 @@ Usage: warden server [options]
 		"github":        github.Skill(),
 		"gitlab":        gitlab.Skill(),
 		"mcp_aws":       mcp_aws.Skill(),
+		"mcp_gcp":       mcp_gcp.Skill(),
 		"mcp_github":    mcp_github.Skill(),
 		"openai":        openai.Skill(),
 		"rds":           rds.Skill(),

@@ -112,6 +112,14 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 
 // buildTargetURL constructs the target URL from the gateway path.
 func buildTargetURL(providerURL, path, rawQuery string) (string, error) {
+	// Providers whose upstream is instance-specific (gitlab, kubernetes,
+	// splunk, mcp_gcp, ...) ship an empty DefaultURL and require the operator
+	// to configure one. Guard here so a request to an unconfigured mount fails
+	// with a clear, logged error instead of forwarding to a schemeless URL
+	// that surfaces as an opaque proxy-level 502.
+	if providerURL == "" {
+		return "", fmt.Errorf("upstream URL not configured")
+	}
 	apiPath, ok := PathAfterGateway(path)
 	if !ok {
 		return "", fmt.Errorf("invalid gateway path: %s", path)
