@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
@@ -143,6 +144,41 @@ func (b *SystemBackend) pathCredentials() []*framework.Path {
 			},
 			HelpSynopsis:    "List credential specs",
 			HelpDescription: "List all credential specs in the current namespace.",
+		},
+		// OAuth2 authorization-code connect flow (stateless two-call handshake).
+		{
+			Pattern: "cred/specs/" + framework.GenericNameRegex("name") + "/authorize",
+			Fields: map[string]*framework.FieldSchema{
+				"name":           {Type: framework.TypeString, Required: true},
+				"redirect_uri":   {Type: framework.TypeString, Required: true},
+				"state":          {Type: framework.TypeString},
+				"code_challenge": {Type: framework.TypeString},
+			},
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.CreateOperation: &framework.PathOperation{
+					Callback: b.handleCredentialSpecAuthorize,
+					Summary:  "Build the OAuth2 authorize URL for a spec's connect flow",
+				},
+			},
+			HelpSynopsis:    "Build the authorize URL for cred spec connect",
+			HelpDescription: "Returns the provider authorize URL. The server holds no state between this call and /connect; the CLI supplies state and the PKCE code_challenge.",
+		},
+		{
+			Pattern: "cred/specs/" + framework.GenericNameRegex("name") + "/connect",
+			Fields: map[string]*framework.FieldSchema{
+				"name":          {Type: framework.TypeString, Required: true},
+				"code":          {Type: framework.TypeString, Required: true},
+				"redirect_uri":  {Type: framework.TypeString, Required: true},
+				"code_verifier": {Type: framework.TypeString},
+			},
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.CreateOperation: &framework.PathOperation{
+					Callback: b.handleCredentialSpecConnect,
+					Summary:  "Exchange an authorization code and seal the credential",
+				},
+			},
+			HelpSynopsis:    "Complete cred spec connect by exchanging the authorization code",
+			HelpDescription: "Exchanges the authorization code for tokens using the client secret the server holds, then seals the result into the spec.",
 		},
 	}
 }
@@ -599,7 +635,14 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 	}
 
 	// Update via credential config store
-	if err := b.core.credConfigStore.UpdateSpec(ctx, updatedSpec); err != nil {
+	// For a connected connect-gated spec (e.g. OAuth2 authorization_code), skip the
+	// validation test-mint: it would consume/rotate the sealed refresh token on an
+	// unrelated edit. Re-run `cred spec connect` to re-verify.
+	var opts []UpdateSpecOptions
+	if b.specRequiresConnect(updatedSpec) && b.specIsConnected(updatedSpec) {
+		opts = append(opts, UpdateSpecOptions{SkipVerification: true})
+	}
+	if err := b.core.credConfigStore.UpdateSpec(ctx, updatedSpec, opts...); err != nil {
 		return logical.ErrorResponse(err), nil
 	}
 
@@ -607,6 +650,177 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		"name":    updatedSpec.Name,
 		"message": fmt.Sprintf("Successfully updated credential spec %s", name),
 	}), nil
+}
+
+// handleCredentialSpecAuthorize handles POST /sys/cred/specs/{name}/authorize.
+// It returns the provider authorize URL for the spec's OAuth2 connect flow.
+func (b *SystemBackend) handleCredentialSpecAuthorize(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	name := d.Get("name").(string)
+	redirectURI := d.Get("redirect_uri").(string)
+	state := d.Get("state").(string)
+	codeChallenge := d.Get("code_challenge").(string)
+
+	spec, authorizer, errResp := b.oauth2SpecAuthorizer(ctx, name)
+	if errResp != nil {
+		return errResp, nil
+	}
+	if err := validateConnectRedirectURI(spec, redirectURI); err != nil {
+		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
+	}
+
+	authorizeURL, err := authorizer.BuildAuthorizeURL(spec, redirectURI, state, codeChallenge)
+	if err != nil {
+		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
+	}
+
+	return b.respondSuccess(map[string]any{
+		"name":          name,
+		"authorize_url": authorizeURL,
+	}), nil
+}
+
+// handleCredentialSpecConnect handles POST /sys/cred/specs/{name}/connect. It
+// exchanges the authorization code (using the client secret the server holds) and
+// seals the returned tokens into the spec. Re-runnable to re-authorize.
+func (b *SystemBackend) handleCredentialSpecConnect(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	name := d.Get("name").(string)
+	code := d.Get("code").(string)
+	redirectURI := d.Get("redirect_uri").(string)
+	codeVerifier := d.Get("code_verifier").(string)
+
+	if code == "" {
+		return logical.ErrorResponse(logical.ErrBadRequest("code is required")), nil
+	}
+
+	spec, authorizer, errResp := b.oauth2SpecAuthorizer(ctx, name)
+	if errResp != nil {
+		return errResp, nil
+	}
+	if err := validateConnectRedirectURI(spec, redirectURI); err != nil {
+		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
+	}
+
+	reconnected := b.specIsConnected(spec)
+
+	sealed, err := authorizer.ExchangeAuthorizationCode(ctx, spec, code, redirectURI, codeVerifier)
+	if err != nil {
+		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
+	}
+
+	// Seal the returned keys into a copy of the spec config.
+	updated := &credential.CredSpec{
+		Name:           spec.Name,
+		Type:           spec.Type,
+		Source:         spec.Source,
+		MinTTL:         spec.MinTTL,
+		MaxTTL:         spec.MaxTTL,
+		RotationPeriod: spec.RotationPeriod,
+		Config:         make(map[string]string, len(spec.Config)+len(sealed)),
+	}
+	for k, v := range spec.Config {
+		updated.Config[k] = v
+	}
+	for k, v := range sealed {
+		updated.Config[k] = v
+	}
+
+	// Skip verification: the exchange is itself the verification, and re-minting
+	// would consume/rotate the just-sealed refresh token.
+	if err := b.core.credConfigStore.UpdateSpec(ctx, updated, UpdateSpecOptions{SkipVerification: true}); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+
+	msg := fmt.Sprintf("Successfully connected credential spec %s", name)
+	if reconnected {
+		msg = fmt.Sprintf("Successfully re-connected credential spec %s (replaced the existing authorization)", name)
+	}
+	return b.respondSuccess(map[string]any{
+		"name":        name,
+		"connected":   true,
+		"reconnected": reconnected,
+		"message":     msg,
+	}), nil
+}
+
+// oauth2SpecAuthorizer loads a connect-gated spec and its OAuth2Authorizer driver,
+// returning an error response if the spec is missing, isn't connect-gated, or the
+// source driver doesn't support the authorization-code flow.
+func (b *SystemBackend) oauth2SpecAuthorizer(ctx context.Context, name string) (*credential.CredSpec, credential.OAuth2Authorizer, *logical.Response) {
+	spec, err := b.core.credConfigStore.GetSpec(ctx, name)
+	if err != nil {
+		if errors.Is(err, ErrSpecNotFound) {
+			return nil, nil, logical.ErrorResponse(logical.ErrNotFoundf("credential spec %q not found", name))
+		}
+		return nil, nil, logical.ErrorResponse(err)
+	}
+	if !b.specRequiresConnect(spec) {
+		return nil, nil, logical.ErrorResponse(logical.ErrBadRequestf("credential spec %q does not use an interactive connect flow", name))
+	}
+	driver, err := b.core.credentialManager.GetOrCreateDriver(ctx, spec.Source)
+	if err != nil {
+		return nil, nil, logical.ErrorResponse(err)
+	}
+	authorizer, ok := driver.(credential.OAuth2Authorizer)
+	if !ok {
+		return nil, nil, logical.ErrorResponse(logical.ErrBadRequestf("source %q does not support the OAuth2 authorization-code flow", spec.Source))
+	}
+	return spec, authorizer, nil
+}
+
+// specRequiresConnect / specIsConnected query the credential type's optional
+// ConnectGated interface.
+func (b *SystemBackend) specRequiresConnect(spec *credential.CredSpec) bool {
+	if cg := b.connectGatedType(spec.Type); cg != nil {
+		return cg.RequiresConnect(spec.Config)
+	}
+	return false
+}
+
+func (b *SystemBackend) specIsConnected(spec *credential.CredSpec) bool {
+	if cg := b.connectGatedType(spec.Type); cg != nil {
+		return cg.IsConnected(spec.Config)
+	}
+	return false
+}
+
+func (b *SystemBackend) connectGatedType(specType string) credential.ConnectGated {
+	if b.core.credentialTypeRegistry == nil {
+		return nil
+	}
+	ct, err := b.core.credentialTypeRegistry.GetByName(specType)
+	if err != nil {
+		return nil
+	}
+	cg, _ := ct.(credential.ConnectGated)
+	return cg
+}
+
+// validateConnectRedirectURI enforces the loopback redirect: if the spec pins a
+// redirect_uri, require an exact match; otherwise require a 127.0.0.1/::1 loopback
+// URL (any port — the ephemeral case).
+func validateConnectRedirectURI(spec *credential.CredSpec, redirectURI string) error {
+	if redirectURI == "" {
+		return fmt.Errorf("redirect_uri is required")
+	}
+	if pinned := spec.Config["redirect_uri"]; pinned != "" {
+		if redirectURI != pinned {
+			return fmt.Errorf("redirect_uri %q does not match the spec's pinned redirect_uri", redirectURI)
+		}
+		return nil
+	}
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		return fmt.Errorf("invalid redirect_uri: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("redirect_uri must use the http or https scheme")
+	}
+	switch u.Hostname() {
+	case "127.0.0.1", "::1":
+		return nil
+	default:
+		return fmt.Errorf("redirect_uri must be a 127.0.0.1 or ::1 loopback address")
+	}
 }
 
 // handleCredentialSpecDelete handles DELETE /sys/cred/specs/{name}

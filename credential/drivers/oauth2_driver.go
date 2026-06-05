@@ -323,7 +323,7 @@ func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credentia
 	}
 
 	rawData := accessTokenRawData(tokenResp)
-	// Surface a rotated refresh token for the minting layer to persist (§5).
+	// Surface a rotated refresh token for the minting layer to persist.
 	if tokenResp.RefreshToken != "" && tokenResp.RefreshToken != refreshToken {
 		rawData[credential.RawRotatedRefreshTokenKey] = tokenResp.RefreshToken
 	}

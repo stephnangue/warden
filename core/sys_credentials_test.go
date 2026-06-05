@@ -2,7 +2,10 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stephnangue/warden/framework"
@@ -40,7 +43,7 @@ func TestSystemBackend_PathCredentials(t *testing.T) {
 	backend, _, _ := setupTestSystemBackend(t)
 
 	paths := backend.pathCredentials()
-	require.Len(t, paths, 4) // sources CRUD, sources list, specs CRUD, specs list
+	require.Len(t, paths, 6) // sources CRUD, sources list, specs CRUD, specs list, specs authorize, specs connect
 
 	// Check sources/{name} path
 	assert.Equal(t, "cred/sources/"+framework.GenericNameRegex("name"), paths[0].Pattern)
@@ -53,6 +56,10 @@ func TestSystemBackend_PathCredentials(t *testing.T) {
 
 	// Check specs/ list path
 	assert.Equal(t, "cred/specs/?$", paths[3].Pattern)
+
+	// Check specs connect-flow paths
+	assert.Equal(t, "cred/specs/"+framework.GenericNameRegex("name")+"/authorize", paths[4].Pattern)
+	assert.Equal(t, "cred/specs/"+framework.GenericNameRegex("name")+"/connect", paths[5].Pattern)
 }
 
 func TestSystemBackend_HandleCredentialSourceCreate(t *testing.T) {
@@ -522,4 +529,196 @@ func TestSystemBackend_HandleCredentialSpecList(t *testing.T) {
 	specs, ok := resp.Data["specs"].([]map[string]any)
 	require.True(t, ok)
 	assert.Len(t, specs, 3)
+}
+
+// =============================================================================
+// OAuth2 connect endpoints
+// =============================================================================
+
+// createOAuth2Source creates an oauth2 source with the given auth/token URLs.
+func createOAuth2Source(t *testing.T, backend *SystemBackend, ctx context.Context, name, authURL, tokenURL string, tlsSkipVerify bool) {
+	t.Helper()
+	cfg := map[string]interface{}{"auth_url": authURL, "token_url": tokenURL}
+	if tlsSkipVerify {
+		cfg["tls_skip_verify"] = "true"
+	}
+	raw := map[string]interface{}{"name": name, "type": "oauth2", "config": cfg, "rotation_period": 0}
+	schema := backend.pathCredentials()[0].Fields
+	resp, err := backend.handleCredentialSourceCreate(ctx, createTestRequest(logical.CreateOperation, "cred/sources/"+name, raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "source create: %+v", resp.Data)
+}
+
+// createAuthCodeSpec creates an empty authorization_code spec.
+func createAuthCodeSpec(t *testing.T, backend *SystemBackend, ctx context.Context, name, source string, extraConfig map[string]string) {
+	t.Helper()
+	cfg := map[string]interface{}{"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret"}
+	for k, v := range extraConfig {
+		cfg[k] = v
+	}
+	raw := map[string]interface{}{"name": name, "type": "oauth_bearer_token", "source": source, "config": cfg}
+	schema := backend.pathCredentials()[2].Fields
+	resp, err := backend.handleCredentialSpecCreate(ctx, createTestRequest(logical.CreateOperation, "cred/specs/"+name, raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "spec create: %+v", resp.Data)
+}
+
+func TestSystemBackend_HandleCredentialSpecAuthorize(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	createOAuth2Source(t, backend, ctx, "gh-src", "https://github.com/login/oauth/authorize", "https://github.com/login/oauth/access_token", false)
+	createAuthCodeSpec(t, backend, ctx, "gh", "gh-src", map[string]string{"scopes": "repo,read:org"})
+
+	schema := backend.pathCredentials()[4].Fields // .../authorize
+	raw := map[string]interface{}{
+		"name":           "gh",
+		"redirect_uri":   "http://127.0.0.1:8765/callback",
+		"state":          "the-state",
+		"code_challenge": "the-challenge",
+	}
+	resp, err := backend.handleCredentialSpecAuthorize(ctx, createTestRequest(logical.CreateOperation, "cred/specs/gh/authorize", raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.Nil(t, resp.Err, "authorize error: %+v", resp.Data)
+
+	authorizeURL, _ := resp.Data["authorize_url"].(string)
+	u, err := url.Parse(authorizeURL)
+	require.NoError(t, err)
+	assert.Equal(t, "github.com", u.Host)
+	q := u.Query()
+	assert.Equal(t, "code", q.Get("response_type"))
+	assert.Equal(t, "cid", q.Get("client_id"))
+	assert.Equal(t, "http://127.0.0.1:8765/callback", q.Get("redirect_uri"))
+	assert.Equal(t, "the-state", q.Get("state"))
+	assert.Equal(t, "repo read:org", q.Get("scope"))
+	assert.Equal(t, "the-challenge", q.Get("code_challenge"))
+}
+
+func TestSystemBackend_HandleCredentialSpecAuthorize_NotConnectGated(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	createOAuth2Source(t, backend, ctx, "cc-src", "https://idp/authorize", "https://idp/token", false)
+	// A client_credentials spec is not connect-gated.
+	raw := map[string]interface{}{"name": "cc", "type": "oauth_bearer_token", "source": "cc-src", "config": map[string]interface{}{"client_id": "x", "client_secret": "y"}}
+	createResp, err := backend.handleCredentialSpecCreate(ctx, createTestRequest(logical.CreateOperation, "cred/specs/cc", raw), createFieldData(backend.pathCredentials()[2].Fields, raw))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, createResp.StatusCode, "%+v", createResp.Data)
+
+	schema := backend.pathCredentials()[4].Fields
+	areq := map[string]interface{}{"name": "cc", "redirect_uri": "http://127.0.0.1:1/callback"}
+	resp, err := backend.handleCredentialSpecAuthorize(ctx, createTestRequest(logical.CreateOperation, "cred/specs/cc/authorize", areq), createFieldData(schema, areq))
+	require.NoError(t, err)
+	require.NotNil(t, resp.Err)
+	assert.Contains(t, resp.Err.Error(), "does not use an interactive connect flow")
+}
+
+func TestSystemBackend_HandleCredentialSpecAuthorize_BadRedirectURI(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	createOAuth2Source(t, backend, ctx, "gh-src", "https://github.com/login/oauth/authorize", "https://github.com/login/oauth/access_token", false)
+	createAuthCodeSpec(t, backend, ctx, "gh", "gh-src", nil)
+
+	schema := backend.pathCredentials()[4].Fields
+	raw := map[string]interface{}{"name": "gh", "redirect_uri": "https://evil.example.com/callback"} // not loopback
+	resp, err := backend.handleCredentialSpecAuthorize(ctx, createTestRequest(logical.CreateOperation, "cred/specs/gh/authorize", raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, resp.Err)
+	assert.Contains(t, resp.Err.Error(), "loopback")
+}
+
+func TestSystemBackend_HandleCredentialSpecConnect(t *testing.T) {
+	// Mock token endpoint returns a refresh token.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, "authorization_code", r.Form.Get("grant_type"))
+		assert.Equal(t, "the-code", r.Form.Get("code"))
+		assert.Equal(t, "csecret", r.Form.Get("client_secret")) // server holds the secret
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "at", "refresh_token": "rt-sealed", "expires_in": 28800})
+	}))
+	defer server.Close()
+
+	backend, ctx, _ := setupTestSystemBackend(t)
+	createOAuth2Source(t, backend, ctx, "gh-src", "https://github.com/login/oauth/authorize", server.URL, true)
+	createAuthCodeSpec(t, backend, ctx, "gh", "gh-src", nil)
+
+	schema := backend.pathCredentials()[5].Fields // .../connect
+	raw := map[string]interface{}{
+		"name":          "gh",
+		"code":          "the-code",
+		"redirect_uri":  "http://127.0.0.1:8765/callback",
+		"code_verifier": "the-verifier",
+	}
+	resp, err := backend.handleCredentialSpecConnect(ctx, createTestRequest(logical.CreateOperation, "cred/specs/gh/connect", raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.Nil(t, resp.Err, "connect error: %+v", resp.Data)
+	assert.Equal(t, true, resp.Data["connected"])
+	assert.Equal(t, false, resp.Data["reconnected"])
+
+	// The refresh token is sealed into the spec.
+	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
+	require.NoError(t, err)
+	assert.Equal(t, "rt-sealed", spec.Config["refresh_token"])
+
+	// Re-running reports reconnected=true.
+	resp2, err := backend.handleCredentialSpecConnect(ctx, createTestRequest(logical.CreateOperation, "cred/specs/gh/connect", raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.Nil(t, resp2.Err)
+	assert.Equal(t, true, resp2.Data["reconnected"])
+}
+
+func TestSystemBackend_HandleCredentialSpecConnect_MissingCode(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	createOAuth2Source(t, backend, ctx, "gh-src", "https://github.com/login/oauth/authorize", "https://github.com/login/oauth/access_token", false)
+	createAuthCodeSpec(t, backend, ctx, "gh", "gh-src", nil)
+
+	schema := backend.pathCredentials()[5].Fields
+	raw := map[string]interface{}{"name": "gh", "redirect_uri": "http://127.0.0.1:8765/callback"} // no code
+	resp, err := backend.handleCredentialSpecConnect(ctx, createTestRequest(logical.CreateOperation, "cred/specs/gh/connect", raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, resp.Err)
+	assert.Contains(t, resp.Err.Error(), "code is required")
+}
+
+func TestSystemBackend_HandleCredentialSpecConnect_ExchangeError(t *testing.T) {
+	// Provider rejects the code (GitHub-style HTTP 200 with an error body).
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "bad_verification_code", "error_description": "The code passed is incorrect or expired."})
+	}))
+	defer server.Close()
+
+	backend, ctx, _ := setupTestSystemBackend(t)
+	createOAuth2Source(t, backend, ctx, "gh-src", "https://github.com/login/oauth/authorize", server.URL, true)
+	createAuthCodeSpec(t, backend, ctx, "gh", "gh-src", nil)
+
+	schema := backend.pathCredentials()[5].Fields
+	raw := map[string]interface{}{"name": "gh", "code": "stale-code", "redirect_uri": "http://127.0.0.1:8765/callback"}
+	resp, err := backend.handleCredentialSpecConnect(ctx, createTestRequest(logical.CreateOperation, "cred/specs/gh/connect", raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, resp.Err, "exchange failure must surface as an error response")
+
+	// The spec must NOT be marked connected after a failed exchange.
+	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
+	require.NoError(t, err)
+	assert.Empty(t, spec.Config["refresh_token"])
+}
+
+func TestSystemBackend_HandleCredentialSpecAuthorize_PinnedRedirectURI(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	createOAuth2Source(t, backend, ctx, "gh-src", "https://github.com/login/oauth/authorize", "https://github.com/login/oauth/access_token", false)
+	// Pin a fixed loopback redirect_uri on the spec.
+	createAuthCodeSpec(t, backend, ctx, "gh", "gh-src", map[string]string{"redirect_uri": "http://127.0.0.1:8765/callback"})
+
+	schema := backend.pathCredentials()[4].Fields
+
+	// Matching redirect_uri is accepted.
+	ok := map[string]interface{}{"name": "gh", "redirect_uri": "http://127.0.0.1:8765/callback", "state": "s"}
+	resp, err := backend.handleCredentialSpecAuthorize(ctx, createTestRequest(logical.CreateOperation, "cred/specs/gh/authorize", ok), createFieldData(schema, ok))
+	require.NoError(t, err)
+	require.Nil(t, resp.Err, "pinned match must succeed: %+v", resp.Data)
+
+	// A different loopback port is rejected even though it is loopback.
+	bad := map[string]interface{}{"name": "gh", "redirect_uri": "http://127.0.0.1:9999/callback", "state": "s"}
+	resp, err = backend.handleCredentialSpecAuthorize(ctx, createTestRequest(logical.CreateOperation, "cred/specs/gh/authorize", bad), createFieldData(schema, bad))
+	require.NoError(t, err)
+	require.NotNil(t, resp.Err)
+	assert.Contains(t, resp.Err.Error(), "does not match")
 }
