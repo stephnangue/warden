@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -109,6 +110,16 @@ func TestOAuth2DriverFactory_ValidateConfig(t *testing.T) {
 			config: map[string]string{
 				"token_url": "https://auth.example.com/oauth/token",
 				"auth_url":  "https://169.254.169.254/latest/meta-data/",
+			},
+			wantErr: true,
+			errMsg:  "must not target a loopback/private/link-local address",
+		},
+		{
+			// token_url is server-fetched (the client secret is POSTed there),
+			// so it must be SSRF-guarded too.
+			name: "token_url SSRF-blocked (private address)",
+			config: map[string]string{
+				"token_url": "https://10.0.0.5/oauth/token",
 			},
 			wantErr: true,
 			errMsg:  "must not target a loopback/private/link-local address",
@@ -848,4 +859,262 @@ func TestValidateOAuth2HTTPSURL_TLSSkipVerify(t *testing.T) {
 	require.NoError(t, validateOAuth2HTTPSURL("https://auth.local/token", "token_url", true))
 	// FTP still rejected
 	require.Error(t, validateOAuth2HTTPSURL("ftp://auth.local/token", "token_url", true))
+}
+
+func TestValidateOAuth2SafeURL_SSRF(t *testing.T) {
+	// Public hostnames pass.
+	require.NoError(t, validateOAuth2SafeURL("https://github.com/login/oauth/authorize", "auth_url", false))
+	// IP literals in blocked ranges are rejected in production.
+	for _, blocked := range []string{
+		"https://127.0.0.1/x", "https://10.0.0.1/x", "https://192.168.1.1/x",
+		"https://169.254.169.254/latest/meta-data/", "https://[::1]/x",
+	} {
+		require.Error(t, validateOAuth2SafeURL(blocked, "auth_url", false), blocked)
+	}
+	// tls_skip_verify allows loopback for dev/test.
+	require.NoError(t, validateOAuth2SafeURL("https://127.0.0.1/x", "auth_url", true))
+}
+
+// =============================================================================
+// Authorization-code flow
+// =============================================================================
+
+func TestOAuth2Driver_ExchangeAuthorizationCode(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, "authorization_code", r.Form.Get("grant_type"))
+		assert.Equal(t, "the-code", r.Form.Get("code"))
+		assert.Equal(t, "http://127.0.0.1:8765/callback", r.Form.Get("redirect_uri"))
+		assert.Equal(t, "cid", r.Form.Get("client_id"))
+		assert.Equal(t, "csecret", r.Form.Get("client_secret"))
+		assert.Equal(t, "the-verifier", r.Form.Get("code_verifier"))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":             "at-1",
+			"refresh_token":            "rt-1",
+			"expires_in":               28800,
+			"refresh_token_expires_in": 15897600,
+			"token_type":               "bearer",
+		})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeOAuth2, Config: map[string]string{"token_url": server.URL}},
+		httpClient: server.Client(),
+	}
+	spec := &credential.CredSpec{
+		Name:   "gh",
+		Type:   credential.TypeOAuthBearerToken,
+		Config: map[string]string{"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret"},
+	}
+
+	sealed, err := d.ExchangeAuthorizationCode(context.Background(), spec, "the-code", "http://127.0.0.1:8765/callback", "the-verifier")
+	require.NoError(t, err)
+	assert.Equal(t, "rt-1", sealed["refresh_token"])
+	exp, perr := time.Parse(time.RFC3339, sealed["refresh_token_expires_at"])
+	require.NoError(t, perr)
+	assert.True(t, exp.After(time.Now()))
+}
+
+func TestOAuth2Driver_ExchangeAuthorizationCode_ProviderError(t *testing.T) {
+	// GitHub reports failures as HTTP 200 with an error body.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":             "bad_verification_code",
+			"error_description": "The code passed is incorrect or expired.",
+		})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"client_id": "cid", "client_secret": "csecret"}}
+
+	_, err := d.ExchangeAuthorizationCode(context.Background(), spec, "bad", "http://127.0.0.1:1/cb", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bad_verification_code")
+	assert.Contains(t, err.Error(), "incorrect or expired")
+}
+
+func TestOAuth2Driver_ExchangeAuthorizationCode_NoRefreshToken(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "static-at", "token_type": "bearer"})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"client_id": "cid", "client_secret": "csecret"}}
+
+	sealed, err := d.ExchangeAuthorizationCode(context.Background(), spec, "c", "http://127.0.0.1:1/cb", "")
+	require.NoError(t, err)
+	assert.Equal(t, "static-at", sealed["access_token"])
+	assert.Empty(t, sealed["refresh_token"])
+}
+
+func TestOAuth2Driver_MintFromRefreshToken_Rotating(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, "refresh_token", r.Form.Get("grant_type"))
+		assert.Equal(t, "rt-old", r.Form.Get("refresh_token"))
+		assert.Equal(t, "cid", r.Form.Get("client_id"))
+		assert.Equal(t, "csecret", r.Form.Get("client_secret"))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  "at-new",
+			"refresh_token": "rt-new", // rotated
+			"expires_in":    28800,
+			"token_type":    "bearer",
+		})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-old",
+	}}
+
+	rawData, ttl, _, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "at-new", rawData["api_key"])
+	assert.Equal(t, 28800*time.Second, ttl)
+	// Rotated token is surfaced under the reserved key for the minting layer.
+	assert.Equal(t, "rt-new", rawData[credential.RawRotatedRefreshTokenKey])
+}
+
+func TestOAuth2Driver_MintFromRefreshToken_NonRotating(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No refresh_token in the response → stable token, no write-back.
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "at-1", "expires_in": 3600})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "g", Config: map[string]string{
+		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-stable",
+	}}
+
+	rawData, _, _, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "at-1", rawData["api_key"])
+	_, has := rawData[credential.RawRotatedRefreshTokenKey]
+	assert.False(t, has)
+}
+
+func TestOAuth2Driver_MintFromRefreshToken_NotConnected(t *testing.T) {
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": "https://example.invalid/token"}}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret"}}
+
+	_, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not connected")
+}
+
+func TestOAuth2Driver_MintFromRefreshToken_StaticAccessToken(t *testing.T) {
+	// No refresh_token but a sealed static access_token (no-refresh provider): no HTTP call.
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": "https://example.invalid/token"}}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"auth_method": "authorization_code", "access_token": "static-token"}}
+
+	rawData, ttl, _, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "static-token", rawData["api_key"])
+	assert.Equal(t, time.Duration(0), ttl)
+}
+
+func TestOAuth2Driver_BuildAuthorizeURL(t *testing.T) {
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{
+		"auth_url": "https://github.com/login/oauth/authorize",
+	}}}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+		"auth_method": "authorization_code", "client_id": "cid", "scopes": "repo,read:org",
+	}}
+
+	raw, err := d.BuildAuthorizeURL(spec, "http://127.0.0.1:8765/callback", "the-state", "the-challenge")
+	require.NoError(t, err)
+
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+	assert.Equal(t, "github.com", u.Host)
+	q := u.Query()
+	assert.Equal(t, "code", q.Get("response_type"))
+	assert.Equal(t, "cid", q.Get("client_id"))
+	assert.Equal(t, "http://127.0.0.1:8765/callback", q.Get("redirect_uri"))
+	assert.Equal(t, "the-state", q.Get("state"))
+	assert.Equal(t, "repo read:org", q.Get("scope")) // comma normalized to space
+	assert.Equal(t, "the-challenge", q.Get("code_challenge"))
+	assert.Equal(t, "S256", q.Get("code_challenge_method"))
+}
+
+func TestOAuth2Driver_BuildAuthorizeURL_MissingAuthURL(t *testing.T) {
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{}}}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"client_id": "cid"}}
+
+	_, err := d.BuildAuthorizeURL(spec, "http://127.0.0.1:1/cb", "s", "c")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auth_url")
+}
+
+func TestOAuth2Driver_BuildAuthorizeURL_PKCEDisabled(t *testing.T) {
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{
+		"auth_url": "https://github.com/login/oauth/authorize",
+	}}}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+		"auth_method": "authorization_code", "client_id": "cid", "pkce": "false",
+	}}
+
+	raw, err := d.BuildAuthorizeURL(spec, "http://127.0.0.1:8765/callback", "s", "the-challenge")
+	require.NoError(t, err)
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+	// pkce=false omits the challenge even when one is passed.
+	assert.Empty(t, u.Query().Get("code_challenge"))
+	assert.Empty(t, u.Query().Get("code_challenge_method"))
+}
+
+func TestOAuth2Driver_MintFromRefreshToken_StaticAccessToken_Expiring(t *testing.T) {
+	exp := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": "https://example.invalid/token"}}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+		"auth_method": "authorization_code", "access_token": "static-token", "access_token_expires_at": exp,
+	}}
+
+	rawData, ttl, _, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "static-token", rawData["api_key"])
+	// TTL derived from access_token_expires_at (not the hardcoded 0).
+	assert.InDelta(t, (2 * time.Hour).Seconds(), ttl.Seconds(), 60)
+}
+
+func TestOAuth2Driver_MintFromRefreshToken_MissingClientCreds(t *testing.T) {
+	// A connected spec (refresh_token sealed) but no client credentials must fail
+	// fast with a clear error instead of a wasted token-endpoint round-trip.
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": "https://example.invalid/token"}}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+		"auth_method": "authorization_code", "refresh_token": "rt",
+	}}
+
+	_, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing client_id or client_secret")
+}
+
+func TestOAuth2Driver_RequiresConnect_IsConnected(t *testing.T) {
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{}}}
+
+	cc := &credential.CredSpec{Config: map[string]string{}} // default client_credentials
+	assert.False(t, d.RequiresConnect(cc))
+
+	ac := &credential.CredSpec{Config: map[string]string{"auth_method": "authorization_code"}}
+	assert.True(t, d.RequiresConnect(ac))
+	assert.False(t, d.IsConnected(ac)) // empty spec, not connected yet
+
+	withRefresh := &credential.CredSpec{Config: map[string]string{"auth_method": "authorization_code", "refresh_token": "rt"}}
+	assert.True(t, d.IsConnected(withRefresh))
+
+	withStatic := &credential.CredSpec{Config: map[string]string{"auth_method": "authorization_code", "access_token": "at"}}
+	assert.True(t, d.IsConnected(withStatic))
 }

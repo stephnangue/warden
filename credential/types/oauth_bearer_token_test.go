@@ -252,7 +252,10 @@ func TestOAuthBearerTokenCredType_RequiresSpecRotation(t *testing.T) {
 
 func TestOAuthBearerTokenCredType_SensitiveConfigFields(t *testing.T) {
 	ct := NewOAuthBearerTokenCredType()
-	assert.Nil(t, ct.SensitiveConfigFields())
+	assert.ElementsMatch(t,
+		[]string{"client_secret", "refresh_token", "access_token"},
+		ct.SensitiveConfigFields(),
+	)
 }
 
 func TestOAuthBearerTokenCredType_FieldSchemas(t *testing.T) {
