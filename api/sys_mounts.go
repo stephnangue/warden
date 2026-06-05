@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/go-viper/mapstructure/v2"
 )
@@ -98,13 +99,13 @@ func (c *Sys) TuneMountWithContext(ctx context.Context, path string, config map[
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
+	// Trim a trailing slash so a normalized mount path ("aws/") doesn't
+	// produce a double slash before the "/tune" suffix.
+	path = strings.TrimSuffix(path, "/")
 	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/providers/%s/tune", path))
 
-	// Wrap config in the expected request body structure
-	body := map[string]any{
-		"config": config,
-	}
-	if err := r.SetJSONBody(body); err != nil {
+	// Tunable fields (currently just "description") are sent at the top level.
+	if err := r.SetJSONBody(config); err != nil {
 		return err
 	}
 
