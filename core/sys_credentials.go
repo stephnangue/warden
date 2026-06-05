@@ -565,6 +565,7 @@ func (b *SystemBackend) handleCredentialSpecRead(ctx context.Context, req *logic
 		"min_ttl":         int64(spec.MinTTL.Seconds()),
 		"max_ttl":         int64(spec.MaxTTL.Seconds()),
 		"rotation_period": int64(spec.RotationPeriod.Seconds()),
+		"connected":       b.specIsConnected(spec),
 	}), nil
 }
 

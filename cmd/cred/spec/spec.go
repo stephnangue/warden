@@ -14,4 +14,5 @@ func init() {
 	SpecCmd.AddCommand(ReadCmd)
 	SpecCmd.AddCommand(UpdateCmd)
 	SpecCmd.AddCommand(DeleteCmd)
+	SpecCmd.AddCommand(ConnectCmd)
 }
