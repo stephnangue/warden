@@ -71,22 +71,47 @@ func TestOAuth2DriverFactory_ValidateConfig(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "missing client_id",
+			// client_id/client_secret are optional at the source level: the
+			// authorization_code flow keeps them on the spec, and presence is
+			// checked at mint time.
+			name: "client_id optional at source level",
 			config: map[string]string{
 				"client_secret": "test-client-secret",
 				"token_url":     "https://auth.example.com/oauth/token",
 			},
-			wantErr: true,
-			errMsg:  "client_id",
+			wantErr: false,
 		},
 		{
-			name: "missing client_secret",
+			name: "client_secret optional at source level",
 			config: map[string]string{
 				"client_id": "test-client-id",
 				"token_url": "https://auth.example.com/oauth/token",
 			},
+			wantErr: false,
+		},
+		{
+			name: "source with only token_url (creds on spec)",
+			config: map[string]string{
+				"token_url": "https://auth.example.com/oauth/token",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid auth_url for authorization_code",
+			config: map[string]string{
+				"token_url": "https://github.com/login/oauth/access_token",
+				"auth_url":  "https://github.com/login/oauth/authorize",
+			},
+			wantErr: false,
+		},
+		{
+			name: "auth_url SSRF-blocked (metadata address)",
+			config: map[string]string{
+				"token_url": "https://auth.example.com/oauth/token",
+				"auth_url":  "https://169.254.169.254/latest/meta-data/",
+			},
 			wantErr: true,
-			errMsg:  "client_secret",
+			errMsg:  "must not target a loopback/private/link-local address",
 		},
 		{
 			name: "missing token_url",

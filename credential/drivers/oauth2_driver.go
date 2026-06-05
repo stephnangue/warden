@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -23,18 +24,25 @@ const (
 	oauth2AuthCustomHeader = "custom_header"
 )
 
+// auth_method selects the OAuth2 flow. It is read spec-over-source and defaults
+// to client_credentials so existing sources keep working unchanged.
+const oauth2AuthMethodClientCredentials = "client_credentials"
+
+// OAuth2 grant types sent in the token request.
+const oauth2GrantClientCredentials = "client_credentials"
+
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*OAuth2Driver)(nil)
 var _ credential.SpecVerifier = (*OAuth2Driver)(nil)
 
-// OAuth2Driver exchanges OAuth2 client credentials for bearer tokens.
+// OAuth2Driver exchanges OAuth2 credentials for bearer tokens.
 //
-// All provider-specific configuration lives in the source config map:
-// client_id, client_secret, token_url (required); default_scopes, verify_url,
-// verify_method, auth_header_type, auth_header_name, display_name (optional).
-//
-// The spec config holds an optional scope override. The driver POSTs to the
-// token endpoint using the client_credentials grant type and returns the
+// The token endpoint and connection options live in the source config (token_url
+// required; auth_url, default_scopes, verify_url, verify_method, auth_header_type,
+// auth_header_name, display_name, ca_data, tls_skip_verify optional). client_id and
+// client_secret may live on the source (client_credentials) or the spec, resolved
+// spec-over-source. The spec's auth_method selects the flow (default
+// client_credentials); the driver POSTs to the token endpoint and returns the
 // resulting access_token as an api_key field.
 type OAuth2Driver struct {
 	credSource *credential.CredSource
@@ -50,18 +58,17 @@ func (f *OAuth2DriverFactory) Type() string {
 	return credential.SourceTypeOAuth2
 }
 
-// ValidateConfig validates source configuration.
-// Requires client_id, client_secret, and token_url.
+// ValidateConfig validates source configuration. token_url is required.
+// client_id/client_secret are optional here because the authorization_code flow
+// keeps them on the spec; presence is checked at mint time.
 func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 	if err := credential.ValidateSchema(config,
 		credential.StringField("client_id").
-			Required().
-			Describe("OAuth2 client ID").
+			Describe("OAuth2 client ID (source-level for client_credentials; may be set per-spec)").
 			Example("your-client-id"),
 
 		credential.StringField("client_secret").
-			Required().
-			Describe("OAuth2 client secret").
+			Describe("OAuth2 client secret (source-level for client_credentials; may be set per-spec)").
 			Example("your-client-secret"),
 
 		credential.StringField("token_url").
@@ -71,6 +78,16 @@ func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 			}).
 			Describe("OAuth2 token endpoint (HTTPS)").
 			Example("https://identity.pagerduty.com/oauth/token"),
+
+		credential.StringField("auth_url").
+			Custom(func(v string) error {
+				if v == "" {
+					return nil
+				}
+				return validateOAuth2SafeURL(v, "auth_url", credential.GetBool(config, "tls_skip_verify", false))
+			}).
+			Describe("OAuth2 authorization endpoint (HTTPS) — required for authorization_code specs").
+			Example("https://github.com/login/oauth/authorize"),
 
 		credential.StringField("default_scopes").
 			Describe("Default OAuth2 scopes (space-separated)").
@@ -185,13 +202,38 @@ type oauth2TokenResponse struct {
 	Scope       string `json:"scope"`
 }
 
-// MintCredential exchanges client credentials for a bearer token.
+// resolve returns spec.Config[key] when set, else the source config value, else def.
+// This lets a spec override or supply source-level keys (e.g. client_id,
+// client_secret, scopes) — needed for the authorization_code flow where those
+// live on the spec.
+func (d *OAuth2Driver) resolve(spec *credential.CredSpec, key, def string) string {
+	if spec != nil {
+		if v := credential.GetString(spec.Config, key, ""); v != "" {
+			return v
+		}
+	}
+	return credential.GetString(d.credSource.Config, key, def)
+}
+
+// MintCredential mints a bearer token using the flow selected by auth_method
+// (default client_credentials).
 func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	authMethod := d.resolve(spec, "auth_method", oauth2AuthMethodClientCredentials)
+	switch authMethod {
+	case oauth2AuthMethodClientCredentials:
+		return d.mintFromClientCredentials(ctx, spec)
+	default:
+		return nil, 0, "", fmt.Errorf("%s OAuth2 unsupported auth_method %q", d.displayName(), authMethod)
+	}
+}
+
+// mintFromClientCredentials exchanges client credentials for a bearer token.
+func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
 	config := d.credSource.Config
 	name := d.displayName()
 
-	clientID := credential.GetString(config, "client_id", "")
-	clientSecret := credential.GetString(config, "client_secret", "")
+	clientID := d.resolve(spec, "client_id", "")
+	clientSecret := d.resolve(spec, "client_secret", "")
 	if clientID == "" || clientSecret == "" {
 		return nil, 0, "", fmt.Errorf("%s OAuth2 source missing client_id or client_secret", name)
 	}
@@ -201,7 +243,7 @@ func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.Cred
 
 	// Build token request body
 	form := url.Values{
-		"grant_type":    {"client_credentials"},
+		"grant_type":    {oauth2GrantClientCredentials},
 		"client_id":     {clientID},
 		"client_secret": {clientSecret},
 	}
@@ -224,7 +266,7 @@ func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.Cred
 
 	httpReq := httputil.HTTPRequest{
 		Method: http.MethodPost,
-		URL:    credential.GetString(config, "token_url", ""),
+		URL:    d.resolve(spec, "token_url", ""),
 		Body:   []byte(form.Encode()),
 		Headers: map[string]string{
 			"Content-Type": "application/x-www-form-urlencoded",
@@ -347,14 +389,6 @@ func validateOAuth2TokenURL(rawURL string) error {
 	return validateOAuth2HTTPSURL(rawURL, "token_url", false)
 }
 
-// validateOAuth2OptionalURL validates that verify_url, if non-empty, is a well-formed HTTPS URL.
-func validateOAuth2OptionalURL(rawURL string) error {
-	if rawURL == "" {
-		return nil
-	}
-	return validateOAuth2HTTPSURL(rawURL, "verify_url", false)
-}
-
 // validateOAuth2HTTPSURL validates that a URL is well-formed HTTPS.
 // When tlsSkipVerify is true, http:// is also accepted for dev/test environments.
 func validateOAuth2HTTPSURL(rawURL, fieldName string, tlsSkipVerify bool) error {
@@ -369,6 +403,32 @@ func validateOAuth2HTTPSURL(rawURL, fieldName string, tlsSkipVerify bool) error 
 		return fmt.Errorf("%s must include a host", fieldName)
 	}
 	return nil
+}
+
+// validateOAuth2SafeURL validates a URL that the server itself will call (token/
+// auth/subject endpoints): well-formed HTTPS and, in production
+// (tlsSkipVerify=false), not an SSRF target. Host IP literals in loopback,
+// private, link-local or unspecified ranges (which includes the cloud metadata
+// address 169.254.169.254) are rejected. Hostnames are not DNS-resolved here.
+func validateOAuth2SafeURL(rawURL, fieldName string, tlsSkipVerify bool) error {
+	if err := validateOAuth2HTTPSURL(rawURL, fieldName, tlsSkipVerify); err != nil {
+		return err
+	}
+	if tlsSkipVerify {
+		return nil // dev/test may legitimately target loopback
+	}
+	parsed, _ := url.Parse(rawURL) // already parsed cleanly above
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil && isBlockedOAuth2IP(ip) {
+		return fmt.Errorf("%s must not target a loopback/private/link-local address: %s", fieldName, parsed.Hostname())
+	}
+	return nil
+}
+
+// isBlockedOAuth2IP reports whether an IP literal is in a range that a
+// server-side outbound OAuth call must not reach (SSRF guard).
+func isBlockedOAuth2IP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
 // validateOAuth2VerifyMethod validates that verify_method is GET or POST.
