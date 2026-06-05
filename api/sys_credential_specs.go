@@ -39,6 +39,10 @@ type CredentialSpecInfo struct {
 	MinTTL         time.Duration     `json:"min_ttl"`
 	MaxTTL         time.Duration     `json:"max_ttl"`
 	RotationPeriod time.Duration     `json:"rotation_period,omitempty"`
+	// Connected reports whether an interactive connect-flow spec (e.g. OAuth2
+	// authorization_code) has a sealed credential. Always false for spec types
+	// that don't use a connect flow.
+	Connected bool `json:"connected,omitempty"`
 }
 
 // UpdateCredentialSpecInput represents the input for updating a credential spec
@@ -179,6 +183,9 @@ func (c *Sys) GetCredentialSpecWithContext(ctx context.Context, name string) (*C
 	}
 	if v, ok := resource.Data["rotation_period"]; ok {
 		spec.RotationPeriod = parseDurationFromSeconds(v)
+	}
+	if v, ok := resource.Data["connected"].(bool); ok {
+		spec.Connected = v
 	}
 
 	return spec, nil
