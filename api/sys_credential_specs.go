@@ -333,3 +333,123 @@ func (c *Sys) DeleteCredentialSpecWithContext(ctx context.Context, name string) 
 
 	return nil
 }
+
+// AuthorizeCredentialSpecInput is the input for building a connect authorize URL.
+type AuthorizeCredentialSpecInput struct {
+	RedirectURI   string `json:"redirect_uri"`
+	State         string `json:"state,omitempty"`
+	CodeChallenge string `json:"code_challenge,omitempty"`
+}
+
+// AuthorizeCredentialSpecOutput carries the provider authorize URL.
+type AuthorizeCredentialSpecOutput struct {
+	Name         string `json:"name"`
+	AuthorizeURL string `json:"authorize_url"`
+}
+
+// ConnectCredentialSpecInput is the input for completing the connect flow.
+type ConnectCredentialSpecInput struct {
+	Code         string `json:"code"`
+	RedirectURI  string `json:"redirect_uri"`
+	CodeVerifier string `json:"code_verifier,omitempty"`
+}
+
+// ConnectCredentialSpecOutput carries the connect result.
+type ConnectCredentialSpecOutput struct {
+	Name        string `json:"name"`
+	Connected   bool   `json:"connected"`
+	Reconnected bool   `json:"reconnected"`
+	Message     string `json:"message"`
+}
+
+// AuthorizeCredentialSpec builds the provider authorize URL for a spec's connect flow.
+func (c *Sys) AuthorizeCredentialSpec(name string, input *AuthorizeCredentialSpecInput) (*AuthorizeCredentialSpecOutput, error) {
+	return c.AuthorizeCredentialSpecWithContext(context.Background(), name, input)
+}
+
+// AuthorizeCredentialSpecWithContext builds the authorize URL with context.
+func (c *Sys) AuthorizeCredentialSpecWithContext(ctx context.Context, name string, input *AuthorizeCredentialSpecInput) (*AuthorizeCredentialSpecOutput, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	if input == nil {
+		return nil, errors.New("input cannot be nil")
+	}
+
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/cred/specs/%s/authorize", name))
+	if err := r.SetJSONBody(input); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	resource, err := ParseResource(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resource == nil || resource.Data == nil {
+		return nil, errors.New("data from server response is empty")
+	}
+
+	output := &AuthorizeCredentialSpecOutput{}
+	if v, ok := resource.Data["name"].(string); ok {
+		output.Name = v
+	}
+	if v, ok := resource.Data["authorize_url"].(string); ok {
+		output.AuthorizeURL = v
+	}
+	return output, nil
+}
+
+// ConnectCredentialSpec completes the connect flow by exchanging the authorization code.
+func (c *Sys) ConnectCredentialSpec(name string, input *ConnectCredentialSpecInput) (*ConnectCredentialSpecOutput, error) {
+	return c.ConnectCredentialSpecWithContext(context.Background(), name, input)
+}
+
+// ConnectCredentialSpecWithContext completes the connect flow with context.
+func (c *Sys) ConnectCredentialSpecWithContext(ctx context.Context, name string, input *ConnectCredentialSpecInput) (*ConnectCredentialSpecOutput, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	if input == nil {
+		return nil, errors.New("input cannot be nil")
+	}
+
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/cred/specs/%s/connect", name))
+	if err := r.SetJSONBody(input); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	resource, err := ParseResource(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resource == nil || resource.Data == nil {
+		return nil, errors.New("data from server response is empty")
+	}
+
+	output := &ConnectCredentialSpecOutput{}
+	if v, ok := resource.Data["name"].(string); ok {
+		output.Name = v
+	}
+	if v, ok := resource.Data["connected"].(bool); ok {
+		output.Connected = v
+	}
+	if v, ok := resource.Data["reconnected"].(bool); ok {
+		output.Reconnected = v
+	}
+	if v, ok := resource.Data["message"].(string); ok {
+		output.Message = v
+	}
+	return output, nil
+}
