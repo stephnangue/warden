@@ -258,6 +258,23 @@ func TestOAuthBearerTokenCredType_SensitiveConfigFields(t *testing.T) {
 	)
 }
 
+func TestOAuthBearerTokenCredType_ConnectGating(t *testing.T) {
+	ct := NewOAuthBearerTokenCredType()
+
+	// client_credentials (default) is not connect-gated.
+	assert.False(t, ct.RequiresConnect(map[string]string{}))
+	assert.False(t, ct.RequiresConnect(map[string]string{"auth_method": "client_credentials"}))
+
+	// authorization_code is connect-gated.
+	ac := map[string]string{"auth_method": "authorization_code"}
+	assert.True(t, ct.RequiresConnect(ac))
+	assert.False(t, ct.IsConnected(ac)) // no token sealed yet
+
+	// Connected once a refresh token or static access token is sealed.
+	assert.True(t, ct.IsConnected(map[string]string{"auth_method": "authorization_code", "refresh_token": "rt"}))
+	assert.True(t, ct.IsConnected(map[string]string{"auth_method": "authorization_code", "access_token": "at"}))
+}
+
 func TestOAuthBearerTokenCredType_FieldSchemas(t *testing.T) {
 	ct := NewOAuthBearerTokenCredType()
 	schemas := ct.FieldSchemas()

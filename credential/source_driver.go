@@ -210,19 +210,6 @@ type SpecRotatable interface {
 // credential's Data map.
 const RawRotatedRefreshTokenKey = "__rotated_refresh_token"
 
-// SpecConnector is an optional interface for drivers whose specs require a
-// one-time interactive connect step (e.g. OAuth2 authorization_code) before they
-// can mint credentials. ValidateSpec skips its test-mint for a spec that requires
-// connecting but is not connected yet.
-type SpecConnector interface {
-	// RequiresConnect reports whether this spec uses a connect-gated flow.
-	RequiresConnect(spec *CredSpec) bool
-
-	// IsConnected reports whether the one-time connect has completed (e.g. a
-	// refresh token or static access token has been sealed into the spec).
-	IsConnected(spec *CredSpec) bool
-}
-
 // OAuth2Authorizer is an optional interface for drivers that support an OAuth2
 // authorization-code consent flow. The CLI captures only the authorization code
 // on a loopback redirect; the server builds the authorize URL and performs the

@@ -1339,3 +1339,93 @@ func TestCredentialConfigStore_ClearNamespace_Isolation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, specs2, 1)
 }
+
+// connectGatedDriver mints into an error so tests can detect whether the
+// validation test-mint ran; connect-gating itself is a credential-type property
+// (connectGatedCredType), not a driver one.
+type connectGatedDriverFactory struct{}
+
+func (f *connectGatedDriverFactory) Type() string { return "connect_driver" }
+func (f *connectGatedDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+	return &connectGatedDriver{}, nil
+}
+func (f *connectGatedDriverFactory) ValidateConfig(config map[string]string) error { return nil }
+func (f *connectGatedDriverFactory) SensitiveConfigFields() []string               { return nil }
+func (f *connectGatedDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+	return "connect_cred", nil
+}
+
+type connectGatedDriver struct{}
+
+func (d *connectGatedDriver) Type() string { return "connect_driver" }
+func (d *connectGatedDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	return nil, 0, "", fmt.Errorf("mint must not run for an unconnected spec")
+}
+func (d *connectGatedDriver) Revoke(ctx context.Context, leaseID string) error { return nil }
+func (d *connectGatedDriver) Cleanup(ctx context.Context) error                { return nil }
+
+// connectGatedCredType implements credential.ConnectGated: authorization_code
+// specs require connecting, and count as connected once a token is sealed.
+type connectGatedCredType struct {
+	testCredentialType
+}
+
+func (t *connectGatedCredType) RequiresConnect(config map[string]string) bool {
+	return config["auth_method"] == "authorization_code"
+}
+func (t *connectGatedCredType) IsConnected(config map[string]string) bool {
+	return config["refresh_token"] != "" || config["access_token"] != ""
+}
+
+func TestCredentialConfigStore_ValidateSpec_ConnectGating(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	store.core.credentialDriverRegistry = credential.NewDriverRegistry(nil)
+	require.NoError(t, store.core.credentialDriverRegistry.RegisterFactory(&connectGatedDriverFactory{}))
+	store.core.credentialTypeRegistry = credential.NewTypeRegistry()
+	require.NoError(t, store.core.credentialTypeRegistry.Register(&connectGatedCredType{testCredentialType{typeName: "connect_cred"}}))
+
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "gh-src", Type: "connect_driver"}))
+
+	// (a) An unconnected authorization_code spec creates: the test-mint is skipped
+	// even though MintCredential would error.
+	unconnected := &credential.CredSpec{
+		Name: "gh", Type: "connect_cred", Source: "gh-src",
+		Config: map[string]string{"auth_method": "authorization_code"},
+	}
+	require.NoError(t, store.CreateSpec(ctx, unconnected),
+		"unconnected authcode spec should create with the test-mint skipped")
+
+	// (b) rotation_period is rejected for a connect-gated spec.
+	err := store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "gh-rot", Type: "connect_cred", Source: "gh-src",
+		Config:         map[string]string{"auth_method": "authorization_code"},
+		RotationPeriod: time.Hour,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rotation_period is not supported")
+
+	// (c) A connected spec runs the test-mint (which errors with this mock) — both
+	// the refresh-token and the static access-token connected states.
+	for _, connectedCfg := range []map[string]string{
+		{"auth_method": "authorization_code", "refresh_token": "rt"},
+		{"auth_method": "authorization_code", "access_token": "static"},
+	} {
+		err := store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "gh-conn-" + connectedCfg["refresh_token"] + connectedCfg["access_token"],
+			Type: "connect_cred", Source: "gh-src", Config: connectedCfg,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "credential test failed")
+	}
+
+	// (d) Updating the unconnected spec to a connected config runs the test-mint
+	// (fails) — unless SkipVerification is set, which the connect seal / write-back use.
+	unconnected.Config["refresh_token"] = "rt"
+	err = store.UpdateSpec(ctx, unconnected)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential test failed")
+
+	require.NoError(t, store.UpdateSpec(ctx, unconnected, UpdateSpecOptions{SkipVerification: true}),
+		"UpdateSpec with SkipVerification should skip the test-mint")
+}

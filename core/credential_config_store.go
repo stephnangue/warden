@@ -294,8 +294,16 @@ func (s *CredentialConfigStore) GetSpec(ctx context.Context, name string) (*cred
 	return spec, nil
 }
 
+// UpdateSpecOptions controls UpdateSpec behavior.
+type UpdateSpecOptions struct {
+	// SkipVerification skips the test-mint / SpecVerifier checks during validation.
+	// Used by the connect seal and refresh-token write-back, which persist a
+	// known-good token and must not re-mint (which would consume/rotate it).
+	SkipVerification bool
+}
+
 // UpdateSpec updates an existing spec
-func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential.CredSpec) error {
+func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential.CredSpec, opts ...UpdateSpecOptions) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -309,7 +317,11 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 	}
 
 	// Validate spec
-	if err := s.ValidateSpec(ctx, spec); err != nil {
+	var skipVerification bool
+	if len(opts) > 0 {
+		skipVerification = opts[0].SkipVerification
+	}
+	if err := s.validateSpec(ctx, spec, skipVerification); err != nil {
 		return err
 	}
 
@@ -762,8 +774,15 @@ func (s *CredentialConfigStore) ClearNamespace(ctx context.Context) error {
 // Validation
 // ============================================================================
 
-// ValidateSpec validates a spec before creation/update
+// ValidateSpec validates a spec before creation/update.
 func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credential.CredSpec) error {
+	return s.validateSpec(ctx, spec, false)
+}
+
+// validateSpec validates a spec. When skipVerification is true the test-mint and
+// SpecVerifier checks are skipped — used by the connect seal and refresh-token
+// write-back, which already hold a known-good token and must not re-mint it.
+func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credential.CredSpec, skipVerification bool) error {
 	if spec.Name == "" {
 		return logical.ErrBadRequest("spec name cannot be empty")
 	}
@@ -791,6 +810,7 @@ func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credenti
 	}
 
 	// Validate credential type exists
+	var credType credential.Type
 	if s.core.credentialTypeRegistry != nil {
 		if !s.core.credentialTypeRegistry.HasType(spec.Type) {
 			return logical.ErrBadRequestf("unknown credential type: %s (available types: %v)",
@@ -800,8 +820,11 @@ func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credenti
 
 		// Validate Config using the credential type's validation
 		// Pass the source type (not source name) to enable source-specific validation
-		credType, err := s.core.credentialTypeRegistry.GetByName(spec.Type)
-		if err == nil {
+		var typeErr error
+		credType, typeErr = s.core.credentialTypeRegistry.GetByName(spec.Type)
+		if typeErr != nil {
+			credType = nil
+		} else {
 			if err := credType.ValidateConfig(spec.Config, source.Type); err != nil {
 				return logical.ErrBadRequestf("invalid config for type '%s': %s", spec.Type, err.Error())
 			}
@@ -809,6 +832,14 @@ func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credenti
 			// Enforce rotation_period for types that embed rotatable credentials
 			if credType.RequiresSpecRotation() && spec.RotationPeriod <= 0 {
 				return logical.ErrBadRequestf("rotation_period is required for credential type '%s' which embeds rotatable credentials", spec.Type)
+			}
+
+			// Connect-gated specs (e.g. OAuth2 authorization_code) are refreshed on
+			// use, not scheduled — reject rotation_period. This is a config rule, so
+			// it runs here rather than in the test-mint block below (which can be
+			// skipped via SkipVerification or in test mode).
+			if cg, ok := credType.(credential.ConnectGated); ok && cg.RequiresConnect(spec.Config) && spec.RotationPeriod > 0 {
+				return logical.ErrBadRequestf("rotation_period is not supported for credential type '%s' (connect-gated; tokens are refreshed on use, not on a schedule)", spec.Type)
 			}
 		}
 	}
@@ -820,7 +851,7 @@ func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credenti
 	// to test source connections at creation time.
 	// Skipped for local sources where MintCredential just echoes config values.
 	// Skip credential verification in test mode (when SkipSpecVerification is true)
-	if !s.config.SkipSpecVerification && s.core.credentialDriverRegistry != nil && source.Type != credential.SourceTypeLocal {
+	if !skipVerification && !s.config.SkipSpecVerification && s.core.credentialDriverRegistry != nil && source.Type != credential.SourceTypeLocal {
 		factory, err := s.core.credentialDriverRegistry.GetFactory(source.Type)
 		if err == nil {
 			driver, err := factory.Create(source.Config, s.logger)
@@ -832,16 +863,28 @@ func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credenti
 					Source: spec.Source,
 					Config: spec.Config,
 				}
-				if _, _, _, err := driver.MintCredential(ctx, testSpec); err != nil {
-					return logical.ErrBadRequestf("credential test failed for spec type '%s': %s", spec.Type, err.Error())
+
+				// Skip the test-mint for a connect-gated spec (e.g. OAuth2
+				// authorization_code) that isn't connected yet — it cannot mint
+				// until `cred spec connect` seals a token.
+				runTestMint := true
+				if cg, ok := credType.(credential.ConnectGated); ok &&
+					cg.RequiresConnect(spec.Config) && !cg.IsConnected(spec.Config) {
+					runTestMint = false
 				}
 
-				// Run additional verification if the driver supports it.
-				// This catches cases where MintCredential doesn't call the upstream
-				// API (e.g., GitHub PAT mode just returns the token).
-				if verifier, ok := driver.(credential.SpecVerifier); ok {
-					if err := verifier.VerifySpec(ctx, testSpec); err != nil {
-						return logical.ErrBadRequestf("credential verification failed for spec type '%s': %s", spec.Type, err.Error())
+				if runTestMint {
+					if _, _, _, err := driver.MintCredential(ctx, testSpec); err != nil {
+						return logical.ErrBadRequestf("credential test failed for spec type '%s': %s", spec.Type, err.Error())
+					}
+
+					// Run additional verification if the driver supports it.
+					// This catches cases where MintCredential doesn't call the upstream
+					// API (e.g., GitHub PAT mode just returns the token).
+					if verifier, ok := driver.(credential.SpecVerifier); ok {
+						if err := verifier.VerifySpec(ctx, testSpec); err != nil {
+							return logical.ErrBadRequestf("credential verification failed for spec type '%s': %s", spec.Type, err.Error())
+						}
 					}
 				}
 			}

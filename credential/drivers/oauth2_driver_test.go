@@ -1102,19 +1102,5 @@ func TestOAuth2Driver_MintFromRefreshToken_MissingClientCreds(t *testing.T) {
 	assert.Contains(t, err.Error(), "missing client_id or client_secret")
 }
 
-func TestOAuth2Driver_RequiresConnect_IsConnected(t *testing.T) {
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{}}}
-
-	cc := &credential.CredSpec{Config: map[string]string{}} // default client_credentials
-	assert.False(t, d.RequiresConnect(cc))
-
-	ac := &credential.CredSpec{Config: map[string]string{"auth_method": "authorization_code"}}
-	assert.True(t, d.RequiresConnect(ac))
-	assert.False(t, d.IsConnected(ac)) // empty spec, not connected yet
-
-	withRefresh := &credential.CredSpec{Config: map[string]string{"auth_method": "authorization_code", "refresh_token": "rt"}}
-	assert.True(t, d.IsConnected(withRefresh))
-
-	withStatic := &credential.CredSpec{Config: map[string]string{"auth_method": "authorization_code", "access_token": "at"}}
-	assert.True(t, d.IsConnected(withStatic))
-}
+// (connect-gating moved to the oauth_bearer_token credential type; see
+// credential/types/oauth_bearer_token_test.go)

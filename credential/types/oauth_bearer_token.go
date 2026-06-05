@@ -154,3 +154,18 @@ func (t *OAuthBearerTokenCredType) RequiresSpecRotation() bool {
 func (t *OAuthBearerTokenCredType) SensitiveConfigFields() []string {
 	return []string{"client_secret", "refresh_token", "access_token"}
 }
+
+// Compile-time assertion that the type is connect-gated for authorization_code.
+var _ credential.ConnectGated = (*OAuthBearerTokenCredType)(nil)
+
+// RequiresConnect reports whether the spec uses the authorization_code flow, which
+// needs a one-time `cred spec connect` before it can mint.
+func (t *OAuthBearerTokenCredType) RequiresConnect(config map[string]string) bool {
+	return config["auth_method"] == "authorization_code"
+}
+
+// IsConnected reports whether the spec has been connected — a refresh token or a
+// static access token has been sealed into it.
+func (t *OAuthBearerTokenCredType) IsConnected(config map[string]string) bool {
+	return config["refresh_token"] != "" || config["access_token"] != ""
+}
