@@ -31,4 +31,5 @@ func init() {
 	ProvidersCmd.AddCommand(DisableCmd)
 	ProvidersCmd.AddCommand(ListCmd)
 	ProvidersCmd.AddCommand(ReadCmd)
+	ProvidersCmd.AddCommand(TuneCmd)
 }

@@ -16,6 +16,41 @@ import (
 func (b *SystemBackend) pathProviders() []*framework.Path {
 	return []*framework.Path{
 		{
+			// Must be registered before the generic "providers/{path}"
+			// path below: routing is first-match in slice order and both
+			// patterns match "providers/<path>/tune". The "/tune" suffix
+			// here disambiguates only because this entry is tried first.
+			//
+			// Inherent limitation: the path capture is greedy and spans
+			// slashes, so a provider whose own mount path ends in a "tune"
+			// segment (e.g. "foo/tune/") is shadowed — "providers/foo/tune"
+			// always resolves here, so such a mount cannot be created, read,
+			// or deleted via the generic path. Mount paths ending in "tune"
+			// are effectively unsupported. Routing runs before mount-path
+			// validation, so this can't be rejected at create time; closing
+			// it would require a different endpoint shape.
+			Pattern: "providers/" + framework.MatchAllRegex("path") + "/tune",
+			Fields: map[string]*framework.FieldSchema{
+				"path": {
+					Type:        framework.TypeString,
+					Description: "The path of the provider to tune",
+					Required:    true,
+				},
+				"description": {
+					Type:        framework.TypeString,
+					Description: "Human-readable description",
+				},
+			},
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.CreateOperation: &framework.PathOperation{
+					Callback: b.handleProviderTune,
+					Summary:  "Tune a provider mount's description",
+				},
+			},
+			HelpSynopsis:    "Tune a provider mount",
+			HelpDescription: "Update the description of an existing provider mount.",
+		},
+		{
 			Pattern: "providers/" + framework.MatchAllRegex("path"),
 			Fields: map[string]*framework.FieldSchema{
 				"path": {
@@ -185,6 +220,51 @@ func (b *SystemBackend) handleProviderRead(ctx context.Context, req *logical.Req
 		"accessor":    entry.Accessor,
 		"config":      maskedConfig,
 		"mount_url":   mountURL(entry.Namespace(), entry.Path),
+	}), nil
+}
+
+// handleProviderTune handles POST /sys/providers/{path}/tune. It updates the
+// mount-level description of an existing provider in place. The description is
+// the only tunable field today; the body is a partial update, so an omitted
+// description leaves the current value untouched while an explicit empty
+// string clears it.
+func (b *SystemBackend) handleProviderTune(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	path := d.Get("path").(string)
+
+	// Exclusive lock: we mutate the entry and rewrite its persisted record,
+	// so we must exclude the RLock readers in handleProviderRead/List.
+	b.core.mountsLock.Lock()
+	defer b.core.mountsLock.Unlock()
+
+	// Normalize path
+	if !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+
+	entry, err := b.core.mounts.findByPath(ctx, path)
+	if err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+	if entry == nil {
+		return logical.ErrorResponse(logical.ErrNotFound("mount not found")), nil
+	}
+
+	// Only touch the description when the caller actually sent the field.
+	if v, ok := d.GetOk("description"); ok {
+		entry.Description = v.(string)
+	}
+
+	// The router holds a pointer to this same entry, so the in-memory change
+	// is already live; persist it so it survives a restart or failover.
+	if err := b.core.persistMounts(ctx, nil, b.core.mounts, entry.UUID); err != nil {
+		b.logger.Error("failed to persist tuned mount", logger.Err(err))
+		return logical.ErrorResponse(logical.ErrInternal("failed to persist mount")), nil
+	}
+
+	return b.respondSuccess(map[string]any{
+		"path":        entry.Path,
+		"description": entry.Description,
+		"message":     fmt.Sprintf("Successfully tuned %s", entry.Path),
 	}), nil
 }
 

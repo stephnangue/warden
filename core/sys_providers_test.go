@@ -55,17 +55,23 @@ func TestSystemBackend_PathProviders(t *testing.T) {
 	backend, _, _ := setupTestSystemBackend(t)
 
 	paths := backend.pathProviders()
-	require.Len(t, paths, 2)
+	require.Len(t, paths, 3)
+
+	// Check providers/{path}/tune path — must be first so it wins routing
+	// against the generic providers/{path} pattern.
+	assert.Equal(t, "providers/"+framework.MatchAllRegex("path")+"/tune", paths[0].Pattern)
+	assert.Contains(t, paths[0].Fields, "path")
+	assert.Contains(t, paths[0].Fields, "description")
 
 	// Check providers/{path} path
-	assert.Equal(t, "providers/"+framework.MatchAllRegex("path"), paths[0].Pattern)
-	assert.Contains(t, paths[0].Fields, "path")
-	assert.Contains(t, paths[0].Fields, "type")
-	assert.Contains(t, paths[0].Fields, "description")
-	assert.Contains(t, paths[0].Fields, "config")
+	assert.Equal(t, "providers/"+framework.MatchAllRegex("path"), paths[1].Pattern)
+	assert.Contains(t, paths[1].Fields, "path")
+	assert.Contains(t, paths[1].Fields, "type")
+	assert.Contains(t, paths[1].Fields, "description")
+	assert.Contains(t, paths[1].Fields, "config")
 
 	// Check providers/ list path
-	assert.Equal(t, "providers/?$", paths[1].Pattern)
+	assert.Equal(t, "providers/?$", paths[2].Pattern)
 }
 
 func TestSystemBackend_HandleProviderCreate(t *testing.T) {
@@ -74,7 +80,7 @@ func TestSystemBackend_HandleProviderCreate(t *testing.T) {
 	// Register mock provider factory
 	core.providers["mock"] = MockProviderFactory
 
-	schema := backend.pathProviders()[0].Fields
+	schema := backend.pathProviders()[1].Fields
 	raw := map[string]interface{}{
 		"path":        "test-provider",
 		"type":        "mock",
@@ -96,7 +102,7 @@ func TestSystemBackend_HandleProviderCreate(t *testing.T) {
 func TestSystemBackend_HandleProviderCreate_InvalidPath(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
-	schema := backend.pathProviders()[0].Fields
+	schema := backend.pathProviders()[1].Fields
 	raw := map[string]interface{}{
 		"path": "sys/invalid", // Reserved path
 		"type": "mock",
@@ -127,7 +133,7 @@ func TestSystemBackend_HandleProviderRead(t *testing.T) {
 	require.NoError(t, err)
 
 	// Now read it
-	schema := backend.pathProviders()[0].Fields
+	schema := backend.pathProviders()[1].Fields
 	raw := map[string]interface{}{
 		"path": "test-provider",
 	}
@@ -149,7 +155,7 @@ func TestSystemBackend_HandleProviderRead(t *testing.T) {
 func TestSystemBackend_HandleProviderRead_NotFound(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
-	schema := backend.pathProviders()[0].Fields
+	schema := backend.pathProviders()[1].Fields
 	raw := map[string]interface{}{
 		"path": "nonexistent",
 	}
@@ -179,7 +185,7 @@ func TestSystemBackend_HandleProviderDelete(t *testing.T) {
 	require.NoError(t, err)
 
 	// Now delete it
-	schema := backend.pathProviders()[0].Fields
+	schema := backend.pathProviders()[1].Fields
 	raw := map[string]interface{}{
 		"path": "test-provider",
 	}
@@ -216,7 +222,7 @@ func TestSystemBackend_HandleProviderList(t *testing.T) {
 	require.NoError(t, core.mount(ctx, entry2))
 
 	// List provider mounts
-	schema := backend.pathProviders()[1].Fields
+	schema := backend.pathProviders()[2].Fields
 	raw := map[string]interface{}{}
 
 	req := createTestRequest(logical.ListOperation, "providers/", raw)
@@ -243,4 +249,104 @@ func TestSystemBackend_HandleProviderList(t *testing.T) {
 		assert.Equal(t, path, em["path"],
 			"path field for %q should equal the map key", path)
 	}
+}
+
+func TestSystemBackend_HandleProviderTune(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	core.providers["mock"] = MockProviderFactory
+
+	entry := &MountEntry{
+		Class:       mountClassProvider,
+		Type:        "mock",
+		Path:        "test-provider/",
+		Description: "old description",
+	}
+	require.NoError(t, core.mount(ctx, entry))
+
+	// paths[0] is the tune schema (path + description).
+	tuneSchema := backend.pathProviders()[0].Fields
+	raw := map[string]interface{}{
+		"path":        "test-provider",
+		"description": "new description",
+	}
+	req := createTestRequest(logical.CreateOperation, "providers/test-provider/tune", raw)
+	resp, err := backend.handleProviderTune(ctx, req, createFieldData(tuneSchema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "new description", resp.Data["description"])
+
+	// The change must be visible to a subsequent read.
+	readSchema := backend.pathProviders()[1].Fields
+	readRaw := map[string]interface{}{"path": "test-provider"}
+	readReq := createTestRequest(logical.ReadOperation, "providers/test-provider", readRaw)
+	readResp, err := backend.handleProviderRead(ctx, readReq, createFieldData(readSchema, readRaw))
+	require.NoError(t, err)
+	assert.Equal(t, "new description", readResp.Data["description"])
+}
+
+func TestSystemBackend_HandleProviderTune_NotFound(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	tuneSchema := backend.pathProviders()[0].Fields
+	raw := map[string]interface{}{
+		"path":        "nonexistent",
+		"description": "x",
+	}
+	req := createTestRequest(logical.CreateOperation, "providers/nonexistent/tune", raw)
+	resp, err := backend.handleProviderTune(ctx, req, createFieldData(tuneSchema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestSystemBackend_HandleProviderTune_OmittedDescriptionNoOp(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	core.providers["mock"] = MockProviderFactory
+
+	entry := &MountEntry{
+		Class:       mountClassProvider,
+		Type:        "mock",
+		Path:        "test-provider/",
+		Description: "keep me",
+	}
+	require.NoError(t, core.mount(ctx, entry))
+
+	// No "description" key: the existing value must survive untouched.
+	tuneSchema := backend.pathProviders()[0].Fields
+	raw := map[string]interface{}{
+		"path": "test-provider",
+	}
+	req := createTestRequest(logical.CreateOperation, "providers/test-provider/tune", raw)
+	resp, err := backend.handleProviderTune(ctx, req, createFieldData(tuneSchema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "keep me", resp.Data["description"])
+}
+
+func TestSystemBackend_HandleProviderTune_ClearDescription(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	core.providers["mock"] = MockProviderFactory
+
+	entry := &MountEntry{
+		Class:       mountClassProvider,
+		Type:        "mock",
+		Path:        "test-provider/",
+		Description: "remove me",
+	}
+	require.NoError(t, core.mount(ctx, entry))
+
+	// An explicit empty description clears the field.
+	tuneSchema := backend.pathProviders()[0].Fields
+	raw := map[string]interface{}{
+		"path":        "test-provider",
+		"description": "",
+	}
+	req := createTestRequest(logical.CreateOperation, "providers/test-provider/tune", raw)
+	resp, err := backend.handleProviderTune(ctx, req, createFieldData(tuneSchema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "", resp.Data["description"])
 }
