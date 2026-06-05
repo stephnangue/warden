@@ -43,7 +43,6 @@ const (
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*OAuth2Driver)(nil)
 var _ credential.SpecVerifier = (*OAuth2Driver)(nil)
-var _ credential.SpecConnector = (*OAuth2Driver)(nil)
 var _ credential.OAuth2Authorizer = (*OAuth2Driver)(nil)
 
 // OAuth2Driver exchanges OAuth2 credentials for bearer tokens.
@@ -413,22 +412,6 @@ func (d *OAuth2Driver) BuildAuthorizeURL(spec *credential.CredSpec, redirectURI,
 	}
 	parsed.RawQuery = q.Encode()
 	return parsed.String(), nil
-}
-
-// RequiresConnect reports whether the spec uses the authorization_code flow,
-// which needs a one-time `cred spec connect` before it can mint.
-func (d *OAuth2Driver) RequiresConnect(spec *credential.CredSpec) bool {
-	return d.resolve(spec, "auth_method", oauth2AuthMethodClientCredentials) == oauth2AuthMethodAuthorizationCode
-}
-
-// IsConnected reports whether the spec has been connected — a refresh token or a
-// static access token has been sealed into it.
-func (d *OAuth2Driver) IsConnected(spec *credential.CredSpec) bool {
-	if spec == nil {
-		return false
-	}
-	return credential.GetString(spec.Config, "refresh_token", "") != "" ||
-		credential.GetString(spec.Config, "access_token", "") != ""
 }
 
 // postTokenRequest POSTs a form-encoded token request and decodes the response,

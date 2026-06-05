@@ -90,3 +90,18 @@ type Type interface {
 	// Used for masking sensitive fields in responses
 	FieldSchemas() map[string]*CredentialFieldSchema
 }
+
+// ConnectGated is an optional interface a credential Type implements when some of
+// its specs require a one-time interactive `cred spec connect` step before they
+// can mint (e.g. OAuth2 authorization_code). Connect-gating is derived from the
+// spec config, so it is modeled on the type — which owns config semantics —
+// rather than on the driver, mirroring RequiresSpecRotation. ValidateSpec rejects
+// rotation_period for a connect-gated spec and skips its test-mint until connected.
+type ConnectGated interface {
+	// RequiresConnect reports whether this spec config uses a connect-gated flow.
+	RequiresConnect(config map[string]string) bool
+
+	// IsConnected reports whether the one-time connect has completed for this spec
+	// config (e.g. a refresh token or static access token has been sealed).
+	IsConnected(config map[string]string) bool
+}
