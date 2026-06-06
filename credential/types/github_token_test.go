@@ -252,7 +252,7 @@ func TestGitHubTokenCredType_Parse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cred, err := ct.Parse(tt.rawData, tt.leaseTTL, tt.leaseID)
+			cred, err := ct.Parse(tt.rawData, nil, tt.leaseTTL, tt.leaseID)
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.errMsg != "" {
@@ -285,7 +285,7 @@ func TestGitHubTokenCredType_Parse_OptionalFields(t *testing.T) {
 		"permissions": `{"contents":"read"}`,
 	}
 
-	cred, err := ct.Parse(rawData, 1*time.Hour, "")
+	cred, err := ct.Parse(rawData, nil, 1*time.Hour, "")
 	require.NoError(t, err)
 
 	assert.Equal(t, "ghs_test", cred.Data["token"])

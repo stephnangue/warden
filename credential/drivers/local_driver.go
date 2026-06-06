@@ -46,7 +46,7 @@ func (f *LocalDriverFactory) InferCredentialType(_ map[string]string) (string, e
 }
 
 // MintCredential retrieves static credential data from the spec's SourceParams
-func (d *LocalDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *LocalDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	// Local credentials are always static (no TTL, no lease)
 	rawData := make(map[string]interface{})
 
@@ -67,7 +67,7 @@ func (d *LocalDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	// - leaseTTL: 0 (static credentials have no TTL)
 	// - leaseID: "" (static credentials have no lease)
 	// - error: nil
-	return rawData, 0, "", nil
+	return rawData, nil, 0, "", nil
 }
 
 // Revoke is a no-op for static credentials

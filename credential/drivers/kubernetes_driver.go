@@ -161,17 +161,17 @@ func (f *KubernetesDriverFactory) Create(config map[string]string, log *logger.G
 //   - namespace: Target namespace (required)
 //   - audiences: Comma-separated token audiences (optional)
 //   - ttl: Token TTL duration, e.g. "1h" (optional, default: 1h)
-func (d *KubernetesDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *KubernetesDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	sa := credential.GetString(spec.Config, "service_account", "")
 	namespace := credential.GetString(spec.Config, "namespace", "")
 	audiencesStr := credential.GetString(spec.Config, "audiences", "")
 	ttl := credential.GetDuration(spec.Config, "ttl", 1*time.Hour)
 
 	if sa == "" {
-		return nil, 0, "", fmt.Errorf("service_account is required in spec config")
+		return nil, nil, 0, "", fmt.Errorf("service_account is required in spec config")
 	}
 	if namespace == "" {
-		return nil, 0, "", fmt.Errorf("namespace is required in spec config")
+		return nil, nil, 0, "", fmt.Errorf("namespace is required in spec config")
 	}
 
 	// Build audiences list
@@ -189,7 +189,7 @@ func (d *KubernetesDriver) MintCredential(ctx context.Context, spec *credential.
 
 	body, err := buildTokenRequestBody(expirationSeconds, audiences)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to marshal TokenRequest: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to marshal TokenRequest: %w", err)
 	}
 
 	path := fmt.Sprintf("/api/v1/namespaces/%s/serviceaccounts/%s/token",
@@ -197,7 +197,7 @@ func (d *KubernetesDriver) MintCredential(ctx context.Context, spec *credential.
 
 	respBody, statusCode, err := d.doK8sRequest(ctx, http.MethodPost, path, body)
 	if err != nil {
-		return nil, 0, "", d.mapError(err, statusCode, sa, namespace)
+		return nil, nil, 0, "", d.mapError(err, statusCode, sa, namespace)
 	}
 
 	// Parse TokenRequest response
@@ -208,11 +208,11 @@ func (d *KubernetesDriver) MintCredential(ctx context.Context, spec *credential.
 		} `json:"status"`
 	}
 	if err := json.Unmarshal(respBody, &tokenResp); err != nil {
-		return nil, 0, "", fmt.Errorf("failed to decode TokenRequest response: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to decode TokenRequest response: %w", err)
 	}
 
 	if tokenResp.Status.Token == "" {
-		return nil, 0, "", fmt.Errorf("TokenRequest response missing token")
+		return nil, nil, 0, "", fmt.Errorf("TokenRequest response missing token")
 	}
 
 	// Compute TTL from expiration timestamp
@@ -256,7 +256,7 @@ func (d *KubernetesDriver) MintCredential(ctx context.Context, spec *credential.
 		)
 	}
 
-	return rawData, computedTTL, "", nil
+	return rawData, nil, computedTTL, "", nil
 }
 
 // Revoke is a no-op for Kubernetes ServiceAccount tokens.

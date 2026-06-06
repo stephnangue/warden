@@ -164,7 +164,7 @@ func (d *ScalewayDriver) iamURL(subpath string) string {
 }
 
 // MintCredential returns Scaleway credentials for the given spec.
-func (d *ScalewayDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *ScalewayDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	mintMethod := credential.GetString(spec.Config, "mint_method", "static_keys")
 	switch mintMethod {
 	case "static_keys":
@@ -172,19 +172,19 @@ func (d *ScalewayDriver) MintCredential(ctx context.Context, spec *credential.Cr
 	case "dynamic_keys":
 		return d.mintDynamicCredential(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method: %s (expected static_keys or dynamic_keys)", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method: %s (expected static_keys or dynamic_keys)", mintMethod)
 	}
 }
 
 // mintStaticCredential reads access_key and secret_key from spec config.
-func (d *ScalewayDriver) mintStaticCredential(spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *ScalewayDriver) mintStaticCredential(spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	accessKey := credential.GetString(spec.Config, "access_key", "")
 	if accessKey == "" {
-		return nil, 0, "", fmt.Errorf("no access_key configured in spec")
+		return nil, nil, 0, "", fmt.Errorf("no access_key configured in spec")
 	}
 	secretKey := credential.GetString(spec.Config, "secret_key", "")
 	if secretKey == "" {
-		return nil, 0, "", fmt.Errorf("no secret_key configured in spec")
+		return nil, nil, 0, "", fmt.Errorf("no secret_key configured in spec")
 	}
 
 	rawData := map[string]interface{}{
@@ -192,21 +192,21 @@ func (d *ScalewayDriver) mintStaticCredential(spec *credential.CredSpec) (map[st
 		"secret_key": secretKey,
 	}
 
-	return rawData, 0, "", nil // Static — no TTL, no lease
+	return rawData, nil, 0, "", nil // Static — no TTL, no lease
 }
 
 // mintDynamicCredential creates a new API key via the Scaleway IAM API.
-func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	d.configMu.RLock()
 	managementKey := d.getManagementSecretKeyLocked()
 	d.configMu.RUnlock()
 	if managementKey == "" {
-		return nil, 0, "", fmt.Errorf("management_secret_key is required on source for dynamic_keys mint method")
+		return nil, nil, 0, "", fmt.Errorf("management_secret_key is required on source for dynamic_keys mint method")
 	}
 
 	applicationID := credential.GetString(spec.Config, "application_id", "")
 	if applicationID == "" {
-		return nil, 0, "", fmt.Errorf("application_id is required for dynamic_keys mint method")
+		return nil, nil, 0, "", fmt.Errorf("application_id is required for dynamic_keys mint method")
 	}
 
 	ttl := credential.GetDuration(spec.Config, "ttl", 1*time.Hour)
@@ -225,7 +225,7 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 
 	bodyJSON, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to marshal request body: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
 	apiURL := d.iamURL("/api-keys")
@@ -251,7 +251,7 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 
 	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to create Scaleway API key: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to create Scaleway API key: %w", err)
 	}
 
 	// Parse response
@@ -264,11 +264,11 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 		ExpiresAt        string `json:"expires_at"`
 	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return nil, 0, "", fmt.Errorf("failed to parse Scaleway API response: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to parse Scaleway API response: %w", err)
 	}
 
 	if resp.AccessKey == "" || resp.SecretKey == "" {
-		return nil, 0, "", fmt.Errorf("Scaleway API returned empty access_key or secret_key")
+		return nil, nil, 0, "", fmt.Errorf("Scaleway API returned empty access_key or secret_key")
 	}
 
 	d.logger.Info("created dynamic Scaleway API key",
@@ -283,7 +283,7 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 	}
 
 	// LeaseID is the access_key — used by Revoke to delete the key
-	return rawData, ttl, resp.AccessKey, nil
+	return rawData, nil, ttl, resp.AccessKey, nil
 }
 
 // Revoke deletes a dynamically created API key via DELETE /iam/v1alpha1/api-keys/{access_key}.

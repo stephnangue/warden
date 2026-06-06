@@ -213,7 +213,7 @@ func TestGrafanaDriver_MintCredential(t *testing.T) {
 		Config: map[string]string{},
 	}
 
-	rawData, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "glsa_minted_token_123", rawData["api_key"])
 	assert.Equal(t, grafanaDefaultTokenExpiry, ttl)
@@ -275,7 +275,7 @@ func TestGrafanaDriver_MintCredential_CustomConfig(t *testing.T) {
 		},
 	}
 
-	rawData, _, leaseID, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, _, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "glsa_custom", rawData["api_key"])
 	assert.Equal(t, "99:100", leaseID)
@@ -301,7 +301,7 @@ func TestGrafanaDriver_MintCredential_InvalidRole(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid role")
 }
@@ -330,7 +330,7 @@ func TestGrafanaDriver_MintCredential_SACreateFails(t *testing.T) {
 		Config: map[string]string{},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to create service account")
 }
@@ -375,7 +375,7 @@ func TestGrafanaDriver_MintCredential_TokenCreateFails_CleansUpSA(t *testing.T) 
 		Config: map[string]string{},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to create service account token")
 	assert.Equal(t, int32(1), deleteCalled.Load(), "should cleanup service account on token create failure")
@@ -421,7 +421,7 @@ func TestGrafanaDriver_MintCredential_EmptyTokenKey(t *testing.T) {
 		Config: map[string]string{},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty token key")
 	assert.Equal(t, int32(1), deleteCalled.Load(), "should cleanup on empty token key")
@@ -606,7 +606,7 @@ func TestGrafanaDriver_MintCredential_SAZeroID(t *testing.T) {
 		Config: map[string]string{},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ID 0")
 }
@@ -638,9 +638,9 @@ func TestGrafanaDriver_AuthorizationHeader(t *testing.T) {
 
 func TestParseGrafanaLeaseID(t *testing.T) {
 	tests := []struct {
-		leaseID       string
-		wantSAID      string
-		wantOrgID     string
+		leaseID   string
+		wantSAID  string
+		wantOrgID string
 	}{
 		{"1337", "1337", ""},
 		{"42:1337", "1337", "42"},

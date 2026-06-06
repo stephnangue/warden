@@ -278,10 +278,10 @@ func (d *VaultDriver) loginViaApprole(ctx context.Context) error {
 }
 
 // MintCredential mints credential using Hashicorp Vault based on mint_method
-func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	// Re-authenticate if needed
 	if err := d.authenticate(ctx); err != nil {
-		return nil, 0, "", fmt.Errorf("authentication failed: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("authentication failed: %w", err)
 	}
 
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
@@ -300,26 +300,26 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	case "oauth2":
 		return d.fetchOAuth2Creds(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'dynamic_aws', 'dynamic_gcp', 'dynamic_ibm', 'vault_token', 'oauth2'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'dynamic_aws', 'dynamic_gcp', 'dynamic_ibm', 'vault_token', 'oauth2'", mintMethod)
 	}
 }
 
 // fetchStaticKVSecret fetches static secrets from Vault KV v2
-func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	kv2Mount := credential.GetString(spec.Config, "kv2_mount", "")
 	secretPath := credential.GetString(spec.Config, "secret_path", "")
 
 	if kv2Mount == "" || secretPath == "" {
-		return nil, 0, "", fmt.Errorf("kv2_mount and secret_path are required for static KV credentials")
+		return nil, nil, 0, "", fmt.Errorf("kv2_mount and secret_path are required for static KV credentials")
 	}
 
 	secret, err := d.vault.KVv2(kv2Mount).Get(ctx, secretPath)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to read KV secret: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to read KV secret: %w", err)
 	}
 
 	if secret == nil || secret.Data == nil {
-		return nil, 0, "", fmt.Errorf("no secret found at path '%s' on mount '%s'", secretPath, kv2Mount)
+		return nil, nil, 0, "", fmt.Errorf("no secret found at path '%s' on mount '%s'", secretPath, kv2Mount)
 	}
 
 	if d.logger != nil {
@@ -331,16 +331,16 @@ func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, spec *credential.
 	}
 
 	// Return raw data (static, no lease)
-	return secret.Data, 0, "", nil
+	return secret.Data, nil, 0, "", nil
 }
 
 // fetchDynamicAWSCreds fetches dynamic AWS credentials from Vault AWS engine
-func (d *VaultDriver) fetchDynamicAWSCreds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *VaultDriver) fetchDynamicAWSCreds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	awsMount := credential.GetString(spec.Config, "aws_mount", "")
 	roleName := credential.GetString(spec.Config, "role_name", "")
 
 	if awsMount == "" || roleName == "" {
-		return nil, 0, "", fmt.Errorf("aws_mount and role_name are required for dynamic AWS credentials")
+		return nil, nil, 0, "", fmt.Errorf("aws_mount and role_name are required for dynamic AWS credentials")
 	}
 
 	// Build request path and data
@@ -361,15 +361,15 @@ func (d *VaultDriver) fetchDynamicAWSCreds(ctx context.Context, spec *credential
 		// Parse and validate TTL against min/max bounds
 		parsedTTL, err := time.ParseDuration(ttl)
 		if err != nil {
-			return nil, 0, "", fmt.Errorf("invalid ttl format '%s': %w", ttl, err)
+			return nil, nil, 0, "", fmt.Errorf("invalid ttl format '%s': %w", ttl, err)
 		}
 
 		// Validate TTL against spec bounds
 		if spec.MinTTL > 0 && parsedTTL < spec.MinTTL {
-			return nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", parsedTTL, spec.MinTTL)
+			return nil, nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", parsedTTL, spec.MinTTL)
 		}
 		if spec.MaxTTL > 0 && parsedTTL > spec.MaxTTL {
-			return nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", parsedTTL, spec.MaxTTL)
+			return nil, nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", parsedTTL, spec.MaxTTL)
 		}
 
 		data["ttl"] = parsedTTL.String()
@@ -387,18 +387,18 @@ func (d *VaultDriver) fetchDynamicAWSCreds(ctx context.Context, spec *credential
 	}
 
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to generate AWS credentials: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to generate AWS credentials: %w", err)
 	}
 
 	if secret == nil || secret.Data == nil {
-		return nil, 0, "", fmt.Errorf("no credentials returned for role '%s' on mount '%s'", roleName, awsMount)
+		return nil, nil, 0, "", fmt.Errorf("no credentials returned for role '%s' on mount '%s'", roleName, awsMount)
 	}
 
 	leaseTTL := time.Duration(secret.LeaseDuration) * time.Second
 
 	// Validate lease TTL is positive
 	if leaseTTL <= 0 {
-		return nil, 0, "", fmt.Errorf("Vault returned invalid lease duration for AWS credentials on mount '%s'", awsMount)
+		return nil, nil, 0, "", fmt.Errorf("Vault returned invalid lease duration for AWS credentials on mount '%s'", awsMount)
 	}
 
 	// Add credential source
@@ -418,16 +418,16 @@ func (d *VaultDriver) fetchDynamicAWSCreds(ctx context.Context, spec *credential
 		)
 	}
 
-	return rawData, leaseTTL, secret.LeaseID, nil
+	return rawData, nil, leaseTTL, secret.LeaseID, nil
 }
 
 // fetchDynamicGCPCreds fetches dynamic GCP credentials from Vault GCP secret engine
-func (d *VaultDriver) fetchDynamicGCPCreds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *VaultDriver) fetchDynamicGCPCreds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	gcpMount := credential.GetString(spec.Config, "gcp_mount", "")
 	roleName := credential.GetString(spec.Config, "role_name", "")
 
 	if gcpMount == "" || roleName == "" {
-		return nil, 0, "", fmt.Errorf("gcp_mount and role_name are required for dynamic GCP credentials")
+		return nil, nil, 0, "", fmt.Errorf("gcp_mount and role_name are required for dynamic GCP credentials")
 	}
 
 	// Build path based on role_type (roleset or static-account)
@@ -439,16 +439,16 @@ func (d *VaultDriver) fetchDynamicGCPCreds(ctx context.Context, spec *credential
 	case "static-account":
 		path = fmt.Sprintf("%s/static-account/%s/token", gcpMount, roleName)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported role_type '%s'; use 'roleset' or 'static-account'", roleType)
+		return nil, nil, 0, "", fmt.Errorf("unsupported role_type '%s'; use 'roleset' or 'static-account'", roleType)
 	}
 
 	secret, err := d.vault.Logical().ReadWithContext(ctx, path)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to generate GCP credentials: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to generate GCP credentials: %w", err)
 	}
 
 	if secret == nil || secret.Data == nil {
-		return nil, 0, "", fmt.Errorf("no credentials returned for role '%s' on mount '%s'", roleName, gcpMount)
+		return nil, nil, 0, "", fmt.Errorf("no credentials returned for role '%s' on mount '%s'", roleName, gcpMount)
 	}
 
 	leaseTTL := time.Duration(secret.LeaseDuration) * time.Second
@@ -481,27 +481,27 @@ func (d *VaultDriver) fetchDynamicGCPCreds(ctx context.Context, spec *credential
 		)
 	}
 
-	return rawData, leaseTTL, secret.LeaseID, nil
+	return rawData, nil, leaseTTL, secret.LeaseID, nil
 }
 
 // fetchOAuth2Creds fetches OAuth2 credentials from an OpenBao/Vault OAuth2 secret engine
 // (compatible with openbao-plugin-secrets-oauthapp)
-func (d *VaultDriver) fetchOAuth2Creds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *VaultDriver) fetchOAuth2Creds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	oauth2Mount := credential.GetString(spec.Config, "oauth2_mount", "")
 	credentialName := credential.GetString(spec.Config, "credential_name", "")
 
 	if oauth2Mount == "" || credentialName == "" {
-		return nil, 0, "", fmt.Errorf("oauth2_mount and credential_name are required for oauth2 credentials")
+		return nil, nil, 0, "", fmt.Errorf("oauth2_mount and credential_name are required for oauth2 credentials")
 	}
 
 	path := fmt.Sprintf("%s/creds/%s", oauth2Mount, credentialName)
 	secret, err := d.vault.Logical().ReadWithContext(ctx, path)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to fetch OAuth2 credentials: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to fetch OAuth2 credentials: %w", err)
 	}
 
 	if secret == nil || secret.Data == nil {
-		return nil, 0, "", fmt.Errorf("no credentials returned for '%s' on mount '%s'", credentialName, oauth2Mount)
+		return nil, nil, 0, "", fmt.Errorf("no credentials returned for '%s' on mount '%s'", credentialName, oauth2Mount)
 	}
 
 	// Compute TTL from expire_time if available (RFC3339 timestamp from oauthapp plugin)
@@ -529,17 +529,17 @@ func (d *VaultDriver) fetchOAuth2Creds(ctx context.Context, spec *credential.Cre
 		)
 	}
 
-	return rawData, leaseTTL, secret.LeaseID, nil
+	return rawData, nil, leaseTTL, secret.LeaseID, nil
 }
 
 // fetchDynamicIBMCreds fetches dynamic IBM Cloud credentials from Vault IBM secrets engine,
 // exchanges the API key for an IAM bearer token, and optionally includes COS HMAC keys.
-func (d *VaultDriver) fetchDynamicIBMCreds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *VaultDriver) fetchDynamicIBMCreds(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	ibmMount := credential.GetString(spec.Config, "ibm_mount", "")
 	roleName := credential.GetString(spec.Config, "role_name", "")
 
 	if ibmMount == "" || roleName == "" {
-		return nil, 0, "", fmt.Errorf("ibm_mount and role_name are required for dynamic IBM credentials")
+		return nil, nil, 0, "", fmt.Errorf("ibm_mount and role_name are required for dynamic IBM credentials")
 	}
 
 	// Step 1: Fetch dynamic API key from Vault IBM secrets engine
@@ -550,13 +550,13 @@ func (d *VaultDriver) fetchDynamicIBMCreds(ctx context.Context, spec *credential
 	if ttl != "" {
 		parsedTTL, err := time.ParseDuration(ttl)
 		if err != nil {
-			return nil, 0, "", fmt.Errorf("invalid ttl format '%s': %w", ttl, err)
+			return nil, nil, 0, "", fmt.Errorf("invalid ttl format '%s': %w", ttl, err)
 		}
 		if spec.MinTTL > 0 && parsedTTL < spec.MinTTL {
-			return nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", parsedTTL, spec.MinTTL)
+			return nil, nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", parsedTTL, spec.MinTTL)
 		}
 		if spec.MaxTTL > 0 && parsedTTL > spec.MaxTTL {
-			return nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", parsedTTL, spec.MaxTTL)
+			return nil, nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", parsedTTL, spec.MaxTTL)
 		}
 		data["ttl"] = parsedTTL.String()
 	}
@@ -569,16 +569,16 @@ func (d *VaultDriver) fetchDynamicIBMCreds(ctx context.Context, spec *credential
 		secret, err = d.vault.Logical().ReadWithContext(ctx, path)
 	}
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to generate IBM credentials from Vault: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to generate IBM credentials from Vault: %w", err)
 	}
 	if secret == nil || secret.Data == nil {
-		return nil, 0, "", fmt.Errorf("no credentials returned for role '%s' on mount '%s'", roleName, ibmMount)
+		return nil, nil, 0, "", fmt.Errorf("no credentials returned for role '%s' on mount '%s'", roleName, ibmMount)
 	}
 
 	// Extract API key from Vault response
 	apiKey, _ := secret.Data["api_key"].(string)
 	if apiKey == "" {
-		return nil, 0, "", fmt.Errorf("Vault IBM engine did not return an api_key for role '%s'", roleName)
+		return nil, nil, 0, "", fmt.Errorf("Vault IBM engine did not return an api_key for role '%s'", roleName)
 	}
 
 	vaultLeaseTTL := time.Duration(secret.LeaseDuration) * time.Second
@@ -600,7 +600,7 @@ func (d *VaultDriver) fetchDynamicIBMCreds(ctx context.Context, spec *credential
 			}
 			cancel()
 		}
-		return nil, 0, "", fmt.Errorf("failed to exchange IBM API key for IAM token: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to exchange IBM API key for IAM token: %w", err)
 	}
 
 	// Step 3: Build result with IAM token
@@ -623,7 +623,7 @@ func (d *VaultDriver) fetchDynamicIBMCreds(ctx context.Context, spec *credential
 		leaseTTL = iamTTL
 	}
 	if leaseTTL <= 0 {
-		return nil, 0, "", fmt.Errorf("Vault returned invalid lease duration for IBM credentials on mount '%s'", ibmMount)
+		return nil, nil, 0, "", fmt.Errorf("Vault returned invalid lease duration for IBM credentials on mount '%s'", ibmMount)
 	}
 
 	if d.logger != nil {
@@ -638,15 +638,15 @@ func (d *VaultDriver) fetchDynamicIBMCreds(ctx context.Context, spec *credential
 		)
 	}
 
-	return rawData, leaseTTL, secret.LeaseID, nil
+	return rawData, nil, leaseTTL, secret.LeaseID, nil
 }
 
 // fetchDynamicVaultToken generates a Vault token via auth/token/create/{role}
-func (d *VaultDriver) fetchDynamicVaultToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *VaultDriver) fetchDynamicVaultToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	tokenRole := credential.GetString(spec.Config, "token_role", "")
 
 	if tokenRole == "" {
-		return nil, 0, "", fmt.Errorf("token_role is required for dynamic Vault token generation")
+		return nil, nil, 0, "", fmt.Errorf("token_role is required for dynamic Vault token generation")
 	}
 
 	// Build request path
@@ -660,15 +660,15 @@ func (d *VaultDriver) fetchDynamicVaultToken(ctx context.Context, spec *credenti
 	if ttl != "" {
 		parsedTTL, err := time.ParseDuration(ttl)
 		if err != nil {
-			return nil, 0, "", fmt.Errorf("invalid ttl format '%s': %w", ttl, err)
+			return nil, nil, 0, "", fmt.Errorf("invalid ttl format '%s': %w", ttl, err)
 		}
 
 		// Validate TTL against spec bounds
 		if spec.MinTTL > 0 && parsedTTL < spec.MinTTL {
-			return nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", parsedTTL, spec.MinTTL)
+			return nil, nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", parsedTTL, spec.MinTTL)
 		}
 		if spec.MaxTTL > 0 && parsedTTL > spec.MaxTTL {
-			return nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", parsedTTL, spec.MaxTTL)
+			return nil, nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", parsedTTL, spec.MaxTTL)
 		}
 
 		data["ttl"] = parsedTTL.String()
@@ -689,11 +689,11 @@ func (d *VaultDriver) fetchDynamicVaultToken(ctx context.Context, spec *credenti
 	// Create the token
 	secret, err := d.vault.Logical().WriteWithContext(ctx, path, data)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to create Vault token: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to create Vault token: %w", err)
 	}
 
 	if secret == nil || secret.Auth == nil {
-		return nil, 0, "", fmt.Errorf("no token returned for role '%s'", tokenRole)
+		return nil, nil, 0, "", fmt.Errorf("no token returned for role '%s'", tokenRole)
 	}
 
 	// Extract token TTL from auth response
@@ -701,7 +701,7 @@ func (d *VaultDriver) fetchDynamicVaultToken(ctx context.Context, spec *credenti
 
 	// Validate lease TTL is positive
 	if leaseTTL <= 0 {
-		return nil, 0, "", fmt.Errorf("Vault returned invalid lease duration for token role '%s'", tokenRole)
+		return nil, nil, 0, "", fmt.Errorf("Vault returned invalid lease duration for token role '%s'", tokenRole)
 	}
 
 	// Build raw data with token
@@ -725,7 +725,7 @@ func (d *VaultDriver) fetchDynamicVaultToken(ctx context.Context, spec *credenti
 
 	// Vault tokens don't have a lease ID in the traditional sense
 	// The token itself is the credential; revocation is done via token/revoke
-	return rawData, leaseTTL, secret.Auth.Accessor, nil
+	return rawData, nil, leaseTTL, secret.Auth.Accessor, nil
 }
 
 // Revoke revokes a Vault lease or token accessor

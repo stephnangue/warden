@@ -317,7 +317,7 @@ func TestElasticDriver_MintCredential(t *testing.T) {
 		Config: map[string]string{},
 	}
 
-	rawData, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
+	rawData, _, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, rawData["api_key"], "should return encoded API key")
@@ -338,7 +338,7 @@ func TestElasticDriver_MintCredential_WithExpiration(t *testing.T) {
 		},
 	}
 
-	rawData, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
+	rawData, _, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, rawData["api_key"])
@@ -359,7 +359,7 @@ func TestElasticDriver_MintCredential_WithRoleDescriptors(t *testing.T) {
 		},
 	}
 
-	rawData, _, _, err := d.MintCredential(context.TODO(), spec)
+	rawData, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 	assert.NotEmpty(t, rawData["api_key"])
 }
@@ -377,7 +377,7 @@ func TestElasticDriver_MintCredential_InvalidRoleDescriptors(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := d.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid role_descriptors JSON")
 }
@@ -415,7 +415,7 @@ func TestElasticDriver_MintCredential_WithCustomKeyName(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := d.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "my-custom-key", receivedName)
 }
@@ -651,7 +651,7 @@ func TestElasticDriver_FullRotationLifecycle(t *testing.T) {
 
 	// Verify the driver still works after rotation
 	spec := &credential.CredSpec{Name: "post-rotation", Config: map[string]string{}}
-	rawData, _, _, err := d.MintCredential(context.TODO(), spec)
+	rawData, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 	assert.NotEmpty(t, rawData["api_key"])
 }
@@ -773,7 +773,7 @@ func TestElasticDriver_RequestIncludesApiKeyHeader(t *testing.T) {
 	}
 
 	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
-	_, _, _, err := d.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 
 	assert.Equal(t, "ApiKey "+apiKey, receivedAuth)
@@ -826,7 +826,7 @@ func TestElasticDriver_ConcurrentMintCredential(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		go func() {
 			spec := &credential.CredSpec{Name: "concurrent-spec", Config: map[string]string{}}
-			_, _, _, err := d.MintCredential(context.TODO(), spec)
+			_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 			errs <- err
 		}()
 	}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper"
 )
 
 // ScalewayKeysCredType handles Scaleway API key credentials.
@@ -123,7 +124,7 @@ func (t *ScalewayKeysCredType) ValidateConfig(config map[string]string, sourceTy
 }
 
 // Parse converts raw credential data from source into structured Credential
-func (t *ScalewayKeysCredType) Parse(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
+func (t *ScalewayKeysCredType) Parse(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
 	accessKey, ok := rawData["access_key"].(string)
 	if !ok || accessKey == "" {
 		return nil, fmt.Errorf("%w: missing or invalid access_key", credential.ErrInvalidCredential)
@@ -132,6 +133,11 @@ func (t *ScalewayKeysCredType) Parse(rawData map[string]interface{}, leaseTTL ti
 	secretKey, ok := rawData["secret_key"].(string)
 	if !ok || secretKey == "" {
 		return nil, fmt.Errorf("%w: missing or invalid secret_key", credential.ErrInvalidCredential)
+	}
+
+	meta, err := helper.ToStringMap(metadata)
+	if err != nil {
+		return nil, err
 	}
 
 	return &credential.Credential{
@@ -145,6 +151,7 @@ func (t *ScalewayKeysCredType) Parse(rawData map[string]interface{}, leaseTTL ti
 			"access_key": accessKey,
 			"secret_key": secretKey,
 		},
+		Metadata: meta,
 	}, nil
 }
 

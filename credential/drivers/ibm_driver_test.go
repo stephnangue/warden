@@ -154,7 +154,7 @@ func TestIBMDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := d.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method")
 }
@@ -304,7 +304,7 @@ func TestIBMDriver_MintIAMToken(t *testing.T) {
 		},
 	}
 
-	rawData, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
+	rawData, _, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, rawData["api_key"])
@@ -326,7 +326,7 @@ func TestIBMDriver_MintIAMToken_DefaultMintMethod(t *testing.T) {
 		Config: map[string]string{}, // no mint_method = defaults to iam_token
 	}
 
-	rawData, _, _, err := d.MintCredential(context.TODO(), spec)
+	rawData, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 	assert.NotEmpty(t, rawData["access_token"])
 }
@@ -346,7 +346,7 @@ func TestIBMDriver_MintIAMToken_InvalidKey(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := d.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "IBM IAM token")
 }
@@ -546,7 +546,7 @@ func TestIBMDriver_MintIAMWithCOS_DualMode(t *testing.T) {
 		},
 	}
 
-	rawData, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
+	rawData, _, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, rawData["access_token"])
@@ -569,7 +569,7 @@ func TestIBMDriver_MintIAMWithCOS_APIOnly(t *testing.T) {
 		},
 	}
 
-	rawData, _, _, err := d.MintCredential(context.TODO(), spec)
+	rawData, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, rawData["access_token"])
@@ -594,7 +594,7 @@ func TestIBMDriver_MintIAMWithCOS_InvalidKey(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := d.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to acquire IBM IAM token")
 }

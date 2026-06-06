@@ -173,7 +173,7 @@ func (f *GCPDriverFactory) Create(config map[string]string, log *logger.GatedLog
 }
 
 // MintCredential mints credentials based on the spec's mint_method.
-func (d *GCPDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *GCPDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	mintMethod := credential.GetString(spec.Config, "mint_method", "access_token")
 
 	switch mintMethod {
@@ -182,18 +182,18 @@ func (d *GCPDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	case "impersonated_access_token":
 		return d.mintImpersonatedAccessToken(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for GCP driver; use 'access_token' or 'impersonated_access_token'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for GCP driver; use 'access_token' or 'impersonated_access_token'", mintMethod)
 	}
 }
 
 // mintAccessToken exchanges the source SA key for an OAuth2 access token
-func (d *GCPDriver) mintAccessToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *GCPDriver) mintAccessToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	scopesStr := credential.GetString(spec.Config, "scopes", "https://www.googleapis.com/auth/cloud-platform")
 	scopes := splitScopes(scopesStr)
 
 	token, expiry, err := d.getSourceToken(ctx, scopes)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to acquire GCP access token: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to acquire GCP access token: %w", err)
 	}
 
 	saKey, _ := d.parseServiceAccountKey()
@@ -219,14 +219,14 @@ func (d *GCPDriver) mintAccessToken(ctx context.Context, spec *credential.CredSp
 	}
 
 	// No leaseID - access tokens expire naturally and cannot be revoked
-	return rawData, ttl, "", nil
+	return rawData, nil, ttl, "", nil
 }
 
 // mintImpersonatedAccessToken impersonates another service account via IAM Credentials API
-func (d *GCPDriver) mintImpersonatedAccessToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *GCPDriver) mintImpersonatedAccessToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	targetSA := credential.GetString(spec.Config, "target_service_account", "")
 	if targetSA == "" {
-		return nil, 0, "", fmt.Errorf("target_service_account is required for impersonated_access_token mint method")
+		return nil, nil, 0, "", fmt.Errorf("target_service_account is required for impersonated_access_token mint method")
 	}
 
 	scopesStr := credential.GetString(spec.Config, "scopes", "https://www.googleapis.com/auth/cloud-platform")
@@ -236,7 +236,7 @@ func (d *GCPDriver) mintImpersonatedAccessToken(ctx context.Context, spec *crede
 	// Get source token with IAM scope for impersonation
 	sourceToken, _, err := d.getSourceToken(ctx, []string{"https://www.googleapis.com/auth/iam"})
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to get source token for impersonation: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to get source token for impersonation: %w", err)
 	}
 
 	// Call IAM Credentials API to generate an access token for the target SA
@@ -249,7 +249,7 @@ func (d *GCPDriver) mintImpersonatedAccessToken(ctx context.Context, spec *crede
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to marshal impersonation request: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to marshal impersonation request: %w", err)
 	}
 
 	respBody, err := d.doGCPRequest(ctx, gcpAPIRequest{
@@ -262,7 +262,7 @@ func (d *GCPDriver) mintImpersonatedAccessToken(ctx context.Context, spec *crede
 		operation:   "generateAccessToken",
 	}, 1)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, nil, 0, "", err
 	}
 
 	var tokenResp struct {
@@ -270,11 +270,11 @@ func (d *GCPDriver) mintImpersonatedAccessToken(ctx context.Context, spec *crede
 		ExpireTime  string `json:"expireTime"` // RFC3339
 	}
 	if err := json.Unmarshal(respBody, &tokenResp); err != nil {
-		return nil, 0, "", fmt.Errorf("failed to decode impersonation response: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to decode impersonation response: %w", err)
 	}
 
 	if tokenResp.AccessToken == "" {
-		return nil, 0, "", fmt.Errorf("impersonation response missing accessToken")
+		return nil, nil, 0, "", fmt.Errorf("impersonation response missing accessToken")
 	}
 
 	// Parse expiry time
@@ -310,7 +310,7 @@ func (d *GCPDriver) mintImpersonatedAccessToken(ctx context.Context, spec *crede
 		)
 	}
 
-	return rawData, ttl, "", nil
+	return rawData, nil, ttl, "", nil
 }
 
 // Revoke is a no-op for GCP credentials (they expire naturally)

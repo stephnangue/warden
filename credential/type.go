@@ -67,9 +67,10 @@ type Type interface {
 
 	// Parse converts raw credential data from source into structured Credential
 	// rawData contains the source-specific credential fields
+	// metadata contains the metadata about the credential
 	// leaseTTL is the lease duration from the source (0 for static)
 	// leaseID is the lease identifier for revocation (empty for static)
-	Parse(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) (*Credential, error)
+	Parse(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) (*Credential, error)
 
 	// Validate checks if credential data is well-formed
 	Validate(cred *Credential) error

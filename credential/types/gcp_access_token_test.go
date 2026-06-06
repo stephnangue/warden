@@ -115,7 +115,7 @@ func TestGCPAccessTokenCredType_Parse(t *testing.T) {
 			"target_service_account": "target@project.iam.gserviceaccount.com",
 		}
 
-		cred, err := ct.Parse(rawData, 1*time.Hour, "")
+		cred, err := ct.Parse(rawData, nil, 1*time.Hour, "")
 		require.NoError(t, err)
 		assert.Equal(t, credential.TypeGCPAccessToken, cred.Type)
 		assert.Equal(t, credential.CategoryCloudIAM, cred.Category)
@@ -131,7 +131,7 @@ func TestGCPAccessTokenCredType_Parse(t *testing.T) {
 			"project_id": "my-project",
 		}
 
-		_, err := ct.Parse(rawData, 1*time.Hour, "")
+		_, err := ct.Parse(rawData, nil, 1*time.Hour, "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "access_token")
 	})
@@ -141,7 +141,7 @@ func TestGCPAccessTokenCredType_Parse(t *testing.T) {
 			"access_token": "",
 		}
 
-		_, err := ct.Parse(rawData, 1*time.Hour, "")
+		_, err := ct.Parse(rawData, nil, 1*time.Hour, "")
 		require.Error(t, err)
 	})
 }

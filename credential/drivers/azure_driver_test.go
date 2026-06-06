@@ -189,7 +189,7 @@ func TestAzureDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 			"mint_method": "invalid_method",
 		},
 	}
-	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method 'invalid_method'")
 }
@@ -206,7 +206,7 @@ func TestAzureDriver_MintCredential_BearerToken_MissingCredentials(t *testing.T)
 			"client_secret": "test-secret",
 		},
 	}
-	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "'client_id' and 'client_secret'")
 
@@ -219,7 +219,7 @@ func TestAzureDriver_MintCredential_BearerToken_MissingCredentials(t *testing.T)
 			"client_id":   "test-client",
 		},
 	}
-	_, _, _, err = driver.MintCredential(context.TODO(), spec2)
+	_, _, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "'client_id' and 'client_secret'")
 }
@@ -238,7 +238,7 @@ func TestAzureDriver_MintCredential_KeyVaultSecret_MissingConfig(t *testing.T) {
 			"secret_name":   "test-secret",
 		},
 	}
-	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "'vault_name' and 'secret_name'")
 
@@ -253,7 +253,7 @@ func TestAzureDriver_MintCredential_KeyVaultSecret_MissingConfig(t *testing.T) {
 			"vault_name":    "test-vault",
 		},
 	}
-	_, _, _, err = driver.MintCredential(context.TODO(), spec2)
+	_, _, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "'vault_name' and 'secret_name'")
 }

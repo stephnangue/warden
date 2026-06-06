@@ -252,9 +252,9 @@ func (m *Manager) issueCredential(ctx context.Context, specName string) (*Creden
 // failure. This is the simple path for specs that do not rotate a refresh token.
 func (m *Manager) mintAndParse(ctx context.Context, spec *CredSpec, driver SourceDriver) (*Credential, error) {
 	var cred *Credential
-	err := m.mintingService.MintWithCleanup(ctx, driver, spec, func(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
+	err := m.mintingService.MintWithCleanup(ctx, driver, spec, func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
 		var parseErr error
-		cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, leaseTTL, leaseID, driver)
+		cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, metadata, leaseTTL, leaseID, driver)
 		return parseErr
 	})
 	if err != nil {
@@ -293,10 +293,10 @@ func (m *Manager) issueWithWriteBack(ctx context.Context, specName string, drive
 			return err
 		}
 		cred = nil
-		return m.mintingService.MintWithCleanup(ctx, driver, spec, func(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
+		return m.mintingService.MintWithCleanup(ctx, driver, spec, func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
 			m.consumeRotatedRefreshToken(ctx, spec, rawData)
 			var parseErr error
-			cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, leaseTTL, leaseID, driver)
+			cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, metadata, leaseTTL, leaseID, driver)
 			return parseErr
 		})
 	}

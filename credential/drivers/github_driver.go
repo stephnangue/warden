@@ -132,7 +132,7 @@ func (d *GitHubDriver) getGitHubURL() string {
 
 // MintCredential returns a GitHub token for the given spec.
 // Auth credentials are read from spec.Config, not from the source.
-func (d *GitHubDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *GitHubDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	authMethod := credential.GetString(spec.Config, "auth_method", "app")
 	switch authMethod {
 	case "app":
@@ -140,12 +140,12 @@ func (d *GitHubDriver) MintCredential(ctx context.Context, spec *credential.Cred
 	case "pat":
 		return d.mintPATCredential(spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported auth_method '%s'", authMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported auth_method '%s'", authMethod)
 	}
 }
 
 // mintAppCredential mints a GitHub App installation access token using spec config
-func (d *GitHubDriver) mintAppCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *GitHubDriver) mintAppCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	d.appTokenMu.Lock()
 	defer d.appTokenMu.Unlock()
 
@@ -156,14 +156,14 @@ func (d *GitHubDriver) mintAppCredential(ctx context.Context, spec *credential.C
 			"expires_at": cached.expiresAt.Format(time.RFC3339),
 		}
 		ttl := time.Until(cached.expiresAt)
-		return rawData, ttl, "", nil
+		return rawData, nil, ttl, "", nil
 	}
 
 	// Parse private key from spec config
 	keyPEM := credential.GetString(spec.Config, "private_key", "")
 	key, err := parseRSAPrivateKey(keyPEM)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to parse private key from spec: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to parse private key from spec: %w", err)
 	}
 
 	appID := credential.GetString(spec.Config, "app_id", "")
@@ -172,7 +172,7 @@ func (d *GitHubDriver) mintAppCredential(ctx context.Context, spec *credential.C
 	// Mint a fresh installation token
 	token, expiresAt, err := d.mintInstallationToken(ctx, key, appID, installationID)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to mint installation token: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to mint installation token: %w", err)
 	}
 
 	// Cache per spec
@@ -195,14 +195,14 @@ func (d *GitHubDriver) mintAppCredential(ctx context.Context, spec *credential.C
 		)
 	}
 
-	return rawData, ttl, "", nil
+	return rawData, nil, ttl, "", nil
 }
 
 // mintPATCredential returns the PAT from spec config as a credential
-func (d *GitHubDriver) mintPATCredential(spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *GitHubDriver) mintPATCredential(spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	token := credential.GetString(spec.Config, "token", "")
 	if token == "" {
-		return nil, 0, "", fmt.Errorf("no GitHub PAT configured in spec")
+		return nil, nil, 0, "", fmt.Errorf("no GitHub PAT configured in spec")
 	}
 
 	rawData := map[string]interface{}{
@@ -210,7 +210,7 @@ func (d *GitHubDriver) mintPATCredential(spec *credential.CredSpec) (map[string]
 	}
 
 	// PATs are static - no TTL, no lease
-	return rawData, 0, "", nil
+	return rawData, nil, 0, "", nil
 }
 
 // mintInstallationToken creates a new installation access token via the GitHub API

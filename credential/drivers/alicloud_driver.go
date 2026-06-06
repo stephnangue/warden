@@ -180,26 +180,26 @@ func (d *AlicloudDriver) ramEndpoint() string {
 }
 
 // MintCredential returns Alicloud credentials for the given spec.
-func (d *AlicloudDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *AlicloudDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 	switch mintMethod {
 	case "assume_role":
 		return d.mintAssumeRole(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported or missing mint_method: %q (only assume_role is supported by the alicloud source)", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported or missing mint_method: %q (only assume_role is supported by the alicloud source)", mintMethod)
 	}
 }
 
 // mintAssumeRole calls STS AssumeRole to obtain temporary credentials.
-func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	mgmtID, mgmtSecret := d.mgmtAccessKey()
 	if mgmtID == "" || mgmtSecret == "" {
-		return nil, 0, "", fmt.Errorf("source access_key_id and access_key_secret are required for assume_role")
+		return nil, nil, 0, "", fmt.Errorf("source access_key_id and access_key_secret are required for assume_role")
 	}
 
 	roleARN := credential.GetString(spec.Config, "role_arn", "")
 	if roleARN == "" {
-		return nil, 0, "", fmt.Errorf("role_arn is required for assume_role")
+		return nil, nil, 0, "", fmt.Errorf("role_arn is required for assume_role")
 	}
 	sessionName := credential.GetString(spec.Config, "role_session_name", "warden-session")
 	duration := credential.GetDuration(spec.Config, "duration_seconds", time.Hour)
@@ -223,7 +223,7 @@ func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.Cr
 
 	respBody, err := d.callSignedJSON(ctx, http.MethodPost, d.stsEndpoint(), params, mgmtID, mgmtSecret, "")
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("STS AssumeRole failed: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("STS AssumeRole failed: %w", err)
 	}
 
 	var resp struct {
@@ -235,10 +235,10 @@ func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.Cr
 		} `json:"Credentials"`
 	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return nil, 0, "", fmt.Errorf("parse STS response: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("parse STS response: %w", err)
 	}
 	if resp.Credentials.AccessKeyID == "" || resp.Credentials.AccessKeySecret == "" {
-		return nil, 0, "", fmt.Errorf("STS returned empty credentials")
+		return nil, nil, 0, "", fmt.Errorf("STS returned empty credentials")
 	}
 
 	d.logger.Info("issued STS temporary credentials",
@@ -251,7 +251,7 @@ func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.Cr
 		"access_key_id":     resp.Credentials.AccessKeyID,
 		"access_key_secret": resp.Credentials.AccessKeySecret,
 		"security_token":    resp.Credentials.SecurityToken,
-	}, duration, "", nil // STS tokens are self-expiring; no leaseID
+	}, nil, duration, "", nil // STS tokens are self-expiring; no leaseID
 }
 
 // Revoke is a no-op: the driver's only supported mint method (assume_role)

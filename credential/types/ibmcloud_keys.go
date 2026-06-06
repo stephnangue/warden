@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper"
 )
 
 // IBMCloudKeysCredType handles IBM Cloud credentials.
@@ -101,7 +102,7 @@ func (t *IBMCloudKeysCredType) ValidateConfig(config map[string]string, sourceTy
 
 // Parse converts raw credential data from source into structured Credential.
 // At least one mode must be present: access_token (API) or access_key_id+secret_access_key (COS).
-func (t *IBMCloudKeysCredType) Parse(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
+func (t *IBMCloudKeysCredType) Parse(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
 	accessKeyID, _ := rawData["access_key_id"].(string)
 	secretAccessKey, _ := rawData["secret_access_key"].(string)
 	accessToken, _ := rawData["access_token"].(string)
@@ -129,6 +130,11 @@ func (t *IBMCloudKeysCredType) Parse(rawData map[string]interface{}, leaseTTL ti
 		data["secret_access_key"] = secretAccessKey
 	}
 
+	meta, err := helper.ToStringMap(metadata)
+	if err != nil {
+		return nil, err
+	}
+
 	return &credential.Credential{
 		Type:      credential.TypeIBMCloudKeys,
 		Category:  credential.CategoryCloudIAM,
@@ -137,6 +143,7 @@ func (t *IBMCloudKeysCredType) Parse(rawData map[string]interface{}, leaseTTL ti
 		IssuedAt:  time.Now(),
 		Revocable: leaseTTL > 0,
 		Data:      data,
+		Metadata:  meta,
 	}, nil
 }
 

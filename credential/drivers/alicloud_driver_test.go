@@ -87,7 +87,7 @@ func TestAlicloudDriverFactory_Create(t *testing.T) {
 func TestAlicloudDriver_StaticKeysRejected(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
-	_, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
+	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
 		Config: map[string]string{
 			"mint_method":       "static_keys",
 			"access_key_id":     "x",
@@ -101,7 +101,7 @@ func TestAlicloudDriver_StaticKeysRejected(t *testing.T) {
 func TestAlicloudDriver_UnsupportedMintMethod(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
-	_, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
+	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
 		Config: map[string]string{"mint_method": "bogus"},
 	})
 	assert.Error(t, err)
@@ -111,7 +111,7 @@ func TestAlicloudDriver_UnsupportedMintMethod(t *testing.T) {
 func TestAlicloudDriver_MissingMintMethod(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
-	_, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
+	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
 		Config: map[string]string{},
 	})
 	assert.Error(t, err)
@@ -157,7 +157,7 @@ func TestAlicloudDriver_MintAssumeRole(t *testing.T) {
 		},
 	}
 
-	raw, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
+	raw, _, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "STS.tempid", raw["access_key_id"])
 	assert.Equal(t, "tempsecret", raw["access_key_secret"])
@@ -179,7 +179,7 @@ func TestAlicloudDriver_MintAssumeRole_MissingRoleArn(t *testing.T) {
 		"access_key_secret": "mgmt-secret",
 	}, createAlicloudTestLogger())
 
-	_, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
+	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
 		Config: map[string]string{"mint_method": "assume_role"},
 	})
 	assert.Error(t, err)
@@ -189,7 +189,7 @@ func TestAlicloudDriver_MintAssumeRole_MissingRoleArn(t *testing.T) {
 func TestAlicloudDriver_MintAssumeRole_MissingManagementKey(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
-	_, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
+	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
 		Config: map[string]string{
 			"mint_method": "assume_role",
 			"role_arn":    "acs:ram::123:role/x",
@@ -214,7 +214,7 @@ func TestAlicloudDriver_DynamicKeysRejected(t *testing.T) {
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
 	}, createAlicloudTestLogger())
-	_, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
+	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
 		Config: map[string]string{
 			"mint_method":   "dynamic_keys",
 			"ram_user_name": "warden-svc",

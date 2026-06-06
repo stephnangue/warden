@@ -233,7 +233,7 @@ func (d *OAuth2Driver) resolve(spec *credential.CredSpec, key, def string) strin
 
 // MintCredential mints a bearer token using the flow selected by auth_method
 // (default client_credentials).
-func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	authMethod := d.resolve(spec, "auth_method", oauth2AuthMethodClientCredentials)
 	switch authMethod {
 	case oauth2AuthMethodClientCredentials:
@@ -241,19 +241,19 @@ func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.Cred
 	case oauth2AuthMethodAuthorizationCode:
 		return d.mintFromRefreshToken(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("%s OAuth2 unsupported auth_method %q", d.displayName(), authMethod)
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 unsupported auth_method %q", d.displayName(), authMethod)
 	}
 }
 
 // mintFromClientCredentials exchanges client credentials for a bearer token.
-func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	config := d.credSource.Config
 	name := d.displayName()
 
 	clientID := d.resolve(spec, "client_id", "")
 	clientSecret := d.resolve(spec, "client_secret", "")
 	if clientID == "" || clientSecret == "" {
-		return nil, 0, "", fmt.Errorf("%s OAuth2 source missing client_id or client_secret", name)
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 source missing client_id or client_secret", name)
 	}
 
 	defaultScopes := credential.GetString(config, "default_scopes", "")
@@ -276,13 +276,13 @@ func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *cred
 
 	tokenResp, err := d.postTokenRequest(ctx, d.tokenURL(), form)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("%s OAuth2 token exchange failed: %w", name, err)
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 token exchange failed: %w", name, err)
 	}
 	if tokenResp.AccessToken == "" {
-		return nil, 0, "", fmt.Errorf("%s OAuth2 token response missing access_token", name)
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 token response missing access_token", name)
 	}
 
-	return accessTokenRawData(tokenResp), ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
+	return accessTokenRawData(tokenResp), nil, ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
 }
 
 // mintFromRefreshToken exchanges the sealed refresh token for a fresh access
@@ -290,22 +290,22 @@ func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *cred
 // static access token at connect time, which is returned directly. When the
 // provider rotates the refresh token, the new value is surfaced under the reserved
 // rawData key for the minting layer to persist.
-func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	name := d.displayName()
 
 	refreshToken := credential.GetString(spec.Config, "refresh_token", "")
 	if refreshToken == "" {
 		// No-refresh-token providers seal a static access token at connect time.
 		if staticToken := credential.GetString(spec.Config, "access_token", ""); staticToken != "" {
-			return map[string]interface{}{"api_key": staticToken}, staticTokenTTL(spec), "", nil
+			return map[string]interface{}{"api_key": staticToken}, nil, staticTokenTTL(spec), "", nil
 		}
-		return nil, 0, "", fmt.Errorf("%s OAuth2 spec %q is not connected — run `warden cred spec connect %s`", name, spec.Name, spec.Name)
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 spec %q is not connected — run `warden cred spec connect %s`", name, spec.Name, spec.Name)
 	}
 
 	clientID := d.resolve(spec, "client_id", "")
 	clientSecret := d.resolve(spec, "client_secret", "")
 	if clientID == "" || clientSecret == "" {
-		return nil, 0, "", fmt.Errorf("%s OAuth2 spec missing client_id or client_secret", name)
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 spec missing client_id or client_secret", name)
 	}
 
 	form := url.Values{
@@ -320,12 +320,12 @@ func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credentia
 		if isRefreshTokenRejection(err) {
 			// Signal the minting layer to re-read the spec and retry once (the
 			// token may have been rotated by another node).
-			return nil, 0, "", fmt.Errorf("%s OAuth2 refresh failed: %w: %w", name, credential.ErrRefreshTokenRejected, err)
+			return nil, nil, 0, "", fmt.Errorf("%s OAuth2 refresh failed: %w: %w", name, credential.ErrRefreshTokenRejected, err)
 		}
-		return nil, 0, "", fmt.Errorf("%s OAuth2 refresh failed: %w", name, err)
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 refresh failed: %w", name, err)
 	}
 	if tokenResp.AccessToken == "" {
-		return nil, 0, "", fmt.Errorf("%s OAuth2 refresh response missing access_token", name)
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 refresh response missing access_token", name)
 	}
 
 	rawData := accessTokenRawData(tokenResp)
@@ -333,7 +333,7 @@ func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credentia
 	if tokenResp.RefreshToken != "" && tokenResp.RefreshToken != refreshToken {
 		rawData[credential.RawRotatedRefreshTokenKey] = tokenResp.RefreshToken
 	}
-	return rawData, ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
+	return rawData, nil, ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
 }
 
 // ExchangeAuthorizationCode exchanges an authorization code for tokens using the
@@ -603,7 +603,7 @@ func (d *OAuth2Driver) Cleanup(_ context.Context) error {
 func (d *OAuth2Driver) VerifySpec(ctx context.Context, spec *credential.CredSpec) error {
 	name := d.displayName()
 
-	rawData, _, _, err := d.MintCredential(ctx, spec)
+	rawData, _, _, _, err := d.MintCredential(ctx, spec)
 	if err != nil {
 		return fmt.Errorf("%s OAuth2 spec verification failed: %w", name, err)
 	}

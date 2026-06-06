@@ -256,7 +256,7 @@ func TestHoneycombDriver_MintCredential(t *testing.T) {
 		},
 	}
 
-	rawData, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "secret-ingest-key-value", rawData["api_key"])
 	assert.Equal(t, "ingest", rawData["key_type"])
@@ -316,7 +316,7 @@ func TestHoneycombDriver_MintCredential_ConfigurationKey(t *testing.T) {
 		},
 	}
 
-	rawData, _, leaseID, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, _, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "secret-config-key", rawData["api_key"])
 	assert.Equal(t, "configuration", rawData["key_type"])
@@ -373,7 +373,7 @@ func TestHoneycombDriver_MintCredential_CustomConfig(t *testing.T) {
 		},
 	}
 
-	rawData, ttl, _, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, ttl, _, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "secret-custom", rawData["api_key"])
 	assert.Equal(t, "ingest", rawData["key_type"])
@@ -403,7 +403,7 @@ func TestHoneycombDriver_MintCredential_InvalidPermissionsJSON(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid permissions JSON")
 }
@@ -442,7 +442,7 @@ func TestHoneycombDriver_MintCredential_EmptyID(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty ID")
 }
@@ -469,7 +469,7 @@ func TestHoneycombDriver_MintCredential_InvalidKeyType(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid key_type")
 }
@@ -493,7 +493,7 @@ func TestHoneycombDriver_MintCredential_MissingEnvironmentID(t *testing.T) {
 		Config: map[string]string{},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "environment_id is required")
 }
@@ -521,7 +521,7 @@ func TestHoneycombDriver_MintCredential_PermissionsOnIngestKey(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "permissions can only be set for configuration keys")
 }
@@ -553,7 +553,7 @@ func TestHoneycombDriver_MintCredential_APIError(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to create API key")
 }
@@ -592,7 +592,7 @@ func TestHoneycombDriver_MintCredential_EmptySecret(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty secret")
 }

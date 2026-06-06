@@ -68,10 +68,11 @@ type SourceDriver interface {
 	// Takes a CredSpec as input
 	// Returns:
 	//   - rawData: map of credential fields
+	//   - metadata: map of fields about the credentials, such as the subject
 	//   - leaseTTL: duration of the lease (0 for static credentials)
 	//   - leaseID: identifier for revocation (empty for static)
 	//   - error: any error encountered
-	MintCredential(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error)
+	MintCredential(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error)
 
 	// Revoke attempts to revoke a lease/credential (best-effort)
 	// Returns nil if revocation is not supported or succeeds

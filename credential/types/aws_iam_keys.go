@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper"
 )
 
 // AWSIAMAccessKeysCredType handles AWS IAM access keys (static and STS temporary)
@@ -201,7 +202,7 @@ func (t *AWSIAMAccessKeysCredType) validateAWSConfig(config map[string]string) e
 }
 
 // Parse converts raw credential data from source into structured Credential
-func (t *AWSIAMAccessKeysCredType) Parse(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
+func (t *AWSIAMAccessKeysCredType) Parse(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
 	// Extract access_key_id (may be named "access_key" from Vault AWS engine)
 	accessKeyID, ok := rawData["access_key_id"].(string)
 	if !ok || accessKeyID == "" {
@@ -222,6 +223,11 @@ func (t *AWSIAMAccessKeysCredType) Parse(rawData map[string]interface{}, leaseTT
 		}
 	}
 
+	meta, err := helper.ToStringMap(metadata)
+	if err != nil {
+		return nil, err
+	}
+
 	cred := &credential.Credential{
 		Type:      credential.TypeAWSAccessKeys,
 		Category:  credential.CategoryCloudIAM,
@@ -233,6 +239,7 @@ func (t *AWSIAMAccessKeysCredType) Parse(rawData map[string]interface{}, leaseTT
 			"access_key_id":     accessKeyID,
 			"secret_access_key": secretAccessKey,
 		},
+		Metadata: meta,
 	}
 
 	// Extract optional session token (for STS temporary credentials)

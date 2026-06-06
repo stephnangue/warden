@@ -302,7 +302,7 @@ func TestKubernetesDriver_MintCredential_Success(t *testing.T) {
 
 	d := newTestK8sDriver(t, server.URL)
 
-	rawData, ttl, leaseID, err := d.MintCredential(context.TODO(), &credential.CredSpec{
+	rawData, _, ttl, leaseID, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
 		Config: map[string]string{
 			"service_account": "my-sa",
@@ -324,7 +324,7 @@ func TestKubernetesDriver_MintCredential_DefaultTTL(t *testing.T) {
 
 	d := newTestK8sDriver(t, server.URL)
 
-	rawData, ttl, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
+	rawData, _, ttl, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
 		Config: map[string]string{
 			"service_account": "my-sa",
@@ -344,7 +344,7 @@ func TestKubernetesDriver_MintCredential_CustomAudiences(t *testing.T) {
 
 	d := newTestK8sDriver(t, server.URL)
 
-	rawData, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
+	rawData, _, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
 		Config: map[string]string{
 			"service_account": "my-sa",
@@ -362,7 +362,7 @@ func TestKubernetesDriver_MintCredential_MissingServiceAccount(t *testing.T) {
 
 	d := newTestK8sDriver(t, server.URL)
 
-	_, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
+	_, _, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
 		Config: map[string]string{
 			"namespace": "default",
@@ -378,7 +378,7 @@ func TestKubernetesDriver_MintCredential_MissingNamespace(t *testing.T) {
 
 	d := newTestK8sDriver(t, server.URL)
 
-	_, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
+	_, _, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
 		Config: map[string]string{
 			"service_account": "my-sa",
@@ -394,7 +394,7 @@ func TestKubernetesDriver_MintCredential_SANotFound(t *testing.T) {
 
 	d := newTestK8sDriver(t, server.URL)
 
-	_, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
+	_, _, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
 		Config: map[string]string{
 			"service_account": "not-found-sa",
@@ -411,7 +411,7 @@ func TestKubernetesDriver_MintCredential_Forbidden(t *testing.T) {
 
 	d := newTestK8sDriver(t, server.URL)
 
-	_, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
+	_, _, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
 		Config: map[string]string{
 			"service_account": "forbidden-sa",
@@ -718,7 +718,7 @@ func TestKubernetesDriver_MintCredential_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	_, _, _, err := d.MintCredential(ctx, &credential.CredSpec{
+	_, _, _, _, err := d.MintCredential(ctx, &credential.CredSpec{
 		Name: "test-spec",
 		Config: map[string]string{
 			"service_account": "my-sa",
@@ -751,7 +751,7 @@ func TestKubernetesDriver_ConcurrentMintAndRotation(t *testing.T) {
 	go func() {
 		defer func() { done <- struct{}{} }()
 		for i := 0; i < 10; i++ {
-			_, _, _, _ = d.MintCredential(context.Background(), &credential.CredSpec{
+			_, _, _, _, _ = d.MintCredential(context.Background(), &credential.CredSpec{
 				Name: "test-spec",
 				Config: map[string]string{
 					"service_account": "my-sa",

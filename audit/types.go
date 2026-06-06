@@ -170,6 +170,11 @@ type Credential struct {
 	// Credential data (sensitive - will be HMAC salted by the format layer)
 	// Contains the actual credential values like access_key, secret_key, password, etc.
 	Data map[string]string `json:"data,omitempty"`
+
+	// Metadata holds non-secret, descriptive attributes (e.g. the forwarded
+	// token's subject). Logged in clear by default; salt-able per key via
+	// salt_fields (response.credential.metadata[.key]).
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // EntryType defines the type of audit entry
@@ -253,6 +258,12 @@ func (e *LogEntry) Clone() *LogEntry {
 				clone.Response.Credential.Data = make(map[string]string, len(e.Response.Credential.Data))
 				for k, v := range e.Response.Credential.Data {
 					clone.Response.Credential.Data[k] = v
+				}
+			}
+			if e.Response.Credential.Metadata != nil {
+				clone.Response.Credential.Metadata = make(map[string]string, len(e.Response.Credential.Metadata))
+				for k, v := range e.Response.Credential.Metadata {
+					clone.Response.Credential.Metadata[k] = v
 				}
 			}
 		}

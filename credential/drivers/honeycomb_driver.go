@@ -152,7 +152,7 @@ func (d *HoneycombDriver) getTeamSlug() string {
 //
 // The leaseID is the Honeycomb key ID (e.g., "hcxik_..."), used for revocation.
 // The key secret is only available at creation time.
-func (d *HoneycombDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *HoneycombDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	keyType := credential.GetString(spec.Config, "key_type", honeycombDefaultKeyType)
 	namePrefix := credential.GetString(spec.Config, "key_name_prefix", honeycombDefaultKeyNamePrefix)
 	environmentID := credential.GetString(spec.Config, "environment_id", "")
@@ -163,11 +163,11 @@ func (d *HoneycombDriver) MintCredential(ctx context.Context, spec *credential.C
 	switch keyType {
 	case "ingest", "configuration":
 	default:
-		return nil, 0, "", fmt.Errorf("invalid key_type '%s': must be 'ingest' or 'configuration'", keyType)
+		return nil, nil, 0, "", fmt.Errorf("invalid key_type '%s': must be 'ingest' or 'configuration'", keyType)
 	}
 
 	if environmentID == "" {
-		return nil, 0, "", fmt.Errorf("environment_id is required in spec config")
+		return nil, nil, 0, "", fmt.Errorf("environment_id is required in spec config")
 	}
 
 	// Build key name
@@ -182,11 +182,11 @@ func (d *HoneycombDriver) MintCredential(ctx context.Context, spec *credential.C
 	// Parse and add permissions if specified (configuration keys only)
 	if permissionsJSON != "" {
 		if keyType != "configuration" {
-			return nil, 0, "", fmt.Errorf("permissions can only be set for configuration keys, not %s keys", keyType)
+			return nil, nil, 0, "", fmt.Errorf("permissions can only be set for configuration keys, not %s keys", keyType)
 		}
 		var permissions map[string]interface{}
 		if err := json.Unmarshal([]byte(permissionsJSON), &permissions); err != nil {
-			return nil, 0, "", fmt.Errorf("invalid permissions JSON: %w", err)
+			return nil, nil, 0, "", fmt.Errorf("invalid permissions JSON: %w", err)
 		}
 		attributes["permissions"] = permissions
 	}
@@ -208,7 +208,7 @@ func (d *HoneycombDriver) MintCredential(ctx context.Context, spec *credential.C
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to marshal API key request: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to marshal API key request: %w", err)
 	}
 
 	// Create the API key
@@ -216,7 +216,7 @@ func (d *HoneycombDriver) MintCredential(ctx context.Context, spec *credential.C
 	path := fmt.Sprintf("/2/teams/%s/api-keys", url.PathEscape(teamSlug))
 	respBody, _, err := d.doHoneycombRequest(ctx, http.MethodPost, path, bodyBytes)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to create API key: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to create API key: %w", err)
 	}
 
 	// Parse response — JSON:API format
@@ -229,13 +229,13 @@ func (d *HoneycombDriver) MintCredential(ctx context.Context, spec *credential.C
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return nil, 0, "", fmt.Errorf("failed to parse API key response: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to parse API key response: %w", err)
 	}
 	if resp.Data.ID == "" {
-		return nil, 0, "", fmt.Errorf("Honeycomb API returned key with empty ID")
+		return nil, nil, 0, "", fmt.Errorf("Honeycomb API returned key with empty ID")
 	}
 	if resp.Data.Attributes.Secret == "" {
-		return nil, 0, "", fmt.Errorf("Honeycomb API returned key with empty secret")
+		return nil, nil, 0, "", fmt.Errorf("Honeycomb API returned key with empty secret")
 	}
 
 	rawData := map[string]interface{}{
@@ -256,7 +256,7 @@ func (d *HoneycombDriver) MintCredential(ctx context.Context, spec *credential.C
 		)
 	}
 
-	return rawData, keyTTL, leaseID, nil
+	return rawData, nil, keyTTL, leaseID, nil
 }
 
 // Revoke deletes the API key identified by leaseID.

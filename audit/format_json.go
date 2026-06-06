@@ -441,6 +441,32 @@ func (f *JSONFormat) saltCredentialField(ctx context.Context, cred *Credential, 
 				cred.Data[key] = salted
 			}
 		}
+	case "metadata":
+		// Metadata logs in clear by default; salting is opt-in via salt_fields
+		// (response.credential.metadata salts every key, .subject one key).
+		if cred.Metadata == nil {
+			return nil
+		}
+		if len(parts) == 1 {
+			for key, value := range cred.Metadata {
+				if value != "" {
+					salted, err := f.saltFn(ctx, value)
+					if err != nil {
+						return err
+					}
+					cred.Metadata[key] = salted
+				}
+			}
+		} else if len(parts) >= 2 {
+			key := parts[1]
+			if value, ok := cred.Metadata[key]; ok && value != "" {
+				salted, err := f.saltFn(ctx, value)
+				if err != nil {
+					return err
+				}
+				cred.Metadata[key] = salted
+			}
+		}
 	}
 
 	return nil
@@ -685,6 +711,12 @@ func (f *JSONFormat) omitCredentialField(cred *Credential, parts []string) {
 			cred.Data = nil
 		} else if len(parts) >= 2 && cred.Data != nil {
 			delete(cred.Data, parts[1])
+		}
+	case "metadata":
+		if len(parts) == 1 {
+			cred.Metadata = nil
+		} else if len(parts) >= 2 && cred.Metadata != nil {
+			delete(cred.Metadata, parts[1])
 		}
 	}
 }

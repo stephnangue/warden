@@ -70,7 +70,7 @@ func TestLocalDriver_MintCredential(t *testing.T) {
 		},
 	}
 
-	data, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
+	data, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "admin", data["username"])
 	assert.Equal(t, "secret", data["password"])

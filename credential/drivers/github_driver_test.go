@@ -167,7 +167,7 @@ func TestGitHubDriver_MintPATCredential(t *testing.T) {
 		},
 	}
 
-	rawData, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "ghp_test123", rawData["token"])
 	assert.Equal(t, time.Duration(0), ttl)
@@ -192,7 +192,7 @@ func TestGitHubDriver_MintPATCredential_EmptyToken(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no GitHub PAT configured")
 }
@@ -214,7 +214,7 @@ func TestGitHubDriver_MintCredential_UnsupportedAuthMethod(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported auth_method")
 }
@@ -258,7 +258,7 @@ func TestGitHubDriver_MintAppCredential(t *testing.T) {
 		},
 	}
 
-	rawData, ttl, _, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, ttl, _, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "ghs_installation_token_123", rawData["token"])
 	assert.NotEmpty(t, rawData["expires_at"])
@@ -301,13 +301,13 @@ func TestGitHubDriver_MintAppCredential_Cached(t *testing.T) {
 	}
 
 	// First call mints
-	rawData1, _, _, err := driver.MintCredential(context.Background(), spec)
+	rawData1, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "ghs_cached_token", rawData1["token"])
 	assert.Equal(t, 1, callCount)
 
 	// Second call should use cache (no additional HTTP call)
-	rawData2, _, _, err := driver.MintCredential(context.Background(), spec)
+	rawData2, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "ghs_cached_token", rawData2["token"])
 	assert.Equal(t, 1, callCount, "should use cached token, not call API again")
@@ -359,17 +359,17 @@ func TestGitHubDriver_MintAppCredential_PerSpecCache(t *testing.T) {
 	}
 
 	// Mint for spec A
-	_, _, _, err := driver.MintCredential(context.Background(), specA)
+	_, _, _, _, err := driver.MintCredential(context.Background(), specA)
 	require.NoError(t, err)
 	assert.Equal(t, 1, callCount)
 
 	// Mint for spec B — should call API again (different spec)
-	_, _, _, err = driver.MintCredential(context.Background(), specB)
+	_, _, _, _, err = driver.MintCredential(context.Background(), specB)
 	require.NoError(t, err)
 	assert.Equal(t, 2, callCount, "different specs should not share cache")
 
 	// Mint for spec A again — should use cache
-	_, _, _, err = driver.MintCredential(context.Background(), specA)
+	_, _, _, _, err = driver.MintCredential(context.Background(), specA)
 	require.NoError(t, err)
 	assert.Equal(t, 2, callCount, "same spec should use cached token")
 }
@@ -403,7 +403,7 @@ func TestGitHubDriver_MintInstallationToken_APIError(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to mint installation token")
 }
@@ -440,7 +440,7 @@ func TestGitHubDriver_MintInstallationToken_EmptyToken(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty token")
 }

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper"
 )
 
 // CloudflareKeysCredType handles Cloudflare cloud credentials.
@@ -99,7 +100,7 @@ func (t *CloudflareKeysCredType) ValidateConfig(config map[string]string, source
 
 // Parse converts raw credential data from source into structured Credential.
 // At least one mode must be present: api_token (API) or access_key_id+secret_access_key (R2).
-func (t *CloudflareKeysCredType) Parse(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
+func (t *CloudflareKeysCredType) Parse(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
 	accessKeyID, _ := rawData["access_key_id"].(string)
 	secretAccessKey, _ := rawData["secret_access_key"].(string)
 	apiToken, _ := rawData["api_token"].(string)
@@ -127,6 +128,11 @@ func (t *CloudflareKeysCredType) Parse(rawData map[string]interface{}, leaseTTL 
 		data["secret_access_key"] = secretAccessKey
 	}
 
+	meta, err := helper.ToStringMap(metadata)
+	if err != nil {
+		return nil, err
+	}
+
 	return &credential.Credential{
 		Type:      credential.TypeCloudflareKeys,
 		Category:  credential.CategoryCloudIAM,
@@ -135,6 +141,7 @@ func (t *CloudflareKeysCredType) Parse(rawData map[string]interface{}, leaseTTL 
 		IssuedAt:  time.Now(),
 		Revocable: leaseTTL > 0,
 		Data:      data,
+		Metadata:  meta,
 	}, nil
 }
 

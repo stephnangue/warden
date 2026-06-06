@@ -254,7 +254,7 @@ func TestAWSDriver_MintCredential_InvalidMethod(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method")
 }
@@ -285,7 +285,7 @@ func TestAWSDriver_MintCredential_TTLBelowMinimum(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "below minimum")
 }
@@ -316,7 +316,7 @@ func TestAWSDriver_MintCredential_TTLExceedsMaximum(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds maximum")
 }
@@ -380,7 +380,7 @@ func TestAWSDriver_MintCredential_RedshiftIAMToken_MissingEndpoint(t *testing.T)
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "db_endpoint")
 }
@@ -397,7 +397,7 @@ func TestAWSDriver_MintCredential_RedshiftIAMToken_NoClusterOrWorkgroup(t *testi
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cluster_identifier")
 	assert.Contains(t, err.Error(), "workgroup_name")
@@ -417,7 +417,7 @@ func TestAWSDriver_MintCredential_RedshiftIAMToken_BothClusterAndWorkgroup(t *te
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exactly one")
 }
@@ -437,7 +437,7 @@ func TestAWSDriver_MintCredential_RedshiftIAMToken_DurationOutOfRange(t *testing
 					"duration_seconds":   d,
 				},
 			}
-			_, _, _, err := driver.MintCredential(context.TODO(), spec)
+			_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "duration_seconds")
 		})
@@ -457,7 +457,7 @@ func TestAWSDriver_MintCredential_UnsupportedMethodMessage_IncludesRedshift(t *t
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "redshift_iam_token")
 }

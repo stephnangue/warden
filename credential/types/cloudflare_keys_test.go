@@ -237,7 +237,7 @@ func TestCloudflareKeysCredType_Parse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cred, err := ct.Parse(tt.rawData, tt.leaseTTL, tt.leaseID)
+			cred, err := ct.Parse(tt.rawData, nil, tt.leaseTTL, tt.leaseID)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)

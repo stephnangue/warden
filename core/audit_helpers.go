@@ -232,6 +232,15 @@ func buildAuditCredential(cred *credential.Credential) *audit.Credential {
 		}
 	}
 
+	// Non-secret metadata (e.g. subject) — logged in clear unless an operator
+	// opts a key into salt_fields.
+	if cred.Metadata != nil {
+		auditCred.Metadata = make(map[string]string, len(cred.Metadata))
+		for k, v := range cred.Metadata {
+			auditCred.Metadata[k] = v
+		}
+	}
+
 	return auditCred
 }
 

@@ -94,7 +94,7 @@ func TestOVHKeysCredType_Parse(t *testing.T) {
 			"access_key": "test-access-key",
 			"secret_key": "test-secret-key",
 			"api_token":  "test-api-token",
-		}, 0, "")
+		}, nil, 0, "")
 		require.NoError(t, err)
 		assert.Equal(t, credential.TypeOVHKeys, cred.Type)
 		assert.Equal(t, "test-access-key", cred.Data["access_key"])
@@ -106,7 +106,7 @@ func TestOVHKeysCredType_Parse(t *testing.T) {
 	t.Run("valid: api_token only (API mode)", func(t *testing.T) {
 		cred, err := ct.Parse(map[string]interface{}{
 			"api_token": "test-api-token",
-		}, 0, "")
+		}, nil, 0, "")
 		require.NoError(t, err)
 		assert.Equal(t, "test-api-token", cred.Data["api_token"])
 		assert.Len(t, cred.Data, 1)
@@ -118,7 +118,7 @@ func TestOVHKeysCredType_Parse(t *testing.T) {
 		cred, err := ct.Parse(map[string]interface{}{
 			"access_key": "test-access-key",
 			"secret_key": "test-secret-key",
-		}, 0, "")
+		}, nil, 0, "")
 		require.NoError(t, err)
 		assert.Equal(t, "test-access-key", cred.Data["access_key"])
 		assert.Equal(t, "test-secret-key", cred.Data["secret_key"])
@@ -132,7 +132,7 @@ func TestOVHKeysCredType_Parse(t *testing.T) {
 			"access_key": "test-access-key",
 			"secret_key": "test-secret-key",
 			"api_token":  "test-api-token",
-		}, 1*time.Hour, "lease-123")
+		}, nil, 1*time.Hour, "lease-123")
 		require.NoError(t, err)
 		assert.Equal(t, 1*time.Hour, cred.LeaseTTL)
 		assert.Equal(t, "lease-123", cred.LeaseID)
@@ -142,7 +142,7 @@ func TestOVHKeysCredType_Parse(t *testing.T) {
 	t.Run("invalid: access_key without secret_key", func(t *testing.T) {
 		_, err := ct.Parse(map[string]interface{}{
 			"access_key": "test-access-key",
-		}, 0, "")
+		}, nil, 0, "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "secret_key")
 	})
@@ -150,13 +150,13 @@ func TestOVHKeysCredType_Parse(t *testing.T) {
 	t.Run("invalid: secret_key without access_key", func(t *testing.T) {
 		_, err := ct.Parse(map[string]interface{}{
 			"secret_key": "test-secret-key",
-		}, 0, "")
+		}, nil, 0, "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "access_key")
 	})
 
 	t.Run("invalid: empty raw data", func(t *testing.T) {
-		_, err := ct.Parse(map[string]interface{}{}, 0, "")
+		_, err := ct.Parse(map[string]interface{}{}, nil, 0, "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "at least one mode")
 	})

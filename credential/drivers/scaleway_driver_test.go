@@ -106,7 +106,7 @@ func TestScalewayDriver_MintStaticCredential(t *testing.T) {
 			},
 		}
 
-		rawData, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
+		rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
 		require.NoError(t, err)
 		assert.Equal(t, "SCWXXXXXXXXXXXXXXXXX", rawData["access_key"])
 		assert.Equal(t, "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", rawData["secret_key"])
@@ -123,7 +123,7 @@ func TestScalewayDriver_MintStaticCredential(t *testing.T) {
 			},
 		}
 
-		rawData, _, _, err := driver.MintCredential(context.Background(), spec)
+		rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
 		require.NoError(t, err)
 		assert.Equal(t, "SCWXXXXXXXXXXXXXXXXX", rawData["access_key"])
 	})
@@ -137,7 +137,7 @@ func TestScalewayDriver_MintStaticCredential(t *testing.T) {
 			},
 		}
 
-		_, _, _, err := driver.MintCredential(context.Background(), spec)
+		_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "access_key")
 	})
@@ -151,7 +151,7 @@ func TestScalewayDriver_MintStaticCredential(t *testing.T) {
 			},
 		}
 
-		_, _, _, err := driver.MintCredential(context.Background(), spec)
+		_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "secret_key")
 	})
@@ -164,7 +164,7 @@ func TestScalewayDriver_MintStaticCredential(t *testing.T) {
 			},
 		}
 
-		_, _, _, err := driver.MintCredential(context.Background(), spec)
+		_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unsupported mint_method")
 	})
@@ -225,7 +225,7 @@ func TestScalewayDriver_MintDynamicCredential(t *testing.T) {
 		},
 	}
 
-	rawData, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "SCWNEWKEYXXXXXXXXXX", rawData["access_key"])
 	assert.Equal(t, "new-uuid-secret-key", rawData["secret_key"])
@@ -248,7 +248,7 @@ func TestScalewayDriver_MintDynamicCredential_MissingManagementKey(t *testing.T)
 		},
 	}
 
-	_, _, _, err = driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err = driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "management_secret_key")
 }
@@ -269,7 +269,7 @@ func TestScalewayDriver_MintDynamicCredential_MissingApplicationID(t *testing.T)
 		},
 	}
 
-	_, _, _, err = driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err = driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "application_id")
 }

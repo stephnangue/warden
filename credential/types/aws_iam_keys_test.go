@@ -299,7 +299,7 @@ func TestAWSIAMAccessKeysCredType_Parse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cred, err := ct.Parse(tt.rawData, tt.leaseTTL, tt.leaseID)
+			cred, err := ct.Parse(tt.rawData, nil, tt.leaseTTL, tt.leaseID)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {

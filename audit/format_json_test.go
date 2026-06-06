@@ -1317,3 +1317,76 @@ func TestOmitResponseFields(t *testing.T) {
 		})
 	}
 }
+
+func TestJSONFormatCredentialMetadata(t *testing.T) {
+	mockSaltFunc := func(ctx context.Context, data string) (string, error) {
+		return "hmac-sha256:" + data, nil
+	}
+
+	newEntry := func() *LogEntry {
+		return &LogEntry{
+			Timestamp: time.Now(),
+			Response: &Response{
+				StatusCode: 200,
+				Credential: &Credential{
+					CredentialID: "cred-1",
+					Type:         "oauth_bearer_token",
+					TokenID:      "tok-1",
+					Data:         map[string]string{"api_key": "secret-token"},
+					Metadata:     map[string]string{"subject": "alice@example.com", "subject_verified": "true"},
+				},
+			},
+		}
+	}
+
+	format := func(saltFields []string, entry *LogEntry) Credential {
+		f := NewJSONFormat(WithSaltFunc(mockSaltFunc), WithSaltFields(saltFields))
+		out, err := f.FormatResponse(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatResponse: %v", err)
+		}
+		var got LogEntry
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return *got.Response.Credential
+	}
+
+	t.Run("clear by default; data salted", func(t *testing.T) {
+		entry := newEntry()
+		c := format([]string{"response.credential.data"}, entry)
+		if c.Metadata["subject"] != "alice@example.com" {
+			t.Errorf("subject should be in clear, got %q", c.Metadata["subject"])
+		}
+		if !containsBytes([]byte(c.Data["api_key"]), "hmac-sha256:") {
+			t.Error("data api_key should be salted")
+		}
+		// The original entry must be untouched (Clone deep-copy).
+		if entry.Response.Credential.Metadata["subject"] != "alice@example.com" {
+			t.Error("original metadata mutated by salting (Clone deep-copy missing)")
+		}
+		if entry.Response.Credential.Data["api_key"] != "secret-token" {
+			t.Error("original data mutated by salting")
+		}
+	})
+
+	t.Run("salt one metadata key", func(t *testing.T) {
+		c := format([]string{"response.credential.metadata.subject"}, newEntry())
+		if !containsBytes([]byte(c.Metadata["subject"]), "hmac-sha256:") {
+			t.Errorf("subject should be salted, got %q", c.Metadata["subject"])
+		}
+		if c.Metadata["subject_verified"] != "true" {
+			t.Errorf("subject_verified should stay clear, got %q", c.Metadata["subject_verified"])
+		}
+	})
+
+	t.Run("salt whole metadata map", func(t *testing.T) {
+		c := format([]string{"response.credential.metadata"}, newEntry())
+		if !containsBytes([]byte(c.Metadata["subject"]), "hmac-sha256:") {
+			t.Error("subject should be salted")
+		}
+		if !containsBytes([]byte(c.Metadata["subject_verified"]), "hmac-sha256:") {
+			t.Error("subject_verified should be salted")
+		}
+	})
+}

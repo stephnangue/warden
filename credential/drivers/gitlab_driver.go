@@ -196,7 +196,7 @@ func (d *GitLabDriver) verifyAuth(ctx context.Context) error {
 }
 
 // MintCredential mints credentials based on the spec's mint_method
-func (d *GitLabDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *GitLabDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 
 	switch mintMethod {
@@ -205,12 +205,12 @@ func (d *GitLabDriver) MintCredential(ctx context.Context, spec *credential.Cred
 	case "group_access_token":
 		return d.mintGroupAccessToken(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for GitLab driver; use 'project_access_token' or 'group_access_token'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for GitLab driver; use 'project_access_token' or 'group_access_token'", mintMethod)
 	}
 }
 
 // mintProjectAccessToken creates a project access token via the GitLab API
-func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	projectID := credential.GetString(spec.Config, "project_id", "")
 	tokenName := credential.GetString(spec.Config, "token_name", "warden-minted")
 	scopes := credential.GetString(spec.Config, "scopes", "api")
@@ -233,13 +233,13 @@ func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credent
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to marshal request body: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
 	path := fmt.Sprintf("/api/v4/projects/%s/access_tokens", url.PathEscape(projectID))
 	respBody, err := d.doGitLabRequest(ctx, http.MethodPost, path, bodyBytes)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to create project access token: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to create project access token: %w", err)
 	}
 
 	var result struct {
@@ -247,11 +247,11 @@ func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credent
 		Token string `json:"token"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, 0, "", fmt.Errorf("failed to parse response: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	if result.Token == "" {
-		return nil, 0, "", fmt.Errorf("GitLab API returned empty token")
+		return nil, nil, 0, "", fmt.Errorf("GitLab API returned empty token")
 	}
 
 	tokenIDStr := strconv.Itoa(result.ID)
@@ -272,11 +272,11 @@ func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credent
 		)
 	}
 
-	return rawData, ttl, leaseID, nil
+	return rawData, nil, ttl, leaseID, nil
 }
 
 // mintGroupAccessToken creates a group access token via the GitLab API
-func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	groupID := credential.GetString(spec.Config, "group_id", "")
 	tokenName := credential.GetString(spec.Config, "token_name", "warden-minted")
 	scopes := credential.GetString(spec.Config, "scopes", "api")
@@ -298,13 +298,13 @@ func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credentia
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to marshal request body: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
 	path := fmt.Sprintf("/api/v4/groups/%s/access_tokens", url.PathEscape(groupID))
 	respBody, err := d.doGitLabRequest(ctx, http.MethodPost, path, bodyBytes)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to create group access token: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to create group access token: %w", err)
 	}
 
 	var result struct {
@@ -312,11 +312,11 @@ func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credentia
 		Token string `json:"token"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, 0, "", fmt.Errorf("failed to parse response: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	if result.Token == "" {
-		return nil, 0, "", fmt.Errorf("GitLab API returned empty token")
+		return nil, nil, 0, "", fmt.Errorf("GitLab API returned empty token")
 	}
 
 	tokenIDStr := strconv.Itoa(result.ID)
@@ -337,7 +337,7 @@ func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credentia
 		)
 	}
 
-	return rawData, ttl, leaseID, nil
+	return rawData, nil, ttl, leaseID, nil
 }
 
 // Revoke revokes a previously minted access token

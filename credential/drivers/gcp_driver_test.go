@@ -123,7 +123,7 @@ func TestGCPDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := d.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method")
 }
@@ -144,7 +144,7 @@ func TestGCPDriver_MintCredential_ImpersonationMissingTarget(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := d.MintCredential(context.TODO(), spec)
+	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "target_service_account")
 }

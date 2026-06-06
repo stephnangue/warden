@@ -127,6 +127,7 @@ func TestAzureBearerTokenCredType_Parse(t *testing.T) {
 	tests := []struct {
 		name     string
 		rawData  map[string]interface{}
+		metadata map[string]interface{}
 		leaseTTL time.Duration
 		leaseID  string
 		wantErr  bool
@@ -141,6 +142,7 @@ func TestAzureBearerTokenCredType_Parse(t *testing.T) {
 				"client_id":    "test-client",
 				"token_type":   "Bearer",
 			},
+			metadata: nil,
 			leaseTTL: 1 * time.Hour,
 			leaseID:  "",
 			wantErr:  false,
@@ -150,6 +152,7 @@ func TestAzureBearerTokenCredType_Parse(t *testing.T) {
 			rawData: map[string]interface{}{
 				"access_token": "test-token",
 			},
+			metadata: nil,
 			leaseTTL: 30 * time.Minute,
 			leaseID:  "",
 			wantErr:  false,
@@ -159,6 +162,7 @@ func TestAzureBearerTokenCredType_Parse(t *testing.T) {
 			rawData: map[string]interface{}{
 				"resource_uri": "https://management.azure.com/",
 			},
+			metadata: nil,
 			leaseTTL: 1 * time.Hour,
 			wantErr:  true,
 			errMsg:   "access_token",
@@ -168,6 +172,7 @@ func TestAzureBearerTokenCredType_Parse(t *testing.T) {
 			rawData: map[string]interface{}{
 				"access_token": "",
 			},
+			metadata: map[string]interface{}{},
 			leaseTTL: 1 * time.Hour,
 			wantErr:  true,
 			errMsg:   "access_token",
@@ -176,7 +181,7 @@ func TestAzureBearerTokenCredType_Parse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cred, err := credType.Parse(tt.rawData, tt.leaseTTL, tt.leaseID)
+			cred, err := credType.Parse(tt.rawData, tt.metadata, tt.leaseTTL, tt.leaseID)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)

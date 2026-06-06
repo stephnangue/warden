@@ -126,7 +126,7 @@ func (d *GrafanaDriver) getAdminToken() string {
 //  3. Return {"api_key": "<token>"} with TTL matching token expiry
 //
 // The leaseID is the service account ID, used for cleanup on Revoke.
-func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	role := credential.GetString(spec.Config, "role", grafanaDefaultRole)
 	namePrefix := credential.GetString(spec.Config, "name_prefix", grafanaDefaultNamePrefix)
 	tokenExpiry := credential.GetDuration(spec.Config, "token_expiry", grafanaDefaultTokenExpiry)
@@ -136,7 +136,7 @@ func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.Cre
 	switch role {
 	case "Viewer", "Editor", "Admin":
 	default:
-		return nil, 0, "", fmt.Errorf("invalid role '%s': must be Viewer, Editor, or Admin", role)
+		return nil, nil, 0, "", fmt.Errorf("invalid role '%s': must be Viewer, Editor, or Admin", role)
 	}
 
 	// Step 1: Create a service account
@@ -147,22 +147,22 @@ func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.Cre
 		"isDisabled": false,
 	})
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to marshal service account request: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to marshal service account request: %w", err)
 	}
 
 	saResp, _, err := d.doGrafanaRequest(ctx, http.MethodPost, "/api/serviceaccounts", saBody, orgID)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to create service account: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to create service account: %w", err)
 	}
 
 	var saResult struct {
 		ID int64 `json:"id"`
 	}
 	if err := json.Unmarshal(saResp, &saResult); err != nil {
-		return nil, 0, "", fmt.Errorf("failed to parse service account response: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to parse service account response: %w", err)
 	}
 	if saResult.ID == 0 {
-		return nil, 0, "", fmt.Errorf("Grafana API returned service account with ID 0")
+		return nil, nil, 0, "", fmt.Errorf("Grafana API returned service account with ID 0")
 	}
 
 	// Step 2: Create a token for the service account
@@ -172,7 +172,7 @@ func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.Cre
 		"secondsToLive": secondsToLive,
 	})
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to marshal token request: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to marshal token request: %w", err)
 	}
 
 	tokenPath := fmt.Sprintf("/api/serviceaccounts/%d/tokens", saResult.ID)
@@ -180,7 +180,7 @@ func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.Cre
 	if err != nil {
 		// Best-effort cleanup: delete the service account we just created
 		d.deleteServiceAccount(ctx, saResult.ID, orgID)
-		return nil, 0, "", fmt.Errorf("failed to create service account token: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to create service account token: %w", err)
 	}
 
 	var tokenResult struct {
@@ -188,11 +188,11 @@ func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.Cre
 	}
 	if err := json.Unmarshal(tokenResp, &tokenResult); err != nil {
 		d.deleteServiceAccount(ctx, saResult.ID, orgID)
-		return nil, 0, "", fmt.Errorf("failed to parse token response: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to parse token response: %w", err)
 	}
 	if tokenResult.Key == "" {
 		d.deleteServiceAccount(ctx, saResult.ID, orgID)
-		return nil, 0, "", fmt.Errorf("Grafana API returned empty token key")
+		return nil, nil, 0, "", fmt.Errorf("Grafana API returned empty token key")
 	}
 
 	// Return credential as api_key for BearerAPIKeyExtractor compatibility
@@ -218,7 +218,7 @@ func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.Cre
 		)
 	}
 
-	return rawData, tokenExpiry, leaseID, nil
+	return rawData, nil, tokenExpiry, leaseID, nil
 }
 
 // Revoke deletes the service account (and all its tokens) identified by leaseID.

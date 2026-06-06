@@ -29,7 +29,7 @@ func TestKubernetesTokenCredType_Parse_Valid(t *testing.T) {
 		"audiences":       "https://my-app.example.com",
 	}
 
-	cred, err := ct.Parse(rawData, 1*time.Hour, "")
+	cred, err := ct.Parse(rawData, nil, 1*time.Hour, "")
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeKubernetesToken, cred.Type)
 	assert.Equal(t, "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.test", cred.Data["token"])
@@ -46,7 +46,7 @@ func TestKubernetesTokenCredType_Parse_MissingToken(t *testing.T) {
 		"service_account": "my-sa",
 	}
 
-	_, err := ct.Parse(rawData, 1*time.Hour, "")
+	_, err := ct.Parse(rawData, nil, 1*time.Hour, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing")
 }
@@ -58,7 +58,7 @@ func TestKubernetesTokenCredType_Revocable(t *testing.T) {
 		"token": "test-token",
 	}
 
-	cred, err := ct.Parse(rawData, 1*time.Hour, "some-lease-id")
+	cred, err := ct.Parse(rawData, nil, 1*time.Hour, "some-lease-id")
 	require.NoError(t, err)
 	assert.False(t, cred.Revocable)
 }

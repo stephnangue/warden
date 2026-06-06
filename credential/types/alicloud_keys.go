@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper"
 )
 
 // AlicloudKeysCredType handles Alibaba Cloud (Alicloud) API key credentials.
@@ -111,7 +112,7 @@ func (t *AlicloudKeysCredType) ValidateConfig(config map[string]string, sourceTy
 }
 
 // Parse converts raw credential data from source into structured Credential
-func (t *AlicloudKeysCredType) Parse(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
+func (t *AlicloudKeysCredType) Parse(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
 	accessKeyID, ok := rawData["access_key_id"].(string)
 	if !ok || accessKeyID == "" {
 		return nil, fmt.Errorf("%w: missing or invalid access_key_id", credential.ErrInvalidCredential)
@@ -131,6 +132,11 @@ func (t *AlicloudKeysCredType) Parse(rawData map[string]interface{}, leaseTTL ti
 		data["security_token"] = securityToken
 	}
 
+	meta, err := helper.ToStringMap(metadata)
+	if err != nil {
+		return nil, err
+	}
+
 	return &credential.Credential{
 		Type:      credential.TypeAlicloudKeys,
 		Category:  credential.CategoryCloudIAM,
@@ -139,6 +145,7 @@ func (t *AlicloudKeysCredType) Parse(rawData map[string]interface{}, leaseTTL ti
 		IssuedAt:  time.Now(),
 		Revocable: leaseTTL > 0,
 		Data:      data,
+		Metadata:  meta,
 	}, nil
 }
 
