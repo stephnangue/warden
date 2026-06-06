@@ -575,6 +575,15 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 
 	b.logger.Info("updating credential spec", logger.String("name", name))
 
+	// Serialize the read-modify-write against a concurrent refresh-token
+	// write-back (or /connect seal) for the same spec, so an edit can't clobber
+	// a freshly rotated refresh_token. Same per-spec lock the minting layer uses.
+	unlock, errResp := b.lockSpec(ctx, name)
+	if errResp != nil {
+		return errResp, nil
+	}
+	defer unlock()
+
 	// Get existing spec
 	spec, err := b.core.credConfigStore.GetSpec(ctx, name)
 	if err != nil {
@@ -693,6 +702,15 @@ func (b *SystemBackend) handleCredentialSpecConnect(ctx context.Context, req *lo
 		return logical.ErrorResponse(logical.ErrBadRequest("code is required")), nil
 	}
 
+	// Serialize the seal against a concurrent refresh-token write-back for the
+	// same spec, so a re-connect can't clobber an in-flight rotation (and vice
+	// versa). Same per-spec lock the minting layer uses; keyed by ns.UUID.
+	unlock, errResp := b.lockSpec(ctx, name)
+	if errResp != nil {
+		return errResp, nil
+	}
+	defer unlock()
+
 	spec, authorizer, errResp := b.oauth2SpecAuthorizer(ctx, name)
 	if errResp != nil {
 		return errResp, nil
@@ -741,6 +759,25 @@ func (b *SystemBackend) handleCredentialSpecConnect(ctx context.Context, req *lo
 		"reconnected": reconnected,
 		"message":     msg,
 	}), nil
+}
+
+// lockSpec takes the per-spec mutation lock (shared with the minting layer's
+// refresh-token write-back), keyed by ns.UUID, returning the unlock func. It
+// returns an error response if the credential manager is unavailable, the
+// namespace is missing, or the context is cancelled while waiting.
+func (b *SystemBackend) lockSpec(ctx context.Context, name string) (func(), *logical.Response) {
+	if b.core.credentialManager == nil {
+		return nil, logical.ErrorResponse(logical.ErrInternal("credential manager not initialized"))
+	}
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, logical.ErrorResponse(err)
+	}
+	unlock, err := b.core.credentialManager.LockSpec(ctx, ns.UUID, name)
+	if err != nil {
+		return nil, logical.ErrorResponse(err)
+	}
+	return unlock, nil
 }
 
 // oauth2SpecAuthorizer loads a connect-gated spec and its OAuth2Authorizer driver,

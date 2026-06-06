@@ -2,7 +2,9 @@ package credential
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	ristretto "github.com/dgraph-io/ristretto/v2"
@@ -46,6 +48,13 @@ type Manager struct {
 	mintingService    *MintingService
 	credentialParser  *CredentialParser
 
+	// configStore persists rotated refresh tokens back into the spec config.
+	configStore ConfigStoreAccessor
+
+	// specLocks serializes spec-config mutations (refresh-token write-back and
+	// the /connect seal) per namespace+spec. Key: "{ns.UUID}:{specName}".
+	specLocks sync.Map
+
 	// Optional expiration registrar for timer-based TTL enforcement
 	// When set, newly issued credentials are registered for expiration
 	expirationRegistrar ExpirationRegistrar
@@ -60,6 +69,12 @@ type Manager struct {
 type ConfigStoreAccessor interface {
 	GetSpec(ctx context.Context, name string) (*CredSpec, error)
 	GetSource(ctx context.Context, name string) (*CredSource, error)
+	// PersistRotatedSpec persists a spec without re-running verification, used by
+	// the refresh-token write-back (re-minting would consume the rotated token).
+	PersistRotatedSpec(ctx context.Context, spec *CredSpec) error
+	// ReloadSpec returns the spec read from storage, bypassing the node-local
+	// cache, so a refresh token another node rotated and persisted is seen.
+	ReloadSpec(ctx context.Context, name string) (*CredSpec, error)
 }
 
 // ExpirationRegistrar defines the interface for registering credentials with an expiration manager.
@@ -98,6 +113,7 @@ func NewManager(
 		driverCoordinator: driverCoordinator,
 		mintingService:    mintingService,
 		credentialParser:  credentialParser,
+		configStore:       configStore,
 		issuanceTimeout:   DefaultIssuanceTimeout,
 	}
 
@@ -221,21 +237,156 @@ func (m *Manager) issueCredential(ctx context.Context, specName string) (*Creden
 		return nil, err
 	}
 
-	// Step 3: Mint credential with automatic cleanup, then parse and validate
-	// MintingService handles orphaned lease cleanup if parsing/validation fails
+	// A spec with a sealed refresh token (OAuth2 authorization_code) mints by
+	// exchanging that single-use token: serialize per spec, persist a rotated
+	// token, and retry once if the provider rejects it. Other specs use the
+	// simple mint path unchanged.
+	if needsRefreshTokenWriteBack(spec) {
+		return m.issueWithWriteBack(ctx, specName, driver)
+	}
+
+	return m.mintAndParse(ctx, spec, driver)
+}
+
+// mintAndParse mints a credential and parses it, with orphaned-lease cleanup on
+// failure. This is the simple path for specs that do not rotate a refresh token.
+func (m *Manager) mintAndParse(ctx context.Context, spec *CredSpec, driver SourceDriver) (*Credential, error) {
 	var cred *Credential
-	err = m.mintingService.MintWithCleanup(ctx, driver, spec, func(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
-		// Parse and validate the minted credential
+	err := m.mintingService.MintWithCleanup(ctx, driver, spec, func(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
 		var parseErr error
 		cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, leaseTTL, leaseID, driver)
 		return parseErr
 	})
-
 	if err != nil {
 		return nil, err
 	}
-
 	return cred, nil
+}
+
+// issueWithWriteBack mints a refresh-token-backed credential under the per-spec
+// lock. It persists a rotated refresh token surfaced by the driver, and on a
+// rejection (the sealed token was already used — typically a rotation on
+// another node) it reloads the spec straight from storage, bypassing this
+// node's cache, and retries exactly once.
+func (m *Manager) issueWithWriteBack(ctx context.Context, specName string, driver SourceDriver) (*Credential, error) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get namespace from context: %w", err)
+	}
+	unlock, err := m.LockSpec(ctx, ns.UUID, specName)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	var cred *Credential
+	// reload bypasses the node-local spec cache so a token another node rotated
+	// and persisted to shared storage is actually seen on the retry.
+	attempt := func(reload bool) error {
+		var spec *CredSpec
+		if reload {
+			spec, err = m.configStore.ReloadSpec(ctx, specName)
+		} else {
+			spec, err = m.specResolver.ResolveSpec(ctx, specName)
+		}
+		if err != nil {
+			return err
+		}
+		cred = nil
+		return m.mintingService.MintWithCleanup(ctx, driver, spec, func(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
+			m.consumeRotatedRefreshToken(ctx, spec, rawData)
+			var parseErr error
+			cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, leaseTTL, leaseID, driver)
+			return parseErr
+		})
+	}
+
+	err = attempt(false)
+	if err != nil && errors.Is(err, ErrRefreshTokenRejected) {
+		// The token was rejected as already-used. Reload from storage (another
+		// node may have rotated+persisted a fresh token this node hasn't cached)
+		// and retry exactly once.
+		m.log.Info("oauth2 refresh token rejected; reloading spec from storage and retrying once",
+			logger.String("spec", specName))
+		err = attempt(true)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return cred, nil
+}
+
+// consumeRotatedRefreshToken strips the reserved rotated-token key from rawData
+// (so it never reaches the credential Data map) and persists the new refresh
+// token into the spec config. Must run before ParseAndValidate.
+//
+// A persist failure does not fail this issuance — the access token just minted
+// is valid and is returned. But it is logged at error level because the old
+// refresh token is now dead at the provider: on this node the rotated token is
+// lost and future mints will fail with invalid_grant until the spec is
+// reconnected (or another node's copy is reloaded from storage).
+func (m *Manager) consumeRotatedRefreshToken(ctx context.Context, spec *CredSpec, rawData map[string]interface{}) {
+	rotated, ok := rawData[RawRotatedRefreshTokenKey]
+	if !ok {
+		return
+	}
+	delete(rawData, RawRotatedRefreshTokenKey)
+	newToken, isString := rotated.(string)
+	if !isString || newToken == "" {
+		// The only producer sets a non-empty string; a different shape means a
+		// rotated token would be silently dropped, so make it visible.
+		m.log.Warn("ignoring rotated refresh token with unexpected value",
+			logger.String("spec", spec.Name))
+		return
+	}
+	// Copy the spec (GetSpec returns a shared cached pointer) before mutating.
+	updated := &CredSpec{
+		Name:           spec.Name,
+		Type:           spec.Type,
+		Source:         spec.Source,
+		MinTTL:         spec.MinTTL,
+		MaxTTL:         spec.MaxTTL,
+		RotationPeriod: spec.RotationPeriod,
+		Config:         make(map[string]string, len(spec.Config)),
+	}
+	for k, v := range spec.Config {
+		updated.Config[k] = v
+	}
+	updated.Config["refresh_token"] = newToken
+	if err := m.configStore.PersistRotatedSpec(ctx, updated); err != nil {
+		m.log.Error("failed to persist rotated refresh token; spec must be reconnected if mints start failing",
+			logger.String("spec", spec.Name), logger.Err(err))
+	}
+}
+
+// needsRefreshTokenWriteBack reports whether a spec mints by exchanging a sealed
+// refresh token. The rotated-token reserved key can only appear for such specs.
+// Gating on the sealed token is robust to where auth_method is set; a spec that
+// retains a stale refresh_token after switching to client_credentials takes this
+// path harmlessly (the write-back is a no-op since no reserved key is surfaced).
+func needsRefreshTokenWriteBack(spec *CredSpec) bool {
+	return spec.Config["refresh_token"] != ""
+}
+
+// LockSpec serializes spec-config mutations (refresh-token write-back and the
+// /connect seal) for one namespace+spec. It is context-aware: a waiter whose
+// context is cancelled or times out returns an error rather than blocking past
+// its deadline. The key MUST use ns.UUID to match the persistence layer's spec
+// keying.
+//
+// Note: the lock map is not pruned on spec/namespace deletion. Each tiny entry
+// (a key string + a buffered channel) persists for the process lifetime; safe
+// pruning would require reference counting and is deferred.
+func (m *Manager) LockSpec(ctx context.Context, nsUUID, specName string) (unlock func(), err error) {
+	key := nsUUID + ":" + specName
+	v, _ := m.specLocks.LoadOrStore(key, make(chan struct{}, 1))
+	ch := v.(chan struct{})
+	select {
+	case ch <- struct{}{}:
+		return func() { <-ch }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // SetExpirationRegistrar sets the expiration registrar for timer-based TTL enforcement.

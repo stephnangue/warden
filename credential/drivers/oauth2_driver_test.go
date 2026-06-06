@@ -3,6 +3,7 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1023,6 +1024,102 @@ func TestOAuth2Driver_MintFromRefreshToken_StaticAccessToken(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "static-token", rawData["api_key"])
 	assert.Equal(t, time.Duration(0), ttl)
+}
+
+func TestOAuth2Driver_MintFromRefreshToken_InvalidGrant_HTTP400(t *testing.T) {
+	// RFC 6749 standard rejection: HTTP 400 with an error body.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_grant", "error_description": "token expired"})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-dead",
+	}}
+
+	_, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, credential.ErrRefreshTokenRejected), "expected ErrRefreshTokenRejected, got %v", err)
+}
+
+func TestOAuth2Driver_MintFromRefreshToken_InvalidGrant_HTTP200(t *testing.T) {
+	// GitHub-style rejection: HTTP 200 with an error body.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_grant"})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-dead",
+	}}
+
+	_, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, credential.ErrRefreshTokenRejected), "expected ErrRefreshTokenRejected, got %v", err)
+}
+
+func TestOAuth2Driver_MintFromRefreshToken_NonGrantError_NotRejection(t *testing.T) {
+	// A non-grant error (HTTP 200 + a different code) must NOT be classified as a
+	// refresh-token rejection, so the minting layer does not retry it.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "temporarily_unavailable"})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt",
+	}}
+
+	_, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, credential.ErrRefreshTokenRejected), "non-grant error must not be a rejection: %v", err)
+}
+
+func TestOAuth2Driver_MintFromRefreshToken_InvalidClient_NotRejection(t *testing.T) {
+	// HTTP 401 invalid_client (wrong client_secret) must NOT be classified as a
+	// refresh-token rejection — the token is fine, the client creds are wrong.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_client"})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "wrong", "refresh_token": "rt",
+	}}
+
+	_, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, credential.ErrRefreshTokenRejected), "invalid_client must not be a refresh-token rejection: %v", err)
+}
+
+func TestOAuth2Driver_MintFromRefreshToken_SlowDown400_NotRejection(t *testing.T) {
+	// HTTP 400 with a non-grant code (slow_down) must NOT be a rejection, even
+	// though the status is 400 — classification is by the parsed error code.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "slow_down"})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt",
+	}}
+
+	_, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, credential.ErrRefreshTokenRejected), "slow_down 400 must not be a refresh-token rejection: %v", err)
 }
 
 func TestOAuth2Driver_BuildAuthorizeURL(t *testing.T) {

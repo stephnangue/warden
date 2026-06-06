@@ -19,28 +19,52 @@ import (
 // Mock Implementations
 // ============================================================================
 
-// mockConfigStore implements ConfigStoreAccessor for testing
+// mockConfigStore implements ConfigStoreAccessor for testing. It models the two
+// layers of the real store separately: a node-local "cache" (read by GetSpec)
+// and shared "storage" (read by ReloadSpec, written by PersistRotatedSpec). This
+// lets tests reproduce the cross-node staleness the real Ristretto-backed store
+// has: a remote node's persist updates storage but not this node's cache.
 type mockConfigStore struct {
-	specs   map[string]*CredSpec
-	sources map[string]*CredSource
+	mu        sync.Mutex
+	cache     map[string]*CredSpec // read by GetSpec (node-local)
+	storage   map[string]*CredSpec // read by ReloadSpec (shared)
+	sources   map[string]*CredSource
+	persisted []*CredSpec // specs captured by PersistRotatedSpec, in order
+	persistFn func(spec *CredSpec) error
 }
 
 func newMockConfigStore() *mockConfigStore {
 	return &mockConfigStore{
-		specs:   make(map[string]*CredSpec),
+		cache:   make(map[string]*CredSpec),
+		storage: make(map[string]*CredSpec),
 		sources: make(map[string]*CredSource),
 	}
 }
 
 func (m *mockConfigStore) GetSpec(ctx context.Context, name string) (*CredSpec, error) {
-	spec, ok := m.specs[name]
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	spec, ok := m.cache[name]
 	if !ok {
 		return nil, errors.New("spec not found")
 	}
 	return spec, nil
 }
 
+func (m *mockConfigStore) ReloadSpec(ctx context.Context, name string) (*CredSpec, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	spec, ok := m.storage[name]
+	if !ok {
+		return nil, errors.New("spec not found")
+	}
+	m.cache[name] = spec // re-reading from storage refreshes the local cache
+	return spec, nil
+}
+
 func (m *mockConfigStore) GetSource(ctx context.Context, name string) (*CredSource, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	source, ok := m.sources[name]
 	if !ok {
 		return nil, errors.New("source not found")
@@ -48,12 +72,46 @@ func (m *mockConfigStore) GetSource(ctx context.Context, name string) (*CredSour
 	return source, nil
 }
 
+func (m *mockConfigStore) PersistRotatedSpec(ctx context.Context, spec *CredSpec) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.persistFn != nil {
+		if err := m.persistFn(spec); err != nil {
+			return err
+		}
+	}
+	m.persisted = append(m.persisted, spec)
+	// A same-node persist updates both storage and this node's cache.
+	m.storage[spec.Name] = spec
+	m.cache[spec.Name] = spec
+	return nil
+}
+
 func (m *mockConfigStore) AddSpec(spec *CredSpec) {
-	m.specs[spec.Name] = spec
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cache[spec.Name] = spec
+	m.storage[spec.Name] = spec
 }
 
 func (m *mockConfigStore) AddSource(source *CredSource) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.sources[source.Name] = source
+}
+
+// rotateOnOtherNode simulates another HA node rotating+persisting a refresh
+// token: shared storage advances, but this node's cache stays stale.
+func (m *mockConfigStore) rotateOnOtherNode(name, refreshToken string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur := m.storage[name]
+	updated := &CredSpec{Name: cur.Name, Type: cur.Type, Source: cur.Source, Config: map[string]string{}}
+	for k, v := range cur.Config {
+		updated.Config[k] = v
+	}
+	updated.Config["refresh_token"] = refreshToken
+	m.storage[name] = updated // cache intentionally left stale
 }
 
 // mockSourceDriver implements SourceDriver for testing
@@ -700,4 +758,163 @@ func TestManager_SpecExists(t *testing.T) {
 		exists := managerWithNilStore.SpecExists(ctx, "any-spec")
 		assert.False(t, exists, "should return false when config store is nil")
 	})
+}
+
+// ============================================================================
+// Refresh-token write-back
+// ============================================================================
+
+func addRefreshSpecAndSource(configStore *mockConfigStore, refreshToken string) {
+	configStore.AddSource(&CredSource{Name: "src", Type: SourceTypeLocal, Config: map[string]string{}})
+	configStore.AddSpec(&CredSpec{Name: "gh", Type: TypeVaultToken, Source: "src", Config: map[string]string{
+		"auth_method": "authorization_code", "refresh_token": refreshToken,
+	}})
+}
+
+func TestManager_WriteBack_StripsReservedKeyAndPersists(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+	addRefreshSpecAndSource(configStore, "rt-old")
+
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"api_key": "at-new", RawRotatedRefreshTokenKey: "rt-new"}, time.Hour, "", nil
+	}
+
+	cred, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour)
+	require.NoError(t, err)
+
+	// The reserved rotated-token key must be stripped before parsing.
+	_, leaked := cred.Data[RawRotatedRefreshTokenKey]
+	assert.False(t, leaked, "reserved rotated-token key must not reach credential Data")
+	assert.Equal(t, "at-new", cred.Data["api_key"])
+
+	// The rotated token is persisted into a fresh spec copy.
+	require.Len(t, configStore.persisted, 1)
+	assert.Equal(t, "rt-new", configStore.persisted[0].Config["refresh_token"])
+}
+
+func TestManager_WriteBack_NonRotating_NoPersist(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+	addRefreshSpecAndSource(configStore, "rt-stable")
+
+	// No reserved key → stable token, no write-back.
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"api_key": "at-1"}, time.Hour, "", nil
+	}
+
+	_, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour)
+	require.NoError(t, err)
+	assert.Empty(t, configStore.persisted, "non-rotating mint must not persist")
+}
+
+func TestManager_InvalidGrant_RetriesOnceWithReloadedSpec(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+	addRefreshSpecAndSource(configStore, "rt-stale")
+
+	// Cross-node rotation: attempt 1 reads this node's stale cache (rt-stale) and
+	// is rejected; meanwhile another node rotated+persisted rt-fresh to shared
+	// storage WITHOUT touching this node's cache. The retry must reload from
+	// storage (not the cache) to pick up rt-fresh.
+	var attempts int32
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+		n := atomic.AddInt32(&attempts, 1)
+		if n == 1 {
+			assert.Equal(t, "rt-stale", spec.Config["refresh_token"])
+			configStore.rotateOnOtherNode("gh", "rt-fresh") // storage advances; cache stays stale
+			return nil, 0, "", ErrRefreshTokenRejected
+		}
+		assert.Equal(t, "rt-fresh", spec.Config["refresh_token"], "retry must reload from storage, bypassing the stale cache")
+		return map[string]interface{}{"api_key": "at-ok"}, time.Hour, "", nil
+	}
+
+	cred, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, "at-ok", cred.Data["api_key"])
+	assert.Equal(t, int32(2), atomic.LoadInt32(&attempts), "must mint exactly twice (one retry)")
+}
+
+func TestManager_InvalidGrant_RetryFailsOnce_SurfacesError(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+	addRefreshSpecAndSource(configStore, "rt-dead")
+
+	var attempts int32
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+		atomic.AddInt32(&attempts, 1)
+		return nil, 0, "", ErrRefreshTokenRejected // never recovers
+	}
+
+	_, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrRefreshTokenRejected))
+	assert.Equal(t, int32(2), atomic.LoadInt32(&attempts), "retry is bounded to exactly one extra attempt")
+}
+
+func TestManager_WriteBack_PersistError_DoesNotFailIssuance(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+	addRefreshSpecAndSource(configStore, "rt-old")
+
+	configStore.persistFn = func(spec *CredSpec) error { return errors.New("storage down") }
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"api_key": "at-new", RawRotatedRefreshTokenKey: "rt-new"}, time.Hour, "", nil
+	}
+
+	// A persist failure must not fail issuance — the access token is still valid.
+	cred, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, "at-new", cred.Data["api_key"])
+}
+
+func TestManager_LockSpec_Mutex(t *testing.T) {
+	manager, _, _ := createTestManager(t)
+	defer manager.Stop()
+
+	unlock, err := manager.LockSpec(context.Background(), "ns-uuid", "gh")
+	require.NoError(t, err)
+
+	// A second lock for the same key blocks until unlock.
+	locked := make(chan struct{})
+	go func() {
+		u2, e := manager.LockSpec(context.Background(), "ns-uuid", "gh")
+		if e == nil {
+			close(locked)
+			u2()
+		}
+	}()
+	select {
+	case <-locked:
+		t.Fatal("second LockSpec acquired while the first was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// A different key does not block.
+	u3, err := manager.LockSpec(context.Background(), "ns-uuid", "other")
+	require.NoError(t, err)
+	u3()
+
+	unlock()
+	select {
+	case <-locked:
+	case <-time.After(time.Second):
+		t.Fatal("second LockSpec did not acquire after unlock")
+	}
+}
+
+func TestManager_LockSpec_ContextCancel(t *testing.T) {
+	manager, _, _ := createTestManager(t)
+	defer manager.Stop()
+
+	unlock, err := manager.LockSpec(context.Background(), "ns-uuid", "gh")
+	require.NoError(t, err)
+	defer unlock()
+
+	// A waiter whose context is cancelled must return an error, not block forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = manager.LockSpec(ctx, "ns-uuid", "gh")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
