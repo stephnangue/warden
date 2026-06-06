@@ -48,11 +48,11 @@ Warden closes the gap by sitting in the path: the agent identifies itself, Warde
 ```
 ┌──────────────┐                    ┌──────────────┐                     ┌──────────────┐
 │              │   1. Discover      │              │                     │              │
-│              │ ─────────────────▶ │              │                     │ AWS, Azure   │
-│   AI Agent   │   what can I do?   │              │                     │ GCP, GitHub  │
-│  MCP Server  │                    │    Warden    │   real credentials  │ Anthropic    │
-│              │   2. Connect       │              │ ──────────────────▶ │ OpenAI, RDS  │
-│              │ ─────────────────▶ │              │                     │ Slack, K8s   │
+│              │ ─────────────────▶ │              │                     │ MCP servers  │
+│   AI Agent   │   what can I do?   │              │                     │ Cloud        │
+│ MCP servers  │                    │    Warden    │   real credentials  │ LLMs         │
+│              │   2. Connect       │              │ ──────────────────▶ │ Code hosts   │
+│              │ ─────────────────▶ │              │                     │ SaaS         │
 │              │   identity only    │              │                     │ ...          │
 └──────────────┘                    └──────────────┘                     └──────────────┘
                                     • Identity ✓
@@ -77,16 +77,19 @@ What an enterprise gets from putting Warden in the path:
 - **Per-call least privilege** — the agent asks Warden what systems and roles are open to it, then **switches roles mid-task**, picking the narrowest fit for each operation by reading operator-set descriptions. A read-scoped role for reads, a write-scoped role only when a write is intended — the agent's posture changes step by step, not session by session.
 - **Hallucination containment** — LLMs make routine mistakes, and a single mistake under a broad credential can cause real damage. Per-call role binding constrains what the agent can do at every step; a hallucinated request that exceeds the role's scope is denied upstream — observable in the audit log, with no state change. LLM errors become recoverable instead of catastrophic.
 - **Compromise containment** — because Warden holds the upstream credentials and the agent never does, a prompt-injected, jailbroken, or otherwise compromised agent has nothing to exfiltrate. Any call it does issue is still bounded by Warden's policy at request time — regardless of what's in the agent's memory or chat history.
-- **Fine-grained access policy** — per-action capabilities and parameter filters, evaluated at request time against caller IP, time of day, and day of week.
+- **Fine-grained access policy** — per-action capabilities and parameter filters, evaluated at request time against caller IP, time of day, and day of week. For MCP traffic the same policy reaches inside each tool call — which tools an agent may invoke, and which arguments it may pass.
 - **Identity-bound access** — JWT (including SPIFFE JWT-SVID) or TLS client certificate (including SPIFFE X.509-SVID); the same identity reaches every upstream the policy permits — no per-system credential sprawl, no API keys handed to agents, nothing to rotate per integration.
-- **Audit** — every request tied to the original identity, the role used, and the upstream called.
+- **On-behalf-of access** — beyond reaching an upstream as a shared service account, Warden can act on behalf of a specific user: the user grants access once through a standard browser consent, and every subsequent call runs under that user's delegated grant, refreshed automatically — so a delegated action is attributed to the real person, not a shared application credential.
+- **Audit** — every request tied to the original identity, the role used, and the upstream called — plus the policy decision recorded on each MCP tool call, and non-secret metadata about the credential Warden minted, such as the identity it represents.
+- **Automatic credential rotation** — Warden rotates the upstream credentials it holds on a schedule, staging the switch for systems that need time to propagate a new key, so the broker's own secrets stay fresh without operator coordination.
 
 ## Supported systems
 
-33 systems across LLMs, cloud, code-hosting, observability, ITSM, Kubernetes, secrets, and databases. Follow any link below to configure your first endpoint, or see [docs/providers.md](docs/providers.md) for the full list.
+36 systems across MCP servers, LLMs, cloud, code-hosting, observability, ITSM, Kubernetes, secrets, and databases. Follow any link below to configure your first endpoint, or see [docs/providers.md](docs/providers.md) for the full list.
 
 | Category | Providers | Warden does |
 |---|---|---|
+| MCP servers | [GitHub](provider/mcp_github/README.md), [AWS](provider/mcp_aws/README.md), [GCP](provider/mcp_gcp/README.md) | Proxies tool calls — injects credentials, enforces tool-level policy |
 | LLM APIs | [Anthropic](provider/anthropic/README.md), [OpenAI](provider/openai/README.md), [Mistral](provider/mistral/README.md), [Cohere](provider/cohere/README.md) | Injects API key |
 | Cloud infrastructure | [AWS](provider/aws/README.md), [Azure](provider/azure/README.md), [GCP](provider/gcp/README.md), [Alicloud](provider/alicloud/README.md), [IBM Cloud](provider/ibmcloud/README.md), [OVH](provider/ovh/README.md), [Scaleway](provider/scaleway/README.md), [Cloudflare](provider/cloudflare/README.md) | Temporary credentials / Bearer tokens |
 | Code hosting & CI/CD | [GitHub](provider/github/README.md), [GitLab](provider/gitlab/README.md), [Atlassian](provider/atlassian/README.md), [Ansible Tower](provider/ansible_tower/README.md), [Terraform Enterprise](provider/tfe/README.md) | Injects App token, PAT, or Bearer token |
@@ -98,6 +101,8 @@ What an enterprise gets from putting Warden in the path:
 
 ## Use cases
 
+**MCP servers** — Warden works both sides of the protocol. Point your own MCP server at Warden instead of the upstream API, and one gateway covers every tool it exposes — replacing the per-tool-credential-in-env model with one identity and one policy surface. Or put Warden in front of a managed MCP server — GitHub, AWS, GCP — and an agent reaches it through Warden, which attaches the credential per request and enforces policy on each tool call, down to which tools run and which arguments they carry.
+
 **SRE agents** — incident-response agents reaching Prometheus, Grafana, Kubernetes, and PagerDuty under one policy layer. Warden scopes each call to the agent's identity — query dashboards but not delete them, restart a pod but not modify IAM. Every action during an incident is tied to the agent's identity in the audit log.
 
 **Agentic coding** — code agents that push to GitHub, deploy to AWS, and read from artifact stores all through one identity. Warden enforces which repos they push to, which buckets they read, and logs every action.
@@ -105,8 +110,6 @@ What an enterprise gets from putting Warden in the path:
 **RAG pipelines** — retrieval agents reaching production databases and object stores under per-request grants. Warden vends a database auth token or pre-signed URL scoped to the exact query or object the agent needs.
 
 **Multi-model orchestration** — an agent reaching Anthropic for reasoning, OpenAI for embeddings, and Mistral for classification through one identity, one policy layer, and one audit log across all three.
-
-**MCP servers** — point the MCP server at Warden instead of the upstream API. The MCP server authenticates with its identity, Warden brokers the connection, and the same gateway covers every tool the server exposes — replacing the per-tool-credential-in-env model with one identity and one policy surface.
 
 **Autonomous workflows** — long-running agents that reach systems over hours or days with time-scoped access. Warden issues credentials per request, so no token outlives the work it was minted for.
 
@@ -120,6 +123,7 @@ Warden supports multiple methods for verifying caller identity.
 |--------|----------------|----|
 | **JWT** | Signed JWT token or SPIFFE JWT-SVID | The **same JWT** goes in whichever credential slot the upstream SDK natively expects (`AWS_SECRET_ACCESS_KEY`, `OPENAI_API_KEY`, `X-Vault-Token`, `Authorization: Bearer`, …). Warden detects it, validates the identity, and swaps in the real upstream credential. Existing SDK code keeps working — only the base URL changes. |
 | **TLS Certificate** | X.509 client certificate or SPIFFE X.509-SVID | Identity is proven at the TLS handshake (or forwarded by a TLS-terminating proxy via `X-SSL-Client-Cert`). The SDK's credential slot is filled with any placeholder value — Warden ignores it once cert auth has proven the identity. Role selection follows the same per-provider conventions as JWT mode. |
+| **Kubernetes** | Kubernetes ServiceAccount token (projected SA JWT) | The pod's ServiceAccount token goes in the SDK's credential slot exactly as in JWT mode. Warden validates it by calling the issuing cluster's TokenReview API — no JWKS endpoint or public keys to distribute — and matches a role bound to the ServiceAccount's namespace and name. |
 
 This is the design property that makes Warden a *drop-in* layer rather than a rewrite tax: a pre-existing boto3, openai-python, Vault CLI, or curl-against-GitHub script becomes Warden-mediated by setting the base URL to Warden and putting the JWT where the secret used to go. It also separates Warden from dedicated auth proxies (which typically require client libraries).
 
