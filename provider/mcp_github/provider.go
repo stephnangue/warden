@@ -1,6 +1,7 @@
 package mcp_github
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -25,21 +26,42 @@ const DefaultMCPGitHubTimeout = 10 * time.Minute
 // negotiation pass through unchanged so Streamable HTTP (JSON or SSE) works
 // without any MCP-specific framework support.
 var Spec = &httpproxy.ProviderSpec{
-	Name:            "mcp_github",
-	DefaultURL:      DefaultMCPGitHubURL,
-	URLConfigKey:    "mcp_github_url",
-	DefaultTimeout:  DefaultMCPGitHubTimeout,
-	ParseStreamBody: false,
-	UserAgent:       "warden-mcp-github-proxy",
-	HelpText:        mcpGitHubBackendHelp,
-	ExtractCredentials: httpproxy.TypedTokenExtractor(
-		credential.TypeGitHubToken, "token", "Authorization", "Bearer ",
-	),
+	Name:               "mcp_github",
+	DefaultURL:         DefaultMCPGitHubURL,
+	URLConfigKey:       "mcp_github_url",
+	DefaultTimeout:     DefaultMCPGitHubTimeout,
+	ParseStreamBody:    false,
+	UserAgent:          "warden-mcp-github-proxy",
+	HelpText:           mcpGitHubBackendHelp,
+	ExtractCredentials: extractBearerToken,
 	// DefaultAccept intentionally unset. The httpproxy framework injects a
 	// default Accept only when the client sends none; MCP clients always
 	// negotiate ("application/json, text/event-stream"). Forcing a default
 	// here would break one-shot JSON clients.
 	ShouldEnforceMCPPolicy: shouldEnforceMCPPolicy,
+}
+
+// extractBearerToken injects the minted credential as Authorization: Bearer.
+// It accepts both GitHub auth shapes a role may bind: the github_token
+// credential (App/PAT, in the "token" field) and the oauth_bearer_token
+// credential (OAuth2 authorization-code, in the "api_key" field).
+func extractBearerToken(req *logical.Request) (map[string]string, error) {
+	if req.Credential == nil {
+		return nil, fmt.Errorf("no credential available")
+	}
+	var token string
+	switch req.Credential.Type {
+	case credential.TypeGitHubToken:
+		token = req.Credential.Data["token"]
+	case credential.TypeOAuthBearerToken:
+		token = req.Credential.Data["api_key"]
+	default:
+		return nil, fmt.Errorf("unsupported credential type for mcp_github: %s", req.Credential.Type)
+	}
+	if token == "" {
+		return nil, fmt.Errorf("credential missing token")
+	}
+	return map[string]string{"Authorization": "Bearer " + token}, nil
 }
 
 // shouldEnforceMCPPolicy opts mcp_github into CBP body-authoritative
@@ -102,8 +124,10 @@ Warden synthesise the canonical gateway path. The X-Warden-Provider
 value is the mount path from 'warden provider list', not the literal
 provider type — see the skill markdown for the exact command.
 
-The same TypeGitHubToken credspec used for the github REST provider works
-here unchanged — binding one to a role grants both REST and MCP reach.
+The github_token credspec used for the github REST provider works here
+unchanged — binding one to a role grants both REST and MCP reach. An
+oauth2 authorization_code credspec (oauth_bearer_token) is also accepted,
+letting a role act as a consenting GitHub user.
 
 Policy:
 Two layers of authorization apply to MCP traffic. The minted GitHub

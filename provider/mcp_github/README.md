@@ -2,7 +2,7 @@
 
 The `mcp_github` provider enables proxied access to GitHub's hosted MCP (Model Context Protocol) server through Warden. MCP clients (Claude Code, Cursor, Continue, Cline, Goose, ...) point at Warden instead of `api.githubcopilot.com`; Warden authenticates the caller, injects a GitHub token bound to the chosen role as `Authorization: Bearer <token>`, and streams JSON or SSE responses back unchanged. Agents never hold a GitHub credential.
 
-It supports both **GitHub App** and **Personal Access Token (PAT)** authentication. The same credential spec used by the `github` REST provider works here unchanged — one role binding grants both REST and MCP reach.
+It supports **GitHub App**, **Personal Access Token (PAT)**, and **OAuth2 authorization-code** authentication. The App and PAT specs used by the `github` REST provider work here unchanged — one role binding grants both REST and MCP reach — while the OAuth2 flow lets an agent act as a specific consenting GitHub user.
 
 ## Table of Contents
 
@@ -22,7 +22,8 @@ It supports both **GitHub App** and **Personal Access Token (PAT)** authenticati
 - Docker and Docker Compose installed and running
 - One of the following:
   - **GitHub App** with a private key and installation ID (recommended — short-lived tokens, auto-refreshed), OR
-  - **Personal Access Token** (classic or fine-grained) with the scopes covering the MCP tools you want to expose (e.g., `repo`, `issues`, `pull_requests`)
+  - **Personal Access Token** (classic or fine-grained) with the scopes covering the MCP tools you want to expose (e.g., `repo`, `issues`, `pull_requests`), OR
+  - **OAuth App** (Client ID + Client Secret) to act as a consenting GitHub user via the authorization-code flow (see [Option C](#option-c-oauth2-authorization-code-flow-acting-as-a-github-user))
 - An MCP client that supports remote MCP servers over HTTP (Claude Code, Cursor, Continue, Cline, Goose, ...)
 
 > **New to Warden?** Follow the standard quickstart flow used by the other provider READMEs (the `github` and `slack` READMEs cover it step by step): deploy the quickstart compose, install the binary, export `WARDEN_ADDR` and `WARDEN_TOKEN`, then return here.
@@ -138,6 +139,120 @@ Verify:
 ```bash
 warden cred spec read github-ops
 ```
+
+### Option C: OAuth2 Authorization Code Flow (acting as a GitHub user)
+
+The App and PAT flows act as an application or a static token. To instead have an
+agent act **as a specific GitHub user** — with a token scoped to exactly what that
+user consented to — use the OAuth2 authorization-code flow. A human authorizes
+once in the browser; Warden seals the resulting refresh token and mints a fresh
+access token on each request. The agent never sees the client secret or the token.
+
+This flow uses its own `oauth2` credential source (not the `github` source created
+at the start of Step 3).
+
+1. Register an **OAuth App** under **Settings > Developer settings > OAuth Apps**
+   (this is distinct from a GitHub App). Note the **Client ID** and generate a
+   **Client Secret**.
+2. Set the app's **Authorization callback URL** to a fixed loopback address —
+   GitHub matches it exactly — for example `http://127.0.0.1:8765/callback`.
+
+Create the source pointing at GitHub's authorize and token endpoints:
+
+```bash
+warden cred source create github-oauth-src \
+  -type=oauth2 \
+  -rotation-period=0 \
+  -config=auth_url=https://github.com/login/oauth/authorize \
+  -config=token_url=https://github.com/login/oauth/access_token
+```
+
+Create the spec — it starts empty, with no token until consent — carrying the
+OAuth App's credentials, the scopes you need, and the pinned callback from step 2.
+The client secret is read from a file so it never lands in shell history:
+
+```bash
+warden cred spec create github-oauth \
+  -source github-oauth-src \
+  -config auth_method=authorization_code \
+  -config client_id=<your-client-id> \
+  -config client_secret=@/path/to/client-secret \
+  -config scopes=repo,read:org \
+  -config redirect_uri=http://127.0.0.1:8765/callback
+```
+
+Complete the one-time consent. Warden binds the pinned loopback port, opens the
+browser to GitHub, captures the authorization code on the redirect, and exchanges
+it for tokens server-side — the client secret never leaves the server:
+
+```bash
+warden cred spec connect github-oauth
+```
+
+Re-run `connect` whenever you need to re-authorize — after revoking the grant,
+widening scopes, or rotating the secret. Add `-force` to replace a live
+authorization without the confirmation prompt, or `-no-browser` on a headless host
+to print the URL to open elsewhere. Bind this spec to the role from Step 1 with
+`cred_spec_name=github-oauth`; Warden then injects the user's access token as
+`Authorization: Bearer <token>` on each MCP request, refreshing it from the sealed
+refresh token as needed.
+
+#### Recording the acting user in the audit log
+
+An audit record already captures **who made the request** — the agent identity
+(`auth.principal_id` and the verified `auth.actors` chain). With the
+authorization-code flow it can also capture **whose GitHub credential was
+forwarded** — the consenting user — so the two identities are correlated on every
+proxied call.
+
+That second identity travels in a separate, non-secret **`metadata`** block on the
+credential, logged *in the clear* — distinct from the credential's `data` (the raw
+token), which the audit layer HMAC-salts by default. You choose which identity
+fields to record with two **source-level** settings:
+
+- `metadata_fields` — comma-separated fields to copy into the metadata block
+  (default `sub`; empty disables).
+- `introspection_url` — for **opaque** tokens (GitHub's are opaque), the
+  userinfo/introspection endpoint Warden calls once per token mint to fetch those
+  fields. For JWT access tokens (Azure AD, Google, Okta, …) leave it unset and
+  Warden decodes the claims locally — no extra call.
+
+Both are source-level so the source operator, not a spec author, decides what is
+exposed; and `introspection_url` stays under the source SSRF guard. For GitHub,
+point at the user endpoint and capture the login:
+
+```bash
+warden cred source update github-oauth-src \
+  -config=introspection_url=https://api.github.com/user \
+  -config=metadata_fields=login
+```
+
+A response audit event for an MCP call then carries both axes — the agent that
+called, and the GitHub user it acted as — while the token stays salted:
+
+```json
+{
+  "type": "response",
+  "auth": {
+    "principal_id": "agent-alpha",
+    "actors": [{ "subject": "agent-alpha", "verified": true }]
+  },
+  "response": {
+    "credential": {
+      "type": "oauth_bearer_token",
+      "source_name": "github-oauth-src",
+      "spec_name": "github-oauth",
+      "metadata": { "login": "octocat" },
+      "data": { "api_key": "hmac-sha256:..." }
+    }
+  }
+}
+```
+
+If a captured field is sensitive (an email, say), add its path to the audit
+device's `salt_fields` to HMAC it instead of logging in the clear — e.g.
+`response.credential.metadata.email` salts that one field, or
+`response.credential.metadata` salts the whole block.
 
 ## Step 4: Create a Policy
 
