@@ -47,12 +47,47 @@ func NewOAuthBearerTokenCredType() *OAuthBearerTokenCredType {
 }
 
 // ConfigSchema returns the declarative schema for OAuth bearer token spec config.
-// The spec holds only the scope — the driver mints the token dynamically.
 func (t *OAuthBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
 		credential.StringField("scope").
-			Describe("OAuth2 scope to request").
+			Describe("OAuth2 scope to request (client_credentials)").
 			Example("read write"),
+
+		// OAuth2 source - authorization_code / client_credentials fields.
+		credential.StringField("auth_method").
+			OneOf("client_credentials", "authorization_code").
+			Describe("OAuth2 flow for an oauth2 source (default client_credentials)").
+			Example("authorization_code"),
+
+		credential.StringField("client_id").
+			Describe("OAuth2 client ID (per-spec for authorization_code)").
+			Example("aBcD3FgHiJkLmN0pQ"),
+
+		credential.StringField("client_secret").
+			Describe("OAuth2 client secret (per-spec for authorization_code; sealed)").
+			Example("@/path/to/client_secret"),
+
+		credential.StringField("scopes").
+			Describe("OAuth2 scopes for authorization_code (comma- or space-separated)").
+			Example("repo,read:org"),
+
+		credential.StringField("redirect_uri").
+			Describe("Pinned loopback redirect for connect, when the provider requires an exact callback match (e.g. GitHub)").
+			Example("http://127.0.0.1:8765/callback"),
+
+		credential.BoolField("pkce").
+			Describe("Send PKCE on connect (default true)").
+			Example("true"),
+
+		// Sealed by `cred spec connect`; not operator-set.
+		credential.StringField("refresh_token").
+			Describe("Sealed at connect time — not operator-set"),
+		credential.StringField("access_token").
+			Describe("Sealed at connect time for providers without refresh tokens — not operator-set"),
+		credential.StringField("refresh_token_expires_at").
+			Describe("Sealed at connect time (RFC3339) — not operator-set"),
+		credential.StringField("access_token_expires_at").
+			Describe("Sealed at connect time for an expiring static access token (RFC3339) — not operator-set"),
 
 		// Vault source - OAuth2 plugin fields
 		credential.StringField("mint_method").
@@ -113,6 +148,9 @@ func (t *OAuthBearerTokenCredType) RequiresSpecRotation() bool {
 }
 
 // SensitiveConfigFields returns spec config keys that should be masked in output.
+// For authorization_code specs these secrets live on the spec (resolved
+// spec-over-source), so they are masked here in addition to the source-level
+// masking the driver factory applies.
 func (t *OAuthBearerTokenCredType) SensitiveConfigFields() []string {
-	return nil
+	return []string{"client_secret", "refresh_token", "access_token"}
 }

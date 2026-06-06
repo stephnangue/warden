@@ -202,3 +202,39 @@ type SpecRotatable interface {
 	// Returns error if cleanup fails. The RotationManager will retry with backoff.
 	CleanupSpecRotation(ctx context.Context, cleanupConfig map[string]string) error
 }
+
+// RawRotatedRefreshTokenKey is a reserved key the OAuth2 driver may set in the
+// rawData returned by MintCredential to surface a refresh token that the provider
+// rotated during a refresh. The minting layer consumes and strips it (persisting
+// the new token) before the credential is parsed, so it never reaches the
+// credential's Data map.
+const RawRotatedRefreshTokenKey = "__rotated_refresh_token"
+
+// SpecConnector is an optional interface for drivers whose specs require a
+// one-time interactive connect step (e.g. OAuth2 authorization_code) before they
+// can mint credentials. ValidateSpec skips its test-mint for a spec that requires
+// connecting but is not connected yet.
+type SpecConnector interface {
+	// RequiresConnect reports whether this spec uses a connect-gated flow.
+	RequiresConnect(spec *CredSpec) bool
+
+	// IsConnected reports whether the one-time connect has completed (e.g. a
+	// refresh token or static access token has been sealed into the spec).
+	IsConnected(spec *CredSpec) bool
+}
+
+// OAuth2Authorizer is an optional interface for drivers that support an OAuth2
+// authorization-code consent flow. The CLI captures only the authorization code
+// on a loopback redirect; the server builds the authorize URL and performs the
+// code→token exchange using the client secret it holds, then seals the returned
+// keys into the spec.
+type OAuth2Authorizer interface {
+	// BuildAuthorizeURL assembles the provider authorize URL for the given spec,
+	// loopback redirect URI, CSRF state and (optional) PKCE code challenge.
+	BuildAuthorizeURL(spec *CredSpec, redirectURI, state, codeChallenge string) (string, error)
+
+	// ExchangeAuthorizationCode exchanges an authorization code for tokens and
+	// returns the spec-config keys to seal (notably "refresh_token", or a static
+	// "access_token" for providers that do not issue refresh tokens).
+	ExchangeAuthorizationCode(ctx context.Context, spec *CredSpec, code, redirectURI, codeVerifier string) (map[string]string, error)
+}

@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
@@ -26,14 +28,23 @@ const (
 
 // auth_method selects the OAuth2 flow. It is read spec-over-source and defaults
 // to client_credentials so existing sources keep working unchanged.
-const oauth2AuthMethodClientCredentials = "client_credentials"
+const (
+	oauth2AuthMethodClientCredentials = "client_credentials"
+	oauth2AuthMethodAuthorizationCode = "authorization_code"
+)
 
 // OAuth2 grant types sent in the token request.
-const oauth2GrantClientCredentials = "client_credentials"
+const (
+	oauth2GrantClientCredentials = "client_credentials"
+	oauth2GrantAuthorizationCode = "authorization_code"
+	oauth2GrantRefreshToken      = "refresh_token"
+)
 
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*OAuth2Driver)(nil)
 var _ credential.SpecVerifier = (*OAuth2Driver)(nil)
+var _ credential.SpecConnector = (*OAuth2Driver)(nil)
+var _ credential.OAuth2Authorizer = (*OAuth2Driver)(nil)
 
 // OAuth2Driver exchanges OAuth2 credentials for bearer tokens.
 //
@@ -74,7 +85,7 @@ func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 		credential.StringField("token_url").
 			Required().
 			Custom(func(v string) error {
-				return validateOAuth2HTTPSURL(v, "token_url", credential.GetBool(config, "tls_skip_verify", false))
+				return validateOAuth2SafeURL(v, "token_url", credential.GetBool(config, "tls_skip_verify", false))
 			}).
 			Describe("OAuth2 token endpoint (HTTPS)").
 			Example("https://identity.pagerduty.com/oauth/token"),
@@ -98,7 +109,7 @@ func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 				if v == "" {
 					return nil
 				}
-				return validateOAuth2HTTPSURL(v, "verify_url", credential.GetBool(config, "tls_skip_verify", false))
+				return validateOAuth2SafeURL(v, "verify_url", credential.GetBool(config, "tls_skip_verify", false))
 			}).
 			Describe("Endpoint to verify minted tokens (skip if empty)").
 			Example("https://api.pagerduty.com/users/me"),
@@ -196,10 +207,15 @@ func (d *OAuth2Driver) displayName() string {
 
 // oauth2TokenResponse is the standard OAuth2 token endpoint response.
 type oauth2TokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int    `json:"expires_in"`
-	Scope       string `json:"scope"`
+	AccessToken           string `json:"access_token"`
+	TokenType             string `json:"token_type"`
+	ExpiresIn             int    `json:"expires_in"`
+	Scope                 string `json:"scope"`
+	RefreshToken          string `json:"refresh_token"`
+	RefreshTokenExpiresIn int    `json:"refresh_token_expires_in"`
+	// Some providers (notably GitHub) report failures as HTTP 200 with an error body.
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description"`
 }
 
 // resolve returns spec.Config[key] when set, else the source config value, else def.
@@ -222,6 +238,8 @@ func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.Cred
 	switch authMethod {
 	case oauth2AuthMethodClientCredentials:
 		return d.mintFromClientCredentials(ctx, spec)
+	case oauth2AuthMethodAuthorizationCode:
+		return d.mintFromRefreshToken(ctx, spec)
 	default:
 		return nil, 0, "", fmt.Errorf("%s OAuth2 unsupported auth_method %q", d.displayName(), authMethod)
 	}
@@ -256,6 +274,167 @@ func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *cred
 		form.Set(k, v)
 	}
 
+	tokenResp, err := d.postTokenRequest(ctx, d.tokenURL(), form)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("%s OAuth2 token exchange failed: %w", name, err)
+	}
+	if tokenResp.AccessToken == "" {
+		return nil, 0, "", fmt.Errorf("%s OAuth2 token response missing access_token", name)
+	}
+
+	return accessTokenRawData(tokenResp), ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
+}
+
+// mintFromRefreshToken exchanges the sealed refresh token for a fresh access
+// token (grant_type=refresh_token). Providers that issue no refresh token seal a
+// static access token at connect time, which is returned directly. When the
+// provider rotates the refresh token, the new value is surfaced under the reserved
+// rawData key for the minting layer to persist.
+func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	name := d.displayName()
+
+	refreshToken := credential.GetString(spec.Config, "refresh_token", "")
+	if refreshToken == "" {
+		// No-refresh-token providers seal a static access token at connect time.
+		if staticToken := credential.GetString(spec.Config, "access_token", ""); staticToken != "" {
+			return map[string]interface{}{"api_key": staticToken}, staticTokenTTL(spec), "", nil
+		}
+		return nil, 0, "", fmt.Errorf("%s OAuth2 spec %q is not connected — run `warden cred spec connect %s`", name, spec.Name, spec.Name)
+	}
+
+	clientID := d.resolve(spec, "client_id", "")
+	clientSecret := d.resolve(spec, "client_secret", "")
+	if clientID == "" || clientSecret == "" {
+		return nil, 0, "", fmt.Errorf("%s OAuth2 spec missing client_id or client_secret", name)
+	}
+
+	form := url.Values{
+		"grant_type":    {oauth2GrantRefreshToken},
+		"refresh_token": {refreshToken},
+		"client_id":     {clientID},
+		"client_secret": {clientSecret},
+	}
+
+	tokenResp, err := d.postTokenRequest(ctx, d.tokenURL(), form)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("%s OAuth2 refresh failed: %w", name, err)
+	}
+	if tokenResp.AccessToken == "" {
+		return nil, 0, "", fmt.Errorf("%s OAuth2 refresh response missing access_token", name)
+	}
+
+	rawData := accessTokenRawData(tokenResp)
+	// Surface a rotated refresh token for the minting layer to persist (§5).
+	if tokenResp.RefreshToken != "" && tokenResp.RefreshToken != refreshToken {
+		rawData[credential.RawRotatedRefreshTokenKey] = tokenResp.RefreshToken
+	}
+	return rawData, ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
+}
+
+// ExchangeAuthorizationCode exchanges an authorization code for tokens using the
+// client secret the server holds, and returns the spec-config keys to seal.
+func (d *OAuth2Driver) ExchangeAuthorizationCode(ctx context.Context, spec *credential.CredSpec, code, redirectURI, codeVerifier string) (map[string]string, error) {
+	name := d.displayName()
+
+	clientID := d.resolve(spec, "client_id", "")
+	clientSecret := d.resolve(spec, "client_secret", "")
+	if clientID == "" || clientSecret == "" {
+		return nil, fmt.Errorf("%s OAuth2 spec missing client_id or client_secret", name)
+	}
+
+	form := url.Values{
+		"grant_type":    {oauth2GrantAuthorizationCode},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+		"client_id":     {clientID},
+		"client_secret": {clientSecret},
+	}
+	if codeVerifier != "" {
+		form.Set("code_verifier", codeVerifier)
+	}
+
+	tokenResp, err := d.postTokenRequest(ctx, d.tokenURL(), form)
+	if err != nil {
+		return nil, fmt.Errorf("%s OAuth2 authorization-code exchange failed: %w", name, err)
+	}
+
+	sealed := map[string]string{}
+	switch {
+	case tokenResp.RefreshToken != "":
+		sealed["refresh_token"] = tokenResp.RefreshToken
+		if tokenResp.RefreshTokenExpiresIn > 0 {
+			sealed["refresh_token_expires_at"] = expiresAt(tokenResp.RefreshTokenExpiresIn)
+		}
+	case tokenResp.AccessToken != "":
+		// No-refresh-token provider: seal the access token. Record its expiry when
+		// the provider returns one so mint can lease it correctly (otherwise it is
+		// treated as non-expiring).
+		sealed["access_token"] = tokenResp.AccessToken
+		if tokenResp.ExpiresIn > 0 {
+			sealed["access_token_expires_at"] = expiresAt(tokenResp.ExpiresIn)
+		}
+	default:
+		return nil, fmt.Errorf("%s OAuth2 authorization-code exchange returned neither refresh_token nor access_token", name)
+	}
+	return sealed, nil
+}
+
+// BuildAuthorizeURL assembles the provider authorize URL. Scopes are read as
+// already-normalized (space-separated) but commas are tolerated defensively.
+func (d *OAuth2Driver) BuildAuthorizeURL(spec *credential.CredSpec, redirectURI, state, codeChallenge string) (string, error) {
+	authURL := credential.GetString(d.credSource.Config, "auth_url", "")
+	if authURL == "" {
+		return "", fmt.Errorf("%s OAuth2 source missing auth_url (required for authorization_code)", d.displayName())
+	}
+	clientID := d.resolve(spec, "client_id", "")
+	if clientID == "" {
+		return "", fmt.Errorf("%s OAuth2 spec missing client_id", d.displayName())
+	}
+
+	parsed, err := url.Parse(authURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid auth_url: %w", err)
+	}
+
+	q := parsed.Query()
+	q.Set("response_type", "code")
+	q.Set("client_id", clientID)
+	q.Set("redirect_uri", redirectURI)
+	if state != "" {
+		q.Set("state", state)
+	}
+	if scope := normalizeOAuth2Scopes(d.resolve(spec, "scopes", "")); scope != "" {
+		q.Set("scope", scope)
+	}
+	// PKCE is on by default; honor an explicit pkce=false to omit the challenge.
+	if codeChallenge != "" && pkceEnabled(d.resolve(spec, "pkce", "")) {
+		q.Set("code_challenge", codeChallenge)
+		q.Set("code_challenge_method", "S256")
+	}
+	parsed.RawQuery = q.Encode()
+	return parsed.String(), nil
+}
+
+// RequiresConnect reports whether the spec uses the authorization_code flow,
+// which needs a one-time `cred spec connect` before it can mint.
+func (d *OAuth2Driver) RequiresConnect(spec *credential.CredSpec) bool {
+	return d.resolve(spec, "auth_method", oauth2AuthMethodClientCredentials) == oauth2AuthMethodAuthorizationCode
+}
+
+// IsConnected reports whether the spec has been connected — a refresh token or a
+// static access token has been sealed into it.
+func (d *OAuth2Driver) IsConnected(spec *credential.CredSpec) bool {
+	if spec == nil {
+		return false
+	}
+	return credential.GetString(spec.Config, "refresh_token", "") != "" ||
+		credential.GetString(spec.Config, "access_token", "") != ""
+}
+
+// postTokenRequest POSTs a form-encoded token request and decodes the response,
+// treating a body that carries an "error" field (some providers, notably GitHub,
+// report failures as HTTP 200 with an error body) as a failure.
+func (d *OAuth2Driver) postTokenRequest(ctx context.Context, tokenURL string, form url.Values) (*oauth2TokenResponse, error) {
 	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       oauth2MaxRetryAttempts,
 		MaxBodySize:       httputil.DefaultMaxBodySize,
@@ -263,10 +442,9 @@ func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *cred
 		BaseBackoff:       1 * time.Second,
 		JitterPercent:     20,
 	}
-
 	httpReq := httputil.HTTPRequest{
 		Method: http.MethodPost,
-		URL:    d.resolve(spec, "token_url", ""),
+		URL:    tokenURL,
 		Body:   []byte(form.Encode()),
 		Headers: map[string]string{
 			"Content-Type": "application/x-www-form-urlencoded",
@@ -276,34 +454,92 @@ func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *cred
 
 	body, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("%s OAuth2 token exchange failed: %w", name, err)
+		return nil, err
 	}
 
 	var tokenResp oauth2TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, 0, "", fmt.Errorf("failed to decode %s OAuth2 token response: %w", name, err)
+		return nil, fmt.Errorf("failed to decode token response: %w", err)
 	}
+	if tokenResp.Error != "" {
+		if tokenResp.ErrorDescription != "" {
+			return nil, fmt.Errorf("token endpoint error %q: %s", tokenResp.Error, tokenResp.ErrorDescription)
+		}
+		return nil, fmt.Errorf("token endpoint error %q", tokenResp.Error)
+	}
+	return &tokenResp, nil
+}
 
-	if tokenResp.AccessToken == "" {
-		return nil, 0, "", fmt.Errorf("%s OAuth2 token response missing access_token", name)
+// accessTokenRawData builds the rawData map returned to the credential parser.
+func accessTokenRawData(resp *oauth2TokenResponse) map[string]interface{} {
+	rawData := map[string]interface{}{"api_key": resp.AccessToken}
+	if resp.Scope != "" {
+		rawData["scope"] = resp.Scope
 	}
+	if resp.TokenType != "" {
+		rawData["token_type"] = resp.TokenType
+	}
+	return rawData
+}
 
-	rawData := map[string]interface{}{
-		"api_key": tokenResp.AccessToken,
+// ttlFromExpiresIn converts an expires_in (seconds) into a lease TTL (0 if absent).
+func ttlFromExpiresIn(expiresIn int) time.Duration {
+	if expiresIn > 0 {
+		return time.Duration(expiresIn) * time.Second
 	}
-	if tokenResp.Scope != "" {
-		rawData["scope"] = tokenResp.Scope
-	}
-	if tokenResp.TokenType != "" {
-		rawData["token_type"] = tokenResp.TokenType
-	}
+	return 0
+}
 
-	var ttl time.Duration
-	if tokenResp.ExpiresIn > 0 {
-		ttl = time.Duration(tokenResp.ExpiresIn) * time.Second
-	}
+// expiresAt returns an RFC3339 UTC timestamp expiresIn seconds from now.
+func expiresAt(expiresIn int) string {
+	return time.Now().Add(time.Duration(expiresIn) * time.Second).UTC().Format(time.RFC3339)
+}
 
-	return rawData, ttl, "", nil
+// normalizeOAuth2Scopes returns scopes space-separated, tolerating comma- or
+// whitespace-separated input.
+func normalizeOAuth2Scopes(raw string) string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	})
+	return strings.Join(fields, " ")
+}
+
+// tokenURL returns the source-level token endpoint. It is deliberately read from
+// the source only (not spec-overridable) so the SSRF-validated source endpoint
+// can't be bypassed by a spec-level token_url.
+func (d *OAuth2Driver) tokenURL() string {
+	return credential.GetString(d.credSource.Config, "token_url", "")
+}
+
+// staticTokenTTL returns the remaining lease for a sealed static access token, or
+// 0 (treated as non-expiring) when no access_token_expires_at is set or it is
+// already past / unparseable.
+func staticTokenTTL(spec *credential.CredSpec) time.Duration {
+	raw := credential.GetString(spec.Config, "access_token_expires_at", "")
+	if raw == "" {
+		return 0
+	}
+	exp, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return 0
+	}
+	if remaining := time.Until(exp); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
+// pkceEnabled reports whether PKCE should be sent, defaulting to true unless the
+// spec explicitly sets pkce=false.
+func pkceEnabled(raw string) bool {
+	if raw == "" {
+		return true
+	}
+	enabled, err := strconv.ParseBool(raw)
+	if err != nil {
+		return true
+	}
+	return enabled
 }
 
 // Revoke is a no-op for OAuth2 bearer tokens — they expire naturally.
