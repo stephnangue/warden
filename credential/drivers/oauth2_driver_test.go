@@ -973,10 +973,11 @@ func TestOAuth2Driver_MintFromRefreshToken_Rotating(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token":  "at-new",
-			"refresh_token": "rt-new", // rotated
-			"expires_in":    28800,
-			"token_type":    "bearer",
+			"access_token":             "at-new",
+			"refresh_token":            "rt-new", // rotated
+			"expires_in":               28800,
+			"refresh_token_expires_in": 15897600, // ~6 months, reset window
+			"token_type":               "bearer",
 		})
 	}))
 	defer server.Close()
@@ -992,6 +993,37 @@ func TestOAuth2Driver_MintFromRefreshToken_Rotating(t *testing.T) {
 	assert.Equal(t, 28800*time.Second, ttl)
 	// Rotated token is surfaced under the reserved key for the minting layer.
 	assert.Equal(t, "rt-new", rawData[credential.RawRotatedRefreshTokenKey])
+	// The reset refresh-token window is surfaced too, as a future RFC3339 expiry.
+	rotatedExp, ok := rawData[credential.RawRotatedRefreshTokenExpiresAtKey].(string)
+	require.True(t, ok, "rotated refresh-token expiry must be surfaced")
+	exp, perr := time.Parse(time.RFC3339, rotatedExp)
+	require.NoError(t, perr)
+	assert.True(t, exp.After(time.Now().Add(180*24*time.Hour-time.Hour)), "expiry should reflect the reset ~6-month window")
+}
+
+func TestOAuth2Driver_MintFromRefreshToken_RotatingWithoutExpiry(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Rotates the refresh token but returns no refresh_token_expires_in.
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  "at-new",
+			"refresh_token": "rt-new",
+			"expires_in":    3600,
+		})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-old",
+	}}
+
+	rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "rt-new", rawData[credential.RawRotatedRefreshTokenKey])
+	// No expiry surfaced when the provider omits refresh_token_expires_in.
+	_, hasExp := rawData[credential.RawRotatedRefreshTokenExpiresAtKey]
+	assert.False(t, hasExp)
 }
 
 func TestOAuth2Driver_MintFromRefreshToken_NonRotating(t *testing.T) {

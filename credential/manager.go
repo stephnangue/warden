@@ -316,9 +316,10 @@ func (m *Manager) issueWithWriteBack(ctx context.Context, specName string, drive
 	return cred, nil
 }
 
-// consumeRotatedRefreshToken strips the reserved rotated-token key from rawData
-// (so it never reaches the credential Data map) and persists the new refresh
-// token into the spec config. Must run before ParseAndValidate.
+// consumeRotatedRefreshToken strips the reserved rotated-token keys from rawData
+// (so they never reach the credential Data map) and persists the new refresh
+// token — and its refreshed expiry, when the provider surfaced one — into the
+// spec config. Must run before ParseAndValidate.
 //
 // A persist failure does not fail this issuance — the access token just minted
 // is valid and is returned. But it is logged at error level because the old
@@ -331,6 +332,10 @@ func (m *Manager) consumeRotatedRefreshToken(ctx context.Context, spec *CredSpec
 		return
 	}
 	delete(rawData, RawRotatedRefreshTokenKey)
+	// The rotated expiry travels under its own reserved key; strip it unconditionally
+	// so it never lands in the credential Data, and apply it below if present.
+	rotatedExpiry, hasExpiry := rawData[RawRotatedRefreshTokenExpiresAtKey]
+	delete(rawData, RawRotatedRefreshTokenExpiresAtKey)
 	newToken, isString := rotated.(string)
 	if !isString || newToken == "" {
 		// The only producer sets a non-empty string; a different shape means a
@@ -353,6 +358,12 @@ func (m *Manager) consumeRotatedRefreshToken(ctx context.Context, spec *CredSpec
 		updated.Config[k] = v
 	}
 	updated.Config["refresh_token"] = newToken
+	// Keep refresh_token_expires_at in step with the rotated token when the provider
+	// returned a fresh expiry. If it rotated the token without one, leave the prior
+	// value untouched rather than assert an expiry we no longer know.
+	if exp, isStr := rotatedExpiry.(string); hasExpiry && isStr && exp != "" {
+		updated.Config["refresh_token_expires_at"] = exp
+	}
 	if err := m.configStore.PersistRotatedSpec(ctx, updated); err != nil {
 		m.log.Error("failed to persist rotated refresh token; spec must be reconnected if mints start failing",
 			logger.String("spec", spec.Name), logger.Err(err))

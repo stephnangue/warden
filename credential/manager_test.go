@@ -777,20 +777,49 @@ func TestManager_WriteBack_StripsReservedKeyAndPersists(t *testing.T) {
 	addRefreshSpecAndSource(configStore, "rt-old")
 
 	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-		return map[string]interface{}{"api_key": "at-new", RawRotatedRefreshTokenKey: "rt-new"}, nil, time.Hour, "", nil
+		return map[string]interface{}{
+			"api_key":                          "at-new",
+			RawRotatedRefreshTokenKey:          "rt-new",
+			RawRotatedRefreshTokenExpiresAtKey: "2030-01-01T00:00:00Z",
+		}, nil, time.Hour, "", nil
 	}
 
 	cred, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour)
 	require.NoError(t, err)
 
-	// The reserved rotated-token key must be stripped before parsing.
+	// The reserved rotated-token keys must be stripped before parsing.
 	_, leaked := cred.Data[RawRotatedRefreshTokenKey]
 	assert.False(t, leaked, "reserved rotated-token key must not reach credential Data")
+	_, leakedExp := cred.Data[RawRotatedRefreshTokenExpiresAtKey]
+	assert.False(t, leakedExp, "reserved rotated-expiry key must not reach credential Data")
 	assert.Equal(t, "at-new", cred.Data["api_key"])
 
-	// The rotated token is persisted into a fresh spec copy.
+	// The rotated token and its refreshed expiry are persisted into a fresh spec copy.
 	require.Len(t, configStore.persisted, 1)
 	assert.Equal(t, "rt-new", configStore.persisted[0].Config["refresh_token"])
+	assert.Equal(t, "2030-01-01T00:00:00Z", configStore.persisted[0].Config["refresh_token_expires_at"])
+}
+
+func TestManager_WriteBack_RotatingWithoutExpiry_KeepsPriorExpiry(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+	configStore.AddSource(&CredSource{Name: "src", Type: SourceTypeLocal, Config: map[string]string{}})
+	configStore.AddSpec(&CredSpec{Name: "gh", Type: TypeVaultToken, Source: "src", Config: map[string]string{
+		"auth_method": "authorization_code", "refresh_token": "rt-old", "refresh_token_expires_at": "2027-01-01T00:00:00Z",
+	}})
+
+	// Rotates the token but surfaces no new expiry.
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"api_key": "at-new", RawRotatedRefreshTokenKey: "rt-new"}, nil, time.Hour, "", nil
+	}
+
+	_, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour)
+	require.NoError(t, err)
+
+	require.Len(t, configStore.persisted, 1)
+	assert.Equal(t, "rt-new", configStore.persisted[0].Config["refresh_token"])
+	// The prior expiry is left untouched rather than dropped or overwritten.
+	assert.Equal(t, "2027-01-01T00:00:00Z", configStore.persisted[0].Config["refresh_token_expires_at"])
 }
 
 func TestManager_WriteBack_NonRotating_NoPersist(t *testing.T) {
