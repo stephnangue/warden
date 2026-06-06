@@ -344,9 +344,14 @@ func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credentia
 	}
 
 	rawData := accessTokenRawData(tokenResp)
-	// Surface a rotated refresh token for the minting layer to persist.
+	// Surface a rotated refresh token for the minting layer to persist. A refresh
+	// resets the refresh-token window, so surface the new expiry too (when the
+	// provider returns one) to keep the persisted refresh_token_expires_at in step.
 	if tokenResp.RefreshToken != "" && tokenResp.RefreshToken != refreshToken {
 		rawData[credential.RawRotatedRefreshTokenKey] = tokenResp.RefreshToken
+		if tokenResp.RefreshTokenExpiresIn > 0 {
+			rawData[credential.RawRotatedRefreshTokenExpiresAtKey] = expiresAt(tokenResp.RefreshTokenExpiresIn)
+		}
 	}
 	return rawData, d.extractMetadata(ctx, spec, tokenResp.AccessToken), ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
 }

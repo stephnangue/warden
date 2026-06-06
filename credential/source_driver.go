@@ -211,6 +211,15 @@ type SpecRotatable interface {
 // credential's Data map.
 const RawRotatedRefreshTokenKey = "__rotated_refresh_token"
 
+// RawRotatedRefreshTokenExpiresAtKey is a reserved key the OAuth2 driver may set
+// in rawData alongside RawRotatedRefreshTokenKey to surface the rotated refresh
+// token's new expiry (RFC3339). Providers that rotate the refresh token reset its
+// lifetime on each refresh, so the connect-time refresh_token_expires_at goes
+// stale. The minting layer consumes and strips this key, updating the spec's
+// refresh_token_expires_at so it tracks the rotated token, before the credential
+// is parsed — so it never reaches the credential's Data map.
+const RawRotatedRefreshTokenExpiresAtKey = "__rotated_refresh_token_expires_at"
+
 // OAuth2Authorizer is an optional interface for drivers that support an OAuth2
 // authorization-code consent flow. The CLI captures only the authorization code
 // on a loopback redirect; the server builds the authorize URL and performs the
