@@ -12,8 +12,8 @@ import (
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"golang.org/x/sync/errgroup"
 
-	authhelper "github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/helper"
 	"github.com/stephnangue/warden/listener"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -260,7 +260,7 @@ func detectIntrospectCredentialFormat(req *logical.Request) string {
 		return ""
 	}
 	jwt := strings.TrimPrefix(auth, "Bearer ")
-	if claims, err := authhelper.ParseJWTClaimsUnverified(jwt); err == nil {
+	if claims, err := helper.ParseJWTClaimsUnverified(jwt); err == nil {
 		if sub, _ := claims["sub"].(string); strings.HasPrefix(sub, "system:serviceaccount:") {
 			return "k8s_sa_jwt"
 		}

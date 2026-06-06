@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper"
 	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
@@ -99,6 +100,20 @@ func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 			}).
 			Describe("OAuth2 authorization endpoint (HTTPS) — required for authorization_code specs").
 			Example("https://github.com/login/oauth/authorize"),
+
+		credential.StringField("introspection_url").
+			Custom(func(v string) error {
+				if v == "" {
+					return nil
+				}
+				return validateOAuth2SafeURL(v, "introspection_url", credential.GetBool(config, "tls_skip_verify", false))
+			}).
+			Describe("Userinfo/introspection endpoint (HTTPS), GET with the access token attached, called at mint to fetch identity fields for opaque tokens; JWT access tokens are decoded locally instead").
+			Example("https://api.github.com/user"),
+
+		credential.StringField("metadata_fields").
+			Describe("Comma-separated identity fields (source-level) copied from the token/userinfo response into the credential's non-secret, audit-logged metadata (default: sub; empty disables)").
+			Example("sub,email"),
 
 		credential.StringField("default_scopes").
 			Describe("Default OAuth2 scopes (space-separated)").
@@ -282,7 +297,7 @@ func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *cred
 		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 token response missing access_token", name)
 	}
 
-	return accessTokenRawData(tokenResp), nil, ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
+	return accessTokenRawData(tokenResp), d.extractMetadata(ctx, spec, tokenResp.AccessToken), ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
 }
 
 // mintFromRefreshToken exchanges the sealed refresh token for a fresh access
@@ -297,7 +312,7 @@ func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credentia
 	if refreshToken == "" {
 		// No-refresh-token providers seal a static access token at connect time.
 		if staticToken := credential.GetString(spec.Config, "access_token", ""); staticToken != "" {
-			return map[string]interface{}{"api_key": staticToken}, nil, staticTokenTTL(spec), "", nil
+			return map[string]interface{}{"api_key": staticToken}, d.extractMetadata(ctx, spec, staticToken), staticTokenTTL(spec), "", nil
 		}
 		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 spec %q is not connected — run `warden cred spec connect %s`", name, spec.Name, spec.Name)
 	}
@@ -333,7 +348,7 @@ func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credentia
 	if tokenResp.RefreshToken != "" && tokenResp.RefreshToken != refreshToken {
 		rawData[credential.RawRotatedRefreshTokenKey] = tokenResp.RefreshToken
 	}
-	return rawData, nil, ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
+	return rawData, d.extractMetadata(ctx, spec, tokenResp.AccessToken), ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
 }
 
 // ExchangeAuthorizationCode exchanges an authorization code for tokens using the
@@ -658,6 +673,122 @@ func buildOAuth2AuthHeaders(config map[string]string, token string) map[string]s
 	}
 
 	return headers
+}
+
+// extractMetadata derives non-secret credential metadata from the configured
+// metadata_fields (default "sub"), copying each named field from the token's
+// identity source: an introspection/userinfo endpoint (introspection_url) when
+// set, otherwise the access token's own JWT claims. Values are stringified so
+// they carry into the clear-logged Credential.Metadata. Best-effort — any failure
+// (opaque token with no introspection_url, endpoint error, no matching fields)
+// yields nil rather than failing the mint.
+func (d *OAuth2Driver) extractMetadata(ctx context.Context, spec *credential.CredSpec, accessToken string) map[string]interface{} {
+	// metadata_fields is source-only: the source operator decides which identity
+	// fields are logged in clear; a spec author must not be able to name
+	// sensitive claims. An empty value disables extraction.
+	fields := splitMetadataFields(credential.GetString(d.credSource.Config, "metadata_fields", "sub"))
+	if len(fields) == 0 {
+		return nil
+	}
+	claims := d.fetchIdentityClaims(ctx, spec, accessToken)
+	if claims == nil {
+		return nil
+	}
+	meta := make(map[string]interface{})
+	for _, f := range fields {
+		v, ok := claims[f]
+		if !ok {
+			continue
+		}
+		// Only scalar identity attributes belong in clear-logged metadata;
+		// composite claims (arrays/objects) are skipped to avoid dumping a
+		// nested subtree (and any sensitive sub-fields) into the audit log.
+		if s, ok := scalarClaim(v); ok {
+			meta[f] = s
+		}
+	}
+	if len(meta) == 0 {
+		return nil
+	}
+	return meta
+}
+
+// fetchIdentityClaims returns the claim/response map to extract metadata from:
+// the introspection_url response when configured, else the access token decoded
+// as a JWT, else nil (an opaque token with no introspection endpoint).
+func (d *OAuth2Driver) fetchIdentityClaims(ctx context.Context, spec *credential.CredSpec, accessToken string) map[string]interface{} {
+	// introspection_url is source-only (like token_url/auth_url): the server
+	// fetches it with the access token attached, so it must stay under the
+	// source-level SSRF guard and not be overridable per spec.
+	if introspectionURL := credential.GetString(d.credSource.Config, "introspection_url", ""); introspectionURL != "" {
+		claims, err := d.callIntrospection(ctx, introspectionURL, accessToken)
+		if err != nil {
+			d.logger.Warn("oauth2 introspection failed; credential metadata omitted",
+				logger.String("spec", spec.Name), logger.Err(err))
+			return nil
+		}
+		return claims
+	}
+	claims, err := helper.ParseJWTClaimsUnverified(accessToken)
+	if err != nil {
+		// Opaque (non-JWT) token and no introspection_url — nothing to derive.
+		return nil
+	}
+	return claims
+}
+
+// callIntrospection fetches the user/token-info document from an introspection
+// or userinfo endpoint, attaching the access token via the configured auth
+// header. introspection_url is SSRF-validated at config time.
+func (d *OAuth2Driver) callIntrospection(ctx context.Context, introspectionURL, accessToken string) (map[string]interface{}, error) {
+	retryConfig := httputil.HTTPRetryConfig{
+		MaxAttempts:       oauth2MaxRetryAttempts,
+		MaxBodySize:       httputil.DefaultMaxBodySize,
+		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
+		BaseBackoff:       1 * time.Second,
+		JitterPercent:     20,
+	}
+	// GET with the access token attached (OIDC userinfo / GitHub /user style).
+	httpReq := httputil.HTTPRequest{
+		Method:  http.MethodGet,
+		URL:     introspectionURL,
+		Headers: buildOAuth2AuthHeaders(d.credSource.Config, accessToken),
+	}
+	body, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	if err != nil {
+		return nil, err
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(body, &claims); err != nil {
+		return nil, fmt.Errorf("introspection response is not a JSON object: %w", err)
+	}
+	return claims, nil
+}
+
+// scalarClaim renders a scalar claim value as a string for the metadata map,
+// reporting ok=false for composite (array/object) or null values, which are
+// skipped. JSON numbers (float64) are formatted without an exponent so large
+// integer ids stay readable.
+func scalarClaim(v interface{}) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case bool:
+		return strconv.FormatBool(t), true
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64), true
+	case json.Number:
+		return t.String(), true
+	default:
+		return "", false
+	}
+}
+
+// splitMetadataFields splits a comma/space-separated field list.
+func splitMetadataFields(raw string) []string {
+	return strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	})
 }
 
 // validateOAuth2TokenURL validates that the token_url is a well-formed HTTPS URL.

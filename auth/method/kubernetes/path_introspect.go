@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	authhelper "github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/helper"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -64,7 +64,7 @@ func (b *kubernetesAuthBackend) handleIntrospectRoles(ctx context.Context, req *
 	// short-circuit when the token's iss doesn't match. Keeps the
 	// aggregator decoupled from per-mount config.
 	if cfg.Issuer != "" && !cfg.DisableIssValidation {
-		claims, _ := authhelper.ParseJWTClaimsUnverified(jwtToken)
+		claims, _ := helper.ParseJWTClaimsUnverified(jwtToken)
 		if claims == nil {
 			return introspectEmpty(), nil
 		}

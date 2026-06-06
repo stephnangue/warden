@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"time"
 
-	authhelper "github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/helper"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -90,7 +90,7 @@ func (b *kubernetesAuthBackend) handleLogin(ctx context.Context, req *logical.Re
 	// Cheap issuer pre-filter: parse-unverified, check iss matches the
 	// mount's configured issuer. Cuts noise before the TokenReview round-trip
 	// for tokens from the wrong cluster.
-	claims, _ := authhelper.ParseJWTClaimsUnverified(jwtStr)
+	claims, _ := helper.ParseJWTClaimsUnverified(jwtStr)
 	if cfg.Issuer != "" && !cfg.DisableIssValidation {
 		if claims == nil {
 			b.logger.Warn("kubernetes login: failed to parse JWT for issuer pre-filter")
