@@ -23,7 +23,7 @@ It supports **GitHub App**, **Personal Access Token (PAT)**, and **OAuth2 author
 - One of the following:
   - **GitHub App** with a private key and installation ID (recommended — short-lived tokens, auto-refreshed), OR
   - **Personal Access Token** (classic or fine-grained) with the scopes covering the MCP tools you want to expose (e.g., `repo`, `issues`, `pull_requests`), OR
-  - **OAuth App** (Client ID + Client Secret) to act as a consenting GitHub user via the authorization-code flow (see [Option C](#option-c-oauth2-authorization-code-flow-acting-as-a-github-user))
+  - **GitHub App** (Client ID + Client Secret) to act as a consenting GitHub user via the authorization-code flow (see [Option C](#option-c-oauth2-authorization-code-flow-acting-as-a-github-user))
 - An MCP client that supports remote MCP servers over HTTP (Claude Code, Cursor, Continue, Cline, Goose, ...)
 
 > **New to Warden?** Follow the standard quickstart flow used by the other provider READMEs (the `github` and `slack` READMEs cover it step by step): deploy the quickstart compose, install the binary, export `WARDEN_ADDR` and `WARDEN_TOKEN`, then return here.
@@ -32,7 +32,7 @@ It supports **GitHub App**, **Personal Access Token (PAT)**, and **OAuth2 author
 
 Set up a JWT auth method and create a role that binds the credential spec and policy. Clients authenticate directly with their JWT — no separate login step is needed.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves `auto_auth_path` per request — writing the config only checks that it is non-empty, not that the mount exists — so a gateway call fails with `no auth mount registered ... for implicit auth` if the referenced auth mount isn't there yet.
 
 ```bash
 # Enable JWT auth if not already enabled
@@ -45,7 +45,7 @@ warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.jso
 warden write auth/jwt/role/mcp-user \
     token_policies="mcp-github-access" \
     user_claim=sub \
-    cred_spec_name=github-oauth
+    cred_spec_name=github-ops
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -182,7 +182,7 @@ app's OAuth client credentials and the pinned callback from step 2. The client
 secret is read from a file so it never lands in shell history:
 
 ```bash
-warden cred spec create github-oauth \
+warden cred spec create github-ops \
   -source github-oauth-src \
   -config auth_method=authorization_code \
   -config client_id=<your-client-id> \
@@ -195,14 +195,14 @@ browser to GitHub, captures the authorization code on the redirect, and exchange
 it for tokens server-side — the client secret never leaves the server:
 
 ```bash
-warden cred spec connect github-oauth
+warden cred spec connect github-ops
 ```
 
 Re-run `connect` whenever you need to re-authorize — after revoking the grant,
 changing the app's permissions, or rotating the secret. Add `-force` to replace a
 live authorization without the confirmation prompt, or `-no-browser` on a headless
 host to print the URL to open elsewhere. Bind this spec to the role from Step 1 with
-`cred_spec_name=github-oauth`; Warden then injects the user's access token as
+`cred_spec_name=github-ops`; Warden then injects the user's access token as
 `Authorization: Bearer <token>` on each MCP request, refreshing it from the sealed
 refresh token as needed.
 
@@ -250,7 +250,7 @@ called, and the GitHub user it acted as — while the token stays salted:
     "credential": {
       "type": "oauth_bearer_token",
       "source_name": "github-oauth-src",
-      "spec_name": "github-oauth",
+      "spec_name": "github-ops",
       "metadata": { "login": "octocat" },
       "data": { "api_key": "hmac-sha256:..." }
     }
@@ -276,12 +276,12 @@ Enforcement is **body-authoritative**. When a policy in scope contains an `mcp {
 | `denied_resources` / `allowed_resources` | `resources/read` with a `params.uri` matching a deny pattern, or not in the allow list |
 | `denied_prompts` / `allowed_prompts` | `prompts/get` with a `params.name` matching a deny pattern, or not in the allow list |
 | `denied_params` / `allowed_params` | A `tools/call` argument (`params.arguments.<key>`) matches a deny pattern, or — when present — fails an allow-list pattern. Both rules are conditional on presence: missing arguments don't trigger either, matching Vault's `allowed_parameters` semantics. Tools whose argument shape doesn't include the gated key pass through unaffected. |
-| `missing_body` | Request body absent on a path the backend opted into MCP enforcement for. POST/JSON-RPC traffic that fails to parse triggers this; non-POST verbs (GET for the SSE notification stream, DELETE for session terminate) silently skip `mcp { }` evaluation — the body-authoritative gate doesn't apply to body-less verbs. |
-| `malformed_jsonrpc` | Body is not a well-formed JSON-RPC 2.0 envelope (bad version, missing method, unknown top-level key, UTF-8 BOM, etc.) |
+| `missing_body` | An `mcp { }` block is bound to a path served by a non-MCP-aware backend — an operator misconfiguration. The body-authoritative gate has no descriptor to evaluate and fails closed. (An absent or unparseable body on a genuine MCP POST surfaces as `malformed_jsonrpc`, not this.) |
+| `malformed_jsonrpc` | Body on an MCP-enforced POST is absent, unreadable, or not a well-formed JSON-RPC 2.0 envelope (bad version, missing method, unknown top-level key, UTF-8 BOM, etc.) |
 | `duplicate_key` | Duplicate object key detected anywhere in the body — Warden rejects ambiguity that Go's standard JSON parser silently last-wins-resolves |
 | `oversized_body` | Body exceeds the mount's `max_body_size` |
 | `batch_empty` | JSON-RPC batch is `[]` |
-| `malformed_params` | A name-bearing method (`tools/call`, `resources/read`, `prompts/get`) has a missing or wrong-shape `params.name` / `params.uri` |
+| `malformed_params` | A name-bearing method has a missing or wrong-shape selector: `params.name` for `tools/call` and `prompts/get`, or `params.uri` for `resources/read` |
 
 All examples below use `capabilities = ["create", "read", "delete"]`. MCP Streamable HTTP uses three HTTP verbs on the same `/gateway/` URL: POST for JSON-RPC requests (mapped by Warden to `create`), GET for the optional server → client SSE notification stream (`read`), and DELETE for session terminate (`delete`). All three need to be in the cap list or off-spec MCP clients fail to connect. The `mcp { }` block only fires on the POST half; GET/DELETE skip body-authoritative evaluation automatically.
 
@@ -446,11 +446,11 @@ bound token allow:
 > List the open issues in myorg/myrepo and summarize the three highest-priority ones.
 ```
 
-The `role` segment in the URL selects which credential spec backs the calls: point
-at a role bound to `github-ops` to act as the App or PAT identity, or at a role
-bound to `github-oauth` (Option C) to act as the consenting GitHub user. The Hydra
-JWT is short-lived — when it expires, refresh it, then `claude mcp remove github`
-and re-add with the new token.
+The `role` segment in the URL selects which credential spec — and thus which GitHub
+identity — backs the calls, via the role's `cred_spec_name` binding from Step 1
+(here, `github-ops`, however you populated it in Step 3). The Hydra JWT is
+short-lived — when it expires, refresh it, then `claude mcp remove github` and
+re-add with the new token.
 
 #### Header-routed alternative
 
