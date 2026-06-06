@@ -32,4 +32,10 @@ var (
 
 	// ErrSourceAlreadyExists is returned when attempting to register a source that already exists
 	ErrSourceAlreadyExists = errors.New("credential source already exists")
+
+	// ErrRefreshTokenRejected is returned when an OAuth2 provider rejects the
+	// refresh token (RFC 6749 invalid_grant). It signals the minting layer that
+	// the sealed token may have been rotated by another node, so it should
+	// re-read the latest spec and retry the refresh once.
+	ErrRefreshTokenRejected = errors.New("oauth2 refresh token rejected")
 )

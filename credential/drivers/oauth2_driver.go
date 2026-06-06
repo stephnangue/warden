@@ -3,6 +3,7 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -316,6 +317,11 @@ func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credentia
 
 	tokenResp, err := d.postTokenRequest(ctx, d.tokenURL(), form)
 	if err != nil {
+		if isRefreshTokenRejection(err) {
+			// Signal the minting layer to re-read the spec and retry once (the
+			// token may have been rotated by another node).
+			return nil, 0, "", fmt.Errorf("%s OAuth2 refresh failed: %w: %w", name, credential.ErrRefreshTokenRejected, err)
+		}
 		return nil, 0, "", fmt.Errorf("%s OAuth2 refresh failed: %w", name, err)
 	}
 	if tokenResp.AccessToken == "" {
@@ -433,24 +439,75 @@ func (d *OAuth2Driver) postTokenRequest(ctx context.Context, tokenURL string, fo
 			"Content-Type": "application/x-www-form-urlencoded",
 			"Accept":       "application/json",
 		},
+		// RFC 6749 §5.2 returns the error body on HTTP 400 (and 401 for
+		// invalid_client). Treat those as readable so the error code can be
+		// parsed and classified, rather than discarded as a transport error.
+		OKStatuses: []int{http.StatusOK, http.StatusBadRequest, http.StatusUnauthorized},
 	}
 
-	body, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	body, status, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
 	if err != nil {
-		return nil, err
+		// Transport failure, or a status outside OKStatuses (e.g. 5xx after
+		// retries). Carry the status so callers can classify it.
+		return nil, &tokenEndpointError{status: status, err: err}
 	}
 
 	var tokenResp oauth2TokenResponse
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to decode token response: %w", err)
-	}
-	if tokenResp.Error != "" {
-		if tokenResp.ErrorDescription != "" {
-			return nil, fmt.Errorf("token endpoint error %q: %s", tokenResp.Error, tokenResp.ErrorDescription)
+	if jsonErr := json.Unmarshal(body, &tokenResp); jsonErr != nil {
+		if status != http.StatusOK {
+			// A non-2xx with an unparseable body (e.g. a proxy error page):
+			// classify by status alone.
+			return nil, &tokenEndpointError{status: status, err: fmt.Errorf("status %d: %s", status, string(body))}
 		}
-		return nil, fmt.Errorf("token endpoint error %q", tokenResp.Error)
+		return nil, fmt.Errorf("failed to decode token response: %w", jsonErr)
+	}
+	if status != http.StatusOK || tokenResp.Error != "" {
+		// An OAuth2 error body — carried on HTTP 400/401, or as an HTTP 200 body
+		// by providers like GitHub. Surface the parsed code for classification.
+		return nil, &tokenEndpointError{status: status, code: tokenResp.Error, description: tokenResp.ErrorDescription}
 	}
 	return &tokenResp, nil
+}
+
+// tokenEndpointError is returned by postTokenRequest when the token endpoint
+// rejects the request. It carries the HTTP status and, when the body was parsed,
+// the OAuth2 error code, so the refresh path can classify an invalid_grant
+// without fragile string matching.
+type tokenEndpointError struct {
+	status      int
+	code        string // OAuth2 error code (e.g. "invalid_grant"); "" if unparsed
+	description string
+	err         error // underlying transport/status error (when code is unparsed)
+}
+
+func (e *tokenEndpointError) Error() string {
+	if e.code != "" {
+		if e.description != "" {
+			return fmt.Sprintf("token endpoint error %q: %s", e.code, e.description)
+		}
+		return fmt.Sprintf("token endpoint error %q", e.code)
+	}
+	if e.err != nil {
+		return e.err.Error()
+	}
+	return fmt.Sprintf("token endpoint status %d", e.status)
+}
+
+func (e *tokenEndpointError) Unwrap() error { return e.err }
+
+// isRefreshTokenRejection reports whether a postTokenRequest error indicates the
+// refresh token (grant) was rejected: an explicit invalid_grant code, or — when
+// the body carried no code — an HTTP 400/401 status (the RFC 6749 statuses for a
+// rejected grant).
+func isRefreshTokenRejection(err error) bool {
+	var tee *tokenEndpointError
+	if !errors.As(err, &tee) {
+		return false
+	}
+	if tee.code != "" {
+		return tee.code == "invalid_grant"
+	}
+	return tee.status == http.StatusBadRequest || tee.status == http.StatusUnauthorized
 }
 
 // accessTokenRawData builds the rawData map returned to the credential parser.

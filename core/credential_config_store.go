@@ -302,6 +302,26 @@ type UpdateSpecOptions struct {
 	SkipVerification bool
 }
 
+// PersistRotatedSpec persists a spec without re-running verification, satisfying
+// credential.ConfigStoreAccessor for the refresh-token write-back. Verification
+// is skipped because re-minting would consume the just-rotated refresh token.
+func (s *CredentialConfigStore) PersistRotatedSpec(ctx context.Context, spec *credential.CredSpec) error {
+	return s.UpdateSpec(ctx, spec, UpdateSpecOptions{SkipVerification: true})
+}
+
+// ReloadSpec evicts the node-local cache entry for a spec and re-reads it,
+// forcing a load from shared storage. The refresh-token write-back uses this on
+// a rejection so a token another node rotated and persisted is actually seen
+// (the spec cache has no cross-node invalidation).
+func (s *CredentialConfigStore) ReloadSpec(ctx context.Context, name string) (*credential.CredSpec, error) {
+	ns, err := s.getNamespaceFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.specsByID.Del(s.buildSpecCacheKey(ns.UUID, name))
+	return s.GetSpec(ctx, name)
+}
+
 // UpdateSpec updates an existing spec
 func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential.CredSpec, opts ...UpdateSpecOptions) error {
 	s.mu.RLock()
