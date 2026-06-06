@@ -45,7 +45,7 @@ warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.jso
 warden write auth/jwt/role/mcp-user \
     token_policies="mcp-github-access" \
     user_claim=sub \
-    cred_spec_name=github-ops
+    cred_spec_name=github-oauth
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -143,19 +143,29 @@ warden cred spec read github-ops
 ### Option C: OAuth2 Authorization Code Flow (acting as a GitHub user)
 
 The App and PAT flows act as an application or a static token. To instead have an
-agent act **as a specific GitHub user** — with a token scoped to exactly what that
-user consented to — use the OAuth2 authorization-code flow. A human authorizes
-once in the browser; Warden seals the resulting refresh token and mints a fresh
-access token on each request. The agent never sees the client secret or the token.
+agent act **as a specific GitHub user** — with access limited to the intersection
+of the app's permissions and what that user consented to — use the OAuth2
+authorization-code flow. A human authorizes once in the browser; Warden seals the
+resulting refresh token and mints a fresh access token on each request. The agent
+never sees the client secret or the token.
 
 This flow uses its own `oauth2` credential source (not the `github` source created
 at the start of Step 3).
 
-1. Register an **OAuth App** under **Settings > Developer settings > OAuth Apps**
-   (this is distinct from a GitHub App). Note the **Client ID** and generate a
-   **Client Secret**.
-2. Set the app's **Authorization callback URL** to a fixed loopback address —
-   GitHub matches it exactly — for example `http://127.0.0.1:8765/callback`.
+Refresh tokens in this flow come only from a **GitHub App** with user-token
+expiration enabled. A classic OAuth App issues a non-expiring user token and no
+refresh token, so it cannot drive the refresh-on-demand model below.
+
+1. Use a **GitHub App** — the one from Option A works, or create a new one under
+   **Settings > Developer settings > GitHub Apps**. Enable **Expire user
+   authorization tokens** in its settings so GitHub returns a refresh token. Note
+   the **Client ID** and generate a **client secret** (this is the app's OAuth
+   client secret, distinct from the private key used in Option A).
+2. Set the app's **Callback URL** to a fixed loopback address — GitHub validates
+   the redirect against it — for example `http://127.0.0.1:8765/callback`.
+
+The user's effective access is the app's configured **permissions** intersected
+with what the user grants at consent time; there is no separate scope list to set.
 
 Create the source pointing at GitHub's authorize and token endpoints:
 
@@ -168,8 +178,8 @@ warden cred source create github-oauth-src \
 ```
 
 Create the spec — it starts empty, with no token until consent — carrying the
-OAuth App's credentials, the scopes you need, and the pinned callback from step 2.
-The client secret is read from a file so it never lands in shell history:
+app's OAuth client credentials and the pinned callback from step 2. The client
+secret is read from a file so it never lands in shell history:
 
 ```bash
 warden cred spec create github-oauth \
@@ -177,7 +187,6 @@ warden cred spec create github-oauth \
   -config auth_method=authorization_code \
   -config client_id=<your-client-id> \
   -config client_secret=@/path/to/client-secret \
-  -config scopes=repo,read:org \
   -config redirect_uri=http://127.0.0.1:8765/callback
 ```
 
@@ -190,9 +199,9 @@ warden cred spec connect github-oauth
 ```
 
 Re-run `connect` whenever you need to re-authorize — after revoking the grant,
-widening scopes, or rotating the secret. Add `-force` to replace a live
-authorization without the confirmation prompt, or `-no-browser` on a headless host
-to print the URL to open elsewhere. Bind this spec to the role from Step 1 with
+changing the app's permissions, or rotating the secret. Add `-force` to replace a
+live authorization without the confirmation prompt, or `-no-browser` on a headless
+host to print the URL to open elsewhere. Bind this spec to the role from Step 1 with
 `cred_spec_name=github-oauth`; Warden then injects the user's access token as
 `Authorization: Bearer <token>` on each MCP request, refreshing it from the sealed
 refresh token as needed.
@@ -405,6 +414,43 @@ For Claude Code, Cursor, Continue, Cline, Goose, and other clients that accept S
 ```
 
 > **Heads-up on `${VAR}` in headers.** MCP clients vary in what they substitute in `.mcp.json`. Claude Code and Cursor expand `${VAR}` in stdio `env` blocks and in the `url` field, but **HTTP-transport `headers` values are a known gap** — the literal `${JWT_TOKEN}` string ships on the wire. For the `Authorization` header (and the routing headers in the next example), paste the actual values instead of `${...}` placeholders, or run the JSON through `envsubst` at deploy time.
+
+#### Claude Code (CLI)
+
+Add the server straight from the command line instead of hand-editing the JSON.
+The shell expands `$JWT_TOKEN` when the command runs, so the token is written into
+the config as a literal value — sidestepping the header-substitution gap noted
+above:
+
+```bash
+claude mcp add --transport http github \
+  "${WARDEN_ADDR}/v1/mcp_github/role/mcp-user/gateway/" \
+  --header "Authorization: Bearer ${JWT_TOKEN}"
+```
+
+This writes a `local`-scope entry (visible only to you, only in this directory) by
+default. Add `--scope project` to write a shared `.mcp.json` you can commit, or
+`--scope user` to make it available across all your projects.
+
+Confirm Claude Code registered it and completes the MCP handshake — this is where a
+missing lifecycle method in your policy (see Step 4) would surface as a hang:
+
+```bash
+claude mcp list
+```
+
+Then just ask Claude to use it; it discovers whatever tools your policy and the
+bound token allow:
+
+```
+> List the open issues in myorg/myrepo and summarize the three highest-priority ones.
+```
+
+The `role` segment in the URL selects which credential spec backs the calls: point
+at a role bound to `github-ops` to act as the App or PAT identity, or at a role
+bound to `github-oauth` (Option C) to act as the consenting GitHub user. The Hydra
+JWT is short-lived — when it expires, refresh it, then `claude mcp remove github`
+and re-add with the new token.
 
 #### Header-routed alternative
 
