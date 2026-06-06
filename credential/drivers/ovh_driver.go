@@ -143,7 +143,7 @@ func (d *OVHDriver) Type() string {
 }
 
 // MintCredential returns OVH credentials for the given spec.
-func (d *OVHDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *OVHDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 	switch mintMethod {
 	case "oauth2_token":
@@ -153,7 +153,7 @@ func (d *OVHDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	case "oauth2_token_and_s3":
 		return d.mintOAuth2TokenAndS3(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method: %s (expected oauth2_token, dynamic_s3, or oauth2_token_and_s3)", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method: %s (expected oauth2_token, dynamic_s3, or oauth2_token_and_s3)", mintMethod)
 	}
 }
 
@@ -249,10 +249,10 @@ func (d *OVHDriver) fetchOAuth2Token(ctx context.Context) (accessToken string, t
 }
 
 // mintOAuth2Token mints a bearer token via the OAuth2 client_credentials grant.
-func (d *OVHDriver) mintOAuth2Token(ctx context.Context) (map[string]interface{}, time.Duration, string, error) {
+func (d *OVHDriver) mintOAuth2Token(ctx context.Context) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	token, ttl, err := d.fetchOAuth2Token(ctx)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, nil, 0, "", err
 	}
 
 	d.logger.Info("minted OVH OAuth2 bearer token",
@@ -263,7 +263,7 @@ func (d *OVHDriver) mintOAuth2Token(ctx context.Context) (map[string]interface{}
 		"api_token": token,
 	}
 
-	return rawData, ttl, "", nil // No leaseID — token expires naturally
+	return rawData, nil, ttl, "", nil // No leaseID — token expires naturally
 }
 
 // s3CredentialResult holds the result of an S3 credential creation call.
@@ -323,20 +323,20 @@ func (d *OVHDriver) createS3Credentials(ctx context.Context, token, projectID, u
 // mintDynamicS3 creates S3 credentials via the OVH cloud API.
 // The TTL is derived from the OAuth2 token used for API auth — S3 keys are
 // revoked and re-created when the credential lease expires (~1h).
-func (d *OVHDriver) mintDynamicS3(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *OVHDriver) mintDynamicS3(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	token, tokenTTL, err := d.fetchOAuth2Token(ctx)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to get OAuth2 token for S3 credential creation: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to get OAuth2 token for S3 credential creation: %w", err)
 	}
 
 	projectID, userID, err := d.resolveProjectAndUser(spec)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, nil, 0, "", err
 	}
 
 	s3, err := d.createS3Credentials(ctx, token, projectID, userID)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, nil, 0, "", err
 	}
 
 	d.logger.Info("created dynamic OVH S3 credentials",
@@ -350,24 +350,24 @@ func (d *OVHDriver) mintDynamicS3(ctx context.Context, spec *credential.CredSpec
 		"secret_key": s3.secretKey,
 	}
 
-	return rawData, tokenTTL, s3.leaseID, nil
+	return rawData, nil, tokenTTL, s3.leaseID, nil
 }
 
 // mintOAuth2TokenAndS3 mints both a bearer token and S3 credentials.
-func (d *OVHDriver) mintOAuth2TokenAndS3(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *OVHDriver) mintOAuth2TokenAndS3(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	token, tokenTTL, err := d.fetchOAuth2Token(ctx)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to mint OAuth2 token for dual-mode credential: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to mint OAuth2 token for dual-mode credential: %w", err)
 	}
 
 	projectID, userID, err := d.resolveProjectAndUser(spec)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, nil, 0, "", err
 	}
 
 	s3, err := d.createS3Credentials(ctx, token, projectID, userID)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, nil, 0, "", err
 	}
 
 	d.logger.Info("minted OVH dual-mode credentials (OAuth2 token + S3)",
@@ -383,7 +383,7 @@ func (d *OVHDriver) mintOAuth2TokenAndS3(ctx context.Context, spec *credential.C
 	}
 
 	// TTL = token TTL (shorter-lived governs refresh; S3 keys are revoked on refresh)
-	return rawData, tokenTTL, s3.leaseID, nil
+	return rawData, nil, tokenTTL, s3.leaseID, nil
 }
 
 // Revoke deletes dynamically created S3 credentials.

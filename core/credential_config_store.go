@@ -894,7 +894,7 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				}
 
 				if runTestMint {
-					if _, _, _, err := driver.MintCredential(ctx, testSpec); err != nil {
+					if _, _, _, _, err := driver.MintCredential(ctx, testSpec); err != nil {
 						return logical.ErrBadRequestf("credential test failed for spec type '%s': %s", spec.Type, err.Error())
 					}
 

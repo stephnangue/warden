@@ -20,6 +20,8 @@ func TestDBAuthTokenCredType_Metadata(t *testing.T) {
 func TestDBAuthTokenCredType_Parse(t *testing.T) {
 	ct := NewDBAuthTokenCredType()
 
+	// The DB-auth drivers place these descriptive fields in rawData; the type's
+	// OptionalFields copy them into cred.Data (matching production).
 	rawData := map[string]interface{}{
 		"auth_token": "my-iam-token-xyz",
 		"db_host":    "mydb.abc123.us-east-1.rds.amazonaws.com",
@@ -30,7 +32,7 @@ func TestDBAuthTokenCredType_Parse(t *testing.T) {
 		"region":     "us-east-1",
 	}
 
-	cred, err := ct.Parse(rawData, 15*time.Minute, "")
+	cred, err := ct.Parse(rawData, nil, 15*time.Minute, "")
 	require.NoError(t, err)
 
 	assert.Equal(t, credential.TypeDBAuthToken, cred.Type)
@@ -53,7 +55,7 @@ func TestDBAuthTokenCredType_Parse_MissingToken(t *testing.T) {
 		"db_host": "mydb.rds.amazonaws.com",
 	}
 
-	_, err := ct.Parse(rawData, 15*time.Minute, "")
+	_, err := ct.Parse(rawData, nil, 15*time.Minute, "")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "auth_token")
 }

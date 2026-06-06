@@ -60,10 +60,10 @@ func (s *MintingService) MintWithCleanup(
 	ctx context.Context,
 	driver SourceDriver,
 	spec *CredSpec,
-	onSuccess func(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) error,
+	onSuccess func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error,
 ) error {
 	// Step 1: Mint credential from driver
-	rawData, leaseTTL, leaseID, err := driver.MintCredential(ctx, spec)
+	rawData, metadata, leaseTTL, leaseID, err := driver.MintCredential(ctx, spec)
 	if err != nil {
 		return fmt.Errorf("failed to fetch credential: %w", err)
 	}
@@ -79,7 +79,7 @@ func (s *MintingService) MintWithCleanup(
 
 	// Step 3: Call success handler to process minted data
 	// This typically involves parsing and validating the credential
-	if err := onSuccess(rawData, leaseTTL, leaseID); err != nil {
+	if err := onSuccess(rawData, metadata, leaseTTL, leaseID); err != nil {
 		return err // Deferred cleanup will revoke the lease
 	}
 

@@ -213,7 +213,7 @@ func TestOVHDriver_MintOAuth2Token(t *testing.T) {
 		},
 	}
 
-	rawData, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "eyJhbGciOiJSUzI1NiIs.test-token", rawData["api_token"])
 	assert.Equal(t, 3599*time.Second, ttl)
@@ -238,7 +238,7 @@ func TestOVHDriver_MintOAuth2Token_EmptyResponse(t *testing.T) {
 		Config: map[string]string{"mint_method": "oauth2_token"},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty access_token")
 }
@@ -282,7 +282,7 @@ func TestOVHDriver_MintDynamicS3(t *testing.T) {
 		},
 	}
 
-	rawData, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "s3-access-key-123", rawData["access_key"])
 	assert.Equal(t, "s3-secret-key-456", rawData["secret_key"])
@@ -329,7 +329,7 @@ func TestOVHDriver_MintDynamicS3_SpecOverridesSource(t *testing.T) {
 		},
 	}
 
-	rawData, _, leaseID, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, _, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "s3-key", rawData["access_key"])
 	assert.Equal(t, "spec-proj/spec-user/s3-key", leaseID)
@@ -356,7 +356,7 @@ func TestOVHDriver_MintDynamicS3_MissingProjectID(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "project_id")
 }
@@ -382,7 +382,7 @@ func TestOVHDriver_MintDynamicS3_MissingUserID(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "user_id")
 }
@@ -425,7 +425,7 @@ func TestOVHDriver_MintOAuth2TokenAndS3(t *testing.T) {
 		},
 	}
 
-	rawData, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "dual-token", rawData["api_token"])
 	assert.Equal(t, "dual-s3-key", rawData["access_key"])
@@ -446,7 +446,7 @@ func TestOVHDriver_MintCredential_UnsupportedMethod(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method")
 }
@@ -557,7 +557,7 @@ func TestOVHDriver_MintOAuth2Token_ServerError(t *testing.T) {
 		Config: map[string]string{"mint_method": "oauth2_token"},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "OAuth2 token request failed")
 }
@@ -575,7 +575,7 @@ func TestOVHDriver_MintOAuth2Token_MalformedJSON(t *testing.T) {
 		Config: map[string]string{"mint_method": "oauth2_token"},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to parse OAuth2 token response")
 }
@@ -597,7 +597,7 @@ func TestOVHDriver_MintOAuth2Token_MissingExpiresIn(t *testing.T) {
 		Config: map[string]string{"mint_method": "oauth2_token"},
 	}
 
-	rawData, ttl, _, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, ttl, _, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "valid-token", rawData["api_token"])
 	assert.Equal(t, 1*time.Hour, ttl) // fallback TTL
@@ -632,7 +632,7 @@ func TestOVHDriver_MintDynamicS3_EmptySecret(t *testing.T) {
 		Config: map[string]string{"mint_method": "dynamic_s3"},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty S3 access or secret key")
 }
@@ -662,7 +662,7 @@ func TestOVHDriver_MintDynamicS3_APIError(t *testing.T) {
 		Config: map[string]string{"mint_method": "dynamic_s3"},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to create OVH S3 credentials")
 }
@@ -704,7 +704,7 @@ func TestOVHDriver_MintOAuth2TokenAndS3_CallCount(t *testing.T) {
 		Config: map[string]string{"mint_method": "oauth2_token_and_s3"},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, 1, tokenCalls, "should make exactly 1 token call")
 	assert.Equal(t, 1, s3Calls, "should make exactly 1 S3 credential call")
@@ -735,7 +735,7 @@ func TestOVHDriver_MintOAuth2TokenAndS3_S3APIError(t *testing.T) {
 		Config: map[string]string{"mint_method": "oauth2_token_and_s3"},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to create OVH S3 credentials")
 }

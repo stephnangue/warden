@@ -185,7 +185,7 @@ func TestStaticAPIKeyDriver_MintCredential(t *testing.T) {
 		Type:   credential.TypeAPIKey,
 		Config: map[string]string{"api_key": "sk-test-key-123"},
 	}
-	rawData, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
+	rawData, _, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "sk-test-key-123", rawData["api_key"])
 	assert.Equal(t, time.Duration(0), ttl)
@@ -199,7 +199,7 @@ func TestStaticAPIKeyDriver_MintCredential_EmptyKey(t *testing.T) {
 		Type:   credential.TypeAPIKey,
 		Config: map[string]string{"api_key": ""},
 	}
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "OpenAI API key")
 }
@@ -210,7 +210,7 @@ func TestStaticAPIKeyDriver_MintCredential_DisplayName(t *testing.T) {
 		Name:   "test",
 		Config: map[string]string{},
 	}
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "API Key") // default display name
 }
@@ -247,7 +247,7 @@ func TestStaticAPIKeyDriver_MintCredential_OptionalMetadata(t *testing.T) {
 				"project_id":      "proj-789",
 			},
 		}
-		rawData, _, _, err := d.MintCredential(context.Background(), spec)
+		rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
 		require.NoError(t, err)
 		assert.Equal(t, "org-456", rawData["organization_id"])
 		assert.Equal(t, "proj-789", rawData["project_id"])
@@ -261,7 +261,7 @@ func TestStaticAPIKeyDriver_MintCredential_OptionalMetadata(t *testing.T) {
 			Name:   "test",
 			Config: map[string]string{"api_key": "sk-test"},
 		}
-		rawData, _, _, err := d.MintCredential(context.Background(), spec)
+		rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
 		require.NoError(t, err)
 		assert.Nil(t, rawData["organization_id"])
 	})
@@ -275,7 +275,7 @@ func TestStaticAPIKeyDriver_MintCredential_OptionalMetadata(t *testing.T) {
 				"organization_id": "org-123",
 			},
 		}
-		rawData, _, _, err := d.MintCredential(context.Background(), spec)
+		rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
 		require.NoError(t, err)
 		assert.Nil(t, rawData["organization_id"])
 	})

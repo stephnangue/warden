@@ -369,7 +369,7 @@ func TestOAuth2Driver_MintCredential(t *testing.T) {
 		Config: map[string]string{"scope": "read write"},
 	}
 
-	rawData, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
+	rawData, _, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "eyJ-test-access-token", rawData["api_key"])
 	assert.Equal(t, "Bearer", rawData["token_type"])
@@ -412,7 +412,7 @@ func TestOAuth2Driver_MintCredential_DefaultScope(t *testing.T) {
 		Config: map[string]string{},
 	}
 
-	rawData, ttl, _, err := d.MintCredential(context.Background(), spec)
+	rawData, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "test-token", rawData["api_key"])
 	assert.Equal(t, 1800*time.Second, ttl)
@@ -460,7 +460,7 @@ func TestOAuth2Driver_MintCredential_ExtraTokenParams(t *testing.T) {
 		Config: map[string]string{},
 	}
 
-	rawData, _, _, err := d.MintCredential(context.Background(), spec)
+	rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "test-token", rawData["api_key"])
 }
@@ -492,7 +492,7 @@ func TestOAuth2Driver_MintCredential_NoExpiresIn(t *testing.T) {
 		Config: map[string]string{},
 	}
 
-	_, ttl, _, err := d.MintCredential(context.Background(), spec)
+	_, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, time.Duration(0), ttl)
 }
@@ -506,7 +506,7 @@ func TestOAuth2Driver_MintCredential_MissingCredentials(t *testing.T) {
 	}
 
 	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing client_id or client_secret")
 }
@@ -531,7 +531,7 @@ func TestOAuth2Driver_MintCredential_TokenEndpointError(t *testing.T) {
 	}
 
 	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "token exchange failed")
 }
@@ -559,7 +559,7 @@ func TestOAuth2Driver_MintCredential_EmptyAccessToken(t *testing.T) {
 	}
 
 	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing access_token")
 }
@@ -584,7 +584,7 @@ func TestOAuth2Driver_MintCredential_MalformedJSON(t *testing.T) {
 	}
 
 	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode")
 }
@@ -600,7 +600,7 @@ func TestOAuth2Driver_MintCredential_DisplayName(t *testing.T) {
 	}
 
 	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "PagerDuty OAuth2 source missing")
 }
@@ -978,7 +978,7 @@ func TestOAuth2Driver_MintFromRefreshToken_Rotating(t *testing.T) {
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-old",
 	}}
 
-	rawData, ttl, _, err := d.MintCredential(context.Background(), spec)
+	rawData, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "at-new", rawData["api_key"])
 	assert.Equal(t, 28800*time.Second, ttl)
@@ -999,7 +999,7 @@ func TestOAuth2Driver_MintFromRefreshToken_NonRotating(t *testing.T) {
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-stable",
 	}}
 
-	rawData, _, _, err := d.MintCredential(context.Background(), spec)
+	rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "at-1", rawData["api_key"])
 	_, has := rawData[credential.RawRotatedRefreshTokenKey]
@@ -1010,7 +1010,7 @@ func TestOAuth2Driver_MintFromRefreshToken_NotConnected(t *testing.T) {
 	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": "https://example.invalid/token"}}, httpClient: http.DefaultClient}
 	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret"}}
 
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not connected")
 }
@@ -1020,7 +1020,7 @@ func TestOAuth2Driver_MintFromRefreshToken_StaticAccessToken(t *testing.T) {
 	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": "https://example.invalid/token"}}, httpClient: http.DefaultClient}
 	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"auth_method": "authorization_code", "access_token": "static-token"}}
 
-	rawData, ttl, _, err := d.MintCredential(context.Background(), spec)
+	rawData, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "static-token", rawData["api_key"])
 	assert.Equal(t, time.Duration(0), ttl)
@@ -1040,7 +1040,7 @@ func TestOAuth2Driver_MintFromRefreshToken_InvalidGrant_HTTP400(t *testing.T) {
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-dead",
 	}}
 
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, credential.ErrRefreshTokenRejected), "expected ErrRefreshTokenRejected, got %v", err)
 }
@@ -1058,7 +1058,7 @@ func TestOAuth2Driver_MintFromRefreshToken_InvalidGrant_HTTP200(t *testing.T) {
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-dead",
 	}}
 
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, credential.ErrRefreshTokenRejected), "expected ErrRefreshTokenRejected, got %v", err)
 }
@@ -1077,7 +1077,7 @@ func TestOAuth2Driver_MintFromRefreshToken_NonGrantError_NotRejection(t *testing
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt",
 	}}
 
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, credential.ErrRefreshTokenRejected), "non-grant error must not be a rejection: %v", err)
 }
@@ -1097,7 +1097,7 @@ func TestOAuth2Driver_MintFromRefreshToken_InvalidClient_NotRejection(t *testing
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "wrong", "refresh_token": "rt",
 	}}
 
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, credential.ErrRefreshTokenRejected), "invalid_client must not be a refresh-token rejection: %v", err)
 }
@@ -1117,7 +1117,7 @@ func TestOAuth2Driver_MintFromRefreshToken_SlowDown400_NotRejection(t *testing.T
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt",
 	}}
 
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, credential.ErrRefreshTokenRejected), "slow_down 400 must not be a refresh-token rejection: %v", err)
 }
@@ -1179,7 +1179,7 @@ func TestOAuth2Driver_MintFromRefreshToken_StaticAccessToken_Expiring(t *testing
 		"auth_method": "authorization_code", "access_token": "static-token", "access_token_expires_at": exp,
 	}}
 
-	rawData, ttl, _, err := d.MintCredential(context.Background(), spec)
+	rawData, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "static-token", rawData["api_key"])
 	// TTL derived from access_token_expires_at (not the hardcoded 0).
@@ -1194,7 +1194,7 @@ func TestOAuth2Driver_MintFromRefreshToken_MissingClientCreds(t *testing.T) {
 		"auth_method": "authorization_code", "refresh_token": "rt",
 	}}
 
-	_, _, _, err := d.MintCredential(context.Background(), spec)
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing client_id or client_secret")
 }

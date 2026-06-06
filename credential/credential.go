@@ -18,11 +18,11 @@ const (
 	TypeDBAuthToken       = "db_auth_token"
 	TypeOAuthBearerToken  = "oauth_bearer_token"
 	TypeKubernetesToken   = "kubernetes_token"
-	TypeScalewayKeys     = "scaleway_keys"
-	TypeOVHKeys          = "ovh_keys"
-	TypeCloudflareKeys   = "cloudflare_keys"
-	TypeIBMCloudKeys     = "ibmcloud_keys"
-	TypeAlicloudKeys     = "alicloud_keys"
+	TypeScalewayKeys      = "scaleway_keys"
+	TypeOVHKeys           = "ovh_keys"
+	TypeCloudflareKeys    = "cloudflare_keys"
+	TypeIBMCloudKeys      = "ibmcloud_keys"
+	TypeAlicloudKeys      = "alicloud_keys"
 )
 
 // Source type constants
@@ -86,7 +86,7 @@ type Credential struct {
 	TokenID  string        // Session token this credential is bound to
 	IssuedAt time.Time     // When the credential was issued
 
-	// Data
+	// The secret part of the credential
 	Data map[string]string // Type-specific credential data
 
 	// Metadata
@@ -94,6 +94,11 @@ type Credential struct {
 	SourceType string // Type of the driver that issued this credential
 	Revocable  bool   // Whether this credential can be revoked
 	SpecName   string // Which spec created this credential (for tracking/audit)
+
+	// Metadata holds non-secret, descriptive attributes about the credential
+	// (e.g. "subject", "subject_verified") that audit logs in clear. Never put
+	// secret material here — that belongs in Data, which audit HMAC-salts.
+	Metadata map[string]string
 }
 
 // IsExpired checks if the credential has expired

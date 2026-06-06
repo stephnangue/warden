@@ -172,6 +172,7 @@ func TestAPIKeyCredType_Parse(t *testing.T) {
 	tests := []struct {
 		name     string
 		rawData  map[string]interface{}
+		metadata map[string]interface{}
 		leaseTTL time.Duration
 		leaseID  string
 		wantErr  bool
@@ -182,6 +183,7 @@ func TestAPIKeyCredType_Parse(t *testing.T) {
 			rawData: map[string]interface{}{
 				"api_key": "sk-xxxxxxxxxxxxxxxxxxxx",
 			},
+			metadata: nil,
 			leaseTTL: 0,
 			leaseID:  "",
 			wantErr:  false,
@@ -194,6 +196,7 @@ func TestAPIKeyCredType_Parse(t *testing.T) {
 				"key_name":        "production-key",
 				"organization_id": "org-456",
 			},
+			metadata: nil,
 			leaseTTL: 0,
 			leaseID:  "",
 			wantErr:  false,
@@ -201,6 +204,7 @@ func TestAPIKeyCredType_Parse(t *testing.T) {
 		{
 			name:     "missing api_key",
 			rawData:  map[string]interface{}{},
+			metadata: map[string]interface{}{},
 			leaseTTL: 0,
 			leaseID:  "",
 			wantErr:  true,
@@ -211,6 +215,7 @@ func TestAPIKeyCredType_Parse(t *testing.T) {
 			rawData: map[string]interface{}{
 				"api_key": "",
 			},
+			metadata: nil,
 			leaseTTL: 0,
 			leaseID:  "",
 			wantErr:  true,
@@ -220,7 +225,7 @@ func TestAPIKeyCredType_Parse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cred, err := ct.Parse(tt.rawData, tt.leaseTTL, tt.leaseID)
+			cred, err := ct.Parse(tt.rawData, tt.metadata, tt.leaseTTL, tt.leaseID)
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.errMsg != "" {
@@ -244,6 +249,8 @@ func TestAPIKeyCredType_Parse(t *testing.T) {
 func TestAPIKeyCredType_Parse_OptionalFields(t *testing.T) {
 	ct := NewAPIKeyCredType()
 
+	// The static-API-key driver places these descriptive fields in rawData; the
+	// api_key type's OptionalFields copy them into cred.Data (matching production).
 	rawData := map[string]interface{}{
 		"api_key":         "sk-xxxxxxxxxxxxxxxxxxxx",
 		"key_id":          "key-123",
@@ -252,7 +259,7 @@ func TestAPIKeyCredType_Parse_OptionalFields(t *testing.T) {
 		"project_id":      "proj-789",
 	}
 
-	cred, err := ct.Parse(rawData, 0, "")
+	cred, err := ct.Parse(rawData, nil, 0, "")
 	require.NoError(t, err)
 
 	assert.Equal(t, "sk-xxxxxxxxxxxxxxxxxxxx", cred.Data["api_key"])

@@ -51,6 +51,7 @@ func NewCredentialParser(typeRegistry *TypeRegistry, logger *logger.GatedLogger)
 //   - ctx: Context with namespace information
 //   - spec: The CredSpec defining the credential type and source
 //   - rawData: Raw credential data from driver.MintCredential()
+//   - metadata: credential metadata from driver.MintCredential()
 //   - leaseTTL: Time-to-live for the credential
 //   - leaseID: Lease identifier for revocation at source
 //   - driver: The source driver that minted the credential (for Type() method)
@@ -60,6 +61,7 @@ func (p *CredentialParser) ParseAndValidate(
 	ctx context.Context,
 	spec *CredSpec,
 	rawData map[string]interface{},
+	metadata map[string]interface{},
 	leaseTTL time.Duration,
 	leaseID string,
 	driver SourceDriver,
@@ -70,8 +72,8 @@ func (p *CredentialParser) ParseAndValidate(
 		return nil, fmt.Errorf("credential type '%s' not found: %w", spec.Type, err)
 	}
 
-	// Step 2: Parse raw data into structured credential
-	cred, err := credType.Parse(rawData, leaseTTL, leaseID)
+	// Step 2: Parse raw data and its metadata into structured credential
+	cred, err := credType.Parse(rawData, metadata, leaseTTL, leaseID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse credential: %w", err)
 	}

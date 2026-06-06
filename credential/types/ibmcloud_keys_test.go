@@ -41,8 +41,8 @@ func TestIBMCloudKeysCredType_ValidateConfig_VaultSource(t *testing.T) {
 			name: "dynamic_ibm with COS keys",
 			config: map[string]string{
 				"mint_method":       "dynamic_ibm",
-				"ibm_mount":        "ibmcloud",
-				"role_name":        "my-role",
+				"ibm_mount":         "ibmcloud",
+				"role_name":         "my-role",
 				"access_key_id":     "cos-access-key",
 				"secret_access_key": "cos-secret-key",
 			},
@@ -237,7 +237,7 @@ func TestIBMCloudKeysCredType_Parse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cred, err := ct.Parse(tt.rawData, tt.leaseTTL, tt.leaseID)
+			cred, err := ct.Parse(tt.rawData, nil, tt.leaseTTL, tt.leaseID)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)

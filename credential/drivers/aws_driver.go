@@ -44,13 +44,13 @@ type AWSDriver struct {
 	authMu         sync.Mutex
 
 	// AWS clients (rebuilt on auth changes)
-	stsClient                  *sts.Client
-	secretsManagerClient       *secretsmanager.Client
-	iamClient                  *iam.Client
-	redshiftClient             *redshift.Client
-	redshiftServerlessClient   *redshiftserverless.Client
-	region                     string
-	baseCredsVerified          bool
+	stsClient                *sts.Client
+	secretsManagerClient     *secretsmanager.Client
+	iamClient                *iam.Client
+	redshiftClient           *redshift.Client
+	redshiftServerlessClient *redshiftserverless.Client
+	region                   string
+	baseCredsVerified        bool
 }
 
 // AWSDriverFactory creates AWSDriver instances
@@ -238,10 +238,10 @@ func (d *AWSDriver) buildClients(creds aws.CredentialsProvider) {
 }
 
 // MintCredential mints credentials using AWS based on credential spec
-func (d *AWSDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *AWSDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	// Re-authenticate if needed
 	if err := d.authenticate(ctx); err != nil {
-		return nil, 0, "", fmt.Errorf("authentication failed: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("authentication failed: %w", err)
 	}
 
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
@@ -256,15 +256,15 @@ func (d *AWSDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	case "redshift_iam_token":
 		return d.mintViaRedshiftIAMToken(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for AWS driver; use 'sts_assume_role', 'secrets_manager', 'rds_iam_token', or 'redshift_iam_token'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for AWS driver; use 'sts_assume_role', 'secrets_manager', 'rds_iam_token', or 'redshift_iam_token'", mintMethod)
 	}
 }
 
 // mintViaSTSAssumeRole mints temporary credentials via STS AssumeRole
-func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	roleArn, err := credential.GetStringRequired(spec.Config, "role_arn")
 	if err != nil {
-		return nil, 0, "", err
+		return nil, nil, 0, "", err
 	}
 
 	sessionName := credential.GetString(spec.Config, "session_name", fmt.Sprintf("warden-%s", spec.Name))
@@ -272,15 +272,15 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.C
 	ttlStr := credential.GetString(spec.Config, "ttl", "1h")
 	ttl, err := time.ParseDuration(ttlStr)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("invalid ttl '%s': %w", ttlStr, err)
+		return nil, nil, 0, "", fmt.Errorf("invalid ttl '%s': %w", ttlStr, err)
 	}
 
 	// Validate TTL against spec bounds
 	if spec.MinTTL > 0 && ttl < spec.MinTTL {
-		return nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", ttl, spec.MinTTL)
+		return nil, nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", ttl, spec.MinTTL)
 	}
 	if spec.MaxTTL > 0 && ttl > spec.MaxTTL {
-		return nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", ttl, spec.MaxTTL)
+		return nil, nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", ttl, spec.MaxTTL)
 	}
 
 	input := &sts.AssumeRoleInput{
@@ -298,7 +298,7 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.C
 
 	result, err := d.stsClient.AssumeRole(ctx, input)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("STS AssumeRole failed for %s: %w", roleArn, err)
+		return nil, nil, 0, "", fmt.Errorf("STS AssumeRole failed for %s: %w", roleArn, err)
 	}
 
 	creds := result.Credentials
@@ -306,7 +306,7 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.C
 
 	// Validate lease TTL is positive (guards against clock skew or cached responses)
 	if leaseTTL <= 0 {
-		return nil, 0, "", fmt.Errorf("STS credentials already expired or have invalid expiration time")
+		return nil, nil, 0, "", fmt.Errorf("STS credentials already expired or have invalid expiration time")
 	}
 
 	// Synthetic lease ID for tracking (STS creds can't be revoked)
@@ -328,14 +328,14 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.C
 		)
 	}
 
-	return rawData, leaseTTL, leaseID, nil
+	return rawData, nil, leaseTTL, leaseID, nil
 }
 
 // mintViaSecretsManager fetches a secret from AWS Secrets Manager
-func (d *AWSDriver) mintViaSecretsManager(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *AWSDriver) mintViaSecretsManager(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	secretID, err := credential.GetStringRequired(spec.Config, "secret_id")
 	if err != nil {
-		return nil, 0, "", err
+		return nil, nil, 0, "", err
 	}
 
 	input := &secretsmanager.GetSecretValueInput{
@@ -350,16 +350,16 @@ func (d *AWSDriver) mintViaSecretsManager(ctx context.Context, spec *credential.
 
 	result, err := d.secretsManagerClient.GetSecretValue(ctx, input)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to get secret '%s': %w", secretID, err)
+		return nil, nil, 0, "", fmt.Errorf("failed to get secret '%s': %w", secretID, err)
 	}
 
 	if result.SecretString == nil {
-		return nil, 0, "", fmt.Errorf("secret '%s' has no string value (binary secrets not supported)", secretID)
+		return nil, nil, 0, "", fmt.Errorf("secret '%s' has no string value (binary secrets not supported)", secretID)
 	}
 
 	var secretData map[string]interface{}
 	if err := json.Unmarshal([]byte(*result.SecretString), &secretData); err != nil {
-		return nil, 0, "", fmt.Errorf("failed to parse secret JSON: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to parse secret JSON: %w", err)
 	}
 
 	// Apply json_key_map if provided (remap keys)
@@ -376,7 +376,7 @@ func (d *AWSDriver) mintViaSecretsManager(ctx context.Context, spec *credential.
 	}
 
 	// Secrets Manager secrets are static (no lease TTL)
-	return secretData, 0, "", nil
+	return secretData, nil, 0, "", nil
 }
 
 // applyKeyMap remaps keys in data according to a comma-separated "srcKey=destKey" map
@@ -399,14 +399,14 @@ func applyKeyMap(data map[string]interface{}, keyMapStr string) map[string]inter
 // mintViaRDSIAMToken generates a short-lived IAM authentication token for RDS.
 // The token is a pre-signed STS GetCallerIdentity URL that RDS accepts as a password.
 // This is a local SigV4 signing operation — no network call to RDS.
-func (d *AWSDriver) mintViaRDSIAMToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *AWSDriver) mintViaRDSIAMToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	dbEndpoint, err := credential.GetStringRequired(spec.Config, "db_endpoint")
 	if err != nil {
-		return nil, 0, "", err
+		return nil, nil, 0, "", err
 	}
 	dbUser, err := credential.GetStringRequired(spec.Config, "db_user")
 	if err != nil {
-		return nil, 0, "", err
+		return nil, nil, 0, "", err
 	}
 
 	dbEngine := credential.GetString(spec.Config, "db_engine", "postgres")
@@ -417,7 +417,7 @@ func (d *AWSDriver) mintViaRDSIAMToken(ctx context.Context, spec *credential.Cre
 
 	token, err := rdsauth.BuildAuthToken(ctx, endpoint, region, dbUser, d.baseCreds)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to build RDS IAM auth token: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to build RDS IAM auth token: %w", err)
 	}
 
 	rawData := map[string]interface{}{
@@ -440,7 +440,7 @@ func (d *AWSDriver) mintViaRDSIAMToken(ctx context.Context, spec *credential.Cre
 	}
 
 	// RDS IAM tokens are valid for 15 minutes
-	return rawData, 15 * time.Minute, "", nil
+	return rawData, nil, 15 * time.Minute, "", nil
 }
 
 // mintViaRedshiftIAMToken generates a short-lived IAM authentication token for
@@ -451,19 +451,19 @@ func (d *AWSDriver) mintViaRDSIAMToken(ctx context.Context, spec *credential.Cre
 //
 // Both APIs return a database user (mapped 1:1 to the source IAM identity for
 // provisioned, workgroup-scoped for serverless) and a temporary password.
-func (d *AWSDriver) mintViaRedshiftIAMToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *AWSDriver) mintViaRedshiftIAMToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	dbEndpoint, err := credential.GetStringRequired(spec.Config, "db_endpoint")
 	if err != nil {
-		return nil, 0, "", err
+		return nil, nil, 0, "", err
 	}
 
 	clusterID := credential.GetString(spec.Config, "cluster_identifier", "")
 	workgroup := credential.GetString(spec.Config, "workgroup_name", "")
 	if clusterID == "" && workgroup == "" {
-		return nil, 0, "", fmt.Errorf("redshift_iam_token requires either 'cluster_identifier' (provisioned) or 'workgroup_name' (serverless)")
+		return nil, nil, 0, "", fmt.Errorf("redshift_iam_token requires either 'cluster_identifier' (provisioned) or 'workgroup_name' (serverless)")
 	}
 	if clusterID != "" && workgroup != "" {
-		return nil, 0, "", fmt.Errorf("redshift_iam_token requires exactly one of 'cluster_identifier' or 'workgroup_name', not both")
+		return nil, nil, 0, "", fmt.Errorf("redshift_iam_token requires exactly one of 'cluster_identifier' or 'workgroup_name', not both")
 	}
 
 	dbName := credential.GetString(spec.Config, "db_name", "")
@@ -472,7 +472,7 @@ func (d *AWSDriver) mintViaRedshiftIAMToken(ctx context.Context, spec *credentia
 
 	durationSeconds := credential.GetInt(spec.Config, "duration_seconds", 900)
 	if durationSeconds < 900 || durationSeconds > 3600 {
-		return nil, 0, "", fmt.Errorf("duration_seconds must be between 900 and 3600 (got %d)", durationSeconds)
+		return nil, nil, 0, "", fmt.Errorf("duration_seconds must be between 900 and 3600 (got %d)", durationSeconds)
 	}
 
 	var (
@@ -492,10 +492,10 @@ func (d *AWSDriver) mintViaRedshiftIAMToken(ctx context.Context, spec *credentia
 		}
 		out, err := d.redshiftClient.GetClusterCredentialsWithIAM(ctx, input)
 		if err != nil {
-			return nil, 0, "", fmt.Errorf("Redshift GetClusterCredentialsWithIAM failed for cluster %s: %w", clusterID, err)
+			return nil, nil, 0, "", fmt.Errorf("Redshift GetClusterCredentialsWithIAM failed for cluster %s: %w", clusterID, err)
 		}
 		if out.DbUser == nil || out.DbPassword == nil {
-			return nil, 0, "", fmt.Errorf("Redshift GetClusterCredentialsWithIAM returned empty credentials for cluster %s", clusterID)
+			return nil, nil, 0, "", fmt.Errorf("Redshift GetClusterCredentialsWithIAM returned empty credentials for cluster %s", clusterID)
 		}
 		dbUser = *out.DbUser
 		dbPassword = *out.DbPassword
@@ -511,10 +511,10 @@ func (d *AWSDriver) mintViaRedshiftIAMToken(ctx context.Context, spec *credentia
 		}
 		out, err := d.redshiftServerlessClient.GetCredentials(ctx, input)
 		if err != nil {
-			return nil, 0, "", fmt.Errorf("Redshift Serverless GetCredentials failed for workgroup %s: %w", workgroup, err)
+			return nil, nil, 0, "", fmt.Errorf("Redshift Serverless GetCredentials failed for workgroup %s: %w", workgroup, err)
 		}
 		if out.DbUser == nil || out.DbPassword == nil {
-			return nil, 0, "", fmt.Errorf("Redshift Serverless GetCredentials returned empty credentials for workgroup %s", workgroup)
+			return nil, nil, 0, "", fmt.Errorf("Redshift Serverless GetCredentials returned empty credentials for workgroup %s", workgroup)
 		}
 		dbUser = *out.DbUser
 		dbPassword = *out.DbPassword
@@ -550,7 +550,7 @@ func (d *AWSDriver) mintViaRedshiftIAMToken(ctx context.Context, spec *credentia
 		)
 	}
 
-	return rawData, leaseTTL, "", nil
+	return rawData, nil, leaseTTL, "", nil
 }
 
 // Revoke attempts to revoke a credential (best-effort)

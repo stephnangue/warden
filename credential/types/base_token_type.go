@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper"
 )
 
 // TokenFieldConfig describes how to extract and validate token fields from raw data
@@ -41,7 +42,7 @@ func (t *BaseTokenType) Metadata() credential.TypeMetadata {
 }
 
 // Parse converts raw credential data from source into structured Credential
-func (t *BaseTokenType) Parse(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
+func (t *BaseTokenType) Parse(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
 	// Extract primary token field
 	var token string
 	var found bool
@@ -76,6 +77,11 @@ func (t *BaseTokenType) Parse(rawData map[string]interface{}, leaseTTL time.Dura
 		}
 	}
 
+	meta, err := helper.ToStringMap(metadata)
+	if err != nil {
+		return nil, err
+	}
+
 	cred := &credential.Credential{
 		Type:      t.TypeMetadata.Name,
 		Category:  t.TypeMetadata.Category,
@@ -84,6 +90,7 @@ func (t *BaseTokenType) Parse(rawData map[string]interface{}, leaseTTL time.Dura
 		IssuedAt:  time.Now(),
 		Revocable: t.Revocable && leaseID != "",
 		Data:      data,
+		Metadata:  meta,
 	}
 
 	return cred, nil

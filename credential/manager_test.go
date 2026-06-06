@@ -117,7 +117,7 @@ func (m *mockConfigStore) rotateOnOtherNode(name, refreshToken string) {
 // mockSourceDriver implements SourceDriver for testing
 type mockSourceDriver struct {
 	driverType   string
-	mintFunc     func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error)
+	mintFunc     func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error)
 	revokeFunc   func(ctx context.Context, leaseID string) error
 	revokeCalls  atomic.Int32
 	mintCalls    atomic.Int32
@@ -128,11 +128,11 @@ type mockSourceDriver struct {
 func newMockSourceDriver(driverType string) *mockSourceDriver {
 	return &mockSourceDriver{
 		driverType: driverType,
-		mintFunc: func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+		mintFunc: func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 			return map[string]interface{}{
 				"username": "test-user",
 				"password": "test-pass",
-			}, time.Hour, "lease-123", nil
+			}, nil, time.Hour, "lease-123", nil
 		},
 		revokeFunc: func(ctx context.Context, leaseID string) error {
 			return nil
@@ -140,7 +140,7 @@ func newMockSourceDriver(driverType string) *mockSourceDriver {
 	}
 }
 
-func (d *mockSourceDriver) MintCredential(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *mockSourceDriver) MintCredential(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	d.mintCalls.Add(1)
 	return d.mintFunc(ctx, spec)
 }
@@ -221,7 +221,7 @@ func (t *mockCredentialType) ValidateConfig(config map[string]string, sourceType
 	return nil
 }
 
-func (t *mockCredentialType) Parse(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) (*Credential, error) {
+func (t *mockCredentialType) Parse(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) (*Credential, error) {
 	data := make(map[string]string)
 	for k, v := range rawData {
 		if s, ok := v.(string); ok {
@@ -632,15 +632,15 @@ func TestManager_IssueCredential_Timeout(t *testing.T) {
 	})
 
 	// Configure driver to block longer than timeout
-	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 		select {
 		case <-ctx.Done():
-			return nil, 0, "", ctx.Err()
+			return nil, nil, 0, "", ctx.Err()
 		case <-time.After(200 * time.Millisecond):
 			return map[string]interface{}{
 				"username": "test-user",
 				"password": "test-pass",
-			}, time.Hour, "lease-123", nil
+			}, nil, time.Hour, "lease-123", nil
 		}
 	}
 
@@ -672,15 +672,15 @@ func TestManager_IssueCredential_ErrorNotCached(t *testing.T) {
 
 	// First call fails
 	callCount := 0
-	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 		callCount++
 		if callCount == 1 {
-			return nil, 0, "", errors.New("transient error")
+			return nil, nil, 0, "", errors.New("transient error")
 		}
 		return map[string]interface{}{
 			"username": "test-user",
 			"password": "test-pass",
-		}, time.Hour, "lease-123", nil
+		}, nil, time.Hour, "lease-123", nil
 	}
 
 	// First request should fail
@@ -776,8 +776,8 @@ func TestManager_WriteBack_StripsReservedKeyAndPersists(t *testing.T) {
 	defer manager.Stop()
 	addRefreshSpecAndSource(configStore, "rt-old")
 
-	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
-		return map[string]interface{}{"api_key": "at-new", RawRotatedRefreshTokenKey: "rt-new"}, time.Hour, "", nil
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"api_key": "at-new", RawRotatedRefreshTokenKey: "rt-new"}, nil, time.Hour, "", nil
 	}
 
 	cred, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour)
@@ -799,8 +799,8 @@ func TestManager_WriteBack_NonRotating_NoPersist(t *testing.T) {
 	addRefreshSpecAndSource(configStore, "rt-stable")
 
 	// No reserved key → stable token, no write-back.
-	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
-		return map[string]interface{}{"api_key": "at-1"}, time.Hour, "", nil
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"api_key": "at-1"}, nil, time.Hour, "", nil
 	}
 
 	_, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour)
@@ -818,15 +818,15 @@ func TestManager_InvalidGrant_RetriesOnceWithReloadedSpec(t *testing.T) {
 	// storage WITHOUT touching this node's cache. The retry must reload from
 	// storage (not the cache) to pick up rt-fresh.
 	var attempts int32
-	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 		n := atomic.AddInt32(&attempts, 1)
 		if n == 1 {
 			assert.Equal(t, "rt-stale", spec.Config["refresh_token"])
 			configStore.rotateOnOtherNode("gh", "rt-fresh") // storage advances; cache stays stale
-			return nil, 0, "", ErrRefreshTokenRejected
+			return nil, nil, 0, "", ErrRefreshTokenRejected
 		}
 		assert.Equal(t, "rt-fresh", spec.Config["refresh_token"], "retry must reload from storage, bypassing the stale cache")
-		return map[string]interface{}{"api_key": "at-ok"}, time.Hour, "", nil
+		return map[string]interface{}{"api_key": "at-ok"}, nil, time.Hour, "", nil
 	}
 
 	cred, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour)
@@ -841,9 +841,9 @@ func TestManager_InvalidGrant_RetryFailsOnce_SurfacesError(t *testing.T) {
 	addRefreshSpecAndSource(configStore, "rt-dead")
 
 	var attempts int32
-	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 		atomic.AddInt32(&attempts, 1)
-		return nil, 0, "", ErrRefreshTokenRejected // never recovers
+		return nil, nil, 0, "", ErrRefreshTokenRejected // never recovers
 	}
 
 	_, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour)
@@ -858,8 +858,8 @@ func TestManager_WriteBack_PersistError_DoesNotFailIssuance(t *testing.T) {
 	addRefreshSpecAndSource(configStore, "rt-old")
 
 	configStore.persistFn = func(spec *CredSpec) error { return errors.New("storage down") }
-	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, time.Duration, string, error) {
-		return map[string]interface{}{"api_key": "at-new", RawRotatedRefreshTokenKey: "rt-new"}, time.Hour, "", nil
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"api_key": "at-new", RawRotatedRefreshTokenKey: "rt-new"}, nil, time.Hour, "", nil
 	}
 
 	// A persist failure must not fail issuance — the access token is still valid.

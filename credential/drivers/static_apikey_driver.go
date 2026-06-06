@@ -163,10 +163,10 @@ func (d *StaticAPIKeyDriver) getAPIURL() string {
 
 // MintCredential returns the API key from spec config.
 // The key is static — no TTL, no lease.
-func (d *StaticAPIKeyDriver) MintCredential(_ context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *StaticAPIKeyDriver) MintCredential(_ context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	apiKey := credential.GetString(spec.Config, "api_key", "")
 	if apiKey == "" {
-		return nil, 0, "", fmt.Errorf("no %s API key configured in spec", d.displayName())
+		return nil, nil, 0, "", fmt.Errorf("no %s API key configured in spec", d.displayName())
 	}
 
 	rawData := map[string]interface{}{
@@ -180,7 +180,7 @@ func (d *StaticAPIKeyDriver) MintCredential(_ context.Context, spec *credential.
 		}
 	}
 
-	return rawData, 0, "", nil // Static — no TTL, no lease
+	return rawData, nil, 0, "", nil // Static — no TTL, no lease
 }
 
 // Revoke is a no-op for static API keys.

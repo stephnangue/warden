@@ -169,7 +169,7 @@ func (f *IBMDriverFactory) Create(config map[string]string, log *logger.GatedLog
 // ============================================================================
 
 // MintCredential mints credentials based on the spec's mint_method.
-func (d *IBMDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *IBMDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	mintMethod := credential.GetString(spec.Config, "mint_method", "iam_token")
 
 	switch mintMethod {
@@ -178,15 +178,15 @@ func (d *IBMDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	case "iam_with_cos":
 		return d.mintIAMWithCOS(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for IBM driver; use 'iam_token' or 'iam_with_cos'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for IBM driver; use 'iam_token' or 'iam_with_cos'", mintMethod)
 	}
 }
 
 // mintIAMToken exchanges the source API key for an IAM bearer token
-func (d *IBMDriver) mintIAMToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *IBMDriver) mintIAMToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	token, expiry, err := d.getIAMToken(ctx)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to acquire IBM IAM token: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to acquire IBM IAM token: %w", err)
 	}
 
 	ttl := time.Until(expiry)
@@ -204,14 +204,14 @@ func (d *IBMDriver) mintIAMToken(ctx context.Context, spec *credential.CredSpec)
 	}
 
 	// No leaseID — IAM tokens expire naturally and cannot be revoked
-	return rawData, ttl, "", nil
+	return rawData, nil, ttl, "", nil
 }
 
 // mintIAMWithCOS mints an IAM bearer token and combines it with static COS HMAC keys from spec config.
-func (d *IBMDriver) mintIAMWithCOS(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *IBMDriver) mintIAMWithCOS(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	token, expiry, err := d.getIAMToken(ctx)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to acquire IBM IAM token: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to acquire IBM IAM token: %w", err)
 	}
 
 	ttl := time.Until(expiry)
@@ -236,7 +236,7 @@ func (d *IBMDriver) mintIAMWithCOS(ctx context.Context, spec *credential.CredSpe
 		)
 	}
 
-	return rawData, ttl, "", nil
+	return rawData, nil, ttl, "", nil
 }
 
 // Revoke is a no-op for IBM credentials (IAM tokens expire naturally)

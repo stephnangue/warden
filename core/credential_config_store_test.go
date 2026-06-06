@@ -715,8 +715,8 @@ func (d *testDriver) Type() string {
 	return "test_driver"
 }
 
-func (d *testDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
-	return nil, 0, "", nil
+func (d *testDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	return nil, nil, 0, "", nil
 }
 
 func (d *testDriver) Revoke(ctx context.Context, leaseID string) error {
@@ -863,7 +863,7 @@ func (t *testCredentialType) ValidateConfig(config map[string]string, sourceName
 	return nil
 }
 
-func (t *testCredentialType) Parse(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
+func (t *testCredentialType) Parse(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
 	// Convert map[string]interface{} to map[string]string for Data field
 	dataStr := make(map[string]string)
 	for k, v := range rawData {
@@ -1086,7 +1086,7 @@ func (t *validatingCredentialType) ValidateConfig(config map[string]string, sour
 	return nil
 }
 
-func (t *validatingCredentialType) Parse(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
+func (t *validatingCredentialType) Parse(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
 	dataStr := make(map[string]string)
 	for k, v := range rawData {
 		if str, ok := v.(string); ok {
@@ -1358,8 +1358,8 @@ func (f *connectGatedDriverFactory) InferCredentialType(_ map[string]string) (st
 type connectGatedDriver struct{}
 
 func (d *connectGatedDriver) Type() string { return "connect_driver" }
-func (d *connectGatedDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
-	return nil, 0, "", fmt.Errorf("mint must not run for an unconnected spec")
+func (d *connectGatedDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	return nil, nil, 0, "", fmt.Errorf("mint must not run for an unconnected spec")
 }
 func (d *connectGatedDriver) Revoke(ctx context.Context, leaseID string) error { return nil }
 func (d *connectGatedDriver) Cleanup(ctx context.Context) error                { return nil }

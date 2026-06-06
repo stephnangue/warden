@@ -194,7 +194,7 @@ func TestGitLabAccessTokenCredType_Parse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cred, err := ct.Parse(tt.rawData, tt.leaseTTL, tt.leaseID)
+			cred, err := ct.Parse(tt.rawData, nil, tt.leaseTTL, tt.leaseID)
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.errMsg != "" {
@@ -228,7 +228,7 @@ func TestGitLabAccessTokenCredType_Parse_OptionalFields(t *testing.T) {
 		"scopes":       "api,read_api",
 	}
 
-	cred, err := ct.Parse(rawData, 24*time.Hour, "lease-1")
+	cred, err := ct.Parse(rawData, nil, 24*time.Hour, "lease-1")
 	require.NoError(t, err)
 
 	assert.Equal(t, "glpat-test", cred.Data["access_token"])

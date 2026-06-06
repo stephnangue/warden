@@ -171,7 +171,7 @@ func (f *ElasticDriverFactory) Create(config map[string]string, log *logger.Gate
 //   - key_name: Override for the generated key name (optional)
 //   - role_descriptors: JSON string of role descriptors (optional)
 //   - expiration: Key expiration duration, e.g. "30d" (optional)
-func (d *ElasticDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *ElasticDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	prefix := credential.GetString(d.credSource.Config, "key_name_prefix", "warden")
 	keyName := credential.GetString(spec.Config, "key_name", fmt.Sprintf("%s-%s-%d", prefix, spec.Name, time.Now().Unix()))
 	expiration := credential.GetString(spec.Config, "expiration", "1h")
@@ -188,7 +188,7 @@ func (d *ElasticDriver) MintCredential(ctx context.Context, spec *credential.Cre
 	if rdJSON := credential.GetString(spec.Config, "role_descriptors", ""); rdJSON != "" {
 		var roleDescriptors map[string]interface{}
 		if err := json.Unmarshal([]byte(rdJSON), &roleDescriptors); err != nil {
-			return nil, 0, "", fmt.Errorf("invalid role_descriptors JSON: %w", err)
+			return nil, nil, 0, "", fmt.Errorf("invalid role_descriptors JSON: %w", err)
 		}
 		reqBody["role_descriptors"] = roleDescriptors
 	}
@@ -199,12 +199,12 @@ func (d *ElasticDriver) MintCredential(ctx context.Context, spec *credential.Cre
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to marshal create API key request: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to marshal create API key request: %w", err)
 	}
 
 	respBody, _, err := d.doElasticRequest(ctx, http.MethodPost, "/_security/api_key", body)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to create Elasticsearch API key: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to create Elasticsearch API key: %w", err)
 	}
 
 	var createResp struct {
@@ -215,11 +215,11 @@ func (d *ElasticDriver) MintCredential(ctx context.Context, spec *credential.Cre
 		Expiration *int64 `json:"expiration"`
 	}
 	if err := json.Unmarshal(respBody, &createResp); err != nil {
-		return nil, 0, "", fmt.Errorf("failed to decode create API key response: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to decode create API key response: %w", err)
 	}
 
 	if createResp.Encoded == "" || createResp.ID == "" {
-		return nil, 0, "", fmt.Errorf("create API key response missing encoded or id field")
+		return nil, nil, 0, "", fmt.Errorf("create API key response missing encoded or id field")
 	}
 
 	rawData := map[string]interface{}{
@@ -246,7 +246,7 @@ func (d *ElasticDriver) MintCredential(ctx context.Context, spec *credential.Cre
 		)
 	}
 
-	return rawData, ttl, leaseID, nil
+	return rawData, nil, ttl, leaseID, nil
 }
 
 // Revoke invalidates an Elasticsearch API key via DELETE /_security/api_key.

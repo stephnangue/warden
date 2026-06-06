@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper"
 )
 
 // OVHKeysCredType handles OVH cloud credentials.
@@ -65,7 +66,7 @@ func (t *OVHKeysCredType) ValidateConfig(config map[string]string, sourceType st
 }
 
 // Parse converts raw credential data from source into structured Credential
-func (t *OVHKeysCredType) Parse(rawData map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
+func (t *OVHKeysCredType) Parse(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) (*credential.Credential, error) {
 	accessKey, _ := rawData["access_key"].(string)
 	secretKey, _ := rawData["secret_key"].(string)
 	apiToken, _ := rawData["api_token"].(string)
@@ -95,6 +96,11 @@ func (t *OVHKeysCredType) Parse(rawData map[string]interface{}, leaseTTL time.Du
 		data["api_token"] = apiToken
 	}
 
+	meta, err := helper.ToStringMap(metadata)
+	if err != nil {
+		return nil, err
+	}
+
 	return &credential.Credential{
 		Type:      credential.TypeOVHKeys,
 		Category:  credential.CategoryCloudIAM,
@@ -103,6 +109,7 @@ func (t *OVHKeysCredType) Parse(rawData map[string]interface{}, leaseTTL time.Du
 		IssuedAt:  time.Now(),
 		Revocable: leaseTTL > 0,
 		Data:      data,
+		Metadata:  meta,
 	}, nil
 }
 

@@ -30,8 +30,8 @@ type mockRotatableDriver struct {
 	failUntilAttempt int32         // fail PrepareRotation until this many calls
 }
 
-func (d *mockRotatableDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
-	return map[string]interface{}{"key": "value"}, time.Hour, "lease-123", nil
+func (d *mockRotatableDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	return map[string]interface{}{"key": "value"}, nil, time.Hour, "lease-123", nil
 }
 
 func (d *mockRotatableDriver) Revoke(ctx context.Context, leaseID string) error {

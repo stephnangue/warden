@@ -202,7 +202,7 @@ func TestGitLabDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 			"mint_method": "invalid_method",
 		},
 	}
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method 'invalid_method'")
 }
@@ -215,7 +215,7 @@ func TestGitLabDriver_MintCredential_MissingMintMethod(t *testing.T) {
 		Type:   credential.TypeGitLabAccessToken,
 		Config: map[string]string{},
 	}
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method")
 }
@@ -300,7 +300,7 @@ func TestGitLabDriver_MintProjectAccessToken(t *testing.T) {
 		},
 	}
 
-	rawData, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "glpat-minted-token", rawData["access_token"])
 	assert.Equal(t, "99", rawData["token_id"])
@@ -345,7 +345,7 @@ func TestGitLabDriver_MintGroupAccessToken(t *testing.T) {
 		},
 	}
 
-	rawData, _, leaseID, err := driver.MintCredential(context.Background(), spec)
+	rawData, _, _, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "glpat-group-token", rawData["access_token"])
 	assert.Equal(t, "77", rawData["token_id"])
@@ -434,7 +434,7 @@ func TestGitLabDriver_MintProjectAccessToken_EmptyToken(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty token")
 }
@@ -470,7 +470,7 @@ func TestGitLabDriver_MintProjectAccessToken_APIError(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := driver.MintCredential(context.Background(), spec)
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to create project access token")
 }

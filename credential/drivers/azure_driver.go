@@ -310,7 +310,7 @@ func (f *AzureDriverFactory) Create(config map[string]string, log *logger.GatedL
 
 // MintCredential mints credentials based on the spec's mint_method.
 // Credentials are minted using the SP credentials stored in the spec (not the source).
-func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	mintMethod := credential.GetString(spec.Config, "mint_method", "bearer_token")
 
 	switch mintMethod {
@@ -319,12 +319,12 @@ func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	case "key_vault_secret":
 		return d.fetchKeyVaultSecret(ctx, spec)
 	default:
-		return nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Azure driver; use 'bearer_token' or 'key_vault_secret'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Azure driver; use 'bearer_token' or 'key_vault_secret'", mintMethod)
 	}
 }
 
 // mintBearerToken exchanges spec's SP credentials for an Azure AD bearer token
-func (d *AzureDriver) mintBearerToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *AzureDriver) mintBearerToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	// Get SP credentials from spec config (pre-provisioned)
 	tenantID := credential.GetString(spec.Config, "tenant_id", d.getTenantID())
 	clientID := credential.GetString(spec.Config, "client_id", "")
@@ -332,13 +332,13 @@ func (d *AzureDriver) mintBearerToken(ctx context.Context, spec *credential.Cred
 	resourceURI := credential.GetString(spec.Config, "resource_uri", "https://management.azure.com/")
 
 	if clientID == "" || clientSecret == "" {
-		return nil, 0, "", fmt.Errorf("spec config must contain 'client_id' and 'client_secret' for bearer_token mint method")
+		return nil, nil, 0, "", fmt.Errorf("spec config must contain 'client_id' and 'client_secret' for bearer_token mint method")
 	}
 
 	// Exchange for bearer token
 	token, expiresIn, err := d.acquireToken(ctx, tenantID, clientID, clientSecret, resourceURI)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to acquire Azure AD token: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to acquire Azure AD token: %w", err)
 	}
 
 	ttl := time.Duration(expiresIn) * time.Second
@@ -360,11 +360,11 @@ func (d *AzureDriver) mintBearerToken(ctx context.Context, spec *credential.Cred
 	}
 
 	// No leaseID - bearer tokens expire naturally and cannot be revoked
-	return rawData, ttl, "", nil
+	return rawData, nil, ttl, "", nil
 }
 
 // fetchKeyVaultSecret fetches a secret from Azure Key Vault
-func (d *AzureDriver) fetchKeyVaultSecret(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, time.Duration, string, error) {
+func (d *AzureDriver) fetchKeyVaultSecret(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	// Get SP credentials from spec config
 	tenantID := credential.GetString(spec.Config, "tenant_id", d.getTenantID())
 	clientID := credential.GetString(spec.Config, "client_id", "")
@@ -374,16 +374,16 @@ func (d *AzureDriver) fetchKeyVaultSecret(ctx context.Context, spec *credential.
 	secretVersion := credential.GetString(spec.Config, "secret_version", "")
 
 	if clientID == "" || clientSecret == "" {
-		return nil, 0, "", fmt.Errorf("spec config must contain 'client_id' and 'client_secret' for key_vault_secret mint method")
+		return nil, nil, 0, "", fmt.Errorf("spec config must contain 'client_id' and 'client_secret' for key_vault_secret mint method")
 	}
 	if vaultName == "" || secretName == "" {
-		return nil, 0, "", fmt.Errorf("spec config must contain 'vault_name' and 'secret_name' for key_vault_secret mint method")
+		return nil, nil, 0, "", fmt.Errorf("spec config must contain 'vault_name' and 'secret_name' for key_vault_secret mint method")
 	}
 
 	// Get bearer token for Key Vault
 	kvToken, _, err := d.acquireToken(ctx, tenantID, clientID, clientSecret, "https://vault.azure.net/")
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("failed to acquire Key Vault token: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to acquire Key Vault token: %w", err)
 	}
 
 	// Build Key Vault URL
@@ -402,7 +402,7 @@ func (d *AzureDriver) fetchKeyVaultSecret(ctx context.Context, spec *credential.
 		operation:   "fetchKeyVaultSecret",
 	}, nil, 1)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, nil, 0, "", err
 	}
 
 	var secretResp struct {
@@ -410,7 +410,7 @@ func (d *AzureDriver) fetchKeyVaultSecret(ctx context.Context, spec *credential.
 		ID    string `json:"id"`
 	}
 	if err := json.Unmarshal(respBody, &secretResp); err != nil {
-		return nil, 0, "", fmt.Errorf("failed to decode Key Vault response: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to decode Key Vault response: %w", err)
 	}
 
 	// Try to parse as JSON for structured secrets
@@ -429,7 +429,7 @@ func (d *AzureDriver) fetchKeyVaultSecret(ctx context.Context, spec *credential.
 	}
 
 	// Key Vault secrets are static - no TTL, no lease
-	return rawData, 0, "", nil
+	return rawData, nil, 0, "", nil
 }
 
 // Revoke is a no-op for Azure credentials (they expire naturally)
