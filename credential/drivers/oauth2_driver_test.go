@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,6 +16,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// mintTestJWT builds an unsigned-shape JWT (header.payload.sig) carrying the
+// given JSON claims, for exercising the local JWT-decode metadata path.
+func mintTestJWT(payloadJSON string) string {
+	enc := base64.RawURLEncoding.EncodeToString
+	return enc([]byte(`{"alg":"none","typ":"JWT"}`)) + "." + enc([]byte(payloadJSON)) + "." + enc([]byte("sig"))
+}
 
 // =============================================================================
 // Factory Tests
@@ -1201,3 +1209,127 @@ func TestOAuth2Driver_MintFromRefreshToken_MissingClientCreds(t *testing.T) {
 
 // (connect-gating moved to the oauth_bearer_token credential type; see
 // credential/types/oauth_bearer_token_test.go)
+
+// =============================================================================
+// Identity metadata (extractMetadata)
+// =============================================================================
+
+func TestOAuth2Driver_ExtractMetadata_JWTDefaultSub(t *testing.T) {
+	// metadata_fields unset → defaults to "sub"; the JWT access token is decoded.
+	jwt := mintTestJWT(`{"sub":"alice@example.com","email":"alice@corp.com"}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": jwt, "expires_in": 3600})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"client_id": "c", "client_secret": "x"}}
+
+	_, metadata, _, _, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "alice@example.com", metadata["sub"])
+	_, hasEmail := metadata["email"]
+	assert.False(t, hasEmail, "only the default sub field should be captured")
+}
+
+func TestOAuth2Driver_ExtractMetadata_JWTConfiguredFields(t *testing.T) {
+	jwt := mintTestJWT(`{"sub":"1234567890","email":"u@example.com","scope":"repo"}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": jwt, "expires_in": 3600})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{
+		"token_url": server.URL, "metadata_fields": "sub,email",
+	}}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"client_id": "c", "client_secret": "x"}}
+
+	_, metadata, _, _, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "1234567890", metadata["sub"])
+	assert.Equal(t, "u@example.com", metadata["email"])
+	_, hasScope := metadata["scope"]
+	assert.False(t, hasScope, "scope not in metadata_fields")
+}
+
+func TestOAuth2Driver_ExtractMetadata_Introspection(t *testing.T) {
+	// Opaque token → call the introspection/userinfo endpoint at mint.
+	userinfo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer opaque-tok", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"login": "octocat", "id": 583231, "email": "o@gh.com"})
+	}))
+	defer userinfo.Close()
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "opaque-tok", "expires_in": 3600})
+	}))
+	defer tokenSrv.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{
+		"token_url": tokenSrv.URL, "introspection_url": userinfo.URL, "metadata_fields": "login,email,id",
+	}}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"client_id": "c", "client_secret": "x"}}
+
+	_, metadata, _, _, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "octocat", metadata["login"])
+	assert.Equal(t, "o@gh.com", metadata["email"])
+	assert.Equal(t, "583231", metadata["id"], "numeric claim is stringified")
+}
+
+func TestOAuth2Driver_ExtractMetadata_OpaqueNoIntrospection(t *testing.T) {
+	// Opaque token, no introspection_url → no metadata (can't derive a subject).
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "opaque-xyz", "expires_in": 3600})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"client_id": "c", "client_secret": "x"}}
+
+	_, metadata, _, _, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Nil(t, metadata)
+}
+
+func TestOAuth2DriverFactory_ValidateConfig_IntrospectionURL_SSRF(t *testing.T) {
+	f := &OAuth2DriverFactory{}
+	err := f.ValidateConfig(map[string]string{
+		"token_url":         "https://auth.example.com/token",
+		"introspection_url": "https://169.254.169.254/latest/meta-data/",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not target a loopback/private/link-local address")
+}
+
+func TestOAuth2Driver_ExtractMetadata_IntrospectionURL_SpecLevelIgnored(t *testing.T) {
+	// A spec-level introspection_url must be ignored — it is source-only so it
+	// stays under the source SSRF guard and can't be injected per spec.
+	called := false
+	userinfo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		json.NewEncoder(w).Encode(map[string]interface{}{"login": "octocat"})
+	}))
+	defer userinfo.Close()
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "opaque-tok", "expires_in": 3600})
+	}))
+	defer tokenSrv.Close()
+
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": tokenSrv.URL}}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "s", Config: map[string]string{
+		"client_id": "c", "client_secret": "x",
+		"introspection_url": userinfo.URL, // spec-level — must be ignored
+		"metadata_fields":   "login",
+	}}
+
+	_, metadata, _, _, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.False(t, called, "spec-level introspection_url must not be called")
+	assert.Nil(t, metadata, "opaque token + no source introspection_url → no metadata")
+}

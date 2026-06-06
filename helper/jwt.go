@@ -9,9 +9,9 @@ import (
 
 // ParseJWTClaimsUnverified decodes a JWT's payload segment and returns its
 // claims as a map. **No signature verification.** Intended for cheap
-// shape-sniffing on incoming requests — e.g. distinguishing a Kubernetes
-// SA token (sub starts with "system:serviceaccount:") from a generic JWT,
-// or pre-filtering by issuer claim before doing a full validator round-trip.
+// shape-sniffing — e.g. distinguishing a Kubernetes SA token (sub starts with
+// "system:serviceaccount:") from a generic JWT, pre-filtering by issuer claim,
+// or reading the subject of a token warden itself just minted for audit.
 //
 // Callers must NOT use the returned claims for authorization decisions;
 // they have not been cryptographically validated. Use a full validator
