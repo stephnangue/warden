@@ -85,11 +85,11 @@ What an enterprise gets from putting Warden in the path:
 
 ## Supported systems
 
-36 systems across MCP servers, LLMs, cloud, code-hosting, observability, ITSM, Kubernetes, secrets, and databases. Follow any link below to configure your first endpoint, or see [docs/providers.md](docs/providers.md) for the full list.
+35 systems across MCP servers, LLMs, cloud, code-hosting, observability, ITSM, Kubernetes, secrets, and databases. Follow any link below to configure your first endpoint, or see [docs/providers.md](docs/providers.md) for the full list.
 
 | Category | Providers | Warden does |
 |---|---|---|
-| MCP servers | [GitHub](provider/mcp_github/README.md), [AWS](provider/mcp_aws/README.md), [GCP](provider/mcp_gcp/README.md) | Proxies tool calls — injects credentials, enforces tool-level policy |
+| MCP servers | [Generic](provider/mcp/README.md) — GitHub, Google Cloud, Slack, Cloudflare, …; [AWS](provider/mcp_aws/README.md) (SigV4) | Proxies tool calls — injects credentials, enforces tool-level policy |
 | LLM APIs | [Anthropic](provider/anthropic/README.md), [OpenAI](provider/openai/README.md), [Mistral](provider/mistral/README.md), [Cohere](provider/cohere/README.md) | Injects API key |
 | Cloud infrastructure | [AWS](provider/aws/README.md), [Azure](provider/azure/README.md), [GCP](provider/gcp/README.md), [Alicloud](provider/alicloud/README.md), [IBM Cloud](provider/ibmcloud/README.md), [OVH](provider/ovh/README.md), [Scaleway](provider/scaleway/README.md), [Cloudflare](provider/cloudflare/README.md) | Temporary credentials / Bearer tokens |
 | Code hosting & CI/CD | [GitHub](provider/github/README.md), [GitLab](provider/gitlab/README.md), [Atlassian](provider/atlassian/README.md), [Ansible Tower](provider/ansible_tower/README.md), [Terraform Enterprise](provider/tfe/README.md) | Injects App token, PAT, or Bearer token |

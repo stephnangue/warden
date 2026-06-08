@@ -320,7 +320,7 @@ Configure your MCP client to point at the Warden mount. The URL pattern is:
 ${WARDEN_ADDR}/v1/mcp_aws/role/{role}/gateway
 ```
 
-**Note no trailing slash on `gateway`.** AWS's hosted MCP Server (and Bedrock AgentCore) lives at exactly `/mcp` and rejects `/mcp/` with a JSON-RPC `-32600 Invalid request path`. This is the opposite convention from `mcp_github`, where the trailing slash is mandatory.
+**Note no trailing slash on `gateway`.** AWS's hosted MCP Server (and Bedrock AgentCore) lives at exactly `/mcp` and rejects `/mcp/` with a JSON-RPC `-32600 Invalid request path`. This is the opposite convention from GitHub's hosted MCP server, where the trailing slash is required.
 
 For Claude Code, Cursor, Continue, Cline, Goose, and other clients that accept Streamable HTTP MCP servers via a JSON config block:
 
@@ -397,7 +397,7 @@ The `region_name` inside the tool arguments selects which AWS region's API to ca
 
 For a Bedrock AgentCore-hosted MCP server, the available tools and their argument shapes come from whatever the customer's server exposes — discover them via `tools/list`.
 
-The **absence** of a trailing slash on `gateway` matters — Warden composes the upstream URL as the mount's configured base + whatever follows `gateway` in the inbound path. For AWS's hosted MCP Server and Bedrock AgentCore, `/mcp/` returns JSON-RPC `-32600 Invalid request path`; only `/mcp` is accepted. This is the opposite convention from `mcp_github`, where the trailing slash is required.
+The **absence** of a trailing slash on `gateway` matters — Warden composes the upstream URL as the mount's configured base + whatever follows `gateway` in the inbound path. For AWS's hosted MCP Server and Bedrock AgentCore, `/mcp/` returns JSON-RPC `-32600 Invalid request path`; only `/mcp` is accepted. This is the opposite convention from GitHub's hosted MCP server, where the trailing slash is required.
 
 ## TLS Certificate Authentication
 

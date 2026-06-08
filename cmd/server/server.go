@@ -57,9 +57,8 @@ import (
 	"github.com/stephnangue/warden/provider/honeycomb"
 	"github.com/stephnangue/warden/provider/ibmcloud"
 	"github.com/stephnangue/warden/provider/kubernetes"
+	"github.com/stephnangue/warden/provider/mcp"
 	mcp_aws "github.com/stephnangue/warden/provider/mcp_aws"
-	mcp_gcp "github.com/stephnangue/warden/provider/mcp_gcp"
-	mcp_github "github.com/stephnangue/warden/provider/mcp_github"
 	"github.com/stephnangue/warden/provider/mistral"
 	"github.com/stephnangue/warden/provider/newrelic"
 	"github.com/stephnangue/warden/provider/openai"
@@ -165,9 +164,8 @@ Usage: warden server [options]
 		"ibmcloud":      ibmcloud.Factory,
 		"github":        github.Factory,
 		"gitlab":        gitlab.Factory,
+		"mcp":           mcp.Factory,
 		"mcp_aws":       mcp_aws.Factory,
-		"mcp_gcp":       mcp_gcp.Factory,
-		"mcp_github":    mcp_github.Factory,
 		"mistral":       mistral.Factory,
 		"newrelic":      newrelic.Factory,
 		"openai":        openai.Factory,
@@ -197,9 +195,8 @@ Usage: warden server [options]
 		"aws":           aws.Skill(),
 		"github":        github.Skill(),
 		"gitlab":        gitlab.Skill(),
+		"mcp":           mcp.Skill(),
 		"mcp_aws":       mcp_aws.Skill(),
-		"mcp_gcp":       mcp_gcp.Skill(),
-		"mcp_github":    mcp_github.Skill(),
 		"openai":        openai.Skill(),
 		"rds":           rds.Skill(),
 		"scaleway":      scaleway.Skill(),
@@ -817,21 +814,21 @@ func createCoreConfig(logger *log.GatedLogger, conf *config.Config, backend phy.
 	clusterAddr := conf.ClusterAddr
 
 	coreConfig := &core.CoreConfig{
-		RawConfig:              conf,
-		Physical:               backend,
-		RedirectAddr:           conf.APIAddr,
-		ClusterAddr:            clusterAddr,
-		StorageType:            conf.Storage.Type,
-		HAPhysical:             haPhysical,
-		Seal:                   barrierSeal,
-		UnwrapSeal:             unwrapSeal,
-		AuditDevices:           auditDevices,
+		RawConfig:               conf,
+		Physical:                backend,
+		RedirectAddr:            conf.APIAddr,
+		ClusterAddr:             clusterAddr,
+		StorageType:             conf.Storage.Type,
+		HAPhysical:              haPhysical,
+		Seal:                    barrierSeal,
+		UnwrapSeal:              unwrapSeal,
+		AuditDevices:            auditDevices,
 		DeclarativeAuditDevices: auditConfigToMountEntries(conf.Audits),
-		Providers:              providers,
-		ProviderSkills:         providerSkills,
-		AuthMethods:            authMethods,
-		Logger:                 logger,
-		SecureRandomReader:     secureRandomReader,
+		Providers:               providers,
+		ProviderSkills:          providerSkills,
+		AuthMethods:             authMethods,
+		Logger:                  logger,
+		SecureRandomReader:      secureRandomReader,
 	}
 	return *coreConfig
 }

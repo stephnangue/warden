@@ -56,7 +56,7 @@ Auth header    : Authorization: Bearer $WARDEN_TOKEN
 ```
 
 Note **no trailing slash** on `gateway` — this is the opposite of
-`mcp_github`. AWS's hosted MCP Server lives at exactly `/mcp` and
+GitHub's hosted MCP server. AWS's hosted MCP Server lives at exactly `/mcp` and
 rejects requests to `/mcp/` with a JSON-RPC `-32600 Invalid request
 path` error. Bedrock AgentCore endpoints follow the same convention.
 
@@ -118,8 +118,8 @@ The **absence** of a trailing slash on `gateway` matters — Warden
 composes the upstream URL as the mount's configured base + whatever
 follows `gateway` in the request. AWS's hosted MCP Server requires
 `/mcp` exactly; `/mcp/` returns JSON-RPC `-32600 Invalid request path`.
-(This is the opposite convention from `mcp_github`, where GitHub's MCP
-server requires the trailing slash on `/mcp/`.)
+(This is the opposite convention from GitHub's hosted MCP server, which
+requires the trailing slash on `/mcp/`.)
 
 ## Header-routed alternative
 
@@ -161,8 +161,8 @@ on `.description` — the same rule as "Pick the right mount" above.
 
 ## Quirks
 
-- **The injected auth is AWS SigV4, not Bearer.** Unlike `mcp_github`
-  which injects `Authorization: Bearer <pat>`, mcp_aws builds an
+- **The injected auth is AWS SigV4, not Bearer.** Unlike the generic `mcp`
+  provider, which injects `Authorization: Bearer <token>`, mcp_aws builds an
   `Authorization: AWS4-HMAC-SHA256 Credential=…/{date}/{region}/{service}/aws4_request,SignedHeaders=…,Signature=…`
   header per request along with `X-Amz-Date`, `X-Amz-Content-Sha256`,
   and (for STS-minted credentials) `X-Amz-Security-Token`. The signing

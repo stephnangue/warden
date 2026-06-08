@@ -13,7 +13,7 @@ import (
 
 func TestParseMCP_AllFields(t *testing.T) {
 	rules := `
-path "mcp_github/gateway/*" {
+path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
     allowed_methods   = ["tools/list", "tools/call"]
@@ -59,7 +59,7 @@ func TestParseMCP_EmptyBlock(t *testing.T) {
 	// presence to trigger the missing-header check; emptiness means
 	// "no further restriction."
 	rules := `
-path "mcp_github/gateway/*" {
+path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {}
 }
@@ -103,7 +103,7 @@ func TestParseMCP_Lowercasing(t *testing.T) {
 	// time so AllowOperation can do case-insensitive matching via plain
 	// string equality.
 	rules := `
-path "mcp_github/gateway/*" {
+path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
     allowed_methods = ["TOOLS/Call", "Tools/LIST"]
@@ -126,7 +126,7 @@ path "mcp_github/gateway/*" {
 
 func TestParseMCP_LeadingStarRejected(t *testing.T) {
 	rules := `
-path "mcp_github/gateway/*" {
+path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
     denied_tools = ["*_admin"]
@@ -142,7 +142,7 @@ path "mcp_github/gateway/*" {
 
 func TestParseMCP_InternalStarRejected(t *testing.T) {
 	rules := `
-path "mcp_github/gateway/*" {
+path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
     allowed_tools = ["get_*_admin"]
@@ -157,7 +157,7 @@ path "mcp_github/gateway/*" {
 
 func TestParseMCP_TrailingStarAccepted(t *testing.T) {
 	rules := `
-path "mcp_github/gateway/*" {
+path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
     denied_tools = ["delete_*"]
@@ -172,7 +172,7 @@ func TestParseMCP_BareStarAccepted(t *testing.T) {
 	// The bare `*` is a zero-prefix trailing-star and matches
 	// everything. Used to express "any value" without enumerating.
 	rules := `
-path "mcp_github/gateway/*" {
+path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
     allowed_prompts = ["*"]
@@ -188,7 +188,7 @@ func TestParseMCP_InvalidPatternInParams(t *testing.T) {
 	// Validation must recurse into the param-map values; the error
 	// should mention which param key the bad pattern came from.
 	rules := `
-path "mcp_github/gateway/*" {
+path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
     allowed_params = {
@@ -210,7 +210,7 @@ func TestParseMCP_MultipleStanzasSamePath(t *testing.T) {
 	// OR-of-rule-sets merge into a single CBPPermissions.MCP slice
 	// happens at NewCBP time alongside the evaluation logic.
 	rules := `
-path "mcp_github/gateway/*" {
+path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
     allowed_methods = ["resources/read"]
@@ -218,7 +218,7 @@ path "mcp_github/gateway/*" {
   }
 }
 
-path "mcp_github/gateway/*" {
+path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
     allowed_methods = ["resources/list"]
@@ -279,7 +279,7 @@ func TestCBPPermissions_Clone_MCPDeepCopy(t *testing.T) {
 	// CBPPermissions, mutate the clone, confirm the original is
 	// unaffected.
 	rules := `
-path "mcp_github/gateway/*" {
+path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
     allowed_tools = ["get_*"]

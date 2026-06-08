@@ -34,7 +34,7 @@ import (
 // mcpMockBackend is a minimal logical.Backend that implements
 // logical.MCPPolicyEnforced. Used to prove that any backend opting
 // into the marker interface gets the same enforcement behaviour as
-// mcp_github — no special-casing in the policy layer.
+// the mcp provider — no special-casing in the policy layer.
 type mcpMockBackend struct {
 	logical.Backend
 	enforce bool
