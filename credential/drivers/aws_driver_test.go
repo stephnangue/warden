@@ -230,6 +230,41 @@ func TestApplyKeyMap(t *testing.T) {
 	}
 }
 
+func TestAccountIDFromARN(t *testing.T) {
+	tests := []struct {
+		name     string
+		arn      string
+		expected string
+	}{
+		{
+			name:     "assumed role ARN",
+			arn:      "arn:aws:sts::123456789012:assumed-role/app-backend/warden-session",
+			expected: "123456789012",
+		},
+		{
+			name:     "iam role ARN",
+			arn:      "arn:aws:iam::123456789012:role/app-backend",
+			expected: "123456789012",
+		},
+		{
+			name:     "too few segments",
+			arn:      "arn:aws:iam::123456789012",
+			expected: "",
+		},
+		{
+			name:     "empty",
+			arn:      "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, accountIDFromARN(tt.arn))
+		})
+	}
+}
+
 func TestAWSDriver_MintCredential_InvalidMethod(t *testing.T) {
 	driver := &AWSDriver{
 		credSource: &credential.CredSource{

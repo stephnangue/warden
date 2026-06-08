@@ -320,6 +320,25 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.C
 		"cred_source":       "aws_sts",
 	}
 
+	// Non-secret, descriptive attributes for clear audit logging. The secret
+	// material stays in rawData; only the principal identity goes here.
+	metadata := map[string]interface{}{
+		"subject":      roleArn, // the role the caller asked to assume
+		"session_name": sessionName,
+		"expiration":   creds.Expiration.UTC().Format(time.RFC3339),
+	}
+	if result.AssumedRoleUser != nil {
+		if arn := aws.ToString(result.AssumedRoleUser.Arn); arn != "" {
+			metadata["assumed_role_arn"] = arn
+			if acct := accountIDFromARN(arn); acct != "" {
+				metadata["account_id"] = acct
+			}
+		}
+		if id := aws.ToString(result.AssumedRoleUser.AssumedRoleId); id != "" {
+			metadata["assumed_role_id"] = id
+		}
+	}
+
 	if d.logger != nil {
 		d.logger.Debug("generated STS temporary credentials",
 			logger.String("spec", spec.Name),
@@ -328,7 +347,7 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.C
 		)
 	}
 
-	return rawData, nil, leaseTTL, leaseID, nil
+	return rawData, metadata, leaseTTL, leaseID, nil
 }
 
 // mintViaSecretsManager fetches a secret from AWS Secrets Manager
@@ -377,6 +396,16 @@ func (d *AWSDriver) mintViaSecretsManager(ctx context.Context, spec *credential.
 
 	// Secrets Manager secrets are static (no lease TTL)
 	return secretData, nil, 0, "", nil
+}
+
+// accountIDFromARN extracts the account-id segment from an ARN
+// (arn:partition:service:region:account-id:resource), or "" if malformed.
+func accountIDFromARN(arn string) string {
+	parts := strings.SplitN(arn, ":", 6)
+	if len(parts) < 6 {
+		return ""
+	}
+	return parts[4]
 }
 
 // applyKeyMap remaps keys in data according to a comma-separated "srcKey=destKey" map
