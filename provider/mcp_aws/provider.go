@@ -26,10 +26,10 @@ import (
 var _ logical.MCPPolicyEnforced = (*mcpAWSBackend)(nil)
 
 // ShouldEnforceMCPPolicy reports whether this request is subject to mcp { }
-// body-authoritative policy enforcement. The gate matches mcp_github exactly:
-// JSON-RPC POSTs only. GET (SSE reconnect) and DELETE (session close), and
-// any non-JSON Content-Type, decline and pass through under credential-scope-
-// only enforcement (IAM here, PAT scopes for mcp_github).
+// body-authoritative policy enforcement. The gate matches the generic mcp
+// provider exactly: JSON-RPC POSTs only. GET (SSE reconnect) and DELETE (session
+// close), and any non-JSON Content-Type, decline and pass through under
+// credential-scope-only enforcement (IAM here, bearer-token scopes there).
 //
 // The body cap returned is the backend's MaxBodySize as of THIS call, read
 // through snapshot() to match the rest of the hot path. A config-write that
@@ -66,7 +66,7 @@ func (b *mcpAWSBackend) ShouldEnforceMCPPolicy(req *logical.Request) (bool, int6
 const DefaultMCPAWSURL = "https://aws-mcp.us-east-1.api.aws/mcp"
 
 // DefaultMCPAWSTimeout caps a single MCP session. MCP responses may stream
-// over SSE across many tool calls, so the default matches mcp_github.
+// over SSE across many tool calls, so the default matches the generic mcp provider.
 const DefaultMCPAWSTimeout = 10 * time.Minute
 
 // mcpAWSBackend is the streaming backend for mcp_aws.

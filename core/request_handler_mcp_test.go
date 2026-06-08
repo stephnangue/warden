@@ -44,7 +44,7 @@ func (b *mcpBackend) ShouldEnforceMCPPolicy(req *logical.Request) (bool, int64) 
 
 func newReq(t *testing.T, body string) *logical.Request {
 	t.Helper()
-	httpReq, err := http.NewRequest(http.MethodPost, "/v1/mcp_github/gateway/", strings.NewReader(body))
+	httpReq, err := http.NewRequest(http.MethodPost, "/v1/mcp/gateway/", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("http.NewRequest: %v", err)
 	}

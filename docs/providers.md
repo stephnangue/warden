@@ -1,6 +1,6 @@
 # Providers
 
-Warden supports 36 providers across MCP servers, LLMs, cloud, observability, code hosting, secrets, and more. Follow the link for each provider to configure your endpoint.
+Warden supports 35 providers across MCP servers, LLMs, cloud, observability, code hosting, secrets, and more. Follow the link for each provider to configure your endpoint.
 
 Status: ✅ available, 🔜 on the roadmap.
 
@@ -8,10 +8,8 @@ Status: ✅ available, 🔜 on the roadmap.
 
 | Provider | Warden does | Status |
 |---|---|---|
-| [GitHub](../provider/mcp_github/README.md) | Proxies GitHub's hosted MCP server — injects token, enforces tool-level policy | ✅ |
+| [Generic](../provider/mcp/README.md) | Proxies any bearer-authenticated MCP server — injects an OAuth or bearer token, enforces tool-level policy. Per-upstream recipes: [GitHub](../provider/mcp/docs/github.md), [Slack](../provider/mcp/docs/slack.md), Cloudflare, … | ✅ |
 | [AWS](../provider/mcp_aws/README.md) | Proxies AWS's hosted MCP server — re-signs with SigV4, enforces tool-level policy | ✅ |
-| [GCP](../provider/mcp_gcp/README.md) | Proxies Google Cloud's hosted MCP server — injects token, enforces tool-level policy | ✅ |
-| Cloudflare | Proxies Cloudflare's hosted MCP servers | 🔜 |
 
 ## LLM APIs
 

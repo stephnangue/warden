@@ -42,8 +42,8 @@ func (f *flushCounter) Count() int {
 
 // TestHandleGateway_SSEFlushesPerEvent verifies that sigv4.ForwardDirect's
 // per-read flush loop fires once per SSE event written upstream, rather than
-// buffering until the response body closes. mcp_github inherits per-event
-// flushing from httputil.ReverseProxy; mcp_aws is on a separate code path
+// buffering until the response body closes. The generic mcp provider inherits
+// per-event flushing from httputil.ReverseProxy; mcp_aws is on a separate code path
 // (sigv4.ForwardDirect) and needs its own regression coverage.
 func TestHandleGateway_SSEFlushesPerEvent(t *testing.T) {
 	const events = 3
