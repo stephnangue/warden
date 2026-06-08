@@ -340,6 +340,30 @@ For Claude Code, Cursor, Continue, Cline, Goose, and other clients that accept S
 
 > **Heads-up on `${VAR}` in headers.** MCP clients vary in what they substitute in `.mcp.json`. Claude Code and Cursor expand `${VAR}` in stdio `env` blocks and in the `url` field, but **HTTP-transport `headers` values are a known gap** — the literal `${JWT_TOKEN}` string ships on the wire. For the `Authorization` header (and the routing headers in the next example), paste the actual values instead of `${...}` placeholders, or run the JSON through `envsubst` at deploy time.
 
+#### Claude Code CLI
+
+Rather than hand-editing `.mcp.json`, Claude Code can register the server from the command line. Because the command runs in your shell, `${WARDEN_ADDR}` and `${JWT_TOKEN}` are expanded before they're written to config — sidestepping the `${VAR}`-in-headers gap above:
+
+```bash
+claude mcp add --transport http aws \
+  "${WARDEN_ADDR}/v1/mcp_aws/role/s3-reader/gateway" \
+  --header "Authorization: Bearer ${JWT_TOKEN}"
+```
+
+`--transport http` selects the Streamable HTTP transport (not the default stdio); `--header` is repeatable. Add `--scope user` to make the server available across every project (the default `local` scope binds it to the current directory). Keep the `gateway` suffix **without** a trailing slash, as in the URL-pattern note above.
+
+To use header-routed mode instead (see the next section for when), pass each routing header with its own `--header` flag against the base URL:
+
+```bash
+claude mcp add --transport http aws "${WARDEN_ADDR}/" \
+  --header "Authorization: Bearer ${JWT_TOKEN}" \
+  --header "X-Warden-Provider: mcp_aws/" \
+  --header "X-Warden-Namespace: <namespace>" \
+  --header "X-Warden-Role: s3-reader"
+```
+
+Confirm the handshake and list the exposed tools with `claude mcp list`; remove the server with `claude mcp remove aws`.
+
 #### Header-routed alternative
 
 Some MCP clients dislike long URLs, or you want one base URL to mux several Warden providers. Pass the mount path as `X-Warden-Provider`, the namespace as `X-Warden-Namespace`, and the role as `X-Warden-Role` instead — Warden synthesises the canonical gateway path from the headers. Look up the mount path first:
