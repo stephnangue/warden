@@ -113,7 +113,7 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 // buildTargetURL constructs the target URL from the gateway path.
 func buildTargetURL(providerURL, path, rawQuery string) (string, error) {
 	// Providers whose upstream is instance-specific (gitlab, kubernetes,
-	// splunk, mcp_gcp, ...) ship an empty DefaultURL and require the operator
+	// splunk, mcp, ...) ship an empty DefaultURL and require the operator
 	// to configure one. Guard here so a request to an unconfigured mount fails
 	// with a clear, logged error instead of forwarding to a schemeless URL
 	// that surfaces as an opaque proxy-level 502.
@@ -124,9 +124,12 @@ func buildTargetURL(providerURL, path, rawQuery string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("invalid gateway path: %s", path)
 	}
-	if apiPath == "" {
-		apiPath = "/"
-	}
+	// Preserve the client's path after "/gateway" verbatim, including whether it
+	// ended in a slash. A bare ".../gateway" (empty suffix) targets the configured
+	// upstream URL as-is; ".../gateway/" appends a slash. This lets a path-bearing
+	// upstream such as https://mcp.slack.com/mcp be reached without a forced
+	// trailing slash that strict servers 301-redirect; host-only upstreams are
+	// unaffected since net/http sends an empty path as "/".
 
 	if rawQuery != "" {
 		return providerURL + apiPath + "?" + rawQuery, nil

@@ -902,23 +902,30 @@ func TestHandleTransparentGatewayStreaming(t *testing.T) {
 // --- buildTargetURL tests ---
 
 func TestBuildTargetURL(t *testing.T) {
-	providerURL := "https://api.test.com"
 	tests := []struct {
 		name     string
+		provider string
 		path     string
 		query    string
 		expected string
 		wantErr  bool
 	}{
-		{"standard path", "/test/gateway/v1/endpoint", "", "https://api.test.com/v1/endpoint", false},
-		{"with query", "/test/gateway/v1/endpoint", "page=1", "https://api.test.com/v1/endpoint?page=1", false},
-		{"bare gateway", "/test/gateway", "", "https://api.test.com/", false},
-		{"trailing slash", "/test/gateway/", "", "https://api.test.com/", false},
-		{"no gateway marker", "/test/v1/endpoint", "", "", true},
+		{"standard path", "https://api.test.com", "/test/gateway/v1/endpoint", "", "https://api.test.com/v1/endpoint", false},
+		{"with query", "https://api.test.com", "/test/gateway/v1/endpoint", "page=1", "https://api.test.com/v1/endpoint?page=1", false},
+		// The client's trailing slash is preserved, not forced. For a host-only
+		// upstream a bare "/gateway" yields no path (net/http sends it as "/").
+		{"bare gateway preserves empty suffix", "https://api.test.com", "/test/gateway", "", "https://api.test.com", false},
+		{"trailing slash preserved", "https://api.test.com", "/test/gateway/", "", "https://api.test.com/", false},
+		// Path-bearing upstream (e.g. Slack MCP at /mcp): a bare "/gateway" must
+		// NOT append a trailing slash, which strict servers 301-redirect.
+		{"path upstream bare gateway", "https://mcp.slack.com/mcp", "/slack-mcp/role/r/gateway", "", "https://mcp.slack.com/mcp", false},
+		{"path upstream trailing slash", "https://mcp.slack.com/mcp", "/slack-mcp/role/r/gateway/", "", "https://mcp.slack.com/mcp/", false},
+		{"path upstream subpath", "https://mcp.slack.com/mcp", "/slack-mcp/role/r/gateway/extra", "", "https://mcp.slack.com/mcp/extra", false},
+		{"no gateway marker", "https://api.test.com", "/test/v1/endpoint", "", "", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := buildTargetURL(providerURL, tc.path, tc.query)
+			result, err := buildTargetURL(tc.provider, tc.path, tc.query)
 			if tc.wantErr {
 				assert.Error(t, err)
 			} else {
