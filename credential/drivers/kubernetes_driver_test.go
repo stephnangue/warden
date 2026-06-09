@@ -784,3 +784,32 @@ func TestKubernetesDriver_MapError_RateLimit(t *testing.T) {
 	err := d.mapError(fmt.Errorf("status 429"), http.StatusTooManyRequests, "my-sa", "default")
 	assert.Contains(t, err.Error(), "rate limited")
 }
+
+func TestKubernetesTokenMetadata(t *testing.T) {
+	t.Run("full", func(t *testing.T) {
+		meta := kubernetesTokenMetadata("app-backend", "default",
+			"https://app.example.com", "2026-06-09T16:04:05Z")
+
+		assert.Equal(t, "system:serviceaccount:default:app-backend", meta["subject"])
+		assert.Equal(t, "app-backend", meta["service_account"])
+		assert.Equal(t, "default", meta["namespace"])
+		assert.Equal(t, "https://app.example.com", meta["audiences"])
+		assert.Equal(t, "2026-06-09T16:04:05Z", meta["expiration"])
+
+		// Secret material never lands in the clear-logged metadata, and every
+		// value is a string (Metadata parsing rejects non-strings).
+		assert.NotContains(t, meta, "token")
+		for k, v := range meta {
+			_, ok := v.(string)
+			assert.Truef(t, ok, "metadata[%q] is %T, expected string", k, v)
+		}
+	})
+
+	t.Run("omits empty audiences and expiration", func(t *testing.T) {
+		meta := kubernetesTokenMetadata("app-backend", "default", "", "")
+
+		assert.Equal(t, "system:serviceaccount:default:app-backend", meta["subject"])
+		assert.NotContains(t, meta, "audiences")
+		assert.NotContains(t, meta, "expiration")
+	})
+}

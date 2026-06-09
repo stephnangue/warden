@@ -248,6 +248,8 @@ func (d *KubernetesDriver) MintCredential(ctx context.Context, spec *credential.
 		"audiences":       audiencesStr,
 	}
 
+	metadata := kubernetesTokenMetadata(sa, namespace, audiencesStr, tokenResp.Status.ExpirationTimestamp)
+
 	if d.logger != nil {
 		d.logger.Debug("minted Kubernetes ServiceAccount token",
 			logger.String("spec", spec.Name),
@@ -256,7 +258,25 @@ func (d *KubernetesDriver) MintCredential(ctx context.Context, spec *credential.
 		)
 	}
 
-	return rawData, nil, computedTTL, "", nil
+	return rawData, metadata, computedTTL, "", nil
+}
+
+// kubernetesTokenMetadata builds clear-loggable identity metadata for a minted
+// ServiceAccount token. subject is the canonical Kubernetes SA identity, matching
+// what apiserver RBAC and audit logs use. The token itself stays in rawData.
+func kubernetesTokenMetadata(sa, namespace, audiences, expiration string) map[string]interface{} {
+	meta := map[string]interface{}{
+		"subject":         fmt.Sprintf("system:serviceaccount:%s:%s", namespace, sa),
+		"service_account": sa,
+		"namespace":       namespace,
+	}
+	if audiences != "" {
+		meta["audiences"] = audiences
+	}
+	if expiration != "" {
+		meta["expiration"] = expiration
+	}
+	return meta
 }
 
 // Revoke is a no-op for Kubernetes ServiceAccount tokens.
