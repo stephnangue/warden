@@ -3,11 +3,76 @@ package drivers
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGCPAccessTokenMetadata(t *testing.T) {
+	expiry := time.Date(2026, 6, 9, 15, 4, 5, 0, time.UTC)
+	saKey := &serviceAccountKey{
+		ClientEmail: "warden-src@my-project.iam.gserviceaccount.com",
+		ProjectID:   "my-project",
+		PrivateKey:  "-----BEGIN PRIVATE KEY-----secret-----END PRIVATE KEY-----",
+	}
+
+	meta := gcpAccessTokenMetadata(saKey, "https://www.googleapis.com/auth/cloud-platform", expiry)
+
+	assert.Equal(t, "warden-src@my-project.iam.gserviceaccount.com", meta["subject"])
+	assert.Equal(t, "my-project", meta["project_id"])
+	assert.Equal(t, "https://www.googleapis.com/auth/cloud-platform", meta["scopes"])
+	assert.Equal(t, "2026-06-09T15:04:05Z", meta["expiration"])
+
+	// Secret material never lands in the clear-logged metadata, and every value
+	// is a string (Metadata parsing rejects non-strings).
+	assert.NotContains(t, meta, "private_key")
+	assert.NotContains(t, meta, "access_token")
+	for k, v := range meta {
+		_, ok := v.(string)
+		assert.Truef(t, ok, "metadata[%q] is %T, expected string", k, v)
+	}
+}
+
+func TestGCPAccessTokenMetadata_NilKey(t *testing.T) {
+	expiry := time.Date(2026, 6, 9, 15, 4, 5, 0, time.UTC)
+
+	meta := gcpAccessTokenMetadata(nil, "scope", expiry)
+
+	// Non-key source auth: no SA identity fields, but token context still present.
+	assert.NotContains(t, meta, "subject")
+	assert.NotContains(t, meta, "project_id")
+	assert.Equal(t, "scope", meta["scopes"])
+	assert.Equal(t, "2026-06-09T15:04:05Z", meta["expiration"])
+}
+
+func TestGCPImpersonatedMetadata(t *testing.T) {
+	saKey := &serviceAccountKey{
+		ClientEmail: "warden-src@my-project.iam.gserviceaccount.com",
+		ProjectID:   "my-project",
+	}
+
+	meta := gcpImpersonatedMetadata(saKey,
+		"app-backend@my-project.iam.gserviceaccount.com",
+		"https://www.googleapis.com/auth/cloud-platform", "3600s", "2026-06-09T16:04:05Z")
+
+	// subject is the impersonated target; the source SA is the authority.
+	assert.Equal(t, "app-backend@my-project.iam.gserviceaccount.com", meta["subject"])
+	assert.Equal(t, "warden-src@my-project.iam.gserviceaccount.com", meta["source_service_account"])
+	assert.Equal(t, "my-project", meta["project_id"])
+	assert.Equal(t, "3600s", meta["lifetime"])
+	assert.Equal(t, "2026-06-09T16:04:05Z", meta["expiration"])
+}
+
+func TestGCPImpersonatedMetadata_NilKeyAndNoExpiry(t *testing.T) {
+	meta := gcpImpersonatedMetadata(nil, "app-backend@x.iam.gserviceaccount.com", "scope", "3600s", "")
+
+	assert.Equal(t, "app-backend@x.iam.gserviceaccount.com", meta["subject"])
+	assert.NotContains(t, meta, "source_service_account")
+	assert.NotContains(t, meta, "project_id")
+	assert.NotContains(t, meta, "expiration")
+}
 
 func TestGCPDriverFactory_Type(t *testing.T) {
 	f := &GCPDriverFactory{}

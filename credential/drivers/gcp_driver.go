@@ -186,6 +186,48 @@ func (d *GCPDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	}
 }
 
+// addSourceSAMetadata copies the non-secret attributes of the source service
+// account key into meta: the project id and the source SA email under emailKey
+// ("subject" for a direct token, the authority "source_service_account" for
+// impersonation). Safe with a nil key.
+func addSourceSAMetadata(meta map[string]interface{}, saKey *serviceAccountKey, emailKey string) {
+	if saKey == nil {
+		return
+	}
+	if saKey.ProjectID != "" {
+		meta["project_id"] = saKey.ProjectID
+	}
+	if saKey.ClientEmail != "" {
+		meta[emailKey] = saKey.ClientEmail
+	}
+}
+
+// gcpAccessTokenMetadata builds clear-loggable identity metadata for a direct
+// (source SA) access token; subject is the source SA email.
+func gcpAccessTokenMetadata(saKey *serviceAccountKey, scopes string, expiry time.Time) map[string]interface{} {
+	meta := map[string]interface{}{
+		"scopes":     scopes,
+		"expiration": expiry.UTC().Format(time.RFC3339),
+	}
+	addSourceSAMetadata(meta, saKey, "subject")
+	return meta
+}
+
+// gcpImpersonatedMetadata builds metadata for an impersonated access token;
+// subject is the target SA, with the source SA recorded as the authority.
+func gcpImpersonatedMetadata(saKey *serviceAccountKey, targetSA, scopes, lifetime, expireTime string) map[string]interface{} {
+	meta := map[string]interface{}{
+		"subject":  targetSA,
+		"scopes":   scopes,
+		"lifetime": lifetime,
+	}
+	if expireTime != "" {
+		meta["expiration"] = expireTime
+	}
+	addSourceSAMetadata(meta, saKey, "source_service_account")
+	return meta
+}
+
 // mintAccessToken exchanges the source SA key for an OAuth2 access token
 func (d *GCPDriver) mintAccessToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	scopesStr := credential.GetString(spec.Config, "scopes", "https://www.googleapis.com/auth/cloud-platform")
@@ -218,8 +260,10 @@ func (d *GCPDriver) mintAccessToken(ctx context.Context, spec *credential.CredSp
 		)
 	}
 
+	metadata := gcpAccessTokenMetadata(saKey, scopesStr, expiry)
+
 	// No leaseID - access tokens expire naturally and cannot be revoked
-	return rawData, nil, ttl, "", nil
+	return rawData, metadata, ttl, "", nil
 }
 
 // mintImpersonatedAccessToken impersonates another service account via IAM Credentials API
@@ -310,7 +354,9 @@ func (d *GCPDriver) mintImpersonatedAccessToken(ctx context.Context, spec *crede
 		)
 	}
 
-	return rawData, nil, ttl, "", nil
+	metadata := gcpImpersonatedMetadata(saKey, targetSA, scopesStr, lifetime, tokenResp.ExpireTime)
+
+	return rawData, metadata, ttl, "", nil
 }
 
 // Revoke is a no-op for GCP credentials (they expire naturally)
