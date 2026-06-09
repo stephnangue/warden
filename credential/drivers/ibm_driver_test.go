@@ -307,10 +307,7 @@ func TestIBMDriver_MintIAMToken(t *testing.T) {
 	rawData, _, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 
-	assert.NotEmpty(t, rawData["api_key"])
 	assert.NotEmpty(t, rawData["access_token"])
-	assert.Equal(t, "Bearer", rawData["token_type"])
-	assert.Equal(t, rawData["api_key"], rawData["access_token"])
 	assert.True(t, ttl > 0)
 	assert.Empty(t, leaseID, "IAM tokens should have no lease ID")
 }

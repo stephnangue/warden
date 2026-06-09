@@ -239,17 +239,10 @@ func (d *GCPDriver) mintAccessToken(ctx context.Context, spec *credential.CredSp
 	}
 
 	saKey, _ := d.parseServiceAccountKey()
-	projectID := ""
-	if saKey != nil {
-		projectID = saKey.ProjectID
-	}
 
 	ttl := time.Until(expiry)
 	rawData := map[string]interface{}{
 		"access_token": token,
-		"project_id":   projectID,
-		"scopes":       scopesStr,
-		"token_type":   "Bearer",
 	}
 
 	if d.logger != nil {
@@ -333,17 +326,9 @@ func (d *GCPDriver) mintImpersonatedAccessToken(ctx context.Context, spec *crede
 	}
 
 	saKey, _ := d.parseServiceAccountKey()
-	projectID := ""
-	if saKey != nil {
-		projectID = saKey.ProjectID
-	}
 
 	rawData := map[string]interface{}{
-		"access_token":           tokenResp.AccessToken,
-		"project_id":             projectID,
-		"scopes":                 scopesStr,
-		"token_type":             "Bearer",
-		"target_service_account": targetSA,
+		"access_token": tokenResp.AccessToken,
 	}
 
 	if d.logger != nil {

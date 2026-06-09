@@ -532,14 +532,7 @@ func isRefreshTokenRejection(err error) bool {
 
 // accessTokenRawData builds the rawData map returned to the credential parser.
 func accessTokenRawData(resp *oauth2TokenResponse) map[string]interface{} {
-	rawData := map[string]interface{}{"api_key": resp.AccessToken}
-	if resp.Scope != "" {
-		rawData["scope"] = resp.Scope
-	}
-	if resp.TokenType != "" {
-		rawData["token_type"] = resp.TokenType
-	}
-	return rawData
+	return map[string]interface{}{"api_key": resp.AccessToken}
 }
 
 // ttlFromExpiresIn converts an expires_in (seconds) into a lease TTL (0 if absent).
