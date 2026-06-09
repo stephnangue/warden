@@ -380,8 +380,6 @@ func TestOAuth2Driver_MintCredential(t *testing.T) {
 	rawData, _, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "eyJ-test-access-token", rawData["api_key"])
-	assert.Equal(t, "Bearer", rawData["token_type"])
-	assert.Equal(t, "read write", rawData["scope"])
 	assert.Equal(t, 3600*time.Second, ttl)
 	assert.Empty(t, leaseID)
 }

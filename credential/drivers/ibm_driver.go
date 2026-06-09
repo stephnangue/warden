@@ -191,9 +191,7 @@ func (d *IBMDriver) mintIAMToken(ctx context.Context, spec *credential.CredSpec)
 
 	ttl := time.Until(expiry)
 	rawData := map[string]interface{}{
-		"api_key":      token,
 		"access_token": token,
-		"token_type":   "Bearer",
 	}
 
 	if d.logger != nil {

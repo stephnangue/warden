@@ -345,10 +345,6 @@ func (d *AzureDriver) mintBearerToken(ctx context.Context, spec *credential.Cred
 
 	rawData := map[string]interface{}{
 		"access_token": token,
-		"resource_uri": resourceURI,
-		"tenant_id":    tenantID,
-		"client_id":    clientID,
-		"token_type":   "Bearer",
 	}
 
 	metadata := azureBearerTokenMetadata(clientID, tenantID, resourceURI, ttl, time.Now())
