@@ -479,3 +479,26 @@ func TestTokenCache_Expiry(t *testing.T) {
 
 	assert.False(t, hit)
 }
+
+func TestAzureBearerTokenMetadata(t *testing.T) {
+	now := time.Date(2026, 6, 9, 15, 4, 5, 0, time.UTC)
+	clientID := "11111111-2222-3333-4444-555555555555"
+	tenantID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+	meta := azureBearerTokenMetadata(clientID, tenantID, "https://management.azure.com/", time.Hour, now)
+
+	// subject is the service principal (client/app id).
+	assert.Equal(t, clientID, meta["subject"])
+	assert.Equal(t, tenantID, meta["tenant_id"])
+	assert.Equal(t, "https://management.azure.com/", meta["resource_uri"])
+	assert.Equal(t, "2026-06-09T16:04:05Z", meta["expiration"])
+
+	// Secret material never lands in the clear-logged metadata, and every value
+	// is a string (Metadata parsing rejects non-strings).
+	assert.NotContains(t, meta, "access_token")
+	assert.NotContains(t, meta, "client_secret")
+	for k, v := range meta {
+		_, ok := v.(string)
+		assert.Truef(t, ok, "metadata[%q] is %T, expected string", k, v)
+	}
+}

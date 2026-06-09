@@ -351,6 +351,8 @@ func (d *AzureDriver) mintBearerToken(ctx context.Context, spec *credential.Cred
 		"token_type":   "Bearer",
 	}
 
+	metadata := azureBearerTokenMetadata(clientID, tenantID, resourceURI, ttl, time.Now())
+
 	if d.logger != nil {
 		d.logger.Debug("minted Azure AD bearer token",
 			logger.String("spec", spec.Name),
@@ -360,7 +362,19 @@ func (d *AzureDriver) mintBearerToken(ctx context.Context, spec *credential.Cred
 	}
 
 	// No leaseID - bearer tokens expire naturally and cannot be revoked
-	return rawData, nil, ttl, "", nil
+	return rawData, metadata, ttl, "", nil
+}
+
+// azureBearerTokenMetadata builds clear-loggable identity metadata for an Azure
+// AD bearer token. subject is the service principal's client/app id (the token's
+// appid claim); the access token itself stays in rawData.
+func azureBearerTokenMetadata(clientID, tenantID, resourceURI string, ttl time.Duration, now time.Time) map[string]interface{} {
+	return map[string]interface{}{
+		"subject":      clientID,
+		"tenant_id":    tenantID,
+		"resource_uri": resourceURI,
+		"expiration":   now.Add(ttl).UTC().Format(time.RFC3339),
+	}
 }
 
 // fetchKeyVaultSecret fetches a secret from Azure Key Vault
