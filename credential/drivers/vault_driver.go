@@ -713,6 +713,17 @@ func (d *VaultDriver) fetchDynamicVaultToken(ctx context.Context, spec *credenti
 		"renewable":    secret.Auth.Renewable,
 	}
 
+	// Non-secret subject identity for clear audit logging: the token role it was
+	// minted from and the Vault entity it resolves to. The token itself stays in
+	// the HMAC-salted rawData.
+	metadata := map[string]interface{}{
+		"role": tokenRole,
+	}
+	// EntityID is empty for tokens not tied to an entity; include it only when present.
+	if secret.Auth.EntityID != "" {
+		metadata["subject"] = secret.Auth.EntityID
+	}
+
 	if d.logger != nil {
 		d.logger.Debug("generated dynamic Vault token",
 			logger.String("spec", spec.Name),
@@ -725,7 +736,7 @@ func (d *VaultDriver) fetchDynamicVaultToken(ctx context.Context, spec *credenti
 
 	// Vault tokens don't have a lease ID in the traditional sense
 	// The token itself is the credential; revocation is done via token/revoke
-	return rawData, nil, leaseTTL, secret.Auth.Accessor, nil
+	return rawData, metadata, leaseTTL, secret.Auth.Accessor, nil
 }
 
 // Revoke revokes a Vault lease or token accessor

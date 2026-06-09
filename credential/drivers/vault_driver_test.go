@@ -2,9 +2,13 @@ package drivers
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/hashicorp/vault/api"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -373,6 +377,75 @@ func TestVaultDriver_MintCredential_VaultTokenRouting(t *testing.T) {
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "token_role is required")
+}
+
+func TestVaultDriver_FetchDynamicVaultToken_Metadata(t *testing.T) {
+	tests := []struct {
+		name            string
+		entityID        string
+		expectSubject   bool
+		expectedSubject string
+	}{
+		{name: "with entity", entityID: "8d2c-entity-id", expectSubject: true, expectedSubject: "8d2c-entity-id"},
+		{name: "no entity", entityID: "", expectSubject: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"auth": map[string]interface{}{
+						"client_token":   "hvs.secret-token",
+						"accessor":       "hvs.accessor",
+						"policies":       []string{"default", "ci-deploy"},
+						"renewable":      true,
+						"entity_id":      tt.entityID,
+						"lease_duration": 3600,
+					},
+				})
+			}))
+			defer srv.Close()
+
+			client, err := api.NewClient(&api.Config{Address: srv.URL})
+			require.NoError(t, err)
+
+			driver := &VaultDriver{
+				vault: client,
+				credSource: &credential.CredSource{
+					Type:   credential.SourceTypeVault,
+					Config: map[string]string{"vault_address": srv.URL},
+				},
+			}
+			spec := &credential.CredSpec{
+				Name: "test-token",
+				Type: credential.TypeVaultToken,
+				Config: map[string]string{
+					"mint_method": "vault_token",
+					"token_role":  "ci-deployer",
+				},
+			}
+
+			rawData, metadata, _, leaseID, err := driver.fetchDynamicVaultToken(context.TODO(), spec)
+			require.NoError(t, err)
+
+			// Metadata carries non-secret subject identity only.
+			assert.Equal(t, "ci-deployer", metadata["role"])
+			if tt.expectSubject {
+				assert.Equal(t, tt.expectedSubject, metadata["subject"])
+			} else {
+				assert.NotContains(t, metadata, "subject")
+			}
+			// Never leak token material into the clear-logged metadata map.
+			for _, k := range []string{"token", "client_token", "accessor", "policies"} {
+				assert.NotContains(t, metadata, k)
+			}
+
+			// Secret stays in rawData; the accessor is the lease ID.
+			assert.Equal(t, "hvs.secret-token", rawData["token"])
+			assert.Equal(t, "hvs.accessor", leaseID)
+		})
+	}
 }
 
 func TestVaultDriver_MintCredential_DynamicGCPRouting(t *testing.T) {
