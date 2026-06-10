@@ -54,6 +54,16 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 		return logical.ErrorResponse(logical.ErrBadRequest("no client certificate provided")), nil
 	}
 
+	// SPIFFE mode can be configured (trust domains, roles) but SVID enforcement
+	// is not yet wired in this build. Fail closed rather than fall through to
+	// x509 verification, which would be the wrong trust model.
+	if b.config != nil && b.config.Mode == modeSPIFFE {
+		return &logical.Response{
+			StatusCode: http.StatusNotImplemented,
+			Err:        fmt.Errorf("SPIFFE SVID authentication is not yet enabled on this mount"),
+		}, nil
+	}
+
 	// Get role name — fall back to default_role if configured
 	roleName := d.Get("role").(string)
 	if roleName == "" && b.config != nil && b.config.DefaultRole != "" {

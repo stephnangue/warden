@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
+
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
 	"github.com/stephnangue/warden/framework"
@@ -19,6 +21,7 @@ import (
 
 // CertAuthConfig represents certificate authentication configuration
 type CertAuthConfig struct {
+	Mode           string        `json:"mode,omitempty"`            // "x509" (default) or "spiffe"
 	TrustedCAPEM   string        `json:"trusted_ca_pem"`            // PEM-encoded trusted CA certs
 	PrincipalClaim string        `json:"principal_claim,omitempty"` // "cn" (default), "dns_san", "email_san", "uri_san", "serial"
 	TokenTTL       time.Duration `json:"token_ttl" default:"1h"`    // Default token TTL
@@ -38,7 +41,18 @@ type certAuthBackend struct {
 	logger            *logger.GatedLogger
 	storageView       sdklogical.Storage
 	revocationChecker *revocationChecker
+
+	// spiffeBundleSet holds the per-trust-domain X.509 authorities used to verify
+	// SVIDs in spiffe mode. Guarded by spiffeMu, separate from configMu.
+	spiffeBundleSet *x509bundle.Set
+	spiffeMu        sync.RWMutex
 }
+
+// Auth mount modes. A mount operates in exactly one mode, fixed on its config.
+const (
+	modeX509   = "x509"   // classic PKI: CA pool + field matching
+	modeSPIFFE = "spiffe" // SPIFFE X.509-SVID relying party
+)
 
 var _ logical.Factory = Factory
 
@@ -65,6 +79,8 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			b.pathRole(),
 			b.pathRoleList(),
 			b.pathIntrospect(),
+			b.pathSPIFFETrustDomain(),
+			b.pathSPIFFETrustDomainList(),
 		},
 	}
 
@@ -91,6 +107,13 @@ func (b *certAuthBackend) setupCertConfig(_ context.Context, conf map[string]any
 	config, err := mapToCertAuthConfig(conf)
 	if err != nil {
 		return err
+	}
+
+	if config.Mode == "" {
+		config.Mode = modeX509
+	}
+	if config.Mode != modeX509 && config.Mode != modeSPIFFE {
+		return fmt.Errorf("invalid mode %q; must be one of: %s, %s", config.Mode, modeX509, modeSPIFFE)
 	}
 
 	if config.TokenTTL == 0 {
@@ -197,7 +220,25 @@ func (b *certAuthBackend) Initialize(ctx context.Context) error {
 			return fmt.Errorf("failed to setup cert config from storage: %w", err)
 		}
 	}
+
+	// In spiffe mode, load the configured trust-domain bundles. Fail closed: if
+	// the bundles cannot be loaded, the mount must not serve SPIFFE logins.
+	if b.mountMode() == modeSPIFFE {
+		if err := b.rebuildBundleSet(ctx); err != nil {
+			return fmt.Errorf("failed to load SPIFFE trust bundles: %w", err)
+		}
+	}
 	return nil
+}
+
+// mountMode returns the configured mount mode, defaulting to x509 when unset.
+func (b *certAuthBackend) mountMode() string {
+	b.configMu.RLock()
+	defer b.configMu.RUnlock()
+	if b.config != nil && b.config.Mode != "" {
+		return b.config.Mode
+	}
+	return modeX509
 }
 
 // SensitiveConfigFields returns the list of config fields that should be masked

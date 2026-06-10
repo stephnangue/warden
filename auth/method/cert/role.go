@@ -13,7 +13,9 @@ type CertRole struct {
 	AllowedURISANs             []string `json:"allowed_uri_sans,omitempty"`
 	AllowedOrganizationalUnits []string `json:"allowed_organizational_units,omitempty"`
 	AllowedOrganizations       []string `json:"allowed_organizations,omitempty"`
-	Certificate                string   `json:"certificate,omitempty"` // Role-specific CA PEM (overrides global)
+	Certificate                string   `json:"certificate,omitempty"`        // Role-specific CA PEM (overrides global) — x509 mode
+	TrustDomain                string   `json:"trust_domain,omitempty"`       // SPIFFE trust domain this role binds to — spiffe mode
+	AllowedSPIFFEIDs           []string `json:"allowed_spiffe_ids,omitempty"` // optional SPIFFE ID segment patterns — spiffe mode
 	TokenPolicies              []string `json:"token_policies"`
 	TokenTTL                   string   `json:"token_ttl"`
 	TokenType                  string   `json:"token_type,omitempty"`
