@@ -14,6 +14,16 @@ import (
 // mode config
 // =============================================================================
 
+// TestSPIFFETrustDomainRoutePatterns locks the API route so it stays
+// "auth/<mount>/trust-domain/<name>" (no redundant "spiffe/" segment that would
+// double up to "auth/spiffe/spiffe/trust-domain/..." on a spiffe-named mount),
+// keeping the documented paths correct.
+func TestSPIFFETrustDomainRoutePatterns(t *testing.T) {
+	b, _ := createTestBackend(t)
+	assert.Equal(t, "trust-domain/"+framework.GenericNameRegex("name"), b.pathSPIFFETrustDomain().Pattern)
+	assert.Equal(t, "trust-domain/?$", b.pathSPIFFETrustDomainList().Pattern)
+}
+
 func TestSetupCertConfig_ModeDefaultAndValidation(t *testing.T) {
 	b, ctx := createTestBackend(t)
 
@@ -54,6 +64,28 @@ func TestHandleConfigWrite_SpiffeModeRejectsPKIFields(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		assert.Contains(t, resp.Err.Error(), "principal_claim is not allowed in spiffe mode")
 	})
+}
+
+func TestHandleConfigWrite_SpiffeModeWithOtherFieldsInOneCall(t *testing.T) {
+	b, ctx := createTestBackend(t)
+
+	// mode set together with the mode-agnostic fields, in a single write.
+	d := &framework.FieldData{
+		Raw: map[string]any{
+			"mode":            "spiffe",
+			"token_ttl":       7200,
+			"default_role":    "api",
+			"revocation_mode": "none",
+		},
+		Schema: b.pathConfig().Fields,
+	}
+	resp, err := b.handleConfigWrite(ctx, &logical.Request{}, d)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	assert.Equal(t, modeSPIFFE, b.config.Mode)
+	assert.Equal(t, "api", b.config.DefaultRole)
+	assert.Equal(t, "2h0m0s", b.config.TokenTTL.String())
 }
 
 func TestHandleConfigWrite_ModeChangeGuard(t *testing.T) {
@@ -129,15 +161,31 @@ func TestTrustDomainCRUD(t *testing.T) {
 }
 
 func TestTrustDomain_RejectedInX509Mode(t *testing.T) {
-	b, ctx := createTestBackend(t) // config nil -> x509 mode
+	b, ctx := createTestBackend(t) // config nil -> x509 mode (default)
 
-	resp, err := b.handleTrustDomainWrite(ctx, &logical.Request{}, &framework.FieldData{
-		Raw:    map[string]any{"name": "example.org", "bundle_pem": "x"},
-		Schema: b.pathSPIFFETrustDomain().Fields,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	assert.Contains(t, resp.Err.Error(), "mode=spiffe")
+	tdSchema := b.pathSPIFFETrustDomain().Fields
+	fd := func() *framework.FieldData {
+		return &framework.FieldData{Raw: map[string]any{"name": "example.org", "bundle_pem": "x"}, Schema: tdSchema}
+	}
+
+	// Every CRUD operation on the trust-domain path is rejected with a 400 in
+	// x509 mode (the routes are registered but mode-gated in the handlers).
+	ops := map[string]func() (*logical.Response, error){
+		"write":  func() (*logical.Response, error) { return b.handleTrustDomainWrite(ctx, &logical.Request{}, fd()) },
+		"read":   func() (*logical.Response, error) { return b.handleTrustDomainRead(ctx, &logical.Request{}, fd()) },
+		"delete": func() (*logical.Response, error) { return b.handleTrustDomainDelete(ctx, &logical.Request{}, fd()) },
+		"list": func() (*logical.Response, error) {
+			return b.handleTrustDomainList(ctx, &logical.Request{}, &framework.FieldData{})
+		},
+	}
+	for name, op := range ops {
+		t.Run(name, func(t *testing.T) {
+			resp, err := op()
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			assert.Contains(t, resp.Err.Error(), "mode=spiffe")
+		})
+	}
 }
 
 func TestTrustDomainWrite_Validation(t *testing.T) {
@@ -195,40 +243,6 @@ func TestValidateRole_ModeGating(t *testing.T) {
 	err = b.validateRole(&CertRole{Name: "r", TrustDomain: "example.org", AllowedCommonNames: []string{"x"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not valid in spiffe mode")
-}
-
-// =============================================================================
-// enforcement gate (PR3: spiffe data plane not yet enabled)
-// =============================================================================
-
-func TestHandleLogin_SpiffeModeGated(t *testing.T) {
-	caCert, caKey, _ := testCA(t)
-	b, ctx := createTestBackend(t)
-	require.NoError(t, b.setupCertConfig(ctx, map[string]any{"mode": "spiffe"}))
-
-	clientCert := testClientCert(t, caCert, caKey, "agent")
-	req := &logical.Request{HTTPRequest: newCertHTTPRequest(t, clientCert)}
-	d := &framework.FieldData{Raw: map[string]any{"role": "api"}, Schema: b.pathLogin().Fields}
-
-	resp, err := b.handleLogin(ctx, req, d)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode)
-	assert.Contains(t, resp.Err.Error(), "not yet enabled")
-}
-
-func TestHandleIntrospect_SpiffeModeEmpty(t *testing.T) {
-	caCert, caKey, _ := testCA(t)
-	b, ctx := createTestBackend(t)
-	require.NoError(t, b.setupCertConfig(ctx, map[string]any{"mode": "spiffe"}))
-
-	clientCert := testClientCert(t, caCert, caKey, "agent")
-	req := &logical.Request{HTTPRequest: newCertHTTPRequest(t, clientCert)}
-
-	resp, err := b.handleIntrospectRoles(ctx, req, &framework.FieldData{})
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	roles := resp.Data["roles"].([]introspectedRole)
-	assert.Empty(t, roles)
 }
 
 // =============================================================================

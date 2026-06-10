@@ -8,6 +8,8 @@ import (
 	"path"
 	"time"
 
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
+
 	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	lgr "github.com/stephnangue/warden/logger"
@@ -54,14 +56,10 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 		return logical.ErrorResponse(logical.ErrBadRequest("no client certificate provided")), nil
 	}
 
-	// SPIFFE mode can be configured (trust domains, roles) but SVID enforcement
-	// is not yet wired in this build. Fail closed rather than fall through to
-	// x509 verification, which would be the wrong trust model.
+	// SPIFFE mode verifies the certificate as an X.509-SVID against the role's
+	// trust-domain bundle, a distinct trust model from x509 mode.
 	if b.config != nil && b.config.Mode == modeSPIFFE {
-		return &logical.Response{
-			StatusCode: http.StatusNotImplemented,
-			Err:        fmt.Errorf("SPIFFE SVID authentication is not yet enabled on this mount"),
-		}, nil
+		return b.handleSPIFFELogin(ctx, req, d, cert)
 	}
 
 	// Get role name — fall back to default_role if configured
@@ -177,6 +175,81 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 			TokenTTL:       effectiveTTL,
 			ClientIP:       req.ClientIP,
 			ClientToken:    fingerprint, // Cert fingerprint for token type caching
+		},
+		Data: map[string]any{
+			"principal_id": principalID,
+			"role":         roleName,
+			"fingerprint":  fingerprint,
+		},
+	}, nil
+}
+
+// handleSPIFFELogin authenticates a client X.509-SVID in spiffe mode. It verifies
+// the certificate against the role's trust-domain bundle (SVID rules + chain +
+// trust-domain binding + optional SPIFFE-ID patterns) and issues a token whose
+// principal is the verified SPIFFE ID. Called with configMu held by handleLogin.
+func (b *certAuthBackend) handleSPIFFELogin(ctx context.Context, req *logical.Request, d *framework.FieldData, cert *x509.Certificate) (*logical.Response, error) {
+	// Resolve the role — fall back to default_role if configured.
+	roleName := d.Get("role").(string)
+	if roleName == "" && b.config != nil && b.config.DefaultRole != "" {
+		roleName = b.config.DefaultRole
+	}
+	if roleName == "" {
+		return logical.ErrorResponse(logical.ErrBadRequest("missing role")), nil
+	}
+
+	role, err := b.getRole(ctx, roleName)
+	if err != nil {
+		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
+	}
+	if role == nil || role.TrustDomain == "" {
+		b.logger.Warn("login failed: role not found or not bound to a trust domain", lgr.String("role", roleName))
+		return &logical.Response{StatusCode: http.StatusUnauthorized, Err: errCertAuthFailed}, nil
+	}
+
+	expectedTD, err := spiffeid.TrustDomainFromString(role.TrustDomain)
+	if err != nil {
+		b.logger.Warn("login failed: role has invalid trust_domain", lgr.Err(err), lgr.String("role", roleName))
+		return &logical.Response{StatusCode: http.StatusUnauthorized, Err: errCertAuthFailed}, nil
+	}
+
+	// Fail closed if no trust bundles are loaded.
+	set := b.snapshotBundleSet()
+	if set == nil {
+		b.logger.Warn("login failed: no SPIFFE trust bundles loaded", lgr.String("role", roleName))
+		return &logical.Response{StatusCode: http.StatusUnauthorized, Err: errCertAuthFailed}, nil
+	}
+
+	id, chains, err := verifySPIFFE(set, []*x509.Certificate{cert}, expectedTD, role.AllowedSPIFFEIDs)
+	if err != nil {
+		b.logger.Warn("login failed: SVID verification", lgr.Err(err), lgr.String("role", roleName))
+		return &logical.Response{StatusCode: http.StatusUnauthorized, Err: errCertAuthFailed}, nil
+	}
+
+	// Reuse the standard revocation check against the verified chains.
+	if b.revocationChecker != nil && b.config != nil &&
+		b.config.RevocationMode != "" && b.config.RevocationMode != "none" {
+		if err := b.revocationChecker.checkRevocation(cert, chains, b.config.RevocationMode); err != nil {
+			b.logger.Warn("login failed: SVID revocation check", lgr.Err(err), lgr.String("role", roleName))
+			return &logical.Response{StatusCode: http.StatusUnauthorized, Err: errCertAuthFailed}, nil
+		}
+	}
+
+	principalID := id.String()
+	effectiveTTL := b.calculateTTL(cert, role)
+	fingerprint := certFingerprint(cert)
+
+	return &logical.Response{
+		StatusCode: http.StatusOK,
+		Auth: &logical.Auth{
+			PrincipalID:    principalID,
+			RoleName:       roleName,
+			Policies:       role.TokenPolicies,
+			CredentialSpec: role.CredSpecName,
+			TokenType:      "cert_role",
+			TokenTTL:       effectiveTTL,
+			ClientIP:       req.ClientIP,
+			ClientToken:    fingerprint,
 		},
 		Data: map[string]any{
 			"principal_id": principalID,
