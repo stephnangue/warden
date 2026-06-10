@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"path"
-	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/auth/helper"
@@ -131,6 +130,11 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 	}
 	if principalClaim == "" {
 		principalClaim = "cn"
+	}
+	// Legacy roles may still carry the removed "spiffe_id" claim; treat it as
+	// "uri_san" (identical result for a single-URI SVID).
+	if principalClaim == "spiffe_id" {
+		principalClaim = "uri_san"
 	}
 
 	// Extract principal identity from the certificate
@@ -281,12 +285,6 @@ func extractPrincipal(cert *x509.Certificate, claim string) string {
 	case "uri_san":
 		if len(cert.URIs) > 0 {
 			return cert.URIs[0].String()
-		}
-	case "spiffe_id":
-		for _, u := range cert.URIs {
-			if strings.HasPrefix(u.String(), "spiffe://") {
-				return u.String()
-			}
 		}
 	case "serial":
 		return cert.SerialNumber.String()

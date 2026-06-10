@@ -85,7 +85,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 var validRevocationModes = []string{"", "none", "crl", "ocsp", "best_effort"}
 
 // validPrincipalClaims lists the allowed values for principal_claim.
-var validPrincipalClaims = []string{"cn", "dns_san", "email_san", "uri_san", "spiffe_id", "serial"}
+var validPrincipalClaims = []string{"cn", "dns_san", "email_san", "uri_san", "serial"}
 
 func (b *certAuthBackend) setupCertConfig(_ context.Context, conf map[string]any) error {
 	config, err := mapToCertAuthConfig(conf)
@@ -98,6 +98,15 @@ func (b *certAuthBackend) setupCertConfig(_ context.Context, conf map[string]any
 	}
 	if config.PrincipalClaim == "" {
 		config.PrincipalClaim = "cn"
+	}
+	// Backward compatibility: the "spiffe_id" principal claim was removed because
+	// it pulled a spiffe:// URI from the certificate without validating it as an
+	// SVID. A persisted value is coerced to "uri_san" (identical result for a
+	// single-URI SVID) so existing mounts keep loading; real SPIFFE validation
+	// now lives in a mount configured with mode=spiffe.
+	if config.PrincipalClaim == "spiffe_id" {
+		b.logger.Warn("principal_claim \"spiffe_id\" is deprecated and does not validate SPIFFE SVIDs; coercing to \"uri_san\" (use a mount with mode=spiffe for SPIFFE validation)")
+		config.PrincipalClaim = "uri_san"
 	}
 	if !isValidPrincipalClaim(config.PrincipalClaim) {
 		return fmt.Errorf("invalid principal_claim %q; must be one of: %v", config.PrincipalClaim, validPrincipalClaims)

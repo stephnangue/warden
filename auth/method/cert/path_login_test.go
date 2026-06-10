@@ -328,7 +328,7 @@ func TestExtractPrincipal(t *testing.T) {
 		{"dns_san", "agent.example.com"},
 		{"email_san", "agent@example.com"},
 		{"uri_san", "spiffe://example.com/agent"},
-		{"spiffe_id", "spiffe://example.com/agent"},
+		{"spiffe_id", ""}, // removed claim — now treated as unknown, yields empty
 		{"serial", cert.SerialNumber.String()},
 		{"unknown", ""},
 	}

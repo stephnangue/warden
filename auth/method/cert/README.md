@@ -69,7 +69,7 @@ warden write auth/cert/config \
 
 `trusted_ca_pem` accepts a concatenated PEM bundle — multiple `-----BEGIN CERTIFICATE-----` blocks back-to-back are all loaded. The mount validates the bundle at write time and rejects PEM with no valid certificates.
 
-When `principal_claim` is omitted, the mount defaults to `cn` (the certificate Subject's CommonName). For SPIFFE-issued certificates, set it to `spiffe_id`; for service-mesh certs, `uri_san` or `dns_san` is often the right pick. See [Principal Claim Selection](#principal-claim-selection) for the full list.
+When `principal_claim` is omitted, the mount defaults to `cn` (the certificate Subject's CommonName). For service-mesh or SPIFFE certificates, `uri_san` or `dns_san` is often the right pick. See [Principal Claim Selection](#principal-claim-selection) for the full list.
 
 ## Step 2: Enable Revocation Checking (Optional)
 
@@ -165,8 +165,7 @@ The first request with a given (certificate fingerprint, role) tuple triggers a 
 | `cn` | `Subject.CommonName` | Default. Operator-issued certs with a meaningful CN per workload. |
 | `dns_san` | First DNS SAN | Service-mesh certs where the SAN is the service name. Returns the first DNS SAN; if you have multiple and need stable picks, narrow via `allowed_dns_sans`. |
 | `email_san` | First email SAN | Operator certs where the identity is a person, not a service. |
-| `uri_san` | First URI SAN | Any URI-typed identity (SPIFFE is the common case, but works for any URI scheme). |
-| `spiffe_id` | First URI SAN starting with `spiffe://` | SPIFFE SVIDs specifically. Differs from `uri_san` in that it filters to SPIFFE URIs — useful when the cert carries multiple URI SANs and only the SPIFFE one is the identity. |
+| `uri_san` | First URI SAN | Any URI-typed identity, including a SPIFFE ID carried in the URI SAN. Note this is a plain string read — it does **not** validate the certificate as a SPIFFE SVID. |
 | `serial` | `SerialNumber` (decimal string) | When the issuing CA assigns one cert per workload and the serial is the registry key. |
 
 Pick the field whose value is **stable for the lifetime of the workload**. The principal flows into audit logs and policy decisions; you don't want it to change across cert rotations of the same workload identity.
@@ -178,7 +177,7 @@ For SPIFFE X.509 SVIDs, the workload identity lives in the certificate's URI SAN
 ```bash
 warden write auth/cert/role/api-frontend \
   allowed_uri_sans="spiffe://prod.example.org/api/frontend/*" \
-  principal_claim="spiffe_id" \
+  principal_claim="uri_san" \
   token_policies="api-read"
 ```
 
@@ -252,7 +251,7 @@ Per-mount introspection (`auth/<mount>/introspect/roles`) exists too — the agg
 | Field | Required | Description |
 |---|---|---|
 | `trusted_ca_pem` | Yes (unless every role sets its own `certificate`) | PEM-encoded CA bundle that signs accepted client certificates. Multiple `-----BEGIN CERTIFICATE-----` blocks may be concatenated. |
-| `principal_claim` | No (default `cn`) | Which certificate field becomes the principal identity. One of `cn`, `dns_san`, `email_san`, `uri_san`, `spiffe_id`, `serial`. |
+| `principal_claim` | No (default `cn`) | Which certificate field becomes the principal identity. One of `cn`, `dns_san`, `email_san`, `uri_san`, `serial`. |
 | `token_ttl` | No (default `1h`) | Default TTL for issued Warden auth tokens; per-role `token_ttl` overrides; capped further by the certificate's `NotAfter`. |
 | `revocation_mode` | No (default `none`) | Revocation check mode. One of `none`, `ocsp`, `crl`, `best_effort`. |
 | `crl_cache_ttl` | No (default `1h`) | How long a fetched CRL is cached per distribution-point URL. Example: `30m`, `2h`. |

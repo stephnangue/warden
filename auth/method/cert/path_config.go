@@ -2,6 +2,7 @@ package cert
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
@@ -21,7 +22,7 @@ func (b *certAuthBackend) pathConfig() *framework.Path {
 			},
 			"principal_claim": {
 				Type:          framework.TypeString,
-				Description:   "Identity source from certificate: cn (default), spiffe_id, dns_san, email_san, uri_san, serial",
+				Description:   "Identity source from certificate: cn (default), dns_san, email_san, uri_san, serial",
 				Default:       "cn",
 				AllowedValues: principalClaimAllowedValues(),
 			},
@@ -102,6 +103,17 @@ func (b *certAuthBackend) handleConfigRead(ctx context.Context, req *logical.Req
 
 // handleConfigWrite handles writing the configuration
 func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	// Reject the removed "spiffe_id" principal claim on new writes. A persisted
+	// legacy value is coerced to "uri_san" on load instead (see setupCertConfig).
+	if v, ok := d.GetOk("principal_claim"); ok {
+		if claim, _ := v.(string); claim == "spiffe_id" {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        fmt.Errorf("principal_claim \"spiffe_id\" is no longer supported; configure a mount with mode=spiffe for SPIFFE SVID validation"),
+			}, nil
+		}
+	}
+
 	// Build config map from field data
 	conf := make(map[string]any)
 
