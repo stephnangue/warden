@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
@@ -13,13 +14,16 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
+// spiffeTrustDomainPrefix is the internal storage-key prefix for trust-domain
+// entries (namespaced away from role/ and config). It is independent of the
+// API route, which is "trust-domain/<name>".
 const spiffeTrustDomainPrefix = "spiffe/trust-domain/"
 
 // pathSPIFFETrustDomain manages a SPIFFE trust domain and the X.509 authorities
 // that are authoritative for it. These paths are only meaningful in spiffe mode.
 func (b *certAuthBackend) pathSPIFFETrustDomain() *framework.Path {
 	return &framework.Path{
-		Pattern: "spiffe/trust-domain/" + framework.GenericNameRegex("name"),
+		Pattern: "trust-domain/" + framework.GenericNameRegex("name"),
 		Fields: map[string]*framework.FieldSchema{
 			"name": {
 				Type:        framework.TypeString,
@@ -49,7 +53,7 @@ func (b *certAuthBackend) pathSPIFFETrustDomain() *framework.Path {
 // pathSPIFFETrustDomainList lists the configured SPIFFE trust domains.
 func (b *certAuthBackend) pathSPIFFETrustDomainList() *framework.Path {
 	return &framework.Path{
-		Pattern: "spiffe/trust-domain/?$",
+		Pattern: "trust-domain/?$",
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ListOperation: &framework.PathOperation{Callback: b.handleTrustDomainList, Summary: "List SPIFFE trust domains"},
 		},
@@ -244,4 +248,12 @@ func (b *certAuthBackend) rebuildBundleSet(ctx context.Context) error {
 	b.spiffeBundleSet = set
 	b.spiffeMu.Unlock()
 	return nil
+}
+
+// snapshotBundleSet returns the current verification set under a read lock. It
+// may be nil if no trust domains have been loaded yet (callers fail closed).
+func (b *certAuthBackend) snapshotBundleSet() *x509bundle.Set {
+	b.spiffeMu.RLock()
+	defer b.spiffeMu.RUnlock()
+	return b.spiffeBundleSet
 }
