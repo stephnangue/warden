@@ -72,7 +72,7 @@ func (b *certAuthBackend) pathRole() *framework.Path {
 			},
 			"principal_claim": {
 				Type:          framework.TypeString,
-				Description:   "Identity source from certificate (overrides global config): cn, dns_san, email_san, uri_san, spiffe_id, serial",
+				Description:   "Identity source from certificate (overrides global config): cn, dns_san, email_san, uri_san, serial",
 				AllowedValues: principalClaimAllowedValues(),
 			},
 		},

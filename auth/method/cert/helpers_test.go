@@ -18,7 +18,7 @@ func TestIsValidPrincipalClaim(t *testing.T) {
 		{"dns_san", true},
 		{"email_san", true},
 		{"uri_san", true},
-		{"spiffe_id", true},
+		{"spiffe_id", false},
 		{"serial", true},
 		{"invalid", false},
 		{"CN", false},
