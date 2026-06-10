@@ -47,6 +47,12 @@ func (b *certAuthBackend) handleIntrospectRoles(ctx context.Context, req *logica
 		return introspectEmpty(), nil
 	}
 
+	// SPIFFE-mode introspection is not yet implemented; return no matches rather
+	// than evaluate x509 trust logic against spiffe roles.
+	if b.config != nil && b.config.Mode == modeSPIFFE {
+		return introspectEmpty(), nil
+	}
+
 	roleNames, err := b.listRoles(ctx)
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil

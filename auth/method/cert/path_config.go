@@ -16,9 +16,15 @@ func (b *certAuthBackend) pathConfig() *framework.Path {
 	return &framework.Path{
 		Pattern: "config",
 		Fields: map[string]*framework.FieldSchema{
+			"mode": {
+				Type:          framework.TypeString,
+				Description:   "Trust model for this mount: x509 (default, classic PKI) or spiffe (SPIFFE X.509-SVID).",
+				Default:       modeX509,
+				AllowedValues: []interface{}{modeX509, modeSPIFFE},
+			},
 			"trusted_ca_pem": {
 				Type:        framework.TypeString,
-				Description: "PEM-encoded trusted CA certificates",
+				Description: "PEM-encoded trusted CA certificates (x509 mode only)",
 			},
 			"principal_claim": {
 				Type:          framework.TypeString,
@@ -63,9 +69,11 @@ func (b *certAuthBackend) pathConfig() *framework.Path {
 		HelpSynopsis: "Configure certificate authentication",
 		HelpDescription: `This endpoint configures the certificate authentication method.
 
-Set 'trusted_ca_pem' to PEM-encoded CA certificates that sign client certificates.
-Use 'principal_claim' to control which certificate field identifies the principal
-(cn, dns_san, email_san, uri_san, or serial).`,
+Set 'mode' to choose the trust model: x509 (default, classic PKI) or spiffe
+(SPIFFE X.509-SVID). In x509 mode, set 'trusted_ca_pem' to the CA bundle that
+signs client certificates and 'principal_claim' to the identity field
+(cn, dns_san, email_san, uri_san, or serial). In spiffe mode, register trust
+domains under spiffe/trust-domain/ instead; those PKI fields are not used.`,
 	}
 }
 
@@ -81,24 +89,34 @@ func (b *certAuthBackend) handleConfigRead(ctx context.Context, req *logical.Req
 		}, nil
 	}
 
-	certCount := 0
-	if b.config.TrustedCAPEM != "" {
-		certCount = parsePEMCertificates(b.config.TrustedCAPEM)
+	mode := b.config.Mode
+	if mode == "" {
+		mode = modeX509
 	}
 
-	return &logical.Response{
-		StatusCode: http.StatusOK,
-		Data: map[string]any{
-			"trusted_ca_pem":   b.config.TrustedCAPEM,
-			"principal_claim":  b.config.PrincipalClaim,
-			"token_ttl":        b.config.TokenTTL.String(),
-			"revocation_mode":  b.config.RevocationMode,
-			"crl_cache_ttl":    b.config.CRLCacheTTL,
-			"ocsp_timeout":     b.config.OCSPTimeout,
-			"default_role":     b.config.DefaultRole,
-			"trusted_ca_count": certCount,
-		},
-	}, nil
+	// Fields common to both modes.
+	data := map[string]any{
+		"mode":            mode,
+		"token_ttl":       b.config.TokenTTL.String(),
+		"revocation_mode": b.config.RevocationMode,
+		"crl_cache_ttl":   b.config.CRLCacheTTL,
+		"ocsp_timeout":    b.config.OCSPTimeout,
+		"default_role":    b.config.DefaultRole,
+	}
+
+	// x509-only fields are surfaced only in x509 mode; in spiffe mode trust
+	// domains are managed and listed under spiffe/trust-domain/.
+	if mode == modeX509 {
+		certCount := 0
+		if b.config.TrustedCAPEM != "" {
+			certCount = parsePEMCertificates(b.config.TrustedCAPEM)
+		}
+		data["trusted_ca_pem"] = b.config.TrustedCAPEM
+		data["principal_claim"] = b.config.PrincipalClaim
+		data["trusted_ca_count"] = certCount
+	}
+
+	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
 }
 
 // handleConfigWrite handles writing the configuration
@@ -114,12 +132,56 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		}
 	}
 
+	// Resolve current vs requested mode and enforce mode coherence.
+	b.configMu.RLock()
+	currentMode := modeX509
+	if b.config != nil && b.config.Mode != "" {
+		currentMode = b.config.Mode
+	}
+	b.configMu.RUnlock()
+
+	effectiveMode := currentMode
+	if v, ok := d.GetOk("mode"); ok {
+		if requested, _ := v.(string); requested != "" {
+			effectiveMode = requested
+			if requested != currentMode {
+				// Switching mode would orphan existing roles/trust domains into an
+				// incompatible mount; require a clean slate.
+				roles, err := b.listRoles(ctx)
+				if err != nil {
+					return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
+				}
+				tds, err := b.listTrustDomains(ctx)
+				if err != nil {
+					return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
+				}
+				if len(roles) > 0 || len(tds) > 0 {
+					return &logical.Response{
+						StatusCode: http.StatusBadRequest,
+						Err:        fmt.Errorf("cannot change mode while roles or trust domains exist; delete them first or use a new mount"),
+					}, nil
+				}
+			}
+		}
+	}
+
+	// PKI-only config fields are not accepted in spiffe mode.
+	if effectiveMode == modeSPIFFE {
+		if _, ok := d.GetOk("trusted_ca_pem"); ok {
+			return &logical.Response{StatusCode: http.StatusBadRequest, Err: fmt.Errorf("trusted_ca_pem is not allowed in spiffe mode; configure trust domains via spiffe/trust-domain/<name>")}, nil
+		}
+		if _, ok := d.GetOk("principal_claim"); ok {
+			return &logical.Response{StatusCode: http.StatusBadRequest, Err: fmt.Errorf("principal_claim is not allowed in spiffe mode; the principal is the verified SVID ID")}, nil
+		}
+	}
+
 	// Build config map from field data
 	conf := make(map[string]any)
 
 	// Copy existing config if present
 	b.configMu.RLock()
 	if b.config != nil {
+		conf["mode"] = b.config.Mode
 		conf["trusted_ca_pem"] = b.config.TrustedCAPEM
 		conf["principal_claim"] = b.config.PrincipalClaim
 		conf["token_ttl"] = b.config.TokenTTL
@@ -137,6 +199,13 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		}
 	}
 
+	// In spiffe mode, drop any carried-over PKI-only fields so the persisted
+	// config stays coherent with the mode.
+	if effectiveMode == modeSPIFFE {
+		delete(conf, "trusted_ca_pem")
+		delete(conf, "principal_claim")
+	}
+
 	// Setup new config
 	if err := b.setupCertConfig(ctx, conf); err != nil {
 		return &logical.Response{
@@ -151,6 +220,7 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 	if b.storageView != nil {
 		b.configMu.RLock()
 		normalized := map[string]any{
+			"mode":            b.config.Mode,
 			"trusted_ca_pem":  b.config.TrustedCAPEM,
 			"principal_claim": b.config.PrincipalClaim,
 			"token_ttl":       b.config.TokenTTL.String(),
