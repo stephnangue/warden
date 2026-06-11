@@ -46,6 +46,14 @@ type certAuthBackend struct {
 	// SVIDs in spiffe mode. Guarded by spiffeMu, separate from configMu.
 	spiffeBundleSet *x509bundle.Set
 	spiffeMu        sync.RWMutex
+
+	// Spiffe Federation refresh loop (active-node only). fedCancel stops the goroutine;
+	// the fed*Interval fields override the defaults and exist for tests.
+	fedCancel         context.CancelFunc
+	fedMu             sync.Mutex
+	fedTickInterval   time.Duration
+	fedMinRefresh     time.Duration
+	fedDefaultRefresh time.Duration
 }
 
 // Auth mount modes. A mount operates in exactly one mode, fixed on its config.
@@ -84,6 +92,10 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			b.pathSPIFFETrustDomainRefresh(),
 		},
 	}
+
+	// Stop the federation refresh loop on unmount/seal (step-down is covered by
+	// the active context passed to Initialize).
+	b.Backend.Clean = func(context.Context) { b.stopFederationRefresh() }
 
 	if err := b.Backend.Setup(ctx, conf); err != nil {
 		return nil, err
@@ -228,6 +240,9 @@ func (b *certAuthBackend) Initialize(ctx context.Context) error {
 		if err := b.rebuildBundleSet(ctx); err != nil {
 			return fmt.Errorf("failed to load SPIFFE trust bundles: %w", err)
 		}
+		// Initialize runs only on the active node; ctx is the active context, so
+		// the refresh loop stops on step-down. It no-ops with no federated domains.
+		b.startFederationRefresh(ctx)
 	}
 	return nil
 }
