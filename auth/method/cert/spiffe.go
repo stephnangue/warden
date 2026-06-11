@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"github.com/spiffe/go-spiffe/v2/bundle/spiffebundle"
@@ -14,6 +15,16 @@ import (
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 
 	"github.com/stephnangue/warden/auth/helper"
+	lgr "github.com/stephnangue/warden/logger"
+)
+
+// Federation refresh-loop tunables. The per-backend fields (fedTickInterval,
+// fedMinRefresh, fedDefaultRefresh) override these and exist for tests.
+const (
+	federationTickInterval   = time.Minute     // how often the loop wakes to check due domains
+	federationMinRefresh     = time.Minute     // floor for a domain's refresh interval
+	federationMaxRefresh     = 24 * time.Hour  // cap for a domain's refresh interval
+	federationDefaultRefresh = 5 * time.Minute // used when a bundle carries no refresh hint
 )
 
 // SPIFFE bundle-endpoint profiles (empty = static, non-federated trust domain).
@@ -274,4 +285,118 @@ func (b *certAuthBackend) refreshFederatedTrustDomain(ctx context.Context, d *SP
 		return false, err
 	}
 	return true, nil
+}
+
+func (b *certAuthBackend) fedTick() time.Duration {
+	if b.fedTickInterval > 0 {
+		return b.fedTickInterval
+	}
+	return federationTickInterval
+}
+
+func (b *certAuthBackend) fedMin() time.Duration {
+	if b.fedMinRefresh > 0 {
+		return b.fedMinRefresh
+	}
+	return federationMinRefresh
+}
+
+func (b *certAuthBackend) fedDefault() time.Duration {
+	if b.fedDefaultRefresh > 0 {
+		return b.fedDefaultRefresh
+	}
+	return federationDefaultRefresh
+}
+
+// refreshInterval returns how long to wait before re-fetching d, honoring the
+// bundle's spiffe_refresh_hint when present and clamping to a sane range.
+func (b *certAuthBackend) refreshInterval(d *SPIFFETrustDomain) time.Duration {
+	interval := b.fedDefault()
+	if d.BundleJSON != "" {
+		if td, err := spiffeid.TrustDomainFromString(d.Name); err == nil {
+			if bundle, err := spiffebundle.Parse(td, []byte(d.BundleJSON)); err == nil {
+				if hint, ok := bundle.RefreshHint(); ok && hint > 0 {
+					interval = hint
+				}
+			}
+		}
+	}
+	if min := b.fedMin(); interval < min {
+		interval = min
+	}
+	if interval > federationMaxRefresh {
+		interval = federationMaxRefresh
+	}
+	return interval
+}
+
+// startFederationRefresh launches (or restarts) the per-mount refresh goroutine.
+// It runs only on the active node (Initialize is active-node only) and stops when
+// ctx is cancelled (step-down) or stopFederationRefresh is called (unmount/seal).
+func (b *certAuthBackend) startFederationRefresh(ctx context.Context) {
+	b.fedMu.Lock()
+	defer b.fedMu.Unlock()
+	if b.fedCancel != nil {
+		b.fedCancel() // stop any prior loop (e.g. re-init on failover)
+	}
+	loopCtx, cancel := context.WithCancel(ctx)
+	b.fedCancel = cancel
+	go b.federationRefreshLoop(loopCtx)
+}
+
+// stopFederationRefresh stops the refresh goroutine if running. Idempotent.
+func (b *certAuthBackend) stopFederationRefresh() {
+	b.fedMu.Lock()
+	defer b.fedMu.Unlock()
+	if b.fedCancel != nil {
+		b.fedCancel()
+		b.fedCancel = nil
+	}
+}
+
+func (b *certAuthBackend) federationRefreshLoop(ctx context.Context) {
+	timer := time.NewTimer(jitter(b.fedTick()))
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			b.refreshDueTrustDomains(ctx)
+			timer.Reset(jitter(b.fedTick()))
+		}
+	}
+}
+
+// refreshDueTrustDomains refreshes every federated trust domain whose refresh
+// interval has elapsed. A never-fetched domain is always due, which primes it.
+func (b *certAuthBackend) refreshDueTrustDomains(ctx context.Context) {
+	entries, err := b.listTrustDomainEntries(ctx)
+	if err != nil {
+		b.logger.Warn("federation: failed to list trust domains", lgr.Err(err))
+		return
+	}
+	now := time.Now()
+	for _, d := range entries {
+		if ctx.Err() != nil { // stop promptly on step-down/unmount
+			return
+		}
+		if !d.IsFederated() {
+			continue
+		}
+		if d.LastRefreshUnix != 0 && now.Before(time.Unix(d.LastRefreshUnix, 0).Add(b.refreshInterval(d))) {
+			continue
+		}
+		if _, err := b.refreshFederatedTrustDomain(ctx, d); err != nil {
+			b.logger.Warn("federation: refresh failed", lgr.String("trust_domain", d.Name), lgr.Err(err))
+		}
+	}
+}
+
+// jitter adds up to ~5% positive jitter to spread refreshes across nodes/restarts.
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	return d + time.Duration(rand.Int63n(int64(d)/20+1))
 }

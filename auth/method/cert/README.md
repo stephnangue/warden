@@ -263,7 +263,47 @@ On each login Warden verifies, via the SPIFFE reference library, that the certif
 
 A certificate whose trust domain isn't configured — or differs from the role's — is rejected, even if some *other* configured bundle would have accepted it. That cross-trust-domain isolation is the property plain CA-pool matching can't provide. The transparent-auth flow behaves exactly as in x509 mode, and revocation is available too — but SVIDs are typically short-lived and carry no CRL/OCSP endpoints, so leave `revocation_mode` at `none` (a strict mode would reject an SVID that has no revocation URL).
 
-> **Chain note.** Only the leaf certificate is available on the forwarded-header path, so the registered bundle must contain the authority that directly signed the SVID (the usual SPIRE setup). **Federation note.** Bundles are configured statically or pushed by SPIRE; fetching them from SPIFFE federation endpoints with periodic refresh is not yet supported.
+> **Chain note.** Only the leaf certificate is available on the forwarded-header path, so the registered bundle must contain the authority that directly signed the SVID (the usual SPIRE setup).
+
+### Federation
+
+Instead of a static bundle, a trust domain can pull its bundle from a remote **bundle endpoint** and refresh it automatically — the SPIFFE Federation model. Setting `bundle_endpoint_profile` makes a trust domain federated:
+
+```bash
+# https_web — the endpoint's TLS cert is validated via Web PKI (system roots,
+# or web_pki_ca_pem for a private CA)
+warden write auth/spiffe/trust-domain/partner.acme.io \
+  bundle_endpoint_url="https://spire.acme.io/bundle" \
+  bundle_endpoint_profile="https_web"
+
+# https_spiffe — the endpoint is authenticated by its own SVID against a required
+# bootstrap bundle and an expected endpoint SPIFFE ID
+warden write auth/spiffe/trust-domain/partner.acme.io \
+  bundle_endpoint_url="https://spire.acme.io:8443" \
+  bundle_endpoint_profile="https_spiffe" \
+  endpoint_spiffe_id="spiffe://partner.acme.io/spire/server" \
+  bundle_pem=@bootstrap.pem
+```
+
+Fields:
+
+- `bundle_endpoint_url` — the `https://` bundle endpoint (required for a federated domain).
+- `bundle_endpoint_profile` — `https_web` or `https_spiffe`.
+- `endpoint_spiffe_id` — the SVID the endpoint presents; **required** for `https_spiffe`, rejected for `https_web`. Must be in the same trust domain.
+- `web_pki_ca_pem` — optional custom CA roots for an `https_web` endpoint's TLS cert (default: system roots).
+- For `https_spiffe` a **bootstrap bundle** (`bundle_pem` or `bundle_json`) is required — it authenticates the first fetch and is the initial set of authorities. An `https_web` domain needs no bootstrap, but has no authorities (and fails closed at login) until its first successful fetch.
+
+Refresh:
+
+- Warden refreshes each federated bundle on a background loop, honoring the bundle's `spiffe_refresh_hint` (clamped to a sane range) and de-duplicating by sequence number; a failed fetch keeps the last-good bundle and surfaces `last_error` on read. A fetched bundle with no X.509 authorities is rejected (last-good kept).
+- A config write doesn't fetch immediately; the loop primes a new federated domain on its next tick, or force a fetch now with `warden write auth/spiffe/trust-domain/<name>/refresh`.
+- `warden read auth/spiffe/trust-domain/<name>` shows the endpoint, profile, `sequence`, `last_refresh`, and `last_error`.
+
+> **HA note.** The refresh loop runs on the **active node only** (standbys forward auth requests). The fetched bundle is persisted, so on failover the new active node loads the last-good bundle and resumes refreshing.
+
+### One mount, many trust domains
+
+A single spiffe mount holds multiple trust domains — your own plus any federated peers. This is the federation-native shape, and it stays safe: a role binds exactly one `trust_domain`, an SVID validates only against its own domain's bundle, and adding a trust domain grants nothing until a role references it. Prefer **separate mounts** only for administrative isolation — distinct ACLs/audit, or different mount-level `token_ttl` / `revocation_mode` / `default_role`.
 
 ## How the Certificate Reaches Warden
 
