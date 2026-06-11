@@ -81,6 +81,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			b.pathIntrospect(),
 			b.pathSPIFFETrustDomain(),
 			b.pathSPIFFETrustDomainList(),
+			b.pathSPIFFETrustDomainRefresh(),
 		},
 	}
 
