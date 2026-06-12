@@ -242,6 +242,17 @@ listener "tcp" {
 			wantErr: "mutually exclusive",
 		},
 		{
+			name: "tls_spiffe + tls_require_client_cert — error",
+			extra: `
+listener "tcp" {
+  address                 = ":8508"
+  tls_spiffe              = true
+  tls_require_client_cert = true
+}
+`,
+			wantErr: "tls_require_client_cert is not used with tls_spiffe",
+		},
+		{
 			name: "tls_spiffe + tls_disable — error",
 			extra: `
 listener "tcp" {

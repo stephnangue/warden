@@ -641,6 +641,9 @@ func validateConfig(config *Config) error {
 			if ln.TLSCertFile != "" || ln.TLSKeyFile != "" || ln.TLSClientCAFile != "" {
 				return fmt.Errorf("listener[%d]: tls_spiffe is mutually exclusive with tls_cert_file/tls_key_file/tls_client_ca_file", i)
 			}
+			if ln.TLSRequireClientCert != nil {
+				return fmt.Errorf("listener[%d]: tls_require_client_cert is not used with tls_spiffe; use tls_spiffe_request_client_cert instead", i)
+			}
 			if ln.TLSSPIFFEStartupTimeout != "" {
 				d, err := time.ParseDuration(ln.TLSSPIFFEStartupTimeout)
 				if err != nil {
