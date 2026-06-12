@@ -383,7 +383,7 @@ func TestPathRole_Fields(t *testing.T) {
 	// Check all expected fields exist
 	expectedFields := []string{
 		"name", "bound_audiences", "bound_subject", "bound_claims",
-		"bound_uri_patterns", "uri_claim", "token_policies",
+		"token_policies",
 		"token_ttl", "user_claim", "cred_spec_name",
 		"max_age",
 	}
@@ -512,8 +512,6 @@ func TestHandleRoleUpdate_AllFields(t *testing.T) {
 			"bound_audiences":     []string{"new-aud"},
 			"bound_subject":       "new-sub",
 			"bound_claims":        map[string]any{"tenant": "acme"},
-			"bound_uri_patterns":  []string{"spiffe://*"},
-			"uri_claim":           "custom_claim",
 			"token_policies":      []string{"new-policy"},
 			"token_ttl":           7200,
 			"user_claim":          "email",
@@ -527,8 +525,6 @@ func TestHandleRoleUpdate_AllFields(t *testing.T) {
 			"bound_audiences":     {Type: framework.TypeCommaStringSlice},
 			"bound_subject":       {Type: framework.TypeString},
 			"bound_claims":        {Type: framework.TypeMap},
-			"bound_uri_patterns":  {Type: framework.TypeCommaStringSlice},
-			"uri_claim":           {Type: framework.TypeString},
 			"token_policies":      {Type: framework.TypeCommaStringSlice},
 			"token_ttl":           {Type: framework.TypeDurationSecond},
 			"user_claim":          {Type: framework.TypeString},
@@ -546,7 +542,6 @@ func TestHandleRoleUpdate_AllFields(t *testing.T) {
 	updated, _ := b.getRole(ctx, "full-update-role")
 	assert.Equal(t, []string{"new-aud"}, updated.BoundAudiences)
 	assert.Equal(t, "new-sub", updated.BoundSubject)
-	assert.Equal(t, "custom_claim", updated.URIClaim)
 	assert.Equal(t, "email", updated.UserClaim)
 	assert.Equal(t, "aws-spec", updated.CredSpecName)
 	assert.Equal(t, "groups", updated.GroupsClaim)
@@ -605,18 +600,6 @@ func TestValidateRole_DefaultsApplied(t *testing.T) {
 	assert.Equal(t, time.Hour.String(), role.TokenTTL)
 }
 
-func TestValidateRole_URIPatternsSetDefaultClaim(t *testing.T) {
-	b, _ := createTestBackendWithStorage(t)
-
-	role := &JWTRole{
-		Name:             "uri-defaults",
-		BoundURIPatterns: []string{"spiffe://*"},
-	}
-	err := b.validateRole(role)
-	require.NoError(t, err)
-	assert.Equal(t, "sub", role.URIClaim)
-}
-
 // =============================================================================
 // Initialize with storage
 // =============================================================================
@@ -630,8 +613,6 @@ func TestBuildRoleFromFieldData_AllFields(t *testing.T) {
 			"bound_audiences":     []string{"aud1"},
 			"bound_subject":       "sub1",
 			"bound_claims":        map[string]any{"k": "v"},
-			"bound_uri_patterns":  []string{"spiffe://*"},
-			"uri_claim":           "custom",
 			"token_policies":      []string{"p1"},
 			"token_ttl":           3600,
 			"user_claim":          "email",
@@ -645,8 +626,6 @@ func TestBuildRoleFromFieldData_AllFields(t *testing.T) {
 			"bound_audiences":     {Type: framework.TypeCommaStringSlice},
 			"bound_subject":       {Type: framework.TypeString},
 			"bound_claims":        {Type: framework.TypeMap},
-			"bound_uri_patterns":  {Type: framework.TypeCommaStringSlice},
-			"uri_claim":           {Type: framework.TypeString},
 			"token_policies":      {Type: framework.TypeCommaStringSlice},
 			"token_ttl":           {Type: framework.TypeDurationSecond},
 			"user_claim":          {Type: framework.TypeString},
@@ -661,7 +640,6 @@ func TestBuildRoleFromFieldData_AllFields(t *testing.T) {
 	assert.Equal(t, "full-role", role.Name)
 	assert.Equal(t, []string{"aud1"}, role.BoundAudiences)
 	assert.Equal(t, "sub1", role.BoundSubject)
-	assert.Equal(t, "custom", role.URIClaim)
 	assert.Equal(t, "email", role.UserClaim)
 	assert.Equal(t, "spec", role.CredSpecName)
 	assert.Equal(t, "groups", role.GroupsClaim)

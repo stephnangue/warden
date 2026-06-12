@@ -12,8 +12,6 @@ type JWTRole struct {
 	BoundAudiences    []string       `json:"bound_audiences,omitempty"`
 	BoundSubject      string         `json:"bound_subject,omitempty"`
 	BoundClaims       map[string]any `json:"bound_claims,omitempty"`
-	BoundURIPatterns  []string       `json:"bound_uri_patterns,omitempty"` // Segment-aware URI patterns (e.g. spiffe://+/dept/*)
-	URIClaim          string         `json:"uri_claim,omitempty"`          // Claim to match against URI patterns (default: "sub")
 	TokenPolicies     []string       `json:"token_policies"`
 	TokenTTL          string         `json:"token_ttl"`
 	TokenType         string         `json:"token_type,omitempty"`

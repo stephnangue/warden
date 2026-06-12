@@ -42,8 +42,6 @@ func mapToJWTAuthConfig(data map[string]any) (*JWTAuthConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal to JWTAuthConfig: %w", err)
 	}
 
-	// Mode validation is done in setupJWTConfig
-
 	if config.UserClaim == "" {
 		config.UserClaim = "sub"
 	}
