@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"context"
-	"github.com/stephnangue/warden/auth/helper"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -351,57 +350,6 @@ func TestValidateBoundClaims_TableDriven(t *testing.T) {
 				assert.Contains(t, err.Error(), tc.errorMsg)
 			} else {
 				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
-// =============================================================================
-// validateBoundURIPatterns Tests (via helper.MatchAny)
-// =============================================================================
-
-func TestBoundURIPatterns_Validation(t *testing.T) {
-	tests := []struct {
-		name       string
-		claimValue string
-		patterns   []string
-		wantMatch  bool
-	}{
-		// SPIFFE ID patterns
-		{"exact spiffe match", "spiffe://example.com/dept/svc", []string{"spiffe://example.com/dept/svc"}, true},
-		{"plus trust domain", "spiffe://example.com/dept/svc", []string{"spiffe://+/dept/svc"}, true},
-		{"prefix wildcard", "spiffe://example.com/dept/team/svc", []string{"spiffe://example.com/dept/*"}, true},
-		{"scheme catch-all", "spiffe://anything/any/path", []string{"spiffe://*"}, true},
-		{"combined plus and star", "spiffe://example.com/dept/team/svc", []string{"spiffe://+/dept/*"}, true},
-		{"mismatch domain", "spiffe://other.com/dept/svc", []string{"spiffe://example.com/dept/svc"}, false},
-		{"mismatch path", "spiffe://example.com/other/svc", []string{"spiffe://+/dept/svc"}, false},
-		{"wrong scheme", "https://example.com/path", []string{"spiffe://*"}, false},
-
-		// Multiple patterns (OR semantics)
-		{"matches second pattern", "spiffe://other.com/web", []string{"spiffe://example.com/web", "spiffe://other.com/web"}, true},
-		{"matches none", "spiffe://third.com/web", []string{"spiffe://example.com/web", "spiffe://other.com/web"}, false},
-
-		// Empty claim
-		{"empty claim value", "", []string{"spiffe://*"}, false},
-		{"empty patterns", "spiffe://example.com/svc", []string{}, false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			claims := map[string]interface{}{
-				"sub": tc.claimValue,
-			}
-
-			claimValue := extractClaim(claims, "sub")
-			var matched bool
-			if claimValue != "" && len(tc.patterns) > 0 {
-				matched = helper.MatchAny(claimValue, tc.patterns)
-			}
-
-			if tc.wantMatch {
-				assert.True(t, matched, "expected claim %q to match patterns %v", tc.claimValue, tc.patterns)
-			} else {
-				assert.False(t, matched, "expected claim %q NOT to match patterns %v", tc.claimValue, tc.patterns)
 			}
 		})
 	}

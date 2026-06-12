@@ -99,36 +99,3 @@ func TestMatchRole_RoleBoundClaimMatches(t *testing.T) {
 
 	assert.NoError(t, matchRole(claims, nil, role))
 }
-
-func TestMatchRole_URIPatternMismatch(t *testing.T) {
-	claims := map[string]any{"sub": "spiffe://other/ns/foo"}
-	role := &JWTRole{
-		Name:             "r",
-		BoundURIPatterns: []string{"spiffe://trusted/ns/*"},
-	}
-
-	err := matchRole(claims, nil, role)
-	assert.Error(t, err)
-}
-
-func TestMatchRole_URIPatternMatches(t *testing.T) {
-	claims := map[string]any{"sub": "spiffe://trusted/ns/foo"}
-	role := &JWTRole{
-		Name:             "r",
-		BoundURIPatterns: []string{"spiffe://trusted/ns/*"},
-	}
-
-	assert.NoError(t, matchRole(claims, nil, role))
-}
-
-func TestMatchRole_URIPatternUsesConfiguredClaim(t *testing.T) {
-	claims := map[string]any{"sub": "alice", "spiffe_id": "spiffe://trusted/ns/foo"}
-	role := &JWTRole{
-		Name:             "r",
-		URIClaim:         "spiffe_id",
-		BoundURIPatterns: []string{"spiffe://trusted/ns/*"},
-	}
-
-	assert.NoError(t, matchRole(claims, nil, role))
-}
-

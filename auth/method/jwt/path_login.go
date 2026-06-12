@@ -121,7 +121,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 		}, nil
 	}
 
-	// Post-Validate claim checks (config + role bound claims, bound URIs).
+	// Post-Validate claim checks (config + role bound claims).
 	// Shared with introspection via matchRole so the two paths cannot drift.
 	if err := matchRole(claims, config.BoundClaims, role); err != nil {
 		b.logger.Warn("login failed: bound claims check", lgr.Err(err), lgr.String("role", roleName))

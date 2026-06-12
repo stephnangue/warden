@@ -7,7 +7,6 @@ import (
 	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
-	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
@@ -39,14 +38,6 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 			"bound_claims": {
 				Type:        framework.TypeMap,
 				Description: "Map of claims that must match for this role",
-			},
-			"bound_uri_patterns": {
-				Type:        framework.TypeCommaStringSlice,
-				Description: "Segment-aware URI patterns to match against uri_claim (e.g. spiffe://+/dept/*, spiffe://*)",
-			},
-			"uri_claim": {
-				Type:        framework.TypeString,
-				Description: "JWT claim to validate against bound_uri_patterns (default: sub)",
 			},
 			"token_policies": {
 				Type:        framework.TypeCommaStringSlice,
@@ -172,8 +163,6 @@ func (b *jwtAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reques
 			"bound_audiences":     role.BoundAudiences,
 			"bound_subject":       role.BoundSubject,
 			"bound_claims":        role.BoundClaims,
-			"bound_uri_patterns":  role.BoundURIPatterns,
-			"uri_claim":           role.URIClaim,
 			"token_policies":      role.TokenPolicies,
 			"token_ttl":           role.TokenTTL,
 			"user_claim":          role.UserClaim,
@@ -210,12 +199,6 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 		}
 		if v, ok := d.GetOk("bound_claims"); ok {
 			role.BoundClaims = v.(map[string]any)
-		}
-		if v, ok := d.GetOk("bound_uri_patterns"); ok {
-			role.BoundURIPatterns = v.([]string)
-		}
-		if v, ok := d.GetOk("uri_claim"); ok {
-			role.URIClaim = v.(string)
 		}
 		if v, ok := d.GetOk("token_policies"); ok {
 			role.TokenPolicies = v.([]string)
@@ -315,18 +298,6 @@ func (b *jwtAuthBackend) validateRole(role *JWTRole) error {
 		return logical.ErrBadRequestf("invalid token_ttl: %v", err)
 	}
 
-	// Validate URI patterns
-	for _, p := range role.BoundURIPatterns {
-		if err := helper.ValidatePattern(p); err != nil {
-			return logical.ErrBadRequestf("invalid bound_uri_patterns pattern: %v", err)
-		}
-	}
-
-	// Default URI claim to "sub" when patterns are configured
-	if len(role.BoundURIPatterns) > 0 && role.URIClaim == "" {
-		role.URIClaim = "sub"
-	}
-
 	// Validate max_age if provided
 	if role.MaxAge != "" {
 		maxAge, err := role.ParseMaxAge()
@@ -358,12 +329,6 @@ func (b *jwtAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldD
 	}
 	if v, ok := d.GetOk("bound_claims"); ok {
 		role.BoundClaims = v.(map[string]any)
-	}
-	if v, ok := d.GetOk("bound_uri_patterns"); ok {
-		role.BoundURIPatterns = v.([]string)
-	}
-	if v, ok := d.GetOk("uri_claim"); ok {
-		role.URIClaim = v.(string)
 	}
 	if v, ok := d.GetOk("token_policies"); ok {
 		role.TokenPolicies = v.([]string)

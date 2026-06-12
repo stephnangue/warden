@@ -2,12 +2,10 @@ package jwt
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/hashicorp/cap/jwt"
-	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -140,25 +138,14 @@ func validateJWTForRole(ctx context.Context, config *JWTAuthConfig, role *JWTRol
 }
 
 // matchRole runs the post-Validate claim checks from the login flow:
-// config-level bound claims, role-level bound claims, and bound URI
-// patterns. Kept as a shared helper so login and introspection cannot
-// drift on which checks are enforced.
+// config-level bound claims and role-level bound claims. Kept as a shared
+// helper so login and introspection cannot drift on which checks are enforced.
 func matchRole(claims map[string]any, configBoundClaims map[string]any, role *JWTRole) error {
 	if err := validateBoundClaims(claims, configBoundClaims); err != nil {
 		return err
 	}
 	if err := validateBoundClaims(claims, role.BoundClaims); err != nil {
 		return err
-	}
-	if len(role.BoundURIPatterns) > 0 {
-		uriClaim := role.URIClaim
-		if uriClaim == "" {
-			uriClaim = "sub"
-		}
-		claimValue := extractClaim(claims, uriClaim)
-		if claimValue == "" || !helper.MatchAny(claimValue, role.BoundURIPatterns) {
-			return fmt.Errorf("URI pattern mismatch")
-		}
 	}
 	return nil
 }
