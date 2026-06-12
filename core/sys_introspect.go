@@ -100,10 +100,11 @@ func (b *SystemBackend) handleIntrospectRoles(ctx context.Context, req *logical.
 	// Snapshot matching auth-mount entries under the lock, then release
 	// before dispatching so that concurrent mount writes are not blocked on
 	// our in-process fan-out. The filter asks the registry "what TokenType
-	// serves this mount, and does its CredentialFormat exactly match what
-	// the caller presented?" — exact-match so a generic JWT never fans out
-	// to a kubernetes mount (which would burn a TokenReview round-trip)
-	// and vice versa.
+	// serves this mount, and does its CredentialFormat match what the caller
+	// presented?" — exact-match so a generic JWT never fans out to a
+	// kubernetes mount (which would burn a TokenReview round-trip) and vice
+	// versa. The one exception is the virtual "spiffe" format, which accepts
+	// both a presented cert and a JWT (a JWT-SVID detects as "jwt").
 	b.core.authLock.RLock()
 	authMounts, err := b.core.auth.findAllNamespaceMounts(ctx)
 	if err != nil {
@@ -113,7 +114,14 @@ func (b *SystemBackend) handleIntrospectRoles(ctx context.Context, req *logical.
 	matching := make([]*MountEntry, 0, len(authMounts))
 	for _, entry := range authMounts {
 		tt := b.core.tokenStore.GetTransparentTokenTypeForAuthMethod(entry.Type)
-		if tt == nil || tt.CredentialFormat() != credFormat {
+		if tt == nil {
+			continue
+		}
+		// Exact-match, except the virtual "spiffe" format accepts both a
+		// presented cert and a generic JWT (a JWT-SVID is detected as "jwt"),
+		// but never a k8s SA token (which a spiffe mount cannot authenticate).
+		cf := tt.CredentialFormat()
+		if cf != credFormat && !(cf == "spiffe" && (credFormat == "cert" || credFormat == "jwt")) {
 			continue
 		}
 		matching = append(matching, entry)

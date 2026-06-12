@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1450,6 +1452,90 @@ func TestHandleTransparentAuth(t *testing.T) {
 		// Should fail with the new mount-existence guard
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no auth mount registered")
+	})
+}
+
+// spiffeFakeCert returns a certificate with the given raw DER bytes and the hex
+// SHA-256 fingerprint the spiffe dispatch computes from it.
+func spiffeFakeCert(der string) (*x509.Certificate, string) {
+	cert := &x509.Certificate{Raw: []byte(der)}
+	h := sha256.Sum256(cert.Raw)
+	return cert, hex.EncodeToString(h[:])
+}
+
+func spiffeReqWithCert(cert *x509.Certificate, clientToken string) *logical.Request {
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/vault/role/api/gateway", nil)
+	httpReq = httpReq.WithContext(listener.WithForwardedClientCert(httpReq.Context(), cert))
+	return &logical.Request{HTTPRequest: httpReq, ClientToken: clientToken}
+}
+
+// TestHandleTransparentAuth_Spiffe drives the full performImplicitAuth dispatch
+// for a "spiffe" mount: a pre-seeded spiffe_role cache entry is resolved through
+// the case "spiffe" branch for both the JWT-SVID and the X.509-SVID credential,
+// including the JWT-wins precedence and the stray-bearer ClientToken reset.
+func TestHandleTransparentAuth_Spiffe(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	mount := mountStubAuthMethod(t, core, "spiffe/", "spiffe")
+	provider := func() *mockTransparentModeProvider {
+		return &mockTransparentModeProvider{transparentMode: true, autoAuthPath: "auth/spiffe/"}
+	}
+	seed := func(t *testing.T, tokenValue, role string) *TokenEntry {
+		t.Helper()
+		te, err := core.tokenStore.GenerateToken(ctx, TypeSpiffeRole, &AuthData{
+			TokenValue: tokenValue, MountAccessor: mount.Accessor, RoleName: role,
+			PrincipalID: "spiffe://example.org/sa/api", ExpireAt: time.Now().Add(time.Hour),
+		})
+		require.NoError(t, err)
+		return te
+	}
+	spiffeJWT := mintK8sJWT(`{"sub":"spiffe://example.org/ns/default/sa/api"}`)
+
+	t.Run("JWT-SVID bearer resolves the cached token", func(t *testing.T) {
+		te := seed(t, spiffeJWT, "api")
+		req := &logical.Request{ClientToken: spiffeJWT}
+		require.NoError(t, core.handleTransparentAuth(ctx, req, provider(), "api"))
+		require.NotNil(t, req.TokenEntry())
+		assert.Equal(t, te.ID, req.TokenEntry().ID)
+	})
+
+	t.Run("X.509-SVID forwarded cert resolves the cached token and sets ClientToken", func(t *testing.T) {
+		cert, fingerprint := spiffeFakeCert("der-x509-svid")
+		te := seed(t, fingerprint, "api")
+		req := spiffeReqWithCert(cert, "")
+		require.NoError(t, core.handleTransparentAuth(ctx, req, provider(), "api"))
+		require.NotNil(t, req.TokenEntry())
+		assert.Equal(t, te.ID, req.TokenEntry().ID)
+		assert.Equal(t, te.ID, req.ClientToken)
+	})
+
+	// A-5: with both a JWT-SVID and a forwarded cert present, the JWT wins. Only
+	// the JWT token is seeded; cert-first would miss the cache and fail logging
+	// into the stub mount.
+	t.Run("JWT-SVID wins over an ambient cert", func(t *testing.T) {
+		cert, _ := spiffeFakeCert("ambient-mesh-cert")
+		te := seed(t, spiffeJWT, "api")
+		req := spiffeReqWithCert(cert, spiffeJWT)
+		require.NoError(t, core.handleTransparentAuth(ctx, req, provider(), "api"))
+		assert.Equal(t, te.ID, req.TokenEntry().ID)
+	})
+
+	// A-6: a stray non-SVID bearer must not shadow the cert-minted token.
+	t.Run("stray non-SVID bearer does not shadow the cert token", func(t *testing.T) {
+		cert, fingerprint := spiffeFakeCert("der-with-stray-bearer")
+		te := seed(t, fingerprint, "api")
+		stray := mintK8sJWT(`{"sub":"1234567890"}`) // generic JWT, not a JWT-SVID
+		req := spiffeReqWithCert(cert, stray)
+		require.NoError(t, core.handleTransparentAuth(ctx, req, provider(), "api"))
+		assert.Equal(t, te.ID, req.TokenEntry().ID)
+		assert.Equal(t, te.ID, req.ClientToken, "stray bearer must be replaced by the cert-minted token ID")
+	})
+
+	t.Run("no credential errors", func(t *testing.T) {
+		req := &logical.Request{ClientToken: ""}
+		err := core.handleTransparentAuth(ctx, req, provider(), "api")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "X.509-SVID")
 	})
 }
 
