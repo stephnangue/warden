@@ -24,6 +24,7 @@ import (
 	"github.com/openbao/openbao/sdk/v2/helper/pathmanager"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	authhelper "github.com/stephnangue/warden/auth/helper"
+	"github.com/stephnangue/warden/helper"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
@@ -1453,6 +1454,40 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 			return c.LookupTransparentTokenWithRole(ctx, ttype, clientToken, mountAccessor, authRole)
 		}
 
+	case "spiffe":
+		// Unified SPIFFE mount: accept either a JWT-SVID (bearer) or an
+		// X.509-SVID (TLS/forwarded cert). Prefer an explicitly-presented
+		// JWT-SVID over an ambient mesh-forwarded cert — a sidecar makes a
+		// forwarded cert present on most requests, so cert-first would shadow
+		// the JWT path and mis-attribute a JWT-SVID workload to the cert
+		// identity. A JWT-SVID is a bearer JWT whose (unverified) sub is a
+		// spiffe:// ID; the mount re-verifies it against the trust-domain bundle.
+		if clientToken := req.ClientToken; isSPIFFEJWTSVID(clientToken) {
+			sfHash := sha256.Sum256([]byte("spiffe-jwt:" + mountAccessor + ":" + clientToken + ":" + authRole))
+			singleflightKey = hex.EncodeToString(sfHash[:])
+			loginData = map[string]any{"jwt": clientToken, "role": authRole}
+			credKey = clientToken
+			lookupFunc = func() (*TokenEntry, error) {
+				return c.LookupTransparentTokenWithRole(ctx, ttype, clientToken, mountAccessor, authRole)
+			}
+		} else if clientCert := extractTransparentClientCert(req); clientCert != nil {
+			hash := sha256.Sum256(clientCert.Raw)
+			fingerprint := hex.EncodeToString(hash[:])
+			sfHash := sha256.Sum256([]byte("spiffe-cert:" + mountAccessor + ":" + fingerprint + ":" + authRole))
+			singleflightKey = hex.EncodeToString(sfHash[:])
+			loginData = map[string]any{"role": authRole}
+			credKey = fingerprint
+			// Authenticate via the X.509-SVID, not any bearer. Clear a stray
+			// non-SVID bearer so the cert-minted token ID becomes ClientToken
+			// downstream (the shared reset below only fires when it is empty).
+			req.ClientToken = ""
+			lookupFunc = func() (*TokenEntry, error) {
+				return c.LookupTransparentTokenWithRole(ctx, ttype, fingerprint, mountAccessor, authRole)
+			}
+		} else {
+			return fmt.Errorf("auth method %q at %q requires an X.509-SVID (TLS/forwarded cert) or a JWT-SVID bearer token", authMountEntry.Type, autoAuthPath)
+		}
+
 	default:
 		return fmt.Errorf("auth method %q has unsupported credential format %q for implicit auth", authMountEntry.Type, ttype.CredentialFormat())
 	}
@@ -1548,6 +1583,23 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		req.ClientToken = te.ID
 	}
 	return nil
+}
+
+// isSPIFFEJWTSVID reports whether token is a JWT whose unverified subject is a
+// SPIFFE ID (a JWT-SVID). The spiffe transparent-auth dispatch uses it to prefer
+// an explicitly-presented JWT-SVID over an ambient mesh-forwarded cert. The
+// signature is NOT verified here — the mount re-verifies the JWT-SVID against
+// the trust-domain bundle at login.
+func isSPIFFEJWTSVID(token string) bool {
+	if !strings.HasPrefix(token, "eyJ") {
+		return false
+	}
+	claims, err := helper.ParseJWTClaimsUnverified(token)
+	if err != nil {
+		return false
+	}
+	sub, _ := claims["sub"].(string)
+	return strings.HasPrefix(sub, "spiffe://")
 }
 
 // extractTransparentClientCert extracts the client certificate from a request.

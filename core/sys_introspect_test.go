@@ -76,12 +76,14 @@ func (b *introspectMockBackend) HandleRequest(ctx context.Context, req *logical.
 	}, nil
 }
 
-func (b *introspectMockBackend) Cleanup(ctx context.Context)                               {}
-func (b *introspectMockBackend) Setup(ctx context.Context, c *logical.BackendConfig) error { return nil }
-func (b *introspectMockBackend) Initialize(ctx context.Context) error                      { return nil }
-func (b *introspectMockBackend) Config() map[string]any                                    { return nil }
-func (b *introspectMockBackend) Type() string                                              { return "jwt" }
-func (b *introspectMockBackend) Class() logical.BackendClass                               { return logical.ClassAuth }
+func (b *introspectMockBackend) Cleanup(ctx context.Context) {}
+func (b *introspectMockBackend) Setup(ctx context.Context, c *logical.BackendConfig) error {
+	return nil
+}
+func (b *introspectMockBackend) Initialize(ctx context.Context) error { return nil }
+func (b *introspectMockBackend) Config() map[string]any               { return nil }
+func (b *introspectMockBackend) Type() string                         { return "jwt" }
+func (b *introspectMockBackend) Class() logical.BackendClass          { return logical.ClassAuth }
 func (b *introspectMockBackend) HandleExistenceCheck(ctx context.Context, req *logical.Request) (bool, bool, error) {
 	return false, false, nil
 }
@@ -140,6 +142,12 @@ func TestDetectIntrospectCredentialFormat(t *testing.T) {
 		httpReq := httptest.NewRequest(http.MethodGet, "/x", nil)
 		httpReq.Header.Set("Authorization", "Bearer "+jwt)
 		assert.Equal(t, "k8s_sa_jwt", detectIntrospectCredentialFormat(&logical.Request{HTTPRequest: httpReq}))
+	})
+	t.Run("SPIFFE JWT-SVID (sub is spiffe://) returns jwt (fans out to spiffe mounts)", func(t *testing.T) {
+		jwt := mintK8sJWT(`{"sub":"spiffe://example.org/ns/default/sa/api"}`)
+		httpReq := httptest.NewRequest(http.MethodGet, "/x", nil)
+		httpReq.Header.Set("Authorization", "Bearer "+jwt)
+		assert.Equal(t, "jwt", detectIntrospectCredentialFormat(&logical.Request{HTTPRequest: httpReq}))
 	})
 	t.Run("no Bearer prefix returns empty", func(t *testing.T) {
 		httpReq := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -407,4 +415,60 @@ func TestSystemBackend_Introspect_FanOutRunsInParallel(t *testing.T) {
 	const maxAllowed = 250 * time.Millisecond
 	assert.Less(t, elapsed, maxAllowed,
 		"fan-out should run in parallel (%d mounts × %v); got %v", nMounts, perMountDelay, elapsed)
+}
+
+// TestIsSPIFFEJWTSVID covers the unverified JWT-SVID detection the spiffe
+// transparent-auth dispatch uses to prefer a JWT-SVID over an ambient cert.
+func TestIsSPIFFEJWTSVID(t *testing.T) {
+	assert.True(t, isSPIFFEJWTSVID(mintK8sJWT(`{"sub":"spiffe://example.org/ns/default/sa/api"}`)),
+		"a JWT with a spiffe:// sub is a JWT-SVID")
+	assert.False(t, isSPIFFEJWTSVID(mintK8sJWT(`{"sub":"system:serviceaccount:default:app"}`)),
+		"a k8s SA token is not a JWT-SVID")
+	assert.False(t, isSPIFFEJWTSVID(mintK8sJWT(`{"sub":"1234567890"}`)),
+		"a generic OIDC JWT is not a JWT-SVID")
+	assert.False(t, isSPIFFEJWTSVID("not-a-jwt"), "a non-eyJ string is not a JWT")
+	assert.False(t, isSPIFFEJWTSVID(""), "empty is not a JWT")
+	assert.False(t, isSPIFFEJWTSVID("eyJ.garbage.sig"), "an unparseable JWT is rejected")
+}
+
+// TestSystemBackend_Introspect_SpiffeMatchesCertAndJWT pins the aggregator-filter
+// relaxation: a "spiffe" mount (virtual CredentialFormat "spiffe") is fanned out
+// to for BOTH a cert-presented and a JWT-presented introspect, but never for a
+// Kubernetes SA token (which a spiffe mount cannot authenticate).
+func TestSystemBackend_Introspect_SpiffeMatchesCertAndJWT(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	ctrl := newIntrospectMock()
+
+	core.authMethods["spiffe"] = ctrl.factory()
+	require.NoError(t, core.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "spiffe", Path: "spiffe-mount/"}))
+	ctrl.rolesByMount["auth/spiffe-mount/"] = []map[string]any{{"name": "spiffe-role"}}
+
+	names := func(resp *logical.Response) []string {
+		roles := resp.Data["roles"].([]aggregatedRole)
+		out := make([]string, len(roles))
+		for i, r := range roles {
+			out[i] = r.Name
+		}
+		return out
+	}
+
+	t.Run("JWT request fans out", func(t *testing.T) {
+		resp, err := backend.handleIntrospectRoles(ctx, jwtRequest(t), nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"spiffe-role"}, names(resp))
+	})
+	t.Run("cert request fans out", func(t *testing.T) {
+		resp, err := backend.handleIntrospectRoles(ctx, certRequest(t), nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"spiffe-role"}, names(resp))
+	})
+	t.Run("k8s SA token does not fan out", func(t *testing.T) {
+		k8sJWT := mintK8sJWT(`{"sub":"system:serviceaccount:default:myapp"}`)
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/introspect/roles", nil)
+		httpReq.Header.Set("Authorization", "Bearer "+k8sJWT)
+		req := &logical.Request{Operation: logical.ReadOperation, Path: "introspect/roles", HTTPRequest: httpReq}
+		resp, err := backend.handleIntrospectRoles(ctx, req, nil)
+		require.NoError(t, err)
+		assert.Empty(t, names(resp))
+	})
 }

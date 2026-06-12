@@ -24,6 +24,7 @@ const (
 	TypeJWTRole        = "jwt_role"
 	TypeCertRole       = "cert_role"
 	TypeKubernetesRole = "kubernetes_role"
+	TypeSpiffeRole     = "spiffe_role"
 )
 
 // Storage path constants for token store organization
@@ -310,6 +311,7 @@ func (s *TokenStore) registerBuiltinTypes() error {
 		&JWTRoleTokenType{},
 		&CertRoleTokenType{},
 		&KubernetesRoleTokenType{},
+		&SpiffeRoleTokenType{},
 	}
 
 	for _, tokenType := range builtinTypes {
