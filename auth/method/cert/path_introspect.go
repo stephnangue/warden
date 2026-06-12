@@ -5,9 +5,6 @@ import (
 	"crypto/x509"
 	"net/http"
 
-	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
-
 	"github.com/stephnangue/warden/framework"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -50,16 +47,6 @@ func (b *certAuthBackend) handleIntrospectRoles(ctx context.Context, req *logica
 		return introspectEmpty(), nil
 	}
 
-	// Determine the mount mode and, for spiffe mode, snapshot the bundle set once.
-	mode := modeX509
-	if b.config != nil && b.config.Mode != "" {
-		mode = b.config.Mode
-	}
-	var set *x509bundle.Set
-	if mode == modeSPIFFE {
-		set = b.snapshotBundleSet()
-	}
-
 	roleNames, err := b.listRoles(ctx)
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
@@ -75,7 +62,7 @@ func (b *certAuthBackend) handleIntrospectRoles(ctx context.Context, req *logica
 		if role == nil {
 			continue
 		}
-		if b.certSatisfiesRole(cert, role, set, mode) {
+		if b.certSatisfiesRole(cert, role) {
 			matches = append(matches, introspectedRole{
 				Name:        role.Name,
 				Description: role.Description,
@@ -121,23 +108,9 @@ func verifyCertForRole(cert *x509.Certificate, role *CertRole, b *certAuthBacken
 }
 
 // certSatisfiesRole reports whether the presented certificate would be accepted
-// by the role under the mount mode — the same trust decision login makes, minus
-// the revocation check (introspection is advisory). In spiffe mode it verifies
-// the SVID against the role's trust-domain bundle; otherwise it runs the x509
-// chain + constraint checks.
-func (b *certAuthBackend) certSatisfiesRole(cert *x509.Certificate, role *CertRole, set *x509bundle.Set, mode string) bool {
-	if mode == modeSPIFFE {
-		if role.TrustDomain == "" || set == nil {
-			return false
-		}
-		expectedTD, err := spiffeid.TrustDomainFromString(role.TrustDomain)
-		if err != nil {
-			return false
-		}
-		_, _, err = verifySPIFFE(set, []*x509.Certificate{cert}, expectedTD, role.AllowedSPIFFEIDs)
-		return err == nil
-	}
-
+// by the role — the same trust decision login makes, minus the revocation check
+// (introspection is advisory): the x509 chain check plus the role constraints.
+func (b *certAuthBackend) certSatisfiesRole(cert *x509.Certificate, role *CertRole) bool {
 	if err := verifyCertForRole(cert, role, b); err != nil {
 		return false
 	}

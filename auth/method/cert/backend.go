@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
-
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
 	"github.com/stephnangue/warden/framework"
@@ -21,7 +19,6 @@ import (
 
 // CertAuthConfig represents certificate authentication configuration
 type CertAuthConfig struct {
-	Mode           string        `json:"mode,omitempty"`            // "x509" (default) or "spiffe"
 	TrustedCAPEM   string        `json:"trusted_ca_pem"`            // PEM-encoded trusted CA certs
 	PrincipalClaim string        `json:"principal_claim,omitempty"` // "cn" (default), "dns_san", "email_san", "uri_san", "serial"
 	TokenTTL       time.Duration `json:"token_ttl" default:"1h"`    // Default token TTL
@@ -41,26 +38,7 @@ type certAuthBackend struct {
 	logger            *logger.GatedLogger
 	storageView       sdklogical.Storage
 	revocationChecker *revocationChecker
-
-	// spiffeBundleSet holds the per-trust-domain X.509 authorities used to verify
-	// SVIDs in spiffe mode. Guarded by spiffeMu, separate from configMu.
-	spiffeBundleSet *x509bundle.Set
-	spiffeMu        sync.RWMutex
-
-	// Spiffe Federation refresh loop (active-node only). fedCancel stops the goroutine;
-	// the fed*Interval fields override the defaults and exist for tests.
-	fedCancel         context.CancelFunc
-	fedMu             sync.Mutex
-	fedTickInterval   time.Duration
-	fedMinRefresh     time.Duration
-	fedDefaultRefresh time.Duration
 }
-
-// Auth mount modes. A mount operates in exactly one mode, fixed on its config.
-const (
-	modeX509   = "x509"   // classic PKI: CA pool + field matching
-	modeSPIFFE = "spiffe" // SPIFFE X.509-SVID relying party
-)
 
 var _ logical.Factory = Factory
 
@@ -87,15 +65,8 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			b.pathRole(),
 			b.pathRoleList(),
 			b.pathIntrospect(),
-			b.pathSPIFFETrustDomain(),
-			b.pathSPIFFETrustDomainList(),
-			b.pathSPIFFETrustDomainRefresh(),
 		},
 	}
-
-	// Stop the federation refresh loop on unmount/seal (step-down is covered by
-	// the active context passed to Initialize).
-	b.Backend.Clean = func(context.Context) { b.stopFederationRefresh() }
 
 	if err := b.Backend.Setup(ctx, conf); err != nil {
 		return nil, err
@@ -122,27 +93,11 @@ func (b *certAuthBackend) setupCertConfig(_ context.Context, conf map[string]any
 		return err
 	}
 
-	if config.Mode == "" {
-		config.Mode = modeX509
-	}
-	if config.Mode != modeX509 && config.Mode != modeSPIFFE {
-		return fmt.Errorf("invalid mode %q; must be one of: %s, %s", config.Mode, modeX509, modeSPIFFE)
-	}
-
 	if config.TokenTTL == 0 {
 		config.TokenTTL = time.Hour
 	}
 	if config.PrincipalClaim == "" {
 		config.PrincipalClaim = "cn"
-	}
-	// Backward compatibility: the "spiffe_id" principal claim was removed because
-	// it pulled a spiffe:// URI from the certificate without validating it as an
-	// SVID. A persisted value is coerced to "uri_san" (identical result for a
-	// single-URI SVID) so existing mounts keep loading; real SPIFFE validation
-	// now lives in a mount configured with mode=spiffe.
-	if config.PrincipalClaim == "spiffe_id" {
-		b.logger.Warn("principal_claim \"spiffe_id\" is deprecated and does not validate SPIFFE SVIDs; coercing to \"uri_san\" (use a mount with mode=spiffe for SPIFFE validation)")
-		config.PrincipalClaim = "uri_san"
 	}
 	if !isValidPrincipalClaim(config.PrincipalClaim) {
 		return fmt.Errorf("invalid principal_claim %q; must be one of: %v", config.PrincipalClaim, validPrincipalClaims)
@@ -233,28 +188,7 @@ func (b *certAuthBackend) Initialize(ctx context.Context) error {
 			return fmt.Errorf("failed to setup cert config from storage: %w", err)
 		}
 	}
-
-	// In spiffe mode, load the configured trust-domain bundles. Fail closed: if
-	// the bundles cannot be loaded, the mount must not serve SPIFFE logins.
-	if b.mountMode() == modeSPIFFE {
-		if err := b.rebuildBundleSet(ctx); err != nil {
-			return fmt.Errorf("failed to load SPIFFE trust bundles: %w", err)
-		}
-		// Initialize runs only on the active node; ctx is the active context, so
-		// the refresh loop stops on step-down. It no-ops with no federated domains.
-		b.startFederationRefresh(ctx)
-	}
 	return nil
-}
-
-// mountMode returns the configured mount mode, defaulting to x509 when unset.
-func (b *certAuthBackend) mountMode() string {
-	b.configMu.RLock()
-	defer b.configMu.RUnlock()
-	if b.config != nil && b.config.Mode != "" {
-		return b.config.Mode
-	}
-	return modeX509
 }
 
 // SensitiveConfigFields returns the list of config fields that should be masked
