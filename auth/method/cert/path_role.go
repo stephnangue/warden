@@ -7,8 +7,6 @@ import (
 	"path"
 	"time"
 
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
-
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
@@ -57,15 +55,7 @@ func (b *certAuthBackend) pathRole() *framework.Path {
 			},
 			"certificate": {
 				Type:        framework.TypeString,
-				Description: "Role-specific CA PEM (overrides global trusted CAs). x509 mode only.",
-			},
-			"trust_domain": {
-				Type:        framework.TypeString,
-				Description: "SPIFFE trust domain this role authenticates (e.g. prod.example.org). Required in spiffe mode; not valid in x509 mode.",
-			},
-			"allowed_spiffe_ids": {
-				Type:        framework.TypeCommaStringSlice,
-				Description: "Optional SPIFFE ID segment-wildcard patterns restricting the path within the trust domain (e.g. spiffe://prod.example.org/ns/*/sa/*). spiffe mode only.",
+				Description: "Role-specific CA PEM (overrides global trusted CAs)",
 			},
 			"token_policies": {
 				Type:        framework.TypeCommaStringSlice,
@@ -171,31 +161,24 @@ func (b *certAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reque
 		return logical.ErrorResponse(logical.ErrNotFoundf("role %q not found", name)), nil
 	}
 
-	// Fields common to both modes.
-	data := map[string]any{
-		"name":           role.Name,
-		"description":    role.Description,
-		"token_policies": role.TokenPolicies,
-		"token_ttl":      role.TokenTTL,
-		"cred_spec_name": role.CredSpecName,
-	}
-
-	// Surface only the fields relevant to the mount's mode.
-	if b.mountMode() == modeSPIFFE {
-		data["trust_domain"] = role.TrustDomain
-		data["allowed_spiffe_ids"] = role.AllowedSPIFFEIDs
-	} else {
-		data["allowed_common_names"] = role.AllowedCommonNames
-		data["allowed_dns_sans"] = role.AllowedDNSSANs
-		data["allowed_email_sans"] = role.AllowedEmailSANs
-		data["allowed_uri_sans"] = role.AllowedURISANs
-		data["allowed_organizational_units"] = role.AllowedOrganizationalUnits
-		data["allowed_organizations"] = role.AllowedOrganizations
-		data["certificate"] = role.Certificate
-		data["principal_claim"] = role.PrincipalClaim
-	}
-
-	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
+	return &logical.Response{
+		StatusCode: http.StatusOK,
+		Data: map[string]any{
+			"name":                         role.Name,
+			"description":                  role.Description,
+			"token_policies":               role.TokenPolicies,
+			"token_ttl":                    role.TokenTTL,
+			"cred_spec_name":               role.CredSpecName,
+			"allowed_common_names":         role.AllowedCommonNames,
+			"allowed_dns_sans":             role.AllowedDNSSANs,
+			"allowed_email_sans":           role.AllowedEmailSANs,
+			"allowed_uri_sans":             role.AllowedURISANs,
+			"allowed_organizational_units": role.AllowedOrganizationalUnits,
+			"allowed_organizations":        role.AllowedOrganizations,
+			"certificate":                  role.Certificate,
+			"principal_claim":              role.PrincipalClaim,
+		},
+	}, nil
 }
 
 // handleRoleUpdate updates an existing role or creates it if it doesn't exist (upsert pattern).
@@ -235,12 +218,6 @@ func (b *certAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Req
 		}
 		if v, ok := d.GetOk("certificate"); ok {
 			role.Certificate = v.(string)
-		}
-		if v, ok := d.GetOk("trust_domain"); ok {
-			role.TrustDomain = v.(string)
-		}
-		if v, ok := d.GetOk("allowed_spiffe_ids"); ok {
-			role.AllowedSPIFFEIDs = v.([]string)
 		}
 		if v, ok := d.GetOk("token_policies"); ok {
 			role.TokenPolicies = v.([]string)
@@ -313,8 +290,8 @@ func (b *certAuthBackend) handleRoleList(ctx context.Context, req *logical.Reque
 	}, nil
 }
 
-// validateRole validates role fields and sets defaults, dispatching to the
-// mode-specific validator for the mount.
+// validateRole validates role fields and sets defaults: at least one certificate
+// constraint, valid patterns, a valid principal_claim, and a parseable TTL.
 func (b *certAuthBackend) validateRole(role *CertRole) error {
 	// Token type is always cert_role for cert auth backends
 	role.TokenType = "cert_role"
@@ -326,19 +303,6 @@ func (b *certAuthBackend) validateRole(role *CertRole) error {
 	// Validate the TTL parses
 	if _, err := role.ParseTokenTTL(); err != nil {
 		return logical.ErrBadRequestf("invalid token_ttl: %v", err)
-	}
-
-	if b.mountMode() == modeSPIFFE {
-		return validateSPIFFERole(role)
-	}
-	return validateX509Role(role)
-}
-
-// validateX509Role validates a role on an x509-mode mount: at least one PKI
-// constraint, valid patterns, and no SPIFFE-only fields.
-func validateX509Role(role *CertRole) error {
-	if role.TrustDomain != "" || len(role.AllowedSPIFFEIDs) > 0 {
-		return logical.ErrBadRequest("trust_domain and allowed_spiffe_ids are only valid in spiffe mode")
 	}
 
 	// Require at least one certificate constraint to prevent overly permissive roles
@@ -391,36 +355,6 @@ func validateX509Role(role *CertRole) error {
 	return nil
 }
 
-// validateSPIFFERole validates a role on a spiffe-mode mount: a required, valid
-// trust_domain, optional SPIFFE-ID patterns, and no PKI-only fields. The trust
-// domain need not already be registered — it is resolved (fail-closed) at login.
-func validateSPIFFERole(role *CertRole) error {
-	if role.TrustDomain == "" {
-		return logical.ErrBadRequest("trust_domain is required in spiffe mode")
-	}
-	if _, err := spiffeid.TrustDomainFromString(role.TrustDomain); err != nil {
-		return logical.ErrBadRequestf("invalid trust_domain %q: %v", role.TrustDomain, err)
-	}
-	for _, p := range role.AllowedSPIFFEIDs {
-		if err := helper.ValidatePattern(p); err != nil {
-			return logical.ErrBadRequestf("invalid allowed_spiffe_ids pattern: %v", err)
-		}
-	}
-
-	if len(role.AllowedCommonNames) > 0 ||
-		len(role.AllowedDNSSANs) > 0 ||
-		len(role.AllowedEmailSANs) > 0 ||
-		len(role.AllowedURISANs) > 0 ||
-		len(role.AllowedOrganizationalUnits) > 0 ||
-		len(role.AllowedOrganizations) > 0 ||
-		role.Certificate != "" ||
-		role.PrincipalClaim != "" {
-		return logical.ErrBadRequest("allowed_common_names, allowed_dns_sans, allowed_email_sans, allowed_uri_sans, allowed_organizational_units, allowed_organizations, certificate, and principal_claim are not valid in spiffe mode")
-	}
-
-	return nil
-}
-
 // buildRoleFromFieldData creates a CertRole from request field data
 func (b *certAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldData) *CertRole {
 	role := &CertRole{
@@ -450,12 +384,6 @@ func (b *certAuthBackend) buildRoleFromFieldData(name string, d *framework.Field
 	}
 	if v, ok := d.GetOk("certificate"); ok {
 		role.Certificate = v.(string)
-	}
-	if v, ok := d.GetOk("trust_domain"); ok {
-		role.TrustDomain = v.(string)
-	}
-	if v, ok := d.GetOk("allowed_spiffe_ids"); ok {
-		role.AllowedSPIFFEIDs = v.([]string)
 	}
 	if v, ok := d.GetOk("token_policies"); ok {
 		role.TokenPolicies = v.([]string)

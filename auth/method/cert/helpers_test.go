@@ -18,7 +18,6 @@ func TestIsValidPrincipalClaim(t *testing.T) {
 		{"dns_san", true},
 		{"email_san", true},
 		{"uri_san", true},
-		{"spiffe_id", false},
 		{"serial", true},
 		{"invalid", false},
 		{"CN", false},
@@ -96,14 +95,6 @@ func TestExtractPrincipal_EmptyURISAN(t *testing.T) {
 		URIs: []*url.URL{},
 	}
 	assert.Equal(t, "", extractPrincipal(cert, "uri_san"))
-}
-
-func TestExtractPrincipal_NoSpiffeURI(t *testing.T) {
-	u, _ := url.Parse("https://example.com/not-spiffe")
-	cert := &x509.Certificate{
-		URIs: []*url.URL{u},
-	}
-	assert.Equal(t, "", extractPrincipal(cert, "spiffe_id"))
 }
 
 // =============================================================================

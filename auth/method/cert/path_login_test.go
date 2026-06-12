@@ -328,7 +328,6 @@ func TestExtractPrincipal(t *testing.T) {
 		{"dns_san", "agent.example.com"},
 		{"email_san", "agent@example.com"},
 		{"uri_san", "spiffe://example.com/agent"},
-		{"spiffe_id", ""}, // removed claim — now treated as unknown, yields empty
 		{"serial", cert.SerialNumber.String()},
 		{"unknown", ""},
 	}
@@ -492,4 +491,66 @@ func newCertHTTPRequest(t *testing.T, cert *x509.Certificate) *http.Request {
 	// Store the cert in the context via the cert forwarding middleware's context key
 	ctx := listener.WithForwardedClientCert(req.Context(), cert)
 	return req.WithContext(ctx)
+}
+
+// TestX509Login_Regression confirms the classic certificate login path
+// authenticates end-to-end (ported from the removed spiffe enforcement suite).
+func TestX509Login_Regression(t *testing.T) {
+	caCert, caKey, caPEM := testCA(t)
+	b, ctx := createTestBackend(t)
+	require.NoError(t, b.setupCertConfig(ctx, map[string]any{
+		"trusted_ca_pem":  caPEM,
+		"principal_claim": "cn",
+	}))
+	require.NoError(t, b.setRole(ctx, &CertRole{
+		Name:               "inventory",
+		AllowedCommonNames: []string{"inventory-*"},
+		TokenPolicies:      []string{"inv"},
+		TokenTTL:           "1h",
+	}))
+
+	clientCert := testClientCert(t, caCert, caKey, "inventory-svc")
+	req := &logical.Request{HTTPRequest: newCertHTTPRequest(t, clientCert)}
+	d := &framework.FieldData{Raw: map[string]any{"role": "inventory"}, Schema: b.pathLogin().Fields}
+	resp, err := b.handleLogin(ctx, req, d)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NotNil(t, resp.Auth)
+	assert.Equal(t, "inventory-svc", resp.Auth.PrincipalID)
+}
+
+// TestSetupCertConfig_RejectsSpiffeID pins the breaking removal of the spiffe_id
+// principal claim: it is no longer coerced to uri_san. A config carrying it —
+// including a value persisted by an older version and reloaded via Initialize —
+// is now rejected by validation. Migrate such mounts to the spiffe auth method.
+func TestSetupCertConfig_RejectsSpiffeID(t *testing.T) {
+	b, ctx := createTestBackend(t)
+	err := b.setupCertConfig(ctx, map[string]any{"principal_claim": "spiffe_id"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid principal_claim")
+}
+
+// TestHandleLogin_SpiffeIDRoleClaimFailsClosed pins that a legacy role still
+// carrying principal_claim=spiffe_id (persisted via setRole, bypassing
+// validation) now fails closed at login rather than being coerced to uri_san.
+func TestHandleLogin_SpiffeIDRoleClaimFailsClosed(t *testing.T) {
+	caCert, caKey, caPEM := testCA(t)
+	b, ctx := createTestBackend(t)
+	require.NoError(t, b.setupCertConfig(ctx, map[string]any{"trusted_ca_pem": caPEM, "principal_claim": "cn"}))
+	require.NoError(t, b.setRole(ctx, &CertRole{
+		Name:               "legacy",
+		AllowedCommonNames: []string{"*"},
+		PrincipalClaim:     "spiffe_id",
+		TokenTTL:           "1h",
+	}))
+
+	clientCert := testClientCert(t, caCert, caKey, "agent", func(tmpl *x509.Certificate) {
+		u, _ := url.Parse("spiffe://example.com/ns/default/sa/agent")
+		tmpl.URIs = append(tmpl.URIs, u)
+	})
+	req := &logical.Request{HTTPRequest: newCertHTTPRequest(t, clientCert)}
+	d := &framework.FieldData{Raw: map[string]any{"role": "legacy"}, Schema: b.pathLogin().Fields}
+	resp, err := b.handleLogin(ctx, req, d)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
