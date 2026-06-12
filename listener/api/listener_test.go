@@ -405,6 +405,104 @@ func TestApiListener_PlainHTTP_Serves(t *testing.T) {
 }
 
 // =============================================================================
+// Injected TLSConfig Tests
+// =============================================================================
+
+// loadTestServerCert loads the self-signed test cert/key into a tls.Certificate
+// and returns it alongside a CA pool that trusts it.
+func loadTestServerCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+	certFile, keyFile, _ := generateTestCertFiles(t)
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	require.NoError(t, err)
+	caPEM, err := os.ReadFile(certFile)
+	require.NoError(t, err)
+	pool := x509.NewCertPool()
+	require.True(t, pool.AppendCertsFromPEM(caPEM))
+	return cert, pool
+}
+
+// TestNewApiListener_InjectedTLSConfig verifies that an injected tls.Config is
+// used verbatim and that no cert/key files are required when one is supplied.
+func TestNewApiListener_InjectedTLSConfig(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	cert, _ := loadTestServerCert(t)
+
+	injected := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return &cert, nil
+		},
+	}
+
+	ln, err := NewApiListener(ApiListenerConfig{
+		Logger:    log,
+		Address:   "127.0.0.1:0",
+		TLSConfig: injected,
+		// no TLSCertFile/TLSKeyFile: an injected config does not require them
+	}, http.DefaultServeMux)
+
+	require.NoError(t, err)
+	require.NotNil(t, ln)
+	assert.False(t, ln.tlsDisable)
+	assert.Same(t, injected, ln.server.TLSConfig, "injected config must be used verbatim")
+	assert.Empty(t, ln.tlsCertFile)
+	assert.Empty(t, ln.tlsKeyFile)
+}
+
+// TestApiListener_InjectedTLSConfig_Serves drives a real handshake through an
+// injected GetCertificate-only config and confirms Start() serves over TLS with
+// empty cert/key paths (ListenAndServeTLS("","") path).
+func TestApiListener_InjectedTLSConfig_Serves(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	cert, caPool := loadTestServerCert(t)
+
+	var gotCertCalls int
+	injected := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			gotCertCalls++
+			return &cert, nil
+		},
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "spiffe-ok")
+	})
+
+	port := getFreePort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	ln, err := NewApiListener(ApiListenerConfig{
+		Logger:    log,
+		Address:   addr,
+		TLSConfig: injected,
+	}, handler)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go ln.Start(ctx)
+	time.Sleep(200 * time.Millisecond)
+	defer ln.Stop()
+
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: caPool}},
+		Timeout:   5 * time.Second,
+	}
+	resp, err := client.Get(fmt.Sprintf("https://%s/test", addr))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, "spiffe-ok", string(body))
+	assert.Positive(t, gotCertCalls, "GetCertificate should be consulted during the handshake")
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
