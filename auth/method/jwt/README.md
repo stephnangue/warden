@@ -1,15 +1,16 @@
 # JWT Auth Method
 
-The JWT auth method validates workload identities by **cryptographically verifying** the signature of a JSON Web Token against a configured key source. The hub holds (or fetches) the issuer's public keys directly; no upstream API call is made per login. Validated claims drive role binding (issuer, audience, subject, arbitrary bound claims, SPIFFE URI patterns), and the resolved principal flows through Warden's transparent-auth layer like any other auth method in the family.
+The JWT auth method validates workload identities by **cryptographically verifying** the signature of a JSON Web Token against a configured key source. The hub holds (or fetches) the issuer's public keys directly; no upstream API call is made per login. Validated claims drive role binding (issuer, audience, subject, arbitrary bound claims), and the resolved principal flows through Warden's transparent-auth layer like any other auth method in the family.
 
 This is the auth method to reach for when:
 
 - Your workloads carry tokens issued by an **OIDC provider** (Auth0, Okta, Keycloak, Google, Azure AD, GitHub Actions OIDC, GitLab CI OIDC, Forgejo, Hydra, Dex, …) and you want their JWTs accepted directly.
-- Your workloads carry **SPIFFE JWT-SVIDs** and you want to bind roles to SPIFFE IDs via segment-aware URI patterns (`spiffe://+/dept/*`).
 - You have a fixed set of static issuer keys (PEM-encoded RSA or ECDSA) and no JWKS endpoint to publish them, and want to ship them with the Warden configuration.
 - You need claim-driven role mapping — e.g. policies attached from the JWT's `groups` claim, or per-tenant routing via a custom `tenant` claim.
 
 If your workload's identity is a Kubernetes ServiceAccount token, prefer the `kubernetes` auth method instead — it validates via TokenReview against the issuing cluster and avoids the JWKS distribution problem entirely. The JWT method works for K8s SA tokens too (the cluster's `/openid/v1/jwks` endpoint is a perfectly valid JWKS source), but only when that endpoint is reachable from Warden, which hardened distros often make awkward.
+
+If your workloads present **SPIFFE identities** — an X.509-SVID or a JWT-SVID — use the dedicated `spiffe` auth method instead. It verifies the SVID against a trust-domain bundle and enforces the SPIFFE audience requirement, which generic JWT claim-binding here cannot do.
 
 ## Table of Contents
 
@@ -18,7 +19,6 @@ If your workload's identity is a Kubernetes ServiceAccount token, prefer the `ku
 - [Step 2: Add Issuer / Audience / Claim Bindings](#step-2-add-issuer--audience--claim-bindings)
 - [Step 3: Create a Role](#step-3-create-a-role)
 - [Step 4: Wire Up Transparent Auth](#step-4-wire-up-transparent-auth)
-- [SPIFFE URI Patterns](#spiffe-uri-patterns)
 - [Group-Based Policies](#group-based-policies)
 - [Claim Mappings](#claim-mappings)
 - [On-Behalf-Of Chain (RFC 8693 `act` Claim)](#on-behalf-of-chain-rfc-8693-act-claim)
@@ -105,7 +105,7 @@ What each does:
 - `bound_audiences` — accepted values of the JWT's `aud` claim. Tokens whose audience isn't in this list are rejected. Pin this when the issuer signs tokens for multiple audiences and only some should be allowed to talk to Warden.
 - `bound_subject` — pin the expected `sub` claim. Rarely set at the mount level (more often per-role).
 - `bound_claims` — a map of arbitrary claim → required value pairs. Tokens missing any required claim or carrying a mismatched value are rejected.
-- `user_claim` — which claim Warden uses as the principal identity in audit logs and the issued token's `PrincipalID`. Defaults to `sub`. Override to `email`, `preferred_username`, `name`, or a SPIFFE ID claim as appropriate.
+- `user_claim` — which claim Warden uses as the principal identity in audit logs and the issued token's `PrincipalID`. Defaults to `sub`. Override to `email`, `preferred_username`, or `name` as appropriate.
 
 ## Step 3: Create a Role
 
@@ -126,7 +126,6 @@ Per-role overrides (when set, these win over the mount-level bindings):
 
 Per-role-only fields:
 
-- `bound_uri_patterns` — segment-aware URI patterns matched against `uri_claim` (default `sub`). The right tool for SPIFFE IDs — see the dedicated section below.
 - `max_age` — a freshness check: tokens whose `iat` (issued-at) claim is older than this duration are rejected. Useful when you want to force re-mint cycles to be no longer than, say, 5 minutes.
 - `cred_spec_name` — the credential spec to use for implicit-auth flows.
 
@@ -161,33 +160,6 @@ The role can be set via the `X-Warden-Role` header (as above), embedded in the U
 The first request with a given (JWT, role) tuple triggers a fresh signature + claim validation and caches the result. Subsequent requests with the same tuple hit Warden's in-memory cache (TTL = `min(role.token_ttl, jwt-exp-derived)`) — no signature re-verification per call.
 
 > **Why no explicit login endpoint?** The `jwt_role` token type is part of Warden's transparent-auth family (alongside `cert_role` and `kubernetes_role`). Explicit logins returning a transparent token type are rejected by design. This keeps the workload's identity — the JWT, attested by the IdP — flowing through every call so each request is independently auditable, with no operator-distributed Warden tokens to rotate or revoke separately.
-
-## SPIFFE URI Patterns
-
-SPIFFE JWT-SVIDs carry the workload identity in the `sub` claim as a `spiffe://trust-domain/path` URI. `bound_uri_patterns` lets a role match against the SPIFFE-style URI structure with segment-aware wildcards rather than substring matches.
-
-```bash
-warden write auth/jwt/role/api-frontend \
-  bound_uri_patterns="spiffe://prod.example.org/api/frontend/*" \
-  token_policies="api-read"
-```
-
-Pattern semantics (segment-aware, splitting on `/`):
-
-- `+` matches exactly one segment, at any position.
-- `*` as the **trailing** segment matches one or more remaining segments (a prefix wildcard).
-- `scheme://*` (or bare `*` with no scheme) matches everything with the same scheme — a catch-all.
-- `+*` is forbidden.
-- All other segments require an exact match.
-
-Examples:
-
-- `spiffe://prod.example.org/api/frontend/*` matches `spiffe://prod.example.org/api/frontend/v1` and `spiffe://prod.example.org/api/frontend/v1/svc` — anything one or more segments deep under `api/frontend/`.
-- `spiffe://+/api/frontend/svc` matches `spiffe://prod.example.org/api/frontend/svc` and `spiffe://staging.example.org/api/frontend/svc` — any trust domain, exact `api/frontend/svc` path.
-- `spiffe://+/+/+` matches any three-segment SPIFFE ID, regardless of trust domain or path.
-- `spiffe://prod.example.org/*` matches any non-empty path under `prod.example.org`.
-
-Set `uri_claim` if your SVID puts the SPIFFE ID somewhere other than `sub` (e.g. `spiffe_id` for some custom IdPs). Default is `sub`.
 
 ## Group-Based Policies
 
@@ -235,7 +207,7 @@ curl -H "Authorization: Bearer $JWT" \
   "${WARDEN_ADDR}/v1/sys/introspect/roles"
 ```
 
-The response is `{roles: [{auth_path, name, description}, ...], warnings: [...]}`. Each role in the list has passed the issuer + audience + subject + bound-claims + URI-pattern checks against the presented token, and `auth_path` tells the agent which mount the role lives on. Introspection is a discovery hint, not an authorization — the agent picks a role and uses it on subsequent gateway requests, where Warden's transparent-auth layer does the actual validation + cache write.
+The response is `{roles: [{auth_path, name, description}, ...], warnings: [...]}`. Each role in the list has passed the issuer + audience + subject + bound-claims checks against the presented token, and `auth_path` tells the agent which mount the role lives on. Introspection is a discovery hint, not an authorization — the agent picks a role and uses it on subsequent gateway requests, where Warden's transparent-auth layer does the actual validation + cache write.
 
 Per-mount introspection (`auth/<mount>/introspect/roles`) exists too — the aggregator calls it internally — but workloads should prefer the aggregator since it handles dispatch.
 
@@ -270,8 +242,6 @@ Exactly one of `oidc_discovery_url`, `jwks_url`, or `jwt_validation_pubkeys` mus
 | `bound_audiences` | No | Per-role audience binding; overrides the mount's `bound_audiences` when set. |
 | `bound_subject` | No | Per-role subject binding; overrides the mount's `bound_subject` when set. |
 | `bound_claims` | No | Per-role claim requirements; merged with the mount's `bound_claims` (both must pass). |
-| `bound_uri_patterns` | No | Segment-aware URI patterns matched against `uri_claim`. Right tool for SPIFFE IDs. |
-| `uri_claim` | No (default `sub` when patterns set) | Claim to extract for URI pattern matching. |
 | `user_claim` | No | Per-role override of the mount's `user_claim`. |
 | `token_policies` | No | Warden policies attached to the issued token (in addition to any group-derived policies). |
 | `token_ttl` | No (default `1h`) | TTL for issued tokens; overrides the mount-level `token_ttl`. |
@@ -282,7 +252,7 @@ Exactly one of `oidc_discovery_url`, `jwks_url`, or `jwt_validation_pubkeys` mus
 
 ## Troubleshooting
 
-**Gateway request returns "authentication failed" with no detail.** This is by design — all authentication failures collapse to the same generic error so the response can't be used to enumerate which check is failing. The Warden server logs carry the specific reason (signature mismatch, expired token, missing required claim, bound-audiences mismatch, URI pattern mismatch, `max_age` exceeded, etc.). Check the Warden server log at the timestamp of the failed call.
+**Gateway request returns "authentication failed" with no detail.** This is by design — all authentication failures collapse to the same generic error so the response can't be used to enumerate which check is failing. The Warden server logs carry the specific reason (signature mismatch, expired token, missing required claim, bound-audiences mismatch, `max_age` exceeded, etc.). Check the Warden server log at the timestamp of the failed call.
 
 **Gateway request returns "explicit login is not supported for roles with token_type=transparent".** Something is hitting `auth/<mount>/login` directly instead of going through transparent auth on a gateway URL. The JWT auth method is transparent-only; the explicit-login endpoint is reserved for internal use. Make sure your client is calling a provider gateway path (e.g. `/v1/<provider>/gateway/...`) with the JWT in the `Authorization: Bearer` header — not posting to `/auth/<mount>/login`.
 
@@ -291,12 +261,6 @@ Exactly one of `oidc_discovery_url`, `jwks_url`, or `jwt_validation_pubkeys` mus
 **Tokens from one IdP pass, tokens from another IdP fail with no clear reason.** Pin `bound_issuer` to the expected `iss` value. Without it, any JWT signed by a key your discovery / JWKS source returns will pass the signature check, which can produce surprising allows when the IdP signs for multiple consumers.
 
 **Group-based policies aren't being applied.** Verify the JWT actually carries the `groups` claim. Warden accepts three shapes for it: a JSON array of strings (`["engineering", "billing"]`), a comma-separated string (`"engineering,billing"`), or a single string (treated as a one-element list). A JSON-encoded string that *looks* like an array (`"[engineering, billing]"`) is not parsed and won't work. If the claim is named something other than `groups`, set `groups_claim` accordingly on the mount or role. Verify the resulting policy names (e.g. `oidc-engineering`) actually exist in Warden.
-
-**SPIFFE URI patterns reject what looks like a matching SVID.** `bound_uri_patterns` is segment-aware (split on `/`). Two easy ways to trip:
-- `+` matches a single segment only — `spiffe://+/foo/bar` accepts one-segment trust domains, not nested paths.
-- `*` is a *prefix* wildcard that only works as the trailing segment — `spiffe://example.com/*` matches one or more segments after `example.com/`, but you can't put `*` in the middle of a path.
-
-Verify the role's patterns with `warden read auth/<mount>/role/<name>`, then walk through the segment match against the SVID's actual `sub` claim by hand. Full pattern semantics are in the SPIFFE URI Patterns section above.
 
 **`max_age` rejects every login.** The JWT must carry an `iat` (issued-at) claim for the freshness check to work. Some IdPs omit `iat`; if yours does, you can't use `max_age` against tokens from it. Either configure the IdP to emit `iat` or drop `max_age` from the role.
 
