@@ -2,6 +2,22 @@
 
 All notable changes to Warden are documented in this file.
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **`jwt` auth method: the `bound_uri_patterns` and `uri_claim` role fields are removed.** They provided segment-aware string matching against a JWT claim as a stand-in for real SPIFFE JWT-SVID validation (shipped in v0.4.0). SPIFFE identities now belong to the new `spiffe` auth method, which verifies a JWT-SVID against a trust-domain bundle and enforces its audience rather than pattern-matching a claim. Stored roles carrying these JSON keys decode cleanly and ignore them; a role that relied on URI-pattern matching becomes more permissive — migrate it to the `spiffe` method.
+
+### New Features
+
+- **New `spiffe` auth method: first-class SPIFFE support for both SVID types on one mount.** Accepts a SPIFFE X.509-SVID (presented over mTLS or a trusted forwarding header) and a SPIFFE JWT-SVID (bearer) on the same mount, verifying each against the trust domain's bundle — which carries both the X.509 and JWT key sets — and issuing a single `spiffe_role` token type. When a request presents both, the explicitly-presented JWT-SVID wins over an ambient forwarded certificate. Roles bind on `trust_domain`, `allowed_spiffe_ids`, and `bound_audiences`; an audience is required for JWT-SVID logins, as SPIFFE mandates. Trust-domain bundles are managed on the mount and can be federated from upstream endpoints with periodic refresh. The method relies on short-lived SVIDs and bundle rotation rather than CRL/OCSP — there is no X.509-SVID revocation surface, and an issued token's TTL is capped by the SVID's expiry.
+
+- **`cert` auth method consolidated to pure PKI.** The experimental SPIFFE mode (`mode=spiffe`, trust-domain configuration, bundle federation, and the `spiffe_id` value for `principal_claim`) — added on `main` after the v0.15.0 release and never shipped in a tagged version — is removed in favour of the dedicated `spiffe` auth method. The `cert` method keeps its X.509 chain-of-trust validation and URI-SAN matching (`uri_san` principal claim plus `allowed_uri_sans`), so a SPIFFE X.509-SVID can still be accepted as an ordinary client certificate bound on its URI SAN.
+
+### Documentation
+
+- **Operator README for the new `spiffe` auth method**, and SPIFFE content retargeted across the `cert`, `jwt`, and Vault-provider docs to point SPIFFE workloads at the dedicated method.
+
 ## [v0.15.0] — 2026-06-06
 
 ### Breaking Changes

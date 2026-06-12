@@ -703,7 +703,7 @@ docker compose -f docker-compose.quickstart.yml down -v
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `trusted_ca_pem` | string | — | PEM-encoded CA certificates that sign client certificates |
-| `principal_claim` | string | `cn` | Identity source: `cn`, `dns_san`, `email_san`, `uri_san`, `spiffe_id`, `serial` |
+| `principal_claim` | string | `cn` | Identity source: `cn`, `dns_san`, `email_san`, `uri_san`, `serial` |
 | `default_role` | string | — | Default role when no role is specified in the URL or request |
 | `token_ttl` | duration | `1h` | Default token TTL |
 | `revocation_mode` | string | `none` | Certificate revocation checking: `none`, `crl`, `ocsp`, `best_effort` |
