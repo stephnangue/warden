@@ -439,6 +439,15 @@ type ListenerBlock struct {
 	TLSDisable           bool     `hcl:"tls_disable,optional"`             // default false => TLS on; requires tls_cert_file + tls_key_file
 	TLSRequireClientCert *bool    `hcl:"tls_require_client_cert,optional"` // nil = default (true when tls_client_ca_file set)
 	TrustedProxies       []string `hcl:"trusted_proxies,optional"`         // CIDR ranges for LB cert forwarding
+
+	// SPIFFE serving identity. When TLSSPIFFE is set, the listener sources its
+	// serving cert from the SPIFFE Workload API (auto-rotating, never on disk)
+	// instead of tls_cert_file/tls_key_file (which are mutually exclusive with it).
+	// The listener always requests (and captures, but never verifies) the client
+	// cert so the SPIFFE/cert auth method can authenticate the peer.
+	TLSSPIFFE               bool   `hcl:"tls_spiffe,optional"`
+	TLSSPIFFESocket         string `hcl:"tls_spiffe_socket,optional"`          // Workload API endpoint; empty => SPIFFE_ENDPOINT_SOCKET
+	TLSSPIFFEStartupTimeout string `hcl:"tls_spiffe_startup_timeout,optional"` // max wait/retry for the first SVID at boot (duration; default 10s)
 }
 
 // LoadConfig reads a single HCL config file and returns a validated *Config.
@@ -620,9 +629,39 @@ func validateConfig(config *Config) error {
 	}
 
 	// Validate listener TLS config. TLS is on by default; opt out with tls_disable.
+	// SPIFFE serving is an alternative TLS mode, mutually exclusive with the
+	// file-based cert/key fields.
 	for i, ln := range config.Listeners {
-		if !ln.TLSDisable && (ln.TLSCertFile == "" || ln.TLSKeyFile == "") {
-			return fmt.Errorf("listener[%d]: TLS is on by default; set tls_disable = true or provide both tls_cert_file and tls_key_file", i)
+		spiffeSubKeySet := ln.TLSSPIFFESocket != "" || ln.TLSSPIFFEStartupTimeout != ""
+		switch {
+		case ln.TLSDisable:
+			if ln.TLSSPIFFE || spiffeSubKeySet {
+				return fmt.Errorf("listener[%d]: tls_spiffe* cannot be set when tls_disable = true", i)
+			}
+		case ln.TLSSPIFFE:
+			if ln.TLSCertFile != "" || ln.TLSKeyFile != "" || ln.TLSClientCAFile != "" {
+				return fmt.Errorf("listener[%d]: tls_spiffe is mutually exclusive with tls_cert_file/tls_key_file/tls_client_ca_file", i)
+			}
+			if ln.TLSRequireClientCert != nil {
+				return fmt.Errorf("listener[%d]: tls_require_client_cert is not used with tls_spiffe; the peer cert is always captured (never verified) and the auth method authenticates it", i)
+			}
+			if ln.TLSSPIFFEStartupTimeout != "" {
+				d, err := time.ParseDuration(ln.TLSSPIFFEStartupTimeout)
+				if err != nil {
+					return fmt.Errorf("listener[%d]: invalid tls_spiffe_startup_timeout %q: %w", i, ln.TLSSPIFFEStartupTimeout, err)
+				}
+				if d <= 0 {
+					return fmt.Errorf("listener[%d]: tls_spiffe_startup_timeout must be positive, got %s", i, d)
+				}
+			}
+		default:
+			// File-based TLS. Reject orphan SPIFFE sub-keys set without tls_spiffe.
+			if spiffeSubKeySet {
+				return fmt.Errorf("listener[%d]: tls_spiffe_socket/tls_spiffe_startup_timeout require tls_spiffe = true", i)
+			}
+			if ln.TLSCertFile == "" || ln.TLSKeyFile == "" {
+				return fmt.Errorf("listener[%d]: TLS is on by default; set tls_disable = true or provide both tls_cert_file and tls_key_file", i)
+			}
 		}
 	}
 

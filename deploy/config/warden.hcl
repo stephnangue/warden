@@ -32,6 +32,37 @@ listener "tcp" {
     tls_require_client_cert = false
 }
 
+# --- SPIFFE serving identity (alternative to file-based TLS) -----------------
+#
+# Instead of tls_cert_file/tls_key_file, a listener can source its serving
+# certificate from the SPIFFE Workload API (a local SPIRE agent). The X509-SVID
+# is kept in memory and fetched fresh on every TLS handshake, so it rotates
+# transparently and no key or cert is ever written to disk.
+#
+# tls_spiffe is mutually exclusive with tls_cert_file / tls_key_file /
+# tls_client_ca_file / tls_require_client_cert. The listener always requests and
+# captures the client's certificate but never verifies it at the TLS layer —
+# the SPIFFE/cert auth method authenticates the peer SVID against its configured
+# trust domains. RequestClientCert only *requests* a cert, so clients that
+# authenticate by token (or present no cert) connect normally.
+#
+# Note: the server presents a SPIFFE SVID (a spiffe:// URI SAN, no DNS SAN), so
+# clients must be SPIFFE-aware (trust the SPIRE bundle and skip hostname
+# verification). Plain/browser clients cannot use a SPIFFE listener — run a
+# separate file-based listener on another port for those.
+#
+# listener "tcp" {
+#   address    = ":8400"
+#   tls_spiffe = true
+#
+#   # Workload API endpoint. Omit to use the SPIFFE_ENDPOINT_SOCKET env var.
+#   # tls_spiffe_socket = "unix:///run/spire/agent/sockets/agent.sock"
+#
+#   # Max time to wait (and retry) for the first SVID at startup before failing
+#   # closed. Tolerates a brief agent-not-ready window at boot. Default "10s".
+#   # tls_spiffe_startup_timeout = "10s"
+# }
+
 # Audit devices are declared with the two-label syntax:
 #   audit "TYPE" "NAME" { description = "..." options = { ... } }
 #

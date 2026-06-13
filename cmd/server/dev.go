@@ -49,8 +49,9 @@ func devModeInit(c *core.Core, customRootToken string) (*core.InitResult, error)
 
 // printDevBanner prints the dev mode startup banner with unseal keys and root token.
 // If devTLSCertDir is non-empty, it also prints the paths to the auto-generated
-// TLS certificate and key, along with usage instructions.
-func printDevBanner(w io.Writer, result *core.InitResult, devTLSCertDir string) {
+// TLS certificate and key, along with usage instructions. If devTLSSpiffe is set,
+// it notes that the listener serves a SPIFFE SVID from the Workload API instead.
+func printDevBanner(w io.Writer, result *core.InitResult, devTLSCertDir string, devTLSSpiffe bool) {
 	fmt.Fprintf(w, "\n")
 	fmt.Fprintf(w, "==> Warden server started in dev mode! <==\n")
 	fmt.Fprintf(w, "\n")
@@ -77,6 +78,14 @@ func printDevBanner(w io.Writer, result *core.InitResult, devTLSCertDir string) 
 		fmt.Fprintf(w, "\n")
 		fmt.Fprintf(w, "  $ export WARDEN_CACERT=%s/cert.pem\n", devTLSCertDir)
 		fmt.Fprintf(w, "  $ export WARDEN_ADDR=https://127.0.0.1:8400\n")
+		fmt.Fprintf(w, "\n")
+	}
+
+	if devTLSSpiffe {
+		fmt.Fprintf(w, "Dev TLS Source: SPIFFE Workload API (auto-rotating SVID, no key on disk)\n")
+		fmt.Fprintf(w, "\n")
+		fmt.Fprintf(w, "The server presents a SPIFFE SVID; clients must be SPIFFE-aware\n")
+		fmt.Fprintf(w, "(trust the SPIRE bundle and skip hostname verification).\n")
 		fmt.Fprintf(w, "\n")
 	}
 

@@ -36,6 +36,7 @@ import (
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/listener/api"
 	clusterlistener "github.com/stephnangue/warden/listener/cluster"
+	"github.com/stephnangue/warden/listener/spiffetls"
 	log "github.com/stephnangue/warden/logger"
 	wardenlogical "github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/physical"
@@ -112,6 +113,8 @@ var (
 	flagDevTLSKeyFile           string
 	flagDevTLSCACertFile        string
 	flagDevTLSRequireClientCert bool
+	flagDevTLSSpiffe            bool
+	flagDevTLSSpiffeSocket      string
 
 	ServerCmd = &cobra.Command{
 		Use:   "server",
@@ -229,6 +232,8 @@ func init() {
 	ServerCmd.Flags().StringVar(&flagDevTLSKeyFile, "dev-tls-key-file", "", "Path to TLS private key file for dev mode")
 	ServerCmd.Flags().StringVar(&flagDevTLSCACertFile, "dev-tls-ca-cert-file", "", "Path to CA certificate for client verification in dev mode")
 	ServerCmd.Flags().BoolVar(&flagDevTLSRequireClientCert, "dev-tls-require-client-cert", false, "Require client certificates when CA cert is configured in dev mode")
+	ServerCmd.Flags().BoolVar(&flagDevTLSSpiffe, "dev-tls-spiffe", false, "Serve dev-mode TLS using a SPIFFE Workload API X509-SVID (server-auth, auto-rotating)")
+	ServerCmd.Flags().StringVar(&flagDevTLSSpiffeSocket, "dev-tls-spiffe-socket", "", "Workload API socket for -dev-tls-spiffe (default: SPIFFE_ENDPOINT_SOCKET env var)")
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -268,6 +273,14 @@ func run(cmd *cobra.Command, args []string) error {
 	if flagDevTLSRequireClientCert && flagDevTLSCACertFile == "" {
 		return fmt.Errorf("-dev-tls-require-client-cert requires -dev-tls-ca-cert-file")
 	}
+
+	// SPIFFE dev TLS: a socket implies the flag; both require -dev and are
+	// mutually exclusive with the file-based dev-TLS flags.
+	resolvedSpiffe, err := resolveDevSpiffeTLS(flagDev, flagDevTLSSpiffe, flagDevTLSSpiffeSocket, flagDevTLS, flagDevTLSCertFile, flagDevTLSKeyFile, flagDevTLSCACertFile)
+	if err != nil {
+		return err
+	}
+	flagDevTLSSpiffe = resolvedSpiffe
 
 	// Load configuration: dev mode builds defaults, otherwise requires config file or dir
 	var conf *config.Config
@@ -318,6 +331,14 @@ func run(cmd *cobra.Command, args []string) error {
 			requireClientCert := flagDevTLSRequireClientCert
 			conf.Listeners[0].TLSRequireClientCert = &requireClientCert
 		}
+	}
+
+	// Configure SPIFFE serving TLS for dev mode (server-auth). The Workload API
+	// must be reachable; source construction below fails closed if it is not.
+	if flagDevTLSSpiffe {
+		conf.Listeners[0].TLSDisable = false
+		conf.Listeners[0].TLSSPIFFE = true
+		conf.Listeners[0].TLSSPIFFESocket = flagDevTLSSpiffeSocket
 	}
 
 	// construct the logger with gate closed during initialization
@@ -447,8 +468,18 @@ func run(cmd *cobra.Command, args []string) error {
 		ForwardingTimeout:    newCore.ClusterConfig().ForwardingTimeout,
 	})
 
+	// Build SPIFFE serving sources for any listener that requests one. Sources
+	// are process-scoped (alive regardless of seal state, since the API listener
+	// serves the unseal endpoint) and shared across listeners that use the same
+	// Workload API socket. Fails closed if a configured socket is unreachable.
+	spiffeSources, closeSpiffeSources, err := buildSpiffeSources(cmd.Context(), conf)
+	if err != nil {
+		return err
+	}
+	defer closeSpiffeSources()
+
 	// init the listeners
-	lns, err := initListeners(httpHandler, newCore, conf, logger, &infoKeys, &info)
+	lns, err := initListeners(httpHandler, newCore, conf, logger, &infoKeys, &info, spiffeSources)
 	if err != nil {
 		// Error already logged in initListeners
 		return err
@@ -526,7 +557,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Print dev mode banner before opening the log gate
 	if flagDev && devInitResult != nil {
-		printDevBanner(cmd.OutOrStdout(), devInitResult, devTLSCertDir)
+		printDevBanner(cmd.OutOrStdout(), devInitResult, devTLSCertDir, flagDevTLSSpiffe)
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "\n==> Warden server started! Log data will stream in below:\n")
@@ -651,30 +682,45 @@ func buildStorage(config *config.Config, logger *log.GatedLogger) (phy.Backend, 
 	return storage, nil
 }
 
-func initListeners(httpHandler http.Handler, c *core.Core, conf *config.Config, logger *log.GatedLogger, infoKeys *[]string, info *map[string]string) ([]listener.Listener, error) {
+func initListeners(httpHandler http.Handler, c *core.Core, conf *config.Config, logger *log.GatedLogger, infoKeys *[]string, info *map[string]string, spiffeSources map[string]*spiffetls.Source) ([]listener.Listener, error) {
 	lns := make([]listener.Listener, 0, len(conf.Listeners)+1)
 
 	for _, lnConfig := range conf.Listeners {
 		switch lnConfig.Type {
 		case listenerTypeTCP, listenerTypeUnix:
-			// construct api listener using shared HTTP handler
-			ln, err := api.NewApiListener(api.ApiListenerConfig{
-				Logger:               logger.WithSystem(subsystemListener),
-				Address:              lnConfig.Address,
-				TLSCertFile:          lnConfig.TLSCertFile,
-				TLSKeyFile:           lnConfig.TLSKeyFile,
-				TLSClientCAFile:      lnConfig.TLSClientCAFile,
-				TLSDisable:           lnConfig.TLSDisable,
-				TLSRequireClientCert: lnConfig.TLSRequireClientCert,
-				TrustedProxies:       lnConfig.TrustedProxies,
-			}, httpHandler)
+			apiCfg := api.ApiListenerConfig{
+				Logger:         logger.WithSystem(subsystemListener),
+				Address:        lnConfig.Address,
+				TLSDisable:     lnConfig.TLSDisable,
+				TrustedProxies: lnConfig.TrustedProxies,
+			}
+
+			typeLabel := lnConfig.Type
+			if lnConfig.TLSSPIFFE {
+				// SPIFFE serving identity: source the cert from the Workload API
+				// and request (capture, but never verify) the client cert so the
+				// SPIFFE/cert auth method can authenticate the peer.
+				src := spiffeSources[lnConfig.TLSSPIFFESocket]
+				if src == nil {
+					return nil, fmt.Errorf("internal error: missing SPIFFE source for listener %s", lnConfig.Address)
+				}
+				apiCfg.TLSConfig = spiffetls.BuildServerTLSConfig(src, true)
+				typeLabel = lnConfig.Type + " (spiffe)"
+			} else {
+				apiCfg.TLSCertFile = lnConfig.TLSCertFile
+				apiCfg.TLSKeyFile = lnConfig.TLSKeyFile
+				apiCfg.TLSClientCAFile = lnConfig.TLSClientCAFile
+				apiCfg.TLSRequireClientCert = lnConfig.TLSRequireClientCert
+			}
+
+			ln, err := api.NewApiListener(apiCfg, httpHandler)
 			if err != nil {
 				return nil, fmt.Errorf("error initializing listener of type %s: %s", lnConfig.Type, err)
 			}
 			lns = append(lns, ln)
 
 			infoKey := fmt.Sprintf("listener %d", len(lns))
-			(*info)[infoKey] = fmt.Sprintf("%s (addr: %q)", lnConfig.Type, lnConfig.Address)
+			(*info)[infoKey] = fmt.Sprintf("%s (addr: %q)", typeLabel, lnConfig.Address)
 			*infoKeys = append(*infoKeys, infoKey)
 		default:
 			return nil, fmt.Errorf("unknown listener type: %s", lnConfig.Type)
@@ -711,6 +757,69 @@ func initListeners(httpHandler http.Handler, c *core.Core, conf *config.Config, 
 	}
 
 	return lns, nil
+}
+
+// resolveDevSpiffeTLS validates the -dev-tls-spiffe flag combination and returns
+// whether SPIFFE serving is enabled for dev mode. Supplying a socket implies the
+// flag; either requires -dev and is mutually exclusive with the file-based
+// dev-TLS flags.
+func resolveDevSpiffeTLS(dev, spiffe bool, spiffeSocket string, devTLS bool, certFile, keyFile, caFile string) (bool, error) {
+	if spiffeSocket != "" {
+		spiffe = true
+	}
+	if !spiffe {
+		return false, nil
+	}
+	if !dev {
+		return false, fmt.Errorf("-dev-tls-spiffe can only be used with -dev")
+	}
+	if devTLS || certFile != "" || keyFile != "" || caFile != "" {
+		return false, fmt.Errorf("-dev-tls-spiffe is mutually exclusive with -dev-tls and the -dev-tls-cert-file/-key-file/-ca-cert-file flags")
+	}
+	return true, nil
+}
+
+// buildSpiffeSources constructs one SPIFFE Workload API source per distinct
+// socket used by a tls_spiffe listener, sharing a source across listeners on the
+// same socket. When several listeners share a socket, the largest configured
+// startup timeout wins. It returns the sources keyed by socket and a close func
+// that tears them all down; on any error it closes whatever was built and
+// returns the error (fail closed). The returned map is nil-safe to index.
+func buildSpiffeSources(ctx context.Context, conf *config.Config) (map[string]*spiffetls.Source, func(), error) {
+	sources := make(map[string]*spiffetls.Source)
+	closeAll := func() {
+		for _, s := range sources {
+			_ = s.Close()
+		}
+	}
+
+	// Resolve the (max) startup timeout per distinct socket.
+	timeouts := make(map[string]time.Duration)
+	for _, ln := range conf.Listeners {
+		if !ln.TLSSPIFFE {
+			continue
+		}
+		d := spiffetls.DefaultStartupTimeout
+		if ln.TLSSPIFFEStartupTimeout != "" {
+			// Already validated to parse as a positive duration in config.
+			if parsed, err := time.ParseDuration(ln.TLSSPIFFEStartupTimeout); err == nil && parsed > 0 {
+				d = parsed
+			}
+		}
+		if cur, ok := timeouts[ln.TLSSPIFFESocket]; !ok || d > cur {
+			timeouts[ln.TLSSPIFFESocket] = d
+		}
+	}
+
+	for socket, timeout := range timeouts {
+		src, err := spiffetls.NewSource(ctx, socket, timeout)
+		if err != nil {
+			closeAll()
+			return nil, nil, fmt.Errorf("error initializing SPIFFE serving identity: %w", err)
+		}
+		sources[socket] = src
+	}
+	return sources, closeAll, nil
 }
 
 // parseListenAddress extracts the host:port from a URL string.

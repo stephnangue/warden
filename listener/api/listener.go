@@ -33,6 +33,15 @@ type ApiListenerConfig struct {
 	TLSDisable           bool     // default false => TLS on; requires TLSCertFile + TLSKeyFile
 	TLSRequireClientCert *bool    // nil = default (true when TLSClientCAFile set)
 	TrustedProxies       []string // CIDR ranges for LB cert forwarding
+
+	// TLSConfig, when non-nil, is used verbatim as the server's TLS config and
+	// supersedes the file-based TLS fields above (TLSCertFile/TLSKeyFile and the
+	// client-CA fields are ignored). It is used to inject a dynamically-sourced
+	// config — e.g. one whose GetCertificate callback resolves the serving cert
+	// at handshake time from an in-memory, auto-rotating source — so no cert or
+	// key is ever read from disk. When set, TLSDisable must be false. File-based
+	// listeners leave this nil.
+	TLSConfig *tls.Config
 }
 
 func NewApiListener(cfg ApiListenerConfig, httpHandler http.Handler) (*ApiListener, error) {
@@ -55,7 +64,18 @@ func NewApiListener(cfg ApiListenerConfig, httpHandler http.Handler) (*ApiListen
 		WriteTimeout: 10 * time.Second,
 	}
 
-	if !cfg.TLSDisable {
+	switch {
+	case cfg.TLSDisable:
+		// Plaintext HTTP; nothing to configure.
+
+	case cfg.TLSConfig != nil:
+		// Injected dynamic TLS config (e.g. a SPIFFE-sourced config whose
+		// GetCertificate resolves the serving cert at handshake time). Use it
+		// verbatim and skip the file-based cert/key requirement; Start() serves
+		// with empty cert/key paths, which is valid because GetCertificate is set.
+		server.TLSConfig = cfg.TLSConfig
+
+	default:
 		if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
 			return nil, fmt.Errorf("TLS is on by default; set tls_disable = true or provide both tls_cert_file and tls_key_file")
 		}

@@ -191,6 +191,149 @@ listener "tcp" {
 	}
 }
 
+func TestLoadConfig_ListenerSPIFFE(t *testing.T) {
+	tests := []struct {
+		name    string
+		extra   string
+		wantErr string // substring; "" means expect success
+	}{
+		{
+			name: "tls_spiffe alone — ok",
+			extra: `
+listener "tcp" {
+  address    = ":8500"
+  tls_spiffe = true
+}
+`,
+		},
+		{
+			name: "tls_spiffe with socket + timeout — ok",
+			extra: `
+listener "tcp" {
+  address                    = ":8501"
+  tls_spiffe                 = true
+  tls_spiffe_socket          = "unix:///run/spire/agent.sock"
+  tls_spiffe_startup_timeout = "15s"
+}
+`,
+		},
+		{
+			name: "tls_spiffe + tls_cert_file — mutually exclusive",
+			extra: `
+listener "tcp" {
+  address       = ":8502"
+  tls_spiffe    = true
+  tls_cert_file = "/c.pem"
+  tls_key_file  = "/k.pem"
+}
+`,
+			wantErr: "mutually exclusive",
+		},
+		{
+			name: "tls_spiffe + tls_client_ca_file — mutually exclusive",
+			extra: `
+listener "tcp" {
+  address             = ":8503"
+  tls_spiffe          = true
+  tls_client_ca_file  = "/ca.pem"
+}
+`,
+			wantErr: "mutually exclusive",
+		},
+		{
+			name: "tls_spiffe + tls_require_client_cert — error",
+			extra: `
+listener "tcp" {
+  address                 = ":8508"
+  tls_spiffe              = true
+  tls_require_client_cert = true
+}
+`,
+			wantErr: "tls_require_client_cert is not used with tls_spiffe",
+		},
+		{
+			name: "tls_spiffe + tls_disable — error",
+			extra: `
+listener "tcp" {
+  address     = ":8504"
+  tls_spiffe  = true
+  tls_disable = true
+}
+`,
+			wantErr: "tls_disable",
+		},
+		{
+			name: "invalid startup timeout — error",
+			extra: `
+listener "tcp" {
+  address                    = ":8505"
+  tls_spiffe                 = true
+  tls_spiffe_startup_timeout = "soon"
+}
+`,
+			wantErr: "tls_spiffe_startup_timeout",
+		},
+		{
+			name: "non-positive startup timeout — error",
+			extra: `
+listener "tcp" {
+  address                    = ":8506"
+  tls_spiffe                 = true
+  tls_spiffe_startup_timeout = "0s"
+}
+`,
+			wantErr: "must be positive",
+		},
+		{
+			name: "orphan SPIFFE sub-key without tls_spiffe — error",
+			extra: `
+listener "tcp" {
+  address                    = ":8507"
+  tls_cert_file              = "/c.pem"
+  tls_key_file               = "/k.pem"
+  tls_spiffe_startup_timeout = "5s"
+}
+`,
+			wantErr: "require tls_spiffe = true",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadFromHCL(t, minimalConfigHCL+tt.extra)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestLoadConfig_ListenerSPIFFEDecode guards the HCL tag names: all three SPIFFE
+// keys must decode into the right ListenerBlock fields.
+func TestLoadConfig_ListenerSPIFFEDecode(t *testing.T) {
+	body := `
+storage "postgres" {
+  connection_url = "postgres://u:p@db:5432/warden"
+}
+
+listener "tcp" {
+  address                    = ":8510"
+  tls_spiffe                 = true
+  tls_spiffe_socket          = "unix:///run/spire/agent.sock"
+  tls_spiffe_startup_timeout = "20s"
+}
+`
+	cfg, err := loadFromHCL(t, body)
+	require.NoError(t, err)
+	require.Len(t, cfg.Listeners, 1)
+	ln := cfg.Listeners[0]
+	assert.True(t, ln.TLSSPIFFE)
+	assert.Equal(t, "unix:///run/spire/agent.sock", ln.TLSSPIFFESocket)
+	assert.Equal(t, "20s", ln.TLSSPIFFEStartupTimeout)
+}
+
 func TestLoadConfig_ClusterAddrValidation(t *testing.T) {
 	tests := []struct {
 		name    string
