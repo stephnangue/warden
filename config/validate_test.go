@@ -207,14 +207,13 @@ listener "tcp" {
 `,
 		},
 		{
-			name: "tls_spiffe with socket + request_client_cert + timeout — ok",
+			name: "tls_spiffe with socket + timeout — ok",
 			extra: `
 listener "tcp" {
-  address                        = ":8501"
-  tls_spiffe                     = true
-  tls_spiffe_socket              = "unix:///run/spire/agent.sock"
-  tls_spiffe_request_client_cert = true
-  tls_spiffe_startup_timeout     = "15s"
+  address                    = ":8501"
+  tls_spiffe                 = true
+  tls_spiffe_socket          = "unix:///run/spire/agent.sock"
+  tls_spiffe_startup_timeout = "15s"
 }
 `,
 		},
@@ -289,10 +288,10 @@ listener "tcp" {
 			name: "orphan SPIFFE sub-key without tls_spiffe — error",
 			extra: `
 listener "tcp" {
-  address                        = ":8507"
-  tls_cert_file                  = "/c.pem"
-  tls_key_file                   = "/k.pem"
-  tls_spiffe_request_client_cert = true
+  address                    = ":8507"
+  tls_cert_file              = "/c.pem"
+  tls_key_file               = "/k.pem"
+  tls_spiffe_startup_timeout = "5s"
 }
 `,
 			wantErr: "require tls_spiffe = true",
@@ -311,7 +310,7 @@ listener "tcp" {
 	}
 }
 
-// TestLoadConfig_ListenerSPIFFEDecode guards the HCL tag names: all four SPIFFE
+// TestLoadConfig_ListenerSPIFFEDecode guards the HCL tag names: all three SPIFFE
 // keys must decode into the right ListenerBlock fields.
 func TestLoadConfig_ListenerSPIFFEDecode(t *testing.T) {
 	body := `
@@ -320,11 +319,10 @@ storage "postgres" {
 }
 
 listener "tcp" {
-  address                        = ":8510"
-  tls_spiffe                     = true
-  tls_spiffe_socket              = "unix:///run/spire/agent.sock"
-  tls_spiffe_request_client_cert = true
-  tls_spiffe_startup_timeout     = "20s"
+  address                    = ":8510"
+  tls_spiffe                 = true
+  tls_spiffe_socket          = "unix:///run/spire/agent.sock"
+  tls_spiffe_startup_timeout = "20s"
 }
 `
 	cfg, err := loadFromHCL(t, body)
@@ -333,7 +331,6 @@ listener "tcp" {
 	ln := cfg.Listeners[0]
 	assert.True(t, ln.TLSSPIFFE)
 	assert.Equal(t, "unix:///run/spire/agent.sock", ln.TLSSPIFFESocket)
-	assert.True(t, ln.TLSSPIFFERequestClientCert)
 	assert.Equal(t, "20s", ln.TLSSPIFFEStartupTimeout)
 }
 

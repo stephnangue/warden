@@ -698,17 +698,14 @@ func initListeners(httpHandler http.Handler, c *core.Core, conf *config.Config, 
 			typeLabel := lnConfig.Type
 			if lnConfig.TLSSPIFFE {
 				// SPIFFE serving identity: source the cert from the Workload API
-				// and optionally capture (not verify) the client cert.
+				// and request (capture, but never verify) the client cert so the
+				// SPIFFE/cert auth method can authenticate the peer.
 				src := spiffeSources[lnConfig.TLSSPIFFESocket]
 				if src == nil {
 					return nil, fmt.Errorf("internal error: missing SPIFFE source for listener %s", lnConfig.Address)
 				}
-				apiCfg.TLSConfig = spiffetls.BuildServerTLSConfig(src, lnConfig.TLSSPIFFERequestClientCert)
-				if lnConfig.TLSSPIFFERequestClientCert {
-					typeLabel = lnConfig.Type + " (spiffe +client-cert)"
-				} else {
-					typeLabel = lnConfig.Type + " (spiffe)"
-				}
+				apiCfg.TLSConfig = spiffetls.BuildServerTLSConfig(src, true)
+				typeLabel = lnConfig.Type + " (spiffe)"
 			} else {
 				apiCfg.TLSCertFile = lnConfig.TLSCertFile
 				apiCfg.TLSKeyFile = lnConfig.TLSKeyFile
