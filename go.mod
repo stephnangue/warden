@@ -4,14 +4,14 @@ go 1.26.0
 
 require (
 	github.com/ProtonMail/go-crypto v1.4.1
-	github.com/aws/aws-sdk-go-v2 v1.41.7
-	github.com/aws/aws-sdk-go-v2/credentials v1.19.16
-	github.com/aws/aws-sdk-go-v2/feature/rds/auth v1.6.23
-	github.com/aws/aws-sdk-go-v2/service/iam v1.53.10
-	github.com/aws/aws-sdk-go-v2/service/redshift v1.62.8
-	github.com/aws/aws-sdk-go-v2/service/redshiftserverless v1.34.6
-	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.7
-	github.com/aws/aws-sdk-go-v2/service/sts v1.42.1
+	github.com/aws/aws-sdk-go-v2 v1.42.0
+	github.com/aws/aws-sdk-go-v2/credentials v1.19.24
+	github.com/aws/aws-sdk-go-v2/feature/rds/auth v1.6.29
+	github.com/aws/aws-sdk-go-v2/service/iam v1.54.5
+	github.com/aws/aws-sdk-go-v2/service/redshift v1.63.3
+	github.com/aws/aws-sdk-go-v2/service/redshiftserverless v1.35.8
+	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.42.3
+	github.com/aws/aws-sdk-go-v2/service/sts v1.43.3
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/go-jose/go-jose/v3 v3.0.5
 	github.com/go-viper/mapstructure/v2 v2.5.0
@@ -21,22 +21,22 @@ require (
 	github.com/hashicorp/vault/api v1.23.0
 	github.com/mitchellh/copystructure v1.2.0
 	github.com/oklog/ulid v1.3.1
-	github.com/openbao/go-kms-wrapping/v2 v2.7.0
+	github.com/openbao/go-kms-wrapping/v2 v2.8.0
 	github.com/openbao/go-kms-wrapping/wrappers/aead/v2 v2.3.0
-	github.com/openbao/go-kms-wrapping/wrappers/alicloudkms/v2 v2.2.0
-	github.com/openbao/go-kms-wrapping/wrappers/awskms/v2 v2.3.0
-	github.com/openbao/go-kms-wrapping/wrappers/azurekeyvault/v2 v2.3.0
-	github.com/openbao/go-kms-wrapping/wrappers/gcpckms/v2 v2.2.0
-	github.com/openbao/go-kms-wrapping/wrappers/kmip/v2 v2.1.0
-	github.com/openbao/go-kms-wrapping/wrappers/ocikms/v2 v2.2.0
-	github.com/openbao/go-kms-wrapping/wrappers/static/v2 v2.1.1
-	github.com/openbao/go-kms-wrapping/wrappers/transit/v2 v2.7.0
+	github.com/openbao/go-kms-wrapping/wrappers/alicloudkms/v2 v2.3.0
+	github.com/openbao/go-kms-wrapping/wrappers/awskms/v2 v2.4.0
+	github.com/openbao/go-kms-wrapping/wrappers/azurekeyvault/v2 v2.4.0
+	github.com/openbao/go-kms-wrapping/wrappers/gcpckms/v2 v2.3.0
+	github.com/openbao/go-kms-wrapping/wrappers/kmip/v2 v2.2.0
+	github.com/openbao/go-kms-wrapping/wrappers/ocikms/v2 v2.3.0
+	github.com/openbao/go-kms-wrapping/wrappers/static/v2 v2.2.0
+	github.com/openbao/go-kms-wrapping/wrappers/transit/v2 v2.8.0
 	github.com/openbao/openbao/sdk/v2 v2.5.1
 	github.com/rs/zerolog v1.35.1
 	github.com/sasha-s/go-deadlock v0.3.9
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	github.com/spiffe/go-spiffe/v2 v2.6.0
+	github.com/spiffe/go-spiffe/v2 v2.7.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/protobuf v1.36.11
@@ -68,12 +68,12 @@ require (
 	github.com/aliyun/alibaba-cloud-sdk-go v1.62.301 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/aws/aws-sdk-go v1.55.6 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.23 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.23 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.24 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.9 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.23 // indirect
-	github.com/aws/smithy-go v1.25.1 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.29 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.29 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.30 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.12 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.29 // indirect
+	github.com/aws/smithy-go v1.27.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/clipperhouse/displaywidth v0.10.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.6.0 // indirect
@@ -146,7 +146,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgraph-io/ristretto/v2 v2.4.0
 	github.com/go-chi/chi v4.1.2+incompatible
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0
@@ -163,7 +163,7 @@ require (
 	github.com/hashicorp/go-sockaddr v1.0.7 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/hashicorp/hcl v1.0.1-vault-7
-	github.com/jackc/pgx/v5 v5.9.2
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.22
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
@@ -174,14 +174,14 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/zclconf/go-cty v1.16.3 // indirect
-	golang.org/x/crypto v0.51.0
-	golang.org/x/mod v0.35.0 // indirect
-	golang.org/x/net v0.54.0
-	golang.org/x/sync v0.20.0
-	golang.org/x/sys v0.44.0 // indirect
-	golang.org/x/text v0.37.0
+	golang.org/x/crypto v0.53.0
+	golang.org/x/mod v0.36.0 // indirect
+	golang.org/x/net v0.55.0
+	golang.org/x/sync v0.21.0
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/text v0.38.0
 	golang.org/x/time v0.15.0
-	golang.org/x/tools v0.44.0 // indirect
+	golang.org/x/tools v0.45.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
