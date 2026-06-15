@@ -31,7 +31,7 @@
 
 **The secure gateway connecting AI agents to the enterprise systems they need to do real work.**
 
-Agents discover what they're allowed to access. Warden brokers every connection. Operators get one control plane for identity, policy, and audit — across every cloud, code-host, observability stack, database, and SaaS the agent reaches.
+Agents discover what they're allowed to access. Warden brokers every connection. Operators get one control plane for identity, policy, and audit — across every MCP server, cloud, code-host, observability stack, database, and SaaS the agent reaches.
 
 ---
 
@@ -60,7 +60,7 @@ Warden closes the gap by sitting in the path: the agent identifies itself, Warde
                                     • Audit ✓
 ```
 
-**Discover.** The agent presents its identity — a JWT or TLS client certificate — and runs three introspection calls against Warden:
+**Discover.** The agent presents its identity — a JWT, TLS client certificate, SPIFFE SVID, or Kubernetes service-account token — and runs three introspection calls against Warden:
 
 1. `warden role list` — which roles is this identity permitted to assume in this namespace?
 2. `warden provider list` — which upstream systems are mounted here?
@@ -78,7 +78,7 @@ What an enterprise gets from putting Warden in the path:
 - **Hallucination containment** — LLMs make routine mistakes, and a single mistake under a broad credential can cause real damage. Per-call role binding constrains what the agent can do at every step; a hallucinated request that exceeds the role's scope is denied upstream — observable in the audit log, with no state change. LLM errors become recoverable instead of catastrophic.
 - **Compromise containment** — because Warden holds the upstream credentials and the agent never does, a prompt-injected, jailbroken, or otherwise compromised agent has nothing to exfiltrate. Any call it does issue is still bounded by Warden's policy at request time — regardless of what's in the agent's memory or chat history.
 - **Fine-grained access policy** — per-action capabilities and parameter filters, evaluated at request time against caller IP, time of day, and day of week. For MCP traffic the same policy reaches inside each tool call — which tools an agent may invoke, and which arguments it may pass.
-- **Identity-bound access** — JWT (including SPIFFE JWT-SVID) or TLS client certificate (including SPIFFE X.509-SVID); the same identity reaches every upstream the policy permits — no per-system credential sprawl, no API keys handed to agents, nothing to rotate per integration.
+- **Identity-bound access** — a JWT, a TLS client certificate, or a first-class SPIFFE SVID (X.509 or JWT); the same identity reaches every upstream the policy permits — no per-system credential sprawl, no API keys handed to agents, nothing to rotate per integration.
 - **On-behalf-of access** — beyond reaching an upstream as a shared service account, Warden can act on behalf of a specific user: the user grants access once through a standard browser consent, and every subsequent call runs under that user's delegated grant, refreshed automatically — so a delegated action is attributed to the real person, not a shared application credential.
 - **Audit** — every request tied to the original identity, the role used, and the upstream called — plus the policy decision recorded on each MCP tool call, and non-secret metadata about the credential Warden minted, such as the identity it represents.
 - **Automatic credential rotation** — Warden rotates the upstream credentials it holds on a schedule, staging the switch for systems that need time to propagate a new key, so the broker's own secrets stay fresh without operator coordination.
@@ -121,8 +121,9 @@ Warden supports multiple methods for verifying caller identity.
 
 | Method | Identity Source | How the agent presents the credential to its SDK |
 |--------|----------------|----|
-| **JWT** | Signed JWT token or SPIFFE JWT-SVID | The **same JWT** goes in whichever credential slot the upstream SDK natively expects (`AWS_SECRET_ACCESS_KEY`, `OPENAI_API_KEY`, `X-Vault-Token`, `Authorization: Bearer`, …). Warden detects it, validates the identity, and swaps in the real upstream credential. Existing SDK code keeps working — only the base URL changes. |
-| **TLS Certificate** | X.509 client certificate or SPIFFE X.509-SVID | Identity is proven at the TLS handshake (or forwarded by a TLS-terminating proxy via `X-SSL-Client-Cert`). The SDK's credential slot is filled with any placeholder value — Warden ignores it once cert auth has proven the identity. Role selection follows the same per-provider conventions as JWT mode. |
+| **JWT** | Signed JWT token | The **same JWT** goes in whichever credential slot the upstream SDK natively expects (`AWS_SECRET_ACCESS_KEY`, `OPENAI_API_KEY`, `X-Vault-Token`, `Authorization: Bearer`, …). Warden detects it, validates the identity, and swaps in the real upstream credential. Existing SDK code keeps working — only the base URL changes. |
+| **TLS Certificate** | X.509 client certificate | Identity is proven at the TLS handshake (or forwarded by a TLS-terminating proxy via `X-SSL-Client-Cert`). The SDK's credential slot is filled with any placeholder value — Warden ignores it once cert auth has proven the identity. Role selection follows the same per-provider conventions as JWT mode. |
+| **SPIFFE** | SPIFFE X.509-SVID or JWT-SVID | First-class SPIFFE identity on a single mount: a workload presents an X.509-SVID at the TLS handshake (or forwarded by a TLS-terminating proxy) or a JWT-SVID as a bearer token, and Warden verifies it against the trust domain's bundle — with federation across trust domains and periodic refresh. It relies on short-lived SVIDs and bundle rotation rather than revocation lists, so it suits workloads already issued identities by a SPIFFE provider such as SPIRE. |
 | **Kubernetes** | Kubernetes ServiceAccount token (projected SA JWT) | The pod's ServiceAccount token goes in the SDK's credential slot exactly as in JWT mode. Warden validates it by calling the issuing cluster's TokenReview API — no JWKS endpoint or public keys to distribute — and matches a role bound to the ServiceAccount's namespace and name. |
 
 This is the design property that makes Warden a *drop-in* layer rather than a rewrite tax: a pre-existing boto3, openai-python, Vault CLI, or curl-against-GitHub script becomes Warden-mediated by setting the base URL to Warden and putting the JWT where the secret used to go. It also separates Warden from dedicated auth proxies (which typically require client libraries).

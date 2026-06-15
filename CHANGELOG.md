@@ -4,7 +4,11 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
+## [v0.16.0] — 2026-06-15
+
 ### Breaking Changes
+
+- **The `mcp_github` and `mcp_gcp` provider types are removed in favour of a single generic `mcp` provider.** The new `mcp` provider fronts any bearer-authenticated MCP server (GitHub, Google Cloud, Slack, Cloudflare, …); its credential extractor injects `Authorization: Bearer` for `oauth_bearer_token`, `api_key`, `github_token`, `gcp_access_token`, and `azure_bearer_token`, making it a superset of the typed bearer-token providers it replaces. The only provider-specific logic those providers carried was credential extraction, now folded into the generic switch; their curated setup guidance moves to per-upstream docs (`github.md`, `slack.md`, …) under the provider. Migration: re-mount as type `mcp` and set `mcp_url` — `https://api.githubcopilot.com/mcp` for GitHub, the operator's URL for Google Cloud. `mcp_aws` is unaffected — it signs requests with SigV4 rather than injecting a bearer token.
 
 - **`jwt` auth method: the `bound_uri_patterns` and `uri_claim` role fields are removed.** They provided segment-aware string matching against a JWT claim as a stand-in for real SPIFFE JWT-SVID validation (shipped in v0.4.0). SPIFFE identities now belong to the new `spiffe` auth method, which verifies a JWT-SVID against a trust-domain bundle and enforces its audience rather than pattern-matching a claim. Stored roles carrying these JSON keys decode cleanly and ignore them; a role that relied on URI-pattern matching becomes more permissive — migrate it to the `spiffe` method.
 
@@ -14,9 +18,23 @@ All notable changes to Warden are documented in this file.
 
 - **`cert` auth method consolidated to pure PKI.** The experimental SPIFFE mode (`mode=spiffe`, trust-domain configuration, bundle federation, and the `spiffe_id` value for `principal_claim`) — added on `main` after the v0.15.0 release and never shipped in a tagged version — is removed in favour of the dedicated `spiffe` auth method. The `cert` method keeps its X.509 chain-of-trust validation and URI-SAN matching (`uri_san` principal claim plus `allowed_uri_sans`), so a SPIFFE X.509-SVID can still be accepted as an ordinary client certificate bound on its URI SAN.
 
+- **The API listener can serve its TLS certificate from the SPIFFE Workload API.** Instead of a static certificate and key on disk, the listener can fetch an X.509-SVID from a SPIFFE Workload API endpoint and rotate it automatically as the SVID is renewed, keeping the control-plane TLS identity short-lived and self-renewing. (#331)
+
+- **Credential drivers attach non-secret subject metadata to the audit log across the AWS, GCP, Azure, Kubernetes, and Vault sources.** Each driver now populates the non-secret `Credential.Metadata` introduced in v0.15.0 when it mints — the assume-role identity on an AWS STS mint, and the token/access-token subject on the GCP, Azure, Kubernetes, and Vault mints — so an audit record shows *which* upstream identity a brokered call acted as, not merely that a call occurred. As part of this, purely descriptive (non-secret) fields are trimmed from the raw credential payload now that they travel as metadata.
+
+### Bug Fixes
+
+- **`httpproxy`: the gateway suffix is forwarded verbatim.** Gateway-suffix path extraction now preserves the upstream path exactly — including trailing slashes — so providers built on the shared HTTP proxy keep a byte-exact path; in particular the SigV4-signed `mcp_aws` gateway's canonical request stays valid.
+
 ### Documentation
 
 - **Operator README for the new `spiffe` auth method**, and SPIFFE content retargeted across the `cert`, `jwt`, and Vault-provider docs to point SPIFFE workloads at the dedicated method.
+
+- **`mcp_aws` README: a Claude Code CLI registration step** (`claude mcp add`) for pointing Claude Code at an `mcp_aws` mount.
+
+### Chart
+
+- Chart version bumped `0.3.1` → `0.3.2`. `appVersion` tracks the v0.16.0 binary; no template or values changes.
 
 ## [v0.15.0] — 2026-06-06
 
@@ -652,6 +670,8 @@ Initial release. See the [v0.1.0 release notes](https://github.com/stephnangue/w
 - Docker image published to `ghcr.io/stephnangue/warden`
 - Pre-built binaries for Linux, macOS, and Windows
 
+[v0.16.0]: https://github.com/stephnangue/warden/compare/v0.15.0...v0.16.0
+[v0.15.0]: https://github.com/stephnangue/warden/compare/v0.14.0...v0.15.0
 [v0.14.0]: https://github.com/stephnangue/warden/compare/v0.13.2...v0.14.0
 [v0.13.2]: https://github.com/stephnangue/warden/compare/v0.13.1...v0.13.2
 [v0.13.1]: https://github.com/stephnangue/warden/compare/v0.13.0...v0.13.1
