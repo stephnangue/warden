@@ -1,0 +1,66 @@
+name: warden-ws-01-cert-llm
+services:
+  # One-shot: generate a CA + server cert (Warden) + client cert (ghostunnel) into ./certs.
+  # The client identity is a classic X.509 Common Name (CN=mcp-agent), read by cert auth.
+  cert-init:
+    image: alpine:3.20
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        apk add --no-cache openssl >/dev/null
+        cd /certs
+        if [ -f client.key ]; then echo "certs already present — skipping"; exit 0; fi
+        openssl req -x509 -new -nodes -days 365 -keyout ca.key -out ca.crt -subj "/CN=warden-demo-ca"
+        openssl req -new -nodes -newkey rsa:2048 -keyout server.key -out server.csr -subj "/CN=warden-server"
+        printf 'subjectAltName=IP:127.0.0.1,DNS:localhost' > server.ext
+        openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 -out server.crt -extfile server.ext
+        openssl req -new -nodes -newkey rsa:2048 -keyout client.key -out client.csr -subj "/CN=mcp-agent/O=Warden Demo"
+        printf 'extendedKeyUsage=clientAuth' > client.ext
+        openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 -out client.crt -extfile client.ext
+        echo "generated CA + server + client certs in ./certs"
+    volumes:
+      - ./certs:/certs
+
+  # Warden in dev mode, serving an mTLS listener from the generated server cert.
+  # Client certs are optional: the admin CLI reaches it through ghostunnel; ghostunnel's
+  # client cert is still verified when presented and captured for cert auth.
+  warden:
+    image: ghcr.io/stephnangue/warden:v0.16.0
+    command:
+      - --dev
+      - --dev-root-token=root
+      - --dev-tls-cert-file=/certs/server.crt
+      - --dev-tls-key-file=/certs/server.key
+      - --dev-tls-ca-cert-file=/certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
+    ports:
+      - "127.0.0.1:9000:9000"          # ghostunnel (shares this netns) is published here
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+    networks: [ws]
+
+  # ghostunnel client tunnel: plain HTTP in on :9000, mTLS out to Warden on :8400.
+  # It holds the client cert/key and originates the mTLS leg — Claude Code (and the
+  # admin CLI) speak plain HTTP to it; the cert is the identity Warden sees.
+  ghostunnel:
+    image: ghostunnel/ghostunnel:v1.10.0-distroless
+    network_mode: "service:warden"     # share Warden's loopback to reach 127.0.0.1:8400
+    command:
+      - client
+      - --listen=0.0.0.0:9000
+      - --unsafe-listen                 # allow 0.0.0.0 so the published port reaches us
+      - --target=127.0.0.1:8400
+      - --cert=/certs/client.crt
+      - --key=/certs/client.key
+      - --cacert=/certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+
+networks:
+  ws:

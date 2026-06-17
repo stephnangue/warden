@@ -1,0 +1,61 @@
+name: warden-ws-02-cert-llm-mcp
+# Same cert stack as 01 (Warden mTLS + ghostunnel client + cert-init). Admin commands
+# run the in-container binary via the `warden()` helper in the README; the GitHub
+# credential is a PAT, so nothing extra (no OAuth callback port) is published here.
+services:
+  cert-init:
+    image: alpine:3.20
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        apk add --no-cache openssl >/dev/null
+        cd /certs
+        if [ -f client.key ]; then echo "certs already present — skipping"; exit 0; fi
+        openssl req -x509 -new -nodes -days 365 -keyout ca.key -out ca.crt -subj "/CN=warden-demo-ca"
+        openssl req -new -nodes -newkey rsa:2048 -keyout server.key -out server.csr -subj "/CN=warden-server"
+        printf 'subjectAltName=IP:127.0.0.1,DNS:localhost' > server.ext
+        openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 -out server.crt -extfile server.ext
+        openssl req -new -nodes -newkey rsa:2048 -keyout client.key -out client.csr -subj "/CN=mcp-agent/O=Warden Demo"
+        printf 'extendedKeyUsage=clientAuth' > client.ext
+        openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 -out client.crt -extfile client.ext
+        echo "generated CA + server + client certs in ./certs"
+    volumes:
+      - ./certs:/certs
+
+  warden:
+    image: ghcr.io/stephnangue/warden:v0.16.0
+    command:
+      - --dev
+      - --dev-root-token=root
+      - --dev-tls-cert-file=/certs/server.crt
+      - --dev-tls-key-file=/certs/server.key
+      - --dev-tls-ca-cert-file=/certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
+    ports:
+      - "127.0.0.1:9000:9000"
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+    networks: [ws]
+
+  ghostunnel:
+    image: ghostunnel/ghostunnel:v1.10.0-distroless
+    network_mode: "service:warden"
+    command:
+      - client
+      - --listen=0.0.0.0:9000
+      - --unsafe-listen
+      - --target=127.0.0.1:8400
+      - --cert=/certs/client.crt
+      - --key=/certs/client.key
+      - --cacert=/certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+
+networks:
+  ws:
