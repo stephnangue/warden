@@ -129,36 +129,24 @@ This is the design property that makes Warden a *drop-in* layer rather than a re
 
 ## Tutorials
 
-**AWS access hygiene — per-call least privilege, mid-task.** A
-Goose agent audits IAM in a sandbox AWS account through four
-read-only lenses (inventory, recent usage, external exposure,
-effective access) and publishes findings to Security Hub and a
-Slack canvas — switching Warden roles between every call so each
-operation runs under exactly the role it needs and nothing more. A
-hallucinated `securityhub:BatchImportFindings` attempted under the
-read intent is denied at AWS by the assumed role's narrow IAM
-policy — not by Warden — and surfaces in the audit log as the
-declared intent on a mismatched action. See
-[the walk-through](docs/tutorials/aws-access-hygiene/README.md).
+**Securing agents on the workstation — from one secret on disk to
+zero.** A three-part, hands-on series that takes a local coding
+agent (Claude Code) and removes every credential from the laptop,
+one rung at a time, without changing how the agent works:
 
-**Vault policy hygiene — one identity, three systems, zero
-credentials.** A Goose agent audits OpenBao ACL policies, reasons
-over them with an Anthropic-compatible LLM, and publishes the
-report to Slack — all under one Forgejo OIDC JWT, all through
-Warden. Sibling demo of the same discover-and-connect pattern,
-exercising the *across-providers* axis (one Vault role for the
-audit, one Slack role for delivery). See
-[the walk-through](docs/tutorials/vault-policy-hygiene/README.md).
+- **Certificate → LLM** — the agent's model calls flow through
+  Warden under an mTLS client-certificate identity; the LLM API key
+  never touches the workstation.
+- **Certificate → LLM + MCP** — a hosted MCP server (GitHub) joins
+  the same identity, and its token lives only in Warden too.
+- **SPIFFE → LLM + MCP** — the identity becomes a keyless,
+  auto-rotating SPIFFE SVID, so even the private key leaves the
+  disk. Zero long-lived credentials remain on the machine.
 
-In both tutorials the agent's recipe contains no URLs, no role
-names, no channel IDs, no account IDs. The runtime hands it three
-env vars and a JWT; the agent asks Warden what's wired up for its
-identity and picks the right combination by reading operator-set
-descriptions. Rename a role, swap the LLM, move to a different
-cluster — the recipe doesn't change.
-
-For the system-side reference — the runtime contract, the discovery
-loop, error handling — see [docs/agent-flow.md](docs/agent-flow.md).
+Every rung makes the same three wins concrete: the secret leaves
+the workstation, every request is policy-checked, and every call is
+audited under the caller's identity. See
+[the series](docs/examples/workstation/README.md).
 
 ## Architecture
 

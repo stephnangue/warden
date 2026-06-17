@@ -1,0 +1,117 @@
+name: warden-ws-03-spiffe-llm-mcp
+services:
+  spire-server:
+    image: ghcr.io/spiffe/spire-server:1.15.1
+    hostname: spire-server
+    user: "0:0"                                   # dev: write the datastore into the root-owned volume
+    entrypoint: ["/opt/spire/bin/spire-server", "run"]
+    command: ["-config", "/opt/spire/conf/server/server.conf"]
+    configs:
+      - source: spire-server-conf
+        target: /opt/spire/conf/server/server.conf
+    volumes:
+      - spire-server-data:/opt/spire/data/server
+    networks: [spiffe]
+
+  spire-agent:
+    image: ghcr.io/spiffe/spire-agent:1.15.1
+    pid: "host"                                   # so the docker attestor can read container cgroups
+    user: "0:0"                                   # dev: write the agent data + socket into root-owned volumes
+    entrypoint: ["/opt/spire/bin/spire-agent", "run"]
+    command: ["-config", "/opt/spire/conf/agent/agent.conf", "-joinToken", "${JOIN_TOKEN}"]
+    configs:
+      - source: spire-agent-conf
+        target: /opt/spire/conf/agent/agent.conf
+    depends_on: [spire-server]
+    volumes:
+      - spire-sockets:/run/spire/sockets
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [spiffe]
+
+  warden:
+    image: ghcr.io/stephnangue/warden:v0.16.0      # published multi-arch image
+    command: ["--dev", "--dev-root-token=root", "--dev-tls-spiffe"]  # fixed dev root token = "root"
+    environment:
+      SPIFFE_ENDPOINT_SOCKET: "unix:///run/spire/sockets/agent.sock"
+    labels:
+      org.example.spiffe: "warden"
+    volumes:
+      - spire-sockets:/run/spire/sockets:ro
+    ports:
+      - "8200:8200"                               # ghostunnel (shares this netns) is published here
+    networks: [spiffe]
+
+  ghostunnel:
+    image: ghostunnel/ghostunnel:v1.10.0-distroless  # official multi-arch image (incl. linux/arm64)
+    network_mode: "service:warden"                # share Warden's loopback to reach 127.0.0.1:8400
+    command:
+      - client
+      - --listen=0.0.0.0:8200
+      - --unsafe-listen                           # allow binding 0.0.0.0 so the published port reaches us
+      - --target=127.0.0.1:8400
+      - --use-workload-api-addr=unix:///run/spire/sockets/agent.sock
+      - --verify-uri=spiffe://example.org/warden
+    labels:
+      org.example.spiffe: "ghostunnel"
+    volumes:
+      - spire-sockets:/run/spire/sockets:ro
+
+# SPIRE configs inlined here (no separate spire/ folder). Requires Compose v2.23.1+
+# for the `content:` field. Mounted read-only into the SPIRE containers above.
+configs:
+  spire-server-conf:
+    content: |
+      server {
+        bind_address          = "0.0.0.0"
+        bind_port             = "8081"
+        trust_domain          = "example.org"
+        data_dir              = "/opt/spire/data/server"
+        log_level             = "INFO"
+        ca_ttl                = "1h"
+        default_x509_svid_ttl = "1m"   # short, so you can watch it rotate
+
+        # Serve this trust domain's bundle over a SPIFFE Federation endpoint so the
+        # Warden auth method can federate (fetch + auto-refresh) it via the
+        # https_spiffe profile. NOTE: this block nests inside server {}.
+        federation {
+          bundle_endpoint {
+            address = "0.0.0.0"
+            port    = "8443"
+            profile "https_spiffe" {}
+          }
+        }
+      }
+      plugins {
+        DataStore "sql" {
+          plugin_data {
+            database_type     = "sqlite3"
+            connection_string = "/opt/spire/data/server/datastore.sqlite3"
+          }
+        }
+        # dev: CA lives in RAM only — restarting spire-server mints a NEW CA/bundle, so
+        # re-federate after a restart or `docker compose down -v`. KeyManager "disk" is durable.
+        KeyManager   "memory"     { plugin_data {} }
+        NodeAttestor "join_token" { plugin_data {} }
+      }
+  spire-agent-conf:
+    content: |
+      agent {
+        data_dir           = "/opt/spire/data/agent"
+        log_level          = "INFO"
+        server_address     = "spire-server"
+        server_port        = "8081"
+        trust_domain       = "example.org"
+        insecure_bootstrap = true                       # dev only: skip pinning the server CA
+        socket_path        = "/run/spire/sockets/agent.sock"
+      }
+      plugins {
+        KeyManager       "memory"     { plugin_data {} }
+        NodeAttestor     "join_token" { plugin_data {} }
+        WorkloadAttestor "docker"     { plugin_data {} } # attests containers by label
+      }
+
+volumes:
+  spire-server-data:
+  spire-sockets:
+networks:
+  spiffe:
