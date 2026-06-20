@@ -37,6 +37,7 @@ services:
       org.example.spiffe: "warden"
     volumes:
       - spire-sockets:/run/spire/sockets:ro
+      - ./audit:/audit                            # the file audit device writes JSON entries here
     ports:
       - "8200:8200"                               # ghostunnel (shares this netns) is published here
     networks: [spiffe]

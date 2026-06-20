@@ -11,6 +11,8 @@ machine** in plaintext (readable by any dependency, script, or tool that runs as
 and it leaves **no central audit** (calls hit the provider directly, with no record of who did
 what). Each rung moves a credential into Warden, which fixes all three: the secret leaves the
 laptop, every request is policy-checked, and every call is audited under the caller's identity.
+And each rung *shows* the last two — it turns on the audit log and watches a request get denied
+by policy, rather than just asserting it.
 
 ## Warden in a nutshell
 
@@ -90,4 +92,3 @@ where agents really run:
 - **Agents in CI/CD** — pipeline identity (OIDC from the CI platform), no long-lived tokens in
   repo or runner secrets.
 
-Both reuse the discover-then-connect model you'll learn here.

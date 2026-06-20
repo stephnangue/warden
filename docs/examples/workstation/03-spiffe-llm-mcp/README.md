@@ -185,7 +185,10 @@ warden cred source create github-src -type=github -rotation-period=0 \
 warden cred spec create github-ops -source github-src -config auth_method=pat -config token=$GH_PAT
 
 warden policy write mcp-github-access - <<'EOF'
-path "github-mcp/role/+/gateway*" { capabilities = ["create", "read", "delete"] }
+path "github-mcp/role/+/gateway*" {
+  capabilities = ["create", "read", "delete"]
+  mcp { denied_tools = ["delete_*", "create_*", "update_*", "push_*", "merge_*", "fork_*"] }
+}
 EOF
 
 warden write auth/spiffe/role/github \
@@ -223,6 +226,35 @@ claude -p "Using the github MCP server, list 3 of my repositories." \
 
 That prompt's **inference and tool call are both routed** over the same SVID.
 
+### Step 9 — policy and audit, under the keyless identity
+
+Everything 01 and 02 enforced still applies — but now the *subject* of every decision is the
+SVID, not a cert CN. Turn on the audit log and watch:
+
+```bash
+warden audit enable file -file-path=/audit/audit.log
+
+# second terminal
+tail -f audit/audit.log | jq '{id: .auth.principal_id, role: .auth.role_name,
+  allowed: .auth.policy_results.allowed, tool: .auth.policy_results.mcp_decision.name}'
+```
+
+Re-run Step 8's `tools/list`: the entry's `id` is `spiffe://example.org/ghostunnel` with
+`allowed: true`. Then try a state-changing tool — the `denied_tools` rule from Step 7 blocks it
+at Warden, before anything reaches GitHub:
+
+```bash
+curl -sS http://127.0.0.1:8200/v1/github-mcp/role/github/gateway/ \
+  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
+       "params":{"name":"delete_repository","arguments":{"owner":"me","repo":"demo"}}}'
+# {"error":"insufficient_permissions","error_description":"Tool 'delete_repository' not allowed."}  (403)
+```
+
+The audit log now holds two decisions under the same keyless SVID — `allowed: true` for the read,
+`allowed: false` for the blocked write. Zero credentials on disk, **and** every call
+policy-checked and attributed to a rotating identity that never touched the workstation.
+
 ---
 
 ## Verify it worked — the zero-credential check
@@ -240,6 +272,11 @@ ls *.key 2>/dev/null || echo "no private key on disk"
 All three come back clean — there's nothing sensitive on the laptop to leak, scope, or
 mis-audit. Every call Claude makes now carries the keyless SVID identity, is checked against
 Warden's policy, and lands in one audit trail.
+
+4. **Policy + audit (Step 9):** the read tool's audit entry shows
+   `auth.principal_id = "spiffe://example.org/ghostunnel"` with `allowed:true`; the `delete_*`
+   call returns `403 insufficient_permissions` and logs `allowed:false` — same keyless identity,
+   no repository changed.
 
 The workstation holds **zero long-lived credentials** — so even a fully cooperative (or fully
 compromised) agent has nothing to hand over.
@@ -271,6 +308,7 @@ removed to all of them. Same Claude Code, same workflow; the laptop just stopped
 claude mcp remove github
 unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY JOIN_TOKEN GH_PAT WARDEN_ADDR WARDEN_TOKEN
 docker compose down -v
+rm -rf audit
 rm -f anthropic-key.txt example.org-ca.pem
 ```
 
