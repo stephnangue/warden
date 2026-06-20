@@ -106,9 +106,16 @@ warden cred source create github-src -type=github -rotation-period=0 \
 warden cred spec create github-ops -source github-src \
   -config auth_method=pat -config token=$GH_PAT
 
-# Policy + cert-auth role — same client cert (allowed_common_names="mcp-agent")
+# Policy + cert-auth role — same client cert (allowed_common_names="mcp-agent").
+# The mcp{} block reaches inside each tool call: read/list/search tools pass,
+# state-changing tools are denied at Warden (demonstrated in Step 6).
 warden policy write mcp-github-access - <<'EOF'
-path "github-mcp/role/+/gateway*" { capabilities = ["create", "read", "delete"] }
+path "github-mcp/role/+/gateway*" {
+  capabilities = ["create", "read", "delete"]
+  mcp {
+    denied_tools = ["delete_*", "create_*", "update_*", "push_*", "merge_*", "fork_*"]
+  }
+}
 EOF
 
 warden write auth/cert/role/github-user \
@@ -156,6 +163,41 @@ This rung is "LLM **+** MCP". If you want inference routed through Warden as wel
 Anthropic provider/role here (it's the same cert stack) and set `ANTHROPIC_BASE_URL` — see
 [01, Steps 3 & 5](../01-cert-llm/#step-3--route-the-anthropic-api-through-warden).
 
+### Step 5 — turn on the audit log
+
+Enable a file audit device so every gateway call is recorded (skip if you already did this in 01):
+
+```bash
+warden audit enable file -file-path=/audit/audit.log
+
+# second terminal
+tail -f audit/audit.log | jq '{type, id: .auth.principal_id, role: .auth.role_name,
+  allowed: .auth.policy_results.allowed, tool: .auth.policy_results.mcp_decision.name}'
+```
+
+Re-run Step 3's `tools/list` and an entry appears with `role: "github-user"` and `allowed: true`
+(the injected GitHub token is salted to `hmac-sha256:…`, never in the clear).
+
+### Step 6 — watch the policy block a tool
+
+The `denied_tools` rule from Step 2 is evaluated *inside* each `tools/call`, **before** Warden
+forwards anything. A read tool passes; a state-changing tool is refused at Warden — so the repo
+is never touched:
+
+```bash
+# Denied — a write tool, blocked at Warden (nothing reaches GitHub)
+curl -sS http://127.0.0.1:9000/v1/github-mcp/role/github-user/gateway/ \
+  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
+       "params":{"name":"delete_repository","arguments":{"owner":"me","repo":"demo"}}}'
+# {"error":"insufficient_permissions","error_description":"Tool 'delete_repository' not allowed."}  (403)
+```
+
+The audit entry for that call shows `allowed: false` with the offending `tool`. Ask Claude to do
+the same ("delete the demo repo") and it gets the identical refusal — the model can *propose* a
+dangerous tool, but Warden won't run it. **A hallucinated or injected write is contained at the
+gateway, recorded, and never executed.**
+
 ---
 
 ## Verify it worked
@@ -166,8 +208,11 @@ Anthropic provider/role here (it's the same cert stack) and set `ANTHROPIC_BASE_
 3. A read-only GitHub tool call from Claude returns data; `docker compose logs warden` shows a
    cert login + `github-ops` credential issue.
 4. **Nothing on disk:** `grep -ri 'ghp_\|Bearer ' ~/.claude.json` finds no token — the config
-   holds only the gateway URL, and the call was authorized by the cert and recorded in Warden's
-   audit log.
+   holds only the gateway URL.
+5. **Audit is real:** the `tools/list` call has an entry with `auth.role_name = "github-user"`,
+   `allowed:true`; the injected token is salted to `hmac-sha256:…`.
+6. **Policy bites:** the `delete_*` `tools/call` returns `403 insufficient_permissions`, shows
+   `allowed:false` with the tool name in the audit log, and no repository was changed.
 
 ## Scorecard
 
@@ -193,7 +238,7 @@ MCP token** remain. What's *still* on disk is the mTLS **client private key**
 claude mcp remove github
 unset GH_PAT WARDEN_ADDR WARDEN_TOKEN
 docker compose down -v
-rm -rf certs
+rm -rf certs audit
 ```
 
 > To add Slack and AWS MCP servers behind the same cert, see the *Add more upstreams* appendix

@@ -35,6 +35,7 @@ services:
       - --dev-tls-ca-cert-file=/certs/ca.crt
     volumes:
       - ./certs:/certs:ro
+      - ./audit:/audit                 # the file audit device writes JSON entries here
     ports:
       - "127.0.0.1:9000:9000"          # ghostunnel (shares this netns) is published here
     depends_on:

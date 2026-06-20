@@ -144,10 +144,10 @@ one rung at a time, without changing how the agent works:
   auto-rotating SPIFFE SVID, so even the private key leaves the
   disk. Zero long-lived credentials remain on the machine.
 
-Every rung makes the same three wins concrete: the secret leaves
-the workstation, every request is policy-checked, and every call is
-audited under the caller's identity. See
-[the series](docs/examples/workstation/README.md).
+Every rung makes the same three wins concrete — and demonstrates
+them, not just asserts them: the secret leaves the workstation, and
+each rung turns on the audit log and watches a request get denied by
+policy. See [the series](docs/examples/workstation/README.md).
 
 ## Architecture
 

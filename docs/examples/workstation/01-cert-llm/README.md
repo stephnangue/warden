@@ -168,8 +168,72 @@ claude
 ```
 
 Every prompt is now routed through Warden: the Console key lives only in Warden, and you can cap
-`model`/`max_tokens` centrally in the `anthropic-access` policy. (To persist it, put
-`ANTHROPIC_BASE_URL` under `env` in `~/.claude/settings.json`.)
+`model`/`max_tokens` centrally in the `anthropic-access` policy (proven in Step 7). (To persist
+it, put `ANTHROPIC_BASE_URL` under `env` in `~/.claude/settings.json`.)
+
+### Step 6 — turn on the audit log
+
+So far "every call is audited" has been a claim. Make it concrete: enable a **file audit
+device**, which writes one JSON entry per request and per response into the mounted `./audit/`:
+
+```bash
+warden audit enable file -file-path=/audit/audit.log
+warden audit list                    # one device — Warden is fail-closed once it has one
+```
+
+Watch it in a second terminal:
+
+```bash
+tail -f audit/audit.log | jq '{type, id: .auth.principal_id, role: .auth.role_name,
+  allowed: .auth.policy_results.allowed, upstream: .response.upstream_url, cred: .response.credential.type}'
+```
+
+Re-run Step 4's curl and an entry appears: `id` is the cert CN `mcp-agent`, `role` is
+`anthropic-user`, `allowed` is `true`, `upstream` is the Anthropic URL, and `cred` is `api_key`.
+The injected key is never in the clear — credential values are salted to `hmac-sha256:…`.
+
+> Only the `file` device type exists. If a bind-mounted log is awkward on your host, enable it to
+> `-file-path=/dev/stdout` instead and read entries with `docker compose logs warden`.
+
+### Step 7 — watch the policy enforce a limit
+
+The role may call the model — but *which* model is a policy decision. Pin it: rewrite the policy
+so only one model is permitted (missing params stay allowed; `"*" = []` permits every other
+field):
+
+```bash
+MODEL="claude-sonnet-4-5"            # a model your Anthropic account can use
+
+warden policy write anthropic-access - <<EOF
+path "anthropic/role/+/gateway*" {
+  capabilities       = ["create", "read", "update", "delete", "patch"]
+  allowed_parameters = { "model" = ["$MODEL"], "*" = [] }
+}
+EOF
+```
+
+A request naming the pinned model is forwarded; one naming any other model is **denied by Warden
+before it reaches Anthropic** (no upstream call, no spend):
+
+```bash
+# Allowed — passes policy, forwarded upstream
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  http://127.0.0.1:9000/v1/anthropic/role/anthropic-user/gateway/v1/messages \
+  -H 'content-type: application/json' \
+  -d "{\"model\":\"$MODEL\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+# 200
+
+# Denied — different model, blocked at Warden
+curl -sS http://127.0.0.1:9000/v1/anthropic/role/anthropic-user/gateway/v1/messages \
+  -H 'content-type: application/json' \
+  -d '{"model":"some-other-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'
+# {"errors":["permission denied"]}   (HTTP 403)
+```
+
+In the audit tail the two calls sit side by side — same `id` and `role`, but `allowed: true` on
+the first and `allowed: false` on the second. That's the whole point made real: the limit lives
+in Warden (change it once, for everyone), and every decision — allowed or denied — is recorded
+against the caller's identity.
 
 ---
 
@@ -181,9 +245,13 @@ Every prompt is now routed through Warden: the Console key lives only in Warden,
    warden` shows a cert login + `anthropic-ops` credential issue, and the upstream call carries
    the injected `x-api-key` (your placeholder is stripped).
 4. Your key never left Warden: `printf '%s' "$ANTHROPIC_API_KEY"` on the workstation is just
-   `placeholder`, and `grep -r sk-ant ~/.claude/` finds nothing. The real key lives only in
-   Warden, every request was policy-checked, and each is in Warden's audit log under the cert
-   identity.
+   `placeholder`, and `grep -r sk-ant ~/.claude/` finds nothing.
+5. **Audit is real:** `audit/audit.log` has a `response` entry for your call with
+   `auth.role_name = "anthropic-user"` and `response.credential.type = "api_key"` (the key value
+   salted to `hmac-sha256:…`).
+6. **Policy bites:** the pinned-model curl returns `200`, the other-model curl returns `403`
+   `permission denied`, and both show in the audit log — `allowed:true` and `allowed:false`
+   under the same identity.
 
 ## Scorecard
 
@@ -211,7 +279,7 @@ MCP server so we also stop storing MCP tokens.
 ```bash
 unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY WARDEN_ADDR WARDEN_TOKEN
 docker compose down -v
-rm -rf certs secrets        # certs/ is a bind mount; down -v won't remove it
+rm -rf certs secrets audit  # certs/ and audit/ are bind mounts; down -v won't remove them
 ```
 
 > Dev mode uses in-memory storage — everything resets on `down`. No Warden source is modified;
