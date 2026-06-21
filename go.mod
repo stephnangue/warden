@@ -175,7 +175,7 @@ require (
 	github.com/zclconf/go-cty v1.16.3 // indirect
 	golang.org/x/crypto v0.53.0
 	golang.org/x/mod v0.36.0 // indirect
-	golang.org/x/net v0.55.0
+	golang.org/x/net v0.56.0
 	golang.org/x/sync v0.21.0
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0
