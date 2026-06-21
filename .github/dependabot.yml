@@ -20,13 +20,6 @@ updates:
       - "go"
     reviewers:
       - "stephnangue"
-    ignore:
-      # Hold the go-kms-wrapping family at the v2.7.0-compatible set.
-      # v2.8.0 of the core library dropped the per-provider wrapper-type
-      # constants and the aead ShamirWrapper API our KMS config relies on,
-      # and no wrapper release compatible with v2.8.0 exists yet. Remove
-      # this once upstream ships a migration path. See PR #330.
-      - dependency-name: "github.com/openbao/go-kms-wrapping/*"
     groups:
       # Group minor and patch updates together
       go-minor-patch:
