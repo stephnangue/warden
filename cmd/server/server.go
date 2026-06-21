@@ -69,6 +69,7 @@ import (
 	"github.com/stephnangue/warden/provider/prometheus"
 	"github.com/stephnangue/warden/provider/rds"
 	"github.com/stephnangue/warden/provider/redshift"
+	"github.com/stephnangue/warden/provider/rest"
 	"github.com/stephnangue/warden/provider/scaleway"
 	"github.com/stephnangue/warden/provider/sentry"
 	"github.com/stephnangue/warden/provider/servicenow"
@@ -183,6 +184,7 @@ Usage: warden server [options]
 		"vault":         vault.Factory,
 		"rds":           rds.Factory,
 		"redshift":      redshift.Factory,
+		"rest":          rest.Factory,
 		"scaleway":      scaleway.Factory,
 		"sentry":        sentry.Factory,
 	}
@@ -203,6 +205,7 @@ Usage: warden server [options]
 		"mcp_aws":       mcp_aws.Skill(),
 		"openai":        openai.Skill(),
 		"rds":           rds.Skill(),
+		"rest":          rest.Skill(),
 		"scaleway":      scaleway.Skill(),
 		"slack":         slack.Skill(),
 		"vault":         vault.Skill(),
