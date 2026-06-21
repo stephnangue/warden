@@ -20,7 +20,7 @@ import (
 	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/go-multierror"
 	wrapping "github.com/openbao/go-kms-wrapping/v2"
-	aeadwrapper "github.com/openbao/go-kms-wrapping/wrappers/aead/v2"
+	aead "github.com/openbao/go-kms-wrapping/v2/aead"
 	"github.com/openbao/openbao/sdk/v2/helper/jsonutil"
 	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/stephnangue/warden/api"
@@ -548,7 +548,7 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 
 	// Load seal information.
 	if c.seal == nil {
-		wrapper := aeadwrapper.NewShamirWrapper()
+		wrapper := aead.NewWrapper()
 		wrapper.SetConfig(context.Background())
 
 		c.seal = NewDefaultSeal(seal.NewAccess(wrapper))
@@ -1027,7 +1027,7 @@ func (c *Core) adjustForSealMigration(unwrapSeal Seal) error {
 		case existBarrierSealConfig.Type == wrapping.WrapperTypeShamir.String():
 			// The configured seal is not Shamir, the stored seal config is Shamir.
 			// This is a migration away from Shamir.
-			unwrapSeal = NewDefaultSeal(seal.NewAccess(aeadwrapper.NewShamirWrapper()))
+			unwrapSeal = NewDefaultSeal(seal.NewAccess(aead.NewWrapper()))
 		default:
 			// We know at this point that there is a configured non-Shamir seal,
 			// that it does not match the stored non-Shamir seal config, and that

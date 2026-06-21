@@ -22,7 +22,6 @@ require (
 	github.com/mitchellh/copystructure v1.2.0
 	github.com/oklog/ulid v1.3.1
 	github.com/openbao/go-kms-wrapping/v2 v2.7.0
-	github.com/openbao/go-kms-wrapping/wrappers/aead/v2 v2.3.0
 	github.com/openbao/go-kms-wrapping/wrappers/alicloudkms/v2 v2.2.0
 	github.com/openbao/go-kms-wrapping/wrappers/awskms/v2 v2.3.0
 	github.com/openbao/go-kms-wrapping/wrappers/azurekeyvault/v2 v2.3.0

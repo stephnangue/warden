@@ -13,7 +13,7 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
 	wrapping "github.com/openbao/go-kms-wrapping/v2"
-	aeadwrapper "github.com/openbao/go-kms-wrapping/wrappers/aead/v2"
+	aead "github.com/openbao/go-kms-wrapping/v2/aead"
 	"github.com/openbao/openbao/sdk/v2/helper/jsonutil"
 	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/stephnangue/warden/core/seal"
@@ -65,7 +65,7 @@ type Seal interface {
 	SetRecoveryKey(context.Context, []byte) error
 	VerifyRecoveryKey(context.Context, []byte) error // SealAccess
 	GetAccess() seal.Access                          // SealAccess
-	GetShamirWrapper() (*aeadwrapper.ShamirWrapper, error)
+	GetShamirWrapper() (*aead.Wrapper, error)
 }
 
 type defaultSeal struct {
@@ -257,12 +257,12 @@ func (d *defaultSeal) SetRecoveryKey(ctx context.Context, key []byte) error {
 	return errors.New("recovery not supported")
 }
 
-func (d *defaultSeal) GetShamirWrapper() (*aeadwrapper.ShamirWrapper, error) {
-	// defaultSeal is meant to be for Shamir seals, so it should always have a ShamirWrapper.
+func (d *defaultSeal) GetShamirWrapper() (*aead.Wrapper, error) {
+	// defaultSeal is meant to be for Shamir seals, so it should always have a Shamir wrapper.
 	// Nonetheless, NewDefaultSeal does not check, so let's play it safe.
-	w, ok := d.GetAccess().GetWrapper().(*aeadwrapper.ShamirWrapper)
+	w, ok := d.GetAccess().GetWrapper().(*aead.Wrapper)
 	if !ok {
-		return nil, fmt.Errorf("expected defaultSeal to have a ShamirWrapper, but found a %T instead", d.GetAccess().GetWrapper())
+		return nil, fmt.Errorf("expected defaultSeal to have a Shamir wrapper, but found a %T instead", d.GetAccess().GetWrapper())
 	}
 	return w, nil
 }

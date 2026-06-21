@@ -17,7 +17,7 @@ import (
 
 	"github.com/hashicorp/errwrap"
 	wrapping "github.com/openbao/go-kms-wrapping/v2"
-	aeadwrapper "github.com/openbao/go-kms-wrapping/wrappers/aead/v2"
+	aead "github.com/openbao/go-kms-wrapping/v2/aead"
 	"github.com/openbao/openbao/sdk/v2/logical"
 	phy "github.com/openbao/openbao/sdk/v2/physical"
 	physInmem "github.com/openbao/openbao/sdk/v2/physical/inmem"
@@ -875,7 +875,7 @@ func setSeal(conf *config.Config, logger *log.GatedLogger, infoKeys *[]string, i
 
 		var seal core.Seal
 		sealLogger := logger.WithSystem(fmt.Sprintf("seal.%s", sealType))
-		defaultSeal := core.NewDefaultSeal(wardenseal.NewAccess(aeadwrapper.NewShamirWrapper()))
+		defaultSeal := core.NewDefaultSeal(wardenseal.NewAccess(aead.NewWrapper()))
 		var sealInfoKeys []string
 		sealInfoMap := map[string]string{}
 		wrapper, sealConfigError = configutil.ConfigureWrapper(&configSeal, &sealInfoKeys, &sealInfoMap, sealLogger)

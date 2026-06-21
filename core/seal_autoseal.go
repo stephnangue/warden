@@ -13,7 +13,7 @@ import (
 	"time"
 
 	wrapping "github.com/openbao/go-kms-wrapping/v2"
-	aeadwrapper "github.com/openbao/go-kms-wrapping/wrappers/aead/v2"
+	aead "github.com/openbao/go-kms-wrapping/v2/aead"
 	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/stephnangue/warden/core/seal"
 	log "github.com/stephnangue/warden/logger"
@@ -100,8 +100,8 @@ func (d *autoSeal) BarrierType() wrapping.WrapperType {
 	return d.barrierType
 }
 
-func (d *autoSeal) GetShamirWrapper() (*aeadwrapper.ShamirWrapper, error) {
-	return nil, errors.New("autoSeal does not use a ShamirWrapper")
+func (d *autoSeal) GetShamirWrapper() (*aead.Wrapper, error) {
+	return nil, errors.New("autoSeal does not use a Shamir wrapper")
 }
 
 func (d *autoSeal) StoredKeysSupported() seal.StoredKeysSupport {

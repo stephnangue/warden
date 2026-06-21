@@ -378,8 +378,6 @@ github.com/olekukonko/tablewriter v1.1.4 h1:ORUMI3dXbMnRlRggJX3+q7OzQFDdvgbN9nVW
 github.com/olekukonko/tablewriter v1.1.4/go.mod h1:+kedxuyTtgoZLwif3P1Em4hARJs+mVnzKxmsCL/C5RY=
 github.com/openbao/go-kms-wrapping/v2 v2.7.0 h1:/Vm3UF0bMLdeU2U1fXI0hLVuJbqBlqpAwXlmn88IJ2Q=
 github.com/openbao/go-kms-wrapping/v2 v2.7.0/go.mod h1:xoUdq1btm4MNgwBpMkVLvXxuvnH4gGzODozWGFpft8w=
-github.com/openbao/go-kms-wrapping/wrappers/aead/v2 v2.3.0 h1:4nrE306wqZAKP/EUkrwA8LcnqpJbPDir+EZBxeOQBSM=
-github.com/openbao/go-kms-wrapping/wrappers/aead/v2 v2.3.0/go.mod h1:vapnd+guYhTvRnwHtxNxlKrTdIFkznVp7r1LYzD4aeI=
 github.com/openbao/go-kms-wrapping/wrappers/alicloudkms/v2 v2.2.0 h1:evwGV3ojzXhno2AnCYzyj10HxGHujq6R93zSlaGRRNk=
 github.com/openbao/go-kms-wrapping/wrappers/alicloudkms/v2 v2.2.0/go.mod h1:wiZapI8HCPoK5UMKITxBzdboKGvZAJiZUW7ZVsgtEgc=
 github.com/openbao/go-kms-wrapping/wrappers/awskms/v2 v2.3.0 h1:Zccqnf/5zjtptBU8OliC3iCbBfwrXvBlcP/Pw9UDAh4=
