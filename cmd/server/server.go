@@ -857,12 +857,12 @@ func setSeal(conf *config.Config, logger *log.GatedLogger, infoKeys *[]string, i
 	// Handle the case where no seal is provided
 	switch len(conf.Seals) {
 	case 0:
-		conf.Seals = append(conf.Seals, config.KMS{Type: wrapping.WrapperTypeShamir.String()})
+		conf.Seals = append(conf.Seals, config.KMS{Type: wardenseal.WrapperTypeShamir.String()})
 	case 1:
 		// If there's only one seal and it's disabled assume they want to
 		// migrate to a shamir seal and simply didn't provide it
 		if conf.Seals[0].IsDisabled() {
-			conf.Seals = append(conf.Seals, config.KMS{Type: wrapping.WrapperTypeShamir.String()})
+			conf.Seals = append(conf.Seals, config.KMS{Type: wardenseal.WrapperTypeShamir.String()})
 		}
 	}
 	createdSeals := make([]core.Seal, len(conf.Seals))
