@@ -18,6 +18,7 @@ import (
 	"github.com/openbao/go-kms-wrapping/wrappers/transit/v2"
 	"github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/config"
+	"github.com/stephnangue/warden/core/seal"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -44,34 +45,34 @@ func configureWrapper(configKMS *config.KMS, infoKeys *[]string, info *map[strin
 	var err error
 
 	switch wrapping.WrapperType(configKMS.Type) {
-	case wrapping.WrapperTypeShamir:
+	case seal.WrapperTypeShamir:
 		return nil, nil
 
-	case wrapping.WrapperTypeAliCloudKms:
+	case alicloudkms.Type:
 		wrapper, kmsInfo, err = GetAliCloudKMSFunc(configKMS, opts...)
 
-	case wrapping.WrapperTypeAwsKms:
+	case awskms.Type:
 		wrapper, kmsInfo, err = GetAWSKMSFunc(configKMS, opts...)
 
-	case wrapping.WrapperTypeAzureKeyVault:
+	case azurekeyvault.Type:
 		wrapper, kmsInfo, err = GetAzureKeyVaultKMSFunc(configKMS, opts...)
 
-	case wrapping.WrapperTypeGcpCkms:
+	case gcpckms.Type:
 		wrapper, kmsInfo, err = GetGCPCKMSKMSFunc(configKMS, opts...)
 
-	case wrapping.WrapperTypeOciKms:
+	case ocikms.Type:
 		if keyId, ok := configKMS.Config()["key_id"]; ok {
 			opts = append(opts, wrapping.WithKeyId(keyId))
 		}
 		wrapper, kmsInfo, err = GetOCIKMSKMSFunc(configKMS, opts...)
 
-	case wrapping.WrapperTypeTransit:
+	case transit.Type:
 		wrapper, kmsInfo, err = GetTransitKMSFunc(configKMS, opts...)
 
-	case wrapping.WrapperTypeKmip:
+	case kmip.Type:
 		wrapper, kmsInfo, err = GetKmipKMSFunc(configKMS, opts...)
 
-	case wrapping.WrapperTypeStatic:
+	case statickms.Type:
 		wrapper, kmsInfo, err = GetStaticKMSFunc(configKMS, opts...)
 
 	default:
