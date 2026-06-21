@@ -8,6 +8,12 @@ import (
 	wrapping "github.com/openbao/go-kms-wrapping/v2"
 )
 
+// WrapperTypeShamir identifies a Shamir barrier seal. The upstream
+// go-kms-wrapping library no longer defines per-type constants, so this is the
+// canonical value for warden. It must stay the literal "shamir" to remain
+// compatible with seal configuration already persisted on disk.
+const WrapperTypeShamir wrapping.WrapperType = "shamir"
+
 type StoredKeysSupport int
 
 const (

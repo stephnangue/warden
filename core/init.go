@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-uuid"
-	wrapping "github.com/openbao/go-kms-wrapping/v2"
 	"github.com/openbao/openbao/sdk/v2/helper/shamir"
 	"github.com/stephnangue/warden/core/seal"
 	"github.com/stephnangue/warden/internal/namespace"
@@ -245,7 +244,7 @@ func (c *Core) initializeInternal(ctx context.Context, initParams *InitParams) (
 	var sealKey []byte
 	var sealKeyShares [][]byte
 
-	if barrierConfig.StoredShares == 1 && c.seal.BarrierType() == wrapping.WrapperTypeShamir {
+	if barrierConfig.StoredShares == 1 && c.seal.BarrierType() == seal.WrapperTypeShamir {
 		sealKey, sealKeyShares, err = c.generateShares(barrierConfig)
 		if err != nil {
 			c.logger.Error("error generating shares",
@@ -458,7 +457,7 @@ func (c *Core) UnsealWithStoredKeys(ctx context.Context) error {
 	c.unsealWithStoredKeysLock.Lock()
 	defer c.unsealWithStoredKeysLock.Unlock()
 
-	if c.seal.BarrierType() == wrapping.WrapperTypeShamir {
+	if c.seal.BarrierType() == seal.WrapperTypeShamir {
 		return nil
 	}
 
