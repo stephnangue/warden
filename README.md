@@ -147,7 +147,7 @@ one rung at a time, without changing how the agent works:
 Every rung makes the same three wins concrete — and demonstrates
 them, not just asserts them: the secret leaves the workstation, and
 each rung turns on the audit log and watches a request get denied by
-policy. See [the series](docs/examples/workstation/README.md).
+policy. See [the series](docs/quickstarts/workstation/README.md).
 
 ## Architecture
 
