@@ -1,11 +1,11 @@
 # Credentials
 
 Warden's purpose is to keep secrets out of workloads. Instead of
-handing an agent a static API key, Warden **brokers** credentials: it holds the
-privileged secret itself, and at request time mints or retrieves a scoped,
-often short-lived credential for the upstream system the caller is trying to
-reach. The workload presents only its [identity](authentication.md); Warden
-turns that into a usable credential.
+handing an agent a static API key, Warden **brokers access**: it holds the
+privileged secret itself and, at request time, mints or retrieves a scoped,
+often short-lived credential for the upstream the caller is trying to reach — then
+injects it into the request rather than handing it over. The workload presents only
+its [identity](authentication.md); it never holds a credential of its own.
 
 This document describes the credential model end to end — the three configuration
 objects that define where credentials come from, the drivers that talk to

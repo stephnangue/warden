@@ -40,14 +40,14 @@ next.
 
 ## Two Styles of Authentication
 
-### Session-token authentication
+### Explicit authentication
 
-A **Warden token** is a session credential that Warden issues and tracks. You
-obtain one by logging in against an auth method (or, for a fresh dev/production
-server, you start with the root token), then send it on the `X-Warden-Token`
-header with every subsequent request. Warden looks the token up, checks that it
-has not expired and belongs to the request's namespace, and uses the policies
-attached to it.
+You authenticate **explicitly** by logging in. A caller presents a credential to
+an auth method, Warden issues a **session token** (a Warden token), and the caller
+sends it on the `X-Warden-Token` header with every subsequent request. Warden
+looks the token up, checks that it has not expired and belongs to the request's
+namespace, and uses the policies attached to it. (A fresh dev or production server
+starts with the root token.)
 
 This is the familiar Vault-style flow: authenticate once, carry a token.
 

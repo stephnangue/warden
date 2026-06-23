@@ -4,7 +4,7 @@ Warden is a Go service that sits between workloads and providers. A [provider](c
 
 **Key design decisions:**
 - **Seal/unseal model** — Warden protects secrets at rest with envelope encryption behind a barrier. A running server unseals itself at startup from an auto-unseal seal (Transit, AWS/GCP/Azure/OCI KMS, PKCS#11, KMIP, or a static key); `shamir` is the default seal type and splits the key into shares. Dev mode uses an in-memory seal. See [Seal and Unseal](concepts/seal-unseal.md).
-- **Credential brokering** — Warden holds the privileged upstream secret and injects a scoped, often short-lived [credential](concepts/credentials.md) into each proxied request, so workloads never hold long-lived keys.
+- **Access brokering** — Warden holds the privileged upstream secret and injects a scoped, often short-lived [credential](concepts/credentials.md) into each proxied request, so workloads reach upstreams without ever holding long-lived keys.
 - **Active/standby HA** — See [High Availability](#high-availability) below.
 - **Namespace isolation** — Every credential source, policy, and mount point is scoped to a [namespace](concepts/namespaces.md) with hard boundaries. Policies cannot leak across namespaces.
 

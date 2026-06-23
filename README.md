@@ -157,7 +157,7 @@ See [docs/architecture.md](docs/architecture.md) for Warden's design decisions, 
 
 A first-party Helm chart deploys Warden as a 3-replica HA cluster on any Kubernetes 1.27+ cluster — bring your own Postgres, your own TLS certificate, and either a Vault Transit endpoint for auto-unseal or a static seal key for development. The chart ships production-leaning defaults; a quickstart values file shrinks the install to a single replica for kind or minikube.
 
-See [docs/deployment/kubernetes.md](docs/deployment/kubernetes.md) for the full guide.
+See [docs/install/kubernetes.md](docs/install/kubernetes.md) for the full guide.
 
 ## Contributing
 
