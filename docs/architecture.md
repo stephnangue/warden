@@ -1,12 +1,12 @@
 # Architecture
 
-Warden is a Go service that sits between workloads and providers. Providers are registered as either streaming backends (which proxy traffic to upstream services) or access backends (which vend credentials directly without proxying). Each backend has its own credential source driver, authentication flow, and policy rules.
+Warden is a Go service that sits between workloads and providers. A [provider](concepts/providers.md) is a mounted backend that proxies a workload's request to an upstream service — authenticating the caller, checking [policy](concepts/policies.md), and injecting a [credential](concepts/credentials.md) on the way through. The workload talks to Warden as if it were the upstream and never holds the upstream secret.
 
 **Key design decisions:**
-- **Seal/unseal model** — Like Vault, Warden protects secrets at rest using envelope encryption. Supports dev mode (in-memory) and production mode with multiple seal types (Shamir, Transit, AWS KMS, GCP KMS, Azure Key Vault, OCI KMS, PKCS11, KMIP) and PostgreSQL storage.
+- **Seal/unseal model** — Warden protects secrets at rest with envelope encryption behind a barrier. A running server unseals itself at startup from an auto-unseal seal (Transit, AWS/GCP/Azure/OCI KMS, PKCS#11, KMIP, or a static key); `shamir` is the default seal type and splits the key into shares. Dev mode uses an in-memory seal. See [Seal and Unseal](concepts/seal-unseal.md).
+- **Credential brokering** — Warden holds the privileged upstream secret and injects a scoped, often short-lived [credential](concepts/credentials.md) into each proxied request, so workloads never hold long-lived keys.
 - **Active/standby HA** — See [High Availability](#high-availability) below.
-- **Access grants over proxying for databases** — For providers like RDS where Warden doesn't need to sit in the data path, access backends return ready-to-use connection strings with short-lived tokens. This avoids the latency and complexity of proxying database traffic while preserving identity-based access control and audit attribution.
-- **Namespace isolation** — Every credential source, policy, and mount point is scoped to a namespace with hard boundaries. Policies cannot leak across namespaces.
+- **Namespace isolation** — Every credential source, policy, and mount point is scoped to a [namespace](concepts/namespaces.md) with hard boundaries. Policies cannot leak across namespaces.
 
 ## High Availability
 
