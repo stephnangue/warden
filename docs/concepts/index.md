@@ -39,6 +39,9 @@ a credential of its own.
 
 ## For AI agents
 
+- [Agent Identity](../agent-identity/README.md) — how an agent presents its
+  identity to Warden: sidecar-presented or agent-presented, and the four
+  approaches under each.
 - [Discovery and Skills](discovery-and-skills.md) — how an agent learns, at
   runtime, what it may do and how.
 - [Delegation](delegation.md) — carrying the on-behalf-of chain into the audit
