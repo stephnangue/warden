@@ -103,6 +103,10 @@ than a bearer token.
 Either way the workload holds no Warden-specific secret; Warden authenticates the
 presented JWT or certificate through [transparent authentication](#transparent-authentication).
 
+For the full set of identity-presentation approaches — sidecar-presented and
+agent-presented, and how to choose between them — see
+[Agent Identity](../agent-identity/README.md).
+
 ## Warden Tokens
 
 A Warden session token is an opaque string with the prefix `cws.` followed by 64
