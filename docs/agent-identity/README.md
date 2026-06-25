@@ -32,7 +32,7 @@ the *variant* says how it lands.
 | | Variant | The agent's request carries… | Validated by |
 |---|---|---|---|
 | **A — Sidecar-Presented Identity** | | *A co-process presents identity; the agent sends a plain local request and stays identity-unaware.* | |
-| A1 | [Sidecar Token Injection](sidecar-injected-token.md) (Robin) | an `Authorization: Bearer` token the sidecar adds | `jwt` / `kubernetes` / `spiffe` |
+| A1 | [Sidecar Token Injection](sidecar-injected-token.md) (Robin) | an `Authorization: Bearer` token the sidecar adds | `kubernetes` / `spiffe` |
 | A2 | [Sidecar mTLS Tunnel](sidecar-tunneled-cert.md) (ghostunnel) | nothing — identity rides the mTLS channel the sidecar originates | `cert` / `spiffe` |
 | **B — Agent-Presented Identity** | | *The identity-aware agent attaches its own credential.* | |
 | B1 | [Self-Minted SVID](self-minted-identity.md) | an SVID the agent fetched from the Workload API | `spiffe` |

@@ -9,11 +9,19 @@ identity — landing it as an **injected token**.
 ## What it is
 
 [Robin](https://github.com/stephnangue/robin) runs beside the agent, holds the
-workload's identity token — an OIDC JWT, a JWT-SVID, or a projected Kubernetes
-ServiceAccount token — and attaches it as a bearer header on every request to
-Warden. The application is wired to call
-`http://127.0.0.1:<port>` instead of Warden directly; it carries no Warden
-secret and needs no knowledge of how it is authenticated.
+workload's identity token — a projected Kubernetes ServiceAccount token or a
+SPIFFE JWT-SVID — and attaches it as a bearer header on every request to Warden.
+The application is wired to call `http://127.0.0.1:<port>` instead of Warden
+directly; it carries no Warden secret and needs no knowledge of how it is
+authenticated.
+
+Robin does not mint that token — it **reads it from where the platform already
+put it**. On Kubernetes that is the pod's projected ServiceAccount token, mounted
+into the container at a path like
+`/var/run/secrets/kubernetes.io/serviceaccount/token` and rotated by the kubelet;
+in a SPIFFE deployment it is a JWT-SVID Robin fetches from the local Workload API
+socket. Either way the token is short-lived and renewed by the platform, and
+Robin simply attaches the current value to each request.
 
 ## Request flow
 
@@ -22,16 +30,15 @@ secret and needs no knowledge of how it is authenticated.
 │  agent  │ ────────────► │  Robin   │ ────────────────────────────────► │ Warden │
 │         │   (loopback)  │ sidecar  │             (over TLS)            │        │
 └─────────┘               └──────────┘                                   └────────┘
-                          holds the JWT /
+                          reads the SA token /
                           JWT-SVID identity
 ```
 
 ## How Warden authenticates it
 
 The injected bearer token is validated by the auth method that matches its
-issuer: the `jwt` method (against an OIDC discovery URL, JWKS, or static keys);
-the `kubernetes` method, for a projected ServiceAccount token, via the cluster's
-TokenReview API; or the `spiffe` method, for a JWT-SVID, against the
+issuer: the `kubernetes` method, for a projected ServiceAccount token, via the
+cluster's TokenReview API; or the `spiffe` method, for a JWT-SVID, against the
 trust-domain bundles. Because the request arrives with no
 `X-Warden-Token`, Warden uses [transparent authentication](../concepts/authentication.md#transparent-authentication):
 it logs the caller in against the provider's configured auth mount, resolves the
@@ -78,4 +85,4 @@ nothing in the pod.
 - [Platform Token Relay](platform-issued-token.md) — the same token, presented by
   the agent itself instead of a sidecar.
 - [Authentication](../concepts/authentication.md) — transparent auth and the
-  `jwt` / `kubernetes` / `spiffe` methods.
+  `kubernetes` / `spiffe` methods.
