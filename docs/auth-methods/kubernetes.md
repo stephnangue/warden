@@ -25,7 +25,6 @@ Operators who have used Vault's or OpenBao's `auth/kubernetes` will find the sha
 - [Discovering Assumable Roles](#discovering-assumable-roles)
 - [Configuration Reference](#configuration-reference)
 - [Troubleshooting](#troubleshooting)
-- [Development / Testing](#development--testing)
 
 ## Prerequisites
 
@@ -253,16 +252,9 @@ A `*`/`*` binding (both names and namespaces only contain `"*"`) is refused at r
 
 **Cached auth entries expire faster than expected.** Warden's cached transparent-auth entry has a TTL equal to the minimum of the role's `token_ttl` and the workload JWT's remaining lifetime. Pods that have been running near the end of their projected-token cycle will get short-lived cache entries. The kubelet refreshes the projected token before expiry, so the next gateway request with the refreshed JWT seeds a new cache entry with the full TTL.
 
-## Development / Testing
+## See Also
 
-For local development against a kind, k3d, or minikube cluster, the easiest path is `tls_skip_verify=true`:
-
-```bash
-warden auth enable -path=k8s-local kubernetes
-warden write auth/k8s-local/config \
-  kubernetes_host="https://127.0.0.1:6443" \
-  tls_skip_verify=true \
-  token_reviewer_jwt="$(kubectl create token warden-token-reviewer -n warden-system --duration=24h)"
-```
-
-For unit-test-level work, the kubernetes auth method's test suite spins up an in-process fake apiserver (an `httptest.Server`) with canned TokenReview responses. Real cluster setup is needed only for end-to-end testing.
+- [Authentication](../concepts/authentication.md) — the credential forms and how transparent auth resolves an identity per request.
+- [Roles](../concepts/roles.md) — how a validated credential maps to policies and token settings.
+- [Agent Identity](../agent-identity/README.md) — how a workload or its sidecar presents this credential to Warden.
+- [Auth Methods](README.md) — the other auth methods Warden ships.

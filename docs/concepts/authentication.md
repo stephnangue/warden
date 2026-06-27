@@ -140,14 +140,15 @@ credential and issues a token with a set of policies. Enable one with:
 warden auth enable cert
 ```
 
-Warden ships these auth methods:
+Warden ships these auth methods; each links to its setup guide under
+[Auth Methods](../auth-methods/README.md):
 
 | Method | Type | Validates |
 |--------|------|-----------|
-| **Certificate** | `cert` | an X.509 client certificate against configured rules |
-| **JWT / OIDC** | `jwt` | a signed JWT against an OIDC discovery URL, JWKS URL, or static public keys |
-| **Kubernetes** | `kubernetes` | a Kubernetes ServiceAccount token via the cluster's TokenReview API |
-| **SPIFFE** | `spiffe` | a SPIFFE identity — accepts **either** an X.509-SVID or a JWT-SVID |
+| [**Certificate**](../auth-methods/cert.md) | `cert` | an X.509 client certificate against configured rules |
+| [**JWT / OIDC**](../auth-methods/jwt.md) | `jwt` | a signed JWT against an OIDC discovery URL, JWKS URL, or static public keys |
+| [**Kubernetes**](../auth-methods/kubernetes.md) | `kubernetes` | a Kubernetes ServiceAccount token via the cluster's TokenReview API |
+| [**SPIFFE**](../auth-methods/spiffe.md) | `spiffe` | a SPIFFE identity — accepts **either** an X.509-SVID or a JWT-SVID |
 
 ### Roles
 

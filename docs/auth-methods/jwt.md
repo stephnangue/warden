@@ -25,7 +25,6 @@ If your workloads present **SPIFFE identities** — an X.509-SVID or a JWT-SVID 
 - [Discovering Assumable Roles](#discovering-assumable-roles)
 - [Configuration Reference](#configuration-reference)
 - [Troubleshooting](#troubleshooting)
-- [Development / Testing](#development--testing)
 
 ## Prerequisites
 
@@ -264,24 +263,9 @@ Exactly one of `oidc_discovery_url`, `jwks_url`, or `jwt_validation_pubkeys` mus
 
 **`max_age` rejects every login.** The JWT must carry an `iat` (issued-at) claim for the freshness check to work. Some IdPs omit `iat`; if yours does, you can't use `max_age` against tokens from it. Either configure the IdP to emit `iat` or drop `max_age` from the role.
 
-## Development / Testing
+## See Also
 
-For local development, the easiest path is to point at a local Hydra (or any OIDC-emitting dev IdP) running over plain HTTP. The validator accepts the URL as-is — TLS is enforced at the transport layer, not by the auth method's config schema.
-
-```bash
-warden auth enable jwt
-warden write auth/jwt/config \
-  oidc_discovery_url="http://localhost:4444" \
-  bound_issuer="http://localhost:4444" \
-  bound_audiences="warden-local" \
-  user_claim="sub" \
-  default_role="dev"
-
-warden write auth/jwt/role/dev \
-  token_policies="default" \
-  token_ttl="1h"
-```
-
-A JWT issued by Hydra for that audience can then be passed as `Authorization: Bearer` on any Warden gateway request that points its provider's `auto_auth_path` at `auth/jwt/`.
-
-For unit-test-level work, the JWT auth method's test suite uses `hashicorp/cap/jwt`'s static-keyset path with locally-generated RSA/ECDSA keypairs — no IdP needed.
+- [Authentication](../concepts/authentication.md) — the credential forms and how transparent auth resolves an identity per request.
+- [Roles](../concepts/roles.md) — how a validated credential maps to policies and token settings.
+- [Agent Identity](../agent-identity/README.md) — how a workload or its sidecar presents this credential to Warden.
+- [Auth Methods](README.md) — the other auth methods Warden ships.
