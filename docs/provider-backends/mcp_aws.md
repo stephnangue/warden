@@ -127,7 +127,7 @@ warden read mcp_aws/config
 
 ## Step 3: Create a Credential Source and Spec
 
-If you already configured an `aws` credential source for another provider (the [`aws` REST provider's README](../aws/README.md) walks through the IAM-user setup in full), you can reuse it here unchanged — `mcp_aws` consumes the same source-and-spec shape. Skip to Step 4 if so.
+If you already configured an `aws` credential source for another provider (the [`aws` REST provider's README](aws.md) walks through the IAM-user setup in full), you can reuse it here unchanged — `mcp_aws` consumes the same source-and-spec shape. Skip to Step 4 if so.
 
 The credential source holds the permanent IAM access key Warden uses to call STS; credential specs on top of it define which role each Warden role assumes. The agent never sees either the source's permanent keys or the minted STS credentials.
 
@@ -140,7 +140,7 @@ warden cred source create aws-src \
   -config region=us-east-1
 ```
 
-`-rotation-period` is how often Warden rotates the source's IAM access keys. Longer periods are acceptable when the IAM user only has `sts:AssumeRole` (no direct resource access); shorter periods (`12h`-`24h`) suit stricter environments. See the [`aws` provider README](../aws/README.md) for a full discussion of the IAM-user policy shape required here.
+`-rotation-period` is how often Warden rotates the source's IAM access keys. Longer periods are acceptable when the IAM user only has `sts:AssumeRole` (no direct resource access); shorter periods (`12h`-`24h`) suit stricter environments. See the [`aws` provider README](aws.md) for a full discussion of the IAM-user policy shape required here.
 
 Verify:
 

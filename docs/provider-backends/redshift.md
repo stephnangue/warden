@@ -45,7 +45,7 @@ Redshift uses the PostgreSQL wire protocol on port **5439**, so any postgres dri
 
 ### 1. Warden server
 
-A running Warden server. See the [AWS provider README](../aws/README.md) for quickstart instructions (download binary, start dev server, set env vars).
+A running Warden server. See the [AWS provider README](aws.md) for quickstart instructions (download binary, start dev server, set env vars).
 
 ### 2. AWS IAM credentials
 

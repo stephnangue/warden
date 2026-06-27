@@ -328,4 +328,4 @@ for the duration of the proxied request.
 - The seeded skills themselves — `warden skill list`, `warden skill read <name> -raw` — are the authoritative agent-facing source. This doc is the system view of the same contract.
 - For a worked tutorial that wires Goose into Warden against three upstreams in parallel, see [tutorials/vault-policy-hygiene/](tutorials/vault-policy-hygiene/).
 - For the proxy/gateway internals (how Warden re-signs SigV4, validates JWTs against the OIDC issuer, etc.), see [architecture.md](architecture.md).
-- For the per-provider catalog (what each type supports and how it's configured), see [providers.md](providers.md).
+- For the per-provider catalog (what each type supports and how it's configured), see [provider-backends/README.md](provider-backends/README.md).

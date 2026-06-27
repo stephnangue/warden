@@ -1,7 +1,7 @@
 # GitHub MCP through Warden
 
 This guide walks through exposing **GitHub's hosted MCP (Model Context Protocol)
-server** to agents via Warden's generic [`mcp`](../README.md) provider. MCP
+server** to agents via Warden's generic [`mcp`](mcp.md) provider. MCP
 clients (Claude Code, Cursor, Continue, Cline, Goose, ...) point at Warden instead
 of `api.githubcopilot.com`; Warden authenticates the caller, injects a GitHub
 token bound to the chosen role as `Authorization: Bearer <token>`, and streams
@@ -397,7 +397,7 @@ curl --cert client.pem --key client-key.pem --cacert warden-ca.pem \
 
 For MCP-client mTLS patterns (local terminating sidecar, or `mcp-remote` as a
 Node bridge) and role selection with a certificate, see the [generic provider
-README](../README.md#tls-certificate-authentication) — the patterns are
+README](mcp.md#tls-certificate-authentication) — the patterns are
 identical; substitute this mount's `path` (`github-mcp/`).
 
 ## Configuration Reference
