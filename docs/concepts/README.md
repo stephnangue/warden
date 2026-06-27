@@ -10,6 +10,8 @@ also jump straight to a topic.
 
 - [Dev Server](dev-server.md) — spin up an in-memory Warden in one command to
   follow along.
+- [CLI Reference](../cli/README.md) — the `warden` command: connecting to a
+  server, global flags, output formats, and a page per command.
 
 ## Identity and access
 

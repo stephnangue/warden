@@ -13,9 +13,11 @@ Usage: warden audit <subcommand> [options]
   Audit devices are responsible for logging all requests and responses
   for security compliance and forensics.
 
-  IMPORTANT: Warden operates in fail-closed mode - at least one audit
-  device must always be enabled. Attempting to disable the last audit
-  device will be rejected.
+  IMPORTANT: Once any audit device is registered, Warden runs fail-closed -
+  every request must be successfully audited or it is rejected. Disabling the
+  last device is allowed and drops the server to an unaudited state until one
+  is re-enabled, so re-enable promptly. Devices declared in HCL config cannot
+  be disabled here.
 
   List all enabled audit devices:
 

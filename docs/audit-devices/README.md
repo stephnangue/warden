@@ -30,4 +30,5 @@ from. Managing devices is therefore a root-namespace, operator-level operation.
 - [Policies](../concepts/policies.md) — the authorization decisions recorded in each entry.
 - [Credentials](../concepts/credentials.md) — what "credential issued" in the log refers to.
 - [Audit Attribution](../use-cases/audit-attribution.md) — tying every request back to an identity.
+- [`warden audit`](../cli/audit.md) — the CLI for enabling, listing, and disabling devices.
 - [Concepts](../concepts/README.md) — how Warden works, end to end.
