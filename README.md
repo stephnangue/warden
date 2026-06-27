@@ -73,19 +73,19 @@ See [the use-case guides](docs/use-cases/) for the full write-ups.
 
 ## Supported systems
 
-Warden fronts systems across MCP servers, LLMs, cloud, code-hosting, observability, ITSM, Kubernetes, secrets, and databases. Follow any link below to configure your first endpoint, or see [docs/providers.md](docs/providers.md) for the full list.
+Warden fronts systems across MCP servers, LLMs, cloud, code-hosting, observability, ITSM, Kubernetes, secrets, and databases. Follow any link below to configure your first endpoint, or see [docs/provider-backends/README.md](docs/provider-backends/README.md) for the full list.
 
 | Category | Providers | Warden does |
 |---|---|---|
-| MCP servers | [Generic](provider/mcp/README.md) — GitHub, Google Cloud, Slack, Cloudflare, …; [AWS](provider/mcp_aws/README.md) (SigV4) | Proxies tool calls — injects credentials, enforces tool-level policy |
-| LLM APIs | [Anthropic](provider/anthropic/README.md), [OpenAI](provider/openai/README.md), [Mistral](provider/mistral/README.md), [Cohere](provider/cohere/README.md) | Injects API key |
-| Cloud infrastructure | [AWS](provider/aws/README.md), [Azure](provider/azure/README.md), [GCP](provider/gcp/README.md), [Alicloud](provider/alicloud/README.md), [IBM Cloud](provider/ibmcloud/README.md), [OVH](provider/ovh/README.md), [Scaleway](provider/scaleway/README.md), [Cloudflare](provider/cloudflare/README.md) | Temporary credentials / Bearer tokens |
-| Code hosting & CI/CD | [GitHub](provider/github/README.md), [GitLab](provider/gitlab/README.md), [Atlassian](provider/atlassian/README.md), [Ansible Tower](provider/ansible_tower/README.md), [Terraform Enterprise](provider/tfe/README.md) | Injects App token, PAT, or Bearer token |
-| Observability | [Datadog](provider/datadog/README.md), [Dynatrace](provider/dynatrace/README.md), [Elastic](provider/elastic/README.md), [Grafana](provider/grafana/README.md), [Honeycomb](provider/honeycomb/README.md), [New Relic](provider/newrelic/README.md), [Prometheus](provider/prometheus/README.md), [Sentry](provider/sentry/README.md), [Splunk](provider/splunk/README.md) | Injects API key / proxies metrics |
-| Incident & ITSM | [PagerDuty](provider/pagerduty/README.md), [ServiceNow](provider/servicenow/README.md), [Slack](provider/slack/README.md) | Injects Bearer token |
-| Kubernetes | [Kubernetes](provider/kubernetes/README.md) | Injects service account token |
-| Secrets backend | [HashiCorp Vault / OpenBao](provider/vault/README.md) | Mints short-lived tokens |
-| Databases | [AWS RDS / Aurora](provider/rds/README.md), [AWS Redshift](provider/redshift/README.md) | Issues IAM database auth token |
+| MCP servers | [Generic](docs/provider-backends/mcp.md) — GitHub, Google Cloud, Slack, Cloudflare, …; [AWS](docs/provider-backends/mcp_aws.md) (SigV4) | Proxies tool calls — injects credentials, enforces tool-level policy |
+| LLM APIs | [Anthropic](docs/provider-backends/anthropic.md), [OpenAI](docs/provider-backends/openai.md), [Mistral](docs/provider-backends/mistral.md), [Cohere](docs/provider-backends/cohere.md) | Injects API key |
+| Cloud infrastructure | [AWS](docs/provider-backends/aws.md), [Azure](docs/provider-backends/azure.md), [GCP](docs/provider-backends/gcp.md), [Alicloud](docs/provider-backends/alicloud.md), [IBM Cloud](docs/provider-backends/ibmcloud.md), [OVH](docs/provider-backends/ovh.md), [Scaleway](docs/provider-backends/scaleway.md), [Cloudflare](docs/provider-backends/cloudflare.md) | Temporary credentials / Bearer tokens |
+| Code hosting & CI/CD | [GitHub](docs/provider-backends/github.md), [GitLab](docs/provider-backends/gitlab.md), [Atlassian](docs/provider-backends/atlassian.md), [Ansible Tower](docs/provider-backends/ansible_tower.md), [Terraform Enterprise](docs/provider-backends/tfe.md) | Injects App token, PAT, or Bearer token |
+| Observability | [Datadog](docs/provider-backends/datadog.md), [Dynatrace](docs/provider-backends/dynatrace.md), [Elastic](docs/provider-backends/elastic.md), [Grafana](docs/provider-backends/grafana.md), [Honeycomb](docs/provider-backends/honeycomb.md), [New Relic](docs/provider-backends/newrelic.md), [Prometheus](docs/provider-backends/prometheus.md), [Sentry](docs/provider-backends/sentry.md), [Splunk](docs/provider-backends/splunk.md) | Injects API key / proxies metrics |
+| Incident & ITSM | [PagerDuty](docs/provider-backends/pagerduty.md), [ServiceNow](docs/provider-backends/servicenow.md), [Slack](docs/provider-backends/slack.md) | Injects Bearer token |
+| Kubernetes | [Kubernetes](docs/provider-backends/kubernetes.md) | Injects service account token |
+| Secrets backend | [HashiCorp Vault / OpenBao](docs/provider-backends/vault.md) | Mints short-lived tokens |
+| Databases | [AWS RDS / Aurora](docs/provider-backends/rds.md), [AWS Redshift](docs/provider-backends/redshift.md) | Issues IAM database auth token |
 
 ## Authentication methods
 

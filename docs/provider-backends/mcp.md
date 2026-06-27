@@ -21,7 +21,7 @@ provider.) It accepts every bearer-shaped credential a role may bind:
   that authenticates a fixed bearer rather than running an OAuth flow. Common
   with self-hosted and enterprise MCP servers.
 - **`github_token`** — a GitHub App installation token or PAT, the same credspec
-  that backs the `github` REST provider. See [`docs/github.md`](docs/github.md).
+  that backs the `github` REST provider. See [`mcp-github.md`](mcp-github.md).
 - **`gcp_access_token`** — a short-lived Google Cloud access token, the same
   credspec that backs the `gcp` REST provider.
 
@@ -30,7 +30,7 @@ provider.) It accepts every bearer-shaped credential a role may bind:
 > differently — Slack's REST API takes a static bot token (`xoxb-…`), but its MCP
 > server requires an OAuth user token and rejects the bot token. Check the
 > upstream's MCP auth before assuming a shared credspec; the per-upstream notes
-> under [`docs/`](docs/) record which shape each server uses.
+> in [`mcp-github.md`](mcp-github.md) and [`mcp-slack.md`](mcp-slack.md) record which shape each server uses.
 
 There is **no canonical generic MCP endpoint**, so this provider has **no default
 upstream URL** — you must set `mcp_url` before the mount can serve traffic. A
@@ -38,8 +38,8 @@ single mount fronts one product; consumers select the right mount by its
 operator-set description, not by reading the URL.
 
 > **Per-upstream recipes.** Concrete, copy-pasteable setups for specific MCP
-> servers live under [`docs/`](docs/).
-> This README is the general operator guide; the `docs/` files layer
+> servers live in the per-upstream pages [`mcp-github.md`](mcp-github.md) and [`mcp-slack.md`](mcp-slack.md).
+> This page is the general operator guide; the per-upstream pages layer
 > upstream-specific credential, URL, and quirk notes on top.
 
 ## Table of Contents
@@ -151,7 +151,7 @@ Most remote MCP servers use this. The upstream authenticates a browser-consented
 OAuth2 grant. Warden stores the refresh token and mints a fresh access token per
 request. Create an `oauth2` source and an `authorization_code` spec, then run the
 connect flow once to record the user's consent. For the **Slack MCP server**
-(`https://mcp.slack.com/mcp`), see [`docs/slack.md`](docs/slack.md) for the exact
+(`https://mcp.slack.com/mcp`), see [`mcp-slack.md`](mcp-slack.md) for the exact
 endpoints and scopes — the Cloudflare example below shows the general shape:
 
 The source holds the upstream's OAuth endpoints; the app's client credentials,
@@ -537,7 +537,7 @@ With cert auth, the role resolves (in priority order):
 |-----------------|-------------|-------------|---------|
 | `oauth_bearer_token` | `oauth2` | `Authorization: Bearer <token>` | OAuth2 MCP servers (Slack, Cloudflare, Linear, Sentry, ...) — incl. authorization-code consent flow. The shape most remote MCP servers require |
 | `api_key` | `api_key` | `Authorization: Bearer <token>` | MCP servers that authenticate a fixed bearer token (personal/service token; self-hosted & enterprise) |
-| `github_token` | `github` | `Authorization: Bearer <token>` | GitHub's hosted MCP server — App token or PAT; same credspec as the `github` REST provider. See [`docs/github.md`](docs/github.md) |
+| `github_token` | `github` | `Authorization: Bearer <token>` | GitHub's hosted MCP server — App token or PAT; same credspec as the `github` REST provider. See [`mcp-github.md`](mcp-github.md) |
 | `gcp_access_token` | `gcp` | `Authorization: Bearer <token>` | A Google Cloud MCP server — same credspec as the `gcp` REST provider |
 
 Servers that expect a static key in a non-`Authorization` header (e.g.

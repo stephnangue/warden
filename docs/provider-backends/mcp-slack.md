@@ -1,7 +1,7 @@
 # Slack MCP through Warden
 
 This guide walks through exposing the **Slack MCP (Model Context Protocol)
-server** to agents via Warden's generic [`mcp`](../README.md) provider. MCP
+server** to agents via Warden's generic [`mcp`](mcp.md) provider. MCP
 clients (Claude Code, Cursor, Continue, Cline, Goose, ...) point at Warden
 instead of `mcp.slack.com`; Warden authenticates the caller, mints a Slack OAuth
 access token bound to the chosen role, injects it as `Authorization: Bearer
@@ -678,7 +678,7 @@ EOF
 
 For MCP-client mTLS patterns (local terminating sidecar, or `mcp-remote` as a
 Node bridge) and role selection with a certificate, see the equivalent section in
-the [generic provider README](../README.md#tls-certificate-authentication) — the
+the [generic provider README](mcp.md#tls-certificate-authentication) — the
 patterns are identical; substitute this mount's `path` (`slack-mcp/`) for the
 provider value in the header-routed configs.
 
