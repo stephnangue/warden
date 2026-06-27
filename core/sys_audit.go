@@ -148,7 +148,7 @@ func (b *SystemBackend) pathAudit() []*framework.Path {
 					Description: "Enables an audit device of the given `type` at `path`. " +
 						"If `config.hmac_key` is omitted, Warden generates a 32-byte random salt and stores it on this device — " +
 						"used by `audit-hash/{path}` to verify whether a plaintext value appears in *this device's* audit logs. " +
-						"Warden runs fail-closed: at least one audit device must remain enabled at all times.",
+						"Once any device is registered, Warden runs fail-closed: every request must be successfully audited or it is rejected.",
 					Responses: createResponses,
 					Examples:  createExamples,
 				},
@@ -199,7 +199,8 @@ func (b *SystemBackend) pathAudit() []*framework.Path {
 					Callback: b.handleAuditDelete,
 					Summary:  "Disable an audit device",
 					Description: "Disables (unmounts) the audit device at `path`. " +
-						"Disabling the last enabled audit device returns 400 — Warden requires at least one audit device to operate (fail-closed mode).",
+						"Disabling the last device is allowed: the server drops to zero registered devices and serves unaudited (fail-open) until one is re-enabled. " +
+						"A device declared in HCL config cannot be disabled via the API and returns 400.",
 					Responses: map[int][]framework.Response{
 						http.StatusOK: {{
 							Description: "Audit device disabled successfully.",
@@ -218,7 +219,7 @@ func (b *SystemBackend) pathAudit() []*framework.Path {
 							},
 						}},
 						http.StatusBadRequest: {{
-							Description: "Cannot disable the last audit device (fail-closed mode), or the underlying disable operation failed.",
+							Description: "The device is owned by an HCL audit declaration, or the underlying disable operation failed.",
 						}},
 					},
 					Examples: []framework.RequestExample{{
