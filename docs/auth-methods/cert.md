@@ -31,7 +31,6 @@ If your workload's identity is a Kubernetes ServiceAccount token, prefer the `ku
 - [Discovering Assumable Roles](#discovering-assumable-roles)
 - [Configuration Reference](#configuration-reference)
 - [Troubleshooting](#troubleshooting)
-- [Development / Testing](#development--testing)
 
 ## Prerequisites
 
@@ -295,32 +294,9 @@ Verify the role's patterns with `warden read auth/<mount>/role/<name>`, then wal
 
 **OCSP / CRL checks are slow or time out under load.** Each cache miss on revocation is a network round-trip. CRLs are cached per distribution-point URL (default 1h, raise `crl_cache_ttl` to reduce fetch frequency); OCSP isn't cached at this layer, but Warden's transparent-auth cache means most logins skip it entirely after first touch. If you're seeing consistent OCSP timeouts, raise `ocsp_timeout` (default 5s) or switch to `crl` for environments where CRLs are more reliable than the OCSP responder.
 
-## Development / Testing
+## See Also
 
-For local development, the easiest path is to generate a self-signed CA and a leaf cert with `openssl`, then point Warden at the CA:
-
-```bash
-# Generate a CA
-openssl req -new -x509 -days 365 -keyout ca.key -out ca.crt -subj "/CN=dev-ca"
-
-# Generate a leaf cert signed by that CA
-openssl req -new -newkey rsa:2048 -nodes -keyout client.key -out client.csr -subj "/CN=dev-agent/O=ExampleCorp"
-openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 -out client.crt
-
-# Configure Warden
-warden auth enable cert
-warden write auth/cert/config \
-  trusted_ca_pem=@ca.crt \
-  principal_claim="cn" \
-  default_role="dev"
-
-warden write auth/cert/role/dev \
-  allowed_common_names="dev-*" \
-  allowed_organizations="ExampleCorp" \
-  token_policies="default" \
-  token_ttl="1h"
-```
-
-The certificate can then be presented as `--cert client.crt --key client.key` on any Warden gateway request that points its provider's `auto_auth_path` at `auth/cert/`.
-
-For unit-test-level work, the cert auth method's test suite generates ephemeral CAs and leaves in-memory — no `openssl` needed.
+- [Authentication](../concepts/authentication.md) — the credential forms and how transparent auth resolves an identity per request.
+- [Roles](../concepts/roles.md) — how a validated credential maps to policies and token settings.
+- [Agent Identity](../agent-identity/README.md) — how a workload or its sidecar presents this credential to Warden.
+- [Auth Methods](README.md) — the other auth methods Warden ships.

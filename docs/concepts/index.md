@@ -17,6 +17,8 @@ How a caller proves who it is and what that lets it do.
 
 - [Authentication](authentication.md) — the three credential forms, transparent
   authentication, and identity-channelling sidecars.
+- [Auth Methods](../auth-methods/README.md) — per-method setup guides for the
+  certificate, JWT/OIDC, Kubernetes, and SPIFFE backends.
 - [Tokens](tokens.md) — what authentication produces: session and transparent
   tokens, and the root token.
 - [Roles](roles.md) — how a validated credential maps to policies and access,
