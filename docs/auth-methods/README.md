@@ -29,4 +29,4 @@ over its neighbours — the [JWT](jwt.md), [Kubernetes](kubernetes.md), and
 - [Authentication](../concepts/authentication.md) — credential forms, explicit vs. transparent auth, and CLI behaviour.
 - [Roles](../concepts/roles.md) — how a validated credential maps to policies and token settings.
 - [Agent Identity](../agent-identity/README.md) — how a workload or its sidecar presents its credential to Warden.
-- [Concepts](../concepts/index.md) — how Warden works, end to end.
+- [Concepts](../concepts/README.md) — how Warden works, end to end.
