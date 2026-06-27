@@ -54,32 +54,15 @@ warden write sys/audit-hash/file input="AKIA...EXAMPLE"
 
 An **audit device** is a pluggable sink that receives the formatted entries.
 Warden ships the **`file`** device, which writes JSON lines to a file and rotates
-them. Its main config keys:
+them. You enable devices from the CLI, in declarative server config, or over the
+`sys/audit/<path>` API, and a device's salt is **not preserved** across
+disable/enable — a re-enabled device gets a fresh key, so old hashes no longer
+correlate.
 
-| Key | Default | Purpose |
-|-----|---------|---------|
-| `file_path` | `warden_audit.log` | File to write to. |
-| `file_mode` | `0600` | Permissions on the file. |
-| `format` | `json` | Serialization format. |
-| `rotate_size` | 100 MB | Rotate when the file reaches this size. |
-| `rotate_daily` | `true` | Also rotate at UTC midnight. |
-| `max_backups` | `5` | Rotated files to keep. |
-| `buffer_size` / `flush_period` | `100` / `5s` | Batching, for throughput. |
-| `hmac_key` | _(auto)_ | The salt key; generated if you don't supply one. |
-
-Enable, inspect, and disable devices from the CLI (or the `sys/audit/<path>`
-endpoints):
-
-```bash
-warden audit enable file -file-path=/var/log/warden/audit.log
-warden audit list
-warden audit read   file/
-warden audit disable file/
-```
-
-The `hmac_key` is masked on read. Note that a device's salt is **not preserved**
-across disable/enable — a re-enabled device gets a fresh key, so old hashes no
-longer correlate.
+For the full configuration reference, the three ways to enable a device, rotation
+and retention, and troubleshooting, see the
+[Audit Devices](../audit-devices/README.md) section and the
+[file device guide](../audit-devices/file.md).
 
 ## Fail-Open Until Configured, Then Fail-Closed
 
@@ -131,4 +114,5 @@ operator-level operation, not something a tenant configures.
 - [Credentials](credentials.md) — what "credential issued" in the log refers to.
 - [Tokens](tokens.md) — the identity fields logged per request.
 - [Namespaces](namespaces.md) — recorded per entry; devices are root-scoped.
+- [Audit Devices](../audit-devices/README.md) — setup guides for enabling and configuring a device.
 - [Dev Server](dev-server.md) — ships unaudited (fail-open).

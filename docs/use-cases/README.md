@@ -25,7 +25,7 @@ what happened.
 
 ## See Also
 
-- [Concepts](../concepts/index.md) — how Warden works, end to end.
+- [Concepts](../concepts/README.md) — how Warden works, end to end.
 - [Architecture](../architecture.md) — the broker in the request path, at a glance.
 - [Agent Flow](../agent-flow.md) — the path an agent takes once its identity is
   established.

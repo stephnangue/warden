@@ -54,6 +54,8 @@ a credential of its own.
 - [Namespaces](namespaces.md) — the hard isolation boundary for every mount,
   policy, and token.
 - [Audit](audit.md) — the forensic record of every request, with secrets hashed.
+- [Audit Devices](../audit-devices/README.md) — setup guides for enabling and
+  configuring the sinks that receive the audit log.
 
 ## Running in production
 
