@@ -33,14 +33,13 @@ type JWTAuthConfig struct {
 	JWTValidationPubKeys []string `json:"jwt_validation_pubkeys,omitempty"`
 
 	// Validation
-	BoundIssuer       string            `json:"bound_issuer,omitempty"`
-	BoundAudiences    []string          `json:"bound_audiences,omitempty"`
-	BoundSubject      string            `json:"bound_subject,omitempty"`
-	BoundClaims       map[string]any    `json:"bound_claims,omitempty"`
-	ClaimMappings     map[string]string `json:"claim_mappings,omitempty"`
-	UserClaim         string            `json:"user_claim,omitempty" default:"sub"`
-	GroupsClaim       string            `json:"groups_claim,omitempty"`
-	GroupPolicyPrefix string            `json:"group_policy_prefix,omitempty"`
+	BoundIssuer       string         `json:"bound_issuer,omitempty"`
+	BoundAudiences    []string       `json:"bound_audiences,omitempty"`
+	BoundSubject      string         `json:"bound_subject,omitempty"`
+	BoundClaims       map[string]any `json:"bound_claims,omitempty"`
+	UserClaim         string         `json:"user_claim,omitempty" default:"sub"`
+	GroupsClaim       string         `json:"groups_claim,omitempty"`
+	GroupPolicyPrefix string         `json:"group_policy_prefix,omitempty"`
 
 	// Token settings
 	TokenTTL time.Duration `json:"token_ttl" default:"1h"`

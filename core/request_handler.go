@@ -708,6 +708,7 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 		TokenValue:     auth.ClientToken,
 		MountAccessor:  mountAccessor,
 		Actors:         auth.Actors,
+		Metadata:       auth.Metadata,
 	}
 
 	tokenValue, err := c.tokenStore.GenerateToken(ctx, auth.TokenType, &authData)

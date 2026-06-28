@@ -62,6 +62,36 @@ func TestPathRole_Create(t *testing.T) {
 	assert.Equal(t, "aws-dev", role.CredSpecName)
 }
 
+func TestPathRole_Create_MetadataClaims(t *testing.T) {
+	b, ctx := createTestBackendWithStorage(t)
+
+	fieldData := &framework.FieldData{
+		Raw: map[string]any{
+			"name": "meta-role",
+			"metadata_claims": map[string]any{
+				"team":                        "team",
+				"/resource_access/warden/env": "env",
+			},
+		},
+		Schema: map[string]*framework.FieldSchema{
+			"name":            {Type: framework.TypeString},
+			"metadata_claims": {Type: framework.TypeMap},
+		},
+	}
+
+	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fieldData)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	role, err := b.getRole(ctx, "meta-role")
+	require.NoError(t, err)
+	require.NotNil(t, role)
+	assert.Equal(t, map[string]string{
+		"team":                        "team",
+		"/resource_access/warden/env": "env",
+	}, role.MetadataClaims)
+}
+
 func TestPathRole_CreateDuplicate(t *testing.T) {
 	b, ctx := createTestBackendWithStorage(t)
 

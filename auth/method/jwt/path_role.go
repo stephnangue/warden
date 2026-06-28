@@ -69,6 +69,10 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Maximum elapsed time since JWT was issued (iat). Rejects JWTs older than this. Example: 30m, 1h",
 			},
+			"metadata_claims": {
+				Type:        framework.TypeMap,
+				Description: "Map of source claim to token metadata key. The source is a literal top-level claim name, or a JSON Pointer (leading /) for a nested claim. Resolved claim values must be strings.",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.CreateOperation: &framework.PathOperation{
@@ -170,6 +174,7 @@ func (b *jwtAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reques
 			"groups_claim":        role.GroupsClaim,
 			"group_policy_prefix": role.GroupPolicyPrefix,
 			"max_age":             role.MaxAge,
+			"metadata_claims":     role.MetadataClaims,
 		},
 	}, nil
 }
@@ -220,6 +225,9 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 		}
 		if v, ok := d.GetOk("max_age"); ok {
 			role.MaxAge = v.(string)
+		}
+		if v, ok := d.GetOk("metadata_claims"); ok {
+			role.MetadataClaims = toStringMap(v.(map[string]any))
 		}
 	}
 
@@ -351,8 +359,24 @@ func (b *jwtAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldD
 	if v, ok := d.GetOk("max_age"); ok {
 		role.MaxAge = v.(string)
 	}
+	if v, ok := d.GetOk("metadata_claims"); ok {
+		role.MetadataClaims = toStringMap(v.(map[string]any))
+	}
 
 	return role
+}
+
+// toStringMap coerces a TypeMap field value into map[string]string, rendering
+// each value to its string form. Nil/empty input yields nil.
+func toStringMap(m map[string]any) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = fmt.Sprintf("%v", v)
+	}
+	return out
 }
 
 // Storage helper methods

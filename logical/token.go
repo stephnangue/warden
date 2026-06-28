@@ -33,6 +33,12 @@ type TokenEntry struct {
 	// Token Data
 	Data map[string]string // Type-specific credential data
 
+	// Metadata holds verified, login-derived identity attributes (mapped
+	// from JWT claims, certificate fields, service-account attributes, etc.)
+	// that token_metadata policy conditions match against. Distinct from
+	// Data, which is type-specific credential material. Never caller-supplied.
+	Metadata map[string]string
+
 	// Usage Tracking
 	mu   sync.RWMutex
 	used bool // One-time use flag

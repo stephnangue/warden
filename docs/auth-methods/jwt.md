@@ -20,7 +20,7 @@ If your workloads present **SPIFFE identities** — an X.509-SVID or a JWT-SVID 
 - [Step 3: Create a Role](#step-3-create-a-role)
 - [Step 4: Wire Up Transparent Auth](#step-4-wire-up-transparent-auth)
 - [Group-Based Policies](#group-based-policies)
-- [Claim Mappings](#claim-mappings)
+- [Token Metadata](#token-metadata)
 - [On-Behalf-Of Chain (RFC 8693 `act` Claim)](#on-behalf-of-chain-rfc-8693-act-claim)
 - [Discovering Assumable Roles](#discovering-assumable-roles)
 - [Configuration Reference](#configuration-reference)
@@ -176,18 +176,18 @@ The prefix is required to keep group-derived policies in a namespace operators c
 
 Per-role overrides for `groups_claim` and `group_policy_prefix` let one mount serve multiple IdP claim conventions.
 
-## Claim Mappings
+## Token Metadata
 
-`claim_mappings` copies arbitrary JWT claims into the issued Warden token's metadata. The mapping is `source-claim=destination-metadata-key`.
+A role's `metadata_claims` copies verified JWT claims onto the issued token's metadata, where `token_metadata` policy conditions can match them. The mapping is `source-claim=destination-metadata-key`. The source is a literal claim name, or a JSON Pointer (leading `/`) for a nested claim; resolved values must be strings.
 
 ```bash
-warden write auth/jwt/config \
-  claim_mappings="tenant=tenant_id,department=dept"
+warden write auth/jwt/role/inventory-agent \
+  metadata_claims="department=dept,/resource_access/warden/env=env"
 ```
 
-A JWT with `"tenant": "acme"` and `"department": "eng"` produces a Warden token whose metadata carries `tenant_id="acme"` and `dept="eng"`. The metadata surfaces in audit log entries for traceability and downstream correlation.
+A JWT with `"department": "eng"` and a nested `resource_access.warden.env` of `"prod"` produces a token whose metadata carries `dept="eng"` and `env="prod"`. A policy can then gate a path with `conditions { token_metadata = ["env=prod"] }`. The metadata also surfaces in audit log entries (`auth.policy_results.token_metadata`) for traceability — logged in clear by default, with opt-in per-key HMAC salting via the audit device's `salt_fields`.
 
-> **Heads-up:** Warden's policy engine does not currently support templated permissions that reference token metadata (e.g. `{{identity.metadata.tenant_id}}` in a policy path). `claim_mappings` is useful today for audit-log enrichment; policy-templating support would consume this metadata when it lands.
+> **Note:** metadata is matched at request time against the token's own values and is never compiled into the policy, so it stays correct for every token. Use it for authorization decisions that depend on identity attributes rather than path/capability alone.
 
 ## On-Behalf-Of Chain (RFC 8693 `act` Claim)
 
@@ -227,7 +227,6 @@ Exactly one of `oidc_discovery_url`, `jwks_url`, or `jwt_validation_pubkeys` mus
 | `bound_audiences` | No | Accepted values of the JWT's `aud` claim. Roles may override with their own list. |
 | `bound_subject` | No | Pinned `sub` claim. Roles may override. |
 | `bound_claims` | No | Map of arbitrary claim → required value. Roles may add their own claims. |
-| `claim_mappings` | No | Map of source-claim → destination-metadata-key. Copies JWT claims into the issued token's metadata. |
 | `user_claim` | No (default `sub`) | Which claim Warden uses as the principal identity. |
 | `groups_claim` | No | JWT claim carrying a list of group names. When set, group-derived policies are appended to the issued token. |
 | `group_policy_prefix` | No (default `group-`) | Prefix prepended to each group name to form the policy name. |
@@ -246,6 +245,7 @@ Exactly one of `oidc_discovery_url`, `jwks_url`, or `jwt_validation_pubkeys` mus
 | `token_ttl` | No (default `1h`) | TTL for issued tokens; overrides the mount-level `token_ttl`. |
 | `groups_claim` | No | Per-role override of the mount's `groups_claim`. |
 | `group_policy_prefix` | No | Per-role override of the mount's `group_policy_prefix`. |
+| `metadata_claims` | No | Map of source claim (literal or JSON Pointer) → token metadata key. Copies verified claims into the token's metadata for `token_metadata` policy conditions. Values must be strings. |
 | `cred_spec_name` | No | Credential spec name for implicit-auth flows. |
 | `max_age` | No | Maximum elapsed time since the JWT's `iat` claim. Example: `30m`. Empty disables the check. |
 
