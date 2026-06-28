@@ -518,7 +518,11 @@ func (ps *PolicyStore) CBP(ctx context.Context, policyNames map[string][]string,
 	allPolicies = append(allPolicies, additionalPolicies...)
 
 	for i, policy := range allPolicies {
-		if policy.Type == PolicyTypeCBP {
+		// Reuse the parse already performed and cached by GetPolicy. Re-parse
+		// only when a prefetched policy arrived without parsed paths. CBP
+		// policies carry no per-request templating, so a cached parse is always
+		// reusable and never identity-dependent.
+		if policy.Type == PolicyTypeCBP && policy.Paths == nil {
 			p, err := parseCBPPolicy(policy.namespace, policy.Raw)
 			if err != nil {
 				return nil, fmt.Errorf("error parsing policy %q: %w", policy.Name, err)
