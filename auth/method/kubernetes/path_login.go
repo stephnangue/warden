@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/framework"
@@ -10,6 +11,49 @@ import (
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
+
+// validK8sMetadataFields lists the verified TokenReview attributes usable in a
+// role's metadata_mappings.
+var validK8sMetadataFields = map[string]bool{
+	"service_account_namespace": true,
+	"service_account_name":      true,
+	"service_account_uid":       true,
+	"username":                  true,
+	"groups":                    true,
+}
+
+// extractK8sMetadata builds the token metadata map from verified TokenReview
+// attributes using the role's mappings (attribute -> metadata key, source ->
+// key). The multi-valued groups attribute is comma-joined. Empty values are
+// skipped. Returns nil when nothing was mapped.
+func extractK8sMetadata(mappings map[string]string, saNamespace, saName, uid, username string, groups []string) map[string]string {
+	if len(mappings) == 0 {
+		return nil
+	}
+	md := make(map[string]string)
+	for source, target := range mappings {
+		var v string
+		switch source {
+		case "service_account_namespace":
+			v = saNamespace
+		case "service_account_name":
+			v = saName
+		case "service_account_uid":
+			v = uid
+		case "username":
+			v = username
+		case "groups":
+			v = strings.Join(groups, ",")
+		}
+		if v != "" {
+			md[target] = v
+		}
+	}
+	if len(md) == 0 {
+		return nil
+	}
+	return md
+}
 
 // pathLogin returns the /login path definition.
 func (b *kubernetesAuthBackend) pathLogin() *framework.Path {
@@ -195,6 +239,7 @@ func (b *kubernetesAuthBackend) handleLogin(ctx context.Context, req *logical.Re
 			// (mountAccessor + JWT + role) into the deterministic cache ID
 			// used for transparent-mode lookups.
 			ClientToken: jwtStr,
+			Metadata:    extractK8sMetadata(role.MetadataMappings, saNamespace, saName, status.User.UID, status.User.Username, status.User.Groups),
 		},
 		Data: map[string]any{
 			"principal_id":              status.User.Username,
