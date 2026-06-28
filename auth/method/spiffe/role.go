@@ -21,6 +21,18 @@ type SPIFFERole struct {
 	CredSpecName      string   `json:"cred_spec_name,omitempty"`
 	GroupsClaim       string   `json:"groups_claim,omitempty"`        // JWT-SVID group claim → policies
 	GroupPolicyPrefix string   `json:"group_policy_prefix,omitempty"` // prefix for group policies (default group-)
+
+	// MetadataMappings maps a SPIFFE-ID component to the token metadata key it
+	// populates (source -> key): trust_domain, spiffe_id, path. Applies to both
+	// SVID flows. Populated onto the token's Metadata and matched by
+	// token_metadata policy conditions.
+	MetadataMappings map[string]string `json:"metadata_mappings,omitempty"`
+
+	// MetadataClaims maps a JWT-SVID claim to the token metadata key it
+	// populates (source -> key). The source is a literal claim key, or a JSON
+	// Pointer "/a/b" for nested. JWT-SVID logins only. Resolved values must be
+	// strings.
+	MetadataClaims map[string]string `json:"metadata_claims,omitempty"`
 }
 
 // ParseTokenTTL parses the TokenTTL string to a time.Duration.

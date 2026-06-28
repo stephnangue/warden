@@ -45,6 +45,14 @@ func (b *spiffeAuthBackend) pathRole() *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Prefix prepended to each group name to form the policy name (default: group-)",
 			},
+			"metadata_mappings": {
+				Type:        framework.TypeMap,
+				Description: "Map of SPIFFE-ID component (trust_domain, spiffe_id, path) to token metadata key. Applies to both SVID flows.",
+			},
+			"metadata_claims": {
+				Type:        framework.TypeMap,
+				Description: "Map of JWT-SVID claim (literal key, or JSON Pointer /a/b for nested) to token metadata key. JWT-SVID logins only; resolved values must be strings.",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.CreateOperation: &framework.PathOperation{Callback: b.handleRoleCreate, Summary: "Create a new role"},
@@ -116,6 +124,8 @@ func (b *spiffeAuthBackend) handleRoleRead(ctx context.Context, req *logical.Req
 			"cred_spec_name":      role.CredSpecName,
 			"groups_claim":        role.GroupsClaim,
 			"group_policy_prefix": role.GroupPolicyPrefix,
+			"metadata_mappings":   role.MetadataMappings,
+			"metadata_claims":     role.MetadataClaims,
 		},
 	}, nil
 }
@@ -157,6 +167,12 @@ func (b *spiffeAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.R
 		}
 		if v, ok := d.GetOk("group_policy_prefix"); ok {
 			role.GroupPolicyPrefix = v.(string)
+		}
+		if v, ok := d.GetOk("metadata_mappings"); ok {
+			role.MetadataMappings = toStringMap(v.(map[string]any))
+		}
+		if v, ok := d.GetOk("metadata_claims"); ok {
+			role.MetadataClaims = toStringMap(v.(map[string]any))
 		}
 	}
 
@@ -220,6 +236,16 @@ func (b *spiffeAuthBackend) validateRole(role *SPIFFERole) error {
 	if _, err := role.ParseTokenTTL(); err != nil {
 		return logical.ErrBadRequestf("invalid token_ttl: %v", err)
 	}
+
+	// Validate metadata_mappings SPIFFE-ID component selectors (the map key is
+	// the source component; the value is the destination metadata key).
+	// metadata_claims keys are claim paths and need no validation (resolved at
+	// login).
+	for source, target := range role.MetadataMappings {
+		if !validSPIFFEMetadataFields[source] {
+			return logical.ErrBadRequestf("invalid metadata_mappings field %q for metadata key %q; must be one of: trust_domain, spiffe_id, path", source, target)
+		}
+	}
 	return nil
 }
 
@@ -260,7 +286,26 @@ func (b *spiffeAuthBackend) buildRoleFromFieldData(name string, d *framework.Fie
 	if v, ok := d.GetOk("group_policy_prefix"); ok {
 		role.GroupPolicyPrefix = v.(string)
 	}
+	if v, ok := d.GetOk("metadata_mappings"); ok {
+		role.MetadataMappings = toStringMap(v.(map[string]any))
+	}
+	if v, ok := d.GetOk("metadata_claims"); ok {
+		role.MetadataClaims = toStringMap(v.(map[string]any))
+	}
 	return role
+}
+
+// toStringMap coerces a TypeMap field value into map[string]string, rendering
+// each value to its string form. Nil/empty input yields nil.
+func toStringMap(m map[string]any) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = fmt.Sprintf("%v", v)
+	}
+	return out
 }
 
 // --- storage ---

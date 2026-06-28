@@ -86,7 +86,8 @@ func (b *spiffeAuthBackend) handleX509SVIDLogin(ctx context.Context, req *logica
 
 	principalID := id.String()
 	fingerprint := certFingerprint(cert)
-	return b.authResponse(req, role, principalID, b.calculateTTL(cert.NotAfter, role), fingerprint, nil), nil
+	metadata := extractSPIFFEIDMetadata(role.MetadataMappings, id)
+	return b.authResponse(req, role, principalID, b.calculateTTL(cert.NotAfter, role), fingerprint, nil, metadata), nil
 }
 
 func (b *spiffeAuthBackend) handleJWTSVIDLogin(ctx context.Context, req *logical.Request, role *SPIFFERole, jwtToken string) (*logical.Response, error) {
@@ -117,14 +118,24 @@ func (b *spiffeAuthBackend) handleJWTSVIDLogin(ctx context.Context, req *logical
 
 	policies := b.resolveGroupPolicies(role, svid.Claims)
 	actors := extractActChain(svid.Claims)
-	resp := b.authResponse(req, role, svid.ID.String(), b.calculateTTL(svid.Expiry, role), jwtToken, actors)
+
+	// Metadata is drawn from both the verified SPIFFE-ID components and, for the
+	// JWT-SVID, the mapped claims. A non-string mapped claim fails the login.
+	claimMeta, err := extractMetadata(svid.Claims, role.MetadataClaims)
+	if err != nil {
+		b.logger.Warn("login failed: metadata claim extraction", lgr.Err(err), lgr.String("role", role.Name))
+		return &logical.Response{StatusCode: http.StatusUnauthorized, Err: errSPIFFEAuthFailed}, nil
+	}
+	metadata := mergeStringMaps(extractSPIFFEIDMetadata(role.MetadataMappings, svid.ID), claimMeta)
+
+	resp := b.authResponse(req, role, svid.ID.String(), b.calculateTTL(svid.Expiry, role), jwtToken, actors, metadata)
 	resp.Auth.Policies = policies
 	return resp, nil
 }
 
 // authResponse builds the common login response. policies default to the role's;
 // the JWT path overrides with group-resolved policies.
-func (b *spiffeAuthBackend) authResponse(req *logical.Request, role *SPIFFERole, principalID string, ttl time.Duration, clientToken string, actors []logical.ActorRef) *logical.Response {
+func (b *spiffeAuthBackend) authResponse(req *logical.Request, role *SPIFFERole, principalID string, ttl time.Duration, clientToken string, actors []logical.ActorRef, metadata map[string]string) *logical.Response {
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
@@ -137,9 +148,62 @@ func (b *spiffeAuthBackend) authResponse(req *logical.Request, role *SPIFFERole,
 			ClientIP:       req.ClientIP,
 			ClientToken:    clientToken,
 			Actors:         actors,
+			Metadata:       metadata,
 		},
 		Data: map[string]any{"principal_id": principalID, "role": role.Name},
 	}
+}
+
+// validSPIFFEMetadataFields lists the SPIFFE-ID component selectors usable in a
+// role's metadata_mappings.
+var validSPIFFEMetadataFields = map[string]bool{
+	"trust_domain": true,
+	"spiffe_id":    true,
+	"path":         true,
+}
+
+// extractSPIFFEIDMetadata builds token metadata from the verified SPIFFE ID
+// using the role's mappings (SPIFFE-ID component -> metadata key, source ->
+// key). Empty values are skipped. Returns nil when nothing was mapped.
+func extractSPIFFEIDMetadata(mappings map[string]string, id spiffeid.ID) map[string]string {
+	if len(mappings) == 0 {
+		return nil
+	}
+	md := make(map[string]string)
+	for source, target := range mappings {
+		var v string
+		switch source {
+		case "trust_domain":
+			v = id.TrustDomain().String()
+		case "spiffe_id":
+			v = id.String()
+		case "path":
+			v = id.Path()
+		}
+		if v != "" {
+			md[target] = v
+		}
+	}
+	if len(md) == 0 {
+		return nil
+	}
+	return md
+}
+
+// mergeStringMaps merges b into a (b wins on key conflict). Returns nil when the
+// result is empty.
+func mergeStringMaps(a, b map[string]string) map[string]string {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(a)+len(b))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		out[k] = v
+	}
+	return out
 }
 
 // resolveGroupPolicies appends group-derived policies (JWT-SVID only) to the

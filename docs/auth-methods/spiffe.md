@@ -26,6 +26,7 @@ If your workload's identity is an ordinary OIDC JWT (not a SPIFFE JWT-SVID), use
 - [Restricting Allowed SPIFFE IDs](#restricting-allowed-spiffe-ids)
 - [Federation](#federation)
 - [Group-Based Policies (JWT-SVID)](#group-based-policies-jwt-svid)
+- [Token Metadata](#token-metadata)
 - [On-Behalf-Of Chain (RFC 8693 `act` Claim)](#on-behalf-of-chain-rfc-8693-act-claim)
 - [Discovering Assumable Roles](#discovering-assumable-roles)
 - [Revocation and SVID Lifetime](#revocation-and-svid-lifetime)
@@ -214,6 +215,23 @@ warden write auth/spiffe/role/inventory-agent \
 
 A JWT-SVID carrying `"groups": ["engineering", "billing"]` gets `spiffe-engineering` and `spiffe-billing` appended to its policy list. The default prefix is `group-`. Warden accepts the claim as a JSON array, a comma-separated string, or a single string.
 
+## Token Metadata
+
+A role can copy verified attributes from the SVID onto the issued token's metadata, where `token_metadata` policy conditions can match them. Two mappings are available, both written as `source = "destination-metadata-key"`:
+
+- `metadata_mappings` — from SPIFFE-ID components (`trust_domain`, `spiffe_id`, `path`). Applies to **both** SVID flows.
+- `metadata_claims` — from JWT-SVID claims. The source is a literal claim name, or a JSON Pointer (leading `/`) for a nested claim. **JWT-SVID logins only**; resolved values must be strings.
+
+```bash
+warden write auth/spiffe/role/inventory-agent \
+  trust_domain="prod.example.org" \
+  bound_audiences="warden" \
+  metadata_mappings="trust_domain=td,path=workload" \
+  metadata_claims="/deploy/env=env"
+```
+
+An X.509-SVID `spiffe://prod.example.org/ns/prod/sa/ci` yields metadata `td="prod.example.org"`, `workload="/ns/prod/sa/ci"`. A JWT-SVID additionally maps its `deploy.env` claim to `env`. A policy can then gate a path with `conditions { token_metadata = ["env=prod"] }`. When both mappings produce the same key, the claim value wins.
+
 ## On-Behalf-Of Chain (RFC 8693 `act` Claim)
 
 RFC 8693 §4.1 defines an `act` claim that attests a delegation chain — "this token represents X, acting on behalf of Y." When a JWT-SVID carries it, Warden extracts the chain (up to a fixed depth of 4), marks each actor as verified (the trust domain signed it), and persists it on the issued token so downstream audit entries carry the full chain. No configuration needed; extraction happens automatically when the claim is present.
@@ -277,6 +295,8 @@ A trust domain is either **static** (a `bundle_pem`/`bundle_json` with no `bundl
 | `cred_spec_name` | No | Credential spec name for implicit-auth flows. |
 | `groups_claim` | No | JWT-SVID claim carrying group names for dynamic policy mapping (JWT-SVID only). |
 | `group_policy_prefix` | No (default `group-`) | Prefix prepended to each group name to form the policy name. |
+| `metadata_mappings` | No | Map of SPIFFE-ID component (`trust_domain`, `spiffe_id`, `path`) → token metadata key. Both SVID flows. |
+| `metadata_claims` | No | Map of JWT-SVID claim (literal or JSON Pointer) → token metadata key. JWT-SVID only; values must be strings. |
 
 ## Troubleshooting
 

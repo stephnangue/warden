@@ -4,12 +4,68 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/mitchellh/pointerstructure"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logical"
 )
+
+// getClaim resolves a JWT-SVID claim value. A leading "/" is a JSON Pointer
+// (RFC 6901) for nested claims; any other string is a literal top-level key.
+// Returns nil when the claim is absent or the pointer cannot be walked (fail
+// closed). Mirrors the JWT auth method's getClaim, including the float ->
+// json.Number coercion so numeric claims stringify predictably.
+func getClaim(claims map[string]interface{}, claim string) interface{} {
+	var val interface{}
+	if !strings.HasPrefix(claim, "/") {
+		val = claims[claim]
+	} else {
+		v, err := pointerstructure.Get(claims, claim)
+		if err != nil {
+			return nil
+		}
+		val = v
+	}
+
+	switch v := val.(type) {
+	case float32:
+		return json.Number(strconv.Itoa(int(v)))
+	case float64:
+		return json.Number(strconv.Itoa(int(v)))
+	}
+	return val
+}
+
+// extractMetadata builds a token metadata map from JWT-SVID claims using the
+// role's claim mappings (source claim -> metadata key, matching OpenBao's
+// claim_mappings direction). Resolved values must be strings; a non-string
+// mapped claim is an error. Absent claims are skipped. Returns nil when nothing
+// was mapped.
+func extractMetadata(claims map[string]interface{}, claimMappings map[string]string) (map[string]string, error) {
+	if len(claimMappings) == 0 {
+		return nil, nil
+	}
+	metadata := make(map[string]string)
+	for source, target := range claimMappings {
+		value := getClaim(claims, source)
+		if value == nil {
+			continue
+		}
+		strValue, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("claim %q for metadata key %q is not a string", source, target)
+		}
+		metadata[target] = strValue
+	}
+	if len(metadata) == 0 {
+		return nil, nil
+	}
+	return metadata, nil
+}
 
 // maxActChainDepth bounds the nested "act" claims walked by extractActChain.
 const maxActChainDepth = 4
