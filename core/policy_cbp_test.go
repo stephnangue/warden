@@ -1569,3 +1569,64 @@ func TestCBP_MergeConditions_DenyOverrides(t *testing.T) {
 	result := cbp.AllowOperation(ctx, req, false)
 	assert.False(t, result.Allowed)
 }
+
+// =============================================================================
+// CBP() re-parse reuse (Lever A)
+// =============================================================================
+
+// TestCBP_ReusesCachedParse verifies that CBP() reuses the parse already
+// performed by GetPolicy instead of re-parsing Raw on every call (Lever A).
+//
+// The cached *Policy is constructed so its parsed Paths intentionally diverge
+// from its Raw text: the cache grants "secret/cached" while Raw would grant
+// "secret/raw". If CBP() were to re-parse Raw, "secret/raw" would be allowed;
+// because it reuses the cached parse, only "secret/cached" is allowed.
+func TestCBP_ReusesCachedParse(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	cached := testParsePolicy(t, `path "secret/cached" { capabilities = ["read"] }`)
+	cached.Name = "diverged"
+	cached.Type = PolicyTypeCBP
+	cached.Raw = `path "secret/raw" { capabilities = ["read"] }`
+	cached.namespace = namespace.RootNamespace
+	require.NotNil(t, cached.Paths)
+
+	// Seed the LRU directly so GetPolicy returns this cached *Policy on the
+	// cache-hit path (storage is never consulted).
+	idx := ps.cacheKey(namespace.RootNamespace, "diverged")
+	ps.tokenPoliciesLRU.Add(idx, cached)
+
+	cbp, err := ps.CBP(ctx, map[string][]string{namespace.RootNamespaceID: {"diverged"}})
+	require.NoError(t, err)
+
+	assert.Contains(t, cbp.Capabilities(ctx, "secret/cached"), ReadCapability,
+		"cached parse should be reused")
+	assert.NotContains(t, cbp.Capabilities(ctx, "secret/raw"), ReadCapability,
+		"Raw must not be re-parsed when Paths is already populated")
+}
+
+// TestCBP_ParsesAdditionalPolicyWithoutPaths verifies the fallback in Lever A:
+// a prefetched policy that arrives without parsed Paths is still parsed from
+// Raw so it contributes its rules.
+func TestCBP_ParsesAdditionalPolicyWithoutPaths(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	// No Paths set; only Raw. The guard must fall back to parsing Raw.
+	extra := &Policy{
+		Name:      "prefetched",
+		Type:      PolicyTypeCBP,
+		Raw:       `path "secret/extra" { capabilities = ["read"] }`,
+		namespace: namespace.RootNamespace,
+	}
+	require.Nil(t, extra.Paths)
+
+	cbp, err := ps.CBP(ctx, map[string][]string{}, extra)
+	require.NoError(t, err)
+
+	assert.Contains(t, cbp.Capabilities(ctx, "secret/extra"), ReadCapability,
+		"prefetched policy without Paths must be parsed from Raw")
+}
