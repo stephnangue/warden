@@ -81,6 +81,13 @@ type Request struct {
 
 	tokenEntry *TokenEntry
 
+	// TokenMetadata carries the authenticating token's verified, login-derived
+	// Metadata into policy evaluation so token_metadata conditions can match
+	// against it. Set from the token entry at the policy-check seam; never
+	// compiled into the cached CBP, so a CBP shared across tokens with the
+	// same policy set is still matched against each token's own metadata.
+	TokenMetadata map[string]string
+
 	// Request metadata
 	ClientIP  string
 	RequestID string

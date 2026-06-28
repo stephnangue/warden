@@ -5,6 +5,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/hashicorp/go-secure-stdlib/strutil"
 )
 
 // PolicyConditions holds the parsed and validated conditions for a path rule.
@@ -14,6 +16,11 @@ type PolicyConditions struct {
 	SourceCIDRs []*net.IPNet   // Parsed CIDR networks from source_ip
 	TimeWindows []TimeWindow   // Parsed time window specifications
 	DaysOfWeek  []time.Weekday // Parsed day-of-week values
+
+	// TokenMetadata maps a token-metadata key to the glob patterns its value
+	// may match, parsed from token_metadata entries of the form "key=pattern".
+	// AND across distinct keys, OR within a key's pattern list.
+	TokenMetadata map[string][]string
 }
 
 // TimeWindow represents a parsed time-of-day window with timezone.
@@ -27,9 +34,10 @@ type TimeWindow struct {
 
 // validConditionKeys defines the recognized condition type names.
 var validConditionKeys = map[string]bool{
-	"source_ip":   true,
-	"time_window": true,
-	"day_of_week": true,
+	"source_ip":      true,
+	"time_window":    true,
+	"day_of_week":    true,
+	"token_metadata": true,
 }
 
 // dayAbbrevToWeekday maps 3-letter abbreviations to time.Weekday.
@@ -106,6 +114,23 @@ func parseAndValidateConditions(raw map[string][]string) (*PolicyConditions, err
 		}
 	}
 
+	if entries, ok := raw["token_metadata"]; ok {
+		if len(entries) == 0 {
+			return nil, fmt.Errorf("token_metadata condition requires at least one entry")
+		}
+		cond.TokenMetadata = make(map[string][]string)
+		for _, entry := range entries {
+			key, pattern, found := strings.Cut(entry, "=")
+			if !found {
+				return nil, fmt.Errorf("invalid token_metadata %q (expected key=pattern)", entry)
+			}
+			if key == "" {
+				return nil, fmt.Errorf("invalid token_metadata %q (empty key)", entry)
+			}
+			cond.TokenMetadata[key] = append(cond.TokenMetadata[key], pattern)
+		}
+	}
+
 	return cond, nil
 }
 
@@ -165,7 +190,12 @@ func parseHHMM(s string) (int, int, error) {
 // Evaluate checks whether the request satisfies all conditions.
 // Returns true if all condition types are met, false otherwise.
 // A nil PolicyConditions always returns true (unconditional).
-func (c *PolicyConditions) Evaluate(clientIP string, now time.Time) bool {
+//
+// tokenMetadata is the authenticating token's login-derived metadata, matched
+// by token_metadata conditions. It is supplied per request (never compiled into
+// the rule) so a CBP shared across tokens is still gated on each token's own
+// metadata.
+func (c *PolicyConditions) Evaluate(clientIP string, now time.Time, tokenMetadata map[string]string) bool {
 	if c == nil {
 		return true
 	}
@@ -188,6 +218,37 @@ func (c *PolicyConditions) Evaluate(clientIP string, now time.Time) bool {
 		}
 	}
 
+	if len(c.TokenMetadata) > 0 {
+		if !c.evaluateTokenMetadata(tokenMetadata) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// evaluateTokenMetadata reports whether the token's metadata satisfies every
+// required key (AND across keys). A key is satisfied when its value matches at
+// least one of the key's glob patterns (OR within a key). A key absent from the
+// token's metadata fails closed; a present value (including "") is matched
+// against the patterns as-is.
+func (c *PolicyConditions) evaluateTokenMetadata(md map[string]string) bool {
+	for key, patterns := range c.TokenMetadata {
+		val, ok := md[key]
+		if !ok {
+			return false
+		}
+		matched := false
+		for _, pattern := range patterns {
+			if strutil.GlobbedStringsMatch(pattern, val) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
 	return true
 }
 
@@ -271,6 +332,13 @@ func (c *PolicyConditions) Clone() *PolicyConditions {
 	if c.DaysOfWeek != nil {
 		clone.DaysOfWeek = make([]time.Weekday, len(c.DaysOfWeek))
 		copy(clone.DaysOfWeek, c.DaysOfWeek)
+	}
+
+	if c.TokenMetadata != nil {
+		clone.TokenMetadata = make(map[string][]string, len(c.TokenMetadata))
+		for key, patterns := range c.TokenMetadata {
+			clone.TokenMetadata[key] = append([]string(nil), patterns...)
+		}
 	}
 
 	return clone

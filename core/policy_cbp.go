@@ -477,7 +477,7 @@ CHECK:
 	if permissions.ConditionSets != nil {
 		conditionsMet := false
 		for _, conds := range permissions.ConditionSets {
-			if conds.Evaluate(req.ClientIP, time.Now()) {
+			if conds.Evaluate(req.ClientIP, time.Now(), req.TokenMetadata) {
 				conditionsMet = true
 				break
 			}
@@ -830,6 +830,14 @@ SWCPATH:
 
 func (c *Core) performPolicyChecks(ctx context.Context, cbp *CBP, te *logical.TokenEntry, req *logical.Request, opts *PolicyCheckOpts) *AuthzResults {
 	ret := new(AuthzResults)
+
+	// Surface the token's verified metadata for token_metadata conditions.
+	// It is read per request rather than compiled into the CBP, so a CBP
+	// shared across tokens with the same policy set is still matched against
+	// each token's own metadata.
+	if te != nil {
+		req.TokenMetadata = te.Metadata
+	}
 
 	// First, perform normal CBP checks if requested.
 	if cbp != nil && !opts.Unauth {

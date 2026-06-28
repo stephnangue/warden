@@ -136,21 +136,53 @@ the key entirely).
 ### Conditions
 
 A path block can gate access on request context with a `conditions` block —
-source IP, time of day, and day of week:
+source IP, time of day, day of week, and the calling token's metadata:
 
 ```hcl
 path "secret/data/app/*" {
   capabilities = ["read"]
   conditions = {
-    source_ip   = ["10.0.0.0/8"]
-    time_window = ["09:00-17:00 America/New_York"]
-    day_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+    source_ip      = ["10.0.0.0/8"]
+    time_window    = ["09:00-17:00 America/New_York"]
+    day_of_week    = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+    token_metadata = ["env=prod", "team=platform*"]
   }
 }
 ```
 
 Different condition types are **AND**ed (all must hold); within one type, the
 entries are **OR**ed (any one matches).
+
+#### `token_metadata`
+
+`token_metadata` matches the authenticating token's verified, login-derived
+metadata. Each entry is `key=pattern`, where `pattern` is a glob, as in
+`allowed_parameters`. The `*` is honored only at the **start and/or end** of the
+pattern: a trailing `*` is a prefix match (`team=platform*` matches values
+*starting with* `platform`), a leading `*` is a suffix match (`team=*-core` matches
+values *ending with* `-core`), and both ends is a substring match (`team=*plat*`).
+A `*` in the middle is literal, and a lone `*` is literal too — use `key=**` to
+match any value (in effect, just requiring the key to be present, since a missing
+key already fails closed). The metadata itself is populated by the auth method
+that issued the token — JWT/SPIFFE claims, X.509 certificate fields, or Kubernetes
+TokenReview attributes (see each method's *Token Metadata* section).
+
+Semantics within the type:
+
+- **AND across distinct keys** — every listed key must be present and match.
+- **OR within one key** — repeating a key (`["tier=gold", "tier=platinum"]`)
+  passes if the value matches any of its patterns.
+- A key **absent** from the token's metadata fails closed.
+
+```hcl
+# only tokens whose metadata says env=prod AND team starts with "platform"
+conditions = { token_metadata = ["env=prod", "team=platform*"] }
+```
+
+Because metadata is matched against the token's own values at request time (not
+compiled into the policy), the same compiled policy stays correct for every
+token — a token with `env=dev` is denied even though another token reusing the
+same policy set is allowed.
 
 ### Path expiration
 
@@ -194,7 +226,7 @@ even considered, and any failure denies the request immediately:
 
 1. **Capability** — does the rule grant the capability for this operation? If
    not, the request is denied and nothing further runs.
-2. **Conditions** — do the `conditions` (source IP, time, day) hold?
+2. **Conditions** — do the `conditions` (source IP, time, day, token metadata) hold?
 3. **MCP block** — for a gateway request, does the parsed body pass the
    `mcp { }` rules?
 4. **Parameters** — finally, `required` / `allowed` / `denied` parameters.

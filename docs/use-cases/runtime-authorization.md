@@ -1,6 +1,6 @@
 # Runtime authorization
 
-_Control every tool call at runtime, down to the argument._
+_Control every call at runtime — down to the argument, and on whose behalf._
 
 ## Reaching a system shouldn't mean doing anything in it
 
@@ -38,7 +38,8 @@ own terms.
 
 The check reaches past the path into the content of the request. A policy can gate
 an operation on its [parameters](../concepts/policies.md#parameter-constraints) and
-on request context — source IP, time of day, day of week — before any credential is
+on request context — source IP, time of day, day of week, and the calling identity's
+own [verified attributes](#authorize-on-whose-behalf-it-acts) — before any credential is
 minted. For [MCP](../concepts/mcp.md) traffic it goes all the way inside the tool
 call: Warden parses the JSON-RPC body and decides, per call, **which tool** the
 agent may invoke, **which resource or prompt** it may name, and **which arguments**
@@ -50,6 +51,37 @@ A denied MCP call comes back as an HTTP 403 with a short reason naming the offen
 tool or parameter, so the agent can correct course instead of guessing at an opaque
 failure — and every decision, allow or deny, is recorded.
 
+## Authorize on whose behalf it acts
+
+The path-and-capability check answers one question: *what can this agent reach in
+this compartment?* But a compartment is usually shared — one analytics agent serves a
+whole team — and the same agent acts for different people. So there is a second
+question: *on whose behalf is this call made, and are they allowed?*
+
+Warden answers it from the token itself. When an agent authenticates, the
+[auth method](../auth-methods/README.md) can copy verified attributes off the token
+it presents — a clearance level, a team, the user it is acting for — drawn from the
+IdP's claims, the client certificate, or the Kubernetes account. Those attributes
+travel with the token as **metadata**, and a policy rule can insist on them: the role
+decides which systems the agent may reach, and the metadata decides whether *this*
+call is one the rule admits. Both have to hold.
+
+Picture one "warehouse reader" agent shared across the company. When it acts for a
+finance analyst, the token it presents carries `department=finance` at a confidential
+clearance; when it acts for an outside contractor, the token carries neither. Both
+sessions drive the same role, so by path and capability alone either could read the
+finance tables. But the rule that grants that path also requires the token to say
+`department=finance` at that clearance — so the finance session goes through and the
+contractor session is refused, same agent, same role, same path. Nothing about the
+policy changed between the two calls; only the verified identity on the token did.
+
+Because the check runs against the token's own attributes at request time — never
+baked into the rule — one policy stays correct for every identity that shares it: one
+overlay, many callers, nothing to maintain per person. The attribute that decided
+each call lands in the [audit log](../concepts/audit.md), so a grant or a denial is
+explainable down to *why*. (The condition that expresses this is
+[`token_metadata`](../concepts/policies.md#token_metadata).)
+
 ## Benefits
 
 - **Least privilege per step** — each call gets the narrowest role that fits it,
@@ -58,6 +90,9 @@ failure — and every decision, allow or deny, is recorded.
   and parameter values, not just which system is reachable.
 - **No privilege accumulation** — authority is re-decided on every call, so nothing
   lingers on the connection to be misused later.
+- **On whose behalf, not just what** — a shared role still gates on the principal the
+  agent is acting for, by the verified attributes on its token, so the same
+  compartment admits one and refuses another.
 
 ## In practice
 
@@ -81,4 +116,4 @@ with the exact tool that was blocked.
 - [Breach containment](breach-containment.md) — the bounded blast radius this
   per-call control produces.
 - [Audit & attribution](audit-attribution.md) — where every allow and deny is
-  recorded.
+  recorded, with the on-behalf-of chain behind each call.
