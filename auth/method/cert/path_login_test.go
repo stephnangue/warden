@@ -342,6 +342,50 @@ func TestExtractPrincipal(t *testing.T) {
 	}
 }
 
+func TestExtractCertMetadata(t *testing.T) {
+	caCert, caKey, _ := testCA(t)
+
+	cert := testClientCert(t, caCert, caKey, "svc-ci", func(tmpl *x509.Certificate) {
+		tmpl.Subject.OrganizationalUnit = []string{"platform-core"}
+		tmpl.Subject.Organization = []string{"acme"}
+		tmpl.DNSNames = []string{"a.example.com", "b.example.com"}
+		tmpl.EmailAddresses = []string{"ci@example.com"}
+	})
+
+	t.Run("maps fields, comma-joins multi-valued SANs, skips empty", func(t *testing.T) {
+		// mappings are source (cert field) -> target (metadata key)
+		md := extractCertMetadata(cert, map[string]string{
+			"cn":        "cn",
+			"ou":        "team",
+			"org":       "org",
+			"dns_san":   "hosts", // multi-valued -> comma-joined in order
+			"email_san": "email",
+			"uri_san":   "uri", // no URIs on this cert -> skipped
+		})
+		assert.Equal(t, map[string]string{
+			"cn":    "svc-ci",
+			"team":  "platform-core",
+			"org":   "acme",
+			"hosts": "a.example.com,b.example.com",
+			"email": "ci@example.com",
+		}, md)
+	})
+
+	t.Run("serial", func(t *testing.T) {
+		md := extractCertMetadata(cert, map[string]string{"serial": "sn"})
+		assert.Equal(t, map[string]string{"sn": cert.SerialNumber.String()}, md)
+	})
+
+	t.Run("nil mappings", func(t *testing.T) {
+		assert.Nil(t, extractCertMetadata(cert, nil))
+	})
+
+	t.Run("all empty -> nil", func(t *testing.T) {
+		bare := testClientCert(t, caCert, caKey, "bare")
+		assert.Nil(t, extractCertMetadata(bare, map[string]string{"ou": "team"}))
+	})
+}
+
 func TestMatchesGlob(t *testing.T) {
 	tests := []struct {
 		value    string

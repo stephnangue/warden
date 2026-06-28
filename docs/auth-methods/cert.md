@@ -28,6 +28,7 @@ If your workload's identity is a Kubernetes ServiceAccount token, prefer the `ku
 - [URI SAN Patterns](#uri-san-patterns)
 - [How the Certificate Reaches Warden](#how-the-certificate-reaches-warden)
 - [Role-Specific CAs](#role-specific-cas)
+- [Token Metadata](#token-metadata)
 - [Discovering Assumable Roles](#discovering-assumable-roles)
 - [Configuration Reference](#configuration-reference)
 - [Troubleshooting](#troubleshooting)
@@ -219,6 +220,18 @@ When a request comes in for this role, the cert is verified against `partner-ca.
 
 If `certificate` is omitted, the role falls back to the mount's `trusted_ca_pem`. If both are unset, the role cannot accept any certificate and login fails with the generic auth-failed error.
 
+## Token Metadata
+
+A role can copy verified certificate fields onto the issued token's metadata, where `token_metadata` policy conditions can match them. `metadata_mappings` is written as `cert-field = "destination-metadata-key"`, drawing from: `cn`, `serial`, `ou`, `org`, `dns_san`, `email_san`, and `uri_san`. Multi-valued fields (the SANs, OU, Org) are comma-joined.
+
+```bash
+warden write auth/cert/role/inventory-agent \
+  allowed_common_names="inventory-agent" \
+  metadata_mappings="ou=team,cn=cn"
+```
+
+A certificate with `OU=platform-core, CN=inventory-agent` yields metadata `team="platform-core"`, `cn="inventory-agent"`. A policy can then gate a path with `conditions { token_metadata = ["team=platform*"] }`. Unknown field selectors are rejected at role write time.
+
 ## Discovering Assumable Roles
 
 Agents that don't know which role to ask for can use Warden's namespace-wide introspection endpoint. The aggregator detects the credential format (certificate vs JWT vs Kubernetes SA JWT) and fans out only to auth mounts whose registered TokenType matches — so a certificate goes to cert mounts, a generic JWT goes to JWT mounts, a K8s SA token goes to kubernetes mounts. The workload doesn't need to know which mount serves it.
@@ -264,6 +277,7 @@ At least one of the `allowed_*` constraint fields must be set — wide-open role
 | `allowed_organizations` | One of six | Exact-match list against `Subject.Organization`. |
 | `certificate` | No | Role-specific CA PEM that replaces the mount's `trusted_ca_pem` for this role only. |
 | `principal_claim` | No | Per-role override of the mount's `principal_claim`. |
+| `metadata_mappings` | No | Map of certificate field (`cn`, `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san`) → token metadata key. Multi-valued fields are comma-joined. |
 | `token_policies` | No | Warden policies attached to the issued token. |
 | `token_ttl` | No (default `1h`) | TTL for issued tokens; overrides the mount-level `token_ttl`; further capped by the certificate's `NotAfter`. |
 | `cred_spec_name` | No | Credential spec name to bind to this role; downstream provider gateways use it to mint the upstream credential. |

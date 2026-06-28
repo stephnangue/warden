@@ -66,6 +66,58 @@ func TestPathRole_TokenTypeAlwaysCertRole(t *testing.T) {
 	assert.Equal(t, "cert_role", role.TokenType)
 }
 
+func TestPathRole_MetadataMappings_RoundTrip(t *testing.T) {
+	b, ctx := createTestBackend(t)
+	b.config = &CertAuthConfig{PrincipalClaim: "cn"}
+
+	fd := &framework.FieldData{
+		Raw: map[string]any{
+			"name":                 "meta-role",
+			"allowed_common_names": []string{"svc-*"},
+			"metadata_mappings": map[string]any{
+				"ou": "team",
+				"cn": "cn",
+			},
+		},
+		Schema: map[string]*framework.FieldSchema{
+			"name":                 {Type: framework.TypeString},
+			"allowed_common_names": {Type: framework.TypeCommaStringSlice},
+			"metadata_mappings":    {Type: framework.TypeMap},
+		},
+	}
+
+	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fd)
+	require.NoError(t, err)
+	assert.Nil(t, resp.Err)
+
+	role, err := b.getRole(ctx, "meta-role")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"ou": "team", "cn": "cn"}, role.MetadataMappings)
+}
+
+func TestPathRole_MetadataMappings_InvalidField(t *testing.T) {
+	b, ctx := createTestBackend(t)
+	b.config = &CertAuthConfig{PrincipalClaim: "cn"}
+
+	fd := &framework.FieldData{
+		Raw: map[string]any{
+			"name":                 "bad-meta-role",
+			"allowed_common_names": []string{"svc-*"},
+			"metadata_mappings":    map[string]any{"not_a_cert_field": "team"},
+		},
+		Schema: map[string]*framework.FieldSchema{
+			"name":                 {Type: framework.TypeString},
+			"allowed_common_names": {Type: framework.TypeCommaStringSlice},
+			"metadata_mappings":    {Type: framework.TypeMap},
+		},
+	}
+
+	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fd)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Err)
+	assert.Contains(t, resp.Err.Error(), "invalid metadata_mappings field")
+}
+
 func TestCertRole_ParseTokenTTL(t *testing.T) {
 	t.Run("empty returns 1h", func(t *testing.T) {
 		r := &CertRole{}
