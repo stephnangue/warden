@@ -27,6 +27,15 @@ const (
 
 	// policyCacheSize is the number of policies that are kept cached
 	policyCacheSize = 1024
+
+	// compiledCBPCacheSize is the number of compiled CBP objects kept cached.
+	// Unlike the policy cache, which is keyed per individual policy (bounded by
+	// how many policies are authored), this cache is keyed per policy SET — the
+	// sorted tuple of all policies a token carries. Distinct policy-set ×
+	// version combinations are combinatorial and typically outnumber distinct
+	// policies, so it is sized larger. Correctness never depends on the size: a
+	// miss simply recompiles, so this is purely a hit-rate tuning knob.
+	compiledCBPCacheSize = 4096
 )
 
 var (
@@ -43,9 +52,26 @@ type PolicyStore struct {
 
 	tokenPoliciesLRU *lru.TwoQueueCache[string, *Policy]
 
+	// compiledCBPLRU caches compiled CBP objects keyed by the policy set they
+	// were built from (see compiledCBPCacheKey). A policy edit bumps its
+	// DataVersion, which changes the key, so stale entries are never served and
+	// age out via the LRU. Entries also carry a time-validity bound to honour
+	// per-path expirations (see compiledCBPEntry).
+	compiledCBPLRU *lru.TwoQueueCache[string, *compiledCBPEntry]
+
 	modifyLock *sync.RWMutex
 
 	logger *logger.GatedLogger
+}
+
+// compiledCBPEntry is a cached compiled CBP together with the instant after
+// which it must be recomputed. validUntil is the earliest future per-path
+// expiration across the policy set; a zero value means no path expires, so the
+// entry never times out (it can still be evicted by the LRU or superseded by a
+// version bump).
+type compiledCBPEntry struct {
+	cbp        *CBP
+	validUntil time.Time
 }
 
 // PolicyEntry is used to store a policy by name
@@ -70,6 +96,9 @@ func NewPolicyStore(ctx context.Context, core *Core, logger *logger.GatedLogger)
 
 	cache, _ := lru.New2Q[string, *Policy](policyCacheSize)
 	ps.tokenPoliciesLRU = cache
+
+	compiledCache, _ := lru.New2Q[string, *compiledCBPEntry](compiledCBPCacheSize)
+	ps.compiledCBPLRU = compiledCache
 
 	return ps, nil
 }
@@ -532,13 +561,83 @@ func (ps *PolicyStore) CBP(ctx context.Context, policyNames map[string][]string,
 		}
 	}
 
+	// Serve a previously compiled CBP when the exact same policy set (by name
+	// and version) was already compiled. Prefetched policies are not keyed from
+	// storage and may be ephemeral, so the cache is bypassed when any are given.
+	cacheable := len(additionalPolicies) == 0 && ps.compiledCBPLRU != nil
+	var cacheKey string
+	if cacheable {
+		cacheKey = compiledCBPCacheKey(allPolicies)
+		if entry, ok := ps.compiledCBPLRU.Get(cacheKey); ok {
+			if entry.validUntil.IsZero() || time.Now().Before(entry.validUntil) {
+				return entry.cbp, nil
+			}
+			// A per-path expiration has elapsed; drop and recompile.
+			ps.compiledCBPLRU.Remove(cacheKey)
+		}
+	}
+
 	// Construct the CBP
 	cbp, err := NewCBP(ctx, allPolicies)
 	if err != nil {
 		return nil, fmt.Errorf("failed to construct CBP: %w", err)
 	}
 
+	if cacheable {
+		ps.compiledCBPLRU.Add(cacheKey, &compiledCBPEntry{
+			cbp:        cbp,
+			validUntil: earliestPathExpiration(allPolicies),
+		})
+	}
+
 	return cbp, nil
+}
+
+// compiledCBPCacheKey builds a stable, order-independent key identifying a
+// policy set. Each policy contributes its namespace, name, data version, and
+// policy-level expiration; a version bump therefore yields a new key so edits
+// are never served from a stale compiled CBP. Per-path expirations are not part
+// of the key (they are time-driven, not version-driven) and are handled via the
+// entry's validUntil bound instead.
+func compiledCBPCacheKey(policies []*Policy) string {
+	tuples := make([]string, 0, len(policies))
+	for _, p := range policies {
+		if p == nil {
+			continue
+		}
+		nsUUID := ""
+		if p.namespace != nil {
+			nsUUID = p.namespace.UUID
+		}
+		tuples = append(tuples, fmt.Sprintf("%s\x1f%s\x1f%d\x1f%d",
+			nsUUID, p.Name, p.DataVersion, p.Expiration.Unix()))
+	}
+	slices.Sort(tuples)
+	return strings.Join(tuples, "\x1e")
+}
+
+// earliestPathExpiration returns the soonest future per-path expiration across
+// the policy set, which bounds how long a compiled CBP stays valid (NewCBP
+// drops already-expired paths at compile time). Already-elapsed expirations are
+// ignored. A zero return means no path expires, so the compiled CBP has no time
+// bound.
+func earliestPathExpiration(policies []*Policy) time.Time {
+	now := time.Now()
+	var earliest time.Time
+	for _, p := range policies {
+		if p == nil {
+			continue
+		}
+		for _, pc := range p.Paths {
+			if pc.Expiration.IsZero() || !pc.Expiration.After(now) {
+				continue
+			}
+			if earliest.IsZero() || pc.Expiration.Before(earliest) {
+				earliest = pc.Expiration
+			}
+		}
+	}
+	return earliest
 }
 
 // loadCBPPolicy is used to load default CBP policies in a specific
