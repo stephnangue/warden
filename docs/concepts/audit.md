@@ -16,7 +16,10 @@ Each operation produces two entries — a **request** entry when it arrives and 
 Between them they capture:
 
 - **Identity** — the [token](tokens.md) ID and accessor, token type, principal
-  and [role](roles.md), the granted policies, and the [namespace](namespaces.md).
+  and [role](roles.md), the granted policies, the [namespace](namespaces.md), and —
+  when the token carries them — its verified, login-derived **metadata** attributes
+  (clearance, team, on-behalf-of user), so a decision that turned on a
+  [`token_metadata`](policies.md#token_metadata) condition is explainable.
 - **Request** — operation, path, HTTP method, client IP, mount point and type,
   and whether it was transparent/unauthenticated/streamed.
 - **Response** — status, any warnings, the upstream URL for a proxied request,
@@ -35,11 +38,15 @@ log ever revealing it.
 
 By default Warden salts the **issued credential's secret data**
 (`response.credential.data`) — the access keys, tokens, and passwords Warden
-injects. Non-secret `metadata` (such as a forwarded token's subject) is logged in
-clear. You can extend or narrow this per device:
+injects. Non-secret metadata is logged in clear: a forwarded token's subject, and
+the token's verified identity attributes (`auth.policy_results.token_metadata`).
+That metadata is descriptive by design, but a value like a clearance level can still
+be sensitive — so it is salt-able per key. You can extend or narrow this per device:
 
-- `salt_fields` — additional dot-paths to HMAC (e.g. `auth.token_id`,
-  `request.data.password`).
+- `salt_fields` — additional dot-paths to HMAC. The path can be a whole map
+  (`auth.policy_results.token_metadata` salts every value) or a single key
+  (`auth.policy_results.token_metadata.clearance` salts just that one); other
+  examples are `auth.token_id` and `request.data.password`.
 - `omit_fields` — dot-paths to drop entirely.
 
 To check whether a known plaintext appears in the log, hash it with the same

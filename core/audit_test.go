@@ -574,7 +574,7 @@ func TestLoadAuditsReconcile(t *testing.T) {
 			Path:        "default",
 			Description: "primary",
 			Config:      map[string]any{"file_path": auditPath},
-			Declarative:  true,
+			Declarative: true,
 		}}
 
 		require.NoError(t, core.loadAudits(ctx))
@@ -690,7 +690,7 @@ func TestLoadAuditsReconcile(t *testing.T) {
 			Path:        "default/",
 			Accessor:    "audit_file_seed",
 			Config:      map[string]any{"file_path": filepath.Join(tmp, "audit.log"), "hmac_key": "x"},
-			Declarative:  true,
+			Declarative: true,
 			NamespaceID: namespace.RootNamespaceID,
 		}}
 		require.NoError(t, core.persistAudits(ctx))
@@ -721,7 +721,7 @@ func TestLoadAuditsReconcile(t *testing.T) {
 			Path:        "api-mount/",
 			Accessor:    "audit_file_apiseed",
 			Config:      map[string]any{"file_path": apiPath, "hmac_key": "x"},
-			Declarative:  false,
+			Declarative: false,
 			NamespaceID: namespace.RootNamespaceID,
 		}}
 		require.NoError(t, core.persistAudits(ctx))
@@ -756,7 +756,7 @@ func TestLoadAuditsReconcile(t *testing.T) {
 			Path:        "shared/",
 			Accessor:    "audit_file_apipre",
 			Config:      map[string]any{"file_path": filepath.Join(tmp, "api.log"), "hmac_key": "x"},
-			Declarative:  false,
+			Declarative: false,
 			NamespaceID: namespace.RootNamespaceID,
 		}}
 		require.NoError(t, core.persistAudits(ctx))
@@ -780,9 +780,9 @@ func TestEnableAudit_ConfigOriginProtection(t *testing.T) {
 
 	// Pre-seat a config-origin entry as if loadAudits had registered it.
 	core.audit.Entries = []*MountEntry{{
-		Class:      mountClassAudit,
-		Type:       "mock",
-		Path:       "owned/",
+		Class:       mountClassAudit,
+		Type:        "mock",
+		Path:        "owned/",
 		Declarative: true,
 	}}
 
@@ -801,9 +801,9 @@ func TestDisableAudit_ConfigOriginProtection(t *testing.T) {
 	core := createMockCoreForAudit()
 
 	core.audit.Entries = []*MountEntry{{
-		Class:      mountClassAudit,
-		Type:       "mock",
-		Path:       "owned/",
+		Class:       mountClassAudit,
+		Type:        "mock",
+		Path:        "owned/",
 		Declarative: true,
 	}}
 
@@ -1062,6 +1062,30 @@ func TestBuildAuditAuth_FromAuth(t *testing.T) {
 	assert.Equal(t, "agent-1", result.PrincipalID)
 	assert.True(t, result.PolicyResults.Allowed)
 	assert.Contains(t, result.PolicyResults.GrantingPolicies, "p1")
+}
+
+func TestBuildAuditAuth_SurfacesTokenMetadata(t *testing.T) {
+	auth := &logical.Auth{
+		PolicyResults: &sdklogical.PolicyResults{Allowed: false},
+	}
+	te := &logical.TokenEntry{
+		PrincipalID: "svc-ci",
+		Metadata:    map[string]string{"env": "dev", "team": "platform-core"},
+	}
+
+	result := buildAuditAuth(auth, te)
+	require.NotNil(t, result)
+	require.NotNil(t, result.PolicyResults)
+	assert.Equal(t, map[string]string{"env": "dev", "team": "platform-core"}, result.PolicyResults.TokenMetadata)
+}
+
+func TestBuildAuditAuth_NoTokenMetadataWhenEmpty(t *testing.T) {
+	auth := &logical.Auth{PolicyResults: &sdklogical.PolicyResults{Allowed: true}}
+	te := &logical.TokenEntry{PrincipalID: "svc-ci"}
+
+	result := buildAuditAuth(auth, te)
+	require.NotNil(t, result.PolicyResults)
+	assert.Nil(t, result.PolicyResults.TokenMetadata)
 }
 
 func TestBuildAuditAuth_AuthOverridesTE(t *testing.T) {

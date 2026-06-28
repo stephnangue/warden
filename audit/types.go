@@ -133,6 +133,13 @@ type PolicyResults struct {
 	// such block applied. The field is omitempty so non-MCP audit
 	// records remain byte-identical to today's output.
 	MCPDecision *logical.MCPDecision `json:"mcp_decision,omitempty"`
+
+	// TokenMetadata is the authenticating token's verified, login-derived
+	// metadata, included so token_metadata policy decisions are explainable.
+	// omitempty so records for tokens without metadata stay byte-identical to
+	// today's output. Logged in clear by default; opt-in per-key HMAC salting
+	// via salt_fields (auth.policy_results.token_metadata[.<key>]).
+	TokenMetadata map[string]string `json:"token_metadata,omitempty"`
 }
 
 // AuthResult contains authentication result from login operations
@@ -308,6 +315,12 @@ func (e *LogEntry) Clone() *LogEntry {
 			if e.Auth.PolicyResults.GrantingPolicies != nil {
 				clone.Auth.PolicyResults.GrantingPolicies = make([]string, len(e.Auth.PolicyResults.GrantingPolicies))
 				copy(clone.Auth.PolicyResults.GrantingPolicies, e.Auth.PolicyResults.GrantingPolicies)
+			}
+			if e.Auth.PolicyResults.TokenMetadata != nil {
+				clone.Auth.PolicyResults.TokenMetadata = make(map[string]string, len(e.Auth.PolicyResults.TokenMetadata))
+				for k, v := range e.Auth.PolicyResults.TokenMetadata {
+					clone.Auth.PolicyResults.TokenMetadata[k] = v
+				}
 			}
 		}
 		if e.Auth.Actors != nil {
