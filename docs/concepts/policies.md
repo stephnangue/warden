@@ -152,6 +152,40 @@ path "secret/data/app/*" {
 Different condition types are **AND**ed (all must hold); within one type, the
 entries are **OR**ed (any one matches).
 
+### Path expiration
+
+A path block can carry an `expiration` — an absolute time after which the rule
+stops applying. It is how you write a grant that revokes itself, without a
+follow-up edit or an external cleanup job:
+
+```hcl
+path "secret/data/incident-4821/*" {
+  capabilities = ["read"]
+  expiration   = "2026-07-01T00:00:00Z"
+}
+```
+
+The value is an absolute instant, accepted as an RFC3339 timestamp (with or
+without fractional seconds, e.g. `2026-07-01T00:00:00Z`) or as an integer Unix
+epoch in seconds. It is **not** a duration — there is no `"24h"` form; compute
+the wall-clock instant when you write the policy.
+
+Once that instant passes, the rule is dropped as if it had never been
+written — it is removed when the policy is compiled to evaluate a request, so no
+separate cleanup step is involved. The effect is scoped to the single path
+block: other `path` blocks in the same policy are untouched.
+
+Expiration **removes a grant; it does not add a deny.** When a rule expires,
+evaluation simply falls back to whatever other rules match the request — a
+broader prefix in the same or another policy keeps applying, and if nothing else
+matches, the request is denied by the [default-deny](#policies) baseline. To
+guarantee a path becomes inaccessible at a deadline regardless of other grants,
+use a `deny` rule, not an expiration.
+
+A common pattern is time-boxed access: a temporary elevation for an incident, a
+contractor grant that lapses on a known date, or a break-glass rule that admits
+access for a fixed window and then closes on its own.
+
 ## Order of Evaluation
 
 Within the single [most-specific](#path-matching) rule that decides a request,
