@@ -75,6 +75,10 @@ func (b *certAuthBackend) pathRole() *framework.Path {
 				Description:   "Identity source from certificate (overrides global config): cn, dns_san, email_san, uri_san, serial",
 				AllowedValues: principalClaimAllowedValues(),
 			},
+			"metadata_mappings": {
+				Type:        framework.TypeMap,
+				Description: "Map of certificate field (cn, serial, ou, org, dns_san, email_san, uri_san) to token metadata key. Multi-valued fields are comma-joined.",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.CreateOperation: &framework.PathOperation{
@@ -177,6 +181,7 @@ func (b *certAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reque
 			"allowed_organizations":        role.AllowedOrganizations,
 			"certificate":                  role.Certificate,
 			"principal_claim":              role.PrincipalClaim,
+			"metadata_mappings":            role.MetadataMappings,
 		},
 	}, nil
 }
@@ -230,6 +235,9 @@ func (b *certAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Req
 		}
 		if v, ok := d.GetOk("principal_claim"); ok {
 			role.PrincipalClaim = v.(string)
+		}
+		if v, ok := d.GetOk("metadata_mappings"); ok {
+			role.MetadataMappings = toStringMap(v.(map[string]any))
 		}
 	}
 
@@ -345,6 +353,14 @@ func (b *certAuthBackend) validateRole(role *CertRole) error {
 		return logical.ErrBadRequestf("invalid principal_claim %q; must be one of: %v", role.PrincipalClaim, validPrincipalClaims)
 	}
 
+	// Validate metadata_mappings certificate field selectors (the map key is
+	// the source cert field; the value is the destination metadata key).
+	for source, target := range role.MetadataMappings {
+		if !validCertMetadataFields[source] {
+			return logical.ErrBadRequestf("invalid metadata_mappings field %q for metadata key %q; must be one of: cn, serial, ou, org, dns_san, email_san, uri_san", source, target)
+		}
+	}
+
 	// Validate role-specific CA PEM if provided
 	if role.Certificate != "" {
 		if _, err := buildCAPool(role.Certificate); err != nil {
@@ -397,8 +413,24 @@ func (b *certAuthBackend) buildRoleFromFieldData(name string, d *framework.Field
 	if v, ok := d.GetOk("principal_claim"); ok {
 		role.PrincipalClaim = v.(string)
 	}
+	if v, ok := d.GetOk("metadata_mappings"); ok {
+		role.MetadataMappings = toStringMap(v.(map[string]any))
+	}
 
 	return role
+}
+
+// toStringMap coerces a TypeMap field value into map[string]string, rendering
+// each value to its string form. Nil/empty input yields nil.
+func toStringMap(m map[string]any) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = fmt.Sprintf("%v", v)
+	}
+	return out
 }
 
 // Storage helper methods

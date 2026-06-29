@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/auth/helper"
@@ -162,6 +163,7 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 			TokenTTL:       effectiveTTL,
 			ClientIP:       req.ClientIP,
 			ClientToken:    fingerprint, // Cert fingerprint for token type caching
+			Metadata:       extractCertMetadata(cert, role.MetadataMappings),
 		},
 		Data: map[string]any{
 			"principal_id": principalID,
@@ -262,6 +264,64 @@ func validateCertConstraints(cert *x509.Certificate, role *CertRole) error {
 	}
 
 	return nil
+}
+
+// validCertMetadataFields lists the certificate field selectors usable in a
+// role's metadata_mappings.
+var validCertMetadataFields = map[string]bool{
+	"cn":        true,
+	"serial":    true,
+	"ou":        true,
+	"org":       true,
+	"dns_san":   true,
+	"email_san": true,
+	"uri_san":   true,
+}
+
+// extractCertMetadata builds the token metadata map from verified certificate
+// fields using the role's mappings (cert field selector -> metadata key, source
+// -> key). Empty fields are skipped. Returns nil when nothing was mapped.
+func extractCertMetadata(cert *x509.Certificate, mappings map[string]string) map[string]string {
+	if len(mappings) == 0 {
+		return nil
+	}
+	md := make(map[string]string)
+	for source, target := range mappings {
+		if v := certFieldValue(cert, source); v != "" {
+			md[target] = v
+		}
+	}
+	if len(md) == 0 {
+		return nil
+	}
+	return md
+}
+
+// certFieldValue renders a certificate field selector to a string. Multi-valued
+// fields (OU, Org, and the SAN lists) are comma-joined so the result is a single
+// deterministic metadata value.
+func certFieldValue(cert *x509.Certificate, field string) string {
+	switch field {
+	case "cn":
+		return cert.Subject.CommonName
+	case "serial":
+		return cert.SerialNumber.String()
+	case "ou":
+		return strings.Join(cert.Subject.OrganizationalUnit, ",")
+	case "org":
+		return strings.Join(cert.Subject.Organization, ",")
+	case "dns_san":
+		return strings.Join(cert.DNSNames, ",")
+	case "email_san":
+		return strings.Join(cert.EmailAddresses, ",")
+	case "uri_san":
+		uris := make([]string, len(cert.URIs))
+		for i, u := range cert.URIs {
+			uris[i] = u.String()
+		}
+		return strings.Join(uris, ",")
+	}
+	return ""
 }
 
 // extractPrincipal extracts the principal identity from the certificate based on the claim type.
