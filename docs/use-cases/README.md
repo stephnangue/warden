@@ -11,7 +11,7 @@ on all five at once.
 |----------|-------------|------------------|
 | [Access brokering](access-brokering.md) | Every integration puts another secret in the agent, where it leaks. | Holds the upstream secret and injects a scoped credential per request; the agent carries only its identity. |
 | [Breach containment](breach-containment.md) | A prompt-injected or hijacked agent can do anything its broad credential allows. | Leaves no secret to steal, bounds every call by policy, and expires the access it grants. |
-| [Runtime authorization](runtime-authorization.md) | Reaching a system means doing anything in it — every tool, every argument. | Authorizes each call at runtime, down to the tool and parameter, default-deny. |
+| [Runtime authorization](runtime-authorization.md) | Reaching a system means doing anything in it — every tool, every argument, for anyone the agent fronts. | Authorizes each call at runtime, down to the tool and parameter and on whose behalf it acts, default-deny. |
 | [Centralized governance](centralized-governance.md) | Dozens of systems, each with its own identity, policy, secrets, and audit. | One control plane — one identity, one policy surface, one audit log, central rotation. |
 | [Audit & attribution](audit-attribution.md) | Shared identities and shared MCP servers erase who actually acted. | Ties every request to a real identity and its on-behalf-of chain, secrets hashed. |
 

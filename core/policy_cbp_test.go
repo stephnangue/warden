@@ -1383,6 +1383,81 @@ func TestCBP_ConditionsSourceIP_Denied(t *testing.T) {
 	assert.False(t, result.Allowed)
 }
 
+func TestCBP_ConditionsTokenMetadata_AllowDeny(t *testing.T) {
+	ctx := testContext()
+
+	policy := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["read"]
+			conditions {
+				token_metadata = ["env=prod", "team=platform*"]
+			}
+		}
+	`)
+
+	cbp, err := NewCBP(ctx, []*Policy{policy})
+	require.NoError(t, err)
+
+	allowed := &logical.Request{
+		Operation:     logical.ReadOperation,
+		Path:          "secret/data/foo",
+		TokenMetadata: map[string]string{"env": "prod", "team": "platform-core"},
+	}
+	assert.True(t, cbp.AllowOperation(ctx, allowed, false).Allowed)
+
+	wrongTeam := &logical.Request{
+		Operation:     logical.ReadOperation,
+		Path:          "secret/data/foo",
+		TokenMetadata: map[string]string{"env": "prod", "team": "billing"},
+	}
+	assert.False(t, cbp.AllowOperation(ctx, wrongTeam, false).Allowed)
+
+	missingKey := &logical.Request{
+		Operation:     logical.ReadOperation,
+		Path:          "secret/data/foo",
+		TokenMetadata: map[string]string{"env": "prod"},
+	}
+	assert.False(t, cbp.AllowOperation(ctx, missingKey, false).Allowed)
+}
+
+// TestCBP_ConditionsTokenMetadata_SharedCompiledCBP_CrossToken proves the
+// correctness guarantee behind the compiled-CBP cache: a single compiled CBP
+// (as would be served from compiledCBPLRU to every token with the same policy
+// set) carries no token identity, so two requests with different TokenMetadata
+// still resolve against their own metadata — one allowed, one denied.
+func TestCBP_ConditionsTokenMetadata_SharedCompiledCBP_CrossToken(t *testing.T) {
+	ctx := testContext()
+
+	policy := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["read"]
+			conditions {
+				token_metadata = ["env=prod"]
+			}
+		}
+	`)
+
+	// One compiled CBP, shared across both "tokens".
+	cbp, err := NewCBP(ctx, []*Policy{policy})
+	require.NoError(t, err)
+
+	prodReq := &logical.Request{
+		Operation:     logical.ReadOperation,
+		Path:          "secret/data/foo",
+		TokenMetadata: map[string]string{"env": "prod"},
+	}
+	devReq := &logical.Request{
+		Operation:     logical.ReadOperation,
+		Path:          "secret/data/foo",
+		TokenMetadata: map[string]string{"env": "dev"},
+	}
+
+	assert.True(t, cbp.AllowOperation(ctx, prodReq, false).Allowed, "prod token should be allowed")
+	assert.False(t, cbp.AllowOperation(ctx, devReq, false).Allowed, "dev token must not inherit prod's decision")
+	// Re-run prod after dev to confirm no state leaked between evaluations.
+	assert.True(t, cbp.AllowOperation(ctx, prodReq, false).Allowed)
+}
+
 func TestCBP_ConditionsCapCheckOnly_SkipsConditions(t *testing.T) {
 	ctx := testContext()
 
@@ -1656,6 +1731,50 @@ func TestCBP_CompiledCacheHit(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Same(t, first, second, "identical policy set should return the cached compiled CBP")
+}
+
+// TestCBP_CompiledCacheHit_TokenMetadataNotLeaked exercises the full cache
+// path: two resolutions of the same policy set return the same cached *CBP, yet
+// a token_metadata condition is still evaluated against each request's own
+// metadata. Guards against the compiled CBP baking in one token's metadata and
+// leaking it to another token that shares the policy set.
+func TestCBP_CompiledCacheHit_TokenMetadataNotLeaked(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	p := testParsePolicy(t, `
+		path "secret/data/*" {
+			capabilities = ["read"]
+			conditions {
+				token_metadata = ["env=prod"]
+			}
+		}
+	`)
+	p.Name = "meta-gated"
+	p.Type = PolicyTypeCBP
+	require.NoError(t, ps.SetPolicy(ctx, p, nil))
+
+	names := map[string][]string{namespace.RootNamespaceID: {"meta-gated"}}
+	first, err := ps.CBP(ctx, names)
+	require.NoError(t, err)
+	second, err := ps.CBP(ctx, names)
+	require.NoError(t, err)
+	require.Same(t, first, second, "expected a compiled-CBP cache hit")
+
+	prodReq := &logical.Request{
+		Operation:     logical.ReadOperation,
+		Path:          "secret/data/foo",
+		TokenMetadata: map[string]string{"env": "prod"},
+	}
+	devReq := &logical.Request{
+		Operation:     logical.ReadOperation,
+		Path:          "secret/data/foo",
+		TokenMetadata: map[string]string{"env": "dev"},
+	}
+
+	assert.True(t, second.AllowOperation(ctx, prodReq, false).Allowed)
+	assert.False(t, second.AllowOperation(ctx, devReq, false).Allowed)
 }
 
 // TestCBP_CompiledCacheInvalidatesOnVersionBump verifies that editing a policy

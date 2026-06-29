@@ -222,56 +222,56 @@ func TestEvaluateSourceIP_Match(t *testing.T) {
 	cond := &PolicyConditions{
 		SourceCIDRs: parseCIDRs(t, "10.0.0.0/8"),
 	}
-	assert.True(t, cond.Evaluate("10.1.2.3", time.Now()))
+	assert.True(t, cond.Evaluate("10.1.2.3", time.Now(), nil))
 }
 
 func TestEvaluateSourceIP_NoMatch(t *testing.T) {
 	cond := &PolicyConditions{
 		SourceCIDRs: parseCIDRs(t, "10.0.0.0/8"),
 	}
-	assert.False(t, cond.Evaluate("192.168.1.1", time.Now()))
+	assert.False(t, cond.Evaluate("192.168.1.1", time.Now(), nil))
 }
 
 func TestEvaluateSourceIP_MultipleCIDRs_SecondMatches(t *testing.T) {
 	cond := &PolicyConditions{
 		SourceCIDRs: parseCIDRs(t, "10.0.0.0/8", "192.168.0.0/16"),
 	}
-	assert.True(t, cond.Evaluate("192.168.1.1", time.Now()))
+	assert.True(t, cond.Evaluate("192.168.1.1", time.Now(), nil))
 }
 
 func TestEvaluateSourceIP_EmptyClientIP(t *testing.T) {
 	cond := &PolicyConditions{
 		SourceCIDRs: parseCIDRs(t, "10.0.0.0/8"),
 	}
-	assert.False(t, cond.Evaluate("", time.Now()))
+	assert.False(t, cond.Evaluate("", time.Now(), nil))
 }
 
 func TestEvaluateSourceIP_UnparseableClientIP(t *testing.T) {
 	cond := &PolicyConditions{
 		SourceCIDRs: parseCIDRs(t, "10.0.0.0/8"),
 	}
-	assert.False(t, cond.Evaluate("not-an-ip", time.Now()))
+	assert.False(t, cond.Evaluate("not-an-ip", time.Now(), nil))
 }
 
 func TestEvaluateSourceIP_IPv6Match(t *testing.T) {
 	cond := &PolicyConditions{
 		SourceCIDRs: parseCIDRs(t, "2001:db8::/32"),
 	}
-	assert.True(t, cond.Evaluate("2001:db8::1", time.Now()))
+	assert.True(t, cond.Evaluate("2001:db8::1", time.Now(), nil))
 }
 
 func TestEvaluateSourceIP_IPv6NoMatch(t *testing.T) {
 	cond := &PolicyConditions{
 		SourceCIDRs: parseCIDRs(t, "2001:db8::/32"),
 	}
-	assert.False(t, cond.Evaluate("2001:db9::1", time.Now()))
+	assert.False(t, cond.Evaluate("2001:db9::1", time.Now(), nil))
 }
 
 func TestEvaluateSourceIP_Loopback(t *testing.T) {
 	cond := &PolicyConditions{
 		SourceCIDRs: parseCIDRs(t, "127.0.0.0/8"),
 	}
-	assert.True(t, cond.Evaluate("127.0.0.1", time.Now()))
+	assert.True(t, cond.Evaluate("127.0.0.1", time.Now(), nil))
 }
 
 // =============================================================================
@@ -287,7 +287,7 @@ func TestEvaluateTimeWindow_WithinRange(t *testing.T) {
 		}},
 	}
 	at := time.Date(2026, 3, 5, 10, 0, 0, 0, time.UTC)
-	assert.True(t, cond.Evaluate("", at))
+	assert.True(t, cond.Evaluate("", at, nil))
 }
 
 func TestEvaluateTimeWindow_OutsideRange(t *testing.T) {
@@ -299,7 +299,7 @@ func TestEvaluateTimeWindow_OutsideRange(t *testing.T) {
 		}},
 	}
 	at := time.Date(2026, 3, 5, 20, 0, 0, 0, time.UTC)
-	assert.False(t, cond.Evaluate("", at))
+	assert.False(t, cond.Evaluate("", at, nil))
 }
 
 func TestEvaluateTimeWindow_AtStart(t *testing.T) {
@@ -311,7 +311,7 @@ func TestEvaluateTimeWindow_AtStart(t *testing.T) {
 		}},
 	}
 	at := time.Date(2026, 3, 5, 8, 0, 0, 0, time.UTC)
-	assert.True(t, cond.Evaluate("", at))
+	assert.True(t, cond.Evaluate("", at, nil))
 }
 
 func TestEvaluateTimeWindow_AtEnd_Excluded(t *testing.T) {
@@ -323,7 +323,7 @@ func TestEvaluateTimeWindow_AtEnd_Excluded(t *testing.T) {
 		}},
 	}
 	at := time.Date(2026, 3, 5, 18, 0, 0, 0, time.UTC)
-	assert.False(t, cond.Evaluate("", at))
+	assert.False(t, cond.Evaluate("", at, nil))
 }
 
 func TestEvaluateTimeWindow_MidnightSpan_Late(t *testing.T) {
@@ -335,7 +335,7 @@ func TestEvaluateTimeWindow_MidnightSpan_Late(t *testing.T) {
 		}},
 	}
 	at := time.Date(2026, 3, 5, 23, 0, 0, 0, time.UTC)
-	assert.True(t, cond.Evaluate("", at))
+	assert.True(t, cond.Evaluate("", at, nil))
 }
 
 func TestEvaluateTimeWindow_MidnightSpan_Early(t *testing.T) {
@@ -347,7 +347,7 @@ func TestEvaluateTimeWindow_MidnightSpan_Early(t *testing.T) {
 		}},
 	}
 	at := time.Date(2026, 3, 5, 3, 0, 0, 0, time.UTC)
-	assert.True(t, cond.Evaluate("", at))
+	assert.True(t, cond.Evaluate("", at, nil))
 }
 
 func TestEvaluateTimeWindow_MidnightSpan_Outside(t *testing.T) {
@@ -359,7 +359,7 @@ func TestEvaluateTimeWindow_MidnightSpan_Outside(t *testing.T) {
 		}},
 	}
 	at := time.Date(2026, 3, 5, 12, 0, 0, 0, time.UTC)
-	assert.False(t, cond.Evaluate("", at))
+	assert.False(t, cond.Evaluate("", at, nil))
 }
 
 func TestEvaluateTimeWindow_TimezoneConversion(t *testing.T) {
@@ -375,11 +375,11 @@ func TestEvaluateTimeWindow_TimezoneConversion(t *testing.T) {
 	}
 	// 15:00 UTC = 10:00 EST → within 08:00-18:00 EST
 	at := time.Date(2026, 3, 5, 15, 0, 0, 0, time.UTC)
-	assert.True(t, cond.Evaluate("", at))
+	assert.True(t, cond.Evaluate("", at, nil))
 
 	// 01:00 UTC = 20:00 EST previous day → outside 08:00-18:00 EST
 	at = time.Date(2026, 3, 5, 1, 0, 0, 0, time.UTC)
-	assert.False(t, cond.Evaluate("", at))
+	assert.False(t, cond.Evaluate("", at, nil))
 }
 
 func TestEvaluateTimeWindow_MultipleWindows_SecondMatches(t *testing.T) {
@@ -390,7 +390,7 @@ func TestEvaluateTimeWindow_MultipleWindows_SecondMatches(t *testing.T) {
 		},
 	}
 	at := time.Date(2026, 3, 5, 15, 0, 0, 0, time.UTC)
-	assert.True(t, cond.Evaluate("", at))
+	assert.True(t, cond.Evaluate("", at, nil))
 }
 
 // =============================================================================
@@ -403,7 +403,7 @@ func TestEvaluateDayOfWeek_Match(t *testing.T) {
 	}
 	// 2026-03-02 is a Monday (UTC)
 	at := time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)
-	assert.True(t, cond.Evaluate("", at))
+	assert.True(t, cond.Evaluate("", at, nil))
 }
 
 func TestEvaluateDayOfWeek_NoMatch(t *testing.T) {
@@ -412,7 +412,7 @@ func TestEvaluateDayOfWeek_NoMatch(t *testing.T) {
 	}
 	// 2026-03-07 is a Saturday (UTC)
 	at := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
-	assert.False(t, cond.Evaluate("", at))
+	assert.False(t, cond.Evaluate("", at, nil))
 }
 
 func TestEvaluateDayOfWeek_Sunday(t *testing.T) {
@@ -421,7 +421,7 @@ func TestEvaluateDayOfWeek_Sunday(t *testing.T) {
 	}
 	// 2026-03-08 is a Sunday (UTC)
 	at := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
-	assert.True(t, cond.Evaluate("", at))
+	assert.True(t, cond.Evaluate("", at, nil))
 }
 
 // =============================================================================
@@ -438,7 +438,7 @@ func TestEvaluateConditions_AllTypesMustMatch_AllPass(t *testing.T) {
 	}
 	// 2026-03-05 is a Thursday
 	at := time.Date(2026, 3, 5, 10, 0, 0, 0, time.UTC)
-	assert.True(t, cond.Evaluate("10.1.2.3", at))
+	assert.True(t, cond.Evaluate("10.1.2.3", at, nil))
 }
 
 func TestEvaluateConditions_IPFails_OthersPass(t *testing.T) {
@@ -450,7 +450,7 @@ func TestEvaluateConditions_IPFails_OthersPass(t *testing.T) {
 		DaysOfWeek: []time.Weekday{time.Thursday},
 	}
 	at := time.Date(2026, 3, 5, 10, 0, 0, 0, time.UTC)
-	assert.False(t, cond.Evaluate("192.168.1.1", at))
+	assert.False(t, cond.Evaluate("192.168.1.1", at, nil))
 }
 
 func TestEvaluateConditions_TimeFails_OthersPass(t *testing.T) {
@@ -462,7 +462,7 @@ func TestEvaluateConditions_TimeFails_OthersPass(t *testing.T) {
 		DaysOfWeek: []time.Weekday{time.Thursday},
 	}
 	at := time.Date(2026, 3, 5, 20, 0, 0, 0, time.UTC)
-	assert.False(t, cond.Evaluate("10.1.2.3", at))
+	assert.False(t, cond.Evaluate("10.1.2.3", at, nil))
 }
 
 func TestEvaluateConditions_DayFails_OthersPass(t *testing.T) {
@@ -475,12 +475,12 @@ func TestEvaluateConditions_DayFails_OthersPass(t *testing.T) {
 	}
 	// 2026-03-05 is a Thursday, not Monday
 	at := time.Date(2026, 3, 5, 10, 0, 0, 0, time.UTC)
-	assert.False(t, cond.Evaluate("10.1.2.3", at))
+	assert.False(t, cond.Evaluate("10.1.2.3", at, nil))
 }
 
 func TestEvaluateConditions_NilConditions(t *testing.T) {
 	var cond *PolicyConditions
-	assert.True(t, cond.Evaluate("anything", time.Now()))
+	assert.True(t, cond.Evaluate("anything", time.Now(), nil))
 }
 
 // =============================================================================
@@ -586,6 +586,138 @@ func TestParseCBPPolicy_UnknownConditionType(t *testing.T) {
 	`)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown condition type")
+}
+
+// =============================================================================
+// token_metadata Parsing Tests
+// =============================================================================
+
+func TestParseConditions_TokenMetadata_Valid(t *testing.T) {
+	cond, err := parseAndValidateConditions(map[string][]string{
+		"token_metadata": {"env=prod", "team=platform*", "env=staging"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string][]string{
+		"env":  {"prod", "staging"},
+		"team": {"platform*"},
+	}, cond.TokenMetadata)
+}
+
+func TestParseConditions_TokenMetadata_Empty(t *testing.T) {
+	_, err := parseAndValidateConditions(map[string][]string{
+		"token_metadata": {},
+	})
+	require.Error(t, err)
+}
+
+func TestParseConditions_TokenMetadata_NoEquals(t *testing.T) {
+	_, err := parseAndValidateConditions(map[string][]string{
+		"token_metadata": {"noequalsign"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "key=pattern")
+}
+
+func TestParseConditions_TokenMetadata_EmptyKey(t *testing.T) {
+	_, err := parseAndValidateConditions(map[string][]string{
+		"token_metadata": {"=val"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty key")
+}
+
+func TestParseConditions_TokenMetadata_EmptyPatternAllowed(t *testing.T) {
+	// "key=" is a deliberate match-empty-value pattern, not an error.
+	cond, err := parseAndValidateConditions(map[string][]string{
+		"token_metadata": {"env="},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string][]string{"env": {""}}, cond.TokenMetadata)
+}
+
+// =============================================================================
+// token_metadata Evaluation Tests
+// =============================================================================
+
+func tokenMetaCond(t *testing.T, entries ...string) *PolicyConditions {
+	t.Helper()
+	cond, err := parseAndValidateConditions(map[string][]string{"token_metadata": entries})
+	require.NoError(t, err)
+	return cond
+}
+
+func TestEvaluateTokenMetadata_ExactMatch(t *testing.T) {
+	cond := tokenMetaCond(t, "env=prod")
+	assert.True(t, cond.Evaluate("", time.Now(), map[string]string{"env": "prod"}))
+	assert.False(t, cond.Evaluate("", time.Now(), map[string]string{"env": "dev"}))
+}
+
+func TestEvaluateTokenMetadata_GlobMatch(t *testing.T) {
+	cond := tokenMetaCond(t, "team=platform*")
+	assert.True(t, cond.Evaluate("", time.Now(), map[string]string{"team": "platform-core"}))
+	assert.False(t, cond.Evaluate("", time.Now(), map[string]string{"team": "billing"}))
+}
+
+// TestEvaluateTokenMetadata_GlobEdgeCases locks the documented glob semantics:
+// `*` is honored only at the start and/or end of the pattern.
+func TestEvaluateTokenMetadata_GlobEdgeCases(t *testing.T) {
+	// Trailing * = prefix match; leading * = suffix match; both = substring.
+	assert.True(t, tokenMetaCond(t, "team=platform*").Evaluate("", time.Now(), map[string]string{"team": "platform-core"}))
+	assert.True(t, tokenMetaCond(t, "team=*-core").Evaluate("", time.Now(), map[string]string{"team": "platform-core"}))
+	assert.True(t, tokenMetaCond(t, "team=*plat*").Evaluate("", time.Now(), map[string]string{"team": "x-platform-y"}))
+
+	// A `*` in the middle is literal, not a wildcard.
+	mid := tokenMetaCond(t, "team=a*b")
+	assert.True(t, mid.Evaluate("", time.Now(), map[string]string{"team": "a*b"}))
+	assert.False(t, mid.Evaluate("", time.Now(), map[string]string{"team": "axb"}))
+
+	// A lone `*` is literal; `**` matches any value (key just has to be present).
+	assert.False(t, tokenMetaCond(t, "team=*").Evaluate("", time.Now(), map[string]string{"team": "anything"}))
+	assert.True(t, tokenMetaCond(t, "team=*").Evaluate("", time.Now(), map[string]string{"team": "*"}))
+	assert.True(t, tokenMetaCond(t, "team=**").Evaluate("", time.Now(), map[string]string{"team": "anything"}))
+	assert.True(t, tokenMetaCond(t, "team=**").Evaluate("", time.Now(), map[string]string{"team": ""}))
+	assert.False(t, tokenMetaCond(t, "team=**").Evaluate("", time.Now(), map[string]string{"other": "x"}))
+}
+
+func TestEvaluateTokenMetadata_MultiKeyAND(t *testing.T) {
+	cond := tokenMetaCond(t, "env=prod", "team=platform*")
+	assert.True(t, cond.Evaluate("", time.Now(), map[string]string{"env": "prod", "team": "platform-core"}))
+	assert.False(t, cond.Evaluate("", time.Now(), map[string]string{"env": "prod", "team": "billing"}))
+	assert.False(t, cond.Evaluate("", time.Now(), map[string]string{"env": "dev", "team": "platform-core"}))
+}
+
+func TestEvaluateTokenMetadata_MultiPatternOR(t *testing.T) {
+	cond := tokenMetaCond(t, "tier=gold", "tier=platinum")
+	assert.True(t, cond.Evaluate("", time.Now(), map[string]string{"tier": "gold"}))
+	assert.True(t, cond.Evaluate("", time.Now(), map[string]string{"tier": "platinum"}))
+	assert.False(t, cond.Evaluate("", time.Now(), map[string]string{"tier": "silver"}))
+}
+
+func TestEvaluateTokenMetadata_MissingKeyFailsClosed(t *testing.T) {
+	cond := tokenMetaCond(t, "env=prod")
+	assert.False(t, cond.Evaluate("", time.Now(), map[string]string{"team": "platform"}))
+	assert.False(t, cond.Evaluate("", time.Now(), nil))
+}
+
+func TestEvaluateTokenMetadata_ComposesWithSourceIP(t *testing.T) {
+	cond, err := parseAndValidateConditions(map[string][]string{
+		"token_metadata": {"env=prod"},
+		"source_ip":      {"10.0.0.0/8"},
+	})
+	require.NoError(t, err)
+	md := map[string]string{"env": "prod"}
+	assert.True(t, cond.Evaluate("10.1.2.3", time.Now(), md))                               // both pass
+	assert.False(t, cond.Evaluate("192.168.1.1", time.Now(), md))                           // IP fails
+	assert.False(t, cond.Evaluate("10.1.2.3", time.Now(), map[string]string{"env": "dev"})) // metadata fails
+}
+
+func TestClone_TokenMetadata_DeepCopy(t *testing.T) {
+	cond := tokenMetaCond(t, "env=prod", "env=staging")
+	clone := cond.Clone()
+	require.Equal(t, cond.TokenMetadata, clone.TokenMetadata)
+	// Mutating the clone must not affect the original.
+	clone.TokenMetadata["env"][0] = "mutated"
+	assert.Equal(t, "prod", cond.TokenMetadata["env"][0])
 }
 
 // =============================================================================
