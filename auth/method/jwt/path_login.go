@@ -253,6 +253,15 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	// claim. Recorded with verified=true; flows through to audit.
 	actors := extractActChain(claims)
 
+	// Verified, login-derived metadata mapped from claims per the role's
+	// metadata_claims config. Persisted onto the token and matched by
+	// token_metadata policy conditions.
+	metadata, err := extractMetadata(claims, role.MetadataClaims)
+	if err != nil {
+		b.logger.Warn("login failed: metadata claim extraction", lgr.Err(err), lgr.String("role", roleName))
+		return logical.ErrorResponse(logical.ErrBadRequest(errAuthFailed.Error())), nil
+	}
+
 	// Return auth response using role configuration.
 	// ClientToken carries the raw JWT so that LoginCreateToken can pass it to
 	// JWTRoleTokenType.Generate(), which hashes jwt+role to compute the
@@ -269,6 +278,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 			ClientIP:       req.ClientIP,
 			ClientToken:    jwtToken,
 			Actors:         actors,
+			Metadata:       metadata,
 		},
 		Data: map[string]any{
 			"principal_id": principalID,

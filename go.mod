@@ -20,6 +20,7 @@ require (
 	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/hashicorp/vault/api v1.23.0
 	github.com/mitchellh/copystructure v1.2.0
+	github.com/mitchellh/pointerstructure v1.2.1
 	github.com/oklog/ulid v1.3.1
 	github.com/openbao/go-kms-wrapping/v2 v2.8.0
 	github.com/openbao/go-kms-wrapping/wrappers/alicloudkms/v2 v2.3.0

@@ -210,6 +210,35 @@ func TestTokenStore_LookupToken(t *testing.T) {
 	assert.Equal(t, entry.Policies, lookedUpEntry.Policies)
 }
 
+// TestTokenStore_Metadata_RoundTrip verifies login-derived Metadata is
+// persisted onto the token and survives a lookup.
+func TestTokenStore_Metadata_RoundTrip(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	authData := &AuthData{
+		PrincipalID: "test-user",
+		RoleName:    "test-role",
+		ExpireAt:    time.Now().Add(24 * time.Hour),
+		Policies:    []string{"default"},
+		Metadata:    map[string]string{"env": "prod", "team": "platform-core"},
+	}
+
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	require.NoError(t, err)
+	assert.Equal(t, authData.Metadata, entry.Metadata)
+
+	tokenValue := entry.Data["token"]
+	require.NotEmpty(t, tokenValue)
+
+	lookedUpEntry, err := core.LookupToken(ctx, tokenValue)
+	require.NoError(t, err)
+	require.NotNil(t, lookedUpEntry)
+	assert.Equal(t, map[string]string{"env": "prod", "team": "platform-core"}, lookedUpEntry.Metadata)
+}
+
 // TestTokenStore_LookupToken_NotFound tests looking up a non-existent token
 func TestTokenStore_LookupToken_NotFound(t *testing.T) {
 	core := createTestCore(t)

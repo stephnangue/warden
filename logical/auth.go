@@ -60,6 +60,13 @@ type Auth struct {
 	// through buildAuditAuth into the audit log; not used for policy
 	// decisions.
 	Actors []ActorRef
+
+	// Metadata is a set of verified, login-derived attributes the auth
+	// method extracted from the authenticated identity (e.g. JWT claims,
+	// certificate fields, service-account attributes). It is persisted onto
+	// the issued token and consulted by token_metadata policy conditions.
+	// Never caller-supplied — only an auth method writes it.
+	Metadata map[string]string
 }
 
 // MCPDecision records the outcome of evaluating an mcp { } policy block
@@ -174,4 +181,9 @@ type AuthData struct {
 	// (e.g. JWT "act" claim) so it can be persisted onto the issued
 	// TokenEntry for transparent-mode cache reuse.
 	Actors []ActorRef
+
+	// Metadata carries verified, login-derived identity attributes the auth
+	// method extracted (e.g. mapped JWT claims). Persisted onto the issued
+	// TokenEntry and consulted by token_metadata policy conditions.
+	Metadata map[string]string
 }

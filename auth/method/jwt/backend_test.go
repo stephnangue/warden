@@ -166,17 +166,6 @@ func TestJWTAuthConfig_BoundAudiences(t *testing.T) {
 	assert.Equal(t, []string{"aud1", "aud2"}, config.BoundAudiences)
 }
 
-func TestJWTAuthConfig_ClaimMappings(t *testing.T) {
-	config := &JWTAuthConfig{
-		ClaimMappings: map[string]string{
-			"email": "user_email",
-			"name":  "display_name",
-		},
-	}
-	assert.Equal(t, "user_email", config.ClaimMappings["email"])
-	assert.Equal(t, "display_name", config.ClaimMappings["name"])
-}
-
 // =============================================================================
 // setupJWTConfig Tests
 // =============================================================================

@@ -127,23 +127,6 @@ func TestMapToJWTAuthConfig_BoundClaims(t *testing.T) {
 	assert.Equal(t, "admin", config.BoundClaims["role"])
 }
 
-func TestMapToJWTAuthConfig_ClaimMappings(t *testing.T) {
-	data := map[string]any{
-		"jwks_url": "https://example.com/.well-known/jwks.json",
-		"claim_mappings": map[string]string{
-			"preferred_username": "username",
-			"email":              "user_email",
-		},
-	}
-
-	config, err := mapToJWTAuthConfig(data)
-	require.NoError(t, err)
-
-	require.NotNil(t, config.ClaimMappings)
-	assert.Equal(t, "username", config.ClaimMappings["preferred_username"])
-	assert.Equal(t, "user_email", config.ClaimMappings["email"])
-}
-
 func TestMapToJWTAuthConfig_GroupsClaim(t *testing.T) {
 	data := map[string]any{
 		"jwks_url":     "https://example.com/.well-known/jwks.json",
@@ -199,7 +182,6 @@ func TestMapToJWTAuthConfig_AllFields(t *testing.T) {
 		"bound_audiences": []string{"aud1"},
 		"bound_subject":   "expected-sub",
 		"bound_claims":    map[string]any{"claim1": "value1"},
-		"claim_mappings":  map[string]string{"c1": "m1"},
 		"user_claim":      "email",
 		"groups_claim":    "roles",
 		"token_ttl":       "4h",
@@ -214,7 +196,6 @@ func TestMapToJWTAuthConfig_AllFields(t *testing.T) {
 	assert.Equal(t, []string{"aud1"}, config.BoundAudiences)
 	assert.Equal(t, "expected-sub", config.BoundSubject)
 	assert.Equal(t, "value1", config.BoundClaims["claim1"])
-	assert.Equal(t, "m1", config.ClaimMappings["c1"])
 	assert.Equal(t, "email", config.UserClaim)
 	assert.Equal(t, "roles", config.GroupsClaim)
 	assert.Equal(t, 4*time.Hour, config.TokenTTL)

@@ -20,6 +20,14 @@ type JWTRole struct {
 	GroupsClaim       string         `json:"groups_claim,omitempty"`        // Override global groups_claim for this role
 	GroupPolicyPrefix string         `json:"group_policy_prefix,omitempty"` // Override global group_policy_prefix for this role
 	MaxAge            string         `json:"max_age,omitempty"`             // Max time since iat (e.g. "30m", "1h"). Empty = no check.
+
+	// MetadataClaims maps a source claim to the token metadata key it
+	// populates (source -> key, matching OpenBao's claim_mappings). The
+	// source is resolved by getClaim: a leading "/" is a JSON Pointer
+	// (RFC 6901) for nested claims, otherwise a literal top-level key.
+	// Resolved values must be strings; populated onto the token's Metadata
+	// and matched by token_metadata policy conditions.
+	MetadataClaims map[string]string `json:"metadata_claims,omitempty"`
 }
 
 // ParseTokenTTL parses the TokenTTL string to a time.Duration.

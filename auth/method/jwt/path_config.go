@@ -47,10 +47,6 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 				Type:        framework.TypeMap,
 				Description: "Map of claims to required values for JWT validation",
 			},
-			"claim_mappings": {
-				Type:        framework.TypeKVPairs,
-				Description: "Map of claims to copy to token metadata",
-			},
 			"jwt_validation_pubkeys": {
 				Type:        framework.TypeCommaStringSlice,
 				Description: "PEM-encoded RSA or ECDSA public keys for static JWT validation. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
@@ -96,8 +92,8 @@ endpoint), or 'jwt_validation_pubkeys' (static PEM-encoded RSA/ECDSA keys)
 to configure how token signatures are verified.
 
 Use 'bound_issuer', 'bound_audiences', 'bound_subject', and 'bound_claims'
-to constrain which tokens are accepted. Use 'claim_mappings' to copy JWT
-claims into token metadata for use in policies.`,
+to constrain which tokens are accepted. Per-role 'metadata_claims' copies
+JWT claims into token metadata for use in token_metadata policy conditions.`,
 	}
 }
 
@@ -125,7 +121,6 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 			"bound_audiences":        b.config.BoundAudiences,
 			"bound_subject":          b.config.BoundSubject,
 			"bound_claims":           b.config.BoundClaims,
-			"claim_mappings":         b.config.ClaimMappings,
 			"user_claim":             b.config.UserClaim,
 			"groups_claim":           b.config.GroupsClaim,
 			"group_policy_prefix":    b.config.GroupPolicyPrefix,
@@ -152,7 +147,6 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		conf["bound_audiences"] = b.config.BoundAudiences
 		conf["bound_subject"] = b.config.BoundSubject
 		conf["bound_claims"] = b.config.BoundClaims
-		conf["claim_mappings"] = b.config.ClaimMappings
 		conf["user_claim"] = b.config.UserClaim
 		conf["groups_claim"] = b.config.GroupsClaim
 		conf["group_policy_prefix"] = b.config.GroupPolicyPrefix
@@ -191,7 +185,6 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 			"bound_audiences":        b.config.BoundAudiences,
 			"bound_subject":          b.config.BoundSubject,
 			"bound_claims":           b.config.BoundClaims,
-			"claim_mappings":         b.config.ClaimMappings,
 			"user_claim":             b.config.UserClaim,
 			"groups_claim":           b.config.GroupsClaim,
 			"group_policy_prefix":    b.config.GroupPolicyPrefix,
