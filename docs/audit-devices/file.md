@@ -172,8 +172,10 @@ for the reasoning; the operational summary:
 - **`salt_fields`** — dot-paths whose values are replaced with
   `hmac-sha256:<hex>` instead of plaintext. The default,
   `response.credential.data`, salts every secret Warden injects (access keys,
-  tokens, passwords). Extend it to hash more, e.g. `auth.token_id` or
-  `request.data.password`.
+  tokens, passwords). Extend it to hash more, e.g. `auth.token_id`,
+  `request.data.password`, or the token's verified identity attributes — a whole map
+  (`auth.policy_results.token_metadata`) or a single key
+  (`auth.policy_results.token_metadata.clearance`).
 - **`omit_fields`** — dot-paths dropped from the entry entirely. The defaults drop
   request and response bodies and headers, which are noisy and often sensitive.
 

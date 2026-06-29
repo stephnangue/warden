@@ -223,6 +223,27 @@ func (f *JSONFormat) saltPolicyResultsField(ctx context.Context, pr *PolicyResul
 				pr.GrantingPolicies[i] = salted
 			}
 		}
+	case "token_metadata":
+		// "...token_metadata" salts every value; "...token_metadata.<key>"
+		// salts one key's value. Mirrors credential metadata salting.
+		if len(parts) == 1 {
+			for k, v := range pr.TokenMetadata {
+				if v == "" {
+					continue
+				}
+				salted, err := f.saltFn(ctx, v)
+				if err != nil {
+					return err
+				}
+				pr.TokenMetadata[k] = salted
+			}
+		} else if v, ok := pr.TokenMetadata[parts[1]]; ok && v != "" {
+			salted, err := f.saltFn(ctx, v)
+			if err != nil {
+				return err
+			}
+			pr.TokenMetadata[parts[1]] = salted
+		}
 	}
 
 	return nil

@@ -160,6 +160,13 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 			if auth.MCPDecision != nil {
 				auditAuth.PolicyResults.MCPDecision = auth.MCPDecision
 			}
+			// Surface the token's verified metadata so token_metadata
+			// policy decisions (allow or deny) are explainable. Logged in
+			// clear by default; the format layer applies opt-in per-key
+			// HMAC salting via salt_fields.
+			if te != nil && len(te.Metadata) > 0 {
+				auditAuth.PolicyResults.TokenMetadata = te.Metadata
+			}
 		}
 	}
 

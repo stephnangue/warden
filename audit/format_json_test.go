@@ -648,6 +648,65 @@ func TestFormatResponse(t *testing.T) {
 	}
 }
 
+func TestFormatTokenMetadataSalting(t *testing.T) {
+	mockSalt := func(ctx context.Context, data string) (string, error) {
+		return "hmac-sha256:" + data + "-salted", nil
+	}
+	newEntry := func() *LogEntry {
+		return &LogEntry{
+			Timestamp: time.Now(),
+			Auth: &Auth{
+				PolicyResults: &PolicyResults{
+					Allowed:       false,
+					TokenMetadata: map[string]string{"env": "dev", "team": "platform-core"},
+				},
+			},
+		}
+	}
+	format := func(t *testing.T, saltFields []string) map[string]string {
+		t.Helper()
+		opts := []JSONFormatOption{WithSaltFunc(mockSalt)}
+		if saltFields != nil {
+			opts = append(opts, WithSaltFields(saltFields))
+		}
+		f := NewJSONFormat(opts...)
+		data, err := f.FormatRequest(context.Background(), newEntry())
+		if err != nil {
+			t.Fatalf("FormatRequest failed: %v", err)
+		}
+		var got LogEntry
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("unmarshal failed: %v", err)
+		}
+		return got.Auth.PolicyResults.TokenMetadata
+	}
+	salted := func(s string) bool { return containsBytes([]byte(s), "hmac-sha256:") }
+
+	t.Run("clear by default", func(t *testing.T) {
+		md := format(t, nil)
+		if md["env"] != "dev" || md["team"] != "platform-core" {
+			t.Errorf("metadata should be clear, got %v", md)
+		}
+	})
+
+	t.Run("salt all keys", func(t *testing.T) {
+		md := format(t, []string{"auth.policy_results.token_metadata"})
+		if !salted(md["env"]) || !salted(md["team"]) {
+			t.Errorf("all values should be salted, got %v", md)
+		}
+	})
+
+	t.Run("salt one key", func(t *testing.T) {
+		md := format(t, []string{"auth.policy_results.token_metadata.team"})
+		if md["env"] != "dev" {
+			t.Errorf("env must stay clear, got %q", md["env"])
+		}
+		if !salted(md["team"]) {
+			t.Errorf("team should be salted, got %q", md["team"])
+		}
+	})
+}
+
 func TestFormatResponseWithSalting(t *testing.T) {
 	mockSalt := func(ctx context.Context, data string) (string, error) {
 		return "hmac-sha256:" + data + "-salted", nil
