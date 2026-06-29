@@ -20,6 +20,75 @@ func roleFieldData(t *testing.T, b *kubernetesAuthBackend, raw map[string]any) *
 	return &framework.FieldData{Raw: raw, Schema: b.pathRole().Fields}
 }
 
+func TestExtractK8sMetadata(t *testing.T) {
+	t.Run("maps attributes, comma-joins groups, skips empty", func(t *testing.T) {
+		// mappings are source (TokenReview attribute) -> target (metadata key)
+		md := extractK8sMetadata(map[string]string{
+			"service_account_namespace": "ns",
+			"service_account_name":      "sa",
+			"service_account_uid":       "uid",
+			"username":                  "user",
+			"groups":                    "groups",
+		},
+			"prod", "deployer", "uid-123", "system:serviceaccount:prod:deployer",
+			[]string{"system:serviceaccounts", "system:serviceaccounts:prod"})
+		assert.Equal(t, map[string]string{
+			"ns":     "prod",
+			"sa":     "deployer",
+			"uid":    "uid-123",
+			"user":   "system:serviceaccount:prod:deployer",
+			"groups": "system:serviceaccounts,system:serviceaccounts:prod",
+		}, md)
+	})
+
+	t.Run("nil mappings", func(t *testing.T) {
+		assert.Nil(t, extractK8sMetadata(nil, "prod", "deployer", "uid", "user", nil))
+	})
+
+	t.Run("all empty -> nil", func(t *testing.T) {
+		assert.Nil(t, extractK8sMetadata(map[string]string{"groups": "g"}, "prod", "deployer", "uid", "user", nil))
+	})
+}
+
+func TestHandleRole_MetadataMappings_RoundTrip(t *testing.T) {
+	b, ctx := newTestBackend(t)
+
+	d := roleFieldData(t, b, map[string]any{
+		"name":                             "meta",
+		"bound_service_account_names":      []string{"app"},
+		"bound_service_account_namespaces": []string{"prod"},
+		"metadata_mappings": map[string]any{
+			"service_account_namespace": "ns",
+			"service_account_name":      "sa",
+		},
+	})
+	resp, err := b.handleRoleCreate(ctx, nil, d)
+	require.NoError(t, err)
+	require.Nil(t, resp.Err, "unexpected validation error: %v", resp.Err)
+
+	role, err := b.getRole(ctx, "meta")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"service_account_namespace": "ns",
+		"service_account_name":      "sa",
+	}, role.MetadataMappings)
+}
+
+func TestHandleRole_MetadataMappings_InvalidField(t *testing.T) {
+	b, ctx := newTestBackend(t)
+
+	d := roleFieldData(t, b, map[string]any{
+		"name":                             "bad-meta",
+		"bound_service_account_names":      []string{"app"},
+		"bound_service_account_namespaces": []string{"prod"},
+		"metadata_mappings":                map[string]any{"not_an_attr": "x"},
+	})
+	resp, err := b.handleRoleCreate(ctx, nil, d)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Err)
+	assert.Contains(t, resp.Err.Error(), "invalid metadata_mappings field")
+}
+
 func TestHandleRoleCreate_Basic(t *testing.T) {
 	b, ctx := newTestBackend(t)
 

@@ -33,6 +33,13 @@ type KubernetesRole struct {
 	// MaxAge optionally caps the elapsed time since the JWT's iat claim.
 	// Empty = no freshness check. Same shape as JWTRole.MaxAge.
 	MaxAge string `json:"max_age,omitempty"`
+
+	// MetadataMappings maps a verified TokenReview attribute to the token
+	// metadata key it populates (source -> key): service_account_namespace,
+	// service_account_name, service_account_uid, username, groups. The
+	// multi-valued groups attribute is comma-joined. Populated onto the token's
+	// Metadata and matched by token_metadata policy conditions.
+	MetadataMappings map[string]string `json:"metadata_mappings,omitempty"`
 }
 
 // ParseTokenTTL parses the TokenTTL string to a time.Duration.

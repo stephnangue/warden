@@ -57,6 +57,10 @@ func (b *kubernetesAuthBackend) pathRole() *framework.Path {
 				Type:        framework.TypeString,
 				Description: `Maximum elapsed time since the JWT was issued (iat). Rejects JWTs older than this. Example: "30m", "1h"`,
 			},
+			"metadata_mappings": {
+				Type:        framework.TypeMap,
+				Description: "Map of TokenReview attribute (service_account_namespace, service_account_name, service_account_uid, username, groups) to token metadata key. The groups attribute is comma-joined.",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.CreateOperation: &framework.PathOperation{
@@ -149,6 +153,7 @@ func (b *kubernetesAuthBackend) handleRoleRead(ctx context.Context, _ *logical.R
 			"token_ttl":                        role.TokenTTL,
 			"cred_spec_name":                   role.CredSpecName,
 			"max_age":                          role.MaxAge,
+			"metadata_mappings":                role.MetadataMappings,
 		},
 	}, nil
 }
@@ -189,6 +194,9 @@ func (b *kubernetesAuthBackend) handleRoleUpdate(ctx context.Context, _ *logical
 		}
 		if v, ok := d.GetOk("max_age"); ok {
 			role.MaxAge = v.(string)
+		}
+		if v, ok := d.GetOk("metadata_mappings"); ok {
+			role.MetadataMappings = toStringMap(v.(map[string]any))
 		}
 	}
 
@@ -269,6 +277,14 @@ func (b *kubernetesAuthBackend) validateRole(role *KubernetesRole) error {
 		}
 	}
 
+	// Validate metadata_mappings attribute selectors (the map key is the source
+	// TokenReview attribute; the value is the destination metadata key).
+	for source, target := range role.MetadataMappings {
+		if !validK8sMetadataFields[source] {
+			return logical.ErrBadRequestf("invalid metadata_mappings field %q for metadata key %q; must be one of: service_account_namespace, service_account_name, service_account_uid, username, groups", source, target)
+		}
+	}
+
 	return nil
 }
 
@@ -315,8 +331,24 @@ func (b *kubernetesAuthBackend) buildRoleFromFieldData(name string, d *framework
 	if v, ok := d.GetOk("max_age"); ok {
 		role.MaxAge = v.(string)
 	}
+	if v, ok := d.GetOk("metadata_mappings"); ok {
+		role.MetadataMappings = toStringMap(v.(map[string]any))
+	}
 
 	return role
+}
+
+// toStringMap coerces a TypeMap field value into map[string]string, rendering
+// each value to its string form. Nil/empty input yields nil.
+func toStringMap(m map[string]any) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = fmt.Sprintf("%v", v)
+	}
+	return out
 }
 
 // Storage helpers — JSON-encoded under role/<name>.

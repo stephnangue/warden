@@ -22,6 +22,7 @@ Operators who have used Vault's or OpenBao's `auth/kubernetes` will find the sha
 - [Self-Reviewing Mode (No `token_reviewer_jwt`)](#self-reviewing-mode-no-token_reviewer_jwt)
 - [Multi-Spoke Topologies](#multi-spoke-topologies)
 - [Audience Binding](#audience-binding)
+- [Token Metadata](#token-metadata)
 - [Discovering Assumable Roles](#discovering-assumable-roles)
 - [Configuration Reference](#configuration-reference)
 - [Troubleshooting](#troubleshooting)
@@ -190,6 +191,19 @@ The practical use:
 
 Without `audience`, the kube-apiserver returns whatever audiences the token naturally carries, and Warden accepts any of them. Add `audience` when you want enforcement; leave it empty when binding by SA name + namespace is enough.
 
+## Token Metadata
+
+A role can copy verified TokenReview attributes onto the issued token's metadata, where `token_metadata` policy conditions can match them. `metadata_mappings` is written as `attribute = "destination-metadata-key"`, drawing from: `service_account_namespace`, `service_account_name`, `service_account_uid`, `username`, and `groups` (multi-valued, comma-joined).
+
+```bash
+warden write auth/kubernetes/role/inventory-agent \
+  bound_service_account_names="inventory-agent" \
+  bound_service_account_namespaces="prod" \
+  metadata_mappings="service_account_namespace=ns,service_account_name=sa"
+```
+
+A workload whose SA is `system:serviceaccount:prod:inventory-agent` yields metadata `ns="prod"`, `sa="inventory-agent"`. A policy can then gate a path with `conditions { token_metadata = ["ns=prod"] }`. Unknown attribute selectors are rejected at role write time.
+
 ## Discovering Assumable Roles
 
 Agents that don't know which role to ask for can use Warden's namespace-wide introspection endpoint to discover the roles their token could assume. The workload doesn't need to know which auth mount serves it — the aggregator detects the token's shape, fans out to every auth mount in the namespace whose registered TokenType matches that shape, and merges the responses.
@@ -233,6 +247,7 @@ A Kubernetes SA token (recognized by its `sub: system:serviceaccount:*` claim) o
 | `token_ttl` | No (default `1h`) | TTL for issued tokens; overrides the mount-level `token_ttl`. |
 | `cred_spec_name` | No | Credential spec name for implicit-auth flows. |
 | `max_age` | No | Maximum elapsed time since the JWT's `iat` claim. Example: `30m`. Empty disables the check. |
+| `metadata_mappings` | No | Map of TokenReview attribute (`service_account_namespace`, `service_account_name`, `service_account_uid`, `username`, `groups`) → token metadata key. `groups` is comma-joined. |
 
 A `*`/`*` binding (both names and namespaces only contain `"*"`) is refused at role-create time — at least one of the two must contain a concrete value.
 
