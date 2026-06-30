@@ -158,16 +158,11 @@ type CBPPermissions struct {
 	PaginationLimit        int
 	GrantingPoliciesMap    map[uint32][]sdklogical.PolicyInfo
 	ResponseKeysFilterPath string
-	// ConditionSets holds condition sets from all merged policies for this path.
-	// nil means unconditional access (at least one policy had no conditions).
-	// Non-nil: each entry is one policy's conditions; request must satisfy at
-	// least one set (OR between sets, AND within each set's types).
-	ConditionSets []*PolicyConditions
 	// Conditions holds compiled path-level CEL conditions from all merged
-	// policies for this path. nil means no CEL condition (unconditional at this
+	// policies for this path. nil means no condition (unconditional at this
 	// layer). Non-nil: the gate passes if at least one program evaluates true
-	// (OR across policies), ANDed with the ConditionSets gate. Programs are
-	// immutable and shared (not deep-copied) across merged CBPs.
+	// (OR across policies). Programs are immutable and shared (not deep-copied)
+	// across merged CBPs.
 	Conditions []*compiledCondition
 	// MCP holds mcp { } rule-sets from all merged policies for this path.
 	// nil/empty means no MCP enforcement applies. Non-nil: each entry is one
@@ -291,17 +286,6 @@ func (p *CBPPermissions) Clone() (*CBPPermissions, error) {
 			return nil, err
 		}
 		ret.GrantingPoliciesMap = clonedGrantingPoliciesMap.(map[uint32][]sdklogical.PolicyInfo)
-	}
-
-	switch {
-	case p.ConditionSets == nil:
-	case len(p.ConditionSets) == 0:
-		ret.ConditionSets = make([]*PolicyConditions, 0)
-	default:
-		ret.ConditionSets = make([]*PolicyConditions, len(p.ConditionSets))
-		for i, cs := range p.ConditionSets {
-			ret.ConditionSets[i] = cs.Clone()
-		}
 	}
 
 	switch {
@@ -550,11 +534,11 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 		pc.Permissions.PaginationLimit = pc.PaginationLimitHCL
 
 		if len(pc.ConditionsHCL) > 0 {
-			conditions, err := parseAndValidateConditions(pc.ConditionsHCL)
-			if err != nil {
-				return fmt.Errorf("path %q: %w", key, err)
-			}
-			pc.Permissions.ConditionSets = []*PolicyConditions{conditions}
+			return fmt.Errorf("path %q: the conditions {} block has been removed — express it as a CEL `condition`. "+
+				"source_ip → cidrContains(\"…\", request.client_ip); "+
+				"time_window → now.getHours(tz)/getMinutes(tz); "+
+				"day_of_week → now.getDayOfWeek(\"UTC\"); "+
+				"token_metadata → token.metadata.<key>", key)
 		}
 
 		if pc.ConditionHCL != "" {

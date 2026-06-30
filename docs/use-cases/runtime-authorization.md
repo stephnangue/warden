@@ -89,8 +89,8 @@ Because the check runs against the token's own attributes at request time — ne
 baked into the rule — one policy stays correct for every identity that shares it: one
 overlay, many callers, nothing to maintain per person. The attribute that decided
 each call lands in the [audit log](../concepts/audit.md), so a grant or a denial is
-explainable down to *why*. (The condition that expresses this is
-[`token_metadata`](../concepts/policies.md#token_metadata).)
+explainable down to *why*. (The condition that expresses this reads
+[`token.metadata`](../concepts/policies.md#fine-grained-access).)
 
 ## Benefits
 

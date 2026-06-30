@@ -222,7 +222,7 @@ If `certificate` is omitted, the role falls back to the mount's `trusted_ca_pem`
 
 ## Token Metadata
 
-A role can copy verified certificate fields onto the issued token's metadata, where `token_metadata` policy conditions can match them. `metadata_mappings` is written as `cert-field = "destination-metadata-key"`, drawing from: `cn`, `serial`, `ou`, `org`, `dns_san`, `email_san`, and `uri_san`. Multi-valued fields (the SANs, OU, Org) are comma-joined.
+A role can copy verified certificate fields onto the issued token's metadata, where a CEL `condition` can match them via `token.metadata`. `metadata_mappings` is written as `cert-field = "destination-metadata-key"`, drawing from: `cn`, `serial`, `ou`, `org`, `dns_san`, `email_san`, and `uri_san`. Multi-valued fields (the SANs, OU, Org) are comma-joined.
 
 ```bash
 warden write auth/cert/role/inventory-agent \
@@ -230,7 +230,7 @@ warden write auth/cert/role/inventory-agent \
   metadata_mappings="ou=team,cn=cn"
 ```
 
-A certificate with `OU=platform-core, CN=inventory-agent` yields metadata `team="platform-core"`, `cn="inventory-agent"`. A policy can then gate a path with `conditions { token_metadata = ["team=platform*"] }`. Unknown field selectors are rejected at role write time.
+A certificate with `OU=platform-core, CN=inventory-agent` yields metadata `team="platform-core"`, `cn="inventory-agent"`. A policy can then gate a path with `condition = "token.metadata.team.startsWith('platform')"`. Unknown field selectors are rejected at role write time.
 
 ## Discovering Assumable Roles
 

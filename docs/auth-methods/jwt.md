@@ -178,14 +178,14 @@ Per-role overrides for `groups_claim` and `group_policy_prefix` let one mount se
 
 ## Token Metadata
 
-A role's `metadata_claims` copies verified JWT claims onto the issued token's metadata, where `token_metadata` policy conditions can match them. The mapping is `source-claim=destination-metadata-key`. The source is a literal claim name, or a JSON Pointer (leading `/`) for a nested claim; resolved values must be strings.
+A role's `metadata_claims` copies verified JWT claims onto the issued token's metadata, where a CEL `condition` can match them via `token.metadata`. The mapping is `source-claim=destination-metadata-key`. The source is a literal claim name, or a JSON Pointer (leading `/`) for a nested claim; resolved values must be strings.
 
 ```bash
 warden write auth/jwt/role/inventory-agent \
   metadata_claims="department=dept,/resource_access/warden/env=env"
 ```
 
-A JWT with `"department": "eng"` and a nested `resource_access.warden.env` of `"prod"` produces a token whose metadata carries `dept="eng"` and `env="prod"`. A policy can then gate a path with `conditions { token_metadata = ["env=prod"] }`. The metadata also surfaces in audit log entries (`auth.policy_results.token_metadata`) for traceability — logged in clear by default, with opt-in per-key HMAC salting via the audit device's `salt_fields`.
+A JWT with `"department": "eng"` and a nested `resource_access.warden.env` of `"prod"` produces a token whose metadata carries `dept="eng"` and `env="prod"`. A policy can then gate a path with `condition = "token.metadata.env == 'prod'"`. The metadata also surfaces in audit log entries (`auth.policy_results.token_metadata`) for traceability — logged in clear by default, with opt-in per-key HMAC salting via the audit device's `salt_fields`.
 
 > **Note:** metadata is matched at request time against the token's own values and is never compiled into the policy, so it stays correct for every token. Use it for authorization decisions that depend on identity attributes rather than path/capability alone.
 
@@ -245,7 +245,7 @@ Exactly one of `oidc_discovery_url`, `jwks_url`, or `jwt_validation_pubkeys` mus
 | `token_ttl` | No (default `1h`) | TTL for issued tokens; overrides the mount-level `token_ttl`. |
 | `groups_claim` | No | Per-role override of the mount's `groups_claim`. |
 | `group_policy_prefix` | No | Per-role override of the mount's `group_policy_prefix`. |
-| `metadata_claims` | No | Map of source claim (literal or JSON Pointer) → token metadata key. Copies verified claims into the token's metadata for `token_metadata` policy conditions. Values must be strings. |
+| `metadata_claims` | No | Map of source claim (literal or JSON Pointer) → token metadata key. Copies verified claims into the token's metadata for CEL `condition` matching via `token.metadata`. Values must be strings. |
 | `cred_spec_name` | No | Credential spec name for implicit-auth flows. |
 | `max_age` | No | Maximum elapsed time since the JWT's `iat` claim. Example: `30m`. Empty disables the check. |
 

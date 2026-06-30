@@ -182,33 +182,18 @@ func TestCBP_PathCondition_UnconditionalGrantWins(t *testing.T) {
 	assert.True(t, res.Allowed, "unconditional grant from B admits any request")
 }
 
-// TestCBP_PathCondition_MixedMechanismsNotFailOpen is the regression guard for
-// the merge fail-open: a CEL-only policy and a conditions{}-only policy on one
-// path must NOT collapse to unconditional. A request satisfying neither is
-// denied.
-func TestCBP_PathCondition_MixedMechanismsNotFailOpen(t *testing.T) {
-	ctx := testContext()
-	celOnly := testParsePolicy(t, `path "x" { capabilities = ["read"] condition = "token.metadata.env == 'prod'" }`)
-	structuredOnly := testParsePolicy(t, `path "x" { capabilities = ["read"] conditions { token_metadata = ["team=red"] } }`)
-	cbp, err := NewCBP(ctx, []*Policy{celOnly, structuredOnly})
-	require.NoError(t, err)
-
-	// Satisfies neither gate -> must be denied (the fail-open this guards).
-	neither := &logical.Request{
-		Operation:     logical.ReadOperation,
-		Path:          "x",
-		TokenMetadata: map[string]string{"env": "dev", "team": "blue"},
-	}
-	assert.False(t, cbp.AllowOperation(ctx, neither, &logical.TokenEntry{Metadata: map[string]string{"env": "dev", "team": "blue"}}, false).Allowed,
-		"mixed mechanisms must not fail open")
-
-	// Satisfies both gates -> allowed (mixed is conservatively ANDed).
-	both := &logical.Request{
-		Operation:     logical.ReadOperation,
-		Path:          "x",
-		TokenMetadata: map[string]string{"env": "prod", "team": "red"},
-	}
-	assert.True(t, cbp.AllowOperation(ctx, both, &logical.TokenEntry{Metadata: map[string]string{"env": "prod", "team": "red"}}, false).Allowed)
+// TestCBP_ConditionsBlockRemoved confirms the legacy conditions {} block is
+// rejected at parse time with a directed "use CEL" error.
+func TestCBP_ConditionsBlockRemoved(t *testing.T) {
+	_, err := ParseCBPPolicy(namespace.RootNamespace, `
+		path "secret/*" {
+			capabilities = ["read"]
+			conditions { token_metadata = ["env=prod"] }
+		}
+	`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conditions {} block has been removed")
+	assert.Contains(t, err.Error(), "token.metadata")
 }
 
 func BenchmarkAllowOperation_NoCondition(b *testing.B) {

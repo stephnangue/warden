@@ -225,11 +225,11 @@ path "anthropic/role/+/gateway/v1/messages" {
     "stream" = ["true"]
     "*"      = []
   }
-  conditions {
-    source_ip   = ["10.0.0.0/8"]
-    time_window = ["08:00-18:00 UTC"]
-    day_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri"]
-  }
+  condition = <<-CEL
+    cidrContains("10.0.0.0/8", request.client_ip) &&
+    now.getHours("UTC") >= 8 && now.getHours("UTC") < 18 &&
+    now.getDayOfWeek("UTC") in [1, 2, 3, 4, 5]
+  CEL
 }
 
 path "anthropic/role/+/gateway/v1/models" {
@@ -238,7 +238,7 @@ path "anthropic/role/+/gateway/v1/models" {
 EOF
 ```
 
-Condition types are AND-ed (all must be satisfied), values within each type are OR-ed (at least one must match). Supported types: `source_ip` (CIDR or bare IP), `time_window` (`HH:MM-HH:MM TZ`, supports midnight-spanning), `day_of_week` (3-letter abbreviations).
+The `condition` is a [CEL](https://cel.dev) expression (see [Policies → CEL conditions](../concepts/policies.md#cel-conditions)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
 
 Verify:
 

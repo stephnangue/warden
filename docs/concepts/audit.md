@@ -19,7 +19,7 @@ Between them they capture:
   and [role](roles.md), the granted policies, the [namespace](namespaces.md), and —
   when the token carries them — its verified, login-derived **metadata** attributes
   (clearance, team, on-behalf-of user), so a decision that turned on a
-  [`token_metadata`](policies.md#token_metadata) condition is explainable.
+  [`token.metadata`](policies.md#fine-grained-access) value is explainable.
 - **Request** — operation, path, HTTP method, client IP, mount point and type,
   and whether it was transparent/unauthenticated/streamed.
 - **Response** — status, any warnings, the upstream URL for a proxied request,

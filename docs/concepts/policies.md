@@ -133,63 +133,13 @@ path "secret/data/app" {
 optionally their values); `denied_parameters` forbids keys (an empty list denies
 the key entirely).
 
-### Conditions
+### Fine-grained access
 
-A path block can gate access on request context with a `conditions` block —
-source IP, time of day, day of week, and the calling token's metadata:
-
-```hcl
-path "secret/data/app/*" {
-  capabilities = ["read"]
-  conditions = {
-    source_ip      = ["10.0.0.0/8"]
-    time_window    = ["09:00-17:00 America/New_York"]
-    day_of_week    = ["Mon", "Tue", "Wed", "Thu", "Fri"]
-    token_metadata = ["env=prod", "team=platform*"]
-  }
-}
-```
-
-Different condition types are **AND**ed (all must hold); within one type, the
-entries are **OR**ed (any one matches).
-
-#### `token_metadata`
-
-`token_metadata` matches the authenticating token's verified, login-derived
-metadata. Each entry is `key=pattern`, where `pattern` is a glob, as in
-`allowed_parameters`. The `*` is honored only at the **start and/or end** of the
-pattern: a trailing `*` is a prefix match (`team=platform*` matches values
-*starting with* `platform`), a leading `*` is a suffix match (`team=*-core` matches
-values *ending with* `-core`), and both ends is a substring match (`team=*plat*`).
-A `*` in the middle is literal, and a lone `*` is literal too — use `key=**` to
-match any value (in effect, just requiring the key to be present, since a missing
-key already fails closed). The metadata itself is populated by the auth method
-that issued the token — JWT/SPIFFE claims, X.509 certificate fields, or Kubernetes
-TokenReview attributes (see each method's *Token Metadata* section).
-
-Semantics within the type:
-
-- **AND across distinct keys** — every listed key must be present and match.
-- **OR within one key** — repeating a key (`["tier=gold", "tier=platinum"]`)
-  passes if the value matches any of its patterns.
-- A key **absent** from the token's metadata fails closed.
-
-```hcl
-# only tokens whose metadata says env=prod AND team starts with "platform"
-conditions = { token_metadata = ["env=prod", "team=platform*"] }
-```
-
-Because metadata is matched against the token's own values at request time (not
-compiled into the policy), the same compiled policy stays correct for every
-token — a token with `env=dev` is denied even though another token reusing the
-same policy set is allowed.
-
-### CEL conditions
-
-When the structured `conditions` block can't express the rule — a numeric
-comparison, set membership, a cross-field relationship, arbitrary boolean
-logic — a path block can carry a **`condition`**: a [CEL](https://cel.dev)
-expression that must evaluate to `true` for the rule to apply.
+A path block can gate access on request context and values with a
+**`condition`** — a [CEL](https://cel.dev) expression that must evaluate to
+`true` for the rule to apply. It expresses source IP, time of day, token
+attributes, numeric comparisons, set membership, cross-field relationships, and
+arbitrary boolean logic in one place:
 
 ```hcl
 path "db/issue-grant" {
@@ -198,9 +148,8 @@ path "db/issue-grant" {
 }
 ```
 
-A `condition` is evaluated **in addition to** the structured `conditions` block
-(both must pass) and against the same request — it does not replace capabilities
-or path matching, which still select the rule.
+A `condition` is evaluated against the request after capability and path
+matching select the rule — it refines a grant, it does not create one.
 
 **What an expression can read.** Conditions evaluate against a fixed set of
 variables built from the request:
@@ -232,7 +181,7 @@ the request body for non-MCP providers; MCP tool-call arguments are exposed as
 - **Typing is runtime.** `request.data` / `call.args` values are typed from the
   request, so `request.data.amount > 1000` is a real numeric comparison and a
   string `"1000"` does **not** satisfy it (it denies, fail-closed).
-- **Identity-independent.** Like `token_metadata`, the expression is compiled
+- **Identity-independent.** The expression is compiled
   once and evaluated against each token's own values at request time, so one
   compiled policy stays correct across every token that shares it.
 - **Bounded.** Expressions are type-checked and cost-bounded at policy-write
@@ -297,26 +246,25 @@ even considered, and any failure denies the request immediately:
 
 1. **Capability** — does the rule grant the capability for this operation? If
    not, the request is denied and nothing further runs.
-2. **Conditions** — do the `conditions` (source IP, time, day, token metadata)
-   and the path-level `condition` (CEL) both hold?
+2. **Condition** — does the path-level `condition` (CEL) hold?
 3. **MCP block** — for a gateway request, does the parsed body pass the
    `mcp { }` rules (including its per-call `condition`)?
 4. **Parameters** — finally, `required` / `allowed` / `denied` parameters.
 
 This ordering is not incidental — it shapes how policies must be written:
 
-- **Path + capability is the outer gate; `conditions` and `mcp` only refine it.**
+- **Path + capability is the outer gate; `condition` and `mcp` only refine it.**
   An `mcp { }` block never grants access on its own: the rule must already grant
   the operation's capability, or the block is never reached. Conversely, granting
   the capability *without* an `mcp` block allows **every** call on that path —
   the block only ever narrows, never widens.
-- **A coarser gate that denies ends the request.** A failed `conditions` check
+- **A coarser gate that denies ends the request.** A failed `condition`
   denies *before* Warden parses the request body, so source-IP and time-of-day
   limits hold no matter what the MCP call contains — and they cost nothing on the
   body-parsing path.
 - **Later gates cannot recover earlier denials.** Passing the MCP rules can't
   restore access the capability check refused. The sequence is strict and
-  fail-closed, so write the outer gates (capability, conditions) to admit exactly
+  fail-closed, so write the outer gates (capability, condition) to admit exactly
   the traffic the inner gates are meant to refine.
 
 ## Authorizing Gateway Requests

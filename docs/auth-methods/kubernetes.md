@@ -193,7 +193,7 @@ Without `audience`, the kube-apiserver returns whatever audiences the token natu
 
 ## Token Metadata
 
-A role can copy verified TokenReview attributes onto the issued token's metadata, where `token_metadata` policy conditions can match them. `metadata_mappings` is written as `attribute = "destination-metadata-key"`, drawing from: `service_account_namespace`, `service_account_name`, `service_account_uid`, `username`, and `groups` (multi-valued, comma-joined).
+A role can copy verified TokenReview attributes onto the issued token's metadata, where a CEL `condition` can match them via `token.metadata`. `metadata_mappings` is written as `attribute = "destination-metadata-key"`, drawing from: `service_account_namespace`, `service_account_name`, `service_account_uid`, `username`, and `groups` (multi-valued, comma-joined).
 
 ```bash
 warden write auth/kubernetes/role/inventory-agent \
@@ -202,7 +202,7 @@ warden write auth/kubernetes/role/inventory-agent \
   metadata_mappings="service_account_namespace=ns,service_account_name=sa"
 ```
 
-A workload whose SA is `system:serviceaccount:prod:inventory-agent` yields metadata `ns="prod"`, `sa="inventory-agent"`. A policy can then gate a path with `conditions { token_metadata = ["ns=prod"] }`. Unknown attribute selectors are rejected at role write time.
+A workload whose SA is `system:serviceaccount:prod:inventory-agent` yields metadata `ns="prod"`, `sa="inventory-agent"`. A policy can then gate a path with `condition = "token.metadata.ns == 'prod'"`. Unknown attribute selectors are rejected at role write time.
 
 ## Discovering Assumable Roles
 

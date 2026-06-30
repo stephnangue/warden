@@ -639,7 +639,7 @@ func TestMCPEval_MultiPolicy_AdditiveMerge(t *testing.T) {
 	// presence of a policy WITHOUT an mcp block does NOT clear
 	// enforcement contributed by the policy WITH one. This is the
 	// design call documented next to the merge code: MCP differs
-	// from ConditionSets (where "absent clears") because adding a
+	// from CEL conditions (where "absent clears") because adding a
 	// broader catch-all policy shouldn't accidentally lift an
 	// existing MCP restriction.
 	policyWithMCP := testParsePolicy(t, `
