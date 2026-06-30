@@ -113,7 +113,7 @@ path "mcp/gateway/*" {
 	}`)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -139,7 +139,7 @@ path "mcp/gateway/*" {
 	]`)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 	assert.Equal(t, "allow", res.MCPDecision.Decision)
@@ -196,7 +196,7 @@ path "mcp/gateway/*" {
 	}`)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -232,7 +232,7 @@ path "mcp/gateway/*" {
 	}`)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -270,7 +270,7 @@ path "mcp/gateway/*" {
 	}`)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed,
 		"non-scalar argument is treated as missing; missing is a conditional skip under the allow-list, not a deny")
@@ -293,7 +293,7 @@ path "mcp/gateway/*" {
 	]`)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision.BatchIndex)
@@ -317,7 +317,7 @@ path "mcp/gateway/*" {
 	req := buildE2ERequest(t, `{ not json`)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	assert.Equal(t, mcpRuleTypeMalformedJSONRPC, res.MCPDecision.RuleType)
@@ -340,7 +340,7 @@ path "mcp/gateway/*" {
 	}`)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	assert.Equal(t, mcpRuleTypeDuplicateKey, res.MCPDecision.RuleType)
@@ -366,7 +366,7 @@ path "mcp/gateway/*" {
 	req := buildE2ERequest(t, body)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: cap})
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	assert.Equal(t, mcpRuleTypeOversizedBody, res.MCPDecision.RuleType)
@@ -404,7 +404,7 @@ path "mcp/gateway/*" {
 	}`)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	assert.Equal(t, mcpRuleTypeMalformedParams, res.MCPDecision.RuleType)
@@ -423,7 +423,7 @@ path "mcp/gateway/*" {
 	req := buildE2ERequest(t, `[]`)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	assert.Equal(t, mcpRuleTypeBatchEmpty, res.MCPDecision.RuleType)
@@ -462,7 +462,7 @@ path "mcp/gateway/*" {
 	require.Nil(t, req.MCPDescriptor.ParseErr,
 		"sentinel descriptor must have ParseErr nil")
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 	assert.Nil(t, res.MCPDecision,
@@ -487,7 +487,7 @@ path "mcp/gateway/*" {
 	require.Nil(t, req.MCPDescriptor.Calls)
 	require.Nil(t, req.MCPDescriptor.ParseErr)
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 	assert.Nil(t, res.MCPDecision)
@@ -511,7 +511,7 @@ path "mcp/gateway/*" {
 	require.Nil(t, req.MCPDescriptor,
 		"non-MCP backend (no marker interface) leaves descriptor nil")
 
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	assert.Equal(t, mcpRuleTypeMissingBody, res.MCPDecision.RuleType)
@@ -547,12 +547,12 @@ path "mcp/gateway/*" {
 	// Backend type A.
 	reqA := buildE2ERequest(t, body)
 	runExtract(reqA, &mcpMockBackend{enforce: true, cap: 1 << 20})
-	resA := cbp.AllowOperation(testContext(), reqA, false)
+	resA := cbp.AllowOperation(testContext(), reqA, nil, false)
 
 	// Backend type B (different struct, same interface).
 	reqB := buildE2ERequest(t, body)
 	runExtract(reqB, &mcpMockBackendAlt{enforce: true, cap: 1 << 20})
-	resB := cbp.AllowOperation(testContext(), reqB, false)
+	resB := cbp.AllowOperation(testContext(), reqB, nil, false)
 
 	require.NotNil(t, resA.MCPDecision)
 	require.NotNil(t, resB.MCPDecision)

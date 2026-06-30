@@ -176,6 +176,10 @@ func (c *Core) CheckToken(ctx context.Context, req *logical.Request, unauth bool
 	if accessControlResults.CBPResults != nil && accessControlResults.CBPResults.MCPDecision != nil {
 		auth.MCPDecision = accessControlResults.CBPResults.MCPDecision
 	}
+	// Carry the path-level CEL condition decision through to buildAuditAuth.
+	if accessControlResults.CBPResults != nil && accessControlResults.CBPResults.Condition != nil {
+		auth.Condition = accessControlResults.CBPResults.Condition
+	}
 
 	if !accessControlResults.Allowed {
 		retErr := accessControlResults.Error
