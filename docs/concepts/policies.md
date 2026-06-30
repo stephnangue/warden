@@ -295,8 +295,9 @@ path "mcp/gateway/*" {
     allowed_prompts   = ["*"]
     denied_prompts    = ["sudo_*"]
 
-    allowed_params = { path = ["docs/*", "specs/*"] }
-    denied_params  = { env  = ["prod", "production"] }
+    # Argument-value rules are expressed as a per-call CEL condition over
+    # call.args (see Fine-grained access):
+    condition = "call.args.?path.orValue('docs/').startsWith('docs/') && call.args.?env.orValue('') != 'prod'"
   }
 }
 ```
@@ -307,6 +308,8 @@ Semantics:
   rejected; otherwise, if an `allowed_*` list is present, the call must match it.
 - **Patterns use trailing `*` only.** `delete_*` and a bare `*` are valid; a `*`
   in any other position is rejected at parse time.
+- **Argument values are gated by the CEL `condition`** over `call.args`,
+  evaluated per call after the name/method lists.
 - **Multiple `mcp` blocks OR together** — adding policies can only widen what is
   allowed. In a batched JSON-RPC request, a single denied call denies the batch.
 

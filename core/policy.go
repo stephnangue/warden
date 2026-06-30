@@ -187,8 +187,6 @@ type CBPMCPRules struct {
 	DeniedResources  []string
 	AllowedPrompts   []string
 	DeniedPrompts    []string
-	AllowedParams    map[string][]string
-	DeniedParams     map[string][]string
 	// Condition is the optional per-call CEL condition for this rule-set,
 	// compiled against the MCP env (call.* available). The set allows a call
 	// only if its structural gates pass AND this condition evaluates true.
@@ -226,18 +224,6 @@ func (m *CBPMCPRules) Clone() *CBPMCPRules {
 	}
 	if m.DeniedPrompts != nil {
 		clone.DeniedPrompts = append([]string(nil), m.DeniedPrompts...)
-	}
-	if m.AllowedParams != nil {
-		clone.AllowedParams = make(map[string][]string, len(m.AllowedParams))
-		for k, v := range m.AllowedParams {
-			clone.AllowedParams[k] = append([]string(nil), v...)
-		}
-	}
-	if m.DeniedParams != nil {
-		clone.DeniedParams = make(map[string][]string, len(m.DeniedParams))
-		for k, v := range m.DeniedParams {
-			clone.DeniedParams[k] = append([]string(nil), v...)
-		}
 	}
 	// Program is immutable; share the pointer.
 	clone.Condition = m.Condition
@@ -586,21 +572,6 @@ func canonicaliseMCPRules(h *MCPRulesHCL) (*CBPMCPRules, error) {
 		}
 		return out, nil
 	}
-	canonMap := func(field string, in map[string][]string) (map[string][]string, error) {
-		if len(in) == 0 {
-			return nil, nil
-		}
-		out := make(map[string][]string, len(in))
-		for k, vs := range in {
-			canonValues, err := canonList(fmt.Sprintf("%s[%q]", field, k), vs)
-			if err != nil {
-				return nil, err
-			}
-			out[strings.ToLower(k)] = canonValues
-		}
-		return out, nil
-	}
-
 	r := &CBPMCPRules{}
 	var err error
 	if r.AllowedMethods, err = canonList("allowed_methods", h.AllowedMethods); err != nil {
@@ -627,11 +598,10 @@ func canonicaliseMCPRules(h *MCPRulesHCL) (*CBPMCPRules, error) {
 	if r.DeniedPrompts, err = canonList("denied_prompts", h.DeniedPrompts); err != nil {
 		return nil, err
 	}
-	if r.AllowedParams, err = canonMap("allowed_params", h.AllowedParams); err != nil {
-		return nil, err
-	}
-	if r.DeniedParams, err = canonMap("denied_params", h.DeniedParams); err != nil {
-		return nil, err
+	if len(h.AllowedParams) > 0 || len(h.DeniedParams) > 0 {
+		return nil, fmt.Errorf("mcp allowed_params/denied_params have been removed — " +
+			"express argument constraints as a CEL `condition` over call.args, e.g. " +
+			"condition = \"call.args.amount <= 1500 && call.args.currency in ['USD','EUR']\"")
 	}
 	if h.Condition != "" {
 		env, err := mcpCELEnv()

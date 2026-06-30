@@ -24,12 +24,6 @@ path "mcp/gateway/*" {
     denied_resources  = ["github://secrets/*"]
     allowed_prompts   = ["*"]
     denied_prompts    = ["sudo_*"]
-    allowed_params = {
-      path = ["docs/*", "specs/*"]
-    }
-    denied_params = {
-      env = ["prod", "production"]
-    }
   }
 }
 `
@@ -49,8 +43,6 @@ path "mcp/gateway/*" {
 	assert.Equal(t, []string{"github://secrets/*"}, r.DeniedResources)
 	assert.Equal(t, []string{"*"}, r.AllowedPrompts)
 	assert.Equal(t, []string{"sudo_*"}, r.DeniedPrompts)
-	assert.Equal(t, map[string][]string{"path": {"docs/*", "specs/*"}}, r.AllowedParams)
-	assert.Equal(t, map[string][]string{"env": {"prod", "production"}}, r.DeniedParams)
 }
 
 func TestParseMCP_EmptyBlock(t *testing.T) {
@@ -80,8 +72,6 @@ path "mcp/gateway/*" {
 	assert.Nil(t, r.DeniedResources)
 	assert.Nil(t, r.AllowedPrompts)
 	assert.Nil(t, r.DeniedPrompts)
-	assert.Nil(t, r.AllowedParams)
-	assert.Nil(t, r.DeniedParams)
 }
 
 func TestParseMCP_NoBlock(t *testing.T) {
@@ -108,9 +98,6 @@ path "mcp/gateway/*" {
   mcp {
     allowed_methods = ["TOOLS/Call", "Tools/LIST"]
     denied_tools    = ["Delete_*", "FORCE_*"]
-    allowed_params = {
-      Path = ["DOCS/*"]
-    }
   }
 }
 `
@@ -120,8 +107,6 @@ path "mcp/gateway/*" {
 
 	assert.Equal(t, []string{"tools/call", "tools/list"}, r.AllowedMethods)
 	assert.Equal(t, []string{"delete_*", "force_*"}, r.DeniedTools)
-	assert.Equal(t, map[string][]string{"path": {"docs/*"}}, r.AllowedParams,
-		"param-name keys and values both lowercase")
 }
 
 func TestParseMCP_LeadingStarRejected(t *testing.T) {
@@ -184,24 +169,23 @@ path "mcp/gateway/*" {
 	assert.Equal(t, []string{"*"}, policy.Paths[0].Permissions.MCP[0].AllowedPrompts)
 }
 
-func TestParseMCP_InvalidPatternInParams(t *testing.T) {
-	// Validation must recurse into the param-map values; the error
-	// should mention which param key the bad pattern came from.
+func TestParseMCP_ParamsRejected(t *testing.T) {
+	// The removed allowed_params/denied_params are rejected at parse time
+	// with a directed error pointing at the CEL call.args equivalent.
 	rules := `
 path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
     allowed_params = {
-      path = ["docs/*", "*invalid"]
+      path = ["docs/*"]
     }
   }
 }
 `
 	_, err := ParseCBPPolicy(namespace.RootNamespace, rules)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "allowed_params")
-	assert.Contains(t, err.Error(), `"path"`)
-	assert.Contains(t, err.Error(), "*invalid")
+	assert.Contains(t, err.Error(), "allowed_params/denied_params have been removed")
+	assert.Contains(t, err.Error(), "call.args")
 }
 
 func TestParseMCP_MultipleStanzasSamePath(t *testing.T) {
@@ -247,29 +231,17 @@ func TestCBPMCPRules_Clone_DeepCopy(t *testing.T) {
 		AllowedResources: []string{"github://repo/A/*"},
 		DeniedResources:  []string{"github://repo/A/secrets/*"},
 		DeniedPrompts:    []string{"sudo_*"},
-		AllowedParams: map[string][]string{
-			"path": {"docs/*", "specs/*"},
-		},
-		DeniedParams: map[string][]string{
-			"env": {"prod"},
-		},
 	}
 	clone := original.Clone()
 	require.NotNil(t, clone)
 	assert.Equal(t, original, clone)
 
-	// Mutating the clone's slices and maps must not affect the original.
+	// Mutating the clone's slices must not affect the original.
 	clone.AllowedMethods[0] = "mutated"
-	clone.AllowedParams["path"][0] = "mutated"
-	clone.AllowedParams["new"] = []string{"x"}
-	clone.DeniedParams["env"][0] = "mutated"
 	clone.DeniedResources[0] = "mutated"
 	clone.DeniedPrompts[0] = "mutated"
 
 	assert.Equal(t, "tools/call", original.AllowedMethods[0])
-	assert.Equal(t, "docs/*", original.AllowedParams["path"][0])
-	assert.NotContains(t, original.AllowedParams, "new")
-	assert.Equal(t, "prod", original.DeniedParams["env"][0])
 	assert.Equal(t, "github://repo/A/secrets/*", original.DeniedResources[0])
 	assert.Equal(t, "sudo_*", original.DeniedPrompts[0])
 }
@@ -283,9 +255,6 @@ path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
     allowed_tools = ["get_*"]
-    allowed_params = {
-      path = ["docs/*"]
-    }
   }
 }
 `
@@ -298,8 +267,6 @@ path "mcp/gateway/*" {
 	require.Len(t, cloned.MCP, 1)
 
 	cloned.MCP[0].AllowedTools[0] = "mutated"
-	cloned.MCP[0].AllowedParams["path"][0] = "mutated"
 
 	assert.Equal(t, "get_*", original.MCP[0].AllowedTools[0])
-	assert.Equal(t, "docs/*", original.MCP[0].AllowedParams["path"][0])
 }
