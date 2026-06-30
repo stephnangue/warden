@@ -140,6 +140,11 @@ type PolicyResults struct {
 	// today's output. Logged in clear by default; opt-in per-key HMAC salting
 	// via salt_fields (auth.policy_results.token_metadata[.<key>]).
 	TokenMetadata map[string]string `json:"token_metadata,omitempty"`
+
+	// Condition carries the path-level CEL condition decision when a condition
+	// was evaluated for a non-MCP request (the MCP per-call condition is
+	// recorded on MCPDecision.Condition instead). nil when none applied.
+	Condition *logical.ConditionResult `json:"condition,omitempty"`
 }
 
 // AuthResult contains authentication result from login operations
@@ -311,6 +316,7 @@ func (e *LogEntry) Clone() *LogEntry {
 			clone.Auth.PolicyResults = &PolicyResults{
 				Allowed:     e.Auth.PolicyResults.Allowed,
 				MCPDecision: e.Auth.PolicyResults.MCPDecision.Clone(),
+				Condition:   e.Auth.PolicyResults.Condition.Clone(),
 			}
 			if e.Auth.PolicyResults.GrantingPolicies != nil {
 				clone.Auth.PolicyResults.GrantingPolicies = make([]string, len(e.Auth.PolicyResults.GrantingPolicies))
