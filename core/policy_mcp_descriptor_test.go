@@ -5,6 +5,7 @@ package core
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/logical"
 )
@@ -29,7 +30,7 @@ func TestEvaluateMCPDescriptor_SingleCallParamString(t *testing.T) {
 			},
 		}},
 	}
-	d := evaluateMCPDescriptor(sets, desc)
+	d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{})
 	if d == nil || d.Decision != "allow" {
 		t.Fatalf("decision = %+v, want allow", d)
 	}
@@ -55,7 +56,7 @@ func TestEvaluateMCPDescriptor_NumericParamMatches(t *testing.T) {
 			},
 		}},
 	}
-	d := evaluateMCPDescriptor(sets, desc)
+	d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{})
 	if d == nil || d.Decision != "deny" {
 		t.Fatalf("decision = %+v, want deny", d)
 	}
@@ -85,7 +86,7 @@ func TestEvaluateMCPDescriptor_NonScalarParamTreatedAsMissing(t *testing.T) {
 				},
 			}},
 		}
-		d := evaluateMCPDescriptor(sets, desc)
+		d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{})
 		if d == nil || d.Decision != "allow" {
 			t.Fatalf("decision = %+v, want allow (object value skipped by deny gate)", d)
 		}
@@ -110,7 +111,7 @@ func TestEvaluateMCPDescriptor_NonScalarParamTreatedAsMissing(t *testing.T) {
 				},
 			}},
 		}
-		d := evaluateMCPDescriptor(sets, desc)
+		d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{})
 		if d == nil || d.Decision != "allow" {
 			t.Fatalf("decision = %+v, want allow (object value treated as missing; conditional skip)", d)
 		}
@@ -130,7 +131,7 @@ func TestEvaluateMCPDescriptor_BatchOneDeniedFailsAll(t *testing.T) {
 			{Method: "tools/call", Name: "delete_repo", BatchIndex: 1},
 		},
 	}
-	d := evaluateMCPDescriptor(sets, desc)
+	d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{})
 	if d == nil || d.Decision != "deny" {
 		t.Fatalf("decision = %+v, want deny", d)
 	}
@@ -152,7 +153,7 @@ func TestEvaluateMCPDescriptor_BatchAllAllowed(t *testing.T) {
 			{Method: "tools/call", Name: "search_repos", BatchIndex: 1},
 		},
 	}
-	d := evaluateMCPDescriptor(sets, desc)
+	d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{})
 	if d == nil || d.Decision != "allow" {
 		t.Fatalf("decision = %+v, want allow", d)
 	}
@@ -165,10 +166,10 @@ func TestEvaluateMCPDescriptor_NoCallsReturnsNil(t *testing.T) {
 	sets := []*CBPMCPRules{{
 		AllowedMethods: []string{"tools/list"},
 	}}
-	if d := evaluateMCPDescriptor(sets, nil); d != nil {
+	if d := evaluateMCPDescriptor(sets, nil, nil, nil, time.Time{}); d != nil {
 		t.Errorf("nil descriptor: decision = %+v, want nil", d)
 	}
-	if d := evaluateMCPDescriptor(sets, &logical.MCPRequestDescriptor{}); d != nil {
+	if d := evaluateMCPDescriptor(sets, &logical.MCPRequestDescriptor{}, nil, nil, time.Time{}); d != nil {
 		t.Errorf("empty Calls: decision = %+v, want nil", d)
 	}
 }

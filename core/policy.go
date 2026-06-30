@@ -147,6 +147,7 @@ type MCPRulesHCL struct {
 	DeniedPrompts    []string            `hcl:"denied_prompts"`
 	AllowedParams    map[string][]string `hcl:"allowed_params"`
 	DeniedParams     map[string][]string `hcl:"denied_params"`
+	Condition        string              `hcl:"condition"`
 }
 
 type CBPPermissions struct {
@@ -193,6 +194,10 @@ type CBPMCPRules struct {
 	DeniedPrompts    []string
 	AllowedParams    map[string][]string
 	DeniedParams     map[string][]string
+	// Condition is the optional per-call CEL condition for this rule-set,
+	// compiled against the MCP env (call.* available). The set allows a call
+	// only if its structural gates pass AND this condition evaluates true.
+	Condition *compiledCondition
 }
 
 // Clone returns a deep copy of the CBPMCPRules. Safe to call on a nil
@@ -239,6 +244,8 @@ func (m *CBPMCPRules) Clone() *CBPMCPRules {
 			clone.DeniedParams[k] = append([]string(nil), v...)
 		}
 	}
+	// Program is immutable; share the pointer.
+	clone.Condition = m.Condition
 	return clone
 }
 
@@ -641,6 +648,17 @@ func canonicaliseMCPRules(h *MCPRulesHCL) (*CBPMCPRules, error) {
 	}
 	if r.DeniedParams, err = canonMap("denied_params", h.DeniedParams); err != nil {
 		return nil, err
+	}
+	if h.Condition != "" {
+		env, err := mcpCELEnv()
+		if err != nil {
+			return nil, fmt.Errorf("mcp cel env: %w", err)
+		}
+		prg, err := compileCELCondition(env, h.Condition)
+		if err != nil {
+			return nil, fmt.Errorf("mcp condition: %w", err)
+		}
+		r.Condition = &compiledCondition{Source: h.Condition, Program: prg}
 	}
 	return r, nil
 }

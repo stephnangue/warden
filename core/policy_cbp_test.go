@@ -21,7 +21,7 @@ func testContext() context.Context {
 }
 
 // Helper function to parse a policy for testing
-func testParsePolicy(t *testing.T, rules string) *Policy {
+func testParsePolicy(t testing.TB, rules string) *Policy {
 	t.Helper()
 	policy, err := ParseCBPPolicy(namespace.RootNamespace, rules)
 	require.NoError(t, err)

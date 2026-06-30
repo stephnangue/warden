@@ -345,19 +345,26 @@ func (a *celActivation) ResolveName(name string) (any, bool) {
 // non-scalar / null / missing values are omitted so absent-key access fails
 // closed. Mutates and returns base.
 func addCallToActivation(base map[string]any, method, tool string, matchArgs map[string]logical.ParamValue, batchIndex int) map[string]any {
+	base["call"] = buildCallNS(method, tool, matchArgs, batchIndex)
+	return base
+}
+
+// buildCallNS builds the per-call `call` namespace. args are typed from
+// ParamValue.Kind; non-scalar / null / missing values are omitted so absent-key
+// access fails closed.
+func buildCallNS(method, tool string, matchArgs map[string]logical.ParamValue, batchIndex int) map[string]any {
 	args := make(map[string]any, len(matchArgs))
 	for k, pv := range matchArgs {
 		if v, ok := paramValueToCEL(pv); ok {
 			args[k] = v
 		}
 	}
-	base["call"] = map[string]any{
+	return map[string]any{
 		"method":      method,
 		"tool":        tool,
 		"args":        args,
 		"batch_index": batchIndex,
 	}
-	return base
 }
 
 // paramValueToCEL converts a parsed MCP argument to a typed CEL value. Only
