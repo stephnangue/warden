@@ -51,6 +51,16 @@ A denied MCP call comes back as an HTTP 403 with a short reason naming the offen
 tool or parameter, so the agent can correct course instead of guessing at an opaque
 failure — and every decision, allow or deny, is recorded.
 
+Some rules are not "which tool" but "how much": a payment under €1,500, a grant no
+longer than an hour, a refund within a smaller cap than a charge. For these a policy
+carries a [`condition`](../concepts/policies.md#cel-conditions) — a CEL expression
+evaluated against the same request, down to the tool-call arguments
+(`call.args.amount <= 1500`, `call.args.currency in ["USD","EUR"]`). It runs
+alongside the allow/deny lists and, like every other gate, fails closed: the value
+has to be present and within bounds, or the call is refused. So Warden governs not
+just *which* action an agent takes but *within what limits* — the budget rides on
+the call, not on a human's trust in the agent.
+
 ## Authorize on whose behalf it acts
 
 The path-and-capability check answers one question: *what can this agent reach in

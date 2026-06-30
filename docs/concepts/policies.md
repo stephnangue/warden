@@ -184,6 +184,77 @@ compiled into the policy), the same compiled policy stays correct for every
 token — a token with `env=dev` is denied even though another token reusing the
 same policy set is allowed.
 
+### CEL conditions
+
+When the structured `conditions` block can't express the rule — a numeric
+comparison, set membership, a cross-field relationship, arbitrary boolean
+logic — a path block can carry a **`condition`**: a [CEL](https://cel.dev)
+expression that must evaluate to `true` for the rule to apply.
+
+```hcl
+path "db/issue-grant" {
+  capabilities = ["create"]
+  condition    = "request.data.ttl_seconds <= 3600 && token.metadata.env == 'prod'"
+}
+```
+
+A `condition` is evaluated **in addition to** the structured `conditions` block
+(both must pass) and against the same request — it does not replace capabilities
+or path matching, which still select the rule.
+
+**What an expression can read.** Conditions evaluate against a fixed set of
+variables built from the request:
+
+| Namespace | Fields |
+| --- | --- |
+| `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `data.<key>` |
+| `token` | `principal`, `role`, `type`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject, verified}`), `ttl_seconds`, `expires_at` |
+| `now` | the request timestamp |
+
+Secret material (the token value, accessor) is never exposed. `request.data` is
+the request body for non-MCP providers; MCP tool-call arguments are exposed as
+`call.args` inside an `mcp { }` block (see [MCP](mcp.md)).
+
+**Helpers beyond the CEL built-ins:**
+
+- `cidrContains(cidr, ip)` — replaces `source_ip`, e.g.
+  `cidrContains("10.0.0.0/8", request.client_ip)`.
+- Time/day come from the built-ins on `now`: `now.getHours("America/New_York")`,
+  `now.getDayOfWeek("UTC")` (`0` = Sunday).
+
+**Semantics:**
+
+- **Fail-closed.** A condition that evaluates `false` *or errors* (a type
+  mismatch, or reading a key that isn't present) denies the request. This means
+  reading an **absent** field denies — the safe default for an authorization
+  gate. To treat a missing value as acceptable, say so explicitly with optional
+  syntax: `request.data.?ttl_seconds.orValue(0) <= 3600`.
+- **Typing is runtime.** `request.data` / `call.args` values are typed from the
+  request, so `request.data.amount > 1000` is a real numeric comparison and a
+  string `"1000"` does **not** satisfy it (it denies, fail-closed).
+- **Identity-independent.** Like `token_metadata`, the expression is compiled
+  once and evaluated against each token's own values at request time, so one
+  compiled policy stays correct across every token that shares it.
+- **Bounded.** Expressions are type-checked and cost-bounded at policy-write
+  time; an invalid, non-boolean, or too-expensive expression is rejected when the
+  policy is written, not at request time.
+
+Examples:
+
+```hcl
+# numeric cap on a request-body field
+condition = "request.data.ttl_seconds <= 3600"
+
+# set membership over token metadata
+condition = "token.metadata.env in ['dev', 'staging']"
+
+# require a verified on-behalf-of delegate in the chain
+condition = "size(token.actors) > 0"
+
+# operation-conditional (capability still selects the rule)
+condition = "request.operation == 'read' ? true : token.metadata.role == 'writer'"
+```
+
 ### Path expiration
 
 A path block can carry an `expiration` — an absolute time after which the rule
@@ -226,9 +297,10 @@ even considered, and any failure denies the request immediately:
 
 1. **Capability** — does the rule grant the capability for this operation? If
    not, the request is denied and nothing further runs.
-2. **Conditions** — do the `conditions` (source IP, time, day, token metadata) hold?
+2. **Conditions** — do the `conditions` (source IP, time, day, token metadata)
+   and the path-level `condition` (CEL) both hold?
 3. **MCP block** — for a gateway request, does the parsed body pass the
-   `mcp { }` rules?
+   `mcp { }` rules (including its per-call `condition`)?
 4. **Parameters** — finally, `required` / `allowed` / `denied` parameters.
 
 This ordering is not incidental — it shapes how policies must be written:
