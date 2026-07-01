@@ -182,6 +182,10 @@ condition = "size(token.actors) > 0"
 condition = "request.operation == 'read' ? true : token.metadata.role == 'writer'"
 ```
 
+For 20 worked examples — source-IP and time gates, auth-method and delegation
+checks, namespace confinement, and a full per-tool MCP budget — see the
+[CEL Condition Cookbook](cel-conditions.md).
+
 ### Path expiration
 
 A path block can carry an `expiration` — an absolute time after which the rule
