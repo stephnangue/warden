@@ -6,6 +6,7 @@ package core
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/checker"
+	celast "github.com/google/cel-go/common/ast"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/interpreter"
@@ -178,21 +180,21 @@ func (e celCostEstimator) EstimateCallCost(function, overloadID string, target *
 // policy-write-time validation path: a syntax error, a non-bool result, an
 // undeclared reference (e.g. call.* in a path-level condition), or an
 // over-budget cost are all rejected here with a directed error.
-func compileCELCondition(env *cel.Env, src string) (cel.Program, error) {
+func compileCELCondition(env *cel.Env, src string) (cel.Program, []string, error) {
 	ast, iss := env.Compile(src)
 	if iss != nil && iss.Err() != nil {
-		return nil, fmt.Errorf("condition does not compile: %w", iss.Err())
+		return nil, nil, fmt.Errorf("condition does not compile: %w", iss.Err())
 	}
 	if !ast.OutputType().IsExactType(cel.BoolType) {
-		return nil, fmt.Errorf("condition must evaluate to bool, got %s", ast.OutputType())
+		return nil, nil, fmt.Errorf("condition must evaluate to bool, got %s", ast.OutputType())
 	}
 
 	est, err := env.EstimateCost(ast, celCostEstimator{maxSize: celInputSizeBound})
 	if err != nil {
-		return nil, fmt.Errorf("condition cost estimation failed: %w", err)
+		return nil, nil, fmt.Errorf("condition cost estimation failed: %w", err)
 	}
 	if est.Max > maxConditionCost {
-		return nil, fmt.Errorf("condition worst-case cost %d exceeds limit %d", est.Max, maxConditionCost)
+		return nil, nil, fmt.Errorf("condition worst-case cost %d exceeds limit %d", est.Max, maxConditionCost)
 	}
 
 	// The runtime cost tracker (cel.CostLimit) allocates per eval and wraps
@@ -204,7 +206,7 @@ func compileCELCondition(env *cel.Env, src string) (cel.Program, error) {
 	// the static bound above, so the per-eval tracker is omitted.
 	est2, err := env.EstimateCost(ast, celCostEstimator{maxSize: celInputSizeBound * 2})
 	if err != nil {
-		return nil, fmt.Errorf("condition cost estimation failed: %w", err)
+		return nil, nil, fmt.Errorf("condition cost estimation failed: %w", err)
 	}
 	var progOpts []cel.ProgramOption
 	if est2.Max != est.Max {
@@ -213,9 +215,95 @@ func compileCELCondition(env *cel.Env, src string) (cel.Program, error) {
 
 	prg, err := env.Program(ast, progOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("condition program construction failed: %w", err)
+		return nil, nil, fmt.Errorf("condition program construction failed: %w", err)
 	}
-	return prg, nil
+	return prg, celReferencedPaths(ast), nil
+}
+
+// celReferencedPaths reconstructs the dotted variable paths an expression reads
+// — e.g. token.metadata.env, call.args.amount — so the deciding condition can
+// record its inputs for audit. Only clean, Ident-rooted field-selection chains
+// under request/token/call are captured; has() test-only selects and
+// index/optional access (request.data["k"], call.args.?x) contribute no path,
+// and now.* time predicates are intentionally not captured (the expression text
+// carries the bound). The result is deduped and sorted.
+func celReferencedPaths(a *cel.Ast) []string {
+	native := a.NativeRep()
+	if native == nil {
+		return nil
+	}
+	root := native.Expr()
+	if root == nil {
+		return nil
+	}
+
+	var selects []celast.Expr
+	consumed := map[int64]bool{} // operand of some Select — an intermediate node
+	skip := map[int64]bool{}     // container of an index/optional access — not a field path
+	celast.PostOrderVisit(root, celast.NewExprVisitor(func(e celast.Expr) {
+		switch e.Kind() {
+		case celast.SelectKind:
+			selects = append(selects, e)
+			consumed[e.AsSelect().Operand().ID()] = true
+		case celast.CallKind:
+			c := e.AsCall()
+			switch c.FunctionName() {
+			case "_?._", "_[_]", "optional_index":
+				if args := c.Args(); len(args) > 0 {
+					skip[args[0].ID()] = true
+				}
+			}
+		}
+	}))
+
+	set := map[string]bool{}
+	for _, e := range selects {
+		if consumed[e.ID()] || skip[e.ID()] {
+			continue
+		}
+		if p, ok := celSelectPath(e); ok {
+			set[p] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// celSelectPath reconstructs the dotted path for a Select chain top (e.g.
+// token.metadata.env). Returns ok=false if the chain contains a test-only
+// select (has()) or does not bottom out on a request/token/call Ident.
+func celSelectPath(e celast.Expr) (string, bool) {
+	var fields []string
+	cur := e
+	for cur.Kind() == celast.SelectKind {
+		sel := cur.AsSelect()
+		if sel.IsTestOnly() {
+			return "", false
+		}
+		fields = append(fields, sel.FieldName())
+		cur = sel.Operand()
+	}
+	if cur.Kind() != celast.IdentKind {
+		return "", false
+	}
+	switch cur.AsIdent() {
+	case "request", "token", "call":
+	default:
+		return "", false
+	}
+	parts := make([]string, 0, len(fields)+1)
+	parts = append(parts, cur.AsIdent())
+	for i := len(fields) - 1; i >= 0; i-- {
+		parts = append(parts, fields[i])
+	}
+	return strings.Join(parts, "."), true
 }
 
 // evalCELCondition evaluates a compiled condition against an activation.
@@ -394,6 +482,10 @@ func paramValueToCEL(pv logical.ParamValue) (any, bool) {
 type compiledCondition struct {
 	Source  string
 	Program cel.Program
+	// RefPaths are the dotted request/token/call variable paths the expression
+	// reads (from celReferencedPaths), snapshotted into the audited
+	// ConditionResult.Inputs at eval time.
+	RefPaths []string
 }
 
 // Package-level envs, built once and reused. The base env compiles path-level
@@ -493,19 +585,77 @@ func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te
 		ok, err := evalCELCondition(c.Program, act)
 		if err != nil {
 			if deciding == nil {
-				deciding = &logical.ConditionResult{Decision: "deny", Expression: c.Source, ErrorKind: celErrorKind(err)}
+				deciding = &logical.ConditionResult{Decision: "deny", Expression: c.Source, ErrorKind: celErrorKind(err), Inputs: resolveConditionInputs(c.RefPaths, act)}
 			}
 			continue
 		}
 		if ok {
-			res := &logical.ConditionResult{Decision: "allow", Expression: c.Source}
+			res := &logical.ConditionResult{Decision: "allow", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, act)}
 			res.Sanitize()
 			return true, res
 		}
 		if deciding == nil {
-			deciding = &logical.ConditionResult{Decision: "deny", Expression: c.Source}
+			deciding = &logical.ConditionResult{Decision: "deny", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, act)}
 		}
 	}
 	deciding.Sanitize()
 	return false, deciding
+}
+
+// resolveConditionInputs snapshots the values of the expression's referenced
+// paths from the evaluation activation into a map for audit. Values are
+// formatted to strings in clear (sensitive keys are protected by optional
+// salt_fields at the audit format layer, not here). Absent keys — the
+// fail-closed case — are omitted. Returns nil when nothing resolved.
+func resolveConditionInputs(refPaths []string, act *celActivation) map[string]string {
+	if len(refPaths) == 0 || act == nil {
+		return nil
+	}
+	out := make(map[string]string, len(refPaths))
+	for _, p := range refPaths {
+		segs := strings.Split(p, ".")
+		cur, ok := act.ResolveName(segs[0])
+		if !ok {
+			continue
+		}
+		for _, s := range segs[1:] {
+			m, isMap := cur.(map[string]any)
+			if !isMap {
+				cur = nil
+				ok = false
+				break
+			}
+			if cur, ok = m[s]; !ok {
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		out[p] = formatCELValue(cur)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// formatCELValue renders a resolved activation value as an audit string.
+// Scalars format precisely; non-scalars (lists/maps such as token.policies /
+// token.actors) fall back to %v.
+func formatCELValue(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case bool:
+		return strconv.FormatBool(t)
+	case float64:
+		return strconv.FormatFloat(t, 'g', -1, 64)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case int:
+		return strconv.Itoa(t)
+	default:
+		return fmt.Sprintf("%v", t)
+	}
 }

@@ -59,6 +59,35 @@ func TestCBP_PathCondition_EndToEnd(t *testing.T) {
 	assert.False(t, res.Allowed)
 }
 
+// TestCBP_PathCondition_RecordsInputs confirms a deciding path-level condition
+// snapshots its referenced request/token values into ConditionResult.Inputs
+// (in clear — salting is an audit-layer opt-in).
+func TestCBP_PathCondition_RecordsInputs(t *testing.T) {
+	ctx := testContext()
+
+	policy := testParsePolicy(t, `
+		path "db/issue-grant" {
+			capabilities = ["create"]
+			condition = "request.data.model == 'sonnet' && token.metadata.env == 'prod'"
+		}
+	`)
+	cbp, err := NewCBP(ctx, []*Policy{policy})
+	require.NoError(t, err)
+
+	prodTE := &logical.TokenEntry{Metadata: map[string]string{"env": "prod"}}
+	res := cbp.AllowOperation(ctx, &logical.Request{
+		Operation: logical.CreateOperation,
+		Path:      "db/issue-grant",
+		Data:      map[string]any{"model": "opus"},
+	}, prodTE, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.Condition)
+	require.NotNil(t, res.Condition.Inputs)
+	assert.Equal(t, "opus", res.Condition.Inputs["request.data.model"])
+	assert.Equal(t, "prod", res.Condition.Inputs["token.metadata.env"])
+}
+
 // TestCBP_PathCondition_MissingDataFailsClosed confirms a condition over an
 // absent request.data key denies (fail-closed) and records a sanitized error
 // category rather than a raw value.

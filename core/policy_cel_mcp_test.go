@@ -55,6 +55,19 @@ func TestMCPCond_NumericAllowDeny(t *testing.T) {
 	assert.Contains(t, res.MCPDecision.Condition.Expression, "call.args.amount")
 }
 
+// TestMCPCond_RecordsInputs confirms a per-call condition snapshots the
+// referenced call.args value into MCPDecision.Condition.Inputs.
+func TestMCPCond_RecordsInputs(t *testing.T) {
+	cbp := mcpAmountCapPolicy(t)
+
+	deny := mcpReq(t, `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_payment","arguments":{"amount":2000}},"id":1}`)
+	res := cbp.AllowOperation(testContext(), deny, nil, false)
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision.Condition)
+	require.NotNil(t, res.MCPDecision.Condition.Inputs)
+	assert.Equal(t, "2000", res.MCPDecision.Condition.Inputs["call.args.amount"])
+}
+
 // TestMCPCond_TokenNamespace confirms an mcp{} condition can read the token
 // namespace (threaded via the TokenEntry), not just call.*.
 func TestMCPCond_TokenNamespace(t *testing.T) {
