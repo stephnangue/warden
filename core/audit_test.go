@@ -1064,30 +1064,6 @@ func TestBuildAuditAuth_FromAuth(t *testing.T) {
 	assert.Contains(t, result.PolicyResults.GrantingPolicies, "p1")
 }
 
-func TestBuildAuditAuth_SurfacesTokenMetadata(t *testing.T) {
-	auth := &logical.Auth{
-		PolicyResults: &sdklogical.PolicyResults{Allowed: false},
-	}
-	te := &logical.TokenEntry{
-		PrincipalID: "svc-ci",
-		Metadata:    map[string]string{"env": "dev", "team": "platform-core"},
-	}
-
-	result := buildAuditAuth(auth, te)
-	require.NotNil(t, result)
-	require.NotNil(t, result.PolicyResults)
-	assert.Equal(t, map[string]string{"env": "dev", "team": "platform-core"}, result.PolicyResults.TokenMetadata)
-}
-
-func TestBuildAuditAuth_NoTokenMetadataWhenEmpty(t *testing.T) {
-	auth := &logical.Auth{PolicyResults: &sdklogical.PolicyResults{Allowed: true}}
-	te := &logical.TokenEntry{PrincipalID: "svc-ci"}
-
-	result := buildAuditAuth(auth, te)
-	require.NotNil(t, result.PolicyResults)
-	assert.Nil(t, result.PolicyResults.TokenMetadata)
-}
-
 func TestBuildAuditAuth_AuthOverridesTE(t *testing.T) {
 	te := &logical.TokenEntry{
 		PrincipalID: "old-user",

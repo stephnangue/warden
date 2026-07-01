@@ -185,7 +185,7 @@ warden write auth/jwt/role/inventory-agent \
   metadata_claims="department=dept,/resource_access/warden/env=env"
 ```
 
-A JWT with `"department": "eng"` and a nested `resource_access.warden.env` of `"prod"` produces a token whose metadata carries `dept="eng"` and `env="prod"`. A policy can then gate a path with `condition = "token.metadata.env == 'prod'"`. The metadata also surfaces in audit log entries (`auth.policy_results.token_metadata`) for traceability — logged in clear by default, with opt-in per-key HMAC salting via the audit device's `salt_fields`.
+A JWT with `"department": "eng"` and a nested `resource_access.warden.env` of `"prod"` produces a token whose metadata carries `dept="eng"` and `env="prod"`. A policy can then gate a path with `condition = "token.metadata.env == 'prod'"`. When a `condition` reads a metadata value to decide a request, that value is recorded in the audit entry under `auth.policy_results.condition.inputs` (keyed by the CEL path, e.g. `token.metadata.env`) — logged in clear by default, salt-able per key via the audit device's `salt_fields`.
 
 > **Note:** metadata is matched at request time against the token's own values and is never compiled into the policy, so it stays correct for every token. Use it for authorization decisions that depend on identity attributes rather than path/capability alone.
 
