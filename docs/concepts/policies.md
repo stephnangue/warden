@@ -131,7 +131,7 @@ variables built from the request:
 
 | Namespace | Fields |
 | --- | --- |
-| `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `data.<key>` |
+| `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `namespace`, `data.<key>` |
 | `token` | `principal`, `role`, `type`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject, verified}`), `ttl_seconds`, `expires_at` |
 | `now` | the request timestamp |
 

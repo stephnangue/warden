@@ -422,7 +422,7 @@ CHECK:
 	// condition denies; the deciding result is recorded for audit on every
 	// branch.
 	if len(permissions.Conditions) > 0 {
-		allowed, condRes := evaluatePathConditions(permissions.Conditions, req, te, now)
+		allowed, condRes := evaluatePathConditions(permissions.Conditions, req, te, now, ns.Path)
 		ret.Condition = condRes
 		if !allowed {
 			return ret
@@ -441,7 +441,7 @@ CHECK:
 	// the routed backend doesn't implement the marker, or it declined
 	// the request (wrong method / Content-Type) — fail closed.
 	if len(permissions.MCP) > 0 {
-		ret.MCPDecision = decideMCP(permissions.MCP, req, te, now)
+		ret.MCPDecision = decideMCP(permissions.MCP, req, te, now, ns.Path)
 		if ret.MCPDecision != nil && ret.MCPDecision.Decision == "deny" {
 			return ret
 		}

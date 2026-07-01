@@ -157,7 +157,7 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 // Every returned decision passes through sanitizeMCPDecision so
 // adversary-controlled bytes don't leak into audit or response
 // rendering.
-func decideMCP(sets []*CBPMCPRules, req *logical.Request, te *logical.TokenEntry, now time.Time) *logical.MCPDecision {
+func decideMCP(sets []*CBPMCPRules, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) *logical.MCPDecision {
 	if len(sets) == 0 {
 		return nil
 	}
@@ -181,7 +181,7 @@ func decideMCP(sets []*CBPMCPRules, req *logical.Request, te *logical.TokenEntry
 			RuleType: desc.ParseErr.Kind,
 		}
 	default:
-		d = evaluateMCPDescriptor(sets, desc, req, te, now)
+		d = evaluateMCPDescriptor(sets, desc, req, te, now, nsPath)
 		if d == nil {
 			// Defence in depth: evaluateMCPDescriptor returns nil
 			// only for empty sets (handled above) or for a non-nil
@@ -212,7 +212,7 @@ func decideMCP(sets []*CBPMCPRules, req *logical.Request, te *logical.TokenEntry
 // descriptor carries no calls. The caller in AllowOperation handles
 // structural failures (nil descriptor, ParseErr non-nil) before
 // invoking this function.
-func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescriptor, req *logical.Request, te *logical.TokenEntry, now time.Time) *logical.MCPDecision {
+func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescriptor, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) *logical.MCPDecision {
 	if len(sets) == 0 {
 		return nil
 	}
@@ -225,7 +225,7 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 	// common no-condition path allocates nothing extra.
 	var act *celActivation
 	if mcpSetsHaveCondition(sets) {
-		act = newCELActivation(celRequestInputFromRequest(req), celTokenInputFromEntry(te, now), now, nil)
+		act = newCELActivation(celRequestInputFromRequest(req, nsPath), celTokenInputFromEntry(te, now), now, nil)
 	}
 
 	batch := len(desc.Calls) > 1

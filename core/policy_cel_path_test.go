@@ -247,6 +247,38 @@ func TestCBP_ConditionsBlockRemoved(t *testing.T) {
 	assert.Contains(t, err.Error(), "token.metadata")
 }
 
+// TestCBP_RequestNamespace confirms request.namespace (the request's target
+// namespace) is exposed and can be compared against token.namespace (where the
+// token was minted) — e.g. to deny a parent-namespace token acting in a child
+// namespace. Both values are captured in the audited Inputs.
+func TestCBP_RequestNamespace(t *testing.T) {
+	env, err := baseCELEnv()
+	require.NoError(t, err)
+	src := "token.namespace == request.namespace"
+	prg, refPaths, err := compileCELCondition(env, src)
+	require.NoError(t, err)
+	cond := &compiledCondition{Source: src, Program: prg, RefPaths: refPaths}
+
+	req := &logical.Request{Operation: logical.ReadOperation, Path: "x"}
+	te := &logical.TokenEntry{NamespacePath: "team-a/"}
+	now := time.Now()
+
+	// Token minted in team-a/ acting in team-a/ -> allow.
+	ok, res := evaluatePathConditions([]*compiledCondition{cond}, req, te, now, "team-a/")
+	assert.True(t, ok)
+	require.NotNil(t, res)
+	assert.Equal(t, "allow", res.Decision)
+	assert.Equal(t, "team-a/", res.Inputs["request.namespace"])
+	assert.Equal(t, "team-a/", res.Inputs["token.namespace"])
+
+	// Same token acting in child namespace team-a/team-b/ -> deny.
+	ok, res = evaluatePathConditions([]*compiledCondition{cond}, req, te, now, "team-a/team-b/")
+	assert.False(t, ok)
+	require.NotNil(t, res)
+	assert.Equal(t, "deny", res.Decision)
+	assert.Equal(t, "team-a/team-b/", res.Inputs["request.namespace"])
+}
+
 func BenchmarkAllowOperation_NoCondition(b *testing.B) {
 	ctx := testContext()
 	policy, _ := ParseCBPPolicy(namespace.RootNamespace, `
