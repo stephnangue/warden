@@ -152,9 +152,6 @@ type MCPRulesHCL struct {
 
 type CBPPermissions struct {
 	CapabilitiesBitmap     uint32
-	AllowedParameters      map[string][]any
-	DeniedParameters       map[string][]any
-	RequiredParameters     []string
 	PaginationLimit        int
 	GrantingPoliciesMap    map[uint32][]sdklogical.PolicyInfo
 	ResponseKeysFilterPath string
@@ -233,33 +230,8 @@ func (m *CBPMCPRules) Clone() *CBPMCPRules {
 func (p *CBPPermissions) Clone() (*CBPPermissions, error) {
 	ret := &CBPPermissions{
 		CapabilitiesBitmap:     p.CapabilitiesBitmap,
-		RequiredParameters:     p.RequiredParameters[:],
 		PaginationLimit:        p.PaginationLimit,
 		ResponseKeysFilterPath: p.ResponseKeysFilterPath,
-	}
-
-	switch {
-	case p.AllowedParameters == nil:
-	case len(p.AllowedParameters) == 0:
-		ret.AllowedParameters = make(map[string][]any)
-	default:
-		clonedAllowed, err := copystructure.Copy(p.AllowedParameters)
-		if err != nil {
-			return nil, err
-		}
-		ret.AllowedParameters = clonedAllowed.(map[string][]any)
-	}
-
-	switch {
-	case p.DeniedParameters == nil:
-	case len(p.DeniedParameters) == 0:
-		ret.DeniedParameters = make(map[string][]any)
-	default:
-		clonedDenied, err := copystructure.Copy(p.DeniedParameters)
-		if err != nil {
-			return nil, err
-		}
-		ret.DeniedParameters = clonedDenied.(map[string][]any)
 	}
 
 	switch {
@@ -464,21 +436,10 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			}
 		}
 
-		if pc.AllowedParametersHCL != nil {
-			pc.Permissions.AllowedParameters = make(map[string][]interface{}, len(pc.AllowedParametersHCL))
-			for k, v := range pc.AllowedParametersHCL {
-				pc.Permissions.AllowedParameters[strings.ToLower(k)] = v
-			}
-		}
-		if pc.DeniedParametersHCL != nil {
-			pc.Permissions.DeniedParameters = make(map[string][]interface{}, len(pc.DeniedParametersHCL))
-
-			for k, v := range pc.DeniedParametersHCL {
-				pc.Permissions.DeniedParameters[strings.ToLower(k)] = v
-			}
-		}
-		if len(pc.RequiredParametersHCL) > 0 {
-			pc.Permissions.RequiredParameters = pc.RequiredParametersHCL[:]
+		if len(pc.AllowedParametersHCL) > 0 || len(pc.DeniedParametersHCL) > 0 || len(pc.RequiredParametersHCL) > 0 {
+			return fmt.Errorf("path %q: required_parameters/allowed_parameters/denied_parameters have been removed — "+
+				"express request-body constraints as a CEL `condition` over request.data, e.g. "+
+				"condition = \"has(request.data.owner) && request.data.tier in ['gold','silver']\"", key)
 		}
 		if len(pc.ResponseKeysFilterPathHCL) > 0 {
 			pc.Permissions.ResponseKeysFilterPath = pc.ResponseKeysFilterPathHCL

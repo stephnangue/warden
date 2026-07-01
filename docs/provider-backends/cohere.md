@@ -225,19 +225,19 @@ For request-body policies (e.g., restrict to specific models or limit token usag
 warden policy write cohere-restricted - <<EOF
 path "cohere/role/+/gateway/v2/chat" {
   capabilities = ["create"]
-  required_parameters = {
-    "model" = ["command-a-03-2025", "command-r-plus-08-2024", "command-r-08-2024"]
-  }
-  max_parameters = {
-    "max_tokens" = 4096
-  }
+  condition = <<-CEL
+    has(request.data.model) &&
+    request.data.model in ["command-a-03-2025", "command-r-plus-08-2024", "command-r-08-2024"] &&
+    (!has(request.data.max_tokens) || request.data.max_tokens <= 4096)
+  CEL
 }
 
 path "cohere/role/+/gateway/v2/embed" {
   capabilities = ["create"]
-  required_parameters = {
-    "model" = ["embed-v4.0", "embed-english-v3.0", "embed-multilingual-v3.0"]
-  }
+  condition = <<-CEL
+    has(request.data.model) &&
+    request.data.model in ["embed-v4.0", "embed-english-v3.0", "embed-multilingual-v3.0"]
+  CEL
 }
 EOF
 ```

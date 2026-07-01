@@ -206,8 +206,8 @@ MODEL="claude-sonnet-4-5"            # a model your Anthropic account can use
 
 warden policy write anthropic-access - <<EOF
 path "anthropic/role/+/gateway*" {
-  capabilities       = ["create", "read", "update", "delete", "patch"]
-  allowed_parameters = { "model" = ["$MODEL"], "*" = [] }
+  capabilities = ["create", "read", "update", "delete", "patch"]
+  condition    = "!has(request.data.model) || request.data.model == '$MODEL'"
 }
 EOF
 ```
@@ -272,7 +272,7 @@ MCP server so we also stop storing MCP tokens.
 - **`cred spec create` fails** — the Console key in `secrets/anthropic-key.txt` is wrong; it's
   validated via `GET /v1/models` at create time.
 - **Claude shows `403` on a model** — the `anthropic-access` policy (or a tighter
-  `allowed_parameters`) is blocking that `model`/param.
+  `condition` over `request.data.model`) is blocking that `model`.
 
 ## Cleanup
 

@@ -212,11 +212,10 @@ For fine-grained cost control, restrict access based on AI request fields:
 warden policy write mistral-restricted - <<EOF
 path "mistral/role/+/gateway/v1/chat/completions" {
   capabilities = ["create"]
-  allowed_parameters = {
-    "model" = ["mistral-small-latest", "mistral-medium-latest"]
-    "stream" = ["true"]
-    "*"      = []
-  }
+  condition = <<-CEL
+    (!has(request.data.model) || request.data.model in ["mistral-small-latest", "mistral-medium-latest"]) &&
+    (!has(request.data.stream) || request.data.stream == true)
+  CEL
 }
 EOF
 ```
@@ -227,12 +226,9 @@ You can also combine parameter restrictions with runtime conditions to protect c
 warden policy write mistral-prod-restricted - <<EOF
 path "mistral/role/+/gateway/v1/chat/completions" {
   capabilities = ["create"]
-  allowed_parameters = {
-    "model" = ["mistral-small-latest"]
-    "stream" = ["true"]
-    "*"      = []
-  }
   condition = <<-CEL
+    (!has(request.data.model) || request.data.model in ["mistral-small-latest"]) &&
+    (!has(request.data.stream) || request.data.stream == true) &&
     cidrContains("10.0.0.0/8", request.client_ip) &&
     now.getHours("UTC") >= 8 && now.getHours("UTC") < 18 &&
     now.getDayOfWeek("UTC") in [1, 2, 3, 4, 5]

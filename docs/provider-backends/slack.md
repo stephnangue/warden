@@ -203,11 +203,7 @@ For fine-grained access control, restrict which Slack methods and channels a rol
 warden policy write slack-restricted - <<EOF
 path "slack/role/+/gateway/chat.postMessage" {
   capabilities = ["create"]
-  allowed_parameters = {
-    "channel" = ["#alerts", "#ops"]
-    "text"    = []
-    "*"       = []
-  }
+  condition = "!has(request.data.channel) || request.data.channel in ['#alerts', '#ops']"
 }
 
 path "slack/role/+/gateway/conversations.list" {
@@ -216,10 +212,7 @@ path "slack/role/+/gateway/conversations.list" {
 
 path "slack/role/+/gateway/conversations.history" {
   capabilities = ["create"]
-  allowed_parameters = {
-    "channel" = []
-    "limit"   = []
-  }
+  condition = "request.data.all(k, k in ['channel', 'limit'])"
 }
 EOF
 ```
@@ -230,15 +223,9 @@ You can combine parameter restrictions with runtime conditions. For example, res
 warden policy write slack-prod-restricted - <<EOF
 path "slack/role/+/gateway/chat.postMessage" {
   capabilities = ["create"]
-  allowed_parameters = {
-    "channel" = ["#alerts", "#incidents"]
-    "text"    = []
-    "*"       = []
-  }
-  denied_parameters = {
-    "as_user" = ["true"]
-  }
   condition = <<-CEL
+    (!has(request.data.channel) || request.data.channel in ["#alerts", "#incidents"]) &&
+    (!has(request.data.as_user) || request.data.as_user != true) &&
     cidrContains("10.0.0.0/8", request.client_ip) &&
     now.getHours("UTC") >= 8 && now.getHours("UTC") < 18 &&
     now.getDayOfWeek("UTC") in [1, 2, 3, 4, 5]
@@ -384,7 +371,7 @@ This allows operators to enforce policies such as:
 - Restrict which channels a service can post to
 - Prevent impersonation (`as_user` denied)
 - Limit read-only services to `conversations.list` and `conversations.history`
-- Require specific fields to be present (`required_parameters`)
+- Require specific fields to be present (`has(request.data.x)` in a `condition`)
 
 ## TLS Certificate Authentication
 

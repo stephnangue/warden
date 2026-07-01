@@ -182,6 +182,28 @@ func TestCBP_PathCondition_UnconditionalGrantWins(t *testing.T) {
 	assert.True(t, res.Allowed, "unconditional grant from B admits any request")
 }
 
+// TestCBP_RequestParamsRemoved confirms the removed request-body parameter
+// constraints are rejected at parse time with a directed "use CEL" error.
+func TestCBP_RequestParamsRemoved(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"required", `required_parameters = ["owner"]`},
+		{"allowed", `allowed_parameters = { tier = ["gold"] }`},
+		{"denied", `denied_parameters = { internal = [] }`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseCBPPolicy(namespace.RootNamespace, `
+				path "secret/data/app" {
+					capabilities = ["create"]
+					`+tc.body+`
+				}
+			`)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "have been removed")
+			assert.Contains(t, err.Error(), "request.data")
+		})
+	}
+}
+
 // TestCBP_ConditionsBlockRemoved confirms the legacy conditions {} block is
 // rejected at parse time with a directed "use CEL" error.
 func TestCBP_ConditionsBlockRemoved(t *testing.T) {

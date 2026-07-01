@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,8 +12,6 @@ import (
 	"github.com/armon/go-radix"
 	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/go-secure-stdlib/parseutil"
-	"github.com/hashicorp/go-secure-stdlib/strutil"
-	"github.com/mitchellh/copystructure"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 
@@ -175,8 +171,6 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 			case pc.Permissions.CapabilitiesBitmap&DenyCapabilityInt > 0:
 				// If this new policy explicitly denies, only save the deny value
 				existingPerms.CapabilitiesBitmap = DenyCapabilityInt
-				existingPerms.AllowedParameters = nil
-				existingPerms.DeniedParameters = nil
 				goto INSERT
 
 			default:
@@ -184,62 +178,6 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 				// value
 				existingPerms.CapabilitiesBitmap = existingPerms.CapabilitiesBitmap | pc.Permissions.CapabilitiesBitmap
 				existingPerms.GrantingPoliciesMap = addGrantingPoliciesToMap(existingPerms.GrantingPoliciesMap, policy, pc.Permissions.CapabilitiesBitmap)
-			}
-
-			if len(pc.Permissions.AllowedParameters) > 0 {
-				if existingPerms.AllowedParameters == nil {
-					clonedAllowed, err := copystructure.Copy(pc.Permissions.AllowedParameters)
-					if err != nil {
-						return nil, err
-					}
-					existingPerms.AllowedParameters = clonedAllowed.(map[string][]interface{})
-				} else {
-					for key, value := range pc.Permissions.AllowedParameters {
-						pcValue, ok := existingPerms.AllowedParameters[key]
-						// If an empty array exist it should overwrite any other
-						// value.
-						if len(value) == 0 || (ok && len(pcValue) == 0) {
-							existingPerms.AllowedParameters[key] = []interface{}{}
-						} else {
-							// Merge the two maps, appending values on key conflict.
-							existingPerms.AllowedParameters[key] = append(value, existingPerms.AllowedParameters[key]...)
-						}
-					}
-				}
-			}
-
-			if len(pc.Permissions.DeniedParameters) > 0 {
-				if existingPerms.DeniedParameters == nil {
-					clonedDenied, err := copystructure.Copy(pc.Permissions.DeniedParameters)
-					if err != nil {
-						return nil, err
-					}
-					existingPerms.DeniedParameters = clonedDenied.(map[string][]interface{})
-				} else {
-					for key, value := range pc.Permissions.DeniedParameters {
-						pcValue, ok := existingPerms.DeniedParameters[key]
-						// If an empty array exist it should overwrite any other
-						// value.
-						if len(value) == 0 || (ok && len(pcValue) == 0) {
-							existingPerms.DeniedParameters[key] = []interface{}{}
-						} else {
-							// Merge the two maps, appending values on key conflict.
-							existingPerms.DeniedParameters[key] = append(value, existingPerms.DeniedParameters[key]...)
-						}
-					}
-				}
-			}
-
-			if len(pc.Permissions.RequiredParameters) > 0 {
-				if len(existingPerms.RequiredParameters) == 0 {
-					existingPerms.RequiredParameters = pc.Permissions.RequiredParameters
-				} else {
-					for _, v := range pc.Permissions.RequiredParameters {
-						if !slices.Contains(existingPerms.RequiredParameters, v) {
-							existingPerms.RequiredParameters = append(existingPerms.RequiredParameters, v)
-						}
-					}
-				}
 			}
 
 			// Lowest set pagination limit wins.
@@ -511,154 +449,47 @@ CHECK:
 
 	ret.GrantingPolicies = grantingPolicies
 
-	// Only check parameter permissions for operations that can modify
-	// parameters.
-	if op == logical.ReadOperation || op == logical.UpdateOperation || op == logical.CreateOperation || op == logical.PatchOperation {
-		for _, parameter := range permissions.RequiredParameters {
-			if _, ok := req.Data[strings.ToLower(parameter)]; !ok {
-				return ret
-			}
-		}
-
-		// If there are no data fields, allow
-		if len(req.Data) == 0 {
-			ret.Allowed = true
-			return ret
-		}
-
-		if len(permissions.DeniedParameters) == 0 {
-			goto ALLOWED_PARAMETERS
-		}
-
-		// Check if all parameters have been denied
-		if _, ok := permissions.DeniedParameters["*"]; ok {
-			return ret
-		}
-
-		for parameter, value := range req.Data {
-			// Check if parameter has been explicitly denied
-			if valueSlice, ok := permissions.DeniedParameters[strings.ToLower(parameter)]; ok {
-				// If the value exists in denied values slice, deny
-				if valueInParameterList(value, valueSlice) {
-					return ret
-				}
-			}
-		}
-
-	ALLOWED_PARAMETERS:
-		// If we don't have any allowed parameters set, allow
-		if len(permissions.AllowedParameters) == 0 {
-			ret.Allowed = true
-			return ret
-		}
-
-		_, allowedAll := permissions.AllowedParameters["*"]
-		if len(permissions.AllowedParameters) == 1 && allowedAll {
-			ret.Allowed = true
-			return ret
-		}
-
-		for parameter, value := range req.Data {
-			valueSlice, ok := permissions.AllowedParameters[strings.ToLower(parameter)]
-			// Requested parameter is not in allowed list
-			if !ok && !allowedAll {
-				return ret
-			}
-
-			// If the value doesn't exists in the allowed values slice,
-			// deny
-			if ok && !valueInParameterList(value, valueSlice) {
-				return ret
-			}
-		}
-	} else if op == logical.ListOperation || op == logical.ScanOperation {
+	// Pagination clamping and list-response key filtering for list/scan.
+	// (Request-body parameter constraints have been removed; express value
+	// rules as a CEL condition over request.data — e.g. has(request.data.x)
+	// to require a field, or request.data.tier in [...] to constrain a value.)
+	if op == logical.ListOperation || op == logical.ScanOperation {
 		if permissions.PaginationLimit > 0 {
 			valRaw, ok := req.Data[limitParameterName]
 			if !ok {
-				// For callers unaware of pagination, deny the request IF
-				// limit is a required parameter; this prevents integrations
-				// from silently continuing to work if they were not expecting
-				// to have pagination while also allowing them to continue
-				// working if the operator just wishes to enable pagination
-				// for them without breakage.
-
-				limitRequiredParameter := false
-				for _, parameter := range permissions.RequiredParameters {
-					if strings.ToLower(parameter) == limitParameterName {
-						limitRequiredParameter = true
-						break
-					}
-				}
-
-				if limitRequiredParameter {
-					return ret
-				}
-
-				// Otherwise, update our field value to the maximum allowed.
+				// No limit supplied — clamp to the maximum allowed page size.
 				if req.Data == nil {
-					// A list operation may have no parameters so we need to
-					// populate this explicitly.
 					req.Data = make(map[string]interface{}, 1)
 				}
 				req.Data[limitParameterName] = strconv.Itoa(permissions.PaginationLimit)
 			} else {
-				// Value was provided on the API request and we have a
-				// non-zero limit so we know it was intended to be a limit
-				// operation on a paginated endpoint. Parse the value and
-				// ACL accordingly.
+				// Limit supplied on a paginated endpoint — parse and clamp.
 				val, err := parseutil.SafeParseInt(valRaw)
 				if err != nil {
-					// Unable to parse provided limit as an integer; we assume
-					// the policy author is correct that this is a regular list
-					// endpoint which (optionally) takes a limit. The one
-					// exception is if the user has passed the literal value
-					// "max" to signify the maximum allowed page size, which
-					// works even if the parameter is required (versus leaving
-					// it off).
+					// Not an integer; only the literal "max" is honored, mapping
+					// to the maximum allowed page size. Anything else is denied.
 					valStr, ok := valRaw.(string)
 					if !ok || valStr != "max" {
-						// Request denied.
 						return ret
 					}
-
-					// Otherwise, update our field value to the maximum allowed.
 					req.Data[limitParameterName] = strconv.Itoa(permissions.PaginationLimit)
-				} else {
+				} else if val > permissions.PaginationLimit {
 					// Deny if we exceed our allotted page size.
-					if val > permissions.PaginationLimit {
-						return ret
-					}
+					return ret
 				}
 			}
 		} else {
-			// Check if we have the value `max` and set it to 0. This allows
-			// pagination-aware applications to read all data via the same
-			// semantics, without knowing ahead of time whether they are
-			// pagination-limited on a given endpoint: they can call with
-			// after=""&limit=max and then retry with after=<last>&limit=max
-			// and see if any results are returned, repeating until none are.
-
-			valRaw, ok := req.Data[limitParameterName]
-			if ok {
-				// Failure to parse should be ignored in this case. The
-				// operator has not indicated to us that this value of
-				// limit should be an integer limit and it may be some
-				// custom plugin with alternative behavior.
-				valStr, ok := valRaw.(string)
-				if ok && valStr == "max" {
-					// Application has indicated they're aware of the value
-					// of limit and so we should set the limit to zero
-					// (maximum).
+			// No pagination limit configured: honor the "max" sentinel so
+			// pagination-aware applications can request all data uniformly.
+			if valRaw, ok := req.Data[limitParameterName]; ok {
+				if valStr, ok := valRaw.(string); ok && valStr == "max" {
 					req.Data[limitParameterName] = "0"
 				}
 			}
 		}
-	}
 
-	// Return the ResponseKeysFilterPath value from this permission: it
-	// will allow filterListResponse to evaluate list filtering without
-	// having knowledge of concrete policies.
-	if op == logical.ListOperation || op == logical.ScanOperation {
+		// Surface the filter path so filterListResponse can evaluate list
+		// filtering without knowledge of concrete policies.
 		ret.ResponseKeysFilterPath = permissions.ResponseKeysFilterPath
 	}
 
@@ -865,37 +696,4 @@ func (c *Core) performPolicyChecks(ctx context.Context, cbp *CBP, te *logical.To
 	ret.Allowed = true
 
 	return ret
-}
-
-func valueInParameterList(v interface{}, list []interface{}) bool {
-	// Empty list is equivalent to the item always existing in the list
-	if len(list) == 0 {
-		return true
-	}
-
-	return valueInSlice(v, list)
-}
-
-func valueInSlice(v interface{}, list []interface{}) bool {
-	for _, el := range list {
-		if el == nil || v == nil {
-			// It doesn't seem possible to set up a nil entry in the list, but it is possible
-			// to pass in a null entry in the API request being checked. Just in case,
-			// nil will match nil.
-			if el == v {
-				return true
-			}
-		} else if reflect.TypeOf(el).String() == "string" && reflect.TypeOf(v).String() == "string" {
-			item := el.(string)
-			val := v.(string)
-
-			if strutil.GlobbedStringsMatch(item, val) {
-				return true
-			}
-		} else if reflect.DeepEqual(el, v) {
-			return true
-		}
-	}
-
-	return false
 }
