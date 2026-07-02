@@ -108,31 +108,6 @@ two candidates, so the named rule is what breaks the tie.
 pattern — a different, less-specific pattern that also matches does not add its
 capabilities.)
 
-### Parameter constraints
-
-A path block can constrain the parameters of a request, not just the operation:
-
-```hcl
-path "secret/data/app" {
-  capabilities = ["create", "update"]
-
-  required_parameters = ["owner"]
-
-  allowed_parameters = {
-    "tier" = ["gold", "silver"]   # only these values
-    "name" = []                   # any value, but the key is allowed
-  }
-
-  denied_parameters = {
-    "internal" = []               # this key may never be set
-  }
-}
-```
-
-`required_parameters` must be present; `allowed_parameters` whitelists keys (and
-optionally their values); `denied_parameters` forbids keys (an empty list denies
-the key entirely).
-
 ### Fine-grained access
 
 A path block can gate access on request context and values with a
@@ -193,6 +168,9 @@ Examples:
 ```hcl
 # numeric cap on a request-body field
 condition = "request.data.ttl_seconds <= 3600"
+
+# request-body constraints: require a field, restrict a value, forbid a key
+condition = "has(request.data.owner) && request.data.tier in ['gold', 'silver'] && !has(request.data.internal)"
 
 # set membership over token metadata
 condition = "token.metadata.env in ['dev', 'staging']"

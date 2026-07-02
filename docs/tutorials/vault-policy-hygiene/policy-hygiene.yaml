@@ -55,8 +55,9 @@ instructions: |
          - `capabilities` list contains "sudo"
          - `path "*"` or `path "sys/*"` at top level
          - create/update/delete/patch on a glob path without
-           `allowed_parameters` narrowing
-       Remediation: narrow path, drop sudo, add allowed_parameters.
+           a `condition` narrowing it
+       Remediation: narrow path, drop sudo, add a CEL `condition`
+       over request.data.
 
   Severity is deterministic, not subjective:
     - critical: any least_privilege_smell with "sudo" OR path "*"

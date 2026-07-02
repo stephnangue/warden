@@ -205,11 +205,10 @@ For fine-grained cost control, restrict access based on AI request fields:
 warden policy write anthropic-restricted - <<EOF
 path "anthropic/role/+/gateway/v1/messages" {
   capabilities = ["create"]
-  allowed_parameters = {
-    "model" = ["claude-sonnet-4-20250514", "claude-haiku-4-20250414"]
-    "stream" = ["true"]
-    "*"      = []
-  }
+  condition = <<-CEL
+    (!has(request.data.model) || request.data.model in ["claude-sonnet-4-20250514", "claude-haiku-4-20250414"]) &&
+    (!has(request.data.stream) || request.data.stream == true)
+  CEL
 }
 EOF
 ```
@@ -220,12 +219,9 @@ You can also combine parameter restrictions with runtime conditions to protect c
 warden policy write anthropic-prod-restricted - <<EOF
 path "anthropic/role/+/gateway/v1/messages" {
   capabilities = ["create"]
-  allowed_parameters = {
-    "model" = ["claude-sonnet-4-20250514", "claude-haiku-4-20250414"]
-    "stream" = ["true"]
-    "*"      = []
-  }
   condition = <<-CEL
+    (!has(request.data.model) || request.data.model in ["claude-sonnet-4-20250514", "claude-haiku-4-20250414"]) &&
+    (!has(request.data.stream) || request.data.stream == true) &&
     cidrContains("10.0.0.0/8", request.client_ip) &&
     now.getHours("UTC") >= 8 && now.getHours("UTC") < 18 &&
     now.getDayOfWeek("UTC") in [1, 2, 3, 4, 5]

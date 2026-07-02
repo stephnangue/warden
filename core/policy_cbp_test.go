@@ -13,6 +13,8 @@ import (
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 )
 
 // Helper function to create a context with root namespace
@@ -655,214 +657,6 @@ func TestCBP_ExistingDenyNotOverridden(t *testing.T) {
 }
 
 // =============================================================================
-// Parameter Tests - Allowed Parameters
-// =============================================================================
-
-func TestCBP_AllowedParameters(t *testing.T) {
-	ctx := testContext()
-
-	policy := testParsePolicy(t, `
-		path "secret/data/*" {
-			capabilities = ["create", "update"]
-			allowed_parameters = {
-				"key1" = []
-				"key2" = ["value1", "value2"]
-			}
-		}
-	`)
-
-	cbp, err := NewCBP(ctx, []*Policy{policy})
-	require.NoError(t, err)
-
-	// Empty allowed values means any value is allowed
-	req := &logical.Request{
-		Path:      "secret/data/test",
-		Operation: logical.CreateOperation,
-		Data: map[string]interface{}{
-			"key1": "any-value",
-		},
-	}
-	result := cbp.AllowOperation(ctx, req, nil, false)
-	assert.True(t, result.Allowed)
-
-	// Specific allowed value
-	req.Data = map[string]interface{}{
-		"key2": "value1",
-	}
-	result = cbp.AllowOperation(ctx, req, nil, false)
-	assert.True(t, result.Allowed)
-
-	// Value not in allowed list
-	req.Data = map[string]interface{}{
-		"key2": "value3",
-	}
-	result = cbp.AllowOperation(ctx, req, nil, false)
-	assert.False(t, result.Allowed)
-
-	// Parameter not in allowed list
-	req.Data = map[string]interface{}{
-		"key3": "value",
-	}
-	result = cbp.AllowOperation(ctx, req, nil, false)
-	assert.False(t, result.Allowed)
-}
-
-func TestCBP_AllowedParametersWildcard(t *testing.T) {
-	ctx := testContext()
-
-	policy := testParsePolicy(t, `
-		path "secret/data/*" {
-			capabilities = ["create"]
-			allowed_parameters = {
-				"*" = []
-			}
-		}
-	`)
-
-	cbp, err := NewCBP(ctx, []*Policy{policy})
-	require.NoError(t, err)
-
-	// Any parameter should be allowed
-	req := &logical.Request{
-		Path:      "secret/data/test",
-		Operation: logical.CreateOperation,
-		Data: map[string]interface{}{
-			"any_key": "any_value",
-			"another": "value",
-		},
-	}
-	result := cbp.AllowOperation(ctx, req, nil, false)
-	assert.True(t, result.Allowed)
-}
-
-// =============================================================================
-// Parameter Tests - Denied Parameters
-// =============================================================================
-
-func TestCBP_DeniedParameters(t *testing.T) {
-	ctx := testContext()
-
-	policy := testParsePolicy(t, `
-		path "secret/data/*" {
-			capabilities = ["create", "update"]
-			denied_parameters = {
-				"password" = []
-				"secret_key" = ["forbidden_value"]
-			}
-		}
-	`)
-
-	cbp, err := NewCBP(ctx, []*Policy{policy})
-	require.NoError(t, err)
-
-	// Denied parameter with any value
-	req := &logical.Request{
-		Path:      "secret/data/test",
-		Operation: logical.CreateOperation,
-		Data: map[string]interface{}{
-			"password": "any-password",
-		},
-	}
-	result := cbp.AllowOperation(ctx, req, nil, false)
-	assert.False(t, result.Allowed)
-
-	// Denied parameter with specific value
-	req.Data = map[string]interface{}{
-		"secret_key": "forbidden_value",
-	}
-	result = cbp.AllowOperation(ctx, req, nil, false)
-	assert.False(t, result.Allowed)
-
-	// Denied parameter with non-forbidden value
-	req.Data = map[string]interface{}{
-		"secret_key": "allowed_value",
-	}
-	result = cbp.AllowOperation(ctx, req, nil, false)
-	assert.True(t, result.Allowed)
-
-	// Non-denied parameter
-	req.Data = map[string]interface{}{
-		"normal_key": "value",
-	}
-	result = cbp.AllowOperation(ctx, req, nil, false)
-	assert.True(t, result.Allowed)
-}
-
-func TestCBP_DeniedParametersWildcard(t *testing.T) {
-	ctx := testContext()
-
-	policy := testParsePolicy(t, `
-		path "secret/data/*" {
-			capabilities = ["create"]
-			denied_parameters = {
-				"*" = []
-			}
-		}
-	`)
-
-	cbp, err := NewCBP(ctx, []*Policy{policy})
-	require.NoError(t, err)
-
-	// Any parameter should be denied
-	req := &logical.Request{
-		Path:      "secret/data/test",
-		Operation: logical.CreateOperation,
-		Data: map[string]interface{}{
-			"any_key": "value",
-		},
-	}
-	result := cbp.AllowOperation(ctx, req, nil, false)
-	assert.False(t, result.Allowed)
-
-	// No data should be allowed
-	req.Data = nil
-	result = cbp.AllowOperation(ctx, req, nil, false)
-	assert.True(t, result.Allowed)
-}
-
-// =============================================================================
-// Parameter Tests - Required Parameters
-// =============================================================================
-
-func TestCBP_RequiredParameters(t *testing.T) {
-	ctx := testContext()
-
-	policy := testParsePolicy(t, `
-		path "secret/data/*" {
-			capabilities = ["create"]
-			required_parameters = ["name", "type"]
-		}
-	`)
-
-	cbp, err := NewCBP(ctx, []*Policy{policy})
-	require.NoError(t, err)
-
-	// All required parameters present
-	req := &logical.Request{
-		Path:      "secret/data/test",
-		Operation: logical.CreateOperation,
-		Data: map[string]interface{}{
-			"name": "test",
-			"type": "secret",
-		},
-	}
-	result := cbp.AllowOperation(ctx, req, nil, false)
-	assert.True(t, result.Allowed)
-
-	// Missing required parameter
-	req.Data = map[string]interface{}{
-		"name": "test",
-	}
-	result = cbp.AllowOperation(ctx, req, nil, false)
-	assert.False(t, result.Allowed)
-
-	// No data at all
-	req.Data = nil
-	result = cbp.AllowOperation(ctx, req, nil, false)
-	assert.False(t, result.Allowed)
-}
-
-// =============================================================================
 // Capabilities Method Tests
 // =============================================================================
 
@@ -1271,62 +1065,26 @@ func TestPerformPolicyChecks_RootPrivsGranted(t *testing.T) {
 
 func TestCBPPermissions_Clone(t *testing.T) {
 	original := &CBPPermissions{
-		CapabilitiesBitmap: ReadCapabilityInt | CreateCapabilityInt,
-		AllowedParameters: map[string][]any{
-			"key1": {"value1", "value2"},
+		CapabilitiesBitmap:     ReadCapabilityInt | CreateCapabilityInt,
+		PaginationLimit:        100,
+		ResponseKeysFilterPath: "secret/data/{{key}}",
+		GrantingPoliciesMap: map[uint32][]sdklogical.PolicyInfo{
+			ReadCapabilityInt: {{Name: "p1"}},
 		},
-		DeniedParameters: map[string][]any{
-			"password": {},
-		},
-		RequiredParameters: []string{"name", "type"},
-		PaginationLimit:    100,
 	}
 
 	cloned, err := original.Clone()
 	require.NoError(t, err)
 
-	// Verify values are copied
 	assert.Equal(t, original.CapabilitiesBitmap, cloned.CapabilitiesBitmap)
 	assert.Equal(t, original.PaginationLimit, cloned.PaginationLimit)
-	assert.Equal(t, original.RequiredParameters, cloned.RequiredParameters)
+	assert.Equal(t, original.ResponseKeysFilterPath, cloned.ResponseKeysFilterPath)
+	assert.Equal(t, original.GrantingPoliciesMap, cloned.GrantingPoliciesMap)
 
-	// Verify deep copy of maps
-	assert.Equal(t, original.AllowedParameters, cloned.AllowedParameters)
-	assert.Equal(t, original.DeniedParameters, cloned.DeniedParameters)
-
-	// Modify original and verify clone is not affected
-	original.AllowedParameters["key1"] = []any{"modified"}
-	assert.NotEqual(t, original.AllowedParameters["key1"], cloned.AllowedParameters["key1"])
-}
-
-func TestCBPPermissions_CloneNilMaps(t *testing.T) {
-	original := &CBPPermissions{
-		CapabilitiesBitmap: ReadCapabilityInt,
-		RequiredParameters: []string{},
-	}
-
-	cloned, err := original.Clone()
-	require.NoError(t, err)
-
-	assert.Nil(t, cloned.AllowedParameters)
-	assert.Nil(t, cloned.DeniedParameters)
-}
-
-func TestCBPPermissions_CloneEmptyMaps(t *testing.T) {
-	original := &CBPPermissions{
-		CapabilitiesBitmap: ReadCapabilityInt,
-		AllowedParameters:  map[string][]any{},
-		DeniedParameters:   map[string][]any{},
-		RequiredParameters: []string{},
-	}
-
-	cloned, err := original.Clone()
-	require.NoError(t, err)
-
-	assert.NotNil(t, cloned.AllowedParameters)
-	assert.NotNil(t, cloned.DeniedParameters)
-	assert.Len(t, cloned.AllowedParameters, 0)
-	assert.Len(t, cloned.DeniedParameters, 0)
+	// Deep copy: mutating the original's granting-policies map must not
+	// affect the clone.
+	original.GrantingPoliciesMap[ReadCapabilityInt] = []sdklogical.PolicyInfo{{Name: "mutated"}}
+	assert.Equal(t, "p1", cloned.GrantingPoliciesMap[ReadCapabilityInt][0].Name)
 }
 
 // =============================================================================

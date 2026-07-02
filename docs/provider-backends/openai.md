@@ -213,11 +213,10 @@ For fine-grained cost control, restrict access based on AI request fields:
 warden policy write openai-restricted - <<EOF
 path "openai/role/+/gateway/v1/chat/completions" {
   capabilities = ["create"]
-  allowed_parameters = {
-    "model" = ["gpt-4o", "gpt-4o-mini"]
-    "stream" = ["true"]
-    "*"      = []
-  }
+  condition = <<-CEL
+    (!has(request.data.model) || request.data.model in ["gpt-4o", "gpt-4o-mini"]) &&
+    (!has(request.data.stream) || request.data.stream == true)
+  CEL
 }
 EOF
 ```
@@ -228,12 +227,9 @@ You can also combine parameter restrictions with runtime conditions to protect c
 warden policy write openai-prod-restricted - <<EOF
 path "openai/role/+/gateway/v1/chat/completions" {
   capabilities = ["create"]
-  allowed_parameters = {
-    "model" = ["gpt-4o", "gpt-4o-mini"]
-    "stream" = ["true"]
-    "*"      = []
-  }
   condition = <<-CEL
+    (!has(request.data.model) || request.data.model in ["gpt-4o", "gpt-4o-mini"]) &&
+    (!has(request.data.stream) || request.data.stream == true) &&
     cidrContains("10.0.0.0/8", request.client_ip) &&
     now.getHours("UTC") >= 8 && now.getHours("UTC") < 18 &&
     now.getDayOfWeek("UTC") in [1, 2, 3, 4, 5]
