@@ -231,7 +231,10 @@ even considered, and any failure denies the request immediately:
 2. **Condition** — does the path-level `condition` (CEL) hold?
 3. **MCP block** — for a gateway request, does the parsed body pass the
    `mcp { }` rules (including its per-call `condition`)?
-4. **Parameters** — finally, `required` / `allowed` / `denied` parameters.
+
+(For `list`/`scan` requests a final step clamps the pagination limit to the
+rule's `pagination_limit` and applies any response key filter — this shapes the
+response, it is not an access gate.)
 
 This ordering is not incidental — it shapes how policies must be written:
 
@@ -258,8 +261,9 @@ what an AI agent is actually allowed to do at the other end of the gateway.
 
 For **[Model Context Protocol](mcp.md) (MCP)** traffic, a path block can carry an `mcp { }`
 block. Warden parses the JSON-RPC body of the proxied request and authorizes each
-call by method, by the tool / resource / prompt it names, and by its parameters —
-before the request ever reaches the upstream:
+call by method, by the tool / resource / prompt it names, and by its arguments (a
+per-call CEL `condition` over `call.args`) — before the request ever reaches the
+upstream:
 
 ```hcl
 path "mcp/gateway/*" {
