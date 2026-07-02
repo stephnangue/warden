@@ -539,7 +539,7 @@ CHECK:
 	// the routed backend doesn't implement the marker, or it declined
 	// the request (wrong method / Content-Type) — fail closed.
 	if len(permissions.MCP) > 0 {
-		ret.MCPDecision = decideMCP(permissions.MCP, req)
+		ret.MCPDecision = decideMCP(permissions.MCP, req, te, now)
 		if ret.MCPDecision != nil && ret.MCPDecision.Decision == "deny" {
 			return ret
 		}

@@ -6,6 +6,7 @@ package core
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/logical"
@@ -39,6 +40,8 @@ const (
 	mcpRuleTypeDeniedPrompts    = "denied_prompts"
 	mcpRuleTypeAllowedParams    = "allowed_params"
 	mcpRuleTypeDeniedParams     = "denied_params"
+	mcpRuleTypeCondition        = "condition"
+	mcpRuleTypeConditionError   = "condition_error"
 	mcpRuleTypeMissingMethod    = "missing_method_header"
 
 	mcpRuleTypeMissingBody       = "missing_body"
@@ -154,7 +157,7 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 // Every returned decision passes through sanitizeMCPDecision so
 // adversary-controlled bytes don't leak into audit or response
 // rendering.
-func decideMCP(sets []*CBPMCPRules, req *logical.Request) *logical.MCPDecision {
+func decideMCP(sets []*CBPMCPRules, req *logical.Request, te *logical.TokenEntry, now time.Time) *logical.MCPDecision {
 	if len(sets) == 0 {
 		return nil
 	}
@@ -178,7 +181,7 @@ func decideMCP(sets []*CBPMCPRules, req *logical.Request) *logical.MCPDecision {
 			RuleType: desc.ParseErr.Kind,
 		}
 	default:
-		d = evaluateMCPDescriptor(sets, desc)
+		d = evaluateMCPDescriptor(sets, desc, req, te, now)
 		if d == nil {
 			// Defence in depth: evaluateMCPDescriptor returns nil
 			// only for empty sets (handled above) or for a non-nil
@@ -209,7 +212,7 @@ func decideMCP(sets []*CBPMCPRules, req *logical.Request) *logical.MCPDecision {
 // descriptor carries no calls. The caller in AllowOperation handles
 // structural failures (nil descriptor, ParseErr non-nil) before
 // invoking this function.
-func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescriptor) *logical.MCPDecision {
+func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescriptor, req *logical.Request, te *logical.TokenEntry, now time.Time) *logical.MCPDecision {
 	if len(sets) == 0 {
 		return nil
 	}
@@ -217,13 +220,25 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 		return nil
 	}
 
+	// Build the request-wide activation once (reused across the batch) only
+	// when at least one set carries a CEL condition; nil otherwise so the
+	// common no-condition path allocates nothing extra.
+	var act *celActivation
+	if mcpSetsHaveCondition(sets) {
+		act = newCELActivation(celRequestInputFromRequest(req), celTokenInputFromEntry(te, now), now, nil)
+	}
+
 	batch := len(desc.Calls) > 1
 	var lastAllow *logical.MCPDecision
 	for i := range desc.Calls {
-		d := evaluateMCPCall(sets, &desc.Calls[i])
+		call := &desc.Calls[i]
+		if act != nil {
+			act.call = buildCallNS(call.Method, call.Name, call.MatchArgs, call.BatchIndex)
+		}
+		d := evaluateMCPCall(sets, call, act)
 		if d.Decision == "deny" {
 			if batch {
-				idx := desc.Calls[i].BatchIndex
+				idx := call.BatchIndex
 				d.BatchIndex = &idx
 			}
 			return d
@@ -233,10 +248,20 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 	return lastAllow
 }
 
+func mcpSetsHaveCondition(sets []*CBPMCPRules) bool {
+	for _, s := range sets {
+		if s != nil && s.Condition != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // evaluateMCPCall runs all rule-sets against one MCPCall and applies
 // the cross-set OR / strongest-reason-deny semantics. Lowercases
 // method/name once at the boundary so per-set comparisons stay cheap.
-func evaluateMCPCall(sets []*CBPMCPRules, call *logical.MCPCall) *logical.MCPDecision {
+// act carries the per-call CEL activation (nil when no set has a condition).
+func evaluateMCPCall(sets []*CBPMCPRules, call *logical.MCPCall, act *celActivation) *logical.MCPDecision {
 	method := strings.ToLower(call.Method)
 	name := strings.ToLower(call.Name)
 
@@ -244,7 +269,7 @@ func evaluateMCPCall(sets []*CBPMCPRules, call *logical.MCPCall) *logical.MCPDec
 	var denyRank int
 
 	for _, set := range sets {
-		setDecision := evaluateMCPSetForCall(set, method, name, call)
+		setDecision := evaluateMCPSetForCall(set, method, name, call, act)
 		if setDecision.Decision == "allow" {
 			return setDecision
 		}
@@ -262,7 +287,7 @@ func evaluateMCPCall(sets []*CBPMCPRules, call *logical.MCPCall) *logical.MCPDec
 // nil) — either an allow with the matching pattern stamped, or a
 // deny with the failing gate and pattern stamped. Reads param values
 // from call.MatchArgs.
-func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.MCPCall) *logical.MCPDecision {
+func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.MCPCall, act *celActivation) *logical.MCPDecision {
 	d := &logical.MCPDecision{Method: method, Name: name}
 
 	// (a) Missing method → deny. The body-authoritative parser
@@ -354,10 +379,32 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 		}
 	}
 
-	// (f) Nothing denied — this set allows. Record the gate that
+	// (f) CEL condition gate (last, after the structured gates). Fail-closed:
+	// an erroring or false condition denies. Evaluated against the request /
+	// token namespaces plus this call.
+	if set.Condition != nil {
+		ok, err := evalCELCondition(set.Condition.Program, act)
+		if err != nil {
+			d.Decision = "deny"
+			d.RuleType = mcpRuleTypeConditionError
+			d.Condition = &logical.ConditionResult{Decision: "deny", Expression: set.Condition.Source, ErrorKind: celErrorKind(err)}
+			return d
+		}
+		if !ok {
+			d.Decision = "deny"
+			d.RuleType = mcpRuleTypeCondition
+			d.Condition = &logical.ConditionResult{Decision: "deny", Expression: set.Condition.Source}
+			return d
+		}
+	}
+
+	// (g) Nothing denied — this set allows. Record the gate that
 	// authorised the request so audit can show which rule fired.
 	d.Decision = "allow"
 	d.RuleType = mcpRuleTypeAllowedMethods
+	if set.Condition != nil {
+		d.Condition = &logical.ConditionResult{Decision: "allow", Expression: set.Condition.Source}
+	}
 	if len(set.AllowedMethods) > 0 {
 		d.MatchedRule = matchMCPAny(method, set.AllowedMethods)
 	} else {
@@ -448,7 +495,9 @@ func mcpDenyRank(ruleType string) int {
 		mcpRuleTypeDeniedTools,
 		mcpRuleTypeDeniedResources,
 		mcpRuleTypeDeniedPrompts,
-		mcpRuleTypeDeniedParams:
+		mcpRuleTypeDeniedParams,
+		mcpRuleTypeCondition,
+		mcpRuleTypeConditionError:
 		return 3
 	case mcpRuleTypeAllowedMethods,
 		mcpRuleTypeAllowedTools,
@@ -542,6 +591,7 @@ func sanitizeMCPDecision(d *logical.MCPDecision) {
 	d.MatchedRule = stripCTL(d.MatchedRule)
 	d.ParamName = stripCTL(d.ParamName)
 	d.ParamValue = stripCTL(d.ParamValue)
+	d.Condition.Sanitize()
 }
 
 // stripCTL removes ASCII control characters (\x00-\x1F, \x7F) from s.

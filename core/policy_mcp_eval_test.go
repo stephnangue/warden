@@ -69,7 +69,7 @@ func synthesizeMCPDescriptorFromBody(body []byte) *logical.MCPRequestDescriptor 
 
 // mustCBP builds a CBP from raw policy HCL, failing the test on any
 // parse or build error. Keeps every test case to a four-line setup.
-func mustCBP(t *testing.T, rules string) *CBP {
+func mustCBP(t testing.TB, rules string) *CBP {
 	t.Helper()
 	policy := testParsePolicy(t, rules)
 	cbp, err := NewCBP(testContext(), []*Policy{policy})
