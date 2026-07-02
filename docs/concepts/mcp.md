@@ -64,6 +64,7 @@ Each call passes through gates in order; the first failure denies it:
    then the matching `allowed_*` list.
 3. **Parameters** (`tools/call` only) — `denied_params` then `allowed_params`,
    per argument key.
+4. **Condition** (CEL) — the block's per-call `condition`, if present, runs last.
 
 Within a gate, a `denied_*` match always rejects; an `allowed_*` list, if present,
 means the value must match it. Patterns are matched with a **trailing `*`** wildcard
@@ -71,6 +72,44 @@ means the value must match it. Patterns are matched with a **trailing `*`** wild
 `allowed_params` entry is conditional — *"if this argument is present, it must
 match"* — and non-scalar argument values (objects, arrays, null) are treated as
 absent, so they neither satisfy nor violate a string pattern.
+
+### Per-call CEL conditions
+
+An `mcp { }` block can carry a **`condition`** — a [CEL](https://cel.dev)
+expression evaluated **once per call**, after the structured gates above. The
+call is allowed only if its structured gates *and* its condition pass. It is the
+expressive escape hatch for value logic the lists can't express — per-tool
+budgets, currency sets, cross-argument rules:
+
+```hcl
+mcp {
+  allowed_methods = ["tools/call"]
+  allowed_tools   = ["create_payment", "refund"]
+  condition       = <<-CEL
+    (call.tool == "create_payment" ? call.args.amount <= 1500 :
+     call.tool == "refund"         ? call.args.amount <=  200 : true)
+    && call.args.currency in ["USD", "EUR"]
+  CEL
+}
+```
+
+The condition reads a per-call namespace on top of the request/token namespaces
+documented in [Policies → CEL conditions](policies.md#cel-conditions):
+
+- `call.method` — the JSON-RPC method (`tools/call`, …)
+- `call.tool` — the name-bearing field (tool/resource/prompt name)
+- `call.args.<key>` — `tools/call` arguments, typed from the body
+- `call.batch_index` — the call's position in a batch
+
+The same **fail-closed** rules apply: a `false` result *or* an error (reading an
+absent argument, a type mismatch) denies. Because the condition is **set-wide**
+— evaluated for *every* method the block governs — a condition that reads
+`call.args` will deny an argument-less method like `tools/list` the same block
+allows. Scope it with `call.method` when a block governs more than `tools/call`:
+
+```hcl
+condition = "call.method != 'tools/call' || call.args.amount <= 1500"
+```
 
 ### Batches and malformed bodies
 
@@ -97,10 +136,13 @@ it tells the agent enough to correct course rather than guess at an opaque 403.
 
 Every consulted `mcp { }` block records its outcome to the [audit log](audit.md):
 the `decision` (allow/deny), the `rule_type` that fired (`denied_tools`,
-`allowed_params`, `duplicate_key`, …), the `method` and `name`, and the parameter
-key/value when a param gate decided it. The decision is recorded on **both** allow
-and deny, so the audit trail shows not just what was blocked but every tool call
-that was permitted — a complete record of an agent's activity through the server.
+`allowed_params`, `duplicate_key`, `condition`, `condition_error`, …), the
+`method` and `name`, and the parameter key/value when a param gate decided it.
+When a `condition` decided the call, a `condition` object records the expression
+and (on a fail-closed error) a sanitized error category. The decision is recorded
+on **both** allow and deny, so the audit trail shows not just what was blocked
+but every tool call that was permitted — a complete record of an agent's activity
+through the server.
 
 ## Using an MCP Mount
 

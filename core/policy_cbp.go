@@ -257,38 +257,17 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 				existingPerms.ResponseKeysFilterPath = pc.Permissions.ResponseKeysFilterPath
 			}
 
-			// Conditions merging: OR semantics across policies.
-			// If existing is already unconditional (nil), it stays nil.
-			// If the new policy has no conditions, clear to nil (unconditional wins).
-			// If both have conditions, append new conditions (OR across sets).
-			// Conditions merge (structured condition sets AND CEL conditions)
-			// with OR-across-policies semantics. A policy counts as
-			// unconditional only when it has NEITHER kind of condition; an
-			// unconditional grant from any policy makes the path unconditional
-			// (it already permits every request). The unconditional decision
-			// must consider both mechanisms together — clearing them
-			// independently would fail OPEN when one policy carries only a CEL
-			// condition and another only a structured block.
-			//
-			// When two conditional policies merge, both mechanisms are
-			// appended and the eval gate ANDs them, so mixing CEL and
-			// structured conditions across policies on one path is
-			// conservatively ANDed rather than ORed — a temporary
-			// additive-phase limitation, removed once the structured block is
-			// retired.
-			{
-				existingUncond := existingPerms.ConditionSets == nil && existingPerms.Conditions == nil
-				mergingUncond := pc.Permissions.ConditionSets == nil && pc.Permissions.Conditions == nil
-				switch {
-				case existingUncond:
-					// Path already unconditional; stays unconditional.
-				case mergingUncond:
-					existingPerms.ConditionSets = nil
-					existingPerms.Conditions = nil
-				default:
-					existingPerms.ConditionSets = append(existingPerms.ConditionSets, pc.Permissions.ConditionSets...)
-					existingPerms.Conditions = append(existingPerms.Conditions, pc.Permissions.Conditions...)
-				}
+			// CEL conditions merge with "unconditional wins" OR semantics
+			// across policies: a merged-in policy without a condition makes the
+			// path unconditional (it already permits every request); otherwise
+			// the conditions are appended and the gate passes if any one is true.
+			switch {
+			case existingPerms.Conditions == nil:
+				// Path already unconditional; stays unconditional.
+			case pc.Permissions.Conditions == nil:
+				existingPerms.Conditions = nil
+			default:
+				existingPerms.Conditions = append(existingPerms.Conditions, pc.Permissions.Conditions...)
 			}
 
 			// MCP rule-set merging: additive OR across policies. Unlike
@@ -496,29 +475,14 @@ CHECK:
 		return ret
 	}
 
-	// now is snapshotted once so the structured conditions and the path-level
-	// CEL condition evaluate against a single, consistent instant.
+	// now is snapshotted once so the path-level condition and any per-call MCP
+	// conditions evaluate against a single, consistent instant.
 	now := time.Now()
 
-	// Check conditions before parameter validation. Conditions restrict
-	// access at the path+operation level, independent of parameters.
-	if permissions.ConditionSets != nil {
-		conditionsMet := false
-		for _, conds := range permissions.ConditionSets {
-			if conds.Evaluate(req.ClientIP, now, req.TokenMetadata) {
-				conditionsMet = true
-				break
-			}
-		}
-		if !conditionsMet {
-			return ret
-		}
-	}
-
-	// Path-level CEL condition gate. Peer to ConditionSets: both gates must
-	// pass (AND). Empty/nil Conditions is unconditional. Fail-closed: an
-	// erroring or false condition denies; the deciding result is recorded for
-	// audit on every branch.
+	// Path-level CEL condition gate, before MCP and parameter validation.
+	// Empty/nil Conditions is unconditional. Fail-closed: an erroring or false
+	// condition denies; the deciding result is recorded for audit on every
+	// branch.
 	if len(permissions.Conditions) > 0 {
 		allowed, condRes := evaluatePathConditions(permissions.Conditions, req, te, now)
 		ret.Condition = condRes

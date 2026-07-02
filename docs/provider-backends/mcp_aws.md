@@ -278,11 +278,11 @@ The `mcp { }` block composes with runtime conditions so you can layer environmen
 warden policy write mcp-aws-business-hours - <<EOF
 path "mcp_aws/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  conditions {
-    source_ip   = ["10.0.0.0/8"]
-    time_window = ["08:00-18:00 UTC"]
-    day_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri"]
-  }
+  condition = <<-CEL
+    cidrContains("10.0.0.0/8", request.client_ip) &&
+    now.getHours("UTC") >= 8 && now.getHours("UTC") < 18 &&
+    now.getDayOfWeek("UTC") in [1, 2, 3, 4, 5]
+  CEL
   mcp {
     allowed_methods = [
       "initialize",

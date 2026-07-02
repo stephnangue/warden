@@ -133,56 +133,76 @@ path "secret/data/app" {
 optionally their values); `denied_parameters` forbids keys (an empty list denies
 the key entirely).
 
-### Conditions
+### Fine-grained access
 
-A path block can gate access on request context with a `conditions` block —
-source IP, time of day, day of week, and the calling token's metadata:
+A path block can gate access on request context and values with a
+**`condition`** — a [CEL](https://cel.dev) expression that must evaluate to
+`true` for the rule to apply. It expresses source IP, time of day, token
+attributes, numeric comparisons, set membership, cross-field relationships, and
+arbitrary boolean logic in one place:
 
 ```hcl
-path "secret/data/app/*" {
-  capabilities = ["read"]
-  conditions = {
-    source_ip      = ["10.0.0.0/8"]
-    time_window    = ["09:00-17:00 America/New_York"]
-    day_of_week    = ["Mon", "Tue", "Wed", "Thu", "Fri"]
-    token_metadata = ["env=prod", "team=platform*"]
-  }
+path "db/issue-grant" {
+  capabilities = ["create"]
+  condition    = "request.data.ttl_seconds <= 3600 && token.metadata.env == 'prod'"
 }
 ```
 
-Different condition types are **AND**ed (all must hold); within one type, the
-entries are **OR**ed (any one matches).
+A `condition` is evaluated against the request after capability and path
+matching select the rule — it refines a grant, it does not create one.
 
-#### `token_metadata`
+**What an expression can read.** Conditions evaluate against a fixed set of
+variables built from the request:
 
-`token_metadata` matches the authenticating token's verified, login-derived
-metadata. Each entry is `key=pattern`, where `pattern` is a glob, as in
-`allowed_parameters`. The `*` is honored only at the **start and/or end** of the
-pattern: a trailing `*` is a prefix match (`team=platform*` matches values
-*starting with* `platform`), a leading `*` is a suffix match (`team=*-core` matches
-values *ending with* `-core`), and both ends is a substring match (`team=*plat*`).
-A `*` in the middle is literal, and a lone `*` is literal too — use `key=**` to
-match any value (in effect, just requiring the key to be present, since a missing
-key already fails closed). The metadata itself is populated by the auth method
-that issued the token — JWT/SPIFFE claims, X.509 certificate fields, or Kubernetes
-TokenReview attributes (see each method's *Token Metadata* section).
+| Namespace | Fields |
+| --- | --- |
+| `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `data.<key>` |
+| `token` | `principal`, `role`, `type`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject, verified}`), `ttl_seconds`, `expires_at` |
+| `now` | the request timestamp |
 
-Semantics within the type:
+Secret material (the token value, accessor) is never exposed. `request.data` is
+the request body for non-MCP providers; MCP tool-call arguments are exposed as
+`call.args` inside an `mcp { }` block (see [MCP](mcp.md)).
 
-- **AND across distinct keys** — every listed key must be present and match.
-- **OR within one key** — repeating a key (`["tier=gold", "tier=platinum"]`)
-  passes if the value matches any of its patterns.
-- A key **absent** from the token's metadata fails closed.
+**Helpers beyond the CEL built-ins:**
+
+- `cidrContains(cidr, ip)` — replaces `source_ip`, e.g.
+  `cidrContains("10.0.0.0/8", request.client_ip)`.
+- Time/day come from the built-ins on `now`: `now.getHours("America/New_York")`,
+  `now.getDayOfWeek("UTC")` (`0` = Sunday).
+
+**Semantics:**
+
+- **Fail-closed.** A condition that evaluates `false` *or errors* (a type
+  mismatch, or reading a key that isn't present) denies the request. This means
+  reading an **absent** field denies — the safe default for an authorization
+  gate. To treat a missing value as acceptable, say so explicitly with optional
+  syntax: `request.data.?ttl_seconds.orValue(0) <= 3600`.
+- **Typing is runtime.** `request.data` / `call.args` values are typed from the
+  request, so `request.data.amount > 1000` is a real numeric comparison and a
+  string `"1000"` does **not** satisfy it (it denies, fail-closed).
+- **Identity-independent.** The expression is compiled
+  once and evaluated against each token's own values at request time, so one
+  compiled policy stays correct across every token that shares it.
+- **Bounded.** Expressions are type-checked and cost-bounded at policy-write
+  time; an invalid, non-boolean, or too-expensive expression is rejected when the
+  policy is written, not at request time.
+
+Examples:
 
 ```hcl
-# only tokens whose metadata says env=prod AND team starts with "platform"
-conditions = { token_metadata = ["env=prod", "team=platform*"] }
-```
+# numeric cap on a request-body field
+condition = "request.data.ttl_seconds <= 3600"
 
-Because metadata is matched against the token's own values at request time (not
-compiled into the policy), the same compiled policy stays correct for every
-token — a token with `env=dev` is denied even though another token reusing the
-same policy set is allowed.
+# set membership over token metadata
+condition = "token.metadata.env in ['dev', 'staging']"
+
+# require a verified on-behalf-of delegate in the chain
+condition = "size(token.actors) > 0"
+
+# operation-conditional (capability still selects the rule)
+condition = "request.operation == 'read' ? true : token.metadata.role == 'writer'"
+```
 
 ### Path expiration
 
@@ -226,25 +246,25 @@ even considered, and any failure denies the request immediately:
 
 1. **Capability** — does the rule grant the capability for this operation? If
    not, the request is denied and nothing further runs.
-2. **Conditions** — do the `conditions` (source IP, time, day, token metadata) hold?
+2. **Condition** — does the path-level `condition` (CEL) hold?
 3. **MCP block** — for a gateway request, does the parsed body pass the
-   `mcp { }` rules?
+   `mcp { }` rules (including its per-call `condition`)?
 4. **Parameters** — finally, `required` / `allowed` / `denied` parameters.
 
 This ordering is not incidental — it shapes how policies must be written:
 
-- **Path + capability is the outer gate; `conditions` and `mcp` only refine it.**
+- **Path + capability is the outer gate; `condition` and `mcp` only refine it.**
   An `mcp { }` block never grants access on its own: the rule must already grant
   the operation's capability, or the block is never reached. Conversely, granting
   the capability *without* an `mcp` block allows **every** call on that path —
   the block only ever narrows, never widens.
-- **A coarser gate that denies ends the request.** A failed `conditions` check
+- **A coarser gate that denies ends the request.** A failed `condition`
   denies *before* Warden parses the request body, so source-IP and time-of-day
   limits hold no matter what the MCP call contains — and they cost nothing on the
   body-parsing path.
 - **Later gates cannot recover earlier denials.** Passing the MCP rules can't
   restore access the capability check refused. The sequence is strict and
-  fail-closed, so write the outer gates (capability, conditions) to admit exactly
+  fail-closed, so write the outer gates (capability, condition) to admit exactly
   the traffic the inner gates are meant to refine.
 
 ## Authorizing Gateway Requests

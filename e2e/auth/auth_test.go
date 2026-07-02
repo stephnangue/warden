@@ -144,13 +144,14 @@ func TestTokenLookupAfterFailover(t *testing.T) {
 	h.WaitForCluster(t, 15, 2*time.Second)
 }
 
-// TestConditionsSourceIPDenied verifies that a policy with source_ip condition
-// NOT matching the request IP denies even with correct capabilities (T-070).
+// TestConditionsSourceIPDenied verifies that a CEL condition gating on source
+// IP denies a request whose client IP does not match, even with correct
+// capabilities (T-070).
 func TestConditionsSourceIPDenied(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
 	h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-deny", port,
-		`{"policy":"path \"vault/role/e2e-reader/gateway/*\" {\n  capabilities = [\"read\",\"list\"]\n  conditions {\n    source_ip = [\"10.0.0.0/8\"]\n  }\n}"}`)
+		`{"policy":"path \"vault/role/e2e-reader/gateway/*\" {\n  capabilities = [\"read\",\"list\"]\n  condition = \"cidrContains('10.0.0.0/8', request.client_ip)\"\n}"}`)
 	h.APIRequest(t, "POST", "auth/jwt/role/e2e-cond-deny-test", port,
 		`{"token_policies":["e2e-cond-deny"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
 
@@ -165,26 +166,26 @@ func TestConditionsSourceIPDenied(t *testing.T) {
 	h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-cond-deny", port, "")
 }
 
-// TestConditionsInvalidCIDRRejected verifies that creating a policy with an
-// invalid CIDR in source_ip conditions is rejected at parse time (T-071).
-func TestConditionsInvalidCIDRRejected(t *testing.T) {
+// TestConditionsBlockRejected verifies that the removed conditions {} block is
+// rejected at policy-write time with a directed error (T-071).
+func TestConditionsBlockRejected(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
-	status, _ := h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-bad-cidr", port,
-		`{"policy":"path \"secret/*\" {\n  capabilities = [\"read\"]\n  conditions {\n    source_ip = [\"not-a-cidr\"]\n  }\n}"}`)
+	status, _ := h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-block", port,
+		`{"policy":"path \"secret/*\" {\n  capabilities = [\"read\"]\n  conditions {\n    source_ip = [\"10.0.0.0/8\"]\n  }\n}"}`)
 	if status != 400 {
-		t.Fatalf("expected 400 for invalid CIDR, got %d", status)
+		t.Fatalf("expected 400 for the removed conditions {} block, got %d", status)
 	}
 }
 
-// TestConditionsUnknownTypeRejected verifies that creating a policy with an
-// unknown condition type is rejected at parse time (T-072).
-func TestConditionsUnknownTypeRejected(t *testing.T) {
+// TestConditionRejectsInvalidCEL verifies that a CEL condition that does not
+// compile to a bool is rejected at policy-write time (T-072).
+func TestConditionRejectsInvalidCEL(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
-	status, _ := h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-bad-type", port,
-		`{"policy":"path \"secret/*\" {\n  capabilities = [\"read\"]\n  conditions {\n    hostname = [\"foo.example.com\"]\n  }\n}"}`)
+	status, _ := h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-bad-cel", port,
+		`{"policy":"path \"secret/*\" {\n  capabilities = [\"read\"]\n  condition = \"1 + 1\"\n}"}`)
 	if status != 400 {
-		t.Fatalf("expected 400 for unknown condition type, got %d", status)
+		t.Fatalf("expected 400 for a non-bool CEL condition, got %d", status)
 	}
 }

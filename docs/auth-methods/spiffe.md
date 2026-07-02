@@ -217,7 +217,7 @@ A JWT-SVID carrying `"groups": ["engineering", "billing"]` gets `spiffe-engineer
 
 ## Token Metadata
 
-A role can copy verified attributes from the SVID onto the issued token's metadata, where `token_metadata` policy conditions can match them. Two mappings are available, both written as `source = "destination-metadata-key"`:
+A role can copy verified attributes from the SVID onto the issued token's metadata, where a CEL `condition` can match them via `token.metadata`. Two mappings are available, both written as `source = "destination-metadata-key"`:
 
 - `metadata_mappings` — from SPIFFE-ID components (`trust_domain`, `spiffe_id`, `path`). Applies to **both** SVID flows.
 - `metadata_claims` — from JWT-SVID claims. The source is a literal claim name, or a JSON Pointer (leading `/`) for a nested claim. **JWT-SVID logins only**; resolved values must be strings.
@@ -230,7 +230,7 @@ warden write auth/spiffe/role/inventory-agent \
   metadata_claims="/deploy/env=env"
 ```
 
-An X.509-SVID `spiffe://prod.example.org/ns/prod/sa/ci` yields metadata `td="prod.example.org"`, `workload="/ns/prod/sa/ci"`. A JWT-SVID additionally maps its `deploy.env` claim to `env`. A policy can then gate a path with `conditions { token_metadata = ["env=prod"] }`. When both mappings produce the same key, the claim value wins.
+An X.509-SVID `spiffe://prod.example.org/ns/prod/sa/ci` yields metadata `td="prod.example.org"`, `workload="/ns/prod/sa/ci"`. A JWT-SVID additionally maps its `deploy.env` claim to `env`. A policy can then gate a path with `condition = "token.metadata.env == 'prod'"`. When both mappings produce the same key, the claim value wins.
 
 ## On-Behalf-Of Chain (RFC 8693 `act` Claim)
 
