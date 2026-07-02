@@ -69,6 +69,11 @@ type CBPResults struct {
 	// possible — the MCP gate runs between conditions and the
 	// parameter check, so a later check can deny after MCP allows.
 	MCPDecision *logical.MCPDecision
+
+	// Condition is populated when a path-level CEL condition was evaluated,
+	// carrying the audited decision (expression + sanitized error). nil when
+	// the matched permission had no path-level condition.
+	Condition *logical.ConditionResult
 }
 
 const limitParameterName = "limit"
@@ -256,14 +261,33 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 			// If existing is already unconditional (nil), it stays nil.
 			// If the new policy has no conditions, clear to nil (unconditional wins).
 			// If both have conditions, append new conditions (OR across sets).
-			if existingPerms.ConditionSets != nil {
-				if pc.Permissions.ConditionSets == nil {
+			// Conditions merge (structured condition sets AND CEL conditions)
+			// with OR-across-policies semantics. A policy counts as
+			// unconditional only when it has NEITHER kind of condition; an
+			// unconditional grant from any policy makes the path unconditional
+			// (it already permits every request). The unconditional decision
+			// must consider both mechanisms together — clearing them
+			// independently would fail OPEN when one policy carries only a CEL
+			// condition and another only a structured block.
+			//
+			// When two conditional policies merge, both mechanisms are
+			// appended and the eval gate ANDs them, so mixing CEL and
+			// structured conditions across policies on one path is
+			// conservatively ANDed rather than ORed — a temporary
+			// additive-phase limitation, removed once the structured block is
+			// retired.
+			{
+				existingUncond := existingPerms.ConditionSets == nil && existingPerms.Conditions == nil
+				mergingUncond := pc.Permissions.ConditionSets == nil && pc.Permissions.Conditions == nil
+				switch {
+				case existingUncond:
+					// Path already unconditional; stays unconditional.
+				case mergingUncond:
 					existingPerms.ConditionSets = nil
-				} else {
-					existingPerms.ConditionSets = append(
-						existingPerms.ConditionSets,
-						pc.Permissions.ConditionSets...,
-					)
+					existingPerms.Conditions = nil
+				default:
+					existingPerms.ConditionSets = append(existingPerms.ConditionSets, pc.Permissions.ConditionSets...)
+					existingPerms.Conditions = append(existingPerms.Conditions, pc.Permissions.Conditions...)
 				}
 			}
 
@@ -301,7 +325,7 @@ func (a *CBP) Capabilities(ctx context.Context, path string) (pathCapabilities [
 		Operation: logical.ListOperation,
 	}
 
-	res := a.AllowOperation(ctx, req, true)
+	res := a.AllowOperation(ctx, req, nil, true)
 	if res.IsRoot {
 		return []string{RootCapability}
 	}
@@ -342,7 +366,7 @@ func (a *CBP) Capabilities(ctx context.Context, path string) (pathCapabilities [
 }
 
 // AllowOperation is used to check if the given operation is permitted.
-func (a *CBP) AllowOperation(ctx context.Context, req *logical.Request, capCheckOnly bool) (ret *CBPResults) {
+func (a *CBP) AllowOperation(ctx context.Context, req *logical.Request, te *logical.TokenEntry, capCheckOnly bool) (ret *CBPResults) {
 	ret = new(CBPResults)
 
 	// Fast-path root
@@ -472,17 +496,33 @@ CHECK:
 		return ret
 	}
 
+	// now is snapshotted once so the structured conditions and the path-level
+	// CEL condition evaluate against a single, consistent instant.
+	now := time.Now()
+
 	// Check conditions before parameter validation. Conditions restrict
 	// access at the path+operation level, independent of parameters.
 	if permissions.ConditionSets != nil {
 		conditionsMet := false
 		for _, conds := range permissions.ConditionSets {
-			if conds.Evaluate(req.ClientIP, time.Now(), req.TokenMetadata) {
+			if conds.Evaluate(req.ClientIP, now, req.TokenMetadata) {
 				conditionsMet = true
 				break
 			}
 		}
 		if !conditionsMet {
+			return ret
+		}
+	}
+
+	// Path-level CEL condition gate. Peer to ConditionSets: both gates must
+	// pass (AND). Empty/nil Conditions is unconditional. Fail-closed: an
+	// erroring or false condition denies; the deciding result is recorded for
+	// audit on every branch.
+	if len(permissions.Conditions) > 0 {
+		allowed, condRes := evaluatePathConditions(permissions.Conditions, req, te, now)
+		ret.Condition = condRes
+		if !allowed {
 			return ret
 		}
 	}
@@ -841,7 +881,7 @@ func (c *Core) performPolicyChecks(ctx context.Context, cbp *CBP, te *logical.To
 
 	// First, perform normal CBP checks if requested.
 	if cbp != nil && !opts.Unauth {
-		ret.CBPResults = cbp.AllowOperation(ctx, req, false)
+		ret.CBPResults = cbp.AllowOperation(ctx, req, te, false)
 		ret.RootPrivs = ret.CBPResults.RootPrivs
 		// Root is always allowed; skip other checks
 		if ret.CBPResults.IsRoot {

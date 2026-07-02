@@ -95,7 +95,7 @@ path "mcp/gateway/*" {
 		"method":  "tools/list",
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -120,7 +120,7 @@ path "mcp/gateway/*" {
 		"params":  {"name": "x"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -145,7 +145,7 @@ path "mcp/gateway/*" {
 		"params":  {"name": "x"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -167,7 +167,7 @@ path "mcp/gateway/*" {
 		"method":  "tools/list",
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 	assert.Nil(t, res.MCPDecision, "no mcp block → no decision recorded")
@@ -193,7 +193,7 @@ path "mcp/gateway/*" {
 		"params":  {"name": "get_repository"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -219,7 +219,7 @@ path "mcp/gateway/*" {
 		"params":  {"name": "code-review"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -242,7 +242,7 @@ path "mcp/gateway/*" {
 		"params":  {"name": "delete_repository"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -270,7 +270,7 @@ path "mcp/gateway/*" {
 		"params":  {"uri": "github://secrets/api-key"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -297,7 +297,7 @@ path "mcp/gateway/*" {
 		"params":  {"name": "sudo_admin"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -326,7 +326,7 @@ path "mcp/gateway/*" {
 		"params":  {"uri": "github://repo/readme.md"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 }
@@ -351,7 +351,7 @@ path "mcp/gateway/*" {
 		"params":  {"uri": "github://secrets/api-key"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	assert.Equal(t, mcpRuleTypeDeniedResources, res.MCPDecision.RuleType)
@@ -375,7 +375,7 @@ path "mcp/gateway/*" {
 		"method":  "tools/list",
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed, "tools/list passes — name gate doesn't fire for name-less method")
 	assert.Equal(t, "tools/list", res.MCPDecision.Method)
@@ -398,7 +398,7 @@ path "mcp/gateway/*" {
 		"params":  {"name": "x"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 	assert.Equal(t, "allow", res.MCPDecision.Decision)
@@ -430,7 +430,7 @@ path "mcp/gateway/*" {
 		},
 		"id": 1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 	assert.Equal(t, "allow", res.MCPDecision.Decision)
@@ -458,7 +458,7 @@ path "mcp/gateway/*" {
 		},
 		"id": 1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	assert.Equal(t, "deny", res.MCPDecision.Decision)
@@ -498,7 +498,7 @@ path "mcp/gateway/*" {
 		},
 		"id": 1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed,
 		"missing argument is not a constraint violation under conditional semantics")
@@ -527,7 +527,7 @@ path "mcp/gateway/*" {
 		},
 		"id": 1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 }
@@ -558,7 +558,7 @@ path "mcp/gateway/*" {
 		},
 		"id": 1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 	assert.True(t, res.Allowed, "both keys satisfied → allow")
 }
 
@@ -589,7 +589,7 @@ path "mcp/gateway/*" {
 		},
 		"id": 1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed, "AND across keys: any failing key denies")
 	assert.Equal(t, "mode", res.MCPDecision.ParamName)
@@ -626,7 +626,7 @@ path "mcp/gateway/*" {
 		"params":  {"name": "get_repository"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed, "set 1 allows, OR wins")
 	assert.Equal(t, "allow", res.MCPDecision.Decision)
@@ -667,7 +667,7 @@ path "mcp/gateway/*" {
 		"params":  {"name": "delete_repository"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 	assert.False(t, res.Allowed, "additive merge: MCP restriction from one policy still applies even with un-mcp'd policy alongside")
 	assert.Equal(t, mcpRuleTypeAllowedTools, res.MCPDecision.RuleType)
 }
@@ -698,7 +698,7 @@ path "mcp/gateway/*" {
 		"params":  {"name": "delete_repository"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	assert.Equal(t, mcpRuleTypeDeniedTools, res.MCPDecision.RuleType,
@@ -729,7 +729,7 @@ path "mcp/gateway/*" {
 		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_repos"}, "id": 2},
 		{"jsonrpc": "2.0", "method": "tools/list", "id": 3}
 	]`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed, "every batch call must allow → batch allows")
 	require.NotNil(t, res.MCPDecision)
@@ -757,7 +757,7 @@ path "mcp/gateway/*" {
 		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_repos"}, "id": 2},
 		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "delete_repo"}, "id": 3}
 	]`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -789,7 +789,7 @@ path "mcp/gateway/*" {
 		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "delete_repo"}, "id": 2},
 		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "drop_database"}, "id": 3}
 	]`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -817,7 +817,7 @@ path "mcp/gateway/*" {
 	req := newMCPRequest(t, "mcp/gateway/", `[
 		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "delete_repo"}, "id": 1}
 	]`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	assert.Equal(t, "deny", res.MCPDecision.Decision)
@@ -839,7 +839,7 @@ path "mcp/gateway/*" {
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `[]`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
@@ -862,7 +862,7 @@ path "mcp/gateway/*" {
 		{"jsonrpc": "2.0", "method": "tools/list", "id": 1},
 		{"jsonrpc": "2.0", "method": "tools/call", "method": "tools/list", "params": {"name": "x"}, "id": 2}
 	]`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.False(t, res.Allowed)
 	assert.Equal(t, mcpRuleTypeDuplicateKey, res.MCPDecision.RuleType)
@@ -892,7 +892,7 @@ path "mcp/gateway/*" {
 		"params":  {"name": "GET_Repository"},
 		"id":      1
 	}`)
-	res := cbp.AllowOperation(testContext(), req, false)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
 	assert.Equal(t, "tools/call", res.MCPDecision.Method)
@@ -1059,7 +1059,7 @@ path "secret/*" {
 	ctx := testContext()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = cbp.AllowOperation(ctx, req, false)
+		_ = cbp.AllowOperation(ctx, req, nil, false)
 	}
 }
 
@@ -1098,7 +1098,7 @@ path "mcp/gateway/*" {
 	ctx := testContext()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = cbp.AllowOperation(ctx, req, false)
+		_ = cbp.AllowOperation(ctx, req, nil, false)
 	}
 }
 
@@ -1117,7 +1117,7 @@ func BenchmarkAllowOperation_StressMCP(b *testing.B) {
 	ctx := testContext()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = cbp.AllowOperation(ctx, req, false)
+		_ = cbp.AllowOperation(ctx, req, nil, false)
 	}
 }
 

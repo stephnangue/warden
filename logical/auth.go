@@ -44,6 +44,12 @@ type Auth struct {
 	// OAuth-shaped 403 body.
 	MCPDecision *MCPDecision
 
+	// Condition carries the path-level CEL condition decision when a
+	// path-level condition was evaluated during CBP evaluation. nil when the
+	// matched permission had no path-level condition. Flows through
+	// buildAuditAuth into audit.PolicyResults.Condition.
+	Condition *ConditionResult
+
 	PrincipalID string
 
 	RoleName string

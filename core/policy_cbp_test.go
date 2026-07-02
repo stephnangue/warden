@@ -166,7 +166,7 @@ func TestCBP_RootAllowsEverything(t *testing.T) {
 				Operation: tc.operation,
 			}
 
-			result := cbp.AllowOperation(ctx, req, false)
+			result := cbp.AllowOperation(ctx, req, nil, false)
 			assert.True(t, result.Allowed)
 			assert.True(t, result.IsRoot)
 			assert.True(t, result.RootPrivs)
@@ -195,12 +195,12 @@ func TestCBP_ExactPathMatch(t *testing.T) {
 		Path:      "secret/data/mykey",
 		Operation: logical.ReadOperation,
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	// Different path should not be allowed
 	req.Path = "secret/data/otherkey"
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 }
 
@@ -221,12 +221,12 @@ func TestCBP_ExactPathNoMatch(t *testing.T) {
 		Path:      "secret/data",
 		Operation: logical.ReadOperation,
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 
 	// Longer path should not match
 	req.Path = "secret/data/specific/extra"
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 }
 
@@ -263,7 +263,7 @@ func TestCBP_PrefixPathMatch(t *testing.T) {
 				Path:      tc.path,
 				Operation: logical.ReadOperation,
 			}
-			result := cbp.AllowOperation(ctx, req, false)
+			result := cbp.AllowOperation(ctx, req, nil, false)
 			assert.Equal(t, tc.allowed, result.Allowed, "path: %s", tc.path)
 		})
 	}
@@ -289,17 +289,17 @@ func TestCBP_MultiplePrefixPaths(t *testing.T) {
 		Path:      "secret/data",
 		Operation: logical.ReadOperation,
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	req.Operation = logical.CreateOperation
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 
 	// kv/* should have read and create
 	req.Path = "kv/data"
 	req.Operation = logical.CreateOperation
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 }
 
@@ -337,7 +337,7 @@ func TestCBP_SegmentWildcard(t *testing.T) {
 				Path:      tc.path,
 				Operation: logical.ReadOperation,
 			}
-			result := cbp.AllowOperation(ctx, req, false)
+			result := cbp.AllowOperation(ctx, req, nil, false)
 			assert.Equal(t, tc.allowed, result.Allowed, "path: %s", tc.path)
 		})
 	}
@@ -372,7 +372,7 @@ func TestCBP_MultipleSegmentWildcards(t *testing.T) {
 				Path:      tc.path,
 				Operation: logical.ReadOperation,
 			}
-			result := cbp.AllowOperation(ctx, req, false)
+			result := cbp.AllowOperation(ctx, req, nil, false)
 			assert.Equal(t, tc.allowed, result.Allowed, "path: %s", tc.path)
 		})
 	}
@@ -406,7 +406,7 @@ func TestCBP_SegmentWildcardWithGlob(t *testing.T) {
 				Path:      tc.path,
 				Operation: logical.ReadOperation,
 			}
-			result := cbp.AllowOperation(ctx, req, false)
+			result := cbp.AllowOperation(ctx, req, nil, false)
 			assert.Equal(t, tc.allowed, result.Allowed, "path: %s", tc.path)
 		})
 	}
@@ -444,7 +444,7 @@ func TestCBP_AllCapabilities(t *testing.T) {
 				Path:      "test/key",
 				Operation: op,
 			}
-			result := cbp.AllowOperation(ctx, req, false)
+			result := cbp.AllowOperation(ctx, req, nil, false)
 			assert.True(t, result.Allowed, "operation: %s", op)
 		})
 	}
@@ -454,7 +454,7 @@ func TestCBP_AllCapabilities(t *testing.T) {
 		Path:      "test/key",
 		Operation: logical.ReadOperation,
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.RootPrivs)
 }
 
@@ -478,21 +478,21 @@ func TestCBP_SpecificCapabilities(t *testing.T) {
 		Path:      "readonly/key",
 		Operation: logical.ReadOperation,
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	req.Operation = logical.CreateOperation
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 
 	// writeonly path
 	req.Path = "writeonly/key"
 	req.Operation = logical.CreateOperation
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	req.Operation = logical.ReadOperation
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 }
 
@@ -522,7 +522,7 @@ func TestCBP_DenyCapability(t *testing.T) {
 				Path:      "secret/sensitive/key",
 				Operation: op,
 			}
-			result := cbp.AllowOperation(ctx, req, false)
+			result := cbp.AllowOperation(ctx, req, nil, false)
 			assert.False(t, result.Allowed, "operation %s should be denied", op)
 		})
 	}
@@ -544,7 +544,7 @@ func TestCBP_HelpOperationAlwaysAllowed(t *testing.T) {
 		Path:      "secret/data",
 		Operation: logical.HelpOperation,
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 }
 
@@ -575,20 +575,20 @@ func TestCBP_MergePoliciesAddCapabilities(t *testing.T) {
 		Path:      "secret/key",
 		Operation: logical.ReadOperation,
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	req.Operation = logical.CreateOperation
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	req.Operation = logical.UpdateOperation
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	// But not delete
 	req.Operation = logical.DeleteOperation
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 }
 
@@ -617,11 +617,11 @@ func TestCBP_DenyOverridesAll(t *testing.T) {
 		Path:      "secret/key",
 		Operation: logical.ReadOperation,
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 
 	req.Operation = logical.CreateOperation
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 }
 
@@ -650,7 +650,7 @@ func TestCBP_ExistingDenyNotOverridden(t *testing.T) {
 		Path:      "secret/key",
 		Operation: logical.ReadOperation,
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 }
 
@@ -682,28 +682,28 @@ func TestCBP_AllowedParameters(t *testing.T) {
 			"key1": "any-value",
 		},
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	// Specific allowed value
 	req.Data = map[string]interface{}{
 		"key2": "value1",
 	}
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	// Value not in allowed list
 	req.Data = map[string]interface{}{
 		"key2": "value3",
 	}
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 
 	// Parameter not in allowed list
 	req.Data = map[string]interface{}{
 		"key3": "value",
 	}
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 }
 
@@ -731,7 +731,7 @@ func TestCBP_AllowedParametersWildcard(t *testing.T) {
 			"another": "value",
 		},
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 }
 
@@ -763,28 +763,28 @@ func TestCBP_DeniedParameters(t *testing.T) {
 			"password": "any-password",
 		},
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 
 	// Denied parameter with specific value
 	req.Data = map[string]interface{}{
 		"secret_key": "forbidden_value",
 	}
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 
 	// Denied parameter with non-forbidden value
 	req.Data = map[string]interface{}{
 		"secret_key": "allowed_value",
 	}
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	// Non-denied parameter
 	req.Data = map[string]interface{}{
 		"normal_key": "value",
 	}
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 }
 
@@ -811,12 +811,12 @@ func TestCBP_DeniedParametersWildcard(t *testing.T) {
 			"any_key": "value",
 		},
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 
 	// No data should be allowed
 	req.Data = nil
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 }
 
@@ -846,19 +846,19 @@ func TestCBP_RequiredParameters(t *testing.T) {
 			"type": "secret",
 		},
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	// Missing required parameter
 	req.Data = map[string]interface{}{
 		"name": "test",
 	}
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 
 	// No data at all
 	req.Data = nil
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 }
 
@@ -941,12 +941,12 @@ func TestCBP_ListOperation(t *testing.T) {
 		Path:      "secret/data/",
 		Operation: logical.ListOperation,
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	// List operation without trailing slash
 	req.Path = "secret/data"
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 }
 
@@ -971,21 +971,21 @@ func TestCBP_ListWithPaginationLimit(t *testing.T) {
 			"limit": 50,
 		},
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	// Exceeds limit
 	req.Data = map[string]interface{}{
 		"limit": 200,
 	}
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 
 	// Using "max" keyword
 	req.Data = map[string]interface{}{
 		"limit": "max",
 	}
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 	assert.Equal(t, "100", req.Data["limit"])
 }
@@ -1018,7 +1018,7 @@ func TestCBP_RevokeRenewRollbackOperations(t *testing.T) {
 				Path:      "auth/token/renew",
 				Operation: op,
 			}
-			result := cbp.AllowOperation(ctx, req, false)
+			result := cbp.AllowOperation(ctx, req, nil, false)
 			assert.True(t, result.Allowed, "operation %s should use update capability", op)
 		})
 	}
@@ -1046,7 +1046,7 @@ func TestCBP_CapCheckOnly(t *testing.T) {
 	}
 
 	// With capCheckOnly = true
-	result := cbp.AllowOperation(ctx, req, true)
+	result := cbp.AllowOperation(ctx, req, nil, true)
 	assert.True(t, result.RootPrivs)
 	assert.Equal(t, ReadCapabilityInt|SudoCapabilityInt, result.CapabilitiesBitmap)
 	assert.False(t, result.Allowed) // Allowed is not set with capCheckOnly
@@ -1073,12 +1073,12 @@ func TestCBP_LeadingSlashHandling(t *testing.T) {
 		Path:      "/secret/data",
 		Operation: logical.ReadOperation,
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	// Path without leading slash
 	req.Path = "secret/data"
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 }
 
@@ -1158,7 +1158,7 @@ func TestCBP_GrantingPolicies(t *testing.T) {
 		Path:      "secret/data",
 		Operation: logical.ReadOperation,
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 	assert.Len(t, result.GrantingPolicies, 1)
 	assert.Equal(t, "test-policy", result.GrantingPolicies[0].Name)
@@ -1354,7 +1354,7 @@ func TestCBP_ConditionsSourceIP_Allowed(t *testing.T) {
 		ClientIP:  "10.1.2.3",
 	}
 
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 }
 
@@ -1379,7 +1379,7 @@ func TestCBP_ConditionsSourceIP_Denied(t *testing.T) {
 		ClientIP:  "192.168.1.1",
 	}
 
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 }
 
@@ -1403,21 +1403,21 @@ func TestCBP_ConditionsTokenMetadata_AllowDeny(t *testing.T) {
 		Path:          "secret/data/foo",
 		TokenMetadata: map[string]string{"env": "prod", "team": "platform-core"},
 	}
-	assert.True(t, cbp.AllowOperation(ctx, allowed, false).Allowed)
+	assert.True(t, cbp.AllowOperation(ctx, allowed, nil, false).Allowed)
 
 	wrongTeam := &logical.Request{
 		Operation:     logical.ReadOperation,
 		Path:          "secret/data/foo",
 		TokenMetadata: map[string]string{"env": "prod", "team": "billing"},
 	}
-	assert.False(t, cbp.AllowOperation(ctx, wrongTeam, false).Allowed)
+	assert.False(t, cbp.AllowOperation(ctx, wrongTeam, nil, false).Allowed)
 
 	missingKey := &logical.Request{
 		Operation:     logical.ReadOperation,
 		Path:          "secret/data/foo",
 		TokenMetadata: map[string]string{"env": "prod"},
 	}
-	assert.False(t, cbp.AllowOperation(ctx, missingKey, false).Allowed)
+	assert.False(t, cbp.AllowOperation(ctx, missingKey, nil, false).Allowed)
 }
 
 // TestCBP_ConditionsTokenMetadata_SharedCompiledCBP_CrossToken proves the
@@ -1452,10 +1452,10 @@ func TestCBP_ConditionsTokenMetadata_SharedCompiledCBP_CrossToken(t *testing.T) 
 		TokenMetadata: map[string]string{"env": "dev"},
 	}
 
-	assert.True(t, cbp.AllowOperation(ctx, prodReq, false).Allowed, "prod token should be allowed")
-	assert.False(t, cbp.AllowOperation(ctx, devReq, false).Allowed, "dev token must not inherit prod's decision")
+	assert.True(t, cbp.AllowOperation(ctx, prodReq, nil, false).Allowed, "prod token should be allowed")
+	assert.False(t, cbp.AllowOperation(ctx, devReq, nil, false).Allowed, "dev token must not inherit prod's decision")
 	// Re-run prod after dev to confirm no state leaked between evaluations.
-	assert.True(t, cbp.AllowOperation(ctx, prodReq, false).Allowed)
+	assert.True(t, cbp.AllowOperation(ctx, prodReq, nil, false).Allowed)
 }
 
 func TestCBP_ConditionsCapCheckOnly_SkipsConditions(t *testing.T) {
@@ -1479,7 +1479,7 @@ func TestCBP_ConditionsCapCheckOnly_SkipsConditions(t *testing.T) {
 		ClientIP:  "192.168.1.1", // Does NOT match, but capCheckOnly should skip
 	}
 
-	result := cbp.AllowOperation(ctx, req, true)
+	result := cbp.AllowOperation(ctx, req, nil, true)
 	assert.True(t, result.CapabilitiesBitmap&ReadCapabilityInt > 0)
 }
 
@@ -1508,12 +1508,12 @@ func TestCBP_ConditionsWithParameters(t *testing.T) {
 		ClientIP:  "10.1.2.3",
 		Data:      map[string]any{"key": "value"},
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	// Bad IP, valid parameter → denied by conditions
 	req.ClientIP = "192.168.1.1"
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 }
 
@@ -1535,7 +1535,7 @@ func TestCBP_ConditionsEmpty_NoEffect(t *testing.T) {
 		ClientIP:  "anything",
 	}
 
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 }
 
@@ -1568,7 +1568,7 @@ func TestCBP_MergeConditions_OneUnconditional(t *testing.T) {
 		ClientIP:  "192.168.1.1",
 	}
 
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 }
 
@@ -1602,17 +1602,17 @@ func TestCBP_MergeConditions_BothConditional_OR(t *testing.T) {
 		Path:      "secret/data/foo",
 		ClientIP:  "10.1.2.3",
 	}
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	// Matches policyB's conditions
 	req.ClientIP = "192.168.1.1"
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.True(t, result.Allowed)
 
 	// Matches neither
 	req.ClientIP = "172.16.0.1"
-	result = cbp.AllowOperation(ctx, req, false)
+	result = cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 }
 
@@ -1643,7 +1643,7 @@ func TestCBP_MergeConditions_DenyOverrides(t *testing.T) {
 		ClientIP:  "10.1.2.3",
 	}
 
-	result := cbp.AllowOperation(ctx, req, false)
+	result := cbp.AllowOperation(ctx, req, nil, false)
 	assert.False(t, result.Allowed)
 }
 
@@ -1773,8 +1773,8 @@ func TestCBP_CompiledCacheHit_TokenMetadataNotLeaked(t *testing.T) {
 		TokenMetadata: map[string]string{"env": "dev"},
 	}
 
-	assert.True(t, second.AllowOperation(ctx, prodReq, false).Allowed)
-	assert.False(t, second.AllowOperation(ctx, devReq, false).Allowed)
+	assert.True(t, second.AllowOperation(ctx, prodReq, nil, false).Allowed)
+	assert.False(t, second.AllowOperation(ctx, devReq, nil, false).Allowed)
 }
 
 // TestCBP_CompiledCacheInvalidatesOnVersionBump verifies that editing a policy
@@ -1901,7 +1901,7 @@ func TestCBP_CompiledCacheConcurrent(t *testing.T) {
 				return
 			}
 			req := &logical.Request{Operation: logical.ReadOperation, Path: "secret/a"}
-			cbp.AllowOperation(ctx, req, false)
+			cbp.AllowOperation(ctx, req, nil, false)
 			cbp.Capabilities(ctx, "secret/b/x")
 		}()
 	}

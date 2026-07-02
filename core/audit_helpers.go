@@ -160,6 +160,11 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 			if auth.MCPDecision != nil {
 				auditAuth.PolicyResults.MCPDecision = auth.MCPDecision
 			}
+			// Surface the path-level CEL condition decision (non-MCP paths)
+			// so denials carry their reason. Already Sanitized at evaluation.
+			if auth.Condition != nil {
+				auditAuth.PolicyResults.Condition = auth.Condition
+			}
 			// Surface the token's verified metadata so token_metadata
 			// policy decisions (allow or deny) are explainable. Logged in
 			// clear by default; the format layer applies opt-in per-key

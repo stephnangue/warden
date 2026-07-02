@@ -120,6 +120,11 @@ type PathRules struct {
 	ResponseKeysFilterPathHCL string              `hcl:"list_scan_response_keys_filter_path"`
 	ConditionsHCL             map[string][]string `hcl:"conditions"`
 
+	// ConditionHCL is the optional path-level CEL condition expression. The
+	// rule applies only if it evaluates true (in addition to the structured
+	// gates). Compiled at parse time into pc.Permissions.Conditions.
+	ConditionHCL string `hcl:"condition"`
+
 	// MCPHCL is the parsed `mcp { }` block. Nil when no such block is
 	// present on this path stanza. Stored on PathRules as the HCL
 	// decode target; the parser then validates it and appends a
@@ -157,6 +162,12 @@ type CBPPermissions struct {
 	// Non-nil: each entry is one policy's conditions; request must satisfy at
 	// least one set (OR between sets, AND within each set's types).
 	ConditionSets []*PolicyConditions
+	// Conditions holds compiled path-level CEL conditions from all merged
+	// policies for this path. nil means no CEL condition (unconditional at this
+	// layer). Non-nil: the gate passes if at least one program evaluates true
+	// (OR across policies), ANDed with the ConditionSets gate. Programs are
+	// immutable and shared (not deep-copied) across merged CBPs.
+	Conditions []*compiledCondition
 	// MCP holds mcp { } rule-sets from all merged policies for this path.
 	// nil/empty means no MCP enforcement applies. Non-nil: each entry is one
 	// source stanza's mcp block; a request is allowed if at least one set
@@ -287,6 +298,15 @@ func (p *CBPPermissions) Clone() (*CBPPermissions, error) {
 	}
 
 	switch {
+	case p.Conditions == nil:
+	case len(p.Conditions) == 0:
+		ret.Conditions = make([]*compiledCondition, 0)
+	default:
+		// Programs are immutable; copy the slice of pointers, not the programs.
+		ret.Conditions = append([]*compiledCondition(nil), p.Conditions...)
+	}
+
+	switch {
 	case p.MCP == nil:
 	case len(p.MCP) == 0:
 		ret.MCP = make([]*CBPMCPRules, 0)
@@ -390,6 +410,7 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			"expiration",
 			"list_scan_response_keys_filter_path",
 			"conditions",
+			"condition",
 			"mcp",
 		}
 		if err := hclutil.CheckHCLKeys(item.Val, valid); err != nil {
@@ -527,6 +548,18 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 				return fmt.Errorf("path %q: %w", key, err)
 			}
 			pc.Permissions.ConditionSets = []*PolicyConditions{conditions}
+		}
+
+		if pc.ConditionHCL != "" {
+			env, err := baseCELEnv()
+			if err != nil {
+				return fmt.Errorf("path %q: cel env: %w", key, err)
+			}
+			prg, err := compileCELCondition(env, pc.ConditionHCL)
+			if err != nil {
+				return fmt.Errorf("path %q condition: %w", key, err)
+			}
+			pc.Permissions.Conditions = []*compiledCondition{{Source: pc.ConditionHCL, Program: prg}}
 		}
 
 		if pc.MCPHCL != nil {
