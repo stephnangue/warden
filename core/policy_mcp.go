@@ -337,49 +337,7 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 		}
 	}
 
-	// (e) Param gate for tools/call only. Each configured key
-	// checked independently — AND across keys, OR within a key's
-	// value-list. Non-scalar argument values (objects, arrays,
-	// null) are treated as missing via callMatchArgString.
-	if method == mcpMethodToolsCall {
-		for paramName, patterns := range set.DeniedParams {
-			value := callMatchArgString(call, paramName)
-			if value == "" {
-				continue // missing can't match a deny pattern
-			}
-			lowerValue := strings.ToLower(value)
-			if m := matchMCPAny(lowerValue, patterns); m != "" {
-				d.Decision = "deny"
-				d.RuleType = mcpRuleTypeDeniedParams
-				d.ParamName = paramName
-				d.ParamValue = value
-				d.MatchedRule = m
-				return d
-			}
-		}
-		for paramName, patterns := range set.AllowedParams {
-			value := callMatchArgString(call, paramName)
-			if value == "" {
-				// Param not present in the call — no constraint applies.
-				// Matches Vault's allowed_parameters convention: the
-				// gate is "IF present, must match", not "must be
-				// present". Tools that don't take this argument at
-				// all (or for which the agent omitted it) pass through;
-				// tools that do take it get the value-list check.
-				continue
-			}
-			lowerValue := strings.ToLower(value)
-			if m := matchMCPAny(lowerValue, patterns); m == "" {
-				d.Decision = "deny"
-				d.RuleType = mcpRuleTypeAllowedParams
-				d.ParamName = paramName
-				d.ParamValue = value
-				return d
-			}
-		}
-	}
-
-	// (f) CEL condition gate (last, after the structured gates). Fail-closed:
+	// (e) CEL condition gate (last, after the structured gates). Fail-closed:
 	// an erroring or false condition denies. Evaluated against the request /
 	// token namespaces plus this call.
 	if set.Condition != nil {
@@ -398,7 +356,7 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 		}
 	}
 
-	// (g) Nothing denied — this set allows. Record the gate that
+	// (f) Nothing denied — this set allows. Record the gate that
 	// authorised the request so audit can show which rule fired.
 	d.Decision = "allow"
 	d.RuleType = mcpRuleTypeAllowedMethods
@@ -415,27 +373,6 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 		d.MatchedRule = matchMCPAny(name, allowList)
 	}
 	return d
-}
-
-// callMatchArgString returns the matcher-comparable string form of a
-// tools/call argument from the descriptor. Returns "" for missing,
-// null, object, and array values so the matcher treats non-scalars
-// uniformly as missing — matching the plan's "non-scalar values can't
-// match a string pattern" semantic.
-func callMatchArgString(call *logical.MCPCall, paramName string) string {
-	if call == nil || call.MatchArgs == nil {
-		return ""
-	}
-	pv, ok := call.MatchArgs[paramName]
-	if !ok {
-		return ""
-	}
-	switch pv.Kind {
-	case logical.ParamString, logical.ParamNumber, logical.ParamBool:
-		return pv.Str
-	default:
-		return ""
-	}
 }
 
 // mcpDenyRuleTypeForName maps a name-bearing method to its denied_*

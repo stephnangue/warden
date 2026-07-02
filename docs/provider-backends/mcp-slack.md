@@ -341,7 +341,6 @@ the matcher denies with a specific `rule_type`:
 | `denied_tools` / `allowed_tools` | `tools/call` with a `params.name` matching a deny pattern, or not in the allow list |
 | `denied_resources` / `allowed_resources` | `resources/read` with a `params.uri` matching a deny pattern, or not in the allow list |
 | `denied_prompts` / `allowed_prompts` | `prompts/get` with a `params.name` matching a deny pattern, or not in the allow list |
-| `denied_params` / `allowed_params` | A `tools/call` argument (`params.arguments.<key>`) matches a deny pattern, or — when present — fails an allow-list pattern. Both rules are conditional on presence: missing arguments don't trigger either, matching Vault's `allowed_parameters` semantics. Tools whose argument shape doesn't include the gated key pass through unaffected. |
 | `missing_body` | An `mcp { }` block is bound to a path served by a non-MCP-aware backend — an operator misconfiguration. The body-authoritative gate has no descriptor to evaluate and fails closed. |
 | `malformed_jsonrpc` | Body on an MCP-enforced POST is absent, unreadable, or not a well-formed JSON-RPC 2.0 envelope (bad version, missing method, unknown top-level key, UTF-8 BOM, etc.) |
 | `duplicate_key` | Duplicate object key detected anywhere in the body — Warden rejects ambiguity that Go's standard JSON parser silently last-wins-resolves |
@@ -409,11 +408,11 @@ path "slack-mcp/role/+/gateway*" {
 EOF
 ```
 
-Argument-level gates restrict the *values* passed to `tools/call`. Keys in
-`denied_params` / `allowed_params` match against `params.arguments.<key>` from
-the parsed body — both rules skip on missing arguments, so a tool that doesn't
-take `channel` at all isn't affected. The policy below permits posting, but only
-to an approved set of channels:
+Argument-level gates restrict the *values* passed to `tools/call`. A per-call
+CEL `condition` reads `call.args.<key>` from the parsed body — guard with
+`has(...)` (or optional `?` access) so a tool that doesn't take `channel_id`
+at all isn't affected. The policy below permits posting, but only to an approved
+set of channels:
 
 ```bash
 warden policy write mcp-slack-approved-channels - <<EOF
@@ -427,9 +426,7 @@ path "slack-mcp/role/+/gateway*" {
       "ping"
     ]
     allowed_tools  = ["post_message"]
-    allowed_params = {
-      channel_id = ["C0123456789", "C0987654321"]
-    }
+    condition = "!has(call.args.channel_id) || call.args.channel_id in ['C0123456789', 'C0987654321']"
   }
 }
 EOF

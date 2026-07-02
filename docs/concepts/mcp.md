@@ -62,16 +62,14 @@ Each call passes through gates in order; the first failure denies it:
 1. **Method** — `denied_methods` then `allowed_methods`.
 2. **Name** (for the three name-bearing methods) — `denied_tools`/`resources`/`prompts`
    then the matching `allowed_*` list.
-3. **Parameters** (`tools/call` only) — `denied_params` then `allowed_params`,
-   per argument key.
-4. **Condition** (CEL) — the block's per-call `condition`, if present, runs last.
+3. **Condition** (CEL) — the block's per-call `condition`, if present, runs last
+   and gates on argument values (`call.args`).
 
-Within a gate, a `denied_*` match always rejects; an `allowed_*` list, if present,
-means the value must match it. Patterns are matched with a **trailing `*`** wildcard
-(`delete_*`, or a bare `*` for "anything"), case-insensitively. For parameters, an
-`allowed_params` entry is conditional — *"if this argument is present, it must
-match"* — and non-scalar argument values (objects, arrays, null) are treated as
-absent, so they neither satisfy nor violate a string pattern.
+Within a name/method gate, a `denied_*` match always rejects; an `allowed_*`
+list, if present, means the value must match it. Patterns are matched with a
+**trailing `*`** wildcard (`delete_*`, or a bare `*` for "anything"),
+case-insensitively. Argument-value constraints are expressed in the per-call
+`condition` (below), not as structured lists.
 
 ### Per-call CEL conditions
 
@@ -136,10 +134,10 @@ it tells the agent enough to correct course rather than guess at an opaque 403.
 
 Every consulted `mcp { }` block records its outcome to the [audit log](audit.md):
 the `decision` (allow/deny), the `rule_type` that fired (`denied_tools`,
-`allowed_params`, `duplicate_key`, `condition`, `condition_error`, …), the
-`method` and `name`, and the parameter key/value when a param gate decided it.
-When a `condition` decided the call, a `condition` object records the expression
-and (on a fail-closed error) a sanitized error category. The decision is recorded
+`allowed_methods`, `duplicate_key`, `condition`, `condition_error`, …), the
+`method` and `name`. When a `condition` decided the call, a `condition` object
+records the expression and (on a fail-closed error) a sanitized error category.
+The decision is recorded
 on **both** allow and deny, so the audit trail shows not just what was blocked
 but every tool call that was permitted — a complete record of an agent's activity
 through the server.

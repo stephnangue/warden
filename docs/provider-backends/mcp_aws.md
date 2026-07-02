@@ -182,7 +182,6 @@ Enforcement is **body-authoritative**. When a policy in scope contains an `mcp {
 | `denied_tools` / `allowed_tools` | `tools/call` with a `params.name` matching a deny pattern, or not in the allow list |
 | `denied_resources` / `allowed_resources` | `resources/read` with a `params.uri` matching a deny pattern, or not in the allow list |
 | `denied_prompts` / `allowed_prompts` | `prompts/get` with a `params.name` matching a deny pattern, or not in the allow list |
-| `denied_params` / `allowed_params` | A `tools/call` argument (`params.arguments.<key>`) matches a deny pattern, or — when present — fails an allow-list pattern. Both rules are conditional on presence: missing arguments don't trigger either, matching Vault's `allowed_parameters` semantics. Tools whose argument shape doesn't include the gated key pass through unaffected. |
 | `missing_body` | Request body absent on a path the backend opted into MCP enforcement for. POST/JSON-RPC traffic that fails to parse triggers this; non-POST verbs (GET for the SSE notification stream, DELETE for session terminate) silently skip `mcp { }` evaluation — the body-authoritative gate doesn't apply to body-less verbs. |
 | `malformed_jsonrpc` | Body is not a well-formed JSON-RPC 2.0 envelope (bad version, missing method, unknown top-level key, UTF-8 BOM, etc.) |
 | `duplicate_key` | Duplicate object key detected anywhere in the body — Warden rejects ambiguity that Go's standard JSON parser silently last-wins-resolves |
@@ -204,7 +203,7 @@ path "mcp_aws/role/+/gateway*" {
 EOF
 ```
 
-A policy that restricts the agent to the `call_aws` tool but only against a vetted set of AWS services. The AWS MCP Server prefixes every tool name with `aws___` (three underscores) — confirm via `tools/list` on the live server. The tool takes `service_name`, `operation_name`, and `region_name` arguments — `allowed_params` keys match those argument names directly:
+A policy that restricts the agent to the `call_aws` tool but only against a vetted set of AWS services. The AWS MCP Server prefixes every tool name with `aws___` (three underscores) — confirm via `tools/list` on the live server. The tool takes `service_name`, `operation_name`, and `region_name` arguments — a per-call CEL `condition` over `call.args` gates those argument values:
 
 ```bash
 warden policy write mcp-aws-s3-readonly - <<EOF
@@ -219,36 +218,32 @@ path "mcp_aws/role/+/gateway*" {
       "ping"
     ]
     allowed_tools   = ["aws___call_aws"]
-    allowed_params = {
-      service_name = ["s3", "dynamodb"]
-    }
+    condition = "!has(call.args.service_name) || call.args.service_name in ['s3', 'dynamodb']"
   }
 }
 EOF
 ```
 
-A complementary deny-list shape — permissive by default, blocks dangerous operations regardless of which service they target. `mcp { }` patterns support a trailing `*` only (literals otherwise), so list the prefix you want to block and any one-off exact names separately:
+A complementary deny shape — permissive by default, blocks dangerous operations regardless of which service they target. The `condition` reads `call.args.operation_name` and denies the dangerous prefixes/names:
 
 ```bash
 warden policy write mcp-aws-safe - <<EOF
 path "mcp_aws/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
   mcp {
-    denied_params = {
-      operation_name = [
-        "delete_*",
-        "terminate_*",
-        "put_bucket_policy",
-        "put_role_policy",
-        "put_user_policy",
-      ]
-    }
+    condition = <<-CEL
+      !has(call.args.operation_name) || !(
+        call.args.operation_name.startsWith("delete_") ||
+        call.args.operation_name.startsWith("terminate_") ||
+        call.args.operation_name in ["put_bucket_policy", "put_role_policy", "put_user_policy"]
+      )
+    CEL
   }
 }
 EOF
 ```
 
-Argument-level gates restrict the *values* passed to `tools/call`. Combine `allowed_params` and `denied_params` to constrain both which services may be called and within what regions:
+Argument-level gates restrict the *values* passed to `tools/call`. One `condition` can constrain both which services may be called and within what regions:
 
 ```bash
 warden policy write mcp-aws-us-only - <<EOF
@@ -263,10 +258,10 @@ path "mcp_aws/role/+/gateway*" {
       "ping"
     ]
     allowed_tools   = ["aws___call_aws"]
-    allowed_params = {
-      service_name = ["s3", "dynamodb", "lambda"]
-      region_name  = ["us-east-1", "us-east-2", "us-west-2"]
-    }
+    condition = <<-CEL
+      (!has(call.args.service_name) || call.args.service_name in ["s3", "dynamodb", "lambda"]) &&
+      (!has(call.args.region_name) || call.args.region_name in ["us-east-1", "us-east-2", "us-west-2"])
+    CEL
   }
 }
 EOF
