@@ -1,6 +1,7 @@
 package logical
 
 import (
+	"strings"
 	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
@@ -136,6 +137,11 @@ type MCPDecision struct {
 	// NOT participate in the strongest-reason ranking that selects
 	// which set's deny surfaces on a multi-set deny.
 	BatchIndex *int `json:"batch_index,omitempty"`
+
+	// Condition carries the CEL condition decision when an mcp{} condition
+	// was evaluated for this call. Populated when RuleType is "condition" or
+	// "condition_error"; nil when no condition applied.
+	Condition *ConditionResult `json:"condition,omitempty"`
 }
 
 // Clone returns a deep copy of the MCPDecision. Safe to call on a nil
@@ -149,7 +155,82 @@ func (d *MCPDecision) Clone() *MCPDecision {
 		idx := *d.BatchIndex
 		clone.BatchIndex = &idx
 	}
+	clone.Condition = d.Condition.Clone()
 	return &clone
+}
+
+// ConditionResult is the audited outcome of evaluating a CEL condition. It is
+// recorded at both audit sites — PolicyResults.Condition (path-level) and
+// MCPDecision.Condition (per-call) — and carries enough to explain a decision
+// without sub-expression tracing: the operator-authored expression, the
+// referenced input values, and (on a fail-closed error) a sanitized category.
+//
+// Hygiene: Expression is operator-authored and safe to log. Inputs values may
+// be adversary-influenced and are CTL-stripped here; secret-bearing keys are
+// redacted/salted by the audit format layer. ErrorKind is a category, never a
+// raw eval-error string or adversary value.
+type ConditionResult struct {
+	// Decision is "allow" or "deny".
+	Decision string `json:"decision"`
+
+	// Expression is the CEL text that decided (the deciding condition on an
+	// OR-merge across policies).
+	Expression string `json:"expression,omitempty"`
+
+	// ErrorKind is a sanitized category for a fail-closed eval error
+	// (e.g. "no_such_key", "type_mismatch", "cost_exceeded"); empty for a
+	// clean allow/deny.
+	ErrorKind string `json:"error_kind,omitempty"`
+
+	// Inputs maps the expression's referenced variables to their CTL-stripped
+	// values so a denial is self-explanatory. Sensitive keys are
+	// redacted/salted by the audit format layer.
+	Inputs map[string]string `json:"inputs,omitempty"`
+}
+
+// Clone returns a deep copy of the ConditionResult. Safe to call on a nil
+// receiver (returns nil).
+func (c *ConditionResult) Clone() *ConditionResult {
+	if c == nil {
+		return nil
+	}
+	clone := *c
+	if c.Inputs != nil {
+		clone.Inputs = make(map[string]string, len(c.Inputs))
+		for k, v := range c.Inputs {
+			clone.Inputs[k] = v
+		}
+	}
+	return &clone
+}
+
+// Sanitize CTL-strips string fields so adversary-influenced input values
+// cannot inject control characters into audit records. Redaction/salting of
+// sensitive Inputs keys is applied separately by the audit format layer.
+func (c *ConditionResult) Sanitize() {
+	if c == nil {
+		return
+	}
+	c.Decision = stripControlChars(c.Decision)
+	c.Expression = stripControlChars(c.Expression)
+	c.ErrorKind = stripControlChars(c.ErrorKind)
+	if c.Inputs != nil {
+		cleaned := make(map[string]string, len(c.Inputs))
+		for k, v := range c.Inputs {
+			cleaned[stripControlChars(k)] = stripControlChars(v)
+		}
+		c.Inputs = cleaned
+	}
+}
+
+// stripControlChars removes C0 control characters and DEL.
+func stripControlChars(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7F {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // ActorRef identifies a subject in the on-behalf-of chain. Verified
