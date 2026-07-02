@@ -457,6 +457,11 @@ func buildRequestNS(req celRequestInput, f fieldSet) map[string]any {
 	return m
 }
 
+// emptyStringMap is a shared, never-mutated empty map bound to token.metadata
+// when a token carries none — non-nil (so absent-key access fails closed)
+// without a per-request allocation.
+var emptyStringMap = map[string]string{}
+
 // buildTokenNS builds the `token` namespace, including only the fields f marks
 // as referenced (all fields when f.all). The expensive fields (metadata copy,
 // actors/policies slices) are built only when referenced. metadata is non-nil.
@@ -475,11 +480,15 @@ func buildTokenNS(tok celTokenInput, f fieldSet) map[string]any {
 		m["namespace"] = tok.NamespacePath
 	}
 	if f.has("metadata") {
-		md := make(map[string]any, len(tok.Metadata))
-		for k, v := range tok.Metadata {
-			md[k] = v
+		// Bind the string map by reference — CEL adapts it via reflection — rather
+		// than copying into a map[string]any. emptyStringMap keeps it non-nil (so
+		// has(token.metadata.x) is false and absent-key access fails closed)
+		// without allocating.
+		if tok.Metadata != nil {
+			m["metadata"] = tok.Metadata
+		} else {
+			m["metadata"] = emptyStringMap
 		}
-		m["metadata"] = md
 	}
 	if f.has("actors") {
 		acts := make([]any, 0, len(tok.Actors))
@@ -783,13 +792,16 @@ func resolveConditionInputs(refPaths []string, refSegs [][]string, act *celActiv
 			continue
 		}
 		for _, s := range segs[1:] {
-			m, isMap := cur.(map[string]any)
-			if !isMap {
-				cur = nil
-				ok = false
-				break
+			switch mm := cur.(type) {
+			case map[string]any:
+				cur, ok = mm[s]
+			case map[string]string:
+				// token.metadata is bound as a string map (see buildTokenNS).
+				cur, ok = mm[s]
+			default:
+				cur, ok = nil, false
 			}
-			if cur, ok = m[s]; !ok {
+			if !ok {
 				break
 			}
 		}
