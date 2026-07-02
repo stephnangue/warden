@@ -224,8 +224,9 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 	// when at least one set carries a CEL condition; nil otherwise so the
 	// common no-condition path allocates nothing extra.
 	var act *celActivation
-	if mcpSetsHaveCondition(sets) {
-		act = newCELActivation(celRequestInputFromRequest(req, nsPath), celTokenInputFromEntry(te, now), now, nil)
+	if reqF, tokF, callF, found := mcpConditionFields(sets); found {
+		act = newCELActivation(celRequestInputFromRequest(req, nsPath), reqF, celTokenInputFromEntry(te, now), tokF, now, nil)
+		act.callFields = callF
 	}
 
 	batch := len(desc.Calls) > 1
@@ -233,7 +234,7 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 	for i := range desc.Calls {
 		call := &desc.Calls[i]
 		if act != nil {
-			act.call = buildCallNS(call.Method, call.Name, call.MatchArgs, call.BatchIndex)
+			act.call = buildCallNS(call.Method, call.Name, call.MatchArgs, call.BatchIndex, act.callFields)
 		}
 		d := evaluateMCPCall(sets, call, act)
 		if d.Decision == "deny" {
@@ -248,13 +249,25 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 	return lastAllow
 }
 
-func mcpSetsHaveCondition(sets []*CBPMCPRules) bool {
+// mcpConditionFields returns the union of the namespace field-sets across all
+// sets that carry a CEL condition, and whether any condition exists. The union
+// prunes the shared per-request activation to only the fields the conditions
+// read (reused across every call in a batch).
+func mcpConditionFields(sets []*CBPMCPRules) (reqF, tokF, callF fieldSet, found bool) {
 	for _, s := range sets {
-		if s != nil && s.Condition != nil {
-			return true
+		if s == nil || s.Condition == nil {
+			continue
 		}
+		if !found {
+			reqF, tokF, callF = s.Condition.ReqFields, s.Condition.TokFields, s.Condition.CallFields
+			found = true
+			continue
+		}
+		reqF = unionFieldSets(reqF, s.Condition.ReqFields)
+		tokF = unionFieldSets(tokF, s.Condition.TokFields)
+		callF = unionFieldSets(callF, s.Condition.CallFields)
 	}
-	return false
+	return
 }
 
 // evaluateMCPCall runs all rule-sets against one MCPCall and applies
@@ -345,13 +358,13 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 		if err != nil {
 			d.Decision = "deny"
 			d.RuleType = mcpRuleTypeConditionError
-			d.Condition = &logical.ConditionResult{Decision: "deny", Expression: set.Condition.Source, ErrorKind: celErrorKind(err), Inputs: resolveConditionInputs(set.Condition.RefPaths, act)}
+			d.Condition = &logical.ConditionResult{Decision: "deny", Expression: set.Condition.Source, ErrorKind: celErrorKind(err), Inputs: resolveConditionInputs(set.Condition.RefPaths, set.Condition.RefSegs, act)}
 			return d
 		}
 		if !ok {
 			d.Decision = "deny"
 			d.RuleType = mcpRuleTypeCondition
-			d.Condition = &logical.ConditionResult{Decision: "deny", Expression: set.Condition.Source, Inputs: resolveConditionInputs(set.Condition.RefPaths, act)}
+			d.Condition = &logical.ConditionResult{Decision: "deny", Expression: set.Condition.Source, Inputs: resolveConditionInputs(set.Condition.RefPaths, set.Condition.RefSegs, act)}
 			return d
 		}
 	}
@@ -361,7 +374,7 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 	d.Decision = "allow"
 	d.RuleType = mcpRuleTypeAllowedMethods
 	if set.Condition != nil {
-		d.Condition = &logical.ConditionResult{Decision: "allow", Expression: set.Condition.Source, Inputs: resolveConditionInputs(set.Condition.RefPaths, act)}
+		d.Condition = &logical.ConditionResult{Decision: "allow", Expression: set.Condition.Source, Inputs: resolveConditionInputs(set.Condition.RefPaths, set.Condition.RefSegs, act)}
 	}
 	if len(set.AllowedMethods) > 0 {
 		d.MatchedRule = matchMCPAny(method, set.AllowedMethods)

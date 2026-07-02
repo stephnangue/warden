@@ -26,11 +26,11 @@ func mustEnv(t *testing.T, mcp bool) *cel.Env {
 // mustCompile compiles src against env or fails the test.
 func mustCompile(t *testing.T, env *cel.Env, src string) cel.Program {
 	t.Helper()
-	prg, _, err := compileCELCondition(env, src)
+	c, err := compileCELCondition(env, src)
 	if err != nil {
 		t.Fatalf("compile %q: %v", src, err)
 	}
-	return prg
+	return c.Program
 }
 
 // baseAct is a minimal request/token activation for path-level tests.
@@ -50,7 +50,7 @@ func str(s string) logical.ParamValue { return logical.ParamValue{Kind: logical.
 func TestCEL_PathLevelEnvRejectsCallReference(t *testing.T) {
 	// A path-level (base) env must NOT know call.* — referencing it is a
 	// compile-time error, never a silent runtime deny.
-	if _, _, err := compileCELCondition(mustEnv(t, false), "call.args.amount <= 1500"); err == nil {
+	if _, err := compileCELCondition(mustEnv(t, false), "call.args.amount <= 1500"); err == nil {
 		t.Fatal("expected compile error for call.* in path-level env, got nil")
 	}
 	// The MCP env accepts the same expression.
@@ -58,7 +58,7 @@ func TestCEL_PathLevelEnvRejectsCallReference(t *testing.T) {
 }
 
 func TestCEL_NonBoolRejected(t *testing.T) {
-	if _, _, err := compileCELCondition(mustEnv(t, false), "1 + 1"); err == nil {
+	if _, err := compileCELCondition(mustEnv(t, false), "1 + 1"); err == nil {
 		t.Fatal("expected rejection of non-bool condition")
 	}
 }
@@ -88,13 +88,62 @@ func TestCEL_ReferencedPaths(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, paths, err := compileCELCondition(mustEnv(t, tc.mcp), tc.src)
+			c, err := compileCELCondition(mustEnv(t, tc.mcp), tc.src)
 			if err != nil {
 				t.Fatalf("compile %q: %v", tc.src, err)
 			}
-			if !reflect.DeepEqual(paths, tc.want) {
-				t.Fatalf("paths = %v, want %v", paths, tc.want)
+			if !reflect.DeepEqual(c.RefPaths, tc.want) {
+				t.Fatalf("paths = %v, want %v", c.RefPaths, tc.want)
 			}
+		})
+	}
+}
+
+// TestCEL_FieldRefs locks in the top-level field-sets used to prune the
+// activation. The invariant is a superset: has(), index, optional access, and
+// comprehensions must all still record the top field they touch, and a bare
+// root reference must trip the all-fields fallback — an under-built field would
+// be a missing key at eval → fail-closed deny.
+func TestCEL_FieldRefs(t *testing.T) {
+	fs := func(names ...string) map[string]bool {
+		m := map[string]bool{}
+		for _, n := range names {
+			m[n] = true
+		}
+		return m
+	}
+	cases := []struct {
+		name           string
+		mcp            bool
+		src            string
+		req, tok, cal  map[string]bool
+		reqAll, tokAll bool
+	}{
+		{name: "scalar select", src: "token.metadata.env == 'prod'", tok: fs("metadata")},
+		{name: "has()", src: "has(request.data.x)", req: fs("data")},
+		{name: "index", src: `request.data["k"] == "v"`, req: fs("data")},
+		{name: "optional", mcp: true, src: "call.args.?amount.orValue(0) <= 3", cal: fs("args")},
+		{name: "comprehension", src: "size(token.actors) > 0 && token.actors.all(a, a.verified)", tok: fs("actors")},
+		{name: "multi-field", src: "request.data.x <= 1 && request.namespace == token.namespace", req: fs("data", "namespace"), tok: fs("namespace")},
+		{name: "bare root -> all", src: "size(token) > 0 || token.metadata.env == 'x'", tok: fs("metadata"), tokAll: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := compileCELCondition(mustEnv(t, tc.mcp), tc.src)
+			if err != nil {
+				t.Fatalf("compile %q: %v", tc.src, err)
+			}
+			check := func(label string, got fieldSet, wantAll bool, want map[string]bool) {
+				if want == nil {
+					want = map[string]bool{}
+				}
+				if got.all != wantAll || !reflect.DeepEqual(got.fields, want) {
+					t.Errorf("%s: got {all=%v %v}, want {all=%v %v}", label, got.all, got.fields, wantAll, want)
+				}
+			}
+			check("request", c.ReqFields, tc.reqAll, tc.req)
+			check("token", c.TokFields, tc.tokAll, tc.tok)
+			check("call", c.CallFields, false, tc.cal)
 		})
 	}
 }

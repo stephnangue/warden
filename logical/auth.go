@@ -220,12 +220,11 @@ func (c *ConditionResult) Sanitize() {
 	c.Decision = stripControlChars(c.Decision)
 	c.Expression = stripControlChars(c.Expression)
 	c.ErrorKind = stripControlChars(c.ErrorKind)
-	if c.Inputs != nil {
-		cleaned := make(map[string]string, len(c.Inputs))
-		for k, v := range c.Inputs {
-			cleaned[stripControlChars(k)] = stripControlChars(v)
-		}
-		c.Inputs = cleaned
+	// Inputs keys are operator-authored CEL paths (identifiers — no control
+	// chars possible), so only values need stripping; strip them in place to
+	// avoid reallocating the map on the eval hot path.
+	for k, v := range c.Inputs {
+		c.Inputs[k] = stripControlChars(v)
 	}
 }
 
