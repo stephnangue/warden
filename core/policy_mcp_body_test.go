@@ -22,7 +22,7 @@ func TestDecideMCP_NilDescriptorDeniesMissingBody(t *testing.T) {
 		AllowedMethods: []string{"tools/list"},
 	}}
 	req := &logical.Request{} // no MCPDescriptor
-	d := decideMCP(sets, req, nil, time.Time{})
+	d := decideMCP(sets, req, nil, time.Time{}, "")
 	require.NotNil(t, d)
 	assert.Equal(t, "deny", d.Decision)
 	assert.Equal(t, mcpRuleTypeMissingBody, d.RuleType)
@@ -55,7 +55,7 @@ func TestDecideMCP_ParseErrMapsByKind(t *testing.T) {
 					},
 				},
 			}
-			d := decideMCP(sets, req, nil, time.Time{})
+			d := decideMCP(sets, req, nil, time.Time{}, "")
 			require.NotNil(t, d)
 			assert.Equal(t, "deny", d.Decision)
 			assert.Equal(t, tc.ruleType, d.RuleType)
@@ -83,7 +83,7 @@ func TestDecideMCP_DescriptorMatcherAllows(t *testing.T) {
 			}},
 		},
 	}
-	d := decideMCP(sets, req, nil, time.Time{})
+	d := decideMCP(sets, req, nil, time.Time{}, "")
 	require.NotNil(t, d)
 	assert.Equal(t, "allow", d.Decision)
 }
@@ -111,7 +111,7 @@ func TestDecideMCP_EmptyDescriptorSkipsEvaluation(t *testing.T) {
 			// Calls nil, ParseErr nil — the per-request opt-out sentinel.
 		},
 	}
-	d := decideMCP(sets, req, nil, time.Time{})
+	d := decideMCP(sets, req, nil, time.Time{}, "")
 	assert.Nil(t, d, "decideMCP must return nil for the per-request opt-out sentinel so the cap-level check decides")
 }
 
@@ -124,10 +124,10 @@ func TestDecideMCP_EmptySetsReturnNil(t *testing.T) {
 			Calls: []logical.MCPCall{{Method: "tools/list"}},
 		},
 	}
-	if d := decideMCP(nil, req, nil, time.Time{}); d != nil {
+	if d := decideMCP(nil, req, nil, time.Time{}, ""); d != nil {
 		t.Errorf("decision = %+v, want nil for empty sets", d)
 	}
-	if d := decideMCP([]*CBPMCPRules{}, req, nil, time.Time{}); d != nil {
+	if d := decideMCP([]*CBPMCPRules{}, req, nil, time.Time{}, ""); d != nil {
 		t.Errorf("decision = %+v, want nil for empty sets slice", d)
 	}
 }
@@ -146,7 +146,7 @@ func TestEvaluateMCPDescriptor_BatchDenyStampsBatchIndex(t *testing.T) {
 			{Method: "tools/call", Name: "delete_repo", BatchIndex: 2},
 		},
 	}
-	d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{})
+	d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{}, "")
 	require.NotNil(t, d)
 	require.Equal(t, "deny", d.Decision)
 	require.NotNil(t, d.BatchIndex, "BatchIndex should be stamped for batch denies")
@@ -164,7 +164,7 @@ func TestEvaluateMCPDescriptor_SingleCallLeavesBatchIndexNil(t *testing.T) {
 			{Method: "tools/call", Name: "delete_repo"},
 		},
 	}
-	d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{})
+	d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{}, "")
 	require.NotNil(t, d)
 	if d.BatchIndex != nil {
 		t.Errorf("BatchIndex = %v, want nil for single-call descriptor", *d.BatchIndex)
@@ -220,7 +220,7 @@ func TestDecideMCP_SanitizesDecisionBoundary(t *testing.T) {
 			}},
 		},
 	}
-	d := decideMCP(sets, req, nil, time.Time{})
+	d := decideMCP(sets, req, nil, time.Time{}, "")
 	require.NotNil(t, d)
 	assert.Equal(t, "deny", d.Decision)
 	assert.Equal(t, mcpRuleTypeDeniedTools, d.RuleType)

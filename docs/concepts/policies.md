@@ -131,7 +131,7 @@ variables built from the request:
 
 | Namespace | Fields |
 | --- | --- |
-| `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `data.<key>` |
+| `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `namespace`, `data.<key>` |
 | `token` | `principal`, `role`, `type`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject, verified}`), `ttl_seconds`, `expires_at` |
 | `now` | the request timestamp |
 
@@ -181,6 +181,10 @@ condition = "size(token.actors) > 0"
 # operation-conditional (capability still selects the rule)
 condition = "request.operation == 'read' ? true : token.metadata.role == 'writer'"
 ```
+
+For 20 worked examples — source-IP and time gates, auth-method and delegation
+checks, namespace confinement, and a full per-tool MCP budget — see the
+[CEL Condition Cookbook](cel-conditions.md).
 
 ### Path expiration
 

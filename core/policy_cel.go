@@ -46,7 +46,8 @@ import (
 //
 //	request.path, request.operation, request.client_ip,
 //	  request.mount_point, request.mount_type, request.mount_class,
-//	  request.mount_accessor, request.transparent, request.data.<k>
+//	  request.mount_accessor, request.transparent, request.namespace,
+//	  request.data.<k>
 //	token.principal, token.role, token.type, token.namespace,
 //	  token.policies (list), token.metadata.<k>, token.actors (list of
 //	  {subject, verified}), token.ttl_seconds, token.expires_at
@@ -80,6 +81,7 @@ type celRequestInput struct {
 	MountClass    string
 	MountAccessor string
 	Transparent   bool
+	Namespace     string
 	Data          map[string]any
 }
 
@@ -338,6 +340,7 @@ func buildRequestNS(req celRequestInput) map[string]any {
 		"mount_class":    req.MountClass,
 		"mount_accessor": req.MountAccessor,
 		"transparent":    req.Transparent,
+		"namespace":      req.Namespace,
 		"data":           data,
 	}
 }
@@ -512,9 +515,13 @@ func mcpCELEnv() (*cel.Env, error) {
 
 // celRequestInputFromRequest adapts a *logical.Request into the request context
 // exposed to expressions. All fields are populated before policy evaluation.
-func celRequestInputFromRequest(req *logical.Request) celRequestInput {
+// nsPath is the request's target namespace (namespace.FromContext at eval),
+// exposed as request.namespace — distinct from token.namespace (where the token
+// was minted). It is not derivable from mount_point, which concatenates the
+// namespace prefix with the mount path.
+func celRequestInputFromRequest(req *logical.Request, nsPath string) celRequestInput {
 	if req == nil {
-		return celRequestInput{}
+		return celRequestInput{Namespace: nsPath}
 	}
 	return celRequestInput{
 		Path:          req.Path,
@@ -525,6 +532,7 @@ func celRequestInputFromRequest(req *logical.Request) celRequestInput {
 		MountClass:    req.MountClass,
 		MountAccessor: req.MountAccessor,
 		Transparent:   req.Transparent,
+		Namespace:     nsPath,
 		Data:          req.Data,
 	}
 }
@@ -574,11 +582,11 @@ func celErrorKind(err error) string {
 // semantics: the gate passes if any condition is true. An empty list is
 // unconditional. Evaluation is fail-closed — an erroring condition denies, and
 // if no condition passes the deciding result is recorded for audit (Sanitized).
-func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te *logical.TokenEntry, now time.Time) (bool, *logical.ConditionResult) {
+func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) (bool, *logical.ConditionResult) {
 	if len(conds) == 0 {
 		return true, nil
 	}
-	act := newCELActivation(celRequestInputFromRequest(req), celTokenInputFromEntry(te, now), now, nil)
+	act := newCELActivation(celRequestInputFromRequest(req, nsPath), celTokenInputFromEntry(te, now), now, nil)
 
 	var deciding *logical.ConditionResult
 	for _, c := range conds {

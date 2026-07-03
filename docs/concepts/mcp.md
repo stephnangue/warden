@@ -92,7 +92,8 @@ mcp {
 ```
 
 The condition reads a per-call namespace on top of the request/token namespaces
-documented in [Policies → CEL conditions](policies.md#cel-conditions):
+documented in [Policies → Fine-grained access](policies.md#fine-grained-access)
+(worked examples in the [CEL Condition Cookbook](cel-conditions.md)):
 
 - `call.method` — the JSON-RPC method (`tools/call`, …)
 - `call.tool` — the name-bearing field (tool/resource/prompt name)

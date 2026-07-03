@@ -27,6 +27,8 @@ How a caller proves who it is and what that lets it do.
   resolved per request.
 - [Policies](policies.md) — capability-based authorization, path matching, and
   request-content rules.
+- [CEL Condition Cookbook](cel-conditions.md) — 20 worked examples for the
+  `condition` expression, from a numeric cap to a full payments stanza.
 
 ## Brokering access
 
