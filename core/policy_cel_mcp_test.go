@@ -5,12 +5,59 @@ package core
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stephnangue/warden/logical"
 )
+
+// TestMCPCond_BatchSharesOneNow guards that decideMCP evaluates every call in a
+// batch against a single `now` snapshot. The condition holds only at the exact
+// instant passed in; if a refactor re-read time.Now() per call, the calls would
+// no longer match and the batch would deny.
+func TestMCPCond_BatchSharesOneNow(t *testing.T) {
+	env, err := mcpCELEnv()
+	require.NoError(t, err)
+	cond, err := compileCELCondition(env, `now == timestamp("1970-01-01T00:00:00Z")`)
+	require.NoError(t, err)
+
+	sets := []*CBPMCPRules{{
+		AllowedMethods: []string{"tools/call"},
+		AllowedTools:   []string{"pay"},
+		Condition:      cond,
+	}}
+	req := &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "mcp/gateway/",
+		MCPDescriptor: &logical.MCPRequestDescriptor{Calls: []logical.MCPCall{
+			{Method: "tools/call", Name: "pay", BatchIndex: 0, MatchArgs: map[string]logical.ParamValue{}},
+			{Method: "tools/call", Name: "pay", BatchIndex: 1, MatchArgs: map[string]logical.ParamValue{}},
+		}},
+	}
+
+	d := decideMCP(sets, req, nil, time.Unix(0, 0).UTC(), "")
+	require.NotNil(t, d)
+	assert.Equal(t, "allow", d.Decision, "both batch calls must see the same now snapshot")
+}
+
+// TestMCPCond_MultiSetConditionOR confirms cross-set OR at the condition level:
+// a call denied by one set's condition but allowed by another's is allowed.
+func TestMCPCond_MultiSetConditionOR(t *testing.T) {
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp { allowed_methods = ["tools/call"] allowed_tools = ["pay"] condition = "call.args.amount <= 100" }
+}
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp { allowed_methods = ["tools/call"] allowed_tools = ["pay"] condition = "call.args.amount <= 5000" }
+}`)
+	req := mcpReq(t, `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"pay","arguments":{"amount":1000}},"id":1}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+	assert.True(t, res.Allowed, "set A denies (>100) but set B allows (<=5000) → cross-set OR allows")
+}
 
 // mcpReq builds a streaming MCP request from a JSON-RPC body and runs the
 // production extractor, leaving req.MCPDescriptor populated.

@@ -30,6 +30,45 @@ func testParsePolicy(t testing.TB, rules string) *Policy {
 	return policy
 }
 
+// TestCBP_ConditionIsIdentityIndependent proves a condition compiles once and is
+// evaluated against per-token activation data — never recompiled per identity.
+// One CBP, two different tokens, opposite outcomes driven purely by token data.
+func TestCBP_ConditionIsIdentityIndependent(t *testing.T) {
+	ctx := testContext()
+	p := testParsePolicy(t, `path "secret/x" { capabilities = ["read"] condition = "token.metadata.env == 'prod'" }`)
+	cbp, err := NewCBP(ctx, []*Policy{p})
+	require.NoError(t, err)
+
+	req := &logical.Request{Operation: logical.ReadOperation, Path: "secret/x"}
+	prod := &logical.TokenEntry{Metadata: map[string]string{"env": "prod"}}
+	dev := &logical.TokenEntry{Metadata: map[string]string{"env": "dev"}}
+
+	assert.True(t, cbp.AllowOperation(ctx, req, prod, false).Allowed)
+	assert.False(t, cbp.AllowOperation(ctx, req, dev, false).Allowed)
+}
+
+// TestCBP_CompiledConditionCacheSharedAcrossCallers confirms a conditioned policy
+// set compiles once and the cached compiled CBP is reused across callers — the
+// compiled program is keyed by the policy set, not by any token identity (the
+// no-templated-policies invariant).
+func TestCBP_CompiledConditionCacheSharedAcrossCallers(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	p := testParsePolicy(t, `path "secret/x" { capabilities = ["read"] condition = "token.metadata.env == 'prod'" }`)
+	p.Name = "cond"
+	p.Type = PolicyTypeCBP
+	require.NoError(t, ps.SetPolicy(ctx, p, nil))
+
+	names := map[string][]string{namespace.RootNamespaceID: {"cond"}}
+	first, err := ps.CBP(ctx, names)
+	require.NoError(t, err)
+	second, err := ps.CBP(ctx, names)
+	require.NoError(t, err)
+	assert.Same(t, first, second, "same policy set → one cached compiled CBP, shared regardless of caller")
+}
+
 // =============================================================================
 // CBP Creation Tests
 // =============================================================================
