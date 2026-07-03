@@ -4,7 +4,10 @@
 package core
 
 import (
+	"errors"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +15,26 @@ import (
 
 	"github.com/stephnangue/warden/logical"
 )
+
+// mustAst compiles src to a checked AST or fails the test.
+func mustAst(t *testing.T, env *cel.Env, src string) *cel.Ast {
+	t.Helper()
+	ast, iss := env.Compile(src)
+	if iss != nil && iss.Err() != nil {
+		t.Fatalf("compile %q: %v", src, iss.Err())
+	}
+	return ast
+}
+
+// bigStringKeyMap builds a request.data map with n distinct keys, used to drive
+// a size-dependent condition past a (test-injected) runtime cost limit.
+func bigStringKeyMap(n int) map[string]any {
+	m := make(map[string]any, n)
+	for i := 0; i < n; i++ {
+		m["k"+strconv.Itoa(i)] = i
+	}
+	return m
+}
 
 // mustEnv builds the base or MCP env or fails the test.
 func mustEnv(t *testing.T, mcp bool) *cel.Env {
@@ -60,6 +83,104 @@ func TestCEL_PathLevelEnvRejectsCallReference(t *testing.T) {
 func TestCEL_NonBoolRejected(t *testing.T) {
 	if _, err := compileCELCondition(mustEnv(t, false), "1 + 1"); err == nil {
 		t.Fatal("expected rejection of non-bool condition")
+	}
+}
+
+// TestCEL_CostRejectedAtCompile confirms an expression whose worst-case cost
+// exceeds the budget at the estimator size bound is rejected at policy-write
+// time (a nested comprehension is ~size², well over the limit at 8192).
+func TestCEL_CostRejectedAtCompile(t *testing.T) {
+	_, err := compileCELCondition(mustEnv(t, true),
+		"call.args.all(k, call.args.all(j, k == j))")
+	if err == nil {
+		t.Fatal("expected compile-time cost rejection for a nested comprehension")
+	}
+	if !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("expected a cost-limit error, got: %v", err)
+	}
+}
+
+// TestCEL_CostIsSizeDependent locks the decision that gates the runtime
+// CostLimit: comprehensions/size-scaling ops are size-dependent, scalar
+// comparisons are not.
+func TestCEL_CostIsSizeDependent(t *testing.T) {
+	mcp := mustEnv(t, true)
+	dep, err := celCostIsSizeDependent(mcp, mustAst(t, mcp, "call.args.all(k, k != '')"), 8192)
+	if err != nil || !dep {
+		t.Fatalf("comprehension should be size-dependent: dep=%v err=%v", dep, err)
+	}
+	base := mustEnv(t, false)
+	dep, err = celCostIsSizeDependent(base, mustAst(t, base, "request.mount_type == 'vault'"), 8192)
+	if err != nil || dep {
+		t.Fatalf("scalar comparison should be size-independent: dep=%v err=%v", dep, err)
+	}
+}
+
+// TestCEL_RuntimeCostLimitDenies exercises the runtime cel.CostLimit backstop:
+// a size-dependent expression compiles under a small injected budget (its
+// estimate at the small size bound fits), then a larger activation drives eval
+// past the budget → fail-closed error. Uses the compile-with-limits seam so the
+// test is deterministic without a million-entry activation.
+func TestCEL_RuntimeCostLimitDenies(t *testing.T) {
+	env := mustEnv(t, false)
+	c, err := compileCELConditionWithLimits(env, "request.data.all(k, k != '')", 100, 5)
+	if err != nil {
+		t.Fatalf("expected the expression to compile under the injected bound: %v", err)
+	}
+	now := time.Unix(0, 0).UTC()
+	act := buildBaseActivation(celRequestInput{Data: bigStringKeyMap(500)}, celTokenInput{}, now)
+	ok, err := evalCELCondition(c.Program, act)
+	if ok {
+		t.Fatal("cost-exceeded eval must not allow")
+	}
+	if err == nil {
+		t.Fatal("expected a runtime cost-limit error")
+	}
+	if got := celErrorKind(err); got != "cost_exceeded" {
+		t.Fatalf("error kind = %q, want cost_exceeded (err: %v)", got, err)
+	}
+}
+
+// TestCEL_ErrorKind pins celErrorKind's categorization (it substring-matches
+// cel-go v0.28.1 error text — a table test guards against silent reclassification
+// on upgrade).
+func TestCEL_ErrorKind(t *testing.T) {
+	now := time.Unix(0, 0).UTC()
+	mcp := mustEnv(t, true)
+	base := mustEnv(t, false)
+
+	mustErrKind := func(label string, err error, want string) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected an eval error, got none", label)
+		}
+		if got := celErrorKind(err); got != want {
+			t.Fatalf("%s: kind=%q want %q (err: %v)", label, got, want, err)
+		}
+	}
+
+	// no_such_key — missing argument.
+	_, err := evalCELCondition(mustCompile(t, mcp, "call.args.amount <= 1500"),
+		mcpAct(now, "pay", nil))
+	mustErrKind("missing arg", err, "no_such_key")
+
+	// type_mismatch — string argument against a numeric comparison.
+	_, err = evalCELCondition(mustCompile(t, mcp, "call.args.amount <= 1500"),
+		mcpAct(now, "pay", map[string]logical.ParamValue{"amount": str("x")}))
+	mustErrKind("string vs numeric", err, "type_mismatch")
+
+	// cost_exceeded — runtime cost-limit trip (via the seam).
+	c, err := compileCELConditionWithLimits(base, "request.data.all(k, k != '')", 100, 5)
+	if err != nil {
+		t.Fatalf("seam compile: %v", err)
+	}
+	_, err = evalCELCondition(c.Program,
+		buildBaseActivation(celRequestInput{Data: bigStringKeyMap(500)}, celTokenInput{}, now))
+	mustErrKind("cost limit", err, "cost_exceeded")
+
+	// eval_error — any error outside the known categories maps to the catch-all.
+	if got := celErrorKind(errors.New("unexpected internal failure")); got != "eval_error" {
+		t.Fatalf("generic error: kind=%q want eval_error", got)
 	}
 }
 
