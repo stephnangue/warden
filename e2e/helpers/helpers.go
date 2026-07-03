@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stephnangue/warden/audit"
 )
 
 // Node ports for the 3-node cluster.
@@ -545,6 +547,30 @@ func GrepNodeLog(t *testing.T, nodeNum int, pattern string) bool {
 	t.Helper()
 	log := ReadNodeLog(t, nodeNum)
 	return strings.Contains(log, pattern)
+}
+
+// ReadAuditEntries parses the JSON file-audit-device log for a node
+// (.logs/node{N}-audit.log — one LogEntry per line) and returns the entries
+// whose raw line contains substr (all entries when substr is ""). Non-audit or
+// partial lines are skipped, so it is safe to poll while the node is writing.
+func ReadAuditEntries(t *testing.T, nodeNum int, substr string) []audit.LogEntry {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(E2EDir(), ".logs", fmt.Sprintf("node%d-audit.log", nodeNum)))
+	if err != nil {
+		return nil
+	}
+	var out []audit.LogEntry
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || (substr != "" && !strings.Contains(line, substr)) {
+			continue
+		}
+		var e audit.LogEntry
+		if json.Unmarshal([]byte(line), &e) == nil && e.Type != "" {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // LoginJWT logs in with a JWT and role, returns (statusCode, wardenToken).
