@@ -182,21 +182,21 @@ func (e celCostEstimator) EstimateCallCost(function, overloadID string, target *
 // policy-write-time validation path: a syntax error, a non-bool result, an
 // undeclared reference (e.g. call.* in a path-level condition), or an
 // over-budget cost are all rejected here with a directed error.
-func compileCELCondition(env *cel.Env, src string) (cel.Program, []string, error) {
+func compileCELCondition(env *cel.Env, src string) (*compiledCondition, error) {
 	ast, iss := env.Compile(src)
 	if iss != nil && iss.Err() != nil {
-		return nil, nil, fmt.Errorf("condition does not compile: %w", iss.Err())
+		return nil, fmt.Errorf("condition does not compile: %w", iss.Err())
 	}
 	if !ast.OutputType().IsExactType(cel.BoolType) {
-		return nil, nil, fmt.Errorf("condition must evaluate to bool, got %s", ast.OutputType())
+		return nil, fmt.Errorf("condition must evaluate to bool, got %s", ast.OutputType())
 	}
 
 	est, err := env.EstimateCost(ast, celCostEstimator{maxSize: celInputSizeBound})
 	if err != nil {
-		return nil, nil, fmt.Errorf("condition cost estimation failed: %w", err)
+		return nil, fmt.Errorf("condition cost estimation failed: %w", err)
 	}
 	if est.Max > maxConditionCost {
-		return nil, nil, fmt.Errorf("condition worst-case cost %d exceeds limit %d", est.Max, maxConditionCost)
+		return nil, fmt.Errorf("condition worst-case cost %d exceeds limit %d", est.Max, maxConditionCost)
 	}
 
 	// The runtime cost tracker (cel.CostLimit) allocates per eval and wraps
@@ -208,7 +208,7 @@ func compileCELCondition(env *cel.Env, src string) (cel.Program, []string, error
 	// the static bound above, so the per-eval tracker is omitted.
 	est2, err := env.EstimateCost(ast, celCostEstimator{maxSize: celInputSizeBound * 2})
 	if err != nil {
-		return nil, nil, fmt.Errorf("condition cost estimation failed: %w", err)
+		return nil, fmt.Errorf("condition cost estimation failed: %w", err)
 	}
 	var progOpts []cel.ProgramOption
 	if est2.Max != est.Max {
@@ -217,36 +217,108 @@ func compileCELCondition(env *cel.Env, src string) (cel.Program, []string, error
 
 	prg, err := env.Program(ast, progOpts...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("condition program construction failed: %w", err)
+		return nil, fmt.Errorf("condition program construction failed: %w", err)
 	}
-	return prg, celReferencedPaths(ast), nil
+	paths, segs, reqF, tokF, callF := celAnalyzeRefs(ast)
+	return &compiledCondition{
+		Source:     src,
+		Program:    prg,
+		RefPaths:   paths,
+		RefSegs:    segs,
+		ReqFields:  reqF,
+		TokFields:  tokF,
+		CallFields: callF,
+	}, nil
 }
 
-// celReferencedPaths reconstructs the dotted variable paths an expression reads
-// — e.g. token.metadata.env, call.args.amount — so the deciding condition can
-// record its inputs for audit. Only clean, Ident-rooted field-selection chains
-// under request/token/call are captured; has() test-only selects and
-// index/optional access (request.data["k"], call.args.?x) contribute no path,
-// and now.* time predicates are intentionally not captured (the expression text
-// carries the bound). The result is deduped and sorted.
-func celReferencedPaths(a *cel.Ast) []string {
-	native := a.NativeRep()
-	if native == nil {
-		return nil
+// fieldSet is the set of top-level namespace fields (e.g. "data", "metadata")
+// an expression reads under one root. all=true means the whole namespace is
+// needed (a degenerate bare-root reference); it is the safe fallback that
+// disables pruning for that root.
+type fieldSet struct {
+	fields map[string]bool
+	all    bool
+}
+
+// has reports whether field name must be built. A nil/empty set with all=false
+// means the namespace is unreferenced and its builder is never invoked.
+func (f fieldSet) has(name string) bool { return f.all || f.fields[name] }
+
+// unionFieldSets merges two field-sets (used only for the rare multi-condition
+// merge; the common single-condition path reuses a compiledCondition's set
+// directly with no allocation).
+func unionFieldSets(a, b fieldSet) fieldSet {
+	if a.all || b.all {
+		return fieldSet{all: true}
 	}
-	root := native.Expr()
-	if root == nil {
-		return nil
+	if len(a.fields) == 0 {
+		return b
+	}
+	if len(b.fields) == 0 {
+		return a
+	}
+	m := make(map[string]bool, len(a.fields)+len(b.fields))
+	for k := range a.fields {
+		m[k] = true
+	}
+	for k := range b.fields {
+		m[k] = true
+	}
+	return fieldSet{fields: m}
+}
+
+// celAnalyzeRefs walks the checked AST once and returns both (a) the dotted
+// audit paths an expression reads — e.g. token.metadata.env — and (b) the
+// top-level field-sets per root used to prune the activation.
+//
+// Audit paths capture only clean, Ident-rooted field-selection chains; has()
+// test-only selects and index/optional access contribute no path, and now.* is
+// intentionally excluded (the expression text carries the bound).
+//
+// Field-sets are a superset of what eval touches: for every Select whose operand
+// is a root Ident, the field name is recorded (this catches has(), index, and
+// optional access, whose innermost select on the root ident is always the top
+// field — and comprehensions, since cel-go's visit() descends into IterRange).
+// A bare root Ident that is not a Select operand sets all=true for that root, so
+// pruning never drops a field the expression needs (an under-built field would
+// be a missing key → fail-closed deny).
+func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call fieldSet) {
+	req, tok, call = fieldSet{fields: map[string]bool{}}, fieldSet{fields: map[string]bool{}}, fieldSet{fields: map[string]bool{}}
+	native := a.NativeRep()
+	if native == nil || native.Expr() == nil {
+		return
 	}
 
 	var selects []celast.Expr
-	consumed := map[int64]bool{} // operand of some Select — an intermediate node
-	skip := map[int64]bool{}     // container of an index/optional access — not a field path
-	celast.PostOrderVisit(root, celast.NewExprVisitor(func(e celast.Expr) {
+	consumed := map[int64]bool{}     // operand of some Select — an intermediate node
+	skip := map[int64]bool{}         // container of an index/optional access — not a field path
+	identCovered := map[int64]bool{} // root-Ident IDs that are a Select operand
+	var rootIdents []celast.Expr     // Idents named request/token/call
+	celast.PostOrderVisit(native.Expr(), celast.NewExprVisitor(func(e celast.Expr) {
 		switch e.Kind() {
 		case celast.SelectKind:
+			s := e.AsSelect()
 			selects = append(selects, e)
-			consumed[e.AsSelect().Operand().ID()] = true
+			op := s.Operand()
+			consumed[op.ID()] = true
+			if op.Kind() == celast.IdentKind {
+				switch op.AsIdent() {
+				case "request":
+					req.fields[s.FieldName()] = true
+					identCovered[op.ID()] = true
+				case "token":
+					tok.fields[s.FieldName()] = true
+					identCovered[op.ID()] = true
+				case "call":
+					call.fields[s.FieldName()] = true
+					identCovered[op.ID()] = true
+				}
+			}
+		case celast.IdentKind:
+			switch e.AsIdent() {
+			case "request", "token", "call":
+				rootIdents = append(rootIdents, e)
+			}
 		case celast.CallKind:
 			c := e.AsCall()
 			switch c.FunctionName() {
@@ -258,24 +330,43 @@ func celReferencedPaths(a *cel.Ast) []string {
 		}
 	}))
 
-	set := map[string]bool{}
+	// Audit paths: maximal Ident-rooted select chains.
+	pset := map[string]bool{}
 	for _, e := range selects {
 		if consumed[e.ID()] || skip[e.ID()] {
 			continue
 		}
 		if p, ok := celSelectPath(e); ok {
-			set[p] = true
+			pset[p] = true
 		}
 	}
-	if len(set) == 0 {
-		return nil
+	if len(pset) > 0 {
+		paths = make([]string, 0, len(pset))
+		for p := range pset {
+			paths = append(paths, p)
+		}
+		sort.Strings(paths)
+		segs = make([][]string, len(paths))
+		for i, p := range paths {
+			segs[i] = strings.Split(p, ".")
+		}
 	}
-	out := make([]string, 0, len(set))
-	for p := range set {
-		out = append(out, p)
+
+	// Bare root references (not a Select operand) disable pruning for that root.
+	for _, id := range rootIdents {
+		if identCovered[id.ID()] {
+			continue
+		}
+		switch id.AsIdent() {
+		case "request":
+			req.all = true
+		case "token":
+			tok.all = true
+		case "call":
+			call.all = true
+		}
 	}
-	sort.Strings(out)
-	return out
+	return
 }
 
 // celSelectPath reconstructs the dotted path for a Select chain top (e.g.
@@ -324,55 +415,105 @@ func evalCELCondition(prg cel.Program, activation any) (bool, error) {
 	return b, nil
 }
 
-// buildRequestNS builds the `request` namespace. data is always non-nil so
+// buildRequestNS builds the `request` namespace, including only the fields f
+// marks as referenced (all fields when f.all). data is always non-nil so
 // has(request.data.x) is false rather than a nil-deref.
-func buildRequestNS(req celRequestInput) map[string]any {
-	data := req.Data
-	if data == nil {
-		data = map[string]any{}
+func buildRequestNS(req celRequestInput, f fieldSet) map[string]any {
+	m := make(map[string]any, len(f.fields))
+	if f.has("path") {
+		m["path"] = req.Path
 	}
-	return map[string]any{
-		"path":           req.Path,
-		"operation":      req.Operation,
-		"client_ip":      req.ClientIP,
-		"mount_point":    req.MountPoint,
-		"mount_type":     req.MountType,
-		"mount_class":    req.MountClass,
-		"mount_accessor": req.MountAccessor,
-		"transparent":    req.Transparent,
-		"namespace":      req.Namespace,
-		"data":           data,
+	if f.has("operation") {
+		m["operation"] = req.Operation
 	}
+	if f.has("client_ip") {
+		m["client_ip"] = req.ClientIP
+	}
+	if f.has("mount_point") {
+		m["mount_point"] = req.MountPoint
+	}
+	if f.has("mount_type") {
+		m["mount_type"] = req.MountType
+	}
+	if f.has("mount_class") {
+		m["mount_class"] = req.MountClass
+	}
+	if f.has("mount_accessor") {
+		m["mount_accessor"] = req.MountAccessor
+	}
+	if f.has("transparent") {
+		m["transparent"] = req.Transparent
+	}
+	if f.has("namespace") {
+		m["namespace"] = req.Namespace
+	}
+	if f.has("data") {
+		data := req.Data
+		if data == nil {
+			data = map[string]any{}
+		}
+		m["data"] = data
+	}
+	return m
 }
 
-// buildTokenNS builds the `token` namespace. metadata is always non-nil.
-func buildTokenNS(tok celTokenInput) map[string]any {
-	md := make(map[string]any, len(tok.Metadata))
-	for k, v := range tok.Metadata {
-		md[k] = v
+// emptyStringMap is a shared, never-mutated empty map bound to token.metadata
+// when a token carries none — non-nil (so absent-key access fails closed)
+// without a per-request allocation.
+var emptyStringMap = map[string]string{}
+
+// buildTokenNS builds the `token` namespace, including only the fields f marks
+// as referenced (all fields when f.all). The expensive fields (metadata copy,
+// actors/policies slices) are built only when referenced. metadata is non-nil.
+func buildTokenNS(tok celTokenInput, f fieldSet) map[string]any {
+	m := make(map[string]any, len(f.fields))
+	if f.has("principal") {
+		m["principal"] = tok.Principal
 	}
-	acts := make([]any, 0, len(tok.Actors))
-	for _, a := range tok.Actors {
-		acts = append(acts, map[string]any{
-			"subject":  a.Subject,
-			"verified": a.Verified,
-		})
+	if f.has("role") {
+		m["role"] = tok.Role
 	}
-	policies := make([]any, 0, len(tok.Policies))
-	for _, p := range tok.Policies {
-		policies = append(policies, p)
+	if f.has("type") {
+		m["type"] = tok.Type
 	}
-	return map[string]any{
-		"principal":   tok.Principal,
-		"role":        tok.Role,
-		"type":        tok.Type,
-		"namespace":   tok.NamespacePath,
-		"policies":    policies,
-		"metadata":    md,
-		"actors":      acts,
-		"ttl_seconds": tok.TTLSeconds,
-		"expires_at":  tok.ExpiresAtUnix,
+	if f.has("namespace") {
+		m["namespace"] = tok.NamespacePath
 	}
+	if f.has("metadata") {
+		// Bind the string map by reference — CEL adapts it via reflection — rather
+		// than copying into a map[string]any. emptyStringMap keeps it non-nil (so
+		// has(token.metadata.x) is false and absent-key access fails closed)
+		// without allocating.
+		if tok.Metadata != nil {
+			m["metadata"] = tok.Metadata
+		} else {
+			m["metadata"] = emptyStringMap
+		}
+	}
+	if f.has("actors") {
+		acts := make([]any, 0, len(tok.Actors))
+		for _, a := range tok.Actors {
+			acts = append(acts, map[string]any{
+				"subject":  a.Subject,
+				"verified": a.Verified,
+			})
+		}
+		m["actors"] = acts
+	}
+	if f.has("policies") {
+		policies := make([]any, 0, len(tok.Policies))
+		for _, p := range tok.Policies {
+			policies = append(policies, p)
+		}
+		m["policies"] = policies
+	}
+	if f.has("ttl_seconds") {
+		m["ttl_seconds"] = tok.TTLSeconds
+	}
+	if f.has("expires_at") {
+		m["expires_at"] = tok.ExpiresAtUnix
+	}
+	return m
 }
 
 // buildBaseActivation eagerly builds the full activation map. Retained for unit
@@ -380,8 +521,8 @@ func buildTokenNS(tok celTokenInput) map[string]any {
 // namespaces an expression never references.
 func buildBaseActivation(req celRequestInput, tok celTokenInput, now time.Time) map[string]any {
 	return map[string]any{
-		"request": buildRequestNS(req),
-		"token":   buildTokenNS(tok),
+		"request": buildRequestNS(req, fieldSet{all: true}),
+		"token":   buildTokenNS(tok, fieldSet{all: true}),
 		"now":     now,
 	}
 }
@@ -392,17 +533,20 @@ func buildBaseActivation(req celRequestInput, tok celTokenInput, now time.Time) 
 // activation is built per evaluation (never shared), so the memoization is not
 // a concurrency concern.
 type celActivation struct {
-	req  celRequestInput
-	tok  celTokenInput
-	now  time.Time
-	call map[string]any // nil for path-level conditions
+	req        celRequestInput
+	reqFields  fieldSet
+	tok        celTokenInput
+	tokFields  fieldSet
+	callFields fieldSet // used when building the per-call namespace (MCP)
+	now        time.Time
+	call       map[string]any // nil for path-level conditions
 
 	reqNS map[string]any
 	tokNS map[string]any
 }
 
-func newCELActivation(req celRequestInput, tok celTokenInput, now time.Time, call map[string]any) *celActivation {
-	return &celActivation{req: req, tok: tok, now: now, call: call}
+func newCELActivation(req celRequestInput, reqFields fieldSet, tok celTokenInput, tokFields fieldSet, now time.Time, call map[string]any) *celActivation {
+	return &celActivation{req: req, reqFields: reqFields, tok: tok, tokFields: tokFields, now: now, call: call}
 }
 
 func (a *celActivation) Parent() interpreter.Activation { return nil }
@@ -411,12 +555,12 @@ func (a *celActivation) ResolveName(name string) (any, bool) {
 	switch name {
 	case "request":
 		if a.reqNS == nil {
-			a.reqNS = buildRequestNS(a.req)
+			a.reqNS = buildRequestNS(a.req, a.reqFields)
 		}
 		return a.reqNS, true
 	case "token":
 		if a.tokNS == nil {
-			a.tokNS = buildTokenNS(a.tok)
+			a.tokNS = buildTokenNS(a.tok, a.tokFields)
 		}
 		return a.tokNS, true
 	case "now":
@@ -436,26 +580,35 @@ func (a *celActivation) ResolveName(name string) (any, bool) {
 // non-scalar / null / missing values are omitted so absent-key access fails
 // closed. Mutates and returns base.
 func addCallToActivation(base map[string]any, method, tool string, matchArgs map[string]logical.ParamValue, batchIndex int) map[string]any {
-	base["call"] = buildCallNS(method, tool, matchArgs, batchIndex)
+	base["call"] = buildCallNS(method, tool, matchArgs, batchIndex, fieldSet{all: true})
 	return base
 }
 
-// buildCallNS builds the per-call `call` namespace. args are typed from
+// buildCallNS builds the per-call `call` namespace, including only the fields f
+// marks as referenced (all fields when f.all). args are typed from
 // ParamValue.Kind; non-scalar / null / missing values are omitted so absent-key
 // access fails closed.
-func buildCallNS(method, tool string, matchArgs map[string]logical.ParamValue, batchIndex int) map[string]any {
-	args := make(map[string]any, len(matchArgs))
-	for k, pv := range matchArgs {
-		if v, ok := paramValueToCEL(pv); ok {
-			args[k] = v
+func buildCallNS(method, tool string, matchArgs map[string]logical.ParamValue, batchIndex int, f fieldSet) map[string]any {
+	m := make(map[string]any, len(f.fields))
+	if f.has("method") {
+		m["method"] = method
+	}
+	if f.has("tool") {
+		m["tool"] = tool
+	}
+	if f.has("args") {
+		args := make(map[string]any, len(matchArgs))
+		for k, pv := range matchArgs {
+			if v, ok := paramValueToCEL(pv); ok {
+				args[k] = v
+			}
 		}
+		m["args"] = args
 	}
-	return map[string]any{
-		"method":      method,
-		"tool":        tool,
-		"args":        args,
-		"batch_index": batchIndex,
+	if f.has("batch_index") {
+		m["batch_index"] = batchIndex
 	}
+	return m
 }
 
 // paramValueToCEL converts a parsed MCP argument to a typed CEL value. Only
@@ -486,9 +639,15 @@ type compiledCondition struct {
 	Source  string
 	Program cel.Program
 	// RefPaths are the dotted request/token/call variable paths the expression
-	// reads (from celReferencedPaths), snapshotted into the audited
-	// ConditionResult.Inputs at eval time.
+	// reads, snapshotted into the audited ConditionResult.Inputs at eval time.
+	// RefSegs is the pre-split form (compile-time) so eval avoids strings.Split.
 	RefPaths []string
+	RefSegs  [][]string
+	// ReqFields/TokFields/CallFields are the top-level namespace fields the
+	// expression reads, used to build only the referenced parts of the activation.
+	ReqFields  fieldSet
+	TokFields  fieldSet
+	CallFields fieldSet
 }
 
 // Package-level envs, built once and reused. The base env compiles path-level
@@ -586,24 +745,31 @@ func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te
 	if len(conds) == 0 {
 		return true, nil
 	}
-	act := newCELActivation(celRequestInputFromRequest(req, nsPath), celTokenInputFromEntry(te, now), now, nil)
+	// Build the activation pruned to the union of fields the conditions read.
+	// The common single-condition case reuses its field-sets with no allocation.
+	reqF, tokF := conds[0].ReqFields, conds[0].TokFields
+	for _, c := range conds[1:] {
+		reqF = unionFieldSets(reqF, c.ReqFields)
+		tokF = unionFieldSets(tokF, c.TokFields)
+	}
+	act := newCELActivation(celRequestInputFromRequest(req, nsPath), reqF, celTokenInputFromEntry(te, now), tokF, now, nil)
 
 	var deciding *logical.ConditionResult
 	for _, c := range conds {
 		ok, err := evalCELCondition(c.Program, act)
 		if err != nil {
 			if deciding == nil {
-				deciding = &logical.ConditionResult{Decision: "deny", Expression: c.Source, ErrorKind: celErrorKind(err), Inputs: resolveConditionInputs(c.RefPaths, act)}
+				deciding = &logical.ConditionResult{Decision: "deny", Expression: c.Source, ErrorKind: celErrorKind(err), Inputs: resolveConditionInputs(c.RefPaths, c.RefSegs, act)}
 			}
 			continue
 		}
 		if ok {
-			res := &logical.ConditionResult{Decision: "allow", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, act)}
+			res := &logical.ConditionResult{Decision: "allow", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, c.RefSegs, act)}
 			res.Sanitize()
 			return true, res
 		}
 		if deciding == nil {
-			deciding = &logical.ConditionResult{Decision: "deny", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, act)}
+			deciding = &logical.ConditionResult{Decision: "deny", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, c.RefSegs, act)}
 		}
 	}
 	deciding.Sanitize()
@@ -615,32 +781,34 @@ func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te
 // formatted to strings in clear (sensitive keys are protected by optional
 // salt_fields at the audit format layer, not here). Absent keys — the
 // fail-closed case — are omitted. Returns nil when nothing resolved.
-func resolveConditionInputs(refPaths []string, act *celActivation) map[string]string {
-	if len(refPaths) == 0 || act == nil {
+func resolveConditionInputs(refPaths []string, refSegs [][]string, act *celActivation) map[string]string {
+	if len(refSegs) == 0 || act == nil {
 		return nil
 	}
-	out := make(map[string]string, len(refPaths))
-	for _, p := range refPaths {
-		segs := strings.Split(p, ".")
+	out := make(map[string]string, len(refSegs))
+	for i, segs := range refSegs {
 		cur, ok := act.ResolveName(segs[0])
 		if !ok {
 			continue
 		}
 		for _, s := range segs[1:] {
-			m, isMap := cur.(map[string]any)
-			if !isMap {
-				cur = nil
-				ok = false
-				break
+			switch mm := cur.(type) {
+			case map[string]any:
+				cur, ok = mm[s]
+			case map[string]string:
+				// token.metadata is bound as a string map (see buildTokenNS).
+				cur, ok = mm[s]
+			default:
+				cur, ok = nil, false
 			}
-			if cur, ok = m[s]; !ok {
+			if !ok {
 				break
 			}
 		}
 		if !ok {
 			continue
 		}
-		out[p] = formatCELValue(cur)
+		out[refPaths[i]] = formatCELValue(cur)
 	}
 	if len(out) == 0 {
 		return nil

@@ -493,11 +493,11 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			if err != nil {
 				return fmt.Errorf("path %q: cel env: %w", key, err)
 			}
-			prg, refPaths, err := compileCELCondition(env, pc.ConditionHCL)
+			cond, err := compileCELCondition(env, pc.ConditionHCL)
 			if err != nil {
 				return fmt.Errorf("path %q condition: %w", key, err)
 			}
-			pc.Permissions.Conditions = []*compiledCondition{{Source: pc.ConditionHCL, Program: prg, RefPaths: refPaths}}
+			pc.Permissions.Conditions = []*compiledCondition{cond}
 		}
 
 		if pc.MCPHCL != nil {
@@ -569,11 +569,11 @@ func canonicaliseMCPRules(h *MCPRulesHCL) (*CBPMCPRules, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mcp cel env: %w", err)
 		}
-		prg, refPaths, err := compileCELCondition(env, h.Condition)
+		cond, err := compileCELCondition(env, h.Condition)
 		if err != nil {
 			return nil, fmt.Errorf("mcp condition: %w", err)
 		}
-		r.Condition = &compiledCondition{Source: h.Condition, Program: prg, RefPaths: refPaths}
+		r.Condition = cond
 	}
 	return r, nil
 }

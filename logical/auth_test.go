@@ -121,10 +121,12 @@ func TestConditionResult_Sanitize(t *testing.T) {
 		Decision:   "deny",
 		Expression: "call.args.x <= 1\x00",
 		ErrorKind:  "type_mismatch\n",
-		Inputs:     map[string]string{"call.args.x\x07": "ab\x1bcd"},
+		Inputs:     map[string]string{"call.args.x": "ab\x1bcd"},
 	}
 	c.Sanitize()
 	assert.Equal(t, "call.args.x <= 1", c.Expression)
 	assert.Equal(t, "type_mismatch", c.ErrorKind)
+	// Inputs keys are trusted operator-authored CEL paths (kept as-is); only
+	// values, which may echo adversary-influenced request data, are CTL-stripped.
 	assert.Equal(t, map[string]string{"call.args.x": "abcd"}, c.Inputs)
 }

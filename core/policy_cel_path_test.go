@@ -196,6 +196,30 @@ func TestCBP_PathCondition_MultiPolicyOR(t *testing.T) {
 	assert.False(t, cbp.AllowOperation(ctx, read, team("green"), false).Allowed, "green satisfies neither")
 }
 
+// TestCBP_PathCondition_MergeUnionBuildsAllFields guards the activation-pruning
+// union: two merged conditions read *different* namespace fields, so the shared
+// activation must build the union (request.data AND token.metadata). If it
+// pruned to only the first condition's fields, the second would hit a missing
+// key and fail closed — so "gold" (satisfying only policy B) proves both were
+// built.
+func TestCBP_PathCondition_MergeUnionBuildsAllFields(t *testing.T) {
+	ctx := testContext()
+	a := testParsePolicy(t, `path "kv/x" { capabilities = ["read"] condition = "token.metadata.env == 'prod'" }`)
+	b := testParsePolicy(t, `path "kv/x" { capabilities = ["read"] condition = "request.data.tier == 'gold'" }`)
+	cbp, err := NewCBP(ctx, []*Policy{a, b})
+	require.NoError(t, err)
+
+	req := func(tier string) *logical.Request {
+		return &logical.Request{Operation: logical.ReadOperation, Path: "kv/x", Data: map[string]any{"tier": tier}}
+	}
+	devTE := &logical.TokenEntry{Metadata: map[string]string{"env": "dev"}}
+
+	// env=dev fails A; tier=gold satisfies B → allowed (B's request.data was built).
+	assert.True(t, cbp.AllowOperation(ctx, req("gold"), devTE, false).Allowed)
+	// env=dev fails A; tier=silver fails B → denied.
+	assert.False(t, cbp.AllowOperation(ctx, req("silver"), devTE, false).Allowed)
+}
+
 // TestCBP_PathCondition_UnconditionalGrantWins confirms a policy that grants the
 // path with no condition makes it unconditional (OR: an unconditional grant
 // admits everything), overriding another policy's condition.
@@ -255,9 +279,8 @@ func TestCBP_RequestNamespace(t *testing.T) {
 	env, err := baseCELEnv()
 	require.NoError(t, err)
 	src := "token.namespace == request.namespace"
-	prg, refPaths, err := compileCELCondition(env, src)
+	cond, err := compileCELCondition(env, src)
 	require.NoError(t, err)
-	cond := &compiledCondition{Source: src, Program: prg, RefPaths: refPaths}
 
 	req := &logical.Request{Operation: logical.ReadOperation, Path: "x"}
 	te := &logical.TokenEntry{NamespacePath: "team-a/"}
