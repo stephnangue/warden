@@ -47,6 +47,14 @@ be sensitive — so it is salt-able per key. You can extend or narrow this per d
   (`auth.policy_results.token_metadata` salts every value) or a single key
   (`auth.policy_results.token_metadata.clearance` salts just that one); other
   examples are `auth.token_id` and `request.data.password`.
+- **CEL condition inputs** — when a policy `condition` decides a request, the
+  values it referenced are recorded under `auth.policy_results.condition.inputs`
+  (path-level) so the decision is self-explanatory, keyed by the CEL path that
+  was read (e.g. `token.metadata.env`, `call.args.amount`, `request.data.model`).
+  These are logged in clear by default and are salt-able: `salt_fields`
+  `auth.policy_results.condition.inputs` salts every input value, and
+  `auth.policy_results.condition.inputs.request.data.model` salts just that one
+  (the trailing segments are the dotted input key).
 - `omit_fields` — dot-paths to drop entirely.
 
 To check whether a known plaintext appears in the log, hash it with the same

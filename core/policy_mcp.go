@@ -44,12 +44,12 @@ const (
 	mcpRuleTypeConditionError   = "condition_error"
 	mcpRuleTypeMissingMethod    = "missing_method_header"
 
-	mcpRuleTypeMissingBody       = "missing_body"
-	mcpRuleTypeMalformedJSONRPC  = "malformed_jsonrpc"
-	mcpRuleTypeDuplicateKey      = "duplicate_key"
-	mcpRuleTypeOversizedBody     = "oversized_body"
-	mcpRuleTypeBatchEmpty        = "batch_empty"
-	mcpRuleTypeMalformedParams   = "malformed_params"
+	mcpRuleTypeMissingBody      = "missing_body"
+	mcpRuleTypeMalformedJSONRPC = "malformed_jsonrpc"
+	mcpRuleTypeDuplicateKey     = "duplicate_key"
+	mcpRuleTypeOversizedBody    = "oversized_body"
+	mcpRuleTypeBatchEmpty       = "batch_empty"
+	mcpRuleTypeMalformedParams  = "malformed_params"
 )
 
 // MCP JSON-RPC method names that carry name-bearing semantics. For
@@ -345,13 +345,13 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 		if err != nil {
 			d.Decision = "deny"
 			d.RuleType = mcpRuleTypeConditionError
-			d.Condition = &logical.ConditionResult{Decision: "deny", Expression: set.Condition.Source, ErrorKind: celErrorKind(err)}
+			d.Condition = &logical.ConditionResult{Decision: "deny", Expression: set.Condition.Source, ErrorKind: celErrorKind(err), Inputs: resolveConditionInputs(set.Condition.RefPaths, act)}
 			return d
 		}
 		if !ok {
 			d.Decision = "deny"
 			d.RuleType = mcpRuleTypeCondition
-			d.Condition = &logical.ConditionResult{Decision: "deny", Expression: set.Condition.Source}
+			d.Condition = &logical.ConditionResult{Decision: "deny", Expression: set.Condition.Source, Inputs: resolveConditionInputs(set.Condition.RefPaths, act)}
 			return d
 		}
 	}
@@ -361,7 +361,7 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 	d.Decision = "allow"
 	d.RuleType = mcpRuleTypeAllowedMethods
 	if set.Condition != nil {
-		d.Condition = &logical.ConditionResult{Decision: "allow", Expression: set.Condition.Source}
+		d.Condition = &logical.ConditionResult{Decision: "allow", Expression: set.Condition.Source, Inputs: resolveConditionInputs(set.Condition.RefPaths, act)}
 	}
 	if len(set.AllowedMethods) > 0 {
 		d.MatchedRule = matchMCPAny(method, set.AllowedMethods)

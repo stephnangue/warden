@@ -4,6 +4,7 @@
 package core
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func mustEnv(t *testing.T, mcp bool) *cel.Env {
 // mustCompile compiles src against env or fails the test.
 func mustCompile(t *testing.T, env *cel.Env, src string) cel.Program {
 	t.Helper()
-	prg, err := compileCELCondition(env, src)
+	prg, _, err := compileCELCondition(env, src)
 	if err != nil {
 		t.Fatalf("compile %q: %v", src, err)
 	}
@@ -49,7 +50,7 @@ func str(s string) logical.ParamValue { return logical.ParamValue{Kind: logical.
 func TestCEL_PathLevelEnvRejectsCallReference(t *testing.T) {
 	// A path-level (base) env must NOT know call.* — referencing it is a
 	// compile-time error, never a silent runtime deny.
-	if _, err := compileCELCondition(mustEnv(t, false), "call.args.amount <= 1500"); err == nil {
+	if _, _, err := compileCELCondition(mustEnv(t, false), "call.args.amount <= 1500"); err == nil {
 		t.Fatal("expected compile error for call.* in path-level env, got nil")
 	}
 	// The MCP env accepts the same expression.
@@ -57,8 +58,44 @@ func TestCEL_PathLevelEnvRejectsCallReference(t *testing.T) {
 }
 
 func TestCEL_NonBoolRejected(t *testing.T) {
-	if _, err := compileCELCondition(mustEnv(t, false), "1 + 1"); err == nil {
+	if _, _, err := compileCELCondition(mustEnv(t, false), "1 + 1"); err == nil {
 		t.Fatal("expected rejection of non-bool condition")
+	}
+}
+
+// TestCEL_ReferencedPaths locks in the dotted request/token/call paths captured
+// for audit Inputs: clean field-selection chains are captured; has(),
+// index/optional access, and now.* are not.
+func TestCEL_ReferencedPaths(t *testing.T) {
+	cases := []struct {
+		name string
+		mcp  bool
+		src  string
+		want []string
+	}{
+		{"token+call scalars", true,
+			"token.metadata.env == 'prod' && call.args.amount <= 1500",
+			[]string{"call.args.amount", "token.metadata.env"}},
+		{"has and index and optional contribute nothing", true,
+			`has(request.data.x) && request.data["k"] == "v" && call.args.?y.orValue(0) <= 3`,
+			nil},
+		{"nested token + list arg", false,
+			"token.principal == 'a' && size(token.policies) > 0",
+			[]string{"token.policies", "token.principal"}},
+		{"now not captured", false,
+			`now.getHours("UTC") < 18 && token.metadata.env == "prod"`,
+			[]string{"token.metadata.env"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, paths, err := compileCELCondition(mustEnv(t, tc.mcp), tc.src)
+			if err != nil {
+				t.Fatalf("compile %q: %v", tc.src, err)
+			}
+			if !reflect.DeepEqual(paths, tc.want) {
+				t.Fatalf("paths = %v, want %v", paths, tc.want)
+			}
+		})
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/stephnangue/warden/logical"
 )
 
 func TestJSONFormat(t *testing.T) {
@@ -703,6 +705,74 @@ func TestFormatTokenMetadataSalting(t *testing.T) {
 		}
 		if !salted(md["team"]) {
 			t.Errorf("team should be salted, got %q", md["team"])
+		}
+	})
+}
+
+// TestFormatConditionInputsSalting exercises salt_fields for the CEL condition
+// inputs map, whose keys are themselves dotted (token.metadata.env).
+func TestFormatConditionInputsSalting(t *testing.T) {
+	mockSalt := func(ctx context.Context, data string) (string, error) {
+		return "hmac-sha256:" + data + "-salted", nil
+	}
+	newEntry := func() *LogEntry {
+		return &LogEntry{
+			Timestamp: time.Now(),
+			Auth: &Auth{
+				PolicyResults: &PolicyResults{
+					Allowed: false,
+					Condition: &logical.ConditionResult{
+						Decision:   "deny",
+						Expression: "token.metadata.env == 'prod'",
+						Inputs: map[string]string{
+							"token.metadata.env": "staging",
+							"request.data.model": "opus",
+						},
+					},
+				},
+			},
+		}
+	}
+	format := func(t *testing.T, saltFields []string) map[string]string {
+		t.Helper()
+		opts := []JSONFormatOption{WithSaltFunc(mockSalt)}
+		if saltFields != nil {
+			opts = append(opts, WithSaltFields(saltFields))
+		}
+		f := NewJSONFormat(opts...)
+		data, err := f.FormatRequest(context.Background(), newEntry())
+		if err != nil {
+			t.Fatalf("FormatRequest failed: %v", err)
+		}
+		var got LogEntry
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("unmarshal failed: %v", err)
+		}
+		return got.Auth.PolicyResults.Condition.Inputs
+	}
+	salted := func(s string) bool { return containsBytes([]byte(s), "hmac-sha256:") }
+
+	t.Run("clear by default", func(t *testing.T) {
+		in := format(t, nil)
+		if in["token.metadata.env"] != "staging" || in["request.data.model"] != "opus" {
+			t.Errorf("inputs should be clear, got %v", in)
+		}
+	})
+
+	t.Run("salt all inputs", func(t *testing.T) {
+		in := format(t, []string{"auth.policy_results.condition.inputs"})
+		if !salted(in["token.metadata.env"]) || !salted(in["request.data.model"]) {
+			t.Errorf("all inputs should be salted, got %v", in)
+		}
+	})
+
+	t.Run("salt one dotted key", func(t *testing.T) {
+		in := format(t, []string{"auth.policy_results.condition.inputs.request.data.model"})
+		if in["token.metadata.env"] != "staging" {
+			t.Errorf("other input must stay clear, got %q", in["token.metadata.env"])
+		}
+		if !salted(in["request.data.model"]) {
+			t.Errorf("request.data.model should be salted, got %q", in["request.data.model"])
 		}
 	})
 }

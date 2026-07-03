@@ -244,6 +244,33 @@ func (f *JSONFormat) saltPolicyResultsField(ctx context.Context, pr *PolicyResul
 			}
 			pr.TokenMetadata[parts[1]] = salted
 		}
+	case "condition":
+		// "...condition.inputs" salts every referenced-input value;
+		// "...condition.inputs.<dotted-key>" salts one (the input map keys are
+		// themselves dotted, e.g. token.metadata.env, so rejoin the tail).
+		if pr.Condition == nil || len(parts) < 2 || parts[1] != "inputs" {
+			return nil
+		}
+		if len(parts) == 2 {
+			for k, v := range pr.Condition.Inputs {
+				if v == "" {
+					continue
+				}
+				salted, err := f.saltFn(ctx, v)
+				if err != nil {
+					return err
+				}
+				pr.Condition.Inputs[k] = salted
+			}
+		} else if key := strings.Join(parts[2:], "."); pr.Condition.Inputs != nil {
+			if v, ok := pr.Condition.Inputs[key]; ok && v != "" {
+				salted, err := f.saltFn(ctx, v)
+				if err != nil {
+					return err
+				}
+				pr.Condition.Inputs[key] = salted
+			}
+		}
 	}
 
 	return nil
