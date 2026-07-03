@@ -134,13 +134,6 @@ type PolicyResults struct {
 	// records remain byte-identical to today's output.
 	MCPDecision *logical.MCPDecision `json:"mcp_decision,omitempty"`
 
-	// TokenMetadata is the authenticating token's verified, login-derived
-	// metadata, included so token_metadata policy decisions are explainable.
-	// omitempty so records for tokens without metadata stay byte-identical to
-	// today's output. Logged in clear by default; opt-in per-key HMAC salting
-	// via salt_fields (auth.policy_results.token_metadata[.<key>]).
-	TokenMetadata map[string]string `json:"token_metadata,omitempty"`
-
 	// Condition carries the path-level CEL condition decision when a condition
 	// was evaluated for a non-MCP request (the MCP per-call condition is
 	// recorded on MCPDecision.Condition instead). nil when none applied.
@@ -321,12 +314,6 @@ func (e *LogEntry) Clone() *LogEntry {
 			if e.Auth.PolicyResults.GrantingPolicies != nil {
 				clone.Auth.PolicyResults.GrantingPolicies = make([]string, len(e.Auth.PolicyResults.GrantingPolicies))
 				copy(clone.Auth.PolicyResults.GrantingPolicies, e.Auth.PolicyResults.GrantingPolicies)
-			}
-			if e.Auth.PolicyResults.TokenMetadata != nil {
-				clone.Auth.PolicyResults.TokenMetadata = make(map[string]string, len(e.Auth.PolicyResults.TokenMetadata))
-				for k, v := range e.Auth.PolicyResults.TokenMetadata {
-					clone.Auth.PolicyResults.TokenMetadata[k] = v
-				}
 			}
 		}
 		if e.Auth.Actors != nil {

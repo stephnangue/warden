@@ -162,15 +162,10 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 			}
 			// Surface the path-level CEL condition decision (non-MCP paths)
 			// so denials carry their reason. Already Sanitized at evaluation.
+			// The condition's referenced inputs (incl. any token.metadata.*
+			// it read) ride ConditionResult.Inputs.
 			if auth.Condition != nil {
 				auditAuth.PolicyResults.Condition = auth.Condition
-			}
-			// Surface the token's verified metadata so token_metadata
-			// policy decisions (allow or deny) are explainable. Logged in
-			// clear by default; the format layer applies opt-in per-key
-			// HMAC salting via salt_fields.
-			if te != nil && len(te.Metadata) > 0 {
-				auditAuth.PolicyResults.TokenMetadata = te.Metadata
 			}
 		}
 	}

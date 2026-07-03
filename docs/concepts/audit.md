@@ -39,14 +39,11 @@ log ever revealing it.
 By default Warden salts the **issued credential's secret data**
 (`response.credential.data`) — the access keys, tokens, and passwords Warden
 injects. Non-secret metadata is logged in clear: a forwarded token's subject, and
-the token's verified identity attributes (`auth.policy_results.token_metadata`).
-That metadata is descriptive by design, but a value like a clearance level can still
-be sensitive — so it is salt-able per key. You can extend or narrow this per device:
+the inputs a policy `condition` referenced to decide a request
+(`auth.policy_results.condition.inputs`). Those input values are descriptive by
+design, but one — a clearance level, a request-body field — can still be
+sensitive, so they are salt-able per key. You can extend or narrow this per device:
 
-- `salt_fields` — additional dot-paths to HMAC. The path can be a whole map
-  (`auth.policy_results.token_metadata` salts every value) or a single key
-  (`auth.policy_results.token_metadata.clearance` salts just that one); other
-  examples are `auth.token_id` and `request.data.password`.
 - **CEL condition inputs** — when a policy `condition` decides a request, the
   values it referenced are recorded under `auth.policy_results.condition.inputs`
   (path-level) so the decision is self-explanatory, keyed by the CEL path that
@@ -55,6 +52,8 @@ be sensitive — so it is salt-able per key. You can extend or narrow this per d
   `auth.policy_results.condition.inputs` salts every input value, and
   `auth.policy_results.condition.inputs.request.data.model` salts just that one
   (the trailing segments are the dotted input key).
+- `salt_fields` — additional dot-paths to HMAC, e.g. `auth.token_id` and
+  `request.data.password`.
 - `omit_fields` — dot-paths to drop entirely.
 
 To check whether a known plaintext appears in the log, hash it with the same
