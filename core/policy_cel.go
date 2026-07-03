@@ -57,15 +57,28 @@ import (
 // Secret material (token value, accessor, client token) is never exposed.
 
 const (
-	// maxConditionCost bounds a single CEL evaluation, both statically (rejected
-	// at policy-write time) and at runtime (cel.CostLimit backstop). Units are
-	// cel-go's abstract cost units.
+	// maxConditionCost bounds a single CEL evaluation in cel-go's abstract cost
+	// units. It serves two distinct roles:
+	//   - Runtime backstop (the real DoS guard): attached as cel.CostLimit to
+	//     every input-size-dependent expression, it caps the work of one Eval
+	//     regardless of the actual input size — a comprehension over an
+	//     adversary-sized request.data/call.args aborts (→ fail-closed deny) once
+	//     it exceeds this budget. This is what bounds per-request cost; it does
+	//     not depend on celInputSizeBound.
+	//   - Write-time rejection: an expression whose worst-case estimate at
+	//     celInputSizeBound already exceeds this is rejected when the policy is
+	//     written (operator gets a directed error instead of a runtime deny).
 	maxConditionCost uint64 = 1_000_000
 
-	// celInputSizeBound is the conservative size (entries / characters) the cost
-	// estimator assumes for our dynamic-map variables, so comprehensions/string
-	// ops over adversary-sized inputs are cost-bounded at compile time. Sized to
-	// the request/body cap; tightened when wired to the real cap.
+	// celInputSizeBound is the size (map entries / string length) the cost
+	// estimator assumes for the dynamic-map variables (request/token/call) that
+	// cel-go cannot size itself. It is a heuristic for the *write-time* check —
+	// large enough to admit reasonable expressions, small enough to reject
+	// pathological ones (e.g. nested comprehensions, ~size² cost). It is
+	// deliberately NOT the real body cap (framework.DefaultMaxBodySize, 10MB →
+	// far more entries): the runtime cel.CostLimit above is the actual per-eval
+	// guard, so this only tunes which expressions fail fast at write time rather
+	// than fail closed at request time.
 	celInputSizeBound uint64 = 8192
 )
 
@@ -183,6 +196,14 @@ func (e celCostEstimator) EstimateCallCost(function, overloadID string, target *
 // undeclared reference (e.g. call.* in a path-level condition), or an
 // over-budget cost are all rejected here with a directed error.
 func compileCELCondition(env *cel.Env, src string) (*compiledCondition, error) {
+	return compileCELConditionWithLimits(env, src, maxConditionCost, celInputSizeBound)
+}
+
+// compileCELConditionWithLimits is compileCELCondition parameterized by the cost
+// budget and estimator size bound. Production always uses the package constants;
+// tests inject small limits to exercise the compile-time rejection and the
+// runtime CostLimit deterministically without building giant activations.
+func compileCELConditionWithLimits(env *cel.Env, src string, maxCost, sizeBound uint64) (*compiledCondition, error) {
 	ast, iss := env.Compile(src)
 	if iss != nil && iss.Err() != nil {
 		return nil, fmt.Errorf("condition does not compile: %w", iss.Err())
@@ -191,28 +212,25 @@ func compileCELCondition(env *cel.Env, src string) (*compiledCondition, error) {
 		return nil, fmt.Errorf("condition must evaluate to bool, got %s", ast.OutputType())
 	}
 
-	est, err := env.EstimateCost(ast, celCostEstimator{maxSize: celInputSizeBound})
+	est, err := env.EstimateCost(ast, celCostEstimator{maxSize: sizeBound})
 	if err != nil {
 		return nil, fmt.Errorf("condition cost estimation failed: %w", err)
 	}
-	if est.Max > maxConditionCost {
-		return nil, fmt.Errorf("condition worst-case cost %d exceeds limit %d", est.Max, maxConditionCost)
+	if est.Max > maxCost {
+		return nil, fmt.Errorf("condition worst-case cost %d exceeds limit %d", est.Max, maxCost)
 	}
 
-	// The runtime cost tracker (cel.CostLimit) allocates per eval and wraps
-	// the program in an observable interpretable — a real hot-path cost. It is
-	// only a backstop for inputs larger than the static estimate assumed, so
-	// it is only needed when the expression's cost is input-size-dependent.
-	// Detect that by re-estimating with a larger size bound: if the worst-case
-	// cost is unchanged, the cost is input-independent and already capped by
-	// the static bound above, so the per-eval tracker is omitted.
-	est2, err := env.EstimateCost(ast, celCostEstimator{maxSize: celInputSizeBound * 2})
-	if err != nil {
-		return nil, fmt.Errorf("condition cost estimation failed: %w", err)
-	}
+	// The runtime cost tracker (cel.CostLimit) allocates per eval and wraps the
+	// program in an observable interpretable — a real hot-path cost. It is only
+	// a backstop for inputs larger than the static estimate assumed, so attach
+	// it only when the expression's cost is input-size-dependent.
 	var progOpts []cel.ProgramOption
-	if est2.Max != est.Max {
-		progOpts = append(progOpts, cel.CostLimit(maxConditionCost))
+	sizeDependent, err := celCostIsSizeDependent(env, ast, sizeBound)
+	if err != nil {
+		return nil, err
+	}
+	if sizeDependent {
+		progOpts = append(progOpts, cel.CostLimit(maxCost))
 	}
 
 	prg, err := env.Program(ast, progOpts...)
@@ -229,6 +247,23 @@ func compileCELCondition(env *cel.Env, src string) (*compiledCondition, error) {
 		TokFields:  tokF,
 		CallFields: callF,
 	}, nil
+}
+
+// celCostIsSizeDependent reports whether an expression's worst-case cost grows
+// with input size — detected by re-estimating at a doubled size bound and
+// checking whether the worst-case changes. A size-independent (constant-cost)
+// expression is already capped by the compile-time estimate and needs no
+// per-eval CostLimit; a size-dependent one does.
+func celCostIsSizeDependent(env *cel.Env, ast *cel.Ast, sizeBound uint64) (bool, error) {
+	est, err := env.EstimateCost(ast, celCostEstimator{maxSize: sizeBound})
+	if err != nil {
+		return false, fmt.Errorf("condition cost estimation failed: %w", err)
+	}
+	est2, err := env.EstimateCost(ast, celCostEstimator{maxSize: sizeBound * 2})
+	if err != nil {
+		return false, fmt.Errorf("condition cost estimation failed: %w", err)
+	}
+	return est2.Max != est.Max, nil
 }
 
 // fieldSet is the set of top-level namespace fields (e.g. "data", "metadata")
