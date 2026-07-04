@@ -56,7 +56,7 @@ Download the **Warden CLI** onto your `PATH` (Apple Silicon shown — swap `darw
 `darwin_amd64` or `linux_*`):
 
 ```bash
-VER=0.16.0
+VER=0.17.0
 curl -fsSL "https://github.com/stephnangue/warden/releases/download/v${VER}/warden_${VER}_darwin_arm64.tar.gz" \
   | tar -xz warden && chmod +x warden
 export PATH="$PWD:$PATH"
@@ -198,8 +198,7 @@ The injected key is never in the clear — credential values are salted to `hmac
 ### Step 7 — watch the policy enforce a limit
 
 The role may call the model — but *which* model is a policy decision. Pin it: rewrite the policy
-so only one model is permitted (missing params stay allowed; `"*" = []` permits every other
-field):
+so only one model is permitted (missing params stay allowed):
 
 ```bash
 MODEL="claude-sonnet-4-5"            # a model your Anthropic account can use

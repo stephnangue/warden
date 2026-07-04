@@ -4,6 +4,42 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
+## [v0.17.0] — 2026-07-04
+
+### Breaking Changes
+
+- **CBP policy: the structured `conditions {}` block is removed in favour of a CEL `condition`.** The block's four predicates (`source_ip`, `time_window`, `day_of_week`, `token_metadata`) are all expressible as a single [CEL](https://cel.dev) expression, so the bespoke evaluator is gone and the parser rejects the block with a directed error naming the CEL equivalent: `source_ip` → `cidrContains("10.0.0.0/8", request.client_ip)`, `time_window` → `now.getHours(tz)` / `now.getMinutes(tz)`, `day_of_week` → `now.getDayOfWeek("UTC")` (0 = Sunday), `token_metadata` → `token.metadata.<key>`. Rewrite affected `path` rules to carry a `condition` string.
+
+- **MCP `allowed_params` / `denied_params` are removed in favour of a per-call CEL `condition` over `call.args`.** Argument-value matching now lives in the `mcp { }` block's `condition` — e.g. `condition = "call.args.amount <= 1500 && call.args.currency in ['USD','EUR']"`. Note the deliberate semantics change: the old convention was *absent argument → passes*, whereas a `condition` is fail-closed (*absent → deny*); use the optional form `call.args.?x.orValue(d)` where "absent is OK". The parser rejects the removed keys with a directed error.
+
+- **CBP request-body `required_parameters` / `allowed_parameters` / `denied_parameters` are removed in favour of a CEL `condition` over `request.data`.** Express body constraints directly — `has(request.data.owner)` to require a field, `request.data.tier in ['gold','silver']` to constrain a value, `!has(request.data.internal)` to forbid one. Pagination clamping (`pagination_limit`) and list-response key filtering are unchanged. The parser rejects the removed keys with a directed error.
+
+### New Features
+
+- **CEL policy conditions: one expressive predicate layer for CBP.** A `path` rule can carry a `condition` (evaluated once per request) and an `mcp { }` block can carry a per-call `condition` (evaluated once per tool call) — a [CEL](https://cel.dev) expression that must evaluate to `true` for the rule to apply. Expressions read a fixed namespace: `request.*` (`path`, `operation`, `client_ip`, `mount_point`/`mount_type`/`mount_class`/`mount_accessor`, `transparent`, `namespace`, `data.<key>`), `token.*` (`principal`, `role`, `type`, `namespace`, `policies`, `metadata.<key>`, `actors`, `ttl_seconds`, `expires_at`), `now`, and — inside `mcp { }` — `call.*` (`method`, `tool`, `args.<key>`, `batch_index`). Helpers: `cidrContains(cidr, ip)`, optional access (`x.?field.orValue(d)`), and timezone-aware `now.getHours(tz)` / `getDayOfWeek(tz)` / `getMinutes(tz)`. Evaluation is **fail-closed** (a `false` result or any error — missing key, type mismatch — denies) and **cost-bounded** (expressions are type-checked and cost-limited at policy-write time, and a runtime cost limit backstops size-dependent expressions). Conditions are compiled once and are identity-independent, so they ride the compiled-policy cache unchanged. A path-level condition referencing `call.*` is a compile-time error. See the new [CEL condition cookbook](docs/concepts/cel-conditions.md).
+
+- **Login-derived token metadata across every auth method.** The `jwt`, `cert`, `kubernetes`, and `spiffe` methods can map verified identity attributes onto the issued token via a per-role `metadata_claims` (JWT / JWT-SVID claims, with JSON-Pointer support for nested claims) or `metadata_mappings` (certificate fields, TokenReview attributes, SPIFFE-ID components). The resulting `token.metadata.<key>` is consulted by CEL conditions and attributed in the audit log.
+
+- **CEL decisions are explainable in the audit log.** When a condition decides a request, the audit record carries `auth.policy_results.condition` — the expression, the decision, a sanitized error category on a fail-closed error, and the referenced input values (`inputs`). Input values are logged in clear by default and are HMAC-salt-able per key via `salt_fields` (`auth.policy_results.condition.inputs[.<dotted-key>]`).
+
+- **New generic `rest` provider: a REST/HTTP reverse-proxy backend.** Proxies a workload's HTTP request to a configured upstream with a Warden-injected credential, for JSON/REST APIs that don't have a dedicated provider. (#342)
+
+### Performance
+
+- **CBP evaluation is faster on the policy hot path.** Compiled CBP objects are cached keyed by the policy set (#353) and the policy parse is reused within `CBP()` (#352). For conditioned rules, the CEL activation is pruned to only the namespace fields the expression references, roughly halving per-request allocations on the conditioned path; condition-less rules are unchanged.
+
+### Documentation
+
+- **Docs tree restructure and expansion.** A new `docs/` layout with dedicated sections for concepts, use-cases, auth-methods, provider-backends, agent-identity, and audit-devices; a per-command CLI reference; the CEL condition cookbook (20 worked examples, simple → complex); documentation of path expiration; and a "Securing agents on the workstation" quickstart/tutorial series.
+
+### Dependencies
+
+- Bump the `go-kms-wrapping` family to v2.8.0 and refactor the seal layer onto Warden-owned Shamir/AEAD constants; grouped `go-minor-patch` and `golang.org/x/net` updates.
+
+### Chart
+
+- Chart version bumped `0.3.2` → `0.3.3`. `appVersion` tracks the v0.17.0 binary; no template or values changes.
+
 ## [v0.16.0] — 2026-06-15
 
 ### Breaking Changes
@@ -670,6 +706,7 @@ Initial release. See the [v0.1.0 release notes](https://github.com/stephnangue/w
 - Docker image published to `ghcr.io/stephnangue/warden`
 - Pre-built binaries for Linux, macOS, and Windows
 
+[v0.17.0]: https://github.com/stephnangue/warden/compare/v0.16.0...v0.17.0
 [v0.16.0]: https://github.com/stephnangue/warden/compare/v0.15.0...v0.16.0
 [v0.15.0]: https://github.com/stephnangue/warden/compare/v0.14.0...v0.15.0
 [v0.14.0]: https://github.com/stephnangue/warden/compare/v0.13.2...v0.14.0

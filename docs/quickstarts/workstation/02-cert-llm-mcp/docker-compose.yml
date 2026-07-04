@@ -24,7 +24,7 @@ services:
       - ./certs:/certs
 
   warden:
-    image: ghcr.io/stephnangue/warden:v0.16.0
+    image: ghcr.io/stephnangue/warden:v0.17.0
     command:
       - --dev
       - --dev-root-token=root

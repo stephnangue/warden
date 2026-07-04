@@ -58,7 +58,7 @@ claude --version
 Download the **Warden CLI** onto your `PATH` (swap `darwin_arm64` for `darwin_amd64` or `linux_*`):
 
 ```bash
-VER=0.16.0
+VER=0.17.0
 curl -fsSL "https://github.com/stephnangue/warden/releases/download/v${VER}/warden_${VER}_darwin_arm64.tar.gz" \
   | tar -xz warden && chmod +x warden
 export PATH="$PWD:$PATH"
