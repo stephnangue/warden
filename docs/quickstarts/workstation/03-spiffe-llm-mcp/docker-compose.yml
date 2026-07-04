@@ -29,7 +29,7 @@ services:
     networks: [spiffe]
 
   warden:
-    image: ghcr.io/stephnangue/warden:v0.16.0      # published multi-arch image
+    image: ghcr.io/stephnangue/warden:v0.17.0      # published multi-arch image
     command: ["--dev", "--dev-root-token=root", "--dev-tls-spiffe"]  # fixed dev root token = "root"
     environment:
       SPIFFE_ENDPOINT_SOCKET: "unix:///run/spire/sockets/agent.sock"

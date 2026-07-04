@@ -78,7 +78,7 @@ Helm 3.8+ pulls OCI charts natively — no `helm repo add` needed:
 
 ```bash
 helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.1.0 \
+  --version 0.3.3 \
   -n warden --create-namespace \
   -f your-values.yaml
 ```
@@ -91,8 +91,8 @@ To pin to a specific Warden binary version against the same chart:
 
 ```bash
 helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.1.0 \
-  --set image.tag=v0.12.0 \
+  --version 0.3.3 \
+  --set image.tag=v0.17.0 \
   -n warden --create-namespace \
   -f your-values.yaml
 ```
@@ -105,7 +105,7 @@ tarball to the GitHub Release page:
 
 ```bash
 curl -L -o warden-chart.tgz \
-  https://github.com/stephnangue/warden/releases/download/v0.12.0/warden-0.1.0.tgz
+  https://github.com/stephnangue/warden/releases/download/v0.17.0/warden-0.3.3.tgz
 
 helm install warden ./warden-chart.tgz \
   -n warden --create-namespace \
@@ -222,12 +222,12 @@ The dev values file lives inside the chart, so for the OCI install path
 download it first with `helm show values`:
 
 ```bash
-helm show values oci://ghcr.io/stephnangue/charts/warden --version 0.1.0 \
+helm show values oci://ghcr.io/stephnangue/charts/warden --version 0.3.3 \
   > /tmp/warden-values.yaml
 # Edit /tmp/warden-values.yaml — or skip this step and use --set flags only.
 
 helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.1.0 \
+  --version 0.3.3 \
   -n warden \
   --set replicaCount=1 \
   --set seal.type=static \
@@ -312,7 +312,7 @@ reference your synced Secret names via `--set` instead.
 
 ```bash
 helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.1.0 \
+  --version 0.3.3 \
   -n warden --create-namespace \
   --set tls.existingSecret=warden-tls \
   --set storage.existingSecret=warden-db \
@@ -422,7 +422,7 @@ different namespace.
 
 ```bash
 helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.2.0 \
+  --version 0.3.3 \
   -n warden --create-namespace \
   --set tls.certManager.enabled=true \
   --set tls.certManager.issuerRef.name=warden-pki \
@@ -568,7 +568,7 @@ done
 
 ```bash
 helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.1.1 \
+  --version 0.3.3 \
   -n warden -f your-values.yaml
 ```
 
@@ -585,9 +585,9 @@ Bump `image.tag` (or upgrade the chart whose `appVersion` advances):
 
 ```bash
 helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.1.0 \
+  --version 0.3.3 \
   -n warden --reuse-values \
-  --set image.tag=v0.13.0
+  --set image.tag=v0.17.0
 ```
 
 Same rolling-restart mechanics. Check release notes for any
@@ -638,7 +638,7 @@ A standby is promoted within ~10s.
 
 ```bash
 helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.1.0 \
+  --version 0.3.3 \
   -n warden --reuse-values \
   --set replicaCount=5
 ```
@@ -802,14 +802,14 @@ no other values to adjust:
 
 ```bash
 helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.1.0 \
+  --version 0.3.3 \
   -n warden --reuse-values \
-  --set image.tag=v0.13.0-debug
+  --set image.tag=v0.17.0-debug
 
 kubectl -n warden exec warden-0 -- sh -c 'ls /config && id'
 ```
 
-Roll back to the production tag (`--set image.tag=v0.13.0`, or
+Roll back to the production tag (`--set image.tag=v0.17.0`, or
 `--set image.tag=""` to fall back to the chart's `appVersion`)
 once the investigation is done. The debug variant is meant for short-lived
 diagnostic windows, not steady-state operation — it carries a

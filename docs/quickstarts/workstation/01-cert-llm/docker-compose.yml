@@ -26,7 +26,7 @@ services:
   # Client certs are optional: the admin CLI reaches it through ghostunnel; ghostunnel's
   # client cert is still verified when presented and captured for cert auth.
   warden:
-    image: ghcr.io/stephnangue/warden:v0.16.0
+    image: ghcr.io/stephnangue/warden:v0.17.0
     command:
       - --dev
       - --dev-root-token=root

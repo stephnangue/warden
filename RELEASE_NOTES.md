@@ -1,53 +1,32 @@
-## Warden v0.16.0
+## Warden v0.17.0
 
-v0.16.0 is the SPIFFE release. A new first-class **`spiffe` auth method** accepts a SPIFFE X.509-SVID (over mTLS or a trusted forwarding header) and a SPIFFE JWT-SVID (bearer) on the **same mount**, verifying each against the trust domain's bundle — which carries both the X.509 and JWT key sets — and issuing one token type. Roles bind on `trust_domain`, `allowed_spiffe_ids`, and `bound_audiences`; bundles are managed on the mount and can be **federated** from upstream endpoints with periodic refresh. The method leans on short-lived SVIDs and bundle rotation rather than CRL/OCSP. The control plane itself can now run on SPIFFE: the **API listener can serve its TLS certificate straight from the SPIFFE Workload API**, rotating automatically as the SVID renews. This release also **consolidates the MCP providers** — a single generic `mcp` provider replaces the typed `mcp_github` and `mcp_gcp` — and threads **non-secret subject metadata into the audit log** across the AWS, GCP, Azure, Kubernetes, and Vault sources, so a brokered call records *which* upstream identity acted. Two breaking changes — read the **Upgrading** section before bumping.
+v0.17.0 is the CEL release. Capability-Based Policy gains one expressive predicate layer: a path rule can carry a **`condition`** (evaluated once per request) and an `mcp { }` block a **per-call `condition`** (evaluated once per tool call) — a [CEL](https://cel.dev) expression over a fixed `request.*` / `token.*` / `now` / `call.*` namespace, with helpers for CIDR matching (`cidrContains`), optional arguments (`call.args.?x.orValue(d)`), and timezone-aware time (`now.getHours(tz)`, `now.getDayOfWeek(tz)`). Evaluation is **fail-closed** and **cost-bounded**, conditions are compiled once and identity-independent, and every decision is **explainable in the audit log** (the expression and the exact input values it read). CEL replaces — and this release **removes** — the three structured mechanisms it subsumes: the `conditions {}` block, MCP `allowed_params`/`denied_params`, and CBP request-body `*_parameters`. Alongside it, **login-derived token metadata** lands across all four auth methods (feeding `token.metadata.*` in conditions), a new generic **`rest` provider** proxies arbitrary JSON/REST upstreams, and the documentation is substantially restructured and expanded (including a 20-example CEL cookbook). Three breaking changes — read **Upgrading** before bumping.
 
 ### Breaking Changes
 
-- **The `mcp_github` and `mcp_gcp` provider types are removed in favour of a single generic `mcp` provider.** The new `mcp` provider fronts any bearer-authenticated MCP server (GitHub, Google Cloud, Slack, Cloudflare, …) and injects `Authorization: Bearer` for `oauth_bearer_token`, `api_key`, `github_token`, `gcp_access_token`, and `azure_bearer_token` — a superset of the typed providers it replaces. Re-mount as type `mcp` and set `mcp_url` (`https://api.githubcopilot.com/mcp` for GitHub; the operator's URL for Google Cloud). `mcp_aws` is unaffected — it SigV4-signs requests rather than injecting a bearer token.
+- **The structured `conditions {}` block is removed — express it as a CEL `condition`.** Its four predicates map directly: `source_ip` → `cidrContains("10.0.0.0/8", request.client_ip)`, `time_window` → `now.getHours(tz)` / `now.getMinutes(tz)`, `day_of_week` → `now.getDayOfWeek("UTC")` (0 = Sunday), `token_metadata` → `token.metadata.<key>`. The parser rejects the block with a directed error.
 
-- **`jwt` auth method: the `bound_uri_patterns` and `uri_claim` role fields are removed.** They provided segment-aware string matching against a JWT claim as a stand-in for real SPIFFE JWT-SVID validation. SPIFFE identities now belong to the new `spiffe` auth method, which verifies a JWT-SVID against a trust-domain bundle and enforces its audience. Stored roles carrying these keys decode cleanly and ignore them — a role that relied on URI-pattern matching becomes more permissive, so migrate it to the `spiffe` method.
+- **MCP `allowed_params` / `denied_params` are removed — express them as a per-call `condition` over `call.args`.** e.g. `condition = "call.args.amount <= 1500 && call.args.currency in ['USD','EUR']"`. Semantics change deliberately: a condition is fail-closed (absent argument → deny), whereas the old lists let an absent argument pass — use `call.args.?x.orValue(d)` where "absent is OK".
+
+- **CBP request-body `required_parameters` / `allowed_parameters` / `denied_parameters` are removed — express them as a `condition` over `request.data`.** `has(request.data.owner)` requires a field, `request.data.tier in ['gold','silver']` constrains a value, `!has(request.data.internal)` forbids one. Pagination (`pagination_limit`) and list-response filtering are unchanged. The parser rejects the removed keys.
 
 ### New Features
 
-- **New `spiffe` auth method: first-class SPIFFE support for both SVID types on one mount.** Accepts a SPIFFE X.509-SVID (presented over mTLS or a trusted forwarding header) and a SPIFFE JWT-SVID (bearer) on the same mount, verifying each against the trust domain's bundle and issuing a single `spiffe_role` token type. When a request presents both, the explicitly-presented JWT-SVID wins over an ambient forwarded certificate. Roles bind on `trust_domain`, `allowed_spiffe_ids`, and `bound_audiences`; an audience is required for JWT-SVID logins, as SPIFFE mandates. Trust-domain bundles are managed on the mount and can be federated from upstream endpoints with periodic refresh. There is no X.509-SVID revocation surface — the method relies on short-lived SVIDs and bundle rotation, and an issued token's TTL is capped by the SVID's expiry.
+- **CEL policy conditions.** Path-level and per-call `mcp { }` conditions over `request.*` (incl. the new `request.namespace`), `token.*`, `now`, and `call.*`; helpers `cidrContains`, optional types, and the timezone-aware `now.get*` built-ins. Fail-closed and cost-bounded (type-checked and cost-limited at write time; a runtime cost limit backstops size-dependent expressions). A path-level condition that references `call.*` is a compile-time error. See the [CEL condition cookbook](https://github.com/stephnangue/warden/blob/main/docs/concepts/cel-conditions.md).
 
-- **The API listener can serve its TLS certificate from the SPIFFE Workload API.** Instead of a static certificate and key on disk, the listener can obtain an X.509-SVID from a SPIFFE Workload API endpoint and rotate it automatically as the SVID is renewed, keeping the control-plane TLS identity short-lived and self-renewing.
+- **Login-derived token metadata across `jwt`, `cert`, `kubernetes`, and `spiffe`.** Per-role `metadata_claims` (claims, incl. nested via JSON Pointer) or `metadata_mappings` (certificate fields, TokenReview attributes, SPIFFE-ID components) map verified identity attributes onto the token; `token.metadata.<key>` is then usable in conditions and attributed in audit.
 
-- **`cert` auth method consolidated to pure PKI.** The never-shipped experimental SPIFFE mode (`mode=spiffe`, trust-domain config, bundle federation, and the `spiffe_id` principal claim) is removed in favour of the dedicated `spiffe` method. The `cert` method keeps its X.509 chain-of-trust validation and URI-SAN matching (`uri_san` principal claim plus `allowed_uri_sans`), so a SPIFFE X.509-SVID can still be accepted as an ordinary client certificate bound on its URI SAN.
+- **Explainable audit for CEL decisions.** `auth.policy_results.condition` records the expression, decision, a sanitized error category, and the referenced `inputs` — logged in clear by default and HMAC-salt-able per key via `salt_fields`.
 
-- **Audit-log subject metadata across the cloud and secrets sources.** The AWS, GCP, Azure, Kubernetes, and Vault drivers now populate the non-secret `Credential.Metadata` introduced in v0.15.0 when they mint — the assume-role identity on an AWS STS mint, and the token/access-token subject on the others — so an audit record shows which upstream identity a brokered call acted as, not merely that a call occurred.
-
-### Bug Fixes
-
-- **`httpproxy`: the gateway suffix is forwarded verbatim.** Gateway-suffix path extraction now preserves the upstream path exactly — including trailing slashes — so the SigV4-signed `mcp_aws` gateway's canonical request stays valid.
-
-### Documentation
-
-- Operator README for the new `spiffe` auth method, with SPIFFE content retargeted across the `cert`, `jwt`, and Vault-provider docs to point SPIFFE workloads at the dedicated method.
-- `mcp_aws` README: a Claude Code CLI registration step (`claude mcp add`) for pointing Claude Code at an `mcp_aws` mount.
-- Root README: a dedicated `spiffe` row in the authentication-methods table.
+- **Generic `rest` provider.** A REST/HTTP reverse-proxy backend for JSON/REST APIs without a dedicated provider, with a Warden-injected credential.
 
 ### Upgrading
 
-```bash
-helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.3.2 \
-  -n warden --reset-then-reuse-values
-```
+Rewrite any policy that used the removed structured mechanisms as a CEL `condition`:
 
-Chart `0.3.1` → `0.3.2` is an `appVersion` bump to track the v0.16.0 binary — there are no chart template or values changes, so existing values files apply as-is.
+- `conditions { source_ip = ["10.0.0.0/8"] }` → `condition = "cidrContains('10.0.0.0/8', request.client_ip)"`
+- `conditions { token_metadata = { env = ["prod"] } }` → `condition = "token.metadata.env == 'prod'"`
+- MCP `allowed_params { amount = ["<=1500"] }` → `mcp { condition = "call.args.amount <= 1500" }` (add `call.args.?amount.orValue(0) <= 1500` if an absent argument should still pass)
+- CBP `required_parameters = ["owner"]` → `condition = "has(request.data.owner)"`
 
-Two operator-facing migrations before bumping:
-
-- **Re-mount any `mcp_github` or `mcp_gcp` provider as type `mcp`** and set `mcp_url` (`https://api.githubcopilot.com/mcp` for GitHub; the operator's URL for Google Cloud). The generic provider reuses the same credential types, so existing credential specs apply unchanged. `mcp_aws` is unaffected.
-- **Migrate any `jwt` role that used `bound_uri_patterns` or `uri_claim` to the `spiffe` method.** Those fields are gone; a role that relied on them now ignores them and becomes more permissive until migrated.
-
-### Resources
-
-- New installs and detailed upgrade procedures: [docs/deployment/kubernetes.md](https://github.com/stephnangue/warden/blob/main/docs/deployment/kubernetes.md).
-- SPIFFE, MCP, and auth-method setup: [README](https://github.com/stephnangue/warden#readme) and the per-provider and per-method READMEs.
-
-### License
-
-[MPL-2.0](https://github.com/stephnangue/warden/blob/main/LICENSE)
+The parser rejects each removed construct at policy-write time with an error naming its CEL equivalent, so a stale policy fails fast on `warden policy write` rather than changing behaviour silently.
