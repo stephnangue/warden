@@ -57,12 +57,12 @@ func TestIsSigV4Request(t *testing.T) {
 
 func TestExtractFromAuthHeader(t *testing.T) {
 	tests := []struct {
-		name      string
-		header    string
-		wantSvc   string
-		wantReg   string
-		wantAKID  string
-		wantErr   bool
+		name     string
+		header   string
+		wantSvc  string
+		wantReg  string
+		wantAKID string
+		wantErr  bool
 	}{
 		{
 			name:     "valid header",
@@ -487,4 +487,108 @@ func TestForwardDirect_UpstreamError(t *testing.T) {
 	ForwardDirect(log, rec, r, []byte{}, http.DefaultTransport)
 
 	assert.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+// --- ForwardDirectFiltered ---
+
+func serveBody(t *testing.T, status int, contentType, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
+func TestForwardDirectFiltered_TransformsBodyAndFixesLength(t *testing.T) {
+	log := createTestLogger()
+	upstream := serveBody(t, http.StatusOK, "application/json", `{"tools":["get_x","delete_x"]}`)
+	defer upstream.Close()
+
+	r, _ := http.NewRequest("POST", upstream.URL+"/gateway", nil)
+	r.RequestURI = ""
+	rec := httptest.NewRecorder()
+
+	modify := func(ct string, body []byte) ([]byte, error) {
+		assert.Equal(t, "application/json", ct)
+		return []byte("FILTERED"), nil
+	}
+	ForwardDirectFiltered(log, rec, r, []byte{}, upstream.Client().Transport, 1<<20, modify)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "FILTERED", rec.Body.String())
+	assert.Equal(t, "8", rec.Header().Get("Content-Length"))
+}
+
+func TestForwardDirectFiltered_NilModifyVerbatim(t *testing.T) {
+	log := createTestLogger()
+	upstream := serveBody(t, http.StatusOK, "application/json", `{"tools":["delete_x"]}`)
+	defer upstream.Close()
+
+	r, _ := http.NewRequest("POST", upstream.URL+"/gateway", nil)
+	r.RequestURI = ""
+	rec := httptest.NewRecorder()
+
+	ForwardDirectFiltered(log, rec, r, []byte{}, upstream.Client().Transport, 1<<20, nil)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "delete_x")
+}
+
+func TestForwardDirectFiltered_NonSuccessSkipsModify(t *testing.T) {
+	log := createTestLogger()
+	upstream := serveBody(t, http.StatusForbidden, "application/json", `{"error":"denied"}`)
+	defer upstream.Close()
+
+	r, _ := http.NewRequest("POST", upstream.URL+"/gateway", nil)
+	r.RequestURI = ""
+	rec := httptest.NewRecorder()
+
+	modify := func(ct string, body []byte) ([]byte, error) {
+		t.Fatalf("modify must not run for a non-2xx response")
+		return nil, nil
+	}
+	ForwardDirectFiltered(log, rec, r, []byte{}, upstream.Client().Transport, 1<<20, modify)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "denied")
+}
+
+func TestForwardDirectFiltered_ModifyErrorFailsClosed(t *testing.T) {
+	log := createTestLogger()
+	upstream := serveBody(t, http.StatusOK, "application/json", `{"tools":[]}`)
+	defer upstream.Close()
+
+	r, _ := http.NewRequest("POST", upstream.URL+"/gateway", nil)
+	r.RequestURI = ""
+	rec := httptest.NewRecorder()
+
+	modify := func(ct string, body []byte) ([]byte, error) {
+		return nil, assert.AnError
+	}
+	ForwardDirectFiltered(log, rec, r, []byte{}, upstream.Client().Transport, 1<<20, modify)
+
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+func TestForwardDirectFiltered_OversizeFailsClosed(t *testing.T) {
+	log := createTestLogger()
+	upstream := serveBody(t, http.StatusOK, "application/json", `{"tools":["a","b","c","d","e"]}`)
+	defer upstream.Close()
+
+	r, _ := http.NewRequest("POST", upstream.URL+"/gateway", nil)
+	r.RequestURI = ""
+	rec := httptest.NewRecorder()
+
+	called := false
+	modify := func(ct string, body []byte) ([]byte, error) {
+		called = true
+		return body, nil
+	}
+	ForwardDirectFiltered(log, rec, r, []byte{}, upstream.Client().Transport, 5, modify)
+
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.False(t, called, "modify must not run when the body exceeds the cap")
 }

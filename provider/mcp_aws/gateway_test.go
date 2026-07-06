@@ -340,3 +340,32 @@ func TestHandleGateway_AgentCoreServiceInference(t *testing.T) {
 	assert.Equal(t, "bedrock-agentcore", service, "AgentCore host must yield service=bedrock-agentcore via arm 1 of the structured match")
 	assert.Equal(t, "us-east-1", region)
 }
+
+// --- MCP list-response filtering ---
+
+// TestHandleGateway_FiltersToolsList drives the full mcp_aws gateway with a
+// list filter attached, proving the response is pruned to the callable items.
+func TestHandleGateway_FiltersToolsList(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_x"},{"name":"delete_x"}]}}`))
+	}))
+	defer srv.Close()
+
+	b := setupBackend(t)
+	configureBackendForUpstream(t, b, srv)
+
+	req, rec := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, stsCredential())
+	req.MCPListFilter = &logical.MCPListFilter{
+		ListMethod: "tools/list",
+		Keep:       func(name string) bool { return !strings.HasPrefix(name, "delete_") },
+	}
+
+	b.handleGateway(context.Background(), req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	out := rec.Body.String()
+	assert.Contains(t, out, "get_x")
+	assert.NotContains(t, out, "delete_x", "denied tool must be pruned from the mcp_aws tools/list response")
+}
