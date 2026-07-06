@@ -133,9 +133,9 @@ path "mcp/gateway/*" {
 }
 `)
 	req := buildE2ERequest(t, `[
-		{"jsonrpc": "2.0", "method": "tools/list", "id": 1},
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_repos"}, "id": 1},
 		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_repos"}, "id": 2},
-		{"jsonrpc": "2.0", "method": "tools/list", "id": 3}
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_repos"}, "id": 3}
 	]`)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
 
@@ -145,6 +145,31 @@ path "mcp/gateway/*" {
 	assert.Equal(t, "allow", res.MCPDecision.Decision)
 	assert.Nil(t, res.MCPDecision.BatchIndex,
 		"all-allowed batch leaves BatchIndex nil")
+}
+
+func TestMCPE2E_BatchWithListMethodDenied(t *testing.T) {
+	// End-to-end: a batch carrying a list method is denied by the
+	// response-filter guard even when every call would otherwise pass.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/list", "tools/call"]
+    allowed_tools   = ["search_repos"]
+  }
+}
+`)
+	req := buildE2ERequest(t, `[
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_repos"}, "id": 1},
+		{"jsonrpc": "2.0", "method": "tools/list", "id": 2}
+	]`)
+	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
+
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeBatchListUnfilterable, res.MCPDecision.RuleType)
 }
 
 // Body byte-identity: after the extractor reads and restores the
@@ -338,7 +363,6 @@ path "mcp/gateway/*" {
 	assert.False(t, res.Allowed)
 	assert.Equal(t, mcpRuleTypeMalformedParams, res.MCPDecision.RuleType)
 }
-
 
 func TestMCPE2E_EmptyBatch_DeniesBatchEmpty(t *testing.T) {
 	cbp := mustCBP(t, `

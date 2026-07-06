@@ -633,7 +633,35 @@ func TestMCPEval_Batch_AllAllowed(t *testing.T) {
 	// Three calls in a batch, all pass. Body goes through the real
 	// ParseJSONRPCStrict (producing 3 MCPCalls with BatchIndex 0/1/2)
 	// and then through the matcher; the decision is the last allow
-	// and BatchIndex stays nil because no element denied.
+	// and BatchIndex stays nil because no element denied. No list method
+	// is present, so the response-filter batch guard does not fire.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/call"]
+    allowed_tools   = ["search_repos", "get_repo"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `[
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_repos"}, "id": 1},
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "get_repo"}, "id": 2},
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_repos"}, "id": 3}
+	]`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.True(t, res.Allowed, "every batch call must allow → batch allows")
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "allow", res.MCPDecision.Decision)
+	assert.Nil(t, res.MCPDecision.BatchIndex,
+		"BatchIndex stamped only on denies")
+}
+
+func TestMCPEval_Batch_WithListMethod_Denied(t *testing.T) {
+	// A batch that contains a list method is denied even when every call
+	// would otherwise pass: a batched JSON-RPC list response can't be
+	// pruned per element, so the response-filter guard fails closed.
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -644,17 +672,16 @@ path "mcp/gateway/*" {
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `[
-		{"jsonrpc": "2.0", "method": "tools/list", "id": 1},
-		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_repos"}, "id": 2},
-		{"jsonrpc": "2.0", "method": "tools/list", "id": 3}
+		{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_repos"}, "id": 1},
+		{"jsonrpc": "2.0", "method": "tools/list", "id": 2}
 	]`)
 	res := cbp.AllowOperation(testContext(), req, nil, false)
 
-	assert.True(t, res.Allowed, "every batch call must allow → batch allows")
+	assert.False(t, res.Allowed)
 	require.NotNil(t, res.MCPDecision)
-	assert.Equal(t, "allow", res.MCPDecision.Decision)
-	assert.Nil(t, res.MCPDecision.BatchIndex,
-		"BatchIndex stamped only on denies")
+	assert.Equal(t, "deny", res.MCPDecision.Decision)
+	assert.Equal(t, mcpRuleTypeBatchListUnfilterable, res.MCPDecision.RuleType)
+	assert.Nil(t, req.MCPListFilter, "no filter attached for a denied batch")
 }
 
 func TestMCPEval_Batch_OneDeniedFailsBatch(t *testing.T) {
@@ -922,6 +949,9 @@ func TestBuildMCPDenyDescription_PerRuleType(t *testing.T) {
 		{mcpRuleTypeMalformedParams,
 			&logical.MCPDecision{RuleType: mcpRuleTypeMalformedParams},
 			"Request params have unexpected shape."},
+		{mcpRuleTypeBatchListUnfilterable,
+			&logical.MCPDecision{RuleType: mcpRuleTypeBatchListUnfilterable},
+			"Batched list requests are not supported."},
 	}
 	for _, c := range cases {
 		t.Run(c.ruleType, func(t *testing.T) {
