@@ -130,6 +130,103 @@ path "mcp/gateway/*" {
 	assert.Equal(t, mcpRuleTypeAllowedMethods, res.MCPDecision.RuleType)
 }
 
+// =============================================================================
+// Deny-by-default + lifecycle exemption
+// =============================================================================
+
+func TestMCPEval_LifecycleMethods_ExemptFromMethodGate(t *testing.T) {
+	// initialize / ping / notifications/* must pass even though the block
+	// allow-lists only data-plane methods — otherwise the MCP handshake
+	// breaks. The exemption skips the allowed_methods gate for them.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/list"]
+    allowed_tools   = ["*"]
+  }
+}
+`)
+	for _, method := range []string{"initialize", "ping", "notifications/initialized"} {
+		body := `{"jsonrpc":"2.0","method":"` + method + `","id":1}`
+		if strings.HasPrefix(method, "notifications/") {
+			body = `{"jsonrpc":"2.0","method":"` + method + `"}` // notification, no id
+		}
+		req := newMCPRequest(t, "mcp/gateway/", body)
+		res := cbp.AllowOperation(testContext(), req, nil, false)
+		assert.True(t, res.Allowed, "lifecycle method %q must be allowed", method)
+		require.NotNil(t, res.MCPDecision)
+		assert.Equal(t, "allow", res.MCPDecision.Decision, "method %q", method)
+		assert.Equal(t, "(lifecycle)", res.MCPDecision.MatchedRule, "method %q", method)
+	}
+}
+
+func TestMCPEval_LifecycleMethod_ExplicitDenyStillBlocks(t *testing.T) {
+	// The deny gate runs before the exemption: an operator can still block
+	// a lifecycle method by naming it in denied_methods.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/list"]
+    denied_methods  = ["ping"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"ping","id":1}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeDeniedMethods, res.MCPDecision.RuleType)
+	assert.Equal(t, "ping", res.MCPDecision.MatchedRule)
+}
+
+func TestMCPEval_ToolsCall_NeedsBothMethodAndToolAllow(t *testing.T) {
+	// Deny-by-default: allowing tools/call as a method is not enough — the
+	// tool name must also match allowed_tools. Empty allowed_tools ⇒ deny.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["tools/call"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "get_repository"},
+		"id":      1
+	}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeAllowedTools, res.MCPDecision.RuleType)
+}
+
+func TestMCPEval_StarOpensEverything(t *testing.T) {
+	// allowed_* = ["*"] restores fully-open behavior for a data-plane call.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_methods = ["*"]
+    allowed_tools   = ["*"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "delete_repository"},
+		"id":      1
+	}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+	assert.True(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "allow", res.MCPDecision.Decision)
+}
+
 func TestMCPEval_DeniedMethods_Match(t *testing.T) {
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
@@ -228,11 +325,15 @@ path "mcp/gateway/*" {
 }
 
 func TestMCPEval_DeniedTools_Match(t *testing.T) {
+	// allowed_methods admits tools/call so the request reaches the name
+	// gate; denied_tools then fires. (Under deny-by-default a set without
+	// allowed_methods would deny at the method gate before the name gate.)
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
-    denied_tools = ["delete_*"]
+    allowed_methods = ["tools/call"]
+    denied_tools    = ["delete_*"]
   }
 }
 `)
@@ -310,7 +411,10 @@ path "mcp/gateway/*" {
 // NOT match the deny pattern passes through the name gate.
 // Pre-Phase-5 the matcher returned (nil, allowList) for resources/read
 // so this code path didn't exist; pinning it here.
-func TestMCPEval_DeniedResources_Only_NonMatchingAllowed(t *testing.T) {
+func TestMCPEval_DeniedResources_NoAllowList_Denies(t *testing.T) {
+	// Deny-by-default: allowed_methods admits resources/read, but with no
+	// allowed_resources every uri is denied — even one matching no
+	// denied_resources pattern. (Was allowed under allow-by-default.)
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -328,7 +432,10 @@ path "mcp/gateway/*" {
 	}`)
 	res := cbp.AllowOperation(testContext(), req, nil, false)
 
-	assert.True(t, res.Allowed)
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "deny", res.MCPDecision.Decision)
+	assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
 }
 
 // Deny-list precedence on resources/read: when the same name matches
@@ -383,9 +490,10 @@ path "mcp/gateway/*" {
 		"name gate didn't fire for name-less method")
 }
 
-func TestMCPEval_EmptyBlock_AllowsAnyMethod(t *testing.T) {
-	// Empty mcp { } block doesn't impose any restriction beyond
-	// "body must parse." A tools/call with arguments still passes.
+func TestMCPEval_EmptyBlock_DeniesByDefault(t *testing.T) {
+	// Deny-by-default: an empty mcp { } block allow-lists nothing, so a
+	// data-plane method is denied at the method gate (empty allowed_methods
+	// matches nothing). (Was allow-any before the flip.)
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -400,8 +508,10 @@ path "mcp/gateway/*" {
 	}`)
 	res := cbp.AllowOperation(testContext(), req, nil, false)
 
-	assert.True(t, res.Allowed)
-	assert.Equal(t, "allow", res.MCPDecision.Decision)
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "deny", res.MCPDecision.Decision)
+	assert.Equal(t, mcpRuleTypeAllowedMethods, res.MCPDecision.RuleType)
 }
 
 // =============================================================================
@@ -496,7 +606,8 @@ path "mcp/gateway/*" {
 path "mcp/gateway/*" {
   capabilities = ["update"]
   mcp {
-    denied_tools = ["delete_*"]
+    allowed_methods = ["tools/call"]
+    denied_tools    = ["delete_*"]
   }
 }
 `)

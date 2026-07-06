@@ -290,13 +290,19 @@ path "mcp/gateway/*" {
 
 Semantics:
 
-- **Deny is checked before allow.** A call matching a `denied_*` list is
-  rejected; otherwise, if an `allowed_*` list is present, the call must match it.
+- **Deny-by-default.** An `mcp { }` block grants nothing until it allow-lists it:
+  an empty or absent `allowed_methods`/`allowed_tools`/`allowed_resources`/`allowed_prompts`
+  denies every method/tool/resource/prompt. Use `["*"]` to open a family fully.
+- **Deny is checked before allow.** A call matching a `denied_*` list is rejected;
+  otherwise it must match the corresponding (mandatory) `allowed_*` list.
+- **Lifecycle methods are exempt.** `initialize`, `ping`, and `notifications/*`
+  bypass the method allow-list so the client handshake always works (a
+  `denied_methods` entry can still block them).
 - **Patterns use trailing `*` only.** `delete_*` and a bare `*` are valid; a `*`
   in any other position is rejected at parse time.
 - **Argument values are gated by the CEL `condition`** over `call.args`,
   evaluated per call after the name/method lists.
-- **Multiple `mcp` blocks OR together** — adding policies can only widen what is
+- **Multiple `mcp` blocks OR together** — adding blocks can only widen what is
   allowed. In a batched JSON-RPC request, a single denied call denies the batch.
 
 This is the authorization step a provider performs after authentication and

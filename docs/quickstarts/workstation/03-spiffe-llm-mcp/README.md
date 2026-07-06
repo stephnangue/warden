@@ -187,7 +187,12 @@ warden cred spec create github-ops -source github-src -config auth_method=pat -c
 warden policy write mcp-github-access - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp { denied_tools = ["delete_*", "create_*", "update_*", "push_*", "merge_*", "fork_*"] }
+  # Deny-by-default: open every method+tool, then block the state-changing ones.
+  mcp {
+    allowed_methods = ["*"]
+    allowed_tools   = ["*"]
+    denied_tools    = ["delete_*", "create_*", "update_*", "push_*", "merge_*", "fork_*"]
+  }
 }
 EOF
 
