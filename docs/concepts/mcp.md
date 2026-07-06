@@ -6,7 +6,8 @@ fetch its **prompts**. Warden fronts MCP servers the same way it fronts any othe
 upstream: the agent points its MCP client at a Warden mount as if it were the
 server, and Warden authenticates the caller, **authorizes the individual
 JSON-RPC call**, injects the upstream [credential](credentials.md), and proxies
-the request — streaming the response back untouched.
+the request — streaming the response back untouched, except that a **list**
+method's response is pruned to the items the caller is allowed to use (below).
 
 What makes MCP special in Warden is the middle step. For most [providers](providers.md)
 authorization is path-and-method; for MCP, Warden parses the JSON-RPC **body** and
@@ -96,6 +97,24 @@ mcp {
 
 Argument-value constraints are expressed in the per-call `condition` (below), not
 as structured lists.
+
+### Filtering list responses
+
+The gates above decide whether a *call* is allowed. Warden also applies them to
+what an agent can *discover*: when a `tools/list`, `resources/list`, or
+`prompts/list` request is allowed, Warden prunes the response so it lists only
+the items the caller could actually use — an item survives iff a `tools/call`
+(resp. `resources/read`, `prompts/get`) for it would pass the gates. Under
+deny-by-default this means a mount with no `allowed_tools` returns an **empty**
+tools list, and one scoped to `get_*` lists only those. Discovery matches
+enforcement: what the agent sees is what it can call.
+
+Per-call CEL `condition`s are *not* evaluated during filtering — a list carries
+no arguments — so a condition-gated tool still appears in the list and its
+arguments are checked when it is actually called. A batched JSON-RPC request
+that contains a list method is denied (`batch_list_unfilterable`): a batched
+list response can't be pruned per element, so Warden fails closed rather than
+return an unfiltered list.
 
 ### Per-call CEL conditions
 

@@ -8,6 +8,10 @@ All notable changes to Warden are documented in this file.
 
 - **MCP `mcp { }` authorization is now deny-by-default.** An `mcp { }` block previously allowed anything it did not explicitly deny — an absent `allowed_methods`/`allowed_tools`/`allowed_resources`/`allowed_prompts` meant "allow all". It now **denies** anything it does not explicitly allow: an empty or absent allow-list for a family denies every method/tool/resource/prompt in it. **This silently tightens deployed policies** — e.g. `mcp { denied_tools = ["delete_*"] }` (or a block carrying only a `condition`) went from "all tools except `delete_*`" to "**deny every tool**". Before upgrading, audit every `mcp { }` block: to restore openness add `allowed_methods = ["*"]` (and `allowed_tools`/`allowed_resources`/`allowed_prompts = ["*"]` as needed), then layer `denied_*` lists and `condition`s on top. The MCP session-lifecycle methods `initialize`, `ping`, and `notifications/*` are **exempt** — they always pass without being allow-listed (a `denied_methods` entry can still block them), so the client handshake works without listing them and the previous "remember to allow-list the handshake methods" guidance no longer applies.
 
+### New Features
+
+- **MCP list responses are filtered to the callable set.** When a `tools/list`, `resources/list`, or `prompts/list` request is allowed, Warden prunes the response so it lists only the items the caller could actually use — an item survives iff a `tools/call` / `resources/read` / `prompts/get` for it would pass the policy gates (per-call CEL `condition`s are deferred to call time, so condition-gated items stay listed). Discovery now matches enforcement: an agent sees only what it can call. A batched request containing a list method is denied (`batch_list_unfilterable`), and a list response that can't be buffered within `max_body_size` fails closed rather than stream unfiltered.
+
 ## [v0.17.0] — 2026-07-04
 
 ### Breaking Changes

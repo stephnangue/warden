@@ -279,6 +279,11 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 		// Initialize reverse proxy with provider-type shared transport
 		b.StreamingBackend.InitProxy(sharedTransport)
 
+		// Prune MCP list responses when the policy layer attaches a filter.
+		// No-op for every request that carries none, so non-MCP providers are
+		// unaffected.
+		b.installMCPListFilter()
+
 		// Register transport shutdown hook
 		if conf.RegisterShutdownHook != nil && shutdownFn != nil {
 			conf.RegisterShutdownHook(spec.Name+"-transport", shutdownFn)
