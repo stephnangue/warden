@@ -506,6 +506,31 @@ func synthesizeGatewayPath(provider, role, apiPath string) (string, error) {
 	return b.String(), nil
 }
 
+// statusClientClosedRequest is nginx's non-standard 499 "Client Closed
+// Request": the client disconnected before any response was written. It has no
+// net/http constant.
+const statusClientClosedRequest = 499
+
+// streamedStatusCode resolves the status code to record for a streamed
+// response. It returns the code the writer actually captured; when nothing was
+// ever written to the client (captured == 0), it derives a code from why the
+// stream ended so the audit distinguishes an aborted stream from an unknown
+// outcome: a canceled context (client hung up) → 499, a deadline (upstream
+// timeout) → 504. If nothing was written and there is no context error, the
+// outcome is genuinely unknown and 0 is preserved.
+func streamedStatusCode(captured int, ctxErr error) int {
+	if captured != 0 {
+		return captured
+	}
+	switch {
+	case errors.Is(ctxErr, context.Canceled):
+		return statusClientClosedRequest
+	case errors.Is(ctxErr, context.DeadlineExceeded):
+		return http.StatusGatewayTimeout
+	}
+	return captured
+}
+
 func (c *Core) handleCancelableRequest(ctx context.Context, req *logical.Request) (resp *logical.Response, err error) {
 	// MountPoint will not always be set at this point, so we ensure the req contains it
 	req.MountPoint = c.router.MatchingMount(ctx, req.Path)
@@ -528,7 +553,11 @@ func (c *Core) handleCancelableRequest(ctx context.Context, req *logical.Request
 
 	if resp != nil && resp.Streamed {
 		if srw, ok := req.ResponseWriter.(*logical.StatusRecordingWriter); ok {
-			resp.StatusCode = srw.StatusCode()
+			var ctxErr error
+			if req.HTTPRequest != nil {
+				ctxErr = req.HTTPRequest.Context().Err()
+			}
+			resp.StatusCode = streamedStatusCode(srw.StatusCode(), ctxErr)
 		}
 	}
 
@@ -882,7 +911,17 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		var ctErr error
 		auth, _, te, ctErr = c.CheckToken(ctx, req, false)
 		if ctErr != nil {
-			c.logger.Warn("error when checking token", logger.Err(ctErr))
+			// A permission denial is an expected authorization outcome, not an
+			// operational fault, and is already recorded in full in the audit
+			// log — so it is kept out of the operational log entirely (even at
+			// debug), or an MCP client probing capabilities (e.g. prompts/list
+			// under a policy that doesn't allow it) would spam it. Genuine
+			// failures (internal errors, malformed requests) still warn.
+			permDenied := errwrap.Contains(ctErr, sdklogical.ErrPermissionDenied.Error()) &&
+				!errwrap.Contains(ctErr, ErrInternalError.Error())
+			if !permDenied {
+				c.logger.Warn("error when checking token", logger.Err(ctErr))
+			}
 			switch {
 			case ctErr == ErrInternalError,
 				errwrap.Contains(ctErr, ErrInternalError.Error()),

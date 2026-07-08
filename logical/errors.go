@@ -4,8 +4,11 @@
 package logical
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 )
 
 // CodedError is an error that carries an HTTP status code.
@@ -119,6 +122,22 @@ func GetErrorCode(err error) int {
 	}
 	if coded, ok := err.(*CodedError); ok {
 		return coded.Status
+	}
+	// Recognise the SDK sentinel errors so their HTTP status survives being
+	// wrapped in an ErrorResponse — otherwise a permission denial (or any
+	// sentinel) recorded in the audit log falls through to 500 even though the
+	// wire response is correct. Mirrors http.errorToStatusCode so the audit
+	// status and the wire status can't drift. errors.Is traverses wrapping,
+	// including multierror, so a wrapped or appended sentinel still matches.
+	switch {
+	case errors.Is(err, sdklogical.ErrPermissionDenied):
+		return http.StatusForbidden
+	case errors.Is(err, sdklogical.ErrUnsupportedOperation):
+		return http.StatusMethodNotAllowed
+	case errors.Is(err, sdklogical.ErrUnsupportedPath):
+		return http.StatusNotFound
+	case errors.Is(err, sdklogical.ErrInvalidRequest):
+		return http.StatusBadRequest
 	}
 	// Check if the error wraps a CodedError
 	if unwrapped, ok := err.(interface{ Unwrap() error }); ok {
