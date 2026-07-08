@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"testing"
 
+	multierror "github.com/hashicorp/go-multierror"
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -131,6 +133,14 @@ func TestWrapWithCode(t *testing.T) {
 	assert.Equal(t, inner, wrapped.Unwrap())
 }
 
+// permDeniedWrapper mirrors core.ErrMCPPolicyDenied: a typed error that
+// Unwraps to the permission-denied sentinel. Used to prove GetErrorCode
+// traverses wrapping the same way the HTTP status mapping does.
+type permDeniedWrapper struct{}
+
+func (permDeniedWrapper) Error() string { return "boom" }
+func (permDeniedWrapper) Unwrap() error { return sdklogical.ErrPermissionDenied }
+
 func TestGetErrorCode(t *testing.T) {
 	t.Run("nil", func(t *testing.T) {
 		assert.Equal(t, 200, GetErrorCode(nil))
@@ -149,6 +159,42 @@ func TestGetErrorCode(t *testing.T) {
 		wrapped := fmt.Errorf("wrap: %w", inner)
 		assert.Equal(t, 404, GetErrorCode(wrapped))
 	})
+
+	// SDK sentinel errors must map to their HTTP status even when wrapped or
+	// appended into a multierror — otherwise the audit log records 500 for a
+	// denial the client received as 403.
+	t.Run("permission denied sentinel", func(t *testing.T) {
+		assert.Equal(t, 403, GetErrorCode(sdklogical.ErrPermissionDenied))
+	})
+
+	t.Run("permission denied in multierror", func(t *testing.T) {
+		assert.Equal(t, 403, GetErrorCode(multierror.Append(nil, sdklogical.ErrPermissionDenied)))
+	})
+
+	t.Run("permission denied via Unwrap in multierror", func(t *testing.T) {
+		assert.Equal(t, 403, GetErrorCode(multierror.Append(nil, permDeniedWrapper{})))
+	})
+
+	t.Run("unsupported operation", func(t *testing.T) {
+		assert.Equal(t, 405, GetErrorCode(sdklogical.ErrUnsupportedOperation))
+	})
+
+	t.Run("unsupported path", func(t *testing.T) {
+		assert.Equal(t, 404, GetErrorCode(sdklogical.ErrUnsupportedPath))
+	})
+
+	t.Run("invalid request wrapped", func(t *testing.T) {
+		assert.Equal(t, 400, GetErrorCode(fmt.Errorf("ctx: %w", sdklogical.ErrInvalidRequest)))
+	})
+}
+
+// TestErrorResponse_PermissionDeniedStatus is the end-to-end assertion for the
+// reported bug: an ErrorResponse built from a permission denial (as the request
+// handler does on a failed token check) must carry 403 so the audit log records
+// the same status the client received on the wire.
+func TestErrorResponse_PermissionDeniedStatus(t *testing.T) {
+	resp := ErrorResponse(multierror.Append(nil, sdklogical.ErrPermissionDenied))
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
 func TestIsNotFound(t *testing.T) {
