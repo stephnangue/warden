@@ -191,7 +191,7 @@ Enforcement is **body-authoritative**. When a policy in scope contains an `mcp {
 
 All examples below use `capabilities = ["create", "read", "delete"]`. MCP Streamable HTTP uses three HTTP verbs on the same `/gateway` URL: POST for JSON-RPC requests (mapped by Warden to `create`), GET for the optional server → client SSE notification stream (`read`), and DELETE for session terminate (`delete`). All three need to be in the cap list or off-spec MCP clients fail to connect. The `mcp { }` block only fires on the POST half; GET/DELETE skip body-authoritative evaluation automatically.
 
-The `allowed_methods` examples below list the MCP **protocol** methods every spec-compliant client uses in its handshake — `initialize`, `notifications/initialized`, `ping` — alongside the data-plane methods (`tools/list`, `tools/call`). Omitting the lifecycle methods makes `claude mcp list` (and similar client health checks) hang on connect.
+`mcp { }` authorization is **deny-by-default**: an empty or absent `allowed_methods`/`allowed_tools` denies everything, so a block grants only what it allow-lists — use `["*"]` to open a family fully. The session-lifecycle methods `initialize`, `notifications/*`, and `ping` are **exempt**: they always pass without being listed, so the client handshake works no matter how narrow the data-plane allow-list is (an explicit `denied_methods` entry can still block them).
 
 The simplest policy grants the gateway and leans on IAM for everything:
 
@@ -210,13 +210,7 @@ warden policy write mcp-aws-s3-readonly - <<EOF
 path "mcp_aws/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
   mcp {
-    allowed_methods = [
-      "initialize",
-      "notifications/initialized",
-      "tools/list",
-      "tools/call",
-      "ping"
-    ]
+    allowed_methods = ["tools/list", "tools/call"]
     allowed_tools   = ["aws___call_aws"]
     condition = "!has(call.args.service_name) || call.args.service_name in ['s3', 'dynamodb']"
   }
@@ -224,13 +218,15 @@ path "mcp_aws/role/+/gateway*" {
 EOF
 ```
 
-A complementary deny shape — permissive by default, blocks dangerous operations regardless of which service they target. The `condition` reads `call.args.operation_name` and denies the dangerous prefixes/names:
+An open-then-subtract shape — allow every method and tool, then block dangerous operations regardless of which service they target. Under deny-by-default the `["*"]` allow-lists are required; the `condition` reads `call.args.operation_name` and denies the dangerous prefixes/names on top:
 
 ```bash
 warden policy write mcp-aws-safe - <<EOF
 path "mcp_aws/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
   mcp {
+    allowed_methods = ["*"]
+    allowed_tools   = ["*"]
     condition = <<-CEL
       !has(call.args.operation_name) || !(
         call.args.operation_name.startsWith("delete_") ||
@@ -250,13 +246,7 @@ warden policy write mcp-aws-us-only - <<EOF
 path "mcp_aws/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
   mcp {
-    allowed_methods = [
-      "initialize",
-      "notifications/initialized",
-      "tools/list",
-      "tools/call",
-      "ping"
-    ]
+    allowed_methods = ["tools/list", "tools/call"]
     allowed_tools   = ["aws___call_aws"]
     condition = <<-CEL
       (!has(call.args.service_name) || call.args.service_name in ["s3", "dynamodb", "lambda"]) &&
@@ -279,13 +269,7 @@ path "mcp_aws/role/+/gateway*" {
     now.getDayOfWeek("UTC") in [1, 2, 3, 4, 5]
   CEL
   mcp {
-    allowed_methods = [
-      "initialize",
-      "notifications/initialized",
-      "tools/list",
-      "tools/call",
-      "ping"
-    ]
+    allowed_methods = ["tools/list", "tools/call"]
     allowed_tools   = ["aws___call_aws"]
   }
 }

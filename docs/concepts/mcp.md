@@ -57,19 +57,45 @@ only:
 
 ### Evaluation order
 
-Each call passes through gates in order; the first failure denies it:
+Authorization is **deny-by-default**: an `mcp { }` block grants nothing until you
+allow-list it. Each call passes through gates in order; the first failure denies it:
 
-1. **Method** — `denied_methods` then `allowed_methods`.
+1. **Method** — `denied_methods` rejects first; then the method must appear in
+   `allowed_methods`. An empty or absent `allowed_methods` matches nothing and so
+   **denies every method**. *Exception:* the session-lifecycle methods
+   `initialize`, `ping`, and `notifications/*` are exempt from the allow-list —
+   they carry no tool/resource/data access and must work for the handshake — but
+   `denied_methods` can still block them explicitly.
 2. **Name** (for the three name-bearing methods) — `denied_tools`/`resources`/`prompts`
-   then the matching `allowed_*` list.
+   rejects first; then the name must appear in the matching `allowed_*` list. An
+   empty or absent list **denies every name**.
 3. **Condition** (CEL) — the block's per-call `condition`, if present, runs last
    and gates on argument values (`call.args`).
 
-Within a name/method gate, a `denied_*` match always rejects; an `allowed_*`
-list, if present, means the value must match it. Patterns are matched with a
-**trailing `*`** wildcard (`delete_*`, or a bare `*` for "anything"),
-case-insensitively. Argument-value constraints are expressed in the per-call
-`condition` (below), not as structured lists.
+Within a name/method gate a `denied_*` match always rejects, and the value must
+then match the corresponding `allowed_*` list — which is **mandatory** under
+deny-by-default. Patterns are matched with a **trailing `*`** wildcard
+(`delete_*`, or a bare `*` for "anything"), case-insensitively. To open a mount
+fully, allow-list `["*"]`:
+
+```hcl
+# fully open (the explicit form of "no restriction")
+mcp {
+  allowed_methods   = ["*"]
+  allowed_tools     = ["*"]
+  allowed_resources = ["*"]
+  allowed_prompts   = ["*"]
+}
+
+# read-only: list and call get_*/list_* only; delete_* is never callable
+mcp {
+  allowed_methods = ["tools/list", "tools/call"]
+  allowed_tools   = ["get_*", "list_*"]
+}
+```
+
+Argument-value constraints are expressed in the per-call `condition` (below), not
+as structured lists.
 
 ### Per-call CEL conditions
 

@@ -4,6 +4,10 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **MCP `mcp { }` authorization is now deny-by-default.** An `mcp { }` block previously allowed anything it did not explicitly deny — an absent `allowed_methods`/`allowed_tools`/`allowed_resources`/`allowed_prompts` meant "allow all". It now **denies** anything it does not explicitly allow: an empty or absent allow-list for a family denies every method/tool/resource/prompt in it. **This silently tightens deployed policies** — e.g. `mcp { denied_tools = ["delete_*"] }` (or a block carrying only a `condition`) went from "all tools except `delete_*`" to "**deny every tool**". Before upgrading, audit every `mcp { }` block: to restore openness add `allowed_methods = ["*"]` (and `allowed_tools`/`allowed_resources`/`allowed_prompts = ["*"]` as needed), then layer `denied_*` lists and `condition`s on top. The MCP session-lifecycle methods `initialize`, `ping`, and `notifications/*` are **exempt** — they always pass without being allow-listed (a `denied_methods` entry can still block them), so the client handshake works without listing them and the previous "remember to allow-list the handshake methods" guidance no longer applies.
+
 ## [v0.17.0] — 2026-07-04
 
 ### Breaking Changes

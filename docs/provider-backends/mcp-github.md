@@ -273,7 +273,7 @@ warden policy write mcp-github-readonly - <<EOF
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
   mcp {
-    allowed_methods = ["initialize","notifications/initialized","tools/list","tools/call","resources/list","resources/read","ping"]
+    allowed_methods = ["tools/list","tools/call","resources/list","resources/read"]
     allowed_tools   = ["get_repository","get_pull_request","list_issues","search_code"]
   }
 }
@@ -288,7 +288,8 @@ warden policy write mcp-github-no-protected-branches - <<EOF
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
   mcp {
-    allowed_methods = ["initialize","notifications/initialized","tools/call","ping"]
+    allowed_methods = ["tools/call"]
+    allowed_tools   = ["create_or_update_file"]
     condition = <<-CEL
       !has(call.args.branch) || !(
         call.args.branch in ["main", "master", "production"] ||

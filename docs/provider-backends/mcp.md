@@ -249,11 +249,12 @@ client SSE notification stream (`read`), and DELETE for session terminate
 connect. The `mcp { }` block only fires on the POST half; GET/DELETE skip
 body-authoritative evaluation automatically.
 
-The `allowed_methods` examples below list the MCP **protocol** methods every
-spec-compliant client uses in its handshake — `initialize`,
-`notifications/initialized`, `ping` — alongside the data-plane methods. Omitting
-the lifecycle methods makes `claude mcp list` (and similar client health checks)
-hang on connect.
+`mcp { }` authorization is **deny-by-default**: an empty or absent
+`allowed_methods`/`allowed_tools` denies everything, so a block grants only what
+it allow-lists — use `["*"]` to open a family fully. The session-lifecycle
+methods `initialize`, `notifications/*`, and `ping` are **exempt**: they always
+pass without being listed, so the client handshake works no matter how narrow the
+data-plane allow-list is (an explicit `denied_methods` entry can still block them).
 
 The simplest policy grants the gateway and leans on the token's scopes for
 everything:
@@ -273,29 +274,25 @@ warden policy write mcp-readonly - <<EOF
 path "cloudflare-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
   mcp {
-    allowed_methods = [
-      "initialize",
-      "notifications/initialized",
-      "tools/list",
-      "tools/call",
-      "resources/list",
-      "resources/read",
-      "ping"
-    ]
+    allowed_methods = ["tools/list", "tools/call", "resources/list", "resources/read"]
     allowed_tools   = ["search_docs", "list_*", "get_*"]
   }
 }
 EOF
 ```
 
-A complementary deny-list shape — permissive by default, blocks dangerous tools:
+An open-then-subtract shape — allow every method and tool, then blocklist the
+dangerous ones. Under deny-by-default the `["*"]` allow-lists are required; the
+`denied_*` lists carve exceptions out of them:
 
 ```bash
 warden policy write mcp-safe - <<EOF
 path "cloudflare-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
   mcp {
-    denied_tools = ["delete_*", "purge_*", "update_*"]
+    allowed_methods = ["*"]
+    allowed_tools   = ["*"]
+    denied_tools    = ["delete_*", "purge_*", "update_*"]
   }
 }
 EOF

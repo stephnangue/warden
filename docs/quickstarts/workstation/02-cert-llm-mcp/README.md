@@ -109,11 +109,14 @@ warden cred spec create github-ops -source github-src \
 # Policy + cert-auth role — same client cert (allowed_common_names="mcp-agent").
 # The mcp{} block reaches inside each tool call: read/list/search tools pass,
 # state-changing tools are denied at Warden (demonstrated in Step 6).
+# Deny-by-default: allow every method+tool, then block the state-changing ones.
 warden policy write mcp-github-access - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
   mcp {
-    denied_tools = ["delete_*", "create_*", "update_*", "push_*", "merge_*", "fork_*"]
+    allowed_methods = ["*"]
+    allowed_tools   = ["*"]
+    denied_tools    = ["delete_*", "create_*", "update_*", "push_*", "merge_*", "fork_*"]
   }
 }
 EOF

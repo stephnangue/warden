@@ -295,60 +295,99 @@ func evaluateMCPCall(sets []*CBPMCPRules, call *logical.MCPCall, act *celActivat
 	return deny
 }
 
+// isLifecycleMethod reports whether method is an MCP session-lifecycle
+// method that is exempt from the deny-by-default method gate. These carry
+// no tool/resource/data access — they only establish and maintain the
+// session (handshake, keepalive, notifications) — so requiring operators
+// to allow-list them in every policy would break the MCP handshake without
+// improving the security posture. An explicit denied_methods entry still
+// blocks them, because the deny gate runs first. method is expected
+// lowercased.
+func isLifecycleMethod(method string) bool {
+	return method == "initialize" ||
+		method == "ping" ||
+		strings.HasPrefix(method, "notifications/")
+}
+
+// isNameBearingMethod reports whether method carries a name gated by an
+// allowed_/denied_ family list (tools/call → tool name, resources/read →
+// uri, prompts/get → name). Under deny-by-default the name gate runs for
+// these methods whether or not the operator configured a family list, so
+// this predicate — not "is a list present" — drives the gate.
+func isNameBearingMethod(method string) bool {
+	switch method {
+	case mcpMethodToolsCall, mcpMethodResourcesRead, mcpMethodPromptsGet:
+		return true
+	}
+	return false
+}
+
+// evaluateMCPGates runs the structural method + name gates of one rule-set
+// under DENY-BY-DEFAULT semantics, without the CEL condition. Returns a
+// deny decision (method/name stamped) when a gate fails, or nil when every
+// gate passes. Shared by evaluateMCPSetForCall — which then applies the CEL
+// gate and the allow-stamp — and by mcpListItemAllowed, which filters list
+// responses and deliberately skips CEL (no call args exist at list time).
+//
+// Deny-by-default: an empty allowed_methods denies every non-lifecycle
+// method, and an empty allowed_<family> denies every tool/resource/prompt.
+// Operators open a mount with allowed_* = ["*"]. Session-lifecycle methods
+// (initialize, ping, notifications/*) are exempt from the method gate.
+func evaluateMCPGates(set *CBPMCPRules, method, name string) *logical.MCPDecision {
+	// (a) Missing method → deny. The body-authoritative parser rejects an
+	// empty method as malformed_jsonrpc before we get here, so this branch
+	// is reachable only via test-synthesised descriptors. Fail closed.
+	if method == "" {
+		return &logical.MCPDecision{Decision: "deny", RuleType: mcpRuleTypeMissingMethod}
+	}
+
+	// (b) Explicit denied_methods match → deny. Runs before the lifecycle
+	// exemption so an operator can still block a lifecycle method by name.
+	if m := matchMCPAny(method, set.DeniedMethods); m != "" {
+		return &logical.MCPDecision{Method: method, Name: name, Decision: "deny", RuleType: mcpRuleTypeDeniedMethods, MatchedRule: m}
+	}
+
+	// (c) Session-lifecycle methods are exempt from the method allow-list
+	// and carry no name — pass straight through.
+	if isLifecycleMethod(method) {
+		return nil
+	}
+
+	// (d) allowed_methods gate, deny-by-default: the method must match a
+	// configured pattern. An empty list matches nothing and so denies.
+	if m := matchMCPAny(method, set.AllowedMethods); m == "" {
+		return &logical.MCPDecision{Method: method, Name: name, Decision: "deny", RuleType: mcpRuleTypeAllowedMethods}
+	}
+
+	// (e) Name gate for name-bearing methods, deny-by-default: a denied_*
+	// match denies; otherwise the name must match allowed_* (empty ⇒ deny).
+	if isNameBearingMethod(method) {
+		denyList, allowList := nameListForMethod(set, method)
+		if m := matchMCPAny(name, denyList); m != "" {
+			return &logical.MCPDecision{Method: method, Name: name, Decision: "deny", RuleType: mcpDenyRuleTypeForName(method), MatchedRule: m}
+		}
+		if m := matchMCPAny(name, allowList); m == "" {
+			return &logical.MCPDecision{Method: method, Name: name, Decision: "deny", RuleType: mcpAllowRuleTypeForName(method)}
+		}
+	}
+
+	return nil
+}
+
 // evaluateMCPSetForCall runs one rule-set against the canonicalised
 // method, name, and call. Returns the set's MCPDecision (always non-
 // nil) — either an allow with the matching pattern stamped, or a
 // deny with the failing gate and pattern stamped. Reads param values
 // from call.MatchArgs.
 func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.MCPCall, act *celActivation) *logical.MCPDecision {
+	// Structural method + name gates (deny-by-default). A non-nil result is
+	// a binding deny; nil means the structured gates passed and the CEL
+	// gate + allow-stamp below decide.
+	if d := evaluateMCPGates(set, method, name); d != nil {
+		return d
+	}
+
 	d := &logical.MCPDecision{Method: method, Name: name}
-
-	// (a) Missing method → deny. The body-authoritative parser
-	// rejects an empty method as malformed_jsonrpc before we get
-	// here, so this branch is now reachable only via test-synthesised
-	// descriptors that intentionally drop method. Fail closed.
-	if method == "" {
-		d.Decision = "deny"
-		d.RuleType = mcpRuleTypeMissingMethod
-		d.Name = "" // no meaningful name without method
-		return d
-	}
-
-	// (b) Explicit denied_methods match → deny.
-	if m := matchMCPAny(method, set.DeniedMethods); m != "" {
-		d.Decision = "deny"
-		d.RuleType = mcpRuleTypeDeniedMethods
-		d.MatchedRule = m
-		return d
-	}
-
-	// (c) allowed_methods configured but method not in it → deny.
-	if len(set.AllowedMethods) > 0 {
-		if m := matchMCPAny(method, set.AllowedMethods); m == "" {
-			d.Decision = "deny"
-			d.RuleType = mcpRuleTypeAllowedMethods
-			return d
-		}
-	}
-
-	// (d) Name gate for name-bearing methods. Skipped entirely when
-	// neither the relevant deny-list nor allow-list is configured
-	// for this method — the rule isn't making a name claim.
-	if denyList, allowList := nameListForMethod(set, method); len(denyList) > 0 || len(allowList) > 0 {
-		if m := matchMCPAny(name, denyList); m != "" {
-			d.Decision = "deny"
-			d.RuleType = mcpDenyRuleTypeForName(method)
-			d.MatchedRule = m
-			return d
-		}
-		if len(allowList) > 0 {
-			if m := matchMCPAny(name, allowList); m == "" {
-				d.Decision = "deny"
-				d.RuleType = mcpAllowRuleTypeForName(method)
-				return d
-			}
-		}
-	}
 
 	// (e) CEL condition gate (last, after the structured gates). Fail-closed:
 	// an erroring or false condition denies. Evaluated against the request /
@@ -376,12 +415,17 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 	if set.Condition != nil {
 		d.Condition = &logical.ConditionResult{Decision: "allow", Expression: set.Condition.Source, Inputs: resolveConditionInputs(set.Condition.RefPaths, set.Condition.RefSegs, act)}
 	}
-	if len(set.AllowedMethods) > 0 {
-		d.MatchedRule = matchMCPAny(method, set.AllowedMethods)
+	// Lifecycle methods pass the exemption without matching allowed_methods;
+	// stamp a sentinel so audit distinguishes them from an allow-list match.
+	if isLifecycleMethod(method) {
+		d.MatchedRule = "(lifecycle)"
 	} else {
-		d.MatchedRule = method
+		d.MatchedRule = matchMCPAny(method, set.AllowedMethods)
 	}
-	if _, allowList := nameListForMethod(set, method); len(allowList) > 0 {
+	// A name-bearing method that reached here matched allowed_<family>
+	// (deny-by-default requires it); surface that as the deciding rule.
+	if isNameBearingMethod(method) {
+		_, allowList := nameListForMethod(set, method)
 		d.RuleType = mcpAllowRuleTypeForName(method)
 		d.MatchedRule = matchMCPAny(name, allowList)
 	}
