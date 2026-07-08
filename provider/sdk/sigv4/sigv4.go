@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,7 +27,6 @@ import (
 // to prevent denial-of-service via a malicious chunk header. AWS SDKs use chunks
 // up to ~1MB; 10MB per chunk is generous.
 const maxChunkSize = 10 << 20 // 10MB
-
 
 var (
 	// AuthRegex parses the SigV4 Authorization header into access_key_id, date, region, service.
@@ -455,8 +455,22 @@ func RemoveAWSChunkedEncoding(r *http.Request) {
 }
 
 // ForwardDirect sends a signed request directly using the given transport,
-// bypassing httputil.ReverseProxy which modifies headers and breaks SigV4 signatures.
+// bypassing httputil.ReverseProxy which modifies headers and breaks SigV4
+// signatures. The response streams back verbatim.
 func ForwardDirect(log *logger.GatedLogger, w http.ResponseWriter, r *http.Request, body []byte, transport http.RoundTripper) {
+	ForwardDirectFiltered(log, w, r, body, transport, 0, nil)
+}
+
+// ForwardDirectFiltered is ForwardDirect with an optional response modifier.
+// When modify is nil the response streams back verbatim (identical to
+// ForwardDirect). When modify is non-nil and the upstream returns a successful
+// (2xx) response, the whole body is buffered (capped at maxBody; maxBody <= 0
+// disables the cap), passed through modify, and written with a corrected
+// Content-Length. It fails closed with 502 — rather than stream an
+// unmodified body — when the body exceeds the cap or modify errors, so a
+// response the caller couldn't transform is never leaked. Non-success
+// responses stream through untouched.
+func ForwardDirectFiltered(log *logger.GatedLogger, w http.ResponseWriter, r *http.Request, body []byte, transport http.RoundTripper, maxBody int64, modify func(contentType string, body []byte) ([]byte, error)) {
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), bytes.NewReader(body))
 	if err != nil {
 		log.Error("failed to create direct request", logger.Err(err))
@@ -492,6 +506,14 @@ func ForwardDirect(log *logger.GatedLogger, w http.ResponseWriter, r *http.Reque
 	}
 	defer resp.Body.Close()
 
+	// Filtered path: buffer a successful response, transform it, and write it
+	// with a corrected length. Fails closed rather than stream a body it
+	// could not transform.
+	if modify != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		writeFilteredResponse(log, w, resp, maxBody, modify)
+		return
+	}
+
 	for k, vv := range resp.Header {
 		for _, val := range vv {
 			w.Header().Add(k, val)
@@ -514,4 +536,50 @@ func ForwardDirect(log *logger.GatedLogger, w http.ResponseWriter, r *http.Reque
 	} else {
 		io.Copy(w, resp.Body)
 	}
+}
+
+// writeFilteredResponse buffers resp's body (capped at maxBody), runs it
+// through modify, and writes the result with a corrected Content-Length. It
+// fails closed with 502 on a read error, an over-cap body, or a modify error.
+// An empty body is written as-is without invoking modify.
+func writeFilteredResponse(log *logger.GatedLogger, w http.ResponseWriter, resp *http.Response, maxBody int64, modify func(contentType string, body []byte) ([]byte, error)) {
+	var reader io.Reader = resp.Body
+	if maxBody > 0 {
+		reader = io.LimitReader(resp.Body, maxBody+1)
+	}
+	buf, err := io.ReadAll(reader)
+	if err != nil {
+		log.Error("filtered forward: read upstream body", logger.Err(err))
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+	if maxBody > 0 && int64(len(buf)) > maxBody {
+		log.Error("filtered forward: response exceeds max body size")
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+
+	out := buf
+	if len(buf) > 0 {
+		out, err = modify(resp.Header.Get("Content-Type"), buf)
+		if err != nil {
+			log.Error("filtered forward: modify failed", logger.Err(err))
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+			return
+		}
+	}
+
+	// The body is fully buffered and possibly resized; drop framing/encoding
+	// headers so the client reads exactly len(out) plain bytes.
+	resp.Header.Del("Content-Length")
+	resp.Header.Del("Transfer-Encoding")
+	resp.Header.Del("Content-Encoding")
+	for k, vv := range resp.Header {
+		for _, val := range vv {
+			w.Header().Add(k, val)
+		}
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(out)
 }

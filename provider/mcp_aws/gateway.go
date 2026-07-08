@@ -6,8 +6,10 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/sdk/mcpfilter"
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
 
@@ -29,7 +31,8 @@ var headersToStrip = []string{
 
 // handleGateway signs the incoming MCP request with AWS SigV4 using credentials
 // minted by core's implicit-auth pipeline, then forwards to the upstream MCP
-// endpoint and streams the response back.
+// endpoint and streams the response back — pruning list responses to the
+// callable items when the policy layer attached an MCP list filter.
 //
 // Pipeline:
 //  1. Read body (capped by MaxBodySize, the same value ShouldEnforceMCPPolicy
@@ -41,8 +44,10 @@ var headersToStrip = []string{
 //  5. Normalize headers (drop hop-by-hop + proxy-forwarded set).
 //  6. Sign with sigv4.ResignRequest using the URL-derived service name and the
 //     resolved region.
-//  7. Forward via sigv4.ForwardDirect, which bypasses httputil.ReverseProxy so
-//     headers and the signed body reach the upstream byte-for-byte.
+//  7. Forward via sigv4.ForwardDirect — or ForwardDirectFiltered when a list
+//     filter is set, which buffers and prunes the list response — bypassing
+//     httputil.ReverseProxy so headers and the signed body reach the upstream
+//     byte-for-byte.
 func (b *mcpAWSBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	r := req.HTTPRequest
 	w := req.ResponseWriter
@@ -117,6 +122,26 @@ func (b *mcpAWSBackend) handleGateway(ctx context.Context, req *logical.Request)
 	transport := snap.transport
 	if transport == nil {
 		transport = http.DefaultTransport
+	}
+
+	// When the policy layer attached an MCP list filter, prune the response to
+	// the callable items. The outbound Accept-Encoding was already dropped by
+	// sigv4.NormalizeRequest, so the transport delivers a decompressed body the
+	// filter can parse. Nil filter → verbatim streaming, unchanged.
+	if f := req.MCPListFilter; f != nil {
+		modify := func(contentType string, respBody []byte) ([]byte, error) {
+			out, _, err := mcpfilter.FilterListResponse(f.ListMethod, contentType, respBody, f.Keep)
+			return out, err
+		}
+		// snap.maxBody is defaulted to DefaultMaxBodySize at config time; guard
+		// here too so the response buffer is always bounded (fail closed on a
+		// list response larger than the cap).
+		maxBody := snap.maxBody
+		if maxBody <= 0 {
+			maxBody = framework.DefaultMaxBodySize
+		}
+		sigv4.ForwardDirectFiltered(b.Logger, w, r, bodyBytes, transport, maxBody, modify)
+		return
 	}
 	sigv4.ForwardDirect(b.Logger, w, r, bodyBytes, transport)
 }
