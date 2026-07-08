@@ -100,13 +100,23 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	// Clean headers and inject credentials
 	b.prepareHeaders(r, credHeaders, dispatch)
 
+	// When the policy layer attached an MCP list filter, carry it into the
+	// proxy's ModifyResponse via the request context, and strip Accept-Encoding
+	// so the transport returns a decompressed body the filter can parse (a
+	// gzip'd list response would otherwise fail closed on every call).
+	if req.MCPListFilter != nil {
+		r = r.WithContext(withMCPListFilter(r.Context(), req.MCPListFilter))
+		r.Header.Del("Accept-Encoding")
+	}
+
 	b.Logger.Trace("Proxying request",
 		logger.String("provider", b.spec.Name),
 		logger.String("path", r.URL.Path),
 		logger.String("method", r.Method),
 	)
 
-	// Forward the request (body streams through without buffering)
+	// Forward the request (body streams through without buffering unless an
+	// MCP list filter is installed, which buffers only the list response)
 	proxy.ServeHTTP(req.ResponseWriter, r)
 }
 
