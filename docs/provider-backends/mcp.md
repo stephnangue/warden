@@ -62,10 +62,46 @@ operator-set description, not by reading the URL.
 - An MCP client that supports remote MCP servers over HTTP (Claude Code, Cursor,
   Continue, Cline, Goose, ...)
 
-> **New to Warden?** Follow the standard quickstart flow used by the other
-> provider READMEs (the `github` and `slack` READMEs cover it step by step):
-> deploy the quickstart compose, install the binary, export `WARDEN_ADDR` and
-> `WARDEN_TOKEN`, then return here.
+> **New to Warden?** Follow these steps to get a local dev environment running:
+>
+> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
+> ```bash
+> curl -fsSL -o docker-compose.quickstart.yml \
+>   https://raw.githubusercontent.com/stephnangue/warden/main/deploy/docker-compose.quickstart.yml
+> docker compose -f docker-compose.quickstart.yml up -d
+> ```
+>
+> **2. Download the latest Warden binary:**
+> ```bash
+> # macOS (Apple Silicon)
+> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_arm64.tar.gz | tar xz
+>
+> # macOS (Intel)
+> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_amd64.tar.gz | tar xz
+>
+> # Linux (x86_64)
+> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_amd64.tar.gz | tar xz
+>
+> # Linux (ARM64)
+> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_arm64.tar.gz | tar xz
+> ```
+>
+> **3. Add the binary to your PATH:**
+> ```bash
+> export PATH="$PWD:$PATH"
+> ```
+>
+> **4. Start the Warden server** in dev mode:
+> ```bash
+> warden server -dev -dev-root-token=root
+> ```
+>
+> **5. In another terminal window**, export the environment variables for the CLI:
+> ```bash
+> export PATH="$PWD:$PATH"
+> export WARDEN_ADDR="http://127.0.0.1:8400"
+> export WARDEN_TOKEN="root"
+> ```
 
 ## Step 1: Configure JWT Auth and Create a Role
 
