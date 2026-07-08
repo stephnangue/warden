@@ -244,6 +244,7 @@ func TestMCPDenyRank_StructuralFailuresOutrankExplicitDeny(t *testing.T) {
 		{mcpRuleTypeOversizedBody, 4},
 		{mcpRuleTypeBatchEmpty, 4},
 		{mcpRuleTypeMalformedParams, 4},
+		{mcpRuleTypeBatchListUnfilterable, 4},
 		{mcpRuleTypeDeniedMethods, 3},
 		{mcpRuleTypeDeniedTools, 3},
 		{mcpRuleTypeDeniedResources, 3},

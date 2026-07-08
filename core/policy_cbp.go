@@ -445,6 +445,16 @@ CHECK:
 		if ret.MCPDecision != nil && ret.MCPDecision.Decision == "deny" {
 			return ret
 		}
+		// The MCP call is allowed. On the real enforcement pass, wire
+		// response-side list filtering: attach a keep-filter for a single
+		// list request, or fail closed on a batched list (unfilterable).
+		if !capCheckOnly && ret.MCPDecision != nil && ret.MCPDecision.Decision == "allow" {
+			if d := attachMCPListFilter(req, permissions.MCP); d != nil {
+				sanitizeMCPDecision(d)
+				ret.MCPDecision = d
+				return ret
+			}
+		}
 	}
 
 	ret.GrantingPolicies = grantingPolicies

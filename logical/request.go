@@ -139,6 +139,13 @@ type Request struct {
 	// Read-only after extraction; the audit layer treats it as a
 	// deep-copy field via MCPRequestDescriptor.Clone.
 	MCPDescriptor *MCPRequestDescriptor `json:"-"`
+
+	// MCPListFilter is set by the policy layer when an allowed MCP
+	// list request (tools/list, resources/list, prompts/list) should
+	// have its response filtered to the items the caller may actually
+	// use. Nil for every other request; a gateway that sees nil streams
+	// the response through verbatim. See MCPListFilter.
+	MCPListFilter *MCPListFilter `json:"-"`
 }
 
 func (r *Request) TokenEntry() *TokenEntry {

@@ -50,6 +50,13 @@ const (
 	mcpRuleTypeOversizedBody    = "oversized_body"
 	mcpRuleTypeBatchEmpty       = "batch_empty"
 	mcpRuleTypeMalformedParams  = "malformed_params"
+
+	// mcpRuleTypeBatchListUnfilterable denies an otherwise-allowed batch
+	// that contains a list method. A batched JSON-RPC list response can't
+	// be pruned per-element to the callable items, so we fail closed rather
+	// than stream an unfiltered list. (JSON-RPC batching was dropped from
+	// the MCP spec in 2025-06-18.)
+	mcpRuleTypeBatchListUnfilterable = "batch_list_unfilterable"
 )
 
 // MCP JSON-RPC method names that carry name-bearing semantics. For
@@ -121,6 +128,78 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 		return set.DeniedPrompts, set.AllowedPrompts
 	}
 	return nil, nil
+}
+
+// mcpListMethodToCall maps an MCP list method to the name-bearing call method
+// whose gate decides whether a listed item is usable: a tools/list item
+// survives iff a tools/call for it would pass, and likewise resources/list →
+// resources/read and prompts/list → prompts/get. A method absent from this map
+// is not a filterable list method.
+var mcpListMethodToCall = map[string]string{
+	"tools/list":     mcpMethodToolsCall,
+	"resources/list": mcpMethodResourcesRead,
+	"prompts/list":   mcpMethodPromptsGet,
+}
+
+// mcpListItemAllowed reports whether a name-bearing call (callMethod) for the
+// named item would pass the structural gates of at least one rule-set —
+// mirroring evaluateMCPCall's cross-set OR, but WITHOUT the CEL condition:
+// list responses carry no call arguments, so arg-level conditions are deferred
+// to call time (a condition-gated tool stays listed). This is the keep-
+// predicate behind Request.MCPListFilter. Inputs are lowercased here to match
+// the canonicalised rule-set patterns.
+func mcpListItemAllowed(sets []*CBPMCPRules, callMethod, name string) bool {
+	method := strings.ToLower(callMethod)
+	lname := strings.ToLower(name)
+	for _, set := range sets {
+		if set == nil {
+			continue
+		}
+		if evaluateMCPGates(set, method, lname) == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// attachMCPListFilter wires response-side list filtering for an MCP request
+// the policy layer has already allowed. It runs only on the real enforcement
+// pass (never cap-check-only) so a probe can't leave a stale filter behind.
+//
+//   - Single list-method call → hang an MCPListFilter on the request whose
+//     Keep predicate reuses mcpListItemAllowed over the same rule-sets, so the
+//     gateway prunes the response to the callable items. Returns nil.
+//   - Batch containing any list method → return a fail-closed deny; a batched
+//     JSON-RPC list response can't be pruned per element, and streaming it
+//     unfiltered would leak denied items.
+//   - Anything else (non-list call, no descriptor) → returns nil, no filter.
+func attachMCPListFilter(req *logical.Request, sets []*CBPMCPRules) *logical.MCPDecision {
+	desc := req.MCPDescriptor
+	if desc == nil || len(desc.Calls) == 0 {
+		return nil
+	}
+
+	if len(desc.Calls) > 1 {
+		for i := range desc.Calls {
+			if _, ok := mcpListMethodToCall[strings.ToLower(desc.Calls[i].Method)]; ok {
+				return &logical.MCPDecision{Decision: "deny", RuleType: mcpRuleTypeBatchListUnfilterable}
+			}
+		}
+		return nil
+	}
+
+	method := strings.ToLower(desc.Calls[0].Method)
+	callMethod, ok := mcpListMethodToCall[method]
+	if !ok {
+		return nil
+	}
+	req.MCPListFilter = &logical.MCPListFilter{
+		ListMethod: method,
+		Keep: func(name string) bool {
+			return mcpListItemAllowed(sets, callMethod, name)
+		},
+	}
+	return nil
 }
 
 // decideMCP is the production entry point called from
@@ -483,7 +562,8 @@ func mcpDenyRank(ruleType string) int {
 		mcpRuleTypeDuplicateKey,
 		mcpRuleTypeOversizedBody,
 		mcpRuleTypeBatchEmpty,
-		mcpRuleTypeMalformedParams:
+		mcpRuleTypeMalformedParams,
+		mcpRuleTypeBatchListUnfilterable:
 		return 4
 	case mcpRuleTypeDeniedMethods,
 		mcpRuleTypeDeniedTools,
@@ -563,6 +643,8 @@ func BuildMCPDenyDescription(d *logical.MCPDecision) string {
 		return "Request batch is empty."
 	case mcpRuleTypeMalformedParams:
 		return "Request params have unexpected shape."
+	case mcpRuleTypeBatchListUnfilterable:
+		return "Batched list requests are not supported."
 	case mcpRuleTypeMissingMethod:
 		return "Request method required."
 	}
