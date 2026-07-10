@@ -21,17 +21,19 @@ import (
 	"github.com/stephnangue/warden/listener"
 )
 
-// mcpBearerRoundTripper injects an Authorization: Bearer header on every
-// outbound request, letting the SDK client present a JWT identity to the
-// discovery endpoint.
-type mcpBearerRoundTripper struct {
-	base   http.RoundTripper
-	bearer string
+// mcpHeaderRoundTripper injects a fixed set of headers on every outbound
+// request, letting the SDK client present a JWT identity (Authorization) and
+// select a namespace (X-Warden-Namespace) against the discovery endpoint.
+type mcpHeaderRoundTripper struct {
+	base    http.RoundTripper
+	headers map[string]string
 }
 
-func (rt mcpBearerRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
-	if rt.bearer != "" {
-		r.Header.Set("Authorization", "Bearer "+rt.bearer)
+func (rt mcpHeaderRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	for k, v := range rt.headers {
+		if v != "" {
+			r.Header.Set(k, v)
+		}
 	}
 	return rt.base.RoundTrip(r)
 }
@@ -60,11 +62,26 @@ func startMCPTestServer(t *testing.T, c *Core, cert *x509.Certificate) *httptest
 // connectMCP dials the discovery endpoint with an optional bearer token and
 // returns a connected client session.
 func connectMCP(t *testing.T, srv *httptest.Server, bearer string) *mcp.ClientSession {
+	return connectMCPWithHeaders(t, srv, map[string]string{"Authorization": bearerHeader(bearer)})
+}
+
+// bearerHeader formats a bearer token as an Authorization header value, or ""
+// when no token is presented.
+func bearerHeader(bearer string) string {
+	if bearer == "" {
+		return ""
+	}
+	return "Bearer " + bearer
+}
+
+// connectMCPWithHeaders dials the discovery endpoint injecting the given
+// headers on every request and returns a connected client session.
+func connectMCPWithHeaders(t *testing.T, srv *httptest.Server, headers map[string]string) *mcp.ClientSession {
 	t.Helper()
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-agent", Version: "1.0.0"}, nil)
 	transport := &mcp.StreamableClientTransport{
 		Endpoint:             srv.URL + "/v1/sys/mcp",
-		HTTPClient:           &http.Client{Transport: mcpBearerRoundTripper{base: http.DefaultTransport, bearer: bearer}},
+		HTTPClient:           &http.Client{Transport: mcpHeaderRoundTripper{base: http.DefaultTransport, headers: headers}},
 		DisableStandaloneSSE: true,
 	}
 	session, err := client.Connect(context.Background(), transport, nil)
@@ -97,7 +114,7 @@ func TestMCPServer_ListRoles_JWTFanOut(t *testing.T) {
 	require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "jwt", Path: "jwt-a/"}))
 	require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "jwt", Path: "jwt-b/"}))
 	ctrl.rolesByMount["auth/jwt-a/"] = []map[string]any{
-		{"name": "reader", "description": "search & read any repo (provider: mcp-github/)"},
+		{"name": "reader", "description": "search & read any repo (skill: github)"},
 	}
 	ctrl.rolesByMount["auth/jwt-b/"] = []map[string]any{
 		{"name": "writer", "description": "write staging"},
@@ -128,7 +145,7 @@ func TestMCPServer_ListRoles_JWTFanOut(t *testing.T) {
 	// dropped from the projection — only {name, description} survive.
 	require.Len(t, out.Roles, 2)
 	assert.Equal(t, "reader", out.Roles[0].Name)
-	assert.Equal(t, "search & read any repo (provider: mcp-github/)", out.Roles[0].Description)
+	assert.Equal(t, "search & read any repo (skill: github)", out.Roles[0].Description)
 	assert.Equal(t, "writer", out.Roles[1].Name)
 	assert.Empty(t, out.Warnings)
 }
@@ -144,7 +161,7 @@ func TestMCPServer_ListRoles_CertPath(t *testing.T) {
 	c.authMethods["cert"] = ctrl.factory()
 	require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "cert", Path: "cert-mount/"}))
 	ctrl.rolesByMount["auth/cert-mount/"] = []map[string]any{
-		{"name": "cert-role", "description": "clone via Git (provider: github/)"},
+		{"name": "cert-role", "description": "clone via Git (skill: github)"},
 	}
 
 	cert := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "agent"}}
@@ -233,4 +250,79 @@ func TestMCPServer_ProtocolNegotiation_FallsBackForOlderClients(t *testing.T) {
 
 	assert.Equal(t, "2025-11-25", negotiate(t, "2025-11-25"))
 	assert.Equal(t, "2025-06-18", negotiate(t, "2025-06-18"))
+}
+
+// seedTestSkill installs a provider-guide skill named after the provider type.
+func seedTestSkill(t *testing.T, c *Core, ctx context.Context, name string) {
+	t.Helper()
+	require.NoError(t, c.skillStore.Create(ctx, &Skill{
+		Name:        name,
+		Description: "drive " + name + " through the gateway",
+		Category:    SkillCategoryProviderGuide,
+		Provider:    name,
+		Body:        "# Using " + name + "\nSend JSON-RPC to the gateway.",
+	}))
+}
+
+// callGetSkill invokes the get_skill tool and returns the raw result.
+func callGetSkill(t *testing.T, session *mcp.ClientSession, args map[string]any) *mcp.CallToolResult {
+	t.Helper()
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_skill", Arguments: args})
+	require.NoError(t, err)
+	return res
+}
+
+// decodeSkill asserts a successful get_skill result and returns the skill map.
+func decodeSkill(t *testing.T, res *mcp.CallToolResult) map[string]any {
+	t.Helper()
+	require.False(t, res.IsError, "unexpected tool error: %v", res.Content)
+	raw, err := json.Marshal(res.StructuredContent)
+	require.NoError(t, err)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(raw, &out))
+	return out
+}
+
+// TestMCPServer_GetSkill_ByName fetches a seeded skill by name and returns its
+// markdown body and metadata.
+func TestMCPServer_GetSkill_ByName(t *testing.T) {
+	_, ctx, c := setupTestSystemBackend(t)
+	seedTestSkill(t, c, ctx, "mcp")
+
+	srv := startMCPTestServer(t, c, nil)
+	session := connectMCP(t, srv, "eyJ.any.token")
+
+	got := decodeSkill(t, callGetSkill(t, session, map[string]any{"skill": "mcp"}))
+	assert.Equal(t, "mcp", got["name"])
+	assert.Contains(t, got["body"].(string), "Using mcp")
+}
+
+// TestMCPServer_GetSkill_Errors covers the tool-error paths: a missing/blank
+// skill name and an unknown skill name.
+func TestMCPServer_GetSkill_Errors(t *testing.T) {
+	_, ctx, c := setupTestSystemBackend(t)
+	seedTestSkill(t, c, ctx, "mcp")
+
+	srv := startMCPTestServer(t, c, nil)
+	session := connectMCP(t, srv, "eyJ.any.token")
+
+	cases := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"missing", map[string]any{}, "skill is required"},
+		{"blank", map[string]any{"skill": "   "}, "skill is required"},
+		{"unknown", map[string]any{"skill": "nope"}, `skill "nope" not found`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := callGetSkill(t, session, tc.args)
+			require.True(t, res.IsError, "expected a tool error")
+			require.NotEmpty(t, res.Content)
+			txt, ok := res.Content[0].(*mcp.TextContent)
+			require.True(t, ok)
+			assert.Contains(t, txt.Text, tc.want)
+		})
+	}
 }

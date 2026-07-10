@@ -2,8 +2,10 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -24,8 +26,8 @@ import (
 // Two tools are exposed:
 //   - list_roles: the roles the caller's identity can assume, each with its
 //     operator-written description (the agent's "menu").
-//   - get_skill:  (added in a later change) the provider-type recipe teaching
-//     the agent how to drive a provider through the gateway.
+//   - get_skill:  the skill (markdown recipe) named in a role description,
+//     teaching the agent how to drive that provider through the gateway.
 
 // mcpServerVersion is the implementation version advertised in the MCP
 // initialize handshake. It is informational only; the wire protocol revision
@@ -66,6 +68,7 @@ func (c *Core) MCPServerHandler() http.Handler {
 	}, nil)
 
 	c.registerListRolesTool(server)
+	c.registerGetSkillTool(server)
 
 	streamable := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
@@ -109,11 +112,11 @@ func (c *Core) MCPServerHandler() http.Handler {
 }
 
 // mcpRole is a single role projected for the list_roles tool. The aggregator's
-// auth_path is deliberately dropped — the agent reads the provider path out of
-// the description verbatim and never needs the auth mount path.
+// auth_path is deliberately dropped — the agent reads the skill name out of the
+// description verbatim and never needs the auth mount path.
 type mcpRole struct {
 	Name        string `json:"name" jsonschema:"the role name the identity can assume"`
-	Description string `json:"description,omitempty" jsonschema:"operator-written description; the provider mount path is embedded here for the agent to parse"`
+	Description string `json:"description,omitempty" jsonschema:"operator-written description; the skill name is embedded here for the agent to parse and feed to get_skill"`
 }
 
 // listRolesInput is the (empty) input for the list_roles tool.
@@ -133,8 +136,8 @@ func (c *Core) registerListRolesTool(server *mcp.Server) {
 		Name: "list_roles",
 		Description: "List the roles the presented identity can assume, each with its " +
 			"operator-written description. This is the agent's discovery menu: the " +
-			"provider mount path is embedded in each role's description for the agent " +
-			"to read and feed to get_skill. Authorizes on the presented identity " +
+			"skill name is embedded in each role's description for the agent to read " +
+			"and feed to get_skill. Authorizes on the presented identity " +
 			"(JWT bearer token or TLS client certificate); no role is required.",
 	}, c.handleMCPListRoles)
 }
@@ -178,4 +181,43 @@ func (c *Core) handleMCPListRoles(ctx context.Context, _ *mcp.CallToolRequest, _
 	}
 
 	return nil, out, nil
+}
+
+// getSkillInput is the input for the get_skill tool: a skill name. The name is
+// the one the operator embeds in a role description (surfaced by list_roles),
+// so the agent reads it out of the menu and feeds it back verbatim.
+type getSkillInput struct {
+	Skill string `json:"skill,omitempty" jsonschema:"the skill name to fetch, as embedded in a role description"`
+}
+
+// registerGetSkillTool wires the get_skill tool onto the MCP server. It reuses
+// the skill store directly — a skill is fetched by name, no mount resolution.
+func (c *Core) registerGetSkillTool(server *mcp.Server) {
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "get_skill",
+		Description: "Fetch an agent skill as markdown by name. The name is the one " +
+			"embedded in a role description (list_roles); it names the provider-type " +
+			"recipe teaching the agent how to drive that provider through Warden's " +
+			"gateway.",
+	}, c.handleMCPGetSkill)
+}
+
+func (c *Core) handleMCPGetSkill(ctx context.Context, _ *mcp.CallToolRequest, in getSkillInput) (*mcp.CallToolResult, map[string]any, error) {
+	name := strings.TrimSpace(in.Skill)
+	if name == "" {
+		return nil, nil, fmt.Errorf("skill is required")
+	}
+	if c.skillStore == nil {
+		return nil, nil, fmt.Errorf("skill store not initialized")
+	}
+
+	skill, err := c.skillStore.Get(ctx, name)
+	if err != nil {
+		if errors.Is(err, ErrSkillNotFound) {
+			return nil, nil, fmt.Errorf("skill %q not found", name)
+		}
+		return nil, nil, err
+	}
+
+	return nil, skillToMap(skill, false), nil
 }
