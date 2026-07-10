@@ -188,6 +188,33 @@ on **both** allow and deny, so the audit trail shows not just what was blocked
 but every tool call that was permitted — a complete record of an agent's activity
 through the server.
 
+## Warden as an MCP Server (Discovery Interface)
+
+Everything above is about Warden **fronting** an upstream MCP server. Warden also
+answers MCP for **its own** capabilities, so an agent can discover what it is
+allowed to do *before* it picks a role and touches a gateway. This discovery
+interface lives at a dedicated, always-on endpoint — `/v1/sys/mcp` — and needs no
+role: it authorizes on the identity the agent presents (a bearer JWT or an mTLS
+client certificate), exactly like the rest of Warden's introspection. A caller in
+a sub-namespace selects it with the usual `X-Warden-Namespace` header.
+
+It exposes two tools:
+
+- **`list_roles`** — the roles the caller's identity can assume, each with its
+  operator-written **description**. This is the agent's menu (see
+  [Roles → Discovery](roles.md#discovery-what-roles-can-i-assume)). By convention
+  the operator embeds the **skill name** in the description — e.g.
+  *"search & read any repo (skill: github)"* — and the agent reads it verbatim.
+- **`get_skill`** — given a **skill name** (the one just read out of a role
+  description), returns that **skill**: the markdown recipe that teaches the agent
+  how to drive the provider through the gateway.
+
+The loop, then, is: connect to `/v1/sys/mcp` → `list_roles` to see the menu → read
+a role's skill name from its description → `get_skill` to learn how to drive it →
+switch to the role-scoped gateway to do the work. The discovery interface is the
+MCP-native form of `warden role list` + `warden skill read`; it only *tells* the
+agent what it can do — the work still flows through the gateways described above.
+
 ## Using an MCP Mount
 
 An agent points its MCP client at the mount's gateway URL and presents its
@@ -222,3 +249,4 @@ skill that documents its quirks.
 - [Credentials](credentials.md) — the bearer token or AWS credential injected.
 - [Audit](audit.md) — where each MCP decision is recorded.
 - [Discovery and Skills](discovery-and-skills.md) — how an agent finds an MCP mount.
+- [Roles](roles.md) — the discovery loop `list_roles`/`get_skill` mirrors, one role per step.
