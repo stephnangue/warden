@@ -3,7 +3,7 @@ name: rds
 description: "Get a short-lived database connection string for AWS RDS through Warden — agent connects to the DB directly with a 15-min IAM auth token."
 category: provider-guide
 provider: rds
-requires: [foundation, discovery]
+requires: []
 upstream: AWS RDS (PostgreSQL, MySQL)
 ---
 
@@ -26,33 +26,40 @@ The Warden call returns a *connection string* you feed to your
 PostgreSQL or MySQL client unchanged. There's no SDK setup; this is
 a single HTTP call followed by a regular DB connection.
 
-`<mount-url>`, `<grant-name>`, and `<role>` below come from the discovery
-flow plus one extra step:
-- `<mount-url>` is the chosen provider's `mount_url` from
-  `warden provider list` (e.g. `/v1/rds/`, `/v1/team-data/rds-prod/`).
-  Warden has already baked the namespace + mount path in.
+You need three values:
+- `<access-url>` is the access URL for the role you chose, embedded in
+  the role's `description` returned by the `list_roles` MCP tool. RDS is
+  not a gateway provider, so this is a **relative** access path
+  `/v1/<namespace>/<mount>/access/` (e.g. `/v1/rds/access/`,
+  `/v1/team-data/rds-prod/access/`) — prepend `$WARDEN_ADDR`.
 - `<grant-name>` is a pre-configured grant (operator decides which
-  RDS instance + DB user + capabilities each grant exposes). List them
-  with `warden list <mount-url>access` and pick by description.
-- `<role>` is the role you picked from `warden role list`. Access
-  backends take the role as a **query parameter** on the access URL
-  (gateway providers take it as a path segment — different shape).
+  RDS instance + DB user + capabilities each grant exposes). Grants are
+  operator-managed and can't be listed by the agent — the grant to use
+  is the one the operator points you at (typically named in the role's
+  description).
+- `<role>` is the role you chose. Access backends take the role as a
+  **query parameter** on the access URL (gateway providers take it as a
+  path segment — different shape).
 
 ```bash
-URL pattern : $WARDEN_ADDR<mount-url>access/<grant-name>?role=<role>
-Auth header : Authorization: Bearer $WARDEN_TOKEN
+URL pattern : $WARDEN_ADDR<access-url><grant-name>?role=<role>
+Auth header : Authorization: Bearer <jwt>
 ```
+
+Present identity as `Authorization: Bearer <jwt>` (or an mTLS client
+cert). A `401` means the JWT expired (typical TTL 5–60 min) — refresh
+and retry.
 
 If the operator has set a `default_role` on the auth method, omitting
 `?role=` falls back to that default.
 
 ## Examples
 
-(All examples assume `mount_url = /v1/rds-prod/`; substitute yours.)
+(Examples use `<access-url>` = `/v1/rds-prod/access/`.)
 
 ```bash
 # Mint a connection string (role passed as query param)
-RESP=$(curl -sH "Authorization: Bearer $WARDEN_TOKEN" \
+RESP=$(curl -sH "Authorization: Bearer <jwt>" \
   "$WARDEN_ADDR/v1/rds-prod/access/analytics-reader?role=analytics-ro")
 
 # {"connection_string":"host=db.example.com port=5432 dbname=analytics user=ro_user password=eyJ...IAM-TOKEN... sslmode=require","lease_duration":900}
@@ -97,8 +104,8 @@ to get a fresh token-bearing connection string.
   the data path. The DB endpoint must be reachable from the agent's
   network; Warden doesn't tunnel it.
 - **Grants are pre-configured by the operator.** Agents can't create
-  grants via this provider — only consume existing ones. Use
-  `warden list <mount>/access` to see what's available.
+  or enumerate grants via this provider — only consume existing ones.
+  The grant to use is the one the operator provisions for your role.
 - **`rds_iam_token` is the underlying mint method.** RDS instances
   must have IAM database authentication enabled and the DB user
   pre-created with `rds_iam` group membership.

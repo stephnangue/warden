@@ -3,7 +3,7 @@ name: vault
 description: "Call HashiCorp Vault / OpenBao through Warden — read secrets, sign, encrypt, manage PKI — without ever holding a Vault token."
 category: provider-guide
 provider: vault
-requires: [foundation, discovery]
+requires: []
 upstream: HashiCorp Vault / OpenBao
 ---
 
@@ -19,18 +19,23 @@ The agent **never holds a Vault token**.
 
 ## Configure the CLI/SDK
 
-`<mount-url>` and `<role>` below come from the discovery flow:
-- `<mount-url>` is the chosen provider's `mount_url` from
-  `warden provider list` (e.g. `/v1/vault/`, `/v1/team-data/secrets-prod/`).
-  Warden has already baked the namespace + mount path in.
-- `<role>` is the role you picked from `warden role list` to perform this
-  task — it goes in the URL path.
+`<gateway-url>` comes from the role you chose: the `list_roles` discovery tool
+returns each role with a `description`, and for a non-MCP provider the operator
+embeds the role's **gateway URL** in it — a relative path
+`/v1/<namespace>/<mount>/role/<role>/gateway/`, with the namespace, mount, and role already baked in. Prepend `$WARDEN_ADDR` (the address you already
+used to discover your roles).
 
-Auth is your JWT:
+The `role/<role>/` segment in `<gateway-url>` is the role this call runs under.
+To act under a *different* role, use the `<gateway-url>` of that role from
+`list_roles` — each role provides its own role-bearing URL in its description.
+
+Present your identity on every call: `Authorization: Bearer <jwt>` (Vault also
+accepts the JWT in `X-Vault-Token`), or an mTLS client certificate. A `401`
+means the JWT expired (typical TTL 5–60 min) — refresh and retry.
 
 ```bash
-URL pattern : $WARDEN_ADDR<mount-url>role/<role>/gateway/<vault-api-path>
-Auth header : Authorization: Bearer $WARDEN_TOKEN  # OR X-Vault-Token: $WARDEN_TOKEN
+URL pattern : $WARDEN_ADDR<gateway-url><vault-api-path>
+Auth header : Authorization: Bearer <jwt>  # OR X-Vault-Token: <jwt>
 ```
 
 ### Vault / OpenBao CLI
@@ -55,8 +60,8 @@ Both honour `VAULT_ADDR` + `VAULT_TOKEN` (yes, `bao` reads
 `VAULT_*` env vars too):
 
 ```bash
-export VAULT_ADDR="$WARDEN_ADDR<mount-url>role/<role>/gateway"
-export VAULT_TOKEN="$WARDEN_TOKEN"
+export VAULT_ADDR="$WARDEN_ADDR<gateway-url>"
+export VAULT_TOKEN="<jwt>"
 
 $CLI kv get secret/myapp/config
 $CLI kv put secret/myapp/config foo=bar
@@ -69,21 +74,21 @@ The agent never holds a real Vault token; the JWT is the identity.
 ### Vault SDK
 
 For the official Go / Python / Node Vault SDKs, the same shape: set
-the client's `Address` to `$WARDEN_ADDR<mount-url>role/<role>/gateway`
+the client's `Address` to `$WARDEN_ADDR<gateway-url>`
 and its `Token` to the JWT.
 
 ### Raw HTTP (curl)
 
 ```bash
-curl -H "Authorization: Bearer $WARDEN_TOKEN" \
-  "$WARDEN_ADDR<mount-url>role/<role>/gateway/v1/secret/data/myapp/config"
+curl -H "Authorization: Bearer <jwt>" \
+  "$WARDEN_ADDR<gateway-url>v1/secret/data/myapp/config"
 ```
 
 ## Examples
 
-(All examples assume `mount_url = /v1/vault/` and role `secrets-reader`;
-substitute yours. `VAULT_ADDR` and `VAULT_TOKEN` are exported as
-shown above.)
+(Examples use a concrete `<gateway-url>` of `/v1/vault/role/secrets-reader/gateway/`;
+substitute the one from your role's `list_roles` description. `VAULT_ADDR` and
+`VAULT_TOKEN` are exported as shown above.)
 
 KV v2 read:
 ```bash
@@ -109,7 +114,7 @@ vault write pki/sign/server-tpl csr=@./req.csr
 
 Same operations via raw HTTP for scripting:
 ```bash
-curl -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -H "Authorization: Bearer <jwt>" \
   $WARDEN_ADDR/v1/vault/role/secrets-reader/gateway/v1/secret/data/app/db
 ```
 

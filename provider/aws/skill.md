@@ -3,7 +3,7 @@ name: aws
 description: "Call AWS services (S3, EC2, Lambda, DynamoDB, STS, …) through Warden's SigV4 gateway."
 category: provider-guide
 provider: aws
-requires: [foundation, discovery]
+requires: []
 upstream: AWS
 ---
 
@@ -18,27 +18,34 @@ AWS service. **No SDK code changes** — only env vars.
 
 ## Configure the CLI/SDK
 
-`<mount-url>` and `<role-name>` below come from the discovery flow:
-- `<mount-url>` is the chosen provider's `mount_url` from
-  `warden provider list` (e.g. `/v1/aws/`, `/v1/team-data/aws-prod/`).
-  Warden has already baked the namespace + mount path in — just append
-  the per-provider suffix (`gateway` for AWS).
-- `<role-name>` is the role you picked from `warden role list` to perform
-  this task.
+Two values are per-task:
+- `<role>` is the role you chose for this task. AWS is unusual: the
+  role travels in `AWS_ACCESS_KEY_ID` (Warden reads it out of the SigV4
+  Authorization header to pick the credential spec), **not** in the URL.
+- `<gateway-url>` is the gateway URL for that role, embedded in the
+  role's `description` returned by the `list_roles` MCP tool. It is a
+  **relative** path — for AWS, mount-level: `/v1/<namespace>/<mount>/gateway`
+  (e.g. `/v1/aws/gateway`, `/v1/team-data/aws-prod/gateway`). Prepend
+  `$WARDEN_ADDR`.
 
-The JWT comes in via `$WARDEN_TOKEN` — see `foundation`. Just use it:
+Present your identity as the JWT placed in the SigV4 secret slots
+(below); Warden verifies the signature against it. A stale JWT surfaces
+as `SignatureDoesNotMatch` (typical JWT TTL 5–60 min) — refresh the JWT
+and retry.
 
 ```bash
-export AWS_ACCESS_KEY_ID="<role-name>"          # role from `warden role list`
-export AWS_SECRET_ACCESS_KEY="$WARDEN_TOKEN"
-export AWS_SESSION_TOKEN="$WARDEN_TOKEN"        # Warden detects "eyJ" prefix
-export AWS_ENDPOINT_URL="$WARDEN_ADDR<mount-url>gateway"
+export AWS_ACCESS_KEY_ID="<role>"               # Warden role name, not an AWS key
+export AWS_SECRET_ACCESS_KEY="<jwt>"
+export AWS_SESSION_TOKEN="<jwt>"                # Warden detects "eyJ" prefix
+export AWS_ENDPOINT_URL="$WARDEN_ADDR<gateway-url>"
 ```
 
 The role-selection idiom is non-obvious: **`AWS_ACCESS_KEY_ID` carries
 the Warden role name** (not an AWS access key). Warden reads it from
 the SigV4 Authorization header to decide which credential spec to
-use.
+use. To act as a different role, set `AWS_ACCESS_KEY_ID` to that role's
+name. If Warden can't resolve a role from the key, it falls back to the
+mount's `default_role`, when the operator has configured one.
 
 ## Examples
 

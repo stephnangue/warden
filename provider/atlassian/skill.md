@@ -3,7 +3,7 @@ name: atlassian
 description: "Call Jira, Confluence, or Bitbucket REST APIs through Warden — search and create issues, read and write pages, list repos — without holding an API token, PAT, or app password."
 category: provider-guide
 provider: atlassian
-requires: [foundation, discovery]
+requires: []
 upstream: Atlassian Jira / Confluence / Bitbucket REST APIs
 ---
 
@@ -20,24 +20,30 @@ The agent **never holds an API token, PAT, or app password**.
 
 ## Configure the CLI/SDK
 
-`<mount-url>` and `<role>` below come from the discovery flow:
-- `<mount-url>` is the chosen provider's `mount_url` from
-  `warden provider list` (e.g. `/v1/jira/`, `/v1/confluence/`,
-  `/v1/bitbucket/`). Warden has already baked the namespace +
-  mount path in.
-- `<role>` is the role you picked from `warden role list` to perform
-  this task — it goes in the URL path.
+`<gateway-url>` comes from the role you chose: the `list_roles` discovery tool
+returns each role with a `description`, and for a non-MCP provider the operator
+embeds the role's **gateway URL** in it — a relative path
+`/v1/<namespace>/<mount>/role/<role>/gateway/`, with the namespace, mount, and role already baked in. Prepend `$WARDEN_ADDR` (the address you already
+used to discover your roles).
+
+The `role/<role>/` segment in `<gateway-url>` is the role this call runs under.
+To act under a *different* role, use the `<gateway-url>` of that role from
+`list_roles` — each role provides its own role-bearing URL in its description.
+
+Present your identity on every call: `Authorization: Bearer <jwt>`, or an mTLS
+client certificate. A `401` means the JWT expired (typical TTL 5–60 min) —
+refresh and retry.
 
 ```bash
-URL pattern : $WARDEN_ADDR<mount-url>role/<role>/gateway/<api-path>
-Auth header : Authorization: Bearer $WARDEN_TOKEN
+URL pattern : $WARDEN_ADDR<gateway-url><api-path>
+Auth header : Authorization: Bearer <jwt>
 ```
 
 **One `atlassian` mount = one product.** A single Atlassian provider
 type fronts every Atlassian REST API; the operator picks which —
 Jira, Confluence, or Bitbucket — at mount time and signals the
-choice via the mount's **description**. Read the description you
-already pulled in discovery Step 4 (e.g. "Engineering Jira Cloud",
+choice via the mount's **description**. Read the role's `list_roles`
+description (e.g. "Engineering Jira Cloud",
 "Docs Confluence space", "Platform Bitbucket"), match it to the
 product, then use the path shapes for that product below:
 
@@ -57,19 +63,21 @@ strip or prepend it. Write the path verbatim after `/gateway/`.
 
 ## Examples
 
-(All examples assume `mount-url = /v1/jira/` and role `atlassian-ops`
-for Jira, `/v1/confluence/` for Confluence, `/v1/bitbucket/` for
-Bitbucket; substitute yours.)
+(Examples use a concrete `<gateway-url>` of
+`/v1/jira/role/atlassian-ops/gateway/` for Jira,
+`/v1/confluence/role/atlassian-ops/gateway/` for Confluence,
+`/v1/bitbucket/role/atlassian-ops/gateway/` for Bitbucket; substitute the one
+from your role's `list_roles` description.)
 
 Current user (verifies the injected credential is valid):
 ```bash
-curl -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -H "Authorization: Bearer <jwt>" \
   $WARDEN_ADDR/v1/jira/role/atlassian-ops/gateway/myself
 ```
 
 Search issues with JQL (use POST to skip URL-encoding):
 ```bash
-curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -X POST -H "Authorization: Bearer <jwt>" \
   -H "Content-Type: application/json" \
   -d '{"jql":"project = ENG AND status = Open","fields":["summary","status"]}' \
   $WARDEN_ADDR/v1/jira/role/atlassian-ops/gateway/search/jql
@@ -77,7 +85,7 @@ curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
 
 Create a Jira issue (note the ADF `description` — see Quirks):
 ```bash
-curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -X POST -H "Authorization: Bearer <jwt>" \
   -H "Content-Type: application/json" \
   -d '{
     "fields": {
@@ -95,13 +103,13 @@ curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
 
 List Confluence spaces:
 ```bash
-curl -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -H "Authorization: Bearer <jwt>" \
   $WARDEN_ADDR/v1/confluence/role/atlassian-ops/gateway/spaces
 ```
 
 Create a Confluence page (requires numeric `spaceId` — see Quirks):
 ```bash
-curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -X POST -H "Authorization: Bearer <jwt>" \
   -H "Content-Type: application/json" \
   -d '{
     "spaceId": "123456",
@@ -114,7 +122,7 @@ curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
 
 List Bitbucket repositories in a workspace:
 ```bash
-curl -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -H "Authorization: Bearer <jwt>" \
   $WARDEN_ADDR/v1/bitbucket/role/atlassian-ops/gateway/repositories/my-workspace
 ```
 
