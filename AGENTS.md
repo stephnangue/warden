@@ -1,82 +1,78 @@
 # Warden — agent guide
 
 This file orients an autonomous agent (LLM, AI assistant, automation
-script) that needs to *call services through Warden*. Operators looking
-to set up Warden, mount providers, or onboard credentials should read
-the per-provider tutorials in `provider/<name>/README.md`; this tree is
-for the *consumer* side.
+script) that needs to *call services through Warden*. Operators looking to
+set up Warden, mount providers, or onboard credentials should read the docs
+— start with [Providers](docs/concepts/providers.md) and the per-backend
+guides under [docs/provider-backends/](docs/provider-backends/); this tree
+is for the *consumer* side.
 
 ## Where to start
 
-Skills are served by the cluster at `/v1/sys/skills`, not from this
-filesystem. Read them in order via the CLI:
+Warden runs its own **MCP discovery server** at `/v1/sys/mcp`. Point your
+MCP client at it (for Claude Code, `claude mcp add`), presenting your
+identity — a bearer JWT (`Authorization: Bearer <jwt>`) or an mTLS client
+certificate — and, for a sub-namespace, the `X-Warden-Namespace` header.
+It needs no role: it authorizes on the identity you present. It exposes
+two tools:
 
-1. **`warden skill read foundation --raw`** — global flags, env vars,
-   exit codes, output framework. Read this first.
-2. **`warden skill read discovery --raw`** — how to introspect which
-   roles you can assume and which providers are available, then match
-   the task at hand to a provider + role.
-3. **`warden skill read <provider-type> --raw`** — once you know which
-   provider type you want (`aws`, `vault`, `openai`, …), this tells you
-   how to point your CLI/SDK at it.
-4. **`warden skill read troubleshooting --raw`** — when something fails:
-   classified errors, what to retry, what means "ask the operator".
+- **`list_roles`** — the roles your identity can assume, each with an
+  operator-written `description`. This is your menu.
+- **`get_skill`** — given a skill name, returns that skill: the markdown
+  recipe for driving the role's provider.
 
-To browse what's in the catalog:
-
-```bash
-warden skill list -F name,description
-```
+The `description` on each role carries what you need: the **skill name**,
+and — for a **non-MCP** provider — the role's **gateway URL** (relative;
+prepend `$WARDEN_ADDR`). For example:
+*"read app secrets (skill: vault, url: /v1/vault/role/read-secret/gateway/)"*.
 
 ## The agent loop
 
 ```
-[ authenticate + set namespace ]      ← runtime sets env vars
+[ connect MCP client to /v1/sys/mcp ]   ← identity in the connection
        │
        ▼
-[ warden role list ]                  ← what identities can I assume?
+[ list_roles ]                          ← which roles can I assume?
        │
        ▼
-[ warden provider list ]              ← what is available in this namespace?
+[ match task → pick a role ]            ← read descriptions; choose the fit
        │
        ▼
-[ match task → pick provider+role ]   ← read descriptions; choose the fit
+[ get_skill <name-from-description> ]   ← the per-provider recipe
        │
        ▼
-[ warden skill read <type> --raw ]    ← the per-provider recipe
-       │
-       ▼
-[ call CLI or SDK with chosen role ]
+[ act under the chosen role ]
 ```
 
-The `discovery` skill walks through each step in full.
+How you act depends on the provider kind. Your role is the `role/<role>/`
+segment of the gateway URL, so you pick a role by **targeting that role's URL** —
+the selector that works for every client. (`X-Warden-Role` is a header override,
+usable only where the client sets per-call headers — not an MCP tool call, whose
+headers are fixed and which carries no role.)
 
-## Provider skills available today
+- **MCP providers** are already attached to your MCP client, **one attachment
+  per role** (the operator wired each at `claude mcp add` time) — call the
+  attached server whose role fits the task.
+- **Non-MCP providers** are driven over HTTP: read the role's gateway URL from
+  its description, prepend `$WARDEN_ADDR`, present your identity on each call,
+  and use another role's URL to act under another role.
 
-Skills for the six providers below are seeded into the registry the
-first time the corresponding provider type is mounted in the cluster:
+## Provider skills
 
-| Provider | Skill name | Pattern |
-|---|---|---|
-| AWS | `aws` | SigV4 gateway |
-| Vault / OpenBao | `vault` | HTTP gateway |
-| GitHub | `github` | HTTP gateway |
-| OpenAI | `openai` | HTTP gateway |
-| Scaleway | `scaleway` | Dual REST + S3 |
-| RDS | `rds` | DB credential mint |
-
-Other providers (`azure`, `gcp`, `cloudflare`, `datadog`, `sentry`,
-`grafana`, `kubernetes`, `slack`, `tfe`, …) follow the same patterns
-but don't yet ship skills. Until they do, the closest existing skill
-plus the provider's `README.md` is your best reference.
+Each provider type ships a skill (`provider/<type>/skill.md`) that is seeded
+into the cluster's registry the **first time a provider of that type is
+mounted**. Fetch one by name with `get_skill` — the name is the provider
+type embedded in a role's description (`aws`, `vault`, `github`, `openai`,
+`slack`, `mcp`, …). If `get_skill` reports *skill "<name>" not found*, no
+provider of that type is enabled — the honest signal that the capability
+does not exist, not an endpoint to fabricate.
 
 ## Adding a skill for a new provider
 
 When a new provider lands under `provider/<name>/`, ship a matching
-`provider/<name>/skill.md` with the same shape as the existing ones,
-and add `<name>.Skill()` to the `providerSkills` map in
-`cmd/server/server.go`. The skill is seeded into the registry on the
-first mount of that provider type.
+`provider/<name>/skill.md` with the same shape as the existing ones, and add
+`<name>.Skill()` to the `providerSkills` map in `cmd/server/server.go`. The
+skill is seeded into the registry on the first mount of that provider type.
 
 ```yaml
 ---
@@ -84,15 +80,18 @@ name: <name>
 description: "<one line: what does this provider expose>"
 category: provider-guide
 provider: <name>
-requires: [foundation, discovery]
+requires: []
 upstream: "<service name>"
 ---
 ```
 
 Body sections, in order:
 1. **What it does** — one paragraph.
-2. **Configure the CLI/SDK** — env vars, endpoint URL, auth headers,
-   how to select a role. The actionable part.
+2. **Configure the CLI/SDK** — for a non-MCP provider, how to build the
+   request from the gateway URL in the role description (`$WARDEN_ADDR` +
+   `<gateway-url>`), how to present identity, and that the role is the URL's
+   `role/<role>/` segment (use another role's URL to switch); for an MCP
+   provider, that the server is pre-attached, one per role. The actionable part.
 3. **Examples** — three to five copy-paste commands or SDK snippets.
 4. **Quirks** — provider-specific gotchas, unsupported operations,
    DNS requirements.

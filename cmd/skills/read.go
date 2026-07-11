@@ -29,9 +29,9 @@ Usage: warden skill read NAME [options]
 
   Examples:
 
-    Read the discovery skill as JSON for an agent:
+    Read a provider skill as JSON for an agent:
 
-      $ warden skill read discovery -o json
+      $ warden skill read vault -o json
 
     Get the raw markdown to pipe into a renderer:
 

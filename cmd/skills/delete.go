@@ -22,11 +22,10 @@ var (
 		Long: `
 Usage: warden skill delete NAME [options]
 
-  Delete a skill. Foundation skills (discovery, foundation,
-  troubleshooting) and seeded provider skills can be deleted — once
-  removed, they stay removed across restarts (the seed marker is
-  sticky). Run 'warden skill list' first if you're not sure of the
-  exact name.
+  Delete a skill. The seeded troubleshooting skill and seeded provider
+  skills can be deleted — once removed, they stay removed across restarts
+  (the seed marker is sticky). Run 'warden skill list' first if you're not
+  sure of the exact name.
 
   Mutations require a root namespace token; sub-namespace tokens get 403.
 
