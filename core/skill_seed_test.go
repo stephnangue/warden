@@ -194,7 +194,8 @@ func TestLoadEmbeddedFoundationSkills_ParsesAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	// Expected foundation set: discovery, foundation, troubleshooting.
+	// Expected foundation set: troubleshooting (foundation + discovery were
+	// retired when discovery moved to the /v1/sys/mcp tools).
 	names := make([]string, 0, len(skills))
 	for _, s := range skills {
 		names = append(names, s.Name)
@@ -203,7 +204,7 @@ func TestLoadEmbeddedFoundationSkills_ParsesAll(t *testing.T) {
 		}
 	}
 	sort.Strings(names)
-	want := []string{"discovery", "foundation", "troubleshooting"}
+	want := []string{"troubleshooting"}
 	if !equalStringSlices(names, want) {
 		t.Errorf("foundation skill names = %v, want %v", names, want)
 	}
@@ -230,7 +231,7 @@ func TestSkillStore_SeedFoundation_WritesAllSkills(t *testing.T) {
 			t.Errorf("Body of %q is empty", s.Name)
 		}
 	}
-	for _, want := range []string{"discovery", "foundation", "troubleshooting"} {
+	for _, want := range []string{"troubleshooting"} {
 		if origin, ok := got[want]; !ok {
 			t.Errorf("missing seeded skill %q", want)
 		} else if origin != SkillOriginSeed {
@@ -245,18 +246,18 @@ func TestSkillStore_SeedFoundation_IsIdempotent(t *testing.T) {
 	if err := store.SeedFoundation(ctx); err != nil {
 		t.Fatalf("first SeedFoundation: %v", err)
 	}
-	first, err := store.Get(ctx, "discovery")
+	first, err := store.Get(ctx, "troubleshooting")
 	if err != nil {
-		t.Fatalf("Get discovery: %v", err)
+		t.Fatalf("Get troubleshooting: %v", err)
 	}
 
 	// Second call must be a no-op (marker short-circuits).
 	if err := store.SeedFoundation(ctx); err != nil {
 		t.Fatalf("second SeedFoundation: %v", err)
 	}
-	second, err := store.Get(ctx, "discovery")
+	second, err := store.Get(ctx, "troubleshooting")
 	if err != nil {
-		t.Fatalf("Get discovery (second): %v", err)
+		t.Fatalf("Get troubleshooting (second): %v", err)
 	}
 	if first.Version != second.Version {
 		t.Errorf("Version changed across seed calls: %d -> %d", first.Version, second.Version)
@@ -272,17 +273,17 @@ func TestSkillStore_SeedFoundation_RespectsDeletion(t *testing.T) {
 	if err := store.SeedFoundation(ctx); err != nil {
 		t.Fatalf("first SeedFoundation: %v", err)
 	}
-	if err := store.Delete(ctx, "discovery"); err != nil {
+	if err := store.Delete(ctx, "troubleshooting"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	// The marker is set, so a second seed must NOT revive discovery.
+	// The marker is set, so a second seed must NOT revive troubleshooting.
 	if err := store.SeedFoundation(ctx); err != nil {
 		t.Fatalf("second SeedFoundation: %v", err)
 	}
-	_, err := store.Get(ctx, "discovery")
+	_, err := store.Get(ctx, "troubleshooting")
 	if !errors.Is(err, ErrSkillNotFound) {
-		t.Errorf("Get(discovery) = %v, want ErrSkillNotFound (deletion must persist across seed)", err)
+		t.Errorf("Get(troubleshooting) = %v, want ErrSkillNotFound (deletion must persist across seed)", err)
 	}
 }
 
@@ -292,14 +293,14 @@ func TestSkillStore_SeedFoundation_PreservesOperatorEdits(t *testing.T) {
 	if err := store.SeedFoundation(ctx); err != nil {
 		t.Fatalf("first SeedFoundation: %v", err)
 	}
-	if _, err := store.Update(ctx, "discovery", &Skill{Description: "edited"}); err != nil {
+	if _, err := store.Update(ctx, "troubleshooting", &Skill{Description: "edited"}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 
 	if err := store.SeedFoundation(ctx); err != nil {
 		t.Fatalf("second SeedFoundation: %v", err)
 	}
-	got, err := store.Get(ctx, "discovery")
+	got, err := store.Get(ctx, "troubleshooting")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

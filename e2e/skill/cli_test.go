@@ -24,13 +24,13 @@ func wardenCLI(t *testing.T, port int, args ...string) (string, error) {
 func TestCLI_SkillList_TableAndJSON(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
-	// Table output should mention at least one foundation skill.
+	// Table output should mention at least one seeded skill.
 	tableOut, err := wardenCLI(t, port, "skill", "list", "-o", "table")
 	if err != nil {
 		t.Fatalf("skill list -o table failed: %v\noutput: %s", err, tableOut)
 	}
-	if !strings.Contains(tableOut, "discovery") {
-		t.Errorf("expected 'discovery' in table output, got:\n%s", tableOut)
+	if !strings.Contains(tableOut, "troubleshooting") {
+		t.Errorf("expected 'troubleshooting' in table output, got:\n%s", tableOut)
 	}
 
 	// JSON output must parse and include the same skill.
@@ -47,13 +47,13 @@ func TestCLI_SkillList_TableAndJSON(t *testing.T) {
 	}
 	found := false
 	for _, item := range items {
-		if item["name"] == "discovery" {
+		if item["name"] == "troubleshooting" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("'discovery' missing from JSON list output")
+		t.Error("'troubleshooting' missing from JSON list output")
 	}
 }
 
@@ -61,31 +61,31 @@ func TestCLI_SkillRead_RawAndStructured(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
 	// Structured JSON read must include the markdown body inline.
-	jsonOut, err := wardenCLI(t, port, "skill", "read", "discovery", "-o", "json")
+	jsonOut, err := wardenCLI(t, port, "skill", "read", "troubleshooting", "-o", "json")
 	if err != nil {
-		t.Fatalf("skill read discovery -o json failed: %v\noutput: %s", err, jsonOut)
+		t.Fatalf("skill read troubleshooting -o json failed: %v\noutput: %s", err, jsonOut)
 	}
 	var rec map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonOut), &rec); err != nil {
 		t.Fatalf("unmarshal JSON: %v\noutput: %s", err, jsonOut)
 	}
 	body, _ := rec["body"].(string)
-	if !strings.Contains(body, "Discovering what you can do") {
+	if !strings.Contains(body, "Troubleshooting") {
 		t.Errorf("JSON body missing expected heading; got %q", body)
 	}
 
 	// --raw must emit just the markdown.
-	rawOut, err := wardenCLI(t, port, "skill", "read", "discovery", "--raw")
+	rawOut, err := wardenCLI(t, port, "skill", "read", "troubleshooting", "--raw")
 	if err != nil {
-		t.Fatalf("skill read discovery --raw failed: %v", err)
+		t.Fatalf("skill read troubleshooting --raw failed: %v", err)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(rawOut), "# Discovering what you can do") {
+	if !strings.HasPrefix(strings.TrimSpace(rawOut), "# Troubleshooting") {
 		// Limit the snippet so a huge body doesn't dominate the failure log.
 		snippet := rawOut
 		if len(snippet) > 100 {
 			snippet = snippet[:100]
 		}
-		t.Errorf("--raw output should start with the discovery heading; got first 100 chars: %q", snippet)
+		t.Errorf("--raw output should start with the troubleshooting heading; got first 100 chars: %q", snippet)
 	}
 	// --raw must NOT contain any JSON envelope markers.
 	if strings.Contains(rawOut, `"data":`) || strings.HasPrefix(strings.TrimSpace(rawOut), "{") {
@@ -255,9 +255,9 @@ func TestCLI_SkillList_FiltersAreClientSide(t *testing.T) {
 	}{
 		{
 			name:     "by category",
-			args:     []string{"--category=agent-flow"},
+			args:     []string{"--category=shared"},
 			matchKey: "category",
-			want:     []string{"agent-flow"},
+			want:     []string{"shared"},
 		},
 		{
 			name:     "by origin",
@@ -285,9 +285,9 @@ func TestCLI_SkillList_FiltersAreClientSide(t *testing.T) {
 			if err := json.Unmarshal([]byte(out), &items); err != nil {
 				t.Fatalf("unmarshal: %v\noutput: %s", err, out)
 			}
-			// Foundation + provider seeds mean every test case should match
-			// at least one record. A 0-length response means the filter is
-			// either broken or the cluster missed a seed.
+			// The troubleshooting seed + provider seeds mean every test case
+			// should match at least one record. A 0-length response means the
+			// filter is either broken or the cluster missed a seed.
 			if len(items) == 0 {
 				t.Fatalf("expected at least one record matching filter %v", tc.args)
 			}
