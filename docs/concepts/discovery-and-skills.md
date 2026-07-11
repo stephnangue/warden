@@ -2,144 +2,163 @@
 
 For an AI agent, the hard part of using Warden is not making the request — it is
 knowing *what it is allowed to do* and *how to do it*. Warden makes both
-answerable at runtime. An authenticated agent can ask the server which
-[roles](roles.md) it can assume, which [provider](providers.md) mounts exist in
-its [namespace](namespaces.md), and how to drive each one — with **no
-pre-distributed configuration**. Nothing is hard-coded into the agent; every fact
-comes from a live call.
+answerable at runtime, **over MCP**. An authenticated agent points its MCP client
+at Warden's own discovery server and asks which [roles](roles.md) it can assume
+and how to drive each one — with **no pre-distributed configuration**. Nothing is
+hard-coded into the agent; every fact comes from a live call.
 
 This has two halves:
 
 - **Discovery** — live, identity-scoped introspection of what the caller can
-  reach: its roles, its providers, and the API schema.
-- **Skills** — agent-facing markdown recipes that teach an agent how to use a
-  capability once it has discovered it.
+  assume: the roles available to its identity. It happens entirely through
+  Warden's MCP discovery interface.
+- **Skills** — agent-facing markdown recipes that teach an agent how to drive a
+  role's provider once it has discovered it.
+
+## The Discovery Interface
+
+Warden runs its own MCP server at `/v1/sys/mcp` — always on, and needing no role:
+it authorizes on the identity the agent presents (a bearer JWT or an mTLS client
+certificate), exactly like the rest of Warden's introspection. A caller in a
+sub-namespace selects its scope with the usual `X-Warden-Namespace` header. This
+is the single surface an agent uses to discover what it can do. It exposes two
+tools:
+
+- **`list_roles`** — the roles the caller's identity can assume, each with an
+  operator-written description.
+- **`get_skill`** — the markdown recipe for a skill, by name.
+
+Together they are the MCP-native form of role introspection and skill reading.
+An agent never needs role names, endpoints, or keys handed to it out of band — it
+connects, and asks. (See
+[MCP → Warden as an MCP Server](mcp.md#warden-as-an-mcp-server-discovery-interface).)
 
 ## The Discovery Loop
 
-The seeded `discovery` skill codifies the loop an agent runs before touching any
-upstream. Each step returns structured JSON and chains into the next:
+An agent runs this loop before touching any upstream. Every step is a call to the
+MCP discovery server; each chains into the next:
 
-1. **Confirm the session** — `WARDEN_ADDR`, `WARDEN_TOKEN` (or
-   `WARDEN_CLIENT_CERT`/`WARDEN_CLIENT_KEY`), and `WARDEN_NAMESPACE` are
-   pre-populated by the runtime; the agent just checks they are set.
-2. **Discover roles** — `warden role list` returns every role the identity can
-   assume, each with an operator-written description.
-3. **List providers** — `warden provider list` returns the mounts in the
-   namespace, each with a `mount_url` and a description.
-4. **Match task → provider, pick a role** — the agent reads the descriptions,
-   chooses the most-scoped option, and surfaces to the user rather than guessing
+1. **Connect** — point the MCP client at `/v1/sys/mcp`, presenting the agent's
+   identity (bearer JWT or client certificate) and, for a sub-namespace, the
+   `X-Warden-Namespace` header.
+2. **List roles** — `list_roles` returns every role the identity can assume, each
+   with its description. This is the agent's menu.
+3. **Match task → role** — the agent reads the descriptions, picks the
+   most-scoped role for the step, and surfaces to the user rather than guessing
    when it is ambiguous.
-5. **Read the provider skill and call** — `warden skill read <type>` returns the
-   recipe for that provider; the agent follows it to make the request.
+4. **Get the skill** — the chosen role's description names a skill; `get_skill`
+   returns that recipe.
+5. **Act** — the agent follows the recipe. The role a request runs as is the
+   `role/<role>/` segment of its gateway URL, so an agent picks a role by
+   **targeting that role's URL** — the selector that works for every client
+   (an MCP attachment, an SDK `base_url`, a raw request alike). (`X-Warden-Role`
+   is a header override, so it only helps clients that set per-call headers — not
+   an MCP tool call.) The two provider kinds differ only in *how the agent
+   reaches them*:
+   - **MCP providers** are already attached to the agent's MCP client (via
+     `claude mcp add`), one attachment per role. The agent calls the attached
+     server whose role fits the task; it can't change the role of an attachment.
+   - **Non-MCP providers** are driven over HTTP: the operator embeds the role's
+     **gateway URL** in the description, so the agent reads it, prepends
+     `$WARDEN_ADDR`, presents its identity, and — to use another role — targets
+     that other role's URL from `list_roles`.
 
-Each surface is covered below.
+The role is the unit of discovery. Because a [role](roles.md) is a view over a
+provider — it decides what the caller may do and which credential is minted — the
+agent never enumerates raw providers or keys. It discovers *roles*, and each
+role's description carries what it needs: the skill name, and (for a non-MCP
+provider) the gateway URL.
+
+### Connective for non-MCP, advisory for MCP
+
+Be clear-eyed about what discovery buys you, because it differs by provider kind:
+
+- **Non-MCP providers — connective.** The agent isn't wired to anything in
+  advance. It learns the gateway URL from `list_roles` at runtime and builds the
+  call itself. This is discovery in its full sense: an identity in, a working
+  upstream call out, with **no pre-distributed configuration**.
+- **MCP providers — advisory.** An MCP client can't attach a server or set a
+  role header at runtime, so the operator must **pre-attach one server per role**
+  ahead of time. The agent is therefore *already connected*; `list_roles` doesn't
+  reach a new gateway, it helps the agent **choose** among the servers it already
+  holds. That is real pre-distributed configuration — the very thing the non-MCP
+  path avoids.
+
+Discovery still earns its keep for MCP, just not as a connector. `list_roles` is
+the **live, identity-scoped** view of which roles are actually usable *now* — an
+attached server whose role the identity can no longer assume would `403`, and
+`list_roles` simply won't list it — and the description carries the operator's
+**intent** that a bare attached-server name doesn't. But the honest trade-off is
+that for MCP, discovery narrows from *discover-and-connect* to
+*understand-and-select*. (Closing that gap — letting an agent act under any
+discovered role through a single attachment — would require a role selector an
+LLM can pass at call time, which MCP does not offer today.)
 
 ## Discovering Roles
 
-`warden role list` (backed by `sys/introspect/roles`) answers *"which roles can
-**I** assume?"* It is identity-scoped: Warden detects the caller's credential
-form — a TLS client certificate, a generic JWT, or a Kubernetes ServiceAccount
-JWT — and fans out only to the auth mounts in the namespace that accept that
-form, returning the **union** of the roles each reports.
+`list_roles` answers *"which roles can **I** assume?"* It is identity-scoped:
+Warden detects the caller's credential form — a TLS client certificate, a generic
+JWT, or a Kubernetes ServiceAccount JWT — and fans out only to the auth mounts in
+the namespace that accept that form, returning the **union** of the roles each
+reports. Each entry is `{name, description}`; a role the identity cannot assume
+never appears, so the menu is exactly the caller's reachable surface — and a
+mount that fails introspection surfaces as a warning rather than hiding the rest.
 
-```bash
-warden role list                       # roles this identity can assume
-warden role list -o json               # machine-readable, for agents
-warden role list -auth-path auth/jwt/  # restrict to one auth mount
-```
+The description is operator-set free text — how operators communicate intent —
+and by convention it carries the machine-readable hints the agent needs: the
+**skill name** for the role's provider, and, for a **non-MCP** provider, the
+role's **gateway URL** (relative — the agent prepends `$WARDEN_ADDR`). For
+example: *"read app secrets (skill: vault, url: /v1/vault/role/read-secret/gateway/)"*.
+The agent reads the skill name out and feeds it to `get_skill`, and drives the URL
+directly. An MCP-provider role carries only the skill name — its gateway URL lives
+in the MCP client config, wired at `claude mcp add` time.
 
-Each result carries a `name`, an `auth_path`, and a `description`. A mount that
-fails introspection is reported as a warning on stderr; the command still exits
-0, so one broken mount cannot hide the rest. The agent never needs role names
-distributed out of band — it learns them from its own credential.
-
-## Discovering Providers
-
-`warden provider list` (backed by `sys/providers`) returns the provider mounts in
-the caller's namespace. For each it reports the `type`, the operator-set
-`description`, and a `mount_url` with the namespace and mount path already baked
-in:
-
-```bash
-warden provider list -o json
-```
-
-The agent reaches the upstream by appending `$WARDEN_ADDR` + `mount_url` + the
-per-provider suffix (`gateway`, `role/<role>/gateway`, …). Because `mount_url`
-already begins `/v1/<namespace>/<mount>/`, the namespace must **not** be prefixed
-again.
-
-> **Identify a mount by its description, not its type or URL.** Several mounts can
-> share a provider type — especially the generic [`rest`](providers.md) provider,
-> where one mount fronts Stripe and another an internal API. The operator-set
-> **description** is the only reliable signal of what a mount is for; the type and
-> URL are not. When it is ambiguous, an agent should ask rather than guess.
-
-## Discovering the Schema
-
-`warden schema` (backed by `sys/schema`, with `sys/internal/specs/openapi` as a
-Vault-compatible alias) returns an OpenAPI description of the endpoints the
-caller can reach. It is namespace-scoped — the document only includes mounts in
-the caller's namespace, so one tenant cannot enumerate another's backends.
-
-```bash
-warden schema --list           # every reachable path
-warden schema aws/config       # describe one path
-warden schema aws/config -raw  # raw OpenAPI fragment (for codegen)
-```
+> **Identify a role by its description, not its name.** Role names are slugs; the
+> operator-set **description** is the reliable signal of what a role is for and
+> which skill drives it. Several roles can front the same provider with different
+> access — the description is how they are told apart. When it is ambiguous, an
+> agent should ask rather than guess.
 
 ## Skills
 
 A **skill** is an agent-facing markdown document, stored in a single global
-registry, that teaches an agent how to use a capability. Each skill is markdown
-with structured frontmatter:
+registry, that teaches an agent how to use a capability. `get_skill` returns one
+by name. Each skill is markdown with structured frontmatter:
 
 | Field | Meaning |
 |-------|---------|
-| `name` | Unique slug (for a provider guide, the provider type, e.g. `aws`). |
+| `name` | Unique slug (for a provider guide, the provider type, e.g. `aws`). This is the name embedded in a role description. |
 | `description` | One-line summary an agent reads to decide relevance. |
 | `category` | `agent-flow`, `shared`, `provider-guide`, `troubleshooting`, or `custom`. |
-| `requires` | Other skills this one depends on (e.g. provider guides require `foundation` and `discovery`). |
+| `requires` | Names of other skills this one depends on (often empty). |
 | `upstream` | The upstream system the skill is about, when applicable. |
 | `provider` | Provider type a `provider-guide` describes. |
 | `body` | The markdown recipe itself. |
 | `version` | Incremented on every change — agents use it to invalidate caches. |
 
-The `body` is a self-contained recipe: how to build the URL, which headers to
-send, and the provider's quirks (an AWS skill notes that an expired JWT surfaces
-as a SigV4 `SignatureDoesNotMatch`; a Slack skill notes that HTTP 200 does not
-mean success — check the `ok` field).
+The `body` is a self-contained recipe: how to reach the role's gateway, which
+headers to send, and the provider's quirks (an AWS skill notes that an expired
+JWT surfaces as a SigV4 `SignatureDoesNotMatch`; a Slack skill notes that HTTP
+200 does not mean success — check the `ok` field).
 
 ### Where skills come from
 
-- **Foundation skills** (`foundation`, `discovery`, troubleshooting) are seeded
-  into every server on first unseal. They teach the discovery loop itself.
+- **The `troubleshooting` skill** is seeded into every server on first unseal —
+  a shared guide to Warden's error model.
 - **Provider skills** ship alongside each provider's code and are seeded into the
   registry the **first time a provider of that type is mounted**. Seeding is
   idempotent: mounting a second instance does not overwrite an operator's edits,
   and a skill that fails to seed never blocks the mount.
 
-So if `warden skill read aws` returns 404, no AWS provider has been enabled on
-the server — the honest signal to an agent that the capability does not exist,
-rather than an endpoint to fabricate.
-
-### Reading skills
-
-```bash
-warden skill list                        # the catalog (bodies omitted)
-warden skill list -category=provider-guide
-warden skill read discovery              # full record as JSON
-warden skill read aws -raw               # just the markdown body
-```
-
-The `list` endpoint omits bodies and returns each skill's `version`, so a
-long-running agent can cache the catalog and re-fetch only what changed.
+So if `get_skill` reports *skill "aws" not found*, no AWS provider has been
+enabled on the server — the honest signal to an agent that the capability does
+not exist, rather than an endpoint to fabricate.
 
 ### Managing skills
 
-Operators can add custom skills — internal runbooks, house conventions — or
-override a seeded one:
+Skills are read over MCP with `get_skill`, but they are *authored* by operators.
+An operator can add custom skills — internal runbooks, house conventions — or
+override a seeded one, through the system API:
 
 ```bash
 warden skill create -name=oncall-runbook -category=custom \
@@ -154,16 +173,16 @@ restricted to the root namespace** — a sub-namespace request is rejected with
 
 ## Everything Is Identity-Scoped
 
-Discovery never reveals more than the caller can actually use. Role introspection
-returns only roles reachable by the caller's credential type; provider listing
-and schema return only mounts in the caller's namespace. An agent's view of the
-system *is* its access — which is what lets it self-onboard safely without an
-operator hand-feeding it endpoints, role names, or keys.
+Discovery never reveals more than the caller can actually use. `list_roles`
+returns only roles reachable by the caller's credential type in the caller's
+namespace, and it runs before any role is chosen — it needs no role token, only
+the identity the agent already holds. An agent's view of the system *is* its
+access, which is what lets it self-onboard safely without an operator hand-feeding
+it endpoints, role names, or keys.
 
 ## See Also
 
-- [Roles](roles.md) — what `warden role list` discovers.
-- [Providers](providers.md) — what `warden provider list` discovers, and the
-  identify-by-description rule.
-- [Authentication](authentication.md) — the credential discovery is scoped to.
-- [Namespaces](namespaces.md) — the boundary every discovery surface respects.
+- [MCP](mcp.md) — the discovery interface, and how a role's gateway is driven.
+- [Roles](roles.md) — the view a `list_roles` entry stands for, one per step.
+- [Authentication](authentication.md) — the identity discovery is scoped to.
+- [Namespaces](namespaces.md) — the boundary every discovery call respects.

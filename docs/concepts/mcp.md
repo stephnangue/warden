@@ -204,16 +204,24 @@ It exposes two tools:
   operator-written **description**. This is the agent's menu (see
   [Roles → Discovery](roles.md#discovery-what-roles-can-i-assume)). By convention
   the operator embeds the **skill name** in the description — e.g.
-  *"search & read any repo (skill: github)"* — and the agent reads it verbatim.
+  *"search & read any repo (skill: github)"* — and, for a **non-MCP** provider,
+  the role's **gateway URL** as well — e.g.
+  *"read app secrets (skill: vault, url: /v1/vault/role/read-secret/gateway/)"*.
+  The agent reads these verbatim.
 - **`get_skill`** — given a **skill name** (the one just read out of a role
   description), returns that **skill**: the markdown recipe that teaches the agent
-  how to drive the provider through the gateway.
+  how to drive the provider.
 
 The loop, then, is: connect to `/v1/sys/mcp` → `list_roles` to see the menu → read
-a role's skill name from its description → `get_skill` to learn how to drive it →
-switch to the role-scoped gateway to do the work. The discovery interface is the
-MCP-native form of `warden role list` + `warden skill read`; it only *tells* the
-agent what it can do — the work still flows through the gateways described above.
+the chosen role's skill name (and, for a non-MCP provider, its gateway URL) from
+the description → `get_skill` to learn how to drive it → do the work. The role a
+request runs as is the `role/<role>/` segment of its gateway URL. For an MCP
+provider that gateway is already attached to the agent's MCP client — one
+attachment per role, so the agent picks the attached server whose role fits; a
+non-MCP provider is called over HTTP at the role's gateway URL from the
+description, and another role means another URL. The discovery interface only
+*tells* the agent what it can do — the work still flows through the gateways
+described above.
 
 ## Using an MCP Mount
 
