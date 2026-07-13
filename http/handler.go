@@ -72,6 +72,12 @@ func Handler(props *HandlerProperties) http.Handler {
 	// System init endpoint - handles initialization before system is ready
 	mux.Handle("/v1/sys/init", handleSysInit(core, log))
 
+	// MCP discovery interface — Warden answering MCP for its own
+	// capabilities (list_roles, get_skill). Registered before the /v1/sys/
+	// catch-all. Not in standbyAllowedPaths: it reads live mount/skill/
+	// introspection state, so standby nodes forward it to the active node.
+	mux.Handle("/v1/sys/mcp", handleSysMCP(core, log))
+
 	// System backend endpoints - catch-all for /v1/sys/
 	// Handles providers, auth, namespaces, credentials, etc.
 	mux.Handle("/v1/sys/", handleLogical(core, log, forwarder))
