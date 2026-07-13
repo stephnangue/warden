@@ -54,6 +54,13 @@ The agent doesn't need to know the role names in advance. It asks Warden which
 roles its identity can assume and reads each role's **description** to choose the
 right one for a step — the same introspection you get from `warden role list`.
 
+An agent speaking MCP gets this natively: Warden runs its own MCP discovery
+interface whose `list_roles` and `get_skill` tools are the MCP form of
+`warden role list` + `warden skill read` — the agent lists its roles, reads a
+skill name out of a description, and fetches that skill, all over MCP before it
+drives a gateway. See
+[MCP → Warden as an MCP Server](mcp.md#warden-as-an-mcp-server-discovery-interface).
+
 <p align="center"><img alt="The agent lists its available roles and Warden returns each with its description" src="../images/warden-role-role-list.png" width="520"></p>
 
 ### Planning: one role per step
