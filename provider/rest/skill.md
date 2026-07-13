@@ -3,7 +3,7 @@ name: rest
 description: "Call an arbitrary single-token REST API through Warden — the specific upstream is set by the operator per mount; identify it from the mount's description, never from the provider type."
 category: provider-guide
 provider: rest
-requires: [foundation, discovery]
+requires: []
 upstream: Operator-defined (see the mount description)
 ---
 
@@ -24,7 +24,7 @@ an internal billing API, another fronts Algolia. You **cannot** tell the
 upstream from the provider type, and you **must not** guess it from the
 mount path or config.
 
-Read the mount's **`description`** from discovery (`warden provider list`)
+Read the role's **`description`** from the `list_roles` discovery tool
 to learn:
 - which service this mount proxies, and
 - its base path / which API routes are in scope.
@@ -35,37 +35,46 @@ say so.
 
 ## Configure the CLI/SDK
 
-`<mount-url>` and `<role>` come from the discovery flow:
-- `<mount-url>` is the chosen mount's `mount_url` from
-  `warden provider list` (e.g. `/v1/billing-api/`).
-- `<role>` is the role you picked from `warden role list` for this task —
-  it goes in the URL path.
+`<gateway-url>` comes from the role you chose: the `list_roles` discovery tool
+returns each role with a `description`, and for a non-MCP provider the operator
+embeds the role's **gateway URL** in it — a relative path
+`/v1/<namespace>/<mount>/role/<role>/gateway/`, with the namespace, mount, and role already baked in. Prepend `$WARDEN_ADDR` (the address you already
+used to discover your roles).
+
+The `role/<role>/` segment in `<gateway-url>` is the role this call runs under.
+To act under a *different* role, use the `<gateway-url>` of that role from
+`list_roles` — each role provides its own role-bearing URL in its description.
+
+Present your identity on every call: `Authorization: Bearer <jwt>`, or an mTLS
+client certificate. A `401` means the JWT expired (typical TTL 5–60 min) —
+refresh and retry.
 
 ```
-URL pattern : $WARDEN_ADDR<mount-url>role/<role>/gateway/<upstream-path>
-Auth header : Authorization: Bearer $WARDEN_TOKEN
+URL pattern : $WARDEN_ADDR<gateway-url><upstream-path>
+Auth header : Authorization: Bearer <jwt>
 ```
 
 Rewrite the upstream host to
-`$WARDEN_ADDR<mount-url>role/<role>/gateway` and add your Warden token as
+`$WARDEN_ADDR<gateway-url>` and add your Warden token as
 the bearer. Everything after `/gateway/` — path, query string, method,
 body — is forwarded verbatim to the upstream. Warden injects the upstream
 credential for you; do not send the upstream's own token.
 
 ## Examples
 
-(Assume `mount_url = /v1/billing-api/` and role `finance`, fronting an
-internal REST API per its description; substitute yours.)
+(Examples use a concrete `<gateway-url>` of `/v1/billing-api/role/finance/gateway/`,
+fronting an internal REST API per its description; substitute the one from your
+role's `list_roles` description.)
 
 GET a resource:
 ```bash
-curl -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -H "Authorization: Bearer <jwt>" \
   $WARDEN_ADDR/v1/billing-api/role/finance/gateway/v1/invoices?status=open
 ```
 
 POST a resource:
 ```bash
-curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -X POST -H "Authorization: Bearer <jwt>" \
   -H "Content-Type: application/json" \
   -d '{"customer":"acme","amount":4200}' \
   $WARDEN_ADDR/v1/billing-api/role/finance/gateway/v1/invoices

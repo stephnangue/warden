@@ -3,7 +3,7 @@ name: slack
 description: "Call the Slack Web API through Warden — post messages, read channels, manage reactions — without holding a bot token."
 category: provider-guide
 provider: slack
-requires: [foundation, discovery]
+requires: []
 upstream: Slack Web API (slack.com/api)
 ---
 
@@ -19,29 +19,37 @@ token bound to the chosen role, injects it as
 
 ## Configure the CLI/SDK
 
-`<mount-url>` and `<role>` below come from the discovery flow:
-- `<mount-url>` is the chosen provider's `mount_url` from
-  `warden provider list` (e.g. `/v1/slack/`, `/v1/team-ops/slack-prod/`).
-  Warden has already baked the namespace + mount path in.
-- `<role>` is the role you picked from `warden role list` to perform this
-  task — it goes in the URL path.
+`<gateway-url>` comes from the role you chose: the `list_roles` discovery tool
+returns each role with a `description`, and for a non-MCP provider the operator
+embeds the role's **gateway URL** in it — a relative path
+`/v1/<namespace>/<mount>/role/<role>/gateway/`, with the namespace, mount, and role already baked in. Prepend `$WARDEN_ADDR` (the address you already
+used to discover your roles).
+
+The `role/<role>/` segment in `<gateway-url>` is the role this call runs under.
+To act under a *different* role, use the `<gateway-url>` of that role from
+`list_roles` — each role provides its own role-bearing URL in its description.
+
+Present your identity on every call: `Authorization: Bearer <jwt>`, or an mTLS
+client certificate. A `401` means the JWT expired (typical TTL 5–60 min) —
+refresh and retry.
 
 ```bash
-URL pattern : $WARDEN_ADDR<mount-url>role/<role>/gateway/<slack-method>
-Auth header : Authorization: Bearer $WARDEN_TOKEN
+URL pattern : $WARDEN_ADDR<gateway-url><slack-method>
+Auth header : Authorization: Bearer <jwt>
 ```
 
 For `curl` or any HTTP client: rewrite the Slack host to
-`$WARDEN_ADDR<mount-url>role/<role>/gateway` and add the bearer token.
+`$WARDEN_ADDR<gateway-url>` and add the bearer token.
 
 ## Examples
 
-(All examples assume `mount_url = /v1/slack/` and role `slack-user`;
-substitute yours. All Slack Web API calls are **POST**, even reads.)
+(Examples use a concrete `<gateway-url>` of
+`/v1/slack/role/slack-user/gateway/`; substitute the one from your role's
+`list_roles` description. All Slack Web API calls are **POST**, even reads.)
 
 Post a message to a channel:
 ```bash
-curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -X POST -H "Authorization: Bearer <jwt>" \
   -H "Content-Type: application/json" \
   -d '{"channel":"#general","text":"Hello from Warden!"}' \
   $WARDEN_ADDR/v1/slack/role/slack-user/gateway/chat.postMessage
@@ -49,7 +57,7 @@ curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
 
 List conversations the bot can see:
 ```bash
-curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -X POST -H "Authorization: Bearer <jwt>" \
   -H "Content-Type: application/json" \
   -d '{"limit":100}' \
   $WARDEN_ADDR/v1/slack/role/slack-user/gateway/conversations.list
@@ -57,7 +65,7 @@ curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
 
 Read recent messages from a channel:
 ```bash
-curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -X POST -H "Authorization: Bearer <jwt>" \
   -H "Content-Type: application/json" \
   -d '{"channel":"C01ABC123","limit":50}' \
   $WARDEN_ADDR/v1/slack/role/slack-user/gateway/conversations.history
@@ -65,7 +73,7 @@ curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
 
 Test that the injected bot token is valid:
 ```bash
-curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -X POST -H "Authorization: Bearer <jwt>" \
   $WARDEN_ADDR/v1/slack/role/slack-user/gateway/auth.test
 ```
 
@@ -79,7 +87,7 @@ at most one canvas, so replace any prior one. Four calls in order:
 1. **Check for an existing canvas** — `conversations.info` reads
    `.channel.properties.canvas.file_id`:
    ```bash
-   EXISTING=$(curl -sSf -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+   EXISTING=$(curl -sSf -X POST -H "Authorization: Bearer <jwt>" \
         -H "Content-Type: application/json" \
         -d '{"channel":"C01ABC123"}' \
         $WARDEN_ADDR/v1/slack/role/slack-user/gateway/conversations.info \
@@ -90,7 +98,7 @@ at most one canvas, so replace any prior one. Four calls in order:
    ```bash
    if [ -n "$EXISTING" ]; then
      jq -n --arg id "$EXISTING" '{canvas_id:$id}' \
-       | curl -sSf -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+       | curl -sSf -X POST -H "Authorization: Bearer <jwt>" \
               -H "Content-Type: application/json" --data @- \
               $WARDEN_ADDR/v1/slack/role/slack-user/gateway/canvases.delete
    fi
@@ -105,7 +113,7 @@ at most one canvas, so replace any prior one. Four calls in order:
          --rawfile md report.md \
          '{channel_id:$ch, title:$title,
            document_content:{type:"markdown", markdown:$md}}' \
-     | curl -sSf -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+     | curl -sSf -X POST -H "Authorization: Bearer <jwt>" \
             -H "Content-Type: application/json" --data @- \
             $WARDEN_ADDR/v1/slack/role/slack-user/gateway/conversations.canvases.create
    ```
@@ -114,7 +122,7 @@ at most one canvas, so replace any prior one. Four calls in order:
    in the channel header but a short message draws attention:
    ```bash
    jq -n --arg ch "C01ABC123" '{channel:$ch, text:"Report updated."}' \
-     | curl -sSf -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+     | curl -sSf -X POST -H "Authorization: Bearer <jwt>" \
             -H "Content-Type: application/json" --data @- \
             $WARDEN_ADDR/v1/slack/role/slack-user/gateway/chat.postMessage
    ```
@@ -128,7 +136,7 @@ Slack Web API. The four above are the real ones.
 
 For the `@slack/web-api` (Node) or `slack_sdk` (Python) clients:
 point the `slackApiUrl` / `base_url` at
-`$WARDEN_ADDR<mount-url>role/<role>/gateway` and supply your JWT as the
+`$WARDEN_ADDR<gateway-url>` and supply your JWT as the
 auth token instead of an `xoxb-` token.
 
 ## Quirks

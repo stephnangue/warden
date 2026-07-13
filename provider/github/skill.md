@@ -3,7 +3,7 @@ name: github
 description: "Call the GitHub REST API or clone/push Git repos through Warden — without holding a GitHub PAT. Covers REST (read repos, manage issues, push releases) and Git smart-HTTP (clone, fetch, push)."
 category: provider-guide
 provider: github
-requires: [foundation, discovery]
+requires: []
 upstream: GitHub REST API (api.github.com or GHE) and Git smart-HTTP (github.com or GHE)
 ---
 
@@ -19,48 +19,55 @@ The agent **never holds a PAT**.
 
 ## Configure the CLI/SDK
 
-`<mount-url>` and `<role>` below come from the discovery flow:
-- `<mount-url>` is the chosen provider's `mount_url` from
-  `warden provider list` (e.g. `/v1/github/`, `/v1/team-data/github-enterprise/`).
-  Warden has already baked the namespace + mount path in.
-- `<role>` is the role you picked from `warden role list` to perform this
-  task — it goes in the URL path.
+`<gateway-url>` comes from the role you chose: the `list_roles` discovery tool
+returns each role with a `description`, and for a non-MCP provider the operator
+embeds the role's **gateway URL** in it — a relative path
+`/v1/<namespace>/<mount>/role/<role>/gateway/`, with the namespace, mount, and role already baked in. Prepend `$WARDEN_ADDR` (the address you already
+used to discover your roles).
+
+The `role/<role>/` segment in `<gateway-url>` is the role this call runs under.
+To act under a *different* role, use the `<gateway-url>` of that role from
+`list_roles` — each role provides its own role-bearing URL in its description.
+
+Present your identity on every call: `Authorization: Bearer <jwt>`, or an mTLS
+client certificate. A `401` means the JWT expired (typical TTL 5–60 min) —
+refresh and retry.
 
 ```bash
-URL pattern : $WARDEN_ADDR<mount-url>role/<role>/gateway/<github-api-path>
-Auth header : Authorization: Bearer $WARDEN_TOKEN
+URL pattern : $WARDEN_ADDR<gateway-url><github-api-path>
+Auth header : Authorization: Bearer <jwt>
 ```
 
 For `curl` or any HTTP client: rewrite the GitHub host to
-`$WARDEN_ADDR<mount-url>role/<role>/gateway` and add the bearer token.
+`$WARDEN_ADDR<gateway-url>` and add the bearer token.
 
 ## Examples
 
-(All examples assume `mount_url = /v1/github/` and role `repo-reader`;
-substitute yours.)
+(Examples use a concrete `<gateway-url>` of `/v1/github/role/repo-reader/gateway/`;
+substitute the one from your role's `list_roles` description.)
 
 List your authenticated user's repos:
 ```bash
-curl -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -H "Authorization: Bearer <jwt>" \
   $WARDEN_ADDR/v1/github/role/repo-reader/gateway/user/repos
 ```
 
 Read a specific repo's issues:
 ```bash
-curl -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -H "Authorization: Bearer <jwt>" \
   $WARDEN_ADDR/v1/github/role/repo-reader/gateway/repos/myorg/myrepo/issues
 ```
 
 Open an issue (operator must grant a write-capable role):
 ```bash
-curl -X POST -H "Authorization: Bearer $WARDEN_TOKEN" \
+curl -X POST -H "Authorization: Bearer <jwt>" \
   -H "Accept: application/vnd.github+json" \
   -d '{"title":"Bug","body":"..."}' \
   $WARDEN_ADDR/v1/github/role/issue-writer/gateway/repos/myorg/myrepo/issues
 ```
 
 For the Octokit JS / PyGithub clients: configure the `baseUrl` /
-`base_url` to `$WARDEN_ADDR<mount-url>role/<role>/gateway`
+`base_url` to `$WARDEN_ADDR<gateway-url>`
 and supply your JWT as the auth token.
 
 ## Quirks
@@ -72,8 +79,8 @@ and supply your JWT as the auth token.
   request supplies its own. Override by setting the header in your
   call.
 - **GHE (GitHub Enterprise Server) deployments** point Warden at the
-  GHE host instead of `api.github.com`; check
-  `warden read github/config` to confirm which.
+  GHE host instead of `api.github.com`; ask the operator which host the
+  mount fronts.
 - **Rate limits propagate from GitHub**. Warden does not retry; back
   off when you see `403 rate limit exceeded` headers.
 
@@ -86,21 +93,20 @@ dispatches per-request based on path shape — `.git/info/refs`,
 `.git/git-upload-pack`, and `.git/git-receive-pack` route to the Git
 host with HTTP Basic Auth instead of the REST `Authorization: token`.
 
-(All examples below assume `mount_url = /v1/github/`; substitute yours
-from `warden provider list`.)
+(Examples use a concrete `<gateway-url>` of `/v1/github/role/repo-reader/gateway/`;
+substitute the one from your role's `list_roles` description.)
 
 ### Clone
 
 The clone URL carries the Warden role as the Basic Auth username and
-the Warden JWT as the password. Substitute `<role>` and the mount URL:
+the Warden JWT as the password. Substitute `<role>` and the mount path:
 
 Git embeds Basic Auth between scheme and host in the clone URL, so
-split `$WARDEN_ADDR` (the canonical env var from the `foundation`
-skill) — `${WARDEN_ADDR%%://*}` is the scheme, `${WARDEN_ADDR#*://}`
-is the host (and port if present):
+split `$WARDEN_ADDR` — `${WARDEN_ADDR%%://*}` is the scheme,
+`${WARDEN_ADDR#*://}` is the host (and port if present):
 
 ```bash
-git clone "${WARDEN_ADDR%%://*}://<role>:${WARDEN_TOKEN}@${WARDEN_ADDR#*://}/v1/github/gateway/<owner>/<repo>.git"
+git clone "${WARDEN_ADDR%%://*}://<role>:<jwt>@${WARDEN_ADDR#*://}/v1/github/gateway/<owner>/<repo>.git"
 ```
 
 Git's credential helpers cache on URL+username, so each role gets a
@@ -116,21 +122,16 @@ git config --global credential.helper "cache --timeout=900"
 ### Header-routed alternative
 
 If you prefer a clone URL that looks like a real Git URL, pass the
-mount path as `X-Warden-Provider` and the namespace as
-`X-Warden-Namespace` via `http.extraheader` instead. `path` comes
-from `warden provider list`; `$WARDEN_NAMESPACE` is in your
-environment:
+mount and namespace as headers via `http.extraheader` instead. Both come
+straight out of `<gateway-url>` (`/v1/<namespace>/<mount>/role/<role>/gateway/`):
+`X-Warden-Provider` is the `<mount>` segment and `X-Warden-Namespace` is
+the `<namespace>` segment.
 
 ```bash
-path=$(warden provider list -o json | jq -r '.[] | select(.type=="github") | .path' | head -1)
-git -c http.extraheader="X-Warden-Provider: $path" \
-    -c http.extraheader="X-Warden-Namespace: $WARDEN_NAMESPACE" \
-    clone "${WARDEN_ADDR%%://*}://<role>:${WARDEN_TOKEN}@${WARDEN_ADDR#*://}/<owner>/<repo>.git"
+git -c http.extraheader="X-Warden-Provider: <mount>" \
+    -c http.extraheader="X-Warden-Namespace: <namespace>" \
+    clone "${WARDEN_ADDR%%://*}://<role>:<jwt>@${WARDEN_ADDR#*://}/<owner>/<repo>.git"
 ```
-
-When more than one `github` mount exists, replace `head -1` with a
-`select(.description=="...")` matching the upstream you want — `path`
-alone doesn't tell you which GitHub host or org the mount fronts.
 
 `http.extraheader` persists into `.git/config` at clone time, so both
 headers carry through to follow-up operations automatically.
