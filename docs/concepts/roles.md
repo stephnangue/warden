@@ -50,15 +50,13 @@ out what it is allowed to do, then decompose the goal into steps that fit.
 
 ### Discovery: what roles can I assume?
 
-The agent doesn't need to know the role names in advance. It asks Warden which
-roles its identity can assume and reads each role's **description** to choose the
-right one for a step — the same introspection you get from `warden role list`.
-
-An agent speaking MCP gets this natively: Warden runs its own MCP discovery
-interface whose `list_roles` and `get_skill` tools are the MCP form of
-`warden role list` + `warden skill read` — the agent lists its roles, reads a
-skill name out of a description, and fetches that skill, all over MCP before it
-drives a gateway. See
+The agent doesn't need to know the role names in advance. Warden runs its own MCP
+discovery server at `/v1/sys/mcp`: the agent calls **`list_roles`** to get every
+role its identity can assume, each with an operator-written **description**, and
+reads that description to choose the right one for a step. The description names
+the **skill** that drives the role's provider — and, for a non-MCP provider,
+carries the role's gateway URL — and **`get_skill`** returns that recipe. All of
+it happens over MCP, before the agent drives a gateway. See
 [MCP → Warden as an MCP Server](mcp.md#warden-as-an-mcp-server-discovery-interface).
 
 <p align="center"><img alt="The agent lists its available roles and Warden returns each with its description" src="../images/warden-role-role-list.png" width="520"></p>
@@ -237,10 +235,11 @@ warden list   auth/jwt/role
 warden delete auth/jwt/role/read-repo
 ```
 
-To discover which roles the **caller's own identity** can assume — the
-introspection the agent used above — use the role list command, which fans out
-across every auth mount of the caller's credential type in the current namespace
-and returns each role with its description:
+Agents discover which roles their **own identity** can assume over MCP, via
+`list_roles` (above). To inspect the same introspection from a terminal, an
+operator can use the role list command, which fans out across every auth mount of
+the credential type in the current namespace and returns each role with its
+description:
 
 ```bash
 warden role list
