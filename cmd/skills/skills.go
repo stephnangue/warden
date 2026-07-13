@@ -14,8 +14,9 @@ Usage: warden skill <subcommand> [options]
 
   Browse and manage the global agent skill registry. Skills are the
   agent-facing recipes that describe how to use Warden's capabilities
-  (the foundation flow plus one record per provider type). Reads are
-  open to any namespace; writes are restricted to the root namespace.
+  (one record per provider type, plus the shared troubleshooting guide).
+  Reads are open to any namespace; writes are restricted to the root
+  namespace.
 
   List every skill in the catalog:
 

@@ -91,7 +91,11 @@ and cannot rewrite the path, such as a git client using `http.extraheader`.
 requests still need it, and `sys/` targets are rejected.)
 
 The role header also works *with* path routing: sending `X-Warden-Role` on a
-path-routed request overrides whatever role is baked into the URL.
+path-routed request overrides whatever role is baked into the URL. (This is a
+mechanism for clients that control their own headers — a programmatic caller, a
+sidecar, or git via `http.extraheader`. An **LLM's MCP tool call cannot** set it
+— its client's headers are fixed — so an agent selects a role by the URL
+instead; see [MCP and Non-MCP Providers](#mcp-and-non-mcp-providers).)
 
 ```bash
 # Path says ci-readonly, header wins → ci-admin
@@ -154,6 +158,35 @@ namespace needs neither. The CLI sets the header from `WARDEN_NAMESPACE`.
 Some read-only or protocol-negotiation paths can be served without
 authentication (for example, a Git smart-HTTP probe that needs the upstream's
 `WWW-Authenticate` challenge before the client retries with credentials).
+
+## MCP and Non-MCP Providers
+
+Server-side every provider is the same gateway. What differs is **how an agent
+talks to it** — and that splits providers into two kinds:
+
+- **MCP providers** (`mcp`, `mcp_aws`) front an upstream **MCP server**. The
+  agent reaches them with an **MCP client** pointed at the gateway URL, which
+  the operator wires up ahead of time (for Claude Code, `claude mcp add`) — one
+  attachment per role. The agent doesn't build the URL at runtime; it calls the
+  attached server whose role fits the task. This pre-wiring has a cost: for MCP,
+  role/URL setup is pre-distributed config, and runtime discovery is *advisory*
+  rather than connective (see
+  [Discovery → Connective for non-MCP, advisory for MCP](discovery-and-skills.md#connective-for-non-mcp-advisory-for-mcp)).
+- **Non-MCP providers** (everything else — `vault`, `github`, `openai`, `aws`,
+  `rds`, `rest`, …) front a REST, DB, or cloud API. The agent makes the
+  **request itself over HTTP**, to the gateway URL it reads from the role's
+  description (see [Discovery and Skills](discovery-and-skills.md)), presenting
+  its identity on each call.
+
+Either way the **role** rides in the gateway URL (`…/role/<role>/gateway/`, or
+the `AWS_ACCESS_KEY_ID` slot / `?role=` query for the SigV4 and access
+providers), so an agent selects a role by **targeting that role's URL** — for
+MCP, by choosing the attached server; for non-MCP, by using the role's URL from
+`list_roles`. An LLM's **MCP tool call** can't set the `X-Warden-Role` header
+(its client's headers are fixed and no role rides in the call), so the URL is the
+selector; the header stays a routing override for clients that control their own
+headers ([Path routing vs. header routing](#path-routing-vs-header-routing)).
+Each provider's [skill](discovery-and-skills.md) spells out the exact mechanics.
 
 ## Enabling a Provider
 
