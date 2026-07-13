@@ -46,16 +46,22 @@ func skillNames(skills []map[string]interface{}) map[string]bool {
 	return names
 }
 
-// TestSkill_FoundationSkillsArePresent verifies the discovery, foundation,
-// and troubleshooting skills are seeded at first unseal and visible via the
-// list endpoint.
+// TestSkill_FoundationSkillsArePresent verifies the troubleshooting skill is
+// seeded at first unseal and visible via the list endpoint. (foundation and
+// discovery were retired when discovery moved to the /v1/sys/mcp tools.)
 func TestSkill_FoundationSkillsArePresent(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	names := skillNames(listSkills(t, port))
 
-	for _, want := range []string{"discovery", "foundation", "troubleshooting"} {
+	for _, want := range []string{"troubleshooting"} {
 		if !names[want] {
 			t.Errorf("foundation skill %q missing from /v1/sys/skills (got %v)", want, names)
+		}
+	}
+	// The retired CLI-loop skills must NOT reappear.
+	for _, gone := range []string{"discovery", "foundation"} {
+		if names[gone] {
+			t.Errorf("retired skill %q is still seeded (got %v)", gone, names)
 		}
 	}
 }
@@ -92,21 +98,21 @@ func TestSkill_ProviderSkillSeededOnMount(t *testing.T) {
 	}
 }
 
-// TestSkill_ReadFoundationSkillReturnsBody verifies that a known foundation
-// skill comes back with its full markdown body via the read endpoint.
+// TestSkill_ReadFoundationSkillReturnsBody verifies that a known seeded skill
+// comes back with its full markdown body via the read endpoint.
 func TestSkill_ReadFoundationSkillReturnsBody(t *testing.T) {
 	port := h.GetLeaderPort(t)
-	status, body := h.APIRequest(t, "GET", "sys/skills/discovery", port, "")
+	status, body := h.APIRequest(t, "GET", "sys/skills/troubleshooting", port, "")
 	if status != 200 {
-		t.Fatalf("read discovery: status %d, body %s", status, string(body))
+		t.Fatalf("read troubleshooting: status %d, body %s", status, string(body))
 	}
 	var out readResp
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("unmarshal: %v\nbody: %s", err, string(body))
 	}
 	bodyStr, _ := out.Data["body"].(string)
-	if !strings.Contains(bodyStr, "Discovering what you can do") {
-		t.Errorf("discovery body does not contain expected heading; got %q", bodyStr)
+	if !strings.Contains(bodyStr, "Troubleshooting") {
+		t.Errorf("troubleshooting body does not contain expected heading; got %q", bodyStr)
 	}
 	if out.Data["origin"] != "seed" {
 		t.Errorf("origin = %v, want \"seed\"", out.Data["origin"])
@@ -290,7 +296,7 @@ func TestSkill_GlobalReadFromSubNamespace(t *testing.T) {
 		h.APIRequest(t, "DELETE", "sys/namespaces/"+ns, port, "")
 	})
 
-	// LIST under the sub-namespace token must succeed and include foundation skills.
+	// LIST under the sub-namespace token must succeed and include the seeded skills.
 	status, body := h.NSAPIRequest(t, "GET", "sys/skills?warden-list=true", ns, port, "")
 	if status != 200 {
 		t.Fatalf("list under sub-namespace: expected 200, got %d, body %s", status, string(body))
@@ -300,16 +306,16 @@ func TestSkill_GlobalReadFromSubNamespace(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	names := skillNames(lr.Data.Skills)
-	for _, want := range []string{"discovery", "foundation", "troubleshooting"} {
+	for _, want := range []string{"troubleshooting"} {
 		if !names[want] {
-			t.Errorf("foundation skill %q missing from sub-namespace list", want)
+			t.Errorf("seeded skill %q missing from sub-namespace list", want)
 		}
 	}
 
 	// READ under the sub-namespace token must succeed.
-	status, _ = h.NSAPIRequest(t, "GET", "sys/skills/discovery", ns, port, "")
+	status, _ = h.NSAPIRequest(t, "GET", "sys/skills/troubleshooting", ns, port, "")
 	if status != 200 {
-		t.Errorf("read discovery from sub-namespace: expected 200, got %d", status)
+		t.Errorf("read troubleshooting from sub-namespace: expected 200, got %d", status)
 	}
 }
 
