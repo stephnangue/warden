@@ -152,7 +152,7 @@ source's `type` selects the driver. Warden ships drivers for:
 
 | Driver `type` | Upstream |
 |---------------|----------|
-| `vault` | HashiCorp Vault / OpenBao |
+| `hvault` | HashiCorp Vault / OpenBao |
 | `aws` | AWS IAM / STS |
 | `azure` | Azure AD / Microsoft Graph |
 | `gcp` | Google Cloud IAM |
@@ -163,6 +163,9 @@ source's `type` selects the driver. Warden ships drivers for:
 | `local` | Static secrets stored in the spec itself |
 | `apikey` | Generic static API keys |
 | `ibm`, `elastic`, `grafana`, `honeycomb`, `alicloud`, `scaleway`, `ovh` | The respective SaaS / cloud APIs |
+
+Each driver has a reference page under [Credential drivers](../credential-drivers/README.md)
+covering its config keys, mint methods, credential types, and rotation behaviour.
 
 Every driver implements a small core contract — mint a credential from a spec,
 revoke a lease, and clean up — and may opt into additional capabilities:
@@ -268,6 +271,7 @@ its own credential configuration, with no inheritance across boundaries.
 
 ## See Also
 
+- [Credential drivers](../credential-drivers/README.md) — a reference page per driver.
 - [Roles](roles.md) — how `cred_spec_name` binds a spec to an identity.
 - [Providers](providers.md) — the mounts that inject or return credentials.
 - [Tokens](tokens.md) — the token a credential is bound to and expires with.
