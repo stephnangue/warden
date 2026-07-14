@@ -196,9 +196,8 @@ func (c *Core) registerGetSkillTool(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_skill",
 		Description: "Fetch an agent skill as markdown by name. The name is the one " +
-			"embedded in a role description (list_roles); it names the provider-type " +
-			"recipe teaching the agent how to drive that provider through Warden's " +
-			"gateway.",
+			"embedded in a role description (list_roles); it identifies the recipe " +
+			"teaching the agent how to drive that role through Warden's gateway.",
 	}, c.handleMCPGetSkill)
 }
 

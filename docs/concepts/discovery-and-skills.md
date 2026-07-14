@@ -122,12 +122,13 @@ in the MCP client config, wired at `claude mcp add` time.
 ## Skills
 
 A **skill** is an agent-facing markdown document, stored in a single global
-registry, that teaches an agent how to use a capability. `get_skill` returns one
-by name. Each skill is markdown with structured frontmatter:
+registry, that teaches an agent how to drive a role once it has been discovered.
+`get_skill` returns one by name. Each skill is markdown with structured
+frontmatter:
 
 | Field | Meaning |
 |-------|---------|
-| `name` | Unique slug (for a provider guide, the provider type, e.g. `aws`). This is the name embedded in a role description. |
+| `name` | Unique slug — the name embedded in a role description and passed to `get_skill`. Warden's default provider guides use the provider type (e.g. `aws`), but a name you author can be anything. |
 | `description` | One-line summary an agent reads to decide relevance. |
 | `category` | `agent-flow`, `shared`, `provider-guide`, `troubleshooting`, or `custom`. |
 | `requires` | Names of other skills this one depends on (often empty). |
@@ -141,24 +142,47 @@ headers to send, and the provider's quirks (an AWS skill notes that an expired
 JWT surfaces as a SigV4 `SignatureDoesNotMatch`; a Slack skill notes that HTTP
 200 does not mean success — check the `ok` field).
 
+### Skills are yours to write
+
+Skills are not a fixed, built-in catalogue — they are **plain markdown you author
+and own**. Warden seeds a sensible default guide for each provider type so an
+agent has something to read out of the box, but nothing about a skill is frozen:
+you can edit a seeded one, override it wholesale, or add entirely new skills of
+your own — an internal runbook, a house convention, a guide narrowed to a single
+workflow. The defaults are a starting point, not a ceiling, and a role's
+description can point at whichever skill name you choose.
+
+This authoring freedom is what lets you **scope a skill to a role** rather than to
+a whole provider. For a non-MCP provider that is what keeps a skill small:
+instead of embedding the provider's entire OpenAPI surface, a role-scoped skill
+documents only the handful of endpoints that role actually exposes — often just
+three or four operations. The role narrows the API down to its task; you write a
+skill that covers exactly that slice. One provider can then be fronted by several
+roles, each paired with its own tight, purpose-built skill. This is a large part
+of why roles matter for REST/OpenAPI providers: they let skills stay small,
+focused, and cheap for an agent to read.
+
 ### Where skills come from
 
+- **Default provider skills** ship alongside each provider's code and are seeded
+  into the registry the **first time a provider of that type is mounted**. Seeding
+  is idempotent: mounting a second instance does not overwrite your edits, and a
+  skill that fails to seed never blocks the mount.
 - **The `troubleshooting` skill** is seeded into every server on first unseal —
   a shared guide to Warden's error model.
-- **Provider skills** ship alongside each provider's code and are seeded into the
-  registry the **first time a provider of that type is mounted**. Seeding is
-  idempotent: mounting a second instance does not overwrite an operator's edits,
-  and a skill that fails to seed never blocks the mount.
+- **Your own skills** — anything you author through the system API (below),
+  including overrides of the seeded defaults.
 
 So if `get_skill` reports *skill "aws" not found*, no AWS provider has been
-enabled on the server — the honest signal to an agent that the capability does
-not exist, rather than an endpoint to fabricate.
+enabled on the server (and no one has authored a skill by that name) — the honest
+signal to an agent that the capability does not exist, rather than an endpoint to
+fabricate.
 
-### Managing skills
+### Authoring skills
 
-Skills are read over MCP with `get_skill`, but they are *authored* by operators.
-An operator can add custom skills — internal runbooks, house conventions — or
-override a seeded one, through the system API:
+Skills are read over MCP with `get_skill`, but they are *authored* by operators
+through the system API. Create a new custom skill, override a seeded one, or
+remove one you added:
 
 ```bash
 warden skill create -name=oncall-runbook -category=custom \
@@ -167,8 +191,10 @@ warden skill update aws -description="our AWS override"
 warden skill delete oncall-runbook
 ```
 
-Reads are open in any namespace; **mutations (`create`/`update`/`delete`) are
-restricted to the root namespace** — a sub-namespace request is rejected with
+Point a role's description at a skill by embedding its `name` (e.g.
+`skill: oncall-runbook`), and any agent that discovers the role reads your recipe
+verbatim. Reads are open in any namespace; **mutations (`create`/`update`/`delete`)
+are restricted to the root namespace** — a sub-namespace request is rejected with
 *"skill mutations are restricted to the root namespace."*
 
 ## Everything Is Identity-Scoped

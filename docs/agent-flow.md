@@ -193,6 +193,12 @@ providers, the gateway URL in each role's description), writes policies, and
 attaches the agent runtime's MCP client to `/v1/sys/mcp` and the MCP-provider
 gateways. After this, the operator is not in the per-call loop.
 
+Each provider seeds a default skill on first mount, but the catalog is the
+operator's to shape: they can override a seeded skill or author their own and
+point a role at it. This is how a skill is kept small — a skill scoped to one
+role need only document the handful of endpoints that role exposes, not the
+provider's whole API. See [Discovery and Skills](concepts/discovery-and-skills.md#skills-are-yours-to-write).
+
 ### Per-call — every time an agent makes an upstream call
 
 ```

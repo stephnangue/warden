@@ -38,6 +38,8 @@ a credential of its own.
 
 - [Credentials](credentials.md) — sources, specs, drivers, lifetime, and
   rotation.
+- [Credential drivers](../credential-drivers/README.md) — a reference page per
+  driver: config keys, mint methods, credential types, and rotation behaviour.
 - [Providers](providers.md) — the gateway mounts that authenticate, authorize,
   inject a credential, and proxy to an upstream.
 - [Model Context Protocol](mcp.md) — fronting MCP servers and authorizing
