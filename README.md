@@ -59,7 +59,7 @@ Warden sits in the request path between an agent and the systems it needs. The a
 
 For each request, Warden authenticates the identity, evaluates the call against policy at request time, injects the real upstream credential, and proxies it — streaming the response back unchanged. The credential belongs to Warden, never the agent, and is short-lived wherever the upstream supports it. The agent holds no secrets, gets exactly the access its policy permits — no more — and every call is tied to its identity in the audit log.
 
-Agents don't need that access wired in ahead of time. They can ask Warden which roles and systems are open to them and read a per-system recipe at runtime, then connect — so a newly mounted system is reachable without redistributing config or rebuilding an SDK. See [the agent flow](docs/agent-flow.md) for the full loop.
+Agents don't need that access wired in ahead of time. They can ask Warden which roles and systems are open to them and read a per-system recipe at runtime, then connect — so a newly mounted system is reachable without redistributing config or rebuilding an SDK. See [the agent flow](https://wardengateway.com/agent-flow/) for the full loop.
 
 ## Use cases
 
@@ -69,23 +69,23 @@ Agents don't need that access wired in ahead of time. They can ask Warden which 
 - **Centralized governance** — one control plane for every system an agent touches: one identity, one policy surface, and one audit log across clouds, code hosts, observability, databases, SaaS, and MCP servers. Namespaces isolate teams on shared infrastructure, and Warden rotates the upstream secrets it holds on a schedule, so they stay fresh without operator coordination.
 - **Audit & attribution** — every request tied to the real identity behind it, the role used, the policy decision, and the upstream called — including the decision recorded on each MCP tool call. A shared MCP server acting for many agents still resolves to the specific agent it acted for, and secrets are never written to the log in the clear.
 
-See [the use-case guides](docs/use-cases/) for the full write-ups.
+See [the use-case guides](https://wardengateway.com/use-cases/) for the full write-ups.
 
 ## Supported systems
 
-Warden fronts systems across MCP servers, LLMs, cloud, code-hosting, observability, ITSM, Kubernetes, secrets, and databases. Follow any link below to configure your first endpoint, or see [docs/provider-backends/README.md](docs/provider-backends/README.md) for the full list.
+Warden fronts systems across MCP servers, LLMs, cloud, code-hosting, observability, ITSM, Kubernetes, secrets, and databases. Follow any link below to configure your first endpoint, or see [docs/provider-backends/README.md](https://wardengateway.com/provider-backends/) for the full list.
 
 | Category | Providers | Warden does |
 |---|---|---|
-| MCP servers | [Generic](docs/provider-backends/mcp.md) — GitHub, Google Cloud, Slack, Cloudflare, …; [AWS](docs/provider-backends/mcp_aws.md) (SigV4) | Proxies tool calls — injects credentials, enforces tool-level policy |
-| LLM APIs | [Anthropic](docs/provider-backends/anthropic.md), [OpenAI](docs/provider-backends/openai.md), [Mistral](docs/provider-backends/mistral.md), [Cohere](docs/provider-backends/cohere.md) | Injects API key |
-| Cloud infrastructure | [AWS](docs/provider-backends/aws.md), [Azure](docs/provider-backends/azure.md), [GCP](docs/provider-backends/gcp.md), [Alicloud](docs/provider-backends/alicloud.md), [IBM Cloud](docs/provider-backends/ibmcloud.md), [OVH](docs/provider-backends/ovh.md), [Scaleway](docs/provider-backends/scaleway.md), [Cloudflare](docs/provider-backends/cloudflare.md) | Temporary credentials / Bearer tokens |
-| Code hosting & CI/CD | [GitHub](docs/provider-backends/github.md), [GitLab](docs/provider-backends/gitlab.md), [Atlassian](docs/provider-backends/atlassian.md), [Ansible Tower](docs/provider-backends/ansible_tower.md), [Terraform Enterprise](docs/provider-backends/tfe.md) | Injects App token, PAT, or Bearer token |
-| Observability | [Datadog](docs/provider-backends/datadog.md), [Dynatrace](docs/provider-backends/dynatrace.md), [Elastic](docs/provider-backends/elastic.md), [Grafana](docs/provider-backends/grafana.md), [Honeycomb](docs/provider-backends/honeycomb.md), [New Relic](docs/provider-backends/newrelic.md), [Prometheus](docs/provider-backends/prometheus.md), [Sentry](docs/provider-backends/sentry.md), [Splunk](docs/provider-backends/splunk.md) | Injects API key / proxies metrics |
-| Incident & ITSM | [PagerDuty](docs/provider-backends/pagerduty.md), [ServiceNow](docs/provider-backends/servicenow.md), [Slack](docs/provider-backends/slack.md) | Injects Bearer token |
-| Kubernetes | [Kubernetes](docs/provider-backends/kubernetes.md) | Injects service account token |
-| Secrets backend | [HashiCorp Vault / OpenBao](docs/provider-backends/vault.md) | Mints short-lived tokens |
-| Databases | [AWS RDS / Aurora](docs/provider-backends/rds.md), [AWS Redshift](docs/provider-backends/redshift.md) | Issues IAM database auth token |
+| MCP servers | [Generic](https://wardengateway.com/provider-backends/mcp/) — GitHub, Google Cloud, Slack, Cloudflare, …; [AWS](https://wardengateway.com/provider-backends/mcp_aws/) (SigV4) | Proxies tool calls — injects credentials, enforces tool-level policy |
+| LLM APIs | [Anthropic](https://wardengateway.com/provider-backends/anthropic/), [OpenAI](https://wardengateway.com/provider-backends/openai/), [Mistral](https://wardengateway.com/provider-backends/mistral/), [Cohere](https://wardengateway.com/provider-backends/cohere/) | Injects API key |
+| Cloud infrastructure | [AWS](https://wardengateway.com/provider-backends/aws/), [Azure](https://wardengateway.com/provider-backends/azure/), [GCP](https://wardengateway.com/provider-backends/gcp/), [Alicloud](https://wardengateway.com/provider-backends/alicloud/), [IBM Cloud](https://wardengateway.com/provider-backends/ibmcloud/), [OVH](https://wardengateway.com/provider-backends/ovh/), [Scaleway](https://wardengateway.com/provider-backends/scaleway/), [Cloudflare](https://wardengateway.com/provider-backends/cloudflare/) | Temporary credentials / Bearer tokens |
+| Code hosting & CI/CD | [GitHub](https://wardengateway.com/provider-backends/github/), [GitLab](https://wardengateway.com/provider-backends/gitlab/), [Atlassian](https://wardengateway.com/provider-backends/atlassian/), [Ansible Tower](https://wardengateway.com/provider-backends/ansible_tower/), [Terraform Enterprise](https://wardengateway.com/provider-backends/tfe/) | Injects App token, PAT, or Bearer token |
+| Observability | [Datadog](https://wardengateway.com/provider-backends/datadog/), [Dynatrace](https://wardengateway.com/provider-backends/dynatrace/), [Elastic](https://wardengateway.com/provider-backends/elastic/), [Grafana](https://wardengateway.com/provider-backends/grafana/), [Honeycomb](https://wardengateway.com/provider-backends/honeycomb/), [New Relic](https://wardengateway.com/provider-backends/newrelic/), [Prometheus](https://wardengateway.com/provider-backends/prometheus/), [Sentry](https://wardengateway.com/provider-backends/sentry/), [Splunk](https://wardengateway.com/provider-backends/splunk/) | Injects API key / proxies metrics |
+| Incident & ITSM | [PagerDuty](https://wardengateway.com/provider-backends/pagerduty/), [ServiceNow](https://wardengateway.com/provider-backends/servicenow/), [Slack](https://wardengateway.com/provider-backends/slack/) | Injects Bearer token |
+| Kubernetes | [Kubernetes](https://wardengateway.com/provider-backends/kubernetes/) | Injects service account token |
+| Secrets backend | [HashiCorp Vault / OpenBao](https://wardengateway.com/provider-backends/vault/) | Mints short-lived tokens |
+| Databases | [AWS RDS / Aurora](https://wardengateway.com/provider-backends/rds/), [AWS Redshift](https://wardengateway.com/provider-backends/redshift/) | Issues IAM database auth token |
 
 ## Authentication methods
 
@@ -117,17 +117,17 @@ one rung at a time, without changing how the agent works:
 Every rung makes the same three wins concrete — and demonstrates
 them, not just asserts them: the secret leaves the workstation, and
 each rung turns on the audit log and watches a request get denied by
-policy. See [the series](docs/quickstarts/workstation/README.md).
+policy. See [the series](https://wardengateway.com/quickstarts/workstation/).
 
 ## Architecture
 
-See [docs/architecture.md](docs/architecture.md) for Warden's design decisions, high availability model, and deployment configuration.
+See [docs/architecture.md](https://wardengateway.com/architecture/) for Warden's design decisions, high availability model, and deployment configuration.
 
 ## Kubernetes
 
 A first-party Helm chart deploys Warden as a 3-replica HA cluster on any Kubernetes 1.27+ cluster — bring your own Postgres, your own TLS certificate, and either a Vault Transit endpoint for auto-unseal or a static seal key for development. The chart ships production-leaning defaults; a quickstart values file shrinks the install to a single replica for kind or minikube.
 
-See [docs/install/kubernetes.md](docs/install/kubernetes.md) for the full guide.
+See [docs/install/kubernetes.md](https://wardengateway.com/install/kubernetes/) for the full guide.
 
 ## Contributing
 

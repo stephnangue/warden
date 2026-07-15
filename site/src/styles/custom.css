@@ -1,0 +1,232 @@
+/*
+ * Warden — Starlight documentation theme.
+ * Layout & feel modelled on the HashiCorp developer docs
+ * (neutral, spacious, filled-pill sidebar), with the Warden red as the accent.
+ * Palette from warden.png: navy #0B1020 · red #E01E1E · white.
+ */
+
+:root {
+  --sl-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
+
+  /* Slightly wider, HashiCorp-like reading column. */
+  --sl-content-width: 47rem;
+  --sl-sidebar-width: 18.5rem;
+
+  /* Accent — the same brand red in both themes; only the light/high shades differ. */
+  --sl-color-accent-low: #3d0a0b;
+  --sl-color-accent: #d21a1a;
+  --sl-color-accent-high: #ffb0b0;
+
+  --warden-red: #e01e1e;
+  --warden-navy: #0b1020;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #ffe0e0;
+  --sl-color-accent: #d21a1a;
+  --sl-color-accent-high: #7f0f13;
+}
+
+/*
+ * Navy-tinted surfaces — scoped to the dark theme ONLY so they never leak into
+ * light mode. (A bare :root here would darken light-mode inline code and
+ * hairlines into an unreadable near-black.)
+ */
+:root[data-theme='dark'] {
+  --sl-color-bg: #0b1020;
+  --sl-color-bg-nav: #0d1428;
+  --sl-color-bg-sidebar: #0b1020;
+  --sl-color-bg-inline-code: #141d38;
+  --sl-color-hairline-shade: #1c2745;
+  --sl-color-hairline: #182036;
+}
+
+/* ------------------------------------------------------------------ *
+ * Header — clean neutral chrome, no accent bar.
+ * ------------------------------------------------------------------ */
+/*
+ * Subtle full-width hairline under the nav, in the HashiCorp docs style.
+ * NOTE: Starlight nests two elements that both carry .header — an outer
+ * <header class="header"> and an inner <div class="header">. Scope to the
+ * outer element, or the border paints twice and reads as a double line.
+ */
+:root[data-theme='light'] {
+  --wg-hairline: #e6e8ee;
+}
+:root[data-theme='dark'] {
+  --wg-hairline: #1c2745;
+}
+header.header {
+  border-bottom: 1px solid var(--wg-hairline);
+  backdrop-filter: saturate(150%) blur(8px);
+}
+header.header > .header {
+  border-bottom: none;
+}
+:root[data-theme='light'] header.header {
+  background: rgba(255, 255, 255, 0.88);
+}
+:root[data-theme='dark'] header.header {
+  background: rgba(11, 16, 32, 0.85);
+}
+
+/* ------------------------------------------------------------------ *
+ * Sidebar — HashiCorp-style: compact items, rounded hover, filled active pill.
+ * ------------------------------------------------------------------ */
+.sidebar-content {
+  padding-top: 0.5rem;
+}
+/* Group labels: small, uppercase, muted. */
+.sidebar-content .large,
+.sidebar-content summary .group-label > span {
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--sl-color-gray-3);
+  font-weight: 600;
+}
+/* Nav links: rounded, compact, muted until hover/active. */
+.sidebar-content a {
+  border-radius: 0.45rem;
+  padding: 0.32rem 0.6rem;
+  line-height: 1.35;
+  color: var(--sl-color-gray-2);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.sidebar-content a:hover {
+  background: var(--sl-color-gray-6);
+  color: var(--sl-color-white);
+}
+/* Active item: filled pill with bold near-black text and a red tick. */
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover {
+  background: var(--sl-color-gray-6);
+  color: var(--sl-color-white);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--warden-red);
+}
+:root[data-theme='dark'] .sidebar-content a:hover {
+  background: #141d38;
+}
+:root[data-theme='dark'] .sidebar-content a[aria-current='page'],
+:root[data-theme='dark'] .sidebar-content a[aria-current='page']:hover {
+  background: #141d38;
+}
+
+/* ------------------------------------------------------------------ *
+ * Content — confident headings, comfortable rhythm, subtle links.
+ * ------------------------------------------------------------------ */
+.sl-markdown-content {
+  --sl-text-code: 0.9em;
+}
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3 {
+  letter-spacing: -0.015em;
+}
+.sl-markdown-content h1 {
+  font-weight: 700;
+}
+.sl-markdown-content h2 {
+  margin-top: 2.5rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--sl-color-hairline);
+}
+.sl-markdown-content a:not(:where(.not-content *)) {
+  text-underline-offset: 0.15em;
+  text-decoration-color: color-mix(in srgb, var(--sl-color-accent) 40%, transparent);
+}
+.sl-markdown-content a:not(:where(.not-content *)):hover {
+  text-decoration-color: var(--sl-color-accent);
+}
+
+/* Tables: lighter, HashiCorp-like grid. */
+.sl-markdown-content th {
+  background: var(--sl-color-gray-7);
+  font-size: 0.9rem;
+  text-transform: none;
+}
+/*
+ * Starlight's reset applies `overflow-wrap: anywhere` to code, which lets a
+ * narrow table column break an identifier at any character
+ * (`kubernetes` -> "kubernet/es"). Keep inline code in cells whole and let the
+ * column size to it instead.
+ */
+.sl-markdown-content :is(td, th) code {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+/* ------------------------------------------------------------------ *
+ * Header — center the search, drop the useless divider.
+ * ------------------------------------------------------------------ */
+/* Center the search box within its header column. */
+.header > div:has(> site-search) {
+  justify-content: center;
+}
+/*
+ * Make the header's columns line up with the page's columns (nav | content |
+ * TOC), so "centred" search means centred over the content box rather than
+ * over Starlight's default wider first column. The header is inset by
+ * --sl-nav-pad-x, so discount that from the outer columns.
+ */
+@media (min-width: 72rem) {
+  header.header > .header {
+    grid-template-columns:
+      calc(var(--sl-sidebar-width) - var(--sl-nav-pad-x))
+      1fr
+      calc(18rem - var(--sl-nav-pad-x));
+  }
+  header.header .right-group {
+    justify-content: flex-end;
+  }
+}
+/* Remove the vertical separator Starlight draws after the social icons. */
+.social-icons::after {
+  border-inline-end: none;
+}
+/* Keep the right-hand controls compact. */
+.right-group,
+.social-icons {
+  gap: 0.6rem;
+}
+
+/* ------------------------------------------------------------------ *
+ * Right-hand "On this page" TOC — narrower, quieter.
+ * ------------------------------------------------------------------ */
+starlight-toc a {
+  font-size: 0.82rem;
+}
+@media (min-width: 72rem) {
+  /*
+   * Three-column proportions modelled on the HashiCorp docs: fixed left nav,
+   * fixed right TOC, and a centre column that fills everything between them.
+   * Starlight caps the content at --sl-content-width and centres it, which
+   * leaves dead gutters either side — so let the pane flex and the container
+   * fill it.
+   */
+  .main-pane {
+    flex: 1;
+    width: auto;
+    min-width: 0;
+  }
+  /*
+   * Use most of the centre column but cap the measure so prose stays readable,
+   * and centre it so the leftover space is balanced either side rather than
+   * dumped between the content and the TOC.
+   */
+  .content-panel .sl-container {
+    max-width: 55rem;
+    margin-inline: auto;
+  }
+  .right-sidebar-container {
+    width: 18rem; /* TOC (16rem) + the panel's 1rem inline padding */
+    flex: none;
+    margin-inline-start: 0;
+  }
+  .right-sidebar-panel .sl-container {
+    width: 16rem;
+    max-width: 16rem;
+  }
+}

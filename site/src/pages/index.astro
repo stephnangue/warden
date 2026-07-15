@@ -1,0 +1,268 @@
+---
+import '../styles/marketing.css';
+
+const github = 'https://github.com/stephnangue/warden';
+const nav = [
+  { label: 'Use cases', href: '/use-cases/' },
+  { label: 'Docs', href: '/concepts/' },
+  { label: 'Download', href: `${github}/releases/latest` },
+  { label: 'GitHub', href: github },
+];
+const benefits = [
+  {
+    h: 'A compromised agent has nothing to steal',
+    p: 'Prompt-injected, jailbroken, or simply wrong — it never held a credential, so there is nothing to exfiltrate. One bad step stays a contained, recoverable event instead of a broad compromise.',
+  },
+  {
+    h: 'No credential sprawl to chase',
+    p: 'One identity reaches every system its policy permits. Nothing to distribute per integration, nothing to rotate per integration, and no static secrets left sitting in a dozen process environments.',
+  },
+  {
+    h: 'Least privilege on every single call',
+    p: 'The agent gets exactly the access its policy allows for that step — down to the tool it may call and the arguments it may pass — never a session-wide grant it can wander around inside.',
+  },
+  {
+    h: 'One place to govern every system',
+    p: 'One identity, one policy surface, and one audit log across clouds, code hosts, observability, databases, SaaS, and MCP servers. Namespaces keep teams isolated on shared infrastructure.',
+  },
+  {
+    h: 'An answer when someone asks who did what',
+    p: 'Every request tied to the real identity behind it, the role it used, the decision that was made, and the upstream it called — with secrets never written to the log in the clear.',
+  },
+  {
+    h: 'Adoption costs you one line',
+    p: 'The identity goes in the credential slot your SDK already expects, so existing code keeps working — only the base URL changes.',
+  },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Warden — the secure gateway for AI agents</title>
+    <meta
+      name="description"
+      content="The secure gateway connecting AI agents to the enterprise systems they need to do real work. One control plane for identity, policy, and audit."
+    />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="canonical" href="https://wardengateway.com/" />
+    <meta property="og:title" content="Warden — the secure gateway for AI agents" />
+    <meta
+      property="og:description"
+      content="The secure gateway connecting AI agents to the enterprise systems they need to do real work."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Warden" />
+    <meta property="og:url" content="https://wardengateway.com/" />
+    <meta property="og:image" content="https://wardengateway.com/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Warden — the secure gateway for AI agents" />
+    <meta
+      name="twitter:description"
+      content="The secure gateway connecting AI agents to the enterprise systems they need to do real work."
+    />
+    <meta name="twitter:image" content="https://wardengateway.com/og.png" />
+  </head>
+  <body>
+    <header class="nav">
+      <div class="wrap nav-inner">
+        <a class="nav-logo" href="/"><img src="/logo-light.svg" alt="Warden" /></a>
+        <nav class="nav-links">
+          {nav.map((l) => <a href={l.href}>{l.label}</a>)}
+        </nav>
+        <div class="nav-spacer"></div>
+        <div class="nav-cta">
+          <a class="btn btn-primary" href="/concepts/">Get started</a>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <!-- Hero -->
+      <section class="hero">
+        <div class="wrap hero-inner">
+          <div>
+            <h1>The secure gateway for the AI agent era</h1>
+            <p class="sub">
+              Manage what your AI agents can reach and stop credentials from ever landing in
+              their hands, with identity-based access for every MCP server, cloud, code host,
+              database, and SaaS your agents now touch.
+            </p>
+            <div class="hero-actions">
+              <a class="btn btn-primary" href="/concepts/">Get started</a>
+              <a class="btn btn-on-dark" href={github}>View on GitHub</a>
+            </div>
+          </div>
+
+          <div class="hero-visual">
+            <svg class="flow" viewBox="0 0 340 366" role="img" aria-label="An AI agent presents only its identity to Warden, which authenticates it, authorizes the call, mints a fresh short-lived credential, and proxies the request to upstream systems.">
+              <defs>
+                <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+                  <path d="M0 0 L10 5 L0 10 z" fill="#cdd4e6" />
+                </marker>
+              </defs>
+              <rect class="box" x="60" y="14" width="220" height="72" rx="12" />
+              <text class="t" x="170" y="46">AI Agent</text>
+              <text class="s" x="170" y="66">presents only its identity</text>
+
+              <line class="line" x1="170" y1="90" x2="170" y2="142" marker-end="url(#ar)" />
+              <text class="e" x="196" y="120" style="text-anchor:start">identity only</text>
+
+              <rect class="box box-warden" x="60" y="146" width="220" height="84" rx="14" />
+              <text class="t t-warden" x="170" y="182">Warden</text>
+              <text class="s" x="170" y="204">authenticate · authorize · mint</text>
+
+              <line class="line" x1="170" y1="234" x2="170" y2="286" marker-end="url(#ar)" />
+              <text class="e" x="196" y="264" style="text-anchor:start">short-lived credential</text>
+
+              <rect class="box" x="60" y="290" width="220" height="72" rx="12" />
+              <text class="t" x="170" y="322">Upstreams</text>
+              <text class="s" x="170" y="342">MCP · Cloud · LLMs · Code · SaaS</text>
+            </svg>
+            <div class="cap">
+              <div class="chip">Identity <span>✓</span></div>
+              <div class="chip">Policy <span>✓</span></div>
+              <div class="chip">Credential <span>✓</span></div>
+              <div class="chip">Audit <span>✓</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Features -->
+      <section class="band">
+        <div class="wrap">
+          <div class="feat-head">
+            <h2 class="h">Broker, authorize, and audit every agent request</h2>
+            <p class="lead">
+              The control gap, not the credential, is the headline: pointing an agent at
+              production means over-scoped, long-lived credentials, no per-request policy, and
+              no identity-tied audit. Warden mints a short-lived credential per request,
+              decides each call as it happens, and ties every request back to the identity that
+              made it.
+            </p>
+          </div>
+          <div class="feat-cols">
+            <div class="feat">
+              <div class="ico">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="7.5" cy="15.5" r="4.5" />
+                  <path d="M10.7 12.3 21 2m-3 3 2.5 2.5M15 5l2.5 2.5" />
+                </svg>
+              </div>
+              <h3>Access brokering</h3>
+              <p>
+                Warden mints a scoped, short-lived credential for every request and injects it
+                on the way through. The agent presents only its own identity and never holds a
+                key — so there is nothing in it to leak.
+              </p>
+            </div>
+            <div class="feat">
+              <div class="ico">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                  <path d="M9 12l2 2 4-4" />
+                </svg>
+              </div>
+              <h3>Runtime authorization</h3>
+              <p>
+                Every call is authorized the moment it happens — down to the action and its
+                arguments, and for MCP, which tools an agent may invoke and which arguments it
+                may pass. Never a session-wide grant.
+              </p>
+            </div>
+            <div class="feat">
+              <div class="ico">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </div>
+              <h3>Audit &amp; attribution</h3>
+              <p>
+                Every request tied to the real identity behind it, the role used, the policy
+                decision, and the upstream called — with secrets never written to the log in
+                the clear.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Benefits -->
+      <section class="band">
+        <div class="wrap">
+          <div class="section-head">
+            <h2 class="h">Everything your agents need. Nothing they can leak.</h2>
+          </div>
+          <div class="grid grid-3">
+            {benefits.map((b) => (
+              <div class="card">
+                <h3>{b.h}</h3>
+                <p>{b.p}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <!-- Closing CTA -->
+      <section class="cta">
+        <div class="wrap">
+          <h2>Remove every secret from the agent.</h2>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="/concepts/">Read the concepts guide</a>
+            <a class="btn btn-on-dark" href={github}>View on GitHub</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="wrap footer-inner">
+        <div>
+          <img src="/logo-dark.svg" alt="Warden" />
+          <p class="blurb">
+            The secure gateway connecting AI agents to the enterprise systems they need to do
+            real work.
+          </p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="/use-cases/">Use cases</a></li>
+            <li><a href="/provider-backends/">Providers</a></li>
+            <li><a href="/auth-methods/">Authentication</a></li>
+            <li><a href="/architecture/">Architecture</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Docs</h4>
+          <ul>
+            <li><a href="/concepts/">Concepts</a></li>
+            <li><a href="/quickstarts/workstation/">Quickstarts</a></li>
+            <li><a href="/cli/">CLI reference</a></li>
+            <li><a href="/install/kubernetes/">Install</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Project</h4>
+          <ul>
+            <li><a href={github}>GitHub</a></li>
+            <li><a href={`${github}/releases`}>Releases</a></li>
+            <li><a href={`${github}/blob/main/CONTRIBUTING.md`}>Contributing</a></li>
+            <li><a href={`${github}/blob/main/LICENSE`}>License (MPL-2.0)</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="wrap footer-bottom">
+        <span>© Warden — MPL-2.0 licensed.</span>
+        <span>An OpenBao integrator.</span>
+      </div>
+    </footer>
+  </body>
+</html>

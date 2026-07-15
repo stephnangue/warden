@@ -1,0 +1,6 @@
+# Cloudflare Pages redirects.
+# The docs live at root paths (/concepts/, /provider-backends/, …), but "/docs"
+# is the obvious guess — and the nav labels it "Docs" — so send it to the
+# concepts guide rather than 404.
+/docs      /concepts/  301
+/docs/*    /concepts/  301

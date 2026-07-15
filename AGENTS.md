@@ -3,8 +3,8 @@
 This file orients an autonomous agent (LLM, AI assistant, automation
 script) that needs to *call services through Warden*. Operators looking to
 set up Warden, mount providers, or onboard credentials should read the docs
-— start with [Providers](docs/concepts/providers.md) and the per-backend
-guides under [docs/provider-backends/](docs/provider-backends/); this tree
+— start with [Providers](https://wardengateway.com/concepts/providers/) and the per-backend
+guides under [docs/provider-backends/](https://wardengateway.com/provider-backends/); this tree
 is for the *consumer* side.
 
 ## Where to start
