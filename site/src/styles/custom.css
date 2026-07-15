@@ -1,0 +1,41 @@
+/*
+ * Warden brand tokens.
+ * Palette derived from warden.png:
+ *   ink / navy background  #0B1020
+ *   red accent (wedge)     #E01E1E
+ *   text on dark           #FFFFFF
+ */
+
+/* Dark theme (default) */
+:root {
+  --sl-color-accent-low: #3d0a0b;
+  --sl-color-accent: #d21a1a;
+  --sl-color-accent-high: #ffb0b0;
+
+  /* Navy-tinted surfaces */
+  --sl-color-black: #0b1020;
+  --sl-color-bg: #0b1020;
+  --sl-color-bg-nav: #0d1428;
+  --sl-color-bg-sidebar: #090e1c;
+  --sl-color-bg-inline-code: #16203c;
+  --sl-color-hairline-shade: #1c2745;
+
+  --warden-red: #e01e1e;
+  --warden-navy: #0b1020;
+}
+
+/* Light theme */
+:root[data-theme='light'] {
+  --sl-color-accent-low: #ffd8d8;
+  --sl-color-accent: #d21a1a;
+  --sl-color-accent-high: #7f0f13;
+
+  --sl-color-bg: #ffffff;
+  --sl-color-bg-nav: #f7f8fb;
+  --sl-color-bg-sidebar: #f7f8fb;
+}
+
+/* Signature red hairline under the top nav — the wedge motif carried across the site. */
+.header {
+  border-bottom: 2px solid var(--warden-red);
+}

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 140" role="img" aria-label="Warden">
+  <!-- red wedge (the "\" backslash motif) -->
+  <path d="M8 12 L44 12 L70 128 L34 128 Z" fill="#E01E1E"/>
+  <!-- wordmark -->
+  <text x="92" y="104" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="104" font-weight="600" letter-spacing="-2" fill="#0B1020">warden</text>
+</svg>

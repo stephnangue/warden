@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Warden">
+  <rect width="64" height="64" rx="12" fill="#0B1020"/>
+  <!-- red wedge (the "\" backslash motif) -->
+  <path d="M20 12 L34 12 L44 52 L30 52 Z" fill="#E01E1E"/>
+</svg>
