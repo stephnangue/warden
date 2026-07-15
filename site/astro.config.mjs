@@ -17,6 +17,11 @@ export default defineConfig({
       },
       favicon: '/favicon.svg',
       customCss: ['./src/styles/custom.css'],
+      // HashiCorp-style: charcoal code blocks in both light and dark themes.
+      expressiveCode: {
+        themes: ['github-dark'],
+        styleOverrides: { borderRadius: '0.6rem' },
+      },
       social: [
         {
           icon: 'github',
