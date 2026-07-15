@@ -6,12 +6,6 @@ Administrative operations on a Warden server. Today this groups a single
 subcommand, `init`, which initializes a fresh server and generates the first root
 token.
 
-## Table of Contents
-
-- [Usage](#usage)
-- [`operator init`](#operator-init)
-- [See Also](#see-also)
-
 ## Usage
 
 ```text

@@ -7,23 +7,6 @@ The IBM Cloud provider enables proxied access to IBM Cloud APIs through Warden. 
 - **Standard API** — Injects `Authorization: Bearer` with an IBM Cloud IAM token and forwards to the IBM Cloud service whose hostname is embedded in the request path. One mount handles every IBM Cloud service (Resource Controller, VPC, Kubernetes Service, Code Engine, etc.).
 - **COS Object Storage** — Verifies the client's SigV4 signature, re-signs with real IBM COS HMAC credentials, and forwards to `s3.<region>.cloud-object-storage.appdomain.cloud`. Compatible with any S3 client (AWS CLI, boto3, s3cmd, MinIO).
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [URL format](#url-format)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
-- [Client configuration](#client-configuration)
-- [Unsupported clients](#unsupported-clients)
-- [COS Object Storage](#cos-object-storage)
-- [Security considerations](#security-considerations)
-- [TLS Certificate Authentication](#tls-certificate-authentication)
-- [Configuration Reference](#configuration-reference)
-- [Token Management](#token-management)
-
 ## URL format
 
 All API requests follow this pattern:

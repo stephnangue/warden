@@ -4,21 +4,6 @@ title: "AWS"
 
 The AWS provider enables proxied access to AWS services through Warden. Clients embed their identity (JWT or TLS client certificate) directly in standard AWS SDK requests. Warden implicitly authenticates the caller, verifies the request signature for integrity, re-signs the request with real AWS credentials, and forwards it to the target AWS endpoint. No explicit Warden login step is required — the AWS SDK works as normal.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Specs](#step-3-create-a-credential-source-and-specs)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Configure AWS SDK and Make Requests](#step-5-configure-aws-sdk-and-make-requests)
-- [Architecture Overview](#architecture-overview)
-- [DNS Configuration](#dns-configuration)
-- [Configuration Reference](#configuration-reference)
-- [Supported AWS Services](#supported-aws-services)
-- [Known Limitations](#known-limitations)
-- [Troubleshooting](#troubleshooting)
-
 ## Prerequisites
 
 - Docker and Docker Compose installed and running

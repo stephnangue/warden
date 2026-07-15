@@ -4,20 +4,6 @@ title: "Atlassian"
 
 The Atlassian provider enables proxied access to all Atlassian Cloud and Data Center REST APIs through Warden with automatic credential injection and policy evaluation. A single provider type supports every Atlassian product — mount multiple instances with different `atlassian_url` values for Jira, Confluence, Jira Service Management, Bitbucket, Compass, and the Admin API.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
-- [Multi-Product Setup](#multi-product-setup)
-- [Data Center and Self-Hosted](#data-center-and-self-hosted)
-- [TLS Certificate Authentication](#tls-certificate-authentication)
-- [Configuration Reference](#configuration-reference)
-- [Authentication Modes](#authentication-modes)
-
 ## Prerequisites
 
 - Docker and Docker Compose installed and running

@@ -4,21 +4,6 @@ title: "Vault"
 
 The Vault provider enables proxied access to HashiCorp Vault (or OpenBao) through Warden. It intercepts client requests, injects a short-lived Vault token minted from a credential spec, and forwards the request to the target Vault instance. This allows Warden to broker Vault access without distributing long-lived credentials to clients.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Create an AppRole in Vault](#step-1-create-an-approle-in-vault)
-- [Step 2: Configure Cert Auth and Create a Role](#step-2-configure-cert-auth-and-create-a-role)
-- [Step 3: Mount and Configure the Provider](#step-3-mount-and-configure-the-provider)
-- [Step 4: Create a Credential Source and Specs](#step-4-create-a-credential-source-and-specs)
-- [Step 5: Create a Policy](#step-5-create-a-policy)
-- [Step 6: Make Requests with Client Certificates](#step-6-make-requests-with-client-certificates)
-- [Architecture Overview](#architecture-overview)
-- [Mint Methods](#mint-methods)
-- [JWT Authentication](#jwt-authentication)
-- [Configuration Reference](#configuration-reference)
-- [Troubleshooting](#troubleshooting)
-
 ## Prerequisites
 
 - HashiCorp Vault running and unsealed

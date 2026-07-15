@@ -4,19 +4,6 @@ title: "Kubernetes"
 
 The Kubernetes provider enables proxied access to Kubernetes API servers through Warden. It forwards requests to the Kubernetes API (Pods, Deployments, Services, Namespaces, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer` header using short-lived ServiceAccount tokens created via the Kubernetes TokenRequest API (`kubernetes` source type).
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
-- [RBAC Requirements](#rbac-requirements)
-- [Configuration Reference](#configuration-reference)
-- [Token Management](#token-management)
-- [Troubleshooting](#troubleshooting)
-
 ## Prerequisites
 
 - Docker and Docker Compose installed and running

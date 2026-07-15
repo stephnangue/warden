@@ -17,24 +17,6 @@ This is the auth method to reach for when:
 
 If your workload's identity is an ordinary OIDC JWT (not a SPIFFE JWT-SVID), use the `jwt` method. If it is a plain X.509 client certificate from a classic PKI (not issued under a SPIFFE trust domain), use the `cert` method. The `cert` method can still accept a SPIFFE X.509-SVID as an ordinary certificate bound on its URI SAN — but only the `spiffe` method verifies it against a trust-domain bundle and accepts the matching JWT-SVID on the same mount.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Enable the Method and Register a Trust Domain](#step-1-enable-the-method-and-register-a-trust-domain)
-- [Step 2: Create a Role](#step-2-create-a-role)
-- [Step 3: Wire Up Transparent Auth](#step-3-wire-up-transparent-auth)
-- [Credential Precedence: JWT-SVID Wins](#credential-precedence-jwt-svid-wins)
-- [The Audience Requirement (JWT-SVID)](#the-audience-requirement-jwt-svid)
-- [Restricting Allowed SPIFFE IDs](#restricting-allowed-spiffe-ids)
-- [Federation](#federation)
-- [Group-Based Policies (JWT-SVID)](#group-based-policies-jwt-svid)
-- [Token Metadata](#token-metadata)
-- [On-Behalf-Of Chain (RFC 8693 `act` Claim)](#on-behalf-of-chain-rfc-8693-act-claim)
-- [Discovering Assumable Roles](#discovering-assumable-roles)
-- [Revocation and SVID Lifetime](#revocation-and-svid-lifetime)
-- [Configuration Reference](#configuration-reference)
-- [Troubleshooting](#troubleshooting)
-
 ## Prerequisites
 
 - A **Warden server** unsealed and reachable from the workload's network.

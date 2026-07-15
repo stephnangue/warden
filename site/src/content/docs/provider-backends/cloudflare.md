@@ -7,19 +7,6 @@ The Cloudflare provider enables proxied access to Cloudflare APIs through Warden
 - **Standard API** — Injects `Authorization: Bearer` header with the API token. Covers zones, DNS records, Workers, accounts, firewall rules, and all other Cloudflare products.
 - **R2 Object Storage** — Verifies the client's SigV4 signature, re-signs with real Cloudflare R2 credentials, and forwards to `<account_id>.r2.cloudflarestorage.com`. Compatible with any S3 client (AWS CLI, boto3, s3cmd, MinIO).
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
-- [R2 Object Storage](#r2-object-storage)
-- [TLS Certificate Authentication](#tls-certificate-authentication)
-- [Configuration Reference](#configuration-reference)
-- [Token Management](#token-management)
-
 ## Prerequisites
 
 - Docker and Docker Compose installed and running

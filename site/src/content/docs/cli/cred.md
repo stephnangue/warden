@@ -8,14 +8,6 @@ request. A source holds the upstream connection and root credential; a spec bind
 to a source and defines type, TTLs, and rotation. The `cred` command groups two
 subcommand families: `cred source` and `cred spec`.
 
-## Table of Contents
-
-- [Usage](#usage)
-- [`cred source`](#cred-source)
-- [`cred spec`](#cred-spec)
-- [`cred spec connect`](#cred-spec-connect)
-- [See Also](#see-also)
-
 ## Usage
 
 ```text

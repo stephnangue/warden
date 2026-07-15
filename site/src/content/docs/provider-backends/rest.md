@@ -12,18 +12,6 @@ One mount fronts one upstream. Three config fields cover the common conventions:
 
 The token *value* is always brokered per request from the credential subsystem (per-role minting, rotation, policy, audit) — it is never stored in the mount config.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
-- [Auth Header Recipes](#auth-header-recipes)
-- [Configuration Reference](#configuration-reference)
-- [Token Management](#token-management)
-
 ## Prerequisites
 
 - A REST API reachable from Warden and a token for it (static API key, or a token mintable by one of Warden's credential sources).

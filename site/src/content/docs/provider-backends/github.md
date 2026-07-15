@@ -4,19 +4,6 @@ title: "GitHub"
 
 The GitHub provider enables proxied access to both the GitHub REST API and Git smart-HTTP (clone, fetch, push) through Warden. It supports both **GitHub App** and **Personal Access Token (PAT)** authentication, and works with GitHub.com and GitHub Enterprise Server.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
-- [Git over HTTPS](#git-over-https)
-- [Authentication Methods](#authentication-methods)
-- [Configuration Reference](#configuration-reference)
-- [GitHub Enterprise Server](#github-enterprise-server)
-
 ## Prerequisites
 
 - Docker and Docker Compose installed and running

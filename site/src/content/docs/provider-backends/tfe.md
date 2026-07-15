@@ -4,18 +4,6 @@ title: "TFE"
 
 The TFE provider enables proxied access to the Terraform Enterprise (TFE) and HCP Terraform API through Warden. It forwards requests to the TFE REST API (Organizations, Workspaces, Runs, State Versions, Variables, Projects, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer <token>` header. One credential mode is supported: static API tokens (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
-- [TLS Certificate Authentication](#tls-certificate-authentication)
-- [Configuration Reference](#configuration-reference)
-- [Token Types](#token-types)
-
 ## Prerequisites
 
 - Docker and Docker Compose installed and running

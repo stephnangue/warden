@@ -6,13 +6,6 @@ Discover the [roles](/concepts/roles/) the presented identity can assume. A
 role selects the policies and credential a request runs with; pass one on any
 command with the global `-r/--role` flag (or `WARDEN_ROLE`).
 
-## Table of Contents
-
-- [Usage](#usage)
-- [Subcommands](#subcommands)
-- [`role list`](#role-list)
-- [See Also](#see-also)
-
 ## Usage
 
 ```text

@@ -17,18 +17,6 @@ secrets, and the fail-open→fail-closed guarantee — see the
 Audit devices are a **root-namespace, operator-level** concern: they are global,
 and every namespace's traffic is logged to the same set of devices.
 
-## Contents
-
-- [Enable it](#enable-it)
-  - [CLI](#cli)
-  - [Declarative (HCL)](#declarative-hcl)
-  - [HTTP API](#http-api)
-- [Configuration reference](#configuration-reference)
-- [Rotation and retention](#rotation-and-retention)
-- [Salting and omission](#salting-and-omission)
-- [Troubleshooting](#troubleshooting)
-- [See Also](#see-also)
-
 ## Enable it
 
 A device is identified by its **mount path** (where it lives in `sys/audit/`) and

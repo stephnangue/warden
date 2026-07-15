@@ -22,18 +22,6 @@ consented to. This is the `mcp` provider's `oauth_bearer_token` credential shape
 > token. The two mounts therefore use different credentials and cannot share a
 > credspec.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Register a Slack OAuth App and Create the Credential](#step-3-register-a-slack-oauth-app-and-create-the-credential)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Point an MCP Client at Warden](#step-5-point-an-mcp-client-at-warden)
-- [TLS Certificate Authentication](#tls-certificate-authentication)
-- [Configuration Reference](#configuration-reference)
-- [Token Scopes and Tool Availability](#token-scopes-and-tool-availability)
-
 ## Prerequisites
 
 - Docker and Docker Compose installed and running

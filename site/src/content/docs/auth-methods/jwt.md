@@ -14,20 +14,6 @@ If your workload's identity is a Kubernetes ServiceAccount token, prefer the `ku
 
 If your workloads present **SPIFFE identities** — an X.509-SVID or a JWT-SVID — use the dedicated `spiffe` auth method instead. It verifies the SVID against a trust-domain bundle and enforces the SPIFFE audience requirement, which generic JWT claim-binding here cannot do.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure the Key Source](#step-1-configure-the-key-source)
-- [Step 2: Add Issuer / Audience / Claim Bindings](#step-2-add-issuer--audience--claim-bindings)
-- [Step 3: Create a Role](#step-3-create-a-role)
-- [Step 4: Wire Up Transparent Auth](#step-4-wire-up-transparent-auth)
-- [Group-Based Policies](#group-based-policies)
-- [Token Metadata](#token-metadata)
-- [On-Behalf-Of Chain (RFC 8693 `act` Claim)](#on-behalf-of-chain-rfc-8693-act-claim)
-- [Discovering Assumable Roles](#discovering-assumable-roles)
-- [Configuration Reference](#configuration-reference)
-- [Troubleshooting](#troubleshooting)
-
 ## Prerequisites
 
 - A **Warden server** unsealed and reachable from the workload's network.

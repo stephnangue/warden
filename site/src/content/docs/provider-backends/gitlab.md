@@ -4,21 +4,6 @@ title: "GitLab"
 
 The GitLab provider enables proxied access to the GitLab REST API through Warden. It supports **Personal Access Token (PAT)** and **OAuth2** authentication, can mint scoped project and group access tokens on demand, and works with both GitLab.com and self-hosted instances.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
-- [Git over HTTPS](#git-over-https)
-- [Minting Project and Group Access Tokens](#minting-project-and-group-access-tokens)
-- [Authentication Methods](#authentication-methods)
-- [Credential Rotation](#credential-rotation)
-- [Configuration Reference](#configuration-reference)
-- [Self-Hosted GitLab](#self-hosted-gitlab)
-
 ## Prerequisites
 
 - Docker and Docker Compose installed and running

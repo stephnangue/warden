@@ -10,17 +10,6 @@ per provider type). See [Discovery & Skills](/concepts/discovery-and-skills/).
 > `delete`) require a root-namespace token.** Running a mutation from a
 > sub-namespace surfaces the server's 403.
 
-## Table of Contents
-
-- [Usage](#usage)
-- [Subcommands](#subcommands)
-- [`skill list`](#skill-list)
-- [`skill read`](#skill-read)
-- [`skill create`](#skill-create)
-- [`skill update`](#skill-update)
-- [`skill delete`](#skill-delete)
-- [See Also](#see-also)
-
 ## Usage
 
 ```text

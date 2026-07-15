@@ -11,19 +11,6 @@ Supports both deployment models:
 
 The legacy `GetClusterCredentials` API (with the `IAM:` / `IAMA:` user prefixes and `AutoCreate` flag) is intentionally not supported.
 
-## Table of Contents
-
-- [How It Works](#how-it-works)
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Redshift Provider](#step-2-mount-and-configure-the-redshift-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create Grants on the Provider](#step-4-create-grants-on-the-provider)
-- [Step 5: Create a Policy](#step-5-create-a-policy)
-- [Step 6: Get a Connection String](#step-6-get-a-connection-string)
-- [Attribution](#attribution)
-- [Configuration Reference](#configuration-reference)
-
 ## How It Works
 
 ```

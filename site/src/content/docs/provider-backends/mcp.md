@@ -44,17 +44,6 @@ operator-set description, not by reading the URL.
 > This page is the general operator guide; the per-upstream pages layer
 > upstream-specific credential, URL, and quirk notes on top.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Point an MCP Client at Warden](#step-5-point-an-mcp-client-at-warden)
-- [TLS Certificate Authentication](#tls-certificate-authentication)
-- [Configuration Reference](#configuration-reference)
-
 ## Prerequisites
 
 - Docker and Docker Compose installed and running

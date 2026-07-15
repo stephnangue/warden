@@ -7,17 +7,6 @@ control what an identity may do on which paths. A policy grants a set of
 `capabilities` (`create`, `read`, `update`, `delete`, `list`, …) on path globs;
 [roles](/concepts/roles/) bind policies to authenticated identities.
 
-## Table of Contents
-
-- [Usage](#usage)
-- [Subcommands](#subcommands)
-- [`policy write`](#policy-write)
-- [`policy read`](#policy-read)
-- [`policy list`](#policy-list)
-- [`policy delete`](#policy-delete)
-- [Conditions (CEL)](#conditions-cel)
-- [See Also](#see-also)
-
 ## Usage
 
 ```text

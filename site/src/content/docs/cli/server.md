@@ -6,14 +6,6 @@ Start a Warden server that responds to API requests. In production the server is
 driven by an HCL configuration file (or a directory of them); a `--dev` flag spins
 up a throwaway, pre-unsealed instance for local work.
 
-## Table of Contents
-
-- [Usage](#usage)
-- [Configuration files](#configuration-files)
-- [Dev mode](#dev-mode)
-- [Flags](#flags)
-- [See Also](#see-also)
-
 ## Usage
 
 ```text

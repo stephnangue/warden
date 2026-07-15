@@ -5,17 +5,6 @@ title: "namespace"
 Manage [namespaces](/concepts/namespaces/) — the isolation boundary that
 separates one tenant's providers, auth methods, and policies from another's.
 
-## Table of Contents
-
-- [Usage](#usage)
-- [Subcommands](#subcommands)
-- [`namespace create`](#namespace-create)
-- [`namespace list`](#namespace-list)
-- [`namespace read`](#namespace-read)
-- [`namespace update`](#namespace-update)
-- [`namespace delete`](#namespace-delete)
-- [See Also](#see-also)
-
 ## Usage
 
 ```text

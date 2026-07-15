@@ -6,19 +6,6 @@ The Grafana provider enables proxied access to the entire Grafana ecosystem thro
 
 A single provider type supports all Grafana services. Mount multiple instances with different `grafana_url` values and use the optional `tenant_id` config to inject the `X-Scope-OrgID` header required by Loki, Mimir, Tempo, and Pyroscope.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
-- [Multi-Service Setup](#multi-service-setup)
-- [TLS Certificate Authentication](#tls-certificate-authentication)
-- [Configuration Reference](#configuration-reference)
-- [Token Management](#token-management)
-
 ## Prerequisites
 
 - Docker and Docker Compose installed and running

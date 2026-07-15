@@ -14,21 +14,6 @@ This is the auth method to reach for when:
 
 Operators who have used Vault's or OpenBao's `auth/kubernetes` will find the shape familiar: the mount points at one kube-apiserver, roles bind to ServiceAccount names and namespaces, and TokenReview does the validation.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Grant `system:auth-delegator` on the Spoke](#step-1-grant-systemauth-delegator-on-the-spoke)
-- [Step 2: Enable and Configure the Auth Method](#step-2-enable-and-configure-the-auth-method)
-- [Step 3: Create a Role Bound to Your Workload](#step-3-create-a-role-bound-to-your-workload)
-- [Step 4: Log In From the Workload](#step-4-log-in-from-the-workload)
-- [Self-Reviewing Mode (No `token_reviewer_jwt`)](#self-reviewing-mode-no-token_reviewer_jwt)
-- [Multi-Spoke Topologies](#multi-spoke-topologies)
-- [Audience Binding](#audience-binding)
-- [Token Metadata](#token-metadata)
-- [Discovering Assumable Roles](#discovering-assumable-roles)
-- [Configuration Reference](#configuration-reference)
-- [Troubleshooting](#troubleshooting)
-
 ## Prerequisites
 
 - A **Warden server** unsealed and reachable from the workload's network.

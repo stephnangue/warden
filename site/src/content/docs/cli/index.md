@@ -10,18 +10,6 @@ formats, and exit codes — then indexes the per-command reference pages.
 
 For what the server *does* with these calls, see [Concepts](/concepts/).
 
-## Table of Contents
-
-- [Connecting to a server](#connecting-to-a-server)
-- [Global flags](#global-flags)
-- [Environment variables](#environment-variables)
-- [Output formats](#output-formats)
-- [Field projection](#field-projection)
-- [Dry run](#dry-run)
-- [Exit codes](#exit-codes)
-- [Command index](#command-index)
-- [See Also](#see-also)
-
 ## Connecting to a server
 
 Two environment variables decide which server a command talks to and as whom:

@@ -12,16 +12,6 @@ request and response for compliance and forensics.
 > one. Re-enable a device promptly. Devices declared in HCL config cannot be
 > disabled via the API.
 
-## Table of Contents
-
-- [Usage](#usage)
-- [Subcommands](#subcommands)
-- [`audit enable`](#audit-enable)
-- [`audit list`](#audit-list)
-- [`audit read`](#audit-read)
-- [`audit disable`](#audit-disable)
-- [See Also](#see-also)
-
 ## Usage
 
 ```text

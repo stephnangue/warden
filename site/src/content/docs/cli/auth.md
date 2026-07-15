@@ -9,16 +9,6 @@ enable a method, inspect it, and tear it down. The credential validation itself
 paths; see [Authentication](/concepts/authentication/) and the per-method
 guides.
 
-## Table of Contents
-
-- [Usage](#usage)
-- [Subcommands](#subcommands)
-- [`auth enable`](#auth-enable)
-- [`auth list`](#auth-list)
-- [`auth read`](#auth-read)
-- [`auth disable`](#auth-disable)
-- [See Also](#see-also)
-
 ## Usage
 
 ```text

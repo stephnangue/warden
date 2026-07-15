@@ -19,22 +19,6 @@ This is the auth method to reach for when:
 
 If your workload's identity is a Kubernetes ServiceAccount token, prefer the `kubernetes` auth method. If it's a JWT from an OIDC provider, prefer the `jwt` method. If your workloads present **SPIFFE SVIDs** (X.509-SVID or JWT-SVID) and you want full trust-domain-bound SVID validation, use the dedicated `spiffe` auth method. The cert method is the right tool when a classic X.509 certificate **is** the identity — not when it's just transport encryption.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure Trusted CAs](#step-1-configure-trusted-cas)
-- [Step 2: Enable Revocation Checking (Optional)](#step-2-enable-revocation-checking-optional)
-- [Step 3: Create a Role](#step-3-create-a-role)
-- [Step 4: Wire Up Transparent Auth](#step-4-wire-up-transparent-auth)
-- [Principal Claim Selection](#principal-claim-selection)
-- [URI SAN Patterns](#uri-san-patterns)
-- [How the Certificate Reaches Warden](#how-the-certificate-reaches-warden)
-- [Role-Specific CAs](#role-specific-cas)
-- [Token Metadata](#token-metadata)
-- [Discovering Assumable Roles](#discovering-assumable-roles)
-- [Configuration Reference](#configuration-reference)
-- [Troubleshooting](#troubleshooting)
-
 ## Prerequisites
 
 - A **Warden server** unsealed and reachable from the workload's network.

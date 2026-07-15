@@ -4,19 +4,6 @@ title: "Honeycomb"
 
 The Honeycomb provider enables proxied access to the Honeycomb API through Warden. It forwards requests to Honeycomb endpoints (`/1/events/{dataset}`, `/1/queries/{dataset}`, `/2/teams/{team}/api-keys`, etc.) with automatic credential injection and policy evaluation. Honeycomb uses two authentication modes: the `X-Honeycomb-Team` header for ingest and configuration keys, and `Authorization: Bearer <key_id>:<key_secret>` for management keys. Credentials can be static tokens from an `apikey` source or dynamically minted API keys from the `honeycomb` source driver.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
-- [Cleanup](#cleanup)
-- [TLS Certificate Authentication](#tls-certificate-authentication)
-- [Configuration Reference](#configuration-reference)
-- [Token Management](#token-management)
-
 ## Prerequisites
 
 - Docker and Docker Compose installed and running

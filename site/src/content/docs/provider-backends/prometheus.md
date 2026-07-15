@@ -4,19 +4,6 @@ title: "Prometheus"
 
 The Prometheus provider enables proxied access to the Prometheus HTTP API through Warden. It forwards requests to Prometheus endpoints (`/api/v1/query`, `/api/v1/targets`, etc.) with automatic credential injection and policy evaluation. It supports both bearer token authentication (for managed services like Grafana Mimir, Amazon Managed Prometheus, and Thanos) and HTTP basic auth (for self-hosted Prometheus instances configured with `--web.config.file`). Credentials are static tokens stored in an `apikey` credential source.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Configure JWT Auth and Create a Role](#step-1-configure-jwt-auth-and-create-a-role)
-- [Step 2: Mount and Configure the Provider](#step-2-mount-and-configure-the-provider)
-- [Step 3: Create a Credential Source and Spec](#step-3-create-a-credential-source-and-spec)
-- [Step 4: Create a Policy](#step-4-create-a-policy)
-- [Step 5: Get a JWT and Make Requests](#step-5-get-a-jwt-and-make-requests)
-- [Cleanup](#cleanup)
-- [TLS Certificate Authentication](#tls-certificate-authentication)
-- [Configuration Reference](#configuration-reference)
-- [Token Management](#token-management)
-
 ## Prerequisites
 
 - Docker and Docker Compose installed and running

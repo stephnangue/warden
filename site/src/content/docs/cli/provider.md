@@ -8,17 +8,6 @@ subcommands to mount, inspect, retune, and unmount a provider. The upstream
 connection details and credential wiring are configured by writing to the mount's
 paths; see the [provider backend guides](/provider-backends/).
 
-## Table of Contents
-
-- [Usage](#usage)
-- [Subcommands](#subcommands)
-- [`provider enable`](#provider-enable)
-- [`provider list`](#provider-list)
-- [`provider read`](#provider-read)
-- [`provider tune`](#provider-tune)
-- [`provider disable`](#provider-disable)
-- [See Also](#see-also)
-
 ## Usage
 
 ```text
