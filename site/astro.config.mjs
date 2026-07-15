@@ -17,6 +17,25 @@ export default defineConfig({
       },
       favicon: '/favicon.svg',
       customCss: ['./src/styles/custom.css'],
+      // Starlight emits og:title/type/url per page; add the shared social card.
+      head: [
+        {
+          tag: 'meta',
+          attrs: { property: 'og:image', content: 'https://wardengateway.com/og.png' },
+        },
+        {
+          tag: 'meta',
+          attrs: { property: 'og:site_name', content: 'Warden' },
+        },
+        {
+          tag: 'meta',
+          attrs: { name: 'twitter:card', content: 'summary_large_image' },
+        },
+        {
+          tag: 'meta',
+          attrs: { name: 'twitter:image', content: 'https://wardengateway.com/og.png' },
+        },
+      ],
       // HashiCorp-style: charcoal code blocks in both light and dark themes.
       expressiveCode: {
         themes: ['github-dark'],
