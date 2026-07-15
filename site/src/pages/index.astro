@@ -4,52 +4,35 @@ import '../styles/marketing.css';
 const github = 'https://github.com/stephnangue/warden';
 const nav = [
   { label: 'Use cases', href: '/use-cases/' },
-  { label: 'Providers', href: '/provider-backends/' },
   { label: 'Docs', href: '/concepts/' },
+  { label: 'Download', href: `${github}/releases/latest` },
   { label: 'GitHub', href: github },
 ];
-const useCases = [
+const benefits = [
   {
-    n: '01',
-    h: 'Access brokering',
-    p: 'Warden holds the upstream secret and injects a scoped, short-lived credential into each request. The agent presents only its own identity and never holds a key — no per-system credential sprawl.',
+    h: 'A compromised agent has nothing to steal',
+    p: 'Prompt-injected, jailbroken, or simply wrong — it never held a credential, so there is nothing to exfiltrate. One bad step stays a contained, recoverable event instead of a broad compromise.',
   },
   {
-    n: '02',
-    h: 'Breach containment',
-    p: 'A prompt-injected, jailbroken, or otherwise compromised agent has nothing to exfiltrate, because it never holds a credential. One bad step stays a contained, recoverable event.',
+    h: 'No credential sprawl to chase',
+    p: 'One identity reaches every system its policy permits. Nothing to distribute per integration, nothing to rotate per integration, and no static secrets left sitting in a dozen process environments.',
   },
   {
-    n: '03',
-    h: 'Runtime authorization',
-    p: 'Every call is authorized the moment it happens — down to the action and its arguments, and for MCP, down to which tools an agent may invoke and which arguments it may pass.',
+    h: 'Least privilege on every single call',
+    p: 'The agent gets exactly the access its policy allows for that step — down to the tool it may call and the arguments it may pass — never a session-wide grant it can wander around inside.',
   },
   {
-    n: '04',
-    h: 'Centralized governance',
-    p: 'One control plane for every system an agent touches: one identity, one policy surface, and one audit log across clouds, code hosts, observability, databases, SaaS, and MCP servers.',
+    h: 'One place to govern every system',
+    p: 'One identity, one policy surface, and one audit log across clouds, code hosts, observability, databases, SaaS, and MCP servers. Namespaces keep teams isolated on shared infrastructure.',
   },
   {
-    n: '05',
-    h: 'Audit & attribution',
-    p: 'Every request tied to the real identity behind it, the role used, the policy decision, and the upstream called — with secrets never written to the log in the clear.',
+    h: 'An answer when someone asks who did what',
+    p: 'Every request tied to the real identity behind it, the role it used, the decision that was made, and the upstream it called — with secrets never written to the log in the clear.',
   },
-];
-const systems = [
-  { h: 'MCP servers', p: 'GitHub, Google Cloud, Slack, Cloudflare, AWS (SigV4), and any generic MCP server — with tool-level policy.' },
-  { h: 'LLM APIs', p: 'Anthropic, OpenAI, Mistral, Cohere.' },
-  { h: 'Cloud infrastructure', p: 'AWS, Azure, GCP, Alicloud, IBM Cloud, OVH, Scaleway, Cloudflare.' },
-  { h: 'Code hosting & CI/CD', p: 'GitHub, GitLab, Atlassian, Ansible Tower, Terraform Enterprise.' },
-  { h: 'Observability', p: 'Datadog, Grafana, Prometheus, Splunk, Sentry, New Relic, Dynatrace, Elastic, Honeycomb.' },
-  { h: 'Incident & ITSM', p: 'PagerDuty, ServiceNow, Slack.' },
-  { h: 'Kubernetes & secrets', p: 'Kubernetes service-account tokens, and short-lived tokens from HashiCorp Vault / OpenBao.' },
-  { h: 'Databases', p: 'AWS RDS / Aurora and Redshift, via IAM database auth tokens.' },
-];
-const auth = [
-  { h: 'JWT', p: 'A signed token Warden validates before swapping in the real upstream credential.' },
-  { h: 'TLS certificate', p: 'An X.509 client certificate, proven at the TLS handshake or forwarded by a terminating proxy.' },
-  { h: 'SPIFFE', p: "An X.509-SVID or JWT-SVID verified against the trust domain's bundle, with federation." },
-  { h: 'Kubernetes', p: "A ServiceAccount token validated through the issuing cluster's TokenReview API." },
+  {
+    h: 'Adoption costs you one line',
+    p: 'The identity goes in the credential slot your SDK already expects, so existing code keeps working — only the base URL changes.',
+  },
 ];
 ---
 
@@ -103,22 +86,20 @@ const auth = [
       <section class="hero">
         <div class="wrap hero-inner">
           <div>
-            <p class="eyebrow">Identity · Policy · Audit</p>
-            <h1>The secure gateway for AI agents.</h1>
+            <h1>The secure gateway for the AI agent era</h1>
             <p class="sub">
-              Agents present only their own identity. Warden brokers every connection —
-              injecting real credentials, enforcing policy on every call, and tying it all to
-              one audit log. Across every MCP server, cloud, code host, database, and SaaS.
+              Manage what your AI agents can reach and stop credentials from ever landing in
+              their hands, with identity-based access for every MCP server, cloud, code host,
+              database, and SaaS your agents now touch.
             </p>
             <div class="hero-actions">
               <a class="btn btn-primary" href="/concepts/">Get started</a>
               <a class="btn btn-on-dark" href={github}>View on GitHub</a>
             </div>
-            <p class="hero-note">Open source · MPL-2.0 · OpenBao integrator</p>
           </div>
 
           <div class="hero-visual">
-            <svg class="flow" viewBox="0 0 340 366" role="img" aria-label="An AI agent presents only its identity to Warden, which injects real credentials and proxies the request to upstream systems.">
+            <svg class="flow" viewBox="0 0 340 366" role="img" aria-label="An AI agent presents only its identity to Warden, which authenticates it, authorizes the call, mints a fresh short-lived credential, and proxies the request to upstream systems.">
               <defs>
                 <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
                   <path d="M0 0 L10 5 L0 10 z" fill="#cdd4e6" />
@@ -133,10 +114,10 @@ const auth = [
 
               <rect class="box box-warden" x="60" y="146" width="220" height="84" rx="14" />
               <text class="t t-warden" x="170" y="182">Warden</text>
-              <text class="s" x="170" y="204">authenticate · authorize · inject</text>
+              <text class="s" x="170" y="204">authenticate · authorize · mint</text>
 
               <line class="line" x1="170" y1="234" x2="170" y2="286" marker-end="url(#ar)" />
-              <text class="e" x="196" y="264" style="text-anchor:start">real credentials</text>
+              <text class="e" x="196" y="264" style="text-anchor:start">short-lived credential</text>
 
               <rect class="box" x="60" y="290" width="220" height="72" rx="12" />
               <text class="t" x="170" y="322">Upstreams</text>
@@ -145,123 +126,84 @@ const auth = [
             <div class="cap">
               <div class="chip">Identity <span>✓</span></div>
               <div class="chip">Policy <span>✓</span></div>
+              <div class="chip">Credential <span>✓</span></div>
               <div class="chip">Audit <span>✓</span></div>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- Positioning strip -->
+      <!-- Features -->
       <section class="band">
         <div class="wrap">
-          <div class="section-head">
-            <p class="kicker">The problem</p>
-            <h2 class="h">The control gap, not the credential, is the headline</h2>
+          <div class="feat-head">
+            <h2 class="h">Broker, authorize, and audit every agent request</h2>
             <p class="lead">
-              Pointing an agent at production means handing it over-scoped, long-lived
-              credentials, with no per-request policy and no identity-tied audit. MCP makes it
-              acute — a dozen tools become a dozen static secrets in a dozen processes, none
-              rotating, none governed.
+              The control gap, not the credential, is the headline: pointing an agent at
+              production means over-scoped, long-lived credentials, no per-request policy, and
+              no identity-tied audit. Warden mints a short-lived credential per request,
+              decides each call as it happens, and ties every request back to the identity that
+              made it.
             </p>
           </div>
-          <div class="proof">
-            <div class="item">
-              <h3><b>Identity</b> the agent owns</h3>
-              <p>A JWT, TLS client certificate, SPIFFE SVID, or Kubernetes token. The agent holds no upstream secret — ever.</p>
+          <div class="feat-cols">
+            <div class="feat">
+              <div class="ico">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="7.5" cy="15.5" r="4.5" />
+                  <path d="M10.7 12.3 21 2m-3 3 2.5 2.5M15 5l2.5 2.5" />
+                </svg>
+              </div>
+              <h3>Access brokering</h3>
+              <p>
+                Warden mints a scoped, short-lived credential for every request and injects it
+                on the way through. The agent presents only its own identity and never holds a
+                key — so there is nothing in it to leak.
+              </p>
             </div>
-            <div class="item">
-              <h3><b>Policy</b> at request time</h3>
-              <p>Every call evaluated the moment it happens — action, arguments, caller IP, time, and on whose behalf.</p>
+            <div class="feat">
+              <div class="ico">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                  <path d="M9 12l2 2 4-4" />
+                </svg>
+              </div>
+              <h3>Runtime authorization</h3>
+              <p>
+                Every call is authorized the moment it happens — down to the action and its
+                arguments, and for MCP, which tools an agent may invoke and which arguments it
+                may pass. Never a session-wide grant.
+              </p>
             </div>
-            <div class="item">
-              <h3><b>Audit</b> tied to the caller</h3>
-              <p>Every request attributed to the real identity, role, decision, and upstream — secrets never logged in clear.</p>
+            <div class="feat">
+              <div class="ico">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </div>
+              <h3>Audit &amp; attribution</h3>
+              <p>
+                Every request tied to the real identity behind it, the role used, the policy
+                decision, and the upstream called — with secrets never written to the log in
+                the clear.
+              </p>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- How it works -->
-      <section>
-        <div class="wrap">
-          <div class="section-head">
-            <p class="kicker">How it works</p>
-            <h2 class="h">Warden sits in the request path</h2>
-            <p class="lead">
-              The agent points at Warden as if it were the upstream. Existing SDK code keeps
-              working — only the base URL changes.
-            </p>
-          </div>
-          <div class="steps">
-            <div class="step">
-              <div class="n">1</div>
-              <h3>Authenticate</h3>
-              <p>Warden verifies the identity the agent presents — no long-lived key in the agent's environment.</p>
-            </div>
-            <div class="step">
-              <div class="n">2</div>
-              <h3>Authorize</h3>
-              <p>The call is evaluated against policy at request time, down to the action and its arguments.</p>
-            </div>
-            <div class="step">
-              <div class="n">3</div>
-              <h3>Inject & proxy</h3>
-              <p>Warden injects the real, short-lived upstream credential and streams the response back unchanged.</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- Use cases -->
+      <!-- Benefits -->
       <section class="band">
         <div class="wrap">
           <div class="section-head">
-            <p class="kicker">Use cases</p>
-            <h2 class="h">Five things Warden does — all at once</h2>
+            <h2 class="h">Everything your agents need. Nothing they can leak.</h2>
           </div>
-          <div class="grid">
-            {useCases.map((u) => (
+          <div class="grid grid-3">
+            {benefits.map((b) => (
               <div class="card">
-                <div class="num">{u.n}</div>
-                <h3>{u.h}</h3>
-                <p>{u.p}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <!-- Supported systems -->
-      <section>
-        <div class="wrap">
-          <div class="section-head">
-            <p class="kicker">Supported systems</p>
-            <h2 class="h">One gateway in front of everything the agent reaches</h2>
-          </div>
-          <div class="systems">
-            {systems.map((s) => (
-              <div class="syscat">
-                <h3>{s.h}</h3>
-                <p>{s.p}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <!-- Authentication -->
-      <section class="band">
-        <div class="wrap">
-          <div class="section-head">
-            <p class="kicker">Authentication</p>
-            <h2 class="h">The agent's own identity — nothing more</h2>
-            <p class="lead">Whichever method you use, the identity goes in the credential slot the upstream SDK already expects.</p>
-          </div>
-          <div class="grid">
-            {auth.map((a) => (
-              <div class="card">
-                <h3>{a.h}</h3>
-                <p>{a.p}</p>
+                <h3>{b.h}</h3>
+                <p>{b.p}</p>
               </div>
             ))}
           </div>

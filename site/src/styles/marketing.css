@@ -322,6 +322,47 @@ h2.h {
   font-size: 0.95rem;
 }
 
+/* ---- Feature row: big left headline, then flat icon columns ---- */
+.feat-head {
+  max-width: 34rem;
+}
+.feat-cols {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2.5rem;
+  margin-top: 4rem;
+}
+.feat .ico {
+  width: 48px;
+  height: 48px;
+  border-radius: 11px;
+  background: #eef0f4;
+  border: 1px solid var(--border);
+  display: grid;
+  place-items: center;
+  margin-bottom: 1.1rem;
+}
+.feat .ico svg {
+  width: 22px;
+  height: 22px;
+  stroke: var(--red);
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.feat h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1.02rem;
+  font-weight: 700;
+}
+.feat p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
 /* ---- Steps (how it works) ---- */
 .steps {
   display: grid;
@@ -356,6 +397,9 @@ h2.h {
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 1.25rem;
   margin-top: 2.5rem;
+}
+.grid-3 {
+  grid-template-columns: repeat(3, 1fr);
 }
 .card {
   background: #fff;
@@ -483,7 +527,8 @@ h2.h {
     grid-template-columns: 1fr;
   }
   .proof,
-  .steps {
+  .steps,
+  .grid-3 {
     grid-template-columns: 1fr;
   }
   .footer-inner {
