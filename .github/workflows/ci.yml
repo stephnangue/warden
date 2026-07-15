@@ -21,6 +21,7 @@ jobs:
     outputs:
       code: ${{ steps.decide.outputs.code }}
       helm: ${{ steps.decide.outputs.helm }}
+      site: ${{ steps.decide.outputs.site }}
     steps:
       - uses: actions/checkout@v7
       # On release-tag pushes, the tag is placed on the same commit as
@@ -41,14 +42,19 @@ jobs:
             helm:
               - 'deploy/helm/**'
               - '.github/workflows/ci.yml'
+            site:
+              - 'site/**'
+              - '.github/workflows/ci.yml'
       - id: decide
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             echo "code=true"  >> "$GITHUB_OUTPUT"
             echo "helm=true"  >> "$GITHUB_OUTPUT"
+            echo "site=true"  >> "$GITHUB_OUTPUT"
           else
             echo "code=${{ steps.filter.outputs.code }}" >> "$GITHUB_OUTPUT"
             echo "helm=${{ steps.filter.outputs.helm }}" >> "$GITHUB_OUTPUT"
+            echo "site=${{ steps.filter.outputs.site }}" >> "$GITHUB_OUTPUT"
           fi
 
   unit:
@@ -76,6 +82,48 @@ jobs:
 
       - name: Build
         run: go build -o warden .
+
+  site:
+    name: site-build
+    needs: [changes]
+    if: needs.changes.outputs.site == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        working-directory: site
+        run: npm ci
+
+      # Catches what would otherwise only surface in the Cloudflare deploy:
+      # a page missing its `title` frontmatter, or a sidebar entry in
+      # astro.config.mjs naming a slug that no longer exists.
+      - name: Build
+        working-directory: site
+        run: npm run build
+
+      # A broken internal link doesn't fail the build — it ships silently —
+      # so crawl the built site as well.
+      - name: Link check
+        working-directory: site
+        run: |
+          npm run preview -- --port 4321 &
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:4321/ >/dev/null && break
+            sleep 1
+          done
+          npx --yes linkinator http://localhost:4321 \
+            --recurse \
+            --skip '^https?://(?!localhost)' \
+            --timeout 20000
 
   helm:
     name: helm-lint
