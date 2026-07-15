@@ -1,0 +1,17 @@
+{
+  // Static-assets-only Worker: Astro builds the whole site to dist/ ahead of
+  // time, so there is no server code to run and no adapter to install.
+  //
+  // This file also has to exist for a second reason: without a wrangler config,
+  // `wrangler deploy` auto-detects Astro, installs the @astrojs/cloudflare
+  // adapter, rewrites astro.config.mjs to server mode and rebuilds — which
+  // fails. Declaring the assets up front keeps it from guessing.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "warden",
+  "compatibility_date": "2026-07-15",
+  "assets": {
+    "directory": "./dist",
+    // Serve Starlight's 404.html for unknown paths rather than a bare error.
+    "not_found_handling": "404-page"
+  }
+}
