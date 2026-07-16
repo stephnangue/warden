@@ -363,6 +363,70 @@ h2.h {
   line-height: 1.6;
 }
 
+/* ---- Pillars (alternating rows) ---- */
+.pillar-list {
+  display: grid;
+  gap: clamp(2.5rem, 6vw, 4.5rem);
+  margin-top: 3rem;
+}
+.pillar {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: clamp(1.5rem, 4vw, 3.5rem);
+  align-items: center;
+}
+.pillar:nth-child(even) .pillar-visual {
+  order: -1;
+}
+.pillar-tag {
+  color: var(--red);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.78rem;
+  margin: 0 0 0.6rem;
+}
+.pillar h3 {
+  font-size: clamp(1.5rem, 2.8vw, 2rem);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.75rem;
+  font-weight: 700;
+}
+.pillar-copy p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 1.05rem;
+}
+.pillar-visual {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: clamp(1.25rem, 3vw, 2rem);
+}
+.pillar-visual svg {
+  width: 100%;
+  height: auto;
+}
+.pillar-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 1.1rem;
+  color: var(--red);
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.pillar-link:hover {
+  color: var(--red-dark);
+}
+.pillar-link .arw {
+  transition: transform 0.15s ease;
+}
+.pillar-link:hover .arw {
+  transform: translateX(3px);
+}
+
 /* ---- Steps (how it works) ---- */
 .steps {
   display: grid;
@@ -530,6 +594,12 @@ h2.h {
   .steps,
   .grid-3 {
     grid-template-columns: 1fr;
+  }
+  .pillar {
+    grid-template-columns: 1fr;
+  }
+  .pillar:nth-child(even) .pillar-visual {
+    order: 0;
   }
   .footer-inner {
     grid-template-columns: 1fr 1fr;
