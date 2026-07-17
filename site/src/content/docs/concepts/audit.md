@@ -131,4 +131,5 @@ operator-level operation, not something a tenant configures.
 - [Tokens](/concepts/tokens/) — the identity fields logged per request.
 - [Namespaces](/concepts/namespaces/) — recorded per entry; devices are root-scoped.
 - [Audit Devices](/audit-devices/) — setup guides for enabling and configuring a device.
+- [Configuration → Audit](/configuration/audit/) — declaring devices at startup in the config file.
 - [Dev Server](/concepts/dev-server/) — ships unaudited (fail-open).

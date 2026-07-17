@@ -41,7 +41,7 @@ listener "tcp" {
 
 ## Configuration
 
-Warden uses HCL configuration files. See `deploy/config/warden.local.hcl` for a full example covering storage backend, listener, providers, and auth methods.
+Warden uses HCL configuration files. See `deploy/config/warden.local.hcl` for a full example covering storage backend, listener, providers, and auth methods, and the [Configuration reference](/configuration/) for every stanza and parameter.
 
 The listener stanza follows the `tls_disable` convention: TLS is on by default and the listener requires both `tls_cert_file` and `tls_key_file`. Set `tls_disable = true` to run plain HTTP (intended for loopback dev work).
 
