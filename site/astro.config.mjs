@@ -189,6 +189,33 @@ export default defineConfig({
         { label: 'Auth methods', autogenerate: { directory: 'auth-methods' } },
         { label: 'Agent identity', autogenerate: { directory: 'agent-identity' } },
         { label: 'CLI', autogenerate: { directory: 'cli' } },
+        {
+          // Server HCL config reference, in reading order. The seal subgroup
+          // has one page per seal type and collapses by default.
+          label: 'Configuration',
+          items: [
+            { slug: 'configuration' },
+            { slug: 'configuration/listener' },
+            { slug: 'configuration/storage' },
+            {
+              label: 'Seal',
+              collapsed: true,
+              items: [
+                { slug: 'configuration/seal' },
+                { slug: 'configuration/seal/shamir' },
+                { slug: 'configuration/seal/awskms' },
+                { slug: 'configuration/seal/azurekeyvault' },
+                { slug: 'configuration/seal/gcpkms' },
+                { slug: 'configuration/seal/transit' },
+                { slug: 'configuration/seal/pkcs11' },
+                { slug: 'configuration/seal/ocikms' },
+                { slug: 'configuration/seal/kmip' },
+                { slug: 'configuration/seal/static' },
+              ],
+            },
+            { slug: 'configuration/audit' },
+          ],
+        },
         { label: 'Quickstarts', autogenerate: { directory: 'quickstarts' } },
         { label: 'Tutorials', autogenerate: { directory: 'tutorials' } },
         { label: 'Install', autogenerate: { directory: 'install' } },

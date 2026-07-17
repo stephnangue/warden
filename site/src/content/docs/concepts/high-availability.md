@@ -136,3 +136,4 @@ lock to time out.
 - [Seal and Unseal](/concepts/seal-unseal/) — why auto-unseal is required for unattended
   failover.
 - [Architecture](/architecture/) — where HA sits in the overall design.
+- [Configuration](/configuration/) — `api_addr`, `cluster_addr`, and the HA tuning parameters.

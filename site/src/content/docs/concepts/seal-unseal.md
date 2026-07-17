@@ -152,7 +152,8 @@ seal "awskms" {
 
 Each type takes its own connection and credential keys (endpoints, key
 identifiers, TLS material). A stanza can also be marked `disabled` to designate a
-previous seal as a migration source when moving from one KMS to another.
+previous seal as a migration source when moving from one KMS to another. For every
+seal type and its keys, see [Configuration → Seal](/configuration/seal/).
 
 ## Dev Mode
 

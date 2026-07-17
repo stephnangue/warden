@@ -52,18 +52,9 @@ storage "postgres" {
 }
 ```
 
-### PostgreSQL options
-
-| Key | Purpose |
-|-----|---------|
-| `connection_url` | The Postgres DSN (required). Can be supplied out of band via the `WARDEN_PG_CONNECTION_URL` environment variable. |
-| `table` | Table holding the encrypted key/value data. |
-| `ha_table` | Table holding the [HA](/concepts/high-availability/) leader-election locks. |
-| `ha_enabled` | `"true"` to enable active/standby HA on this backend. |
-| `max_parallel` | Cap on concurrent operations against Postgres. |
-| `max_idle_connections` | Idle size of the connection pool. |
-| `max_connect_retries` | Retries while waiting for the database to come up at startup. |
-| `skip_create_table` | `"true"` to skip automatic table creation (pre-provisioned or read-only databases). |
+`connection_url` is the Postgres DSN (required); it can be supplied out of band
+via the `WARDEN_PG_CONNECTION_URL` environment variable. For every storage key and
+its default, see [Configuration → Storage](/configuration/storage/).
 
 By default Warden creates its tables on first boot and verifies the server is a
 supported PostgreSQL version. Writes are transactional (ACID), which Warden relies
