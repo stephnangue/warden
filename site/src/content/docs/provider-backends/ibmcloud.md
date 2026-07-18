@@ -35,58 +35,18 @@ Only hosts matching the `allowed_host_suffixes` list (default: `.cloud.ibm.com`,
   - An API key (from IBM Cloud Console > Manage > Access (IAM) > API keys) for the REST API
   - COS HMAC credentials (access key ID + secret access key) for Object Storage — generate via IBM Cloud Console > Cloud Object Storage > Service credentials > New credential (include HMAC keys)
 
-> **New to Warden?** Follow these steps to get a local dev environment running:
->
-> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
-> ```bash
-> curl -fsSL -o docker-compose.quickstart.yml \
->   https://raw.githubusercontent.com/stephnangue/warden/main/deploy/docker-compose.quickstart.yml
-> docker compose -f docker-compose.quickstart.yml up -d
-> ```
->
-> **2. Download the latest Warden binary:**
-> ```bash
-> # macOS (Apple Silicon)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_arm64.tar.gz | tar xz
->
-> # macOS (Intel)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_amd64.tar.gz | tar xz
->
-> # Linux (x86_64)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_amd64.tar.gz | tar xz
->
-> # Linux (ARM64)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_arm64.tar.gz | tar xz
-> ```
->
-> **3. Add the binary to your PATH:**
-> ```bash
-> export PATH="$PWD:$PATH"
-> ```
->
-> **4. Start the Warden server** in dev mode:
-> ```bash
-> warden server -dev -dev-root-token=root
-> ```
->
-> **5. In another terminal window**, export the environment variables for the CLI:
-> ```bash
-> export PATH="$PWD:$PATH"
-> export WARDEN_ADDR="http://127.0.0.1:8400"
-> export WARDEN_TOKEN="root"
-> ```
+:::note[New to Warden?]
+Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
+:::
 
 ## Step 1: Configure JWT Auth and Create a Role
 
-Set up a JWT auth method and create a role that binds the credential spec and policy. Clients authenticate directly with their JWT — no separate login step is needed.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
 > **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
 
 ```bash
-# Enable JWT auth if not already enabled
 warden auth enable jwt
-
-# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role that binds the credential spec and policy
@@ -128,6 +88,8 @@ warden write ibmcloud/config <<EOF
 }
 EOF
 ```
+
+See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
 
 To restrict which IBM hostnames the gateway will forward to (recommended for production):
 
@@ -251,14 +213,7 @@ warden policy read ibmcloud-access
 
 ## Step 5: Get a JWT and Make Requests
 
-Get a JWT from Hydra using one of the quickstart clients:
-
-```bash
-export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
-  | jq -r '.access_token')
-```
+Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
 Requests use role-based paths with the **IBM service hostname as the first path segment**. Warden performs implicit JWT authentication and injects the real IBM Cloud IAM token server-side — clients present a Warden JWT, not an IBM API key.
 
@@ -495,7 +450,9 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 Steps 1-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener.
+:::note[Prerequisite]
+Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
+:::
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
@@ -552,61 +509,6 @@ COS Object Storage:
 aws s3 ls s3://my-bucket/ \
   --endpoint-url "https://warden.internal/v1/ibmcloud/role/ibmcloud-user/gateway"
 ```
-
-## Configuration Reference
-
-### Provider Config
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `ibmcloud_url` | string | `https://cloud.ibm.com` | Retained for framework compatibility; **ignored in API mode** (the target host is encoded in the request path). |
-| `allowed_host_suffixes` | list(string) | `.cloud.ibm.com,.appdomain.cloud` | Hostname suffixes permitted as API gateway targets. Each entry must start with `.`. Use `*` alone to disable (not recommended). |
-| `cos_endpoint_type` | string | `public` | IBM COS endpoint type: `public`, `private` (VPC-only), or `direct` (Classic Infrastructure) |
-| `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
-| `timeout` | duration | `30s` | Request timeout |
-| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
-| `default_role` | string | — | Fallback role when not specified in URL |
-
-### Credential Spec Config (iam_with_cos — IBM Source)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `iam_with_cos` |
-| `access_key_id` | string | COS mode | IBM COS HMAC access key ID (required with `secret_access_key`) |
-| `secret_access_key` | string | COS mode | IBM COS HMAC secret access key (sensitive — required with `access_key_id`) |
-
-### Credential Spec Config (dynamic_ibm — Vault IBM Secrets Engine)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `dynamic_ibm` |
-| `ibm_mount` | string | Yes | Vault IBM secrets engine mount path |
-| `role_name` | string | Yes | Vault IBM secrets engine role name |
-| `iam_endpoint` | string | No | IBM Cloud IAM endpoint (default: `https://iam.cloud.ibm.com`) |
-| `ttl` | duration | No | Requested lease TTL for the dynamic API key |
-| `access_key_id` | string | COS mode | IBM COS HMAC access key ID (static, from spec config) |
-| `secret_access_key` | string | COS mode | IBM COS HMAC secret access key (static, from spec config) |
-
-### Credential Source Config (IBM)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `api_key` | string | Yes | IBM Cloud API key |
-| `account_id` | string | No | IBM Cloud account ID (discovered from API key if omitted) |
-| `iam_endpoint` | string | No | IBM Cloud IAM endpoint (default: `https://iam.cloud.ibm.com`) |
-| `activation_delay` | duration | No | Wait period for API key propagation during rotation (default: `2m`) |
-
-### Credential Source Config (Vault/OpenBao)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `vault_address` | string | Yes | Vault server address (e.g., `https://vault.example.com`) |
-| `vault_namespace` | string | No | Vault namespace (Enterprise/HCP only) |
-| `auth_method` | string | No | Authentication method (`approle`) |
-| `role_id` | string | Yes* | AppRole role ID (*required when `auth_method=approle`) |
-| `secret_id` | string | Yes* | AppRole secret ID (*required when `auth_method=approle`) |
-| `approle_mount` | string | Yes* | AppRole auth mount path (*required when `auth_method=approle`) |
-| `role_name` | string | Yes* | AppRole role name for rotation (*required when `auth_method=approle`) |
 
 ## Token Management
 

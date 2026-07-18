@@ -10,46 +10,9 @@ The AWS provider enables proxied access to AWS services through Warden. Clients 
 - AWS account with IAM access
 - AWS CLI (for initial IAM setup)
 
-> **New to Warden?** Follow these steps to get a local dev environment running:
->
-> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
-> ```bash
-> curl -fsSL -o docker-compose.quickstart.yml \
->   https://raw.githubusercontent.com/stephnangue/warden/main/deploy/docker-compose.quickstart.yml
-> docker compose -f docker-compose.quickstart.yml up -d
-> ```
->
-> **2. Download the latest Warden binary:**
-> ```bash
-> # macOS (Apple Silicon)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_arm64.tar.gz | tar xz
->
-> # macOS (Intel)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_amd64.tar.gz | tar xz
->
-> # Linux (x86_64)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_amd64.tar.gz | tar xz
->
-> # Linux (ARM64)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_arm64.tar.gz | tar xz
-> ```
->
-> **3. Add the binary to your PATH:**
-> ```bash
-> export PATH="$PWD:$PATH"
-> ```
->
-> **4. Start the Warden server** in dev mode:
-> ```bash
-> warden server -dev -dev-root-token=root
-> ```
->
-> **5. In another terminal window**, export the environment variables for the CLI:
-> ```bash
-> export PATH="$PWD:$PATH"
-> export WARDEN_ADDR="http://127.0.0.1:8400"
-> export WARDEN_TOKEN="root"
-> ```
+:::note[New to Warden?]
+Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
+:::
 
 ### Create the IAM User
 
@@ -138,13 +101,10 @@ Attach the permissions policies your consumers need to this role (e.g., S3 acces
 
 ## Step 1: Configure JWT Auth and Create a Role
 
-Set up a JWT auth method and create a role that binds the credential spec and policy:
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup:
 
 ```bash
-# Enable JWT auth if not already enabled
 warden auth enable jwt
-
-# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role
@@ -192,6 +152,8 @@ EOF
 - `default_role`: the auth role to use for all requests. When set, this takes precedence over the `access_key_id` value in the SigV4 header.
 
 For production, set `proxy_domains` to your Warden server's domain (see [DNS Configuration](#dns-configuration)).
+
+See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
 
 Verify:
 
@@ -334,7 +296,7 @@ path "aws/gateway*" {
 EOF
 ```
 
-The `condition` is a [CEL](https://cel.dev) expression (see [Policies → CEL conditions](/concepts/policies/#cel-conditions)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
+The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/concepts/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
 
 Verify:
 
@@ -348,14 +310,7 @@ With Warden there is no explicit login step. The client embeds its identity dire
 
 ### JWT Auth method
 
-Get a JWT from your identity provider (Hydra in this quickstart):
-
-```bash
-export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
-  | jq -r '.access_token')
-```
+Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT`.
 
 Configure the AWS SDK to use the JWT as credentials. The auth role name goes in `AWS_ACCESS_KEY_ID`, and the JWT goes in both `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`:
 
@@ -391,7 +346,9 @@ Warden detects the JWT in the `X-Amz-Security-Token` header, authenticates it ag
 
 For workloads that already have X.509 certificates (Kubernetes pods with cert-manager, VMs with machine certificates, SPIFFE X.509-SVIDs), Warden can authenticate using TLS client certificates instead of JWTs.
 
-> **Prerequisite:** TLS must be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+:::note[Prerequisite]
+Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
+:::
 
 #### Set up cert auth and configure the provider
 
@@ -422,7 +379,7 @@ warden write aws/config <<EOF
 EOF
 ```
 
-The `allowed_common_names` field supports glob patterns. You can also match on other certificate fields: `allowed_dns_sans`, `allowed_email_sans`, `allowed_uri_sans`, or `allowed_organizational_units`.
+The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 #### Configure the AWS SDK
 
@@ -450,57 +407,6 @@ docker compose -f docker-compose.quickstart.yml down -v
 ```
 
 Since Warden dev mode uses in-memory storage, all configuration is lost when the server stops.
-
-## Architecture Overview
-
-```
-                          +-----------------------------+
-                          |  AWS IAM User               |
-                          |  warden-cred-source-root    |
-                          |                             |
-                          |  Policies:                  |
-                          |  - SelfManageAccessKeys     |
-                          |  - AssumeRoles (devops-*,   |
-                          |    internal-*)              |
-                          +--------+--------------------+
-                                   |
-              +--------------------+--------------------+
-              |                    |                     |
-       IAM key rotation    sts:AssumeRole         sts:AssumeRole
-       (self-management)         |                      |
-              |          +-------v--------+   +---------v-----------+
-              |          | devops-*       |   | internal-*          |
-              |          | roles          |   | roles               |
-              |          | (consumer      |   | (source driver      |
-              |          |  permissions)  |   |  permissions, e.g.  |
-              |          +-------+--------+   |  Secrets Manager)   |
-              |                  |             +---------+-----------+
-              v                  v                       v
-       Warden rotates     Warden mints           Source driver
-       base keys          STS creds for           uses elevated
-       periodically       consumers               permissions
-```
-
-### Request Flow
-
-1. Client signs request using the auth role name and JWT (or role name only for cert mode) as AWS credentials
-2. Request is sent to Warden gateway endpoint
-3. Warden authenticates the caller via the configured auth backend (JWT in `X-Amz-Security-Token` or role name as `access_key_id` for cert mode)
-4. Warden verifies the incoming SigV4 signature for request integrity
-5. Warden retrieves real AWS credentials from the credential spec
-6. Warden re-signs the request with valid AWS credentials
-7. Request is forwarded to the actual AWS endpoint
-8. Response is returned to the client
-
-### Security Model
-
-- **No credential distribution**: Clients never receive or store AWS credentials. They use their existing identity (JWT or certificate) directly.
-- **Implicit authentication**: Warden validates the embedded credential on every request — no long-lived Warden tokens to manage or revoke.
-- **Request integrity**: SigV4 signature verification ensures requests have not been tampered with in transit.
-- **Least privilege on the IAM user**: The user can only rotate its own keys and assume specific roles. If the base keys leak, the attacker still needs to know which roles to assume.
-- **Short-lived consumer credentials**: STS credentials expire automatically (controlled by TTL). No long-lived secrets are exposed to consumers.
-- **Automatic key rotation**: Warden rotates the base IAM keys on the configured schedule, limiting the window of exposure for any single key pair.
-- **Audit trail**: Each STS AssumeRole call is logged in CloudTrail with a distinct session name.
 
 ## DNS Configuration
 
@@ -573,73 +479,6 @@ warden write aws/config proxy_domains="warden.yourdomain.com"
 
 For HTTPS, you'll need a **wildcard SSL certificate** (`*.warden.yourdomain.com`), obtainable from Let's Encrypt (free, via DNS-01 challenge), commercial CAs, or internal PKI.
 
-## Configuration Reference
-
-### Provider Config
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `proxy_domains` | list(string) | `["localhost"]` | Domains that Warden listens on for proxied requests |
-| `max_body_size` | int | `10485760` (10 MB) | Maximum request body size in bytes (max 100 MB) |
-| `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
-| `tls_skip_verify` | bool | `false` | Skip TLS certificate verification; also allows `http://` URLs (development only) |
-| `ca_data` | string | — | Base64-encoded PEM CA certificate for custom/self-signed CAs |
-| `auto_auth_path` | string | Yes | Path to auth mount for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
-| `default_role` | string | — | Default auth role when not specified in `access_key_id` |
-
-### Credential Source Config
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `access_key_id` | string | Yes | IAM user access key ID |
-| `secret_access_key` | string | Yes | IAM user secret access key |
-| `region` | string | Yes | AWS region for API calls |
-| `assume_role_arn` | string | No | Role ARN for source driver to assume (needed for Secrets Manager mint method) |
-| `tls_skip_verify` | bool | No | Skip TLS certificate verification; also allows `http://` URLs (default: `false`) |
-| `ca_data` | string | No | Base64-encoded PEM CA certificate for custom/self-signed CAs |
-
-### Credential Spec Config — sts_assume_role
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `sts_assume_role` |
-| `role_arn` | string | Yes | ARN of the role to assume for consumers |
-| `ttl` | duration | No | Default credential TTL (default: `1h`) |
-| `session_name` | string | No | STS session name (default: `warden-<spec_name>`) |
-| `external_id` | string | No | External ID for the AssumeRole call |
-| `policy` | string | No | Inline session policy to further restrict permissions |
-
-### Credential Spec Config — secrets_manager
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `secrets_manager` |
-| `secret_id` | string | Yes | Secret ID or ARN in Secrets Manager |
-| `version_stage` | string | No | Version stage to retrieve (default: `AWSCURRENT`) |
-
-### Credential Spec Config — static_aws (via hvault)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `static_aws` |
-| `kv2_mount` | string | Yes | KV v2 mount path in Vault |
-| `secret_path` | string | Yes | Path to secret (must contain `access_key_id` and `secret_access_key`) |
-
-### Credential Spec Config — dynamic_aws (via hvault)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `dynamic_aws` |
-| `aws_mount` | string | Yes | Vault AWS secrets engine mount path |
-| `role_name` | string | Yes | AWS role name configured in Vault |
-| `role_arn` | string | No | ARN of the role to assume (for STS) |
-| `role_session_name` | string | No | Session name for STS assumption |
-| `ttl` | duration | No | Credential TTL (clamped to spec min/max bounds) |
-
-### TTL Bounds
-
-- `-min-ttl`: Minimum credential TTL. Requests for shorter TTLs are clamped up.
-- `-max-ttl`: Maximum credential TTL. Requests for longer TTLs are clamped down.
 
 ## Supported AWS Services
 

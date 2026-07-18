@@ -10,75 +10,9 @@ The Vault provider enables proxied access to HashiCorp Vault (or OpenBao) throug
 - Vault CLI (for initial AppRole setup)
 - OpenSSL (for generating certificates)
 
-> **New to Warden?** Follow these steps to get a local dev environment running:
->
-> **1. Download the latest Warden binary:**
-> ```bash
-> # macOS (Apple Silicon)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_arm64.tar.gz | tar xz
->
-> # macOS (Intel)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_amd64.tar.gz | tar xz
->
-> # Linux (x86_64)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_amd64.tar.gz | tar xz
->
-> # Linux (ARM64)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_arm64.tar.gz | tar xz
-> ```
->
-> **2. Add the binary to your PATH:**
-> ```bash
-> export PATH="$PWD:$PATH"
-> ```
->
-> **3. Generate certificates** for the server and a client:
-> ```bash
-> CERT_DIR=certs
-> mkdir -p "$CERT_DIR"
->
-> # Generate a CA certificate and key
-> openssl ecparam -genkey -name prime256v1 -out "$CERT_DIR/ca.key"
-> openssl req -new -x509 -sha256 -key "$CERT_DIR/ca.key" -out "$CERT_DIR/ca.pem" -days 365 \
->     -subj "/CN=Warden Dev CA/O=Warden Dev"
->
-> # Generate a server certificate signed by the CA
-> openssl ecparam -genkey -name prime256v1 -out "$CERT_DIR/server.key"
-> openssl req -new -sha256 -key "$CERT_DIR/server.key" -out "$CERT_DIR/server.csr" \
->     -subj "/CN=localhost/O=Warden Dev"
-> openssl x509 -req -sha256 -in "$CERT_DIR/server.csr" \
->     -CA "$CERT_DIR/ca.pem" -CAkey "$CERT_DIR/ca.key" \
->     -CAcreateserial -out "$CERT_DIR/server.pem" -days 365 \
->     -extfile <(printf "subjectAltName=DNS:localhost,IP:127.0.0.1")
->
-> # Generate a client certificate signed by the same CA
-> openssl ecparam -genkey -name prime256v1 -out "$CERT_DIR/client.key"
-> openssl req -new -sha256 -key "$CERT_DIR/client.key" -out "$CERT_DIR/client.csr" \
->     -subj "/CN=agent-quickstart/O=Warden Dev"
-> openssl x509 -req -sha256 -in "$CERT_DIR/client.csr" \
->     -CA "$CERT_DIR/ca.pem" -CAkey "$CERT_DIR/ca.key" \
->     -CAcreateserial -out "$CERT_DIR/client.pem" -days 365
-> ```
->
-> **4. Start the Warden server** in dev mode with TLS and mTLS:
-> ```bash
-> warden server -dev -dev-root-token=root \
->     -dev-tls-cert-file=$CERT_DIR/server.pem \
->     -dev-tls-key-file=$CERT_DIR/server.key \
->     -dev-tls-ca-cert-file=$CERT_DIR/ca.pem \
->     -dev-tls-require-client-cert
-> ```
->
-> **5. In another terminal window**, export the environment variables for the CLI:
-> ```bash
-> CERT_DIR=certs
-> export PATH="$PWD:$PATH"
-> export WARDEN_ADDR="https://127.0.0.1:8400"
-> export WARDEN_CACERT="$PWD/$CERT_DIR/ca.pem"
-> export WARDEN_CLIENT_CERT="$PWD/$CERT_DIR/client.pem"
-> export WARDEN_CLIENT_KEY="$PWD/$CERT_DIR/client.key"
-> export WARDEN_TOKEN="root"
-> ```
+:::note[New to Warden?]
+Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
+:::
 
 ## Step 1: Create an AppRole in Vault
 
@@ -201,7 +135,7 @@ warden write auth/cert/role/vault-user \
     cred_spec_name=vault-reader
 ```
 
-The `allowed_common_names` field supports glob patterns. The client certificate generated in the Prerequisites has CN `agent-quickstart`, which matches `agent-*`. You can also match on other certificate fields: `allowed_dns_sans`, `allowed_email_sans`, `allowed_uri_sans`, or `allowed_organizational_units`.
+The `allowed_common_names` field supports glob patterns. The client certificate generated in the Prerequisites has CN `agent-quickstart`, which matches `agent-*`. You can also match on other certificate fields; see [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ## Step 3: Mount and Configure the Provider
 
@@ -235,6 +169,8 @@ warden write vault/config <<EOF
 }
 EOF
 ```
+
+See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
 
 Verify:
 
@@ -350,7 +286,7 @@ path "vault/gateway*" {
 EOF
 ```
 
-The `condition` is a [CEL](https://cel.dev) expression (see [Policies → CEL conditions](/concepts/policies/#cel-conditions)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
+The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/concepts/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
 
 Verify:
 
@@ -449,64 +385,6 @@ rm -rf $CERT_DIR/
 
 Since Warden dev mode uses in-memory storage, all configuration is lost when the server stops.
 
-## Architecture Overview
-
-```
-                +--------------------------------------+
-                |  HashiCorp Vault                     |
-                |                                      |
-                |  AppRole: warden-source              |
-                |  - Policies: warden-source           |
-                |  - secret_id auto-rotated            |
-                |                                      |
-                |  Token Roles:                        |
-                |  - reader (read-only policies)       |
-                |  - admin (elevated policies)         |
-                +--------+-----------------------------+
-                         |
-                         | AppRole auth
-                         | (rotates secret_id)
-                         |
-                +--------v-----------------------------+
-                |  Warden Vault Provider               |
-                |                                      |
-                |  Credential Source (hvault)          |
-                |    mint_method: vault_token          |
-                |    → Mints child Vault tokens        |
-                |                                      |
-                |  Gateway Proxy                       |
-                |    → Injects token into requests     |
-                +--------------------------------------+
-```
-
-### Request Flow
-
-1. Client presents its TLS certificate during the mTLS handshake with Warden
-2. Client sends request to Warden gateway
-3. Warden validates the client certificate against the trusted CA and authenticates the client
-4. Warden retrieves a Vault token from the credential spec bound to the cert auth role
-5. Warden strips client auth headers and injects the real Vault token as `X-Vault-Token`
-6. Request is forwarded to the configured Vault instance
-7. Response is returned to the client
-
-### Security Model
-
-- **Mutual TLS (mTLS)**: Both server and client authenticate via certificates, providing strong identity verification without shared secrets.
-- **Least privilege on the AppRole**: The Warden AppRole only has access to the specific secret paths it needs. Compromise of the `secret_id` is limited to those paths.
-- **Automatic secret_id rotation**: Warden rotates the AppRole credentials on the configured schedule, limiting exposure of any single `secret_id`.
-- **Short-lived consumer credentials**: Dynamic credentials (database, AWS, tokens) have bounded TTLs. Vault automatically revokes them on expiration.
-- **Lease revocation**: Warden can proactively revoke credentials before they expire. Database and AWS leases are revoked via `sys/leases/revoke`; Vault tokens are revoked via their accessor.
-
-### Rotation
-
-Warden automatically rotates the AppRole `secret_id` on the configured schedule using a three-phase protocol:
-
-1. **Prepare**: Generate a new `secret_id` (both old and new remain valid)
-2. **Commit**: Persist the new config and re-authenticate with the new `secret_id`
-3. **Cleanup**: Destroy the old `secret_id` using its accessor
-
-If cleanup fails, it is retried daily for up to 7 days. Rotation requires `auth_method=approle` with `role_name` set.
-
 ## Mint Methods
 
 | Mint Method | Credential Type | Description |
@@ -533,11 +411,10 @@ Steps 1, 3-5 (provider setup) are identical. Replace Steps 2 and 6 with the foll
 
 ### Enable JWT Auth
 
-```bash
-# Enable JWT auth
-warden auth enable jwt
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup:
 
-# Configure JWT with the identity provider's JWKS endpoint
+```bash
+warden auth enable jwt
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role that binds the credential spec and policy
@@ -562,14 +439,9 @@ warden write vault/config <<EOF
 EOF
 ```
 
-Get a JWT from the identity provider and make requests:
+Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT`.
 
 ```bash
-export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
-  | jq -r '.access_token')
-
 VAULT_ENDPOINT="${WARDEN_ADDR}/v1/vault/role/vault-user/gateway"
 
 # Read a secret
@@ -598,136 +470,6 @@ To stop the identity provider containers:
 ```bash
 docker compose -f docker-compose.quickstart.yml down -v
 ```
-
-## Configuration Reference
-
-### Provider Config
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `vault_address` | string | — | Base URL of the Vault instance (required, e.g., `https://vault.example.com:8200`) |
-| `max_body_size` | int | `10485760` (10 MB) | Maximum request body size in bytes (max 100 MB) |
-| `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`) |
-| `tls_skip_verify` | bool | `false` | Skip TLS certificate verification (development only). Note: `http://` URLs are always allowed for `vault_address` |
-| `ca_data` | string | — | Base64-encoded PEM CA certificate for custom/self-signed CAs |
-| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication, e.g. `auth/cert/` or `auth/jwt/` |
-| `default_role` | string | — | Fallback role when not specified in the URL path |
-
-### Credential Source Config
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `vault_address` | string | Yes | Vault server address |
-| `auth_method` | string | No | Authentication method (`approle` or omit for pre-set token) |
-| `role_id` | string | If approle | AppRole role ID |
-| `secret_id` | string | If approle | AppRole secret ID (rotated automatically) |
-| `secret_id_accessor` | string | If approle | Secret ID accessor (used for rotation cleanup) |
-| `approle_mount` | string | If approle | AppRole auth mount path |
-| `role_name` | string | If approle | AppRole role name (required for rotation) |
-| `vault_namespace` | string | No | Vault namespace for multi-tenancy setups |
-
-### Credential Spec Config — vault_token
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `vault_token` |
-| `token_role` | string | Yes | Token role name (configured at `auth/token/roles/` in Vault) |
-| `ttl` | duration | No | Token TTL (clamped to min/max bounds) |
-| `display_name` | string | No | User-friendly name attached to the token |
-| `meta` | string | No | Metadata attached to the token |
-
-### Credential Spec Config — static_aws
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `static_aws` |
-| `kv2_mount` | string | Yes | KV v2 mount path in Vault |
-| `secret_path` | string | Yes | Path to the secret within the mount |
-
-### Credential Spec Config — static_apikey
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `static_apikey` |
-| `kv2_mount` | string | Yes | KV v2 mount path in Vault |
-| `secret_path` | string | Yes | Path to the secret within the mount |
-
-### Credential Spec Config — dynamic_aws
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `dynamic_aws` |
-| `aws_mount` | string | Yes | Vault AWS engine mount path |
-| `role_name` | string | Yes | AWS role name configured in Vault |
-| `role_arn` | string | No | ARN of the role to assume (for STS) |
-| `role_session_name` | string | No | Session name for the STS assumption |
-| `ttl` | duration | No | Credential TTL (clamped to min/max bounds) |
-
-### Credential Spec Config — dynamic_gcp
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `dynamic_gcp` |
-| `gcp_mount` | string | Yes | Vault GCP secrets engine mount path |
-| `role_name` | string | Yes | GCP roleset or static account name |
-| `role_type` | string | No | `roleset` (default) or `static-account` |
-
-### Credential Spec Config — oauth2
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `oauth2` |
-| `oauth2_mount` | string | Yes | Vault OAuth2 secrets engine mount path |
-| `credential_name` | string | Yes | Credential name configured in the OAuth2 plugin |
-
-### TTL Bounds
-
-- `-min-ttl`: Minimum credential TTL. Requests for shorter TTLs are clamped up.
-- `-max-ttl`: Maximum credential TTL. Requests for longer TTLs are clamped down.
-
-### Cert Auth Config
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `trusted_ca_pem` | string | — | PEM-encoded CA certificates that sign client certificates |
-| `principal_claim` | string | `cn` | Identity source: `cn`, `dns_san`, `email_san`, `uri_san`, `serial` |
-| `default_role` | string | — | Default role when no role is specified in the URL or request |
-| `token_ttl` | duration | `1h` | Default token TTL |
-| `revocation_mode` | string | `none` | Certificate revocation checking: `none`, `crl`, `ocsp`, `best_effort` |
-
-### Cert Auth Role Config
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `allowed_common_names` | list | No* | Glob patterns for allowed certificate CNs |
-| `allowed_dns_sans` | list | No* | Glob patterns for allowed DNS SANs |
-| `allowed_email_sans` | list | No* | Glob patterns for allowed email SANs |
-| `allowed_uri_sans` | list | No* | URI SAN patterns (`+` matches one segment, trailing `*` matches one or more) |
-| `allowed_organizational_units` | list | No* | Allowed organizational units |
-| `certificate` | string | No | Role-specific CA PEM (overrides global trusted CAs) |
-| `token_policies` | list | Yes | Policies to assign to tokens |
-| `token_ttl` | duration | No | Token TTL (default: 1h) |
-| `cred_spec_name` | string | No | Credential spec for gateway access |
-| `principal_claim` | string | No | Override global `principal_claim` for this role |
-
-*At least one constraint (`allowed_common_names`, `allowed_dns_sans`, etc.) should be specified.
-
-### JWT Auth Config
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `mode` | string | `jwt` | Auth mode: `jwt` or `oidc` |
-| `jwks_url` | string | — | URL to the JWKS endpoint for token verification |
-| `default_role` | string | — | Default role when no role is specified |
-
-### JWT Auth Role Config
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `user_claim` | string | Yes | JWT claim to use as the user identity (e.g., `sub`) |
-| `token_policies` | list | Yes | Policies to assign to tokens |
-| `token_ttl` | duration | No | Token TTL (default: 1h) |
-| `cred_spec_name` | string | No | Credential spec for gateway access |
 
 ## Troubleshooting
 

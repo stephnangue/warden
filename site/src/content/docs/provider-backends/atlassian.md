@@ -9,58 +9,18 @@ The Atlassian provider enables proxied access to all Atlassian Cloud and Data Ce
 - Docker and Docker Compose installed and running
 - An **Atlassian API token** (from [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens)) for Atlassian Cloud, or a **Personal Access Token (PAT)** for Data Center instances
 
-> **New to Warden?** Follow these steps to get a local dev environment running:
->
-> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
-> ```bash
-> curl -fsSL -o docker-compose.quickstart.yml \
->   https://raw.githubusercontent.com/stephnangue/warden/main/deploy/docker-compose.quickstart.yml
-> docker compose -f docker-compose.quickstart.yml up -d
-> ```
->
-> **2. Download the latest Warden binary:**
-> ```bash
-> # macOS (Apple Silicon)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_arm64.tar.gz | tar xz
->
-> # macOS (Intel)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_amd64.tar.gz | tar xz
->
-> # Linux (x86_64)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_amd64.tar.gz | tar xz
->
-> # Linux (ARM64)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_arm64.tar.gz | tar xz
-> ```
->
-> **3. Add the binary to your PATH:**
-> ```bash
-> export PATH="$PWD:$PATH"
-> ```
->
-> **4. Start the Warden server** in dev mode:
-> ```bash
-> warden server -dev -dev-root-token=root
-> ```
->
-> **5. In another terminal window**, export the environment variables for the CLI:
-> ```bash
-> export PATH="$PWD:$PATH"
-> export WARDEN_ADDR="http://127.0.0.1:8400"
-> export WARDEN_TOKEN="root"
-> ```
+:::note[New to Warden?]
+Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
+:::
 
 ## Step 1: Configure JWT Auth and Create a Role
 
-Set up a JWT auth method and create a role that binds the credential spec and policy. Clients authenticate directly with their JWT — no separate login step is needed.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
 > **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
 
 ```bash
-# Enable JWT auth if not already enabled
 warden auth enable jwt
-
-# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role that binds the credential spec and policy
@@ -222,14 +182,7 @@ EOF
 
 ## Step 5: Get a JWT and Make Requests
 
-Get a JWT from Hydra using one of the quickstart clients:
-
-```bash
-export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
-  | jq -r '.access_token')
-```
+Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
 The URL pattern is: `/v1/{mount}/role/{role}/gateway/{api-path}`
 
@@ -434,7 +387,9 @@ For older Data Center versions without PAT support, use Basic Auth the same way 
 
 Steps 1 and 5 use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. Steps 2-4 (provider, credential, and policy setup) are identical regardless of the auth method.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener. In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`.
+:::note[Prerequisite]
+Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
+:::
 
 ### Enable Cert Auth
 
@@ -480,48 +435,6 @@ curl --cert client.pem --key client-key.pem \
     --cacert warden-ca.pem \
     -s "https://warden.internal/v1/jira/role/atlassian-user/gateway/myself"
 ```
-
-## Configuration Reference
-
-### Provider Config
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `atlassian_url` | string | — | **Required.** Atlassian product API base URL (see product URLs below) |
-| `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
-| `timeout` | duration | `30s` | Request timeout |
-| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
-| `default_role` | string | — | Fallback role when not specified in URL |
-
-### Product Base URLs
-
-| Product | `atlassian_url` |
-|---------|----------------|
-| Jira Cloud | `https://{domain}.atlassian.net/rest/api/3` |
-| Confluence Cloud | `https://{domain}.atlassian.net/wiki/api/v2` |
-| Jira Service Management Cloud | `https://{domain}.atlassian.net/rest/servicedeskapi` |
-| Compass | `https://{domain}.atlassian.net/gateway/api/compass/v1` |
-| Atlassian Admin API | `https://api.atlassian.com` |
-| Bitbucket Cloud | `https://api.bitbucket.org/2.0` |
-| Jira Data Center | `https://{host}/rest/api/2` |
-| Confluence Data Center | `https://{host}/rest/api` |
-| Bitbucket Data Center | `https://{host}/rest/api/1.0` |
-
-### Credential Source Config (Static API Key)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `display_name` | string | No | Label for logs/errors (default: `API Key`) |
-| `optional_metadata` | string | No | Set to `email` to enable Basic Auth mode for Cloud personal tokens and Bitbucket app passwords |
-| `api_url` | string | No | API base URL for token verification |
-| `verify_endpoint` | string | No | Verification path appended to `api_url` |
-
-### Credential Spec Config
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `api_key` | string | Yes | Atlassian API token, PAT, app password, or Admin API org key (sensitive — masked in output) |
-| `email` | string | Conditional | Account email — required for Cloud personal tokens and Bitbucket app passwords (only forwarded if source has `optional_metadata=email`) |
 
 ## Authentication Modes
 

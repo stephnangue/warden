@@ -13,58 +13,18 @@ The OVH provider enables proxied access to OVHcloud APIs through Warden. It supp
 - An **OVHcloud account** with an OAuth2 service account (`client_id` + `client_secret`) — create one via [OVHcloud IAM](https://www.ovh.com/auth/) with `flow: "CLIENT_CREDENTIALS"`
 - For S3 Object Storage: a Public Cloud project ID and user ID
 
-> **New to Warden?** Follow these steps to get a local dev environment running:
->
-> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
-> ```bash
-> curl -fsSL -o docker-compose.quickstart.yml \
->   https://raw.githubusercontent.com/stephnangue/warden/main/deploy/docker-compose.quickstart.yml
-> docker compose -f docker-compose.quickstart.yml up -d
-> ```
->
-> **2. Download the latest Warden binary:**
-> ```bash
-> # macOS (Apple Silicon)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_arm64.tar.gz | tar xz
->
-> # macOS (Intel)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_amd64.tar.gz | tar xz
->
-> # Linux (x86_64)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_amd64.tar.gz | tar xz
->
-> # Linux (ARM64)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_arm64.tar.gz | tar xz
-> ```
->
-> **3. Add the binary to your PATH:**
-> ```bash
-> export PATH="$PWD:$PATH"
-> ```
->
-> **4. Start the Warden server** in dev mode:
-> ```bash
-> warden server -dev -dev-root-token=root
-> ```
->
-> **5. In another terminal window**, export the environment variables for the CLI:
-> ```bash
-> export PATH="$PWD:$PATH"
-> export WARDEN_ADDR="http://127.0.0.1:8400"
-> export WARDEN_TOKEN="root"
-> ```
+:::note[New to Warden?]
+Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
+:::
 
 ## Step 1: Configure JWT Auth and Create a Role
 
-Set up a JWT auth method and create a role that binds the credential spec and policy. Clients authenticate directly with their JWT — no separate login step is needed.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
 > **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
 
 ```bash
-# Enable JWT auth if not already enabled
 warden auth enable jwt
-
-# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role that binds the credential spec and policy
@@ -106,6 +66,8 @@ warden write ovh/config <<EOF
 }
 EOF
 ```
+
+See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
 
 Verify the configuration:
 
@@ -226,14 +188,7 @@ warden policy read ovh-access
 
 ## Step 5: Get a JWT and Make Requests
 
-Get a JWT from Hydra using one of the quickstart clients:
-
-```bash
-export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
-  | jq -r '.access_token')
-```
+Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
 Requests use role-based paths. Warden performs implicit JWT authentication and injects the OVH credentials automatically.
 
@@ -391,7 +346,9 @@ S3 Object Storage regions are independent of the API region and are auto-detecte
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+:::note[Prerequisite]
+Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
+:::
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
@@ -422,7 +379,7 @@ warden write auth/cert/role/ovh-user \
     cred_spec_name=ovh-ops
 ```
 
-The `allowed_common_names` field supports glob patterns. You can also match on other certificate fields: `allowed_dns_sans`, `allowed_email_sans`, `allowed_uri_sans`, or `allowed_organizational_units`.
+The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ### Configure Provider for Cert Auth
 
@@ -456,50 +413,6 @@ S3 Object Storage:
 aws s3 ls s3://my-bucket/ \
   --endpoint-url "https://warden.internal/v1/ovh/role/ovh-user/gateway"
 ```
-
-## Configuration Reference
-
-### Provider Config
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `ovh_url` | string | `https://eu.api.ovh.com/1.0` | OVH API base URL |
-| `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
-| `timeout` | duration | `30s` | Request timeout |
-| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
-| `default_role` | string | — | Fallback role when not specified in URL |
-
-### Credential Source Config (OVH OAuth2)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `client_id` | string | Yes | OAuth2 service account client ID |
-| `client_secret` | string | Yes | OAuth2 service account client secret (sensitive) |
-| `ovh_endpoint` | string | No | Regional endpoint: `ovh-eu` (default), `ovh-ca`, or `ovh-us` |
-| `project_id` | string | For S3 | Default Public Cloud project ID (can be overridden per-spec) |
-| `user_id` | string | For S3 | Default Public Cloud user ID (can be overridden per-spec) |
-
-### Credential Spec Config (OVH source — oauth2_token)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `oauth2_token` |
-
-### Credential Spec Config (OVH source — dynamic_s3)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `dynamic_s3` |
-| `project_id` | string | No | Override source default project ID |
-| `user_id` | string | No | Override source default user ID |
-
-### Credential Spec Config (OVH source — oauth2_token_and_s3)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `oauth2_token_and_s3` |
-| `project_id` | string | No | Override source default project ID |
-| `user_id` | string | No | Override source default user ID |
 
 ## Token Management
 

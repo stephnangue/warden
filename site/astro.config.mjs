@@ -88,6 +88,8 @@ export default defineConfig({
           label: 'Providers',
           items: [
             { slug: 'provider-backends' },
+            { slug: 'provider-backends/local-dev-setup' },
+            { slug: 'provider-backends/configuration' },
             {
               label: 'MCP servers',
               collapsed: true,

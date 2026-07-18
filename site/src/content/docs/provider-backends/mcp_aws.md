@@ -27,58 +27,18 @@ For a single developer with a laptop and personal AWS creds, `mcp-proxy-for-aws`
   - Permanent IAM credentials (access key + secret) for an identity that has `sts:AssumeRole` on the target role — these stay inside Warden's credential source and never reach the agent
 - An MCP client that supports remote MCP servers over HTTP (Claude Code, Cursor, Continue, Cline, Goose, ...)
 
-> **New to Warden?** Follow these steps to get a local dev environment running:
->
-> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
-> ```bash
-> curl -fsSL -o docker-compose.quickstart.yml \
->   https://raw.githubusercontent.com/stephnangue/warden/main/deploy/docker-compose.quickstart.yml
-> docker compose -f docker-compose.quickstart.yml up -d
-> ```
->
-> **2. Download the latest Warden binary:**
-> ```bash
-> # macOS (Apple Silicon)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_arm64.tar.gz | tar xz
->
-> # macOS (Intel)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_darwin_amd64.tar.gz | tar xz
->
-> # Linux (x86_64)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_amd64.tar.gz | tar xz
->
-> # Linux (ARM64)
-> curl -L https://github.com/stephnangue/warden/releases/latest/download/warden_$(curl -s https://api.github.com/repos/stephnangue/warden/releases/latest | grep tag_name | cut -d '"' -f4 | tr -d v)_linux_arm64.tar.gz | tar xz
-> ```
->
-> **3. Add the binary to your PATH:**
-> ```bash
-> export PATH="$PWD:$PATH"
-> ```
->
-> **4. Start the Warden server** in dev mode:
-> ```bash
-> warden server -dev -dev-root-token=root
-> ```
->
-> **5. In another terminal window**, export the environment variables for the CLI:
-> ```bash
-> export PATH="$PWD:$PATH"
-> export WARDEN_ADDR="http://127.0.0.1:8400"
-> export WARDEN_TOKEN="root"
-> ```
+:::note[New to Warden?]
+Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
+:::
 
 ## Step 1: Configure JWT Auth and Create a Role
 
-Set up a JWT auth method and create a role that binds the credential spec and policy. Clients authenticate directly with their JWT — no separate login step is needed.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
 > **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
 
 ```bash
-# Enable JWT auth if not already enabled
 warden auth enable jwt
-
-# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role that binds the credential spec and policy
@@ -148,6 +108,8 @@ warden write mcp_aws/config <<EOF
 EOF
 ```
 
+See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
+
 Verify the configuration:
 
 ```bash
@@ -203,24 +165,9 @@ warden cred spec read aws-s3-reader
 
 MCP traffic passes through two complementary layers of authorization. The IAM role's permissions are the security boundary — they bound what the agent can actually do at AWS regardless of what Warden lets through. On top of that, Warden's CBP policies support an `mcp { }` block for governance-style restrictions enforced at the gateway: allow- and deny-lists for JSON-RPC methods, tool names, resource URIs, prompt names, and selected tool arguments.
 
-Enforcement is **body-authoritative**. When a policy in scope contains an `mcp { }` block, Warden strict-parses the JSON-RPC request body and matches against the parsed body. The parser fails closed on any structural problem and the matcher denies with a specific `rule_type`:
+The `mcp { }` block is **body-authoritative** and **deny-by-default** — Warden strict-parses the JSON-RPC body and a block grants only what it allow-lists (`initialize`, `ping`, and `notifications/*` stay exempt for the handshake). See [Body-Authoritative Authorization](/concepts/mcp/#body-authoritative-authorization) for the full semantics and [Denial reasons](/concepts/mcp/#denial-reasons) for the `rule_type` values recorded on each decision.
 
-| `rule_type` | Trigger |
-|---|---|
-| `denied_methods` / `allowed_methods` | JSON-RPC `method` matches a deny pattern, or is absent from a configured allow list |
-| `denied_tools` / `allowed_tools` | `tools/call` with a `params.name` matching a deny pattern, or not in the allow list |
-| `denied_resources` / `allowed_resources` | `resources/read` with a `params.uri` matching a deny pattern, or not in the allow list |
-| `denied_prompts` / `allowed_prompts` | `prompts/get` with a `params.name` matching a deny pattern, or not in the allow list |
-| `missing_body` | Request body absent on a path the backend opted into MCP enforcement for. POST/JSON-RPC traffic that fails to parse triggers this; non-POST verbs (GET for the SSE notification stream, DELETE for session terminate) silently skip `mcp { }` evaluation — the body-authoritative gate doesn't apply to body-less verbs. |
-| `malformed_jsonrpc` | Body is not a well-formed JSON-RPC 2.0 envelope (bad version, missing method, unknown top-level key, UTF-8 BOM, etc.) |
-| `duplicate_key` | Duplicate object key detected anywhere in the body — Warden rejects ambiguity that Go's standard JSON parser silently last-wins-resolves |
-| `oversized_body` | Body exceeds the mount's `max_body_size` |
-| `batch_empty` | JSON-RPC batch is `[]` |
-| `malformed_params` | A name-bearing method (`tools/call`, `resources/read`, `prompts/get`) has a missing or wrong-shape `params.name` / `params.uri` |
-
-All examples below use `capabilities = ["create", "read", "delete"]`. MCP Streamable HTTP uses three HTTP verbs on the same `/gateway` URL: POST for JSON-RPC requests (mapped by Warden to `create`), GET for the optional server → client SSE notification stream (`read`), and DELETE for session terminate (`delete`). All three need to be in the cap list or off-spec MCP clients fail to connect. The `mcp { }` block only fires on the POST half; GET/DELETE skip body-authoritative evaluation automatically.
-
-`mcp { }` authorization is **deny-by-default**: an empty or absent `allowed_methods`/`allowed_tools` denies everything, so a block grants only what it allow-lists — use `["*"]` to open a family fully. The session-lifecycle methods `initialize`, `notifications/*`, and `ping` are **exempt**: they always pass without being listed, so the client handshake works no matter how narrow the data-plane allow-list is (an explicit `denied_methods` entry can still block them).
+All examples below use `capabilities = ["create", "read", "delete"]` — the three MCP Streamable HTTP verbs on the `/gateway` URL (POST for JSON-RPC, GET for the SSE stream, DELETE for session terminate). The `mcp { }` block only fires on the POST half.
 
 The simplest policy grants the gateway and leans on IAM for everything:
 
@@ -313,14 +260,7 @@ Policies that omit the `mcp { }` block keep the simplest behavior: Warden passes
 
 ## Step 5: Point an MCP Client at Warden
 
-Get a JWT from Hydra using one of the quickstart clients:
-
-```bash
-export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
-  | jq -r '.access_token')
-```
+Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
 Configure your MCP client to point at the Warden mount. The URL pattern is:
 
@@ -435,7 +375,9 @@ The **absence** of a trailing slash on `gateway` matters — Warden composes the
 
 Steps 1 and 5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+:::note[Prerequisite]
+Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
+:::
 
 Steps 2-4 (provider mount, credential source and spec, policy) are identical — the `mcp-aws-access` policy from Step 4 works for either auth method. Replace Steps 1 and 5 with the following.
 
@@ -466,7 +408,7 @@ warden write auth/cert/role/s3-reader \
     cred_spec_name=aws-s3-reader
 ```
 
-The `allowed_common_names` field supports glob patterns. You can also match on other certificate fields: `allowed_dns_sans`, `allowed_email_sans`, `allowed_uri_sans`, or `allowed_organizational_units`.
+The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ### Configure Provider for Cert Auth
 
@@ -562,22 +504,7 @@ With cert auth, the role is resolved (in priority order):
 2. `/role/<role>/` segment in the URL path — not used in header-routed mode, but available when an MCP client cannot send custom headers
 3. `default_role` set on the cert auth method's config — useful when one cert maps 1:1 to one role; the JSON config can drop `X-Warden-Role` entirely
 
-## Configuration Reference
-
-### Provider Config
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `mcp_aws_url` | string | `https://aws-mcp.us-east-1.api.aws/mcp` | MCP server base URL (must be HTTPS). Drives the SigV4 service and signing-region inference. |
-| `region` | string | inferred from URL | SigV4 signing region. Required when the host doesn't yield one via DNS-label inference (e.g. GovCloud, China partition, custom test hosts). Independent of which AWS region the agent's API calls actually target. |
-| `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
-| `timeout` | duration | `10m` | Session timeout. Raise for long agent sessions that keep an SSE stream open across many tool calls. |
-| `tls_skip_verify` | bool | `false` | Skip TLS certificate verification (development only) |
-| `ca_data` | string | — | Base64-encoded PEM CA certificate for custom/self-signed CAs |
-| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`) |
-| `default_role` | string | — | Fallback role when not specified in URL |
-
-### Region behavior
+## Region behavior
 
 The mount's `region` is the **SigV4 signing region for the upstream MCP endpoint**, not a restriction on which AWS region the agent's API calls target. AWS's MCP Server makes API calls in any region; the agent picks the target region via `region_name` inside the tool arguments. One mount fronting `aws-mcp.us-east-1.api.aws/mcp` already serves agents operating against every AWS region's APIs.
 
@@ -601,12 +528,3 @@ Common patterns:
 
 The CloudTrail entry for each AWS API call captures both the assumed-role identity and (via Warden's audit log linkage) the originating Warden session. Treat the IAM role as the security boundary and the `mcp { }` block as governance over which JSON-RPC shapes ever reach AWS.
 
-**Rotate** the source's permanent credentials by updating the source config:
-
-```bash
-warden cred source update aws-src \
-  -config=access_key_id=AKIA-new... \
-  -config=secret_access_key=...
-```
-
-Then revoke the old access key from the IAM console. STS sessions minted before the rotation continue to work until they expire (per `ttl` on the spec); new sessions use the new source credentials.

@@ -20,15 +20,12 @@ Warden is transparent to clients: they use standard Alicloud SDKs pointed at the
 
 ## Step 1: Configure JWT Auth and Create a Role
 
-Set up a JWT auth method and create a role that binds the credential spec and policy. Clients authenticate directly with their JWT — no separate login step is needed.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
 > **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
 
 ```bash
-# Enable JWT auth if not already enabled
 warden auth enable jwt
-
-# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role that binds the credential spec and policy
@@ -70,6 +67,8 @@ warden write alicloud/config <<EOF
 }
 EOF
 ```
+
+See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
 
 If you're running Warden directly (no reverse proxy) and clients can resolve real Alicloud hostnames at Warden's address (e.g., via DNS or `/etc/hosts` overrides), omit `proxy_domains`.
 
@@ -335,7 +334,9 @@ Warden extracts the JWT from `X-Amz-Security-Token` (it starts with `eyJ`), auth
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
-> **Prerequisite:** Certificate authentication requires TLS to be enabled on the Warden listener so that client certificates can be presented during the TLS handshake (mTLS). In dev mode, use `-dev-tls` to enable TLS with auto-generated certificates. Alternatively, place Warden behind a load balancer that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+:::note[Prerequisite]
+Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
+:::
 
 Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
 
@@ -386,18 +387,6 @@ For cert-based transparent auth, the client signs with the **role name** as both
 # Credential=alicloud-user,... — Warden recognizes the role name and resolves
 # the cert-authenticated identity.
 ```
-
-## Configuration Reference
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `auto_auth_path` | string | — | Required. Auth mount path for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`). |
-| `default_role` | string | — | Fallback role when not provided in the URL path or resolved from the request. |
-| `proxy_domains` | []string | `[]` | Reverse-proxy DNS suffixes. Hosts of the form `<real>.aliyuncs.com.<proxy-domain>` are rewritten to `<real>.aliyuncs.com` before forwarding. Direct `*.aliyuncs.com` hosts are always accepted; anything else is rejected (SSRF guard). Entries must not themselves contain `aliyuncs.com`. |
-| `max_body_size` | int | 10MB | Maximum request body size in bytes (max 100MB). |
-| `timeout` | duration | 30s | Request timeout for verification + re-sign + forwarding. |
-| `tls_skip_verify` | bool | false | Skip TLS verification of upstream Alicloud endpoints (insecure; for testing only). |
-| `ca_data` | string | — | Base64-encoded PEM bundle to trust as the upstream CA. |
 
 ## Credential Reference
 

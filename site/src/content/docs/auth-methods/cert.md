@@ -26,6 +26,15 @@ If your workload's identity is a Kubernetes ServiceAccount token, prefer the `ku
 - A way to get the workload's certificate to Warden — either direct mTLS termination at the Warden listener, or a trusted reverse proxy that terminates TLS and re-presents the certificate via a forwarding header. See [How the Certificate Reaches Warden](#how-the-certificate-reaches-warden).
 - A **role-mapping policy** in Warden that scopes what the resulting auth token can do (authenticating a certificate doesn't grant access on its own).
 
+## Enabling mTLS on the Listener
+
+Certificate auth requires TLS on the Warden listener so the client certificate can be presented during the handshake (mTLS). Two ways to satisfy it:
+
+- **Dev mode.** Use `-dev-tls` to enable TLS with auto-generated certificates, or provide your own with `-dev-tls-cert-file`, `-dev-tls-key-file`, and `-dev-tls-ca-cert-file`. See [Serving TLS](/concepts/dev-server/#serving-tls) and [Requiring client certificates](/concepts/dev-server/#requiring-client-certificates-mtls).
+- **Behind a load balancer.** Place Warden behind a proxy that terminates TLS and forwards the client certificate via the `X-Forwarded-Client-Cert` or `X-SSL-Client-Cert` header.
+
+Both paths end at the same certificate extractor — see [How the Certificate Reaches Warden](#how-the-certificate-reaches-warden) for the trust-boundary details.
+
 ## Step 1: Configure Trusted CAs
 
 Enable the auth method:

@@ -178,6 +178,26 @@ short `error_description` naming the offending method, tool, or parameter
 generic — it never reveals the shape of the policy or echoes raw body bytes — but
 it tells the agent enough to correct course rather than guess at an opaque 403.
 
+### Denial reasons
+
+Every decision records a `rule_type` in the [audit log](/concepts/audit/). Policy
+`rule_type`s name which gate fired; structural ones name a strict-parse failure,
+distinct from a policy refusal so operators can tell bad input from a governed
+denial:
+
+| `rule_type` | Trigger |
+|---|---|
+| `denied_methods` / `allowed_methods` | JSON-RPC `method` matches a deny pattern, or is absent from a configured allow list |
+| `denied_tools` / `allowed_tools` | `tools/call` with a `params.name` matching a deny pattern, or not in the allow list |
+| `denied_resources` / `allowed_resources` | `resources/read` with a `params.uri` matching a deny pattern, or not in the allow list |
+| `denied_prompts` / `allowed_prompts` | `prompts/get` with a `params.name` matching a deny pattern, or not in the allow list |
+| `missing_body` | A `POST`/JSON-RPC body is absent or fails to parse on a path with MCP enforcement. Body-less verbs (`GET` SSE stream, `DELETE` session terminate) skip `mcp { }` evaluation entirely |
+| `malformed_jsonrpc` | Body is not a well-formed JSON-RPC 2.0 envelope (bad version, missing method, unknown top-level key, UTF-8 BOM, …) |
+| `duplicate_key` | Duplicate object key anywhere in the body — Warden rejects the ambiguity a last-wins parser would hide |
+| `oversized_body` | Body exceeds the mount's `max_body_size` |
+| `batch_empty` | JSON-RPC batch is `[]` |
+| `malformed_params` | A name-bearing method (`tools/call`, `resources/read`, `prompts/get`) has a missing or wrong-shape `params.name` / `params.uri` |
+
 ## Auditing MCP Decisions
 
 Every consulted `mcp { }` block records its outcome to the [audit log](/concepts/audit/):
