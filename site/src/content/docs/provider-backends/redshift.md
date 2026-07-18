@@ -332,39 +332,3 @@ conn = psycopg2.connect(resp["connection_string"])
 ## Attribution
 
 Warden injects the requesting principal's identity into the connection string via PostgreSQL's `application_name` parameter. It surfaces in `STV_SESSIONS`, `STL_CONNECTION_LOG`, and Redshift audit logs — letting you trace which Warden workload opened each connection without giving every workload its own database user.
-
-## Configuration Reference
-
-### Provider Config
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`) |
-
-### Credential Spec Config (`redshift_iam_token` mint method)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `redshift_iam_token` |
-| `db_endpoint` | string | Yes | Redshift endpoint hostname (used in the returned connection string) |
-| `cluster_identifier` | string | One of two | Redshift provisioned cluster identifier. Mutually exclusive with `workgroup_name`. |
-| `workgroup_name` | string | One of two | Redshift Serverless workgroup name. Mutually exclusive with `cluster_identifier`. |
-| `db_name` | string | No | Database name passed to AWS for IAM scoping. If omitted, the IAM policy must allow access to all databases on the cluster/workgroup. |
-| `db_port` | string | No | Defaults to `5439` |
-| `region` | string | No | AWS region (defaults to source region) |
-| `duration_seconds` | int | No | Token TTL in seconds, 900–3600. Default `900`. |
-
-### Provider Grant Config
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `credential_spec` | string | Yes | Name of the credential spec to mint |
-| `db_name` | string | No | Database name to include in the connection string |
-| `description` | string | No | Human-readable description |
-
-### Response Format
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `connection_string` | string | Ready-to-use libpq DSN for `sql.Open()` or equivalent |
-| `lease_duration` | int | Token validity in seconds (900–3600 depending on `duration_seconds`) |

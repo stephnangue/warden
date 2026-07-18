@@ -75,6 +75,13 @@ warden write auth/jwt/config \
 
 Multiple PEM keys can be supplied as a comma-separated list — useful during key rotation when the issuer may sign with either of two keys.
 
+**Quickstart (Ory Hydra).** The provider guides use the local [dev setup](/provider-backends/local-dev-setup/), whose bundled Hydra publishes a JWKS endpoint. Point the mount at it:
+
+```bash
+warden auth enable jwt
+warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
+```
+
 ## Step 2: Add Issuer / Audience / Claim Bindings
 
 Bindings configured on the mount apply to every login through it (a role may override most of them with per-role bindings).
@@ -147,6 +154,21 @@ The role can be set via the `X-Warden-Role` header (as above), embedded in the U
 The first request with a given (JWT, role) tuple triggers a fresh signature + claim validation and caches the result. Subsequent requests with the same tuple hit Warden's in-memory cache (TTL = `min(role.token_ttl, jwt-exp-derived)`) — no signature re-verification per call.
 
 > **Why no explicit login endpoint?** The `jwt_role` token type is part of Warden's transparent-auth family (alongside `cert_role` and `kubernetes_role`). Explicit logins returning a transparent token type are rejected by design. This keeps the workload's identity — the JWT, attested by the IdP — flowing through every call so each request is independently auditable, with no operator-distributed Warden tokens to rotate or revoke separately.
+
+## Obtaining a JWT
+
+The workload gets its JWT from your identity provider — the same IdP whose keys back the mount's [key source](#step-1-configure-the-key-source). How depends on the provider (OAuth2 client-credentials, an OIDC device flow, a CI runner's OIDC token, etc.).
+
+For the local [dev setup](/provider-backends/local-dev-setup/), the bundled Ory Hydra issues one via the OAuth2 client-credentials grant:
+
+```bash
+export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
+  | jq -r '.access_token')
+```
+
+The workload then presents `$JWT` on every gateway request (as `Authorization: Bearer`, or via the provider-specific credential field documented in each provider guide).
 
 ## Group-Based Policies
 

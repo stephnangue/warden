@@ -11,29 +11,16 @@ The Kubernetes provider enables proxied access to Kubernetes API servers through
 - A **ServiceAccount** with permissions to create tokens for other service accounts (see [RBAC Requirements](#rbac-requirements))
 - A **bearer token** for the source ServiceAccount
 
-> **New to Warden?** Follow these steps to get a local dev environment running:
->
-> **1. Deploy the quickstart stack** -- this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
-> ```bash
-> curl -fsSL -o docker-compose.quickstart.yml \
->   https://raw.githubusercontent.com/stephnangue/warden/main/deploy/docker-compose.quickstart.yml
-> docker compose -f docker-compose.quickstart.yml up -d
-> ```
->
-> **2. Start Warden in dev mode:**
-> ```bash
-> warden server -dev -dev-root-token=root
-> ```
+:::note[New to Warden?]
+Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
+:::
 
 ## Step 1: Configure JWT Auth and Create a Role
 
-Enable JWT auth and create a role bound to a Warden policy:
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup:
 
 ```bash
-# Enable JWT auth (if not already enabled)
 warden auth enable jwt -path=auth/jwt/
-
-# Configure JWT auth with your OIDC provider
 warden write auth/jwt/config \
   jwks_url="http://localhost:4444/.well-known/jwks.json" \
   default_role="k8s-user"
@@ -56,6 +43,8 @@ warden write kubernetes/config \
   kubernetes_url="https://my-cluster.example.com:6443" \
   auto_auth_path="auth/jwt/"
 ```
+
+See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
 
 For clusters with custom CA certificates:
 
@@ -238,14 +227,7 @@ EOF
 
 ## Step 5: Get a JWT and Make Requests
 
-Get a JWT from Hydra using one of the quickstart clients:
-
-```bash
-export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read" \
-  | jq -r '.access_token')
-```
+Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
 Requests use role-based paths. Warden performs implicit JWT authentication and injects the Kubernetes ServiceAccount token automatically.
 
@@ -318,41 +300,6 @@ roleRef:
 ```
 
 To restrict token creation to specific namespaces, use a `Role` and `RoleBinding` instead of `ClusterRole` and `ClusterRoleBinding`.
-
-## Configuration Reference
-
-### Provider Configuration
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `kubernetes_url` | string | Yes | Kubernetes API server URL (e.g., `https://my-cluster.example.com:6443`) |
-| `max_body_size` | int | No | Maximum request body size in bytes (default: 10MB, max: 100MB) |
-| `timeout` | string | No | Request timeout duration (default: `30s`) |
-| `auto_auth_path` | string | Yes | Auth mount path for implicit authentication (e.g., `auth/jwt/`) |
-| `default_role` | string | No | Default role when not specified in URL path |
-| `tls_skip_verify` | bool | No | Skip TLS certificate verification; also allows `http://` URLs (default: `false`) |
-| `ca_data` | string | No | Base64-encoded PEM CA certificate for custom CAs |
-
-### Credential Source Configuration
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `kubernetes_url` | string | Yes | Kubernetes API server URL |
-| `token` | string | Yes | Bearer token for authenticating to the API server |
-| `ca_data` | string | No | Base64-encoded PEM CA certificate |
-| `tls_skip_verify` | string | No | Skip TLS verification; also allows `http://` URLs (`true`/`false`, default: `false`) |
-| `source_service_account` | string | No | Name of the source SA (required for rotation) |
-| `source_namespace` | string | No | Namespace of the source SA (required for rotation) |
-| `source_token_ttl` | string | No | TTL for rotated source tokens (default: `24h`, min: `10m`, max: `48h`) |
-
-### Credential Spec Configuration
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `service_account` | string | Yes | Target service account name |
-| `namespace` | string | Yes | Namespace of the target service account |
-| `audiences` | string | No | Comma-separated list of token audiences |
-| `ttl` | string | No | Token TTL (e.g., `1h`, `30m`). Default: `1h`. Min: `10m`, Max: `48h` |
 
 ## Token Management
 

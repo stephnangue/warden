@@ -313,14 +313,7 @@ EOF
 
 ## Step 6: Get a Connection String
 
-Get a JWT from your identity provider:
-
-```bash
-export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
-  | jq -r '.access_token')
-```
+Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
 Pass the JWT directly — no login step needed:
 
@@ -400,39 +393,3 @@ Warden injects the requesting principal's identity into the connection string fo
 | MySQL | `connectionAttributes=program_name:<principal>` | `performance_schema.session_connect_attrs` |
 
 This means database audit logs show both the shared IAM user and which Warden workload opened the connection — without requiring per-workload database users.
-
-## Configuration Reference
-
-### Provider Config
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g., `auth/jwt/`) |
-
-### Credential Spec Config (`rds_iam_token` type)
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mint_method` | string | Yes | Must be `rds_iam_token` |
-| `db_endpoint` | string | Yes | RDS endpoint hostname |
-| `db_user` | string | Yes | Database user mapped to IAM identity |
-| `db_engine` | string | No | `postgres` (default) or `mysql` |
-| `db_port` | string | No | Defaults based on engine (5432, 3306) |
-| `region` | string | No | AWS region (defaults to source region) |
-| `role_arn` | string | No | IAM role ARN for cross-account access |
-
-### Provider Grant Config
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `credential_spec` | string | Yes | Name of the credential spec to mint |
-| `db_name` | string | No | Database name to include in connection string |
-| `db_engine` | string | No | Overrides engine from credential spec |
-| `description` | string | No | Human-readable description |
-
-### Response Format
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `connection_string` | string | Ready-to-use DSN for `sql.Open()` or equivalent |
-| `lease_duration` | int | Token validity in seconds (900 for RDS IAM) |

@@ -16,39 +16,18 @@ The token *value* is always brokered per request from the credential subsystem (
 
 - A REST API reachable from Warden and a token for it (static API key, or a token mintable by one of Warden's credential sources).
 
-> **New to Warden?** Follow these steps to get a local dev environment running:
->
-> **1. Deploy the quickstart stack** — this starts an identity provider ([Ory Hydra](https://www.ory.sh/hydra/)) needed to issue JWTs for authentication in Steps 1 and 5:
-> ```bash
-> curl -fsSL -o docker-compose.quickstart.yml \
->   https://raw.githubusercontent.com/stephnangue/warden/main/deploy/docker-compose.quickstart.yml
-> docker compose -f docker-compose.quickstart.yml up -d
-> ```
->
-> **2. Download the latest Warden binary** from the [releases page](https://github.com/stephnangue/warden/releases/latest) and add it to your `PATH`.
->
-> **3. Start the Warden server** in dev mode:
-> ```bash
-> warden server -dev -dev-root-token=root
-> ```
->
-> **4. In another terminal window**, export the environment variables for the CLI:
-> ```bash
-> export WARDEN_ADDR="http://127.0.0.1:8400"
-> export WARDEN_TOKEN="root"
-> ```
+:::note[New to Warden?]
+Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
+:::
 
 ## Step 1: Configure JWT Auth and Create a Role
 
-Set up a JWT auth method and create a role that binds the credential spec and policy. Clients authenticate directly with their JWT — no separate login step is needed.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
 > **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
 
 ```bash
-# Enable JWT auth if not already enabled
 warden auth enable jwt
-
-# Configure JWT with Hydra's JWKS endpoint (from docker-compose.quickstart.yml)
 warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
 
 # Create a role that binds the credential spec and policy
@@ -80,6 +59,8 @@ warden write billing-api/config <<EOF
 }
 EOF
 ```
+
+See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
 
 Verify the configuration (the token value is never shown — it is brokered per request):
 
@@ -136,12 +117,7 @@ EOF
 
 ## Step 5: Get a JWT and Make Requests
 
-```bash
-export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
-  | jq -r '.access_token')
-```
+Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
 The URL pattern is `/v1/<mount>/role/{role}/gateway/{api-path}`. Everything after `/gateway/` — path, query, method, body — is forwarded verbatim:
 
@@ -180,33 +156,6 @@ The same provider fronts many APIs by varying three fields. Common upstreams:
 | Twitch (Helix) | `Authorization` | `Bearer ` | `Client-Id=<id>` |
 
 `token_prefix` distinguishes the unset default (`Bearer `) from an explicit empty string (raw token in the header) — set `token_prefix=""` for APIs that want the bare token.
-
-## Configuration Reference
-
-### Provider Config
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `base_url` | string | — | **Required.** Upstream API base URL (HTTPS unless `tls_skip_verify`) |
-| `token_header` | string | `Authorization` | Header the brokered token is injected into |
-| `token_prefix` | string | `Bearer ` | Prefix prepended to the token; set `""` for a raw token |
-| `headers` | key=value | — | Additional static headers injected on every request (override client values) |
-| `max_body_size` | int | 10485760 (10 MB) | Maximum request body size in bytes (max 100 MB) |
-| `timeout` | duration | `30s` | Request timeout |
-| `auto_auth_path` | string | — | **Required.** Auth mount path for implicit authentication (e.g. `auth/jwt/`, `auth/cert/`) |
-| `default_role` | string | — | Fallback role when not specified in the URL |
-| `tls_skip_verify` | bool | `false` | Skip upstream TLS verification (development only) |
-| `ca_data` | string | — | Base64-encoded PEM CA certificate for custom/self-signed CAs |
-
-### Supported Credential Types
-
-| Source `-type` | Credential type | Notes |
-|---|---|---|
-| `apikey` | `api_key` | Static token on the spec |
-| `oauth2` | `oauth_bearer_token` | OAuth2 client-credentials / refresh; token minted and refreshed |
-| `grafana`, `honeycomb`, `elastic` | `api_key` | Dynamically minted keys |
-
-All carry the token in the `api_key` field. Git, Kubernetes, and cloud credential types are **not** supported — use their dedicated providers.
 
 ## Token Management
 
