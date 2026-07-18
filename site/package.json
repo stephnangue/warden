@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
+    "prebuild": "rm -rf .astro node_modules/.astro",
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro"
