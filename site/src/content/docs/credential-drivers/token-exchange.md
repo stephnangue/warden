@@ -51,6 +51,102 @@ Always `oauth_bearer_token`. It is **dynamic** when the token endpoint returns a
 - `client_secret` and `private_key` are masked; subject/actor/minted tokens are never logged.
 - `tls_skip_verify` is for development only (a cleartext IdP would expose caller tokens).
 
+## Examples
+
+**RFC 8693 OBO of the caller's own identity** — the agent's verified inbound JWT is exchanged for a token scoped to an internal API.
+
+```bash
+warden cred source create idp-exchange \
+  -type=token_exchange \
+  -config=token_url=https://idp.example.com/oauth2/v1/token \
+  -config=client_auth=client_secret_post \
+  -config=client_id=warden-gateway \
+  -config=client_secret="$OAUTH_CLIENT_SECRET"
+
+warden cred spec create internal-api \
+  -source=idp-exchange \
+  -config=subject_token_source=auth_token \
+  -config=audience=https://api.internal.example.com \
+  -config=scope=read:orders
+```
+
+**Microsoft Entra OBO (`jwt_bearer`)** — the subject is sent as `assertion` with Entra's on-behalf-of flag.
+
+```bash
+warden cred source create entra-obo \
+  -type=token_exchange \
+  -config=token_url=https://login.microsoftonline.com/$TENANT/oauth2/v2.0/token \
+  -config=grant=jwt_bearer \
+  -config=client_auth=client_secret_post \
+  -config=client_id=$CLIENT_ID \
+  -config=client_secret="$CLIENT_SECRET" \
+  -config=token_param.requested_token_use=on_behalf_of
+
+warden cred spec create graph \
+  -source=entra-obo \
+  -config=subject_token_source=auth_token \
+  -config=scope=https://graph.microsoft.com/.default
+```
+
+**Header-sourced subject (a carried user token)** — the agent supplies a user's token in `X-Warden-Subject-Token`; the source's `subject_*` keys let the driver validate it before exchanging.
+
+```bash
+warden cred source create partner-idp \
+  -type=token_exchange \
+  -config=token_url=https://idp.example.com/oauth2/v1/token \
+  -config=client_auth=client_secret_post \
+  -config=client_id=warden-gateway \
+  -config=client_secret="$OAUTH_CLIENT_SECRET" \
+  -config=subject_jwks_url=https://login.example.com/keys \
+  -config=subject_issuer=https://login.example.com/ \
+  -config=subject_audience=api://warden
+
+warden cred spec create internal-api \
+  -source=partner-idp \
+  -config=subject_token_source=header \
+  -config=audience=https://api.internal.example.com
+```
+
+**`private_key_jwt` client authentication** — Warden signs a client assertion instead of sending a secret.
+
+```bash
+warden cred source create idp-pkjwt \
+  -type=token_exchange \
+  -config=token_url=https://idp.example.com/oauth2/v1/token \
+  -config=client_auth=private_key_jwt \
+  -config=client_id=warden-gateway \
+  -config=private_key="$(cat client-key.pem)"
+```
+
+**Delegation — agent acting for a user** — the user's token is the subject (header); the agent's own verified inbound JWT is the actor. The minted token carries an `act` chain.
+
+```bash
+warden cred spec create internal-api-deleg \
+  -source=idp-exchange \
+  -config=subject_token_source=header \
+  -config=actor_token_source=auth_token \
+  -config=audience=https://api.internal.example.com
+```
+
+**ID-JAG cross-app access** — two legs in one mint: an ID-JAG from the home IdP, redeemed at the resource authorization server.
+
+```bash
+warden cred source create crossapp \
+  -type=token_exchange \
+  -config=grant=id_jag \
+  -config=token_url=https://idp.example.com/oauth2/v1/token \
+  -config=resource_token_url=https://auth.resourceapp.example.com/oauth2/token \
+  -config=client_auth=private_key_jwt \
+  -config=client_id=warden-gateway \
+  -config=private_key="$(cat client-key.pem)"
+
+warden cred spec create resource-api \
+  -source=crossapp \
+  -config=subject_token_source=auth_token \
+  -config=audience=https://auth.resourceapp.example.com \
+  -config=scope=files:read
+```
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=token_exchange -config=key=value ...`:
