@@ -171,15 +171,19 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 		cacheKey += ":x:" + inputs.Fingerprint()
 	}
 
-	// Check cache first
-	if cred, found := m.cache.Get(cacheKey); found {
+	// Check cache first. A cached credential that has outlived its lease is
+	// treated as a miss and re-minted: the cache carries no read-time expiry of
+	// its own, and non-revocable credentials (e.g. exchanged bearer tokens) are
+	// not tracked by the expiration manager, so IsExpired is the guard that keeps
+	// a stale token from being served past its lifetime.
+	if cred, found := m.cache.Get(cacheKey); found && !cred.IsExpired() {
 		return cred, nil
 	}
 
 	// Use singleflight to ensure only one creation per cacheKey
 	v, err, _ := m.group.Do(cacheKey, func() (interface{}, error) {
 		// Double-check cache in case another goroutine just added it
-		if cred, found := m.cache.Get(cacheKey); found {
+		if cred, found := m.cache.Get(cacheKey); found && !cred.IsExpired() {
 			return cred, nil
 		}
 
@@ -196,7 +200,19 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 		cred.TokenID = tokenID
 		cred.SpecName = specName
 
-		m.cache.Set(cacheKey, cred, 1)
+		// Cache the credential. Bound a dynamic credential's entry by its remaining
+		// lifetime (capped by the session TTL) so an expired token is actively
+		// evicted rather than lingering; the IsExpired guard on the read path is the
+		// correctness backstop, this keeps memory from accumulating stale entries.
+		if cred.LeaseTTL > 0 {
+			ttl := cred.LeaseTTL
+			if tokenTTL > 0 && tokenTTL < ttl {
+				ttl = tokenTTL
+			}
+			m.cache.SetWithTTL(cacheKey, cred, 1, ttl)
+		} else {
+			m.cache.Set(cacheKey, cred, 1)
+		}
 
 		// Wait for value to be processed (Ristretto is async)
 		m.cache.Wait()

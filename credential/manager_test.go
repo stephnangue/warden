@@ -392,6 +392,40 @@ func TestManager_IssueCredential_CacheHit(t *testing.T) {
 	assert.Equal(t, int32(1), factory.driver.mintCalls.Load())
 }
 
+func TestManager_IssueCredential_ExpiredNotServed(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+
+	// A short-lived, non-revocable credential (LeaseTTL>0, no leaseID) — the shape
+	// of an exchanged bearer token. It must not be served from cache once its lease
+	// has elapsed; the manager must re-mint.
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"username": "u", "password": "p"}, nil, 40 * time.Millisecond, "", nil
+	}
+
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: map[string]string{}})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: map[string]string{}})
+
+	ctx := createNamespaceContext()
+	tokenID := "token-expiry"
+	tokenTTL := time.Hour
+
+	_, err := manager.IssueCredential(ctx, tokenID, "test-spec", tokenTTL, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), factory.driver.mintCalls.Load())
+
+	// Within the lease: cache hit, no re-mint.
+	_, err = manager.IssueCredential(ctx, tokenID, "test-spec", tokenTTL, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), factory.driver.mintCalls.Load(), "should serve from cache before expiry")
+
+	// After the lease elapses: the expired entry is not served — re-mint.
+	time.Sleep(80 * time.Millisecond)
+	_, err = manager.IssueCredential(ctx, tokenID, "test-spec", tokenTTL, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "expired credential must be re-minted, not served stale")
+}
+
 func TestManager_IssueCredential_SpecNotFound(t *testing.T) {
 	manager, _, _ := createTestManager(t)
 	defer manager.Stop()
