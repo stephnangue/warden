@@ -864,6 +864,12 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		}
 	}
 
+	// Structurally validate any token-exchange keys. Whether a driver supports
+	// exchange is enforced at mint time (fail closed), not here.
+	if err := credential.ValidateExchangeSpecConfig(spec.Config); err != nil {
+		return logical.ErrBadRequestf("invalid token-exchange config: %s", err.Error())
+	}
+
 	// Test credential minting if driver registry is available.
 	// This catches invalid auth credentials early (e.g., wrong GitHub app_id,
 	// expired PAT, invalid private key) rather than failing at gateway time.
@@ -890,6 +896,13 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				runTestMint := true
 				if cg, ok := credType.(credential.ConnectGated); ok &&
 					cg.RequiresConnect(spec.Config) && !cg.IsConnected(spec.Config) {
+					runTestMint = false
+				}
+
+				// A token-exchange spec has no caller subject token at creation
+				// time, so it cannot be test-minted here — it mints only on a live
+				// request that carries the exchange inputs.
+				if credential.SpecRequestsExchange(spec.Config) {
 					runTestMint = false
 				}
 
