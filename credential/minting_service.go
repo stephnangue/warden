@@ -53,6 +53,8 @@ func NewMintingService(logger *logger.GatedLogger) *MintingService {
 //   - ctx: Context for the minting operation
 //   - driver: The source driver to mint credentials from
 //   - spec: The credential spec defining minting parameters
+//   - inputs: Optional caller-derived token-exchange inputs. When non-nil, the
+//     driver must implement ExchangeMinter or minting fails closed.
 //   - onSuccess: Callback to process minted data (parse/validate)
 //
 // Returns an error if minting fails or if onSuccess callback fails
@@ -60,10 +62,29 @@ func (s *MintingService) MintWithCleanup(
 	ctx context.Context,
 	driver SourceDriver,
 	spec *CredSpec,
+	inputs *ExchangeInputs,
 	onSuccess func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error,
 ) error {
-	// Step 1: Mint credential from driver
-	rawData, metadata, leaseTTL, leaseID, err := driver.MintCredential(ctx, spec)
+	// Step 1: Mint credential from driver. When the caller supplied
+	// token-exchange inputs, route to the exchange-aware mint path; a driver
+	// that cannot consume them fails closed rather than dropping the bearer
+	// token or minting a generic credential under an exchange-scoped cache key.
+	var (
+		rawData  map[string]interface{}
+		metadata map[string]interface{}
+		leaseTTL time.Duration
+		leaseID  string
+		err      error
+	)
+	if inputs != nil {
+		em, ok := driver.(ExchangeMinter)
+		if !ok {
+			return fmt.Errorf("source driver %q does not accept token-exchange inputs", driver.Type())
+		}
+		rawData, metadata, leaseTTL, leaseID, err = em.MintCredentialWithExchange(ctx, spec, inputs)
+	} else {
+		rawData, metadata, leaseTTL, leaseID, err = driver.MintCredential(ctx, spec)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to fetch credential: %w", err)
 	}
