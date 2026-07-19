@@ -952,6 +952,8 @@ func TestPrepareHeaders(t *testing.T) {
 		req, _ := http.NewRequest("POST", "https://api.test.com/v1/chat", nil)
 		req.Header.Set("Authorization", "Bearer warden-token")
 		req.Header.Set("X-Warden-Token", "warden-token")
+		req.Header.Set("X-Warden-Subject-Token", "eyJ.subject")
+		req.Header.Set("X-Warden-Actor-Token", "eyJ.actor")
 		req.Header.Set("X-Custom-Remove", "should-go")
 		req.Header.Set("X-Keep", "keep-me")
 
@@ -959,6 +961,9 @@ func TestPrepareHeaders(t *testing.T) {
 
 		assert.Equal(t, "Bearer real-key", req.Header.Get("Authorization"))
 		assert.Empty(t, req.Header.Get("X-Warden-Token"))
+		// Token-exchange inputs are internal secrets and must never reach upstream.
+		assert.Empty(t, req.Header.Get("X-Warden-Subject-Token"))
+		assert.Empty(t, req.Header.Get("X-Warden-Actor-Token"))
 		assert.Empty(t, req.Header.Get("X-Custom-Remove"))
 		assert.Equal(t, "keep-me", req.Header.Get("X-Keep"))
 	})

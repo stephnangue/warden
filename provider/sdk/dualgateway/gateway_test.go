@@ -67,6 +67,9 @@ func TestHandleAPIRequest_HeaderAuth(t *testing.T) {
 		assert.Equal(t, "warden-test-proxy", r.Header.Get("User-Agent"))
 		assert.Equal(t, "test-secret-key", r.Header.Get("X-Auth-Token"))
 		assert.Empty(t, r.Header.Get("X-Warden-Token"))
+		// Token-exchange inputs are internal secrets and must never reach upstream.
+		assert.Empty(t, r.Header.Get("X-Warden-Subject-Token"))
+		assert.Empty(t, r.Header.Get("X-Warden-Actor-Token"))
 		assert.Equal(t, "/instance/v1/zones/fr-par-1/servers", r.URL.Path)
 		assert.Equal(t, "page=2", r.URL.RawQuery)
 		w.Header().Set("Content-Type", "application/json")
@@ -81,6 +84,8 @@ func TestHandleAPIRequest_HeaderAuth(t *testing.T) {
 	rec := httptest.NewRecorder()
 	httpReq := httptest.NewRequest("GET", "/instance/v1/zones/fr-par-1/servers?page=2", nil)
 	httpReq.Header.Set("X-Warden-Token", "should-be-stripped")
+	httpReq.Header.Set("X-Warden-Subject-Token", "eyJ.subject")
+	httpReq.Header.Set("X-Warden-Actor-Token", "eyJ.actor")
 
 	req := &logical.Request{
 		HTTPRequest:    httpReq,
@@ -276,7 +281,7 @@ func TestS3EndpointWithState(t *testing.T) {
 		Name: "r2", HelpText: "h", CredentialType: "c",
 		DefaultURL: "https://x.com", URLConfigKey: "r2_url",
 		DefaultTimeout: 30e9, UserAgent: "u",
-		APIAuth:    APIAuthStrategy{HeaderName: "X", HeaderValueFormat: "%s", CredentialField: "k"},
+		APIAuth: APIAuthStrategy{HeaderName: "X", HeaderValueFormat: "%s", CredentialField: "k"},
 		S3Endpoint: func(state map[string]any, region string) string {
 			acct, _ := state["account_id"].(string)
 			return acct + ".r2.cloudflarestorage.com"

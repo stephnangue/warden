@@ -89,6 +89,8 @@ func makeMCPRequest(path, body string, cred *credential.Credential) (*logical.Re
 	r.Header.Set("X-Warden-Provider", "mcp_aws/")
 	r.Header.Set("X-Warden-Role", "s3-reader")
 	r.Header.Set("X-Warden-On-Behalf-Of", "alice@example.com")
+	r.Header.Set("X-Warden-Subject-Token", "eyJ.subject")
+	r.Header.Set("X-Warden-Actor-Token", "eyJ.actor")
 	// Hop-by-hop that NormalizeRequest must drop.
 	r.Header.Set("Connection", "keep-alive")
 
@@ -161,7 +163,7 @@ func TestHandleGateway_SignsAndForwards_STS(t *testing.T) {
 	assert.NotEmpty(t, got.headers.Get("X-Amz-Content-Sha256"))
 
 	// No Warden header leak.
-	for _, h := range []string{"X-Warden-Token", "X-Warden-Namespace", "X-Warden-Provider", "X-Warden-Role", "X-Warden-On-Behalf-Of"} {
+	for _, h := range []string{"X-Warden-Token", "X-Warden-Namespace", "X-Warden-Provider", "X-Warden-Role", "X-Warden-On-Behalf-Of", "X-Warden-Subject-Token", "X-Warden-Actor-Token"} {
 		assert.Empty(t, got.headers.Get(h), "header %q leaked to upstream", h)
 	}
 	// No Bearer leak — Authorization must be SigV4 only.
