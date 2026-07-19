@@ -24,6 +24,7 @@ import (
 	"github.com/openbao/openbao/sdk/v2/helper/pathmanager"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	authhelper "github.com/stephnangue/warden/auth/helper"
+	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/helper"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
@@ -1229,6 +1230,83 @@ func (c *Core) parseFormBody(req *logical.Request) error {
 	return nil
 }
 
+// Header names carrying caller-supplied token-exchange inputs. Both are bearer
+// secrets: they are consumed here and stripped by the provider gateways before
+// any upstream forwarding, exactly like X-Warden-On-Behalf-Of.
+const (
+	headerSubjectToken = "X-Warden-Subject-Token"
+	headerActorToken   = "X-Warden-Actor-Token"
+)
+
+// resolveExchangeInputs derives the token-exchange inputs for a request from the
+// credential spec's configuration. It returns (nil, nil) when the spec does not
+// opt into exchange, so the non-exchange mint path is completely unaffected.
+//
+// The plumbing never verifies token contents — it only records provenance via
+// SubjectTokenOrigin. Every configured-but-missing input fails the request
+// closed rather than silently minting a non-exchange credential.
+func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, specName string) (*credential.ExchangeInputs, error) {
+	spec, err := c.credConfigStore.GetSpec(ctx, specName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load credential spec: %w", err)
+	}
+	if !credential.SpecRequestsExchange(spec.Config) {
+		return nil, nil
+	}
+
+	inputs := &credential.ExchangeInputs{
+		SubjectTokenType: spec.Config[credential.ConfigSubjectTokenType],
+		ActorTokenType:   spec.Config[credential.ConfigActorTokenType],
+	}
+	if inputs.SubjectTokenType == "" {
+		inputs.SubjectTokenType = credential.TokenTypeJWT
+	}
+
+	switch spec.Config[credential.ConfigSubjectTokenSource] {
+	case credential.SourceAuthToken:
+		// Reuse the JWT Warden verified during inbound authentication. It lives
+		// in ClientToken only for transparent JWT auth; an opaque session token
+		// or a cert-authenticated request has no reusable JWT and fails closed.
+		if !strings.HasPrefix(req.ClientToken, "eyJ") {
+			return nil, fmt.Errorf("spec %q requires an inbound JWT subject token but the request was not JWT-authenticated", specName)
+		}
+		inputs.SubjectToken = req.ClientToken
+		inputs.SubjectTokenOrigin = credential.ExchangeOriginVerified
+	case credential.SourceHeader:
+		tok := req.HTTPRequest.Header.Get(headerSubjectToken)
+		if tok == "" {
+			return nil, fmt.Errorf("spec %q requires a %s header", specName, headerSubjectToken)
+		}
+		inputs.SubjectToken = tok
+		inputs.SubjectTokenOrigin = credential.ExchangeOriginUnverified
+	default:
+		// SpecRequestsExchange already excluded "none"/absent; any other value
+		// was rejected at spec-validation time.
+		return nil, fmt.Errorf("spec %q has an unsupported %s", specName, credential.ConfigSubjectTokenSource)
+	}
+
+	if spec.Config[credential.ConfigActorTokenSource] == credential.SourceHeader {
+		// The actor token is a delegation credential, distinct from the
+		// X-Warden-On-Behalf-Of attribution label.
+		tok := req.HTTPRequest.Header.Get(headerActorToken)
+		if tok == "" {
+			return nil, fmt.Errorf("spec %q requires a %s header", specName, headerActorToken)
+		}
+		inputs.ActorToken = tok
+		if inputs.ActorTokenType == "" {
+			inputs.ActorTokenType = credential.TokenTypeJWT
+		}
+	} else {
+		// No actor requested: drop any default type so Validate's pairing holds.
+		inputs.ActorTokenType = ""
+	}
+
+	if err := inputs.Validate(); err != nil {
+		return nil, err
+	}
+	return inputs, nil
+}
+
 // mintCredentialForRequest mints credentials for requests using the credential manager
 func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Request, te *logical.TokenEntry) error {
 	if te == nil {
@@ -1267,9 +1345,16 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 		tokenTTL = 1 * time.Hour
 	}
 
+	// Resolve any caller-supplied token-exchange inputs the spec opts into.
+	// Returns nil for non-exchange specs, leaving the mint path unchanged.
+	inputs, err := c.resolveExchangeInputs(ctx, req, te.CredentialSpec)
+	if err != nil {
+		return logical.ErrBadRequestf("token exchange input resolution failed: %s", err.Error())
+	}
+
 	// Issue credential using the credential manager
 	// Credentials are cache-only (not persisted) - ExpirationEntry handles lease revocation
-	cred, err := c.credentialManager.IssueCredential(ctx, te.ID, te.CredentialSpec, tokenTTL, nil)
+	cred, err := c.credentialManager.IssueCredential(ctx, te.ID, te.CredentialSpec, tokenTTL, inputs)
 	if err != nil {
 		return fmt.Errorf("failed to issue credential: %w", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logical"
@@ -2236,4 +2237,137 @@ func TestValidActorSubject(t *testing.T) {
 			assert.Equal(t, tc.want, validActorSubject(tc.input))
 		})
 	}
+}
+
+// exchangeResolveEnv wires a credential config store into a minimal Core and
+// creates a local source, so resolveExchangeInputs can read seeded specs.
+func exchangeResolveEnv(t *testing.T) (*Core, context.Context) {
+	t.Helper()
+	store, ctx := setupTestCredentialConfigStore(t)
+	c := store.core
+	c.credConfigStore = store
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "local-src", Type: "local"}))
+	return c, ctx
+}
+
+func seedSpec(t *testing.T, c *Core, ctx context.Context, name string, config map[string]string) {
+	t.Helper()
+	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name:   name,
+		Type:   "vault_token",
+		Source: "local-src",
+		Config: config,
+	}))
+}
+
+// requestWith builds a request carrying the given inbound Warden token and headers.
+func requestWith(clientToken string, headers map[string]string) *logical.Request {
+	httpReq := httptest.NewRequest("POST", "/v1/x/gateway/foo", nil)
+	for k, v := range headers {
+		httpReq.Header.Set(k, v)
+	}
+	return &logical.Request{ClientToken: clientToken, HTTPRequest: httpReq}
+}
+
+func TestCreateSpec_RejectsInvalidExchangeConfig(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	// actor_token_source without a subject source is rejected by validateSpec.
+	err := c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name:   "bad-spec",
+		Type:   "vault_token",
+		Source: "local-src",
+		Config: map[string]string{credential.ConfigActorTokenSource: credential.SourceHeader},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token-exchange config")
+}
+
+func TestResolveExchangeInputs_NoExchangeConfig(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	seedSpec(t, c, ctx, "plain", map[string]string{})
+
+	inputs, err := c.resolveExchangeInputs(ctx, requestWith("opaque-token", nil), "plain")
+	require.NoError(t, err)
+	assert.Nil(t, inputs, "non-exchange specs must yield nil inputs")
+}
+
+func TestResolveExchangeInputs_AuthToken_JWT(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	seedSpec(t, c, ctx, "auth-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceAuthToken,
+	})
+
+	inputs, err := c.resolveExchangeInputs(ctx, requestWith("eyJhbGciOi.payload.sig", nil), "auth-spec")
+	require.NoError(t, err)
+	require.NotNil(t, inputs)
+	assert.Equal(t, "eyJhbGciOi.payload.sig", inputs.SubjectToken)
+	assert.Equal(t, credential.TokenTypeJWT, inputs.SubjectTokenType)
+	assert.Equal(t, credential.ExchangeOriginVerified, inputs.SubjectTokenOrigin)
+}
+
+func TestResolveExchangeInputs_AuthToken_OpaqueFailsClosed(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	seedSpec(t, c, ctx, "auth-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceAuthToken,
+	})
+
+	_, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque-session-token", nil), "auth-spec")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not JWT-authenticated")
+}
+
+func TestResolveExchangeInputs_HeaderSource(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	seedSpec(t, c, ctx, "hdr-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+	})
+
+	req := requestWith("opaque-token", map[string]string{headerSubjectToken: "eyJ.caller.subject"})
+	inputs, err := c.resolveExchangeInputs(ctx, req, "hdr-spec")
+	require.NoError(t, err)
+	require.NotNil(t, inputs)
+	assert.Equal(t, "eyJ.caller.subject", inputs.SubjectToken)
+	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.SubjectTokenOrigin)
+	assert.Empty(t, inputs.ActorToken)
+}
+
+func TestResolveExchangeInputs_HeaderSource_MissingFailsClosed(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	seedSpec(t, c, ctx, "hdr-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+	})
+
+	_, err := c.resolveExchangeInputs(ctx, requestWith("opaque-token", nil), "hdr-spec")
+	require.Error(t, err)
+}
+
+func TestResolveExchangeInputs_ActorHeader(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	seedSpec(t, c, ctx, "deleg-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+		credential.ConfigActorTokenSource:   credential.SourceHeader,
+	})
+
+	req := requestWith("opaque-token", map[string]string{
+		headerSubjectToken: "eyJ.subject",
+		headerActorToken:   "eyJ.actor",
+	})
+	inputs, err := c.resolveExchangeInputs(ctx, req, "deleg-spec")
+	require.NoError(t, err)
+	require.NotNil(t, inputs)
+	assert.Equal(t, "eyJ.subject", inputs.SubjectToken)
+	assert.Equal(t, "eyJ.actor", inputs.ActorToken)
+	assert.Equal(t, credential.TokenTypeJWT, inputs.ActorTokenType)
+}
+
+func TestResolveExchangeInputs_ActorHeader_MissingFailsClosed(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	seedSpec(t, c, ctx, "deleg-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+		credential.ConfigActorTokenSource:   credential.SourceHeader,
+	})
+
+	req := requestWith("opaque-token", map[string]string{headerSubjectToken: "eyJ.subject"})
+	_, err := c.resolveExchangeInputs(ctx, req, "deleg-spec")
+	require.Error(t, err)
 }
