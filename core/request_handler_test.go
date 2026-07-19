@@ -2358,6 +2358,40 @@ func TestResolveExchangeInputs_ActorHeader(t *testing.T) {
 	assert.Equal(t, "eyJ.subject", inputs.SubjectToken)
 	assert.Equal(t, "eyJ.actor", inputs.ActorToken)
 	assert.Equal(t, credential.TokenTypeJWT, inputs.ActorTokenType)
+	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.ActorTokenOrigin)
+}
+
+func TestResolveExchangeInputs_ActorAuthToken(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	// subject via header (a user token), actor via the agent's verified inbound JWT.
+	seedSpec(t, c, ctx, "deleg-auth", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+		credential.ConfigActorTokenSource:   credential.SourceAuthToken,
+	})
+
+	req := requestWith("eyJ.agent-jwt", map[string]string{headerSubjectToken: "eyJ.user"})
+	inputs, err := c.resolveExchangeInputs(ctx, req, "deleg-auth")
+	require.NoError(t, err)
+	require.NotNil(t, inputs)
+	assert.Equal(t, "eyJ.user", inputs.SubjectToken)
+	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.SubjectTokenOrigin)
+	assert.Equal(t, "eyJ.agent-jwt", inputs.ActorToken, "the agent's inbound JWT is reused as the actor")
+	assert.Equal(t, credential.ExchangeOriginVerified, inputs.ActorTokenOrigin)
+	assert.Equal(t, credential.TokenTypeJWT, inputs.ActorTokenType)
+}
+
+func TestResolveExchangeInputs_ActorAuthToken_OpaqueFailsClosed(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	seedSpec(t, c, ctx, "deleg-auth", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+		credential.ConfigActorTokenSource:   credential.SourceAuthToken,
+	})
+
+	// Non-JWT (opaque) inbound token cannot serve as the actor.
+	req := requestWith("s.opaque-session", map[string]string{headerSubjectToken: "eyJ.user"})
+	_, err := c.resolveExchangeInputs(ctx, req, "deleg-auth")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not JWT-authenticated")
 }
 
 func TestResolveExchangeInputs_ActorHeader_MissingFailsClosed(t *testing.T) {

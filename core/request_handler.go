@@ -1285,18 +1285,32 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		return nil, fmt.Errorf("spec %q has an unsupported %s", specName, credential.ConfigSubjectTokenSource)
 	}
 
-	if spec.Config[credential.ConfigActorTokenSource] == credential.SourceHeader {
+	switch spec.Config[credential.ConfigActorTokenSource] {
+	case credential.SourceHeader:
 		// The actor token is a delegation credential, distinct from the
-		// X-Warden-On-Behalf-Of attribution label.
+		// X-Warden-On-Behalf-Of attribution label. Caller-supplied, so unverified.
 		tok := req.HTTPRequest.Header.Get(headerActorToken)
 		if tok == "" {
 			return nil, fmt.Errorf("spec %q requires a %s header", specName, headerActorToken)
 		}
 		inputs.ActorToken = tok
+		inputs.ActorTokenOrigin = credential.ExchangeOriginUnverified
 		if inputs.ActorTokenType == "" {
 			inputs.ActorTokenType = credential.TokenTypeJWT
 		}
-	} else {
+	case credential.SourceAuthToken:
+		// The agent's verified inbound JWT acts as the actor (agent-acting-for-user).
+		// Requires JWT auth; spec validation forbids subject_token_source=auth_token
+		// here, so ClientToken is free to serve as the actor.
+		if !strings.HasPrefix(req.ClientToken, "eyJ") {
+			return nil, fmt.Errorf("spec %q requires an inbound JWT actor token but the request was not JWT-authenticated", specName)
+		}
+		inputs.ActorToken = req.ClientToken
+		inputs.ActorTokenOrigin = credential.ExchangeOriginVerified
+		if inputs.ActorTokenType == "" {
+			inputs.ActorTokenType = credential.TokenTypeJWT
+		}
+	default:
 		// No actor requested: drop any default type so Validate's pairing holds.
 		inputs.ActorTokenType = ""
 	}

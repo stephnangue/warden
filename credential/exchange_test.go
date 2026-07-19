@@ -190,6 +190,15 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 			config:  map[string]string{ConfigActorTokenSource: SourceHeader},
 			wantErr: true,
 		},
+		{
+			name:   "subject header + actor auth_token",
+			config: map[string]string{ConfigSubjectTokenSource: SourceHeader, ConfigActorTokenSource: SourceAuthToken},
+		},
+		{
+			name:    "subject and actor both auth_token (mutually exclusive)",
+			config:  map[string]string{ConfigSubjectTokenSource: SourceAuthToken, ConfigActorTokenSource: SourceAuthToken},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

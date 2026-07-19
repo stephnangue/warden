@@ -82,6 +82,12 @@ type ExchangeInputs struct {
 	// SubjectTokenOrigin is one of ExchangeOriginVerified or
 	// ExchangeOriginUnverified.
 	SubjectTokenOrigin string
+	// ActorTokenOrigin records how the actor token was obtained, mirroring
+	// SubjectTokenOrigin: ExchangeOriginVerified when it is the caller's inbound
+	// JWT (actor_token_source=auth_token), ExchangeOriginUnverified when supplied
+	// on a header. Empty when no actor token is present. A driver consuming an
+	// unverified actor must validate it before forwarding, exactly as for a subject.
+	ActorTokenOrigin string
 }
 
 // Validate performs structural checks only. It does not verify token contents
@@ -111,6 +117,16 @@ func (e *ExchangeInputs) Validate() error {
 	if len(e.ActorToken) > maxExchangeTokenBytes {
 		return fmt.Errorf("actor_token exceeds %d bytes", maxExchangeTokenBytes)
 	}
+	if e.ActorToken == "" && e.ActorTokenOrigin != "" {
+		return fmt.Errorf("actor_token_origin set without actor_token")
+	}
+	if e.ActorTokenOrigin != "" {
+		switch e.ActorTokenOrigin {
+		case ExchangeOriginVerified, ExchangeOriginUnverified:
+		default:
+			return fmt.Errorf("invalid actor_token_origin %q", e.ActorTokenOrigin)
+		}
+	}
 	switch e.SubjectTokenOrigin {
 	case ExchangeOriginVerified, ExchangeOriginUnverified:
 	default:
@@ -138,6 +154,7 @@ func (e *ExchangeInputs) Fingerprint() string {
 	writeField(e.ActorTokenType)
 	writeField(e.ActorToken)
 	writeField(e.SubjectTokenOrigin)
+	writeField(e.ActorTokenOrigin)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -155,7 +172,7 @@ func SpecRequestsExchange(config map[string]string) bool {
 func ValidateExchangeSpecConfig(config map[string]string) error {
 	if err := ValidateSchema(config,
 		StringField(ConfigSubjectTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone),
-		StringField(ConfigActorTokenSource).OneOf(SourceHeader, SourceNone),
+		StringField(ConfigActorTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone),
 	); err != nil {
 		return err
 	}
@@ -164,6 +181,11 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	actorSrc := config[ConfigActorTokenSource]
 	if actorSrc != "" && actorSrc != SourceNone && !SpecRequestsExchange(config) {
 		return fmt.Errorf("field '%s': requires '%s' to be set", ConfigActorTokenSource, ConfigSubjectTokenSource)
+	}
+	// A single inbound token cannot be both the subject and the actor.
+	if config[ConfigSubjectTokenSource] == SourceAuthToken && actorSrc == SourceAuthToken {
+		return fmt.Errorf("field '%s': cannot be '%s' when '%s' is also '%s' (one inbound token cannot be both subject and actor)",
+			ConfigActorTokenSource, SourceAuthToken, ConfigSubjectTokenSource, SourceAuthToken)
 	}
 	return nil
 }
