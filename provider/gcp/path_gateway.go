@@ -23,6 +23,8 @@ var headersToRemove = []string{
 	"X-Warden-Role",
 	"X-Warden-Provider",
 	"X-Warden-On-Behalf-Of",
+	"X-Warden-Subject-Token",
+	"X-Warden-Actor-Token",
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",

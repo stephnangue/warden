@@ -23,6 +23,8 @@ var headersToStrip = []string{
 	"X-Warden-Provider",
 	"X-Warden-Role",
 	"X-Warden-On-Behalf-Of",
+	"X-Warden-Subject-Token",
+	"X-Warden-Actor-Token",
 	// Cookie carries client session identity that AWS will ignore but that
 	// would otherwise bleed across the trust boundary. Strip explicitly —
 	// sigv4.NormalizeRequest doesn't touch it.
