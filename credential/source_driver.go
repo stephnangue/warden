@@ -61,8 +61,9 @@ type SourceDriverFactory interface {
 // and returns raw credential data that the credential type's Parse method structures
 // into a Credential object.
 //
-// Drivers may optionally implement Rotatable (to rotate their own source credentials)
-// and/or SpecRotatable (to rotate credentials embedded in specs).
+// Drivers may optionally implement Rotatable (to rotate their own source credentials),
+// SpecRotatable (to rotate credentials embedded in specs), and/or ExchangeMinter (to
+// consume caller-derived RFC 8693 token-exchange inputs at mint time).
 type SourceDriver interface {
 	// MintCredential retrieves or mint raw credential data from the source
 	// Takes a CredSpec as input
@@ -234,4 +235,25 @@ type OAuth2Authorizer interface {
 	// returns the spec-config keys to seal (notably "refresh_token", or a static
 	// "access_token" for providers that do not issue refresh tokens).
 	ExchangeAuthorizationCode(ctx context.Context, spec *CredSpec, code, redirectURI, codeVerifier string) (map[string]string, error)
+}
+
+// ExchangeMinter is an optional interface for drivers that consume caller-derived
+// RFC 8693 token-exchange inputs (a subject token and optional actor token). The
+// minting layer type-asserts for it and calls MintCredentialWithExchange only when
+// inputs are non-nil; otherwise MintCredential is used. When inputs are present and
+// the driver does not implement this interface, minting fails closed rather than
+// dropping the caller's bearer token.
+//
+// Drivers MUST treat unverified subject tokens
+// (inputs.SubjectTokenOrigin == ExchangeOriginUnverified) as untrusted and validate
+// them (signature, audience, expiry) before forwarding to any STS — the plumbing
+// performs structural checks only.
+//
+// A driver implementing this interface asserts it at compile time:
+//
+//	var _ credential.ExchangeMinter = (*TokenExchangeDriver)(nil)
+type ExchangeMinter interface {
+	// MintCredentialWithExchange mints a credential using the given exchange
+	// inputs. The return contract matches SourceDriver.MintCredential.
+	MintCredentialWithExchange(ctx context.Context, spec *CredSpec, inputs *ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error)
 }
