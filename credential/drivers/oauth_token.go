@@ -20,7 +20,7 @@ import (
 // This is the shared token-endpoint POST used by both the OAuth2 driver and the
 // token_exchange driver, so grant assembly stays per-driver while the transport,
 // retry, and error-classification behaviour is defined once.
-func postOAuthTokenForm(ctx context.Context, httpClient *http.Client, tokenURL string, form url.Values) (*oauth2TokenResponse, error) {
+func postOAuthTokenForm(ctx context.Context, httpClient *http.Client, tokenURL string, form url.Values, extraHeaders map[string]string) (*oauth2TokenResponse, error) {
 	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       oauth2MaxRetryAttempts,
 		MaxBodySize:       httputil.DefaultMaxBodySize,
@@ -28,14 +28,24 @@ func postOAuthTokenForm(ctx context.Context, httpClient *http.Client, tokenURL s
 		BaseBackoff:       1 * time.Second,
 		JitterPercent:     20,
 	}
+	headers := map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+		"Accept":       "application/json",
+	}
+	// Extra headers carry client authentication that lives outside the form body
+	// (e.g. client_secret_basic's Authorization header). They cannot override the
+	// content negotiation above.
+	for k, v := range extraHeaders {
+		if k == "Content-Type" || k == "Accept" {
+			continue
+		}
+		headers[k] = v
+	}
 	httpReq := httputil.HTTPRequest{
-		Method: http.MethodPost,
-		URL:    tokenURL,
-		Body:   []byte(form.Encode()),
-		Headers: map[string]string{
-			"Content-Type": "application/x-www-form-urlencoded",
-			"Accept":       "application/json",
-		},
+		Method:  http.MethodPost,
+		URL:     tokenURL,
+		Body:    []byte(form.Encode()),
+		Headers: headers,
 		// RFC 6749 §5.2 returns the error body on HTTP 400 (and 401 for
 		// invalid_client). Treat those as readable so the error code can be
 		// parsed and classified, rather than discarded as a transport error.

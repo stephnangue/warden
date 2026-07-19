@@ -448,7 +448,7 @@ func (d *OAuth2Driver) BuildAuthorizeURL(spec *credential.CredSpec, redirectURI,
 // It delegates to the package-level postOAuthTokenForm, which is shared with the
 // token_exchange driver.
 func (d *OAuth2Driver) postTokenRequest(ctx context.Context, tokenURL string, form url.Values) (*oauth2TokenResponse, error) {
-	return postOAuthTokenForm(ctx, d.httpClient, tokenURL, form)
+	return postOAuthTokenForm(ctx, d.httpClient, tokenURL, form, nil)
 }
 
 // tokenEndpointError is returned by postTokenRequest when the token endpoint
