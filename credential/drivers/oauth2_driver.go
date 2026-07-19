@@ -228,6 +228,10 @@ type oauth2TokenResponse struct {
 	Scope                 string `json:"scope"`
 	RefreshToken          string `json:"refresh_token"`
 	RefreshTokenExpiresIn int    `json:"refresh_token_expires_in"`
+	// IssuedTokenType is the RFC 8693 §2.2.1 issued_token_type, naming the format
+	// of the returned token. The token_exchange driver reads it (e.g. to confirm
+	// an ID-JAG assertion in the cross-app flow); plain OAuth2 leaves it empty.
+	IssuedTokenType string `json:"issued_token_type"`
 	// Some providers (notably GitHub) report failures as HTTP 200 with an error body.
 	Error            string `json:"error"`
 	ErrorDescription string `json:"error_description"`
@@ -440,53 +444,11 @@ func (d *OAuth2Driver) BuildAuthorizeURL(spec *credential.CredSpec, redirectURI,
 	return parsed.String(), nil
 }
 
-// postTokenRequest POSTs a form-encoded token request and decodes the response,
-// treating a body that carries an "error" field (some providers, notably GitHub,
-// report failures as HTTP 200 with an error body) as a failure.
+// postTokenRequest POSTs a form-encoded token request and decodes the response.
+// It delegates to the package-level postOAuthTokenForm, which is shared with the
+// token_exchange driver.
 func (d *OAuth2Driver) postTokenRequest(ctx context.Context, tokenURL string, form url.Values) (*oauth2TokenResponse, error) {
-	retryConfig := httputil.HTTPRetryConfig{
-		MaxAttempts:       oauth2MaxRetryAttempts,
-		MaxBodySize:       httputil.DefaultMaxBodySize,
-		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
-		BaseBackoff:       1 * time.Second,
-		JitterPercent:     20,
-	}
-	httpReq := httputil.HTTPRequest{
-		Method: http.MethodPost,
-		URL:    tokenURL,
-		Body:   []byte(form.Encode()),
-		Headers: map[string]string{
-			"Content-Type": "application/x-www-form-urlencoded",
-			"Accept":       "application/json",
-		},
-		// RFC 6749 §5.2 returns the error body on HTTP 400 (and 401 for
-		// invalid_client). Treat those as readable so the error code can be
-		// parsed and classified, rather than discarded as a transport error.
-		OKStatuses: []int{http.StatusOK, http.StatusBadRequest, http.StatusUnauthorized},
-	}
-
-	body, status, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
-	if err != nil {
-		// Transport failure, or a status outside OKStatuses (e.g. 5xx after
-		// retries). Carry the status so callers can classify it.
-		return nil, &tokenEndpointError{status: status, err: err}
-	}
-
-	var tokenResp oauth2TokenResponse
-	if jsonErr := json.Unmarshal(body, &tokenResp); jsonErr != nil {
-		if status != http.StatusOK {
-			// A non-2xx with an unparseable body (e.g. a proxy error page):
-			// classify by status alone.
-			return nil, &tokenEndpointError{status: status, err: fmt.Errorf("status %d: %s", status, string(body))}
-		}
-		return nil, fmt.Errorf("failed to decode token response: %w", jsonErr)
-	}
-	if status != http.StatusOK || tokenResp.Error != "" {
-		// An OAuth2 error body — carried on HTTP 400/401, or as an HTTP 200 body
-		// by providers like GitHub. Surface the parsed code for classification.
-		return nil, &tokenEndpointError{status: status, code: tokenResp.Error, description: tokenResp.ErrorDescription}
-	}
-	return &tokenResp, nil
+	return postOAuthTokenForm(ctx, d.httpClient, tokenURL, form)
 }
 
 // tokenEndpointError is returned by postTokenRequest when the token endpoint
