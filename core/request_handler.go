@@ -1269,7 +1269,7 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 
 	// Issue credential using the credential manager
 	// Credentials are cache-only (not persisted) - ExpirationEntry handles lease revocation
-	cred, err := c.credentialManager.IssueCredential(ctx, te.ID, te.CredentialSpec, tokenTTL)
+	cred, err := c.credentialManager.IssueCredential(ctx, te.ID, te.CredentialSpec, tokenTTL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to issue credential: %w", err)
 	}

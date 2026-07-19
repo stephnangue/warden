@@ -142,9 +142,12 @@ func NewManager(
 //   - tokenID: The session token ID to bind the credential to
 //   - specName: The name of the credential spec to use
 //   - tokenTTL: The TTL of the session token (used for cache duration)
+//   - inputs: Optional caller-derived token-exchange inputs. When non-nil they
+//     are folded into the cache key so distinct exchange inputs cannot share a
+//     cached credential.
 //
 // Returns the issued credential or an error
-func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName string, tokenTTL time.Duration) (*Credential, error) {
+func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName string, tokenTTL time.Duration, inputs *ExchangeInputs) (*Credential, error) {
 	// Apply issuance timeout to prevent slow drivers from blocking indefinitely
 	ctx, cancel := context.WithTimeout(ctx, m.issuanceTimeout)
 	defer cancel()
@@ -159,6 +162,15 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 	// Including specName allows access backends to mint different specs for the same token.
 	cacheKey := fmt.Sprintf("%s:%s:%s", ns.ID, tokenID, specName)
 
+	// When the request carries token-exchange inputs, fold their fingerprint into
+	// the key so two callers sharing one session token (e.g. an opaque service
+	// token) each supplying a different subject token get distinct cached
+	// credentials instead of leaking one caller's credential to the other. The
+	// non-exchange path (inputs == nil) keeps the key byte-identical.
+	if inputs != nil {
+		cacheKey += ":x:" + inputs.Fingerprint()
+	}
+
 	// Check cache first
 	if cred, found := m.cache.Get(cacheKey); found {
 		return cred, nil
@@ -172,7 +184,7 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 		}
 
 		// Issue new credential from source
-		cred, err := m.issueCredential(ctx, specName)
+		cred, err := m.issueCredential(ctx, specName, inputs)
 		if err != nil {
 			return nil, err
 		}
@@ -224,7 +236,7 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 }
 
 // issueCredential performs the actual credential issuance from the source
-func (m *Manager) issueCredential(ctx context.Context, specName string) (*Credential, error) {
+func (m *Manager) issueCredential(ctx context.Context, specName string, inputs *ExchangeInputs) (*Credential, error) {
 	// Step 1: Resolve credential spec using SpecResolver
 	spec, err := m.specResolver.ResolveSpec(ctx, specName)
 	if err != nil {
@@ -242,17 +254,17 @@ func (m *Manager) issueCredential(ctx context.Context, specName string) (*Creden
 	// token, and retry once if the provider rejects it. Other specs use the
 	// simple mint path unchanged.
 	if needsRefreshTokenWriteBack(spec) {
-		return m.issueWithWriteBack(ctx, specName, driver)
+		return m.issueWithWriteBack(ctx, specName, driver, inputs)
 	}
 
-	return m.mintAndParse(ctx, spec, driver)
+	return m.mintAndParse(ctx, spec, driver, inputs)
 }
 
 // mintAndParse mints a credential and parses it, with orphaned-lease cleanup on
 // failure. This is the simple path for specs that do not rotate a refresh token.
-func (m *Manager) mintAndParse(ctx context.Context, spec *CredSpec, driver SourceDriver) (*Credential, error) {
+func (m *Manager) mintAndParse(ctx context.Context, spec *CredSpec, driver SourceDriver, inputs *ExchangeInputs) (*Credential, error) {
 	var cred *Credential
-	err := m.mintingService.MintWithCleanup(ctx, driver, spec, func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
+	err := m.mintingService.MintWithCleanup(ctx, driver, spec, inputs, func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
 		var parseErr error
 		cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, metadata, leaseTTL, leaseID, driver)
 		return parseErr
@@ -268,7 +280,7 @@ func (m *Manager) mintAndParse(ctx context.Context, spec *CredSpec, driver Sourc
 // rejection (the sealed token was already used — typically a rotation on
 // another node) it reloads the spec straight from storage, bypassing this
 // node's cache, and retries exactly once.
-func (m *Manager) issueWithWriteBack(ctx context.Context, specName string, driver SourceDriver) (*Credential, error) {
+func (m *Manager) issueWithWriteBack(ctx context.Context, specName string, driver SourceDriver, inputs *ExchangeInputs) (*Credential, error) {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get namespace from context: %w", err)
@@ -293,7 +305,7 @@ func (m *Manager) issueWithWriteBack(ctx context.Context, specName string, drive
 			return err
 		}
 		cred = nil
-		return m.mintingService.MintWithCleanup(ctx, driver, spec, func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
+		return m.mintingService.MintWithCleanup(ctx, driver, spec, inputs, func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
 			m.consumeRotatedRefreshToken(ctx, spec, rawData)
 			var parseErr error
 			cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, metadata, leaseTTL, leaseID, driver)
