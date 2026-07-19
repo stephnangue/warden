@@ -298,6 +298,17 @@ func TestTokenExchangeDriverFactory_ValidateConfig(t *testing.T) {
 		c["token_param.subject_token"] = "x"
 		assert.Error(t, f.ValidateConfig(c))
 	})
+	t.Run("id_jag without resource_token_url", func(t *testing.T) {
+		c := base()
+		c["grant"] = tokenExchangeGrantIDJAG
+		assert.Error(t, f.ValidateConfig(c))
+	})
+	t.Run("id_jag with resource_token_url", func(t *testing.T) {
+		c := base()
+		c["grant"] = tokenExchangeGrantIDJAG
+		c["resource_token_url"] = "https://auth.resourceapp.example.com/token"
+		assert.NoError(t, f.ValidateConfig(c))
+	})
 	t.Run("non-https token_url", func(t *testing.T) {
 		c := base()
 		c["token_url"] = "http://idp.example.com/token"
@@ -454,6 +465,50 @@ func TestTokenExchangeDriver_PrivateKeyJWT(t *testing.T) {
 	assert.Equal(t, "warden-gateway", claims.Subject)
 	assert.Contains(t, claims.Audience, sts.URL)
 	assert.NotEmpty(t, claims.ID, "assertion should carry a jti")
+}
+
+func TestTokenExchangeDriver_IDJAG(t *testing.T) {
+	subject := makeUnsignedJWT(map[string]interface{}{"sub": "user"})
+
+	// Leg 2: resource authorization server redeems the ID-JAG for an access token.
+	resSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, "urn:ietf:params:oauth:grant-type:jwt-bearer", r.Form.Get("grant_type"))
+		assert.Equal(t, "the-id-jag", r.Form.Get("assertion"))
+		assert.Equal(t, "files:read", r.Form.Get("scope"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "final-access", "expires_in": 600})
+	}))
+	defer resSrv.Close()
+
+	// Leg 1: home IdP exchanges the subject for an ID-JAG bound to the resource AS.
+	idpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, "urn:ietf:params:oauth:grant-type:token-exchange", r.Form.Get("grant_type"))
+		assert.Equal(t, tokenTypeIDJAG, r.Form.Get("requested_token_type"))
+		assert.Equal(t, subject, r.Form.Get("subject_token"))
+		assert.Equal(t, "https://resource-as.example.com", r.Form.Get("audience"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "the-id-jag", "issued_token_type": tokenTypeIDJAG, "expires_in": 300})
+	}))
+	defer idpSrv.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url":          idpSrv.URL,
+		"resource_token_url": resSrv.URL,
+		"grant":              tokenExchangeGrantIDJAG,
+		"client_id":          "c",
+		"client_secret":      "s",
+	}, &http.Client{})
+	spec := &credential.CredSpec{Config: map[string]string{
+		"audience": "https://resource-as.example.com",
+		"scope":    "files:read",
+	}}
+
+	rawData, _, ttl, _, err := d.MintCredentialWithExchange(context.Background(), spec, verifiedSubject(subject))
+	require.NoError(t, err)
+	assert.Equal(t, "final-access", rawData["api_key"], "the final resource-AS access token is returned, not the ID-JAG")
+	assert.Equal(t, 600*time.Second, ttl)
 }
 
 func TestTokenExchangeDriverFactory_Basics(t *testing.T) {

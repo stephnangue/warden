@@ -25,7 +25,12 @@ var subjectSigningAlgs = []jwt.Alg{jwt.RS256, jwt.RS384, jwt.RS512, jwt.ES256, j
 const (
 	tokenExchangeGrantRFC8693   = "rfc8693"
 	tokenExchangeGrantJWTBearer = "jwt_bearer"
+	tokenExchangeGrantIDJAG     = "id_jag"
 )
+
+// tokenTypeIDJAG is the requested_token_type for an ID-JAG assertion (leg 1 of
+// the cross-app-access flow).
+const tokenTypeIDJAG = "urn:ietf:params:oauth:token-type:id-jag"
 
 // Client-authentication methods selected by the source's `client_auth` config.
 // private_key_jwt is added in a later change; the secret methods ship here.
@@ -89,9 +94,19 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 			Example("https://idp.example.com/oauth2/v1/token"),
 
 		credential.StringField("grant").
-			OneOf(tokenExchangeGrantRFC8693, tokenExchangeGrantJWTBearer).
-			Describe("Exchange grant: rfc8693 (token-exchange) or jwt_bearer (assertion; Entra OBO)").
+			OneOf(tokenExchangeGrantRFC8693, tokenExchangeGrantJWTBearer, tokenExchangeGrantIDJAG).
+			Describe("Exchange grant: rfc8693 (token-exchange), jwt_bearer (assertion; Entra OBO), or id_jag (cross-app access)").
 			Example("rfc8693"),
+
+		credential.StringField("resource_token_url").
+			Custom(func(v string) error {
+				if v == "" {
+					return nil
+				}
+				return validateOAuth2SafeURL(v, "resource_token_url", skip)
+			}).
+			Describe("Resource authorization-server token endpoint (HTTPS) for id_jag leg 2").
+			Example("https://auth.resourceapp.example.com/oauth2/token"),
 
 		credential.StringField("client_auth").
 			OneOf(clientAuthSecretBasic, clientAuthSecretPost, clientAuthPrivateKeyJWT).
@@ -164,6 +179,13 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 			Example("false"),
 	); err != nil {
 		return err
+	}
+
+	// id_jag needs a second (resource authorization-server) endpoint for leg 2.
+	if credential.GetString(config, "grant", tokenExchangeGrantRFC8693) == tokenExchangeGrantIDJAG {
+		if credential.GetString(config, "resource_token_url", "") == "" {
+			return fmt.Errorf("resource_token_url is required for grant=id_jag")
+		}
 	}
 
 	// Client-auth method determines which credentials are required.
@@ -260,25 +282,98 @@ func (d *TokenExchangeDriver) MintCredentialWithExchange(ctx context.Context, sp
 		}
 	}
 
-	form, err := d.buildExchangeForm(spec, inputs)
+	var (
+		resp *oauth2TokenResponse
+		err  error
+	)
+	if credential.GetString(d.credSource.Config, "grant", tokenExchangeGrantRFC8693) == tokenExchangeGrantIDJAG {
+		resp, err = d.mintIDJAG(ctx, spec, inputs)
+	} else {
+		resp, err = d.exchangeOnce(ctx, spec, inputs)
+	}
 	if err != nil {
 		return nil, nil, 0, "", err
-	}
-	tokenURL := credential.GetString(d.credSource.Config, "token_url", "")
-	headers := map[string]string{}
-	if err := d.applyClientAuth(form, headers, tokenURL); err != nil {
-		return nil, nil, 0, "", err
-	}
-
-	resp, err := postOAuthTokenForm(ctx, d.httpClient, tokenURL, form, headers)
-	if err != nil {
-		return nil, nil, 0, "", classifyExchangeError(err)
 	}
 	if resp.AccessToken == "" {
 		return nil, nil, 0, "", fmt.Errorf("token_exchange: token response missing access_token")
 	}
 
 	return accessTokenRawData(resp), d.subjectMetadata(resp, inputs), ttlFromExpiresIn(resp.ExpiresIn), "", nil
+}
+
+// exchangeOnce performs a single-hop exchange (rfc8693 or jwt_bearer).
+func (d *TokenExchangeDriver) exchangeOnce(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (*oauth2TokenResponse, error) {
+	form, err := d.buildExchangeForm(spec, inputs)
+	if err != nil {
+		return nil, err
+	}
+	tokenURL := credential.GetString(d.credSource.Config, "token_url", "")
+	headers := map[string]string{}
+	if err := d.applyClientAuth(form, headers, tokenURL); err != nil {
+		return nil, err
+	}
+	resp, err := postOAuthTokenForm(ctx, d.httpClient, tokenURL, form, headers)
+	if err != nil {
+		return nil, classifyExchangeError(err)
+	}
+	return resp, nil
+}
+
+// mintIDJAG runs the two-leg ID-JAG cross-app-access flow inside one mint:
+//
+//	leg 1 → token_url (home IdP): RFC 8693 token-exchange with
+//	        requested_token_type=id-jag → an ID-JAG assertion bound to the resource AS
+//	leg 2 → resource_token_url (resource AS): RFC 7523 jwt-bearer with the ID-JAG
+//	        as the assertion → the downstream access token
+//
+// Client auth runs on both legs (each with its own endpoint as the assertion
+// audience). Only the final access token is returned; the ID-JAG is single-use.
+func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (*oauth2TokenResponse, error) {
+	cfg := d.credSource.Config
+
+	// Leg 1: exchange the subject for an ID-JAG at the home IdP.
+	idpURL := credential.GetString(cfg, "token_url", "")
+	leg1 := url.Values{}
+	leg1.Set("grant_type", grantTypeTokenExchange)
+	leg1.Set("subject_token", inputs.SubjectToken)
+	leg1.Set("subject_token_type", subjectTokenType(inputs))
+	leg1.Set("requested_token_type", tokenTypeIDJAG)
+	if aud := d.resolve(spec, "audience"); aud != "" {
+		leg1.Set("audience", aud)
+	}
+	if inputs.ActorToken != "" {
+		leg1.Set("actor_token", inputs.ActorToken)
+		leg1.Set("actor_token_type", actorTokenType(inputs))
+	}
+	h1 := map[string]string{}
+	if err := d.applyClientAuth(leg1, h1, idpURL); err != nil {
+		return nil, err
+	}
+	jag, err := postOAuthTokenForm(ctx, d.httpClient, idpURL, leg1, h1)
+	if err != nil {
+		return nil, classifyExchangeError(err)
+	}
+	if jag.AccessToken == "" {
+		return nil, fmt.Errorf("id_jag: leg 1 returned no ID-JAG assertion")
+	}
+
+	// Leg 2: redeem the ID-JAG at the resource authorization server.
+	resURL := credential.GetString(cfg, "resource_token_url", "")
+	leg2 := url.Values{}
+	leg2.Set("grant_type", grantTypeJWTBearer)
+	leg2.Set("assertion", jag.AccessToken)
+	if scope := d.resolve(spec, "scope"); scope != "" {
+		leg2.Set("scope", scope)
+	}
+	h2 := map[string]string{}
+	if err := d.applyClientAuth(leg2, h2, resURL); err != nil {
+		return nil, err
+	}
+	final, err := postOAuthTokenForm(ctx, d.httpClient, resURL, leg2, h2)
+	if err != nil {
+		return nil, classifyExchangeError(err)
+	}
+	return final, nil
 }
 
 // buildExchangeForm assembles the token-endpoint form for the configured grant.
