@@ -2,6 +2,8 @@ package drivers
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -9,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	jose "github.com/go-jose/go-jose/v3"
+	josejwt "github.com/go-jose/go-jose/v3/jwt"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -206,6 +210,117 @@ func TestTokenExchangeDriverFactory_ValidateConfig(t *testing.T) {
 		c["token_url"] = "http://idp.example.com/token"
 		assert.Error(t, f.ValidateConfig(c))
 	})
+}
+
+// signRS256JWT signs claims with priv and serves the matching JWKS from a test
+// server, returning the token and the JWKS URL.
+func signRS256JWT(t *testing.T, priv *rsa.PrivateKey, claims josejwt.Claims) string {
+	t.Helper()
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: priv}, (&jose.SignerOptions{}).WithType("JWT"))
+	require.NoError(t, err)
+	tok, err := josejwt.Signed(signer).Claims(claims).CompactSerialize()
+	require.NoError(t, err)
+	return tok
+}
+
+func jwksServer(t *testing.T, pub *rsa.PublicKey) *httptest.Server {
+	t.Helper()
+	set := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: pub, KeyID: "k1", Algorithm: "RS256", Use: "sig"}}}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(set)
+	}))
+}
+
+func TestTokenExchangeDriver_HeaderSubject_ValidatedAndExchanged(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	jwks := jwksServer(t, &priv.PublicKey)
+	defer jwks.Close()
+
+	now := time.Now()
+	subject := signRS256JWT(t, priv, josejwt.Claims{
+		Issuer:   "https://issuer.example.com/",
+		Subject:  "user-abc",
+		Audience: josejwt.Audience{"api://warden"},
+		IssuedAt: josejwt.NewNumericDate(now),
+		Expiry:   josejwt.NewNumericDate(now.Add(time.Hour)),
+	})
+
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, subject, r.Form.Get("subject_token"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "down", "expires_in": 300})
+	}))
+	defer sts.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url":        sts.URL,
+		"client_id":        "c",
+		"client_secret":    "s",
+		"subject_jwks_url": jwks.URL,
+		"subject_issuer":   "https://issuer.example.com/",
+		"subject_audience": "api://warden",
+	}, sts.Client())
+
+	inputs := &credential.ExchangeInputs{
+		SubjectToken:       subject,
+		SubjectTokenType:   credential.TokenTypeJWT,
+		SubjectTokenOrigin: credential.ExchangeOriginUnverified,
+	}
+	rawData, meta, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
+	require.NoError(t, err)
+	assert.Equal(t, "down", rawData["api_key"])
+	assert.Equal(t, "user-abc", meta["subject"])
+	assert.Equal(t, "false", meta["subject_verified"], "a header-sourced subject is validated but not inbound-verified")
+}
+
+func TestTokenExchangeDriver_HeaderSubject_BadSignature_FailClosed(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	other, _ := rsa.GenerateKey(rand.Reader, 2048) // signs the token; not in the JWKS
+	jwks := jwksServer(t, &priv.PublicKey)
+	defer jwks.Close()
+
+	now := time.Now()
+	subject := signRS256JWT(t, other, josejwt.Claims{
+		Issuer: "https://issuer.example.com/", Subject: "attacker",
+		Audience: josejwt.Audience{"api://warden"}, Expiry: josejwt.NewNumericDate(now.Add(time.Hour)),
+	})
+
+	called := false
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer sts.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url": sts.URL, "client_id": "c", "client_secret": "s",
+		"subject_jwks_url": jwks.URL, "subject_issuer": "https://issuer.example.com/", "subject_audience": "api://warden",
+	}, sts.Client())
+	inputs := &credential.ExchangeInputs{SubjectToken: subject, SubjectTokenType: credential.TokenTypeJWT, SubjectTokenOrigin: credential.ExchangeOriginUnverified}
+
+	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed validation")
+	assert.False(t, called, "an invalid subject must never reach the STS")
+}
+
+func TestTokenExchangeDriver_HeaderSubject_NoKeyset_FailClosed(t *testing.T) {
+	called := false
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer sts.Close()
+	// issuer+audience set, but no jwks/discovery URL → cannot validate → fail closed.
+	d := newExchangeDriver(map[string]string{
+		"token_url": sts.URL, "client_id": "c", "client_secret": "s",
+		"subject_issuer": "https://issuer.example.com/", "subject_audience": "api://warden",
+	}, sts.Client())
+	inputs := &credential.ExchangeInputs{
+		SubjectToken:       makeUnsignedJWT(map[string]interface{}{"sub": "u"}),
+		SubjectTokenType:   credential.TokenTypeJWT,
+		SubjectTokenOrigin: credential.ExchangeOriginUnverified,
+	}
+	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
+	require.Error(t, err)
+	assert.False(t, called)
 }
 
 func TestTokenExchangeDriverFactory_Basics(t *testing.T) {
