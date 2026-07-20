@@ -408,6 +408,16 @@ func (d *TokenExchangeDriver) buildExchangeForm(spec *credential.CredSpec, input
 			form.Set("actor_token_type", actorTokenType(inputs))
 		}
 	case tokenExchangeGrantJWTBearer:
+		// audience/resource are RFC 8693 token-exchange parameters; jwt-bearer has
+		// no slot for them (it targets via scope). Reject rather than silently drop
+		// an operator-set value — if a specific IdP genuinely needs one, it can be
+		// sent explicitly via token_param.audience / token_param.resource.
+		if aud := d.resolve(spec, "audience"); aud != "" {
+			return nil, fmt.Errorf("token_exchange: 'audience' is not sent with grant=jwt_bearer; target via 'scope', or set 'token_param.audience' if your IdP requires it")
+		}
+		if res := d.resolve(spec, "resource"); res != "" {
+			return nil, fmt.Errorf("token_exchange: 'resource' is not sent with grant=jwt_bearer; target via 'scope', or set 'token_param.resource' if your IdP requires it")
+		}
 		form.Set("grant_type", grantTypeJWTBearer)
 		form.Set("assertion", inputs.SubjectToken)
 	default:

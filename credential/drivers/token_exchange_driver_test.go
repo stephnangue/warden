@@ -114,6 +114,24 @@ func TestTokenExchangeDriver_JWTBearer_Entra(t *testing.T) {
 	assert.Equal(t, "graph-token", rawData["api_key"])
 }
 
+func TestTokenExchangeDriver_JWTBearer_RejectsAudienceResource(t *testing.T) {
+	// audience/resource are rfc8693 params; with jwt_bearer they must be rejected,
+	// not silently dropped — and the STS must not be called.
+	called := false
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer sts.Close()
+	for _, key := range []string{"audience", "resource"} {
+		d := newExchangeDriver(map[string]string{
+			"token_url": sts.URL, "grant": tokenExchangeGrantJWTBearer, "client_id": "c", "client_secret": "s",
+		}, sts.Client())
+		spec := &credential.CredSpec{Config: map[string]string{key: "https://target.example.com"}}
+		_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, verifiedSubject(makeUnsignedJWT(map[string]interface{}{"sub": "u"})))
+		require.Error(t, err, "jwt_bearer + %s must error", key)
+		assert.Contains(t, err.Error(), key)
+	}
+	assert.False(t, called, "the STS must not be called when the config is rejected")
+}
+
 func TestTokenExchangeDriver_ClientSecretBasic(t *testing.T) {
 	subject := makeUnsignedJWT(map[string]interface{}{"sub": "u"})
 
