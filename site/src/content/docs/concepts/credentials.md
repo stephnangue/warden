@@ -48,7 +48,8 @@ naming a different role on each request.
 ### Sources
 
 A source is created with a name, a `type` (the driver), a `config` map holding
-the upstream connection and privileged secret, and a required `rotation_period`
+the upstream connection and the credentials the driver uses — a privileged secret,
+or the client credentials for an identity exchange — and a required `rotation_period`
 (pass `0` to disable rotation):
 
 ```bash
