@@ -18,6 +18,78 @@ This driver is unusual in two ways. First, the credentials it mints are supplied
 it is the only driver that rotates **both** its own source secret **and** the secret
 embedded in a spec, both through Microsoft Graph.
 
+## Credential issued
+
+The default `bearer_token` method issues an `azure_bearer_token` — a **dynamic**
+credential that carries the token's Azure AD TTL, and is **not revocable**: Azure bearer
+tokens expire naturally, so revocation is a no-op. The `key_vault_secret` method returns
+the secret value as a **static** credential with no lease or TTL. See
+[the lifetime model](/concepts/credentials/#lifetime-and-revocation).
+
+## Capabilities
+
+- **Source rotation** — **slow**: stages a new source `client_secret` (a fresh Azure AD
+  password credential added via Microsoft Graph) and waits ~5m (default, tunable via the
+  source's `activation_delay`) so it propagates across Azure AD before the old secret is
+  destroyed. Requires the source service principal to hold `Application.ReadWrite.All`.
+- **Spec rotation** — **slow**: rotates the workload service principal's `client_secret`
+  stored in the spec, again through Microsoft Graph and with the same propagation wait.
+  This is the only driver that rotates a spec's own embedded secret.
+
+No spec verification.
+
+## Examples
+
+One source holds the privileged service-principal login; each spec below picks a
+`mint_method` and carries its own workload service-principal credentials.
+
+```bash
+warden cred source create azure-prod \
+  -type=azure \
+  -config=tenant_id=00000000-0000-0000-0000-000000000000 \
+  -config=client_id=11111111-1111-1111-1111-111111111111 \
+  -config=client_secret=s3cr3t-value \
+  -config=secret_id=22222222-2222-2222-2222-222222222222 \
+  -rotation-period=720h
+```
+
+**Bearer token** — a short-lived Azure AD token for the Azure Resource Manager API:
+
+```bash
+warden cred spec create arm-token \
+  -source=azure-prod \
+  -config=mint_method=bearer_token \
+  -config=client_id=33333333-3333-3333-3333-333333333333 \
+  -config=client_secret=workload-s3cr3t \
+  -config=resource_uri=https://management.azure.com/
+```
+
+**Key Vault secret** — fetch a stored secret by vault and name:
+
+```bash
+warden cred spec create db-password \
+  -source=azure-prod \
+  -config=mint_method=key_vault_secret \
+  -config=client_id=44444444-4444-4444-4444-444444444444 \
+  -config=client_secret=workload-s3cr3t \
+  -config=vault_name=prod-kv \
+  -config=secret_name=db-connection-string
+```
+
+**Rotating workload secret** — a bearer-token spec whose embedded `client_secret` Warden
+rotates on a schedule through Microsoft Graph:
+
+```bash
+warden cred spec create graph-token \
+  -source=azure-prod \
+  -config=mint_method=bearer_token \
+  -config=client_id=55555555-5555-5555-5555-555555555555 \
+  -config=client_secret=workload-s3cr3t \
+  -config=secret_id=66666666-6666-6666-6666-666666666666 \
+  -config=resource_uri=https://graph.microsoft.com/ \
+  -rotation-period=720h
+```
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=azure -config=key=value ...`:
@@ -56,45 +128,6 @@ Keys set with `warden cred spec create ... -config=key=value`:
 | `secret_version` | No | latest | Specific secret version (`key_vault_secret` only). |
 
 \* Required when `mint_method=key_vault_secret`.
-
-## Credential issued
-
-The default `bearer_token` method issues an `azure_bearer_token` — a **dynamic**
-credential that carries the token's Azure AD TTL, and is **not revocable**: Azure bearer
-tokens expire naturally, so revocation is a no-op. The `key_vault_secret` method returns
-the secret value as a **static** credential with no lease or TTL. See
-[the lifetime model](/concepts/credentials/#lifetime-and-revocation).
-
-## Capabilities
-
-- **Source rotation** — **slow**: stages a new source `client_secret` (a fresh Azure AD
-  password credential added via Microsoft Graph) and waits ~5m (default, tunable via the
-  source's `activation_delay`) so it propagates across Azure AD before the old secret is
-  destroyed. Requires the source service principal to hold `Application.ReadWrite.All`.
-- **Spec rotation** — **slow**: rotates the workload service principal's `client_secret`
-  stored in the spec, again through Microsoft Graph and with the same propagation wait.
-  This is the only driver that rotates a spec's own embedded secret.
-
-No spec verification.
-
-## Example
-
-```bash
-warden cred source create azure-prod \
-  -type=azure \
-  -config=tenant_id=00000000-0000-0000-0000-000000000000 \
-  -config=client_id=11111111-1111-1111-1111-111111111111 \
-  -config=client_secret=s3cr3t-value \
-  -config=secret_id=22222222-2222-2222-2222-222222222222 \
-  -rotation-period=720h
-
-warden cred spec create arm-token \
-  -source=azure-prod \
-  -config=mint_method=bearer_token \
-  -config=client_id=33333333-3333-3333-3333-333333333333 \
-  -config=client_secret=workload-s3cr3t \
-  -config=resource_uri=https://management.azure.com/
-```
 
 ## See Also
 

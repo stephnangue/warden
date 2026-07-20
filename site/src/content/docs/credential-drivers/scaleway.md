@@ -8,6 +8,52 @@ The Scaleway driver brokers credentials from **Scaleway IAM**. A **source** hold
 
 Operators reach for this driver to give workloads Scaleway API keys without embedding long-lived secrets in the workload. Static keys are convenient when a key pair already exists; dynamic keys let Warden create short-lived keys per lease and revoke them automatically when the lease ends.
 
+## Credential issued
+
+Both mint methods issue credentials of type `scaleway_keys` (an `access_key` / `secret_key` pair).
+
+- `static_keys` credentials are **static** — no lease, no TTL, not revocable by Warden.
+- `dynamic_keys` credentials are **dynamic** — they carry a lease/TTL and are **revocable**: Warden deletes the API key via the IAM API when the lease expires or is revoked.
+
+See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
+
+## Capabilities
+
+- **Spec verification** — validates a spec at create/update time. For `static_keys` it confirms the key pair resolves against the IAM API; for `dynamic_keys` it checks that the source has a management key and the spec sets `application_id`.
+- **Source rotation** — **slow**: stages a newly minted management key alongside the old one and waits ~30 seconds (default, tunable via the source's `activation_delay`) so it propagates before the old key is destroyed. Rotates the source's `management_access_key` / `management_secret_key`; requires both to be present.
+
+## Examples
+
+The source carries a management key when dynamic minting or rotation is in play. Each spec then picks a `mint_method`.
+
+```bash
+warden cred source create scw-prod \
+  -type=scaleway \
+  -config=management_access_key=SCWXXXXXXXXXXXXXXXXX \
+  -config=management_secret_key=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  -rotation-period=720h
+```
+
+**Dynamic keys** — Warden mints a fresh, expiring API key per lease bound to an IAM application, and revokes it on expiry:
+
+```bash
+warden cred spec create scw-app-keys \
+  -source=scw-prod \
+  -config=mint_method=dynamic_keys \
+  -config=application_id=11111111-2222-3333-4444-555555555555 \
+  -config=ttl=1h
+```
+
+**Static keys** — hand back a pre-existing key pair stored on the spec, with no lease or revocation:
+
+```bash
+warden cred spec create scw-legacy \
+  -source=scw-prod \
+  -config=mint_method=static_keys \
+  -config=access_key=SCWYYYYYYYYYYYYYYYYY \
+  -config=secret_key=yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy
+```
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=scaleway -config=key=value ...`:
@@ -41,36 +87,6 @@ Spec-config keys (`warden cred spec create ... -config=key=value`):
 | `ttl` | No (dynamic) | `1h` | Lifetime of the minted key; sets its `expires_at`. |
 | `description` | No (dynamic) | `warden-<spec>` | Description recorded on the created key. |
 | `default_project_id` | No (dynamic) | — | Default project scoped to the created key. |
-
-## Credential issued
-
-Both mint methods issue credentials of type `scaleway_keys` (an `access_key` / `secret_key` pair).
-
-- `static_keys` credentials are **static** — no lease, no TTL, not revocable by Warden.
-- `dynamic_keys` credentials are **dynamic** — they carry a lease/TTL and are **revocable**: Warden deletes the API key via the IAM API when the lease expires or is revoked.
-
-See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
-
-## Capabilities
-
-- **Spec verification** — validates a spec at create/update time. For `static_keys` it confirms the key pair resolves against the IAM API; for `dynamic_keys` it checks that the source has a management key and the spec sets `application_id`.
-- **Source rotation** — **slow**: stages a newly minted management key alongside the old one and waits ~30 seconds (default, tunable via the source's `activation_delay`) so it propagates before the old key is destroyed. Rotates the source's `management_access_key` / `management_secret_key`; requires both to be present.
-
-## Example
-
-```bash
-warden cred source create scw-prod \
-  -type=scaleway \
-  -config=management_access_key=SCWXXXXXXXXXXXXXXXXX \
-  -config=management_secret_key=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
-  -rotation-period=720h
-
-warden cred spec create scw-app-keys \
-  -source=scw-prod \
-  -config=mint_method=dynamic_keys \
-  -config=application_id=11111111-2222-3333-4444-555555555555 \
-  -config=ttl=1h
-```
 
 ## See Also
 

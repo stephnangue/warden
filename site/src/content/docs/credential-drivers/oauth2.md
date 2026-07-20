@@ -8,6 +8,59 @@ The **OAuth2 driver** exchanges OAuth2 credentials for short-lived **bearer toke
 
 The token endpoint and connection options live in the **source** config (`token_url` required). The `client_id` and `client_secret` may live on the source — natural for `client_credentials` — or be supplied per **spec**, resolved spec-over-source. For the `authorization_code` flow, per-user tokens are sealed onto the spec by a one-time interactive consent step, and the driver refreshes them at mint time.
 
+## Credential issued
+
+Always `oauth_bearer_token`. It is **dynamic** when the provider returns an expiry (the credential carries a lease TTL and is re-minted on expiry) and **static** (non-expiring) when it does not. Bearer tokens are not revocable — they expire naturally, so revocation is a no-op. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
+
+## Capabilities
+
+- **Spec verification** — mints a token and, when `verify_url` is set, calls it to confirm the token works before the spec is accepted.
+- **OAuth2 authorization-code consent** — this is the only OAuth2 authorizer. For an `authorization_code` spec, run the one-time interactive `warden cred spec connect <name>`: it opens the provider's authorize URL, captures the returned code on a loopback redirect, exchanges it for tokens, and seals the resulting refresh token (or static access token) onto the spec. Later mints refresh from the sealed grant with no user present.
+
+No source rotation — the source secret is not rotated by the driver.
+
+## Examples
+
+**client_credentials** — machine-to-machine, client credentials on the source:
+
+```bash
+warden cred source create pagerduty \
+  -type=oauth2 \
+  -config=token_url=https://identity.pagerduty.com/oauth/token \
+  -config=client_id=your-client-id \
+  -config=client_secret=your-client-secret \
+  -config=default_scopes="read write" \
+  -config=verify_url=https://api.pagerduty.com/users/me \
+  -rotation-period=0
+
+warden cred spec create pagerduty-readonly \
+  -source=pagerduty \
+  -config=auth_method=client_credentials \
+  -config=scope="read"
+```
+
+**authorization_code** — acting on behalf of a user who consents once. Set `auth_url` on the source and leave the token keys unset; they are sealed onto the spec by the consent step:
+
+```bash
+warden cred source create google-user \
+  -type=oauth2 \
+  -config=token_url=https://oauth2.googleapis.com/token \
+  -config=auth_url=https://accounts.google.com/o/oauth2/v2/auth \
+  -config=client_id=your-client-id \
+  -config=client_secret=your-client-secret \
+  -config=introspection_url=https://openidconnect.googleapis.com/v1/userinfo \
+  -config=metadata_fields=sub,email \
+  -rotation-period=0
+
+warden cred spec create google-calendar \
+  -source=google-user \
+  -config=auth_method=authorization_code \
+  -config=scope="https://www.googleapis.com/auth/calendar.readonly"
+
+# one-time interactive consent seals the refresh token onto the spec
+warden cred spec connect google-calendar
+```
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=oauth2 -config=key=value ...`:
@@ -52,35 +105,6 @@ Keys operators set with `warden cred spec create ... -config=key=value`:
 | `refresh_token_expires_at` | No | — | RFC3339 expiry of a sealed refresh token. |
 
 For `authorization_code`, do not set the token keys by hand — they are populated by the one-time consent flow (see Capabilities). When the provider rotates the refresh token during a refresh, the driver surfaces the new value to the minting layer automatically, so the sealed grant stays current.
-
-## Credential issued
-
-Always `oauth_bearer_token`. It is **dynamic** when the provider returns an expiry (the credential carries a lease TTL and is re-minted on expiry) and **static** (non-expiring) when it does not. Bearer tokens are not revocable — they expire naturally, so revocation is a no-op. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
-
-## Capabilities
-
-- **Spec verification** — mints a token and, when `verify_url` is set, calls it to confirm the token works before the spec is accepted.
-- **OAuth2 authorization-code consent** — this is the only OAuth2 authorizer. For an `authorization_code` spec, run the one-time interactive `warden cred spec connect <name>`: it opens the provider's authorize URL, captures the returned code on a loopback redirect, exchanges it for tokens, and seals the resulting refresh token (or static access token) onto the spec. Later mints refresh from the sealed grant with no user present.
-
-No source rotation — the source secret is not rotated by the driver.
-
-## Example
-
-```bash
-warden cred source create pagerduty \
-  -type=oauth2 \
-  -config=token_url=https://identity.pagerduty.com/oauth/token \
-  -config=client_id=your-client-id \
-  -config=client_secret=your-client-secret \
-  -config=default_scopes="read write" \
-  -config=verify_url=https://api.pagerduty.com/users/me \
-  -rotation-period=0
-
-warden cred spec create pagerduty-readonly \
-  -source=pagerduty \
-  -config=auth_method=client_credentials \
-  -config=scope="read"
-```
 
 ## See Also
 

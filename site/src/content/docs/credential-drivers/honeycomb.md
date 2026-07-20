@@ -8,6 +8,50 @@ The **Honeycomb** driver mints **Honeycomb V2 API keys** from the key-management
 
 Reach for this driver when a workload needs a short-lived Honeycomb **ingest** or **configuration** key rather than a long-lived hand-issued one. Minted key secrets are **capture-once** — Honeycomb returns the secret only at creation time, so Warden captures it then and injects it on demand. Keys do not expire natively, so the spec's `key_ttl` governs the Warden lease.
 
+## Credential issued
+
+Issues a credential of type `api_key`. It is **dynamic** — it carries a lease whose TTL comes from the spec's `key_ttl` — and it is **revocable**: expiry or explicit revoke deletes the underlying Honeycomb key. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
+
+## Capabilities
+
+- **Spec verification** — validates the spec's `environment_id` and `key_type`, then lists API keys with a page size of 1 to confirm the management key and team slug work at spec create/update time.
+
+Mint and revoke otherwise; no source or spec rotation.
+
+## Examples
+
+One source holds the team management key; each spec picks an environment and key type.
+
+```bash
+warden cred source create honeycomb-prod \
+  -type=honeycomb \
+  -config=team_slug=my-team \
+  -config=management_key_id=hcxmk_abc123 \
+  -config=management_key_secret=s3cr3t \
+  -rotation-period=0
+```
+
+**Ingest key** — for shipping telemetry into an environment, on a 12h lease:
+
+```bash
+warden cred spec create honeycomb-ingest \
+  -source=honeycomb-prod \
+  -config=environment_id=env_prod01 \
+  -config=key_type=ingest \
+  -config=key_ttl=12h
+```
+
+**Configuration key** — a scoped management key carrying an explicit permission object:
+
+```bash
+warden cred spec create honeycomb-config \
+  -source=honeycomb-prod \
+  -config=environment_id=env_prod01 \
+  -config=key_type=configuration \
+  -config=permissions={"boards":{"read":true},"datasets":{"read":true}} \
+  -config=key_ttl=24h
+```
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=honeycomb -config=key=value ...`:
@@ -32,33 +76,6 @@ A single mint method issues Honeycomb API keys. Keys set with `warden cred spec 
 | `key_name_prefix` | No | `warden-` | Prefix for the generated key name (name is `<prefix><spec>-<timestamp>`). |
 | `permissions` | No | — | JSON permission object; allowed only for `configuration` keys. |
 | `key_ttl` | No | `24h` | Warden lease duration for the minted key. |
-
-## Credential issued
-
-Issues a credential of type `api_key`. It is **dynamic** — it carries a lease whose TTL comes from the spec's `key_ttl` — and it is **revocable**: expiry or explicit revoke deletes the underlying Honeycomb key. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
-
-## Capabilities
-
-- **Spec verification** — validates the spec's `environment_id` and `key_type`, then lists API keys with a page size of 1 to confirm the management key and team slug work at spec create/update time.
-
-Mint and revoke otherwise; no source or spec rotation.
-
-## Example
-
-```bash
-warden cred source create honeycomb-prod \
-  -type=honeycomb \
-  -config=team_slug=my-team \
-  -config=management_key_id=hcxmk_abc123 \
-  -config=management_key_secret=s3cr3t \
-  -rotation-period=0
-
-warden cred spec create honeycomb-ingest \
-  -source=honeycomb-prod \
-  -config=environment_id=env_prod01 \
-  -config=key_type=ingest \
-  -config=key_ttl=12h
-```
 
 ## See Also
 
