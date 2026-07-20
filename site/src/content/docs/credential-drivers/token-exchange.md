@@ -10,25 +10,55 @@ It is **exchange-only**: it never mints from static source config. Every spec mu
 
 ## Grant modes
 
-- **`rfc8693`** — `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` with `subject_token`, `subject_token_type`, `audience`/`scope`/`resource`, and (for delegation) `actor_token`.
+- **`rfc8693`** — `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` with `subject_token`, `subject_token_type`, `audience`/`scope`/`resources`, and (for delegation) `actor_token`.
 - **`jwt_bearer`** — `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer` with the subject as `assertion`. Entra OBO adds `token_param.requested_token_use=on_behalf_of`.
 - **`id_jag`** — two legs inside one mint: leg 1 exchanges the subject at `token_url` for an ID-JAG assertion (`requested_token_type=…:id-jag`, `audience`=the resource AS); leg 2 redeems the ID-JAG at `resource_token_url` via `jwt_bearer`. Only the final access token is returned.
 
 ## Impersonation vs delegation
 
-RFC 8693 §1.1 distinguishes two outcomes by whether the **minted token carries an `act` claim** (delegation — an acting party is recorded) or not (impersonation — only the subject). An `act` claim arises two ways: Warden sends an `actor_token`, **or** the subject token already carries an embedded `act`.
+Every exchange has a **subject** — the identity the new downstream token will *represent* (who
+the request is *for*). It may also name an **actor** — a second identity recorded as *acting on
+behalf of* the subject. Whether the minted token names an actor decides the outcome (RFC 8693 §1.1):
 
-**Warden sends no actor token** (`actor_token_source=none`) — forwards only a subject; works with `rfc8693` and `jwt_bearer`.
-- Normally **impersonation** — the minted token represents only the subject:
-  - `subject_token_source=auth_token` — act as the caller's own verified identity.
-  - `subject_token_source=header` — act as a distinct identity the agent carries (e.g. a user token).
-- **Pre-delegated subject:** if the subject token *already carries an embedded `act`* (it is itself a delegated token), the minted token inherits that chain, so the **result is delegation** even though Warden sent no actor token. This holds for either subject source, including `subject_token_source=auth_token`.
+- **Impersonation** — the token represents **only the subject**. The upstream can't tell an agent
+  was involved; Warden hands it a token that simply *is* the principal.
+- **Delegation** — the token also carries an **`act` claim** naming the actor, so the upstream sees
+  "**agent A acting for user B**" and can audit or authorize on both.
 
-**Warden sends an actor token** (`actor_token_source=auth_token` or `header`) — adds an acting party, so the minted token carries an `act` chain ("agent acting for user"). **`rfc8693` only** (jwt-bearer has no actor slot).
-- Preferred: `subject_token_source=header` (user token) + `actor_token_source=auth_token` (the agent's verified inbound JWT — sent once, not re-validated).
-- `actor_token_source=header` when the actor is a distinct token the agent supplies.
+### Where the subject and actor come from
 
-`subject_token_source=auth_token` requires JWT-based inbound auth. `actor_token_source=auth_token` requires `subject_token_source=header` (one inbound token cannot be both subject and actor).
+Each is a caller-derived token, drawn from one of two sources (both validated per the
+[origin trust model](#origin-trust-model) below):
+
+- **`auth_token`** — the caller's **own inbound JWT**, the identity it authenticated to Warden with.
+- **`header`** — a **separate token the caller carries**, supplied in `X-Warden-Subject-Token` /
+  `X-Warden-Actor-Token` (e.g. an end user's token the agent is holding).
+
+### The patterns
+
+| What you want | `subject_token_source` | `actor_token_source` | Minted token |
+|---|---|---|---|
+| Act **as yourself** | `auth_token` | `none` | represents the caller — *impersonation* |
+| Act **as a user you carry** | `header` (user token) | `none` | represents the user; agent invisible — *impersonation* |
+| **Agent acting for a user** | `header` (user token) | `auth_token` (agent's JWT) | `sub`=user, `act`=agent — *delegation* |
+| Delegation with a **distinct** actor | `header` | `header` | `act`=the supplied actor — *delegation* |
+
+The third row is the canonical delegation: the agent presents the **user's** token as the subject
+(`X-Warden-Subject-Token`), and its **own** inbound JWT — the one it already sent in `Authorization`
+to authenticate — is reused as the actor. It needs no separate `X-Warden-Actor-Token`, unlike
+`actor_token_source=header`, where the agent would send its token a second time.
+
+### Two things that trip people up
+
+- **A pre-delegated subject yields delegation on its own.** If the subject token is *itself* already
+  a delegated token (it carries an embedded `act`), the minted token inherits that chain — so you get
+  a *delegation* result even with `actor_token_source=none`. Adding an actor on top just nests another
+  layer.
+- **Delegation is `rfc8693`-only.** The `jwt_bearer`/Entra grant has no slot for an actor token, so
+  an actor is rejected there. (Impersonation works with both grants.)
+
+**Constraints:** `auth_token` requires JWT-based inbound auth; and since one inbound token can't be
+both subject and actor, `actor_token_source=auth_token` requires `subject_token_source=header`.
 
 ## Origin trust model
 
@@ -67,8 +97,13 @@ warden cred spec create internal-api \
   -source=idp-exchange \
   -config=subject_token_source=auth_token \
   -config=audience=https://api.internal.example.com \
-  -config=scope=read:orders
+  -config=scope=read:orders \
+  -config=resources="https://api.internal.example.com https://reports.internal.example.com"
 ```
+
+`resources` is a space-separated list of RFC 8707 resource indicators, sent as
+repeated `resource` parameters so the exchanged token can be bound to one or more
+downstream APIs.
 
 **Microsoft Entra OBO (`jwt_bearer`)** — the subject is sent as `assertion` with Entra's on-behalf-of flag.
 
@@ -144,8 +179,13 @@ warden cred spec create resource-api \
   -source=crossapp \
   -config=subject_token_source=auth_token \
   -config=audience=https://auth.resourceapp.example.com \
-  -config=scope=files:read
+  -config=scope=files:read \
+  -config=resources=https://files.resourceapp.example.com
 ```
+
+For `id_jag`, `resources` is sent on **leg 2** (the resource-AS redemption), so it
+scopes the final access token — `audience` still binds the ID-JAG to the resource
+authorization server on leg 1.
 
 ## Source config
 
@@ -183,4 +223,4 @@ Every `token_exchange` spec **must** set `subject_token_source`. Keys operators 
 | `actor_token_type` | No | `…:token-type:jwt` | RFC 8693 actor token type. |
 | `audience` | No | — | Target audience for the exchanged token (the resource AS for `id_jag`). |
 | `scope` | No | — | Scope requested for the exchanged token. |
-| `resource` | No | — | RFC 8707 resource indicator. |
+| `resources` | No | — | RFC 8707 resource indicator(s) — space-separated absolute URIs, sent as repeated `resource` parameters. Grant-agnostic (rfc8693 and jwt_bearer; for `id_jag`, on leg 2 — the final access token). |

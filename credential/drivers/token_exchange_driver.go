@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -376,6 +377,9 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 	if scope := d.resolve(spec, "scope"); scope != "" {
 		leg2.Set("scope", scope)
 	}
+	// RFC 8707 resource indicators scope the final access token, so they belong on
+	// leg 2 (the resource-AS redemption), not leg 1 (which mints the ID-JAG).
+	d.addResources(leg2, spec)
 	h2 := map[string]string{}
 	if err := d.applyClientAuth(leg2, h2, resURL); err != nil {
 		return nil, err
@@ -400,23 +404,17 @@ func (d *TokenExchangeDriver) buildExchangeForm(spec *credential.CredSpec, input
 		if aud := d.resolve(spec, "audience"); aud != "" {
 			form.Set("audience", aud)
 		}
-		if res := d.resolve(spec, "resource"); res != "" {
-			form.Set("resource", res)
-		}
 		if inputs.ActorToken != "" {
 			form.Set("actor_token", inputs.ActorToken)
 			form.Set("actor_token_type", actorTokenType(inputs))
 		}
 	case tokenExchangeGrantJWTBearer:
-		// audience/resource are RFC 8693 token-exchange parameters; jwt-bearer has
-		// no slot for them (it targets via scope). Reject rather than silently drop
-		// an operator-set value — if a specific IdP genuinely needs one, it can be
-		// sent explicitly via token_param.audience / token_param.resource.
+		// audience is an RFC 8693 token-exchange parameter; jwt-bearer has no slot
+		// for it (it targets via scope). Reject rather than silently drop an
+		// operator-set value — if a specific IdP needs it, send token_param.audience.
+		// (RFC 8707 resources are grant-agnostic and handled below.)
 		if aud := d.resolve(spec, "audience"); aud != "" {
-			return nil, fmt.Errorf("token_exchange: 'audience' is not sent with grant=jwt_bearer; target via 'scope', or set 'token_param.audience' if your IdP requires it")
-		}
-		if res := d.resolve(spec, "resource"); res != "" {
-			return nil, fmt.Errorf("token_exchange: 'resource' is not sent with grant=jwt_bearer; target via 'scope', or set 'token_param.resource' if your IdP requires it")
+			return nil, fmt.Errorf("token_exchange: 'audience' is not sent with grant=jwt_bearer; target via 'scope'/'resources', or set 'token_param.audience' if your IdP requires it")
 		}
 		form.Set("grant_type", grantTypeJWTBearer)
 		form.Set("assertion", inputs.SubjectToken)
@@ -427,6 +425,8 @@ func (d *TokenExchangeDriver) buildExchangeForm(spec *credential.CredSpec, input
 	if scope := d.resolve(spec, "scope"); scope != "" {
 		form.Set("scope", scope)
 	}
+	// RFC 8707 resource indicators (grant-agnostic).
+	d.addResources(form, spec)
 	// Vendor-specific extras (e.g. Entra's requested_token_use=on_behalf_of).
 	for k, v := range credential.GetPrefixed(cfg, "token_param.") {
 		form.Set(k, v)
@@ -494,6 +494,16 @@ func (d *TokenExchangeDriver) buildClientAssertion(clientID, tokenEndpoint strin
 		return "", fmt.Errorf("token_exchange: failed to sign client assertion: %w", err)
 	}
 	return assertion, nil
+}
+
+// addResources appends the source/spec's RFC 8707 resource indicators as repeated
+// `resource` form parameters. `resources` is a space-separated list of absolute
+// URIs; RFC 8707 §2 allows the parameter to appear multiple times. It is
+// grant-agnostic, so it applies to rfc8693, jwt_bearer, and the id_jag legs alike.
+func (d *TokenExchangeDriver) addResources(form url.Values, spec *credential.CredSpec) {
+	for _, r := range strings.Fields(d.resolve(spec, "resources")) {
+		form.Add("resource", r)
+	}
 }
 
 // resolve returns spec.Config[key] when set, else the source config value.

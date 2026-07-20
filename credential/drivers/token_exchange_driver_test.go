@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -114,22 +115,52 @@ func TestTokenExchangeDriver_JWTBearer_Entra(t *testing.T) {
 	assert.Equal(t, "graph-token", rawData["api_key"])
 }
 
-func TestTokenExchangeDriver_JWTBearer_RejectsAudienceResource(t *testing.T) {
-	// audience/resource are rfc8693 params; with jwt_bearer they must be rejected,
-	// not silently dropped — and the STS must not be called.
+func TestTokenExchangeDriver_JWTBearer_RejectsAudience(t *testing.T) {
+	// audience is an rfc8693 param with no jwt-bearer slot: reject, don't silently
+	// drop — and the STS must not be called. (resources are RFC 8707 and allowed.)
 	called := false
 	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
 	defer sts.Close()
-	for _, key := range []string{"audience", "resource"} {
-		d := newExchangeDriver(map[string]string{
-			"token_url": sts.URL, "grant": tokenExchangeGrantJWTBearer, "client_id": "c", "client_secret": "s",
-		}, sts.Client())
-		spec := &credential.CredSpec{Config: map[string]string{key: "https://target.example.com"}}
-		_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, verifiedSubject(makeUnsignedJWT(map[string]interface{}{"sub": "u"})))
-		require.Error(t, err, "jwt_bearer + %s must error", key)
-		assert.Contains(t, err.Error(), key)
-	}
+	d := newExchangeDriver(map[string]string{
+		"token_url": sts.URL, "grant": tokenExchangeGrantJWTBearer, "client_id": "c", "client_secret": "s",
+	}, sts.Client())
+	spec := &credential.CredSpec{Config: map[string]string{"audience": "https://target.example.com"}}
+	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, verifiedSubject(makeUnsignedJWT(map[string]interface{}{"sub": "u"})))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "audience")
 	assert.False(t, called, "the STS must not be called when the config is rejected")
+}
+
+// resourceValues returns all repeated `resource` form values the STS received.
+func assertResources(t *testing.T, form url.Values, want ...string) {
+	t.Helper()
+	assert.ElementsMatch(t, want, form["resource"], "repeated RFC 8707 resource indicators")
+}
+
+func TestTokenExchangeDriver_Resources_MultiValue(t *testing.T) {
+	// RFC 8707: `resources` (space-separated) is sent as repeated `resource` params,
+	// on both rfc8693 and jwt_bearer.
+	for _, grant := range []string{tokenExchangeGrantRFC8693, tokenExchangeGrantJWTBearer} {
+		t.Run(grant, func(t *testing.T) {
+			var got url.Values
+			sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.NoError(t, r.ParseForm())
+				got = r.Form
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+			}))
+			defer sts.Close()
+			d := newExchangeDriver(map[string]string{
+				"token_url": sts.URL, "grant": grant, "client_id": "c", "client_secret": "s",
+			}, sts.Client())
+			spec := &credential.CredSpec{Config: map[string]string{
+				"resources": "https://api.example.com https://api2.example.com",
+			}}
+			_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, verifiedSubject(makeUnsignedJWT(map[string]interface{}{"sub": "u"})))
+			require.NoError(t, err)
+			assertResources(t, got, "https://api.example.com", "https://api2.example.com")
+		})
+	}
 }
 
 func TestTokenExchangeDriver_ClientSecretBasic(t *testing.T) {
@@ -551,6 +582,7 @@ func TestTokenExchangeDriver_IDJAG(t *testing.T) {
 		assert.Equal(t, "urn:ietf:params:oauth:grant-type:jwt-bearer", r.Form.Get("grant_type"))
 		assert.Equal(t, "the-id-jag", r.Form.Get("assertion"))
 		assert.Equal(t, "files:read", r.Form.Get("scope"))
+		assertResources(t, r.Form, "https://api.example.com") // RFC 8707 on the final token (leg 2)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "final-access", "expires_in": 600})
 	}))
@@ -563,6 +595,7 @@ func TestTokenExchangeDriver_IDJAG(t *testing.T) {
 		assert.Equal(t, tokenTypeIDJAG, r.Form.Get("requested_token_type"))
 		assert.Equal(t, subject, r.Form.Get("subject_token"))
 		assert.Equal(t, "https://resource-as.example.com", r.Form.Get("audience"))
+		assert.Empty(t, r.Form["resource"], "resources belong on leg 2, not leg 1")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "the-id-jag", "issued_token_type": tokenTypeIDJAG, "expires_in": 300})
 	}))
@@ -576,8 +609,9 @@ func TestTokenExchangeDriver_IDJAG(t *testing.T) {
 		"client_secret":      "s",
 	}, &http.Client{})
 	spec := &credential.CredSpec{Config: map[string]string{
-		"audience": "https://resource-as.example.com",
-		"scope":    "files:read",
+		"audience":  "https://resource-as.example.com",
+		"scope":     "files:read",
+		"resources": "https://api.example.com",
 	}}
 
 	rawData, _, ttl, _, err := d.MintCredentialWithExchange(context.Background(), spec, verifiedSubject(subject))

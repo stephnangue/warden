@@ -109,9 +109,9 @@ func (t *OAuthBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("audience").
 			Describe("Target audience for the exchanged token (token_exchange source)").
 			Example("https://api.internal.example.com"),
-		credential.StringField("resource").
-			Describe("RFC 8707 resource indicator for the exchanged token (token_exchange source)").
-			Example("https://api.internal.example.com"),
+		credential.StringField("resources").
+			Describe("RFC 8707 resource indicator(s) for the exchanged token — space-separated absolute URIs (token_exchange source)").
+			Example("https://api.internal.example.com https://api2.internal.example.com"),
 	}
 }
 
