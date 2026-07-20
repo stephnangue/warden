@@ -178,7 +178,7 @@ Every `token_exchange` spec **must** set `subject_token_source`. Keys operators 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `subject_token_source` | Yes | — | Subject origin: `auth_token` (the caller's verified inbound JWT) or `header` (`X-Warden-Subject-Token`, validated by the driver). |
-| `subject_token_type` | No | `…:token-type:jwt` | RFC 8693 subject token type. |
+| `subject_token_type` | No | `…:token-type:jwt` | RFC 8693 subject token type. Some STSs are strict — e.g. Keycloak's Standard Token Exchange accepts only `urn:ietf:params:oauth:token-type:access_token`, so set this explicitly for them. |
 | `actor_token_source` | No | `none` | Delegation actor: `none`, `auth_token` (the agent's inbound JWT), or `header` (`X-Warden-Actor-Token`). |
 | `actor_token_type` | No | `…:token-type:jwt` | RFC 8693 actor token type. |
 | `audience` | No | — | Target audience for the exchanged token (the resource AS for `id_jag`). |
