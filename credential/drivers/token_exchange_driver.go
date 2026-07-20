@@ -331,19 +331,26 @@ func (d *TokenExchangeDriver) exchangeOnce(ctx context.Context, spec *credential
 func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (*oauth2TokenResponse, error) {
 	cfg := d.credSource.Config
 
-	// Leg 1: exchange the subject for an ID-JAG at the home IdP.
+	// Leg 1: exchange the subject for an ID-JAG at the home IdP. The ID-JAG must be
+	// bound to the resource authorization server via audience.
 	idpURL := credential.GetString(cfg, "token_url", "")
+	audience := d.resolve(spec, "audience")
+	if audience == "" {
+		return nil, fmt.Errorf("id_jag: audience (the resource authorization server) is required")
+	}
 	leg1 := url.Values{}
 	leg1.Set("grant_type", grantTypeTokenExchange)
 	leg1.Set("subject_token", inputs.SubjectToken)
 	leg1.Set("subject_token_type", subjectTokenType(inputs))
 	leg1.Set("requested_token_type", tokenTypeIDJAG)
-	if aud := d.resolve(spec, "audience"); aud != "" {
-		leg1.Set("audience", aud)
-	}
+	leg1.Set("audience", audience)
 	if inputs.ActorToken != "" {
 		leg1.Set("actor_token", inputs.ActorToken)
 		leg1.Set("actor_token_type", actorTokenType(inputs))
+	}
+	// Vendor-specific extras apply to the exchange (leg 1) at the home IdP.
+	for k, v := range credential.GetPrefixed(cfg, "token_param.") {
+		leg1.Set(k, v)
 	}
 	h1 := map[string]string{}
 	if err := d.applyClientAuth(leg1, h1, idpURL); err != nil {
@@ -355,6 +362,10 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 	}
 	if jag.AccessToken == "" {
 		return nil, fmt.Errorf("id_jag: leg 1 returned no ID-JAG assertion")
+	}
+	// If the IdP labels the issued token, confirm it is an ID-JAG before redeeming it.
+	if jag.IssuedTokenType != "" && jag.IssuedTokenType != tokenTypeIDJAG {
+		return nil, fmt.Errorf("id_jag: leg 1 returned issued_token_type %q, expected %q", jag.IssuedTokenType, tokenTypeIDJAG)
 	}
 
 	// Leg 2: redeem the ID-JAG at the resource authorization server.
@@ -558,13 +569,24 @@ func (d *TokenExchangeDriver) getSubjectValidator(ctx context.Context) (*jwt.Val
 	discoveryURL := credential.GetString(cfg, "subject_oidc_discovery_url", "")
 	jwksURL := credential.GetString(cfg, "subject_jwks_url", "")
 
+	// Reuse the source CA (if any) for the JWKS/discovery fetch, so a header-subject
+	// issuer behind a private CA validates instead of silently failing closed.
+	caPEM := ""
+	if caData := credential.GetString(cfg, "ca_data", ""); caData != "" {
+		decoded, err := base64.StdEncoding.DecodeString(caData)
+		if err != nil {
+			return nil, fmt.Errorf("ca_data is not valid base64: %w", err)
+		}
+		caPEM = string(decoded)
+	}
+
 	var keySet jwt.KeySet
 	var err error
 	switch {
 	case discoveryURL != "":
-		keySet, err = jwt.NewOIDCDiscoveryKeySet(ctx, discoveryURL, "")
+		keySet, err = jwt.NewOIDCDiscoveryKeySet(ctx, discoveryURL, caPEM)
 	case jwksURL != "":
-		keySet, err = jwt.NewJSONWebKeySet(ctx, jwksURL, "")
+		keySet, err = jwt.NewJSONWebKeySet(ctx, jwksURL, caPEM)
 	default:
 		return nil, fmt.Errorf("no subject_oidc_discovery_url or subject_jwks_url configured")
 	}

@@ -408,6 +408,63 @@ func TestTokenExchangeDriver_HeaderSubject_BadSignature_FailClosed(t *testing.T)
 	assert.False(t, called, "an invalid subject must never reach the STS")
 }
 
+func TestTokenExchangeDriver_HeaderSubject_Expired_FailClosed(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	jwks := jwksServer(t, &priv.PublicKey)
+	defer jwks.Close()
+	now := time.Now()
+	// Validly signed, correct issuer/audience, but expired (well past the 150s leeway).
+	subject := signTestJWT(t, priv, josejwt.Claims{
+		Issuer: "https://issuer.example.com/", Subject: "u",
+		Audience: josejwt.Audience{"api://warden"},
+		IssuedAt: josejwt.NewNumericDate(now.Add(-2 * time.Hour)),
+		Expiry:   josejwt.NewNumericDate(now.Add(-1 * time.Hour)),
+	})
+
+	called := false
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer sts.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url": sts.URL, "client_id": "c", "client_secret": "s",
+		"subject_jwks_url": jwks.URL, "subject_issuer": "https://issuer.example.com/", "subject_audience": "api://warden",
+	}, sts.Client())
+	inputs := &credential.ExchangeInputs{SubjectToken: subject, SubjectTokenType: credential.TokenTypeJWT, SubjectTokenOrigin: credential.ExchangeOriginUnverified}
+
+	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed validation")
+	assert.False(t, called, "an expired subject must never reach the STS")
+}
+
+func TestTokenExchangeDriver_HeaderSubject_WrongAudience_FailClosed(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	jwks := jwksServer(t, &priv.PublicKey)
+	defer jwks.Close()
+	now := time.Now()
+	// Valid signature and issuer, but the token is audienced for a different service.
+	subject := signTestJWT(t, priv, josejwt.Claims{
+		Issuer: "https://issuer.example.com/", Subject: "u",
+		Audience: josejwt.Audience{"api://someone-else"},
+		IssuedAt: josejwt.NewNumericDate(now), Expiry: josejwt.NewNumericDate(now.Add(time.Hour)),
+	})
+
+	called := false
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer sts.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url": sts.URL, "client_id": "c", "client_secret": "s",
+		"subject_jwks_url": jwks.URL, "subject_issuer": "https://issuer.example.com/", "subject_audience": "api://warden",
+	}, sts.Client())
+	inputs := &credential.ExchangeInputs{SubjectToken: subject, SubjectTokenType: credential.TokenTypeJWT, SubjectTokenOrigin: credential.ExchangeOriginUnverified}
+
+	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed validation")
+	assert.False(t, called, "a wrong-audience subject must never reach the STS")
+}
+
 func TestTokenExchangeDriver_HeaderSubject_NoKeyset_FailClosed(t *testing.T) {
 	called := false
 	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
