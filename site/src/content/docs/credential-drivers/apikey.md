@@ -8,6 +8,42 @@ The **static API key** driver serves a long-lived **API key** to any HTTP API �
 
 An operator reaches for this driver when the upstream has no dynamic-credential API — the key is minted out-of-band and Warden simply stores it, verifies it, and injects it. At mint time the key is returned as-is with **no TTL and no lease**. The source config also controls an optional verification call so a bad key is caught the moment a spec is created.
 
+## Credential issued
+
+Issues a credential of type `api_key`. It is **static** — no lease, no TTL — and **not revocable**: revocation is a no-op because the key is owned and rotated outside Warden. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
+
+## Capabilities
+
+- **Spec verification** — if `verify_endpoint` is set, creating or updating a spec triggers a light call to `api_url` + `verify_endpoint` using the configured method and auth header, retried on HTTP 429 or 500. A key that fails the call is rejected. With no `verify_endpoint`, verification is skipped.
+
+No rotation of any kind — the key is static and managed upstream.
+
+## Examples
+
+One source describes the API; each spec carries a different key. Here two teams share the same OpenAI source with distinct keys:
+
+```bash
+warden cred source create openai \
+  -type=apikey \
+  -config=api_url=https://api.openai.com \
+  -config=verify_endpoint=/v1/models \
+  -config=verify_method=GET \
+  -config=auth_header_type=bearer \
+  -config=optional_metadata=organization_id \
+  -config=display_name=OpenAI \
+  -rotation-period=0
+
+warden cred spec create openai-team-a \
+  -source=openai \
+  -config=api_key=sk-proj-abc123... \
+  -config=organization_id=org-XXXX
+
+warden cred spec create openai-team-b \
+  -source=openai \
+  -config=api_key=sk-proj-def456... \
+  -config=organization_id=org-YYYY
+```
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=apikey -config=key=value ...`:
@@ -33,35 +69,6 @@ There is a single mint path. The spec carries the actual key plus whatever field
 |-----|----------|---------|-------------|
 | `api_key` | Yes | — | The API key to serve. Returned verbatim as the credential. |
 | *fields from `optional_metadata`* | No | — | Any field named in the source's `optional_metadata` (e.g. `organization_id`, `project_id`) is copied into the credential data when present. |
-
-## Credential issued
-
-Issues a credential of type `api_key`. It is **static** — no lease, no TTL — and **not revocable**: revocation is a no-op because the key is owned and rotated outside Warden. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
-
-## Capabilities
-
-- **Spec verification** — if `verify_endpoint` is set, creating or updating a spec triggers a light call to `api_url` + `verify_endpoint` using the configured method and auth header, retried on HTTP 429 or 500. A key that fails the call is rejected. With no `verify_endpoint`, verification is skipped.
-
-No rotation of any kind — the key is static and managed upstream.
-
-## Example
-
-```bash
-warden cred source create openai \
-  -type=apikey \
-  -config=api_url=https://api.openai.com \
-  -config=verify_endpoint=/v1/models \
-  -config=verify_method=GET \
-  -config=auth_header_type=bearer \
-  -config=optional_metadata=organization_id \
-  -config=display_name=OpenAI \
-  -rotation-period=0
-
-warden cred spec create openai-team-a \
-  -source=openai \
-  -config=api_key=sk-proj-abc123... \
-  -config=organization_id=org-XXXX
-```
 
 ## See Also
 

@@ -8,6 +8,54 @@ The GitLab driver mints **project access tokens** and **group access tokens** fr
 
 The privileged secret lives in the **source** config. The driver authenticates to GitLab one of two ways, set by `auth_method`: **PAT mode** (default) uses a **personal access token**, and **OAuth2 mode** uses an application ID and secret via the client-credentials flow. Each **spec** then names a project or group and the scopes the minted token should carry. An operator reaches for this driver to broker CI and automation access to specific GitLab projects or groups without distributing standing tokens.
 
+## Credential issued
+
+Both mint methods issue a `gitlab_access_token`. It is **dynamic** — it carries a lease and TTL derived from `ttl` — and **revocable**: Warden deletes the token via the GitLab API when the lease ends. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
+
+## Capabilities
+
+- **Source rotation** — **fast**, prepares and activates in one step (immediately-consistent upstream). The driver rotates its own source credential: in PAT mode it calls GitLab's atomic PAT rotate endpoint; in OAuth2 mode it renews the application secret. In both cases GitLab invalidates the old credential as part of the rotate, so the new one is committed inline with no propagation delay.
+
+## Examples
+
+**PAT source, project access token** — authenticate with a personal access token and mint a project-scoped token:
+
+```bash
+warden cred source create gitlab-ci \
+  -type=gitlab \
+  -config=gitlab_address=https://gitlab.example.com \
+  -config=auth_method=pat \
+  -config=personal_access_token=glpat-xxxxxxxxxxxx \
+  -rotation-period=720h
+
+warden cred spec create gitlab-app-deploy \
+  -source=gitlab-ci \
+  -config=mint_method=project_access_token \
+  -config=project_id=42 \
+  -config=scopes=api,read_repository \
+  -config=ttl=24h
+```
+
+**OAuth2 source, group access token** — authenticate with an application ID and secret and mint a group-scoped token:
+
+```bash
+warden cred source create gitlab-oauth \
+  -type=gitlab \
+  -config=gitlab_address=https://gitlab.example.com \
+  -config=auth_method=oauth2 \
+  -config=application_id=your-application-id \
+  -config=application_secret=your-application-secret \
+  -rotation-period=720h
+
+warden cred spec create gitlab-group-ci \
+  -source=gitlab-oauth \
+  -config=mint_method=group_access_token \
+  -config=group_id=100 \
+  -config=scopes=read_repository \
+  -config=access_level=30 \
+  -config=ttl=24h
+```
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=gitlab -config=key=value ...`:
@@ -40,32 +88,6 @@ Spec-config keys for `warden cred spec create ... -config=key=value`:
 | `scopes` | No | `api` | Comma-separated token scopes. |
 | `access_level` | No | `30` | Access level for the token (30 = developer). |
 | `ttl` | No | `24h` | Token lifetime; sets the expiry date and the lease TTL. |
-
-## Credential issued
-
-Both mint methods issue a `gitlab_access_token`. It is **dynamic** — it carries a lease and TTL derived from `ttl` — and **revocable**: Warden deletes the token via the GitLab API when the lease ends. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
-
-## Capabilities
-
-- **Source rotation** — **fast**, prepares and activates in one step (immediately-consistent upstream). The driver rotates its own source credential: in PAT mode it calls GitLab's atomic PAT rotate endpoint; in OAuth2 mode it renews the application secret. In both cases GitLab invalidates the old credential as part of the rotate, so the new one is committed inline with no propagation delay.
-
-## Example
-
-```bash
-warden cred source create gitlab-ci \
-  -type=gitlab \
-  -config=gitlab_address=https://gitlab.example.com \
-  -config=auth_method=pat \
-  -config=personal_access_token=glpat-xxxxxxxxxxxx \
-  -rotation-period=720h
-
-warden cred spec create gitlab-app-deploy \
-  -source=gitlab-ci \
-  -config=mint_method=project_access_token \
-  -config=project_id=42 \
-  -config=scopes=api,read_repository \
-  -config=ttl=24h
-```
 
 ## See Also
 

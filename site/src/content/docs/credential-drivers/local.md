@@ -8,6 +8,48 @@ The **local** driver serves **static credentials** that live directly in the **s
 
 Reach for `local` when you already hold a fixed secret — a pre-issued token, a shared password, a static connection string — and simply want Warden to broker it to a workload. Because a local source can serve many different credential shapes, the credential `type` cannot be inferred and must be stated explicitly on the spec with `-type=`.
 
+## Credential issued
+
+The credential `type` is whatever you pass to `-type=` on the spec (the driver serves many types). Local credentials are **static**: they carry no lease and no TTL, and they are **not revocable** — revocation is a no-op. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
+
+## Capabilities
+
+Mint only — no verification, no rotation, and revocation and cleanup are no-ops.
+
+## Examples
+
+One empty source can back specs of many different credential shapes; each spec states its own `-type=`.
+
+```bash
+warden cred source create my-static \
+  -type=local \
+  -rotation-period=0
+```
+
+**Static API key** — a pre-issued Slack bot token served as the `api_key` type:
+
+```bash
+warden cred spec create slack-bot-token \
+  -source=my-static \
+  -type=api_key \
+  -config=api_key=xoxb-EXAMPLE-STATIC-TOKEN
+```
+
+The spec config becomes the credential data verbatim, so the fields you set must
+match what the chosen `-type` expects — here the `api_key` type reads an `api_key`
+field.
+
+**Multi-field secret** — a fixed username/password/URL bundle served under a chosen type:
+
+```bash
+warden cred spec create legacy-db \
+  -source=my-static \
+  -type=database \
+  -config=username=app \
+  -config=password=s3cr3t \
+  -config=url=postgres://db.example.com:5432/app
+```
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=local -config=key=value ...`:
@@ -23,31 +65,6 @@ Because the source cannot infer a type, `-type=` must be set explicitly when cre
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `<any>` | No | — | Arbitrary field copied verbatim into the credential data. |
-
-## Credential issued
-
-The credential `type` is whatever you pass to `-type=` on the spec (the driver serves many types). Local credentials are **static**: they carry no lease and no TTL, and they are **not revocable** — revocation is a no-op. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
-
-## Capabilities
-
-Mint only — no verification, no rotation, and revocation and cleanup are no-ops.
-
-## Example
-
-```bash
-warden cred source create my-static \
-  -type=local \
-  -rotation-period=0
-
-warden cred spec create slack-bot-token \
-  -source=my-static \
-  -type=api_key \
-  -config=api_key=xoxb-EXAMPLE-STATIC-TOKEN
-```
-
-The spec config becomes the credential data verbatim, so the fields you set must
-match what the chosen `-type` expects — here the `api_key` type reads an `api_key`
-field.
 
 ## See Also
 

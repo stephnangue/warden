@@ -8,6 +8,48 @@ The Grafana driver mints **Grafana service-account tokens** by talking to the Gr
 
 The privileged secret lives in the **source**: an `admin_token` (an admin service-account token with permission to create and delete service accounts) plus the `grafana_url` to reach. Each **spec** decides the shape of what gets minted — the role granted, the naming prefix, an optional org, and the token TTL. An operator reaches for this driver to grant workloads short-lived, least-privilege Grafana access without ever sharing the standing admin token.
 
+## Credential issued
+
+Issues a credential of type `api_key`. It is **dynamic** — it carries a lease and a TTL equal to `token_expiry` — and it is **revocable**: revoking deletes the backing service account and invalidates the token. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
+
+## Capabilities
+
+- **Spec verification** — validates the source's admin token at spec create/update time with a lightweight service-account listing call.
+
+Mint and revoke otherwise; no source or spec rotation. Create the source with `-rotation-period=0`.
+
+## Examples
+
+One source holds the standing admin token; each spec below decides the role, org, and token TTL.
+
+```bash
+warden cred source create grafana-cloud \
+  -type=grafana \
+  -config=grafana_url=https://mystack.grafana.net \
+  -config=admin_token=glsa_xxxxxxxxxxxxxxxxxxxx \
+  -rotation-period=0
+```
+
+**Viewer token** — read-only dashboard access with a 1h lifetime:
+
+```bash
+warden cred spec create grafana-dashboards \
+  -source=grafana-cloud \
+  -config=role=Viewer \
+  -config=name_prefix=warden- \
+  -config=token_expiry=1h
+```
+
+**Editor token scoped to an org** — write access within a specific Grafana organization:
+
+```bash
+warden cred spec create grafana-editor \
+  -source=grafana-cloud \
+  -config=role=Editor \
+  -config=org_id=2 \
+  -config=token_expiry=4h
+```
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=grafana -config=key=value ...`:
@@ -29,32 +71,6 @@ A single mint method: each mint creates a service account and issues one token o
 | `name_prefix` | No | `warden-` | Prefix for the generated service-account name. |
 | `org_id` | No | — | Grafana organization ID to scope the service account to; omit for the default org. |
 | `token_expiry` | No | `1h` | TTL of the minted token. |
-
-## Credential issued
-
-Issues a credential of type `api_key`. It is **dynamic** — it carries a lease and a TTL equal to `token_expiry` — and it is **revocable**: revoking deletes the backing service account and invalidates the token. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
-
-## Capabilities
-
-- **Spec verification** — validates the source's admin token at spec create/update time with a lightweight service-account listing call.
-
-Mint and revoke otherwise; no source or spec rotation. Create the source with `-rotation-period=0`.
-
-## Example
-
-```bash
-warden cred source create grafana-cloud \
-  -type=grafana \
-  -config=grafana_url=https://mystack.grafana.net \
-  -config=admin_token=glsa_xxxxxxxxxxxxxxxxxxxx \
-  -rotation-period=0
-
-warden cred spec create grafana-dashboards \
-  -source=grafana-cloud \
-  -config=role=Viewer \
-  -config=name_prefix=warden- \
-  -config=token_expiry=1h
-```
 
 ## See Also
 

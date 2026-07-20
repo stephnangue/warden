@@ -8,6 +8,73 @@ The AWS driver brokers credentials from **Amazon Web Services**. The **source** 
 
 Reach for this driver when workloads need scoped, time-bounded access to AWS APIs or to IAM-authenticated databases without ever handling the operator's standing IAM key. The privileged key lives only in the source config; specs carry the per-request details (which role, which secret, which database).
 
+## Credential issued
+
+- `sts_assume_role` and `secrets_manager` issue **`aws_access_keys`**.
+- `rds_iam_token` and `redshift_iam_token` issue **`db_auth_token`**.
+
+STS credentials are **dynamic** — they carry a lease and TTL — but are **not revocable**: AWS provides no way to invalidate temporary STS credentials, so they are tracked under a synthetic lease ID and simply expire. RDS and Redshift IAM tokens are also short-lived and expiry-bound (RDS tokens last ~15 minutes; Redshift honors `duration_seconds`). Secrets Manager values are **static** — no lease, no revocation. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
+
+## Capabilities
+
+- **Source rotation** — **slow**: stages a newly created IAM access key alongside the old one and waits ~5 minutes (`DefaultAWSActivationDelay`, tunable via the source's `activation_delay`) so the new key propagates through AWS IAM's eventual consistency before the old key is destroyed. Only permanent IAM keys (those with an `AKIA` prefix) are rotatable. What gets rotated is the source's own IAM access key pair.
+
+No spec verification.
+
+## Examples
+
+One source holds the standing IAM key; each spec below picks a `mint_method`.
+
+```bash
+warden cred source create prod-aws \
+  -type=aws \
+  -config=access_key_id=AKIAIOSFODNN7EXAMPLE \
+  -config=secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+  -config=region=us-east-1 \
+  -rotation-period=720h
+```
+
+**STS AssumeRole** — temporary session credentials for a role:
+
+```bash
+warden cred spec create deploy-role \
+  -source=prod-aws \
+  -config=mint_method=sts_assume_role \
+  -config=role_arn=arn:aws:iam::123456789012:role/DeployRole \
+  -config=ttl=1h
+```
+
+**Secrets Manager** — fetch a stored secret:
+
+```bash
+warden cred spec create db-password \
+  -source=prod-aws \
+  -config=mint_method=secrets_manager \
+  -config=secret_id=prod/db/credentials
+```
+
+**RDS IAM auth token** — a short-lived database password:
+
+```bash
+warden cred spec create rds-token \
+  -source=prod-aws \
+  -config=mint_method=rds_iam_token \
+  -config=db_endpoint=mydb.abc123.us-east-1.rds.amazonaws.com \
+  -config=db_user=app_user \
+  -config=db_engine=postgres
+```
+
+**Redshift IAM auth token** — for a provisioned cluster:
+
+```bash
+warden cred spec create redshift-token \
+  -source=prod-aws \
+  -config=mint_method=redshift_iam_token \
+  -config=db_endpoint=mycluster.abc123.us-east-1.redshift.amazonaws.com \
+  -config=cluster_identifier=mycluster \
+  -config=db_name=analytics
+```
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=aws -config=key=value ...`:
@@ -54,36 +121,6 @@ Spec-config keys set with `warden cred spec create ... -config=key=value`:
 | `db_name` | No | — | Target database name for Redshift. |
 | `duration_seconds` | No | `900` | Redshift token lifetime, 900–3600 seconds. |
 | `region` | No | source `region` | Overrides the source region for the DB token. |
-
-## Credential issued
-
-- `sts_assume_role` and `secrets_manager` issue **`aws_access_keys`**.
-- `rds_iam_token` and `redshift_iam_token` issue **`db_auth_token`**.
-
-STS credentials are **dynamic** — they carry a lease and TTL — but are **not revocable**: AWS provides no way to invalidate temporary STS credentials, so they are tracked under a synthetic lease ID and simply expire. RDS and Redshift IAM tokens are also short-lived and expiry-bound (RDS tokens last ~15 minutes; Redshift honors `duration_seconds`). Secrets Manager values are **static** — no lease, no revocation. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
-
-## Capabilities
-
-- **Source rotation** — **slow**: stages a newly created IAM access key alongside the old one and waits ~5 minutes (`DefaultAWSActivationDelay`, tunable via the source's `activation_delay`) so the new key propagates through AWS IAM's eventual consistency before the old key is destroyed. Only permanent IAM keys (those with an `AKIA` prefix) are rotatable. What gets rotated is the source's own IAM access key pair.
-
-No spec verification.
-
-## Example
-
-```bash
-warden cred source create prod-aws \
-  -type=aws \
-  -config=access_key_id=AKIAIOSFODNN7EXAMPLE \
-  -config=secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-  -config=region=us-east-1 \
-  -rotation-period=720h
-
-warden cred spec create deploy-role \
-  -source=prod-aws \
-  -config=mint_method=sts_assume_role \
-  -config=role_arn=arn:aws:iam::123456789012:role/DeployRole \
-  -config=ttl=1h
-```
 
 ## See Also
 

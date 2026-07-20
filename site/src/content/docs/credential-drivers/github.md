@@ -8,6 +8,46 @@ The GitHub driver mints **GitHub tokens** for workloads that call the GitHub RES
 
 Each spec picks an **`auth_method`**: `app` (the default) uses a GitHub App private key to mint short-lived installation access tokens (~1h TTL), while `pat` passes through a static Personal Access Token. An operator reaches for this driver whenever a workload needs to authenticate to GitHub without holding the long-lived App key or PAT itself.
 
+## Credential issued
+
+The driver always issues the `github_token` type. In `app` mode the token is **dynamic** — it carries a TTL (~1h) tied to the installation token's expiry. In `pat` mode the token is **static** — no lease, no TTL. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation). GitHub App installation tokens are revocable and expire naturally; the driver relies on their short lifetime rather than tracking leases for explicit revocation.
+
+## Capabilities
+
+- **Spec verification** — validates a spec at create/update time. In `pat` mode it confirms the token with a lightweight identity call; in `app` mode the spec is exercised by a trial mint against the GitHub API.
+- **Not rotatable — by design.** GitHub App installation tokens are ephemeral (~1h) and are simply re-minted on demand, and GitHub exposes no API to rotate a PAT. There is nothing long-lived on the source to rotate, so the driver does not implement source rotation.
+
+## Examples
+
+One source holds only connection details; each spec below picks an `auth_method`.
+
+```bash
+warden cred source create github-prod \
+  -type=github \
+  -config=github_url=https://api.github.com \
+  -rotation-period=0
+```
+
+**GitHub App** — mint short-lived installation access tokens from an App private key:
+
+```bash
+warden cred spec create ci-deploy \
+  -source=github-prod \
+  -config=auth_method=app \
+  -config=app_id=123456 \
+  -config=installation_id=7891011 \
+  -config=private_key="$(cat app-private-key.pem)"
+```
+
+**Personal Access Token** — pass a static PAT through unchanged:
+
+```bash
+warden cred spec create readonly-pat \
+  -source=github-prod \
+  -config=auth_method=pat \
+  -config=token=ghp_xxxxxxxxxxxxxxxxxxxx
+```
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=github -config=key=value ...`:
@@ -36,31 +76,6 @@ Spec-config keys set with `warden cred spec create ... -config=key=value`:
 | `app_id` | For `app` | — | GitHub App ID (JWT issuer). |
 | `installation_id` | For `app` | — | Installation ID the token is minted for. |
 | `token` | For `pat` | — | The Personal Access Token to pass through. |
-
-## Credential issued
-
-The driver always issues the `github_token` type. In `app` mode the token is **dynamic** — it carries a TTL (~1h) tied to the installation token's expiry. In `pat` mode the token is **static** — no lease, no TTL. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation). GitHub App installation tokens are revocable and expire naturally; the driver relies on their short lifetime rather than tracking leases for explicit revocation.
-
-## Capabilities
-
-- **Spec verification** — validates a spec at create/update time. In `pat` mode it confirms the token with a lightweight identity call; in `app` mode the spec is exercised by a trial mint against the GitHub API.
-- **Not rotatable — by design.** GitHub App installation tokens are ephemeral (~1h) and are simply re-minted on demand, and GitHub exposes no API to rotate a PAT. There is nothing long-lived on the source to rotate, so the driver does not implement source rotation.
-
-## Example
-
-```bash
-warden cred source create github-prod \
-  -type=github \
-  -config=github_url=https://api.github.com \
-  -rotation-period=0
-
-warden cred spec create ci-deploy \
-  -source=github-prod \
-  -config=auth_method=app \
-  -config=app_id=123456 \
-  -config=installation_id=7891011 \
-  -config=private_key="$(cat app-private-key.pem)"
-```
 
 ## See Also
 

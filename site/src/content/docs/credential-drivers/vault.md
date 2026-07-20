@@ -8,6 +8,98 @@ The `hvault` driver brokers credentials out of **HashiCorp Vault** (or **OpenBao
 
 Reach for it when your secrets already live in Vault: static KV entries, dynamic cloud credentials from the AWS/GCP/IBM engines, OAuth2 bearer tokens from the oauthapp engine, or freshly minted Vault tokens. Warden authenticates once with the source's privileged AppRole, then mints per request against whatever engine the spec points at.
 
+## Credential issued
+
+The credential `type` depends on the mint method: `static_aws`/`dynamic_aws` issue `aws_access_keys`, `static_apikey` issues `api_key`, `dynamic_gcp` issues `gcp_access_token`, `dynamic_ibm` issues `ibmcloud_keys`, `oauth2` issues `oauth_bearer_token`, and `vault_token` issues `vault_token`.
+
+Static KV secrets are **static** — no lease, no TTL, not revocable. Every dynamic method (`dynamic_aws`, `dynamic_gcp`, `dynamic_ibm`, `oauth2`, `vault_token`) is **dynamic** — it carries a lease/TTL and is **revocable**: Vault leases are revoked by lease ID and Vault tokens by accessor. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
+
+## Capabilities
+
+- **Source rotation** — **fast**: prepares and activates in one step (immediately-consistent upstream). Rotates the source's own AppRole `secret_id` by generating a new one, re-authenticating, then destroying the old secret ID by accessor. Requires `auth_method=approle` and `role_name`.
+
+No spec verification. Static KV mints only fetch and revoke.
+
+## Examples
+
+One source holds the standing AppRole identity; each spec below picks a `mint_method`.
+
+```bash
+warden cred source create prod-vault \
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=approle \
+  -config=role_id=role-id-uuid \
+  -config=secret_id=secret-id-uuid \
+  -config=approle_mount=approle \
+  -config=role_name=warden-source-role \
+  -rotation-period=720h
+```
+
+**Static KV secret** — fetch a stored value from a KV v2 mount:
+
+```bash
+warden cred spec create static-apikey \
+  -source=prod-vault \
+  -config=mint_method=static_apikey \
+  -config=kv2_mount=secret \
+  -config=secret_path=services/billing/api-key
+```
+
+**Dynamic AWS** — generate temporary AWS access keys from the AWS engine:
+
+```bash
+warden cred spec create prod-aws \
+  -source=prod-vault \
+  -config=mint_method=dynamic_aws \
+  -config=aws_mount=aws \
+  -config=role_name=deploy \
+  -config=ttl=30m
+```
+
+**Dynamic GCP** — mint a GCP access token from a roleset:
+
+```bash
+warden cred spec create prod-gcp \
+  -source=prod-vault \
+  -config=mint_method=dynamic_gcp \
+  -config=gcp_mount=gcp \
+  -config=role_name=viewer \
+  -config=role_type=roleset
+```
+
+**Dynamic IBM** — mint IBM Cloud credentials from the IBM engine:
+
+```bash
+warden cred spec create prod-ibm \
+  -source=prod-vault \
+  -config=mint_method=dynamic_ibm \
+  -config=ibm_mount=ibmcloud \
+  -config=role_name=reader \
+  -config=ttl=1h
+```
+
+**Vault token** — mint a fresh Vault token from a token role:
+
+```bash
+warden cred spec create app-token \
+  -source=prod-vault \
+  -config=mint_method=vault_token \
+  -config=token_role=app \
+  -config=ttl=1h \
+  -config=display_name=app-worker
+```
+
+**OAuth2 bearer** — draw a bearer token from the OAuth2 (oauthapp) engine:
+
+```bash
+warden cred spec create oauth-bearer \
+  -source=prod-vault \
+  -config=mint_method=oauth2 \
+  -config=oauth2_mount=oauth2 \
+  -config=credential_name=github-app
+```
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=hvault -config=key=value ...`:
@@ -61,39 +153,6 @@ Spec-config keys set with `warden cred spec create ... -config=key=value`:
 | `access_key_id` / `secret_access_key` | No | — | Optional COS HMAC keys added to IBM credentials. |
 | `display_name` | No | — | Display name for a minted Vault token. |
 | `meta` | No | — | Metadata for a minted Vault token. |
-
-## Credential issued
-
-The credential `type` depends on the mint method: `static_aws`/`dynamic_aws` issue `aws_access_keys`, `static_apikey` issues `api_key`, `dynamic_gcp` issues `gcp_access_token`, `dynamic_ibm` issues `ibmcloud_keys`, `oauth2` issues `oauth_bearer_token`, and `vault_token` issues `vault_token`.
-
-Static KV secrets are **static** — no lease, no TTL, not revocable. Every dynamic method (`dynamic_aws`, `dynamic_gcp`, `dynamic_ibm`, `oauth2`, `vault_token`) is **dynamic** — it carries a lease/TTL and is **revocable**: Vault leases are revoked by lease ID and Vault tokens by accessor. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
-
-## Capabilities
-
-- **Source rotation** — **fast**: prepares and activates in one step (immediately-consistent upstream). Rotates the source's own AppRole `secret_id` by generating a new one, re-authenticating, then destroying the old secret ID by accessor. Requires `auth_method=approle` and `role_name`.
-
-No spec verification. Static KV mints only fetch and revoke.
-
-## Example
-
-```bash
-warden cred source create prod-vault \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=role-id-uuid \
-  -config=secret_id=secret-id-uuid \
-  -config=approle_mount=approle \
-  -config=role_name=warden-source-role \
-  -rotation-period=720h
-
-warden cred spec create prod-aws \
-  -source=prod-vault \
-  -config=mint_method=dynamic_aws \
-  -config=aws_mount=aws \
-  -config=role_name=deploy \
-  -config=ttl=30m
-```
 
 ## See Also
 
