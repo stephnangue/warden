@@ -139,9 +139,14 @@ func GetErrorCode(err error) int {
 	case errors.Is(err, sdklogical.ErrInvalidRequest):
 		return http.StatusBadRequest
 	}
-	// Check if the error wraps a CodedError
+	// Check if the error wraps a CodedError. Only recurse when there is an inner
+	// error: an error that implements Unwrap() but returns nil (e.g. a token
+	// endpoint error carrying only a parsed OAuth code) is still a real failure
+	// and must not fall through to GetErrorCode(nil) == 200.
 	if unwrapped, ok := err.(interface{ Unwrap() error }); ok {
-		return GetErrorCode(unwrapped.Unwrap())
+		if inner := unwrapped.Unwrap(); inner != nil {
+			return GetErrorCode(inner)
+		}
 	}
 	return http.StatusInternalServerError
 }

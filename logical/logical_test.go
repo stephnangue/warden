@@ -141,6 +141,13 @@ type permDeniedWrapper struct{}
 func (permDeniedWrapper) Error() string { return "boom" }
 func (permDeniedWrapper) Unwrap() error { return sdklogical.ErrPermissionDenied }
 
+// unwrapsToNil is a real error that implements Unwrap() but returns no inner
+// error — like a token-endpoint error carrying only a parsed OAuth code.
+type unwrapsToNil struct{}
+
+func (unwrapsToNil) Error() string { return "boom" }
+func (unwrapsToNil) Unwrap() error { return nil }
+
 func TestGetErrorCode(t *testing.T) {
 	t.Run("nil", func(t *testing.T) {
 		assert.Equal(t, 200, GetErrorCode(nil))
@@ -158,6 +165,14 @@ func TestGetErrorCode(t *testing.T) {
 		inner := ErrNotFound("not found")
 		wrapped := fmt.Errorf("wrap: %w", inner)
 		assert.Equal(t, 404, GetErrorCode(wrapped))
+	})
+
+	t.Run("error whose Unwrap returns nil is 500, not 200", func(t *testing.T) {
+		// A real failure that implements Unwrap() but has no inner error (e.g. an
+		// OAuth token-endpoint error carrying only a parsed error code) must not
+		// recurse into GetErrorCode(nil) and report success.
+		assert.Equal(t, 500, GetErrorCode(unwrapsToNil{}))
+		assert.Equal(t, 500, GetErrorCode(fmt.Errorf("wrap: %w", unwrapsToNil{})))
 	})
 
 	// SDK sentinel errors must map to their HTTP status even when wrapped or
