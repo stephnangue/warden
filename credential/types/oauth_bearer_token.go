@@ -102,16 +102,26 @@ func (t *OAuthBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("credential_name").
 			Describe("Credential name in the OAuth2 plugin (required for oauth2 mint_method)").
 			Example("my-oauth-cred"),
+
+		// token_exchange source - RFC 8693 target parameters. The exchange plumbing
+		// keys (subject_token_source, actor_token_source, *_token_type) are validated
+		// separately by credential.ValidateExchangeSpecConfig.
+		credential.StringField("audience").
+			Describe("Target audience for the exchanged token (token_exchange source)").
+			Example("https://api.internal.example.com"),
+		credential.StringField("resource").
+			Describe("RFC 8707 resource indicator for the exchanged token (token_exchange source)").
+			Example("https://api.internal.example.com"),
 	}
 }
 
 // ValidateConfig validates the Config for an OAuth bearer token credential spec.
 func (t *OAuthBearerTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
 	switch sourceType {
-	case credential.SourceTypeOAuth2, credential.SourceTypeVault, credential.SourceTypeIBM:
+	case credential.SourceTypeOAuth2, credential.SourceTypeVault, credential.SourceTypeIBM, credential.SourceTypeTokenExchange:
 		// Supported
 	default:
-		return fmt.Errorf("oauth_bearer_token credentials require an oauth2, vault, or ibm source, got: %s", sourceType)
+		return fmt.Errorf("oauth_bearer_token credentials require an oauth2, vault, ibm, or token_exchange source, got: %s", sourceType)
 	}
 
 	schema := t.ConfigSchema()
@@ -135,6 +145,15 @@ func (t *OAuthBearerTokenCredType) ValidateConfig(config map[string]string, sour
 		// IBM source uses iam_token mint method (default); no additional spec config needed
 		if mm := config["mint_method"]; mm != "" && mm != "iam_token" {
 			return fmt.Errorf("'mint_method' must be 'iam_token' for ibm source, got: %s", mm)
+		}
+	case credential.SourceTypeTokenExchange:
+		// The token_exchange driver is exchange-only: it mints solely from a
+		// caller-derived subject. A spec that opts out (subject_token_source absent
+		// or "none") has no identity to exchange, so reject it here rather than
+		// failing opaquely at mint time.
+		if src := config[credential.ConfigSubjectTokenSource]; src == "" || src == credential.SourceNone {
+			return fmt.Errorf("'%s' is required for a token_exchange source (set '%s' or '%s')",
+				credential.ConfigSubjectTokenSource, credential.SourceAuthToken, credential.SourceHeader)
 		}
 	}
 
