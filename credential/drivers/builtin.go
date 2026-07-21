@@ -89,5 +89,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register token-exchange driver factory (RFC 8693 / RFC 7523 / Entra OBO)
+	if err := registry.RegisterFactory(&TokenExchangeDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }
