@@ -4,9 +4,13 @@ title: "Credential Drivers"
 
 A **driver** is the pluggable component that knows how to talk to one kind of
 upstream. A [credential source](/concepts/credentials/) names a driver through
-its `type`, holds the privileged secret, and the driver mints or retrieves the
-scoped credential a workload needs — an STS session, a Vault token, a GitHub
-installation token — which Warden injects into the proxied request.
+its `type` and holds whatever that driver needs to obtain credentials — usually a
+privileged secret, though some drivers instead **exchange the caller's own
+identity** for a downstream credential and hold only the client credentials to
+authenticate to an STS. The driver then mints or retrieves the scoped credential a
+workload needs — an STS session, a Vault token, a GitHub installation token, a
+token exchanged from the caller's identity — which Warden injects into the proxied
+request.
 
 Every driver implements the same core contract — **mint** a credential from a spec,
 **revoke** a lease, and **clean up** — and may opt into extra capabilities:
@@ -21,6 +25,9 @@ Every driver implements the same core contract — **mint** a credential from a 
 - **Spec rotation** — use the source's elevated permissions to rotate a credential
   embedded in a spec.
 - **OAuth2 authorization-code consent** — drive a one-time interactive consent flow.
+- **Token exchange** — mint from caller-derived RFC 8693 inputs (a subject token,
+  and optionally an actor token) rather than the source's own secret, exchanging
+  the caller's identity for a scoped downstream credential.
 
 See [Credentials](/concepts/credentials/) for the source / spec / credential
 model these pages build on.
@@ -39,6 +46,7 @@ model these pages build on.
 | [HashiCorp Vault](/credential-drivers/vault/) | `hvault` | Vault / OpenBao — KV, AWS/GCP/IBM engines, tokens, OAuth2 | source rotation (fast) |
 | [Kubernetes](/credential-drivers/kubernetes/) | `kubernetes` | ServiceAccount tokens via the TokenRequest API | spec verification · source rotation (fast) |
 | [OAuth2](/credential-drivers/oauth2/) | `oauth2` | generic OAuth2 providers | spec verification · OAuth2 consent |
+| [Token Exchange](/credential-drivers/token-exchange/) | `token_exchange` | RFC 8693 / RFC 7523 exchange at any OAuth2 STS (Entra OBO, ID-JAG) | token exchange |
 
 ## Cloud
 

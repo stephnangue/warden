@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -112,6 +113,54 @@ func TestTokenExchangeDriver_JWTBearer_Entra(t *testing.T) {
 	rawData, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, verifiedSubject(subject))
 	require.NoError(t, err)
 	assert.Equal(t, "graph-token", rawData["api_key"])
+}
+
+func TestTokenExchangeDriver_JWTBearer_RejectsAudience(t *testing.T) {
+	// audience is an rfc8693 param with no jwt-bearer slot: reject, don't silently
+	// drop — and the STS must not be called. (resources are RFC 8707 and allowed.)
+	called := false
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer sts.Close()
+	d := newExchangeDriver(map[string]string{
+		"token_url": sts.URL, "grant": tokenExchangeGrantJWTBearer, "client_id": "c", "client_secret": "s",
+	}, sts.Client())
+	spec := &credential.CredSpec{Config: map[string]string{"audience": "https://target.example.com"}}
+	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, verifiedSubject(makeUnsignedJWT(map[string]interface{}{"sub": "u"})))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "audience")
+	assert.False(t, called, "the STS must not be called when the config is rejected")
+}
+
+// resourceValues returns all repeated `resource` form values the STS received.
+func assertResources(t *testing.T, form url.Values, want ...string) {
+	t.Helper()
+	assert.ElementsMatch(t, want, form["resource"], "repeated RFC 8707 resource indicators")
+}
+
+func TestTokenExchangeDriver_Resources_MultiValue(t *testing.T) {
+	// RFC 8707: `resources` (space-separated) is sent as repeated `resource` params,
+	// on both rfc8693 and jwt_bearer.
+	for _, grant := range []string{tokenExchangeGrantRFC8693, tokenExchangeGrantJWTBearer} {
+		t.Run(grant, func(t *testing.T) {
+			var got url.Values
+			sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.NoError(t, r.ParseForm())
+				got = r.Form
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+			}))
+			defer sts.Close()
+			d := newExchangeDriver(map[string]string{
+				"token_url": sts.URL, "grant": grant, "client_id": "c", "client_secret": "s",
+			}, sts.Client())
+			spec := &credential.CredSpec{Config: map[string]string{
+				"resources": "https://api.example.com https://api2.example.com",
+			}}
+			_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, verifiedSubject(makeUnsignedJWT(map[string]interface{}{"sub": "u"})))
+			require.NoError(t, err)
+			assertResources(t, got, "https://api.example.com", "https://api2.example.com")
+		})
+	}
 }
 
 func TestTokenExchangeDriver_ClientSecretBasic(t *testing.T) {
@@ -298,6 +347,17 @@ func TestTokenExchangeDriverFactory_ValidateConfig(t *testing.T) {
 		c["token_param.subject_token"] = "x"
 		assert.Error(t, f.ValidateConfig(c))
 	})
+	t.Run("id_jag without resource_token_url", func(t *testing.T) {
+		c := base()
+		c["grant"] = tokenExchangeGrantIDJAG
+		assert.Error(t, f.ValidateConfig(c))
+	})
+	t.Run("id_jag with resource_token_url", func(t *testing.T) {
+		c := base()
+		c["grant"] = tokenExchangeGrantIDJAG
+		c["resource_token_url"] = "https://auth.resourceapp.example.com/token"
+		assert.NoError(t, f.ValidateConfig(c))
+	})
 	t.Run("non-https token_url", func(t *testing.T) {
 		c := base()
 		c["token_url"] = "http://idp.example.com/token"
@@ -397,6 +457,63 @@ func TestTokenExchangeDriver_HeaderSubject_BadSignature_FailClosed(t *testing.T)
 	assert.False(t, called, "an invalid subject must never reach the STS")
 }
 
+func TestTokenExchangeDriver_HeaderSubject_Expired_FailClosed(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	jwks := jwksServer(t, &priv.PublicKey)
+	defer jwks.Close()
+	now := time.Now()
+	// Validly signed, correct issuer/audience, but expired (well past the 150s leeway).
+	subject := signTestJWT(t, priv, josejwt.Claims{
+		Issuer: "https://issuer.example.com/", Subject: "u",
+		Audience: josejwt.Audience{"api://warden"},
+		IssuedAt: josejwt.NewNumericDate(now.Add(-2 * time.Hour)),
+		Expiry:   josejwt.NewNumericDate(now.Add(-1 * time.Hour)),
+	})
+
+	called := false
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer sts.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url": sts.URL, "client_id": "c", "client_secret": "s",
+		"subject_jwks_url": jwks.URL, "subject_issuer": "https://issuer.example.com/", "subject_audience": "api://warden",
+	}, sts.Client())
+	inputs := &credential.ExchangeInputs{SubjectToken: subject, SubjectTokenType: credential.TokenTypeJWT, SubjectTokenOrigin: credential.ExchangeOriginUnverified}
+
+	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed validation")
+	assert.False(t, called, "an expired subject must never reach the STS")
+}
+
+func TestTokenExchangeDriver_HeaderSubject_WrongAudience_FailClosed(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	jwks := jwksServer(t, &priv.PublicKey)
+	defer jwks.Close()
+	now := time.Now()
+	// Valid signature and issuer, but the token is audienced for a different service.
+	subject := signTestJWT(t, priv, josejwt.Claims{
+		Issuer: "https://issuer.example.com/", Subject: "u",
+		Audience: josejwt.Audience{"api://someone-else"},
+		IssuedAt: josejwt.NewNumericDate(now), Expiry: josejwt.NewNumericDate(now.Add(time.Hour)),
+	})
+
+	called := false
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer sts.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url": sts.URL, "client_id": "c", "client_secret": "s",
+		"subject_jwks_url": jwks.URL, "subject_issuer": "https://issuer.example.com/", "subject_audience": "api://warden",
+	}, sts.Client())
+	inputs := &credential.ExchangeInputs{SubjectToken: subject, SubjectTokenType: credential.TokenTypeJWT, SubjectTokenOrigin: credential.ExchangeOriginUnverified}
+
+	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed validation")
+	assert.False(t, called, "a wrong-audience subject must never reach the STS")
+}
+
 func TestTokenExchangeDriver_HeaderSubject_NoKeyset_FailClosed(t *testing.T) {
 	called := false
 	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
@@ -454,6 +571,53 @@ func TestTokenExchangeDriver_PrivateKeyJWT(t *testing.T) {
 	assert.Equal(t, "warden-gateway", claims.Subject)
 	assert.Contains(t, claims.Audience, sts.URL)
 	assert.NotEmpty(t, claims.ID, "assertion should carry a jti")
+}
+
+func TestTokenExchangeDriver_IDJAG(t *testing.T) {
+	subject := makeUnsignedJWT(map[string]interface{}{"sub": "user"})
+
+	// Leg 2: resource authorization server redeems the ID-JAG for an access token.
+	resSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, "urn:ietf:params:oauth:grant-type:jwt-bearer", r.Form.Get("grant_type"))
+		assert.Equal(t, "the-id-jag", r.Form.Get("assertion"))
+		assert.Equal(t, "files:read", r.Form.Get("scope"))
+		assertResources(t, r.Form, "https://api.example.com") // RFC 8707 on the final token (leg 2)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "final-access", "expires_in": 600})
+	}))
+	defer resSrv.Close()
+
+	// Leg 1: home IdP exchanges the subject for an ID-JAG bound to the resource AS.
+	idpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, "urn:ietf:params:oauth:grant-type:token-exchange", r.Form.Get("grant_type"))
+		assert.Equal(t, tokenTypeIDJAG, r.Form.Get("requested_token_type"))
+		assert.Equal(t, subject, r.Form.Get("subject_token"))
+		assert.Equal(t, "https://resource-as.example.com", r.Form.Get("audience"))
+		assert.Empty(t, r.Form["resource"], "resources belong on leg 2, not leg 1")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "the-id-jag", "issued_token_type": tokenTypeIDJAG, "expires_in": 300})
+	}))
+	defer idpSrv.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url":          idpSrv.URL,
+		"resource_token_url": resSrv.URL,
+		"grant":              tokenExchangeGrantIDJAG,
+		"client_id":          "c",
+		"client_secret":      "s",
+	}, &http.Client{})
+	spec := &credential.CredSpec{Config: map[string]string{
+		"audience":  "https://resource-as.example.com",
+		"scope":     "files:read",
+		"resources": "https://api.example.com",
+	}}
+
+	rawData, _, ttl, _, err := d.MintCredentialWithExchange(context.Background(), spec, verifiedSubject(subject))
+	require.NoError(t, err)
+	assert.Equal(t, "final-access", rawData["api_key"], "the final resource-AS access token is returned, not the ID-JAG")
+	assert.Equal(t, 600*time.Second, ttl)
 }
 
 func TestTokenExchangeDriverFactory_Basics(t *testing.T) {
