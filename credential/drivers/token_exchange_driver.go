@@ -245,10 +245,19 @@ func (d *TokenExchangeDriver) MintCredentialWithExchange(ctx context.Context, sp
 			return nil, nil, 0, "", err
 		}
 	}
-	// Actor delegation is added in a follow-up change; reject rather than silently
-	// dropping the actor a caller supplied.
+
+	// Actor delegation (RFC 8693). jwt-bearer has no actor slot, so reject an actor
+	// there. An unverified (header-sourced) actor is validated like a subject; a
+	// verified (auth_token) actor — the agent's inbound JWT — is forwarded as-is.
 	if inputs.ActorToken != "" {
-		return nil, nil, 0, "", fmt.Errorf("token_exchange: actor tokens are not yet supported by this source")
+		if credential.GetString(d.credSource.Config, "grant", tokenExchangeGrantRFC8693) == tokenExchangeGrantJWTBearer {
+			return nil, nil, 0, "", fmt.Errorf("token_exchange: actor tokens are not supported with grant=jwt_bearer (no actor slot)")
+		}
+		if inputs.ActorTokenOrigin != credential.ExchangeOriginVerified {
+			if err := d.validateUntrustedToken(ctx, inputs.ActorToken, "actor"); err != nil {
+				return nil, nil, 0, "", err
+			}
+		}
 	}
 
 	form, err := d.buildExchangeForm(spec, inputs)
@@ -287,6 +296,10 @@ func (d *TokenExchangeDriver) buildExchangeForm(spec *credential.CredSpec, input
 		}
 		if res := d.resolve(spec, "resource"); res != "" {
 			form.Set("resource", res)
+		}
+		if inputs.ActorToken != "" {
+			form.Set("actor_token", inputs.ActorToken)
+			form.Set("actor_token_type", actorTokenType(inputs))
 		}
 	case tokenExchangeGrantJWTBearer:
 		form.Set("grant_type", grantTypeJWTBearer)
@@ -476,6 +489,14 @@ func (d *TokenExchangeDriver) getSubjectValidator(ctx context.Context) (*jwt.Val
 func subjectTokenType(inputs *credential.ExchangeInputs) string {
 	if inputs.SubjectTokenType != "" {
 		return inputs.SubjectTokenType
+	}
+	return credential.TokenTypeJWT
+}
+
+// actorTokenType returns the RFC 8693 actor_token_type, defaulting to jwt.
+func actorTokenType(inputs *credential.ExchangeInputs) string {
+	if inputs.ActorTokenType != "" {
+		return inputs.ActorTokenType
 	}
 	return credential.TokenTypeJWT
 }

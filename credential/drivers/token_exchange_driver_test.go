@@ -164,17 +164,108 @@ func TestTokenExchangeDriver_UnverifiedRejected_NoCall(t *testing.T) {
 	assert.False(t, called, "the STS must not be called for an unverified subject")
 }
 
-func TestTokenExchangeDriver_ActorRejected(t *testing.T) {
+func TestTokenExchangeDriver_ActorVerified_Forwarded(t *testing.T) {
+	subject := makeUnsignedJWT(map[string]interface{}{"sub": "user"})
+	actor := makeUnsignedJWT(map[string]interface{}{"sub": "agent"})
+
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, subject, r.Form.Get("subject_token"))
+		assert.Equal(t, actor, r.Form.Get("actor_token"))
+		assert.Equal(t, credential.TokenTypeJWT, r.Form.Get("actor_token_type"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+	}))
+	defer sts.Close()
+
+	// A verified (auth_token) actor is forwarded as-is — no subject-validation config needed.
 	d := newExchangeDriver(map[string]string{
-		"token_url": "https://idp.example.com", "client_id": "c", "client_secret": "s",
+		"token_url": sts.URL, "client_id": "c", "client_secret": "s",
+	}, sts.Client())
+	inputs := verifiedSubject(subject)
+	inputs.ActorToken = actor
+	inputs.ActorTokenType = credential.TokenTypeJWT
+	inputs.ActorTokenOrigin = credential.ExchangeOriginVerified
+
+	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
+	require.NoError(t, err)
+}
+
+func TestTokenExchangeDriver_ActorHeader_Validated(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	jwks := jwksServer(t, &priv.PublicKey)
+	defer jwks.Close()
+	now := time.Now()
+	actor := signTestJWT(t, priv, josejwt.Claims{
+		Issuer: "https://issuer.example.com/", Subject: "agent",
+		Audience: josejwt.Audience{"api://warden"},
+		IssuedAt: josejwt.NewNumericDate(now), NotBefore: josejwt.NewNumericDate(now),
+		Expiry: josejwt.NewNumericDate(now.Add(time.Hour)),
+	})
+	subject := makeUnsignedJWT(map[string]interface{}{"sub": "user"})
+
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, actor, r.Form.Get("actor_token"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+	}))
+	defer sts.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url": sts.URL, "client_id": "c", "client_secret": "s",
+		"subject_jwks_url": jwks.URL, "subject_issuer": "https://issuer.example.com/", "subject_audience": "api://warden",
+	}, sts.Client())
+	inputs := verifiedSubject(subject) // subject verified (forwarded as-is)
+	inputs.ActorToken = actor
+	inputs.ActorTokenType = credential.TokenTypeJWT
+	inputs.ActorTokenOrigin = credential.ExchangeOriginUnverified // header-sourced → validated
+
+	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
+	require.NoError(t, err)
+}
+
+func TestTokenExchangeDriver_ActorHeader_BadSignature_FailClosed(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	other, _ := rsa.GenerateKey(rand.Reader, 2048)
+	jwks := jwksServer(t, &priv.PublicKey)
+	defer jwks.Close()
+	actor := signTestJWT(t, other, josejwt.Claims{
+		Issuer: "https://issuer.example.com/", Subject: "attacker",
+		Audience: josejwt.Audience{"api://warden"}, Expiry: josejwt.NewNumericDate(time.Now().Add(time.Hour)),
+	})
+
+	called := false
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer sts.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url": sts.URL, "client_id": "c", "client_secret": "s",
+		"subject_jwks_url": jwks.URL, "subject_issuer": "https://issuer.example.com/", "subject_audience": "api://warden",
+	}, sts.Client())
+	inputs := verifiedSubject(makeUnsignedJWT(map[string]interface{}{"sub": "user"}))
+	inputs.ActorToken = actor
+	inputs.ActorTokenType = credential.TokenTypeJWT
+	inputs.ActorTokenOrigin = credential.ExchangeOriginUnverified
+
+	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "actor token failed validation")
+	assert.False(t, called)
+}
+
+func TestTokenExchangeDriver_Actor_JWTBearerRejected(t *testing.T) {
+	d := newExchangeDriver(map[string]string{
+		"token_url": "https://idp.example.com", "grant": tokenExchangeGrantJWTBearer, "client_id": "c", "client_secret": "s",
 	}, http.DefaultClient)
 	inputs := verifiedSubject(makeUnsignedJWT(map[string]interface{}{"sub": "u"}))
 	inputs.ActorToken = makeUnsignedJWT(map[string]interface{}{"sub": "agent"})
 	inputs.ActorTokenType = credential.TokenTypeJWT
+	inputs.ActorTokenOrigin = credential.ExchangeOriginVerified
 
 	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "actor tokens are not yet supported")
+	assert.Contains(t, err.Error(), "no actor slot")
 }
 
 func TestTokenExchangeDriverFactory_ValidateConfig(t *testing.T) {
