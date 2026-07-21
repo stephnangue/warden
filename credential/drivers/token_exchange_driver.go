@@ -30,9 +30,16 @@ const (
 // Client-authentication methods selected by the source's `client_auth` config.
 // private_key_jwt is added in a later change; the secret methods ship here.
 const (
-	clientAuthSecretBasic = "client_secret_basic"
-	clientAuthSecretPost  = "client_secret_post"
+	clientAuthSecretBasic   = "client_secret_basic"
+	clientAuthSecretPost    = "client_secret_post"
+	clientAuthPrivateKeyJWT = "private_key_jwt"
 )
+
+// clientAssertionType is the RFC 7523 client-assertion type for private_key_jwt.
+const clientAssertionType = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+
+// clientAssertionTTL bounds the lifetime of a signed client assertion.
+const clientAssertionTTL = 5 * time.Minute
 
 // grant_type URNs sent in the token request.
 const (
@@ -87,7 +94,7 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 			Example("rfc8693"),
 
 		credential.StringField("client_auth").
-			OneOf(clientAuthSecretBasic, clientAuthSecretPost).
+			OneOf(clientAuthSecretBasic, clientAuthSecretPost, clientAuthPrivateKeyJWT).
 			Describe("How Warden authenticates to the token endpoint").
 			Example("client_secret_post"),
 
@@ -96,8 +103,28 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 			Example("warden-gateway"),
 
 		credential.StringField("client_secret").
-			Describe("OAuth2 client secret (masked on read)").
+			Describe("OAuth2 client secret (masked on read; for client_secret_* auth)").
 			Example("****"),
+
+		credential.StringField("private_key").
+			Custom(func(v string) error {
+				if v == "" {
+					return nil
+				}
+				_, err := parseRSAPrivateKey(v)
+				return err
+			}).
+			Describe("PEM RSA private key for private_key_jwt client authentication (masked on read)").
+			Example("-----BEGIN PRIVATE KEY----- ..."),
+
+		credential.StringField("client_assertion_alg").
+			OneOf("RS256").
+			Describe("Signing algorithm for the private_key_jwt client assertion (RS256)").
+			Example("RS256"),
+
+		credential.StringField("client_assertion_kid").
+			Describe("Optional key id (kid) header for the client assertion").
+			Example("key-1"),
 
 		credential.StringField("ca_data").
 			Custom(ValidateCAData).
@@ -139,11 +166,15 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 		return err
 	}
 
-	// The secret-based client-auth methods require client credentials.
+	// Client-auth method determines which credentials are required.
 	switch credential.GetString(config, "client_auth", clientAuthSecretPost) {
 	case clientAuthSecretBasic, clientAuthSecretPost, "":
 		if credential.GetString(config, "client_id", "") == "" || credential.GetString(config, "client_secret", "") == "" {
 			return fmt.Errorf("client_id and client_secret are required for a secret-based client_auth")
+		}
+	case clientAuthPrivateKeyJWT:
+		if credential.GetString(config, "client_id", "") == "" || credential.GetString(config, "private_key", "") == "" {
+			return fmt.Errorf("client_id and private_key are required for client_auth=private_key_jwt")
 		}
 	}
 
@@ -164,7 +195,7 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 
 // SensitiveConfigFields returns source config keys that should be masked.
 func (f *TokenExchangeDriverFactory) SensitiveConfigFields() []string {
-	return []string{"client_secret", "ca_data"}
+	return []string{"client_secret", "private_key", "ca_data"}
 }
 
 // InferCredentialType returns the credential type for token_exchange sources.
@@ -224,12 +255,12 @@ func (d *TokenExchangeDriver) MintCredentialWithExchange(ctx context.Context, sp
 	if err != nil {
 		return nil, nil, 0, "", err
 	}
+	tokenURL := credential.GetString(d.credSource.Config, "token_url", "")
 	headers := map[string]string{}
-	if err := d.applyClientAuth(form, headers); err != nil {
+	if err := d.applyClientAuth(form, headers, tokenURL); err != nil {
 		return nil, nil, 0, "", err
 	}
 
-	tokenURL := credential.GetString(d.credSource.Config, "token_url", "")
 	resp, err := postOAuthTokenForm(ctx, d.httpClient, tokenURL, form, headers)
 	if err != nil {
 		return nil, nil, 0, "", classifyExchangeError(err)
@@ -274,8 +305,10 @@ func (d *TokenExchangeDriver) buildExchangeForm(spec *credential.CredSpec, input
 	return form, nil
 }
 
-// applyClientAuth decorates the request with the configured client authentication.
-func (d *TokenExchangeDriver) applyClientAuth(form url.Values, headers map[string]string) error {
+// applyClientAuth decorates the request with the configured client
+// authentication. tokenEndpoint is the audience for a private_key_jwt assertion
+// (each ID-JAG leg authenticates against its own endpoint).
+func (d *TokenExchangeDriver) applyClientAuth(form url.Values, headers map[string]string, tokenEndpoint string) error {
 	cfg := d.credSource.Config
 	clientID := credential.GetString(cfg, "client_id", "")
 	clientSecret := credential.GetString(cfg, "client_secret", "")
@@ -288,10 +321,50 @@ func (d *TokenExchangeDriver) applyClientAuth(form url.Values, headers map[strin
 		// RFC 6749 §2.3.1: client id/secret are form-urlencoded, then Basic-encoded.
 		creds := url.QueryEscape(clientID) + ":" + url.QueryEscape(clientSecret)
 		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
+	case clientAuthPrivateKeyJWT:
+		assertion, err := d.buildClientAssertion(clientID, tokenEndpoint)
+		if err != nil {
+			return err
+		}
+		form.Set("client_id", clientID)
+		form.Set("client_assertion_type", clientAssertionType)
+		form.Set("client_assertion", assertion)
 	default:
 		return fmt.Errorf("token_exchange: unsupported client_auth %q", credential.GetString(cfg, "client_auth", ""))
 	}
 	return nil
+}
+
+// buildClientAssertion builds and signs an RFC 7523 client-assertion JWT: a
+// short-lived JWT with iss=sub=client_id and aud=tokenEndpoint, signed with the
+// source's configured RSA private key.
+func (d *TokenExchangeDriver) buildClientAssertion(clientID, tokenEndpoint string) (string, error) {
+	key, err := parseRSAPrivateKey(credential.GetString(d.credSource.Config, "private_key", ""))
+	if err != nil {
+		return "", fmt.Errorf("token_exchange: invalid private_key: %w", err)
+	}
+	jti, err := newJTI()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	header := map[string]string{}
+	if kid := credential.GetString(d.credSource.Config, "client_assertion_kid", ""); kid != "" {
+		header["kid"] = kid
+	}
+	claims := map[string]interface{}{
+		"iss": clientID,
+		"sub": clientID,
+		"aud": tokenEndpoint,
+		"jti": jti,
+		"iat": now.Unix(),
+		"exp": now.Add(clientAssertionTTL).Unix(),
+	}
+	assertion, err := signRS256JWT(key, header, claims)
+	if err != nil {
+		return "", fmt.Errorf("token_exchange: failed to sign client assertion: %w", err)
+	}
+	return assertion, nil
 }
 
 // resolve returns spec.Config[key] when set, else the source config value.

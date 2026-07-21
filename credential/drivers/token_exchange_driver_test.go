@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -212,9 +214,9 @@ func TestTokenExchangeDriverFactory_ValidateConfig(t *testing.T) {
 	})
 }
 
-// signRS256JWT signs claims with priv and serves the matching JWKS from a test
+// signTestJWT signs claims with priv and serves the matching JWKS from a test
 // server, returning the token and the JWKS URL.
-func signRS256JWT(t *testing.T, priv *rsa.PrivateKey, claims josejwt.Claims) string {
+func signTestJWT(t *testing.T, priv *rsa.PrivateKey, claims josejwt.Claims) string {
 	t.Helper()
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: priv}, (&jose.SignerOptions{}).WithType("JWT"))
 	require.NoError(t, err)
@@ -239,7 +241,7 @@ func TestTokenExchangeDriver_HeaderSubject_ValidatedAndExchanged(t *testing.T) {
 	defer jwks.Close()
 
 	now := time.Now()
-	subject := signRS256JWT(t, priv, josejwt.Claims{
+	subject := signTestJWT(t, priv, josejwt.Claims{
 		Issuer:   "https://issuer.example.com/",
 		Subject:  "user-abc",
 		Audience: josejwt.Audience{"api://warden"},
@@ -283,7 +285,7 @@ func TestTokenExchangeDriver_HeaderSubject_BadSignature_FailClosed(t *testing.T)
 	defer jwks.Close()
 
 	now := time.Now()
-	subject := signRS256JWT(t, other, josejwt.Claims{
+	subject := signTestJWT(t, other, josejwt.Claims{
 		Issuer: "https://issuer.example.com/", Subject: "attacker",
 		Audience: josejwt.Audience{"api://warden"}, Expiry: josejwt.NewNumericDate(now.Add(time.Hour)),
 	})
@@ -323,11 +325,51 @@ func TestTokenExchangeDriver_HeaderSubject_NoKeyset_FailClosed(t *testing.T) {
 	assert.False(t, called)
 }
 
+func TestTokenExchangeDriver_PrivateKeyJWT(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	require.NoError(t, err)
+	privPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+
+	var gotAssertion string
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, clientAssertionType, r.Form.Get("client_assertion_type"))
+		assert.Empty(t, r.Form.Get("client_secret"))
+		gotAssertion = r.Form.Get("client_assertion")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+	}))
+	defer sts.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url":   sts.URL,
+		"client_auth": clientAuthPrivateKeyJWT,
+		"client_id":   "warden-gateway",
+		"private_key": privPEM,
+	}, sts.Client())
+
+	_, _, _, _, err = d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, verifiedSubject(makeUnsignedJWT(map[string]interface{}{"sub": "u"})))
+	require.NoError(t, err)
+
+	// The client assertion must verify against the public key with the expected claims.
+	require.NotEmpty(t, gotAssertion)
+	parsed, err := josejwt.ParseSigned(gotAssertion)
+	require.NoError(t, err)
+	var claims josejwt.Claims
+	require.NoError(t, parsed.Claims(&priv.PublicKey, &claims))
+	assert.Equal(t, "warden-gateway", claims.Issuer)
+	assert.Equal(t, "warden-gateway", claims.Subject)
+	assert.Contains(t, claims.Audience, sts.URL)
+	assert.NotEmpty(t, claims.ID, "assertion should carry a jti")
+}
+
 func TestTokenExchangeDriverFactory_Basics(t *testing.T) {
 	f := &TokenExchangeDriverFactory{}
 	assert.Equal(t, credential.SourceTypeTokenExchange, f.Type())
 	ct, err := f.InferCredentialType(nil)
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeOAuthBearerToken, ct)
-	assert.ElementsMatch(t, []string{"client_secret", "ca_data"}, f.SensitiveConfigFields())
+	assert.ElementsMatch(t, []string{"client_secret", "private_key", "ca_data"}, f.SensitiveConfigFields())
 }
