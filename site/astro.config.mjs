@@ -91,7 +91,7 @@ export default defineConfig({
             { slug: 'provider-backends/local-dev-setup' },
             { slug: 'provider-backends/configuration' },
             {
-              label: 'MCP servers',
+              label: 'MCP',
               collapsed: true,
               items: [
                 { slug: 'provider-backends/mcp' },
@@ -101,7 +101,7 @@ export default defineConfig({
               ],
             },
             {
-              label: 'LLM APIs',
+              label: 'LLM',
               collapsed: true,
               items: [
                 { slug: 'provider-backends/anthropic' },
@@ -111,7 +111,7 @@ export default defineConfig({
               ],
             },
             {
-              label: 'Cloud infrastructure',
+              label: 'Cloud',
               collapsed: true,
               items: [
                 { slug: 'provider-backends/aws' },
@@ -125,7 +125,7 @@ export default defineConfig({
               ],
             },
             {
-              label: 'Code hosting & CI/CD',
+              label: 'CI/CD',
               collapsed: true,
               items: [
                 { slug: 'provider-backends/github' },
@@ -151,7 +151,7 @@ export default defineConfig({
               ],
             },
             {
-              label: 'Incident & ITSM',
+              label: 'ITSM',
               collapsed: true,
               items: [
                 { slug: 'provider-backends/pagerduty' },
@@ -160,33 +160,73 @@ export default defineConfig({
               ],
             },
             {
-              label: 'Databases',
+              // Kubernetes, the Vault secrets backend, and databases.
+              label: 'Infrastructure',
               collapsed: true,
               items: [
+                { slug: 'provider-backends/kubernetes' },
+                { slug: 'provider-backends/vault' },
                 { slug: 'provider-backends/rds' },
                 { slug: 'provider-backends/redshift' },
               ],
             },
             {
-              label: 'Kubernetes',
-              collapsed: true,
-              items: [{ slug: 'provider-backends/kubernetes' }],
-            },
-            {
-              label: 'Secrets backend',
-              collapsed: true,
-              items: [{ slug: 'provider-backends/vault' }],
-            },
-            {
-              label: 'Generic REST',
+              label: 'Generic',
               collapsed: true,
               items: [{ slug: 'provider-backends/rest' }],
             },
           ],
         },
         {
+          // Grouped by the categories in credential-drivers/index.md, not
+          // alphabetical. Subgroups collapse by default; the active page's
+          // group opens.
           label: 'Credential drivers',
-          autogenerate: { directory: 'credential-drivers' },
+          items: [
+            { slug: 'credential-drivers' },
+            {
+              label: 'Generic',
+              collapsed: true,
+              items: [
+                { slug: 'credential-drivers/local' },
+                { slug: 'credential-drivers/apikey' },
+              ],
+            },
+            {
+              label: 'Platform',
+              collapsed: true,
+              items: [
+                { slug: 'credential-drivers/vault' },
+                { slug: 'credential-drivers/kubernetes' },
+                { slug: 'credential-drivers/oauth2' },
+                { slug: 'credential-drivers/token-exchange' },
+              ],
+            },
+            {
+              label: 'Cloud',
+              collapsed: true,
+              items: [
+                { slug: 'credential-drivers/aws' },
+                { slug: 'credential-drivers/azure' },
+                { slug: 'credential-drivers/gcp' },
+                { slug: 'credential-drivers/ibm' },
+                { slug: 'credential-drivers/alicloud' },
+                { slug: 'credential-drivers/scaleway' },
+                { slug: 'credential-drivers/ovh' },
+              ],
+            },
+            {
+              label: 'SaaS',
+              collapsed: true,
+              items: [
+                { slug: 'credential-drivers/github' },
+                { slug: 'credential-drivers/gitlab' },
+                { slug: 'credential-drivers/elastic' },
+                { slug: 'credential-drivers/grafana' },
+                { slug: 'credential-drivers/honeycomb' },
+              ],
+            },
+          ],
         },
         { label: 'Auth methods', autogenerate: { directory: 'auth-methods' } },
         { label: 'Agent identity', autogenerate: { directory: 'agent-identity' } },
