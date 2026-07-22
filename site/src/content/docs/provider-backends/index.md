@@ -14,14 +14,14 @@ Each page below is a setup guide for one provider — prerequisites, mount
 configuration, credential sources and specs, policy, and a configuration
 reference.
 
-## MCP servers
+## MCP
 
 | Provider | Description |
 |---|---|
 | [Generic](/provider-backends/mcp/) | Any bearer-authenticated Model Context Protocol server. Per-upstream recipes: [GitHub](/provider-backends/mcp-github/), [Slack](/provider-backends/mcp-slack/), Cloudflare, … |
 | [AWS](/provider-backends/mcp_aws/) | AWS's hosted Model Context Protocol server |
 
-## LLM APIs
+## LLM
 
 | Provider | Description |
 |---|---|
@@ -30,20 +30,20 @@ reference.
 | [Mistral](/provider-backends/mistral/) | Mistral chat and embeddings models |
 | [Cohere](/provider-backends/cohere/) | Cohere generation, embeddings, and rerank models |
 
-## Cloud infrastructure
+## Cloud
 
 | Provider | Description |
 |---|---|
 | [AWS](/provider-backends/aws/) | Amazon Web Services control plane and service APIs |
-| [Alicloud](/provider-backends/alicloud/) | Alibaba Cloud OpenAPI (ACS3) and OSS object storage |
 | [Azure](/provider-backends/azure/) | Microsoft Azure resource management and services |
 | [GCP](/provider-backends/gcp/) | Google Cloud Platform APIs |
+| [Alicloud](/provider-backends/alicloud/) | Alibaba Cloud OpenAPI (ACS3) and OSS object storage |
 | [IBM Cloud](/provider-backends/ibmcloud/) | IBM Cloud platform services |
 | [OVH](/provider-backends/ovh/) | OVHcloud public cloud and hosting APIs |
 | [Scaleway](/provider-backends/scaleway/) | Scaleway cloud platform APIs |
 | [Cloudflare](/provider-backends/cloudflare/) | Cloudflare edge platform — API and Logpush |
 
-## Code hosting & CI/CD
+## CI/CD
 
 | Provider | Description |
 |---|---|
@@ -67,7 +67,7 @@ reference.
 | [Sentry](/provider-backends/sentry/) | Sentry error and performance monitoring |
 | [Splunk](/provider-backends/splunk/) | Splunk logging and search platform |
 
-## Incident & ITSM
+## ITSM
 
 | Provider | Description |
 |---|---|
@@ -75,18 +75,14 @@ reference.
 | [ServiceNow](/provider-backends/servicenow/) | ServiceNow ITSM platform |
 | [Slack](/provider-backends/slack/) | Slack messaging and Web API |
 
-## Infrastructure automation
+## Infrastructure
 
 | Provider | Description |
 |---|---|
 | [Kubernetes](/provider-backends/kubernetes/) | Kubernetes API server |
-
-## Secrets
-
-| Provider | Description |
-|---|---|
 | [HashiCorp Vault / OpenBao](/provider-backends/vault/) | HashiCorp Vault / OpenBao secrets platform |
-
+| [RDS](/provider-backends/rds/) | Short-lived IAM auth tokens for PostgreSQL and MySQL on Amazon RDS and Aurora |
+| [Redshift](/provider-backends/redshift/) | Short-lived IAM auth tokens for Amazon Redshift provisioned clusters and Serverless |
 
 ## Generic
 
