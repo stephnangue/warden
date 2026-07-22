@@ -3,11 +3,12 @@ title: "Credentials"
 ---
 
 Warden's purpose is to keep secrets out of workloads. Instead of
-handing an agent a static API key, Warden **brokers access**: it holds the
-privileged secret itself and, at request time, mints or retrieves a scoped,
-often short-lived credential for the upstream the caller is trying to reach — then
-injects it into the request rather than handing it over. The workload presents only
-its [identity](/concepts/authentication/); it never holds a credential of its own.
+handing an agent a static API key, Warden **brokers access**: at request time it
+mints a scoped, often short-lived credential for the upstream the caller is trying
+to reach — either from a privileged secret it holds, or by exchanging the caller's
+own identity — then injects it into the request rather than handing it over. The
+workload presents only its [identity](/concepts/authentication/); it never holds a
+credential of its own.
 
 This document describes the credential model end to end — the three configuration
 objects that define where credentials come from, the drivers that talk to
@@ -150,8 +151,23 @@ secret that mints it never leaves Warden.
 
 ## Drivers
 
-A **driver** is the pluggable component that talks to a specific upstream. The
-source's `type` selects the driver. Warden ships drivers for:
+A **driver** is the component responsible for minting the credential Warden
+injects into the outbound request. The source's `type` selects the driver; when a
+request reaches a [provider](/concepts/providers/) mount, the driver named by the
+spec's source produces the scoped credential for that upstream.
+
+Drivers fall into two families by *how* they obtain that credential:
+
+- **Service account** — the driver authenticates to the upstream as Warden's own
+  service identity, using a secret the source holds. A **static** driver injects a
+  long-lived secret directly; a **dynamic** driver uses its secret to mint a
+  short-lived credential from the upstream's token service and injects that.
+- **Token exchange** — the driver forwards the *caller's own* identity and
+  exchanges it, at an identity provider or security token service, for a
+  downstream credential scoped to that caller; the source holds only the client
+  credentials for the exchange, not a privileged upstream secret.
+
+Warden ships drivers for:
 
 | Driver `type` | Upstream |
 |---------------|----------|
@@ -162,27 +178,16 @@ source's `type` selects the driver. Warden ships drivers for:
 | `github` | GitHub (PATs, App installation tokens) |
 | `gitlab` | GitLab |
 | `oauth2` | Generic OAuth2 providers |
+| `token_exchange` | RFC 8693 / RFC 7523 exchange at any OAuth2 STS |
 | `kubernetes` | Kubernetes API |
 | `local` | Static secrets stored in the spec itself |
 | `apikey` | Generic static API keys |
 | `ibm`, `elastic`, `grafana`, `honeycomb`, `alicloud`, `scaleway`, `ovh` | The respective SaaS / cloud APIs |
 
 Each driver has a reference page under [Credential drivers](/credential-drivers/)
-covering its config keys, mint methods, credential types, and rotation behaviour.
-
-Every driver implements a small core contract — mint a credential from a spec,
-revoke a lease, and clean up — and may opt into additional capabilities:
-
-- **Spec verification** — validate a spec's credentials with a lightweight
-  upstream call at *create/update* time (not on the hot path), so a wrong PAT or
-  bad app ID fails early rather than at the gateway.
-- **Source rotation** — rotate the source's *own* privileged secret (e.g. a
-  Vault AppRole secret ID, an AWS IAM key).
-- **Spec rotation** — use the source's elevated permissions to rotate a
-  credential embedded in a spec (e.g. an Azure source rotating a workload service
-  principal's client secret via Graph).
-- **OAuth2 authorization-code consent** — drive an interactive consent flow (see
-  [OAuth2 consent](#oauth2-consent)).
+covering its config keys, mint methods, credential types, and rotation behaviour;
+the [driver families](/credential-drivers/#driver-families) section there
+illustrates each flow.
 
 ## Rotation
 
