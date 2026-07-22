@@ -2,73 +2,130 @@
 title: "Credential Drivers"
 ---
 
-A **driver** is the pluggable component that knows how to talk to one kind of
-upstream. A [credential source](/concepts/credentials/) names a driver through
-its `type` and holds whatever that driver needs to obtain credentials — usually a
-privileged secret, though some drivers instead **exchange the caller's own
-identity** for a downstream credential and hold only the client credentials to
-authenticate to an STS. The driver then mints or retrieves the scoped credential a
-workload needs — an STS session, a Vault token, a GitHub installation token, a
-token exchanged from the caller's identity — which Warden injects into the proxied
-request.
+A **driver** is the component responsible for minting the credential that Warden
+injects into the outbound request. A [credential source](/concepts/credentials/)
+names a driver through its `type`; when a workload's request reaches a
+[provider](/concepts/providers/) mount, the driver produces the scoped credential
+for that upstream and Warden injects it into the proxied call. The workload
+presents only its [identity](/concepts/authentication/) — it never holds the
+credential itself.
 
-Every driver implements the same core contract — **mint** a credential from a spec,
-**revoke** a lease, and **clean up** — and may opt into extra capabilities:
+See [Credentials](/concepts/credentials/) for the source / spec / credential model
+these pages build on.
 
-- **Spec verification** — validate a spec's credentials with a light upstream call
-  at create/update time, so a bad key fails early rather than at the gateway.
-- **Source rotation** — rotate the source's *own* privileged secret on a schedule.
-  A driver is **fast** (prepare and activate in one step) when its upstream is
-  immediately consistent, or **slow** (stage the new secret and wait for it to
-  propagate before destroying the old one) when it is eventually consistent. The
-  wait is tunable per source via `activation_delay`.
-- **Spec rotation** — use the source's elevated permissions to rotate a credential
-  embedded in a spec.
-- **OAuth2 authorization-code consent** — drive a one-time interactive consent flow.
-- **Token exchange** — mint from caller-derived RFC 8693 inputs (a subject token,
-  and optionally an actor token) rather than the source's own secret, exchanging
-  the caller's identity for a scoped downstream credential.
+## Driver families
 
-See [Credentials](/concepts/credentials/) for the source / spec / credential
-model these pages build on.
+Drivers fall into two families by *how* they obtain the credential.
 
-## Generic and static
+### Service account
 
-| Driver | `type` | Serves | Capabilities |
-|--------|--------|--------|--------------|
-| [Local](/credential-drivers/local/) | `local` | static secrets stored directly in the spec | mint only |
-| [Static API Key](/credential-drivers/apikey/) | `apikey` | a static API key (in the spec) for any HTTP API | spec verification |
+The driver authenticates to the upstream as Warden's own service identity, using a
+secret held on the source. The caller's identity selects which credential to mint
+but is never forwarded upstream.
 
-## Platform
+**Static** — the driver holds a long-lived secret and injects it into the outbound
+request unchanged.
 
-| Driver | `type` | Upstream | Capabilities |
-|--------|--------|----------|--------------|
-| [HashiCorp Vault](/credential-drivers/vault/) | `hvault` | Vault / OpenBao — KV, AWS/GCP/IBM engines, tokens, OAuth2 | source rotation (fast) |
-| [Kubernetes](/credential-drivers/kubernetes/) | `kubernetes` | ServiceAccount tokens via the TokenRequest API | spec verification · source rotation (fast) |
-| [OAuth2](/credential-drivers/oauth2/) | `oauth2` | generic OAuth2 providers | spec verification · OAuth2 consent |
-| [Token Exchange](/credential-drivers/token-exchange/) | `token_exchange` | RFC 8693 / RFC 7523 exchange at any OAuth2 STS (Entra OBO, ID-JAG) | token exchange |
+<p align="center"><img alt="An agent presents its identity to Warden; the driver injects a static key into the request to the LLM API" src="/images/warden-cred-service-account-static.png" width="760"></p>
 
-## Cloud
+**Dynamic** — the driver holds a secret it uses to mint a short-lived credential
+from the upstream's security token service, then injects that. The held secret can
+itself be [rotated](/concepts/credentials/#rotation) on a schedule.
 
-| Driver | `type` | Upstream | Capabilities |
-|--------|--------|----------|--------------|
-| [AWS](/credential-drivers/aws/) | `aws` | STS, Secrets Manager, RDS / Redshift IAM tokens | source rotation (slow, ~5m) |
-| [Azure](/credential-drivers/azure/) | `azure` | Azure AD bearer tokens, Key Vault secrets | source rotation (slow, ~5m) · **spec rotation** |
-| [GCP](/credential-drivers/gcp/) | `gcp` | IAM access tokens, service-account impersonation | source rotation (slow, ~2m) |
-| [IBM Cloud](/credential-drivers/ibm/) | `ibm` | IAM bearer tokens, COS keys | spec verification · source rotation (slow, ~2m) |
-| [Alibaba Cloud](/credential-drivers/alicloud/) | `alicloud` | STS AssumeRole | spec verification · source rotation (slow, ~5m) |
-| [Scaleway](/credential-drivers/scaleway/) | `scaleway` | IAM static or dynamic API keys | spec verification · source rotation (slow, ~30s) |
-| [OVHcloud](/credential-drivers/ovh/) | `ovh` | OAuth2 bearer tokens, dynamic S3 credentials | spec verification |
+<p align="center"><img alt="The driver uses a dynamic key to call AWS STS, receives a short-lived token, and injects it into the request to the AWS API" src="/images/warden-cred-service-account-dynamic.png" width="760"></p>
 
-## SaaS
+### Token exchange
 
-| Driver | `type` | Upstream | Capabilities |
-|--------|--------|----------|--------------|
-| [GitHub](/credential-drivers/github/) | `github` | App installation tokens and PATs (auth in the spec) | spec verification |
-| [GitLab](/credential-drivers/gitlab/) | `gitlab` | project and group access tokens | source rotation (fast) |
-| [Elasticsearch](/credential-drivers/elastic/) | `elastic` | `/_security` API keys | spec verification · source rotation (slow, ~10s) |
-| [Grafana](/credential-drivers/grafana/) | `grafana` | service-account tokens | spec verification |
-| [Honeycomb](/credential-drivers/honeycomb/) | `honeycomb` | V2 API keys | spec verification |
+The driver forwards the **caller's own identity** and exchanges it, at an identity
+provider or security token service, for a downstream credential scoped to that
+caller. The source holds only the client credentials that authenticate the
+exchange — not a privileged upstream secret.
+
+**RFC 7523 — JWT bearer.** The driver exchanges the caller's ID token for an access
+token at the identity provider.
+
+<p align="center"><img alt="The driver sends the caller's ID token to the identity provider, receives an access token, and injects it into the request to the MCP server" src="/images/warden-cred-token-exchange-rfc7523.png" width="760"></p>
+
+**RFC 8693 — token exchange (on-behalf-of).** The driver presents the user's
+subject token together with the agent's actor token; the returned access token
+preserves the on-behalf-of chain.
+
+<p align="center"><img alt="The driver presents the user's subject token and the agent's actor token to the identity provider and receives an access token for the MCP server" src="/images/warden-cred-token-exchange-rfc8693.png" width="760"></p>
+
+**ID-JAG — identity assertion authorization grant.** The identity provider issues
+an ID-JAG from the user and agent identities; the driver presents it to the
+resource's authorization server for the final access token.
+
+<p align="center"><img alt="The identity provider issues an ID-JAG from the user and agent identities; the driver exchanges it at the authorization server for an access token to reach the MCP server" src="/images/warden-cred-token-exchange-id-jag.png" width="820"></p>
+
+## Choosing a family
+
+Start from what the *upstream* accepts, and whether downstream authorization must
+reflect the caller's own identity.
+
+| Use | When |
+|-----|------|
+| **Service account — static** | The upstream only accepts a long-lived pre-shared secret — an API key or PAT — with no short-lived-token mechanism. Simplest to set up; keep the secret fresh with [rotation](/concepts/credentials/#rotation). |
+| **Service account — dynamic** | The upstream exposes a security token service (AWS STS, GCP IAM, Vault, the Kubernetes TokenRequest API). Prefer this over static whenever it is available: every request gets a short-lived credential that expires on its own, shrinking the blast radius of a leak. |
+| **Token exchange** | Downstream authorization must reflect the *caller's* identity — per-user scoping, on-behalf-of, or audit at the resource itself — and the upstream speaks OAuth2 / OIDC. |
+
+The dividing line is whose identity the upstream sees. With a **service account**,
+every caller of a spec shares Warden's own upstream identity and permissions — the
+caller's identity only selects *which* spec to use. With **token exchange**, the
+upstream sees the actual caller.
+
+Within token exchange, pick the flow the upstream supports:
+
+- **RFC 7523** — you hold the caller's ID token and the identity provider will
+  exchange it directly for an access token (a single identity, no delegation chain).
+- **RFC 8693** — you must preserve an on-behalf-of chain: a user subject acting
+  through an agent actor.
+- **ID-JAG** — the resource's authorization server is distinct from the identity
+  provider, and the grant must cross that boundary (cross-app / enterprise
+  delegation).
+
+## Reference
+
+Every driver has its own page covering config keys, mint methods, credential
+types, and rotation behaviour.
+
+### Generic
+
+| Driver | `type` | Upstream |
+|--------|--------|----------|
+| [Local](/credential-drivers/local/) | `local` | static secrets stored directly in the spec |
+| [Static API Key](/credential-drivers/apikey/) | `apikey` | a static API key, held in the spec, for any HTTP API |
+
+### Platform
+
+| Driver | `type` | Upstream |
+|--------|--------|----------|
+| [HashiCorp Vault](/credential-drivers/vault/) | `hvault` | Vault / OpenBao — KV, AWS/GCP/IBM engines, tokens, OAuth2 |
+| [Kubernetes](/credential-drivers/kubernetes/) | `kubernetes` | ServiceAccount tokens via the TokenRequest API |
+| [OAuth2](/credential-drivers/oauth2/) | `oauth2` | generic OAuth2 providers |
+| [Token Exchange](/credential-drivers/token-exchange/) | `token_exchange` | RFC 8693 / RFC 7523 exchange at any OAuth2 STS (Entra OBO, ID-JAG) |
+
+### Cloud
+
+| Driver | `type` | Upstream |
+|--------|--------|----------|
+| [AWS](/credential-drivers/aws/) | `aws` | STS, Secrets Manager, RDS / Redshift IAM tokens |
+| [Azure](/credential-drivers/azure/) | `azure` | Azure AD bearer tokens, Key Vault secrets |
+| [GCP](/credential-drivers/gcp/) | `gcp` | IAM access tokens, service-account impersonation |
+| [IBM Cloud](/credential-drivers/ibm/) | `ibm` | IAM bearer tokens, COS keys |
+| [Alibaba Cloud](/credential-drivers/alicloud/) | `alicloud` | STS AssumeRole |
+| [Scaleway](/credential-drivers/scaleway/) | `scaleway` | IAM static or dynamic API keys |
+| [OVHcloud](/credential-drivers/ovh/) | `ovh` | OAuth2 bearer tokens, dynamic S3 credentials |
+
+### SaaS
+
+| Driver | `type` | Upstream |
+|--------|--------|----------|
+| [GitHub](/credential-drivers/github/) | `github` | App installation tokens and PATs (auth in the spec) |
+| [GitLab](/credential-drivers/gitlab/) | `gitlab` | project and group access tokens |
+| [Elasticsearch](/credential-drivers/elastic/) | `elastic` | `/_security` API keys |
+| [Grafana](/credential-drivers/grafana/) | `grafana` | service-account tokens |
+| [Honeycomb](/credential-drivers/honeycomb/) | `honeycomb` | V2 API keys |
 
 ## See Also
 
