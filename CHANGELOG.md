@@ -2,15 +2,43 @@
 
 All notable changes to Warden are documented in this file.
 
-## [Unreleased]
+## [v0.18.0] — 2026-07-23
 
 ### Breaking Changes
 
-- **MCP `mcp { }` authorization is now deny-by-default.** An `mcp { }` block previously allowed anything it did not explicitly deny — an absent `allowed_methods`/`allowed_tools`/`allowed_resources`/`allowed_prompts` meant "allow all". It now **denies** anything it does not explicitly allow: an empty or absent allow-list for a family denies every method/tool/resource/prompt in it. **This silently tightens deployed policies** — e.g. `mcp { denied_tools = ["delete_*"] }` (or a block carrying only a `condition`) went from "all tools except `delete_*`" to "**deny every tool**". Before upgrading, audit every `mcp { }` block: to restore openness add `allowed_methods = ["*"]` (and `allowed_tools`/`allowed_resources`/`allowed_prompts = ["*"]` as needed), then layer `denied_*` lists and `condition`s on top. The MCP session-lifecycle methods `initialize`, `ping`, and `notifications/*` are **exempt** — they always pass without being allow-listed (a `denied_methods` entry can still block them), so the client handshake works without listing them and the previous "remember to allow-list the handshake methods" guidance no longer applies.
+- **MCP `mcp { }` authorization is now deny-by-default.** An `mcp { }` block previously allowed anything it did not explicitly deny — an absent `allowed_methods`/`allowed_tools`/`allowed_resources`/`allowed_prompts` meant "allow all". It now **denies** anything it does not explicitly allow: an empty or absent allow-list for a family denies every method/tool/resource/prompt in it. **This silently tightens deployed policies** — e.g. `mcp { denied_tools = ["delete_*"] }` (or a block carrying only a `condition`) went from "all tools except `delete_*`" to "**deny every tool**". Before upgrading, audit every `mcp { }` block: to restore openness add `allowed_methods = ["*"]` (and `allowed_tools`/`allowed_resources`/`allowed_prompts = ["*"]` as needed), then layer `denied_*` lists and `condition`s on top. The MCP session-lifecycle methods `initialize`, `ping`, and `notifications/*` are **exempt** — they always pass without being allow-listed (a `denied_methods` entry can still block them), so the client handshake works without listing them and the previous "remember to allow-list the handshake methods" guidance no longer applies. (#381)
 
 ### New Features
 
-- **MCP list responses are filtered to the callable set.** When a `tools/list`, `resources/list`, or `prompts/list` request is allowed, Warden prunes the response so it lists only the items the caller could actually use — an item survives iff a `tools/call` / `resources/read` / `prompts/get` for it would pass the policy gates (per-call CEL `condition`s are deferred to call time, so condition-gated items stay listed). Discovery now matches enforcement: an agent sees only what it can call. A batched request containing a list method is denied (`batch_list_unfilterable`), and a list response that can't be buffered within `max_body_size` fails closed rather than stream unfiltered.
+- **New `token_exchange` credential source — RFC 8693 on-behalf-of token exchange.** A credential source of type `token_exchange` mints an upstream access token by exchanging a caller-presented token at an STS/IdP `token_url`, so a Warden role can broker a call *as the agent acting for the end user* rather than as a static service identity. The exchange is verified-origin: `subject_token_source` / `actor_token_source` select where the subject and actor tokens come from — `auth_token` reuses the agent's own verified inbound Warden JWT (forwarded with a `verified` origin), `header` reads `X-Warden-Subject-Token` / `X-Warden-Actor-Token` (treated as unverified), `none` omits it; the two sources cannot both be `auth_token`. Three grants are selectable via `grant`: `rfc8693` (token exchange), `jwt_bearer` (RFC 7523), and `id_jag` (the two-leg ID-JAG cross-app-access flow, which requires a `resource_token_url`). Client authentication to the token endpoint is `client_secret_basic`, `client_secret_post`, or `private_key_jwt` (an RFC 7523 `RS256` client assertion). Requested `audience`, `scope`, and RFC 8707 `resources` (resource indicators) live on the credential spec; a header-sourced subject token is verified against a configured issuer/JWKS (`subject_issuer`, `subject_jwks_url`, `subject_oidc_discovery_url`, `subject_audience`). The source issues an `oauth_bearer_token` credential, so any bearer-token provider — including the generic `mcp` provider — can carry it, and the caller-supplied `X-Warden-Subject-Token` / `X-Warden-Actor-Token` headers are stripped before the request is proxied upstream. (#405–#408, #415, #417–#422)
+
+- **MCP discovery server at `sys/mcp`.** An always-on MCP endpoint lets an agent discover what it can do through Warden over MCP itself, replacing the retired CLI-loop discovery skills. It exposes two tools: `list_roles` returns the roles the caller's identity can assume (each role description naming the skill that drives it), and `get_skill` (argument `skill`) returns that skill as markdown; the namespace is selected with the `X-Warden-Namespace` header. (#388, #389, #390)
+
+- **Provider skills retuned for MCP-only discovery.** The CLI-loop foundation and discovery skills are retired in favour of onboarding through the `sys/mcp` discovery server. (#391, #392)
+
+- **MCP list responses are filtered to the callable set.** When a `tools/list`, `resources/list`, or `prompts/list` request is allowed, Warden prunes the response so it lists only the items the caller could actually use — an item survives iff a `tools/call` / `resources/read` / `prompts/get` for it would pass the policy gates (per-call CEL `condition`s are deferred to call time, so condition-gated items stay listed). Discovery now matches enforcement: an agent sees only what it can call. A batched request containing a list method is denied (`batch_list_unfilterable`), and a list response that can't be buffered within `max_body_size` fails closed rather than stream unfiltered. (#380, #382, #383, #384)
+
+### Bug Fixes
+
+- **Expired cached credentials are no longer served.** A credential past its expiry is re-minted instead of being handed out from the cache. (#414)
+
+- **A wrapped error whose `Unwrap()` returns nil no longer reports HTTP 200.** The response status now reflects the error rather than defaulting to success on that path. (#412)
+
+- **Permission denials report the correct HTTP status and quiet the audit log.** A denied request no longer logs at an alarming level or returns a misleading status. (#385)
+
+### Documentation
+
+- **Credential-driver documentation restructured around driver families**, with per-driver reference pages, worked examples, and configuration moved after the narrative; a new Configuration reference section; shared JWT/TLS/MCP configuration extracted from the individual provider guides; agent onboarding and the concept docs rewritten for MCP-only discovery; and roles reframed as database views. (#386, #390, #393–#395, #402, #403, #413, #423, #424)
+
+- **New public site, `wardengateway.com`**, with the landing page's rationale rebuilt as five pillars, an MCP tool-filtering tutorial, and a one-line install script. (#396, #400, #425)
+
+### Infrastructure
+
+- **A single required `ci-gate` status check** now gates merges, and the documentation site is built and link-checked on `site/**` changes; site build and install-script fixes cover static-asset declaration, stale content-layer state, and installing `warden` onto the `PATH`. (#398, #399, #401, #404, #426)
+
+### Chart
+
+- Chart version bumped `0.3.3` → `0.3.4`. `appVersion` tracks the v0.18.0 binary; no template or values changes.
 
 ## [v0.17.0] — 2026-07-04
 
@@ -714,6 +742,7 @@ Initial release. See the [v0.1.0 release notes](https://github.com/stephnangue/w
 - Docker image published to `ghcr.io/stephnangue/warden`
 - Pre-built binaries for Linux, macOS, and Windows
 
+[v0.18.0]: https://github.com/stephnangue/warden/compare/v0.17.0...v0.18.0
 [v0.17.0]: https://github.com/stephnangue/warden/compare/v0.16.0...v0.17.0
 [v0.16.0]: https://github.com/stephnangue/warden/compare/v0.15.0...v0.16.0
 [v0.15.0]: https://github.com/stephnangue/warden/compare/v0.14.0...v0.15.0
