@@ -1,5 +1,7 @@
 ---
 title: "Filtering MCP Tools with Warden Policy"
+sidebar:
+  label: "MCP tools filtering"
 ---
 
 **Goal:** put an MCP server behind Warden and let a **policy** decide which of its tools an agent can
@@ -216,8 +218,10 @@ next.
 
 ### Step 7 — apply the filter
 
-Rewrite the **same** policy as an allow-list, plus an explicit deny-list for good measure. No need to
-touch Claude — Warden re-evaluates the policy on the very next request:
+Claude fetches an MCP server's tool list once, when a session starts, and caches it for the whole
+session — so a running session won't notice a policy change. **Exit your `claude` session first**
+(`/exit`), *then* rewrite the **same** policy as an allow-list, plus an explicit deny-list for good
+measure:
 
 ```bash
 warden policy write mcp-tools - <<'EOF'
@@ -238,14 +242,13 @@ The block is **deny-by-default**: a tool must match `allowed_tools` and must *no
 
 ### Step 8 — ask the same question again (the "after")
 
-Staying in the **same** `claude` session — no reconnect, no restart — ask exactly what you asked
-before:
+**Start a fresh `claude` session** and ask exactly what you asked before:
 
 > **list all the available tools on github mcp server**
 
-Claude re-queries the server, and this time it lists **only** the `get_*` / `list_*` / `search_*` read
-tools. The write tools are gone — Warden pruned them from `tools/list` under the new policy. The
-identical prompt, a different answer, and the only thing that changed was the policy.
+The new session fetches the pruned list, so this time Claude shows **only** the `get_*` / `list_*` /
+`search_*` read tools. The write tools are gone — Warden pruned them from `tools/list` under the new
+policy. The identical prompt, a different answer, and the only thing that changed was the policy.
 
 A read still works ("list 3 of my repositories"). Now ask for a write:
 
@@ -297,8 +300,9 @@ The injected GitHub token never appears in the clear — the audit layer salts i
   invalid PAT — Warden verifies it on creation). Re-run that command with a valid token.
 - **`404` from GitHub on a tool call** — trailing-slash mismatch. The gateway URL must end
   `…/gateway/`; the suffix after `gateway` is forwarded verbatim to GitHub's `…/mcp/`.
-- **The tool list didn't change after Step 7** — you're looking at a cached answer; ask the question
-  again so Claude re-queries the server (it re-runs `tools/list`).
+- **The tool list didn't change after Step 7** — Claude caches the tool list for the life of a
+  session, so re-asking in the *same* session won't help. Exit Claude (`/exit`), then start a new
+  `claude` session; it fetches the pruned list on connect.
 
 ## Cleanup
 
