@@ -4,3 +4,8 @@
 # concepts guide rather than 404.
 /docs      /concepts/  301
 /docs/*    /concepts/  301
+
+# Serve the install script at a clean /install. The file is /install.sh so it does
+# not collide with the /install/ docs section (e.g. /install/kubernetes/); this
+# rewrite (200) serves the script's bytes at /install without changing the URL.
+/install   /install.sh   200
