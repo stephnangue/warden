@@ -345,141 +345,73 @@ warden skill create -name=gh-via-warden -category=shared \
   -body-file=gh-via-warden.md
 ````
 
-**2. The role skills.** Each lists only its REST path suffixes and `requires` the base skill — no
-gateway URL, no repeated mechanics. `$GW` is the role's gateway (set from its description, per the
-base skill). Author them one at a time.
+**2. The role skills.** Here they are deliberately **tiny** — a title line and the list of
+rest-paths the role may call, nothing else. That list is the one thing the skill uniquely adds: the
+model already knows GitHub's REST API and (from `gh-via-warden`) how to call it, so the skill's job
+is to state the *authorized surface*, not re-teach the API. `$GW` is the role's gateway, set from its
+`list_roles` description per the base skill. Author them one at a time.
 
 `gh-repo-creator`:
 
-````bash
-cat > gh-repo-creator.md <<'EOF'
-# repo-creator — create the warden-gh-api repository
-
-Uses `gh api` against `$GW`, the gateway from this role's description — see the required
-**gh-via-warden** skill for the recipe.
-
-## Endpoints
-
-| Method | rest-path | Purpose |
-|--------|-----------|---------|
-| POST | `user/repos` | create a repo — the name **must** be `warden-gh-api` (the policy enforces it) |
-
-## Example
-
 ```bash
-gh api --method POST "$GW/user/repos" \
-  -H "Authorization: Bearer $JWT" -f name=warden-gh-api -F auto_init=true --jq '.full_name'
-```
+cat > gh-repo-creator.md <<'EOF'
+# repo-creator — see gh-via-warden for gh api mechanics; $GW from this role's description
+- POST  user/repos   (body name must be "warden-gh-api", policy-enforced; -F auto_init=true seeds a README)
 EOF
 
 warden skill create -name=gh-repo-creator -category=custom -requires=gh-via-warden \
   -description="create the warden-gh-api repository via gh api" -body-file=gh-repo-creator.md
-````
+```
 
 `gh-repo-reader`:
 
-````bash
-cat > gh-repo-reader.md <<'EOF'
-# repo-reader — read the warden-gh-api repo
-
-Uses `gh api` against `$GW`, the gateway from this role's description — see the required
-**gh-via-warden** skill for the recipe.
-
-## Endpoints
-
-| Method | rest-path | Purpose |
-|--------|-----------|---------|
-| GET | `repos/{owner}/warden-gh-api` | repo metadata |
-| GET | `repos/{owner}/warden-gh-api/readme` | rendered README |
-| GET | `repos/{owner}/warden-gh-api/contents/{path}` | file or directory contents |
-| GET | `repos/{owner}/warden-gh-api/languages` | language breakdown |
-
-`{owner}` is your GitHub login — the `full_name` returned when the repo was created.
-
-## Examples
-
 ```bash
-gh api "$GW/repos/OWNER/warden-gh-api/readme" -H "Authorization: Bearer $JWT" --jq '.name'
-```
+cat > gh-repo-reader.md <<'EOF'
+# repo-reader (read-only) — see gh-via-warden for mechanics; $GW from this role's description
+# {owner} = the full_name returned when the repo was created
+- GET  repos/{owner}/warden-gh-api
+- GET  repos/{owner}/warden-gh-api/readme
+- GET  repos/{owner}/warden-gh-api/contents/{path}
+- GET  repos/{owner}/warden-gh-api/languages
 EOF
 
 warden skill create -name=gh-repo-reader -category=custom -requires=gh-via-warden \
   -description="read the warden-gh-api repo via gh api" -body-file=gh-repo-reader.md
-````
+```
 
 `gh-issue-manager`:
 
-````bash
-cat > gh-issue-manager.md <<'EOF'
-# issue-manager — triage issues on warden-gh-api
-
-Uses `gh api` against `$GW`, the gateway from this role's description — see the required
-**gh-via-warden** skill for the recipe.
-
-## Endpoints
-
-| Method | rest-path | Purpose |
-|--------|-----------|---------|
-| GET | `repos/{owner}/warden-gh-api/issues` | list issues |
-| POST | `repos/{owner}/warden-gh-api/issues` | open an issue (`title`, `body`) |
-| PATCH | `repos/{owner}/warden-gh-api/issues/{number}` | edit / close (`state=closed`) |
-| POST | `repos/{owner}/warden-gh-api/issues/{number}/comments` | comment (`body`) |
-
-## Examples
-
 ```bash
-gh api --method POST "$GW/repos/OWNER/warden-gh-api/issues" \
-  -H "Authorization: Bearer $JWT" -f title="flaky test" -f body="seen in CI" --jq '.number'
-
-gh api --method PATCH "$GW/repos/OWNER/warden-gh-api/issues/1" \
-  -H "Authorization: Bearer $JWT" -f state=closed
-```
+cat > gh-issue-manager.md <<'EOF'
+# issue-manager — see gh-via-warden for mechanics; $GW from this role's description
+- GET, POST   repos/{owner}/warden-gh-api/issues            (open: -f title= -f body=)
+- GET, PATCH  repos/{owner}/warden-gh-api/issues/{n}        (close: -f state=closed)
+- POST        repos/{owner}/warden-gh-api/issues/{n}/comments
 EOF
 
 warden skill create -name=gh-issue-manager -category=custom -requires=gh-via-warden \
   -description="triage issues on warden-gh-api via gh api" -body-file=gh-issue-manager.md
-````
+```
 
 `gh-label-curator`:
 
-````bash
-cat > gh-label-curator.md <<'EOF'
-# label-curator — manage labels on warden-gh-api
-
-Uses `gh api` against `$GW`, the gateway from this role's description — see the required
-**gh-via-warden** skill for the recipe.
-
-## Endpoints
-
-| Method | rest-path | Purpose |
-|--------|-----------|---------|
-| GET | `repos/{owner}/warden-gh-api/labels` | list labels |
-| POST | `repos/{owner}/warden-gh-api/labels` | create (`name`, `color`, `description`) |
-| PATCH | `repos/{owner}/warden-gh-api/labels/{name}` | rename / recolor (`new_name`, `color`) |
-| DELETE | `repos/{owner}/warden-gh-api/labels/{name}` | delete |
-
-`color` is 6-char hex, no leading `#` (e.g. `ededed`).
-
-## Examples
-
 ```bash
-gh api --method POST "$GW/repos/OWNER/warden-gh-api/labels" \
-  -H "Authorization: Bearer $JWT" -f name=needs-triage -f color=ededed
-
-gh api --method PATCH "$GW/repos/OWNER/warden-gh-api/labels/needs-triage" \
-  -H "Authorization: Bearer $JWT" -f new_name=triage
-```
+cat > gh-label-curator.md <<'EOF'
+# label-curator — see gh-via-warden for mechanics; $GW from this role's description
+- GET, POST      repos/{owner}/warden-gh-api/labels         (create: -f name= -f color=<6-hex>)
+- PATCH, DELETE  repos/{owner}/warden-gh-api/labels/{name}  (rename: -f new_name=)
 EOF
 
 warden skill create -name=gh-label-curator -category=custom -requires=gh-via-warden \
   -description="manage labels on warden-gh-api via gh api" -body-file=gh-label-curator.md
-````
+```
 
 :::tip
-The point is size. GitHub's OpenAPI description is megabytes; the base recipe plus a role's handful
-of endpoints is a page. The agent gets the same lean, task-shaped menu a GitHub MCP server would
-hand it — and shares one base recipe across roles the way an MCP client shares a transport — but the
-upstream is the ordinary REST API.
+Notice how little each role skill holds: not the API, not the call syntax — just the **paths this
+role may call**. The model already knows GitHub's REST API; the skill exists to hand it the
+*authorized surface*, and the base recipe (shared once) supplies the `gh api` mechanics. GitHub's
+OpenAPI description is megabytes; this is a few lines per role — a lean, task-shaped menu like a
+GitHub MCP server's tool list, over the ordinary REST API.
 :::
 
 ### Step 7 — connect Claude
