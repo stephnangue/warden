@@ -254,13 +254,13 @@ A read still works ("list 3 of my repositories"). Now ask for a write:
 
 > **delete my repository `demo`**
 
-Claude will *propose* `delete_repository`, but Warden refuses it at the gateway and returns:
+This time Claude has no `delete_repository` tool to reach for — it was pruned from the list — so it
+can't attempt the delete at all, and tells you it has no way to do it. The dangerous capability was
+never offered to the model in the first place, so there's nothing to hallucinate or inject.
 
-```json
-{ "error": "insufficient_permissions", "error_description": "Tool 'delete_repository' not allowed." }
-```
-
-Nothing reaches GitHub — the model can propose a write, but the policy won't let it run.
+That pruning is trustworthy because it comes from the *same policy* the gateway enforces on every
+request: even a forged call that skipped the tool list would be refused with `insufficient_permissions`
+("Tool 'delete_repository' not allowed.") before anything reached GitHub.
 
 ### Step 9 — see it in the audit log
 
