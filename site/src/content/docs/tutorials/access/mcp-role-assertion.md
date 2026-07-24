@@ -52,10 +52,10 @@ to the agent's identity; the fourth binds to a different one.
 
 | Role | What its policy grants | Scoped to repo | Agent can assume? |
 |------|------------------------|----------------|-------------------|
-| `repo-lifecycle` | create & delete a repo | `warden-role-assertion` | ✅ |
+| `repo-lifecycle` | create the repo, write & delete its files | `warden-role-assertion` | ✅ |
 | `issue-triage` | open & close issues | `warden-role-assertion` | ✅ |
 | `repo-reader` | read files | `warden-role-assertion` | ✅ |
-| `forbidden-repo-lifecycle` | create & delete a repo | `warden-forbidden` | ❌ — bound to another identity |
+| `forbidden-repo-lifecycle` | create the repo, write & delete its files | `warden-forbidden` | ❌ — bound to another identity |
 
 The fourth role is real and fully functional — it just belongs to a **different principal**
 (think: a human admin). The agent holds the wrong identity for it, so Warden never admits the
@@ -176,10 +176,15 @@ See [GitHub MCP](/provider-backends/mcp-github/) for App-based and OAuth credent
 Each role is a **policy** (what it may do, scoped to one repo) plus a **role binding** (who
 may assume it, which credential it mints). Run the blocks below one at a time.
 
-**1. `repo-lifecycle` — create & delete `warden-role-assertion`.** Its two tools carry the
-repo name under **different keys** — `create_repository` takes `name` (the repo doesn't exist
-yet), `delete_repository` takes `owner` + `repo` — so the condition allows either, using
-optional access so the absent key never errors:
+**1. `repo-lifecycle` — create `warden-role-assertion` and write & delete its files.**
+GitHub's MCP server has no repo-*deletion* tool, so a repo's "lifecycle" here is creating it
+and then owning its **contents**: `create_repository` makes the repo, `create_or_update_file`
+writes files, and `delete_file` removes them. The condition scopes all of them to one repo,
+keyed with `has()`: *if* an argument is present it must equal the repo. The tools name the
+repo under **different keys** — `create_repository` takes `name` (the repo doesn't exist
+yet), the file tools take `owner` + `repo` — so each key is pinned on its own line. A call
+that carries neither key — `tools/list`, and the lifecycle handshake — passes untouched, so
+the tool listing works with no special-case for the method:
 
 ```bash
 warden policy write pol-repo-lifecycle - <<'EOF'
@@ -187,10 +192,10 @@ path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
   mcp {
     allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["create_repository", "delete_repository"]
+    allowed_tools   = ["create_repository", "create_or_update_file", "delete_file"]
     condition = <<-CEL
-      call.args.?name.orValue("") == "warden-role-assertion" ||
-      call.args.?repo.orValue("") == "warden-role-assertion"
+      (!has(call.args.name) || call.args.name == "warden-role-assertion") &&
+      (!has(call.args.repo) || call.args.repo == "warden-role-assertion")
     CEL
   }
 }
@@ -201,12 +206,14 @@ warden write auth/jwt/role/repo-lifecycle \
   token_policies=pol-repo-lifecycle \
   user_claim=sub \
   cred_spec_name=github-ops \
-  description="create & delete the warden-role-assertion repo (skill: mcp)" \
+  description="create the warden-role-assertion repo and write & delete its files (skill: mcp)" \
   token_ttl=1h
 ```
 
-**2. `issue-triage` — open & close issues on `warden-role-assertion`.** Closing an issue is
-`update_issue` with `state=closed`; both tools carry `repo`, so one clause covers them:
+**2. `issue-triage` — open & close issues on `warden-role-assertion`.** GitHub's MCP server
+exposes a single `issue_write` tool for both — `method: "create"` opens an issue,
+`method: "update"` with `state: "closed"` closes it — and it carries `repo`, so one `has()`
+clause scopes it; a `tools/list`, which has no `repo`, passes untouched:
 
 ```bash
 warden policy write pol-issue-triage - <<'EOF'
@@ -214,8 +221,10 @@ path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
   mcp {
     allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["create_issue", "update_issue"]
-    condition       = "call.args.repo == \"warden-role-assertion\""
+    allowed_tools   = ["issue_write"]
+    condition = <<-CEL
+      !has(call.args.repo) || call.args.repo == "warden-role-assertion"
+    CEL
   }
 }
 EOF
@@ -238,7 +247,9 @@ path "github-mcp/role/+/gateway*" {
   mcp {
     allowed_methods = ["tools/list", "tools/call"]
     allowed_tools   = ["get_file_contents"]
-    condition       = "call.args.repo == \"warden-role-assertion\""
+    condition = <<-CEL
+      !has(call.args.repo) || call.args.repo == "warden-role-assertion"
+    CEL
   }
 }
 EOF
@@ -262,10 +273,10 @@ path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
   mcp {
     allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["create_repository", "delete_repository"]
+    allowed_tools   = ["create_repository", "create_or_update_file", "delete_file"]
     condition = <<-CEL
-      call.args.?name.orValue("") == "warden-forbidden" ||
-      call.args.?repo.orValue("") == "warden-forbidden"
+      (!has(call.args.name) || call.args.name == "warden-forbidden") &&
+      (!has(call.args.repo) || call.args.repo == "warden-forbidden")
     CEL
   }
 }
@@ -276,7 +287,7 @@ warden write auth/jwt/role/forbidden-repo-lifecycle \
   token_policies=pol-forbidden \
   user_claim=sub \
   cred_spec_name=github-ops \
-  description="create & delete the warden-forbidden repo (skill: mcp)" \
+  description="create the warden-forbidden repo and write & delete its files (skill: mcp)" \
   token_ttl=1h
 ```
 
@@ -316,15 +327,21 @@ forbidden one, so you can see it refused:
 claude mcp add --transport http gh-repo-lifecycle \
   "http://127.0.0.1:8400/v1/github-mcp/role/repo-lifecycle/gateway/" \
   --header "Authorization: Bearer $JWT"
+```
 
+```bash
 claude mcp add --transport http gh-issue-triage \
   "http://127.0.0.1:8400/v1/github-mcp/role/issue-triage/gateway/" \
   --header "Authorization: Bearer $JWT"
+```
 
+```bash
 claude mcp add --transport http gh-repo-reader \
   "http://127.0.0.1:8400/v1/github-mcp/role/repo-reader/gateway/" \
   --header "Authorization: Bearer $JWT"
+```
 
+```bash
 claude mcp add --transport http gh-forbidden \
   "http://127.0.0.1:8400/v1/github-mcp/role/forbidden-repo-lifecycle/gateway/" \
   --header "Authorization: Bearer $JWT"
@@ -361,22 +378,32 @@ is **not on the list** — Warden only returns roles the presented identity is a
 the forbidden role doesn't exist as far as this agent is concerned. The menu the agent plans
 against is already scoped to its identity.
 
-### Step 8 — one role per task (the "before" of each is a fresh role)
+### Step 8 — one role per task
 
-Ask for three things in turn. Each maps to exactly one role, and Warden records which.
+Ask for these in turn. Each maps to exactly one role, and Warden records which.
 
 **Create the repo** — this uses `repo-lifecycle`:
 
 > **create a new GitHub repository named `warden-role-assertion`, initialized with a README**
 
 The *initialized with a README* part matters: it tells `create_repository` to auto-init the
-repo with a `README.md`, so the third task has a file to read. Without it the repo is empty
-and `get_file_contents` returns a `404`. (The `repo-lifecycle` condition only checks the
-repo `name`, so the extra argument passes freely.)
+repo with a `README.md`, so the read task later has a file to fetch. Without it the repo is
+empty and `get_file_contents` returns a `404`. (The `repo-lifecycle` condition only checks
+the repo `name`, so the extra argument passes freely.)
+
+**Write, then delete a file** — still `repo-lifecycle`:
+
+> **add a file `NOTES.md` with the text "scratch" to `warden-role-assertion`, then delete it**
+
+That exercises `create_or_update_file` and `delete_file` — the "delete" half of this role's
+lifecycle — both scoped by the condition to `warden-role-assertion`.
 
 **Open, then close an issue** — this uses `issue-triage`:
 
 > **open an issue titled "hello" on `warden-role-assertion`, then close it**
+
+Both go through the single `issue_write` tool (`method: "create"`, then `method: "update"`
+with `state: "closed"`).
 
 **Read a file** — this uses `repo-reader`:
 
@@ -420,11 +447,12 @@ tail -f /tmp/warden-audit.log | jq 'select(.type=="request") | {
 }'
 ```
 
-The three tasks each show a different role and `allowed: true`:
+The tasks each show a different role and `allowed: true`:
 
 ```json
 { "role": "repo-lifecycle", "allowed": true, "tool": "create_repository", "decision": "allow", "rule": "allowed_tools" }
-{ "role": "issue-triage",   "allowed": true, "tool": "create_issue",     "decision": "allow", "rule": "allowed_tools" }
+{ "role": "repo-lifecycle", "allowed": true, "tool": "delete_file",       "decision": "allow", "rule": "allowed_tools" }
+{ "role": "issue-triage",   "allowed": true, "tool": "issue_write",       "decision": "allow", "rule": "allowed_tools" }
 { "role": "repo-reader",    "allowed": true, "tool": "get_file_contents", "decision": "allow", "rule": "allowed_tools" }
 ```
 
