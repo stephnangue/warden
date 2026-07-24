@@ -38,13 +38,16 @@ URL pattern : $WARDEN_ADDR<gateway-url><github-api-path>
 Auth header : Authorization: Bearer <jwt>
 ```
 
-For `curl` or any HTTP client: rewrite the GitHub host to
-`$WARDEN_ADDR<gateway-url>` and add the bearer token.
-
-## Examples
+Pick the client below. All three set the GitHub host to `$WARDEN_ADDR<gateway-url>`
+and switch role by using the target role's `<gateway-url>` (or sending an
+`X-Warden-Role` header).
 
 (Examples use a concrete `<gateway-url>` of `/v1/github/role/repo-reader/gateway/`;
 substitute the one from your role's `list_roles` description.)
+
+### curl / raw HTTP
+
+Rewrite the GitHub host to `$WARDEN_ADDR<gateway-url>` and add the bearer token.
 
 List your authenticated user's repos:
 ```bash
@@ -66,9 +69,44 @@ curl -X POST -H "Authorization: Bearer <jwt>" \
   $WARDEN_ADDR/v1/github/role/issue-writer/gateway/repos/myorg/myrepo/issues
 ```
 
-For the Octokit JS / PyGithub clients: configure the `baseUrl` /
-`base_url` to `$WARDEN_ADDR<gateway-url>`
-and supply your JWT as the auth token.
+### gh CLI
+
+`gh`'s high-level subcommands build their own request paths and can't be pointed
+at a Warden gateway, but `gh api` takes a full URL and calls any REST endpoint.
+Point it at `$WARDEN_ADDR<gateway-url>` and pass the bearer token — exactly like
+curl.
+
+```bash
+# gh refuses to run with no token configured; the value is unused because the
+# real credential is the Authorization header below. Any placeholder works.
+export GH_TOKEN="unused-real-credential-is-the-authorization-header"
+
+# Prepend $WARDEN_ADDR to the role's <gateway-url>, then append the REST path.
+gh api "$WARDEN_ADDR/v1/github/role/repo-reader/gateway/repos/myorg/myrepo" \
+  -H "Authorization: Bearer <jwt>"
+
+# --paginate and --jq work through the proxy:
+gh api --paginate "$WARDEN_ADDR/v1/github/role/repo-reader/gateway/user/repos" \
+  -H "Authorization: Bearer <jwt>" --jq '.[].full_name'
+```
+
+- **Auth**: pass `-H "Authorization: Bearer <jwt>"`. Warden reads the bearer value
+  as your identity; `gh` leaves an `Authorization` header you set yourself
+  untouched.
+- **Switch role**: use the target role's `<gateway-url>`, or add
+  `-H "X-Warden-Role: <role>"`.
+- **Writes**: `--method POST` (or `-X`), fields via `-f key=val` / `-F key=@file`,
+  or a full body with `--input file.json`.
+- **Scope**: only `gh api` routes through Warden — it reaches any `api.github.com`
+  REST endpoint, matching curl's reach. High-level subcommands (`gh repo`,
+  `gh issue`, `gh pr`) do not work through Warden, and GraphQL (`gh api graphql`)
+  is not proxied.
+
+### SDK (Octokit JS / PyGithub)
+
+Configure the client's `baseUrl` / `base_url` to `$WARDEN_ADDR<gateway-url>` and
+supply your JWT as the auth token. Switch role by pointing at a different role's
+`<gateway-url>`.
 
 ## Quirks
 
