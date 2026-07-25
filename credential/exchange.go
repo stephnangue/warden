@@ -88,6 +88,18 @@ type ExchangeInputs struct {
 	// on a header. Empty when no actor token is present. A driver consuming an
 	// unverified actor must validate it before forwarding, exactly as for a subject.
 	ActorTokenOrigin string
+
+	// CacheIdentity, when non-empty, is the value Fingerprint() keys the
+	// credential cache on IN PLACE OF SubjectToken. It exists for subjects whose
+	// SubjectToken is freshly minted on every request (a Warden-signed identity
+	// assertion carries a new jti/iat/exp each time), which would otherwise make
+	// the fingerprint unique per request and defeat the cache. Set it to a stable
+	// identity tuple (e.g. subject + audience) so distinct identities stay
+	// isolated while one identity reuses its cached upstream credential.
+	//
+	// It MUST be set only by core (resolveExchangeInputs), never derived from a
+	// caller-supplied value, and it does not travel to drivers as a token.
+	CacheIdentity string
 }
 
 // Validate performs structural checks only. It does not verify token contents
@@ -141,6 +153,13 @@ func (e *ExchangeInputs) Validate() error {
 // Each field is length-prefixed before hashing so that no two distinct field
 // combinations can collide by concatenation (e.g. subject "ab"/actor "c" must
 // not hash the same as subject "a"/actor "bc").
+//
+// When CacheIdentity is set, it is hashed in place of SubjectToken (so a
+// per-request-volatile assertion does not defeat the cache), under a distinct
+// domain tag so the CacheIdentity path and the raw-subject path can never
+// collide. Every other field — token type, actor, origins — is always folded
+// in, so a Warden-minted subject and a raw subject that happen to share a value
+// still key differently, and delegation/provenance never share a cache entry.
 func (e *ExchangeInputs) Fingerprint() string {
 	h := sha256.New()
 	writeField := func(s string) {
@@ -150,7 +169,13 @@ func (e *ExchangeInputs) Fingerprint() string {
 		h.Write([]byte(s))
 	}
 	writeField(e.SubjectTokenType)
-	writeField(e.SubjectToken)
+	if e.CacheIdentity != "" {
+		writeField("cache-identity")
+		writeField(e.CacheIdentity)
+	} else {
+		writeField("subject-token")
+		writeField(e.SubjectToken)
+	}
 	writeField(e.ActorTokenType)
 	writeField(e.ActorToken)
 	writeField(e.SubjectTokenOrigin)

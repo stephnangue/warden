@@ -142,6 +142,40 @@ func TestExchangeInputs_Fingerprint_NoConcatAmbiguity(t *testing.T) {
 	}
 }
 
+// TestExchangeInputs_Fingerprint_CacheIdentity covers the Warden-minted-subject
+// caching contract: the fingerprint keys on CacheIdentity (stable) rather than
+// the volatile SubjectToken, so re-mints of the same identity share a cache
+// entry while distinct identities stay isolated and cannot collide with the
+// raw-subject path.
+func TestExchangeInputs_Fingerprint_CacheIdentity(t *testing.T) {
+	// Same identity, different (freshly minted) subject bytes -> same fingerprint.
+	a := &ExchangeInputs{SubjectToken: "assertion-mint-1", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, CacheIdentity: "wid:ns:mount:alice|aud"}
+	b := &ExchangeInputs{SubjectToken: "assertion-mint-2", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, CacheIdentity: "wid:ns:mount:alice|aud"}
+	if a.Fingerprint() != b.Fingerprint() {
+		t.Fatal("same CacheIdentity must fingerprint identically despite different subject bytes")
+	}
+
+	// Different identity -> different fingerprint.
+	c := &ExchangeInputs{SubjectToken: "assertion-mint-1", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, CacheIdentity: "wid:ns:mount:bob|aud"}
+	if c.Fingerprint() == a.Fingerprint() {
+		t.Fatal("distinct CacheIdentity must fingerprint differently")
+	}
+
+	// Domain separation: CacheIdentity="X" must not collide with SubjectToken="X".
+	viaIdentity := &ExchangeInputs{SubjectToken: "assertion", SubjectTokenType: TokenTypeJWT, CacheIdentity: "X"}
+	viaSubject := &ExchangeInputs{SubjectToken: "X", SubjectTokenType: TokenTypeJWT}
+	if viaIdentity.Fingerprint() == viaSubject.Fingerprint() {
+		t.Fatal("CacheIdentity path must be domain-separated from the raw-subject path")
+	}
+
+	// Setting CacheIdentity must change the fingerprint vs. keying on the subject.
+	withID := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT, CacheIdentity: "id"}
+	withoutID := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT}
+	if withID.Fingerprint() == withoutID.Fingerprint() {
+		t.Fatal("CacheIdentity must be folded into the fingerprint")
+	}
+}
+
 func TestSpecRequestsExchange(t *testing.T) {
 	tests := []struct {
 		name   string
