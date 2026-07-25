@@ -2,10 +2,15 @@ package drivers
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -89,6 +94,29 @@ func TestAWSDriverFactory_ValidateConfig(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "session_duration",
+		},
+		{
+			name:    "wif valid without keys",
+			config:  map[string]string{"auth_method": "wif", "region": "us-east-1"},
+			wantErr: false,
+		},
+		{
+			name:    "wif rejects static keys",
+			config:  map[string]string{"auth_method": "wif", "region": "us-east-1", "access_key_id": "AKIA..."},
+			wantErr: true,
+			errMsg:  "must not be set for auth_method=wif",
+		},
+		{
+			name:    "wif rejects assume_role_arn",
+			config:  map[string]string{"auth_method": "wif", "region": "us-east-1", "assume_role_arn": "arn:aws:iam::1:role/x"},
+			wantErr: true,
+			errMsg:  "assume_role_arn is not supported",
+		},
+		{
+			name:    "invalid auth_method",
+			config:  map[string]string{"auth_method": "bogus", "region": "us-east-1"},
+			wantErr: true,
+			errMsg:  "auth_method",
 		},
 	}
 
@@ -495,6 +523,136 @@ func TestAWSDriver_MintCredential_UnsupportedMethodMessage_IncludesRedshift(t *t
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "redshift_iam_token")
+}
+
+// =============================================================================
+// AWS Workload Identity Federation (AssumeRoleWithWebIdentity)
+// =============================================================================
+
+// TestAWSDriver_Create_WIF_Keyless verifies a wif source is constructed with no
+// IAM keys and without an eager credential probe (no network).
+func TestAWSDriver_Create_WIF_Keyless(t *testing.T) {
+	factory := &AWSDriverFactory{}
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := factory.Create(map[string]string{"auth_method": "wif", "region": "us-east-1"}, log)
+	require.NoError(t, err)
+	require.NotNil(t, drv)
+	awsDrv := drv.(*AWSDriver)
+	assert.NotNil(t, awsDrv.anonSTSClient, "wif source must build the anonymous STS client")
+}
+
+// TestAWSDriver_MintGuards covers the fail-closed routing between the exchange
+// and non-exchange paths.
+func TestAWSDriver_MintGuards(t *testing.T) {
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+
+	// A static source: the web-identity mint_method requires exchange inputs, so
+	// plain MintCredential must refuse it.
+	staticDrv := &AWSDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "static"}},
+		logger:     log,
+	}
+	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "sts_assume_role_web_identity", "role_arn": "arn:aws:iam::1:role/x"}}
+	_, _, _, _, err := staticDrv.MintCredential(context.TODO(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires token-exchange inputs")
+
+	// A wif source reached with a non-WIF mint_method must fail clearly, not
+	// fall into authenticate() with empty keys.
+	wifDrv := &AWSDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "wif"}},
+		logger:     log,
+	}
+	_, _, _, _, err = wifDrv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "secrets_manager"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auth_method=wif supports only")
+}
+
+// TestAWSDriver_MintCredentialWithExchange_Guards covers the exchange-path guards
+// before any network call.
+func TestAWSDriver_MintCredentialWithExchange_Guards(t *testing.T) {
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv := &AWSDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "wif"}},
+		logger:     log,
+	}
+	roleSpec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "sts_assume_role_web_identity", "role_arn": "arn:aws:iam::1:role/x"}}
+
+	// Wrong mint_method.
+	_, _, _, _, err := drv.MintCredentialWithExchange(context.TODO(), &credential.CredSpec{Config: map[string]string{"mint_method": "sts_assume_role"}}, &credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenOrigin: credential.ExchangeOriginVerified})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sts_assume_role_web_identity")
+
+	// Missing subject.
+	_, _, _, _, err = drv.MintCredentialWithExchange(context.TODO(), roleSpec, &credential.ExchangeInputs{})
+	require.Error(t, err)
+
+	// Unverified origin must be rejected (only Warden-minted assertions allowed).
+	_, _, _, _, err = drv.MintCredentialWithExchange(context.TODO(), roleSpec, &credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenOrigin: credential.ExchangeOriginUnverified})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "verified subject")
+}
+
+// TestAWSDriver_WebIdentity_HappyPath drives the full exchange against a mocked
+// STS endpoint, asserting the assertion is forwarded as WebIdentityToken and the
+// returned credentials are surfaced.
+func TestAWSDriver_WebIdentity_HappyPath(t *testing.T) {
+	var gotToken, gotAction string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotToken = r.Form.Get("WebIdentityToken")
+		gotAction = r.Form.Get("Action")
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = w.Write([]byte(`<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleWithWebIdentityResult>
+    <Credentials>
+      <AccessKeyId>ASIAEXAMPLE</AccessKeyId>
+      <SecretAccessKey>secretexample</SecretAccessKey>
+      <SessionToken>tokenexample</SessionToken>
+      <Expiration>2035-01-01T00:00:00Z</Expiration>
+    </Credentials>
+    <AssumedRoleUser>
+      <Arn>arn:aws:sts::123456789012:assumed-role/App/warden-wid</Arn>
+      <AssumedRoleId>AROAEXAMPLE:warden-wid</AssumedRoleId>
+    </AssumedRoleUser>
+  </AssumeRoleWithWebIdentityResult>
+</AssumeRoleWithWebIdentityResponse>`))
+	}))
+	defer srv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv := &AWSDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "wif", "region": "us-east-1"}},
+		logger:     log,
+		region:     "us-east-1",
+		anonSTSClient: sts.New(sts.Options{
+			Region:       "us-east-1",
+			BaseEndpoint: aws.String(srv.URL),
+			Credentials:  aws.AnonymousCredentials{},
+		}),
+	}
+	spec := &credential.CredSpec{Name: "wid", Config: map[string]string{
+		"mint_method": "sts_assume_role_web_identity",
+		"role_arn":    "arn:aws:iam::123456789012:role/App",
+		"ttl":         "15m",
+	}}
+	inputs := &credential.ExchangeInputs{
+		SubjectToken:       "eyJ.warden.assertion",
+		SubjectTokenType:   credential.TokenTypeJWT,
+		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+	}
+
+	rawData, metadata, ttl, leaseID, err := drv.MintCredentialWithExchange(context.TODO(), spec, inputs)
+	require.NoError(t, err)
+	assert.Equal(t, "AssumeRoleWithWebIdentity", gotAction)
+	assert.Equal(t, "eyJ.warden.assertion", gotToken, "the Warden assertion must be sent as WebIdentityToken")
+	assert.Equal(t, "ASIAEXAMPLE", rawData["access_key_id"])
+	assert.Equal(t, "secretexample", rawData["secret_access_key"])
+	assert.Equal(t, "tokenexample", rawData["session_token"])
+	assert.Equal(t, "arn:aws:sts::123456789012:assumed-role/App/warden-wid", metadata["assumed_role_arn"])
+	assert.Equal(t, "123456789012", metadata["account_id"])
+	assert.Equal(t, "sts:ASIAEXAMPLE", leaseID)
+	assert.Greater(t, ttl, time.Duration(0))
 }
 
 // =============================================================================
