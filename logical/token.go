@@ -27,6 +27,12 @@ type TokenEntry struct {
 	PrincipalID string // Associated principal
 	RoleName    string // Associated role
 
+	// MountAccessor is the stable identifier of the auth mount that issued
+	// this login. It discriminates principals that different mounts (trusting
+	// different identity providers) may map to the same PrincipalID, so a
+	// federated identity assertion can carry a globally-unique subject.
+	MountAccessor string
+
 	// Lifecycle
 	ExpireAt time.Time // Expiration time
 
