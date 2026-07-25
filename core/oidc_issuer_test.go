@@ -183,6 +183,84 @@ func TestOIDCIssuer_KeyStorage_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestCore_setupOIDCIssuer covers the Core lifecycle wiring: disabled by
+// default, active-node key generation, standby stays not-ready, and the key
+// persists across setups.
+func TestCore_setupOIDCIssuer(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	ctx := context.Background()
+	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
+
+	// Disabled by default: no config -> nil issuer.
+	if err := core.setupOIDCIssuer(ctx, false); err != nil {
+		t.Fatalf("setup (no config): %v", err)
+	}
+	if core.OIDCIssuer() != nil {
+		t.Fatal("issuer must be disabled with no config")
+	}
+
+	// Config present but disabled -> still nil.
+	if err := saveIssuerConfig(ctx, storage, &issuerConfig{Enabled: false, IssuerURL: "https://iss.example"}); err != nil {
+		t.Fatalf("save disabled config: %v", err)
+	}
+	if err := core.setupOIDCIssuer(ctx, false); err != nil {
+		t.Fatalf("setup (disabled): %v", err)
+	}
+	if core.OIDCIssuer() != nil {
+		t.Fatal("issuer must stay disabled when Enabled=false")
+	}
+
+	// Enabled, no key yet, standby -> issuer present but not ready (cannot generate).
+	if err := saveIssuerConfig(ctx, storage, &issuerConfig{Enabled: true, IssuerURL: "https://iss.example"}); err != nil {
+		t.Fatalf("save enabled config: %v", err)
+	}
+	if err := core.setupOIDCIssuer(ctx, true /* standby */); err != nil {
+		t.Fatalf("setup (standby): %v", err)
+	}
+	if iss := core.OIDCIssuer(); iss == nil || iss.Ready() {
+		t.Fatal("standby with no key must produce a not-ready issuer")
+	}
+	if k, _ := loadSigningKey(ctx, storage); k != nil {
+		t.Fatal("standby must not generate/persist a key")
+	}
+
+	// Enabled, active -> generates + persists a key, issuer ready and can mint.
+	if err := core.setupOIDCIssuer(ctx, false /* active */); err != nil {
+		t.Fatalf("setup (active): %v", err)
+	}
+	iss := core.OIDCIssuer()
+	if iss == nil || !iss.Ready() {
+		t.Fatal("active node must produce a ready issuer")
+	}
+	tok, err := iss.MintIdentityAssertion(&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, "aud", time.Minute)
+	if err != nil || tok == "" {
+		t.Fatalf("ready issuer must mint: %v", err)
+	}
+	persisted, _ := loadSigningKey(ctx, storage)
+	if persisted == nil {
+		t.Fatal("active node must persist the generated key")
+	}
+	firstKid := persisted.kid
+
+	// Re-setup (active) must reuse the persisted key, not generate a new one.
+	if err := core.setupOIDCIssuer(ctx, false); err != nil {
+		t.Fatalf("setup (reuse): %v", err)
+	}
+	reloaded, _ := loadSigningKey(ctx, storage)
+	if reloaded == nil || reloaded.kid != firstKid {
+		t.Fatal("re-setup must reuse the persisted signing key")
+	}
+
+	// Seal teardown clears the issuer.
+	if err := core.stopOIDCIssuer(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if core.OIDCIssuer() != nil {
+		t.Fatal("stopOIDCIssuer must clear the issuer")
+	}
+}
+
 // TestOIDCIssuer_Rotation checks that installing a new active key retires the old
 // one and both remain in the JWKS so in-flight assertions still verify.
 func TestOIDCIssuer_Rotation(t *testing.T) {

@@ -220,6 +220,11 @@ type Core struct {
 	// (e.g., Vault AppRole secret_id rotation)
 	rotationManager *RotationManager
 
+	// oidcIssuer, when configured, makes Warden its own OIDC issuer: it mints
+	// short-lived identity assertions for Workload Identity Federation. nil (or
+	// not-ready) when disabled, so the warden_identity mint path fails closed.
+	oidcIssuer *OIDCIssuer
+
 	// shutdownHooks are process-level cleanup functions registered by backends
 	// (e.g., transport shutdown). Keyed by name for idempotency.
 	shutdownHooks   map[string]func()
@@ -815,6 +820,64 @@ func (c *Core) GetRotationManager() *RotationManager {
 	return c.rotationManager
 }
 
+// setupOIDCIssuer constructs the OIDC issuer from its stored config during
+// unseal. It is disabled by default: with no config (or Enabled=false) the
+// issuer is left nil and the warden_identity mint path fails closed.
+//
+// When enabled, it loads the signing key from storage. If none exists yet, the
+// active node generates and persists one; a standby leaves the issuer not-ready
+// (it cannot write) and will activate on promotion, when unseal runs again as
+// active. Key generation and persistence therefore happen only on the active node.
+func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
+	storage := NewBarrierView(c.barrier, oidcIssuerStorePrefix)
+
+	cfg, err := loadIssuerConfig(ctx, storage)
+	if err != nil {
+		return err
+	}
+	if cfg == nil || !cfg.Enabled {
+		c.oidcIssuer = nil
+		return nil
+	}
+
+	issuer := NewOIDCIssuer(cfg.IssuerURL)
+
+	key, err := loadSigningKey(ctx, storage)
+	if err != nil {
+		return err
+	}
+	if key == nil {
+		if standby {
+			c.logger.Warn("oidc issuer enabled but no signing key present; standby stays not-ready until promotion")
+			c.oidcIssuer = issuer
+			return nil
+		}
+		key, err = generateSigningKey()
+		if err != nil {
+			return err
+		}
+		if err := persistSigningKey(ctx, storage, key); err != nil {
+			return err
+		}
+		c.logger.Info("oidc issuer generated a new signing key", logger.String("kid", key.kid))
+	}
+	issuer.SetActiveKey(key)
+	c.oidcIssuer = issuer
+	c.logger.Info("oidc issuer setup complete", logger.String("issuer", cfg.IssuerURL))
+	return nil
+}
+
+// stopOIDCIssuer tears down the issuer during seal.
+func (c *Core) stopOIDCIssuer() error {
+	c.oidcIssuer = nil
+	return nil
+}
+
+// OIDCIssuer returns the configured OIDC issuer, or nil when it is disabled.
+func (c *Core) OIDCIssuer() *OIDCIssuer {
+	return c.oidcIssuer
+}
+
 // RegisterShutdownHook registers a named shutdown hook to run during preSeal.
 // The key ensures idempotency — the same key overwrites the previous hook.
 func (c *Core) RegisterShutdownHook(key string, fn func()) {
@@ -1312,6 +1375,9 @@ func (c *Core) preSeal() error {
 	if err := c.stopRotationManager(); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error stopping rotation manager: %w", err))
 	}
+	if err := c.stopOIDCIssuer(); err != nil {
+		result = multierror.Append(result, fmt.Errorf("error stopping oidc issuer: %w", err))
+	}
 
 	if err := c.teardownPolicyStore(); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error tearing down policy store: %w", err))
@@ -1436,6 +1502,12 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 
 	// Wire up credential config store to rotation manager for source rotation registration
 	c.credConfigStore.SetRotationManager(c.rotationManager)
+
+	// Setup the OIDC issuer (Workload Identity Federation). Disabled by default;
+	// generates/persists a signing key only on the active node.
+	if err := c.setupOIDCIssuer(ctx, standby); err != nil {
+		return err
+	}
 
 	if err := c.loadMounts(ctx); err != nil {
 		return err
