@@ -72,6 +72,14 @@ func Handler(props *HandlerProperties) http.Handler {
 	// System init endpoint - handles initialization before system is ready
 	mux.Handle("/v1/sys/init", handleSysInit(core, log))
 
+	// OIDC issuer discovery + JWKS (Workload Identity Federation). Served at the
+	// origin root — not under /v1/ — so an upstream STS fetches them at the
+	// standard well-known path. Unauthenticated; wrapGenericHandler exempts these
+	// from the /v1/ prefix check. Deliberately NOT in standbyAllowedPaths: only
+	// the active node holds the signing key/config, so standbys forward.
+	mux.Handle(oidcDiscoveryPath, handleOIDCDiscovery(core, log))
+	mux.Handle(oidcJWKSPath, handleOIDCJWKS(core, log))
+
 	// MCP discovery interface — Warden answering MCP for its own
 	// capabilities (list_roles, get_skill). Registered before the /v1/sys/
 	// catch-all. Not in standbyAllowedPaths: it reads live mount/skill/
@@ -353,6 +361,19 @@ func wrapGenericHandler(c *core.Core, handler http.Handler, log *logger.GatedLog
 			// core/request_handler.go:367.
 			r.URL.Path = "/v1" + r.URL.Path
 			r.URL.RawPath = ""
+		}
+
+		// OIDC issuer discovery/JWKS live at the origin root, not under /v1/, so an
+		// upstream can fetch them at the standard well-known path. Exempt them from
+		// the /v1/ check. A standby forwards to the active node (only the active
+		// holds the signing key/config).
+		if isOIDCIssuerPath(r.URL.Path) {
+			if c != nil && c.Standby() {
+				forwardToActive(c, forwarder, w, r)
+				return
+			}
+			handler.ServeHTTP(w, r)
+			return
 		}
 
 		// Validate request path
