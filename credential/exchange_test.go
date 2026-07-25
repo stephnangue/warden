@@ -233,6 +233,15 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 			config:  map[string]string{ConfigSubjectTokenSource: SourceAuthToken, ConfigActorTokenSource: SourceAuthToken},
 			wantErr: true,
 		},
+		{
+			name:    "warden_identity without assertion_audience",
+			config:  map[string]string{ConfigSubjectTokenSource: SourceWardenIdentity},
+			wantErr: true,
+		},
+		{
+			name:   "warden_identity with assertion_audience",
+			config: map[string]string{ConfigSubjectTokenSource: SourceWardenIdentity, ConfigAssertionAudience: "https://sts.example/aud"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

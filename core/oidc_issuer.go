@@ -41,6 +41,9 @@ type OIDCIssuer struct {
 	// clockSkewLeeway is subtracted from a minted assertion's nbf to tolerate
 	// modest clock skew at the verifier.
 	clockSkewLeeway time.Duration
+
+	// assertionTTL is the configured lifetime of a minted assertion.
+	assertionTTL time.Duration
 }
 
 // signingKey is an RSA keypair plus its stable JWKS key id.
@@ -65,7 +68,26 @@ func NewOIDCIssuer(issuerURL string) *OIDCIssuer {
 	return &OIDCIssuer{
 		issuerURL:       issuerURL,
 		clockSkewLeeway: defaultClockSkewLeeway,
+		assertionTTL:    defaultAssertionTTL,
 	}
+}
+
+// SetAssertionTTL configures the minted-assertion lifetime. A non-positive value
+// keeps the default.
+func (i *OIDCIssuer) SetAssertionTTL(ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.assertionTTL = ttl
+}
+
+// AssertionTTL returns the configured assertion lifetime.
+func (i *OIDCIssuer) AssertionTTL() time.Duration {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.assertionTTL
 }
 
 // Ready reports whether an active signing key is installed. The mint path must

@@ -1245,7 +1245,8 @@ const (
 // The plumbing never verifies token contents — it only records provenance via
 // SubjectTokenOrigin. Every configured-but-missing input fails the request
 // closed rather than silently minting a non-exchange credential.
-func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, specName string) (*credential.ExchangeInputs, error) {
+func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, te *logical.TokenEntry) (*credential.ExchangeInputs, error) {
+	specName := te.CredentialSpec
 	spec, err := c.credConfigStore.GetSpec(ctx, specName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load credential spec: %w", err)
@@ -1279,6 +1280,29 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		}
 		inputs.SubjectToken = tok
 		inputs.SubjectTokenOrigin = credential.ExchangeOriginUnverified
+	case credential.SourceWardenIdentity:
+		// Warden mints a fresh, short-lived assertion of the caller's resolved
+		// identity (origin verified — Warden signed it). Fails closed if the
+		// issuer is disabled/not-ready or the audience is missing.
+		issuer := c.oidcIssuer
+		if issuer == nil || !issuer.Ready() {
+			return nil, fmt.Errorf("spec %q requires subject_token_source=warden_identity but the OIDC issuer is not enabled/ready", specName)
+		}
+		audience := spec.Config[credential.ConfigAssertionAudience]
+		if audience == "" {
+			return nil, fmt.Errorf("spec %q with subject_token_source=warden_identity requires %s", specName, credential.ConfigAssertionAudience)
+		}
+		assertion, mintErr := issuer.MintIdentityAssertion(te, audience, issuer.AssertionTTL())
+		if mintErr != nil {
+			return nil, fmt.Errorf("spec %q: mint identity assertion: %w", specName, mintErr)
+		}
+		inputs.SubjectToken = assertion
+		inputs.SubjectTokenType = credential.TokenTypeJWT
+		inputs.SubjectTokenOrigin = credential.ExchangeOriginVerified
+		// Key the credential cache on the stable identity + audience, NOT the
+		// freshly-minted assertion bytes (which change every request), so one
+		// identity reuses its cached upstream credential.
+		inputs.CacheIdentity = wardenSubject(te) + "\x00" + audience
 	default:
 		// SpecRequestsExchange already excluded "none"/absent; any other value
 		// was rejected at spec-validation time.
@@ -1361,7 +1385,7 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 
 	// Resolve any caller-supplied token-exchange inputs the spec opts into.
 	// Returns nil for non-exchange specs, leaving the mint path unchanged.
-	inputs, err := c.resolveExchangeInputs(ctx, req, te.CredentialSpec)
+	inputs, err := c.resolveExchangeInputs(ctx, req, te)
 	if err != nil {
 		return logical.ErrBadRequestf("token exchange input resolution failed: %s", err.Error())
 	}

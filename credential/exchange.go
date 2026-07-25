@@ -55,7 +55,19 @@ const (
 	SourceAuthToken = "auth_token"
 	SourceHeader    = "header"
 	SourceNone      = "none"
+	// SourceWardenIdentity mints a fresh Warden-signed identity assertion (via
+	// the OIDC issuer) as the subject token. Used for Workload Identity
+	// Federation: Warden re-issues the resolved agent identity so an upstream
+	// federates Warden's issuer once, regardless of how the agent authenticated.
+	// Valid only for the subject source.
+	SourceWardenIdentity = "warden_identity"
 )
+
+// ConfigAssertionAudience is the spec-config key naming the `aud` of a
+// warden_identity assertion — the upstream the assertion is minted for. Required
+// and non-empty whenever subject_token_source=warden_identity: it is the control
+// that stops an assertion for one upstream being replayed at another.
+const ConfigAssertionAudience = "assertion_audience"
 
 // maxExchangeTokenBytes bounds a single subject or actor token. Real JWTs and
 // access tokens are far smaller; the cap guards against a caller pushing an
@@ -196,10 +208,17 @@ func SpecRequestsExchange(config map[string]string) bool {
 // closed at mint time instead.
 func ValidateExchangeSpecConfig(config map[string]string) error {
 	if err := ValidateSchema(config,
-		StringField(ConfigSubjectTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone),
+		StringField(ConfigSubjectTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone, SourceWardenIdentity),
 		StringField(ConfigActorTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone),
 	); err != nil {
 		return err
+	}
+	// A Warden-minted subject must declare the audience it is minted for. An
+	// empty/absent aud is replayable at any upstream whose trust policy does not
+	// pin aud, so require it here (enforced again at mint time, defence in depth).
+	if config[ConfigSubjectTokenSource] == SourceWardenIdentity && config[ConfigAssertionAudience] == "" {
+		return fmt.Errorf("field '%s': is required when '%s' is '%s'",
+			ConfigAssertionAudience, ConfigSubjectTokenSource, SourceWardenIdentity)
 	}
 	// An actor token only has meaning alongside a subject token (RFC 8693 §2.1),
 	// so reject an actor source without a subject source.

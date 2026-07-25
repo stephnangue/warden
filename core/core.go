@@ -841,6 +841,7 @@ func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
 	}
 
 	issuer := NewOIDCIssuer(cfg.IssuerURL)
+	issuer.SetAssertionTTL(cfg.assertionTTL())
 
 	key, err := loadSigningKey(ctx, storage)
 	if err != nil {

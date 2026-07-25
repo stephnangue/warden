@@ -2269,6 +2269,12 @@ func requestWith(clientToken string, headers map[string]string) *logical.Request
 	return &logical.Request{ClientToken: clientToken, HTTPRequest: httpReq}
 }
 
+// teForSpec builds the minimal token entry resolveExchangeInputs needs: the
+// bound credential spec name.
+func teForSpec(spec string) *logical.TokenEntry {
+	return &logical.TokenEntry{CredentialSpec: spec}
+}
+
 func TestCreateSpec_RejectsInvalidExchangeConfig(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	// actor_token_source without a subject source is rejected by validateSpec.
@@ -2286,7 +2292,7 @@ func TestResolveExchangeInputs_NoExchangeConfig(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	seedSpec(t, c, ctx, "plain", map[string]string{})
 
-	inputs, err := c.resolveExchangeInputs(ctx, requestWith("opaque-token", nil), "plain")
+	inputs, err := c.resolveExchangeInputs(ctx, requestWith("opaque-token", nil), teForSpec("plain"))
 	require.NoError(t, err)
 	assert.Nil(t, inputs, "non-exchange specs must yield nil inputs")
 }
@@ -2297,7 +2303,7 @@ func TestResolveExchangeInputs_AuthToken_JWT(t *testing.T) {
 		credential.ConfigSubjectTokenSource: credential.SourceAuthToken,
 	})
 
-	inputs, err := c.resolveExchangeInputs(ctx, requestWith("eyJhbGciOi.payload.sig", nil), "auth-spec")
+	inputs, err := c.resolveExchangeInputs(ctx, requestWith("eyJhbGciOi.payload.sig", nil), teForSpec("auth-spec"))
 	require.NoError(t, err)
 	require.NotNil(t, inputs)
 	assert.Equal(t, "eyJhbGciOi.payload.sig", inputs.SubjectToken)
@@ -2311,7 +2317,7 @@ func TestResolveExchangeInputs_AuthToken_OpaqueFailsClosed(t *testing.T) {
 		credential.ConfigSubjectTokenSource: credential.SourceAuthToken,
 	})
 
-	_, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque-session-token", nil), "auth-spec")
+	_, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque-session-token", nil), teForSpec("auth-spec"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not JWT-authenticated")
 }
@@ -2323,7 +2329,7 @@ func TestResolveExchangeInputs_HeaderSource(t *testing.T) {
 	})
 
 	req := requestWith("opaque-token", map[string]string{headerSubjectToken: "eyJ.caller.subject"})
-	inputs, err := c.resolveExchangeInputs(ctx, req, "hdr-spec")
+	inputs, err := c.resolveExchangeInputs(ctx, req, teForSpec("hdr-spec"))
 	require.NoError(t, err)
 	require.NotNil(t, inputs)
 	assert.Equal(t, "eyJ.caller.subject", inputs.SubjectToken)
@@ -2337,7 +2343,7 @@ func TestResolveExchangeInputs_HeaderSource_MissingFailsClosed(t *testing.T) {
 		credential.ConfigSubjectTokenSource: credential.SourceHeader,
 	})
 
-	_, err := c.resolveExchangeInputs(ctx, requestWith("opaque-token", nil), "hdr-spec")
+	_, err := c.resolveExchangeInputs(ctx, requestWith("opaque-token", nil), teForSpec("hdr-spec"))
 	require.Error(t, err)
 }
 
@@ -2352,7 +2358,7 @@ func TestResolveExchangeInputs_ActorHeader(t *testing.T) {
 		headerSubjectToken: "eyJ.subject",
 		headerActorToken:   "eyJ.actor",
 	})
-	inputs, err := c.resolveExchangeInputs(ctx, req, "deleg-spec")
+	inputs, err := c.resolveExchangeInputs(ctx, req, teForSpec("deleg-spec"))
 	require.NoError(t, err)
 	require.NotNil(t, inputs)
 	assert.Equal(t, "eyJ.subject", inputs.SubjectToken)
@@ -2370,7 +2376,7 @@ func TestResolveExchangeInputs_ActorAuthToken(t *testing.T) {
 	})
 
 	req := requestWith("eyJ.agent-jwt", map[string]string{headerSubjectToken: "eyJ.user"})
-	inputs, err := c.resolveExchangeInputs(ctx, req, "deleg-auth")
+	inputs, err := c.resolveExchangeInputs(ctx, req, teForSpec("deleg-auth"))
 	require.NoError(t, err)
 	require.NotNil(t, inputs)
 	assert.Equal(t, "eyJ.user", inputs.SubjectToken)
@@ -2389,7 +2395,7 @@ func TestResolveExchangeInputs_ActorAuthToken_OpaqueFailsClosed(t *testing.T) {
 
 	// Non-JWT (opaque) inbound token cannot serve as the actor.
 	req := requestWith("s.opaque-session", map[string]string{headerSubjectToken: "eyJ.user"})
-	_, err := c.resolveExchangeInputs(ctx, req, "deleg-auth")
+	_, err := c.resolveExchangeInputs(ctx, req, teForSpec("deleg-auth"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not JWT-authenticated")
 }
@@ -2402,6 +2408,52 @@ func TestResolveExchangeInputs_ActorHeader_MissingFailsClosed(t *testing.T) {
 	})
 
 	req := requestWith("opaque-token", map[string]string{headerSubjectToken: "eyJ.subject"})
-	_, err := c.resolveExchangeInputs(ctx, req, "deleg-spec")
+	_, err := c.resolveExchangeInputs(ctx, req, teForSpec("deleg-spec"))
 	require.Error(t, err)
+}
+
+func TestResolveExchangeInputs_WardenIdentity(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "wid-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+	})
+
+	te := &logical.TokenEntry{
+		CredentialSpec: "wid-spec",
+		PrincipalID:    "spiffe://acme/agent/bot",
+		NamespaceID:    "ns1",
+		MountAccessor:  "auth_jwt_1",
+	}
+	// The inbound token is opaque (not a JWT): warden_identity does not reuse it,
+	// it mints a fresh assertion, so this must still succeed.
+	req := requestWith("s.opaque-session", nil)
+
+	inputs, err := c.resolveExchangeInputs(ctx, req, te)
+	require.NoError(t, err)
+	require.NotNil(t, inputs)
+	assert.True(t, strings.HasPrefix(inputs.SubjectToken, "eyJ"), "subject must be a minted JWT assertion")
+	assert.Equal(t, credential.TokenTypeJWT, inputs.SubjectTokenType)
+	assert.Equal(t, credential.ExchangeOriginVerified, inputs.SubjectTokenOrigin)
+	assert.Equal(t, wardenSubject(te)+"\x00"+"https://sts.example/aud", inputs.CacheIdentity)
+
+	// Cache identity is stable across re-mints even though the assertion bytes differ.
+	inputs2, err := c.resolveExchangeInputs(ctx, req, te)
+	require.NoError(t, err)
+	assert.Equal(t, inputs.CacheIdentity, inputs2.CacheIdentity, "cache identity must be stable")
+}
+
+func TestResolveExchangeInputs_WardenIdentity_IssuerNotReadyFailsClosed(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = nil // disabled
+	seedSpec(t, c, ctx, "wid-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+	})
+
+	te := &logical.TokenEntry{CredentialSpec: "wid-spec", PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
+	_, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque", nil), te)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not enabled/ready")
 }
