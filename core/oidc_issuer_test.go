@@ -119,6 +119,70 @@ func TestOIDCIssuer_FailClosed(t *testing.T) {
 	}
 }
 
+// TestOIDCIssuer_KeyStorage_RoundTrip verifies the signing key survives a
+// persist/load cycle through a barrier view (so a promoted standby can reload the
+// key an active node generated) and still signs a verifiable assertion.
+func TestOIDCIssuer_KeyStorage_RoundTrip(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
+	ctx := context.Background()
+
+	// No key yet -> (nil, nil).
+	got, err := loadSigningKey(ctx, storage)
+	if err != nil {
+		t.Fatalf("loadSigningKey (empty): %v", err)
+	}
+	if got != nil {
+		t.Fatal("expected no signing key before one is persisted")
+	}
+
+	original, err := generateSigningKey()
+	if err != nil {
+		t.Fatalf("generateSigningKey: %v", err)
+	}
+	if err := persistSigningKey(ctx, storage, original); err != nil {
+		t.Fatalf("persistSigningKey: %v", err)
+	}
+
+	loaded, err := loadSigningKey(ctx, storage)
+	if err != nil {
+		t.Fatalf("loadSigningKey: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected a signing key after persist")
+	}
+	if loaded.kid != original.kid {
+		t.Errorf("kid mismatch: got %q want %q", loaded.kid, original.kid)
+	}
+	if !loaded.key.Equal(original.key) {
+		t.Error("loaded private key does not equal the persisted one")
+	}
+
+	// The reloaded key mints an assertion that verifies against the same key's JWKS.
+	iss := NewOIDCIssuer("https://iss.example")
+	iss.SetActiveKey(loaded)
+	jwks := serveJWKS(t, iss)
+	tok, err := iss.MintIdentityAssertion(&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, "aud", time.Minute)
+	if err != nil {
+		t.Fatalf("mint with reloaded key: %v", err)
+	}
+	keySet, err := jwt.NewJSONWebKeySet(ctx, jwks.URL, "")
+	if err != nil {
+		t.Fatalf("keyset: %v", err)
+	}
+	validator, err := jwt.NewValidator(keySet)
+	if err != nil {
+		t.Fatalf("validator: %v", err)
+	}
+	if _, err := validator.Validate(ctx, tok, jwt.Expected{
+		Issuer: "https://iss.example", Audiences: []string{"aud"}, SigningAlgorithms: []jwt.Alg{jwt.RS256},
+	}); err != nil {
+		t.Errorf("assertion from reloaded key must verify: %v", err)
+	}
+}
+
 // TestOIDCIssuer_Rotation checks that installing a new active key retires the old
 // one and both remain in the JWKS so in-flight assertions still verify.
 func TestOIDCIssuer_Rotation(t *testing.T) {
