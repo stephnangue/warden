@@ -225,6 +225,11 @@ type Core struct {
 	// not-ready) when disabled, so the warden_identity mint path fails closed.
 	oidcIssuer *OIDCIssuer
 
+	// oidcPublisher, when configured, pushes the issuer's public discovery + JWKS
+	// to an external surface (bucket/CDN). nil when the built-in endpoint is the
+	// only surface.
+	oidcPublisher JWKSPublisher
+
 	// shutdownHooks are process-level cleanup functions registered by backends
 	// (e.g., transport shutdown). Keyed by name for idempotency.
 	shutdownHooks   map[string]func()
@@ -837,8 +842,20 @@ func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
 	}
 	if cfg == nil || !cfg.Enabled {
 		c.oidcIssuer = nil
+		c.oidcPublisher = nil
 		return nil
 	}
+
+	// A bad publisher config must NOT fail unseal — the built-in endpoint still
+	// serves. It is validated up front on the config-write path instead, so a
+	// persisted-but-invalid publisher (e.g. a directory that later disappears)
+	// degrades to endpoint-only rather than bricking the node.
+	publisher, perr := newJWKSPublisher(cfg.Publisher)
+	if perr != nil {
+		c.logger.Warn("oidc issuer: publisher config invalid; serving from the built-in endpoint only", logger.Err(perr))
+		publisher = nil
+	}
+	c.oidcPublisher = publisher
 
 	issuer := NewOIDCIssuer(cfg.IssuerURL)
 	issuer.SetAssertionTTL(cfg.assertionTTL())
@@ -865,12 +882,39 @@ func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
 	issuer.SetActiveKey(key)
 	c.oidcIssuer = issuer
 	c.logger.Info("oidc issuer setup complete", logger.String("issuer", cfg.IssuerURL))
+
+	// Push the current documents to the external surface on the active node.
+	// Best-effort here: a publish failure must not fail unseal (the built-in
+	// endpoint still serves), but the config-write path surfaces it explicitly.
+	if !standby {
+		if err := c.publishOIDC(ctx); err != nil {
+			c.logger.Warn("oidc issuer: initial publish failed", logger.Err(err))
+		}
+	}
 	return nil
+}
+
+// publishOIDC pushes the current discovery + JWKS documents to the configured
+// publisher. A no-op when no publisher is configured or the issuer is not ready.
+func (c *Core) publishOIDC(ctx context.Context) error {
+	if c.oidcPublisher == nil || c.oidcIssuer == nil || !c.oidcIssuer.Ready() {
+		return nil
+	}
+	discovery, err := c.oidcIssuer.DiscoveryDocument(c.oidcIssuer.IssuerURL() + "/" + oidcJWKSObjectPath)
+	if err != nil {
+		return err
+	}
+	jwks, err := c.oidcIssuer.JWKS()
+	if err != nil {
+		return err
+	}
+	return c.oidcPublisher.Publish(ctx, discovery, jwks)
 }
 
 // stopOIDCIssuer tears down the issuer during seal.
 func (c *Core) stopOIDCIssuer() error {
 	c.oidcIssuer = nil
+	c.oidcPublisher = nil
 	return nil
 }
 

@@ -26,6 +26,10 @@ type issuerConfig struct {
 	Enabled   bool   `json:"enabled"`
 	IssuerURL string `json:"issuer_url"`    // public `iss` URL upstreams fetch from
 	TTL       string `json:"assertion_ttl"` // duration string; empty -> defaultAssertionTTL
+
+	// Publisher, when set, pushes the public discovery + JWKS documents to an
+	// external surface (bucket/CDN) so IssuerURL need not be Warden's own address.
+	Publisher publisherConfig `json:"publisher,omitempty"`
 }
 
 // assertionTTL parses the configured TTL, falling back to the default.
