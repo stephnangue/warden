@@ -37,6 +37,12 @@ func TestSysOIDCIssuerConfig(t *testing.T) {
 	assert.Equal(t, false, resp.Data["enabled"])
 	assert.Nil(t, core.OIDCIssuer())
 
+	// Validation on a fresh config (no issuer_url stored yet): enabling without an
+	// issuer_url fails, and a non-HTTPS URL fails. Neither is persisted, so the
+	// real enable below still starts clean.
+	assert.True(t, write(ctx, map[string]any{"enabled": true}).IsError())
+	assert.True(t, write(ctx, map[string]any{"enabled": true, "issuer_url": "http://insecure"}).IsError())
+
 	// Enable it: the issuer becomes ready and mints.
 	resp = write(ctx, map[string]any{
 		"enabled":       true,
@@ -52,16 +58,24 @@ func TestSysOIDCIssuerConfig(t *testing.T) {
 	assert.Equal(t, true, resp.Data["enabled"])
 	assert.Equal(t, "https://warden-oidc.example", resp.Data["issuer_url"])
 	assert.Equal(t, true, resp.Data["ready"])
+	assert.Equal(t, int64(300), resp.Data["assertion_ttl"])
 
-	// Validation: enabled without issuer_url.
-	assert.True(t, write(ctx, map[string]any{"enabled": true}).IsError())
-	// Validation: non-HTTPS issuer_url.
-	assert.True(t, write(ctx, map[string]any{"enabled": true, "issuer_url": "http://insecure"}).IsError())
+	// Partial update: changing one field must NOT reset the others. Enabling and
+	// the issuer_url are carried forward from the stored config.
+	resp = write(ctx, map[string]any{"key_rotation_period": "24h"})
+	require.False(t, resp.IsError(), "partial update should succeed: %+v", resp.Data)
+	resp = read(ctx)
+	assert.Equal(t, true, resp.Data["enabled"], "enabled preserved")
+	assert.Equal(t, "https://warden-oidc.example", resp.Data["issuer_url"], "issuer_url preserved")
+	assert.Equal(t, int64(300), resp.Data["assertion_ttl"], "assertion_ttl preserved")
+	assert.Equal(t, int64(24*3600), resp.Data["key_rotation_period"], "rotation period updated")
 
-	// Disable: issuer torn down.
+	// Disable: a partial write of just enabled=false tears the issuer down while
+	// keeping the rest of the config for a later re-enable.
 	resp = write(ctx, map[string]any{"enabled": false})
 	require.False(t, resp.IsError())
 	assert.Nil(t, core.OIDCIssuer())
+	assert.Equal(t, "https://warden-oidc.example", read(ctx).Data["issuer_url"], "issuer_url retained while disabled")
 }
 
 func TestSysOIDCIssuerConfig_Publisher(t *testing.T) {
@@ -235,4 +249,80 @@ func TestSysOIDCIssuerConfig_RootNamespaceOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resp.IsError())
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+// TestMergePublisherConfig covers the publisher field-merge: cross-type fields
+// are rejected, a type switch clears the previous type's fields, an omitted type
+// is inherited, and masked/omitted secrets are preserved.
+func TestMergePublisherConfig(t *testing.T) {
+	// A field belonging to another type is rejected, not silently ignored.
+	_, err := mergePublisherConfig(publisherConfig{}, map[string]any{
+		"type": "s3", "bucket": "b", "region": "r", "dir": "/x",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "only valid for type")
+
+	_, err = mergePublisherConfig(publisherConfig{}, map[string]any{
+		"type": "local_file", "dir": "/x", "base_url": "https://y",
+	})
+	require.Error(t, err)
+
+	// A clean s3 config passes and carries no foreign fields.
+	pc, err := mergePublisherConfig(publisherConfig{}, map[string]any{
+		"type": "s3", "bucket": "b", "region": "r",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "s3", pc.Type)
+	assert.Equal(t, "b", pc.Bucket)
+	assert.Empty(t, pc.BaseURL)
+
+	// A type switch drops the previous type's fields (and its secret).
+	prior := publisherConfig{Type: "http_put", BaseURL: "https://old", Autheader: "X", AuthValue: "sekret"}
+	pc, err = mergePublisherConfig(prior, map[string]any{"type": "s3", "bucket": "b", "region": "r"})
+	require.NoError(t, err)
+	assert.Equal(t, "s3", pc.Type)
+	assert.Empty(t, pc.BaseURL, "old http_put base_url must be cleared on a type switch")
+	assert.Empty(t, pc.AuthValue, "old secret must be cleared on a type switch")
+	assert.Equal(t, "b", pc.Bucket)
+
+	// A partial edit that omits the type inherits it and preserves the rest.
+	prior = publisherConfig{Type: "s3", Bucket: "b", Region: "r", AccessKeyID: "a", SecretAccessKey: "s"}
+	pc, err = mergePublisherConfig(prior, map[string]any{"prefix": "p"})
+	require.NoError(t, err)
+	assert.Equal(t, "s3", pc.Type, "type inherited when omitted")
+	assert.Equal(t, "p", pc.Prefix)
+	assert.Equal(t, "b", pc.Bucket, "other fields preserved")
+	assert.Equal(t, "s", pc.SecretAccessKey, "secret preserved")
+
+	// A foreign field on an inherited-type partial edit is still rejected.
+	_, err = mergePublisherConfig(prior, map[string]any{"base_url": "https://y"})
+	require.Error(t, err)
+
+	// A masked secret keeps the prior one (an update need not re-send it).
+	prior = publisherConfig{Type: "http_put", BaseURL: "https://y", AuthValue: "sekret"}
+	pc, err = mergePublisherConfig(prior, map[string]any{"type": "http_put", "auth_value": maskValue})
+	require.NoError(t, err)
+	assert.Equal(t, "sekret", pc.AuthValue)
+}
+
+// TestSysOIDCIssuerConfig_PublisherCrossTypeRejected verifies a cross-type
+// publisher field is rejected at write time and nothing is persisted.
+func TestSysOIDCIssuerConfig_PublisherCrossTypeRejected(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	schema := backend.pathOIDCIssuer()[0].Fields
+
+	raw := map[string]any{
+		"enabled":    true,
+		"issuer_url": "https://iss.example",
+		"publisher":  map[string]any{"type": "s3", "bucket": "b", "region": "r", "dir": "/x"},
+	}
+	resp, err := backend.handleOIDCIssuerConfigWrite(ctx, createTestRequest(logical.UpdateOperation, "oidc-issuer/config", raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.True(t, resp.IsError())
+	assert.Contains(t, resp.Err.Error(), "only valid for type")
+
+	// Rejected before persistence: no config stored.
+	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
+	cfg, _ := loadIssuerConfig(ctx, storage)
+	assert.Nil(t, cfg, "a rejected write must not persist")
 }

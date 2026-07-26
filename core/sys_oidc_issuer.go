@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -65,9 +66,9 @@ func (b *SystemBackend) pathOIDCIssuer() []*framework.Path {
 			},
 			HelpSynopsis: "Configure Warden as an OIDC issuer for Workload Identity Federation",
 			HelpDescription: "Root-namespace-only. Enables the issuer and sets the public issuer URL, " +
-				"assertion TTL, signing-key rotation timings, and publisher. A write REPLACES the whole " +
-				"config; omitted fields revert to defaults, except masked secrets (publisher auth_value / " +
-				"secret_access_key) which are carried forward when omitted. Cross-tenant isolation is " +
+				"assertion TTL, signing-key rotation timings, and publisher. A write is a PARTIAL update: " +
+				"only the fields present in the request change; omitted fields keep their current values. " +
+				"Clear or disable a field by setting it explicitly (e.g. key_rotation_period=0). Cross-tenant isolation is " +
 				"enforced by the namespace-scoped `sub` claim (wid:{namespaceID}:{mountAccessor}:{principalID}); " +
 				"upstream trust policies MUST condition on `sub` (or `warden_namespace`), never on `aud` alone.",
 		},
@@ -127,42 +128,55 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 		return resp, nil
 	}
 
-	enabled := d.Get("enabled").(bool)
-	issuerURL := strings.TrimSpace(d.Get("issuer_url").(string))
-	ttlSec, _ := d.Get("assertion_ttl").(int)
-	rotationSec, _ := d.Get("key_rotation_period").(int)
-	cacheTTLSec, _ := d.Get("jwks_cache_ttl").(int)
-	graceSec, _ := d.Get("retired_key_grace").(int)
-	publisherRaw, _ := d.Get("publisher").(map[string]any)
-
-	if enabled {
-		if issuerURL == "" {
-			return logical.ErrorResponse(logical.ErrBadRequest("issuer_url is required when the issuer is enabled")), nil
-		}
-		if !strings.HasPrefix(issuerURL, "https://") {
-			return logical.ErrorResponse(logical.ErrBadRequest("issuer_url must be https:// (AWS/GCP/Azure require HTTPS OIDC providers)")), nil
-		}
-	}
-
 	storage := NewBarrierView(b.core.barrier, oidcIssuerStorePrefix)
 	prior, _ := loadIssuerConfig(ctx, storage)
 
-	cfg := &issuerConfig{
-		Enabled:   enabled,
-		IssuerURL: issuerURL,
-		Publisher: parsePublisherConfig(publisherRaw, prior),
+	// Partial update: start from the current config (or an empty one on first
+	// write) and overlay ONLY the fields the request actually set, so changing one
+	// setting never silently reverts the others to their defaults. A field is
+	// cleared/disabled by setting it explicitly (e.g. key_rotation_period=0).
+	cfg := &issuerConfig{}
+	if prior != nil {
+		*cfg = *prior
 	}
-	if ttlSec > 0 {
-		cfg.TTL = (time.Duration(ttlSec) * time.Second).String()
+	if v, ok := d.GetOk("enabled"); ok {
+		cfg.Enabled = v.(bool)
 	}
-	if rotationSec > 0 {
-		cfg.KeyRotationPeriod = (time.Duration(rotationSec) * time.Second).String()
+	if v, ok := d.GetOk("issuer_url"); ok {
+		cfg.IssuerURL = strings.TrimSpace(v.(string))
 	}
-	if cacheTTLSec > 0 {
-		cfg.JWKSCacheTTL = (time.Duration(cacheTTLSec) * time.Second).String()
+	if v, ok := d.GetOk("assertion_ttl"); ok {
+		cfg.TTL = (time.Duration(v.(int)) * time.Second).String()
 	}
-	if graceSec > 0 {
-		cfg.RetiredKeyGrace = (time.Duration(graceSec) * time.Second).String()
+	if v, ok := d.GetOk("key_rotation_period"); ok {
+		cfg.KeyRotationPeriod = (time.Duration(v.(int)) * time.Second).String()
+	}
+	if v, ok := d.GetOk("jwks_cache_ttl"); ok {
+		cfg.JWKSCacheTTL = (time.Duration(v.(int)) * time.Second).String()
+	}
+	if v, ok := d.GetOk("retired_key_grace"); ok {
+		cfg.RetiredKeyGrace = (time.Duration(v.(int)) * time.Second).String()
+	}
+	if v, ok := d.GetOk("publisher"); ok {
+		// Field-level merge over the current publisher: unset fields keep their
+		// value, a type switch clears the old type's fields, and a field set for
+		// the wrong type is rejected rather than silently ignored.
+		merged, err := mergePublisherConfig(cfg.Publisher, v.(map[string]any))
+		if err != nil {
+			return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
+		}
+		cfg.Publisher = merged
+	}
+
+	// Validate the MERGED result (not just the request), so enabling without
+	// re-supplying an already-stored issuer_url still passes.
+	if cfg.Enabled {
+		if cfg.IssuerURL == "" {
+			return logical.ErrorResponse(logical.ErrBadRequest("issuer_url is required when the issuer is enabled")), nil
+		}
+		if !strings.HasPrefix(cfg.IssuerURL, "https://") {
+			return logical.ErrorResponse(logical.ErrBadRequest("issuer_url must be https:// (AWS/GCP/Azure require HTTPS OIDC providers)")), nil
+		}
 	}
 
 	// A rotation cadence must comfortably outlast the JWKS cache TTL, otherwise the
@@ -198,47 +212,99 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 		}
 	}
 
-	b.logger.Info("oidc issuer configured", logger.Bool("enabled", enabled), logger.String("issuer_url", issuerURL))
+	b.logger.Info("oidc issuer configured", logger.Bool("enabled", cfg.Enabled), logger.String("issuer_url", cfg.IssuerURL))
 
 	return b.respondSuccess(map[string]any{
-		"enabled":    enabled,
-		"issuer_url": issuerURL,
+		"enabled":    cfg.Enabled,
+		"issuer_url": cfg.IssuerURL,
 		"ready":      oidcIssuerReady(b.core),
 	}), nil
 }
 
-// parsePublisherConfig normalizes the request "publisher" map into a
-// publisherConfig. Sensitive fields (auth_value, secret_access_key) that come in
-// empty or masked are preserved from prior when the publisher type is unchanged,
-// so an update need not re-send secrets that were masked on read.
-func parsePublisherConfig(raw map[string]any, prior *issuerConfig) publisherConfig {
-	get := func(k string) string {
+// publisherFieldOwners maps each type-specific publisher field to the single
+// publisher type it belongs to. A field set for any other type is a
+// misconfiguration (e.g. `dir` under an s3 publisher would be silently ignored).
+var publisherFieldOwners = map[string]string{
+	"dir":               "local_file",
+	"base_url":          "http_put",
+	"auth_header":       "http_put",
+	"auth_value":        "http_put",
+	"bucket":            "s3",
+	"region":            "s3",
+	"prefix":            "s3",
+	"access_key_id":     "s3",
+	"secret_access_key": "s3",
+}
+
+// mergePublisherConfig overlays the request "publisher" map onto the prior
+// publisher config (a field-level partial update, matching the top-level config
+// semantics), and returns an error when a request explicitly sets a field that
+// does not belong to the selected type. The type is carried forward from prior
+// when the request omits it; changing the type drops the previous type's fields
+// so no inert leftovers remain. Masked/empty secrets are preserved from prior
+// when the type is unchanged, so an update need not re-send them.
+func mergePublisherConfig(prior publisherConfig, raw map[string]any) (publisherConfig, error) {
+	get := func(k string) (string, bool) {
 		if v, ok := raw[k].(string); ok {
-			return strings.TrimSpace(v)
+			return strings.TrimSpace(v), true
 		}
-		return ""
+		return "", false
 	}
-	pc := publisherConfig{
-		Type:            get("type"),
-		Dir:             get("dir"),
-		BaseURL:         get("base_url"),
-		Autheader:       get("auth_header"),
-		AuthValue:       get("auth_value"),
-		Bucket:          get("bucket"),
-		Region:          get("region"),
-		Prefix:          get("prefix"),
-		AccessKeyID:     get("access_key_id"),
-		SecretAccessKey: get("secret_access_key"),
+
+	effType := prior.Type
+	if t, ok := get("type"); ok && t != "" {
+		effType = t
 	}
-	if prior != nil && prior.Publisher.Type == pc.Type {
-		if pc.AuthValue == "" || pc.AuthValue == maskValue {
-			pc.AuthValue = prior.Publisher.AuthValue
-		}
-		if pc.SecretAccessKey == "" || pc.SecretAccessKey == maskValue {
-			pc.SecretAccessKey = prior.Publisher.SecretAccessKey
+
+	// Reject fields the request explicitly set that belong to another type.
+	for field, owner := range publisherFieldOwners {
+		if v, ok := get(field); ok && v != "" && v != maskValue && owner != effType {
+			return publisherConfig{}, fmt.Errorf(
+				"publisher field %q is only valid for type %q, not %q", field, owner, effType)
 		}
 	}
-	return pc
+
+	// Keep the prior fields only when the type is unchanged; a type change starts
+	// fresh so the previous type's fields are cleared rather than lingering inert.
+	pc := publisherConfig{Type: effType}
+	if effType == prior.Type {
+		pc = prior
+		pc.Type = effType
+	}
+
+	// Overlay provided fields owned by the effective type (foreign ones already
+	// errored above; a provided-empty value is a no-op for a non-owned field).
+	if v, ok := get("dir"); ok {
+		pc.Dir = v
+	}
+	if v, ok := get("base_url"); ok {
+		pc.BaseURL = v
+	}
+	if v, ok := get("auth_header"); ok {
+		pc.Autheader = v
+	}
+	if v, ok := get("bucket"); ok {
+		pc.Bucket = v
+	}
+	if v, ok := get("region"); ok {
+		pc.Region = v
+	}
+	if v, ok := get("prefix"); ok {
+		pc.Prefix = v
+	}
+	if v, ok := get("access_key_id"); ok {
+		pc.AccessKeyID = v
+	}
+	// Secrets: overlay only a real value; an omitted/empty/masked secret keeps the
+	// prior one (carried via pc=prior when the type is unchanged).
+	if v, ok := get("auth_value"); ok && v != "" && v != maskValue {
+		pc.AuthValue = v
+	}
+	if v, ok := get("secret_access_key"); ok && v != "" && v != maskValue {
+		pc.SecretAccessKey = v
+	}
+
+	return pc, nil
 }
 
 // maskedPublisher renders a publisher config for read, masking secrets.
