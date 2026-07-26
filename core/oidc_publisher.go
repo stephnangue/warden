@@ -62,8 +62,8 @@ type JWKSPublisher interface {
 
 // newJWKSPublisher builds the configured publisher, or (nil, nil) when none is
 // configured (the built-in HTTP endpoint remains the surface). cacheControl is
-// the Cache-Control header value Warden derives from the key lifecycle and sends
-// on uploads, so a cached JWKS never outlives the rotation overlap.
+// the Cache-Control header value Warden derives from the JWKS cache TTL and sends
+// on uploads, so a verifier refreshes the JWKS before a newly published key signs.
 func newJWKSPublisher(cfg publisherConfig, cacheControl string) (JWKSPublisher, error) {
 	switch cfg.Type {
 	case "", "none":

@@ -36,17 +36,17 @@ func (b *SystemBackend) pathOIDCIssuer() []*framework.Path {
 					Type:        framework.TypeDurationSecond,
 					Description: "Signing-key rotation cadence. 0 disables automatic rotation.",
 				},
-				"key_activation_delay": {
+				"jwks_cache_ttl": {
 					Type:        framework.TypeDurationSecond,
-					Description: "How long a newly staged key is published before it signs (should exceed the published JWKS cache TTL). Default 1m.",
+					Description: "Cache-Control max-age of the published JWKS; also the minimum time a new signing key is pre-published before it signs. Default 1m.",
 				},
-				"key_overlap": {
+				"retired_key_grace": {
 					Type:        framework.TypeDurationSecond,
-					Description: "Margin beyond assertion TTL before a retired key is pruned from the JWKS. Default 1h.",
+					Description: "Safety margin kept beyond the assertion TTL before a retired key is pruned from the JWKS (retired keys stay verifiable for assertion_ttl + this). Default 1h.",
 				},
 				"publisher": {
 					Type:        framework.TypeMap,
-					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key. Cache-Control is derived from key_activation_delay.",
+					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key. Cache-Control is derived from jwks_cache_ttl.",
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
@@ -108,13 +108,13 @@ func (b *SystemBackend) handleOIDCIssuerConfigRead(ctx context.Context, _ *logic
 	}
 
 	data := map[string]any{
-		"enabled":              cfg.Enabled,
-		"issuer_url":           cfg.IssuerURL,
-		"assertion_ttl":        int64(cfg.assertionTTL().Seconds()),
-		"key_rotation_period":  int64(cfg.keyRotationPeriod().Seconds()),
-		"key_activation_delay": int64(cfg.keyActivationDelay().Seconds()),
-		"key_overlap":          int64(cfg.keyOverlap().Seconds()),
-		"ready":                oidcIssuerReady(b.core),
+		"enabled":             cfg.Enabled,
+		"issuer_url":          cfg.IssuerURL,
+		"assertion_ttl":       int64(cfg.assertionTTL().Seconds()),
+		"key_rotation_period": int64(cfg.keyRotationPeriod().Seconds()),
+		"jwks_cache_ttl":      int64(cfg.jwksCacheTTL().Seconds()),
+		"retired_key_grace":   int64(cfg.retiredKeyGrace().Seconds()),
+		"ready":               oidcIssuerReady(b.core),
 	}
 	if cfg.Publisher.Type != "" {
 		data["publisher"] = maskedPublisher(cfg.Publisher)
@@ -131,8 +131,8 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 	issuerURL := strings.TrimSpace(d.Get("issuer_url").(string))
 	ttlSec, _ := d.Get("assertion_ttl").(int)
 	rotationSec, _ := d.Get("key_rotation_period").(int)
-	activationSec, _ := d.Get("key_activation_delay").(int)
-	overlapSec, _ := d.Get("key_overlap").(int)
+	cacheTTLSec, _ := d.Get("jwks_cache_ttl").(int)
+	graceSec, _ := d.Get("retired_key_grace").(int)
 	publisherRaw, _ := d.Get("publisher").(map[string]any)
 
 	if enabled {
@@ -158,20 +158,20 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 	if rotationSec > 0 {
 		cfg.KeyRotationPeriod = (time.Duration(rotationSec) * time.Second).String()
 	}
-	if activationSec > 0 {
-		cfg.KeyActivationDelay = (time.Duration(activationSec) * time.Second).String()
+	if cacheTTLSec > 0 {
+		cfg.JWKSCacheTTL = (time.Duration(cacheTTLSec) * time.Second).String()
 	}
-	if overlapSec > 0 {
-		cfg.KeyOverlap = (time.Duration(overlapSec) * time.Second).String()
+	if graceSec > 0 {
+		cfg.RetiredKeyGrace = (time.Duration(graceSec) * time.Second).String()
 	}
 
-	// A rotation cadence must comfortably outlast one rotation's own activation
-	// wait, otherwise rotations run back-to-back and retired keys pile up. (The
-	// published JWKS Cache-Control max-age is derived from the activation delay, so
-	// a cached JWKS is always refreshed before a rotated key starts signing —
-	// nothing else to validate here.)
-	if p := cfg.keyRotationPeriod(); p > 0 && p <= cfg.keyActivationDelay() {
-		return logical.ErrorResponse(logical.ErrBadRequestf("key_rotation_period (%s) must exceed key_activation_delay (%s)", p, cfg.keyActivationDelay())), nil
+	// A rotation cadence must comfortably outlast the JWKS cache TTL, otherwise the
+	// pre-published next key would not have been cacheable for a full period before
+	// it signs — this guarantees the rotation-time propagation floor is a no-op in
+	// the steady state. (The published JWKS Cache-Control max-age is derived from
+	// the same value, so a cached JWKS is always refreshed before a new key signs.)
+	if p := cfg.keyRotationPeriod(); p > 0 && p <= cfg.jwksCacheTTL() {
+		return logical.ErrorResponse(logical.ErrBadRequestf("key_rotation_period (%s) must exceed jwks_cache_ttl (%s)", p, cfg.jwksCacheTTL())), nil
 	}
 
 	// Validate the publisher builds BEFORE persisting, so an invalid config can

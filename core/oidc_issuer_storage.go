@@ -30,11 +30,13 @@ type storedSigningKey struct {
 	RetiredAt time.Time `json:"retired_at,omitempty"`
 }
 
-// storedKeySet is the versioned keyset: the active signing key plus retired keys
-// still published in the JWKS so in-flight assertions verify.
+// storedKeySet is the versioned keyset: the active signing key, the pre-published
+// next key (promoted to active on the following rotation), plus retired keys still
+// published in the JWKS so in-flight assertions verify.
 type storedKeySet struct {
 	Version int                `json:"version"`
 	Active  storedSigningKey   `json:"active"`
+	Next    storedSigningKey   `json:"next"`
 	Retired []storedSigningKey `json:"retired,omitempty"`
 }
 
@@ -68,16 +70,25 @@ func fromStored(s storedSigningKey) (*signingKey, error) {
 	return &signingKey{key: rsaKey, kid: s.Kid, createdAt: s.CreatedAt, retiredAt: s.RetiredAt}, nil
 }
 
-// persistKeySet writes the active + retired keys to storage (barrier-encrypted).
-func persistKeySet(ctx context.Context, storage sdklogical.Storage, active *signingKey, retired []*signingKey) error {
+// persistKeySet writes the active + next + retired keys to storage
+// (barrier-encrypted). Both active and next are required: the issuer always keeps
+// a pre-published next key ready to promote, so a keyset missing either is invalid.
+func persistKeySet(ctx context.Context, storage sdklogical.Storage, active, next *signingKey, retired []*signingKey) error {
 	if active == nil {
 		return fmt.Errorf("oidc issuer: cannot persist a keyset with no active key")
+	}
+	if next == nil {
+		return fmt.Errorf("oidc issuer: cannot persist a keyset with no next key")
 	}
 	storedActive, err := toStored(active)
 	if err != nil {
 		return err
 	}
-	set := storedKeySet{Version: 1, Active: storedActive}
+	storedNext, err := toStored(next)
+	if err != nil {
+		return err
+	}
+	set := storedKeySet{Version: 2, Active: storedActive, Next: storedNext}
 	for _, r := range retired {
 		sr, err := toStored(r)
 		if err != nil {
@@ -92,30 +103,34 @@ func persistKeySet(ctx context.Context, storage sdklogical.Storage, active *sign
 	return storage.Put(ctx, &sdklogical.StorageEntry{Key: oidcKeySetPath, Value: data})
 }
 
-// loadKeySet reads the keyset from storage. It returns (nil, nil, nil) when none
-// has been persisted yet, so the caller can decide to generate a key.
-func loadKeySet(ctx context.Context, storage sdklogical.Storage) (active *signingKey, retired []*signingKey, err error) {
+// loadKeySet reads the keyset from storage. It returns (nil, nil, nil, nil) when
+// none has been persisted yet, so the caller can decide to generate the keys.
+func loadKeySet(ctx context.Context, storage sdklogical.Storage) (active, next *signingKey, retired []*signingKey, err error) {
 	entry, err := storage.Get(ctx, oidcKeySetPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("oidc issuer: read keyset: %w", err)
+		return nil, nil, nil, fmt.Errorf("oidc issuer: read keyset: %w", err)
 	}
 	if entry == nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	var set storedKeySet
 	if err := json.Unmarshal(entry.Value, &set); err != nil {
-		return nil, nil, fmt.Errorf("oidc issuer: unmarshal keyset: %w", err)
+		return nil, nil, nil, fmt.Errorf("oidc issuer: unmarshal keyset: %w", err)
 	}
 	active, err = fromStored(set.Active)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	next, err = fromStored(set.Next)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	for _, sr := range set.Retired {
 		r, err := fromStored(sr)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		retired = append(retired, r)
 	}
-	return active, retired, nil
+	return active, next, retired, nil
 }

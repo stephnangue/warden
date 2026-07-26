@@ -28,18 +28,20 @@ type issuerConfig struct {
 	TTL       string `json:"assertion_ttl"` // duration string; empty -> defaultAssertionTTL
 
 	// KeyRotationPeriod, when > 0, rotates the signing key on that cadence (with a
-	// JWKS overlap so in-flight assertions keep verifying). Empty/0 disables
-	// automatic rotation.
+	// retired-key grace window so in-flight assertions keep verifying). Empty/0
+	// disables automatic rotation.
 	KeyRotationPeriod string `json:"key_rotation_period,omitempty"`
 
-	// KeyActivationDelay is how long a newly staged key is published before it
-	// starts signing, so verifiers fetch it first. It should exceed the cache TTL
-	// the operator sets on the published JWKS. Empty -> defaultKeyActivationDelay.
-	KeyActivationDelay string `json:"key_activation_delay,omitempty"`
+	// JWKSCacheTTL is the Cache-Control max-age of the published/served JWKS — how
+	// long a verifier or CDN may cache it. It doubles as the propagation floor: a
+	// freshly published next key must be in the JWKS at least this long before it
+	// may start signing. Empty -> defaultJWKSCacheTTL.
+	JWKSCacheTTL string `json:"jwks_cache_ttl,omitempty"`
 
-	// KeyOverlap is the margin kept beyond a minted assertion's TTL before a
-	// retired key is pruned from the JWKS. Empty -> defaultKeyOverlap.
-	KeyOverlap string `json:"key_overlap,omitempty"`
+	// RetiredKeyGrace is the safety margin kept BEYOND a minted assertion's TTL
+	// before a retired key is pruned from the JWKS (a retired key therefore stays
+	// verifiable for assertion_ttl + retired_key_grace). Empty -> defaultRetiredKeyGrace.
+	RetiredKeyGrace string `json:"retired_key_grace,omitempty"`
 
 	// Publisher, when set, pushes the public discovery + JWKS documents to an
 	// external surface (bucket/CDN) so IssuerURL need not be Warden's own address.
@@ -47,10 +49,11 @@ type issuerConfig struct {
 }
 
 const (
-	// defaultKeyActivationDelay is the stage->activate wait when unset.
-	defaultKeyActivationDelay = time.Minute
-	// defaultKeyOverlap is the retired-key retention margin beyond assertion TTL.
-	defaultKeyOverlap = time.Hour
+	// defaultJWKSCacheTTL is the published JWKS Cache-Control max-age (and the
+	// next-key pre-publication floor) when unset.
+	defaultJWKSCacheTTL = time.Minute
+	// defaultRetiredKeyGrace is the retired-key retention margin beyond assertion TTL.
+	defaultRetiredKeyGrace = time.Hour
 )
 
 func parseDurationOr(s string, def time.Duration) time.Duration {
@@ -76,12 +79,12 @@ func (c *issuerConfig) keyRotationPeriod() time.Duration {
 	return d
 }
 
-func (c *issuerConfig) keyActivationDelay() time.Duration {
-	return parseDurationOr(c.KeyActivationDelay, defaultKeyActivationDelay)
+func (c *issuerConfig) jwksCacheTTL() time.Duration {
+	return parseDurationOr(c.JWKSCacheTTL, defaultJWKSCacheTTL)
 }
 
-func (c *issuerConfig) keyOverlap() time.Duration {
-	return parseDurationOr(c.KeyOverlap, defaultKeyOverlap)
+func (c *issuerConfig) retiredKeyGrace() time.Duration {
+	return parseDurationOr(c.RetiredKeyGrace, defaultRetiredKeyGrace)
 }
 
 // assertionTTL parses the configured TTL, falling back to the default.
