@@ -66,6 +66,9 @@ func (b *SystemBackend) paths() []*framework.Path {
 	// Credential paths
 	paths = append(paths, b.pathCredentials()...)
 
+	// OIDC issuer (Workload Identity Federation) — root-namespace-only
+	paths = append(paths, b.pathOIDCIssuer()...)
+
 	// Skill registry paths
 	paths = append(paths, b.pathSkills()...)
 
