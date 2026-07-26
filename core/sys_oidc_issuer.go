@@ -32,9 +32,21 @@ func (b *SystemBackend) pathOIDCIssuer() []*framework.Path {
 					Type:        framework.TypeDurationSecond,
 					Description: "Lifetime of a minted identity assertion (default 5m).",
 				},
+				"key_rotation_period": {
+					Type:        framework.TypeDurationSecond,
+					Description: "Signing-key rotation cadence. 0 disables automatic rotation.",
+				},
+				"key_activation_delay": {
+					Type:        framework.TypeDurationSecond,
+					Description: "How long a newly staged key is published before it signs (should exceed the published JWKS cache TTL). Default 1m.",
+				},
+				"key_overlap": {
+					Type:        framework.TypeDurationSecond,
+					Description: "Margin beyond assertion TTL before a retired key is pruned from the JWKS. Default 1h.",
+				},
 				"publisher": {
 					Type:        framework.TypeMap,
-					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key, cache_control.",
+					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key. Cache-Control is derived from key_activation_delay.",
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
@@ -52,12 +64,20 @@ func (b *SystemBackend) pathOIDCIssuer() []*framework.Path {
 				},
 			},
 			HelpSynopsis: "Configure Warden as an OIDC issuer for Workload Identity Federation",
-			HelpDescription: "Root-namespace-only. Enables the issuer and sets the public issuer URL and " +
-				"assertion TTL. Cross-tenant isolation is enforced by the namespace-scoped `sub` claim " +
-				"(wid:{namespaceID}:{mountAccessor}:{principalID}); upstream trust policies MUST condition " +
-				"on `sub` (or `warden_namespace`), never on `aud` alone.",
+			HelpDescription: "Root-namespace-only. Enables the issuer and sets the public issuer URL, " +
+				"assertion TTL, signing-key rotation timings, and publisher. A write REPLACES the whole " +
+				"config; omitted fields revert to defaults, except masked secrets (publisher auth_value / " +
+				"secret_access_key) which are carried forward when omitted. Cross-tenant isolation is " +
+				"enforced by the namespace-scoped `sub` claim (wid:{namespaceID}:{mountAccessor}:{principalID}); " +
+				"upstream trust policies MUST condition on `sub` (or `warden_namespace`), never on `aud` alone.",
 		},
 	}
+}
+
+// oidcIssuerReady reports whether the issuer is configured and has an active key.
+func oidcIssuerReady(c *Core) bool {
+	iss := c.OIDCIssuer()
+	return iss != nil && iss.Ready()
 }
 
 // requireRootNamespace returns an error response unless the request is in the
@@ -88,10 +108,13 @@ func (b *SystemBackend) handleOIDCIssuerConfigRead(ctx context.Context, _ *logic
 	}
 
 	data := map[string]any{
-		"enabled":       cfg.Enabled,
-		"issuer_url":    cfg.IssuerURL,
-		"assertion_ttl": int64(cfg.assertionTTL().Seconds()),
-		"ready":         b.core.oidcIssuer != nil && b.core.oidcIssuer.Ready(),
+		"enabled":              cfg.Enabled,
+		"issuer_url":           cfg.IssuerURL,
+		"assertion_ttl":        int64(cfg.assertionTTL().Seconds()),
+		"key_rotation_period":  int64(cfg.keyRotationPeriod().Seconds()),
+		"key_activation_delay": int64(cfg.keyActivationDelay().Seconds()),
+		"key_overlap":          int64(cfg.keyOverlap().Seconds()),
+		"ready":                oidcIssuerReady(b.core),
 	}
 	if cfg.Publisher.Type != "" {
 		data["publisher"] = maskedPublisher(cfg.Publisher)
@@ -107,6 +130,9 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 	enabled := d.Get("enabled").(bool)
 	issuerURL := strings.TrimSpace(d.Get("issuer_url").(string))
 	ttlSec, _ := d.Get("assertion_ttl").(int)
+	rotationSec, _ := d.Get("key_rotation_period").(int)
+	activationSec, _ := d.Get("key_activation_delay").(int)
+	overlapSec, _ := d.Get("key_overlap").(int)
 	publisherRaw, _ := d.Get("publisher").(map[string]any)
 
 	if enabled {
@@ -129,11 +155,29 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 	if ttlSec > 0 {
 		cfg.TTL = (time.Duration(ttlSec) * time.Second).String()
 	}
+	if rotationSec > 0 {
+		cfg.KeyRotationPeriod = (time.Duration(rotationSec) * time.Second).String()
+	}
+	if activationSec > 0 {
+		cfg.KeyActivationDelay = (time.Duration(activationSec) * time.Second).String()
+	}
+	if overlapSec > 0 {
+		cfg.KeyOverlap = (time.Duration(overlapSec) * time.Second).String()
+	}
+
+	// A rotation cadence must comfortably outlast one rotation's own activation
+	// wait, otherwise rotations run back-to-back and retired keys pile up. (The
+	// published JWKS Cache-Control max-age is derived from the activation delay, so
+	// a cached JWKS is always refreshed before a rotated key starts signing —
+	// nothing else to validate here.)
+	if p := cfg.keyRotationPeriod(); p > 0 && p <= cfg.keyActivationDelay() {
+		return logical.ErrorResponse(logical.ErrBadRequestf("key_rotation_period (%s) must exceed key_activation_delay (%s)", p, cfg.keyActivationDelay())), nil
+	}
 
 	// Validate the publisher builds BEFORE persisting, so an invalid config can
 	// never be stored (a persisted-but-invalid publisher would otherwise degrade
 	// every subsequent unseal to endpoint-only with a warning).
-	if _, err := newJWKSPublisher(cfg.Publisher); err != nil {
+	if _, err := newJWKSPublisher(cfg.Publisher, ""); err != nil {
 		return logical.ErrorResponse(logical.ErrBadRequestf("invalid publisher config: %v", err)), nil
 	}
 
@@ -159,7 +203,7 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 	return b.respondSuccess(map[string]any{
 		"enabled":    enabled,
 		"issuer_url": issuerURL,
-		"ready":      b.core.oidcIssuer != nil && b.core.oidcIssuer.Ready(),
+		"ready":      oidcIssuerReady(b.core),
 	}), nil
 }
 
@@ -185,7 +229,6 @@ func parsePublisherConfig(raw map[string]any, prior *issuerConfig) publisherConf
 		Prefix:          get("prefix"),
 		AccessKeyID:     get("access_key_id"),
 		SecretAccessKey: get("secret_access_key"),
-		CacheControl:    get("cache_control"),
 	}
 	if prior != nil && prior.Publisher.Type == pc.Type {
 		if pc.AuthValue == "" || pc.AuthValue == maskValue {
@@ -227,9 +270,6 @@ func maskedPublisher(pc publisherConfig) map[string]any {
 	}
 	if pc.SecretAccessKey != "" {
 		m["secret_access_key"] = maskValue
-	}
-	if pc.CacheControl != "" {
-		m["cache_control"] = pc.CacheControl
 	}
 	return m
 }

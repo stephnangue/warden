@@ -38,12 +38,31 @@ type OIDCIssuer struct {
 	// assertion they signed has expired, so in-flight assertions still verify.
 	retired []*signingKey
 
+	// staged is a not-yet-active key published in the JWKS ahead of activation, so
+	// a verifier can fetch it before the first assertion it signs arrives (closes
+	// the propagation gap when the JWKS is pushed to a bucket/CDN). In-memory only.
+	staged *signingKey
+
 	// clockSkewLeeway is subtracted from a minted assertion's nbf to tolerate
 	// modest clock skew at the verifier.
 	clockSkewLeeway time.Duration
 
 	// assertionTTL is the configured lifetime of a minted assertion.
 	assertionTTL time.Duration
+
+	// cacheControl is the Cache-Control header served on the JWKS/discovery, and
+	// pushed to the publisher. Derived from the key-activation delay so a cached
+	// JWKS never outlives the window in which a rotated key must be fetched.
+	cacheControl string
+}
+
+// oidcCacheControl derives the Cache-Control header from the activation delay.
+func oidcCacheControl(activationDelay time.Duration) string {
+	secs := int(activationDelay.Seconds())
+	if secs < 0 {
+		secs = 0
+	}
+	return fmt.Sprintf("public, max-age=%d", secs)
 }
 
 // signingKey is an RSA keypair plus its stable JWKS key id.
@@ -51,6 +70,9 @@ type signingKey struct {
 	key       *rsa.PrivateKey
 	kid       string
 	createdAt time.Time
+	// retiredAt is set when the key stops being active. It stays in the JWKS until
+	// every assertion it signed has expired, then is pruned. Zero for the active key.
+	retiredAt time.Time
 }
 
 // oidcSigningAlg is fixed to RS256 for v1 — the universal OIDC verifier default,
@@ -69,7 +91,22 @@ func NewOIDCIssuer(issuerURL string) *OIDCIssuer {
 		issuerURL:       issuerURL,
 		clockSkewLeeway: defaultClockSkewLeeway,
 		assertionTTL:    defaultAssertionTTL,
+		cacheControl:    oidcCacheControl(defaultKeyActivationDelay),
 	}
+}
+
+// SetCacheControl sets the served/published Cache-Control from the activation delay.
+func (i *OIDCIssuer) SetCacheControl(activationDelay time.Duration) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.cacheControl = oidcCacheControl(activationDelay)
+}
+
+// CacheControl returns the Cache-Control header value for the JWKS/discovery.
+func (i *OIDCIssuer) CacheControl() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.cacheControl
 }
 
 // SetAssertionTTL configures the minted-assertion lifetime. A non-positive value
@@ -112,9 +149,94 @@ func (i *OIDCIssuer) SetActiveKey(key *signingKey) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.active != nil && i.active.kid != key.kid {
+		i.active.retiredAt = time.Now()
 		i.retired = append(i.retired, i.active)
 	}
 	i.active = key
+}
+
+// StageKey publishes k in the JWKS without making it active, so verifiers can
+// fetch it before it signs anything. Pass nil to clear a stage (e.g. on failure).
+func (i *OIDCIssuer) StageKey(k *signingKey) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.staged = k
+}
+
+// ActivateStaged promotes the staged key to active (retiring the previous active)
+// and clears the stage. No-op when nothing is staged.
+func (i *OIDCIssuer) ActivateStaged() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.staged == nil {
+		return
+	}
+	if i.active != nil && i.active.kid != i.staged.kid {
+		i.active.retiredAt = time.Now()
+		i.retired = append(i.retired, i.active)
+	}
+	i.active = i.staged
+	i.staged = nil
+}
+
+// RestoreKeys installs a full keyset loaded from storage (active plus retired),
+// used on unseal / standby promotion so in-flight assertions signed by a
+// retired key still verify.
+func (i *OIDCIssuer) RestoreKeys(active *signingKey, retired []*signingKey) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.active = active
+	i.retired = append([]*signingKey(nil), retired...)
+}
+
+// Keys returns the active key and a copy of the retired set, for persistence.
+func (i *OIDCIssuer) Keys() (active *signingKey, retired []*signingKey) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.active, append([]*signingKey(nil), i.retired...)
+}
+
+// PruneRetired drops retired keys retired before cutoff (their assertions have
+// all expired) and returns how many were removed.
+func (i *OIDCIssuer) PruneRetired(cutoff time.Time) int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	before := len(i.retired)
+	i.retired = prunedRetired(i.retired, cutoff)
+	return before - len(i.retired)
+}
+
+// prunedRetired returns retired keys not yet past cutoff (a fresh copy).
+func prunedRetired(retired []*signingKey, cutoff time.Time) []*signingKey {
+	out := make([]*signingKey, 0, len(retired))
+	for _, k := range retired {
+		if k.retiredAt.Before(cutoff) {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
+// PendingActivation returns the (active, retired) keyset that ActivateStaged
+// followed by PruneRetired(cutoff) would produce, WITHOUT mutating the issuer.
+// The rotation loop persists this before flipping in memory, so nothing signs
+// with a key that is not yet in storage. When nothing is staged it returns the
+// current active plus the pruned retired set.
+func (i *OIDCIssuer) PendingActivation(cutoff time.Time) (active *signingKey, retired []*signingKey) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.staged == nil {
+		return i.active, prunedRetired(i.retired, cutoff)
+	}
+	next := append([]*signingKey(nil), i.retired...)
+	if i.active != nil && i.active.kid != i.staged.kid {
+		// Copy so the persisted retiredAt does not mutate the live active key.
+		old := *i.active
+		old.retiredAt = time.Now()
+		next = append(next, &old)
+	}
+	return i.staged, prunedRetired(next, cutoff)
 }
 
 // generateSigningKey creates a fresh RSA-2048 keypair and its RFC 7638 key id.
@@ -191,15 +313,18 @@ func wardenSubject(te *logical.TokenEntry) string {
 	return fmt.Sprintf("wid:%s:%s:%s", te.NamespaceID, te.MountAccessor, te.PrincipalID)
 }
 
-// JWKS returns the JSON Web Key Set (active plus retired-but-unpruned public
-// keys) that a verifier fetches to validate a minted assertion.
+// JWKS returns the JSON Web Key Set (active, retired-but-unpruned, and a staged
+// key) that a verifier fetches to validate a minted assertion.
 func (i *OIDCIssuer) JWKS() ([]byte, error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 
-	keys := make([]jwkRSA, 0, 1+len(i.retired))
+	keys := make([]jwkRSA, 0, 2+len(i.retired))
 	if i.active != nil {
 		keys = append(keys, rsaPublicJWK(i.active))
+	}
+	if i.staged != nil {
+		keys = append(keys, rsaPublicJWK(i.staged))
 	}
 	for _, r := range i.retired {
 		keys = append(keys, rsaPublicJWK(r))

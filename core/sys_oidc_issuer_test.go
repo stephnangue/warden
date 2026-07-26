@@ -200,6 +200,24 @@ func TestSetupOIDCIssuer_BadPublisherDoesNotFailUnseal(t *testing.T) {
 	assert.Nil(t, core.oidcPublisher, "an invalid publisher degrades to endpoint-only")
 }
 
+// TestSysOIDCIssuerConfig_RotationValidation verifies a rotation period that does
+// not exceed the activation delay is rejected.
+func TestSysOIDCIssuerConfig_RotationValidation(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	schema := backend.pathOIDCIssuer()[0].Fields
+
+	raw := map[string]any{
+		"enabled":              true,
+		"issuer_url":           "https://iss.example",
+		"key_rotation_period":  30,
+		"key_activation_delay": 60, // period <= activation delay
+	}
+	resp, err := backend.handleOIDCIssuerConfigWrite(ctx, createTestRequest(logical.UpdateOperation, "oidc-issuer/config", raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.True(t, resp.IsError())
+	assert.Contains(t, resp.Err.Error(), "must exceed key_activation_delay")
+}
+
 func TestSysOIDCIssuerConfig_RootNamespaceOnly(t *testing.T) {
 	backend, _, _ := setupTestSystemBackend(t)
 	schema := backend.pathOIDCIssuer()[0].Fields

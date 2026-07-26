@@ -50,9 +50,6 @@ type publisherConfig struct {
 	Prefix          string `json:"prefix,omitempty"`
 	AccessKeyID     string `json:"access_key_id,omitempty"`
 	SecretAccessKey string `json:"secret_access_key,omitempty"`
-
-	// CacheControl, if set, is sent on http_put / s3 uploads.
-	CacheControl string `json:"cache_control,omitempty"`
 }
 
 // JWKSPublisher pushes the issuer's public discovery + JWKS documents to an
@@ -64,8 +61,10 @@ type JWKSPublisher interface {
 }
 
 // newJWKSPublisher builds the configured publisher, or (nil, nil) when none is
-// configured (the built-in HTTP endpoint remains the surface).
-func newJWKSPublisher(cfg publisherConfig) (JWKSPublisher, error) {
+// configured (the built-in HTTP endpoint remains the surface). cacheControl is
+// the Cache-Control header value Warden derives from the key lifecycle and sends
+// on uploads, so a cached JWKS never outlives the rotation overlap.
+func newJWKSPublisher(cfg publisherConfig, cacheControl string) (JWKSPublisher, error) {
 	switch cfg.Type {
 	case "", "none":
 		return nil, nil
@@ -75,9 +74,9 @@ func newJWKSPublisher(cfg publisherConfig) (JWKSPublisher, error) {
 		}
 		return &localFilePublisher{dir: cfg.Dir}, nil
 	case "http_put":
-		return newHTTPPutPublisher(cfg)
+		return newHTTPPutPublisher(cfg, cacheControl)
 	case "s3":
-		return newS3Publisher(cfg)
+		return newS3Publisher(cfg, cacheControl)
 	default:
 		return nil, fmt.Errorf("oidc publisher: unsupported type %q", cfg.Type)
 	}
@@ -117,7 +116,7 @@ type httpPutPublisher struct {
 	client       *http.Client
 }
 
-func newHTTPPutPublisher(cfg publisherConfig) (JWKSPublisher, error) {
+func newHTTPPutPublisher(cfg publisherConfig, cacheControl string) (JWKSPublisher, error) {
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("oidc publisher: http_put requires 'base_url'")
 	}
@@ -129,7 +128,7 @@ func newHTTPPutPublisher(cfg publisherConfig) (JWKSPublisher, error) {
 		baseURL:      strings.TrimRight(cfg.BaseURL, "/"),
 		authHeader:   authHeader,
 		authValue:    cfg.AuthValue,
-		cacheControl: cfg.CacheControl,
+		cacheControl: cacheControl,
 		client:       &http.Client{Timeout: 15 * time.Second},
 	}, nil
 }
@@ -177,7 +176,7 @@ type s3Publisher struct {
 	cacheControl string
 }
 
-func newS3Publisher(cfg publisherConfig) (JWKSPublisher, error) {
+func newS3Publisher(cfg publisherConfig, cacheControl string) (JWKSPublisher, error) {
 	if cfg.Bucket == "" || cfg.Region == "" {
 		return nil, fmt.Errorf("oidc publisher: s3 requires 'bucket' and 'region'")
 	}
@@ -192,7 +191,7 @@ func newS3Publisher(cfg publisherConfig) (JWKSPublisher, error) {
 		client:       client,
 		bucket:       cfg.Bucket,
 		prefix:       strings.Trim(cfg.Prefix, "/"),
-		cacheControl: cfg.CacheControl,
+		cacheControl: cacheControl,
 	}, nil
 }
 

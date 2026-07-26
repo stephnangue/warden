@@ -18,27 +18,27 @@ import (
 
 func TestNewJWKSPublisher_Dispatch(t *testing.T) {
 	// none -> nil publisher.
-	p, err := newJWKSPublisher(publisherConfig{})
+	p, err := newJWKSPublisher(publisherConfig{}, "")
 	require.NoError(t, err)
 	assert.Nil(t, p)
 
 	// missing required fields error.
-	_, err = newJWKSPublisher(publisherConfig{Type: "local_file"})
+	_, err = newJWKSPublisher(publisherConfig{Type: "local_file"}, "")
 	require.Error(t, err)
-	_, err = newJWKSPublisher(publisherConfig{Type: "http_put"})
+	_, err = newJWKSPublisher(publisherConfig{Type: "http_put"}, "")
 	require.Error(t, err)
-	_, err = newJWKSPublisher(publisherConfig{Type: "s3", Bucket: "b", Region: "r"})
+	_, err = newJWKSPublisher(publisherConfig{Type: "s3", Bucket: "b", Region: "r"}, "")
 	require.Error(t, err) // missing keys
 
 	// unsupported type.
-	_, err = newJWKSPublisher(publisherConfig{Type: "ftp"})
+	_, err = newJWKSPublisher(publisherConfig{Type: "ftp"}, "")
 	require.Error(t, err)
 
 	// valid constructions.
-	p, err = newJWKSPublisher(publisherConfig{Type: "local_file", Dir: t.TempDir()})
+	p, err = newJWKSPublisher(publisherConfig{Type: "local_file", Dir: t.TempDir()}, "")
 	require.NoError(t, err)
 	assert.Equal(t, "local_file", p.Type())
-	p, err = newJWKSPublisher(publisherConfig{Type: "http_put", BaseURL: "https://x"})
+	p, err = newJWKSPublisher(publisherConfig{Type: "http_put", BaseURL: "https://x"}, "")
 	require.NoError(t, err)
 	assert.Equal(t, "http_put", p.Type())
 }
@@ -68,8 +68,8 @@ func TestHTTPPutPublisher(t *testing.T) {
 	defer srv.Close()
 
 	p, err := newJWKSPublisher(publisherConfig{
-		Type: "http_put", BaseURL: srv.URL, AuthValue: "Bearer cf-token", CacheControl: "max-age=60",
-	})
+		Type: "http_put", BaseURL: srv.URL, AuthValue: "Bearer cf-token",
+	}, "public, max-age=60")
 	require.NoError(t, err)
 	require.NoError(t, p.Publish(context.Background(), []byte(`{"issuer":"x"}`), []byte(`{"keys":[]}`)))
 
@@ -77,7 +77,7 @@ func TestHTTPPutPublisher(t *testing.T) {
 	require.True(t, ok, "discovery must be PUT")
 	assert.Equal(t, http.MethodPut, disc.method)
 	assert.Equal(t, "Bearer cf-token", disc.auth, "auth header must be sent")
-	assert.Equal(t, "max-age=60", disc.cc)
+	assert.Equal(t, "public, max-age=60", disc.cc)
 
 	jwks, ok := seen["/oidc/jwks"]
 	require.True(t, ok, "jwks must be PUT")
@@ -89,7 +89,7 @@ func TestHTTPPutPublisher_ErrorOnNon2xx(t *testing.T) {
 		w.WriteHeader(http.StatusForbidden)
 	}))
 	defer srv.Close()
-	p, err := newJWKSPublisher(publisherConfig{Type: "http_put", BaseURL: srv.URL, AuthValue: "Bearer x"})
+	p, err := newJWKSPublisher(publisherConfig{Type: "http_put", BaseURL: srv.URL, AuthValue: "Bearer x"}, "")
 	require.NoError(t, err)
 	require.Error(t, p.Publish(context.Background(), []byte(`{}`), []byte(`{}`)))
 }

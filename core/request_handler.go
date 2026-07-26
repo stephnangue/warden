@@ -1284,7 +1284,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// Warden mints a fresh, short-lived assertion of the caller's resolved
 		// identity (origin verified — Warden signed it). Fails closed if the
 		// issuer is disabled/not-ready or the audience is missing.
-		issuer := c.oidcIssuer
+		issuer := c.OIDCIssuer()
 		if issuer == nil || !issuer.Ready() {
 			return nil, fmt.Errorf("spec %q requires subject_token_source=warden_identity but the OIDC issuer is not enabled/ready", specName)
 		}

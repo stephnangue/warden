@@ -43,7 +43,7 @@ func handleOIDCDiscovery(c *core.Core, log *logger.GatedLogger) http.Handler {
 			respondError(w, http.StatusInternalServerError, "failed to build discovery document")
 			return
 		}
-		writeJSONBytes(w, doc)
+		writeJSONBytes(w, doc, issuer.CacheControl())
 	})
 }
 
@@ -66,17 +66,18 @@ func handleOIDCJWKS(c *core.Core, log *logger.GatedLogger) http.Handler {
 			respondError(w, http.StatusInternalServerError, "failed to build jwks")
 			return
 		}
-		writeJSONBytes(w, jwks)
+		writeJSONBytes(w, jwks, issuer.CacheControl())
 	})
 }
 
-// writeJSONBytes writes a pre-marshalled JSON body with a short cache lifetime.
-// The cache window is deliberately shorter than the signing-key retirement
-// overlap so a rotated-in key is visible before it signs and a rotated-out key
-// is dropped promptly.
-func writeJSONBytes(w http.ResponseWriter, body []byte) {
+// writeJSONBytes writes a pre-marshalled JSON body with the issuer's derived
+// Cache-Control (from the key-activation delay), so a cached JWKS never outlives
+// the window in which a rotated-in key must be fetched.
+func writeJSONBytes(w http.ResponseWriter, body []byte, cacheControl string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "public, max-age=60")
+	if cacheControl != "" {
+		w.Header().Set("Cache-Control", cacheControl)
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }

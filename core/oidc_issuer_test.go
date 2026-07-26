@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/hashicorp/cap/jwt"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func newReadyIssuer(t *testing.T, issuerURL string) *OIDCIssuer {
@@ -129,10 +132,10 @@ func TestOIDCIssuer_KeyStorage_RoundTrip(t *testing.T) {
 	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
 	ctx := context.Background()
 
-	// No key yet -> (nil, nil).
-	got, err := loadSigningKey(ctx, storage)
+	// No key yet -> (nil, nil, nil).
+	got, _, err := loadKeySet(ctx, storage)
 	if err != nil {
-		t.Fatalf("loadSigningKey (empty): %v", err)
+		t.Fatalf("loadKeySet (empty): %v", err)
 	}
 	if got != nil {
 		t.Fatal("expected no signing key before one is persisted")
@@ -142,13 +145,13 @@ func TestOIDCIssuer_KeyStorage_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generateSigningKey: %v", err)
 	}
-	if err := persistSigningKey(ctx, storage, original); err != nil {
-		t.Fatalf("persistSigningKey: %v", err)
+	if err := persistKeySet(ctx, storage, original, nil); err != nil {
+		t.Fatalf("persistKeySet: %v", err)
 	}
 
-	loaded, err := loadSigningKey(ctx, storage)
+	loaded, _, err := loadKeySet(ctx, storage)
 	if err != nil {
-		t.Fatalf("loadSigningKey: %v", err)
+		t.Fatalf("loadKeySet: %v", err)
 	}
 	if loaded == nil {
 		t.Fatal("expected a signing key after persist")
@@ -221,7 +224,7 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	if iss := core.OIDCIssuer(); iss == nil || iss.Ready() {
 		t.Fatal("standby with no key must produce a not-ready issuer")
 	}
-	if k, _ := loadSigningKey(ctx, storage); k != nil {
+	if k, _, _ := loadKeySet(ctx, storage); k != nil {
 		t.Fatal("standby must not generate/persist a key")
 	}
 
@@ -237,7 +240,7 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	if err != nil || tok == "" {
 		t.Fatalf("ready issuer must mint: %v", err)
 	}
-	persisted, _ := loadSigningKey(ctx, storage)
+	persisted, _, _ := loadKeySet(ctx, storage)
 	if persisted == nil {
 		t.Fatal("active node must persist the generated key")
 	}
@@ -247,7 +250,7 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	if err := core.setupOIDCIssuer(ctx, false); err != nil {
 		t.Fatalf("setup (reuse): %v", err)
 	}
-	reloaded, _ := loadSigningKey(ctx, storage)
+	reloaded, _, _ := loadKeySet(ctx, storage)
 	if reloaded == nil || reloaded.kid != firstKid {
 		t.Fatal("re-setup must reuse the persisted signing key")
 	}
@@ -259,6 +262,248 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	if core.OIDCIssuer() != nil {
 		t.Fatal("stopOIDCIssuer must clear the issuer")
 	}
+}
+
+// jwksKIDs returns the set of key ids in an issuer's current JWKS.
+func jwksKIDs(t *testing.T, iss *OIDCIssuer) map[string]bool {
+	t.Helper()
+	body, err := iss.JWKS()
+	if err != nil {
+		t.Fatalf("JWKS: %v", err)
+	}
+	var set struct {
+		Keys []struct {
+			Kid string `json:"kid"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal(body, &set); err != nil {
+		t.Fatalf("unmarshal jwks: %v", err)
+	}
+	out := map[string]bool{}
+	for _, k := range set.Keys {
+		out[k.Kid] = true
+	}
+	return out
+}
+
+// spyPublisher records the JWKS bytes of each Publish call.
+type spyPublisher struct{ jwks [][]byte }
+
+func (s *spyPublisher) Type() string { return "spy" }
+func (s *spyPublisher) Publish(_ context.Context, _, jwks []byte) error {
+	s.jwks = append(s.jwks, append([]byte(nil), jwks...))
+	return nil
+}
+
+func enableIssuer(t *testing.T, core *Core) *OIDCIssuer {
+	t.Helper()
+	ctx := context.Background()
+	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
+	require.NoError(t, saveIssuerConfig(ctx, storage, &issuerConfig{Enabled: true, IssuerURL: "https://iss.example"}))
+	require.NoError(t, core.setupOIDCIssuer(ctx, false))
+	iss := core.OIDCIssuer()
+	require.NotNil(t, iss)
+	require.True(t, iss.Ready())
+	return iss
+}
+
+// TestRotateOIDCKey covers one rotation with no external publisher: the active
+// key changes, the old key is retired (still in the JWKS), and the keyset is
+// persisted.
+func TestRotateOIDCKey(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	ctx := context.Background()
+	iss := enableIssuer(t, core)
+
+	oldActive, _ := iss.Keys()
+	oldKid := oldActive.kid
+
+	require.NoError(t, core.rotateOIDCKey(ctx, iss, nil, 0, defaultKeyOverlap))
+
+	newActive, retired := iss.Keys()
+	assert.NotEqual(t, oldKid, newActive.kid, "active key must change on rotation")
+	require.Len(t, retired, 1)
+	assert.Equal(t, oldKid, retired[0].kid, "the old key must be retired")
+	assert.False(t, retired[0].retiredAt.IsZero(), "retiredAt must be set")
+
+	// JWKS carries both keys during overlap.
+	kids := jwksKIDs(t, iss)
+	assert.True(t, kids[newActive.kid] && kids[oldKid], "JWKS must contain both keys")
+
+	// Persisted keyset reflects the rotation.
+	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
+	pActive, pRetired, err := loadKeySet(ctx, storage)
+	require.NoError(t, err)
+	assert.Equal(t, newActive.kid, pActive.kid)
+	require.Len(t, pRetired, 1)
+	assert.Equal(t, oldKid, pRetired[0].kid)
+}
+
+// TestOIDCIssuer_DerivedCacheControl verifies the Cache-Control is derived from
+// the activation delay and wired onto the issuer at setup.
+func TestOIDCIssuer_DerivedCacheControl(t *testing.T) {
+	assert.Equal(t, "public, max-age=120", oidcCacheControl(120*time.Second))
+	assert.Equal(t, "public, max-age=0", oidcCacheControl(0))
+
+	iss := NewOIDCIssuer("https://iss")
+	iss.SetCacheControl(90 * time.Second)
+	assert.Equal(t, "public, max-age=90", iss.CacheControl())
+
+	// Setup derives it from key_activation_delay.
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	ctx := context.Background()
+	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
+	require.NoError(t, saveIssuerConfig(ctx, storage, &issuerConfig{
+		Enabled: true, IssuerURL: "https://iss.example", KeyActivationDelay: "150s",
+	}))
+	require.NoError(t, core.setupOIDCIssuer(ctx, false))
+	assert.Equal(t, "public, max-age=150", core.OIDCIssuer().CacheControl())
+}
+
+// TestOIDCIssuer_PruneRetired verifies retired keys are pruned by cutoff.
+func TestOIDCIssuer_PruneRetired(t *testing.T) {
+	iss := newReadyIssuer(t, "https://iss.example")
+	k2, err := generateSigningKey()
+	require.NoError(t, err)
+	iss.SetActiveKey(k2) // retires k1 with retiredAt=now
+	_, retired := iss.Keys()
+	require.Len(t, retired, 1)
+
+	// Cutoff in the past keeps a freshly-retired key.
+	assert.Equal(t, 0, iss.PruneRetired(time.Now().Add(-time.Hour)))
+	_, retired = iss.Keys()
+	assert.Len(t, retired, 1)
+
+	// Cutoff in the future prunes it.
+	assert.Equal(t, 1, iss.PruneRetired(time.Now().Add(time.Hour)))
+	_, retired = iss.Keys()
+	assert.Len(t, retired, 0)
+}
+
+// TestRotateOIDCKey_StagesBeforeActivate proves the two-stage ordering: the new
+// key is published (staged) before it becomes active, so a verifier can fetch it
+// first.
+func TestRotateOIDCKey_StagesBeforeActivate(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	ctx := context.Background()
+	iss := enableIssuer(t, core)
+
+	spy := &spyPublisher{}
+
+	oldActive, _ := iss.Keys()
+	oldKid := oldActive.kid
+
+	// 5ms activation delay keeps the test fast while still exercising the wait.
+	require.NoError(t, core.rotateOIDCKey(ctx, iss, spy, 5*time.Millisecond, defaultKeyOverlap))
+	newActive, _ := iss.Keys()
+
+	require.GreaterOrEqual(t, len(spy.jwks), 1, "the staged key must be published")
+	// The very first publish (staged, pre-activation) already contains the
+	// new key alongside the still-active old key.
+	var first struct {
+		Keys []struct {
+			Kid string `json:"kid"`
+		} `json:"keys"`
+	}
+	require.NoError(t, json.Unmarshal(spy.jwks[0], &first))
+	got := map[string]bool{}
+	for _, k := range first.Keys {
+		got[k.Kid] = true
+	}
+	assert.True(t, got[newActive.kid], "the new key must be in the JWKS before it is activated")
+	assert.True(t, got[oldKid], "the old (still-active) key must also be present")
+}
+
+// TestRotateOIDCKey_CancelAbandonsStage verifies that a context cancelled during
+// the activation delay abandons the staged key: the active key is unchanged, the
+// keyset is not persisted, and no orphan key is left staged.
+func TestRotateOIDCKey_CancelAbandonsStage(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	iss := enableIssuer(t, core)
+
+	before, _ := iss.Keys()
+	beforeKid := before.kid
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled: the activation-delay select returns immediately
+
+	err := core.rotateOIDCKey(ctx, iss, &spyPublisher{}, time.Minute, defaultKeyOverlap)
+	require.Error(t, err)
+
+	after, retired := iss.Keys()
+	assert.Equal(t, beforeKid, after.kid, "active key must be unchanged after an aborted rotation")
+	assert.Len(t, retired, 0, "no key should be retired")
+	assert.Len(t, jwksKIDs(t, iss), 1, "no staged key should remain in the JWKS")
+
+	// Persisted keyset still has only the original active.
+	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
+	pActive, pRetired, _ := loadKeySet(context.Background(), storage)
+	assert.Equal(t, beforeKid, pActive.kid)
+	assert.Len(t, pRetired, 0)
+}
+
+// TestRotateOIDCKey_RepublishesFinalKeyset checks the post-activation republish:
+// the last published JWKS contains the new active and the retired old key.
+func TestRotateOIDCKey_RepublishesFinalKeyset(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	iss := enableIssuer(t, core)
+	spy := &spyPublisher{}
+	oldActive, _ := iss.Keys()
+
+	require.NoError(t, core.rotateOIDCKey(context.Background(), iss, spy, 0, defaultKeyOverlap))
+	newActive, _ := iss.Keys()
+
+	require.GreaterOrEqual(t, len(spy.jwks), 2, "staged publish + final republish")
+	var last struct {
+		Keys []struct {
+			Kid string `json:"kid"`
+		} `json:"keys"`
+	}
+	require.NoError(t, json.Unmarshal(spy.jwks[len(spy.jwks)-1], &last))
+	got := map[string]bool{}
+	for _, k := range last.Keys {
+		got[k.Kid] = true
+	}
+	assert.True(t, got[newActive.kid], "final JWKS must contain the new active key")
+	assert.True(t, got[oldActive.kid], "final JWKS must retain the retired old key")
+}
+
+// TestOIDCKeyRotation_Lifecycle checks the goroutine lifecycle: a standby starts
+// no loop; the active node starts one; and stop joins it.
+func TestOIDCKeyRotation_Lifecycle(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	iss := enableIssuer(t, core)
+
+	// Standby -> no loop.
+	core.startOIDCKeyRotation(true, time.Hour, time.Hour, iss, nil, time.Minute, time.Hour)
+	assert.Nil(t, core.oidcRotationCancel, "standby must not start a rotation loop")
+
+	// period 0 -> no loop.
+	core.startOIDCKeyRotation(false, 0, 0, iss, nil, time.Minute, time.Hour)
+	assert.Nil(t, core.oidcRotationCancel)
+
+	// Active + positive period -> loop started, with a far-future first tick so it
+	// never fires during the test.
+	core.startOIDCKeyRotation(false, time.Hour, time.Hour, iss, nil, time.Minute, time.Hour)
+	require.NotNil(t, core.oidcRotationCancel, "active node must start the loop")
+	require.NotNil(t, core.oidcRotationDone)
+	done := core.oidcRotationDone
+
+	// Stop joins the goroutine (done is closed) and clears the handles.
+	core.stopOIDCKeyRotation()
+	select {
+	case <-done:
+	default:
+		t.Fatal("stopOIDCKeyRotation must join the loop (done not closed)")
+	}
+	assert.Nil(t, core.oidcRotationCancel)
+	assert.Nil(t, core.oidcRotationDone)
 }
 
 // TestOIDCIssuer_Rotation checks that installing a new active key retires the old
