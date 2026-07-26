@@ -1,6 +1,7 @@
 package credential
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -74,14 +75,18 @@ const ConfigAssertionAudience = "assertion_audience"
 // oversized blob through the exchange plumbing.
 const maxExchangeTokenBytes = 256 * 1024
 
-// ExchangeInputs carries caller-derived RFC 8693 token-exchange inputs from an
-// inbound request down to a credential driver at mint time. The values are
-// bearer secrets: the plumbing never logs them, never persists them, and never
-// places them in a credential's data map. Only a driver that implements
-// ExchangeMinter receives them.
+// ExchangeInputs carries the RFC 8693 token-exchange inputs for one request from
+// the request handler down to a credential driver at mint time. The subject and
+// actor tokens are either derived from the inbound request (a reused auth JWT or a
+// caller-supplied header) or minted by Warden itself — a signed identity assertion
+// for Workload Identity Federation, produced lazily via ResolveSubjectToken. The
+// token values are bearer secrets: the plumbing never logs them, never persists
+// them, and never places them in a credential's data map. Only a driver that
+// implements ExchangeMinter receives them.
 type ExchangeInputs struct {
 	// SubjectToken is the RFC 8693 §2.1 subject_token — the identity being
-	// exchanged.
+	// exchanged. It may be empty until the Manager populates it when
+	// ResolveSubjectToken is set (a subject minted lazily on a cache miss).
 	SubjectToken string
 	// SubjectTokenType is the RFC 8693 §2.1 subject_token_type.
 	SubjectTokenType string
@@ -110,8 +115,21 @@ type ExchangeInputs struct {
 	// isolated while one identity reuses its cached upstream credential.
 	//
 	// It MUST be set only by core (resolveExchangeInputs), never derived from a
-	// caller-supplied value, and it does not travel to drivers as a token.
+	// caller-supplied value, and it does not travel to drivers as a token. It is
+	// mandatory whenever ResolveSubjectToken is set (enforced by Validate).
 	CacheIdentity string
+
+	// ResolveSubjectToken, when non-nil, produces SubjectToken lazily. It is
+	// invoked by the credential Manager only on a real cache MISS (inside the
+	// singleflight leader), so a per-request-expensive subject token — e.g. a
+	// Warden-signed RS256 identity assertion — is never minted just to be
+	// discarded on a cache hit. When set, SubjectToken may be empty until the
+	// Manager populates it, and CacheIdentity MUST be set so Fingerprint() is
+	// stable without the token bytes.
+	//
+	// Set only by core (resolveExchangeInputs), never from caller input. It is
+	// not hashed by Fingerprint, never logged, and never persisted.
+	ResolveSubjectToken func(ctx context.Context) (string, error)
 }
 
 // Validate performs structural checks only. It does not verify token contents
@@ -121,7 +139,14 @@ func (e *ExchangeInputs) Validate() error {
 	if e == nil {
 		return fmt.Errorf("exchange inputs are nil")
 	}
-	if e.SubjectToken == "" {
+	if e.ResolveSubjectToken != nil {
+		// Lazy subject: the token is produced on a cache miss, so it may be empty
+		// here — but the fingerprint must not then hash an empty SubjectToken and
+		// collide across identities, so CacheIdentity is mandatory.
+		if e.CacheIdentity == "" {
+			return fmt.Errorf("cache_identity is required when the subject token is resolved lazily")
+		}
+	} else if e.SubjectToken == "" {
 		return fmt.Errorf("subject_token is required")
 	}
 	if e.SubjectTokenType == "" {
@@ -172,6 +197,9 @@ func (e *ExchangeInputs) Validate() error {
 // collide. Every other field — token type, actor, origins — is always folded
 // in, so a Warden-minted subject and a raw subject that happen to share a value
 // still key differently, and delegation/provenance never share a cache entry.
+//
+// ResolveSubjectToken is intentionally NOT hashed: a lazily-minted subject sets
+// CacheIdentity (mandatory per Validate), which stands in for the token here.
 func (e *ExchangeInputs) Fingerprint() string {
 	h := sha256.New()
 	writeField := func(s string) {

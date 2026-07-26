@@ -1245,6 +1245,10 @@ const (
 // The plumbing never verifies token contents — it only records provenance via
 // SubjectTokenOrigin. Every configured-but-missing input fails the request
 // closed rather than silently minting a non-exchange credential.
+//
+// For subject_token_source=warden_identity the assertion mint is deferred to a
+// credential-cache miss (via inputs.ResolveSubjectToken) so a cache hit pays no
+// signing cost; the issuer-ready and audience checks stay eager and fail closed.
 func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, te *logical.TokenEntry) (*credential.ExchangeInputs, error) {
 	specName := te.CredentialSpec
 	spec, err := c.credConfigStore.GetSpec(ctx, specName)
@@ -1292,17 +1296,21 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		if audience == "" {
 			return nil, fmt.Errorf("spec %q with subject_token_source=warden_identity requires %s", specName, credential.ConfigAssertionAudience)
 		}
-		assertion, mintErr := issuer.MintIdentityAssertion(te, audience, issuer.AssertionTTL())
-		if mintErr != nil {
-			return nil, fmt.Errorf("spec %q: mint identity assertion: %w", specName, mintErr)
-		}
-		inputs.SubjectToken = assertion
 		inputs.SubjectTokenType = credential.TokenTypeJWT
 		inputs.SubjectTokenOrigin = credential.ExchangeOriginVerified
 		// Key the credential cache on the stable identity + audience, NOT the
 		// freshly-minted assertion bytes (which change every request), so one
 		// identity reuses its cached upstream credential.
 		inputs.CacheIdentity = wardenSubject(te) + "\x00" + audience
+		// Defer the RS256 assertion mint to a credential-cache MISS. On the hot
+		// path (a cache hit) the assertion would be minted and immediately thrown
+		// away; the Manager invokes this only on a real miss, inside its
+		// singleflight leader, so at most one assertion is minted per miss. The
+		// CacheIdentity above keys the cache, so the fingerprint never needs the
+		// (not-yet-minted) assertion bytes.
+		inputs.ResolveSubjectToken = func(context.Context) (string, error) {
+			return issuer.MintIdentityAssertion(te, audience, issuer.AssertionTTL())
+		}
 	default:
 		// SpecRequestsExchange already excluded "none"/absent; any other value
 		// was rejected at spec-validation time.

@@ -1,6 +1,12 @@
 package credential
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
+
+// stubResolve is a no-op lazy subject-token provider for tests.
+func stubResolve(context.Context) (string, error) { return "lazy-token", nil }
 
 func TestExchangeInputs_Validate(t *testing.T) {
 	tests := []struct {
@@ -31,6 +37,25 @@ func TestExchangeInputs_Validate(t *testing.T) {
 			inputs: &ExchangeInputs{
 				SubjectTokenType:   TokenTypeJWT,
 				SubjectTokenOrigin: ExchangeOriginVerified,
+			},
+			wantErr: true,
+		},
+		{
+			name: "lazy subject with cache identity",
+			inputs: &ExchangeInputs{
+				// SubjectToken empty on purpose: resolved lazily on a cache miss.
+				SubjectTokenType:    TokenTypeJWT,
+				SubjectTokenOrigin:  ExchangeOriginVerified,
+				CacheIdentity:       "wid:ns:mount:alice\x00aud",
+				ResolveSubjectToken: stubResolve,
+			},
+		},
+		{
+			name: "lazy subject without cache identity",
+			inputs: &ExchangeInputs{
+				SubjectTokenType:    TokenTypeJWT,
+				SubjectTokenOrigin:  ExchangeOriginVerified,
+				ResolveSubjectToken: stubResolve,
 			},
 			wantErr: true,
 		},
@@ -173,6 +198,31 @@ func TestExchangeInputs_Fingerprint_CacheIdentity(t *testing.T) {
 	withoutID := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT}
 	if withID.Fingerprint() == withoutID.Fingerprint() {
 		t.Fatal("CacheIdentity must be folded into the fingerprint")
+	}
+}
+
+// TestExchangeInputs_Fingerprint_IgnoresResolveClosure proves the lazy provider
+// does not enter the cache key: a leader (closure set, subject not yet minted)
+// and a would-be follower must key identically so they share one cache entry.
+func TestExchangeInputs_Fingerprint_IgnoresResolveClosure(t *testing.T) {
+	base := ExchangeInputs{
+		SubjectTokenType:   TokenTypeJWT,
+		SubjectTokenOrigin: ExchangeOriginVerified,
+		CacheIdentity:      "wid:ns:mount:alice\x00aud",
+	}
+	withClosure := base
+	withClosure.ResolveSubjectToken = stubResolve
+
+	if base.Fingerprint() != withClosure.Fingerprint() {
+		t.Fatal("ResolveSubjectToken must not affect the fingerprint")
+	}
+
+	// And a later-populated SubjectToken must also not change the key (the closure
+	// path keys on CacheIdentity, not the minted bytes).
+	populated := withClosure
+	populated.SubjectToken = "freshly-minted-assertion"
+	if populated.Fingerprint() != base.Fingerprint() {
+		t.Fatal("a lazily-populated SubjectToken must not change the CacheIdentity-keyed fingerprint")
 	}
 }
 

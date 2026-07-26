@@ -2309,6 +2309,7 @@ func TestResolveExchangeInputs_AuthToken_JWT(t *testing.T) {
 	assert.Equal(t, "eyJhbGciOi.payload.sig", inputs.SubjectToken)
 	assert.Equal(t, credential.TokenTypeJWT, inputs.SubjectTokenType)
 	assert.Equal(t, credential.ExchangeOriginVerified, inputs.SubjectTokenOrigin)
+	assert.Nil(t, inputs.ResolveSubjectToken, "non-warden_identity sources resolve eagerly")
 }
 
 func TestResolveExchangeInputs_AuthToken_OpaqueFailsClosed(t *testing.T) {
@@ -2334,6 +2335,7 @@ func TestResolveExchangeInputs_HeaderSource(t *testing.T) {
 	require.NotNil(t, inputs)
 	assert.Equal(t, "eyJ.caller.subject", inputs.SubjectToken)
 	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.SubjectTokenOrigin)
+	assert.Nil(t, inputs.ResolveSubjectToken, "non-warden_identity sources resolve eagerly")
 	assert.Empty(t, inputs.ActorToken)
 }
 
@@ -2412,7 +2414,7 @@ func TestResolveExchangeInputs_ActorHeader_MissingFailsClosed(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestResolveExchangeInputs_WardenIdentity(t *testing.T) {
+func TestResolveExchangeInputs_WardenIdentity_MintDeferred(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
 	seedSpec(t, c, ctx, "wid-spec", map[string]string{
@@ -2426,19 +2428,28 @@ func TestResolveExchangeInputs_WardenIdentity(t *testing.T) {
 		NamespaceID:    "ns1",
 		MountAccessor:  "auth_jwt_1",
 	}
-	// The inbound token is opaque (not a JWT): warden_identity does not reuse it,
-	// it mints a fresh assertion, so this must still succeed.
+	// The inbound token is opaque (not a JWT): warden_identity does not reuse it.
 	req := requestWith("s.opaque-session", nil)
 
 	inputs, err := c.resolveExchangeInputs(ctx, req, te)
 	require.NoError(t, err)
 	require.NotNil(t, inputs)
-	assert.True(t, strings.HasPrefix(inputs.SubjectToken, "eyJ"), "subject must be a minted JWT assertion")
+
+	// The RS256 mint is DEFERRED to a credential-cache miss: no assertion bytes
+	// are produced here, but the eager metadata + the lazy provider are set so the
+	// cache key is stable and the mint runs only when actually needed.
+	assert.Empty(t, inputs.SubjectToken, "assertion must not be minted eagerly")
+	require.NotNil(t, inputs.ResolveSubjectToken, "a lazy subject-token provider must be set")
 	assert.Equal(t, credential.TokenTypeJWT, inputs.SubjectTokenType)
 	assert.Equal(t, credential.ExchangeOriginVerified, inputs.SubjectTokenOrigin)
 	assert.Equal(t, wardenSubject(te)+"\x00"+"https://sts.example/aud", inputs.CacheIdentity)
 
-	// Cache identity is stable across re-mints even though the assertion bytes differ.
+	// Invoking the provider mints a real JWT assertion (what the Manager does on a miss).
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(tok, "eyJ"), "the provider must mint a JWT assertion")
+
+	// The cache identity is stable across requests and needs no mint to compute.
 	inputs2, err := c.resolveExchangeInputs(ctx, req, te)
 	require.NoError(t, err)
 	assert.Equal(t, inputs.CacheIdentity, inputs2.CacheIdentity, "cache identity must be stable")
