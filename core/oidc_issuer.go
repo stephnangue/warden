@@ -239,7 +239,13 @@ func generateSigningKey() (*signingKey, error) {
 // presentation to the upstream named by audience. It fails closed when the issuer
 // has no active key or when audience is empty (an assertion without an audience
 // is replayable at any upstream whose trust policy does not pin `aud`).
-func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, audience string, ttl time.Duration) (string, error) {
+//
+// metadata, when non-empty, is embedded under a single nested "warden_metadata"
+// claim (never splatted at the top level, so it cannot clobber a registered or
+// warden_* claim). The caller is responsible for choosing and bounding what it
+// contains: the assertion crosses a trust boundary, so only operator-allowlisted,
+// size-capped attributes should reach this point.
+func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, audience string, ttl time.Duration, metadata map[string]string) (string, error) {
 	if te == nil {
 		return "", fmt.Errorf("oidc issuer: nil token entry")
 	}
@@ -280,6 +286,9 @@ func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, audience stri
 		"warden_role":       te.RoleName,
 		"warden_namespace":  te.NamespacePath,
 		"warden_auth_mount": te.MountAccessor,
+	}
+	if len(metadata) > 0 {
+		claims["warden_metadata"] = metadata
 	}
 	header := map[string]string{"alg": oidcSigningAlg, "typ": "JWT", "kid": active.kid}
 

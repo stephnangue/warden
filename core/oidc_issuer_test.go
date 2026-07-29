@@ -76,7 +76,7 @@ func TestOIDCIssuer_Mint_VerifiesAgainstJWKS(t *testing.T) {
 	}
 	const audience = "https://sso.acme.internal/realms/acme"
 
-	token, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute)
+	token, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute, nil)
 	if err != nil {
 		t.Fatalf("MintIdentityAssertion: %v", err)
 	}
@@ -114,6 +114,45 @@ func TestOIDCIssuer_Mint_VerifiesAgainstJWKS(t *testing.T) {
 	}
 }
 
+// TestOIDCIssuer_Mint_WardenMetadataClaim verifies that projected metadata rides
+// under a single nested "warden_metadata" claim, verifiable against the JWKS, and
+// that an empty projection emits no such claim (byte-for-byte the prior behavior).
+func TestOIDCIssuer_Mint_WardenMetadataClaim(t *testing.T) {
+	const issuerURL = "https://warden-oidc.example.com"
+	iss := newReadyIssuer(t, issuerURL)
+	jwks := serveJWKS(t, iss)
+	te := &logical.TokenEntry{PrincipalID: "p", RoleName: "r", NamespaceID: "n", MountAccessor: "m"}
+	const audience = "sts.amazonaws.com"
+
+	ctx := context.Background()
+	keySet, err := jwt.NewJSONWebKeySet(ctx, jwks.URL, "")
+	require.NoError(t, err)
+	validator, err := jwt.NewValidator(keySet)
+	require.NoError(t, err)
+	expected := jwt.Expected{Issuer: issuerURL, Audiences: []string{audience}, SigningAlgorithms: []jwt.Alg{jwt.RS256}}
+
+	// With metadata: exactly the passed keys appear, nested under warden_metadata.
+	withMeta, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute, map[string]string{"team": "payments", "env": "prod"})
+	require.NoError(t, err)
+	claims, err := validator.Validate(ctx, withMeta, expected)
+	require.NoError(t, err)
+	md, ok := claims["warden_metadata"].(map[string]interface{})
+	require.True(t, ok, "warden_metadata claim missing or wrong type: %v", claims["warden_metadata"])
+	assert.Equal(t, "payments", md["team"])
+	assert.Equal(t, "prod", md["env"])
+	assert.Len(t, md, 2)
+
+	// Empty projection: no warden_metadata claim at all.
+	for _, empty := range []map[string]string{nil, {}} {
+		noMeta, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute, empty)
+		require.NoError(t, err)
+		claims, err := validator.Validate(ctx, noMeta, expected)
+		require.NoError(t, err)
+		_, present := claims["warden_metadata"]
+		assert.False(t, present, "warden_metadata must be absent for empty projection %v", empty)
+	}
+}
+
 // TestOIDCIssuer_FailClosed covers the cases where minting must refuse.
 func TestOIDCIssuer_FailClosed(t *testing.T) {
 	te := &logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
@@ -123,18 +162,18 @@ func TestOIDCIssuer_FailClosed(t *testing.T) {
 	if notReady.Ready() {
 		t.Fatal("issuer with no key must not be ready")
 	}
-	if _, err := notReady.MintIdentityAssertion(te, "aud", time.Minute); err == nil {
+	if _, err := notReady.MintIdentityAssertion(te, "aud", time.Minute, nil); err == nil {
 		t.Error("mint must fail closed when no active key is installed")
 	}
 
 	ready := newReadyIssuer(t, "https://iss.example")
-	if _, err := ready.MintIdentityAssertion(te, "", time.Minute); err == nil {
+	if _, err := ready.MintIdentityAssertion(te, "", time.Minute, nil); err == nil {
 		t.Error("mint must fail closed on empty audience")
 	}
-	if _, err := ready.MintIdentityAssertion(nil, "aud", time.Minute); err == nil {
+	if _, err := ready.MintIdentityAssertion(nil, "aud", time.Minute, nil); err == nil {
 		t.Error("mint must fail closed on nil token entry")
 	}
-	if _, err := ready.MintIdentityAssertion(&logical.TokenEntry{}, "aud", time.Minute); err == nil {
+	if _, err := ready.MintIdentityAssertion(&logical.TokenEntry{}, "aud", time.Minute, nil); err == nil {
 		t.Error("mint must fail closed when the principal is empty")
 	}
 
@@ -149,7 +188,7 @@ func TestOIDCIssuer_FailClosed(t *testing.T) {
 	if nextOnly.Ready() {
 		t.Error("an issuer with only a next key must not be ready")
 	}
-	if _, err := nextOnly.MintIdentityAssertion(te, "aud", time.Minute); err == nil {
+	if _, err := nextOnly.MintIdentityAssertion(te, "aud", time.Minute, nil); err == nil {
 		t.Error("mint must fail closed when only a next key is installed")
 	}
 }
@@ -215,7 +254,7 @@ func TestOIDCIssuer_KeyStorage_RoundTrip(t *testing.T) {
 	iss := NewOIDCIssuer("https://iss.example")
 	iss.RestoreKeys(loaded, loadedNext, nil)
 	jwks := serveJWKS(t, iss)
-	tok, err := iss.MintIdentityAssertion(&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, "aud", time.Minute)
+	tok, err := iss.MintIdentityAssertion(&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, "aud", time.Minute, nil)
 	if err != nil {
 		t.Fatalf("mint with reloaded key: %v", err)
 	}
@@ -284,7 +323,7 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	if iss == nil || !iss.Ready() {
 		t.Fatal("active node must produce a ready issuer")
 	}
-	tok, err := iss.MintIdentityAssertion(&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, "aud", time.Minute)
+	tok, err := iss.MintIdentityAssertion(&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, "aud", time.Minute, nil)
 	if err != nil || tok == "" {
 		t.Fatalf("ready issuer must mint: %v", err)
 	}
@@ -569,7 +608,7 @@ func TestOIDCIssuer_Rotation(t *testing.T) {
 	te := &logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
 
 	// Sign with key 1 (active), then rotate to promote the next key (key 2).
-	tok1, err := iss.MintIdentityAssertion(te, "aud", 5*time.Minute)
+	tok1, err := iss.MintIdentityAssertion(te, "aud", 5*time.Minute, nil)
 	if err != nil {
 		t.Fatalf("mint 1: %v", err)
 	}
@@ -600,7 +639,7 @@ func TestOIDCIssuer_Rotation(t *testing.T) {
 	}
 
 	// A new assertion signed by the active key verifies too.
-	tok2, err := iss.MintIdentityAssertion(te, "aud", 5*time.Minute)
+	tok2, err := iss.MintIdentityAssertion(te, "aud", 5*time.Minute, nil)
 	if err != nil {
 		t.Fatalf("mint 2: %v", err)
 	}

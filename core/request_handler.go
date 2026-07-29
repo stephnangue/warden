@@ -1238,6 +1238,44 @@ const (
 	headerActorToken   = "X-Warden-Actor-Token"
 )
 
+// maxAssertionMetadataBytes bounds the JSON size of the metadata projected into a
+// warden_identity assertion. The assertion is a bearer token presented to a
+// third-party upstream (STS, an OAuth endpoint) that enforces its own token-size
+// limits, so an oversized projection fails closed here rather than breaking the
+// exchange downstream.
+const maxAssertionMetadataBytes = 4 * 1024
+
+// projectAssertionMetadata selects the operator-allowlisted keys from the token's
+// login-derived metadata for embedding in a warden_identity assertion. Absent keys
+// are skipped (as the auth-method extractors do). It returns the projected map plus
+// a canonical fingerprint fragment (the marshalled JSON, whose object keys Go sorts
+// deterministically) that isolates the credential cache per distinct projected
+// metadata, so two tokens sharing subject+audience but differing in projected
+// metadata never share a cached upstream credential. It fails closed when the
+// projection exceeds maxAssertionMetadataBytes.
+func projectAssertionMetadata(md map[string]string, keys []string) (map[string]string, string, error) {
+	if len(keys) == 0 || len(md) == 0 {
+		return nil, "", nil
+	}
+	projected := make(map[string]string, len(keys))
+	for _, k := range keys {
+		if v, ok := md[k]; ok {
+			projected[k] = v
+		}
+	}
+	if len(projected) == 0 {
+		return nil, "", nil
+	}
+	encoded, err := json.Marshal(projected)
+	if err != nil {
+		return nil, "", fmt.Errorf("marshal assertion metadata: %w", err)
+	}
+	if len(encoded) > maxAssertionMetadataBytes {
+		return nil, "", fmt.Errorf("assertion metadata exceeds %d bytes", maxAssertionMetadataBytes)
+	}
+	return projected, string(encoded), nil
+}
+
 // resolveExchangeInputs derives the token-exchange inputs for a request from the
 // credential spec's configuration. It returns (nil, nil) when the spec does not
 // opt into exchange, so the non-exchange mint path is completely unaffected.
@@ -1296,12 +1334,26 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		if audience == "" {
 			return nil, fmt.Errorf("spec %q with subject_token_source=warden_identity requires %s", specName, credential.ConfigAssertionAudience)
 		}
+		// Project only the operator-allowlisted metadata keys into the assertion.
+		// Empty allowlist projects nothing (mdFingerprint is ""), so the assertion
+		// and cache key are byte-for-byte what they were before this opt-in existed.
+		projected, mdFingerprint, err := projectAssertionMetadata(te.Metadata, credential.AssertionMetadataKeys(spec.Config))
+		if err != nil {
+			return nil, fmt.Errorf("spec %q: %w", specName, err)
+		}
 		inputs.SubjectTokenType = credential.TokenTypeJWT
 		inputs.SubjectTokenOrigin = credential.ExchangeOriginVerified
 		// Key the credential cache on the stable identity + audience, NOT the
 		// freshly-minted assertion bytes (which change every request), so one
-		// identity reuses its cached upstream credential.
+		// identity reuses its cached upstream credential. When metadata is projected
+		// into the assertion, fold its fingerprint in too so two tokens sharing
+		// subject+audience but differing in projected metadata stay isolated. The
+		// fragment is appended only when non-empty, so the no-metadata cache key is
+		// byte-for-byte what it was before this opt-in existed.
 		inputs.CacheIdentity = wardenSubject(te) + "\x00" + audience
+		if mdFingerprint != "" {
+			inputs.CacheIdentity += "\x00" + mdFingerprint
+		}
 		// Defer the RS256 assertion mint to a credential-cache MISS. On the hot
 		// path (a cache hit) the assertion would be minted and immediately thrown
 		// away; the Manager invokes this only on a real miss, inside its
@@ -1309,7 +1361,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// CacheIdentity above keys the cache, so the fingerprint never needs the
 		// (not-yet-minted) assertion bytes.
 		inputs.ResolveSubjectToken = func(context.Context) (string, error) {
-			return issuer.MintIdentityAssertion(te, audience, issuer.AssertionTTL())
+			return issuer.MintIdentityAssertion(te, audience, issuer.AssertionTTL(), projected)
 		}
 	default:
 		// SpecRequestsExchange already excluded "none"/absent; any other value

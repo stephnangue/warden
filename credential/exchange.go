@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"strings"
 )
 
 // RFC 8693 §3 token-type identifiers. These label the format of a subject or
@@ -69,6 +70,38 @@ const (
 // and non-empty whenever subject_token_source=warden_identity: it is the control
 // that stops an assertion for one upstream being replayed at another.
 const ConfigAssertionAudience = "assertion_audience"
+
+// ConfigAssertionMetadataClaims is the spec-config key naming which of the
+// caller's login-derived metadata keys to project into a warden_identity
+// assertion (comma-separated). Absent/empty projects nothing — the assertion
+// crosses a trust boundary to a third-party upstream, so disclosure is opt-in and
+// operator-chosen, never the whole metadata map. Valid only when
+// subject_token_source=warden_identity.
+const ConfigAssertionMetadataClaims = "assertion_metadata_claims"
+
+// AssertionMetadataKeys parses the comma-separated ConfigAssertionMetadataClaims
+// value into a de-duplicated, order-preserving list of metadata key names,
+// ignoring blank entries and surrounding whitespace. Returns nil when unset.
+func AssertionMetadataKeys(config map[string]string) []string {
+	raw := config[ConfigAssertionMetadataClaims]
+	if raw == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var keys []string
+	for _, part := range strings.Split(raw, ",") {
+		k := strings.TrimSpace(part)
+		if k == "" {
+			continue
+		}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		keys = append(keys, k)
+	}
+	return keys
+}
 
 // maxExchangeTokenBytes bounds a single subject or actor token. Real JWTs and
 // access tokens are far smaller; the cap guards against a caller pushing an
@@ -247,6 +280,12 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	if config[ConfigSubjectTokenSource] == SourceWardenIdentity && config[ConfigAssertionAudience] == "" {
 		return fmt.Errorf("field '%s': is required when '%s' is '%s'",
 			ConfigAssertionAudience, ConfigSubjectTokenSource, SourceWardenIdentity)
+	}
+	// Projecting metadata into the assertion only makes sense when Warden mints it;
+	// on a reused/caller-supplied subject Warden does not control the claims.
+	if config[ConfigAssertionMetadataClaims] != "" && config[ConfigSubjectTokenSource] != SourceWardenIdentity {
+		return fmt.Errorf("field '%s': is valid only when '%s' is '%s'",
+			ConfigAssertionMetadataClaims, ConfigSubjectTokenSource, SourceWardenIdentity)
 	}
 	// An actor token only has meaning alongside a subject token (RFC 8693 §2.1),
 	// so reject an actor source without a subject source.

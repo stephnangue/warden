@@ -292,6 +292,22 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 			name:   "warden_identity with assertion_audience",
 			config: map[string]string{ConfigSubjectTokenSource: SourceWardenIdentity, ConfigAssertionAudience: "https://sts.example/aud"},
 		},
+		{
+			name: "assertion_metadata_claims with warden_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource:      SourceWardenIdentity,
+				ConfigAssertionAudience:       "https://sts.example/aud",
+				ConfigAssertionMetadataClaims: "team,env",
+			},
+		},
+		{
+			name: "assertion_metadata_claims without warden_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource:      SourceHeader,
+				ConfigAssertionMetadataClaims: "team",
+			},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -301,6 +317,33 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestAssertionMetadataKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"unset", "", nil},
+		{"single", "team", []string{"team"}},
+		{"multiple with spaces", " team , env ", []string{"team", "env"}},
+		{"blanks skipped", "team,,env,", []string{"team", "env"}},
+		{"dedup preserves order", "team,env,team", []string{"team", "env"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AssertionMetadataKeys(map[string]string{ConfigAssertionMetadataClaims: tt.raw})
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("got %v, want %v", got, tt.want)
+				}
 			}
 		})
 	}

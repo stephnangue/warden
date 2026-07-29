@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -2453,6 +2455,91 @@ func TestResolveExchangeInputs_WardenIdentity_MintDeferred(t *testing.T) {
 	inputs2, err := c.resolveExchangeInputs(ctx, req, te)
 	require.NoError(t, err)
 	assert.Equal(t, inputs.CacheIdentity, inputs2.CacheIdentity, "cache identity must be stable")
+}
+
+// decodeAssertionClaims base64-decodes the payload segment of a compact JWS so a
+// test can inspect the minted assertion's claims without a full JWKS round-trip.
+func decodeAssertionClaims(t *testing.T, token string) map[string]interface{} {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3, "expected a compact JWS with three segments")
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims map[string]interface{}
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return claims
+}
+
+func TestResolveExchangeInputs_WardenIdentity_MetadataProjected(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "wid-spec", map[string]string{
+		credential.ConfigSubjectTokenSource:      credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:       "https://sts.example/aud",
+		credential.ConfigAssertionMetadataClaims: "team,env",
+	})
+
+	teProd := &logical.TokenEntry{
+		CredentialSpec: "wid-spec",
+		PrincipalID:    "spiffe://acme/agent/bot",
+		NamespaceID:    "ns1",
+		MountAccessor:  "auth_jwt_1",
+		// email is NOT allowlisted and must not reach the assertion.
+		Metadata: map[string]string{"team": "payments", "env": "prod", "email": "a@b.co"},
+	}
+	req := requestWith("s.opaque-session", nil)
+
+	inputs, err := c.resolveExchangeInputs(ctx, req, teProd)
+	require.NoError(t, err)
+	require.NotNil(t, inputs.ResolveSubjectToken)
+
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+	md, ok := claims["warden_metadata"].(map[string]interface{})
+	require.True(t, ok, "warden_metadata claim missing: %v", claims["warden_metadata"])
+	assert.Equal(t, "payments", md["team"])
+	assert.Equal(t, "prod", md["env"])
+	_, leaked := md["email"]
+	assert.False(t, leaked, "non-allowlisted metadata must not be projected")
+	assert.Len(t, md, 2)
+
+	// A token differing only in projected metadata must get a DIFFERENT cache
+	// identity, so it cannot be handed another identity's cached credential.
+	teStaging := &logical.TokenEntry{
+		CredentialSpec: "wid-spec",
+		PrincipalID:    "spiffe://acme/agent/bot",
+		NamespaceID:    "ns1",
+		MountAccessor:  "auth_jwt_1",
+		Metadata:       map[string]string{"team": "payments", "env": "staging"},
+	}
+	inputsStaging, err := c.resolveExchangeInputs(ctx, req, teStaging)
+	require.NoError(t, err)
+	assert.NotEqual(t, inputs.CacheIdentity, inputsStaging.CacheIdentity,
+		"differing projected metadata must isolate the credential cache")
+}
+
+func TestResolveExchangeInputs_WardenIdentity_MetadataOverCapFailsClosed(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "wid-spec", map[string]string{
+		credential.ConfigSubjectTokenSource:      credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:       "https://sts.example/aud",
+		credential.ConfigAssertionMetadataClaims: "blob",
+	})
+
+	te := &logical.TokenEntry{
+		CredentialSpec: "wid-spec",
+		PrincipalID:    "spiffe://acme/agent/bot",
+		NamespaceID:    "ns1",
+		MountAccessor:  "auth_jwt_1",
+		Metadata:       map[string]string{"blob": strings.Repeat("x", maxAssertionMetadataBytes+1)},
+	}
+	req := requestWith("s.opaque-session", nil)
+
+	_, err := c.resolveExchangeInputs(ctx, req, te)
+	require.Error(t, err, "an over-cap metadata projection must fail closed")
+	assert.Contains(t, err.Error(), "assertion metadata exceeds")
 }
 
 func TestResolveExchangeInputs_WardenIdentity_IssuerNotReadyFailsClosed(t *testing.T) {

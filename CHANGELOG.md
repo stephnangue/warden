@@ -2,6 +2,12 @@
 
 All notable changes to Warden are documented in this file.
 
+## [Unreleased]
+
+### New Features
+
+- **`warden_identity` assertions can carry allowlisted token metadata.** A credential spec with `subject_token_source=warden_identity` may set `assertion_metadata_claims` (comma-separated) to project selected login-derived token-metadata keys into the minted assertion, so an upstream trust policy (e.g. an AWS IAM role trust condition) can gate on attributes such as `team` or `env` without Warden minting a distinct upstream role per value. The projection is opt-in and least-disclosure: absent/empty projects nothing (unchanged behavior), only the named keys are included — never the whole metadata map — and they ride under a single nested `warden_metadata` claim so they cannot clobber a registered or `warden_*` claim. The projected set is size-capped and fails the request closed if exceeded, and it is folded into the credential-cache key so two tokens that share subject and audience but differ in projected metadata never share a cached upstream credential.
+
 ## [v0.18.0] — 2026-07-23
 
 ### Breaking Changes
