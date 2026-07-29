@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,10 +15,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// keyEqual reports whether two signing keys' private halves are equal. Both
+// *rsa.PrivateKey and *ecdsa.PrivateKey implement Equal(crypto.PrivateKey).
+func keyEqual(a, b crypto.Signer) bool {
+	e, ok := a.(interface{ Equal(crypto.PrivateKey) bool })
+	return ok && e.Equal(b)
+}
+
 func newReadyIssuer(t *testing.T, issuerURL string) *OIDCIssuer {
 	t.Helper()
 	iss := NewOIDCIssuer(issuerURL)
-	key, err := generateSigningKey()
+	key, err := generateSigningKey(oidcAlgRS256)
 	if err != nil {
 		t.Fatalf("generateSigningKey: %v", err)
 	}
@@ -30,11 +38,11 @@ func newReadyIssuer(t *testing.T, issuerURL string) *OIDCIssuer {
 func newReadyIssuerWithNext(t *testing.T, issuerURL string) (iss *OIDCIssuer, active, next *signingKey) {
 	t.Helper()
 	iss = NewOIDCIssuer(issuerURL)
-	active, err := generateSigningKey()
+	active, err := generateSigningKey(oidcAlgRS256)
 	if err != nil {
 		t.Fatalf("generateSigningKey (active): %v", err)
 	}
-	next, err = generateSigningKey()
+	next, err = generateSigningKey(oidcAlgRS256)
 	if err != nil {
 		t.Fatalf("generateSigningKey (next): %v", err)
 	}
@@ -153,6 +161,81 @@ func TestOIDCIssuer_Mint_WardenMetadataClaim(t *testing.T) {
 	}
 }
 
+// TestOIDCIssuer_ES256_MintAndJWKS proves the ES256 path end-to-end: an ES256 key
+// mints an assertion that verifies against the served JWKS via cap/jwt (which
+// rejects a DER-encoded signature, so this guards the raw R‖S JWS encoding), and
+// the JWKS renders a proper EC JWK.
+func TestOIDCIssuer_ES256_MintAndJWKS(t *testing.T) {
+	const issuerURL = "https://warden-oidc.example.com"
+	iss := NewOIDCIssuer(issuerURL)
+	key, err := generateSigningKey(oidcAlgES256)
+	require.NoError(t, err)
+	iss.RestoreKeys(key, nil, nil)
+	jwks := serveJWKS(t, iss)
+
+	te := &logical.TokenEntry{PrincipalID: "p", RoleName: "r", NamespaceID: "n", MountAccessor: "m"}
+	const audience = "sts.amazonaws.com"
+	token, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute, nil)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	keySet, err := jwt.NewJSONWebKeySet(ctx, jwks.URL, "")
+	require.NoError(t, err)
+	validator, err := jwt.NewValidator(keySet)
+	require.NoError(t, err)
+	// Allow ONLY ES256: verification passing proves the header alg is ES256 and the
+	// signature is a valid raw-R‖S ES256 signature (a DER signature would fail here).
+	claims, err := validator.Validate(ctx, token, jwt.Expected{
+		Issuer: issuerURL, Audiences: []string{audience}, SigningAlgorithms: []jwt.Alg{jwt.ES256},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, wardenSubject(te), claims["sub"])
+
+	// The JWKS entry is a P-256 EC JWK (crv/x/y, no RSA n/e).
+	body, err := iss.JWKS()
+	require.NoError(t, err)
+	var set struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	require.NoError(t, json.Unmarshal(body, &set))
+	require.Len(t, set.Keys, 1)
+	k := set.Keys[0]
+	assert.Equal(t, "EC", k["kty"])
+	assert.Equal(t, "P-256", k["crv"])
+	assert.Equal(t, "ES256", k["alg"])
+	assert.Equal(t, key.kid, k["kid"])
+	assert.NotEmpty(t, k["x"])
+	assert.NotEmpty(t, k["y"])
+	_, hasN := k["n"]
+	assert.False(t, hasN, "EC JWK must not carry RSA n")
+
+	// Discovery advertises the active key's algorithm.
+	disc, err := iss.DiscoveryDocument(jwks.URL)
+	require.NoError(t, err)
+	var d struct {
+		Algs []string `json:"id_token_signing_alg_values_supported"`
+	}
+	require.NoError(t, json.Unmarshal(disc, &d))
+	assert.Equal(t, []string{"ES256"}, d.Algs)
+}
+
+// TestOIDCIssuer_ES256_StorageRoundTrip verifies an ES256 key survives the
+// polymorphic PKCS#8 storage path (alg preserved, key reloads).
+func TestOIDCIssuer_ES256_StorageRoundTrip(t *testing.T) {
+	orig, err := generateSigningKey(oidcAlgES256)
+	require.NoError(t, err)
+
+	stored, err := toStored(orig)
+	require.NoError(t, err)
+	assert.Equal(t, "ES256", stored.Alg)
+
+	loaded, err := fromStored(stored)
+	require.NoError(t, err)
+	assert.Equal(t, orig.kid, loaded.kid)
+	assert.Equal(t, "ES256", loaded.alg)
+	assert.True(t, keyEqual(loaded.key, orig.key), "reloaded ES256 key must equal the original")
+}
+
 // TestOIDCIssuer_FailClosed covers the cases where minting must refuse.
 func TestOIDCIssuer_FailClosed(t *testing.T) {
 	te := &logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
@@ -180,7 +263,7 @@ func TestOIDCIssuer_FailClosed(t *testing.T) {
 	// A next key alone (no active) is not ready — the next key never signs until
 	// it is promoted to active.
 	nextOnly := NewOIDCIssuer("https://iss.example")
-	k, err := generateSigningKey()
+	k, err := generateSigningKey(oidcAlgRS256)
 	if err != nil {
 		t.Fatalf("generateSigningKey: %v", err)
 	}
@@ -212,11 +295,11 @@ func TestOIDCIssuer_KeyStorage_RoundTrip(t *testing.T) {
 		t.Fatal("expected no signing key before one is persisted")
 	}
 
-	original, err := generateSigningKey()
+	original, err := generateSigningKey(oidcAlgRS256)
 	if err != nil {
 		t.Fatalf("generateSigningKey (active): %v", err)
 	}
-	originalNext, err := generateSigningKey()
+	originalNext, err := generateSigningKey(oidcAlgRS256)
 	if err != nil {
 		t.Fatalf("generateSigningKey (next): %v", err)
 	}
@@ -240,13 +323,13 @@ func TestOIDCIssuer_KeyStorage_RoundTrip(t *testing.T) {
 	if loaded.kid != original.kid {
 		t.Errorf("active kid mismatch: got %q want %q", loaded.kid, original.kid)
 	}
-	if !loaded.key.Equal(original.key) {
+	if !keyEqual(loaded.key, original.key) {
 		t.Error("loaded active private key does not equal the persisted one")
 	}
 	if loadedNext.kid != originalNext.kid {
 		t.Errorf("next kid mismatch: got %q want %q", loadedNext.kid, originalNext.kid)
 	}
-	if !loadedNext.key.Equal(originalNext.key) {
+	if !keyEqual(loadedNext.key, originalNext.key) {
 		t.Error("loaded next private key does not equal the persisted one")
 	}
 
@@ -467,7 +550,7 @@ func TestOIDCIssuer_DerivedCacheControl(t *testing.T) {
 // TestOIDCIssuer_PruneRetired verifies retired keys are pruned by cutoff.
 func TestOIDCIssuer_PruneRetired(t *testing.T) {
 	iss, _, _ := newReadyIssuerWithNext(t, "https://iss.example")
-	k3, err := generateSigningKey()
+	k3, err := generateSigningKey(oidcAlgRS256)
 	require.NoError(t, err)
 	// Rotate with a far-past cutoff so the freshly-retired old active is kept.
 	require.NoError(t, iss.Rotate(k3, time.Now().Add(-time.Hour)))
@@ -613,7 +696,7 @@ func TestOIDCIssuer_Rotation(t *testing.T) {
 		t.Fatalf("mint 1: %v", err)
 	}
 
-	key3, err := generateSigningKey()
+	key3, err := generateSigningKey(oidcAlgRS256)
 	if err != nil {
 		t.Fatalf("generate key 3: %v", err)
 	}
@@ -658,7 +741,7 @@ func TestOIDCIssuer_Rotate_NoNext(t *testing.T) {
 	require.NotNil(t, activeBefore)
 	require.Nil(t, nextBefore)
 
-	newNext, err := generateSigningKey()
+	newNext, err := generateSigningKey(oidcAlgRS256)
 	require.NoError(t, err)
 
 	_, _, perr := iss.PendingRotation(time.Now())
@@ -678,9 +761,9 @@ func TestOIDCIssuer_Rotate_NoNext(t *testing.T) {
 // must NOT rotate immediately.
 func TestOIDCKeyRotation_FirstTickAnchor(t *testing.T) {
 	const period = time.Hour
-	active, err := generateSigningKey()
+	active, err := generateSigningKey(oidcAlgRS256)
 	require.NoError(t, err)
-	next, err := generateSigningKey()
+	next, err := generateSigningKey(oidcAlgRS256)
 	require.NoError(t, err)
 
 	// Simulate a restart shortly after a rotation: the active key was minted a full

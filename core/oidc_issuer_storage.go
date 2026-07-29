@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
@@ -21,11 +23,11 @@ const oidcIssuerStorePrefix = "core/oidc-issuer/"
 // keyset (active plus retired-but-unexpired keys).
 const oidcKeySetPath = "keyset"
 
-// storedSigningKey is the barrier-encrypted storage format of one RSA signing key.
+// storedSigningKey is the barrier-encrypted storage format of one signing key.
 type storedSigningKey struct {
 	Kid       string    `json:"kid"`
 	Alg       string    `json:"alg"`
-	KeyPKCS8  string    `json:"key_pkcs8"` // base64(std) PKCS#8 DER of the RSA private key
+	KeyPKCS8  string    `json:"key_pkcs8"` // base64(std) PKCS#8 DER (RSA or ECDSA)
 	CreatedAt time.Time `json:"created_at"`
 	RetiredAt time.Time `json:"retired_at,omitempty"`
 }
@@ -47,7 +49,7 @@ func toStored(sk *signingKey) (storedSigningKey, error) {
 	}
 	return storedSigningKey{
 		Kid:       sk.kid,
-		Alg:       oidcSigningAlg,
+		Alg:       sk.alg,
 		KeyPKCS8:  base64.StdEncoding.EncodeToString(der),
 		CreatedAt: sk.createdAt,
 		RetiredAt: sk.retiredAt,
@@ -63,11 +65,16 @@ func fromStored(s storedSigningKey) (*signingKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("oidc issuer: parse stored key: %w", err)
 	}
-	rsaKey, ok := parsed.(*rsa.PrivateKey)
+	signer, ok := parsed.(crypto.Signer)
 	if !ok {
-		return nil, fmt.Errorf("oidc issuer: stored signing key is not RSA")
+		return nil, fmt.Errorf("oidc issuer: stored signing key is not a crypto.Signer (%T)", parsed)
 	}
-	return &signingKey{key: rsaKey, kid: s.Kid, createdAt: s.CreatedAt, retiredAt: s.RetiredAt}, nil
+	switch signer.(type) {
+	case *rsa.PrivateKey, *ecdsa.PrivateKey:
+	default:
+		return nil, fmt.Errorf("oidc issuer: unsupported stored signing key type %T", parsed)
+	}
+	return &signingKey{key: signer, alg: s.Alg, kid: s.Kid, createdAt: s.CreatedAt, retiredAt: s.RetiredAt}, nil
 }
 
 // persistKeySet writes the active + next + retired keys to storage

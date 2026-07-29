@@ -2,12 +2,15 @@ package core
 
 import (
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"sync"
 	"time"
 
@@ -65,9 +68,11 @@ func oidcCacheControl(cacheTTL time.Duration) string {
 	return fmt.Sprintf("public, max-age=%d", secs)
 }
 
-// signingKey is an RSA keypair plus its stable JWKS key id.
+// signingKey is a signing keypair (RSA or ECDSA) plus its algorithm and stable
+// JWKS key id.
 type signingKey struct {
-	key       *rsa.PrivateKey
+	key       crypto.Signer // *rsa.PrivateKey (RS256) or *ecdsa.PrivateKey (ES256)
+	alg       string        // oidcAlgRS256 | oidcAlgES256
 	kid       string
 	createdAt time.Time
 	// retiredAt is set when the key stops being active. It stays in the JWKS until
@@ -75,10 +80,14 @@ type signingKey struct {
 	retiredAt time.Time
 }
 
-// oidcSigningAlg is fixed to RS256 for v1 — the universal OIDC verifier default,
-// and the algorithm AWS IAM OIDC providers accept. EC/ES256 can be added later
-// as an additional JWKS key rather than a switch.
-const oidcSigningAlg = "RS256"
+// Supported JWS signing algorithms. RS256 (RSA-2048, PKCS#1 v1.5) is the universal
+// OIDC verifier default and the algorithm AWS IAM OIDC providers accept; ES256
+// (ECDSA P-256) is the smaller/faster alternative some upstreams prefer. They
+// coexist in one JWKS — a verifier selects the key by kid+alg from the token.
+const (
+	oidcAlgRS256 = "RS256"
+	oidcAlgES256 = "ES256"
+)
 
 // defaultClockSkewLeeway backdates nbf so a verifier with a slightly fast clock
 // does not reject a freshly minted assertion.
@@ -222,23 +231,32 @@ func (i *OIDCIssuer) Rotate(newNext *signingKey, cutoff time.Time) error {
 	return nil
 }
 
-// generateSigningKey creates a fresh RSA-2048 keypair and its RFC 7638 key id.
-func generateSigningKey() (*signingKey, error) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, fmt.Errorf("oidc issuer: generate signing key: %w", err)
+// generateSigningKey creates a fresh keypair for alg (RS256 → RSA-2048, ES256 →
+// ECDSA P-256) and its stable RFC 7638 key id.
+func generateSigningKey(alg string) (*signingKey, error) {
+	switch alg {
+	case oidcAlgRS256:
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			return nil, fmt.Errorf("oidc issuer: generate RS256 signing key: %w", err)
+		}
+		return &signingKey{key: key, alg: alg, kid: rsaThumbprint(&key.PublicKey), createdAt: time.Now()}, nil
+	case oidcAlgES256:
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("oidc issuer: generate ES256 signing key: %w", err)
+		}
+		return &signingKey{key: key, alg: alg, kid: ecThumbprint(&key.PublicKey), createdAt: time.Now()}, nil
+	default:
+		return nil, fmt.Errorf("oidc issuer: unsupported signing algorithm %q", alg)
 	}
-	return &signingKey{
-		key:       key,
-		kid:       rsaThumbprint(&key.PublicKey),
-		createdAt: time.Now(),
-	}, nil
 }
 
-// MintIdentityAssertion signs a short-lived RS256 JWT asserting te's identity for
-// presentation to the upstream named by audience. It fails closed when the issuer
-// has no active key or when audience is empty (an assertion without an audience
-// is replayable at any upstream whose trust policy does not pin `aud`).
+// MintIdentityAssertion signs a short-lived JWT (with the active key's algorithm)
+// asserting te's identity for presentation to the upstream named by audience. It
+// fails closed when the issuer has no active key or when audience is empty (an
+// assertion without an audience is replayable at any upstream whose trust policy
+// does not pin `aud`).
 //
 // metadata, when non-empty, is embedded under a single nested "warden_metadata"
 // claim (never splatted at the top level, so it cannot clobber a registered or
@@ -290,9 +308,9 @@ func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, audience stri
 	if len(metadata) > 0 {
 		claims["warden_metadata"] = metadata
 	}
-	header := map[string]string{"alg": oidcSigningAlg, "typ": "JWT", "kid": active.kid}
+	header := map[string]string{"alg": active.alg, "typ": "JWT", "kid": active.kid}
 
-	return signRS256(active.key, header, claims)
+	return signJWT(active, header, claims)
 }
 
 // wardenSubject builds the globally-unique subject of a minted assertion:
@@ -312,18 +330,18 @@ func (i *OIDCIssuer) JWKS() ([]byte, error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 
-	keys := make([]jwkRSA, 0, 2+len(i.retired))
+	keys := make([]jwk, 0, 2+len(i.retired))
 	if i.active != nil {
-		keys = append(keys, rsaPublicJWK(i.active))
+		keys = append(keys, publicJWK(i.active))
 	}
 	if i.next != nil {
-		keys = append(keys, rsaPublicJWK(i.next))
+		keys = append(keys, publicJWK(i.next))
 	}
 	for _, r := range i.retired {
-		keys = append(keys, rsaPublicJWK(r))
+		keys = append(keys, publicJWK(r))
 	}
 	return json.Marshal(struct {
-		Keys []jwkRSA `json:"keys"`
+		Keys []jwk `json:"keys"`
 	}{Keys: keys})
 }
 
@@ -331,8 +349,14 @@ func (i *OIDCIssuer) JWKS() ([]byte, error) {
 // at /.well-known/openid-configuration to locate the JWKS and confirm the signing
 // algorithm.
 func (i *OIDCIssuer) DiscoveryDocument(jwksURI string) ([]byte, error) {
+	// Single keyset for now, so the supported-alg list mirrors the active key's
+	// algorithm (RS256 until a second keyset is introduced).
 	i.mu.RLock()
 	issuerURL := i.issuerURL
+	alg := oidcAlgRS256
+	if i.active != nil {
+		alg = i.active.alg
+	}
 	i.mu.RUnlock()
 
 	doc := map[string]interface{}{
@@ -340,32 +364,39 @@ func (i *OIDCIssuer) DiscoveryDocument(jwksURI string) ([]byte, error) {
 		"jwks_uri":                              jwksURI,
 		"response_types_supported":              []string{"id_token"},
 		"subject_types_supported":               []string{"public"},
-		"id_token_signing_alg_values_supported": []string{oidcSigningAlg},
+		"id_token_signing_alg_values_supported": []string{alg},
 	}
 	return json.Marshal(doc)
 }
 
-// jwkRSA is a public RSA key in JWK form.
-type jwkRSA struct {
+// jwk is a public signing key in JWK form — RSA (n,e) or EC (crv,x,y).
+type jwk struct {
 	Kty string `json:"kty"`
 	Use string `json:"use"`
 	Alg string `json:"alg"`
 	Kid string `json:"kid"`
-	N   string `json:"n"`
-	E   string `json:"e"`
+	N   string `json:"n,omitempty"`
+	E   string `json:"e,omitempty"`
+	Crv string `json:"crv,omitempty"`
+	X   string `json:"x,omitempty"`
+	Y   string `json:"y,omitempty"`
 }
 
-// rsaPublicJWK renders a signing key's public half as a JWK.
-func rsaPublicJWK(sk *signingKey) jwkRSA {
-	pub := &sk.key.PublicKey
-	return jwkRSA{
-		Kty: "RSA",
-		Use: "sig",
-		Alg: oidcSigningAlg,
-		Kid: sk.kid,
-		N:   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
-		E:   base64.RawURLEncoding.EncodeToString(bigEndianExponent(pub.E)),
+// publicJWK renders a signing key's public half as a JWK, dispatching on key type.
+func publicJWK(sk *signingKey) jwk {
+	j := jwk{Use: "sig", Alg: sk.alg, Kid: sk.kid}
+	switch pub := sk.key.Public().(type) {
+	case *rsa.PublicKey:
+		j.Kty = "RSA"
+		j.N = base64.RawURLEncoding.EncodeToString(pub.N.Bytes())
+		j.E = base64.RawURLEncoding.EncodeToString(bigEndianExponent(pub.E))
+	case *ecdsa.PublicKey:
+		j.Kty = "EC"
+		j.Crv = "P-256"
+		j.X = base64.RawURLEncoding.EncodeToString(ecCoord(pub.X))
+		j.Y = base64.RawURLEncoding.EncodeToString(ecCoord(pub.Y))
 	}
+	return j
 }
 
 // rsaThumbprint computes the RFC 7638 JWK thumbprint (SHA-256 over the canonical
@@ -379,6 +410,25 @@ func rsaThumbprint(pub *rsa.PublicKey) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
+// ecThumbprint computes the RFC 7638 JWK thumbprint (SHA-256 over the canonical
+// {"crv","kty","x","y"} JSON) as the key id for a P-256 EC key.
+func ecThumbprint(pub *ecdsa.PublicKey) string {
+	x := base64.RawURLEncoding.EncodeToString(ecCoord(pub.X))
+	y := base64.RawURLEncoding.EncodeToString(ecCoord(pub.Y))
+	// RFC 7638: members in lexicographic order, no whitespace.
+	canonical := fmt.Sprintf(`{"crv":"P-256","kty":"EC","x":%q,"y":%q}`, x, y)
+	sum := sha256.Sum256([]byte(canonical))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// ecCoord renders a P-256 coordinate (or ECDSA signature scalar) as a fixed 32-byte
+// big-endian slice — the width JWK/JWS require, left-padded with zeros.
+func ecCoord(n *big.Int) []byte {
+	b := make([]byte, 32)
+	n.FillBytes(b)
+	return b
+}
+
 // bigEndianExponent renders an RSA public exponent as a minimal big-endian byte
 // slice (e.g. 65537 -> {0x01,0x00,0x01}).
 func bigEndianExponent(e int) []byte {
@@ -389,9 +439,10 @@ func bigEndianExponent(e int) []byte {
 	return b
 }
 
-// signRS256 signs header+claims as a compact RS256 JWS. Kept self-contained (the
-// driver package has an equivalent private signer; core does not reach into it).
-func signRS256(key *rsa.PrivateKey, header map[string]string, claims map[string]interface{}) (string, error) {
+// signJWT signs header+claims as a compact JWS using the key's algorithm. Kept
+// self-contained (the driver package has an equivalent private signer; core does
+// not reach into it).
+func signJWT(sk *signingKey, header map[string]string, claims map[string]interface{}) (string, error) {
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
 		return "", fmt.Errorf("oidc issuer: marshal header: %w", err)
@@ -402,9 +453,24 @@ func signRS256(key *rsa.PrivateKey, header map[string]string, claims map[string]
 	}
 	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
 	digest := sha256.Sum256([]byte(signingInput))
-	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
-	if err != nil {
-		return "", fmt.Errorf("oidc issuer: sign: %w", err)
+
+	var sig []byte
+	switch key := sk.key.(type) {
+	case *rsa.PrivateKey:
+		sig, err = rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+		if err != nil {
+			return "", fmt.Errorf("oidc issuer: sign: %w", err)
+		}
+	case *ecdsa.PrivateKey:
+		r, s, serr := ecdsa.Sign(rand.Reader, key, digest[:])
+		if serr != nil {
+			return "", fmt.Errorf("oidc issuer: sign: %w", serr)
+		}
+		// JWS ES256 signature is the fixed-width concatenation R‖S (32 bytes each),
+		// NOT the ASN.1/DER form ecdsa.PrivateKey.Sign would produce.
+		sig = append(ecCoord(r), ecCoord(s)...)
+	default:
+		return "", fmt.Errorf("oidc issuer: unsupported signing key type %T", sk.key)
 	}
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }

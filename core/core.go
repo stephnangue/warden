@@ -897,11 +897,11 @@ func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
 		// First enable on the active node: generate the active key AND its
 		// pre-published successor, so the next key is in the JWKS from the very
 		// first publish, a full rotation period before it ever signs.
-		active, err = generateSigningKey()
+		active, err = generateSigningKey(oidcAlgRS256)
 		if err != nil {
 			return err
 		}
-		next, err = generateSigningKey()
+		next, err = generateSigningKey(oidcAlgRS256)
 		if err != nil {
 			return err
 		}
@@ -1082,7 +1082,7 @@ func (c *Core) rotateOIDCKey(ctx context.Context, issuer *OIDCIssuer, publisher 
 		return err
 	}
 
-	newNext, err := generateSigningKey()
+	newNext, err := generateSigningKey(oidcAlgRS256)
 	if err != nil {
 		return err
 	}
