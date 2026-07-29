@@ -1361,7 +1361,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// CacheIdentity above keys the cache, so the fingerprint never needs the
 		// (not-yet-minted) assertion bytes.
 		inputs.ResolveSubjectToken = func(context.Context) (string, error) {
-			return issuer.MintIdentityAssertion(te, audience, issuer.AssertionTTL(), projected)
+			return issuer.MintIdentityAssertion(te, audience, issuer.AssertionTTL(), projected, oidcAlgRS256)
 		}
 	default:
 		// SpecRequestsExchange already excluded "none"/absent; any other value

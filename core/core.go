@@ -880,13 +880,28 @@ func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
 	issuer.SetAssertionTTL(cfg.assertionTTL())
 	issuer.SetCacheControl(cfg.jwksCacheTTL())
 
-	active, next, retired, err := loadKeySet(ctx, storage)
+	keysets, err := loadKeySet(ctx, storage)
 	if err != nil {
 		return err
 	}
-	if active == nil {
+	if keysets == nil {
+		keysets = make(map[string]*algKeyset)
+	}
+	// A keyset is complete only with both an active and a pre-published next key.
+	incomplete := func(alg string) bool {
+		ks := keysets[alg]
+		return ks == nil || ks.active == nil || ks.next == nil
+	}
+	needsKeys := false
+	for _, alg := range oidcSupportedAlgs {
+		if incomplete(alg) {
+			needsKeys = true
+			break
+		}
+	}
+	if needsKeys {
 		if standby {
-			c.logger.Warn("oidc issuer enabled but no signing key present; standby stays not-ready until promotion")
+			c.logger.Warn("oidc issuer enabled but signing keys are missing; standby stays not-ready until promotion")
 			c.stopOIDCKeyRotation()
 			c.oidcMu.Lock()
 			c.oidcIssuer = issuer
@@ -894,24 +909,31 @@ func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
 			c.oidcMu.Unlock()
 			return nil
 		}
-		// First enable on the active node: generate the active key AND its
-		// pre-published successor, so the next key is in the JWKS from the very
-		// first publish, a full rotation period before it ever signs.
-		active, err = generateSigningKey(oidcAlgRS256)
-		if err != nil {
+		// Active node: generate the active key AND its pre-published successor for
+		// every supported algorithm still missing one, so each next key is in the
+		// JWKS from the first publish, a full rotation period before it ever signs.
+		// (Also self-heals a keyset added after an algorithm becomes supported.)
+		for _, alg := range oidcSupportedAlgs {
+			if !incomplete(alg) {
+				continue
+			}
+			active, err := generateSigningKey(alg)
+			if err != nil {
+				return err
+			}
+			next, err := generateSigningKey(alg)
+			if err != nil {
+				return err
+			}
+			keysets[alg] = &algKeyset{active: active, next: next}
+			c.logger.Info("oidc issuer generated signing keys",
+				logger.String("alg", alg), logger.String("active_kid", active.kid), logger.String("next_kid", next.kid))
+		}
+		if err := persistKeySet(ctx, storage, keysets); err != nil {
 			return err
 		}
-		next, err = generateSigningKey(oidcAlgRS256)
-		if err != nil {
-			return err
-		}
-		if err := persistKeySet(ctx, storage, active, next, nil); err != nil {
-			return err
-		}
-		c.logger.Info("oidc issuer generated signing keys",
-			logger.String("active_kid", active.kid), logger.String("next_kid", next.kid))
 	}
-	issuer.RestoreKeys(active, next, retired)
+	issuer.RestoreKeys(keysets)
 
 	c.oidcMu.Lock()
 	c.oidcIssuer = issuer
@@ -933,7 +955,7 @@ func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
 	// Signing-key rotation runs only on the active node. Restart it on every
 	// (re)setup so a config change or promotion picks up the current settings.
 	period := cfg.keyRotationPeriod()
-	firstTick := oidcRotationFirstTick(active, next, period)
+	firstTick := oidcRotationFirstTick(keysets, period)
 	c.startOIDCKeyRotation(standby, period, firstTick, issuer, publisher, cfg.jwksCacheTTL(), cfg.retiredKeyGrace())
 	return nil
 }
@@ -999,10 +1021,25 @@ func (c *Core) startOIDCKeyRotation(standby bool, period, firstTick time.Duratio
 // the past and the loop would rotate immediately on every unseal/restart/promotion.
 // The active key's age is only a fallback for the (setup-guaranteed impossible)
 // case of an active node with no next key.
-func oidcRotationFirstTick(active, next *signingKey, period time.Duration) time.Duration {
-	anchor := active.createdAt
-	if next != nil {
-		anchor = next.createdAt
+func oidcRotationFirstTick(keysets map[string]*algKeyset, period time.Duration) time.Duration {
+	// Anchor on the EARLIEST next-key age across algorithms so no keyset rotates
+	// late. Keysets are generated together at enable, so their ages are identical
+	// in practice; the earliest is only distinct after a later self-heal.
+	var anchor time.Time
+	for _, ks := range keysets {
+		age := ks.next
+		if age == nil {
+			age = ks.active
+		}
+		if age == nil {
+			continue
+		}
+		if anchor.IsZero() || age.createdAt.Before(anchor) {
+			anchor = age.createdAt
+		}
+	}
+	if anchor.IsZero() {
+		return 0
 	}
 	return time.Until(anchor.Add(period))
 }
@@ -1055,24 +1092,38 @@ func (c *Core) rotateOIDCKey(ctx context.Context, issuer *OIDCIssuer, publisher 
 		return nil
 	}
 
-	_, next, _ := issuer.Keys()
-	if next == nil {
-		// Setup guarantees a next key on the active node; this is a defensive guard.
-		return fmt.Errorf("oidc issuer: cannot rotate without a next key")
+	keysets := issuer.Keys()
+	if len(keysets) == 0 {
+		// Setup guarantees keys on the active node; this is a defensive guard.
+		return fmt.Errorf("oidc issuer: cannot rotate with no keys")
 	}
 
 	// Propagation floor: a fresh next key must be published at least cacheTTL before
-	// it signs, so any CDN cache and verifier have refreshed the JWKS. In steady
-	// state next is ~one rotation period old, so the remainder is <= 0 and there is
-	// no wait; the floor only bites on cold start / a shrunk period. Skipped when
-	// there is no external publisher (the built-in endpoint serves live).
+	// it signs, so any CDN cache and verifier have refreshed the JWKS. Wait out the
+	// youngest next key across algorithms (same-age in practice, so usually a single
+	// wait). In steady state each next is ~one rotation period old, so the remainder
+	// is <= 0 and there is no wait; the floor only bites on cold start / a shrunk
+	// period. Skipped when there is no external publisher (the endpoint serves live).
+	// Only the supported algorithms are rotated (each is generatable). Iterating the
+	// supported set rather than whatever storage held means a stray/unknown held alg
+	// can never break rotation of the healthy ones; it is left untouched in the map.
 	if publisher != nil && cacheTTL > 0 {
-		if rem := cacheTTL - time.Since(next.createdAt); rem > 0 {
+		var wait time.Duration
+		for _, alg := range oidcSupportedAlgs {
+			ks := keysets[alg]
+			if ks == nil || ks.next == nil {
+				return fmt.Errorf("oidc issuer: cannot rotate without a next %s key", alg)
+			}
+			if rem := cacheTTL - time.Since(ks.next.createdAt); rem > wait {
+				wait = rem
+			}
+		}
+		if wait > 0 {
 			select {
 			case <-ctx.Done():
-				// Nothing to roll back — the next key is durable and stays published.
+				// Nothing to roll back — the next keys are durable and stay published.
 				return ctx.Err()
-			case <-time.After(rem):
+			case <-time.After(wait):
 			}
 		}
 	}
@@ -1082,36 +1133,47 @@ func (c *Core) rotateOIDCKey(ctx context.Context, issuer *OIDCIssuer, publisher 
 		return err
 	}
 
-	newNext, err := generateSigningKey(oidcAlgRS256)
-	if err != nil {
-		return err
-	}
-
 	if grace <= 0 {
 		grace = defaultRetiredKeyGrace
 	}
 	cutoff := time.Now().Add(-(issuer.AssertionTTL() + grace))
 
-	// Persist the post-rotation keyset (promoted active, fresh next, pruned retired)
+	// Compute each supported algorithm's post-rotation keyset (promoted active, fresh
+	// next, pruned retired) WITHOUT mutating the issuer, then persist the whole map
 	// BEFORE flipping in memory. On failure nothing has mutated in memory and the
 	// current keyset is still in storage, so a retry next tick is safe.
-	pendingActive, pendingRetired, err := issuer.PendingRotation(cutoff)
-	if err != nil {
-		return err
+	newNextByAlg := make(map[string]*signingKey, len(oidcSupportedAlgs))
+	for _, alg := range oidcSupportedAlgs {
+		if keysets[alg] == nil {
+			// Ready() guarantees every supported alg is present; defensive.
+			return fmt.Errorf("oidc issuer: missing %s keyset", alg)
+		}
+		newNext, err := generateSigningKey(alg)
+		if err != nil {
+			return err
+		}
+		newNextByAlg[alg] = newNext
+		pendingActive, pendingRetired, err := issuer.PendingRotation(alg, cutoff)
+		if err != nil {
+			return err
+		}
+		keysets[alg] = &algKeyset{active: pendingActive, next: newNext, retired: pendingRetired}
 	}
+
 	storage := NewBarrierView(c.barrier, oidcIssuerStorePrefix)
-	if err := persistKeySet(ctx, storage, pendingActive, newNext, pendingRetired); err != nil {
+	if err := persistKeySet(ctx, storage, keysets); err != nil {
 		return fmt.Errorf("persist rotated keyset: %w", err)
 	}
 
-	if err := issuer.Rotate(newNext, cutoff); err != nil {
-		return err
+	for alg, newNext := range newNextByAlg {
+		if err := issuer.Rotate(alg, newNext, cutoff); err != nil {
+			return err
+		}
 	}
 	if err := c.publishOIDCFor(ctx, issuer, publisher); err != nil {
 		c.logger.Warn("oidc issuer: republish after rotation failed", logger.Err(err))
 	}
-	c.logger.Info("oidc issuer rotated signing key",
-		logger.String("active_kid", pendingActive.kid), logger.String("next_kid", newNext.kid))
+	c.logger.Info("oidc issuer rotated signing keys", logger.Int("algorithms", len(keysets)))
 	return nil
 }
 

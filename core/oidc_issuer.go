@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"sort"
 	"sync"
 	"time"
 
@@ -35,16 +36,11 @@ type OIDCIssuer struct {
 	// `iss` claim of every minted assertion. Normally the published bucket/CDN URL.
 	issuerURL string
 
-	// active is the current signing key. nil until installed (issuer not ready).
-	active *signingKey
-	// retired holds keys rotated out but still published in the JWKS until every
-	// assertion they signed has expired, so in-flight assertions still verify.
-	retired []*signingKey
-
-	// next is the pre-published successor key: persisted and rendered in the JWKS a
-	// full rotation period before it becomes active, so verifiers (and any CDN cache)
-	// already hold it when it starts signing. Rotation promotes it to active.
-	next *signingKey
+	// keysets holds one keyset per supported signing algorithm (RS256, ES256),
+	// keyed by the JWS alg. A spec selects which algorithm signs its assertion; the
+	// JWKS publishes every keyset's keys so a verifier picks by kid+alg. Empty until
+	// keys are installed (issuer not ready).
+	keysets map[string]*algKeyset
 
 	// clockSkewLeeway is subtracted from a minted assertion's nbf to tolerate
 	// modest clock skew at the verifier.
@@ -89,6 +85,37 @@ const (
 	oidcAlgES256 = "ES256"
 )
 
+// oidcSupportedAlgs is the fixed set of algorithms the issuer maintains a keyset
+// for. The issuer generates, rotates, and publishes a keyset per entry; a spec
+// selects which one signs its assertion.
+var oidcSupportedAlgs = []string{oidcAlgRS256}
+
+// algKeyset is the active/next/retired triple for one signing algorithm. active
+// signs; next is the pre-published successor promoted on rotation; retired keys
+// stay in the JWKS until their assertions expire, then are pruned.
+type algKeyset struct {
+	active  *signingKey
+	next    *signingKey
+	retired []*signingKey
+}
+
+// copyKeysets deep-copies the map (and each retired slice) so callers cannot
+// mutate the issuer's live state through a returned/stored reference.
+func copyKeysets(src map[string]*algKeyset) map[string]*algKeyset {
+	dst := make(map[string]*algKeyset, len(src))
+	for alg, ks := range src {
+		if ks == nil {
+			continue
+		}
+		dst[alg] = &algKeyset{
+			active:  ks.active,
+			next:    ks.next,
+			retired: append([]*signingKey(nil), ks.retired...),
+		}
+	}
+	return dst
+}
+
 // defaultClockSkewLeeway backdates nbf so a verifier with a slightly fast clock
 // does not reject a freshly minted assertion.
 const defaultClockSkewLeeway = 60 * time.Second
@@ -98,6 +125,7 @@ const defaultClockSkewLeeway = 60 * time.Second
 func NewOIDCIssuer(issuerURL string) *OIDCIssuer {
 	return &OIDCIssuer{
 		issuerURL:       issuerURL,
+		keysets:         make(map[string]*algKeyset),
 		clockSkewLeeway: defaultClockSkewLeeway,
 		assertionTTL:    defaultAssertionTTL,
 		cacheControl:    oidcCacheControl(defaultJWKSCacheTTL),
@@ -136,12 +164,17 @@ func (i *OIDCIssuer) AssertionTTL() time.Duration {
 	return i.assertionTTL
 }
 
-// Ready reports whether an active signing key is installed. The mint path must
-// fail closed when this is false.
+// Ready reports whether every supported algorithm has an active signing key. The
+// mint path must fail closed when this is false.
 func (i *OIDCIssuer) Ready() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return i.active != nil
+	for _, alg := range oidcSupportedAlgs {
+		if ks := i.keysets[alg]; ks == nil || ks.active == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // IssuerURL returns the configured issuer URL (the `iss` claim value).
@@ -151,33 +184,35 @@ func (i *OIDCIssuer) IssuerURL() string {
 	return i.issuerURL
 }
 
-// RestoreKeys installs a full keyset loaded from storage (active, next, and
-// retired), used on unseal / standby promotion so in-flight assertions signed by
-// a retired key still verify and the pre-published next key survives a restart.
-func (i *OIDCIssuer) RestoreKeys(active, next *signingKey, retired []*signingKey) {
+// RestoreKeys installs the full per-algorithm keyset map loaded from storage (or
+// freshly generated), used on unseal / standby promotion so in-flight assertions
+// signed by a retired key still verify and each pre-published next key survives a
+// restart.
+func (i *OIDCIssuer) RestoreKeys(keysets map[string]*algKeyset) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.active = active
-	i.next = next
-	i.retired = append([]*signingKey(nil), retired...)
+	i.keysets = copyKeysets(keysets)
 }
 
-// Keys returns the active key, the next key, and a copy of the retired set, for
-// persistence.
-func (i *OIDCIssuer) Keys() (active, next *signingKey, retired []*signingKey) {
+// Keys returns a deep copy of the per-algorithm keyset map, for persistence.
+func (i *OIDCIssuer) Keys() map[string]*algKeyset {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return i.active, i.next, append([]*signingKey(nil), i.retired...)
+	return copyKeysets(i.keysets)
 }
 
-// PruneRetired drops retired keys retired before cutoff (their assertions have
-// all expired) and returns how many were removed.
+// PruneRetired drops, across every algorithm, retired keys retired before cutoff
+// (their assertions have all expired) and returns how many were removed.
 func (i *OIDCIssuer) PruneRetired(cutoff time.Time) int {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	before := len(i.retired)
-	i.retired = prunedRetired(i.retired, cutoff)
-	return before - len(i.retired)
+	removed := 0
+	for _, ks := range i.keysets {
+		before := len(ks.retired)
+		ks.retired = prunedRetired(ks.retired, cutoff)
+		removed += before - len(ks.retired)
+	}
+	return removed
 }
 
 // prunedRetired returns retired keys not yet past cutoff (a fresh copy).
@@ -192,42 +227,50 @@ func prunedRetired(retired []*signingKey, cutoff time.Time) []*signingKey {
 	return out
 }
 
-// PendingRotation returns the (active, retired) keyset that Rotate(cutoff) would
-// produce, WITHOUT mutating the issuer, so the rotation loop can persist it before
-// flipping in memory (nothing signs with a key not yet in storage). The returned
-// active is the current next key. It errors when there is no next key to promote.
-func (i *OIDCIssuer) PendingRotation(cutoff time.Time) (active *signingKey, retired []*signingKey, err error) {
+// PendingRotation returns the (active, retired) state that Rotate(alg, cutoff)
+// would produce for one algorithm, WITHOUT mutating the issuer, so the rotation
+// loop can persist it before flipping in memory (nothing signs with a key not yet
+// in storage). The returned active is that algorithm's current next key. It errors
+// when the algorithm has no next key to promote.
+func (i *OIDCIssuer) PendingRotation(alg string, cutoff time.Time) (active *signingKey, retired []*signingKey, err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	if i.next == nil {
-		return nil, nil, fmt.Errorf("oidc issuer: no next key to promote")
+	ks := i.keysets[alg]
+	if ks == nil || ks.next == nil {
+		return nil, nil, fmt.Errorf("oidc issuer: no next %s key to promote", alg)
 	}
-	next := append([]*signingKey(nil), i.retired...)
-	if i.active != nil && i.active.kid != i.next.kid {
+	next := append([]*signingKey(nil), ks.retired...)
+	if ks.active != nil && ks.active.kid != ks.next.kid {
 		// Copy so the persisted retiredAt does not mutate the live active key.
-		old := *i.active
+		old := *ks.active
 		old.retiredAt = time.Now()
 		next = append(next, &old)
 	}
-	return i.next, prunedRetired(next, cutoff), nil
+	return ks.next, prunedRetired(next, cutoff), nil
 }
 
-// Rotate retires the current active key, promotes the next key to active, installs
-// newNext as the new next key, and prunes retired keys past cutoff. It errors
-// (leaving the issuer untouched) when there is no next key to promote.
-func (i *OIDCIssuer) Rotate(newNext *signingKey, cutoff time.Time) error {
+// Rotate retires one algorithm's active key, promotes its next key to active,
+// installs newNext as the new next, and prunes that algorithm's retired keys past
+// cutoff. It errors (leaving the issuer untouched) when the algorithm has no next
+// key to promote.
+func (i *OIDCIssuer) Rotate(alg string, newNext *signingKey, cutoff time.Time) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.next == nil {
-		return fmt.Errorf("oidc issuer: no next key to promote")
+	ks := i.keysets[alg]
+	if ks == nil || ks.next == nil {
+		return fmt.Errorf("oidc issuer: no next %s key to promote", alg)
 	}
-	if i.active != nil && i.active.kid != i.next.kid {
-		i.active.retiredAt = time.Now()
-		i.retired = append(i.retired, i.active)
+	if ks.active != nil && ks.active.kid != ks.next.kid {
+		// Copy before stamping retiredAt so a signingKey is never mutated in place
+		// (any Keys() snapshot or JWKS reader that shares the pointer stays stable),
+		// matching PendingRotation.
+		old := *ks.active
+		old.retiredAt = time.Now()
+		ks.retired = append(ks.retired, &old)
 	}
-	i.active = i.next
-	i.next = newNext
-	i.retired = prunedRetired(i.retired, cutoff)
+	ks.active = ks.next
+	ks.next = newNext
+	ks.retired = prunedRetired(ks.retired, cutoff)
 	return nil
 }
 
@@ -252,18 +295,18 @@ func generateSigningKey(alg string) (*signingKey, error) {
 	}
 }
 
-// MintIdentityAssertion signs a short-lived JWT (with the active key's algorithm)
+// MintIdentityAssertion signs a short-lived JWT with the alg-selected signing key,
 // asserting te's identity for presentation to the upstream named by audience. It
-// fails closed when the issuer has no active key or when audience is empty (an
-// assertion without an audience is replayable at any upstream whose trust policy
-// does not pin `aud`).
+// fails closed when the issuer has no active key for alg or when audience is empty
+// (an assertion without an audience is replayable at any upstream whose trust
+// policy does not pin `aud`).
 //
 // metadata, when non-empty, is embedded under a single nested "warden_metadata"
 // claim (never splatted at the top level, so it cannot clobber a registered or
 // warden_* claim). The caller is responsible for choosing and bounding what it
 // contains: the assertion crosses a trust boundary, so only operator-allowlisted,
 // size-capped attributes should reach this point.
-func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, audience string, ttl time.Duration, metadata map[string]string) (string, error) {
+func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, audience string, ttl time.Duration, metadata map[string]string, alg string) (string, error) {
 	if te == nil {
 		return "", fmt.Errorf("oidc issuer: nil token entry")
 	}
@@ -278,13 +321,16 @@ func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, audience stri
 	}
 
 	i.mu.RLock()
-	active := i.active
+	var active *signingKey
+	if ks := i.keysets[alg]; ks != nil {
+		active = ks.active
+	}
 	issuerURL := i.issuerURL
 	leeway := i.clockSkewLeeway
 	i.mu.RUnlock()
 
 	if active == nil {
-		return "", fmt.Errorf("oidc issuer: no active signing key (issuer not ready)")
+		return "", fmt.Errorf("oidc issuer: no active %s signing key (issuer not ready)", alg)
 	}
 
 	jti, err := randomJTI()
@@ -330,41 +376,60 @@ func (i *OIDCIssuer) JWKS() ([]byte, error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 
-	keys := make([]jwk, 0, 2+len(i.retired))
-	if i.active != nil {
-		keys = append(keys, publicJWK(i.active))
-	}
-	if i.next != nil {
-		keys = append(keys, publicJWK(i.next))
-	}
-	for _, r := range i.retired {
-		keys = append(keys, publicJWK(r))
+	keys := make([]jwk, 0, 2*len(i.keysets))
+	// Publish every keyset the issuer holds (sorted by alg for a deterministic
+	// order), so a verifier can validate a token signed by any of them.
+	for _, alg := range sortedKeys(i.keysets) {
+		ks := i.keysets[alg]
+		if ks.active != nil {
+			keys = append(keys, publicJWK(ks.active))
+		}
+		if ks.next != nil {
+			keys = append(keys, publicJWK(ks.next))
+		}
+		for _, r := range ks.retired {
+			keys = append(keys, publicJWK(r))
+		}
 	}
 	return json.Marshal(struct {
 		Keys []jwk `json:"keys"`
 	}{Keys: keys})
 }
 
+// sortedKeys returns the keyset map's algorithm keys in sorted order.
+func sortedKeys(keysets map[string]*algKeyset) []string {
+	algs := make([]string, 0, len(keysets))
+	for alg := range keysets {
+		algs = append(algs, alg)
+	}
+	sort.Strings(algs)
+	return algs
+}
+
 // DiscoveryDocument returns the minimal OIDC discovery metadata an upstream reads
 // at /.well-known/openid-configuration to locate the JWKS and confirm the signing
 // algorithm.
 func (i *OIDCIssuer) DiscoveryDocument(jwksURI string) ([]byte, error) {
-	// Single keyset for now, so the supported-alg list mirrors the active key's
-	// algorithm (RS256 until a second keyset is introduced).
+	// Advertise every algorithm that currently has an active key.
 	i.mu.RLock()
 	issuerURL := i.issuerURL
-	alg := oidcAlgRS256
-	if i.active != nil {
-		alg = i.active.alg
+	var algs []string
+	for _, alg := range sortedKeys(i.keysets) {
+		if ks := i.keysets[alg]; ks.active != nil {
+			algs = append(algs, alg)
+		}
 	}
 	i.mu.RUnlock()
+	if len(algs) == 0 {
+		algs = []string{oidcAlgRS256}
+	}
 
 	doc := map[string]interface{}{
 		"issuer":                                issuerURL,
 		"jwks_uri":                              jwksURI,
 		"response_types_supported":              []string{"id_token"},
 		"subject_types_supported":               []string{"public"},
-		"id_token_signing_alg_values_supported": []string{alg},
+		"id_token_signing_alg_values_supported": algs,
 	}
 	return json.Marshal(doc)
 }

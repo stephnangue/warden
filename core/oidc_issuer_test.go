@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/cap/jwt"
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,6 +23,39 @@ func keyEqual(a, b crypto.Signer) bool {
 	return ok && e.Equal(b)
 }
 
+// rs256Keyset wraps a single RS256 keyset as the per-algorithm map the issuer uses.
+func rs256Keyset(active, next *signingKey, retired []*signingKey) map[string]*algKeyset {
+	return map[string]*algKeyset{oidcAlgRS256: {active: active, next: next, retired: retired}}
+}
+
+// rs256Keys returns an issuer's RS256 active, next, and retired keys.
+func rs256Keys(iss *OIDCIssuer) (active, next *signingKey, retired []*signingKey) {
+	ks := iss.Keys()[oidcAlgRS256]
+	if ks == nil {
+		return nil, nil, nil
+	}
+	return ks.active, ks.next, ks.retired
+}
+
+// loadRS256 loads the persisted keyset and returns the RS256 keyset's active,
+// next, and retired keys (all nil when none is persisted).
+func loadRS256(ctx context.Context, storage sdklogical.Storage) (active, next *signingKey, retired []*signingKey, err error) {
+	keysets, err := loadKeySet(ctx, storage)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ks := keysets[oidcAlgRS256]
+	if ks == nil {
+		return nil, nil, nil, nil
+	}
+	return ks.active, ks.next, ks.retired, nil
+}
+
+// persistRS256 persists a single RS256 keyset (the pre-map helper shape).
+func persistRS256(ctx context.Context, storage sdklogical.Storage, active, next *signingKey, retired []*signingKey) error {
+	return persistKeySet(ctx, storage, rs256Keyset(active, next, retired))
+}
+
 func newReadyIssuer(t *testing.T, issuerURL string) *OIDCIssuer {
 	t.Helper()
 	iss := NewOIDCIssuer(issuerURL)
@@ -29,7 +63,7 @@ func newReadyIssuer(t *testing.T, issuerURL string) *OIDCIssuer {
 	if err != nil {
 		t.Fatalf("generateSigningKey: %v", err)
 	}
-	iss.RestoreKeys(key, nil, nil)
+	iss.RestoreKeys(rs256Keyset(key, nil, nil))
 	return iss
 }
 
@@ -46,7 +80,7 @@ func newReadyIssuerWithNext(t *testing.T, issuerURL string) (iss *OIDCIssuer, ac
 	if err != nil {
 		t.Fatalf("generateSigningKey (next): %v", err)
 	}
-	iss.RestoreKeys(active, next, nil)
+	iss.RestoreKeys(rs256Keyset(active, next, nil))
 	return iss, active, next
 }
 
@@ -84,7 +118,7 @@ func TestOIDCIssuer_Mint_VerifiesAgainstJWKS(t *testing.T) {
 	}
 	const audience = "https://sso.acme.internal/realms/acme"
 
-	token, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute, nil)
+	token, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute, nil, oidcAlgRS256)
 	if err != nil {
 		t.Fatalf("MintIdentityAssertion: %v", err)
 	}
@@ -140,7 +174,7 @@ func TestOIDCIssuer_Mint_WardenMetadataClaim(t *testing.T) {
 	expected := jwt.Expected{Issuer: issuerURL, Audiences: []string{audience}, SigningAlgorithms: []jwt.Alg{jwt.RS256}}
 
 	// With metadata: exactly the passed keys appear, nested under warden_metadata.
-	withMeta, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute, map[string]string{"team": "payments", "env": "prod"})
+	withMeta, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute, map[string]string{"team": "payments", "env": "prod"}, oidcAlgRS256)
 	require.NoError(t, err)
 	claims, err := validator.Validate(ctx, withMeta, expected)
 	require.NoError(t, err)
@@ -152,7 +186,7 @@ func TestOIDCIssuer_Mint_WardenMetadataClaim(t *testing.T) {
 
 	// Empty projection: no warden_metadata claim at all.
 	for _, empty := range []map[string]string{nil, {}} {
-		noMeta, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute, empty)
+		noMeta, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute, empty, oidcAlgRS256)
 		require.NoError(t, err)
 		claims, err := validator.Validate(ctx, noMeta, expected)
 		require.NoError(t, err)
@@ -170,12 +204,12 @@ func TestOIDCIssuer_ES256_MintAndJWKS(t *testing.T) {
 	iss := NewOIDCIssuer(issuerURL)
 	key, err := generateSigningKey(oidcAlgES256)
 	require.NoError(t, err)
-	iss.RestoreKeys(key, nil, nil)
+	iss.RestoreKeys(map[string]*algKeyset{oidcAlgES256: {active: key}})
 	jwks := serveJWKS(t, iss)
 
 	te := &logical.TokenEntry{PrincipalID: "p", RoleName: "r", NamespaceID: "n", MountAccessor: "m"}
 	const audience = "sts.amazonaws.com"
-	token, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute, nil)
+	token, err := iss.MintIdentityAssertion(te, audience, 5*time.Minute, nil, oidcAlgES256)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -236,6 +270,31 @@ func TestOIDCIssuer_ES256_StorageRoundTrip(t *testing.T) {
 	assert.True(t, keyEqual(loaded.key, orig.key), "reloaded ES256 key must equal the original")
 }
 
+// TestOIDCIssuer_KeyStorage_RejectsOldVersion ensures an unrecognized keyset
+// version fails loudly rather than being silently regenerated over (which would
+// destroy an existing keyset and orphan in-flight assertions).
+func TestOIDCIssuer_KeyStorage_RejectsOldVersion(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	ctx := context.Background()
+	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
+
+	require.NoError(t, storage.Put(ctx, &sdklogical.StorageEntry{
+		Key: oidcKeySetPath, Value: []byte(`{"version":2,"active":{}}`),
+	}))
+	_, err := loadKeySet(ctx, storage)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported keyset version 2")
+}
+
+// TestOIDCIssuer_JWKS_EmptyIsArray ensures the JWKS renders keys as [] (a valid
+// RFC 7517 array), not null, when the issuer holds no keys.
+func TestOIDCIssuer_JWKS_EmptyIsArray(t *testing.T) {
+	body, err := NewOIDCIssuer("https://iss.example").JWKS()
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"keys":[]}`, string(body))
+}
+
 // TestOIDCIssuer_FailClosed covers the cases where minting must refuse.
 func TestOIDCIssuer_FailClosed(t *testing.T) {
 	te := &logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
@@ -245,18 +304,18 @@ func TestOIDCIssuer_FailClosed(t *testing.T) {
 	if notReady.Ready() {
 		t.Fatal("issuer with no key must not be ready")
 	}
-	if _, err := notReady.MintIdentityAssertion(te, "aud", time.Minute, nil); err == nil {
+	if _, err := notReady.MintIdentityAssertion(te, "aud", time.Minute, nil, oidcAlgRS256); err == nil {
 		t.Error("mint must fail closed when no active key is installed")
 	}
 
 	ready := newReadyIssuer(t, "https://iss.example")
-	if _, err := ready.MintIdentityAssertion(te, "", time.Minute, nil); err == nil {
+	if _, err := ready.MintIdentityAssertion(te, "", time.Minute, nil, oidcAlgRS256); err == nil {
 		t.Error("mint must fail closed on empty audience")
 	}
-	if _, err := ready.MintIdentityAssertion(nil, "aud", time.Minute, nil); err == nil {
+	if _, err := ready.MintIdentityAssertion(nil, "aud", time.Minute, nil, oidcAlgRS256); err == nil {
 		t.Error("mint must fail closed on nil token entry")
 	}
-	if _, err := ready.MintIdentityAssertion(&logical.TokenEntry{}, "aud", time.Minute, nil); err == nil {
+	if _, err := ready.MintIdentityAssertion(&logical.TokenEntry{}, "aud", time.Minute, nil, oidcAlgRS256); err == nil {
 		t.Error("mint must fail closed when the principal is empty")
 	}
 
@@ -267,11 +326,11 @@ func TestOIDCIssuer_FailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generateSigningKey: %v", err)
 	}
-	nextOnly.RestoreKeys(nil, k, nil)
+	nextOnly.RestoreKeys(rs256Keyset(nil, k, nil))
 	if nextOnly.Ready() {
 		t.Error("an issuer with only a next key must not be ready")
 	}
-	if _, err := nextOnly.MintIdentityAssertion(te, "aud", time.Minute, nil); err == nil {
+	if _, err := nextOnly.MintIdentityAssertion(te, "aud", time.Minute, nil, oidcAlgRS256); err == nil {
 		t.Error("mint must fail closed when only a next key is installed")
 	}
 }
@@ -287,7 +346,7 @@ func TestOIDCIssuer_KeyStorage_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	// No key yet -> (nil, nil, nil, nil).
-	got, _, _, err := loadKeySet(ctx, storage)
+	got, _, _, err := loadRS256(ctx, storage)
 	if err != nil {
 		t.Fatalf("loadKeySet (empty): %v", err)
 	}
@@ -305,15 +364,15 @@ func TestOIDCIssuer_KeyStorage_RoundTrip(t *testing.T) {
 	}
 
 	// A keyset with no next key must be rejected.
-	if err := persistKeySet(ctx, storage, original, nil, nil); err == nil {
+	if err := persistRS256(ctx, storage, original, nil, nil); err == nil {
 		t.Fatal("persistKeySet must reject a keyset with no next key")
 	}
 
-	if err := persistKeySet(ctx, storage, original, originalNext, nil); err != nil {
+	if err := persistRS256(ctx, storage, original, originalNext, nil); err != nil {
 		t.Fatalf("persistKeySet: %v", err)
 	}
 
-	loaded, loadedNext, _, err := loadKeySet(ctx, storage)
+	loaded, loadedNext, _, err := loadRS256(ctx, storage)
 	if err != nil {
 		t.Fatalf("loadKeySet: %v", err)
 	}
@@ -335,9 +394,9 @@ func TestOIDCIssuer_KeyStorage_RoundTrip(t *testing.T) {
 
 	// The reloaded key mints an assertion that verifies against the same key's JWKS.
 	iss := NewOIDCIssuer("https://iss.example")
-	iss.RestoreKeys(loaded, loadedNext, nil)
+	iss.RestoreKeys(rs256Keyset(loaded, loadedNext, nil))
 	jwks := serveJWKS(t, iss)
-	tok, err := iss.MintIdentityAssertion(&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, "aud", time.Minute, nil)
+	tok, err := iss.MintIdentityAssertion(&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, "aud", time.Minute, nil, oidcAlgRS256)
 	if err != nil {
 		t.Fatalf("mint with reloaded key: %v", err)
 	}
@@ -394,7 +453,7 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	if iss := core.OIDCIssuer(); iss == nil || iss.Ready() {
 		t.Fatal("standby with no key must produce a not-ready issuer")
 	}
-	if k, _, _, _ := loadKeySet(ctx, storage); k != nil {
+	if k, _, _, _ := loadRS256(ctx, storage); k != nil {
 		t.Fatal("standby must not generate/persist a key")
 	}
 
@@ -406,11 +465,11 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	if iss == nil || !iss.Ready() {
 		t.Fatal("active node must produce a ready issuer")
 	}
-	tok, err := iss.MintIdentityAssertion(&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, "aud", time.Minute, nil)
+	tok, err := iss.MintIdentityAssertion(&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, "aud", time.Minute, nil, oidcAlgRS256)
 	if err != nil || tok == "" {
 		t.Fatalf("ready issuer must mint: %v", err)
 	}
-	persisted, persistedNext, _, _ := loadKeySet(ctx, storage)
+	persisted, persistedNext, _, _ := loadRS256(ctx, storage)
 	if persisted == nil || persistedNext == nil {
 		t.Fatal("active node must persist both the active and next keys")
 	}
@@ -427,7 +486,7 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	if err := core.setupOIDCIssuer(ctx, false); err != nil {
 		t.Fatalf("setup (reuse): %v", err)
 	}
-	reloaded, reloadedNext, _, _ := loadKeySet(ctx, storage)
+	reloaded, reloadedNext, _, _ := loadRS256(ctx, storage)
 	if reloaded == nil || reloaded.kid != firstKid {
 		t.Fatal("re-setup must reuse the persisted active key")
 	}
@@ -484,7 +543,7 @@ func enableIssuer(t *testing.T, core *Core) *OIDCIssuer {
 	iss := core.OIDCIssuer()
 	require.NotNil(t, iss)
 	require.True(t, iss.Ready())
-	if _, next, _ := iss.Keys(); next == nil {
+	if _, next, _ := rs256Keys(iss); next == nil {
 		t.Fatal("enabled issuer must have a pre-published next key")
 	}
 	return iss
@@ -499,11 +558,11 @@ func TestRotateOIDCKey(t *testing.T) {
 	ctx := context.Background()
 	iss := enableIssuer(t, core)
 
-	oldActive, oldNext, _ := iss.Keys()
+	oldActive, oldNext, _ := rs256Keys(iss)
 
 	require.NoError(t, core.rotateOIDCKey(ctx, iss, nil, 0, defaultRetiredKeyGrace))
 
-	newActive, newNext, retired := iss.Keys()
+	newActive, newNext, retired := rs256Keys(iss)
 	assert.Equal(t, oldNext.kid, newActive.kid, "rotation must promote the next key to active")
 	assert.NotEqual(t, newActive.kid, newNext.kid, "a fresh next key must be generated")
 	assert.NotEqual(t, oldActive.kid, newNext.kid, "the new next key must be distinct from the old active")
@@ -517,7 +576,7 @@ func TestRotateOIDCKey(t *testing.T) {
 
 	// Persisted keyset reflects the rotation.
 	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
-	pActive, pNext, pRetired, err := loadKeySet(ctx, storage)
+	pActive, pNext, pRetired, err := loadRS256(ctx, storage)
 	require.NoError(t, err)
 	assert.Equal(t, newActive.kid, pActive.kid)
 	assert.Equal(t, newNext.kid, pNext.kid)
@@ -553,18 +612,18 @@ func TestOIDCIssuer_PruneRetired(t *testing.T) {
 	k3, err := generateSigningKey(oidcAlgRS256)
 	require.NoError(t, err)
 	// Rotate with a far-past cutoff so the freshly-retired old active is kept.
-	require.NoError(t, iss.Rotate(k3, time.Now().Add(-time.Hour)))
-	_, _, retired := iss.Keys()
+	require.NoError(t, iss.Rotate(oidcAlgRS256, k3, time.Now().Add(-time.Hour)))
+	_, _, retired := rs256Keys(iss)
 	require.Len(t, retired, 1)
 
 	// Cutoff in the past keeps a freshly-retired key.
 	assert.Equal(t, 0, iss.PruneRetired(time.Now().Add(-time.Hour)))
-	_, _, retired = iss.Keys()
+	_, _, retired = rs256Keys(iss)
 	assert.Len(t, retired, 1)
 
 	// Cutoff in the future prunes it.
 	assert.Equal(t, 1, iss.PruneRetired(time.Now().Add(time.Hour)))
-	_, _, retired = iss.Keys()
+	_, _, retired = rs256Keys(iss)
 	assert.Len(t, retired, 0)
 }
 
@@ -577,14 +636,14 @@ func TestRotateOIDCKey_NextPrePublished(t *testing.T) {
 	ctx := context.Background()
 	iss := enableIssuer(t, core)
 
-	_, oldNext, _ := iss.Keys()
+	_, oldNext, _ := rs256Keys(iss)
 
 	// The next key is in the JWKS before it ever signs.
 	assert.True(t, jwksKIDs(t, iss)[oldNext.kid], "the next key must be published before activation")
 
 	require.NoError(t, core.rotateOIDCKey(ctx, iss, nil, 0, defaultRetiredKeyGrace))
 
-	newActive, _, _ := iss.Keys()
+	newActive, _, _ := rs256Keys(iss)
 	assert.Equal(t, oldNext.kid, newActive.kid, "the pre-published next key must become active")
 }
 
@@ -596,7 +655,7 @@ func TestRotateOIDCKey_CancelDuringFloorWait(t *testing.T) {
 	defer core.tokenStore.Close()
 	iss := enableIssuer(t, core)
 
-	before, beforeNext, _ := iss.Keys()
+	before, beforeNext, _ := rs256Keys(iss)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled: the floor-wait select returns immediately
@@ -607,14 +666,14 @@ func TestRotateOIDCKey_CancelDuringFloorWait(t *testing.T) {
 	err := core.rotateOIDCKey(ctx, iss, &spyPublisher{}, time.Minute, defaultRetiredKeyGrace)
 	require.Error(t, err)
 
-	after, afterNext, retired := iss.Keys()
+	after, afterNext, retired := rs256Keys(iss)
 	assert.Equal(t, before.kid, after.kid, "active key must be unchanged after an aborted rotation")
 	assert.Equal(t, beforeNext.kid, afterNext.kid, "the durable next key must remain")
 	assert.Len(t, retired, 0, "no key should be retired")
 
 	// Persisted keyset still has the original active and next.
 	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
-	pActive, pNext, pRetired, _ := loadKeySet(context.Background(), storage)
+	pActive, pNext, pRetired, _ := loadRS256(context.Background(), storage)
 	assert.Equal(t, before.kid, pActive.kid)
 	assert.Equal(t, beforeNext.kid, pNext.kid)
 	assert.Len(t, pRetired, 0)
@@ -628,11 +687,11 @@ func TestRotateOIDCKey_PublishesOnceWithFullKeyset(t *testing.T) {
 	defer core.tokenStore.Close()
 	iss := enableIssuer(t, core)
 	spy := &spyPublisher{}
-	oldActive, oldNext, _ := iss.Keys()
+	oldActive, oldNext, _ := rs256Keys(iss)
 
 	// cacheTTL=0 -> no floor wait; one publish after the flip.
 	require.NoError(t, core.rotateOIDCKey(context.Background(), iss, spy, 0, defaultRetiredKeyGrace))
-	newActive, newNext, _ := iss.Keys()
+	newActive, newNext, _ := rs256Keys(iss)
 
 	require.Len(t, spy.jwks, 1, "rotation must publish exactly once")
 	var last struct {
@@ -691,7 +750,7 @@ func TestOIDCIssuer_Rotation(t *testing.T) {
 	te := &logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
 
 	// Sign with key 1 (active), then rotate to promote the next key (key 2).
-	tok1, err := iss.MintIdentityAssertion(te, "aud", 5*time.Minute, nil)
+	tok1, err := iss.MintIdentityAssertion(te, "aud", 5*time.Minute, nil, oidcAlgRS256)
 	if err != nil {
 		t.Fatalf("mint 1: %v", err)
 	}
@@ -701,7 +760,7 @@ func TestOIDCIssuer_Rotation(t *testing.T) {
 		t.Fatalf("generate key 3: %v", err)
 	}
 	// Far-past cutoff keeps the freshly-retired key 1 in the JWKS.
-	require.NoError(t, iss.Rotate(key3, time.Now().Add(-time.Hour)))
+	require.NoError(t, iss.Rotate(oidcAlgRS256, key3, time.Now().Add(-time.Hour)))
 
 	jwks := serveJWKS(t, iss)
 	ctx := context.Background()
@@ -722,7 +781,7 @@ func TestOIDCIssuer_Rotation(t *testing.T) {
 	}
 
 	// A new assertion signed by the active key verifies too.
-	tok2, err := iss.MintIdentityAssertion(te, "aud", 5*time.Minute, nil)
+	tok2, err := iss.MintIdentityAssertion(te, "aud", 5*time.Minute, nil, oidcAlgRS256)
 	if err != nil {
 		t.Fatalf("mint 2: %v", err)
 	}
@@ -737,19 +796,19 @@ func TestOIDCIssuer_Rotation(t *testing.T) {
 // state untouched when there is no next key to promote.
 func TestOIDCIssuer_Rotate_NoNext(t *testing.T) {
 	iss := newReadyIssuer(t, "https://iss.example") // active only, no next
-	activeBefore, nextBefore, _ := iss.Keys()
+	activeBefore, nextBefore, _ := rs256Keys(iss)
 	require.NotNil(t, activeBefore)
 	require.Nil(t, nextBefore)
 
 	newNext, err := generateSigningKey(oidcAlgRS256)
 	require.NoError(t, err)
 
-	_, _, perr := iss.PendingRotation(time.Now())
+	_, _, perr := iss.PendingRotation(oidcAlgRS256, time.Now())
 	assert.Error(t, perr, "PendingRotation must error without a next key")
 
-	assert.Error(t, iss.Rotate(newNext, time.Now()), "Rotate must error without a next key")
+	assert.Error(t, iss.Rotate(oidcAlgRS256, newNext, time.Now()), "Rotate must error without a next key")
 
-	activeAfter, nextAfter, retired := iss.Keys()
+	activeAfter, nextAfter, retired := rs256Keys(iss)
 	assert.Equal(t, activeBefore.kid, activeAfter.kid, "active must be unchanged")
 	assert.Nil(t, nextAfter, "next must remain nil")
 	assert.Len(t, retired, 0)
@@ -771,7 +830,7 @@ func TestOIDCKeyRotation_FirstTickAnchor(t *testing.T) {
 	active.createdAt = time.Now().Add(-period)
 	next.createdAt = time.Now()
 
-	firstTick := oidcRotationFirstTick(active, next, period)
+	firstTick := oidcRotationFirstTick(rs256Keyset(active, next, nil), period)
 
 	// Anchored on next.createdAt+period, the first tick is ~a full period out, NOT ~0.
 	assert.Greater(t, firstTick, period-time.Minute, "first tick must anchor on the next key, not fire immediately")
@@ -801,9 +860,9 @@ func TestRotateOIDCKey_PropagationFloor(t *testing.T) {
 		defer core.tokenStore.Close()
 		iss := enableIssuer(t, core)
 		// Age the next key past the cache TTL so the floor is already satisfied.
-		active, next, retired := iss.Keys()
+		active, next, retired := rs256Keys(iss)
 		next.createdAt = time.Now().Add(-time.Hour)
-		iss.RestoreKeys(active, next, retired)
+		iss.RestoreKeys(rs256Keyset(active, next, retired))
 		start := time.Now()
 		require.NoError(t, core.rotateOIDCKey(context.Background(), iss, &spyPublisher{}, cacheTTL, defaultRetiredKeyGrace))
 		assert.Less(t, time.Since(start), 300*time.Millisecond, "an old-enough next key must not wait")
