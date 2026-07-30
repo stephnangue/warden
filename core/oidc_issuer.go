@@ -87,8 +87,8 @@ const (
 
 // oidcSupportedAlgs is the fixed set of algorithms the issuer maintains a keyset
 // for. The issuer generates, rotates, and publishes a keyset per entry; a spec
-// selects which one signs its assertion.
-var oidcSupportedAlgs = []string{oidcAlgRS256}
+// selects which one signs its assertion (RS256 by default).
+var oidcSupportedAlgs = []string{oidcAlgRS256, oidcAlgES256}
 
 // algKeyset is the active/next/retired triple for one signing algorithm. active
 // signs; next is the pre-published successor promoted on rotation; retired keys

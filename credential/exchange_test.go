@@ -308,6 +308,31 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "assertion_algorithm ES256 with warden_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceWardenIdentity,
+				ConfigAssertionAudience:  "https://sts.example/aud",
+				ConfigAssertionAlgorithm: AssertionAlgES256,
+			},
+		},
+		{
+			name: "assertion_algorithm unknown value",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceWardenIdentity,
+				ConfigAssertionAudience:  "https://sts.example/aud",
+				ConfigAssertionAlgorithm: "EdDSA",
+			},
+			wantErr: true,
+		},
+		{
+			name: "assertion_algorithm without warden_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceHeader,
+				ConfigAssertionAlgorithm: AssertionAlgES256,
+			},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

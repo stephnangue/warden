@@ -2470,6 +2470,68 @@ func decodeAssertionClaims(t *testing.T, token string) map[string]interface{} {
 	return claims
 }
 
+// decodeAssertionHeader base64-decodes the header segment of a compact JWS.
+func decodeAssertionHeader(t *testing.T, token string) map[string]interface{} {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3, "expected a compact JWS with three segments")
+	hdr, err := base64.RawURLEncoding.DecodeString(parts[0])
+	require.NoError(t, err)
+	var header map[string]interface{}
+	require.NoError(t, json.Unmarshal(hdr, &header))
+	return header
+}
+
+// TestResolveExchangeInputs_WardenIdentity_Algorithm verifies the spec's
+// assertion_algorithm selects the signing algorithm (default RS256, opt into
+// ES256), reflected in the minted assertion's JWS header.
+func TestResolveExchangeInputs_WardenIdentity_Algorithm(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	te := &logical.TokenEntry{CredentialSpec: "", PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
+
+	cases := []struct {
+		name    string
+		cfgAlg  string
+		wantAlg string
+	}{
+		{"default is RS256", "", "RS256"},
+		{"explicit RS256", "RS256", "RS256"},
+		{"explicit ES256", "ES256", "ES256"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				credential.ConfigAssertionAudience:  "https://sts.example/aud",
+			}
+			if tc.cfgAlg != "" {
+				cfg[credential.ConfigAssertionAlgorithm] = tc.cfgAlg
+			}
+			specName := "wid-" + tc.wantAlg + tc.cfgAlg
+			seedSpec(t, c, ctx, specName, cfg)
+			te.CredentialSpec = specName
+
+			inputs, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque", nil), te)
+			require.NoError(t, err)
+			require.NotNil(t, inputs.ResolveSubjectToken)
+
+			tok, err := inputs.ResolveSubjectToken(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantAlg, decodeAssertionHeader(t, tok)["alg"], "assertion header alg")
+		})
+	}
+}
+
+// TestAssertionAlgConstantsMatch guards the string coupling between the credential
+// package's spec-config algorithm values and the issuer's supported-alg constants:
+// they must be identical, or a spec's algorithm would never match a keyset and the
+// mint would fail closed.
+func TestAssertionAlgConstantsMatch(t *testing.T) {
+	assert.Equal(t, oidcAlgRS256, credential.AssertionAlgRS256)
+	assert.Equal(t, oidcAlgES256, credential.AssertionAlgES256)
+}
+
 func TestResolveExchangeInputs_WardenIdentity_MetadataProjected(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")

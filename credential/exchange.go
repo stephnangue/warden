@@ -103,6 +103,32 @@ func AssertionMetadataKeys(config map[string]string) []string {
 	return keys
 }
 
+// Assertion signing algorithms selectable per warden_identity spec via
+// ConfigAssertionAlgorithm. RS256 (the default) is the universal OIDC verifier
+// default and the algorithm AWS IAM OIDC providers accept; ES256 (ECDSA P-256) is
+// the smaller/faster alternative some upstreams (e.g. GCP WIF) prefer. The issuer
+// publishes a JWKS key for each, so a spec can pick either. The string values must
+// match the issuer's supported algs.
+const (
+	AssertionAlgRS256   = "RS256"
+	AssertionAlgES256   = "ES256"
+	DefaultAssertionAlg = AssertionAlgRS256
+)
+
+// ConfigAssertionAlgorithm is the spec-config key selecting the JWS algorithm a
+// warden_identity assertion is signed with. Absent/empty defaults to RS256. Valid
+// only when subject_token_source=warden_identity.
+const ConfigAssertionAlgorithm = "assertion_algorithm"
+
+// AssertionAlgorithm returns the spec's configured assertion signing algorithm,
+// defaulting to RS256 when unset.
+func AssertionAlgorithm(config map[string]string) string {
+	if a := config[ConfigAssertionAlgorithm]; a != "" {
+		return a
+	}
+	return DefaultAssertionAlg
+}
+
 // maxExchangeTokenBytes bounds a single subject or actor token. Real JWTs and
 // access tokens are far smaller; the cap guards against a caller pushing an
 // oversized blob through the exchange plumbing.
@@ -271,6 +297,7 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	if err := ValidateSchema(config,
 		StringField(ConfigSubjectTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone, SourceWardenIdentity),
 		StringField(ConfigActorTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone),
+		StringField(ConfigAssertionAlgorithm).OneOf(AssertionAlgRS256, AssertionAlgES256),
 	); err != nil {
 		return err
 	}
@@ -286,6 +313,11 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	if config[ConfigAssertionMetadataClaims] != "" && config[ConfigSubjectTokenSource] != SourceWardenIdentity {
 		return fmt.Errorf("field '%s': is valid only when '%s' is '%s'",
 			ConfigAssertionMetadataClaims, ConfigSubjectTokenSource, SourceWardenIdentity)
+	}
+	// The assertion algorithm only applies to a Warden-minted subject.
+	if config[ConfigAssertionAlgorithm] != "" && config[ConfigSubjectTokenSource] != SourceWardenIdentity {
+		return fmt.Errorf("field '%s': is valid only when '%s' is '%s'",
+			ConfigAssertionAlgorithm, ConfigSubjectTokenSource, SourceWardenIdentity)
 	}
 	// An actor token only has meaning alongside a subject token (RFC 8693 §2.1),
 	// so reject an actor source without a subject source.

@@ -901,8 +901,13 @@ func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
 	}
 	if needsKeys {
 		if standby {
-			c.logger.Warn("oidc issuer enabled but signing keys are missing; standby stays not-ready until promotion")
+			// A standby cannot generate keys. Install whatever it loaded (which may
+			// be a complete keyset for some algorithms and none for others) so those
+			// keys still verify in-flight assertions; it stays not-ready until
+			// promotion fills the gaps.
+			c.logger.Warn("oidc issuer enabled but some signing keys are missing; standby stays not-ready until promotion")
 			c.stopOIDCKeyRotation()
+			issuer.RestoreKeys(keysets)
 			c.oidcMu.Lock()
 			c.oidcIssuer = issuer
 			c.oidcPublisher = publisher

@@ -56,31 +56,40 @@ func persistRS256(ctx context.Context, storage sdklogical.Storage, active, next 
 	return persistKeySet(ctx, storage, rs256Keyset(active, next, retired))
 }
 
+// mustGen generates a signing key for alg or fails the test.
+func mustGen(t *testing.T, alg string) *signingKey {
+	t.Helper()
+	k, err := generateSigningKey(alg)
+	if err != nil {
+		t.Fatalf("generateSigningKey(%s): %v", alg, err)
+	}
+	return k
+}
+
+// newReadyIssuer returns a fully-ready issuer: an active key for EVERY supported
+// algorithm (so Ready() is true). RS256-focused tests reach the RS256 key via
+// rs256Keys; the extra ES256 key just rides along in the JWKS.
 func newReadyIssuer(t *testing.T, issuerURL string) *OIDCIssuer {
 	t.Helper()
 	iss := NewOIDCIssuer(issuerURL)
-	key, err := generateSigningKey(oidcAlgRS256)
-	if err != nil {
-		t.Fatalf("generateSigningKey: %v", err)
-	}
-	iss.RestoreKeys(rs256Keyset(key, nil, nil))
+	iss.RestoreKeys(map[string]*algKeyset{
+		oidcAlgRS256: {active: mustGen(t, oidcAlgRS256)},
+		oidcAlgES256: {active: mustGen(t, oidcAlgES256)},
+	})
 	return iss
 }
 
-// newReadyIssuerWithNext returns an issuer with an active key and a pre-published
-// next key, plus both keys, for rotation-shaped tests.
+// newReadyIssuerWithNext returns a fully-ready issuer with an active + pre-published
+// next key for every supported algorithm, plus the RS256 active/next, for
+// rotation-shaped tests.
 func newReadyIssuerWithNext(t *testing.T, issuerURL string) (iss *OIDCIssuer, active, next *signingKey) {
 	t.Helper()
 	iss = NewOIDCIssuer(issuerURL)
-	active, err := generateSigningKey(oidcAlgRS256)
-	if err != nil {
-		t.Fatalf("generateSigningKey (active): %v", err)
-	}
-	next, err = generateSigningKey(oidcAlgRS256)
-	if err != nil {
-		t.Fatalf("generateSigningKey (next): %v", err)
-	}
-	iss.RestoreKeys(rs256Keyset(active, next, nil))
+	active, next = mustGen(t, oidcAlgRS256), mustGen(t, oidcAlgRS256)
+	iss.RestoreKeys(map[string]*algKeyset{
+		oidcAlgRS256: {active: active, next: next},
+		oidcAlgES256: {active: mustGen(t, oidcAlgES256), next: mustGen(t, oidcAlgES256)},
+	})
 	return iss, active, next
 }
 
@@ -321,17 +330,18 @@ func TestOIDCIssuer_FailClosed(t *testing.T) {
 
 	// A next key alone (no active) is not ready — the next key never signs until
 	// it is promoted to active.
+	// RS256 has a next key but no active (ES256 is complete, so the not-ready state
+	// is caused specifically by RS256 lacking an active key, not by a missing alg).
 	nextOnly := NewOIDCIssuer("https://iss.example")
-	k, err := generateSigningKey(oidcAlgRS256)
-	if err != nil {
-		t.Fatalf("generateSigningKey: %v", err)
-	}
-	nextOnly.RestoreKeys(rs256Keyset(nil, k, nil))
+	nextOnly.RestoreKeys(map[string]*algKeyset{
+		oidcAlgRS256: {next: mustGen(t, oidcAlgRS256)},
+		oidcAlgES256: {active: mustGen(t, oidcAlgES256), next: mustGen(t, oidcAlgES256)},
+	})
 	if nextOnly.Ready() {
-		t.Error("an issuer with only a next key must not be ready")
+		t.Error("an issuer with only a next key for an alg must not be ready")
 	}
 	if _, err := nextOnly.MintIdentityAssertion(te, "aud", time.Minute, nil, oidcAlgRS256); err == nil {
-		t.Error("mint must fail closed when only a next key is installed")
+		t.Error("mint must fail closed when the alg has only a next key")
 	}
 }
 
@@ -547,6 +557,33 @@ func enableIssuer(t *testing.T, core *Core) *OIDCIssuer {
 		t.Fatal("enabled issuer must have a pre-published next key")
 	}
 	return iss
+}
+
+// TestCore_setupOIDCIssuer_GeneratesAllAlgs verifies enabling the issuer generates
+// a keyset for every supported algorithm, so a spec can select either with no cold
+// start: the JWKS carries an RSA and an EC key (active+next each) and discovery
+// advertises both algorithms.
+func TestCore_setupOIDCIssuer_GeneratesAllAlgs(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	iss := enableIssuer(t, core)
+
+	keysets := iss.Keys()
+	require.NotNil(t, keysets[oidcAlgRS256], "RS256 keyset")
+	require.NotNil(t, keysets[oidcAlgES256], "ES256 keyset")
+	assert.NotNil(t, keysets[oidcAlgRS256].active)
+	assert.NotNil(t, keysets[oidcAlgES256].active)
+
+	// 2 algorithms x (active + next).
+	assert.Len(t, jwksKIDs(t, iss), 4)
+
+	disc, err := iss.DiscoveryDocument("https://iss.example/oidc/jwks")
+	require.NoError(t, err)
+	var d struct {
+		Algs []string `json:"id_token_signing_alg_values_supported"`
+	}
+	require.NoError(t, json.Unmarshal(disc, &d))
+	assert.ElementsMatch(t, []string{"RS256", "ES256"}, d.Algs)
 }
 
 // TestRotateOIDCKey covers one rotation with no external publisher: the active

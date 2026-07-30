@@ -1354,14 +1354,18 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		if mdFingerprint != "" {
 			inputs.CacheIdentity += "\x00" + mdFingerprint
 		}
-		// Defer the RS256 assertion mint to a credential-cache MISS. On the hot
+		// Defer the assertion mint to a credential-cache MISS. On the hot
 		// path (a cache hit) the assertion would be minted and immediately thrown
 		// away; the Manager invokes this only on a real miss, inside its
 		// singleflight leader, so at most one assertion is minted per miss. The
 		// CacheIdentity above keys the cache, so the fingerprint never needs the
 		// (not-yet-minted) assertion bytes.
+		// The spec selects the assertion signing algorithm (default RS256). The
+		// issuer maintains a keyset per algorithm, so either is available with no
+		// cold start; validation restricts it to a supported alg at spec-create.
+		alg := credential.AssertionAlgorithm(spec.Config)
 		inputs.ResolveSubjectToken = func(context.Context) (string, error) {
-			return issuer.MintIdentityAssertion(te, audience, issuer.AssertionTTL(), projected, oidcAlgRS256)
+			return issuer.MintIdentityAssertion(te, audience, issuer.AssertionTTL(), projected, alg)
 		}
 	default:
 		// SpecRequestsExchange already excluded "none"/absent; any other value
