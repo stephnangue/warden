@@ -304,6 +304,58 @@ func TestOIDCIssuer_JWKS_EmptyIsArray(t *testing.T) {
 	assert.JSONEq(t, `{"keys":[]}`, string(body))
 }
 
+// TestOIDCIssuer_AlgSpec_Extensible proves the algorithm descriptor table
+// generalizes over BOTH a different hash (SHA-384) and a different EC curve (P-384):
+// RS384 and ES384 — present in oidcAlgSpecs but not yet in oidcSupportedAlgs —
+// generate, sign, and verify against the served JWKS end-to-end. Enabling either is
+// then just adding its name to oidcSupportedAlgs and the credential OneOf.
+func TestOIDCIssuer_AlgSpec_Extensible(t *testing.T) {
+	cases := []struct {
+		alg    string
+		jwtAlg jwt.Alg
+		kty    string
+		crv    string
+	}{
+		{oidcAlgRS384, jwt.RS384, "RSA", ""},
+		{oidcAlgES384, jwt.ES384, "EC", "P-384"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.alg, func(t *testing.T) {
+			const issuerURL = "https://iss.example"
+			iss := NewOIDCIssuer(issuerURL)
+			iss.RestoreKeys(map[string]*algKeyset{tc.alg: {active: mustGen(t, tc.alg)}})
+			jwks := serveJWKS(t, iss)
+
+			te := &logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
+			tok, err := iss.MintIdentityAssertion(te, "aud", time.Minute, nil, tc.alg)
+			require.NoError(t, err)
+
+			ctx := context.Background()
+			keySet, err := jwt.NewJSONWebKeySet(ctx, jwks.URL, "")
+			require.NoError(t, err)
+			validator, err := jwt.NewValidator(keySet)
+			require.NoError(t, err)
+			_, err = validator.Validate(ctx, tok, jwt.Expected{
+				Issuer: issuerURL, Audiences: []string{"aud"}, SigningAlgorithms: []jwt.Alg{tc.jwtAlg},
+			})
+			require.NoError(t, err, "%s assertion must verify against the JWKS", tc.alg)
+
+			// The JWKS renders the correct key type / curve for the new algorithm.
+			body, err := iss.JWKS()
+			require.NoError(t, err)
+			var set struct {
+				Keys []map[string]any `json:"keys"`
+			}
+			require.NoError(t, json.Unmarshal(body, &set))
+			require.Len(t, set.Keys, 1)
+			assert.Equal(t, tc.kty, set.Keys[0]["kty"])
+			if tc.crv != "" {
+				assert.Equal(t, tc.crv, set.Keys[0]["crv"])
+			}
+		})
+	}
+}
+
 // TestOIDCIssuer_FailClosed covers the cases where minting must refuse.
 func TestOIDCIssuer_FailClosed(t *testing.T) {
 	te := &logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
