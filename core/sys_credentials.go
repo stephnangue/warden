@@ -37,8 +37,8 @@ func (b *SystemBackend) pathCredentials() []*framework.Path {
 				},
 				"rotation_period": {
 					Type:        framework.TypeDurationSecond,
-					Description: "Rotation period in seconds for credential source rotation",
-					Required:    true,
+					Description: "Rotation period in seconds for credential source rotation. Required by source types that rotate a long-lived secret (e.g. hvault); not applicable to keyless sources (e.g. AWS auth_method=wif). Enforced per type at create time.",
+					Default:     0,
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
