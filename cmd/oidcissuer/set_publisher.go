@@ -41,6 +41,7 @@ Usage: warden oidc-issuer set-publisher -type=<type> [-config=key=value ...]
       http_put     base_url, auth_header, auth_value
       s3           bucket, region, access_key_id, secret_access_key, prefix
       azure_blob   account_name, container, account_key, prefix, endpoint
+      gcs          bucket, credentials_json, prefix, endpoint
       none         (removes the publisher)
 
   S3:
@@ -55,6 +56,12 @@ Usage: warden oidc-issuer set-publisher -type=<type> [-config=key=value ...]
       $ warden oidc-issuer set-publisher -type=azure_blob \
           -config=account_name=wardenoidc -config=container=jwks \
           -config=account_key=@/run/secrets/key
+
+  Google Cloud Storage:
+
+      $ warden oidc-issuer set-publisher -type=gcs \
+          -config=bucket=my-jwks \
+          -config=credentials_json=@/run/secrets/sa.json
 
   Remove the publisher:
 
@@ -75,7 +82,7 @@ Usage: warden oidc-issuer set-publisher -type=<type> [-config=key=value ...]
 
 func init() {
 	f := SetPublisherCmd.Flags()
-	f.StringVar(&pubType, "type", "", "Publisher type: none, local_file, http_put, s3, or azure_blob")
+	f.StringVar(&pubType, "type", "", "Publisher type: none, local_file, http_put, s3, azure_blob, or gcs")
 	f.StringToStringVar(&pubConfig, "config", nil, "Type-specific config (key=value; repeatable). Use @file to read a value from a file, e.g. -config=account_key=@/run/secrets/key")
 	f.StringVarP(&pubJSON, "json", "j", "", "Full publisher JSON block — '<json>', '@file.json', or '-' for stdin (mutually exclusive with -type/-config)")
 }

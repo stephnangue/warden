@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 )
 
 func TestNewJWKSPublisher_Dispatch(t *testing.T) {
@@ -32,6 +33,10 @@ func TestNewJWKSPublisher_Dispatch(t *testing.T) {
 	require.Error(t, err) // missing keys
 	_, err = newJWKSPublisher(publisherConfig{Type: "azure_blob", AccountName: "a", Container: "c"}, "")
 	require.Error(t, err) // missing account_key
+	_, err = newJWKSPublisher(publisherConfig{Type: "gcs"}, "")
+	require.Error(t, err) // missing bucket
+	_, err = newJWKSPublisher(publisherConfig{Type: "gcs", Bucket: "b"}, "")
+	require.Error(t, err) // missing credentials_json
 
 	// unsupported type.
 	_, err = newJWKSPublisher(publisherConfig{Type: "ftp"}, "")
@@ -161,5 +166,42 @@ func TestAzureBlobPublisher(t *testing.T) {
 
 	jwks, ok := seen["/jwks/prod/oidc/jwks"]
 	require.True(t, ok, "jwks blob must be PUT")
+	assert.Equal(t, "application/json", jwks.contentType)
+}
+
+func TestGCSPublisher(t *testing.T) {
+	type got struct{ method, auth, contentType, cacheControl string }
+	seen := map[string]got{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if r.Method == http.MethodPut {
+			seen[r.URL.Path] = got{r.Method, r.Header.Get("Authorization"), r.Header.Get("Content-Type"), r.Header.Get("Cache-Control")}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Inject a static token source and point the endpoint at the fake server, so the
+	// upload path is exercised without a real Google token exchange.
+	p := &gcsPublisher{
+		tokenSource:  oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}),
+		endpoint:     srv.URL,
+		bucket:       "warden-oidc",
+		prefix:       "prod",
+		cacheControl: "public, max-age=60",
+		client:       srv.Client(),
+	}
+
+	require.NoError(t, p.Publish(context.Background(), []byte(`{"issuer":"x"}`), []byte(`{"keys":[]}`)))
+
+	disc, ok := seen["/warden-oidc/prod/.well-known/openid-configuration"]
+	require.True(t, ok, "discovery object must be PUT")
+	assert.Equal(t, http.MethodPut, disc.method)
+	assert.Equal(t, "Bearer test-token", disc.auth)
+	assert.Equal(t, "application/json", disc.contentType)
+	assert.Equal(t, "public, max-age=60", disc.cacheControl)
+
+	jwks, ok := seen["/warden-oidc/prod/oidc/jwks"]
+	require.True(t, ok, "jwks object must be PUT")
 	assert.Equal(t, "application/json", jwks.contentType)
 }
