@@ -16,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 // The OIDC issuer's public documents are published under these object paths, so
@@ -32,7 +34,7 @@ const (
 // signing key never leaves Warden.
 type publisherConfig struct {
 	// Type is "", "none" (serve only from Warden's own endpoint), "local_file",
-	// "http_put", "s3", or "azure_blob".
+	// "http_put", "s3", "azure_blob", or "gcs".
 	Type string `json:"type,omitempty"`
 
 	// local_file: an external process (with its own credentials) syncs the
@@ -64,7 +66,15 @@ type publisherConfig struct {
 	AccountName string `json:"account_name,omitempty"`
 	Container   string `json:"container,omitempty"`
 	AccountKey  string `json:"account_key,omitempty"`
-	Endpoint    string `json:"endpoint,omitempty"`
+	Endpoint    string `json:"endpoint,omitempty"` // shared with gcs (API endpoint override)
+
+	// gcs: writes to a Google Cloud Storage bucket authenticated by a stored
+	// static service-account JSON key. CredentialsJSON is a stored static secret
+	// (masked); like the s3/azure_blob keys it is an infra-scoped write credential
+	// used only on rotation, and key rotation is a planned follow-on. Bucket above
+	// is reused; Prefix is reused as the object-name prefix; Endpoint overrides the
+	// storage API endpoint (for a private endpoint or a test/emulator).
+	CredentialsJSON string `json:"credentials_json,omitempty"`
 }
 
 // JWKSPublisher pushes the issuer's public discovery + JWKS documents to an
@@ -94,6 +104,8 @@ func newJWKSPublisher(cfg publisherConfig, cacheControl string) (JWKSPublisher, 
 		return newS3Publisher(cfg, cacheControl)
 	case "azure_blob":
 		return newAzureBlobPublisher(cfg, cacheControl)
+	case "gcs":
+		return newGCSPublisher(cfg, cacheControl)
 	default:
 		return nil, fmt.Errorf("oidc publisher: unsupported type %q", cfg.Type)
 	}
@@ -312,6 +324,107 @@ func (p *azureBlobPublisher) put(ctx context.Context, name string, body []byte) 
 	})
 	if err != nil {
 		return fmt.Errorf("oidc publisher: azure_blob upload %s: %w", blobName, err)
+	}
+	return nil
+}
+
+// gcsUploadTimeout bounds a single object upload, matching the other cloud
+// publishers' per-upload timeout so a slow/flaky endpoint cannot stall a rotation
+// (which runs off the request path and has no outer deadline).
+const gcsUploadTimeout = 15 * time.Second
+
+// gcsDefaultEndpoint is the public Cloud Storage host; Endpoint overrides it for a
+// private endpoint or a test server.
+const gcsDefaultEndpoint = "https://storage.googleapis.com"
+
+// gcsScope is the OAuth2 scope needed to write objects.
+const gcsScope = "https://www.googleapis.com/auth/devstorage.read_write"
+
+// gcsPublisher uploads the documents to a Google Cloud Storage bucket over the
+// single-request upload API, authenticated by an OAuth2 token minted from a stored
+// static service-account JSON key. Like the S3/Azure publishers this is an
+// infra-scoped write credential used only on rotation (rare), distinct from the
+// per-agent secrets WIF removes. The key does not expire; regenerating and swapping
+// it is a planned rotation follow-on. Uploading directly rather than via the cloud
+// SDK keeps the credential path identical to the source drivers and avoids a large
+// dependency for two small PUTs.
+type gcsPublisher struct {
+	tokenSource  oauth2.TokenSource
+	endpoint     string
+	bucket       string
+	prefix       string
+	cacheControl string
+	client       *http.Client
+}
+
+func newGCSPublisher(cfg publisherConfig, cacheControl string) (JWKSPublisher, error) {
+	if cfg.Bucket == "" {
+		return nil, fmt.Errorf("oidc publisher: gcs requires 'bucket'")
+	}
+	if cfg.CredentialsJSON == "" {
+		return nil, fmt.Errorf("oidc publisher: gcs requires 'credentials_json'")
+	}
+	// Pin the credential type to a service-account key. Accepting an unvalidated
+	// config here is a security risk: an external_account/workload-identity JSON
+	// could point token minting at an attacker-controlled URL, so anything but a
+	// service account is rejected.
+	creds, err := google.CredentialsFromJSONWithType(context.Background(), []byte(cfg.CredentialsJSON), google.ServiceAccount, gcsScope)
+	if err != nil {
+		return nil, fmt.Errorf("oidc publisher: gcs credentials: %w", err)
+	}
+	endpoint := cfg.Endpoint
+	if endpoint == "" {
+		endpoint = gcsDefaultEndpoint
+	}
+	return &gcsPublisher{
+		tokenSource:  creds.TokenSource,
+		endpoint:     strings.TrimRight(endpoint, "/"),
+		bucket:       cfg.Bucket,
+		prefix:       strings.Trim(cfg.Prefix, "/"),
+		cacheControl: cacheControl,
+		client:       &http.Client{},
+	}, nil
+}
+
+func (p *gcsPublisher) Type() string { return "gcs" }
+
+func (p *gcsPublisher) Publish(ctx context.Context, discovery, jwks []byte) error {
+	if err := p.put(ctx, oidcDiscoveryObjectPath, discovery); err != nil {
+		return err
+	}
+	return p.put(ctx, oidcJWKSObjectPath, jwks)
+}
+
+func (p *gcsPublisher) put(ctx context.Context, name string, body []byte) error {
+	object := name
+	if p.prefix != "" {
+		object = p.prefix + "/" + name
+	}
+	token, err := p.tokenSource.Token()
+	if err != nil {
+		return fmt.Errorf("oidc publisher: gcs token: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, gcsUploadTimeout)
+	defer cancel()
+	// Single-request upload: PUT {endpoint}/{bucket}/{object}. Object names may
+	// contain '/', which stays a path separator in the URL.
+	url := p.endpoint + "/" + p.bucket + "/" + object
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("oidc publisher: gcs build PUT %s: %w", object, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if p.cacheControl != "" {
+		req.Header.Set("Cache-Control", p.cacheControl)
+	}
+	token.SetAuthHeader(req)
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("oidc publisher: gcs upload %s: %w", object, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("oidc publisher: gcs upload %s returned status %d", object, resp.StatusCode)
 	}
 	return nil
 }

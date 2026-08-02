@@ -47,7 +47,7 @@ func (b *SystemBackend) pathOIDCIssuer() []*framework.Path {
 				},
 				"publisher": {
 					Type:        framework.TypeMap,
-					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3|azure_blob), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key, account_name, container, account_key, endpoint. Cache-Control is derived from jwks_cache_ttl.",
+					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3|azure_blob|gcs), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key, account_name, container, account_key, endpoint, credentials_json. Cache-Control is derived from jwks_cache_ttl.",
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
@@ -230,15 +230,16 @@ var publisherFieldOwners = map[string][]string{
 	"base_url":          {"http_put"},
 	"auth_header":       {"http_put"},
 	"auth_value":        {"http_put"},
-	"bucket":            {"s3"},
+	"bucket":            {"s3", "gcs"},
 	"region":            {"s3"},
-	"prefix":            {"s3", "azure_blob"},
+	"prefix":            {"s3", "azure_blob", "gcs"},
 	"access_key_id":     {"s3"},
 	"secret_access_key": {"s3"},
 	"account_name":      {"azure_blob"},
 	"container":         {"azure_blob"},
 	"account_key":       {"azure_blob"},
-	"endpoint":          {"azure_blob"},
+	"endpoint":          {"azure_blob", "gcs"},
+	"credentials_json":  {"gcs"},
 }
 
 // ownedBy reports whether field is valid for the given publisher type.
@@ -330,6 +331,9 @@ func mergePublisherConfig(prior publisherConfig, raw map[string]any) (publisherC
 	if v, ok := get("account_key"); ok && v != "" && v != maskValue {
 		pc.AccountKey = v
 	}
+	if v, ok := get("credentials_json"); ok && v != "" && v != maskValue {
+		pc.CredentialsJSON = v
+	}
 
 	return pc, nil
 }
@@ -375,6 +379,9 @@ func maskedPublisher(pc publisherConfig) map[string]any {
 	}
 	if pc.Endpoint != "" {
 		m["endpoint"] = pc.Endpoint
+	}
+	if pc.CredentialsJSON != "" {
+		m["credentials_json"] = maskValue
 	}
 	return m
 }

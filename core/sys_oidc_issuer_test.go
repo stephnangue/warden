@@ -336,6 +336,37 @@ func TestMergePublisherConfig(t *testing.T) {
 	pc, err = mergePublisherConfig(prior, map[string]any{"type": "azure_blob", "account_key": maskValue})
 	require.NoError(t, err)
 	assert.Equal(t, "realkey", pc.AccountKey)
+
+	// A clean gcs config passes; bucket/prefix/endpoint are shared and accepted here.
+	pc, err = mergePublisherConfig(publisherConfig{}, map[string]any{
+		"type": "gcs", "bucket": "my-jwks", "prefix": "prod",
+		"credentials_json": `{"type":"service_account"}`, "endpoint": "https://storage.example",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "gcs", pc.Type)
+	assert.Equal(t, "my-jwks", pc.Bucket)
+	assert.Equal(t, "prod", pc.Prefix)
+	assert.Equal(t, `{"type":"service_account"}`, pc.CredentialsJSON)
+	assert.Equal(t, "https://storage.example", pc.Endpoint)
+
+	// Read masks the credentials but renders the non-secret fields plainly.
+	masked = maskedPublisher(pc)
+	assert.Equal(t, "my-jwks", masked["bucket"])
+	assert.Equal(t, "prod", masked["prefix"])
+	assert.Equal(t, "https://storage.example", masked["endpoint"])
+	assert.Equal(t, maskValue, masked["credentials_json"])
+
+	// An azure_blob field under gcs is rejected.
+	_, err = mergePublisherConfig(publisherConfig{}, map[string]any{
+		"type": "gcs", "bucket": "b", "credentials_json": "c", "account_name": "a",
+	})
+	require.Error(t, err)
+
+	// Masked credentials_json keeps the prior one.
+	prior = publisherConfig{Type: "gcs", Bucket: "b", CredentialsJSON: "realkey"}
+	pc, err = mergePublisherConfig(prior, map[string]any{"type": "gcs", "credentials_json": maskValue})
+	require.NoError(t, err)
+	assert.Equal(t, "realkey", pc.CredentialsJSON)
 }
 
 // TestSysOIDCIssuerConfig_PublisherCrossTypeRejected verifies a cross-type
