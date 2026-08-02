@@ -144,7 +144,9 @@ func NewManager(
 //   - tokenTTL: The TTL of the session token (used for cache duration)
 //   - inputs: Optional caller-derived token-exchange inputs. When non-nil they
 //     are folded into the cache key so distinct exchange inputs cannot share a
-//     cached credential.
+//     cached credential. When inputs.ResolveSubjectToken is set, the subject
+//     token is materialized only on a cache miss (inside the singleflight),
+//     so a cache hit incurs no subject-mint cost.
 //
 // Returns the issued credential or an error
 func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName string, tokenTTL time.Duration, inputs *ExchangeInputs) (*Credential, error) {
@@ -185,6 +187,20 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 		// Double-check cache in case another goroutine just added it
 		if cred, found := m.cache.Get(cacheKey); found && !cred.IsExpired() {
 			return cred, nil
+		}
+
+		// Materialize a lazily-resolved subject token (e.g. a Warden-minted
+		// identity assertion) only now — after both cache checks have confirmed a
+		// real miss — so cache hits never pay for the mint. singleflight coalesces
+		// concurrent requests for this cacheKey, so a burst of N simultaneous
+		// misses runs this once and the other N-1 share the resulting credential;
+		// each request has its own inputs, so mutating SubjectToken here is race-free.
+		if inputs != nil && inputs.ResolveSubjectToken != nil && inputs.SubjectToken == "" {
+			tok, rerr := inputs.ResolveSubjectToken(ctx)
+			if rerr != nil {
+				return nil, fmt.Errorf("failed to resolve subject token: %w", rerr)
+			}
+			inputs.SubjectToken = tok
 		}
 
 		// Issue new credential from source

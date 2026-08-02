@@ -52,7 +52,7 @@ Usage: warden cred source create <name> [flags]
 func init() {
 	CreateCmd.Flags().StringVar(&createType, "type", "", "Source type (required unless -json)")
 	CreateCmd.Flags().StringToStringVar(&createConfig, "config", nil, "Source configuration (key=value)")
-	CreateCmd.Flags().StringVar(&createRotationPeriod, "rotation-period", "", "Rotation period for credential source (e.g., 24h, 30m) (required unless -json)")
+	CreateCmd.Flags().StringVar(&createRotationPeriod, "rotation-period", "", "Rotation period for credential source (e.g., 24h, 30m); required by some source types (e.g. hvault), not applicable to keyless sources")
 	CreateCmd.Flags().StringVarP(&createJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with -type/-config/-rotation-period)")
 }
 
@@ -84,12 +84,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Typed-flag path: required-flag validation moves here so -json can
-	// satisfy them without tripping cobra's MarkFlagRequired.
+	// satisfy them without tripping cobra's MarkFlagRequired. Only -type is
+	// universally required; whether a rotation period is required depends on
+	// the source type (e.g. hvault needs one, keyless AWS wif does not), so
+	// that check is left to the server rather than duplicated per type here.
 	if createType == "" {
 		return fmt.Errorf("-type is required (or use -json): %w", helpers.ErrUsage)
-	}
-	if createRotationPeriod == "" {
-		return fmt.Errorf("-rotation-period is required (or use -json): %w", helpers.ErrUsage)
 	}
 	if err := helpers.ValidateIdentifier("-type", createType); err != nil {
 		return err

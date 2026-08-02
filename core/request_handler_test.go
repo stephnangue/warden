@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -2269,6 +2271,12 @@ func requestWith(clientToken string, headers map[string]string) *logical.Request
 	return &logical.Request{ClientToken: clientToken, HTTPRequest: httpReq}
 }
 
+// teForSpec builds the minimal token entry resolveExchangeInputs needs: the
+// bound credential spec name.
+func teForSpec(spec string) *logical.TokenEntry {
+	return &logical.TokenEntry{CredentialSpec: spec}
+}
+
 func TestCreateSpec_RejectsInvalidExchangeConfig(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	// actor_token_source without a subject source is rejected by validateSpec.
@@ -2286,7 +2294,7 @@ func TestResolveExchangeInputs_NoExchangeConfig(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	seedSpec(t, c, ctx, "plain", map[string]string{})
 
-	inputs, err := c.resolveExchangeInputs(ctx, requestWith("opaque-token", nil), "plain")
+	inputs, err := c.resolveExchangeInputs(ctx, requestWith("opaque-token", nil), teForSpec("plain"))
 	require.NoError(t, err)
 	assert.Nil(t, inputs, "non-exchange specs must yield nil inputs")
 }
@@ -2297,12 +2305,13 @@ func TestResolveExchangeInputs_AuthToken_JWT(t *testing.T) {
 		credential.ConfigSubjectTokenSource: credential.SourceAuthToken,
 	})
 
-	inputs, err := c.resolveExchangeInputs(ctx, requestWith("eyJhbGciOi.payload.sig", nil), "auth-spec")
+	inputs, err := c.resolveExchangeInputs(ctx, requestWith("eyJhbGciOi.payload.sig", nil), teForSpec("auth-spec"))
 	require.NoError(t, err)
 	require.NotNil(t, inputs)
 	assert.Equal(t, "eyJhbGciOi.payload.sig", inputs.SubjectToken)
 	assert.Equal(t, credential.TokenTypeJWT, inputs.SubjectTokenType)
 	assert.Equal(t, credential.ExchangeOriginVerified, inputs.SubjectTokenOrigin)
+	assert.Nil(t, inputs.ResolveSubjectToken, "non-warden_identity sources resolve eagerly")
 }
 
 func TestResolveExchangeInputs_AuthToken_OpaqueFailsClosed(t *testing.T) {
@@ -2311,7 +2320,7 @@ func TestResolveExchangeInputs_AuthToken_OpaqueFailsClosed(t *testing.T) {
 		credential.ConfigSubjectTokenSource: credential.SourceAuthToken,
 	})
 
-	_, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque-session-token", nil), "auth-spec")
+	_, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque-session-token", nil), teForSpec("auth-spec"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not JWT-authenticated")
 }
@@ -2323,11 +2332,12 @@ func TestResolveExchangeInputs_HeaderSource(t *testing.T) {
 	})
 
 	req := requestWith("opaque-token", map[string]string{headerSubjectToken: "eyJ.caller.subject"})
-	inputs, err := c.resolveExchangeInputs(ctx, req, "hdr-spec")
+	inputs, err := c.resolveExchangeInputs(ctx, req, teForSpec("hdr-spec"))
 	require.NoError(t, err)
 	require.NotNil(t, inputs)
 	assert.Equal(t, "eyJ.caller.subject", inputs.SubjectToken)
 	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.SubjectTokenOrigin)
+	assert.Nil(t, inputs.ResolveSubjectToken, "non-warden_identity sources resolve eagerly")
 	assert.Empty(t, inputs.ActorToken)
 }
 
@@ -2337,7 +2347,7 @@ func TestResolveExchangeInputs_HeaderSource_MissingFailsClosed(t *testing.T) {
 		credential.ConfigSubjectTokenSource: credential.SourceHeader,
 	})
 
-	_, err := c.resolveExchangeInputs(ctx, requestWith("opaque-token", nil), "hdr-spec")
+	_, err := c.resolveExchangeInputs(ctx, requestWith("opaque-token", nil), teForSpec("hdr-spec"))
 	require.Error(t, err)
 }
 
@@ -2352,7 +2362,7 @@ func TestResolveExchangeInputs_ActorHeader(t *testing.T) {
 		headerSubjectToken: "eyJ.subject",
 		headerActorToken:   "eyJ.actor",
 	})
-	inputs, err := c.resolveExchangeInputs(ctx, req, "deleg-spec")
+	inputs, err := c.resolveExchangeInputs(ctx, req, teForSpec("deleg-spec"))
 	require.NoError(t, err)
 	require.NotNil(t, inputs)
 	assert.Equal(t, "eyJ.subject", inputs.SubjectToken)
@@ -2370,7 +2380,7 @@ func TestResolveExchangeInputs_ActorAuthToken(t *testing.T) {
 	})
 
 	req := requestWith("eyJ.agent-jwt", map[string]string{headerSubjectToken: "eyJ.user"})
-	inputs, err := c.resolveExchangeInputs(ctx, req, "deleg-auth")
+	inputs, err := c.resolveExchangeInputs(ctx, req, teForSpec("deleg-auth"))
 	require.NoError(t, err)
 	require.NotNil(t, inputs)
 	assert.Equal(t, "eyJ.user", inputs.SubjectToken)
@@ -2389,7 +2399,7 @@ func TestResolveExchangeInputs_ActorAuthToken_OpaqueFailsClosed(t *testing.T) {
 
 	// Non-JWT (opaque) inbound token cannot serve as the actor.
 	req := requestWith("s.opaque-session", map[string]string{headerSubjectToken: "eyJ.user"})
-	_, err := c.resolveExchangeInputs(ctx, req, "deleg-auth")
+	_, err := c.resolveExchangeInputs(ctx, req, teForSpec("deleg-auth"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not JWT-authenticated")
 }
@@ -2402,6 +2412,208 @@ func TestResolveExchangeInputs_ActorHeader_MissingFailsClosed(t *testing.T) {
 	})
 
 	req := requestWith("opaque-token", map[string]string{headerSubjectToken: "eyJ.subject"})
-	_, err := c.resolveExchangeInputs(ctx, req, "deleg-spec")
+	_, err := c.resolveExchangeInputs(ctx, req, teForSpec("deleg-spec"))
 	require.Error(t, err)
+}
+
+func TestResolveExchangeInputs_WardenIdentity_MintDeferred(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "wid-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+	})
+
+	te := &logical.TokenEntry{
+		CredentialSpec: "wid-spec",
+		PrincipalID:    "spiffe://acme/agent/bot",
+		NamespaceID:    "ns1",
+		MountAccessor:  "auth_jwt_1",
+	}
+	// The inbound token is opaque (not a JWT): warden_identity does not reuse it.
+	req := requestWith("s.opaque-session", nil)
+
+	inputs, err := c.resolveExchangeInputs(ctx, req, te)
+	require.NoError(t, err)
+	require.NotNil(t, inputs)
+
+	// The RS256 mint is DEFERRED to a credential-cache miss: no assertion bytes
+	// are produced here, but the eager metadata + the lazy provider are set so the
+	// cache key is stable and the mint runs only when actually needed.
+	assert.Empty(t, inputs.SubjectToken, "assertion must not be minted eagerly")
+	require.NotNil(t, inputs.ResolveSubjectToken, "a lazy subject-token provider must be set")
+	assert.Equal(t, credential.TokenTypeJWT, inputs.SubjectTokenType)
+	assert.Equal(t, credential.ExchangeOriginVerified, inputs.SubjectTokenOrigin)
+	assert.Equal(t, wardenSubject(te)+"\x00"+"https://sts.example/aud", inputs.CacheIdentity)
+
+	// Invoking the provider mints a real JWT assertion (what the Manager does on a miss).
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(tok, "eyJ"), "the provider must mint a JWT assertion")
+
+	// The cache identity is stable across requests and needs no mint to compute.
+	inputs2, err := c.resolveExchangeInputs(ctx, req, te)
+	require.NoError(t, err)
+	assert.Equal(t, inputs.CacheIdentity, inputs2.CacheIdentity, "cache identity must be stable")
+}
+
+// decodeAssertionClaims base64-decodes the payload segment of a compact JWS so a
+// test can inspect the minted assertion's claims without a full JWKS round-trip.
+func decodeAssertionClaims(t *testing.T, token string) map[string]interface{} {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3, "expected a compact JWS with three segments")
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims map[string]interface{}
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return claims
+}
+
+// decodeAssertionHeader base64-decodes the header segment of a compact JWS.
+func decodeAssertionHeader(t *testing.T, token string) map[string]interface{} {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3, "expected a compact JWS with three segments")
+	hdr, err := base64.RawURLEncoding.DecodeString(parts[0])
+	require.NoError(t, err)
+	var header map[string]interface{}
+	require.NoError(t, json.Unmarshal(hdr, &header))
+	return header
+}
+
+// TestResolveExchangeInputs_WardenIdentity_Algorithm verifies the spec's
+// assertion_algorithm selects the signing algorithm (default RS256, opt into
+// ES256), reflected in the minted assertion's JWS header.
+func TestResolveExchangeInputs_WardenIdentity_Algorithm(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	te := &logical.TokenEntry{CredentialSpec: "", PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
+
+	cases := []struct {
+		name    string
+		cfgAlg  string
+		wantAlg string
+	}{
+		{"default is RS256", "", "RS256"},
+		{"explicit RS256", "RS256", "RS256"},
+		{"explicit ES256", "ES256", "ES256"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				credential.ConfigAssertionAudience:  "https://sts.example/aud",
+			}
+			if tc.cfgAlg != "" {
+				cfg[credential.ConfigAssertionAlgorithm] = tc.cfgAlg
+			}
+			specName := "wid-" + tc.wantAlg + tc.cfgAlg
+			seedSpec(t, c, ctx, specName, cfg)
+			te.CredentialSpec = specName
+
+			inputs, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque", nil), te)
+			require.NoError(t, err)
+			require.NotNil(t, inputs.ResolveSubjectToken)
+
+			tok, err := inputs.ResolveSubjectToken(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantAlg, decodeAssertionHeader(t, tok)["alg"], "assertion header alg")
+		})
+	}
+}
+
+// TestAssertionAlgConstantsMatch guards the string coupling between the credential
+// package's spec-config algorithm values and the issuer's supported-alg constants:
+// they must be identical, or a spec's algorithm would never match a keyset and the
+// mint would fail closed.
+func TestAssertionAlgConstantsMatch(t *testing.T) {
+	assert.Equal(t, oidcAlgRS256, credential.AssertionAlgRS256)
+	assert.Equal(t, oidcAlgES256, credential.AssertionAlgES256)
+}
+
+func TestResolveExchangeInputs_WardenIdentity_MetadataProjected(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "wid-spec", map[string]string{
+		credential.ConfigSubjectTokenSource:      credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:       "https://sts.example/aud",
+		credential.ConfigAssertionMetadataClaims: "team,env",
+	})
+
+	teProd := &logical.TokenEntry{
+		CredentialSpec: "wid-spec",
+		PrincipalID:    "spiffe://acme/agent/bot",
+		NamespaceID:    "ns1",
+		MountAccessor:  "auth_jwt_1",
+		// email is NOT allowlisted and must not reach the assertion.
+		Metadata: map[string]string{"team": "payments", "env": "prod", "email": "a@b.co"},
+	}
+	req := requestWith("s.opaque-session", nil)
+
+	inputs, err := c.resolveExchangeInputs(ctx, req, teProd)
+	require.NoError(t, err)
+	require.NotNil(t, inputs.ResolveSubjectToken)
+
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+	md, ok := claims["warden_metadata"].(map[string]interface{})
+	require.True(t, ok, "warden_metadata claim missing: %v", claims["warden_metadata"])
+	assert.Equal(t, "payments", md["team"])
+	assert.Equal(t, "prod", md["env"])
+	_, leaked := md["email"]
+	assert.False(t, leaked, "non-allowlisted metadata must not be projected")
+	assert.Len(t, md, 2)
+
+	// A token differing only in projected metadata must get a DIFFERENT cache
+	// identity, so it cannot be handed another identity's cached credential.
+	teStaging := &logical.TokenEntry{
+		CredentialSpec: "wid-spec",
+		PrincipalID:    "spiffe://acme/agent/bot",
+		NamespaceID:    "ns1",
+		MountAccessor:  "auth_jwt_1",
+		Metadata:       map[string]string{"team": "payments", "env": "staging"},
+	}
+	inputsStaging, err := c.resolveExchangeInputs(ctx, req, teStaging)
+	require.NoError(t, err)
+	assert.NotEqual(t, inputs.CacheIdentity, inputsStaging.CacheIdentity,
+		"differing projected metadata must isolate the credential cache")
+}
+
+func TestResolveExchangeInputs_WardenIdentity_MetadataOverCapFailsClosed(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "wid-spec", map[string]string{
+		credential.ConfigSubjectTokenSource:      credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:       "https://sts.example/aud",
+		credential.ConfigAssertionMetadataClaims: "blob",
+	})
+
+	te := &logical.TokenEntry{
+		CredentialSpec: "wid-spec",
+		PrincipalID:    "spiffe://acme/agent/bot",
+		NamespaceID:    "ns1",
+		MountAccessor:  "auth_jwt_1",
+		Metadata:       map[string]string{"blob": strings.Repeat("x", maxAssertionMetadataBytes+1)},
+	}
+	req := requestWith("s.opaque-session", nil)
+
+	_, err := c.resolveExchangeInputs(ctx, req, te)
+	require.Error(t, err, "an over-cap metadata projection must fail closed")
+	assert.Contains(t, err.Error(), "assertion metadata exceeds")
+}
+
+func TestResolveExchangeInputs_WardenIdentity_IssuerNotReadyFailsClosed(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = nil // disabled
+	seedSpec(t, c, ctx, "wid-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+	})
+
+	te := &logical.TokenEntry{CredentialSpec: "wid-spec", PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
+	_, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque", nil), te)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not enabled/ready")
 }

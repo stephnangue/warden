@@ -10,6 +10,7 @@ import (
 	"github.com/stephnangue/warden/cmd/cred"
 	"github.com/stephnangue/warden/cmd/helpers"
 	"github.com/stephnangue/warden/cmd/namespaces"
+	"github.com/stephnangue/warden/cmd/oidcissuer"
 	"github.com/stephnangue/warden/cmd/operator"
 	"github.com/stephnangue/warden/cmd/policies"
 	"github.com/stephnangue/warden/cmd/providers"
@@ -74,6 +75,7 @@ func init() {
 	wardenCmd.AddCommand(auth.AuthCmd)
 	wardenCmd.AddCommand(audit.AuditCmd)
 	wardenCmd.AddCommand(namespaces.NamespacesCmd)
+	wardenCmd.AddCommand(oidcissuer.OIDCIssuerCmd)
 	wardenCmd.AddCommand(policies.PoliciesCmd)
 	wardenCmd.AddCommand(cred.CredCmd)
 	wardenCmd.AddCommand(schema.SchemaCmd)

@@ -220,6 +220,28 @@ type Core struct {
 	// (e.g., Vault AppRole secret_id rotation)
 	rotationManager *RotationManager
 
+	// oidcIssuer, when configured, makes Warden its own OIDC issuer: it mints
+	// short-lived identity assertions for Workload Identity Federation. nil (or
+	// not-ready) when disabled, so the warden_identity mint path fails closed.
+	//
+	// oidcMu guards all the oidc* fields below against the concurrent rotation
+	// goroutine, config writes (setupOIDCIssuer), and the mint/publish paths.
+	oidcMu        sync.RWMutex
+	oidcIssuer    *OIDCIssuer
+	oidcPublisher JWKSPublisher
+
+	// oidcRotationCancel stops the active node's signing-key rotation loop, and
+	// oidcRotationDone is closed when the loop goroutine has exited (so stop can
+	// join it). nil when rotation is disabled or the node is a standby.
+	oidcRotationCancel context.CancelFunc
+	oidcRotationDone   chan struct{}
+	// oidcJWKSCacheTTL / oidcRetiredKeyGrace are the rotation timings from config.
+	// oidcJWKSCacheTTL is the published JWKS Cache-Control max-age, which also
+	// floors how long a fresh next key is pre-published before it may sign.
+	// oidcRetiredKeyGrace is the margin beyond assertion TTL a retired key is kept.
+	oidcJWKSCacheTTL    time.Duration
+	oidcRetiredKeyGrace time.Duration
+
 	// shutdownHooks are process-level cleanup functions registered by backends
 	// (e.g., transport shutdown). Keyed by name for idempotency.
 	shutdownHooks   map[string]func()
@@ -815,6 +837,368 @@ func (c *Core) GetRotationManager() *RotationManager {
 	return c.rotationManager
 }
 
+// setupOIDCIssuer constructs the OIDC issuer from its stored config during
+// unseal. It is disabled by default: with no config (or Enabled=false) the
+// issuer is left nil and the warden_identity mint path fails closed.
+//
+// When enabled, it loads the signing key from storage. If none exists yet, the
+// active node generates and persists one; a standby leaves the issuer not-ready
+// (it cannot write) and will activate on promotion, when unseal runs again as
+// active. Key generation and persistence therefore happen only on the active node.
+func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
+	storage := NewBarrierView(c.barrier, oidcIssuerStorePrefix)
+
+	cfg, err := loadIssuerConfig(ctx, storage)
+	if err != nil {
+		return err
+	}
+	if cfg == nil || !cfg.Enabled {
+		c.stopOIDCKeyRotation() // never leak the loop when disabling
+		c.oidcMu.Lock()
+		c.oidcIssuer = nil
+		c.oidcPublisher = nil
+		c.oidcMu.Unlock()
+		return nil
+	}
+
+	// The Cache-Control for the published/served JWKS is derived from the JWKS
+	// cache TTL so a cached copy never outlives the window in which a newly
+	// published key must be fetched before it starts signing.
+	cacheControl := oidcCacheControl(cfg.jwksCacheTTL())
+
+	// A bad publisher config must NOT fail unseal — the built-in endpoint still
+	// serves. It is validated up front on the config-write path instead, so a
+	// persisted-but-invalid publisher (e.g. a directory that later disappears)
+	// degrades to endpoint-only rather than bricking the node.
+	publisher, perr := newJWKSPublisher(cfg.Publisher, cacheControl)
+	if perr != nil {
+		c.logger.Warn("oidc issuer: publisher config invalid; serving from the built-in endpoint only", logger.Err(perr))
+		publisher = nil
+	}
+
+	issuer := NewOIDCIssuer(cfg.IssuerURL)
+	issuer.SetAssertionTTL(cfg.assertionTTL())
+	issuer.SetCacheControl(cfg.jwksCacheTTL())
+
+	keysets, err := loadKeySet(ctx, storage)
+	if err != nil {
+		return err
+	}
+	if keysets == nil {
+		keysets = make(map[string]*algKeyset)
+	}
+	// A keyset is complete only with both an active and a pre-published next key.
+	incomplete := func(alg string) bool {
+		ks := keysets[alg]
+		return ks == nil || ks.active == nil || ks.next == nil
+	}
+	needsKeys := false
+	for _, alg := range oidcSupportedAlgs {
+		if incomplete(alg) {
+			needsKeys = true
+			break
+		}
+	}
+	if needsKeys {
+		if standby {
+			// A standby cannot generate keys. Install whatever it loaded (which may
+			// be a complete keyset for some algorithms and none for others) so those
+			// keys still verify in-flight assertions; it stays not-ready until
+			// promotion fills the gaps.
+			c.logger.Warn("oidc issuer enabled but some signing keys are missing; standby stays not-ready until promotion")
+			c.stopOIDCKeyRotation()
+			issuer.RestoreKeys(keysets)
+			c.oidcMu.Lock()
+			c.oidcIssuer = issuer
+			c.oidcPublisher = publisher
+			c.oidcMu.Unlock()
+			return nil
+		}
+		// Active node: generate the active key AND its pre-published successor for
+		// every supported algorithm still missing one, so each next key is in the
+		// JWKS from the first publish, a full rotation period before it ever signs.
+		// (Also self-heals a keyset added after an algorithm becomes supported.)
+		for _, alg := range oidcSupportedAlgs {
+			if !incomplete(alg) {
+				continue
+			}
+			active, err := generateSigningKey(alg)
+			if err != nil {
+				return err
+			}
+			next, err := generateSigningKey(alg)
+			if err != nil {
+				return err
+			}
+			keysets[alg] = &algKeyset{active: active, next: next}
+			c.logger.Info("oidc issuer generated signing keys",
+				logger.String("alg", alg), logger.String("active_kid", active.kid), logger.String("next_kid", next.kid))
+		}
+		if err := persistKeySet(ctx, storage, keysets); err != nil {
+			return err
+		}
+	}
+	issuer.RestoreKeys(keysets)
+
+	c.oidcMu.Lock()
+	c.oidcIssuer = issuer
+	c.oidcPublisher = publisher
+	c.oidcJWKSCacheTTL = cfg.jwksCacheTTL()
+	c.oidcRetiredKeyGrace = cfg.retiredKeyGrace()
+	c.oidcMu.Unlock()
+	c.logger.Info("oidc issuer setup complete", logger.String("issuer", cfg.IssuerURL))
+
+	// Push the current documents to the external surface on the active node.
+	// Best-effort here: a publish failure must not fail unseal (the built-in
+	// endpoint still serves), but the config-write path surfaces it explicitly.
+	if !standby {
+		if err := c.publishOIDCFor(ctx, issuer, publisher); err != nil {
+			c.logger.Warn("oidc issuer: initial publish failed", logger.Err(err))
+		}
+	}
+
+	// Signing-key rotation runs only on the active node. Restart it on every
+	// (re)setup so a config change or promotion picks up the current settings.
+	period := cfg.keyRotationPeriod()
+	firstTick := oidcRotationFirstTick(keysets, period)
+	c.startOIDCKeyRotation(standby, period, firstTick, issuer, publisher, cfg.jwksCacheTTL(), cfg.retiredKeyGrace())
+	return nil
+}
+
+// publishOIDC pushes the current discovery + JWKS documents to the configured
+// publisher, reading the current issuer/publisher under the lock.
+func (c *Core) publishOIDC(ctx context.Context) error {
+	c.oidcMu.RLock()
+	issuer, publisher := c.oidcIssuer, c.oidcPublisher
+	c.oidcMu.RUnlock()
+	return c.publishOIDCFor(ctx, issuer, publisher)
+}
+
+// publishOIDCFor publishes a specific issuer's documents. It is a no-op when no
+// publisher is configured or the issuer is not ready. Taking explicit arguments
+// lets the rotation loop publish the issuer it was started with, never a
+// concurrently-swapped one.
+func (c *Core) publishOIDCFor(ctx context.Context, issuer *OIDCIssuer, publisher JWKSPublisher) error {
+	if publisher == nil || issuer == nil || !issuer.Ready() {
+		return nil
+	}
+	discovery, err := issuer.DiscoveryDocument(issuer.IssuerURL() + "/" + oidcJWKSObjectPath)
+	if err != nil {
+		return err
+	}
+	jwks, err := issuer.JWKS()
+	if err != nil {
+		return err
+	}
+	return publisher.Publish(ctx, discovery, jwks)
+}
+
+// startOIDCKeyRotation (re)starts the signing-key rotation loop. It runs only on
+// the active node and only when a positive period is configured; any existing
+// loop is stopped (and joined) first. The loop operates on the issuer/publisher
+// it is handed, so a later config swap never affects an in-flight rotation. The
+// context is parented on the active context so leadership loss cancels it.
+func (c *Core) startOIDCKeyRotation(standby bool, period, firstTick time.Duration, issuer *OIDCIssuer, publisher JWKSPublisher, cacheTTL, grace time.Duration) {
+	c.stopOIDCKeyRotation()
+	if standby || period <= 0 || issuer == nil {
+		return
+	}
+	if firstTick < 0 {
+		firstTick = 0
+	}
+	ctx, cancel := context.WithCancel(c.activeContext)
+	done := make(chan struct{})
+	c.oidcMu.Lock()
+	c.oidcRotationCancel = cancel
+	c.oidcRotationDone = done
+	c.oidcMu.Unlock()
+	go c.oidcKeyRotationLoop(ctx, done, period, firstTick, issuer, publisher, cacheTTL, grace)
+	c.logger.Info("oidc issuer: signing-key rotation enabled", logger.String("period", period.String()))
+}
+
+// oidcRotationFirstTick returns the delay until the first rotation should fire.
+//
+// It anchors on the NEXT key's age, not the active key's: the next key was created
+// exactly one rotation cycle before it should be promoted, so next.createdAt+period
+// IS the correct next-rotation time — and it is stable across restarts. Anchoring
+// on the active key would be wrong, because the active key was minted a full period
+// earlier (as the previous cycle's next), so active.createdAt+period is already in
+// the past and the loop would rotate immediately on every unseal/restart/promotion.
+// The active key's age is only a fallback for the (setup-guaranteed impossible)
+// case of an active node with no next key.
+func oidcRotationFirstTick(keysets map[string]*algKeyset, period time.Duration) time.Duration {
+	// Anchor on the EARLIEST next-key age across algorithms so no keyset rotates
+	// late. Keysets are generated together at enable, so their ages are identical
+	// in practice; the earliest is only distinct after a later self-heal.
+	var anchor time.Time
+	for _, ks := range keysets {
+		age := ks.next
+		if age == nil {
+			age = ks.active
+		}
+		if age == nil {
+			continue
+		}
+		if anchor.IsZero() || age.createdAt.Before(anchor) {
+			anchor = age.createdAt
+		}
+	}
+	if anchor.IsZero() {
+		return 0
+	}
+	return time.Until(anchor.Add(period))
+}
+
+// stopOIDCKeyRotation cancels the rotation loop and waits for it to exit, so a
+// demoted/sealing node never keeps rotating and clobbering the new active's keys.
+func (c *Core) stopOIDCKeyRotation() {
+	c.oidcMu.Lock()
+	cancel := c.oidcRotationCancel
+	done := c.oidcRotationDone
+	c.oidcRotationCancel = nil
+	c.oidcRotationDone = nil
+	c.oidcMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+}
+
+func (c *Core) oidcKeyRotationLoop(ctx context.Context, done chan struct{}, period, firstTick time.Duration, issuer *OIDCIssuer, publisher JWKSPublisher, cacheTTL, grace time.Duration) {
+	defer close(done)
+	timer := time.NewTimer(firstTick)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			if err := c.rotateOIDCKey(ctx, issuer, publisher, cacheTTL, grace); err != nil {
+				c.logger.Warn("oidc issuer: key rotation failed", logger.Err(err))
+			}
+			timer.Reset(period)
+		}
+	}
+}
+
+// rotateOIDCKey performs one signing-key rotation on the given issuer by promoting
+// its pre-published next key. The next key has already been in the JWKS for a full
+// rotation period, so promotion is an instant flip — no propagation wait in the
+// steady state. The steps: (optionally) wait out the propagation floor if the next
+// key is younger than the JWKS cache TTL, generate a fresh next key, PERSIST the
+// post-rotation keyset BEFORE flipping in memory, flip, then publish once. The
+// promoted key was persisted as `next` by the previous rotation and the fresh next
+// is persisted here before it can ever be promoted, so Warden never signs with a
+// key absent from storage.
+func (c *Core) rotateOIDCKey(ctx context.Context, issuer *OIDCIssuer, publisher JWKSPublisher, cacheTTL, grace time.Duration) error {
+	if issuer == nil || !issuer.Ready() {
+		return nil
+	}
+
+	keysets := issuer.Keys()
+	if len(keysets) == 0 {
+		// Setup guarantees keys on the active node; this is a defensive guard.
+		return fmt.Errorf("oidc issuer: cannot rotate with no keys")
+	}
+
+	// Propagation floor: a fresh next key must be published at least cacheTTL before
+	// it signs, so any CDN cache and verifier have refreshed the JWKS. Wait out the
+	// youngest next key across algorithms (same-age in practice, so usually a single
+	// wait). In steady state each next is ~one rotation period old, so the remainder
+	// is <= 0 and there is no wait; the floor only bites on cold start / a shrunk
+	// period. Skipped when there is no external publisher (the endpoint serves live).
+	// Only the supported algorithms are rotated (each is generatable). Iterating the
+	// supported set rather than whatever storage held means a stray/unknown held alg
+	// can never break rotation of the healthy ones; it is left untouched in the map.
+	if publisher != nil && cacheTTL > 0 {
+		var wait time.Duration
+		for _, alg := range oidcSupportedAlgs {
+			ks := keysets[alg]
+			if ks == nil || ks.next == nil {
+				return fmt.Errorf("oidc issuer: cannot rotate without a next %s key", alg)
+			}
+			if rem := cacheTTL - time.Since(ks.next.createdAt); rem > wait {
+				wait = rem
+			}
+		}
+		if wait > 0 {
+			select {
+			case <-ctx.Done():
+				// Nothing to roll back — the next keys are durable and stay published.
+				return ctx.Err()
+			case <-time.After(wait):
+			}
+		}
+	}
+	// Bail if leadership was lost during the wait — a demoted node must not
+	// persist/flip and race the new active.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if grace <= 0 {
+		grace = defaultRetiredKeyGrace
+	}
+	cutoff := time.Now().Add(-(issuer.AssertionTTL() + grace))
+
+	// Compute each supported algorithm's post-rotation keyset (promoted active, fresh
+	// next, pruned retired) WITHOUT mutating the issuer, then persist the whole map
+	// BEFORE flipping in memory. On failure nothing has mutated in memory and the
+	// current keyset is still in storage, so a retry next tick is safe.
+	newNextByAlg := make(map[string]*signingKey, len(oidcSupportedAlgs))
+	for _, alg := range oidcSupportedAlgs {
+		if keysets[alg] == nil {
+			// Ready() guarantees every supported alg is present; defensive.
+			return fmt.Errorf("oidc issuer: missing %s keyset", alg)
+		}
+		newNext, err := generateSigningKey(alg)
+		if err != nil {
+			return err
+		}
+		newNextByAlg[alg] = newNext
+		pendingActive, pendingRetired, err := issuer.PendingRotation(alg, cutoff)
+		if err != nil {
+			return err
+		}
+		keysets[alg] = &algKeyset{active: pendingActive, next: newNext, retired: pendingRetired}
+	}
+
+	storage := NewBarrierView(c.barrier, oidcIssuerStorePrefix)
+	if err := persistKeySet(ctx, storage, keysets); err != nil {
+		return fmt.Errorf("persist rotated keyset: %w", err)
+	}
+
+	for alg, newNext := range newNextByAlg {
+		if err := issuer.Rotate(alg, newNext, cutoff); err != nil {
+			return err
+		}
+	}
+	if err := c.publishOIDCFor(ctx, issuer, publisher); err != nil {
+		c.logger.Warn("oidc issuer: republish after rotation failed", logger.Err(err))
+	}
+	c.logger.Info("oidc issuer rotated signing keys", logger.Int("algorithms", len(keysets)))
+	return nil
+}
+
+// stopOIDCIssuer tears down the issuer during seal.
+func (c *Core) stopOIDCIssuer() error {
+	c.stopOIDCKeyRotation()
+	c.oidcMu.Lock()
+	c.oidcIssuer = nil
+	c.oidcPublisher = nil
+	c.oidcMu.Unlock()
+	return nil
+}
+
+// OIDCIssuer returns the configured OIDC issuer, or nil when it is disabled.
+func (c *Core) OIDCIssuer() *OIDCIssuer {
+	c.oidcMu.RLock()
+	defer c.oidcMu.RUnlock()
+	return c.oidcIssuer
+}
+
 // RegisterShutdownHook registers a named shutdown hook to run during preSeal.
 // The key ensures idempotency — the same key overwrites the previous hook.
 func (c *Core) RegisterShutdownHook(key string, fn func()) {
@@ -1312,6 +1696,9 @@ func (c *Core) preSeal() error {
 	if err := c.stopRotationManager(); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error stopping rotation manager: %w", err))
 	}
+	if err := c.stopOIDCIssuer(); err != nil {
+		result = multierror.Append(result, fmt.Errorf("error stopping oidc issuer: %w", err))
+	}
 
 	if err := c.teardownPolicyStore(); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error tearing down policy store: %w", err))
@@ -1436,6 +1823,12 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 
 	// Wire up credential config store to rotation manager for source rotation registration
 	c.credConfigStore.SetRotationManager(c.rotationManager)
+
+	// Setup the OIDC issuer (Workload Identity Federation). Disabled by default;
+	// generates/persists a signing key only on the active node.
+	if err := c.setupOIDCIssuer(ctx, standby); err != nil {
+		return err
+	}
 
 	if err := c.loadMounts(ctx); err != nil {
 		return err

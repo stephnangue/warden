@@ -1,6 +1,12 @@
 package credential
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
+
+// stubResolve is a no-op lazy subject-token provider for tests.
+func stubResolve(context.Context) (string, error) { return "lazy-token", nil }
 
 func TestExchangeInputs_Validate(t *testing.T) {
 	tests := []struct {
@@ -31,6 +37,25 @@ func TestExchangeInputs_Validate(t *testing.T) {
 			inputs: &ExchangeInputs{
 				SubjectTokenType:   TokenTypeJWT,
 				SubjectTokenOrigin: ExchangeOriginVerified,
+			},
+			wantErr: true,
+		},
+		{
+			name: "lazy subject with cache identity",
+			inputs: &ExchangeInputs{
+				// SubjectToken empty on purpose: resolved lazily on a cache miss.
+				SubjectTokenType:    TokenTypeJWT,
+				SubjectTokenOrigin:  ExchangeOriginVerified,
+				CacheIdentity:       "wid:ns:mount:alice\x00aud",
+				ResolveSubjectToken: stubResolve,
+			},
+		},
+		{
+			name: "lazy subject without cache identity",
+			inputs: &ExchangeInputs{
+				SubjectTokenType:    TokenTypeJWT,
+				SubjectTokenOrigin:  ExchangeOriginVerified,
+				ResolveSubjectToken: stubResolve,
 			},
 			wantErr: true,
 		},
@@ -142,6 +167,65 @@ func TestExchangeInputs_Fingerprint_NoConcatAmbiguity(t *testing.T) {
 	}
 }
 
+// TestExchangeInputs_Fingerprint_CacheIdentity covers the Warden-minted-subject
+// caching contract: the fingerprint keys on CacheIdentity (stable) rather than
+// the volatile SubjectToken, so re-mints of the same identity share a cache
+// entry while distinct identities stay isolated and cannot collide with the
+// raw-subject path.
+func TestExchangeInputs_Fingerprint_CacheIdentity(t *testing.T) {
+	// Same identity, different (freshly minted) subject bytes -> same fingerprint.
+	a := &ExchangeInputs{SubjectToken: "assertion-mint-1", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, CacheIdentity: "wid:ns:mount:alice|aud"}
+	b := &ExchangeInputs{SubjectToken: "assertion-mint-2", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, CacheIdentity: "wid:ns:mount:alice|aud"}
+	if a.Fingerprint() != b.Fingerprint() {
+		t.Fatal("same CacheIdentity must fingerprint identically despite different subject bytes")
+	}
+
+	// Different identity -> different fingerprint.
+	c := &ExchangeInputs{SubjectToken: "assertion-mint-1", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, CacheIdentity: "wid:ns:mount:bob|aud"}
+	if c.Fingerprint() == a.Fingerprint() {
+		t.Fatal("distinct CacheIdentity must fingerprint differently")
+	}
+
+	// Domain separation: CacheIdentity="X" must not collide with SubjectToken="X".
+	viaIdentity := &ExchangeInputs{SubjectToken: "assertion", SubjectTokenType: TokenTypeJWT, CacheIdentity: "X"}
+	viaSubject := &ExchangeInputs{SubjectToken: "X", SubjectTokenType: TokenTypeJWT}
+	if viaIdentity.Fingerprint() == viaSubject.Fingerprint() {
+		t.Fatal("CacheIdentity path must be domain-separated from the raw-subject path")
+	}
+
+	// Setting CacheIdentity must change the fingerprint vs. keying on the subject.
+	withID := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT, CacheIdentity: "id"}
+	withoutID := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT}
+	if withID.Fingerprint() == withoutID.Fingerprint() {
+		t.Fatal("CacheIdentity must be folded into the fingerprint")
+	}
+}
+
+// TestExchangeInputs_Fingerprint_IgnoresResolveClosure proves the lazy provider
+// does not enter the cache key: a leader (closure set, subject not yet minted)
+// and a would-be follower must key identically so they share one cache entry.
+func TestExchangeInputs_Fingerprint_IgnoresResolveClosure(t *testing.T) {
+	base := ExchangeInputs{
+		SubjectTokenType:   TokenTypeJWT,
+		SubjectTokenOrigin: ExchangeOriginVerified,
+		CacheIdentity:      "wid:ns:mount:alice\x00aud",
+	}
+	withClosure := base
+	withClosure.ResolveSubjectToken = stubResolve
+
+	if base.Fingerprint() != withClosure.Fingerprint() {
+		t.Fatal("ResolveSubjectToken must not affect the fingerprint")
+	}
+
+	// And a later-populated SubjectToken must also not change the key (the closure
+	// path keys on CacheIdentity, not the minted bytes).
+	populated := withClosure
+	populated.SubjectToken = "freshly-minted-assertion"
+	if populated.Fingerprint() != base.Fingerprint() {
+		t.Fatal("a lazily-populated SubjectToken must not change the CacheIdentity-keyed fingerprint")
+	}
+}
+
 func TestSpecRequestsExchange(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -199,6 +283,56 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 			config:  map[string]string{ConfigSubjectTokenSource: SourceAuthToken, ConfigActorTokenSource: SourceAuthToken},
 			wantErr: true,
 		},
+		{
+			name:    "warden_identity without assertion_audience",
+			config:  map[string]string{ConfigSubjectTokenSource: SourceWardenIdentity},
+			wantErr: true,
+		},
+		{
+			name:   "warden_identity with assertion_audience",
+			config: map[string]string{ConfigSubjectTokenSource: SourceWardenIdentity, ConfigAssertionAudience: "https://sts.example/aud"},
+		},
+		{
+			name: "assertion_metadata_claims with warden_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource:      SourceWardenIdentity,
+				ConfigAssertionAudience:       "https://sts.example/aud",
+				ConfigAssertionMetadataClaims: "team,env",
+			},
+		},
+		{
+			name: "assertion_metadata_claims without warden_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource:      SourceHeader,
+				ConfigAssertionMetadataClaims: "team",
+			},
+			wantErr: true,
+		},
+		{
+			name: "assertion_algorithm ES256 with warden_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceWardenIdentity,
+				ConfigAssertionAudience:  "https://sts.example/aud",
+				ConfigAssertionAlgorithm: AssertionAlgES256,
+			},
+		},
+		{
+			name: "assertion_algorithm unknown value",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceWardenIdentity,
+				ConfigAssertionAudience:  "https://sts.example/aud",
+				ConfigAssertionAlgorithm: "EdDSA",
+			},
+			wantErr: true,
+		},
+		{
+			name: "assertion_algorithm without warden_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceHeader,
+				ConfigAssertionAlgorithm: AssertionAlgES256,
+			},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -208,6 +342,33 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestAssertionMetadataKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"unset", "", nil},
+		{"single", "team", []string{"team"}},
+		{"multiple with spaces", " team , env ", []string{"team", "env"}},
+		{"blanks skipped", "team,,env,", []string{"team", "env"}},
+		{"dedup preserves order", "team,env,team", []string{"team", "env"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AssertionMetadataKeys(map[string]string{ConfigAssertionMetadataClaims: tt.raw})
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("got %v, want %v", got, tt.want)
+				}
 			}
 		})
 	}

@@ -996,8 +996,8 @@ func (f *exchangeDriverFactory) Type() string { return "exchange_src" }
 func (f *exchangeDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (SourceDriver, error) {
 	return f.driver, nil
 }
-func (f *exchangeDriverFactory) ValidateConfig(config map[string]string) error   { return nil }
-func (f *exchangeDriverFactory) SensitiveConfigFields() []string                 { return nil }
+func (f *exchangeDriverFactory) ValidateConfig(config map[string]string) error { return nil }
+func (f *exchangeDriverFactory) SensitiveConfigFields() []string               { return nil }
 func (f *exchangeDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
 	return "", fmt.Errorf("mock exchange driver cannot infer type")
 }
@@ -1082,4 +1082,147 @@ func TestManager_IssueCredential_ExchangeInputs_NonExchangeDriver(t *testing.T) 
 	_, err = manager.IssueCredential(ctx, "tok", "test-spec", time.Hour, exchangeInputsFor("s"))
 	require.Error(t, err)
 	assert.Equal(t, int32(0), factory.driver.mintCalls.Load(), "plain mint must never run for exchange inputs")
+}
+
+// lazyExchangeInputsFor builds exchange inputs whose subject token is minted
+// lazily (as warden_identity does), incrementing mintCount each time the closure
+// actually runs. Each call returns a fresh struct, mirroring per-request
+// construction, while sharing the counter.
+func lazyExchangeInputsFor(cacheIdentity, token string, mintCount *atomic.Int32) *ExchangeInputs {
+	return &ExchangeInputs{
+		SubjectTokenType:   TokenTypeJWT,
+		SubjectTokenOrigin: ExchangeOriginVerified,
+		CacheIdentity:      cacheIdentity,
+		ResolveSubjectToken: func(context.Context) (string, error) {
+			mintCount.Add(1)
+			return token, nil
+		},
+	}
+}
+
+// A lazily-resolved subject token is minted exactly once on a cache miss and the
+// resolved bytes reach the driver; a subsequent request for the same identity is
+// served from cache with ZERO further mints or exchanges. This is the whole point
+// of deferring the mint.
+func TestManager_IssueCredential_LazySubject_MintOnMissZeroOnHit(t *testing.T) {
+	manager, factory := createExchangeTestManager(t)
+	defer manager.Stop()
+
+	ctx := createNamespaceContext()
+	var mintCount atomic.Int32
+
+	cred1, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour,
+		lazyExchangeInputsFor("id-alice", "assertion-1", &mintCount))
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), mintCount.Load(), "a cache miss must mint exactly once")
+	assert.Equal(t, "assertion-1", cred1.Data["username"], "the resolved token must reach the driver")
+
+	// Fresh inputs (per-request), same identity → cache hit.
+	cred2, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour,
+		lazyExchangeInputsFor("id-alice", "assertion-2", &mintCount))
+	require.NoError(t, err)
+	assert.Equal(t, cred1.CredentialID, cred2.CredentialID, "same identity must hit cache")
+	assert.Equal(t, int32(1), mintCount.Load(), "a cache HIT must not mint")
+	assert.Equal(t, int32(1), factory.driver.exchangeCount.Load(), "a cache HIT must not exchange")
+}
+
+// Distinct identities must not share a cached credential, and each mints once.
+func TestManager_IssueCredential_LazySubject_DistinctIdentities(t *testing.T) {
+	manager, factory := createExchangeTestManager(t)
+	defer manager.Stop()
+
+	ctx := createNamespaceContext()
+	var mintCount atomic.Int32
+
+	credA, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour,
+		lazyExchangeInputsFor("id-alice", "assertion-A", &mintCount))
+	require.NoError(t, err)
+	credB, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour,
+		lazyExchangeInputsFor("id-bob", "assertion-B", &mintCount))
+	require.NoError(t, err)
+
+	assert.NotEqual(t, credA.CredentialID, credB.CredentialID, "distinct identities must not share a credential")
+	assert.Equal(t, int32(2), mintCount.Load(), "each distinct identity mints once")
+	assert.Equal(t, int32(2), factory.driver.exchangeCount.Load())
+}
+
+// A burst of N concurrent misses for the same identity is coalesced by
+// singleflight into a SINGLE mint and a single exchange; all callers share one
+// credential.
+func TestManager_IssueCredential_LazySubject_SingleflightCoalesces(t *testing.T) {
+	manager, factory := createExchangeTestManager(t)
+	defer manager.Stop()
+
+	ctx := createNamespaceContext()
+	var mintCount atomic.Int32
+
+	const N = 10
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	results := make([]*Credential, N)
+	errs := make([]error, N)
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			in := &ExchangeInputs{
+				SubjectTokenType:   TokenTypeJWT,
+				SubjectTokenOrigin: ExchangeOriginVerified,
+				CacheIdentity:      "id-shared",
+				ResolveSubjectToken: func(context.Context) (string, error) {
+					mintCount.Add(1)
+					time.Sleep(20 * time.Millisecond) // widen the singleflight window
+					return "assertion-shared", nil
+				},
+			}
+			<-start
+			results[i], errs[i] = manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour, in)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := 0; i < N; i++ {
+		require.NoError(t, errs[i])
+	}
+	id0 := results[0].CredentialID
+	for i := 1; i < N; i++ {
+		assert.Equal(t, id0, results[i].CredentialID, "all coalesced callers must share one credential")
+	}
+	assert.Equal(t, int32(1), mintCount.Load(), "N concurrent misses must mint once")
+	assert.Equal(t, int32(1), factory.driver.exchangeCount.Load(), "N concurrent misses must exchange once")
+}
+
+// A failure inside the lazy mint must surface as an error, must NOT invoke the
+// driver, and must NOT be cached — the next request retries cleanly.
+func TestManager_IssueCredential_LazySubject_ResolveErrorNotCached(t *testing.T) {
+	manager, factory := createExchangeTestManager(t)
+	defer manager.Stop()
+
+	ctx := createNamespaceContext()
+	var calls atomic.Int32
+	makeInputs := func() *ExchangeInputs {
+		return &ExchangeInputs{
+			SubjectTokenType:   TokenTypeJWT,
+			SubjectTokenOrigin: ExchangeOriginVerified,
+			CacheIdentity:      "id-alice",
+			ResolveSubjectToken: func(context.Context) (string, error) {
+				if calls.Add(1) == 1 {
+					return "", fmt.Errorf("mint boom")
+				}
+				return "assertion-ok", nil
+			},
+		}
+	}
+
+	_, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour, makeInputs())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to resolve subject token")
+	assert.Equal(t, int32(0), factory.driver.exchangeCount.Load(), "driver must not run when the mint fails")
+
+	// The error was not cached: a retry re-runs the closure and succeeds.
+	cred, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour, makeInputs())
+	require.NoError(t, err)
+	assert.Equal(t, "assertion-ok", cred.Data["username"])
+	assert.Equal(t, int32(1), factory.driver.exchangeCount.Load())
 }

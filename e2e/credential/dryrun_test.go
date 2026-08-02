@@ -100,28 +100,32 @@ func TestDryRun_RejectsUnknownField(t *testing.T) {
 }
 
 // TestDryRun_RejectsMissingRequired exercises the required-field branch of
-// the validator: cred source create needs `type` and `rotation_period`.
-// Omitting one should cause a clean local validation failure.
+// the validator: `type` is the one universally required source field.
+// (rotation_period is required only for certain source types and is enforced
+// at create time by the driver/validateSource, not by the path schema, so
+// omitting it no longer trips the schema validator.) Omitting `type` should
+// cause a clean local validation failure.
 func TestDryRun_RejectsMissingRequired(t *testing.T) {
 	leader := h.GetLeaderPort(t)
 	port := leader
 
 	const name = "e2e-dryrun-missing-required"
 
-	// Skip --rotation-period — server schema marks it required.
+	// Skip `type` — the path schema marks it required. rotation_period is
+	// supplied so it isn't the field flagged as missing.
 	out, err := h.WardenCLIWithPort(t, port, map[string]string{
 		"WARDEN_TOKEN": h.RootToken(t),
 	},
 		"write", "sys/cred/sources/"+name,
-		"type=aws",
+		"rotation_period=86400",
 		"--dry-run",
 		"-o", "json",
 	)
 	if err == nil {
 		t.Fatalf("expected non-zero exit for missing required field; got success. Output:\n%s", out)
 	}
-	if !strings.Contains(out, "rotation_period") || !strings.Contains(out, "missing") {
-		t.Errorf("expected error mentioning required rotation_period; got:\n%s", out)
+	if !strings.Contains(out, "type") || !strings.Contains(out, "missing") {
+		t.Errorf("expected error mentioning required type; got:\n%s", out)
 	}
 }
 

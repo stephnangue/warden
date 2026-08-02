@@ -28,6 +28,7 @@ const DefaultAWSActivationDelay = 5 * time.Minute
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*AWSDriver)(nil)
 var _ credential.Rotatable = (*AWSDriver)(nil)
+var _ credential.ExchangeMinter = (*AWSDriver)(nil)
 
 // AWSDriver fetches credentials from AWS (STS AssumeRole, Secrets Manager)
 type AWSDriver struct {
@@ -51,7 +52,23 @@ type AWSDriver struct {
 	redshiftServerlessClient *redshiftserverless.Client
 	region                   string
 	baseCredsVerified        bool
+
+	// anonSTSClient calls sts:AssumeRoleWithWebIdentity, which is unsigned — it
+	// takes no AWS credentials, only the web identity token. Built once in Create
+	// so a keyless federation (auth_method=oidc_federation) source needs no IAM keys.
+	anonSTSClient *sts.Client
 }
+
+// awsAuthMethodStatic and awsAuthMethodOIDCFederation select how the source
+// authenticates. static (default) uses long-lived IAM keys; oidc_federation holds
+// no key and mints only via sts:AssumeRoleWithWebIdentity from a caller-presented
+// identity assertion.
+const (
+	awsAuthMethodStatic         = "static"
+	awsAuthMethodOIDCFederation = "oidc_federation"
+
+	mintMethodSTSAssumeRoleWebIdentity = "sts_assume_role_web_identity"
+)
 
 // AWSDriverFactory creates AWSDriver instances
 type AWSDriverFactory struct{}
@@ -63,15 +80,18 @@ func (f *AWSDriverFactory) Type() string {
 
 // ValidateConfig validates AWS driver configuration using declarative schema
 func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
-	return credential.ValidateSchema(config,
+	if err := credential.ValidateSchema(config,
+		credential.StringField("auth_method").
+			OneOf(awsAuthMethodStatic, awsAuthMethodOIDCFederation).
+			Describe("How the source authenticates: static (IAM keys) or oidc_federation (Workload Identity Federation, keyless)").
+			Example("static"),
+
 		credential.StringField("access_key_id").
-			Required().
-			Describe("AWS IAM access key ID for the source").
+			Describe("AWS IAM access key ID (required for auth_method=static)").
 			Example("AKIAIOSFODNN7EXAMPLE"),
 
 		credential.StringField("secret_access_key").
-			Required().
-			Describe("AWS IAM secret access key for the source").
+			Describe("AWS IAM secret access key (required for auth_method=static)").
 			Example("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
 
 		credential.StringField("region").
@@ -80,7 +100,7 @@ func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
 			Example("us-east-1"),
 
 		credential.StringField("assume_role_arn").
-			Describe("Optional IAM role ARN to assume for elevated permissions").
+			Describe("Optional IAM role ARN to assume for elevated permissions (static only)").
 			Example("arn:aws:iam::123456789012:role/WardenSourceRole"),
 
 		credential.StringField("session_name").
@@ -94,7 +114,27 @@ func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
 		credential.StringField("external_id").
 			Describe("Optional external ID for AssumeRole operations").
 			Example("unique-external-id"),
-	)
+	); err != nil {
+		return err
+	}
+
+	// Cross-field rules per auth_method.
+	switch credential.GetString(config, "auth_method", awsAuthMethodStatic) {
+	case awsAuthMethodStatic:
+		if credential.GetString(config, "access_key_id", "") == "" || credential.GetString(config, "secret_access_key", "") == "" {
+			return fmt.Errorf("access_key_id and secret_access_key are required for auth_method=static")
+		}
+	case awsAuthMethodOIDCFederation:
+		// A federation source holds no static secret. Reject leftover static config
+		// so a misconfiguration cannot silently mix modes.
+		if credential.GetString(config, "access_key_id", "") != "" || credential.GetString(config, "secret_access_key", "") != "" {
+			return fmt.Errorf("access_key_id/secret_access_key must not be set for auth_method=oidc_federation")
+		}
+		if credential.GetString(config, "assume_role_arn", "") != "" {
+			return fmt.Errorf("assume_role_arn is not supported for auth_method=oidc_federation")
+		}
+	}
+	return nil
 }
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
@@ -108,7 +148,7 @@ func (f *AWSDriverFactory) InferCredentialType(specConfig map[string]string) (st
 	switch mintMethod {
 	case "rds_iam_token", "redshift_iam_token":
 		return credential.TypeDBAuthToken, nil
-	case "sts_assume_role", "secrets_manager", "":
+	case "sts_assume_role", mintMethodSTSAssumeRoleWebIdentity, "secrets_manager", "":
 		return credential.TypeAWSAccessKeys, nil
 	default:
 		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
@@ -131,6 +171,17 @@ func (f *AWSDriverFactory) Create(config map[string]string, log *logger.GatedLog
 		logger:    log.WithSubsystem(credential.SourceTypeAWS),
 		baseCreds: baseCreds,
 		region:    region,
+		// AssumeRoleWithWebIdentity is unsigned: anonymous credentials skip SigV4.
+		anonSTSClient: sts.NewFromConfig(aws.Config{
+			Region:      region,
+			Credentials: aws.AnonymousCredentials{},
+		}),
+	}
+
+	// A federation source holds no IAM keys: skip the eager credential probe. All
+	// authentication happens per-request from the caller's identity assertion.
+	if credential.GetString(config, "auth_method", awsAuthMethodStatic) == awsAuthMethodOIDCFederation {
+		return driver, nil
 	}
 
 	// Perform initial authentication
@@ -239,12 +290,26 @@ func (d *AWSDriver) buildClients(creds aws.CredentialsProvider) {
 
 // MintCredential mints credentials using AWS based on credential spec
 func (d *AWSDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	mintMethod := credential.GetString(spec.Config, "mint_method", "")
+	authMethod := credential.GetString(d.credSource.Config, "auth_method", awsAuthMethodStatic)
+
+	// The web-identity mint is exchange-only: it needs a caller identity
+	// assertion and flows through MintCredentialWithExchange. Reaching it here
+	// means the spec lacks subject_token_source=warden_identity.
+	if mintMethod == mintMethodSTSAssumeRoleWebIdentity {
+		return nil, nil, 0, "", fmt.Errorf("mint_method=%s requires token-exchange inputs; set subject_token_source=warden_identity on the spec", mintMethodSTSAssumeRoleWebIdentity)
+	}
+	// A federation source holds no static credentials, so only the web-identity
+	// mint is possible on it. Fail clearly rather than falling into authenticate()
+	// with empty keys and a misleading "invalid AWS credentials" error.
+	if authMethod == awsAuthMethodOIDCFederation {
+		return nil, nil, 0, "", fmt.Errorf("auth_method=oidc_federation supports only mint_method=%s (got %q)", mintMethodSTSAssumeRoleWebIdentity, mintMethod)
+	}
+
 	// Re-authenticate if needed
 	if err := d.authenticate(ctx); err != nil {
 		return nil, nil, 0, "", fmt.Errorf("authentication failed: %w", err)
 	}
-
-	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 
 	switch mintMethod {
 	case "sts_assume_role":
@@ -341,6 +406,103 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.C
 
 	if d.logger != nil {
 		d.logger.Debug("generated STS temporary credentials",
+			logger.String("spec", spec.Name),
+			logger.String("role_arn", roleArn),
+			logger.String("lease_ttl", leaseTTL.String()),
+		)
+	}
+
+	return rawData, metadata, leaseTTL, leaseID, nil
+}
+
+// MintCredentialWithExchange federates a caller-derived identity assertion into
+// temporary AWS credentials via sts:AssumeRoleWithWebIdentity (Workload Identity
+// Federation). It requires mint_method=sts_assume_role_web_identity and a
+// verified subject (a Warden-minted assertion, subject_token_source=warden_identity):
+// AWS validates the assertion's signature against Warden's published JWKS, so an
+// unverified caller token must never be forwarded on Warden's authority.
+func (d *AWSDriver) MintCredentialWithExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if credential.GetString(spec.Config, "mint_method", "") != mintMethodSTSAssumeRoleWebIdentity {
+		return nil, nil, 0, "", fmt.Errorf("aws: mint_method must be %s to accept token-exchange inputs", mintMethodSTSAssumeRoleWebIdentity)
+	}
+	if inputs == nil || inputs.SubjectToken == "" {
+		return nil, nil, 0, "", fmt.Errorf("aws: no subject token in exchange inputs")
+	}
+	if inputs.SubjectTokenOrigin != credential.ExchangeOriginVerified {
+		return nil, nil, 0, "", fmt.Errorf("aws: web-identity federation requires a verified subject (subject_token_source=warden_identity)")
+	}
+	return d.mintViaSTSAssumeRoleWebIdentity(ctx, spec, inputs.SubjectToken)
+}
+
+// mintViaSTSAssumeRoleWebIdentity exchanges webIdentityToken for temporary AWS
+// credentials. The call is unsigned (anonSTSClient), so an oidc_federation source
+// needs no IAM keys.
+func (d *AWSDriver) mintViaSTSAssumeRoleWebIdentity(ctx context.Context, spec *credential.CredSpec, webIdentityToken string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	roleArn, err := credential.GetStringRequired(spec.Config, "role_arn")
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+
+	sessionName := credential.GetString(spec.Config, "session_name", fmt.Sprintf("warden-%s", spec.Name))
+
+	ttlStr := credential.GetString(spec.Config, "ttl", "1h")
+	ttl, err := time.ParseDuration(ttlStr)
+	if err != nil {
+		return nil, nil, 0, "", fmt.Errorf("invalid ttl '%s': %w", ttlStr, err)
+	}
+	if spec.MinTTL > 0 && ttl < spec.MinTTL {
+		return nil, nil, 0, "", fmt.Errorf("requested TTL %s is below minimum %s", ttl, spec.MinTTL)
+	}
+	if spec.MaxTTL > 0 && ttl > spec.MaxTTL {
+		return nil, nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", ttl, spec.MaxTTL)
+	}
+
+	input := &sts.AssumeRoleWithWebIdentityInput{
+		RoleArn:          &roleArn,
+		RoleSessionName:  &sessionName,
+		WebIdentityToken: &webIdentityToken,
+		DurationSeconds:  aws.Int32(int32(ttl.Seconds())),
+	}
+	if policy := credential.GetString(spec.Config, "policy", ""); policy != "" {
+		input.Policy = &policy
+	}
+
+	result, err := d.anonSTSClient.AssumeRoleWithWebIdentity(ctx, input)
+	if err != nil {
+		return nil, nil, 0, "", fmt.Errorf("STS AssumeRoleWithWebIdentity failed for %s: %w", roleArn, err)
+	}
+
+	creds := result.Credentials
+	leaseTTL := time.Until(*creds.Expiration)
+	if leaseTTL <= 0 {
+		return nil, nil, 0, "", fmt.Errorf("STS credentials already expired or have invalid expiration time")
+	}
+	leaseID := fmt.Sprintf("sts:%s", *creds.AccessKeyId)
+
+	rawData := map[string]interface{}{
+		"access_key_id":     *creds.AccessKeyId,
+		"secret_access_key": *creds.SecretAccessKey,
+		"session_token":     *creds.SessionToken,
+		"security_token":    *creds.SessionToken,
+		"cred_source":       "aws_sts_web_identity",
+	}
+
+	metadata := map[string]interface{}{
+		"subject":      roleArn,
+		"session_name": sessionName,
+		"expiration":   creds.Expiration.UTC().Format(time.RFC3339),
+	}
+	if result.AssumedRoleUser != nil {
+		if arn := aws.ToString(result.AssumedRoleUser.Arn); arn != "" {
+			metadata["assumed_role_arn"] = arn
+			if acct := accountIDFromARN(arn); acct != "" {
+				metadata["account_id"] = acct
+			}
+		}
+	}
+
+	if d.logger != nil {
+		d.logger.Debug("generated STS temporary credentials via web identity",
 			logger.String("spec", spec.Name),
 			logger.String("role_arn", roleArn),
 			logger.String("lease_ttl", leaseTTL.String()),

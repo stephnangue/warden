@@ -1,10 +1,12 @@
 package credential
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"strings"
 )
 
 // RFC 8693 §3 token-type identifiers. These label the format of a subject or
@@ -55,21 +57,95 @@ const (
 	SourceAuthToken = "auth_token"
 	SourceHeader    = "header"
 	SourceNone      = "none"
+	// SourceWardenIdentity mints a fresh Warden-signed identity assertion (via
+	// the OIDC issuer) as the subject token. Used for Workload Identity
+	// Federation: Warden re-issues the resolved agent identity so an upstream
+	// federates Warden's issuer once, regardless of how the agent authenticated.
+	// Valid only for the subject source.
+	SourceWardenIdentity = "warden_identity"
 )
+
+// ConfigAssertionAudience is the spec-config key naming the `aud` of a
+// warden_identity assertion — the upstream the assertion is minted for. Required
+// and non-empty whenever subject_token_source=warden_identity: it is the control
+// that stops an assertion for one upstream being replayed at another.
+const ConfigAssertionAudience = "assertion_audience"
+
+// ConfigAssertionMetadataClaims is the spec-config key naming which of the
+// caller's login-derived metadata keys to project into a warden_identity
+// assertion (comma-separated). Absent/empty projects nothing — the assertion
+// crosses a trust boundary to a third-party upstream, so disclosure is opt-in and
+// operator-chosen, never the whole metadata map. Valid only when
+// subject_token_source=warden_identity.
+const ConfigAssertionMetadataClaims = "assertion_metadata_claims"
+
+// AssertionMetadataKeys parses the comma-separated ConfigAssertionMetadataClaims
+// value into a de-duplicated, order-preserving list of metadata key names,
+// ignoring blank entries and surrounding whitespace. Returns nil when unset.
+func AssertionMetadataKeys(config map[string]string) []string {
+	raw := config[ConfigAssertionMetadataClaims]
+	if raw == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var keys []string
+	for _, part := range strings.Split(raw, ",") {
+		k := strings.TrimSpace(part)
+		if k == "" {
+			continue
+		}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// Assertion signing algorithms selectable per warden_identity spec via
+// ConfigAssertionAlgorithm. RS256 (the default) is the universal OIDC verifier
+// default and the algorithm AWS IAM OIDC providers accept; ES256 (ECDSA P-256) is
+// the smaller/faster alternative some upstreams (e.g. GCP WIF) prefer. The issuer
+// publishes a JWKS key for each, so a spec can pick either. The string values must
+// match the issuer's supported algs.
+const (
+	AssertionAlgRS256   = "RS256"
+	AssertionAlgES256   = "ES256"
+	DefaultAssertionAlg = AssertionAlgRS256
+)
+
+// ConfigAssertionAlgorithm is the spec-config key selecting the JWS algorithm a
+// warden_identity assertion is signed with. Absent/empty defaults to RS256. Valid
+// only when subject_token_source=warden_identity.
+const ConfigAssertionAlgorithm = "assertion_algorithm"
+
+// AssertionAlgorithm returns the spec's configured assertion signing algorithm,
+// defaulting to RS256 when unset.
+func AssertionAlgorithm(config map[string]string) string {
+	if a := config[ConfigAssertionAlgorithm]; a != "" {
+		return a
+	}
+	return DefaultAssertionAlg
+}
 
 // maxExchangeTokenBytes bounds a single subject or actor token. Real JWTs and
 // access tokens are far smaller; the cap guards against a caller pushing an
 // oversized blob through the exchange plumbing.
 const maxExchangeTokenBytes = 256 * 1024
 
-// ExchangeInputs carries caller-derived RFC 8693 token-exchange inputs from an
-// inbound request down to a credential driver at mint time. The values are
-// bearer secrets: the plumbing never logs them, never persists them, and never
-// places them in a credential's data map. Only a driver that implements
-// ExchangeMinter receives them.
+// ExchangeInputs carries the RFC 8693 token-exchange inputs for one request from
+// the request handler down to a credential driver at mint time. The subject and
+// actor tokens are either derived from the inbound request (a reused auth JWT or a
+// caller-supplied header) or minted by Warden itself — a signed identity assertion
+// for Workload Identity Federation, produced lazily via ResolveSubjectToken. The
+// token values are bearer secrets: the plumbing never logs them, never persists
+// them, and never places them in a credential's data map. Only a driver that
+// implements ExchangeMinter receives them.
 type ExchangeInputs struct {
 	// SubjectToken is the RFC 8693 §2.1 subject_token — the identity being
-	// exchanged.
+	// exchanged. It may be empty until the Manager populates it when
+	// ResolveSubjectToken is set (a subject minted lazily on a cache miss).
 	SubjectToken string
 	// SubjectTokenType is the RFC 8693 §2.1 subject_token_type.
 	SubjectTokenType string
@@ -88,6 +164,31 @@ type ExchangeInputs struct {
 	// on a header. Empty when no actor token is present. A driver consuming an
 	// unverified actor must validate it before forwarding, exactly as for a subject.
 	ActorTokenOrigin string
+
+	// CacheIdentity, when non-empty, is the value Fingerprint() keys the
+	// credential cache on IN PLACE OF SubjectToken. It exists for subjects whose
+	// SubjectToken is freshly minted on every request (a Warden-signed identity
+	// assertion carries a new jti/iat/exp each time), which would otherwise make
+	// the fingerprint unique per request and defeat the cache. Set it to a stable
+	// identity tuple (e.g. subject + audience) so distinct identities stay
+	// isolated while one identity reuses its cached upstream credential.
+	//
+	// It MUST be set only by core (resolveExchangeInputs), never derived from a
+	// caller-supplied value, and it does not travel to drivers as a token. It is
+	// mandatory whenever ResolveSubjectToken is set (enforced by Validate).
+	CacheIdentity string
+
+	// ResolveSubjectToken, when non-nil, produces SubjectToken lazily. It is
+	// invoked by the credential Manager only on a real cache MISS (inside the
+	// singleflight leader), so a per-request-expensive subject token — e.g. a
+	// Warden-signed RS256 identity assertion — is never minted just to be
+	// discarded on a cache hit. When set, SubjectToken may be empty until the
+	// Manager populates it, and CacheIdentity MUST be set so Fingerprint() is
+	// stable without the token bytes.
+	//
+	// Set only by core (resolveExchangeInputs), never from caller input. It is
+	// not hashed by Fingerprint, never logged, and never persisted.
+	ResolveSubjectToken func(ctx context.Context) (string, error)
 }
 
 // Validate performs structural checks only. It does not verify token contents
@@ -97,7 +198,14 @@ func (e *ExchangeInputs) Validate() error {
 	if e == nil {
 		return fmt.Errorf("exchange inputs are nil")
 	}
-	if e.SubjectToken == "" {
+	if e.ResolveSubjectToken != nil {
+		// Lazy subject: the token is produced on a cache miss, so it may be empty
+		// here — but the fingerprint must not then hash an empty SubjectToken and
+		// collide across identities, so CacheIdentity is mandatory.
+		if e.CacheIdentity == "" {
+			return fmt.Errorf("cache_identity is required when the subject token is resolved lazily")
+		}
+	} else if e.SubjectToken == "" {
 		return fmt.Errorf("subject_token is required")
 	}
 	if e.SubjectTokenType == "" {
@@ -141,6 +249,16 @@ func (e *ExchangeInputs) Validate() error {
 // Each field is length-prefixed before hashing so that no two distinct field
 // combinations can collide by concatenation (e.g. subject "ab"/actor "c" must
 // not hash the same as subject "a"/actor "bc").
+//
+// When CacheIdentity is set, it is hashed in place of SubjectToken (so a
+// per-request-volatile assertion does not defeat the cache), under a distinct
+// domain tag so the CacheIdentity path and the raw-subject path can never
+// collide. Every other field — token type, actor, origins — is always folded
+// in, so a Warden-minted subject and a raw subject that happen to share a value
+// still key differently, and delegation/provenance never share a cache entry.
+//
+// ResolveSubjectToken is intentionally NOT hashed: a lazily-minted subject sets
+// CacheIdentity (mandatory per Validate), which stands in for the token here.
 func (e *ExchangeInputs) Fingerprint() string {
 	h := sha256.New()
 	writeField := func(s string) {
@@ -150,7 +268,13 @@ func (e *ExchangeInputs) Fingerprint() string {
 		h.Write([]byte(s))
 	}
 	writeField(e.SubjectTokenType)
-	writeField(e.SubjectToken)
+	if e.CacheIdentity != "" {
+		writeField("cache-identity")
+		writeField(e.CacheIdentity)
+	} else {
+		writeField("subject-token")
+		writeField(e.SubjectToken)
+	}
 	writeField(e.ActorTokenType)
 	writeField(e.ActorToken)
 	writeField(e.SubjectTokenOrigin)
@@ -171,10 +295,29 @@ func SpecRequestsExchange(config map[string]string) bool {
 // closed at mint time instead.
 func ValidateExchangeSpecConfig(config map[string]string) error {
 	if err := ValidateSchema(config,
-		StringField(ConfigSubjectTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone),
+		StringField(ConfigSubjectTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone, SourceWardenIdentity),
 		StringField(ConfigActorTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone),
+		StringField(ConfigAssertionAlgorithm).OneOf(AssertionAlgRS256, AssertionAlgES256),
 	); err != nil {
 		return err
+	}
+	// A Warden-minted subject must declare the audience it is minted for. An
+	// empty/absent aud is replayable at any upstream whose trust policy does not
+	// pin aud, so require it here (enforced again at mint time, defence in depth).
+	if config[ConfigSubjectTokenSource] == SourceWardenIdentity && config[ConfigAssertionAudience] == "" {
+		return fmt.Errorf("field '%s': is required when '%s' is '%s'",
+			ConfigAssertionAudience, ConfigSubjectTokenSource, SourceWardenIdentity)
+	}
+	// Projecting metadata into the assertion only makes sense when Warden mints it;
+	// on a reused/caller-supplied subject Warden does not control the claims.
+	if config[ConfigAssertionMetadataClaims] != "" && config[ConfigSubjectTokenSource] != SourceWardenIdentity {
+		return fmt.Errorf("field '%s': is valid only when '%s' is '%s'",
+			ConfigAssertionMetadataClaims, ConfigSubjectTokenSource, SourceWardenIdentity)
+	}
+	// The assertion algorithm only applies to a Warden-minted subject.
+	if config[ConfigAssertionAlgorithm] != "" && config[ConfigSubjectTokenSource] != SourceWardenIdentity {
+		return fmt.Errorf("field '%s': is valid only when '%s' is '%s'",
+			ConfigAssertionAlgorithm, ConfigSubjectTokenSource, SourceWardenIdentity)
 	}
 	// An actor token only has meaning alongside a subject token (RFC 8693 §2.1),
 	// so reject an actor source without a subject source.

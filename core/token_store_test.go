@@ -239,6 +239,36 @@ func TestTokenStore_Metadata_RoundTrip(t *testing.T) {
 	assert.Equal(t, map[string]string{"env": "prod", "team": "platform-core"}, lookedUpEntry.Metadata)
 }
 
+// TestTokenStore_MountAccessor_RoundTrip verifies the auth-mount accessor set on
+// AuthData is persisted onto the issued TokenEntry and survives a lookup, so a
+// federated identity assertion can use it to disambiguate the subject.
+func TestTokenStore_MountAccessor_RoundTrip(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	authData := &AuthData{
+		PrincipalID:   "test-user",
+		RoleName:      "test-role",
+		ExpireAt:      time.Now().Add(24 * time.Hour),
+		Policies:      []string{"default"},
+		MountAccessor: "auth_jwt_abc123",
+	}
+
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	require.NoError(t, err)
+	assert.Equal(t, "auth_jwt_abc123", entry.MountAccessor)
+
+	tokenValue := entry.Data["token"]
+	require.NotEmpty(t, tokenValue)
+
+	lookedUpEntry, err := core.LookupToken(ctx, tokenValue)
+	require.NoError(t, err)
+	require.NotNil(t, lookedUpEntry)
+	assert.Equal(t, "auth_jwt_abc123", lookedUpEntry.MountAccessor)
+}
+
 // TestTokenStore_LookupToken_NotFound tests looking up a non-existent token
 func TestTokenStore_LookupToken_NotFound(t *testing.T) {
 	core := createTestCore(t)
