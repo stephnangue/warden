@@ -17,21 +17,6 @@ var (
 	cfgJWKSCacheTTL      string
 	cfgRetiredKeyGrace   string
 
-	cfgPublisherType        string
-	cfgPublisherDir         string
-	cfgPublisherBaseURL     string
-	cfgPublisherAuthHdr     string
-	cfgPublisherAuthValue   string
-	cfgPublisherBucket      string
-	cfgPublisherRegion      string
-	cfgPublisherPrefix      string
-	cfgPublisherAccessKey   string
-	cfgPublisherSecretKey   string
-	cfgPublisherAccountName string
-	cfgPublisherContainer   string
-	cfgPublisherAccountKey  string
-	cfgPublisherEndpoint    string
-
 	cfgJSON string
 
 	ConfigureCmd = &cobra.Command{
@@ -42,9 +27,9 @@ var (
 		Long: `
 Usage: warden oidc-issuer configure [options]
 
-  Enable the OIDC issuer and set its issuer URL, assertion TTL, signing-key
-  rotation timings, and (optionally) a publisher that pushes the discovery +
-  JWKS documents to a bucket/CDN. Root namespace only.
+  Enable the OIDC issuer and set its issuer URL, assertion TTL, and signing-key
+  rotation timings. Root namespace only. Use 'warden oidc-issuer set-publisher'
+  to push the discovery + JWKS documents to a bucket/CDN.
 
   A write is a PARTIAL update: only the fields you pass change; everything else
   keeps its current value. So you can tweak one setting without re-supplying the
@@ -59,18 +44,6 @@ Usage: warden oidc-issuer configure [options]
   Change just the rotation cadence later (issuer_url and the rest are kept):
 
       $ warden oidc-issuer configure -key-rotation-period=24h
-
-  Configure with an S3 publisher:
-
-      $ warden oidc-issuer configure -issuer-url=https://cdn.example.com/oidc \
-          -publisher-type=s3 -publisher-bucket=my-jwks -publisher-region=us-east-1 \
-          -publisher-access-key-id=AKIA... -publisher-secret-access-key=...
-
-  Configure with an Azure Blob publisher:
-
-      $ warden oidc-issuer configure -issuer-url=https://cdn.example.com/oidc \
-          -publisher-type=azure_blob -publisher-account-name=wardenoidc \
-          -publisher-container=jwks -publisher-account-key=...
 
   Full JSON payload (agent-friendly):
 
@@ -92,21 +65,6 @@ func init() {
 	f.StringVar(&cfgJWKSCacheTTL, "jwks-cache-ttl", "", "Cache-Control max-age of the published JWKS; also the min pre-publication age of a new key (default 1m)")
 	f.StringVar(&cfgRetiredKeyGrace, "retired-key-grace", "", "Margin beyond the assertion TTL before a retired key is pruned from the JWKS (default 1h)")
 
-	f.StringVar(&cfgPublisherType, "publisher-type", "", "Publisher type: none, local_file, http_put, s3, or azure_blob")
-	f.StringVar(&cfgPublisherDir, "publisher-dir", "", "local_file: directory the documents are written to")
-	f.StringVar(&cfgPublisherBaseURL, "publisher-base-url", "", "http_put: origin the documents are PUT under")
-	f.StringVar(&cfgPublisherAuthHdr, "publisher-auth-header", "", "http_put: auth header name (default Authorization)")
-	f.StringVar(&cfgPublisherAuthValue, "publisher-auth-value", "", "http_put: auth header value, e.g. 'Bearer <token>' (masked on read)")
-	f.StringVar(&cfgPublisherBucket, "publisher-bucket", "", "s3: bucket name")
-	f.StringVar(&cfgPublisherRegion, "publisher-region", "", "s3: region")
-	f.StringVar(&cfgPublisherPrefix, "publisher-prefix", "", "s3/azure_blob: blob-name/key prefix")
-	f.StringVar(&cfgPublisherAccessKey, "publisher-access-key-id", "", "s3: access key id")
-	f.StringVar(&cfgPublisherSecretKey, "publisher-secret-access-key", "", "s3: secret access key (masked on read)")
-	f.StringVar(&cfgPublisherAccountName, "publisher-account-name", "", "azure_blob: storage account name")
-	f.StringVar(&cfgPublisherContainer, "publisher-container", "", "azure_blob: container name")
-	f.StringVar(&cfgPublisherAccountKey, "publisher-account-key", "", "azure_blob: storage account key (masked on read)")
-	f.StringVar(&cfgPublisherEndpoint, "publisher-endpoint", "", "azure_blob: override service URL (sovereign cloud, private endpoint, or emulator; default is public cloud)")
-
 	f.StringVarP(&cfgJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with the typed flags)")
 }
 
@@ -124,25 +82,11 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	var payload map[string]any
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"-issuer-url":                  cfgIssuerURL != "",
-			"-assertion-ttl":               cfgAssertionTTL != "",
-			"-key-rotation-period":         cfgKeyRotationPeriod != "",
-			"-jwks-cache-ttl":              cfgJWKSCacheTTL != "",
-			"-retired-key-grace":           cfgRetiredKeyGrace != "",
-			"-publisher-type":              cfgPublisherType != "",
-			"-publisher-dir":               cfgPublisherDir != "",
-			"-publisher-base-url":          cfgPublisherBaseURL != "",
-			"-publisher-auth-header":       cfgPublisherAuthHdr != "",
-			"-publisher-auth-value":        cfgPublisherAuthValue != "",
-			"-publisher-bucket":            cfgPublisherBucket != "",
-			"-publisher-region":            cfgPublisherRegion != "",
-			"-publisher-prefix":            cfgPublisherPrefix != "",
-			"-publisher-access-key-id":     cfgPublisherAccessKey != "",
-			"-publisher-secret-access-key": cfgPublisherSecretKey != "",
-			"-publisher-account-name":      cfgPublisherAccountName != "",
-			"-publisher-container":         cfgPublisherContainer != "",
-			"-publisher-account-key":       cfgPublisherAccountKey != "",
-			"-publisher-endpoint":          cfgPublisherEndpoint != "",
+			"-issuer-url":          cfgIssuerURL != "",
+			"-assertion-ttl":       cfgAssertionTTL != "",
+			"-key-rotation-period": cfgKeyRotationPeriod != "",
+			"-jwks-cache-ttl":      cfgJWKSCacheTTL != "",
+			"-retired-key-grace":   cfgRetiredKeyGrace != "",
 		}); err != nil {
 			return err
 		}
@@ -173,25 +117,6 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("-%s: %w", strings.ReplaceAll(d.key, "_", "-"), err)
 			}
 			payload[d.key] = secs
-		}
-
-		publisher := map[string]any{}
-		setIfNonEmpty(publisher, "type", cfgPublisherType)
-		setIfNonEmpty(publisher, "dir", cfgPublisherDir)
-		setIfNonEmpty(publisher, "base_url", cfgPublisherBaseURL)
-		setIfNonEmpty(publisher, "auth_header", cfgPublisherAuthHdr)
-		setIfNonEmpty(publisher, "auth_value", cfgPublisherAuthValue)
-		setIfNonEmpty(publisher, "bucket", cfgPublisherBucket)
-		setIfNonEmpty(publisher, "region", cfgPublisherRegion)
-		setIfNonEmpty(publisher, "prefix", cfgPublisherPrefix)
-		setIfNonEmpty(publisher, "access_key_id", cfgPublisherAccessKey)
-		setIfNonEmpty(publisher, "secret_access_key", cfgPublisherSecretKey)
-		setIfNonEmpty(publisher, "account_name", cfgPublisherAccountName)
-		setIfNonEmpty(publisher, "container", cfgPublisherContainer)
-		setIfNonEmpty(publisher, "account_key", cfgPublisherAccountKey)
-		setIfNonEmpty(publisher, "endpoint", cfgPublisherEndpoint)
-		if len(publisher) > 0 {
-			payload["publisher"] = publisher
 		}
 	}
 

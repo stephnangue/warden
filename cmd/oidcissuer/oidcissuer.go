@@ -26,6 +26,11 @@ Usage: warden oidc-issuer <subcommand> [options]
 
       $ warden oidc-issuer configure -issuer-url=https://warden.example.com
 
+  Publish the discovery + JWKS documents to a bucket/CDN:
+
+      $ warden oidc-issuer set-publisher -type=s3 \
+          -config=bucket=my-jwks -config=region=us-east-1
+
   Show the current configuration and readiness:
 
       $ warden oidc-issuer read
@@ -41,6 +46,7 @@ Usage: warden oidc-issuer <subcommand> [options]
 
 func init() {
 	OIDCIssuerCmd.AddCommand(ConfigureCmd)
+	OIDCIssuerCmd.AddCommand(SetPublisherCmd)
 	OIDCIssuerCmd.AddCommand(ReadCmd)
 	OIDCIssuerCmd.AddCommand(DisableCmd)
 }
