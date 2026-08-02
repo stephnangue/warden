@@ -47,7 +47,7 @@ func (b *SystemBackend) pathOIDCIssuer() []*framework.Path {
 				},
 				"publisher": {
 					Type:        framework.TypeMap,
-					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key. Cache-Control is derived from jwks_cache_ttl.",
+					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3|azure_blob), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key, account_name, container, account_key, endpoint. Cache-Control is derived from jwks_cache_ttl.",
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
@@ -221,19 +221,34 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 	}), nil
 }
 
-// publisherFieldOwners maps each type-specific publisher field to the single
-// publisher type it belongs to. A field set for any other type is a
-// misconfiguration (e.g. `dir` under an s3 publisher would be silently ignored).
-var publisherFieldOwners = map[string]string{
-	"dir":               "local_file",
-	"base_url":          "http_put",
-	"auth_header":       "http_put",
-	"auth_value":        "http_put",
-	"bucket":            "s3",
-	"region":            "s3",
-	"prefix":            "s3",
-	"access_key_id":     "s3",
-	"secret_access_key": "s3",
+// publisherFieldOwners maps each type-specific publisher field to the publisher
+// type(s) it belongs to. A field set for any other type is a misconfiguration
+// (e.g. `dir` under an s3 publisher would be silently ignored). A field may be
+// shared by more than one type (e.g. `prefix` for both s3 and azure_blob).
+var publisherFieldOwners = map[string][]string{
+	"dir":               {"local_file"},
+	"base_url":          {"http_put"},
+	"auth_header":       {"http_put"},
+	"auth_value":        {"http_put"},
+	"bucket":            {"s3"},
+	"region":            {"s3"},
+	"prefix":            {"s3", "azure_blob"},
+	"access_key_id":     {"s3"},
+	"secret_access_key": {"s3"},
+	"account_name":      {"azure_blob"},
+	"container":         {"azure_blob"},
+	"account_key":       {"azure_blob"},
+	"endpoint":          {"azure_blob"},
+}
+
+// ownedBy reports whether field is valid for the given publisher type.
+func ownedBy(owners []string, typ string) bool {
+	for _, o := range owners {
+		if o == typ {
+			return true
+		}
+	}
+	return false
 }
 
 // mergePublisherConfig overlays the request "publisher" map onto the prior
@@ -257,10 +272,10 @@ func mergePublisherConfig(prior publisherConfig, raw map[string]any) (publisherC
 	}
 
 	// Reject fields the request explicitly set that belong to another type.
-	for field, owner := range publisherFieldOwners {
-		if v, ok := get(field); ok && v != "" && v != maskValue && owner != effType {
+	for field, owners := range publisherFieldOwners {
+		if v, ok := get(field); ok && v != "" && v != maskValue && !ownedBy(owners, effType) {
 			return publisherConfig{}, fmt.Errorf(
-				"publisher field %q is only valid for type %q, not %q", field, owner, effType)
+				"publisher field %q is only valid for type(s) %s, not %q", field, strings.Join(owners, "|"), effType)
 		}
 	}
 
@@ -295,6 +310,15 @@ func mergePublisherConfig(prior publisherConfig, raw map[string]any) (publisherC
 	if v, ok := get("access_key_id"); ok {
 		pc.AccessKeyID = v
 	}
+	if v, ok := get("account_name"); ok {
+		pc.AccountName = v
+	}
+	if v, ok := get("container"); ok {
+		pc.Container = v
+	}
+	if v, ok := get("endpoint"); ok {
+		pc.Endpoint = v
+	}
 	// Secrets: overlay only a real value; an omitted/empty/masked secret keeps the
 	// prior one (carried via pc=prior when the type is unchanged).
 	if v, ok := get("auth_value"); ok && v != "" && v != maskValue {
@@ -302,6 +326,9 @@ func mergePublisherConfig(prior publisherConfig, raw map[string]any) (publisherC
 	}
 	if v, ok := get("secret_access_key"); ok && v != "" && v != maskValue {
 		pc.SecretAccessKey = v
+	}
+	if v, ok := get("account_key"); ok && v != "" && v != maskValue {
+		pc.AccountKey = v
 	}
 
 	return pc, nil
@@ -336,6 +363,18 @@ func maskedPublisher(pc publisherConfig) map[string]any {
 	}
 	if pc.SecretAccessKey != "" {
 		m["secret_access_key"] = maskValue
+	}
+	if pc.AccountName != "" {
+		m["account_name"] = pc.AccountName
+	}
+	if pc.Container != "" {
+		m["container"] = pc.Container
+	}
+	if pc.AccountKey != "" {
+		m["account_key"] = maskValue
+	}
+	if pc.Endpoint != "" {
+		m["endpoint"] = pc.Endpoint
 	}
 	return m
 }
