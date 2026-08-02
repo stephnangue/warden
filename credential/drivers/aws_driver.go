@@ -55,16 +55,17 @@ type AWSDriver struct {
 
 	// anonSTSClient calls sts:AssumeRoleWithWebIdentity, which is unsigned — it
 	// takes no AWS credentials, only the web identity token. Built once in Create
-	// so a Workload Identity Federation (auth_method=wif) source needs no IAM keys.
+	// so a keyless federation (auth_method=oidc_federation) source needs no IAM keys.
 	anonSTSClient *sts.Client
 }
 
-// awsAuthMethodStatic and awsAuthMethodWIF select how the source authenticates.
-// static (default) uses long-lived IAM keys; wif holds no key and mints only via
-// sts:AssumeRoleWithWebIdentity from a caller-presented identity assertion.
+// awsAuthMethodStatic and awsAuthMethodOIDCFederation select how the source
+// authenticates. static (default) uses long-lived IAM keys; oidc_federation holds
+// no key and mints only via sts:AssumeRoleWithWebIdentity from a caller-presented
+// identity assertion.
 const (
-	awsAuthMethodStatic = "static"
-	awsAuthMethodWIF    = "wif"
+	awsAuthMethodStatic         = "static"
+	awsAuthMethodOIDCFederation = "oidc_federation"
 
 	mintMethodSTSAssumeRoleWebIdentity = "sts_assume_role_web_identity"
 )
@@ -81,8 +82,8 @@ func (f *AWSDriverFactory) Type() string {
 func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
 	if err := credential.ValidateSchema(config,
 		credential.StringField("auth_method").
-			OneOf(awsAuthMethodStatic, awsAuthMethodWIF).
-			Describe("How the source authenticates: static (IAM keys) or wif (Workload Identity Federation, keyless)").
+			OneOf(awsAuthMethodStatic, awsAuthMethodOIDCFederation).
+			Describe("How the source authenticates: static (IAM keys) or oidc_federation (Workload Identity Federation, keyless)").
 			Example("static"),
 
 		credential.StringField("access_key_id").
@@ -123,14 +124,14 @@ func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
 		if credential.GetString(config, "access_key_id", "") == "" || credential.GetString(config, "secret_access_key", "") == "" {
 			return fmt.Errorf("access_key_id and secret_access_key are required for auth_method=static")
 		}
-	case awsAuthMethodWIF:
-		// A WIF source holds no static secret. Reject leftover static config so a
-		// misconfiguration cannot silently mix modes.
+	case awsAuthMethodOIDCFederation:
+		// A federation source holds no static secret. Reject leftover static config
+		// so a misconfiguration cannot silently mix modes.
 		if credential.GetString(config, "access_key_id", "") != "" || credential.GetString(config, "secret_access_key", "") != "" {
-			return fmt.Errorf("access_key_id/secret_access_key must not be set for auth_method=wif")
+			return fmt.Errorf("access_key_id/secret_access_key must not be set for auth_method=oidc_federation")
 		}
 		if credential.GetString(config, "assume_role_arn", "") != "" {
-			return fmt.Errorf("assume_role_arn is not supported for auth_method=wif")
+			return fmt.Errorf("assume_role_arn is not supported for auth_method=oidc_federation")
 		}
 	}
 	return nil
@@ -177,9 +178,9 @@ func (f *AWSDriverFactory) Create(config map[string]string, log *logger.GatedLog
 		}),
 	}
 
-	// A WIF source holds no IAM keys: skip the eager credential probe. All
+	// A federation source holds no IAM keys: skip the eager credential probe. All
 	// authentication happens per-request from the caller's identity assertion.
-	if credential.GetString(config, "auth_method", awsAuthMethodStatic) == awsAuthMethodWIF {
+	if credential.GetString(config, "auth_method", awsAuthMethodStatic) == awsAuthMethodOIDCFederation {
 		return driver, nil
 	}
 
@@ -298,11 +299,11 @@ func (d *AWSDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	if mintMethod == mintMethodSTSAssumeRoleWebIdentity {
 		return nil, nil, 0, "", fmt.Errorf("mint_method=%s requires token-exchange inputs; set subject_token_source=warden_identity on the spec", mintMethodSTSAssumeRoleWebIdentity)
 	}
-	// A WIF source holds no static credentials, so only the web-identity mint is
-	// possible on it. Fail clearly rather than falling into authenticate() with
-	// empty keys and a misleading "invalid AWS credentials" error.
-	if authMethod == awsAuthMethodWIF {
-		return nil, nil, 0, "", fmt.Errorf("auth_method=wif supports only mint_method=%s (got %q)", mintMethodSTSAssumeRoleWebIdentity, mintMethod)
+	// A federation source holds no static credentials, so only the web-identity
+	// mint is possible on it. Fail clearly rather than falling into authenticate()
+	// with empty keys and a misleading "invalid AWS credentials" error.
+	if authMethod == awsAuthMethodOIDCFederation {
+		return nil, nil, 0, "", fmt.Errorf("auth_method=oidc_federation supports only mint_method=%s (got %q)", mintMethodSTSAssumeRoleWebIdentity, mintMethod)
 	}
 
 	// Re-authenticate if needed
@@ -434,8 +435,8 @@ func (d *AWSDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 }
 
 // mintViaSTSAssumeRoleWebIdentity exchanges webIdentityToken for temporary AWS
-// credentials. The call is unsigned (anonSTSClient), so a WIF source needs no
-// IAM keys.
+// credentials. The call is unsigned (anonSTSClient), so an oidc_federation source
+// needs no IAM keys.
 func (d *AWSDriver) mintViaSTSAssumeRoleWebIdentity(ctx context.Context, spec *credential.CredSpec, webIdentityToken string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	roleArn, err := credential.GetStringRequired(spec.Config, "role_arn")
 	if err != nil {

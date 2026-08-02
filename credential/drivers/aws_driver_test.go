@@ -96,19 +96,19 @@ func TestAWSDriverFactory_ValidateConfig(t *testing.T) {
 			errMsg:  "session_duration",
 		},
 		{
-			name:    "wif valid without keys",
-			config:  map[string]string{"auth_method": "wif", "region": "us-east-1"},
+			name:    "oidc_federation valid without keys",
+			config:  map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"},
 			wantErr: false,
 		},
 		{
-			name:    "wif rejects static keys",
-			config:  map[string]string{"auth_method": "wif", "region": "us-east-1", "access_key_id": "AKIA..."},
+			name:    "oidc_federation rejects static keys",
+			config:  map[string]string{"auth_method": "oidc_federation", "region": "us-east-1", "access_key_id": "AKIA..."},
 			wantErr: true,
-			errMsg:  "must not be set for auth_method=wif",
+			errMsg:  "must not be set for auth_method=oidc_federation",
 		},
 		{
-			name:    "wif rejects assume_role_arn",
-			config:  map[string]string{"auth_method": "wif", "region": "us-east-1", "assume_role_arn": "arn:aws:iam::1:role/x"},
+			name:    "oidc_federation rejects assume_role_arn",
+			config:  map[string]string{"auth_method": "oidc_federation", "region": "us-east-1", "assume_role_arn": "arn:aws:iam::1:role/x"},
 			wantErr: true,
 			errMsg:  "assume_role_arn is not supported",
 		},
@@ -529,16 +529,16 @@ func TestAWSDriver_MintCredential_UnsupportedMethodMessage_IncludesRedshift(t *t
 // AWS Workload Identity Federation (AssumeRoleWithWebIdentity)
 // =============================================================================
 
-// TestAWSDriver_Create_WIF_Keyless verifies a wif source is constructed with no
-// IAM keys and without an eager credential probe (no network).
+// TestAWSDriver_Create_WIF_Keyless verifies an oidc_federation source is
+// constructed with no IAM keys and without an eager credential probe (no network).
 func TestAWSDriver_Create_WIF_Keyless(t *testing.T) {
 	factory := &AWSDriverFactory{}
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := factory.Create(map[string]string{"auth_method": "wif", "region": "us-east-1"}, log)
+	drv, err := factory.Create(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}, log)
 	require.NoError(t, err)
 	require.NotNil(t, drv)
 	awsDrv := drv.(*AWSDriver)
-	assert.NotNil(t, awsDrv.anonSTSClient, "wif source must build the anonymous STS client")
+	assert.NotNil(t, awsDrv.anonSTSClient, "oidc_federation source must build the anonymous STS client")
 }
 
 // TestAWSDriver_MintGuards covers the fail-closed routing between the exchange
@@ -557,15 +557,15 @@ func TestAWSDriver_MintGuards(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires token-exchange inputs")
 
-	// A wif source reached with a non-WIF mint_method must fail clearly, not
-	// fall into authenticate() with empty keys.
+	// An oidc_federation source reached with a non-federation mint_method must fail
+	// clearly, not fall into authenticate() with empty keys.
 	wifDrv := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "wif"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation"}},
 		logger:     log,
 	}
 	_, _, _, _, err = wifDrv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "secrets_manager"}})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "auth_method=wif supports only")
+	assert.Contains(t, err.Error(), "auth_method=oidc_federation supports only")
 }
 
 // TestAWSDriver_MintCredentialWithExchange_Guards covers the exchange-path guards
@@ -573,7 +573,7 @@ func TestAWSDriver_MintGuards(t *testing.T) {
 func TestAWSDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	drv := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "wif"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation"}},
 		logger:     log,
 	}
 	roleSpec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "sts_assume_role_web_identity", "role_arn": "arn:aws:iam::1:role/x"}}
@@ -622,7 +622,7 @@ func TestAWSDriver_WebIdentity_HappyPath(t *testing.T) {
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	drv := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "wif", "region": "us-east-1"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}},
 		logger:     log,
 		region:     "us-east-1",
 		anonSTSClient: sts.New(sts.Options{
