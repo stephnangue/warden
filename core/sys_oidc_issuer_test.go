@@ -303,6 +303,39 @@ func TestMergePublisherConfig(t *testing.T) {
 	pc, err = mergePublisherConfig(prior, map[string]any{"type": "http_put", "auth_value": maskValue})
 	require.NoError(t, err)
 	assert.Equal(t, "sekret", pc.AuthValue)
+
+	// A clean azure_blob config passes; prefix is shared with s3 and accepted here.
+	pc, err = mergePublisherConfig(publisherConfig{}, map[string]any{
+		"type": "azure_blob", "account_name": "wardenoidc", "container": "jwks",
+		"prefix": "prod", "account_key": "k", "endpoint": "https://wardenoidc.blob.core.usgovcloudapi.net/",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "azure_blob", pc.Type)
+	assert.Equal(t, "wardenoidc", pc.AccountName)
+	assert.Equal(t, "jwks", pc.Container)
+	assert.Equal(t, "prod", pc.Prefix)
+	assert.Equal(t, "k", pc.AccountKey)
+	assert.Equal(t, "https://wardenoidc.blob.core.usgovcloudapi.net/", pc.Endpoint)
+
+	// Read masks the account key but renders the non-secret fields plainly.
+	masked := maskedPublisher(pc)
+	assert.Equal(t, "wardenoidc", masked["account_name"])
+	assert.Equal(t, "jwks", masked["container"])
+	assert.Equal(t, "prod", masked["prefix"])
+	assert.Equal(t, "https://wardenoidc.blob.core.usgovcloudapi.net/", masked["endpoint"])
+	assert.Equal(t, maskValue, masked["account_key"])
+
+	// An s3 field under azure_blob is rejected.
+	_, err = mergePublisherConfig(publisherConfig{}, map[string]any{
+		"type": "azure_blob", "account_name": "a", "container": "c", "bucket": "b",
+	})
+	require.Error(t, err)
+
+	// A masked account_key keeps the prior one.
+	prior = publisherConfig{Type: "azure_blob", AccountName: "a", Container: "c", AccountKey: "realkey"}
+	pc, err = mergePublisherConfig(prior, map[string]any{"type": "azure_blob", "account_key": maskValue})
+	require.NoError(t, err)
+	assert.Equal(t, "realkey", pc.AccountKey)
 }
 
 // TestSysOIDCIssuerConfig_PublisherCrossTypeRejected verifies a cross-type
