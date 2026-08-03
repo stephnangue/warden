@@ -37,7 +37,7 @@ func (t *AWSIAMAccessKeysCredType) ConfigSchema() []*credential.FieldValidator {
 
 		// Common field for vault and aws sources
 		credential.StringField("mint_method").
-			OneOf("static_aws", "dynamic_aws", "sts_assume_role", "sts_assume_role_web_identity", "secrets_manager", "rds_iam_token", "redshift_iam_token").
+			OneOf("static_aws", "dynamic_aws", "sts_assume_role", "secrets_manager", "rds_iam_token", "redshift_iam_token").
 			Describe("Method for minting AWS credentials").
 			Example("sts_assume_role"),
 
@@ -192,19 +192,17 @@ func (t *AWSIAMAccessKeysCredType) validateAWSConfig(config map[string]string) e
 		if config["role_arn"] == "" {
 			return fmt.Errorf("'role_arn' is required when mint_method is sts_assume_role")
 		}
-	case "sts_assume_role_web_identity":
-		if config["role_arn"] == "" {
-			return fmt.Errorf("'role_arn' is required when mint_method is sts_assume_role_web_identity")
-		}
-		// Web-identity federation is exchange-only: it needs a caller identity
-		// assertion (normally subject_token_source=warden_identity). Reject a WIF
-		// mint_method without a subject source at creation, rather than at mint.
-		if !credential.SpecRequestsExchange(config) {
-			return fmt.Errorf("mint_method=sts_assume_role_web_identity requires a subject_token_source (e.g. warden_identity)")
-		}
 	case "secrets_manager":
 		if config["secret_id"] == "" {
 			return fmt.Errorf("'secret_id' is required when mint_method is secrets_manager")
+		}
+		// The keyless (federation) variant assumes a role via web identity before
+		// reading the secret, so it also needs a role to assume. A spec requests
+		// exchange via subject_token_source; static-auth secrets specs do not and are
+		// unaffected. (The auth_method lives on the source, which this validator does
+		// not see, so the source/exchange pairing is enforced at mint time.)
+		if credential.SpecRequestsExchange(config) && config["role_arn"] == "" {
+			return fmt.Errorf("'role_arn' is required for keyless secrets_manager (a spec with subject_token_source)")
 		}
 	}
 

@@ -89,6 +89,65 @@ func TestAWSIAMAccessKeysCredType_ValidateConfig_LocalSource(t *testing.T) {
 	}
 }
 
+func TestAWSIAMAccessKeysCredType_ValidateConfig_AWSSource(t *testing.T) {
+	ct := &AWSIAMAccessKeysCredType{}
+
+	tests := []struct {
+		name    string
+		config  map[string]string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "sts_assume_role requires role_arn",
+			config:  map[string]string{"mint_method": "sts_assume_role"},
+			wantErr: true,
+			errMsg:  "role_arn",
+		},
+		{
+			name:    "sts_assume_role valid",
+			config:  map[string]string{"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::1:role/x"},
+			wantErr: false,
+		},
+		{
+			name:    "secrets_manager requires secret_id",
+			config:  map[string]string{"mint_method": "secrets_manager"},
+			wantErr: true,
+			errMsg:  "secret_id",
+		},
+		{
+			name:    "static secrets_manager needs no role_arn",
+			config:  map[string]string{"mint_method": "secrets_manager", "secret_id": "prod/db"},
+			wantErr: false,
+		},
+		{
+			name:    "keyless secrets_manager requires role_arn",
+			config:  map[string]string{"mint_method": "secrets_manager", "secret_id": "prod/db", "subject_token_source": "warden_identity"},
+			wantErr: true,
+			errMsg:  "role_arn",
+		},
+		{
+			name:    "keyless secrets_manager valid with role_arn",
+			config:  map[string]string{"mint_method": "secrets_manager", "secret_id": "prod/db", "subject_token_source": "warden_identity", "role_arn": "arn:aws:iam::1:role/x"},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ct.ValidateConfig(tt.config, credential.SourceTypeAWS)
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestAWSIAMAccessKeysCredType_ValidateConfig_VaultSource(t *testing.T) {
 	ct := &AWSIAMAccessKeysCredType{}
 
