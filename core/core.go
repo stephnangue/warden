@@ -1036,8 +1036,23 @@ func (c *Core) publishOIDCFor(ctx context.Context, issuer *OIDCIssuer, publisher
 // context is parented on the active context so leadership loss cancels it.
 func (c *Core) startOIDCKeyRotation(standby bool, period, firstTick time.Duration, issuer *OIDCIssuer, publisher JWKSPublisher, cacheTTL, grace time.Duration) {
 	c.stopOIDCKeyRotation()
-	if standby || period <= 0 || issuer == nil {
+	if standby || issuer == nil {
+		// A standby must not touch the active-node-owned status anchor.
 		return
+	}
+	storage := NewBarrierView(c.barrier, oidcIssuerStorePrefix)
+	if period <= 0 {
+		// Rotation disabled by config: drop any stale status anchor so a later re-enable
+		// reseeds from the current key age instead of reporting a stale last_rotated_at.
+		if err := clearOIDCKeyRotationState(c.activeContext, storage); err != nil {
+			c.logger.Warn("oidc issuer: key rotation: clearing status anchor failed", logger.Err(err))
+		}
+		return
+	}
+	// Seed the status anchor (display only) if absent, from the loop's real schedule anchor
+	// (earliest next-key createdAt), so next_rotation matches the loop's first tick.
+	if err := c.seedOIDCKeyRotationState(c.activeContext, storage, issuer); err != nil {
+		c.logger.Warn("oidc issuer: key rotation: seeding status anchor failed", logger.Err(err))
 	}
 	if firstTick < 0 {
 		firstTick = 0
@@ -1111,8 +1126,14 @@ func (c *Core) oidcKeyRotationLoop(ctx context.Context, done chan struct{}, peri
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			if err := c.rotateOIDCKey(ctx, issuer, publisher, cacheTTL, grace); err != nil {
-				c.logger.Warn("oidc issuer: key rotation failed", logger.Err(err))
+			rotErr := c.rotateOIDCKey(ctx, issuer, publisher, cacheTTL, grace)
+			// Record the outcome (skip if the loop is tearing down — ctx cancellation is
+			// not a rotation failure worth persisting, and the state write would fail).
+			if ctx.Err() == nil {
+				c.recordOIDCKeyRotationOutcome(ctx, rotErr)
+			}
+			if rotErr != nil {
+				c.logger.Warn("oidc issuer: key rotation failed", logger.Err(rotErr))
 			}
 			timer.Reset(period)
 		}

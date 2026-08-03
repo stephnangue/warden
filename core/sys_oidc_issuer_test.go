@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -69,6 +70,28 @@ func TestSysOIDCIssuerConfig(t *testing.T) {
 	assert.Equal(t, "https://warden-oidc.example", resp.Data["issuer_url"], "issuer_url preserved")
 	assert.Equal(t, int64(300), resp.Data["assertion_ttl"], "assertion_ttl preserved")
 	assert.Equal(t, int64(24*3600), resp.Data["key_rotation_period"], "rotation period updated")
+
+	// Enabling rotation surfaces a key_rotation status block, anchored on the key age, so
+	// last_rotated_at/next_rotation are populated and running is true on this active node.
+	kr, ok := resp.Data["key_rotation"].(map[string]any)
+	require.True(t, ok, "key_rotation block present when rotation enabled")
+	assert.Equal(t, true, kr["running"], "rotation loop running on the active node")
+	assert.NotEmpty(t, kr["last_rotated_at"])
+	assert.NotEmpty(t, kr["next_rotation"])
+	assert.NotContains(t, kr, "last_error")
+
+	// A recorded rotation failure surfaces in the block without advancing the anchor.
+	prevRotatedAt := kr["last_rotated_at"]
+	core.recordOIDCKeyRotationOutcome(ctx, fmt.Errorf("generate ES256 signing key: boom"))
+	kr = read(ctx).Data["key_rotation"].(map[string]any)
+	assert.Equal(t, "generate ES256 signing key: boom", kr["last_error"])
+	assert.NotEmpty(t, kr["last_error_at"])
+	assert.Equal(t, prevRotatedAt, kr["last_rotated_at"], "a failure must not advance the anchor")
+
+	// key_rotation is gated on rotation being enabled: disabling it (period=0) hides the block.
+	resp = write(ctx, map[string]any{"key_rotation_period": 0})
+	require.False(t, resp.IsError())
+	assert.NotContains(t, read(ctx).Data, "key_rotation", "block hidden when rotation disabled")
 
 	// Disable: a partial write of just enabled=false tears the issuer down while
 	// keeping the rest of the config for a later re-enable.

@@ -129,15 +129,19 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error configuring OIDC issuer: %w", err)
 	}
 
+	// The write response echoes only the issuer state (enabled/issuer_url/ready). Read
+	// back so the confirmation reflects the full merged config — the durations just set,
+	// the signing-key rotation status, and any publisher — in the same coherent format as
+	// 'read'. Fall back to the write response if the read fails, so success is still reported.
 	data := map[string]any{}
-	var resData map[string]any
-	if resource != nil {
-		resData = resource.Data
+	if read, rerr := c.Operator().Read(oidcIssuerConfigPath); rerr == nil && read != nil && read.Data != nil {
+		data = read.Data
+	} else if resource != nil {
+		data = resource.Data
 	}
-	helpers.MergeServerResponseInto(data, resData, map[string]any{"enabled": true})
 	return helpers.RenderMap(data, func() {
 		fmt.Println("Success! OIDC issuer configured.")
-		helpers.PrintMapAsTable(data)
+		printOIDCIssuerTable(data)
 	})
 }
 
