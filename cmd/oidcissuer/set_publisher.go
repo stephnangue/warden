@@ -29,7 +29,7 @@ Usage: warden oidc-issuer set-publisher -type=<type> [-config=key=value ...]
   repeatable -config=key=value pair, so new publisher fields need no new flags.
   Config keys are the type's field names, validated server-side per type. A
   value prefixed with '@' is read from a file (handy for secrets):
-  -config=account_key=@/run/secrets/key.
+  -config=client_secret=@/run/secrets/sp.
 
   A write is a PARTIAL update over the stored publisher: unset keys keep their
   value, switching -type drops the previous type's fields, and secrets are
@@ -41,16 +41,20 @@ Usage: warden oidc-issuer set-publisher -type=<type> [-config=key=value ...]
       local_file   dir
       http_put     base_url, auth_header, auth_value
       s3           bucket, region, access_key_id, secret_access_key, prefix, endpoint
-      azure_blob   account_name, container, account_key, prefix, endpoint
+      azure_blob   account_name, container, tenant_id, client_id, client_secret,
+                   secret_id, prefix, endpoint
       gcs          bucket, credentials_json, prefix, endpoint
       none         (removes the publisher)
 
-  Automatic credential rotation (gcs and s3) is enabled with -rotation-period: on
-  that cadence Warden mints a fresh write key, verifies it, swaps it in, and deletes
-  the old one. gcs needs iam.serviceAccountKeys.create/delete on its own service
-  account; s3 needs iam:CreateAccessKey/DeleteAccessKey/ListAccessKeys on its own IAM
-  user (a permanent AKIA… key, not temporary STS credentials). Set -rotation-period=0
-  to disable.
+  Automatic credential rotation (gcs, s3, azure_blob) is enabled with
+  -rotation-period: on that cadence Warden mints a fresh write credential, verifies
+  it, swaps it in, and deletes the old one. gcs needs
+  iam.serviceAccountKeys.create/delete on its own service account; s3 needs
+  iam:CreateAccessKey/DeleteAccessKey/ListAccessKeys on its own IAM user (a permanent
+  AKIA… key, not temporary STS credentials); azure_blob authenticates with a service
+  principal (Entra ID) that has Storage Blob Data Contributor on the container and
+  Graph rights to manage its own app registration, and rotation regenerates that SP's
+  client_secret. Set -rotation-period=0 to disable.
 
   The s3 endpoint key targets an S3-compatible object store (MinIO, Cloudflare R2,
   …). Rotation always uses AWS IAM, so -rotation-period applies to real-AWS keys
@@ -63,11 +67,12 @@ Usage: warden oidc-issuer set-publisher -type=<type> [-config=key=value ...]
           -config=access_key_id=AKIA... \
           -config=secret_access_key=@/run/secrets/s3
 
-  Azure Blob:
+  Azure Blob (service-principal auth, with automatic secret rotation every 30 days):
 
-      $ warden oidc-issuer set-publisher -type=azure_blob \
+      $ warden oidc-issuer set-publisher -type=azure_blob -rotation-period=720h \
           -config=account_name=wardenoidc -config=container=jwks \
-          -config=account_key=@/run/secrets/key
+          -config=tenant_id=<tenant> -config=client_id=<app-id> \
+          -config=client_secret=@/run/secrets/sp -config=secret_id=<keyId>
 
   Google Cloud Storage (with automatic key rotation every 30 days):
 
@@ -95,8 +100,8 @@ Usage: warden oidc-issuer set-publisher -type=<type> [-config=key=value ...]
 func init() {
 	f := SetPublisherCmd.Flags()
 	f.StringVar(&pubType, "type", "", "Publisher type: none, local_file, http_put, s3, azure_blob, or gcs")
-	f.StringToStringVar(&pubConfig, "config", nil, "Type-specific config (key=value; repeatable). Use @file to read a value from a file, e.g. -config=account_key=@/run/secrets/key")
-	f.StringVar(&pubRotationPeriod, "rotation-period", "", "Automatic credential-rotation cadence for the publisher's write key (gcs and s3). A Go duration like 720h; 0 disables. Empty leaves it unchanged.")
+	f.StringToStringVar(&pubConfig, "config", nil, "Type-specific config (key=value; repeatable). Use @file to read a value from a file, e.g. -config=client_secret=@/run/secrets/sp")
+	f.StringVar(&pubRotationPeriod, "rotation-period", "", "Automatic credential-rotation cadence for the publisher's write key (gcs, s3, azure_blob). A Go duration like 720h; 0 disables. Empty leaves it unchanged.")
 	f.StringVarP(&pubJSON, "json", "j", "", "Full publisher JSON block — '<json>', '@file.json', or '-' for stdin (mutually exclusive with -type/-config)")
 }
 
