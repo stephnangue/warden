@@ -180,6 +180,6 @@ func runSetPublisher(cmd *cobra.Command, args []string) error {
 	}
 	return helpers.RenderMap(data, func() {
 		fmt.Println("Success! OIDC issuer publisher configured.")
-		helpers.PrintMapAsTable(data)
+		printOIDCIssuerTable(data)
 	})
 }

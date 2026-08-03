@@ -117,6 +117,36 @@ func (b *SystemBackend) handleOIDCIssuerConfigRead(ctx context.Context, _ *logic
 		"retired_key_grace":   int64(cfg.retiredKeyGrace().Seconds()),
 		"ready":               oidcIssuerReady(b.core),
 	}
+	// Signing-key rotation runtime status (distinct from the publisher-credential rotation
+	// below). Only when automatic rotation is enabled, mirroring publisher_rotation's gating.
+	if cfg.keyRotationPeriod() > 0 {
+		kr := map[string]any{"running": b.core.oidcKeyRotationActive()}
+		st, _ := loadOIDCKeyRotationState(ctx, storage)
+		anchor := time.Time{}
+		switch {
+		case st != nil && !st.LastRotatedAt.IsZero():
+			anchor = st.LastRotatedAt
+		default:
+			// State not seeded yet (e.g. upgrade of an already-enabled issuer): fall back to
+			// the issuer's schedule anchor so the block is still populated.
+			if iss := b.core.OIDCIssuer(); iss != nil {
+				if a, ok := iss.NextKeyCreatedAt(); ok {
+					anchor = a
+				}
+			}
+		}
+		if !anchor.IsZero() {
+			kr["last_rotated_at"] = anchor.UTC().Format(time.RFC3339)
+			kr["next_rotation"] = anchor.Add(cfg.keyRotationPeriod()).UTC().Format(time.RFC3339)
+		}
+		if st != nil && st.LastError != "" {
+			kr["last_error"] = st.LastError
+			if !st.LastErrorAt.IsZero() {
+				kr["last_error_at"] = st.LastErrorAt.UTC().Format(time.RFC3339)
+			}
+		}
+		data["key_rotation"] = kr
+	}
 	if cfg.Publisher.Type != "" {
 		data["publisher"] = maskedPublisher(cfg.Publisher)
 	}

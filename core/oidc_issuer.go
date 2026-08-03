@@ -247,6 +247,33 @@ func prunedRetired(retired []*signingKey, cutoff time.Time) []*signingKey {
 	return out
 }
 
+// NextKeyCreatedAt returns the earliest creation time of the pre-published next key
+// across supported algorithms (falling back to the active key for a keyset without a
+// next). This is the anchor the rotation loop schedules its next tick from, and the
+// moment of the last rotation (or of enable, before the first rotation). ok is false when
+// the issuer holds no keys.
+func (i *OIDCIssuer) NextKeyCreatedAt() (time.Time, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	var anchor time.Time
+	for _, ks := range i.keysets {
+		k := ks.next
+		if k == nil {
+			k = ks.active
+		}
+		if k == nil {
+			continue
+		}
+		if anchor.IsZero() || k.createdAt.Before(anchor) {
+			anchor = k.createdAt
+		}
+	}
+	if anchor.IsZero() {
+		return time.Time{}, false
+	}
+	return anchor, true
+}
+
 // PendingRotation returns the (active, retired) state that Rotate(alg, cutoff)
 // would produce for one algorithm, WITHOUT mutating the issuer, so the rotation
 // loop can persist it before flipping in memory (nothing signs with a key not yet
