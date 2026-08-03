@@ -79,8 +79,9 @@ func (c *Core) startPublisherCredRotation(standby bool, period time.Duration, pu
 	storage := NewBarrierView(c.barrier, oidcIssuerStorePrefix)
 	if period <= 0 {
 		// Rotation is disabled by config (period unset, or a type switch cleared the
-		// gcs-only rotation_period). Drop any stale schedule anchor so a later re-enable
-		// starts a fresh period instead of firing immediately off an old timestamp.
+		// rotation_period, which is owned only by rotatable types). Drop any stale schedule
+		// anchor so a later re-enable starts a fresh period instead of firing immediately
+		// off an old timestamp.
 		if err := clearPublisherRotationState(c.activeContext, storage); err != nil {
 			c.logger.Warn("oidc issuer: publisher-credential rotation: clearing schedule anchor failed", logger.Err(err))
 		}
@@ -88,11 +89,12 @@ func (c *Core) startPublisherCredRotation(standby bool, period time.Duration, pu
 	}
 	rp, ok := publisher.(RotatablePublisher)
 	if publisher == nil || !ok || !rp.SupportsRotation() {
-		// period > 0 but the publisher is not rotatable — since rotation_period is gcs-only,
-		// this means the gcs publisher failed to build (e.g. a corrupted stored key degraded
-		// setup to endpoint-only). Do NOT clear the anchor: preserve the schedule so a
-		// repaired config resumes on its original cadence rather than waiting a fresh period.
-		c.logger.Warn("oidc issuer: publisher-credential rotation configured but the publisher is not rotatable; not rotating (publisher build may have failed)")
+		// period > 0 but the publisher is not rotatable. rotation_period is only accepted for
+		// rotatable types, so this means the publisher failed to build (e.g. a corrupted
+		// stored key degraded setup to endpoint-only) or holds a non-rotatable credential
+		// (an s3 non-AKIA key reachable only via a direct storage edit). Do NOT clear the
+		// anchor: preserve the schedule so a repaired config resumes on its original cadence.
+		c.logger.Warn("oidc issuer: publisher-credential rotation configured but the publisher is not rotatable; not rotating (publisher build failed or credential not rotatable)")
 		return
 	}
 
@@ -181,17 +183,17 @@ func (c *Core) publisherCredRotationLoop(ctx context.Context, done chan struct{}
 // credential live, so publishing never breaks; the cycle retries next tick.
 func (c *Core) rotatePublisherCredential(ctx context.Context, rp RotatablePublisher) error {
 	// 1. Create + verify the new credential (abortable via ctx so stop() joins fast).
-	newFields, cleanup, err := rp.PrepareRotation(ctx)
+	newFields, prevFields, cleanup, err := rp.PrepareRotation(ctx)
 	if err != nil {
 		return fmt.Errorf("prepare: %w", err)
 	}
 
 	// 2. Persist the new credential into the publisher config (durable before swap).
-	// Aborts (and rolls back) if the stored config no longer holds the key this cycle
-	// chained from — e.g. an operator swapped credentials_json or changed the publisher
-	// type concurrently. Overwriting there would silently discard the operator's change
-	// (a compromise remediation!) and re-instate a key minted from the old chain.
-	if err := c.persistRotatedPublisherFields(ctx, newFields, cleanup); err != nil {
+	// Aborts (and rolls back) if the stored config no longer holds the values this cycle
+	// chained from — e.g. an operator swapped the credential or changed the publisher type
+	// concurrently. Overwriting there would silently discard the operator's change (a
+	// compromise remediation!) and re-instate a key minted from the old chain.
+	if err := c.persistRotatedPublisherFields(ctx, newFields, prevFields); err != nil {
 		// The new credential was created + verified but never persisted or committed;
 		// delete it (best-effort) so a persist failure does not leak a live key toward
 		// the provider quota. Skip when ctx was cancelled (node sealing) — the loop is
@@ -248,10 +250,13 @@ var errRotationSuperseded = errors.New("rotation superseded by a concurrent conf
 
 // persistRotatedPublisherFields overlays the rotated credential fields onto the stored
 // issuer config and saves it, under oidcConfigMu so a concurrent operator config write
-// cannot lost-update the credential. It first compare-and-swaps: the stored publisher
-// must still be gcs and still hold the exact key this cycle started from (identified by
-// cleanup["old_key_id"]); otherwise it returns errRotationSuperseded and persists nothing.
-func (c *Core) persistRotatedPublisherFields(ctx context.Context, newFields, cleanup map[string]string) error {
+// cannot lost-update the credential. It first compare-and-swaps: every field in prevFields
+// must still hold its pre-rotation value in the stored config; otherwise an operator
+// changed the credential (or the publisher type) concurrently, so it returns
+// errRotationSuperseded and persists nothing (the caller rolls back the new credential).
+// The check is credential-format-agnostic — a new publisher type only needs its fields
+// wired into publisherFieldValue/setPublisherField.
+func (c *Core) persistRotatedPublisherFields(ctx context.Context, newFields, prevFields map[string]string) error {
 	c.oidcConfigMu.Lock()
 	defer c.oidcConfigMu.Unlock()
 
@@ -264,27 +269,46 @@ func (c *Core) persistRotatedPublisherFields(ctx context.Context, newFields, cle
 		return fmt.Errorf("issuer config missing")
 	}
 
-	// Compare-and-swap guard: only overwrite if the stored key is still the one we
-	// chained from. If the operator changed the publisher (new key, or a type switch
-	// that clears credentials_json) while this cycle ran, abandon the persist so their
-	// change stands and our now-stale new key is rolled back by the caller.
-	if oldKeyID := cleanup["old_key_id"]; oldKeyID != "" {
-		if cfg.Publisher.Type != "gcs" {
-			return errRotationSuperseded
-		}
-		curKey, err := parseGCSServiceAccountKey(cfg.Publisher.CredentialsJSON)
-		if err != nil || curKey.PrivateKeyID != oldKeyID {
+	for k, want := range prevFields {
+		cur, ok := publisherFieldValue(&cfg.Publisher, k)
+		if !ok || cur != want {
 			return errRotationSuperseded
 		}
 	}
-
 	for k, v := range newFields {
-		switch k {
-		case "credentials_json":
-			cfg.Publisher.CredentialsJSON = v
-		default:
-			return fmt.Errorf("unexpected rotated publisher field %q", k)
+		if err := setPublisherField(&cfg.Publisher, k, v); err != nil {
+			return err
 		}
 	}
 	return saveIssuerConfig(ctx, storage, cfg)
+}
+
+// publisherFieldValue / setPublisherField map a rotated-credential field key to its slot
+// on publisherConfig, keeping persistRotatedPublisherFields free of any per-provider
+// credential-format knowledge. Extend the switches when a new rotatable publisher lands.
+func publisherFieldValue(pc *publisherConfig, key string) (string, bool) {
+	switch key {
+	case "credentials_json":
+		return pc.CredentialsJSON, true
+	case "access_key_id":
+		return pc.AccessKeyID, true
+	case "secret_access_key":
+		return pc.SecretAccessKey, true
+	default:
+		return "", false
+	}
+}
+
+func setPublisherField(pc *publisherConfig, key, val string) error {
+	switch key {
+	case "credentials_json":
+		pc.CredentialsJSON = val
+	case "access_key_id":
+		pc.AccessKeyID = val
+	case "secret_access_key":
+		pc.SecretAccessKey = val
+	default:
+		return fmt.Errorf("unexpected rotated publisher field %q", key)
+	}
+	return nil
 }

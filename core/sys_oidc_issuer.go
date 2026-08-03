@@ -47,7 +47,7 @@ func (b *SystemBackend) pathOIDCIssuer() []*framework.Path {
 				},
 				"publisher": {
 					Type:        framework.TypeMap,
-					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3|azure_blob|gcs), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key, account_name, container, account_key, endpoint, credentials_json, rotation_period (gcs only). Cache-Control is derived from jwks_cache_ttl.",
+					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3|azure_blob|gcs), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key, account_name, container, account_key, endpoint, credentials_json, rotation_period (gcs and s3). Cache-Control is derived from jwks_cache_ttl.",
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
@@ -243,6 +243,13 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 			case dur < minPublisherRotationPeriod:
 				return logical.ErrorResponse(logical.ErrBadRequestf("rotation_period (%s) must be at least %s", dur, minPublisherRotationPeriod)), true
 			}
+			// Fail fast: an s3 publisher can only self-rotate a permanent IAM-user key
+			// (AKIA…); temporary STS credentials (ASIA…) cannot create/delete keys. Reject
+			// at write time rather than silently never rotating.
+			if cfg.Publisher.RotationPeriod != "" && cfg.Publisher.Type == "s3" &&
+				!strings.HasPrefix(cfg.Publisher.AccessKeyID, "AKIA") {
+				return logical.ErrorResponse(logical.ErrBadRequest("rotation_period on an s3 publisher requires a permanent IAM user access key (access_key_id must start with AKIA); temporary STS credentials cannot self-rotate")), true
+			}
 		}
 
 		if err := saveIssuerConfig(ctx, storage, cfg); err != nil {
@@ -292,9 +299,9 @@ var publisherFieldOwners = map[string][]string{
 	"account_name":      {"azure_blob"},
 	"container":         {"azure_blob"},
 	"account_key":       {"azure_blob"},
-	"endpoint":          {"azure_blob", "gcs"},
+	"endpoint":          {"azure_blob", "gcs", "s3"},
 	"credentials_json":  {"gcs"},
-	"rotation_period":   {"gcs"},
+	"rotation_period":   {"gcs", "s3"},
 }
 
 // ownedBy reports whether field is valid for the given publisher type.
