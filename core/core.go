@@ -235,6 +235,19 @@ type Core struct {
 	// join it). nil when rotation is disabled or the node is a standby.
 	oidcRotationCancel context.CancelFunc
 	oidcRotationDone   chan struct{}
+	// oidcPubRotationCancel/oidcPubRotationDone are the same pair for the active
+	// node's publisher-credential rotation loop (see oidc_publisher_rotation.go).
+	oidcPubRotationCancel context.CancelFunc
+	oidcPubRotationDone   chan struct{}
+	// oidcConfigMu serializes the load-modify-save of the issuer config doc so a
+	// rotation persist and an operator config write cannot lost-update each other.
+	oidcConfigMu sync.Mutex
+	// oidcSetupMu serializes setupOIDCIssuer/stopOIDCIssuer so two concurrent config
+	// writes (or a write racing seal/promotion) cannot interleave loop start/stop and
+	// leak a rotation goroutine that outlives its cancel func. Distinct from oidcConfigMu
+	// (which the config-write handler releases before calling setupOIDCIssuer) to avoid a
+	// deadlock against the rotation loop's own oidcConfigMu acquisition.
+	oidcSetupMu sync.Mutex
 	// oidcJWKSCacheTTL / oidcRetiredKeyGrace are the rotation timings from config.
 	// oidcJWKSCacheTTL is the published JWKS Cache-Control max-age, which also
 	// floors how long a fresh next key is pre-published before it may sign.
@@ -846,7 +859,19 @@ func (c *Core) GetRotationManager() *RotationManager {
 // (it cannot write) and will activate on promotion, when unseal runs again as
 // active. Key generation and persistence therefore happen only on the active node.
 func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
+	// Serialize issuer setup/teardown so concurrent config writes (or a write racing
+	// seal/promotion) cannot interleave rotation-loop start/stop and leak a goroutine.
+	c.oidcSetupMu.Lock()
+	defer c.oidcSetupMu.Unlock()
+
 	storage := NewBarrierView(c.barrier, oidcIssuerStorePrefix)
+
+	// Stop the publisher-credential rotation loop BEFORE reading config and rebuilding
+	// the publisher: joining it here guarantees no in-flight rotation can commit+delete
+	// a key after we have already rebuilt the live publisher from a pre-rotation config
+	// snapshot (which would leave the publisher holding a deleted key). It is restarted
+	// at the end from the fresh config.
+	c.stopPublisherCredRotation()
 
 	cfg, err := loadIssuerConfig(ctx, storage)
 	if err != nil {
@@ -854,6 +879,14 @@ func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
 	}
 	if cfg == nil || !cfg.Enabled {
 		c.stopOIDCKeyRotation() // never leak the loop when disabling
+		// Drop any publisher-rotation schedule anchor so re-enabling the issuer later
+		// starts a fresh period rather than firing off a stale timestamp (active only —
+		// the active node owns this shared state).
+		if !standby {
+			if derr := clearPublisherRotationState(ctx, storage); derr != nil {
+				c.logger.Warn("oidc issuer: publisher-credential rotation: clearing schedule anchor failed", logger.Err(derr))
+			}
+		}
 		c.oidcMu.Lock()
 		c.oidcIssuer = nil
 		c.oidcPublisher = nil
@@ -962,6 +995,9 @@ func (c *Core) setupOIDCIssuer(ctx context.Context, standby bool) error {
 	period := cfg.keyRotationPeriod()
 	firstTick := oidcRotationFirstTick(keysets, period)
 	c.startOIDCKeyRotation(standby, period, firstTick, issuer, publisher, cfg.jwksCacheTTL(), cfg.retiredKeyGrace())
+
+	// Publisher-credential rotation (active node, credential-bearing publishers only).
+	c.startPublisherCredRotation(standby, cfg.Publisher.rotationPeriod(), publisher)
 	return nil
 }
 
@@ -1184,7 +1220,10 @@ func (c *Core) rotateOIDCKey(ctx context.Context, issuer *OIDCIssuer, publisher 
 
 // stopOIDCIssuer tears down the issuer during seal.
 func (c *Core) stopOIDCIssuer() error {
+	c.oidcSetupMu.Lock()
+	defer c.oidcSetupMu.Unlock()
 	c.stopOIDCKeyRotation()
+	c.stopPublisherCredRotation()
 	c.oidcMu.Lock()
 	c.oidcIssuer = nil
 	c.oidcPublisher = nil

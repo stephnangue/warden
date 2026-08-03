@@ -8,9 +8,10 @@ import (
 )
 
 var (
-	pubType   string
-	pubConfig map[string]string
-	pubJSON   string
+	pubType           string
+	pubConfig         map[string]string
+	pubRotationPeriod string
+	pubJSON           string
 
 	SetPublisherCmd = &cobra.Command{
 		Use:           "set-publisher",
@@ -44,6 +45,12 @@ Usage: warden oidc-issuer set-publisher -type=<type> [-config=key=value ...]
       gcs          bucket, credentials_json, prefix, endpoint
       none         (removes the publisher)
 
+  Automatic credential rotation (gcs only) is enabled with -rotation-period: on
+  that cadence Warden mints a fresh service-account key, verifies it, swaps it in,
+  and deletes the old one (the service account must hold
+  iam.serviceAccountKeys.create/delete on itself). Set -rotation-period=0 to
+  disable.
+
   S3:
 
       $ warden oidc-issuer set-publisher -type=s3 \
@@ -57,9 +64,9 @@ Usage: warden oidc-issuer set-publisher -type=<type> [-config=key=value ...]
           -config=account_name=wardenoidc -config=container=jwks \
           -config=account_key=@/run/secrets/key
 
-  Google Cloud Storage:
+  Google Cloud Storage (with automatic key rotation every 30 days):
 
-      $ warden oidc-issuer set-publisher -type=gcs \
+      $ warden oidc-issuer set-publisher -type=gcs -rotation-period=720h \
           -config=bucket=my-jwks \
           -config=credentials_json=@/run/secrets/sa.json
 
@@ -84,6 +91,7 @@ func init() {
 	f := SetPublisherCmd.Flags()
 	f.StringVar(&pubType, "type", "", "Publisher type: none, local_file, http_put, s3, azure_blob, or gcs")
 	f.StringToStringVar(&pubConfig, "config", nil, "Type-specific config (key=value; repeatable). Use @file to read a value from a file, e.g. -config=account_key=@/run/secrets/key")
+	f.StringVar(&pubRotationPeriod, "rotation-period", "", "Automatic credential-rotation cadence for the publisher's write key (gcs only). A Go duration like 720h; 0 disables. Empty leaves it unchanged.")
 	f.StringVarP(&pubJSON, "json", "j", "", "Full publisher JSON block — '<json>', '@file.json', or '-' for stdin (mutually exclusive with -type/-config)")
 }
 
@@ -101,8 +109,9 @@ func runSetPublisher(cmd *cobra.Command, args []string) error {
 	var publisher map[string]any
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"-type":   pubType != "",
-			"-config": len(pubConfig) > 0,
+			"-type":            pubType != "",
+			"-config":          len(pubConfig) > 0,
+			"-rotation-period": pubRotationPeriod != "",
 		}); err != nil {
 			return err
 		}
@@ -127,6 +136,11 @@ func runSetPublisher(cmd *cobra.Command, args []string) error {
 		publisher = map[string]any{"type": pubType}
 		for k, v := range resolved {
 			publisher[k] = v
+		}
+		// rotation_period is a publisher field surfaced as a typed flag; fold it into
+		// the same payload so the server validates and merges it per type.
+		if pubRotationPeriod != "" {
+			publisher["rotation_period"] = pubRotationPeriod
 		}
 	}
 

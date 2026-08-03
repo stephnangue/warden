@@ -47,7 +47,7 @@ func (b *SystemBackend) pathOIDCIssuer() []*framework.Path {
 				},
 				"publisher": {
 					Type:        framework.TypeMap,
-					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3|azure_blob|gcs), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key, account_name, container, account_key, endpoint, credentials_json. Cache-Control is derived from jwks_cache_ttl.",
+					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3|azure_blob|gcs), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key, account_name, container, account_key, endpoint, credentials_json, rotation_period (gcs only). Cache-Control is derived from jwks_cache_ttl.",
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
@@ -120,6 +120,24 @@ func (b *SystemBackend) handleOIDCIssuerConfigRead(ctx context.Context, _ *logic
 	if cfg.Publisher.Type != "" {
 		data["publisher"] = maskedPublisher(cfg.Publisher)
 	}
+	// Publisher-credential rotation runtime status (separate from the config above), so an
+	// operator can see rotation health without tailing logs. Only when rotation is enabled.
+	if cfg.Publisher.rotationPeriod() > 0 {
+		rot := map[string]any{"running": b.core.publisherRotationActive()}
+		if st, serr := loadPublisherRotationState(ctx, storage); serr == nil && st != nil {
+			if !st.LastRotatedAt.IsZero() {
+				rot["last_rotated_at"] = st.LastRotatedAt.UTC().Format(time.RFC3339)
+				rot["next_rotation"] = st.LastRotatedAt.Add(cfg.Publisher.rotationPeriod()).UTC().Format(time.RFC3339)
+			}
+			if st.LastError != "" {
+				rot["last_error"] = st.LastError
+				if !st.LastErrorAt.IsZero() {
+					rot["last_error_at"] = st.LastErrorAt.UTC().Format(time.RFC3339)
+				}
+			}
+		}
+		data["publisher_rotation"] = rot
+	}
 	return b.respondSuccess(data), nil
 }
 
@@ -128,75 +146,111 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 		return resp, nil
 	}
 
-	storage := NewBarrierView(b.core.barrier, oidcIssuerStorePrefix)
-	prior, _ := loadIssuerConfig(ctx, storage)
-
-	// Partial update: start from the current config (or an empty one on first
-	// write) and overlay ONLY the fields the request actually set, so changing one
-	// setting never silently reverts the others to their defaults. A field is
-	// cleared/disabled by setting it explicitly (e.g. key_rotation_period=0).
+	// Load-modify-save under oidcConfigMu so a concurrent rotation persist (which also
+	// writes the config doc) cannot lost-update this write, and vice versa. The lock is
+	// scoped to this closure and released before setupOIDCIssuer below — setup joins the
+	// rotation loop, which itself takes oidcConfigMu, so holding it across setup would
+	// deadlock. On a validation failure the closure returns (resp, true) to short-circuit.
 	cfg := &issuerConfig{}
-	if prior != nil {
-		*cfg = *prior
-	}
-	if v, ok := d.GetOk("enabled"); ok {
-		cfg.Enabled = v.(bool)
-	}
-	if v, ok := d.GetOk("issuer_url"); ok {
-		cfg.IssuerURL = strings.TrimSpace(v.(string))
-	}
-	if v, ok := d.GetOk("assertion_ttl"); ok {
-		cfg.TTL = (time.Duration(v.(int)) * time.Second).String()
-	}
-	if v, ok := d.GetOk("key_rotation_period"); ok {
-		cfg.KeyRotationPeriod = (time.Duration(v.(int)) * time.Second).String()
-	}
-	if v, ok := d.GetOk("jwks_cache_ttl"); ok {
-		cfg.JWKSCacheTTL = (time.Duration(v.(int)) * time.Second).String()
-	}
-	if v, ok := d.GetOk("retired_key_grace"); ok {
-		cfg.RetiredKeyGrace = (time.Duration(v.(int)) * time.Second).String()
-	}
-	if v, ok := d.GetOk("publisher"); ok {
-		// Field-level merge over the current publisher: unset fields keep their
-		// value, a type switch clears the old type's fields, and a field set for
-		// the wrong type is rejected rather than silently ignored.
-		merged, err := mergePublisherConfig(cfg.Publisher, v.(map[string]any))
-		if err != nil {
-			return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
+	if resp, done := func() (*logical.Response, bool) {
+		b.core.oidcConfigMu.Lock()
+		defer b.core.oidcConfigMu.Unlock()
+
+		storage := NewBarrierView(b.core.barrier, oidcIssuerStorePrefix)
+		prior, lerr := loadIssuerConfig(ctx, storage)
+		if lerr != nil {
+			// Do NOT fall through on a read error: a nil prior would turn this partial
+			// update into a destructive overwrite that wipes issuer_url and the whole
+			// publisher block (including the stored write credential).
+			return logical.ErrorResponse(lerr), true
 		}
-		cfg.Publisher = merged
-	}
 
-	// Validate the MERGED result (not just the request), so enabling without
-	// re-supplying an already-stored issuer_url still passes.
-	if cfg.Enabled {
-		if cfg.IssuerURL == "" {
-			return logical.ErrorResponse(logical.ErrBadRequest("issuer_url is required when the issuer is enabled")), nil
+		// Partial update: start from the current config (or an empty one on first
+		// write) and overlay ONLY the fields the request actually set, so changing one
+		// setting never silently reverts the others to their defaults. A field is
+		// cleared/disabled by setting it explicitly (e.g. key_rotation_period=0).
+		if prior != nil {
+			*cfg = *prior
 		}
-		if !strings.HasPrefix(cfg.IssuerURL, "https://") {
-			return logical.ErrorResponse(logical.ErrBadRequest("issuer_url must be https:// (AWS/GCP/Azure require HTTPS OIDC providers)")), nil
+		if v, ok := d.GetOk("enabled"); ok {
+			cfg.Enabled = v.(bool)
 		}
-	}
+		if v, ok := d.GetOk("issuer_url"); ok {
+			cfg.IssuerURL = strings.TrimSpace(v.(string))
+		}
+		if v, ok := d.GetOk("assertion_ttl"); ok {
+			cfg.TTL = (time.Duration(v.(int)) * time.Second).String()
+		}
+		if v, ok := d.GetOk("key_rotation_period"); ok {
+			cfg.KeyRotationPeriod = (time.Duration(v.(int)) * time.Second).String()
+		}
+		if v, ok := d.GetOk("jwks_cache_ttl"); ok {
+			cfg.JWKSCacheTTL = (time.Duration(v.(int)) * time.Second).String()
+		}
+		if v, ok := d.GetOk("retired_key_grace"); ok {
+			cfg.RetiredKeyGrace = (time.Duration(v.(int)) * time.Second).String()
+		}
+		if v, ok := d.GetOk("publisher"); ok {
+			// Field-level merge over the current publisher: unset fields keep their
+			// value, a type switch clears the old type's fields, and a field set for
+			// the wrong type is rejected rather than silently ignored.
+			merged, err := mergePublisherConfig(cfg.Publisher, v.(map[string]any))
+			if err != nil {
+				return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), true
+			}
+			cfg.Publisher = merged
+		}
 
-	// A rotation cadence must comfortably outlast the JWKS cache TTL, otherwise the
-	// pre-published next key would not have been cacheable for a full period before
-	// it signs — this guarantees the rotation-time propagation floor is a no-op in
-	// the steady state. (The published JWKS Cache-Control max-age is derived from
-	// the same value, so a cached JWKS is always refreshed before a new key signs.)
-	if p := cfg.keyRotationPeriod(); p > 0 && p <= cfg.jwksCacheTTL() {
-		return logical.ErrorResponse(logical.ErrBadRequestf("key_rotation_period (%s) must exceed jwks_cache_ttl (%s)", p, cfg.jwksCacheTTL())), nil
-	}
+		// Validate the MERGED result (not just the request), so enabling without
+		// re-supplying an already-stored issuer_url still passes.
+		if cfg.Enabled {
+			if cfg.IssuerURL == "" {
+				return logical.ErrorResponse(logical.ErrBadRequest("issuer_url is required when the issuer is enabled")), true
+			}
+			if !strings.HasPrefix(cfg.IssuerURL, "https://") {
+				return logical.ErrorResponse(logical.ErrBadRequest("issuer_url must be https:// (AWS/GCP/Azure require HTTPS OIDC providers)")), true
+			}
+		}
 
-	// Validate the publisher builds BEFORE persisting, so an invalid config can
-	// never be stored (a persisted-but-invalid publisher would otherwise degrade
-	// every subsequent unseal to endpoint-only with a warning).
-	if _, err := newJWKSPublisher(cfg.Publisher, ""); err != nil {
-		return logical.ErrorResponse(logical.ErrBadRequestf("invalid publisher config: %v", err)), nil
-	}
+		// A rotation cadence must comfortably outlast the JWKS cache TTL, otherwise the
+		// pre-published next key would not have been cacheable for a full period before
+		// it signs — this guarantees the rotation-time propagation floor is a no-op in
+		// the steady state. (The published JWKS Cache-Control max-age is derived from
+		// the same value, so a cached JWKS is always refreshed before a new key signs.)
+		if p := cfg.keyRotationPeriod(); p > 0 && p <= cfg.jwksCacheTTL() {
+			return logical.ErrorResponse(logical.ErrBadRequestf("key_rotation_period (%s) must exceed jwks_cache_ttl (%s)", p, cfg.jwksCacheTTL())), true
+		}
 
-	if err := saveIssuerConfig(ctx, storage, cfg); err != nil {
-		return logical.ErrorResponse(err), nil
+		// Validate the publisher builds BEFORE persisting, so an invalid config can
+		// never be stored (a persisted-but-invalid publisher would otherwise degrade
+		// every subsequent unseal to endpoint-only with a warning).
+		if _, err := newJWKSPublisher(cfg.Publisher, ""); err != nil {
+			return logical.ErrorResponse(logical.ErrBadRequestf("invalid publisher config: %v", err)), true
+		}
+
+		// Validate rotation_period strictly (the stored value is trusted by the lenient
+		// rotationPeriod() reader, so a typo must be caught here, not silently disable
+		// rotation). An empty value or "0" disables it; anything else must parse as a Go
+		// duration and clear a floor that keeps rotation from hammering the provider API.
+		if rp := strings.TrimSpace(cfg.Publisher.RotationPeriod); rp != "" {
+			dur, err := time.ParseDuration(rp)
+			if err != nil {
+				return logical.ErrorResponse(logical.ErrBadRequestf("invalid rotation_period %q: use a Go duration like 720h, or 0 to disable", rp)), true
+			}
+			switch {
+			case dur == 0:
+				cfg.Publisher.RotationPeriod = "" // normalize "0" to unset so reads stay clean
+			case dur < minPublisherRotationPeriod:
+				return logical.ErrorResponse(logical.ErrBadRequestf("rotation_period (%s) must be at least %s", dur, minPublisherRotationPeriod)), true
+			}
+		}
+
+		if err := saveIssuerConfig(ctx, storage, cfg); err != nil {
+			return logical.ErrorResponse(err), true
+		}
+		return nil, false
+	}(); done {
+		return resp, nil
 	}
 
 	// Activate the change: reload the issuer from the just-written config. On the
@@ -240,6 +294,7 @@ var publisherFieldOwners = map[string][]string{
 	"account_key":       {"azure_blob"},
 	"endpoint":          {"azure_blob", "gcs"},
 	"credentials_json":  {"gcs"},
+	"rotation_period":   {"gcs"},
 }
 
 // ownedBy reports whether field is valid for the given publisher type.
@@ -320,6 +375,9 @@ func mergePublisherConfig(prior publisherConfig, raw map[string]any) (publisherC
 	if v, ok := get("endpoint"); ok {
 		pc.Endpoint = v
 	}
+	if v, ok := get("rotation_period"); ok {
+		pc.RotationPeriod = v
+	}
 	// Secrets: overlay only a real value; an omitted/empty/masked secret keeps the
 	// prior one (carried via pc=prior when the type is unchanged).
 	if v, ok := get("auth_value"); ok && v != "" && v != maskValue {
@@ -382,6 +440,9 @@ func maskedPublisher(pc publisherConfig) map[string]any {
 	}
 	if pc.CredentialsJSON != "" {
 		m["credentials_json"] = maskValue
+	}
+	if pc.RotationPeriod != "" {
+		m["rotation_period"] = pc.RotationPeriod
 	}
 	return m
 }
