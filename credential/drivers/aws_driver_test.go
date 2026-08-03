@@ -546,26 +546,18 @@ func TestAWSDriver_Create_WIF_Keyless(t *testing.T) {
 func TestAWSDriver_MintGuards(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 
-	// A static source: the web-identity mint_method requires exchange inputs, so
-	// plain MintCredential must refuse it.
-	staticDrv := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "static"}},
-		logger:     log,
-	}
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "sts_assume_role_web_identity", "role_arn": "arn:aws:iam::1:role/x"}}
-	_, _, _, _, err := staticDrv.MintCredential(context.TODO(), spec)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "requires token-exchange inputs")
-
-	// An oidc_federation source reached with a non-federation mint_method must fail
-	// clearly, not fall into authenticate() with empty keys.
+	// An oidc_federation source reached via the non-exchange path (the spec lacks
+	// subject_token_source) must fail clearly, not fall into authenticate() with
+	// empty keys.
 	wifDrv := &AWSDriver{
 		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation"}},
 		logger:     log,
 	}
-	_, _, _, _, err = wifDrv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "secrets_manager"}})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "auth_method=oidc_federation supports only")
+	for _, mm := range []string{"secrets_manager", "sts_assume_role"} {
+		_, _, _, _, err := wifDrv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": mm}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "requires subject_token_source=warden_identity")
+	}
 }
 
 // TestAWSDriver_MintCredentialWithExchange_Guards covers the exchange-path guards
@@ -576,12 +568,22 @@ func TestAWSDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation"}},
 		logger:     log,
 	}
-	roleSpec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "sts_assume_role_web_identity", "role_arn": "arn:aws:iam::1:role/x"}}
+	roleSpec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::1:role/x"}}
+	verified := &credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenOrigin: credential.ExchangeOriginVerified}
 
-	// Wrong mint_method.
-	_, _, _, _, err := drv.MintCredentialWithExchange(context.TODO(), &credential.CredSpec{Config: map[string]string{"mint_method": "sts_assume_role"}}, &credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenOrigin: credential.ExchangeOriginVerified})
+	// A static source must not reach the federation path.
+	staticDrv := &AWSDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "static"}},
+		logger:     log,
+	}
+	_, _, _, _, err := staticDrv.MintCredentialWithExchange(context.TODO(), roleSpec, verified)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "sts_assume_role_web_identity")
+	assert.Contains(t, err.Error(), "auth_method=oidc_federation")
+
+	// A mint_method with no federation support is rejected before any STS call.
+	_, _, _, _, err = drv.MintCredentialWithExchange(context.TODO(), &credential.CredSpec{Config: map[string]string{"mint_method": "rds_iam_token"}}, verified)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not supported over auth_method=oidc_federation")
 
 	// Missing subject.
 	_, _, _, _, err = drv.MintCredentialWithExchange(context.TODO(), roleSpec, &credential.ExchangeInputs{})
@@ -591,11 +593,17 @@ func TestAWSDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 	_, _, _, _, err = drv.MintCredentialWithExchange(context.TODO(), roleSpec, &credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenOrigin: credential.ExchangeOriginUnverified})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "verified subject")
+
+	// For sts_assume_role, the requested TTL is bound-checked before any STS call.
+	boundedSpec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::1:role/x", "ttl": "2h"}, MaxTTL: time.Hour}
+	_, _, _, _, err = drv.MintCredentialWithExchange(context.TODO(), boundedSpec, verified)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum")
 }
 
-// TestAWSDriver_WebIdentity_HappyPath drives the full exchange against a mocked
-// STS endpoint, asserting the assertion is forwarded as WebIdentityToken and the
-// returned credentials are surfaced.
+// TestAWSDriver_WebIdentity_HappyPath drives mint_method=sts_assume_role over a keyless
+// (oidc_federation) source against a mocked STS endpoint, asserting the assertion is
+// forwarded as WebIdentityToken and the assumed-role credentials are surfaced.
 func TestAWSDriver_WebIdentity_HappyPath(t *testing.T) {
 	var gotToken, gotAction string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -632,7 +640,7 @@ func TestAWSDriver_WebIdentity_HappyPath(t *testing.T) {
 		}),
 	}
 	spec := &credential.CredSpec{Name: "wid", Config: map[string]string{
-		"mint_method": "sts_assume_role_web_identity",
+		"mint_method": "sts_assume_role",
 		"role_arn":    "arn:aws:iam::123456789012:role/App",
 		"ttl":         "15m",
 	}}
@@ -653,6 +661,80 @@ func TestAWSDriver_WebIdentity_HappyPath(t *testing.T) {
 	assert.Equal(t, "123456789012", metadata["account_id"])
 	assert.Equal(t, "sts:ASIAEXAMPLE", leaseID)
 	assert.Greater(t, ttl, time.Duration(0))
+}
+
+// TestAWSDriver_SecretsManager_WebIdentity_HappyPath drives the keyless two-step:
+// federate the assertion for short-lived role credentials, then read a Secrets Manager
+// secret with those credentials.
+func TestAWSDriver_SecretsManager_WebIdentity_HappyPath(t *testing.T) {
+	var gotToken, gotDuration string
+	stsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotToken = r.Form.Get("WebIdentityToken")
+		gotDuration = r.Form.Get("DurationSeconds")
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = w.Write([]byte(`<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleWithWebIdentityResult>
+    <Credentials>
+      <AccessKeyId>ASIAEXAMPLE</AccessKeyId>
+      <SecretAccessKey>secretexample</SecretAccessKey>
+      <SessionToken>tokenexample</SessionToken>
+      <Expiration>2035-01-01T00:00:00Z</Expiration>
+    </Credentials>
+  </AssumeRoleWithWebIdentityResult>
+</AssumeRoleWithWebIdentityResponse>`))
+	}))
+	defer stsSrv.Close()
+
+	// The stored secret holds AWS IAM keys — that is the shape mint_method=secrets_manager
+	// yields (the credential type is aws_access_keys), whether static or keyless.
+	var smTarget, smAuth string
+	smSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		smTarget = r.Header.Get("X-Amz-Target")
+		smAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		_, _ = w.Write([]byte(`{"Name":"prod/app/keys","SecretString":"{\"access_key_id\":\"AKIASTOREDEXAMPLE\",\"secret_access_key\":\"0123456789012345678901234567890123456789\"}"}`))
+	}))
+	defer smSrv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv := &AWSDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}},
+		logger:     log,
+		region:     "us-east-1",
+		anonSTSClient: sts.New(sts.Options{
+			Region:       "us-east-1",
+			BaseEndpoint: aws.String(stsSrv.URL),
+			Credentials:  aws.AnonymousCredentials{},
+		}),
+		smBaseEndpoint: smSrv.URL,
+	}
+	spec := &credential.CredSpec{Name: "app", Config: map[string]string{
+		"mint_method": "secrets_manager",
+		"secret_id":   "prod/app/keys",
+		"role_arn":    "arn:aws:iam::123456789012:role/WardenSecretsReader",
+	}}
+	inputs := &credential.ExchangeInputs{
+		SubjectToken:       "eyJ.warden.assertion",
+		SubjectTokenType:   credential.TokenTypeJWT,
+		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+	}
+
+	rawData, metadata, ttl, leaseID, err := drv.MintCredentialWithExchange(context.TODO(), spec, inputs)
+	require.NoError(t, err)
+	assert.Equal(t, "eyJ.warden.assertion", gotToken, "the Warden assertion must be sent as WebIdentityToken")
+	// The transient fetch session is the fixed 15m minimum, not the secret's TTL.
+	assert.Equal(t, "900", gotDuration, "the federated fetch must request a fixed 15m session")
+	assert.Contains(t, smTarget, "GetSecretValue", "the second call must hit Secrets Manager")
+	// The Secrets Manager call must be signed with the freshly federated temp creds
+	// (their access key id appears in the SigV4 Credential= scope).
+	assert.Contains(t, smAuth, "ASIAEXAMPLE", "the secret read must use the federated credentials")
+	assert.Equal(t, "AKIASTOREDEXAMPLE", rawData["access_key_id"])
+	assert.Equal(t, "0123456789012345678901234567890123456789", rawData["secret_access_key"])
+	// A fetched secret is static: no metadata, no lease.
+	assert.Nil(t, metadata)
+	assert.Equal(t, time.Duration(0), ttl)
+	assert.Equal(t, "", leaseID)
 }
 
 // =============================================================================
