@@ -1,7 +1,6 @@
 package core
 
 import (
-	"encoding/base64"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -22,7 +21,7 @@ func TestNewJWKSPublisher_Dispatch(t *testing.T) {
 	_, err = newJWKSPublisher(publisherConfig{Type: "s3", Bucket: "b", Region: "r"}, "")
 	require.Error(t, err) // missing keys
 	_, err = newJWKSPublisher(publisherConfig{Type: "azure_blob", AccountName: "a", Container: "c"}, "")
-	require.Error(t, err) // missing account_key
+	require.Error(t, err) // missing service-principal (tenant_id/client_id/client_secret)
 	_, err = newJWKSPublisher(publisherConfig{Type: "gcs"}, "")
 	require.Error(t, err) // missing bucket
 	_, err = newJWKSPublisher(publisherConfig{Type: "gcs", Bucket: "b"}, "")
@@ -41,7 +40,7 @@ func TestNewJWKSPublisher_Dispatch(t *testing.T) {
 	assert.Equal(t, "http_put", p.Type())
 	p, err = newJWKSPublisher(publisherConfig{
 		Type: "azure_blob", AccountName: "wardenoidc", Container: "jwks",
-		AccountKey: base64.StdEncoding.EncodeToString([]byte("dummy-account-key")),
+		TenantID: "tenant", ClientID: "client", ClientSecret: "secret",
 	}, "")
 	require.NoError(t, err)
 	assert.Equal(t, "azure_blob", p.Type())

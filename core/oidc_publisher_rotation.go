@@ -294,6 +294,10 @@ func publisherFieldValue(pc *publisherConfig, key string) (string, bool) {
 		return pc.AccessKeyID, true
 	case "secret_access_key":
 		return pc.SecretAccessKey, true
+	case "client_secret":
+		return pc.ClientSecret, true
+	case "secret_id":
+		return pc.SecretID, true
 	default:
 		return "", false
 	}
@@ -307,6 +311,10 @@ func setPublisherField(pc *publisherConfig, key, val string) error {
 		pc.AccessKeyID = val
 	case "secret_access_key":
 		pc.SecretAccessKey = val
+	case "client_secret":
+		pc.ClientSecret = val
+	case "secret_id":
+		pc.SecretID = val
 	default:
 		return fmt.Errorf("unexpected rotated publisher field %q", key)
 	}

@@ -46,17 +46,25 @@ type publisherConfig struct {
 	AccessKeyID     string `json:"access_key_id,omitempty"`
 	SecretAccessKey string `json:"secret_access_key,omitempty"`
 
-	// azure_blob: Shared Key auth to an Azure Storage container. AccountKey is a
-	// stored static secret (masked); it never expires, and the storage account's
-	// two-key model keeps it rotation-ready (a rotation follow-on regenerates the
-	// inactive key and swaps AccountKey). Prefix above is reused as the blob-name
-	// prefix within the container. Endpoint overrides the service URL (for a
-	// sovereign cloud, a private endpoint, or a test/emulator); empty defaults to
-	// the public-cloud host for AccountName.
-	AccountName string `json:"account_name,omitempty"`
-	Container   string `json:"container,omitempty"`
-	AccountKey  string `json:"account_key,omitempty"`
-	Endpoint    string `json:"endpoint,omitempty"` // shared with gcs (API endpoint override)
+	// azure_blob: writes to an Azure Storage container authenticated by a service
+	// principal's OAuth token (Entra ID data-plane auth). Warden self-rotates the SP's
+	// ClientSecret via Microsoft Graph (see RotatablePublisher): on the configured
+	// cadence it adds a fresh secret to the app registration, verifies it, swaps it in,
+	// and removes the old one — which requires the SP to hold Storage Blob Data
+	// Contributor on the container and Graph rights to manage its own app registration
+	// (Application.ReadWrite.OwnedBy as an owner of its app, or Application.ReadWrite.All).
+	// ClientSecret is masked; SecretID is the Graph password-credential id (keyId) of the
+	// current secret, used to remove it on rotation. Prefix above is reused as the
+	// blob-name prefix; Endpoint overrides the blob service URL (private endpoint or a
+	// test/emulator), empty defaults to the public-cloud host. Sovereign clouds are not yet
+	// supported: the OAuth authority and Graph host are the public-cloud endpoints.
+	AccountName  string `json:"account_name,omitempty"`
+	Container    string `json:"container,omitempty"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	ClientID     string `json:"client_id,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"`
+	SecretID     string `json:"secret_id,omitempty"`
+	Endpoint     string `json:"endpoint,omitempty"` // shared with gcs (API endpoint override)
 
 	// gcs: writes to a Google Cloud Storage bucket authenticated by a stored
 	// static service-account JSON key. CredentialsJSON is a stored static secret

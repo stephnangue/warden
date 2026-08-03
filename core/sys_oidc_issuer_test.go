@@ -304,26 +304,32 @@ func TestMergePublisherConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "sekret", pc.AuthValue)
 
-	// A clean azure_blob config passes; prefix is shared with s3 and accepted here.
+	// A clean azure_blob (service-principal) config passes; prefix is shared with s3.
 	pc, err = mergePublisherConfig(publisherConfig{}, map[string]any{
-		"type": "azure_blob", "account_name": "wardenoidc", "container": "jwks",
-		"prefix": "prod", "account_key": "k", "endpoint": "https://wardenoidc.blob.core.usgovcloudapi.net/",
+		"type": "azure_blob", "account_name": "wardenoidc", "container": "jwks", "prefix": "prod",
+		"tenant_id": "t", "client_id": "ci", "client_secret": "cs", "secret_id": "sid",
+		"endpoint": "https://wardenoidc.blob.core.usgovcloudapi.net/",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "azure_blob", pc.Type)
 	assert.Equal(t, "wardenoidc", pc.AccountName)
 	assert.Equal(t, "jwks", pc.Container)
 	assert.Equal(t, "prod", pc.Prefix)
-	assert.Equal(t, "k", pc.AccountKey)
+	assert.Equal(t, "t", pc.TenantID)
+	assert.Equal(t, "ci", pc.ClientID)
+	assert.Equal(t, "cs", pc.ClientSecret)
+	assert.Equal(t, "sid", pc.SecretID)
 	assert.Equal(t, "https://wardenoidc.blob.core.usgovcloudapi.net/", pc.Endpoint)
 
-	// Read masks the account key but renders the non-secret fields plainly.
+	// Read masks the client secret but renders the non-secret fields plainly.
 	masked := maskedPublisher(pc)
 	assert.Equal(t, "wardenoidc", masked["account_name"])
 	assert.Equal(t, "jwks", masked["container"])
 	assert.Equal(t, "prod", masked["prefix"])
-	assert.Equal(t, "https://wardenoidc.blob.core.usgovcloudapi.net/", masked["endpoint"])
-	assert.Equal(t, maskValue, masked["account_key"])
+	assert.Equal(t, "t", masked["tenant_id"])
+	assert.Equal(t, "ci", masked["client_id"])
+	assert.Equal(t, "sid", masked["secret_id"])
+	assert.Equal(t, maskValue, masked["client_secret"])
 
 	// An s3 field under azure_blob is rejected.
 	_, err = mergePublisherConfig(publisherConfig{}, map[string]any{
@@ -331,11 +337,11 @@ func TestMergePublisherConfig(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	// A masked account_key keeps the prior one.
-	prior = publisherConfig{Type: "azure_blob", AccountName: "a", Container: "c", AccountKey: "realkey"}
-	pc, err = mergePublisherConfig(prior, map[string]any{"type": "azure_blob", "account_key": maskValue})
+	// A masked client_secret keeps the prior one.
+	prior = publisherConfig{Type: "azure_blob", AccountName: "a", Container: "c", ClientSecret: "realsecret"}
+	pc, err = mergePublisherConfig(prior, map[string]any{"type": "azure_blob", "client_secret": maskValue})
 	require.NoError(t, err)
-	assert.Equal(t, "realkey", pc.AccountKey)
+	assert.Equal(t, "realsecret", pc.ClientSecret)
 
 	// A clean gcs config passes; bucket/prefix/endpoint are shared and accepted here.
 	pc, err = mergePublisherConfig(publisherConfig{}, map[string]any{

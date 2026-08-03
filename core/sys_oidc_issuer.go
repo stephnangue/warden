@@ -47,7 +47,7 @@ func (b *SystemBackend) pathOIDCIssuer() []*framework.Path {
 				},
 				"publisher": {
 					Type:        framework.TypeMap,
-					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3|azure_blob|gcs), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key, account_name, container, account_key, endpoint, credentials_json, rotation_period (gcs and s3). Cache-Control is derived from jwks_cache_ttl.",
+					Description: "Optional publisher pushing discovery+JWKS to a bucket/CDN. Keys: type (local_file|http_put|s3|azure_blob|gcs), dir, base_url, auth_header, auth_value, bucket, region, prefix, access_key_id, secret_access_key, account_name, container, tenant_id, client_id, client_secret, secret_id, endpoint, credentials_json, rotation_period (gcs, s3, azure_blob). Cache-Control is derived from jwks_cache_ttl.",
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
@@ -298,10 +298,13 @@ var publisherFieldOwners = map[string][]string{
 	"secret_access_key": {"s3"},
 	"account_name":      {"azure_blob"},
 	"container":         {"azure_blob"},
-	"account_key":       {"azure_blob"},
+	"tenant_id":         {"azure_blob"},
+	"client_id":         {"azure_blob"},
+	"client_secret":     {"azure_blob"},
+	"secret_id":         {"azure_blob"},
 	"endpoint":          {"azure_blob", "gcs", "s3"},
 	"credentials_json":  {"gcs"},
-	"rotation_period":   {"gcs", "s3"},
+	"rotation_period":   {"gcs", "s3", "azure_blob"},
 }
 
 // ownedBy reports whether field is valid for the given publisher type.
@@ -379,6 +382,15 @@ func mergePublisherConfig(prior publisherConfig, raw map[string]any) (publisherC
 	if v, ok := get("container"); ok {
 		pc.Container = v
 	}
+	if v, ok := get("tenant_id"); ok {
+		pc.TenantID = v
+	}
+	if v, ok := get("client_id"); ok {
+		pc.ClientID = v
+	}
+	if v, ok := get("secret_id"); ok {
+		pc.SecretID = v
+	}
 	if v, ok := get("endpoint"); ok {
 		pc.Endpoint = v
 	}
@@ -393,8 +405,8 @@ func mergePublisherConfig(prior publisherConfig, raw map[string]any) (publisherC
 	if v, ok := get("secret_access_key"); ok && v != "" && v != maskValue {
 		pc.SecretAccessKey = v
 	}
-	if v, ok := get("account_key"); ok && v != "" && v != maskValue {
-		pc.AccountKey = v
+	if v, ok := get("client_secret"); ok && v != "" && v != maskValue {
+		pc.ClientSecret = v
 	}
 	if v, ok := get("credentials_json"); ok && v != "" && v != maskValue {
 		pc.CredentialsJSON = v
@@ -439,8 +451,17 @@ func maskedPublisher(pc publisherConfig) map[string]any {
 	if pc.Container != "" {
 		m["container"] = pc.Container
 	}
-	if pc.AccountKey != "" {
-		m["account_key"] = maskValue
+	if pc.TenantID != "" {
+		m["tenant_id"] = pc.TenantID
+	}
+	if pc.ClientID != "" {
+		m["client_id"] = pc.ClientID
+	}
+	if pc.ClientSecret != "" {
+		m["client_secret"] = maskValue
+	}
+	if pc.SecretID != "" {
+		m["secret_id"] = pc.SecretID
 	}
 	if pc.Endpoint != "" {
 		m["endpoint"] = pc.Endpoint
