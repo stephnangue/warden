@@ -346,34 +346,50 @@ func generateSigningKey(alg string) (*signingKey, error) {
 	return &signingKey{key: key, alg: alg, kid: rsaThumbprint(&key.PublicKey), createdAt: time.Now()}, nil
 }
 
+// AssertionClaims carries the per-mint inputs for MintIdentityAssertion beyond
+// the token identity: the target audience, TTL, signing algorithm, optional
+// projected metadata, and an optional named resource.
+type AssertionClaims struct {
+	// Audience is the `aud` — the upstream the assertion is minted for. Required.
+	Audience string
+	// TTL is the assertion lifetime (`exp` = iat + TTL). Must be positive.
+	TTL time.Duration
+	// Alg selects the signing key/algorithm (e.g. RS256, ES256).
+	Alg string
+	// Metadata, when non-empty, is embedded under a single nested
+	// "warden_metadata" claim (never splatted at the top level, so it cannot
+	// clobber a registered or warden_* claim). The caller chooses and bounds what
+	// it contains: the assertion crosses a trust boundary, so only
+	// operator-allowlisted, size-capped attributes should reach this point.
+	Metadata map[string]string
+	// Resource, when non-empty, is emitted as the top-level "warden_resource"
+	// claim naming the single downstream resource the assertion targets, so a
+	// verifier evaluating bound claims can pin it to one resource. Opaque string.
+	Resource string
+}
+
 // MintIdentityAssertion signs a short-lived JWT with the alg-selected signing key,
-// asserting te's identity for presentation to the upstream named by audience. It
-// fails closed when the issuer has no active key for alg or when audience is empty
-// (an assertion without an audience is replayable at any upstream whose trust
+// asserting te's identity for presentation to the upstream named by c.Audience. It
+// fails closed when the issuer has no active key for c.Alg or when c.Audience is
+// empty (an assertion without an audience is replayable at any upstream whose trust
 // policy does not pin `aud`).
-//
-// metadata, when non-empty, is embedded under a single nested "warden_metadata"
-// claim (never splatted at the top level, so it cannot clobber a registered or
-// warden_* claim). The caller is responsible for choosing and bounding what it
-// contains: the assertion crosses a trust boundary, so only operator-allowlisted,
-// size-capped attributes should reach this point.
-func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, audience string, ttl time.Duration, metadata map[string]string, alg string) (string, error) {
+func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, c AssertionClaims) (string, error) {
 	if te == nil {
 		return "", fmt.Errorf("oidc issuer: nil token entry")
 	}
 	if te.PrincipalID == "" {
 		return "", fmt.Errorf("oidc issuer: token entry has no principal")
 	}
-	if audience == "" {
+	if c.Audience == "" {
 		return "", fmt.Errorf("oidc issuer: assertion audience is required")
 	}
-	if ttl <= 0 {
+	if c.TTL <= 0 {
 		return "", fmt.Errorf("oidc issuer: assertion ttl must be positive")
 	}
 
 	i.mu.RLock()
 	var active *signingKey
-	if ks := i.keysets[alg]; ks != nil {
+	if ks := i.keysets[c.Alg]; ks != nil {
 		active = ks.active
 	}
 	issuerURL := i.issuerURL
@@ -381,7 +397,7 @@ func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, audience stri
 	i.mu.RUnlock()
 
 	if active == nil {
-		return "", fmt.Errorf("oidc issuer: no active %s signing key (issuer not ready)", alg)
+		return "", fmt.Errorf("oidc issuer: no active %s signing key (issuer not ready)", c.Alg)
 	}
 
 	jti, err := randomJTI()
@@ -393,17 +409,20 @@ func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, audience stri
 	claims := map[string]interface{}{
 		"iss":               issuerURL,
 		"sub":               wardenSubject(te),
-		"aud":               audience,
+		"aud":               c.Audience,
 		"iat":               now.Unix(),
 		"nbf":               now.Add(-leeway).Unix(),
-		"exp":               now.Add(ttl).Unix(),
+		"exp":               now.Add(c.TTL).Unix(),
 		"jti":               jti,
 		"warden_role":       te.RoleName,
 		"warden_namespace":  te.NamespacePath,
 		"warden_auth_mount": te.MountAccessor,
 	}
-	if len(metadata) > 0 {
-		claims["warden_metadata"] = metadata
+	if len(c.Metadata) > 0 {
+		claims["warden_metadata"] = c.Metadata
+	}
+	if c.Resource != "" {
+		claims["warden_resource"] = c.Resource
 	}
 	header := map[string]string{"alg": active.alg, "typ": "JWT", "kid": active.kid}
 

@@ -25,6 +25,7 @@ import (
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	authhelper "github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/helper"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
@@ -1334,6 +1335,24 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		if audience == "" {
 			return nil, fmt.Errorf("spec %q with subject_token_source=warden_identity requires %s", specName, credential.ConfigAssertionAudience)
 		}
+		// Resolve the single downstream resource to name in the assertion so a
+		// verifier can pin it to one resource. Unset derives it from the source/spec
+		// config (pure, network-free — no live driver is built here); "none" opts
+		// out; any other value is emitted verbatim. Best-effort: a spec with no
+		// single static resource simply carries no warden_resource claim.
+		var resource string
+		switch r := spec.Config[credential.ConfigAssertionResource]; r {
+		case credential.AssertionResourceNone:
+			// opt-out: emit no warden_resource claim
+		case "":
+			src, srcErr := c.credConfigStore.GetSource(ctx, spec.Source)
+			if srcErr != nil {
+				return nil, fmt.Errorf("spec %q: failed to load source %q: %w", specName, spec.Source, srcErr)
+			}
+			resource, _ = drivers.DeriveAssertionResource(src.Type, src.Config, spec.Config)
+		default:
+			resource = r
+		}
 		// Project only the operator-allowlisted metadata keys into the assertion.
 		// Empty allowlist projects nothing (mdFingerprint is ""), so the assertion
 		// and cache key are byte-for-byte what they were before this opt-in existed.
@@ -1351,6 +1370,15 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// fragment is appended only when non-empty, so the no-metadata cache key is
 		// byte-for-byte what it was before this opt-in existed.
 		inputs.CacheIdentity = wardenSubject(te) + "\x00" + audience
+		// Fold the resource in beside the audience. Correctness-relevant, not just
+		// defensive: a token-exchange resource can come from source config, which
+		// can change under a fixed specName (the outer cache key). Appended only
+		// when non-empty, so no-resource keys stay byte-for-byte unchanged; kept
+		// before mdFingerprint (marshalled JSON starting with '{'), so the fragments
+		// can never be confused.
+		if resource != "" {
+			inputs.CacheIdentity += "\x00res=" + resource
+		}
 		if mdFingerprint != "" {
 			inputs.CacheIdentity += "\x00" + mdFingerprint
 		}
@@ -1365,7 +1393,13 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// cold start; validation restricts it to a supported alg at spec-create.
 		alg := credential.AssertionAlgorithm(spec.Config)
 		inputs.ResolveSubjectToken = func(context.Context) (string, error) {
-			return issuer.MintIdentityAssertion(te, audience, issuer.AssertionTTL(), projected, alg)
+			return issuer.MintIdentityAssertion(te, AssertionClaims{
+				Audience: audience,
+				TTL:      issuer.AssertionTTL(),
+				Alg:      alg,
+				Metadata: projected,
+				Resource: resource,
+			})
 		}
 	default:
 		// SpecRequestsExchange already excluded "none"/absent; any other value

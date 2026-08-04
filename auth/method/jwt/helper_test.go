@@ -52,6 +52,32 @@ func TestValidateBoundClaims_SingleMatch(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestValidateBoundClaims_WardenResource documents the enforcement lever for a
+// Warden-minted assertion's warden_resource claim: a role bound to one resource
+// accepts only an assertion naming exactly that resource (whole-string, opaque —
+// a ':' in the value is compared literally, not parsed), and rejects any other.
+func TestValidateBoundClaims_WardenResource(t *testing.T) {
+	boundClaims := map[string]any{"warden_resource": "aws-secretsmanager:prod/db"}
+
+	// Exact resource → accepted.
+	err := validateBoundClaims(map[string]interface{}{
+		"sub":             "wid:n:m:agent",
+		"warden_resource": "aws-secretsmanager:prod/db",
+	}, boundClaims)
+	assert.NoError(t, err)
+
+	// Different resource → rejected.
+	err = validateBoundClaims(map[string]interface{}{
+		"sub":             "wid:n:m:agent",
+		"warden_resource": "aws-secretsmanager:prod/api",
+	}, boundClaims)
+	assert.Error(t, err)
+
+	// Missing the claim → rejected.
+	err = validateBoundClaims(map[string]interface{}{"sub": "wid:n:m:agent"}, boundClaims)
+	assert.Error(t, err)
+}
+
 func TestValidateBoundClaims_MultipleMatches(t *testing.T) {
 	claims := map[string]interface{}{
 		"sub":    "user123",

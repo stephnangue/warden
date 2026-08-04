@@ -499,6 +499,26 @@ func (d *AWSDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 	}
 }
 
+// awsAssertionResource reports the canonical downstream resource an AWS
+// federation spec targets, for the warden_resource assertion claim. Pure: reads
+// spec config only, no network or driver state. Mirrors the federated mint_method
+// dispatch in MintCredentialWithExchange so the named resource is the one the
+// exchange actually reaches. The provider prefix is human-readable sugar on an
+// opaque value — never parse it back (a secret id / ARN can itself contain ':').
+func awsAssertionResource(specCfg map[string]string) (string, bool) {
+	switch credential.GetString(specCfg, "mint_method", "") {
+	case "secrets_manager":
+		if id := credential.GetString(specCfg, "secret_id", ""); id != "" {
+			return "aws-secretsmanager:" + id, true
+		}
+	case "sts_assume_role":
+		if arn := credential.GetString(specCfg, "role_arn", ""); arn != "" {
+			return "aws-iam:" + arn, true
+		}
+	}
+	return "", false
+}
+
 // federatedSessionTTL resolves the assume-role session duration from the spec's ttl
 // (default 1h), validated against the spec's TTL bounds.
 func federatedSessionTTL(spec *credential.CredSpec) (time.Duration, error) {

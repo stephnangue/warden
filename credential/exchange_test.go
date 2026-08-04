@@ -333,6 +333,32 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "assertion_resource with warden_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceWardenIdentity,
+				ConfigAssertionAudience:  "https://sts.example/aud",
+				ConfigAssertionResource:  "aws-secretsmanager:prod/db",
+			},
+			wantErr: false,
+		},
+		{
+			name: "assertion_resource=none with warden_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceWardenIdentity,
+				ConfigAssertionAudience:  "https://sts.example/aud",
+				ConfigAssertionResource:  AssertionResourceNone,
+			},
+			wantErr: false,
+		},
+		{
+			name: "assertion_resource without warden_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceHeader,
+				ConfigAssertionResource:  "aws-secretsmanager:prod/db",
+			},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

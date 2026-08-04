@@ -2457,6 +2457,85 @@ func TestResolveExchangeInputs_WardenIdentity_MintDeferred(t *testing.T) {
 	assert.Equal(t, inputs.CacheIdentity, inputs2.CacheIdentity, "cache identity must be stable")
 }
 
+// TestResolveExchangeInputs_WardenIdentity_ResourceDerived proves the resource is
+// auto-derived from the federation source/spec config, folded into the cache
+// identity, and emitted as the warden_resource claim — all without building a live
+// driver, so nothing touches the network on the request path.
+func TestResolveExchangeInputs_WardenIdentity_ResourceDerived(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-fed", Type: credential.SourceTypeAWS,
+		Config: map[string]string{"auth_method": "oidc_federation"},
+	}))
+	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name: "wid-res", Type: "vault_token", Source: "aws-fed",
+		Config: map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+			"mint_method":                       "secrets_manager",
+			"secret_id":                         "prod/db",
+		},
+	}))
+
+	te := &logical.TokenEntry{CredentialSpec: "wid-res", PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
+	inputs, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque", nil), te)
+	require.NoError(t, err)
+	require.NotNil(t, inputs)
+
+	const wantRes = "aws-secretsmanager:prod/db"
+	assert.Equal(t, wardenSubject(te)+"\x00"+"sts.amazonaws.com"+"\x00res="+wantRes, inputs.CacheIdentity)
+
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, wantRes, decodeAssertionClaims(t, tok)["warden_resource"])
+}
+
+// TestResolveExchangeInputs_WardenIdentity_ResourceOverrideAndOptOut verifies the
+// explicit assertion_resource override wins over derivation (emitted verbatim,
+// colon and all) and that assertion_resource=none suppresses the claim even when
+// the spec would otherwise derive one.
+func TestResolveExchangeInputs_WardenIdentity_ResourceOverrideAndOptOut(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-fed2", Type: credential.SourceTypeAWS,
+		Config: map[string]string{"auth_method": "oidc_federation"},
+	}))
+	newSpecTE := func(name string, resourceCfg string) *logical.TokenEntry {
+		require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+			Name: name, Type: "vault_token", Source: "aws-fed2",
+			Config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+				credential.ConfigAssertionResource:  resourceCfg,
+				"mint_method":                       "secrets_manager",
+				"secret_id":                         "prod/db",
+			},
+		}))
+		return &logical.TokenEntry{CredentialSpec: name, PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
+	}
+
+	// Explicit override wins over derivation, verbatim.
+	teOv := newSpecTE("wid-override", "custom:thing")
+	inOv, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque", nil), teOv)
+	require.NoError(t, err)
+	assert.Contains(t, inOv.CacheIdentity, "\x00res=custom:thing")
+	tokOv, err := inOv.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "custom:thing", decodeAssertionClaims(t, tokOv)["warden_resource"])
+
+	// Opt-out suppresses the claim despite a derivable secret_id.
+	teNone := newSpecTE("wid-none", credential.AssertionResourceNone)
+	inNone, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque", nil), teNone)
+	require.NoError(t, err)
+	assert.Equal(t, wardenSubject(teNone)+"\x00"+"sts.amazonaws.com", inNone.CacheIdentity)
+	tokNone, err := inNone.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	_, present := decodeAssertionClaims(t, tokNone)["warden_resource"]
+	assert.False(t, present, "warden_resource must be absent when opted out")
+}
+
 // decodeAssertionClaims base64-decodes the payload segment of a compact JWS so a
 // test can inspect the minted assertion's claims without a full JWKS round-trip.
 func decodeAssertionClaims(t *testing.T, token string) map[string]interface{} {
