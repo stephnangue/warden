@@ -400,6 +400,19 @@ func (d *AzureDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	}
 }
 
+// azureAssertionResource reports the canonical downstream resource an Azure
+// federation spec targets, for the warden_resource assertion claim. Pure: reads
+// spec config only. Only bearer_token is federated; the resource is the target
+// API (resource_uri), which is coarser than a single secret — it names the API,
+// not one item behind it. Mirrors the resource_uri read in mintBearerToken.
+func azureAssertionResource(specCfg map[string]string) (string, bool) {
+	if credential.GetString(specCfg, "mint_method", "bearer_token") != "bearer_token" {
+		return "", false
+	}
+	uri := credential.GetString(specCfg, "resource_uri", "https://management.azure.com/")
+	return "azure:" + uri, true
+}
+
 // mintBearerToken exchanges the spec's SP identity for an Azure AD bearer token.
 // When assertion is non-empty the token is acquired via Workload Identity Federation
 // (the assertion is presented as a client_assertion, no client_secret needed);

@@ -506,6 +506,24 @@ func (d *TokenExchangeDriver) addResources(form url.Values, spec *credential.Cre
 	}
 }
 
+// tokenExchangeAssertionResource reports the single RFC 8707 resource a
+// token-exchange spec targets, for the warden_resource assertion claim. Pure:
+// reads config maps only. It reproduces resolve()'s spec-then-source fallback for
+// the `resources` key (which is why the resource can vary with source config, not
+// just spec — see the CacheIdentity note). Only a lone resource is named; zero or
+// several yield no claim, since a scalar claim can't express a set.
+func tokenExchangeAssertionResource(sourceCfg, specCfg map[string]string) (string, bool) {
+	raw := credential.GetString(specCfg, "resources", "")
+	if raw == "" {
+		raw = credential.GetString(sourceCfg, "resources", "")
+	}
+	fields := strings.Fields(raw)
+	if len(fields) != 1 {
+		return "", false
+	}
+	return "oauth-resource:" + fields[0], true
+}
+
 // resolve returns spec.Config[key] when set, else the source config value.
 func (d *TokenExchangeDriver) resolve(spec *credential.CredSpec, key string) string {
 	if spec != nil {

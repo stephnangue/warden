@@ -129,6 +129,20 @@ func AssertionAlgorithm(config map[string]string) string {
 	return DefaultAssertionAlg
 }
 
+// ConfigAssertionResource is the spec-config key that names the single
+// downstream resource a warden_identity assertion targets, emitted as the
+// `warden_resource` claim so a verifier evaluating arbitrary bound claims can
+// pin the assertion to one resource. Three modes: unset derives the resource
+// from the source/spec config; AssertionResourceNone suppresses the claim; any
+// other value is emitted verbatim. Valid only when
+// subject_token_source=warden_identity.
+const ConfigAssertionResource = "assertion_resource"
+
+// AssertionResourceNone is the ConfigAssertionResource value that suppresses the
+// warden_resource claim entirely (opt-out), for deployments that do not want a
+// resource name disclosed into the cross-boundary assertion.
+const AssertionResourceNone = "none"
+
 // maxExchangeTokenBytes bounds a single subject or actor token. Real JWTs and
 // access tokens are far smaller; the cap guards against a caller pushing an
 // oversized blob through the exchange plumbing.
@@ -318,6 +332,11 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	if config[ConfigAssertionAlgorithm] != "" && config[ConfigSubjectTokenSource] != SourceWardenIdentity {
 		return fmt.Errorf("field '%s': is valid only when '%s' is '%s'",
 			ConfigAssertionAlgorithm, ConfigSubjectTokenSource, SourceWardenIdentity)
+	}
+	// Naming a resource in the assertion only makes sense when Warden mints it.
+	if config[ConfigAssertionResource] != "" && config[ConfigSubjectTokenSource] != SourceWardenIdentity {
+		return fmt.Errorf("field '%s': is valid only when '%s' is '%s'",
+			ConfigAssertionResource, ConfigSubjectTokenSource, SourceWardenIdentity)
 	}
 	// An actor token only has meaning alongside a subject token (RFC 8693 §2.1),
 	// so reject an actor source without a subject source.
