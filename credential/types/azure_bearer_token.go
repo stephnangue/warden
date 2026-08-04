@@ -72,13 +72,11 @@ func (t *AzureBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("12345678-1234-1234-1234-123456789012"),
 
 		credential.StringField("client_secret").
-			Required().
-			Describe("Azure AD service principal client secret").
+			Describe("Azure AD service principal client secret (required for static specs; omit for keyless federation)").
 			Example("my-client-secret"),
 
 		credential.StringField("secret_id").
-			Required().
-			Describe("Azure AD password credential ID for rotation tracking").
+			Describe("Azure AD password credential ID for rotation tracking (required for static specs; omit for keyless federation)").
 			Example("uuid-secret-id"),
 
 		credential.StringField("resource_uri").
@@ -117,6 +115,27 @@ func (t *AzureBearerTokenCredType) ValidateConfig(config map[string]string, sour
 	schema := t.ConfigSchema()
 	if err := credential.ValidateSchema(config, schema...); err != nil {
 		return err
+	}
+
+	// Step 3: Cross-field rules for keyless federation vs static specs.
+	// A federated spec (subject_token_source set) presents a Warden assertion as a
+	// client_assertion, so it holds no client_secret. The audience/algorithm rules
+	// for warden_identity are enforced generically by ValidateExchangeSpecConfig.
+	mintMethod := config["mint_method"]
+	if credential.SpecRequestsExchange(config) {
+		if config["tenant_id"] == "" {
+			return fmt.Errorf("'tenant_id' is required for a keyless federated spec (a spec with subject_token_source)")
+		}
+		if config["client_secret"] != "" || config["secret_id"] != "" {
+			return fmt.Errorf("'client_secret'/'secret_id' must not be set for a keyless federated spec")
+		}
+		if mintMethod != "" && mintMethod != "bearer_token" {
+			return fmt.Errorf("mint_method %q is not supported over federation (supported: bearer_token)", mintMethod)
+		}
+	} else {
+		if config["client_secret"] == "" || config["secret_id"] == "" {
+			return fmt.Errorf("'client_secret' and 'secret_id' are required for a static azure spec")
+		}
 	}
 
 	return nil

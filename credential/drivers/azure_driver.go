@@ -36,8 +36,21 @@ const addPasswordMaxAttempts = 5
 // mechanism (3 immediate retries + daily retry for 7 days).
 const removePasswordMaxAttempts = 3
 
+// Source authentication methods. static uses a stored client_secret; oidc_federation
+// is keyless — a caller-scoped Warden assertion is presented as a client_assertion
+// (Azure AD Workload Identity Federation), so no secret is stored in Warden.
+const (
+	azureAuthMethodStatic         = "static"
+	azureAuthMethodOIDCFederation = "oidc_federation"
+)
+
 // tenantIDPattern matches Azure AD tenant IDs (UUID format)
 var tenantIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// defaultAzureLoginHost is the public-cloud Entra ID authority host. The driver's
+// loginHost field defaults to this; tests override the field to point token
+// acquisition at a local server.
+const defaultAzureLoginHost = "https://login.microsoftonline.com"
 
 // validateTenantID checks that the tenant ID is a valid UUID
 func validateTenantID(tenantID string) error {
@@ -156,6 +169,7 @@ func (d *AzureDriver) doAzureRequest(ctx context.Context, apiReq azureAPIRequest
 var _ credential.SourceDriver = (*AzureDriver)(nil)
 var _ credential.Rotatable = (*AzureDriver)(nil)
 var _ credential.SpecRotatable = (*AzureDriver)(nil)
+var _ credential.ExchangeMinter = (*AzureDriver)(nil)
 
 // AzureDriver mints credentials from Azure services.
 // It exchanges pre-provisioned service principal credentials (stored in specs)
@@ -190,6 +204,10 @@ type AzureDriver struct {
 
 	// HTTP client for Azure API calls
 	httpClient *http.Client
+
+	// Entra ID authority host; empty means the public-cloud default. Tests set it
+	// to a local server so token acquisition can be exercised without Azure.
+	loginHost string
 
 	// Flag to track if source credentials have been verified
 	sourceVerified bool
@@ -227,26 +245,27 @@ func (f *AzureDriverFactory) Type() string {
 
 // ValidateConfig validates Azure driver configuration using declarative schema
 func (f *AzureDriverFactory) ValidateConfig(config map[string]string) error {
-	return credential.ValidateSchema(config,
+	if err := credential.ValidateSchema(config,
+		credential.StringField("auth_method").
+			OneOf(azureAuthMethodStatic, azureAuthMethodOIDCFederation).
+			Describe("How the source authenticates: static (client secret) or oidc_federation (Workload Identity Federation, keyless)").
+			Example("static"),
+
 		credential.StringField("tenant_id").
-			Required().
 			Custom(validateTenantID).
-			Describe("Azure AD tenant ID (UUID)").
+			Describe("Azure AD tenant ID (UUID; required for auth_method=static)").
 			Example("00000000-0000-0000-0000-000000000000"),
 
 		credential.StringField("client_id").
-			Required().
-			Describe("Azure AD application (client) ID").
+			Describe("Azure AD application (client) ID (required for auth_method=static)").
 			Example("11111111-1111-1111-1111-111111111111"),
 
 		credential.StringField("client_secret").
-			Required().
-			Describe("Azure AD application client secret").
+			Describe("Azure AD application client secret (required for auth_method=static)").
 			Example("secret-value"),
 
 		credential.StringField("secret_id").
-			Required().
-			Describe("Secret ID for the client secret (for rotation tracking)").
+			Describe("Secret ID for the client secret (for rotation tracking; required for auth_method=static)").
 			Example("secret-id-uuid"),
 
 		credential.StringField("ca_data").
@@ -257,7 +276,27 @@ func (f *AzureDriverFactory) ValidateConfig(config map[string]string) error {
 		credential.BoolField("tls_skip_verify").
 			Describe("Skip TLS certificate verification (development only)").
 			Example("false"),
-	)
+	); err != nil {
+		return err
+	}
+
+	// Cross-field rules per auth_method.
+	switch credential.GetString(config, "auth_method", azureAuthMethodStatic) {
+	case azureAuthMethodStatic:
+		if credential.GetString(config, "tenant_id", "") == "" ||
+			credential.GetString(config, "client_id", "") == "" ||
+			credential.GetString(config, "client_secret", "") == "" ||
+			credential.GetString(config, "secret_id", "") == "" {
+			return fmt.Errorf("tenant_id, client_id, client_secret, and secret_id are required for auth_method=static")
+		}
+	case azureAuthMethodOIDCFederation:
+		// A federation source holds no static secret. Reject leftover static config
+		// so a misconfiguration cannot silently mix modes.
+		if credential.GetString(config, "client_secret", "") != "" || credential.GetString(config, "secret_id", "") != "" {
+			return fmt.Errorf("client_secret/secret_id must not be set for auth_method=oidc_federation")
+		}
+	}
+	return nil
 }
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
@@ -271,7 +310,7 @@ func (f *AzureDriverFactory) InferCredentialType(specConfig map[string]string) (
 	switch mintMethod {
 	case "azure_db_iam_token":
 		return credential.TypeDBAuthToken, nil
-	case "":
+	case "", "bearer_token":
 		return credential.TypeAzureBearerToken, nil
 	default:
 		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
@@ -296,6 +335,12 @@ func (f *AzureDriverFactory) Create(config map[string]string, log *logger.GatedL
 	}
 	driver.httpClient = httpClient
 
+	// A keyless federation source holds no client_secret to verify — the caller-scoped
+	// assertion arrives only at mint time. Skip the eager source-token probe.
+	if credential.GetString(config, "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
+		return driver, nil
+	}
+
 	// Validate source credentials by acquiring a token
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -311,11 +356,18 @@ func (f *AzureDriverFactory) Create(config map[string]string, log *logger.GatedL
 // MintCredential mints credentials based on the spec's mint_method.
 // Credentials are minted using the SP credentials stored in the spec (not the source).
 func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	// A keyless source mints only through the exchange path, which carries the
+	// caller-scoped assertion. Fail closed here to avoid silently minting with
+	// no credential material.
+	if credential.GetString(d.credSource.Config, "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
+		return nil, nil, 0, "", fmt.Errorf("azure: source uses auth_method=oidc_federation; the spec must set subject_token_source=warden_identity")
+	}
+
 	mintMethod := credential.GetString(spec.Config, "mint_method", "bearer_token")
 
 	switch mintMethod {
 	case "bearer_token":
-		return d.mintBearerToken(ctx, spec)
+		return d.mintBearerToken(ctx, spec, "")
 	case "key_vault_secret":
 		return d.fetchKeyVaultSecret(ctx, spec)
 	default:
@@ -323,20 +375,56 @@ func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	}
 }
 
-// mintBearerToken exchanges spec's SP credentials for an Azure AD bearer token
-func (d *AzureDriver) mintBearerToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	// Get SP credentials from spec config (pre-provisioned)
-	tenantID := credential.GetString(spec.Config, "tenant_id", d.getTenantID())
-	clientID := credential.GetString(spec.Config, "client_id", "")
-	clientSecret := credential.GetString(spec.Config, "client_secret", "")
-	resourceURI := credential.GetString(spec.Config, "resource_uri", "https://management.azure.com/")
-
-	if clientID == "" || clientSecret == "" {
-		return nil, nil, 0, "", fmt.Errorf("spec config must contain 'client_id' and 'client_secret' for bearer_token mint method")
+// MintCredentialWithExchange mints a bearer token via Azure AD Workload Identity
+// Federation: the caller-scoped Warden assertion in inputs is presented to Entra as a
+// client_assertion, so a keyless source needs no stored secret. Gated on a federation
+// source and a verified subject (Warden minted it — an unverified caller token is never
+// forwarded on Warden's authority).
+func (d *AzureDriver) MintCredentialWithExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if credential.GetString(d.credSource.Config, "auth_method", azureAuthMethodStatic) != azureAuthMethodOIDCFederation {
+		return nil, nil, 0, "", fmt.Errorf("azure: workload identity federation requires auth_method=oidc_federation on the source")
+	}
+	if inputs == nil || inputs.SubjectToken == "" {
+		return nil, nil, 0, "", fmt.Errorf("azure: no subject token in exchange inputs")
+	}
+	if inputs.SubjectTokenOrigin != credential.ExchangeOriginVerified {
+		return nil, nil, 0, "", fmt.Errorf("azure: workload identity federation requires a verified subject (subject_token_source=warden_identity)")
 	}
 
-	// Exchange for bearer token
-	token, expiresIn, err := d.acquireToken(ctx, tenantID, clientID, clientSecret, resourceURI)
+	mintMethod := credential.GetString(spec.Config, "mint_method", "bearer_token")
+	switch mintMethod {
+	case "bearer_token":
+		return d.mintBearerToken(ctx, spec, inputs.SubjectToken)
+	default:
+		return nil, nil, 0, "", fmt.Errorf("azure: mint_method %q is not supported over auth_method=oidc_federation (supported: bearer_token)", mintMethod)
+	}
+}
+
+// mintBearerToken exchanges the spec's SP identity for an Azure AD bearer token.
+// When assertion is non-empty the token is acquired via Workload Identity Federation
+// (the assertion is presented as a client_assertion, no client_secret needed);
+// otherwise the pre-provisioned client_secret from the spec is used.
+func (d *AzureDriver) mintBearerToken(ctx context.Context, spec *credential.CredSpec, assertion string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	// Get SP identity from spec config (pre-provisioned)
+	tenantID := credential.GetString(spec.Config, "tenant_id", d.getTenantID())
+	clientID := credential.GetString(spec.Config, "client_id", "")
+	resourceURI := credential.GetString(spec.Config, "resource_uri", "https://management.azure.com/")
+
+	var token string
+	var expiresIn int
+	var err error
+	if assertion != "" {
+		if clientID == "" || tenantID == "" {
+			return nil, nil, 0, "", fmt.Errorf("spec config must contain 'client_id' and 'tenant_id' for federated bearer_token mint method")
+		}
+		token, expiresIn, err = d.acquireTokenWithAssertion(ctx, tenantID, clientID, assertion, resourceURI)
+	} else {
+		clientSecret := credential.GetString(spec.Config, "client_secret", "")
+		if clientID == "" || clientSecret == "" {
+			return nil, nil, 0, "", fmt.Errorf("spec config must contain 'client_id' and 'client_secret' for bearer_token mint method")
+		}
+		token, expiresIn, err = d.acquireToken(ctx, tenantID, clientID, clientSecret, resourceURI)
+	}
 	if err != nil {
 		return nil, nil, 0, "", fmt.Errorf("failed to acquire Azure AD token: %w", err)
 	}
@@ -695,17 +783,42 @@ func (d *AzureDriver) CleanupSpecRotation(ctx context.Context, cleanupConfig map
 
 // acquireToken exchanges client credentials for an Azure AD token
 func (d *AzureDriver) acquireToken(ctx context.Context, tenantID, clientID, clientSecret, resourceURI string) (string, int, error) {
-	if err := validateTenantID(tenantID); err != nil {
-		return "", 0, err
-	}
-
-	tokenURL := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenantID)
-
 	data := url.Values{}
 	data.Set("client_id", clientID)
 	data.Set("client_secret", clientSecret)
 	data.Set("scope", resourceURI+".default")
 	data.Set("grant_type", "client_credentials")
+	return d.postTokenRequest(ctx, tenantID, data, "acquireToken")
+}
+
+// acquireTokenWithAssertion exchanges a Warden-minted assertion for an Azure AD token
+// via the JWT-bearer client-credentials grant (Workload Identity Federation). The
+// assertion is presented as a client_assertion instead of a client_secret; the target
+// app registration must trust Warden's OIDC issuer via a federated identity credential.
+func (d *AzureDriver) acquireTokenWithAssertion(ctx context.Context, tenantID, clientID, assertion, resourceURI string) (string, int, error) {
+	data := url.Values{}
+	data.Set("client_id", clientID)
+	data.Set("client_assertion_type", clientAssertionType)
+	data.Set("client_assertion", assertion)
+	data.Set("scope", resourceURI+".default")
+	data.Set("grant_type", "client_credentials")
+	return d.postTokenRequest(ctx, tenantID, data, "acquireTokenWithAssertion")
+}
+
+// postTokenRequest POSTs an OAuth2 token request to the Entra ID token endpoint for
+// tenantID and returns the access token and its lifetime in seconds. Callers supply the
+// grant-specific form fields (client_secret vs client_assertion); the URL construction,
+// tenant validation, HTTP call, and response decoding are shared.
+func (d *AzureDriver) postTokenRequest(ctx context.Context, tenantID string, data url.Values, operation string) (string, int, error) {
+	if err := validateTenantID(tenantID); err != nil {
+		return "", 0, err
+	}
+
+	host := d.loginHost
+	if host == "" {
+		host = defaultAzureLoginHost
+	}
+	tokenURL := fmt.Sprintf("%s/%s/oauth2/v2.0/token", host, tenantID)
 
 	respBody, err := d.doAzureRequest(ctx, azureAPIRequest{
 		method:      "POST",
@@ -713,7 +826,7 @@ func (d *AzureDriver) acquireToken(ctx context.Context, tenantID, clientID, clie
 		body:        []byte(data.Encode()),
 		contentType: "application/x-www-form-urlencoded",
 		okStatuses:  []int{http.StatusOK},
-		operation:   "acquireToken",
+		operation:   operation,
 	}, nil, 1)
 	if err != nil {
 		return "", 0, err
@@ -809,6 +922,12 @@ func (d *AzureDriver) getGraphTokenLocked(ctx context.Context) (string, error) {
 // hasGraphPermissions checks if the source has Graph API access (result is cached).
 // Uses graphPermsMu (not tokenMu) to avoid blocking token operations during the probe.
 func (d *AzureDriver) hasGraphPermissions() bool {
+	// A keyless federation source has no client_secret, so the source-token probe
+	// below would be a doomed round-trip. It also has nothing to rotate.
+	if credential.GetString(d.credSource.Config, "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
+		return false
+	}
+
 	d.graphPermsMu.Lock()
 	defer d.graphPermsMu.Unlock()
 

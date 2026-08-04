@@ -121,6 +121,95 @@ func TestAzureBearerTokenCredType_ValidateConfig(t *testing.T) {
 	}
 }
 
+func TestAzureBearerTokenCredType_ValidateConfig_Federation(t *testing.T) {
+	credType := NewAzureBearerTokenCredType()
+
+	tests := []struct {
+		name    string
+		config  map[string]string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "valid federated spec",
+			config: map[string]string{
+				"mint_method":          "bearer_token",
+				"subject_token_source": "warden_identity",
+				"assertion_audience":   "api://AzureADTokenExchange",
+				"tenant_id":            "00000000-0000-0000-0000-000000000001",
+				"client_id":            "11111111-1111-1111-1111-111111111111",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid federated spec with default mint_method",
+			config: map[string]string{
+				"subject_token_source": "warden_identity",
+				"assertion_audience":   "api://AzureADTokenExchange",
+				"tenant_id":            "00000000-0000-0000-0000-000000000001",
+				"client_id":            "11111111-1111-1111-1111-111111111111",
+			},
+			wantErr: false,
+		},
+		{
+			name: "federated spec missing tenant_id",
+			config: map[string]string{
+				"subject_token_source": "warden_identity",
+				"assertion_audience":   "api://AzureADTokenExchange",
+				"client_id":            "11111111-1111-1111-1111-111111111111",
+			},
+			wantErr: true,
+			errMsg:  "tenant_id",
+		},
+		{
+			name: "federated spec must not carry client_secret",
+			config: map[string]string{
+				"subject_token_source": "warden_identity",
+				"assertion_audience":   "api://AzureADTokenExchange",
+				"tenant_id":            "00000000-0000-0000-0000-000000000001",
+				"client_id":            "11111111-1111-1111-1111-111111111111",
+				"client_secret":        "leftover",
+			},
+			wantErr: true,
+			errMsg:  "must not be set",
+		},
+		{
+			name: "federated spec rejects key_vault_secret",
+			config: map[string]string{
+				"mint_method":          "key_vault_secret",
+				"subject_token_source": "warden_identity",
+				"assertion_audience":   "api://AzureADTokenExchange",
+				"tenant_id":            "00000000-0000-0000-0000-000000000001",
+				"client_id":            "11111111-1111-1111-1111-111111111111",
+			},
+			wantErr: true,
+			errMsg:  "not supported over federation",
+		},
+		{
+			name: "federated spec still requires client_id",
+			config: map[string]string{
+				"subject_token_source": "warden_identity",
+				"assertion_audience":   "api://AzureADTokenExchange",
+				"tenant_id":            "00000000-0000-0000-0000-000000000001",
+			},
+			wantErr: true,
+			errMsg:  "client_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := credType.ValidateConfig(tt.config, credential.SourceTypeAzure)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestAzureBearerTokenCredType_Parse(t *testing.T) {
 	credType := NewAzureBearerTokenCredType()
 
