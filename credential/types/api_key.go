@@ -69,10 +69,10 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 			Describe("Project ID (optional)").
 			Example("proj-xxxxxxxxxxxx"),
 
-		// Vault source - static_apikey fields
+		// Store-backed sources (vault static_apikey, aws secrets_manager)
 		credential.StringField("mint_method").
-			OneOf("static_apikey").
-			Describe("Mint method (required for vault source)").
+			OneOf("static_apikey", "secrets_manager").
+			Describe("Mint method (required for vault or aws source)").
 			Example("static_apikey"),
 
 		credential.StringField("kv2_mount").
@@ -82,6 +82,29 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("secret_path").
 			Describe("Path to secret in KV2 (required for static_apikey)").
 			Example("apikeys/my-service"),
+
+		// AWS source - Secrets Manager fields. The fetched secret must contain an
+		// api_key field (or be remapped to one via json_key_map).
+		credential.StringField("credential_type").
+			OneOf(credential.TypeAPIKey).
+			Describe("Selects the api_key shape for a Secrets Manager secret").
+			Example(credential.TypeAPIKey),
+
+		credential.StringField("secret_id").
+			Describe("AWS Secrets Manager secret ID (required for secrets_manager)").
+			Example("prod/app/openai"),
+
+		credential.StringField("role_arn").
+			Describe("IAM role ARN to assume via web identity (required for keyless secrets_manager)").
+			Example("arn:aws:iam::123456789012:role/WardenSecretsReader"),
+
+		credential.StringField("version_stage").
+			Describe("Secrets Manager version stage (optional, defaults to AWSCURRENT)").
+			Example("AWSCURRENT"),
+
+		credential.StringField("version_id").
+			Describe("Specific Secrets Manager version ID (optional)").
+			Example("uuid-version-id"),
 	}
 }
 
@@ -92,10 +115,10 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	switch sourceType {
-	case credential.SourceTypeAPIKey, credential.SourceTypeLocal, credential.SourceTypeVault:
+	case credential.SourceTypeAPIKey, credential.SourceTypeLocal, credential.SourceTypeVault, credential.SourceTypeAWS:
 		// Supported
 	default:
-		return fmt.Errorf("api_key credentials require an apikey, local, or vault source, got: %s", sourceType)
+		return fmt.Errorf("api_key credentials require an apikey, local, vault, or aws source, got: %s", sourceType)
 	}
 
 	// Step 2: Validate config against schema
@@ -116,6 +139,15 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 		if config["secret_path"] == "" {
 			return fmt.Errorf("'secret_path' is required when mint_method is static_apikey")
 		}
+	case credential.SourceTypeAWS:
+		// The API key is read from AWS Secrets Manager, not carried in the spec, so
+		// validate the fetch config (shared with aws_access_keys) rather than requiring
+		// an api_key field here. The secret's payload must contain api_key (or be
+		// remapped to it via json_key_map).
+		if config["mint_method"] != "secrets_manager" {
+			return fmt.Errorf("'mint_method' must be 'secrets_manager' for an aws source, got: %s", config["mint_method"])
+		}
+		return validateAWSSecretsManagerSpecConfig(config)
 	default:
 		if config["api_key"] == "" {
 			return fmt.Errorf("'api_key' is required")

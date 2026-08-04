@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/types"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -410,6 +411,51 @@ func TestAWSDriverFactory_InferCredentialType_Redshift(t *testing.T) {
 	assert.Equal(t, credential.TypeDBAuthToken, credType)
 }
 
+// TestAWSDriverFactory_InferCredentialType_SecretsManager covers the shape selector:
+// a Secrets Manager secret defaults to AWS access keys, and credential_type selects a
+// different stored-secret shape.
+func TestAWSDriverFactory_InferCredentialType_SecretsManager(t *testing.T) {
+	factory := &AWSDriverFactory{}
+
+	cases := []struct {
+		name     string
+		credType string
+		want     string
+		wantErr  bool
+	}{
+		{name: "default is aws access keys", credType: "", want: credential.TypeAWSAccessKeys},
+		{name: "explicit aws access keys", credType: credential.TypeAWSAccessKeys, want: credential.TypeAWSAccessKeys},
+		{name: "api key shape", credType: credential.TypeAPIKey, want: credential.TypeAPIKey},
+		{name: "unsupported shape rejected", credType: "gitlab_access_token", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := map[string]string{"mint_method": "secrets_manager"}
+			if tc.credType != "" {
+				cfg["credential_type"] = tc.credType
+			}
+			got, err := factory.InferCredentialType(cfg)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+
+	// credential_type is meaningful only for secrets_manager; using it elsewhere is
+	// an explicit error, not a silent fallback to aws_access_keys.
+	t.Run("credential_type rejected for non-secrets_manager mint", func(t *testing.T) {
+		_, err := factory.InferCredentialType(map[string]string{
+			"mint_method":     "sts_assume_role",
+			"credential_type": credential.TypeAPIKey,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "only valid with mint_method=secrets_manager")
+	})
+}
+
 // newRedshiftTestDriver creates a driver with verified base creds and built clients,
 // suitable for exercising mintViaRedshiftIAMToken's validation paths.
 // It does NOT make real AWS calls — tests must short-circuit before the SDK call.
@@ -735,6 +781,79 @@ func TestAWSDriver_SecretsManager_WebIdentity_HappyPath(t *testing.T) {
 	assert.Nil(t, metadata)
 	assert.Equal(t, time.Duration(0), ttl)
 	assert.Equal(t, "", leaseID)
+}
+
+// TestAWSDriver_SecretsManager_APIKey_RoundTrip proves the hvault-mirror pattern end to
+// end: the keyless secrets_manager fetch is shape-agnostic, and the same fetched blob is
+// parsed by the api_key credential type (selected via credential_type) into an API key.
+func TestAWSDriver_SecretsManager_APIKey_RoundTrip(t *testing.T) {
+	var gotToken string
+	stsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotToken = r.Form.Get("WebIdentityToken")
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = w.Write([]byte(`<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleWithWebIdentityResult>
+    <Credentials>
+      <AccessKeyId>ASIAEXAMPLE</AccessKeyId>
+      <SecretAccessKey>secretexample</SecretAccessKey>
+      <SessionToken>tokenexample</SessionToken>
+      <Expiration>2035-01-01T00:00:00Z</Expiration>
+    </Credentials>
+  </AssumeRoleWithWebIdentityResult>
+</AssumeRoleWithWebIdentityResponse>`))
+	}))
+	defer stsSrv.Close()
+
+	// The stored secret holds an API key, not AWS access keys — the mint path does not
+	// care about the shape; the credential type does.
+	smSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		_, _ = w.Write([]byte(`{"Name":"prod/app/openai","SecretString":"{\"api_key\":\"sk-test-123\"}"}`))
+	}))
+	defer smSrv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv := &AWSDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}},
+		logger:     log,
+		region:     "us-east-1",
+		anonSTSClient: sts.New(sts.Options{
+			Region:       "us-east-1",
+			BaseEndpoint: aws.String(stsSrv.URL),
+			Credentials:  aws.AnonymousCredentials{},
+		}),
+		smBaseEndpoint: smSrv.URL,
+	}
+	spec := &credential.CredSpec{Name: "openai", Config: map[string]string{
+		"mint_method":     "secrets_manager",
+		"credential_type": "api_key",
+		"secret_id":       "prod/app/openai",
+		"role_arn":        "arn:aws:iam::123456789012:role/WardenSecretsReader",
+	}}
+	inputs := &credential.ExchangeInputs{
+		SubjectToken:       "eyJ.warden.assertion",
+		SubjectTokenType:   credential.TokenTypeJWT,
+		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+	}
+
+	// Mint: the driver fetches the raw secret, shape-agnostic.
+	rawData, _, _, _, err := drv.MintCredentialWithExchange(context.TODO(), spec, inputs)
+	require.NoError(t, err)
+	assert.Equal(t, "eyJ.warden.assertion", gotToken)
+
+	// The spec selected api_key, so the api_key type parses the fetched blob into a
+	// well-formed API key credential (reusing its validation and masking).
+	inferred, err := (&AWSDriverFactory{}).InferCredentialType(spec.Config)
+	require.NoError(t, err)
+	require.Equal(t, credential.TypeAPIKey, inferred)
+
+	apiKeyType := types.NewAPIKeyCredType()
+	cred, err := apiKeyType.Parse(rawData, nil, 0, "")
+	require.NoError(t, err)
+	require.NoError(t, apiKeyType.Validate(cred))
+	assert.Equal(t, credential.TypeAPIKey, cred.Type)
+	assert.Equal(t, "sk-test-123", cred.Data["api_key"])
 }
 
 // =============================================================================

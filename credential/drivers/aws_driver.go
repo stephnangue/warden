@@ -153,13 +153,37 @@ func (f *AWSDriverFactory) SensitiveConfigFields() []string {
 // InferCredentialType infers the credential type from the spec's mint_method.
 func (f *AWSDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
 	mintMethod := specConfig["mint_method"]
+	// credential_type selects the stored-secret shape and is meaningful only for
+	// secrets_manager; reject it elsewhere rather than silently ignoring it.
+	if specConfig["credential_type"] != "" && mintMethod != "secrets_manager" {
+		return "", fmt.Errorf("credential_type is only valid with mint_method=secrets_manager (got mint_method=%q)", mintMethod)
+	}
 	switch mintMethod {
 	case "rds_iam_token", "redshift_iam_token":
 		return credential.TypeDBAuthToken, nil
-	case "sts_assume_role", "secrets_manager", "":
+	case "secrets_manager":
+		// A stored secret can hold different credential shapes; the spec selects one
+		// via credential_type (default: AWS access keys). This mirrors how a Vault
+		// source vends multiple shapes — the transport is one thing, the shape another.
+		return inferSecretsManagerType(specConfig["credential_type"])
+	case "sts_assume_role", "":
 		return credential.TypeAWSAccessKeys, nil
 	default:
 		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
+	}
+}
+
+// inferSecretsManagerType maps the operator-selected credential_type to a supported
+// stored-secret shape. Empty defaults to AWS access keys for back-compat. Extend the
+// allowlist to admit another storable type once its ValidateConfig accepts an AWS source.
+func inferSecretsManagerType(credType string) (string, error) {
+	switch credType {
+	case "", credential.TypeAWSAccessKeys:
+		return credential.TypeAWSAccessKeys, nil
+	case credential.TypeAPIKey:
+		return credential.TypeAPIKey, nil
+	default:
+		return "", fmt.Errorf("unsupported credential_type %q for mint_method=secrets_manager (supported: %s, %s)", credType, credential.TypeAWSAccessKeys, credential.TypeAPIKey)
 	}
 }
 
