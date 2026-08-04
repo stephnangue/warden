@@ -193,19 +193,28 @@ func (t *AWSIAMAccessKeysCredType) validateAWSConfig(config map[string]string) e
 			return fmt.Errorf("'role_arn' is required when mint_method is sts_assume_role")
 		}
 	case "secrets_manager":
-		if config["secret_id"] == "" {
-			return fmt.Errorf("'secret_id' is required when mint_method is secrets_manager")
-		}
-		// The keyless (federation) variant assumes a role via web identity before
-		// reading the secret, so it also needs a role to assume. A spec requests
-		// exchange via subject_token_source; static-auth secrets specs do not and are
-		// unaffected. (The auth_method lives on the source, which this validator does
-		// not see, so the source/exchange pairing is enforced at mint time.)
-		if credential.SpecRequestsExchange(config) && config["role_arn"] == "" {
-			return fmt.Errorf("'role_arn' is required for keyless secrets_manager (a spec with subject_token_source)")
-		}
+		return validateAWSSecretsManagerSpecConfig(config)
 	}
 
+	return nil
+}
+
+// validateAWSSecretsManagerSpecConfig validates the spec config for reading a secret
+// from AWS Secrets Manager. It is shared by every credential type that can be sourced
+// from Secrets Manager (aws_access_keys, api_key, ...), so the fetch-config rules live
+// in one place independent of the shape the secret is parsed into.
+func validateAWSSecretsManagerSpecConfig(config map[string]string) error {
+	if config["secret_id"] == "" {
+		return fmt.Errorf("'secret_id' is required when mint_method is secrets_manager")
+	}
+	// The keyless (federation) variant assumes a role via web identity before
+	// reading the secret, so it also needs a role to assume. A spec requests
+	// exchange via subject_token_source; static-auth secrets specs do not and are
+	// unaffected. (The auth_method lives on the source, which this validator does
+	// not see, so the source/exchange pairing is enforced at mint time.)
+	if credential.SpecRequestsExchange(config) && config["role_arn"] == "" {
+		return fmt.Errorf("'role_arn' is required for keyless secrets_manager (a spec with subject_token_source)")
+	}
 	return nil
 }
 

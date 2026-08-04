@@ -19,6 +19,63 @@ func TestAPIKeyCredType_Metadata(t *testing.T) {
 	assert.Equal(t, time.Duration(0), metadata.DefaultTTL)
 }
 
+// TestAPIKeyCredType_ValidateConfig_AWSSource covers an API key sourced from AWS
+// Secrets Manager: the key comes from the fetched secret, so the spec validates the
+// fetch config (secret_id, role_arn for keyless) instead of requiring an api_key field.
+func TestAPIKeyCredType_ValidateConfig_AWSSource(t *testing.T) {
+	ct := NewAPIKeyCredType()
+
+	tests := []struct {
+		name    string
+		config  map[string]string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "valid static secrets_manager",
+			config:  map[string]string{"mint_method": "secrets_manager", "secret_id": "prod/app/openai"},
+			wantErr: false,
+		},
+		{
+			name:    "missing secret_id",
+			config:  map[string]string{"mint_method": "secrets_manager"},
+			wantErr: true,
+			errMsg:  "secret_id",
+		},
+		{
+			name:    "wrong mint_method for aws source",
+			config:  map[string]string{"mint_method": "sts_assume_role"},
+			wantErr: true,
+			errMsg:  "secrets_manager",
+		},
+		{
+			name:    "keyless requires role_arn",
+			config:  map[string]string{"mint_method": "secrets_manager", "secret_id": "prod/app/openai", "subject_token_source": "warden_identity"},
+			wantErr: true,
+			errMsg:  "role_arn",
+		},
+		{
+			name:    "keyless valid with role_arn",
+			config:  map[string]string{"mint_method": "secrets_manager", "secret_id": "prod/app/openai", "subject_token_source": "warden_identity", "role_arn": "arn:aws:iam::1:role/x"},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ct.ValidateConfig(tt.config, credential.SourceTypeAWS)
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 	ct := NewAPIKeyCredType()
 
@@ -100,13 +157,13 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 		},
 		// --- Unsupported source types ---
 		{
-			name: "unsupported source type - aws",
+			name: "unsupported source type - github",
 			config: map[string]string{
 				"api_key": "sk-test",
 			},
-			sourceType: "aws",
+			sourceType: "github",
 			wantErr:    true,
-			errMsg:     "require an apikey, local, or vault source",
+			errMsg:     "require an apikey, local, vault, or aws source",
 		},
 		// --- Vault source ---
 		{
