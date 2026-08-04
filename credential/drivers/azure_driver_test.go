@@ -571,7 +571,7 @@ func TestAzureDriver_MintCredential_Federation_FailsClosed(t *testing.T) {
 	}
 	_, _, _, _, err := drv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "bearer_token"}})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "subject_token_source=warden_identity")
+	assert.Contains(t, err.Error(), "subject_token_source (warden_identity or auth_token)")
 }
 
 // TestAzureDriver_MintCredentialWithExchange_Guards covers the exchange-path guards
@@ -668,6 +668,51 @@ func TestAzureDriver_MintCredentialWithExchange_HappyPath(t *testing.T) {
 	assert.Equal(t, "11111111-1111-1111-1111-111111111111", metadata["subject"])
 	assert.Equal(t, time.Hour, ttl)
 	assert.Empty(t, leaseID, "bearer tokens expire naturally; no lease")
+}
+
+// TestAzureDriver_MintCredentialWithExchange_ForwardedSubject_HappyPath drives the
+// auth_token federation topology: the subject is the caller's origin-verified inbound JWT
+// that Warden forwards untouched (not a Warden-minted assertion), so ResolveSubjectToken
+// and CacheIdentity are unset. The driver treats any verified subject the same, so this
+// must reach Entra and be presented as the client_assertion verbatim. It guards the
+// supported contract against a future change that re-gates federation to Warden-minted
+// subjects only.
+func TestAzureDriver_MintCredentialWithExchange_ForwardedSubject_HappyPath(t *testing.T) {
+	var gotAssertion, gotAssertionType string
+	var sawSecretKey bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotAssertion = r.PostForm.Get("client_assertion")
+		gotAssertionType = r.PostForm.Get("client_assertion_type")
+		_, sawSecretKey = r.PostForm.Get("client_secret"), r.PostForm.Has("client_secret")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"eyJ.azure.token","expires_in":3600,"token_type":"Bearer"}`))
+	}))
+	defer srv.Close()
+
+	drv := &AzureDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: map[string]string{"auth_method": "oidc_federation"}},
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		loginHost:  srv.URL,
+	}
+	spec := &credential.CredSpec{Name: "azure-mgmt", Config: map[string]string{
+		"mint_method": "bearer_token",
+		"tenant_id":   "00000000-0000-0000-0000-000000000001",
+		"client_id":   "11111111-1111-1111-1111-111111111111",
+	}}
+	// A forwarded inbound JWT: verified origin, no ResolveSubjectToken, no CacheIdentity.
+	inputs := &credential.ExchangeInputs{
+		SubjectToken:       "eyJ.inbound.idp.jwt",
+		SubjectTokenType:   credential.TokenTypeJWT,
+		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+	}
+
+	rawData, _, _, _, err := drv.MintCredentialWithExchange(context.TODO(), spec, inputs)
+	require.NoError(t, err)
+	assert.Equal(t, "eyJ.inbound.idp.jwt", gotAssertion, "the forwarded inbound JWT must be presented as the client_assertion verbatim")
+	assert.Equal(t, clientAssertionType, gotAssertionType)
+	assert.False(t, sawSecretKey, "a federated exchange must not send a client_secret")
+	assert.Equal(t, "eyJ.azure.token", rawData["access_token"])
 }
 
 // TestAzureDriver_MintBearerToken_Static_HappyPath exercises the static client_secret

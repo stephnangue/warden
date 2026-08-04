@@ -331,7 +331,7 @@ func (d *AWSDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	// clearly rather than falling into authenticate() with empty keys and a misleading
 	// "invalid AWS credentials" error.
 	if authMethod == awsAuthMethodOIDCFederation {
-		return nil, nil, 0, "", fmt.Errorf("auth_method=oidc_federation requires subject_token_source=warden_identity on the spec (federated minting runs through the token-exchange path)")
+		return nil, nil, 0, "", fmt.Errorf("auth_method=oidc_federation requires subject_token_source on the spec (warden_identity or auth_token); federated minting runs through the token-exchange path")
 	}
 
 	// Re-authenticate if needed
@@ -443,13 +443,19 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.C
 	return rawData, metadata, leaseTTL, leaseID, nil
 }
 
-// MintCredentialWithExchange federates a caller-derived identity assertion into AWS
-// via sts:AssumeRoleWithWebIdentity (Workload Identity Federation), then produces the
+// MintCredentialWithExchange federates a caller-derived identity into AWS via
+// sts:AssumeRoleWithWebIdentity (Workload Identity Federation), then produces the
 // outcome the spec's mint_method asks for. It requires a keyless source
-// (auth_method=oidc_federation) and a verified subject (a Warden-minted assertion,
-// subject_token_source=warden_identity): AWS validates the assertion's signature against
-// Warden's published JWKS, so an unverified caller token must never be forwarded on
-// Warden's authority.
+// (auth_method=oidc_federation) and a verified subject, of which there are two shapes:
+//   - subject_token_source=warden_identity: Warden mints a fresh assertion and AWS
+//     validates its signature against Warden's published JWKS (federate Warden once).
+//   - subject_token_source=auth_token: Warden forwards the caller's origin-verified
+//     inbound JWT untouched, and AWS validates it against the origin IdP's JWKS
+//     (the role must federate that IdP directly, and its trust policy must accept the
+//     token's audience — Warden pins nothing here since it did not mint the token).
+//
+// Either way the subject is one Warden verified inbound; an unverified caller token
+// (subject_token_source=header) is never forwarded on Warden's authority.
 //
 // Supported mint methods over federation:
 //   - sts_assume_role: the federated role credentials are themselves the issued credential.
@@ -462,7 +468,7 @@ func (d *AWSDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 		return nil, nil, 0, "", fmt.Errorf("aws: no subject token in exchange inputs")
 	}
 	if inputs.SubjectTokenOrigin != credential.ExchangeOriginVerified {
-		return nil, nil, 0, "", fmt.Errorf("aws: web-identity federation requires a verified subject (subject_token_source=warden_identity)")
+		return nil, nil, 0, "", fmt.Errorf("aws: web-identity federation requires a verified subject (subject_token_source=warden_identity or auth_token); a caller-supplied, unverified subject is rejected")
 	}
 
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
