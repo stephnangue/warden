@@ -840,9 +840,85 @@ func TestCredentialConfigStore_ValidateSpec_TypeValidation(t *testing.T) {
 	}
 }
 
+// TestCredentialConfigStore_ValidateSpec_ExchangeRotation covers the rotation_period
+// rules around token-exchange (keyless federation) specs: a rotating type still
+// requires rotation_period normally, an exchange spec is exempt from that requirement,
+// and an exchange spec must NOT carry a rotation_period (it mints fresh per request and
+// enrolling it would schedule a rotation that can never persist).
+func TestCredentialConfigStore_ValidateSpec_ExchangeRotation(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	store.core.credentialTypeRegistry = credential.NewTypeRegistry()
+
+	rotType := &testCredentialType{typeName: "rotating_type", requiresRotation: true}
+	if err := store.core.credentialTypeRegistry.Register(rotType); err != nil {
+		t.Fatalf("failed to register type: %v", err)
+	}
+
+	// Local source: the test-mint block is skipped, so no driver is needed.
+	store.core.credentialDriverRegistry = nil
+	if err := store.CreateSource(ctx, &credential.CredSource{Name: "local-src", Type: "local"}); err != nil {
+		t.Fatalf("failed to create source: %v", err)
+	}
+
+	exchangeCfg := map[string]string{
+		"subject_token_source": "warden_identity",
+		"assertion_audience":   "api://AzureADTokenExchange",
+	}
+
+	tests := []struct {
+		name        string
+		spec        *credential.CredSpec
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name: "rotating type without rotation_period is rejected",
+			spec: &credential.CredSpec{
+				Name: "needs-rotation", Type: "rotating_type", Source: "local-src",
+				MinTTL: time.Minute, MaxTTL: time.Hour,
+			},
+			expectError: true,
+			errorMsg:    "rotation_period is required",
+		},
+		{
+			name: "exchange spec is exempt from the rotation_period requirement",
+			spec: &credential.CredSpec{
+				Name: "exchange-no-rotation", Type: "rotating_type", Source: "local-src",
+				Config: exchangeCfg, MinTTL: time.Minute, MaxTTL: time.Hour,
+			},
+			expectError: false,
+		},
+		{
+			name: "exchange spec must not set rotation_period",
+			spec: &credential.CredSpec{
+				Name: "exchange-with-rotation", Type: "rotating_type", Source: "local-src",
+				Config: exchangeCfg, RotationPeriod: 24 * time.Hour, MinTTL: time.Minute, MaxTTL: time.Hour,
+			},
+			expectError: true,
+			errorMsg:    "not supported",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := store.CreateSpec(ctx, tt.spec)
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error containing %q, got nil", tt.errorMsg)
+				} else if tt.errorMsg != "" && !contains(err.Error(), tt.errorMsg) {
+					t.Errorf("expected error containing %q, got %q", tt.errorMsg, err.Error())
+				}
+			} else if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 // testCredentialType is a minimal credential type for testing
 type testCredentialType struct {
-	typeName string
+	typeName         string
+	requiresRotation bool
 }
 
 func (t *testCredentialType) Metadata() credential.TypeMetadata {
@@ -890,7 +966,7 @@ func (t *testCredentialType) Revoke(ctx context.Context, cred *credential.Creden
 }
 
 func (t *testCredentialType) RequiresSpecRotation() bool {
-	return false
+	return t.requiresRotation
 }
 
 func (t *testCredentialType) SensitiveConfigFields() []string { return nil }

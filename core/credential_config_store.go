@@ -849,8 +849,17 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				return logical.ErrBadRequestf("invalid config for type '%s': %s", spec.Type, err.Error())
 			}
 
-			// Enforce rotation_period for types that embed rotatable credentials
-			if credType.RequiresSpecRotation() && spec.RotationPeriod <= 0 {
+			// A token-exchange spec (subject_token_source set) is minted fresh per
+			// request from a caller-derived assertion; it embeds no secret, so
+			// scheduled rotation is meaningless. Reject rotation_period outright —
+			// otherwise the spec is enrolled for a rotation that can never persist,
+			// and a spec-rotating type would mutate the upstream every failed cycle.
+			if credential.SpecRequestsExchange(spec.Config) {
+				if spec.RotationPeriod > 0 {
+					return logical.ErrBadRequestf("rotation_period is not supported for credential type '%s' (token-exchange spec; credentials are minted per request, not rotated)", spec.Type)
+				}
+			} else if credType.RequiresSpecRotation() && spec.RotationPeriod <= 0 {
+				// Types that embed rotatable credentials must schedule rotation.
 				return logical.ErrBadRequestf("rotation_period is required for credential type '%s' which embeds rotatable credentials", spec.Type)
 			}
 
