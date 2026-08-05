@@ -231,7 +231,7 @@ func TestSetupOIDCIssuer_BadPublisherDoesNotFailUnseal(t *testing.T) {
 	}))
 
 	// Setup (as unseal would) must NOT fail; the issuer comes up, publisher is nil.
-	require.NoError(t, core.setupOIDCIssuer(ctx, false))
+	require.NoError(t, core.setupOIDCIssuer(ctx, false, false))
 	require.NotNil(t, core.OIDCIssuer())
 	assert.True(t, core.OIDCIssuer().Ready())
 	assert.Nil(t, core.oidcPublisher, "an invalid publisher degrades to endpoint-only")

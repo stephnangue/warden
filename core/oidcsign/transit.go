@@ -381,7 +381,7 @@ func (kd *transitKeyData) publicKeyForVersion(version int) (crypto.PublicKey, er
 	if err != nil {
 		return nil, err
 	}
-	return parsePublicKeyPEM(v.PublicKey)
+	return ParsePublicKeyPEM(v.PublicKey)
 }
 
 func (kd *transitKeyData) creationTimeForVersion(version int) (time.Time, error) {
@@ -396,8 +396,8 @@ func (kd *transitKeyData) creationTimeForVersion(version int) (time.Time, error)
 	return t, nil
 }
 
-// parsePublicKeyPEM decodes a PKIX PEM public key and ensures it is RSA or ECDSA.
-func parsePublicKeyPEM(pemStr string) (crypto.PublicKey, error) {
+// ParsePublicKeyPEM decodes a PKIX PEM public key and ensures it is RSA or ECDSA.
+func ParsePublicKeyPEM(pemStr string) (crypto.PublicKey, error) {
 	if pemStr == "" {
 		return nil, fmt.Errorf("oidcsign: empty public key")
 	}
@@ -415,6 +415,16 @@ func parsePublicKeyPEM(pemStr string) (crypto.PublicKey, error) {
 	default:
 		return nil, fmt.Errorf("oidcsign: unsupported public key type %T", pub)
 	}
+}
+
+// MarshalPublicKeyPEM encodes an RSA/ECDSA public key as a PKIX PEM block, the
+// form persisted alongside a remote key handle (so JWKS/unseal need no KMS call).
+func MarshalPublicKeyPEM(pub crypto.PublicKey) (string, error) {
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return "", fmt.Errorf("oidcsign: marshal public key: %w", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
 }
 
 // decodeTransitSignature extracts the raw signature bytes from transit's

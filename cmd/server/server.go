@@ -450,6 +450,18 @@ func run(cmd *cobra.Command, args []string) error {
 	info["storage"] = conf.Storage.Type
 	infoKeys = append(infoKeys, "storage")
 
+	// Surface the OIDC issuer external signer (never the token) so an operator can
+	// confirm the signer stanza was loaded and the issuer key will live in the KMS.
+	if conf.Signer != nil {
+		prefix := conf.Signer.KeyNamePrefix
+		if prefix == "" {
+			prefix = "warden-oidc"
+		}
+		info["oidc signer"] = fmt.Sprintf("%s (mount: %s, key_prefix: %s)",
+			conf.Signer.Type, conf.Signer.MountPath, prefix)
+		infoKeys = append(infoKeys, "oidc signer")
+	}
+
 	if conf.APIAddr != "" {
 		info["api address"] = conf.APIAddr
 		infoKeys = append(infoKeys, "api address")

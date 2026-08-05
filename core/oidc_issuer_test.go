@@ -40,7 +40,7 @@ func rs256Keys(iss *OIDCIssuer) (active, next *signingKey, retired []*signingKey
 // loadRS256 loads the persisted keyset and returns the RS256 keyset's active,
 // next, and retired keys (all nil when none is persisted).
 func loadRS256(ctx context.Context, storage sdklogical.Storage) (active, next *signingKey, retired []*signingKey, err error) {
-	keysets, err := loadKeySet(ctx, storage)
+	keysets, err := loadKeySet(ctx, storage, nil, 0, nil)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -307,7 +307,7 @@ func TestOIDCIssuer_ES256_StorageRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ES256", stored.Alg)
 
-	loaded, err := fromStored(stored)
+	loaded, err := fromStored(stored, nil, 0)
 	require.NoError(t, err)
 	assert.Equal(t, orig.kid, loaded.kid)
 	assert.Equal(t, "ES256", loaded.alg)
@@ -326,7 +326,7 @@ func TestOIDCIssuer_KeyStorage_RejectsOldVersion(t *testing.T) {
 	require.NoError(t, storage.Put(ctx, &sdklogical.StorageEntry{
 		Key: oidcKeySetPath, Value: []byte(`{"version":2,"active":{}}`),
 	}))
-	_, err := loadKeySet(ctx, storage)
+	_, err := loadKeySet(ctx, storage, nil, 0, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported keyset version 2")
 }
@@ -522,7 +522,7 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
 
 	// Disabled by default: no config -> nil issuer.
-	if err := core.setupOIDCIssuer(ctx, false); err != nil {
+	if err := core.setupOIDCIssuer(ctx, false, false); err != nil {
 		t.Fatalf("setup (no config): %v", err)
 	}
 	if core.OIDCIssuer() != nil {
@@ -533,7 +533,7 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	if err := saveIssuerConfig(ctx, storage, &issuerConfig{Enabled: false, IssuerURL: "https://iss.example"}); err != nil {
 		t.Fatalf("save disabled config: %v", err)
 	}
-	if err := core.setupOIDCIssuer(ctx, false); err != nil {
+	if err := core.setupOIDCIssuer(ctx, false, false); err != nil {
 		t.Fatalf("setup (disabled): %v", err)
 	}
 	if core.OIDCIssuer() != nil {
@@ -544,7 +544,7 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	if err := saveIssuerConfig(ctx, storage, &issuerConfig{Enabled: true, IssuerURL: "https://iss.example"}); err != nil {
 		t.Fatalf("save enabled config: %v", err)
 	}
-	if err := core.setupOIDCIssuer(ctx, true /* standby */); err != nil {
+	if err := core.setupOIDCIssuer(ctx, true /* standby */, false); err != nil {
 		t.Fatalf("setup (standby): %v", err)
 	}
 	if iss := core.OIDCIssuer(); iss == nil || iss.Ready() {
@@ -555,7 +555,7 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	}
 
 	// Enabled, active -> generates + persists a key, issuer ready and can mint.
-	if err := core.setupOIDCIssuer(ctx, false /* active */); err != nil {
+	if err := core.setupOIDCIssuer(ctx, false /* active */, false); err != nil {
 		t.Fatalf("setup (active): %v", err)
 	}
 	iss := core.OIDCIssuer()
@@ -580,7 +580,7 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	firstKid, firstNextKid := persisted.kid, persistedNext.kid
 
 	// Re-setup (active) must reuse the persisted keys, not generate new ones.
-	if err := core.setupOIDCIssuer(ctx, false); err != nil {
+	if err := core.setupOIDCIssuer(ctx, false, false); err != nil {
 		t.Fatalf("setup (reuse): %v", err)
 	}
 	reloaded, reloadedNext, _, _ := loadRS256(ctx, storage)
@@ -636,7 +636,7 @@ func enableIssuer(t *testing.T, core *Core) *OIDCIssuer {
 	ctx := context.Background()
 	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
 	require.NoError(t, saveIssuerConfig(ctx, storage, &issuerConfig{Enabled: true, IssuerURL: "https://iss.example"}))
-	require.NoError(t, core.setupOIDCIssuer(ctx, false))
+	require.NoError(t, core.setupOIDCIssuer(ctx, false, false))
 	iss := core.OIDCIssuer()
 	require.NotNil(t, iss)
 	require.True(t, iss.Ready())
@@ -684,7 +684,7 @@ func TestRotateOIDCKey(t *testing.T) {
 
 	oldActive, oldNext, _ := rs256Keys(iss)
 
-	require.NoError(t, core.rotateOIDCKey(ctx, iss, nil, 0, defaultRetiredKeyGrace))
+	require.NoError(t, core.rotateOIDCKey(ctx, localKeySource{}, iss, nil, 0, defaultRetiredKeyGrace))
 
 	newActive, newNext, retired := rs256Keys(iss)
 	assert.Equal(t, oldNext.kid, newActive.kid, "rotation must promote the next key to active")
@@ -726,7 +726,7 @@ func TestOIDCIssuer_DerivedCacheControl(t *testing.T) {
 	require.NoError(t, saveIssuerConfig(ctx, storage, &issuerConfig{
 		Enabled: true, IssuerURL: "https://iss.example", JWKSCacheTTL: "150s",
 	}))
-	require.NoError(t, core.setupOIDCIssuer(ctx, false))
+	require.NoError(t, core.setupOIDCIssuer(ctx, false, false))
 	assert.Equal(t, "public, max-age=150", core.OIDCIssuer().CacheControl())
 }
 
@@ -765,7 +765,7 @@ func TestRotateOIDCKey_NextPrePublished(t *testing.T) {
 	// The next key is in the JWKS before it ever signs.
 	assert.True(t, jwksKIDs(t, iss)[oldNext.kid], "the next key must be published before activation")
 
-	require.NoError(t, core.rotateOIDCKey(ctx, iss, nil, 0, defaultRetiredKeyGrace))
+	require.NoError(t, core.rotateOIDCKey(ctx, localKeySource{}, iss, nil, 0, defaultRetiredKeyGrace))
 
 	newActive, _, _ := rs256Keys(iss)
 	assert.Equal(t, oldNext.kid, newActive.kid, "the pre-published next key must become active")
@@ -787,7 +787,7 @@ func TestRotateOIDCKey_CancelDuringFloorWait(t *testing.T) {
 	// A large cache TTL forces the floor to be active: the next key was just created
 	// at enable, so it is younger than the TTL and the rotation must wait — and here
 	// the cancelled context aborts that wait.
-	err := core.rotateOIDCKey(ctx, iss, &spyPublisher{}, time.Minute, defaultRetiredKeyGrace)
+	err := core.rotateOIDCKey(ctx, localKeySource{}, iss, &spyPublisher{}, time.Minute, defaultRetiredKeyGrace)
 	require.Error(t, err)
 
 	after, afterNext, retired := rs256Keys(iss)
@@ -814,7 +814,7 @@ func TestRotateOIDCKey_PublishesOnceWithFullKeyset(t *testing.T) {
 	oldActive, oldNext, _ := rs256Keys(iss)
 
 	// cacheTTL=0 -> no floor wait; one publish after the flip.
-	require.NoError(t, core.rotateOIDCKey(context.Background(), iss, spy, 0, defaultRetiredKeyGrace))
+	require.NoError(t, core.rotateOIDCKey(context.Background(), localKeySource{}, iss, spy, 0, defaultRetiredKeyGrace))
 	newActive, newNext, _ := rs256Keys(iss)
 
 	require.Len(t, spy.jwks, 1, "rotation must publish exactly once")
@@ -842,16 +842,16 @@ func TestOIDCKeyRotation_Lifecycle(t *testing.T) {
 	iss := enableIssuer(t, core)
 
 	// Standby -> no loop.
-	core.startOIDCKeyRotation(true, time.Hour, time.Hour, iss, nil, time.Minute, time.Hour)
+	core.startOIDCKeyRotation(true, localKeySource{}, time.Hour, time.Hour, iss, nil, time.Minute, time.Hour)
 	assert.Nil(t, core.oidcRotationCancel, "standby must not start a rotation loop")
 
 	// period 0 -> no loop.
-	core.startOIDCKeyRotation(false, 0, 0, iss, nil, time.Minute, time.Hour)
+	core.startOIDCKeyRotation(false, localKeySource{}, 0, 0, iss, nil, time.Minute, time.Hour)
 	assert.Nil(t, core.oidcRotationCancel)
 
 	// Active + positive period -> loop started, with a far-future first tick so it
 	// never fires during the test.
-	core.startOIDCKeyRotation(false, time.Hour, time.Hour, iss, nil, time.Minute, time.Hour)
+	core.startOIDCKeyRotation(false, localKeySource{}, time.Hour, time.Hour, iss, nil, time.Minute, time.Hour)
 	require.NotNil(t, core.oidcRotationCancel, "active node must start the loop")
 	require.NotNil(t, core.oidcRotationDone)
 	done := core.oidcRotationDone
@@ -975,7 +975,7 @@ func TestRotateOIDCKey_PropagationFloor(t *testing.T) {
 		defer core.tokenStore.Close()
 		iss := enableIssuer(t, core) // next created ~now
 		start := time.Now()
-		require.NoError(t, core.rotateOIDCKey(context.Background(), iss, &spyPublisher{}, cacheTTL, defaultRetiredKeyGrace))
+		require.NoError(t, core.rotateOIDCKey(context.Background(), localKeySource{}, iss, &spyPublisher{}, cacheTTL, defaultRetiredKeyGrace))
 		assert.GreaterOrEqual(t, time.Since(start), 450*time.Millisecond, "a young next key must wait out most of the floor")
 	})
 
@@ -988,7 +988,7 @@ func TestRotateOIDCKey_PropagationFloor(t *testing.T) {
 		next.createdAt = time.Now().Add(-time.Hour)
 		iss.RestoreKeys(rs256Keyset(active, next, retired))
 		start := time.Now()
-		require.NoError(t, core.rotateOIDCKey(context.Background(), iss, &spyPublisher{}, cacheTTL, defaultRetiredKeyGrace))
+		require.NoError(t, core.rotateOIDCKey(context.Background(), localKeySource{}, iss, &spyPublisher{}, cacheTTL, defaultRetiredKeyGrace))
 		assert.Less(t, time.Since(start), 300*time.Millisecond, "an old-enough next key must not wait")
 	})
 }
@@ -1002,6 +1002,6 @@ func TestRotateOIDCKey_NoFloorWithoutPublisher(t *testing.T) {
 	start := time.Now()
 	// Large cache TTL, but publisher == nil -> no wait. The bound sits well below
 	// the TTL yet above a rotation's RSA-keygen cost so the check is not flaky.
-	require.NoError(t, core.rotateOIDCKey(context.Background(), iss, nil, time.Minute, defaultRetiredKeyGrace))
+	require.NoError(t, core.rotateOIDCKey(context.Background(), localKeySource{}, iss, nil, time.Minute, defaultRetiredKeyGrace))
 	assert.Less(t, time.Since(start), 300*time.Millisecond, "no publisher means no propagation floor")
 }
