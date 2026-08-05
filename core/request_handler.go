@@ -1392,8 +1392,8 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// issuer maintains a keyset per algorithm, so either is available with no
 		// cold start; validation restricts it to a supported alg at spec-create.
 		alg := credential.AssertionAlgorithm(spec.Config)
-		inputs.ResolveSubjectToken = func(context.Context) (string, error) {
-			return issuer.MintIdentityAssertion(te, AssertionClaims{
+		inputs.ResolveSubjectToken = func(ctx context.Context) (string, error) {
+			return issuer.MintIdentityAssertion(ctx, te, AssertionClaims{
 				Audience: audience,
 				TTL:      issuer.AssertionTTL(),
 				Alg:      alg,

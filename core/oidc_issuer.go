@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -8,6 +9,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	_ "crypto/sha512" // registers SHA-384/512 for crypto.Hash.New()
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -373,7 +375,7 @@ type AssertionClaims struct {
 // fails closed when the issuer has no active key for c.Alg or when c.Audience is
 // empty (an assertion without an audience is replayable at any upstream whose trust
 // policy does not pin `aud`).
-func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, c AssertionClaims) (string, error) {
+func (i *OIDCIssuer) MintIdentityAssertion(ctx context.Context, te *logical.TokenEntry, c AssertionClaims) (string, error) {
 	if te == nil {
 		return "", fmt.Errorf("oidc issuer: nil token entry")
 	}
@@ -426,7 +428,7 @@ func (i *OIDCIssuer) MintIdentityAssertion(te *logical.TokenEntry, c AssertionCl
 	}
 	header := map[string]string{"alg": active.alg, "typ": "JWT", "kid": active.kid}
 
-	return signJWT(active, header, claims)
+	return signJWT(ctx, active, header, claims)
 }
 
 // wardenSubject builds the globally-unique subject of a minted assertion:
@@ -617,10 +619,14 @@ func bigEndianExponent(e int) []byte {
 	return b
 }
 
-// signJWT signs header+claims as a compact JWS using the key's algorithm. Kept
+// signJWT signs header+claims as a compact JWS using the key's algorithm. It
+// signs through the crypto.Signer interface (sk.key), so the same path serves a
+// local in-process key and a remote signer that holds no key material and reaches
+// an external KMS to sign. A signer that honors context binds ctx to that call so
+// the mint request's deadline/cancellation reaches the KMS round-trip. Kept
 // self-contained (the driver package has an equivalent private signer; core does
 // not reach into it).
-func signJWT(sk *signingKey, header map[string]string, claims map[string]interface{}) (string, error) {
+func signJWT(ctx context.Context, sk *signingKey, header map[string]string, claims map[string]interface{}) (string, error) {
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
 		return "", fmt.Errorf("oidc issuer: marshal header: %w", err)
@@ -638,26 +644,49 @@ func signJWT(sk *signingKey, header map[string]string, claims map[string]interfa
 	h.Write([]byte(signingInput))
 	digest := h.Sum(nil)
 
-	var sig []byte
-	switch key := sk.key.(type) {
-	case *rsa.PrivateKey:
-		sig, err = rsa.SignPKCS1v15(rand.Reader, key, spec.hash, digest)
-		if err != nil {
-			return "", fmt.Errorf("oidc issuer: sign: %w", err)
-		}
-	case *ecdsa.PrivateKey:
-		r, s, serr := ecdsa.Sign(rand.Reader, key, digest)
-		if serr != nil {
-			return "", fmt.Errorf("oidc issuer: sign: %w", serr)
-		}
+	// Bind the request context if the signer supports it (the remote KMS signer
+	// does; a local *rsa/*ecdsa key does not and ignores ctx).
+	signer := sk.key
+	if b, ok := signer.(interface {
+		WithContext(context.Context) crypto.Signer
+	}); ok && ctx != nil {
+		signer = b.WithContext(ctx)
+	}
+	// crypto.Signer.Sign expects the already-hashed digest and returns, for RSA,
+	// PKCS#1 v1.5 bytes (opts is a plain crypto.Hash, not *rsa.PSSOptions) and, for
+	// ECDSA, an ASN.1/DER SEQUENCE{r,s}.
+	sig, err := signer.Sign(rand.Reader, digest, spec.hash)
+	if err != nil {
+		return "", fmt.Errorf("oidc issuer: sign: %w", err)
+	}
+	if spec.curve != nil {
 		// JWS ES* signature is the fixed-width concatenation R‖S (each the curve's
-		// coordinate width), NOT the ASN.1/DER form ecdsa.PrivateKey.Sign produces.
-		n := ecByteLen(key.Curve)
-		sig = append(ecCoord(r, n), ecCoord(s, n)...)
-	default:
-		return "", fmt.Errorf("oidc issuer: unsupported signing key type %T", sk.key)
+		// coordinate width), NOT the ASN.1/DER form crypto.Signer produces for ECDSA.
+		sig, err = ecSigASN1ToJWS(sig, spec.curve)
+		if err != nil {
+			return "", err
+		}
 	}
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// ecSigASN1ToJWS converts an ECDSA signature from the ASN.1/DER SEQUENCE{r,s} form
+// that crypto.Signer produces into the fixed-width R‖S concatenation JWS requires
+// (each scalar the curve's coordinate width, left-padded with zeros).
+func ecSigASN1ToJWS(der []byte, curve elliptic.Curve) ([]byte, error) {
+	var parsed struct{ R, S *big.Int }
+	rest, err := asn1.Unmarshal(der, &parsed)
+	if err != nil {
+		return nil, fmt.Errorf("oidc issuer: parse ECDSA signature: %w", err)
+	}
+	if len(rest) != 0 {
+		return nil, fmt.Errorf("oidc issuer: trailing bytes after ECDSA signature")
+	}
+	if parsed.R == nil || parsed.S == nil || parsed.R.Sign() <= 0 || parsed.S.Sign() <= 0 {
+		return nil, fmt.Errorf("oidc issuer: invalid ECDSA signature scalars")
+	}
+	n := ecByteLen(curve)
+	return append(ecCoord(parsed.R, n), ecCoord(parsed.S, n)...), nil
 }
 
 // randomJTI returns a random assertion identifier.
