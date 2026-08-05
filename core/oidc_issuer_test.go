@@ -127,7 +127,7 @@ func TestOIDCIssuer_Mint_VerifiesAgainstJWKS(t *testing.T) {
 	}
 	const audience = "https://sso.acme.internal/realms/acme"
 
-	token, err := iss.MintIdentityAssertion(te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgRS256})
+	token, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgRS256})
 	if err != nil {
 		t.Fatalf("MintIdentityAssertion: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestOIDCIssuer_Mint_WardenMetadataClaim(t *testing.T) {
 	expected := jwt.Expected{Issuer: issuerURL, Audiences: []string{audience}, SigningAlgorithms: []jwt.Alg{jwt.RS256}}
 
 	// With metadata: exactly the passed keys appear, nested under warden_metadata.
-	withMeta, err := iss.MintIdentityAssertion(te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Metadata: map[string]string{"team": "payments", "env": "prod"}, Alg: oidcAlgRS256})
+	withMeta, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Metadata: map[string]string{"team": "payments", "env": "prod"}, Alg: oidcAlgRS256})
 	require.NoError(t, err)
 	claims, err := validator.Validate(ctx, withMeta, expected)
 	require.NoError(t, err)
@@ -195,7 +195,7 @@ func TestOIDCIssuer_Mint_WardenMetadataClaim(t *testing.T) {
 
 	// Empty projection: no warden_metadata claim at all.
 	for _, empty := range []map[string]string{nil, {}} {
-		noMeta, err := iss.MintIdentityAssertion(te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Metadata: empty, Alg: oidcAlgRS256})
+		noMeta, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Metadata: empty, Alg: oidcAlgRS256})
 		require.NoError(t, err)
 		claims, err := validator.Validate(ctx, noMeta, expected)
 		require.NoError(t, err)
@@ -224,14 +224,14 @@ func TestOIDCIssuer_Mint_WardenResourceClaim(t *testing.T) {
 	// With a resource: the exact string appears as a top-level claim. A ':' in the
 	// value is carried verbatim (the claim is opaque, never parsed).
 	const resource = "aws-secretsmanager:prod/db"
-	withRes, err := iss.MintIdentityAssertion(te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgRS256, Resource: resource})
+	withRes, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgRS256, Resource: resource})
 	require.NoError(t, err)
 	claims, err := validator.Validate(ctx, withRes, expected)
 	require.NoError(t, err)
 	assert.Equal(t, resource, claims["warden_resource"])
 
 	// Empty resource: no warden_resource claim at all.
-	noRes, err := iss.MintIdentityAssertion(te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgRS256})
+	noRes, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgRS256})
 	require.NoError(t, err)
 	claims, err = validator.Validate(ctx, noRes, expected)
 	require.NoError(t, err)
@@ -253,7 +253,7 @@ func TestOIDCIssuer_ES256_MintAndJWKS(t *testing.T) {
 
 	te := &logical.TokenEntry{PrincipalID: "p", RoleName: "r", NamespaceID: "n", MountAccessor: "m"}
 	const audience = "sts.amazonaws.com"
-	token, err := iss.MintIdentityAssertion(te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgES256})
+	token, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgES256})
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -362,7 +362,7 @@ func TestOIDCIssuer_AlgSpec_Extensible(t *testing.T) {
 			jwks := serveJWKS(t, iss)
 
 			te := &logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
-			tok, err := iss.MintIdentityAssertion(te, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: tc.alg})
+			tok, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: tc.alg})
 			require.NoError(t, err)
 
 			ctx := context.Background()
@@ -400,18 +400,18 @@ func TestOIDCIssuer_FailClosed(t *testing.T) {
 	if notReady.Ready() {
 		t.Fatal("issuer with no key must not be ready")
 	}
-	if _, err := notReady.MintIdentityAssertion(te, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgRS256}); err == nil {
+	if _, err := notReady.MintIdentityAssertion(context.Background(), te, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgRS256}); err == nil {
 		t.Error("mint must fail closed when no active key is installed")
 	}
 
 	ready := newReadyIssuer(t, "https://iss.example")
-	if _, err := ready.MintIdentityAssertion(te, AssertionClaims{Audience: "", TTL: time.Minute, Alg: oidcAlgRS256}); err == nil {
+	if _, err := ready.MintIdentityAssertion(context.Background(), te, AssertionClaims{Audience: "", TTL: time.Minute, Alg: oidcAlgRS256}); err == nil {
 		t.Error("mint must fail closed on empty audience")
 	}
-	if _, err := ready.MintIdentityAssertion(nil, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgRS256}); err == nil {
+	if _, err := ready.MintIdentityAssertion(context.Background(), nil, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgRS256}); err == nil {
 		t.Error("mint must fail closed on nil token entry")
 	}
-	if _, err := ready.MintIdentityAssertion(&logical.TokenEntry{}, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgRS256}); err == nil {
+	if _, err := ready.MintIdentityAssertion(context.Background(), &logical.TokenEntry{}, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgRS256}); err == nil {
 		t.Error("mint must fail closed when the principal is empty")
 	}
 
@@ -427,7 +427,7 @@ func TestOIDCIssuer_FailClosed(t *testing.T) {
 	if nextOnly.Ready() {
 		t.Error("an issuer with only a next key for an alg must not be ready")
 	}
-	if _, err := nextOnly.MintIdentityAssertion(te, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgRS256}); err == nil {
+	if _, err := nextOnly.MintIdentityAssertion(context.Background(), te, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgRS256}); err == nil {
 		t.Error("mint must fail closed when the alg has only a next key")
 	}
 }
@@ -493,7 +493,7 @@ func TestOIDCIssuer_KeyStorage_RoundTrip(t *testing.T) {
 	iss := NewOIDCIssuer("https://iss.example")
 	iss.RestoreKeys(rs256Keyset(loaded, loadedNext, nil))
 	jwks := serveJWKS(t, iss)
-	tok, err := iss.MintIdentityAssertion(&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgRS256})
+	tok, err := iss.MintIdentityAssertion(context.Background(), &logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgRS256})
 	if err != nil {
 		t.Fatalf("mint with reloaded key: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestCore_setupOIDCIssuer(t *testing.T) {
 	if iss == nil || !iss.Ready() {
 		t.Fatal("active node must produce a ready issuer")
 	}
-	tok, err := iss.MintIdentityAssertion(&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgRS256})
+	tok, err := iss.MintIdentityAssertion(context.Background(), &logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}, AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgRS256})
 	if err != nil || tok == "" {
 		t.Fatalf("ready issuer must mint: %v", err)
 	}
@@ -874,7 +874,7 @@ func TestOIDCIssuer_Rotation(t *testing.T) {
 	te := &logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
 
 	// Sign with key 1 (active), then rotate to promote the next key (key 2).
-	tok1, err := iss.MintIdentityAssertion(te, AssertionClaims{Audience: "aud", TTL: 5 * time.Minute, Alg: oidcAlgRS256})
+	tok1, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{Audience: "aud", TTL: 5 * time.Minute, Alg: oidcAlgRS256})
 	if err != nil {
 		t.Fatalf("mint 1: %v", err)
 	}
@@ -905,7 +905,7 @@ func TestOIDCIssuer_Rotation(t *testing.T) {
 	}
 
 	// A new assertion signed by the active key verifies too.
-	tok2, err := iss.MintIdentityAssertion(te, AssertionClaims{Audience: "aud", TTL: 5 * time.Minute, Alg: oidcAlgRS256})
+	tok2, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{Audience: "aud", TTL: 5 * time.Minute, Alg: oidcAlgRS256})
 	if err != nil {
 		t.Fatalf("mint 2: %v", err)
 	}
