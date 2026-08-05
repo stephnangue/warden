@@ -602,7 +602,7 @@ func TestAWSDriver_MintGuards(t *testing.T) {
 	for _, mm := range []string{"secrets_manager", "sts_assume_role"} {
 		_, _, _, _, err := wifDrv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": mm}})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "requires subject_token_source=warden_identity")
+		assert.Contains(t, err.Error(), "requires subject_token_source on the spec (warden_identity or auth_token)")
 	}
 }
 
@@ -707,6 +707,65 @@ func TestAWSDriver_WebIdentity_HappyPath(t *testing.T) {
 	assert.Equal(t, "123456789012", metadata["account_id"])
 	assert.Equal(t, "sts:ASIAEXAMPLE", leaseID)
 	assert.Greater(t, ttl, time.Duration(0))
+}
+
+// TestAWSDriver_WebIdentity_ForwardedSubject_HappyPath drives the auth_token federation
+// topology: the subject is the caller's origin-verified inbound JWT that Warden forwards
+// untouched (not a Warden-minted assertion), so ResolveSubjectToken and CacheIdentity are
+// unset. The driver treats any verified subject the same, so this must reach STS and
+// forward the token verbatim. It guards the supported contract against a future change
+// that re-gates federation to Warden-minted subjects only.
+func TestAWSDriver_WebIdentity_ForwardedSubject_HappyPath(t *testing.T) {
+	var gotToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotToken = r.Form.Get("WebIdentityToken")
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = w.Write([]byte(`<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleWithWebIdentityResult>
+    <Credentials>
+      <AccessKeyId>ASIAEXAMPLE</AccessKeyId>
+      <SecretAccessKey>secretexample</SecretAccessKey>
+      <SessionToken>tokenexample</SessionToken>
+      <Expiration>2035-01-01T00:00:00Z</Expiration>
+    </Credentials>
+    <AssumedRoleUser>
+      <Arn>arn:aws:sts::123456789012:assumed-role/App/warden-wid</Arn>
+      <AssumedRoleId>AROAEXAMPLE:warden-wid</AssumedRoleId>
+    </AssumedRoleUser>
+  </AssumeRoleWithWebIdentityResult>
+</AssumeRoleWithWebIdentityResponse>`))
+	}))
+	defer srv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv := &AWSDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}},
+		logger:     log,
+		region:     "us-east-1",
+		anonSTSClient: sts.New(sts.Options{
+			Region:       "us-east-1",
+			BaseEndpoint: aws.String(srv.URL),
+			Credentials:  aws.AnonymousCredentials{},
+		}),
+	}
+	spec := &credential.CredSpec{Name: "wid", Config: map[string]string{
+		"mint_method": "sts_assume_role",
+		"role_arn":    "arn:aws:iam::123456789012:role/App",
+		"ttl":         "15m",
+	}}
+	// A forwarded inbound JWT: verified origin, but no ResolveSubjectToken and no
+	// CacheIdentity (the token is eager and stable, so it keys the cache itself).
+	inputs := &credential.ExchangeInputs{
+		SubjectToken:       "eyJ.inbound.idp.jwt",
+		SubjectTokenType:   credential.TokenTypeJWT,
+		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+	}
+
+	rawData, _, _, _, err := drv.MintCredentialWithExchange(context.TODO(), spec, inputs)
+	require.NoError(t, err)
+	assert.Equal(t, "eyJ.inbound.idp.jwt", gotToken, "the forwarded inbound JWT must be sent as WebIdentityToken verbatim")
+	assert.Equal(t, "ASIAEXAMPLE", rawData["access_key_id"])
 }
 
 // TestAWSDriver_SecretsManager_WebIdentity_HappyPath drives the keyless two-step:
