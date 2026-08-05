@@ -42,38 +42,8 @@ services:
       -dev-root-token-id="e2e-vault-root-token"
       -dev-listen-address=0.0.0.0:8200
 
-  # Ory Hydra — OAuth2/OIDC server for transparent mode JWT issuance
-  postgres-hydra:
-    image: postgres:15-alpine
-    container_name: e2e-postgres-hydra
-    ports:
-      - "5434:5432"
-    environment:
-      POSTGRES_USER: hydra
-      POSTGRES_PASSWORD: hydrapassword
-      POSTGRES_DB: hydra
-    volumes:
-      - e2e-postgres-hydra-data:/var/lib/postgresql/data
-    networks:
-      - e2e-network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hydra"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  hydra-migrate:
-    image: oryd/hydra:v2.2
-    container_name: e2e-hydra-migrate
-    environment:
-      DSN: postgres://hydra:hydrapassword@postgres-hydra:5432/hydra?sslmode=disable
-    networks:
-      - e2e-network
-    depends_on:
-      postgres-hydra:
-        condition: service_healthy
-    command: migrate sql -e --yes
-
+  # Ory Hydra — OAuth2/OIDC server for transparent mode JWT issuance.
+  # Uses an in-memory SQLite store (DSN=memory)
   hydra:
     image: oryd/hydra:v2.2
     container_name: e2e-hydra
@@ -81,7 +51,7 @@ services:
       - "4444:4444"
       - "4445:4445"
     environment:
-      DSN: postgres://hydra:hydrapassword@postgres-hydra:5432/hydra?sslmode=disable
+      DSN: memory
       URLS_SELF_ISSUER: http://localhost:4444
       URLS_CONSENT: http://localhost:3000/consent
       URLS_LOGIN: http://localhost:3000/login
@@ -98,9 +68,6 @@ services:
       LOG_LEVEL: warn
     networks:
       - e2e-network
-    depends_on:
-      hydra-migrate:
-        condition: service_completed_successfully
     restart: unless-stopped
     command: serve all --dev
 
@@ -133,4 +100,3 @@ networks:
 
 volumes:
   e2e-postgres-warden-data:
-  e2e-postgres-hydra-data:
