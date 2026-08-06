@@ -85,16 +85,30 @@ var algParamsByAlg = map[string]algParams{
 // closed), used for retired remote keys after a cutover or once the stanza is
 // removed.
 type Signer struct {
-	backend Backend
-	ref     KeyRef
-	pub     crypto.PublicKey
-	timeout time.Duration
-	ctx     context.Context // optional request-scoped context bound via WithContext
+	backend     Backend
+	backendType string // persisted discriminator, retained even when backend is nil
+	ref         KeyRef
+	pub         crypto.PublicKey
+	timeout     time.Duration
+	ctx         context.Context // optional request-scoped context bound via WithContext
 }
 
-// NewSigner builds a Signer. backend may be nil for a verification-only signer.
+// NewSigner builds a signing-capable Signer bound to a live backend.
 func NewSigner(backend Backend, ref KeyRef, pub crypto.PublicKey, timeout time.Duration) *Signer {
-	return &Signer{backend: backend, ref: ref, pub: pub, timeout: timeout}
+	bt := ""
+	if backend != nil {
+		bt = backend.Type()
+	}
+	return &Signer{backend: backend, backendType: bt, ref: ref, pub: pub, timeout: timeout}
+}
+
+// NewVerifyingSigner builds a verification-only Signer (no live backend): Public
+// works, Sign fails closed. Used to reconstruct a retired remote key after a
+// cutover, or when the signer stanza has been removed — it keeps the key in the
+// JWKS so its in-flight assertions still verify. backendType is retained so the
+// key re-serializes as remote.
+func NewVerifyingSigner(backendType string, ref KeyRef, pub crypto.PublicKey) *Signer {
+	return &Signer{backendType: backendType, ref: ref, pub: pub}
 }
 
 // Public returns the cached public key (never a KMS round-trip).
@@ -102,6 +116,10 @@ func (s *Signer) Public() crypto.PublicKey { return s.pub }
 
 // Ref returns the backend key reference this signer is bound to.
 func (s *Signer) Ref() KeyRef { return s.ref }
+
+// BackendType returns the backend discriminator ("transit"), retained even for a
+// verification-only signer so it round-trips through storage as a remote key.
+func (s *Signer) BackendType() string { return s.backendType }
 
 // CanSign reports whether this signer has a live backend (vs verification-only).
 func (s *Signer) CanSign() bool { return s.backend != nil }

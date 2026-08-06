@@ -303,7 +303,7 @@ func TestDecodeTransitSignature(t *testing.T) {
 func TestSigner_NilBackend_And_Context(t *testing.T) {
 	// Verification-only signer (nil backend) fails closed on Sign but exposes Public.
 	pub := genKey(t, "rsa-2048").Public()
-	s := NewSigner(nil, KeyRef{KeyName: "k", Version: 1, Alg: "RS256"}, pub, time.Second)
+	s := NewVerifyingSigner("transit", KeyRef{KeyName: "k", Version: 1, Alg: "RS256"}, pub)
 	assert.False(t, s.CanSign())
 	assert.Equal(t, pub, s.Public())
 	_, err := s.Sign(rand.Reader, []byte("d"), crypto.SHA256)
@@ -379,11 +379,11 @@ func TestTransit_Sign_Rejects(t *testing.T) {
 }
 
 func TestParsePublicKeyPEM_Rejects(t *testing.T) {
-	_, err := parsePublicKeyPEM("")
+	_, err := ParsePublicKeyPEM("")
 	require.Error(t, err)
-	_, err = parsePublicKeyPEM("not pem at all")
+	_, err = ParsePublicKeyPEM("not pem at all")
 	require.Error(t, err)
-	_, err = parsePublicKeyPEM("-----BEGIN PUBLIC KEY-----\nZm9v\n-----END PUBLIC KEY-----\n")
+	_, err = ParsePublicKeyPEM("-----BEGIN PUBLIC KEY-----\nZm9v\n-----END PUBLIC KEY-----\n")
 	require.Error(t, err, "valid PEM framing but garbage DER must fail")
 }
 

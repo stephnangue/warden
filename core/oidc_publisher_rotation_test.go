@@ -192,7 +192,7 @@ func TestSetupOIDCIssuer_PublisherRotationLifecycle(t *testing.T) {
 		IssuerURL: "https://iss.example",
 		Publisher: publisherConfig{Type: "gcs", Bucket: "b", CredentialsJSON: saKey, Endpoint: stg.URL, RotationPeriod: "720h"},
 	}))
-	require.NoError(t, core.setupOIDCIssuer(ctx, false))
+	require.NoError(t, core.setupOIDCIssuer(ctx, false, false))
 
 	core.oidcMu.RLock()
 	running := core.oidcPubRotationCancel != nil
@@ -210,7 +210,7 @@ func TestSetupOIDCIssuer_PublisherRotationLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	cfg.Publisher.RotationPeriod = ""
 	require.NoError(t, saveIssuerConfig(ctx, storage, cfg))
-	require.NoError(t, core.setupOIDCIssuer(ctx, false))
+	require.NoError(t, core.setupOIDCIssuer(ctx, false, false))
 
 	core.oidcMu.RLock()
 	running2 := core.oidcPubRotationCancel != nil

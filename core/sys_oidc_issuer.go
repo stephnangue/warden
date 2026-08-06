@@ -293,7 +293,7 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 	// Activate the change: reload the issuer from the just-written config. On the
 	// active node this generates and persists a signing key on first enable, and
 	// builds the publisher (a misconfigured publisher fails here).
-	if err := b.core.setupOIDCIssuer(ctx, b.core.Standby()); err != nil {
+	if err := b.core.setupOIDCIssuer(ctx, b.core.Standby(), true); err != nil {
 		return logical.ErrorResponse(err), nil
 	}
 	// Surface a publish failure at config time (unseal only warns).
