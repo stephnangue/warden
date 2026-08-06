@@ -25,6 +25,7 @@ type Config struct {
 	Storage   *StorageBlock   `hcl:"storage,block"`
 	Seals     []KMS           `hcl:"seal,block"`
 	Audits    []AuditBlock    `hcl:"audit,block"`
+	Signer    *SignerBlock    `hcl:"signer,block"`
 
 	// APIAddr is the address advertised to clients for API requests.
 	// In HA mode, standby nodes redirect clients to this address on the active node.
@@ -68,6 +69,32 @@ type Config struct {
 	ClusterListenerReadTimeout  string `hcl:"cluster_listener_read_timeout,optional"`
 	ClusterListenerWriteTimeout string `hcl:"cluster_listener_write_timeout,optional"`
 	ForwardingTimeout           string `hcl:"forwarding_timeout,optional"`
+}
+
+// SignerBlock configures an external signer for the OIDC issuer's signing keys,
+// so the private key is held in a KMS and never enters Warden (remote signing).
+// The type label selects the backend; only "transit" is supported today. Omit the
+// block entirely for the default in-process keys. This is node-local
+// infrastructure (like the seal stanza); the issuer's runtime config
+// (issuer_url, TTLs, rotation period) is managed separately via the API.
+type SignerBlock struct {
+	Type string `hcl:"type,label"`
+
+	// config for the transit signer
+	Address        string `hcl:"address,optional"`
+	Token          string `hcl:"token,optional"` // optional; falls back to VAULT_TOKEN
+	MountPath      string `hcl:"mount_path,optional"`
+	KeyNamePrefix  string `hcl:"key_name_prefix,optional"` // default "warden-oidc" (applied by core)
+	Namespace      string `hcl:"namespace,optional"`
+	RequestTimeout string `hcl:"request_timeout,optional"` // Go duration; per-KMS-call timeout
+	DisableRenewal string `hcl:"disable_renewal,optional"`
+
+	TlsCaCert     string `hcl:"tls_ca_cert,optional"`
+	TlsCaPath     string `hcl:"tls_ca_path,optional"`
+	TlsClientCert string `hcl:"tls_client_cert,optional"`
+	TlsClientKey  string `hcl:"tls_client_key,optional"`
+	TlsServerName string `hcl:"tls_server_name,optional"`
+	TlsSkipVerify string `hcl:"tls_skip_verify,optional"`
 }
 
 type KMS struct {
@@ -710,6 +737,33 @@ func validateConfig(config *Config) error {
 			return fmt.Errorf("audit[%d]: duplicate (type=%q, path=%q) already declared at audit[%d]", i, a.Type, a.Path, prev)
 		}
 		auditSeen[key] = i
+	}
+
+	// Validate the OIDC issuer external signer stanza if present. Only transit is
+	// supported today; the rest are shape checks so a misconfiguration fails at
+	// load time rather than at first mint.
+	if s := config.Signer; s != nil {
+		if s.Type != "transit" {
+			return fmt.Errorf("signer: unsupported type %q; only \"transit\" is supported", s.Type)
+		}
+		if s.MountPath == "" {
+			return fmt.Errorf("signer %q: mount_path is required", s.Type)
+		}
+		if s.Address == "" && os.Getenv("VAULT_ADDR") == "" {
+			return fmt.Errorf("signer %q: address is required (or set VAULT_ADDR)", s.Type)
+		}
+		if strings.Contains(s.KeyNamePrefix, "/") {
+			return fmt.Errorf("signer %q: key_name_prefix %q must not contain '/'", s.Type, s.KeyNamePrefix)
+		}
+		if s.RequestTimeout != "" {
+			d, err := time.ParseDuration(s.RequestTimeout)
+			if err != nil {
+				return fmt.Errorf("signer %q: invalid request_timeout %q: %w", s.Type, s.RequestTimeout, err)
+			}
+			if d <= 0 {
+				return fmt.Errorf("signer %q: request_timeout must be positive, got %s", s.Type, d)
+			}
+		}
 	}
 
 	// Validate cluster_addr format if set

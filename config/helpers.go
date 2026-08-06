@@ -6,7 +6,7 @@ func (c *Config) GetStorage() *StorageBlock {
 
 // mergeConfig copies non-zero fields from src into dst, so a sequence of
 // loaded configs collapses to a single merged *Config with "later wins"
-// semantics. Slice and pointer block fields (Listeners, Storage, Seals)
+// semantics. Slice and pointer block fields (Listeners, Storage, Seals, Signer)
 // are replaced wholesale when src defines them — there is no per-field
 // merge inside a block, which matches how operators typically split
 // secret vs non-secret HCL (one file owns each block entirely).
@@ -40,6 +40,9 @@ func mergeConfig(dst, src *Config) {
 	}
 	if len(src.Audits) > 0 {
 		dst.Audits = src.Audits
+	}
+	if src.Signer != nil {
+		dst.Signer = src.Signer
 	}
 	if src.APIAddr != "" {
 		dst.APIAddr = src.APIAddr

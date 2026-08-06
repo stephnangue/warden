@@ -115,10 +115,12 @@ func init() {
 	storageSchema, _ := gohcl.ImpliedBodySchema(StorageBlock{})
 	sealSchema, _ := gohcl.ImpliedBodySchema(KMS{})
 	auditSchema, _ := gohcl.ImpliedBodySchema(AuditBlock{})
+	signerSchema, _ := gohcl.ImpliedBodySchema(SignerBlock{})
 	nestedSchemas = map[string]*hcl.BodySchema{
 		"listener": listenerSchema,
 		"storage":  storageSchema,
 		"seal":     sealSchema,
 		"audit":    auditSchema,
+		"signer":   signerSchema,
 	}
 }
