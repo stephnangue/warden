@@ -128,3 +128,26 @@ listener "tcp" {
 
 # Max time for a forwarded request from standby to active node.
 # forwarding_timeout = "1m"
+
+# --- OIDC issuer external signer (optional) ---------------------------------
+# Hold the OIDC issuer signing key in an external KMS so the private key never
+# leaves the KMS (remote signing). Omit this block entirely to use the default
+# in-process keys. Only the "transit" backend (OpenBao/Vault) is supported today.
+# Every node must carry the SAME signer block, since any node may become active.
+#
+# The transit token needs only these capabilities (least privilege):
+#   path "transit/keys/warden-oidc-*"        { capabilities = ["create","read","update"] }
+#   path "transit/keys/warden-oidc-*/rotate" { capabilities = ["update"] }
+#   path "transit/sign/warden-oidc-*"        { capabilities = ["update"] }
+# The signing keys are created non-exportable; Warden refuses an exportable key.
+# Never raise the transit key's min_encryption_version above its active version.
+#
+# signer "transit" {
+#   address         = "https://openbao.example.com:8200"
+#   token           = "{{ env "WARDEN_OIDC_KMS_TOKEN" }}"  # optional; falls back to VAULT_TOKEN
+#   mount_path      = "transit"
+#   key_name_prefix = "warden-oidc"        # keys: warden-oidc-rs256, warden-oidc-es256
+#   namespace       = ""                   # optional
+#   request_timeout = "10s"                # per-signing-call timeout
+#   tls_ca_cert     = "/etc/warden/tls/kms-ca.pem"
+# }

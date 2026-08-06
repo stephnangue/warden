@@ -36,3 +36,16 @@ audit "file" "default" {
     file_path = "../.logs/node3-audit.log"
   }
 }
+
+# OIDC issuer signing keys held in Vault transit (remote signing). Inert until the
+# issuer is enabled via the API; then the private key is created in transit and
+# never leaves it. The e2e vault is a throwaway dev server, so the node uses its
+# root token directly (production uses a least-privilege token — see the
+# signer block in deploy/config/warden.hcl).
+signer "transit" {
+  address         = "http://127.0.0.1:8200"
+  token           = "e2e-vault-root-token"
+  mount_path      = "transit"
+  key_name_prefix = "warden-oidc"
+  request_timeout = "10s"
+}

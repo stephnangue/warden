@@ -103,6 +103,16 @@ for attempt in $(seq 1 30); do
 done
 echo "Vault is ready."
 
+# Enable the transit secrets engine for the OIDC issuer's external signer (remote
+# signing). The issuer's private signing key is created here and never leaves it.
+# The nodes' signer stanza authenticates with the dev root token (this is a
+# throwaway e2e vault); production uses a least-privilege token (see the signer
+# block in deploy/config/warden.hcl).
+echo "Enabling Vault transit for the OIDC issuer signer..."
+curl -s -X POST "$VAULT_ADDR/v1/sys/mounts/transit" \
+  -H "X-Vault-Token: $VAULT_TOKEN" -d '{"type":"transit"}' >/dev/null 2>&1 || true
+echo "  transit enabled."
+
 echo "Waiting for Hydra to be ready..."
 for attempt in $(seq 1 60); do
   if curl -s "$HYDRA_ADMIN/health/ready" >/dev/null 2>&1; then
