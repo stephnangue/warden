@@ -1331,7 +1331,34 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		if issuer == nil || !issuer.Ready() {
 			return nil, fmt.Errorf("spec %q requires subject_token_source=warden_identity but the OIDC issuer is not enabled/ready", specName)
 		}
+
+		// Load the source at most once, and only when a derivation actually needs it
+		// (an unset audience or an unset assertion_resource). A spec that sets the
+		// audience explicitly and opts out of / pins the resource never loads the
+		// source, preserving the prior behaviour and error surface for those specs.
+		var srcCached *credential.CredSource
+		loadSource := func() (*credential.CredSource, error) {
+			if srcCached == nil {
+				s, err := c.credConfigStore.GetSource(ctx, spec.Source)
+				if err != nil {
+					return nil, fmt.Errorf("spec %q: failed to load source %q: %w", specName, spec.Source, err)
+				}
+				srcCached = s
+			}
+			return srcCached, nil
+		}
+
+		// The assertion audience: an explicit spec value wins; otherwise derive it
+		// from the source (e.g. a GCP federation source derives it from its
+		// workload_identity_provider). Fails closed if neither yields one.
 		audience := spec.Config[credential.ConfigAssertionAudience]
+		if audience == "" {
+			src, srcErr := loadSource()
+			if srcErr != nil {
+				return nil, srcErr
+			}
+			audience, _ = drivers.DeriveAssertionAudience(src.Type, src.Config, spec.Config)
+		}
 		if audience == "" {
 			return nil, fmt.Errorf("spec %q with subject_token_source=warden_identity requires %s", specName, credential.ConfigAssertionAudience)
 		}
@@ -1345,9 +1372,9 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		case credential.AssertionResourceNone:
 			// opt-out: emit no warden_resource claim
 		case "":
-			src, srcErr := c.credConfigStore.GetSource(ctx, spec.Source)
+			src, srcErr := loadSource()
 			if srcErr != nil {
-				return nil, fmt.Errorf("spec %q: failed to load source %q: %w", specName, spec.Source, srcErr)
+				return nil, srcErr
 			}
 			resource, _ = drivers.DeriveAssertionResource(src.Type, src.Config, spec.Config)
 		default:

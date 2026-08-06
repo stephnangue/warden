@@ -9,6 +9,7 @@ import (
 	ristretto "github.com/dgraph-io/ristretto/v2"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -877,6 +878,19 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 	// exchange is enforced at mint time (fail closed), not here.
 	if err := credential.ValidateExchangeSpecConfig(spec.Config); err != nil {
 		return logical.ErrBadRequestf("invalid token-exchange config: %s", err.Error())
+	}
+
+	// A warden_identity assertion must declare its audience. The spec may omit it
+	// only when the source can derive one (e.g. a GCP federation source derives it
+	// from its workload_identity_provider); otherwise it is required. This check is
+	// source-aware, so it lives here rather than in the source-agnostic structural
+	// validator above. Re-checked at mint time (defence in depth).
+	if spec.Config[credential.ConfigSubjectTokenSource] == credential.SourceWardenIdentity &&
+		spec.Config[credential.ConfigAssertionAudience] == "" {
+		if _, ok := drivers.DeriveAssertionAudience(source.Type, source.Config, spec.Config); !ok {
+			return logical.ErrBadRequestf("field '%s': is required when '%s' is '%s'",
+				credential.ConfigAssertionAudience, credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity)
+		}
 	}
 
 	// Test credential minting if driver registry is available.

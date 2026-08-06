@@ -284,9 +284,13 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "warden_identity without assertion_audience",
+			// The audience-required rule is now source-aware and enforced one layer
+			// up (in the core config store), since some source types derive the
+			// audience from their own config. This structural validator no longer
+			// rejects a missing audience on its own.
+			name:    "warden_identity without assertion_audience (structural: allowed)",
 			config:  map[string]string{ConfigSubjectTokenSource: SourceWardenIdentity},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name:   "warden_identity with assertion_audience",
