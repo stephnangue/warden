@@ -276,6 +276,10 @@ func (f *AzureDriverFactory) ValidateConfig(config map[string]string) error {
 		credential.BoolField("tls_skip_verify").
 			Describe("Skip TLS certificate verification (development only)").
 			Example("false"),
+
+		credential.StringField("audience").
+			Describe("Audience minted into a warden_identity assertion for this source (oidc_federation only; default api://AzureADTokenExchange)").
+			Example("api://AzureADTokenExchange"),
 	); err != nil {
 		return err
 	}
@@ -288,6 +292,11 @@ func (f *AzureDriverFactory) ValidateConfig(config map[string]string) error {
 			credential.GetString(config, "client_secret", "") == "" ||
 			credential.GetString(config, "secret_id", "") == "" {
 			return fmt.Errorf("tenant_id, client_id, client_secret, and secret_id are required for auth_method=static")
+		}
+		// audience seeds only the warden_identity federation assertion; on a static
+		// source it would be silently ignored, so reject it rather than mislead.
+		if credential.GetString(config, "audience", "") != "" {
+			return fmt.Errorf("audience is only valid for auth_method=oidc_federation")
 		}
 	case azureAuthMethodOIDCFederation:
 		// A federation source holds no static secret. Reject leftover static config
@@ -401,6 +410,21 @@ func (d *AzureDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	default:
 		return nil, nil, 0, "", fmt.Errorf("azure: mint_method %q is not supported over auth_method=oidc_federation (supported: bearer_token)", mintMethod)
 	}
+}
+
+// defaultAzureFederationAudience is the standard `aud` an Entra federated identity
+// credential expects on a client_assertion presented for workload identity
+// federation.
+const defaultAzureFederationAudience = "api://AzureADTokenExchange"
+
+// azureAssertionAudience derives the warden_identity assertion audience for an Azure
+// federation source: the source's explicit `audience`, else the conventional
+// default. Only a keyless (oidc_federation) source federates.
+func azureAssertionAudience(sourceCfg map[string]string) (string, bool) {
+	if credential.GetString(sourceCfg, "auth_method", azureAuthMethodStatic) != azureAuthMethodOIDCFederation {
+		return "", false
+	}
+	return credential.GetString(sourceCfg, "audience", defaultAzureFederationAudience), true
 }
 
 // azureAssertionResource reports the canonical downstream resource an Azure

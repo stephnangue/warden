@@ -749,3 +749,55 @@ func TestAzureDriver_MintBearerToken_Static_HappyPath(t *testing.T) {
 	assert.Equal(t, "client_credentials", gotGrant)
 	assert.Equal(t, "eyJ.static.token", rawData["access_token"])
 }
+
+func TestAzureAssertionAudience(t *testing.T) {
+	t.Run("federation default", func(t *testing.T) {
+		aud, ok := azureAssertionAudience(map[string]string{"auth_method": "oidc_federation"})
+		require.True(t, ok)
+		assert.Equal(t, "api://AzureADTokenExchange", aud)
+	})
+
+	t.Run("federation explicit override", func(t *testing.T) {
+		aud, ok := azureAssertionAudience(map[string]string{"auth_method": "oidc_federation", "audience": "api://custom"})
+		require.True(t, ok)
+		assert.Equal(t, "api://custom", aud)
+	})
+
+	t.Run("static source derives nothing", func(t *testing.T) {
+		_, ok := azureAssertionAudience(map[string]string{"auth_method": "static"})
+		assert.False(t, ok)
+	})
+
+	t.Run("routed via DeriveAssertionAudience", func(t *testing.T) {
+		aud, ok := DeriveAssertionAudience(credential.SourceTypeAzure, map[string]string{"auth_method": "oidc_federation"}, map[string]string{})
+		require.True(t, ok)
+		assert.Equal(t, "api://AzureADTokenExchange", aud)
+	})
+}
+
+func TestAzureValidateConfig_AudienceOnlyFederation(t *testing.T) {
+	f := &AzureDriverFactory{}
+
+	t.Run("audience rejected on static", func(t *testing.T) {
+		err := f.ValidateConfig(map[string]string{
+			"auth_method":   "static",
+			"tenant_id":     "00000000-0000-0000-0000-000000000000",
+			"client_id":     "cid",
+			"client_secret": "sec",
+			"secret_id":     "sid",
+			"audience":      "api://AzureADTokenExchange",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "only valid for auth_method=oidc_federation")
+	})
+
+	t.Run("audience allowed on federation", func(t *testing.T) {
+		err := f.ValidateConfig(map[string]string{
+			"auth_method": "oidc_federation",
+			"tenant_id":   "00000000-0000-0000-0000-000000000000",
+			"client_id":   "cid",
+			"audience":    "api://custom",
+		})
+		require.NoError(t, err)
+	})
+}

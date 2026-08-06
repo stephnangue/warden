@@ -51,6 +51,10 @@ func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg map[string]st
 	switch sourceType {
 	case credential.SourceTypeGCP:
 		return gcpAssertionAudience(sourceCfg)
+	case credential.SourceTypeAWS:
+		return awsAssertionAudience(sourceCfg)
+	case credential.SourceTypeAzure:
+		return azureAssertionAudience(sourceCfg)
 	default:
 		return "", false
 	}
