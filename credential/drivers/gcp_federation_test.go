@@ -89,7 +89,7 @@ func TestGCPDriverFactory_ValidateConfig_Federation(t *testing.T) {
 func TestGCPDriverFactory_InferCredentialType_Federation(t *testing.T) {
 	f := &GCPDriverFactory{}
 
-	for _, mm := range []string{"", "access_token", "impersonated_access_token", "federated_access_token"} {
+	for _, mm := range []string{"", "access_token", "impersonated_access_token"} {
 		got, err := f.InferCredentialType(map[string]string{"mint_method": mm})
 		require.NoError(t, err, "mint_method=%q", mm)
 		assert.Equal(t, credential.TypeGCPAccessToken, got, "mint_method=%q", mm)
@@ -128,7 +128,7 @@ func TestGCPDriver_MintCredentialWithExchange_RejectsStaticSource(t *testing.T) 
 		Config: map[string]string{"auth_method": "static"},
 	}}
 	inputs := &credential.ExchangeInputs{SubjectToken: "tok", SubjectTokenOrigin: credential.ExchangeOriginVerified}
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "federated_access_token"}}
+	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "access_token"}}
 	_, _, _, _, err := d.MintCredentialWithExchange(context.TODO(), spec, inputs)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "auth_method=oidc_federation")
@@ -137,7 +137,7 @@ func TestGCPDriver_MintCredentialWithExchange_RejectsStaticSource(t *testing.T) 
 func TestGCPDriver_MintCredentialWithExchange_RejectsUnverified(t *testing.T) {
 	d := newFederationDriver(testWIFProvider, "", "")
 	inputs := &credential.ExchangeInputs{SubjectToken: "tok", SubjectTokenOrigin: credential.ExchangeOriginUnverified}
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "federated_access_token"}}
+	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "access_token"}}
 	_, _, _, _, err := d.MintCredentialWithExchange(context.TODO(), spec, inputs)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "verified subject")
@@ -316,13 +316,29 @@ func TestGCPDriver_MintCredentialWithExchange_Federated_TTLCap(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:   "s",
 		MaxTTL: 15 * time.Minute,
-		Config: map[string]string{"mint_method": "federated_access_token"},
+		Config: map[string]string{"mint_method": "access_token"},
 	}
 
 	raw, _, ttl, _, err := d.MintCredentialWithExchange(context.TODO(), spec, inputs)
 	require.NoError(t, err)
 	assert.Equal(t, "FED-TOKEN", raw["access_token"])
 	assert.Equal(t, 15*time.Minute, ttl, "lease TTL capped at MaxTTL")
+}
+
+func TestGCPDriver_MintCredentialWithExchange_DefaultsToAccessToken(t *testing.T) {
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"FED-TOKEN","expires_in":3600}`))
+	}))
+	defer sts.Close()
+
+	d := newFederationDriver(testWIFProvider, sts.URL, "")
+	inputs := &credential.ExchangeInputs{SubjectToken: "jwt", SubjectTokenOrigin: credential.ExchangeOriginVerified}
+	// No mint_method set: federation defaults to access_token (the federated token itself).
+	spec := &credential.CredSpec{Name: "s", Config: map[string]string{}}
+
+	raw, _, _, _, err := d.MintCredentialWithExchange(context.TODO(), spec, inputs)
+	require.NoError(t, err)
+	assert.Equal(t, "FED-TOKEN", raw["access_token"])
 }
 
 func TestGCPDriver_MintCredentialWithExchange_UnsupportedMethod(t *testing.T) {
@@ -347,7 +363,7 @@ func TestGCPAssertionResource(t *testing.T) {
 	t.Run("federated from source", func(t *testing.T) {
 		res, ok := gcpAssertionResource(
 			map[string]string{"workload_identity_provider": testWIFProvider},
-			map[string]string{"mint_method": "federated_access_token"},
+			map[string]string{"mint_method": "access_token"},
 		)
 		assert.True(t, ok)
 		assert.Equal(t, "gcp-wif:"+testWIFProvider, res)
@@ -356,7 +372,7 @@ func TestGCPAssertionResource(t *testing.T) {
 	t.Run("routed via DeriveAssertionResource", func(t *testing.T) {
 		res, ok := DeriveAssertionResource(credential.SourceTypeGCP,
 			map[string]string{"workload_identity_provider": testWIFProvider},
-			map[string]string{"mint_method": "federated_access_token"},
+			map[string]string{"mint_method": "access_token"},
 		)
 		assert.True(t, ok)
 		assert.Equal(t, "gcp-wif:"+testWIFProvider, res)
