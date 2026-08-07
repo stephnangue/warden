@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stephnangue/warden/core/oidcsign"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
@@ -168,7 +169,29 @@ func (b *SystemBackend) handleOIDCIssuerConfigRead(ctx context.Context, _ *logic
 		}
 		data["publisher_rotation"] = rot
 	}
+	data["signer"] = b.signerSummary()
 	return b.respondSuccess(data), nil
+}
+
+// signerSummary describes where the issuer's active signing key is held: the mode
+// (in-process vs external KMS) and, for a KMS, its backend type — both read from the
+// live active key, so they can't disagree and are correct on any node (a standby's
+// verification-only key retains the backend type). No KMS topology or token.
+func (b *SystemBackend) signerSummary() map[string]any {
+	out := map[string]any{"mode": "in_process"}
+	if iss := b.core.OIDCIssuer(); iss != nil {
+		for _, ks := range iss.Keys() {
+			if ks == nil || ks.active == nil {
+				continue
+			}
+			if rs, ok := ks.active.key.(*oidcsign.Signer); ok {
+				out["mode"] = "external_kms"
+				out["backend"] = rs.BackendType()
+				break
+			}
+		}
+	}
+	return out
 }
 
 func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logical.Request, d *framework.FieldData) (*logical.Response, error) {

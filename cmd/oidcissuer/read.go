@@ -21,8 +21,9 @@ var (
 Usage: warden oidc-issuer read
 
   Show the current OIDC issuer configuration — enabled state, issuer URL,
-  assertion TTL, signing-key rotation timings and status, publisher (secrets
-  masked), and whether the issuer is ready to mint. Root namespace only.
+  assertion TTL, signing-key rotation timings and status, where the signing key
+  is held (in-process or an external KMS), publisher (secrets masked), and whether
+  the issuer is ready to mint. Root namespace only.
 
       $ warden oidc-issuer read
 `,
@@ -76,10 +77,14 @@ var publisherFields = []string{
 	"endpoint", "credentials_json", "rotation_period",
 }
 
+// signerFields is the field order of the signer block: where the signing key is held
+// (mode) and, for an external KMS, the backend type.
+var signerFields = []string{"mode", "backend"}
+
 // printOIDCIssuerTable renders the read response as a coherent two-column table: durations
-// as duration strings, and each nested block expanded into dot-keyed rows (publisher.type,
-// key_rotation.next_rotation, …) instead of one crammed comma-joined cell. Falls back to
-// the generic renderer for an unexpected shape.
+// as duration strings, and each nested block expanded into underscore-joined rows
+// (publisher_type, key_rotation_next_rotation, …) instead of one crammed comma-joined cell.
+// Falls back to the generic renderer for an unexpected shape.
 func printOIDCIssuerTable(data map[string]any) {
 	var rows [][]any
 	for _, k := range scalarOrder {
@@ -99,6 +104,7 @@ func printOIDCIssuerTable(data map[string]any) {
 	rows = appendBlock(rows, data, "key_rotation", rotationFields)
 	rows = appendBlock(rows, data, "publisher", publisherFields)
 	rows = appendBlock(rows, data, "publisher_rotation", rotationFields)
+	rows = appendBlock(rows, data, "signer", signerFields)
 
 	if len(rows) == 0 {
 		helpers.PrintMapAsTable(data)
@@ -107,9 +113,9 @@ func printOIDCIssuerTable(data map[string]any) {
 	helpers.PrintTable([]string{"Key", "Value"}, rows)
 }
 
-// appendBlock expands a nested map value into one dot-keyed row per field, in the given
-// order, then any unexpected keys sorted (so a field the server adds later is surfaced,
-// never silently dropped).
+// appendBlock expands a nested map value into one underscore-joined row per field, in the
+// given order, then any unexpected keys sorted (so a field the server adds later is
+// surfaced, never silently dropped).
 func appendBlock(rows [][]any, data map[string]any, name string, order []string) [][]any {
 	block, ok := data[name].(map[string]any)
 	if !ok {
@@ -119,7 +125,7 @@ func appendBlock(rows [][]any, data map[string]any, name string, order []string)
 	for _, f := range order {
 		seen[f] = true
 		if v, ok := block[f]; ok {
-			rows = append(rows, []any{name + "." + f, blockValueCell(f, v)})
+			rows = append(rows, []any{name + "_" + f, blockValueCell(f, v)})
 		}
 	}
 	extra := make([]string, 0)
@@ -130,7 +136,7 @@ func appendBlock(rows [][]any, data map[string]any, name string, order []string)
 	}
 	sort.Strings(extra)
 	for _, f := range extra {
-		rows = append(rows, []any{name + "." + f, cellString(block[f])})
+		rows = append(rows, []any{name + "_" + f, cellString(block[f])})
 	}
 	return rows
 }
