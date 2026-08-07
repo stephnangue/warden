@@ -426,7 +426,7 @@ func TestVaultDriver_FetchDynamicVaultToken_Metadata(t *testing.T) {
 				},
 			}
 
-			rawData, metadata, _, leaseID, err := driver.fetchDynamicVaultToken(context.TODO(), spec)
+			rawData, metadata, _, leaseID, err := driver.fetchDynamicVaultToken(context.TODO(), client, spec)
 			require.NoError(t, err)
 
 			// Metadata carries non-secret subject identity only.
