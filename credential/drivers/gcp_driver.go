@@ -209,7 +209,7 @@ func (f *GCPDriverFactory) InferCredentialType(specConfig map[string]string) (st
 	switch mintMethod {
 	case "cloud_sql_iam_token":
 		return credential.TypeDBAuthToken, nil
-	case "", "access_token", "impersonated_access_token", "federated_access_token":
+	case "", "access_token", "impersonated_access_token":
 		return credential.TypeGCPAccessToken, nil
 	default:
 		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
@@ -469,7 +469,7 @@ const gcpFederationScope = "https://www.googleapis.com/auth/cloud-platform"
 // Supported mint methods over federation:
 //   - impersonated_access_token: STS federated token → generateAccessToken on the
 //     target SA; the impersonated token is the issued credential.
-//   - federated_access_token: the STS federated token is itself the issued credential.
+//   - access_token: the STS federated token is itself the issued credential.
 func (d *GCPDriver) MintCredentialWithExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	if d.getAuthMethod() != gcpAuthMethodOIDCFederation {
 		return nil, nil, 0, "", fmt.Errorf("gcp: workload identity federation requires auth_method=oidc_federation on the source")
@@ -481,7 +481,7 @@ func (d *GCPDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 		return nil, nil, 0, "", fmt.Errorf("gcp: workload identity federation requires a verified subject (subject_token_source=warden_identity or auth_token); a caller-supplied, unverified subject is rejected")
 	}
 
-	mintMethod := credential.GetString(spec.Config, "mint_method", "")
+	mintMethod := credential.GetString(spec.Config, "mint_method", "access_token")
 	switch mintMethod {
 	case "impersonated_access_token":
 		targetSA := credential.GetString(spec.Config, "target_service_account", "")
@@ -526,7 +526,7 @@ func (d *GCPDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 		}
 		return rawData, metadata, ttl, "", nil
 
-	case "federated_access_token":
+	case "access_token":
 		// The federated token itself is the issued credential; honor the spec's scopes.
 		scopesStr := credential.GetString(spec.Config, "scopes", gcpFederationScope)
 		fedToken, ttl, err := d.exchangeWIFToken(ctx, inputs.SubjectToken, inputs.SubjectTokenType, scopesStr)
@@ -556,7 +556,7 @@ func (d *GCPDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 		return rawData, metadata, ttl, "", nil
 
 	default:
-		return nil, nil, 0, "", fmt.Errorf("gcp: mint_method %q is not supported over auth_method=oidc_federation (supported: impersonated_access_token, federated_access_token)", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("gcp: mint_method %q is not supported over auth_method=oidc_federation (supported: impersonated_access_token, access_token)", mintMethod)
 	}
 }
 
@@ -630,12 +630,16 @@ func validateGCPLifetime(spec *credential.CredSpec, lifetime string) error {
 // config only, no network or driver state. The provider prefix is human-readable
 // sugar on an opaque value — never parse it back.
 func gcpAssertionResource(sourceCfg, specCfg map[string]string) (string, bool) {
-	switch credential.GetString(specCfg, "mint_method", "") {
+	// Default mirrors the federated mint_method dispatch in MintCredentialWithExchange
+	// (empty → access_token) so the named resource matches what the exchange reaches.
+	// A static source has no workload_identity_provider, so access_token still yields
+	// no resource there.
+	switch credential.GetString(specCfg, "mint_method", "access_token") {
 	case "impersonated_access_token":
 		if sa := credential.GetString(specCfg, "target_service_account", ""); sa != "" {
 			return "gcp-iam:" + sa, true
 		}
-	case "federated_access_token":
+	case "access_token":
 		if p := credential.GetString(sourceCfg, "workload_identity_provider", ""); p != "" {
 			return "gcp-wif:" + p, true
 		}

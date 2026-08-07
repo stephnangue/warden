@@ -161,7 +161,7 @@ func TestDeriveAssertionResource(t *testing.T) {
 			name:       "gcp federated names the provider from source config",
 			sourceType: credential.SourceTypeGCP,
 			sourceCfg:  map[string]string{"workload_identity_provider": testAudGCPProvider},
-			specCfg:    map[string]string{"mint_method": "federated_access_token"},
+			specCfg:    map[string]string{"mint_method": "access_token"},
 			want:       "gcp-wif:" + testAudGCPProvider,
 			wantOK:     true,
 		},
