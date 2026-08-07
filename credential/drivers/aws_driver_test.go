@@ -918,3 +918,53 @@ func TestAWSDriver_SecretsManager_APIKey_RoundTrip(t *testing.T) {
 // =============================================================================
 // AzureDriver readLimitedBody Test
 // =============================================================================
+
+func TestAWSAssertionAudience(t *testing.T) {
+	t.Run("federation default", func(t *testing.T) {
+		aud, ok := awsAssertionAudience(map[string]string{"auth_method": "oidc_federation"})
+		require.True(t, ok)
+		assert.Equal(t, "sts.amazonaws.com", aud)
+	})
+
+	t.Run("federation explicit override", func(t *testing.T) {
+		aud, ok := awsAssertionAudience(map[string]string{"auth_method": "oidc_federation", "audience": "my-client-id"})
+		require.True(t, ok)
+		assert.Equal(t, "my-client-id", aud)
+	})
+
+	t.Run("static source derives nothing", func(t *testing.T) {
+		_, ok := awsAssertionAudience(map[string]string{"auth_method": "static"})
+		assert.False(t, ok)
+	})
+
+	t.Run("routed via DeriveAssertionAudience", func(t *testing.T) {
+		aud, ok := DeriveAssertionAudience(credential.SourceTypeAWS, map[string]string{"auth_method": "oidc_federation"}, map[string]string{})
+		require.True(t, ok)
+		assert.Equal(t, "sts.amazonaws.com", aud)
+	})
+}
+
+func TestAWSValidateConfig_AudienceOnlyFederation(t *testing.T) {
+	f := &AWSDriverFactory{}
+
+	t.Run("audience rejected on static", func(t *testing.T) {
+		err := f.ValidateConfig(map[string]string{
+			"auth_method":       "static",
+			"access_key_id":     "AKIA",
+			"secret_access_key": "sk",
+			"region":            "us-east-1",
+			"audience":          "sts.amazonaws.com",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "only valid for auth_method=oidc_federation")
+	})
+
+	t.Run("audience allowed on federation", func(t *testing.T) {
+		err := f.ValidateConfig(map[string]string{
+			"auth_method": "oidc_federation",
+			"region":      "us-east-1",
+			"audience":    "my-client-id",
+		})
+		require.NoError(t, err)
+	})
+}

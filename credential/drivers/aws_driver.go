@@ -122,6 +122,10 @@ func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
 		credential.StringField("external_id").
 			Describe("Optional external ID for AssumeRole operations").
 			Example("unique-external-id"),
+
+		credential.StringField("audience").
+			Describe("Audience minted into a warden_identity assertion for this source (oidc_federation only; default sts.amazonaws.com)").
+			Example("sts.amazonaws.com"),
 	); err != nil {
 		return err
 	}
@@ -131,6 +135,11 @@ func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
 	case awsAuthMethodStatic:
 		if credential.GetString(config, "access_key_id", "") == "" || credential.GetString(config, "secret_access_key", "") == "" {
 			return fmt.Errorf("access_key_id and secret_access_key are required for auth_method=static")
+		}
+		// audience seeds only the warden_identity federation assertion; on a static
+		// source it would be silently ignored, so reject it rather than mislead.
+		if credential.GetString(config, "audience", "") != "" {
+			return fmt.Errorf("audience is only valid for auth_method=oidc_federation")
 		}
 	case awsAuthMethodOIDCFederation:
 		// A federation source holds no static secret. Reject leftover static config
@@ -511,6 +520,23 @@ func (d *AWSDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 // dispatch in MintCredentialWithExchange so the named resource is the one the
 // exchange actually reaches. The provider prefix is human-readable sugar on an
 // opaque value — never parse it back (a secret id / ARN can itself contain ':').
+// defaultAWSFederationAudience is the conventional `aud` for IAM OIDC federation:
+// AWS STS AssumeRoleWithWebIdentity accepts sts.amazonaws.com unless the OIDC
+// provider is configured with different client IDs.
+const defaultAWSFederationAudience = "sts.amazonaws.com"
+
+// awsAssertionAudience derives the warden_identity assertion audience for an AWS
+// federation source: the source's explicit `audience`, else the conventional
+// default. Only a keyless (oidc_federation) source federates, so a static source
+// supplies no derived audience — a warden_identity spec on it must set one
+// explicitly (and would fail closed at mint anyway).
+func awsAssertionAudience(sourceCfg map[string]string) (string, bool) {
+	if credential.GetString(sourceCfg, "auth_method", awsAuthMethodStatic) != awsAuthMethodOIDCFederation {
+		return "", false
+	}
+	return credential.GetString(sourceCfg, "audience", defaultAWSFederationAudience), true
+}
+
 func awsAssertionResource(specCfg map[string]string) (string, bool) {
 	switch credential.GetString(specCfg, "mint_method", "") {
 	case "secrets_manager":
