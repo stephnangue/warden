@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
@@ -61,6 +62,13 @@ func TestSysOIDCIssuerConfig(t *testing.T) {
 	assert.Equal(t, true, resp.Data["ready"])
 	assert.Equal(t, int64(300), resp.Data["assertion_ttl"])
 
+	// Default signing keys are generated in process, so the signer block reports
+	// in_process with no backend.
+	sgn, ok := resp.Data["signer"].(map[string]any)
+	require.True(t, ok, "signer block present")
+	assert.Equal(t, "in_process", sgn["mode"])
+	assert.NotContains(t, sgn, "backend", "no backend for in-process keys")
+
 	// Partial update: changing one field must NOT reset the others. Enabling and
 	// the issuer_url are carried forward from the stored config.
 	resp = write(ctx, map[string]any{"key_rotation_period": "24h"})
@@ -99,6 +107,41 @@ func TestSysOIDCIssuerConfig(t *testing.T) {
 	require.False(t, resp.IsError())
 	assert.Nil(t, core.OIDCIssuer())
 	assert.Equal(t, "https://warden-oidc.example", read(ctx).Data["issuer_url"], "issuer_url retained while disabled")
+}
+
+// TestSysOIDCIssuerConfig_SignerExternalKMS checks that the read signer block reports an
+// external-KMS key location, derived from the live active key (not config): after installing
+// KMS-backed keysets, the block reads external_kms with the backend's discriminator.
+func TestSysOIDCIssuerConfig_SignerExternalKMS(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	schema := backend.pathOIDCIssuer()[0].Fields
+
+	resp, err := backend.handleOIDCIssuerConfigWrite(ctx, createTestRequest(logical.UpdateOperation, "oidc-issuer/config", map[string]any{
+		"enabled":    true,
+		"issuer_url": "https://warden-oidc.example",
+	}), createFieldData(schema, map[string]any{"enabled": true, "issuer_url": "https://warden-oidc.example"}))
+	require.NoError(t, err)
+	require.False(t, resp.IsError(), "enable should succeed: %+v", resp.Data)
+	require.NotNil(t, core.OIDCIssuer())
+
+	// Swap the in-process keysets for KMS-backed ones (the live active key is the
+	// signer block's source of truth).
+	fake := newFakeSignBackend(t)
+	src := remoteKeySource{backend: fake, timeout: time.Second}
+	keysets := map[string]*algKeyset{}
+	for _, alg := range oidcSupportedAlgs {
+		active, next, err := src.bootstrap(ctx, alg)
+		require.NoError(t, err)
+		keysets[alg] = &algKeyset{active: active, next: next}
+	}
+	core.OIDCIssuer().RestoreKeys(keysets)
+
+	read, err := backend.handleOIDCIssuerConfigRead(ctx, createTestRequest(logical.ReadOperation, "oidc-issuer/config", nil), createFieldData(schema, nil))
+	require.NoError(t, err)
+	sgn, ok := read.Data["signer"].(map[string]any)
+	require.True(t, ok, "signer block present")
+	assert.Equal(t, "external_kms", sgn["mode"])
+	assert.Equal(t, "transit", sgn["backend"])
 }
 
 func TestSysOIDCIssuerConfig_Publisher(t *testing.T) {

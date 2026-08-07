@@ -26,8 +26,9 @@ func captureStdout(t *testing.T, fn func()) string {
 }
 
 // TestPrintOIDCIssuerTable checks the coherent read table: durations render as duration
-// strings (not bare seconds), and nested blocks expand into dot-keyed rows (not one crammed
-// comma-joined cell). Numbers arrive as json.Number, matching the API client's UseNumber decode.
+// strings (not bare seconds), and nested blocks expand into underscore-joined rows (not one
+// crammed comma-joined cell). Numbers arrive as json.Number, matching the API client's
+// UseNumber decode.
 func TestPrintOIDCIssuerTable(t *testing.T) {
 	data := map[string]any{
 		"enabled":             true,
@@ -55,6 +56,10 @@ func TestPrintOIDCIssuerTable(t *testing.T) {
 			"last_rotated_at": "2026-08-03T20:00:11Z",
 			"next_rotation":   "2026-08-03T20:01:11Z",
 		},
+		"signer": map[string]any{
+			"mode":    "external_kms",
+			"backend": "transit",
+		},
 	}
 
 	out := captureStdout(t, func() { printOIDCIssuerTable(data) })
@@ -65,20 +70,21 @@ func TestPrintOIDCIssuerTable(t *testing.T) {
 			t.Errorf("expected duration %q in output:\n%s", want, out)
 		}
 	}
-	// Nested blocks are expanded into dot-keyed rows.
+	// Nested blocks are expanded into underscore-joined rows.
 	for _, want := range []string{
-		"publisher.account_name", "wardenoidc16865",
-		"publisher.client_secret", "***********",
-		"key_rotation.running", "key_rotation.next_rotation",
-		"publisher_rotation.last_rotated_at",
+		"publisher_account_name", "wardenoidc16865",
+		"publisher_client_secret", "***********",
+		"key_rotation_running", "key_rotation_next_rotation",
+		"publisher_rotation_last_rotated_at",
+		"signer_mode", "external_kms", "signer_backend", "transit",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q in output:\n%s", want, out)
 		}
 	}
 	// publisher.rotation_period is normalized to a canonical duration.
-	if !strings.Contains(out, "publisher.rotation_period") {
-		t.Errorf("expected publisher.rotation_period row:\n%s", out)
+	if !strings.Contains(out, "publisher_rotation_period") {
+		t.Errorf("expected publisher_rotation_period row:\n%s", out)
 	}
 	// The old crammed comma-joined nested cell must be gone.
 	if strings.Contains(out, "account_name=wardenoidc16865") {
@@ -102,7 +108,9 @@ func TestPrintOIDCIssuerTable_Disabled(t *testing.T) {
 	if !strings.Contains(out, "disabled") {
 		t.Errorf("expected key_rotation_period to read 'disabled':\n%s", out)
 	}
-	if strings.Contains(out, "key_rotation.") {
+	// The block is absent — assert on a block-only field (key_rotation_running), not the
+	// key_rotation_ prefix, which the top-level key_rotation_period scalar also shares.
+	if strings.Contains(out, "key_rotation_running") {
 		t.Errorf("no key_rotation block expected when disabled:\n%s", out)
 	}
 
