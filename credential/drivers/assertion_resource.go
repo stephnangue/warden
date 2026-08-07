@@ -25,6 +25,8 @@ func DeriveAssertionResource(sourceType string, sourceCfg, specCfg map[string]st
 		return azureAssertionResource(specCfg)
 	case credential.SourceTypeTokenExchange:
 		return tokenExchangeAssertionResource(sourceCfg, specCfg)
+	case credential.SourceTypeGCP:
+		return gcpAssertionResource(sourceCfg, specCfg)
 	default:
 		return "", false
 	}
