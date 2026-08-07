@@ -315,13 +315,12 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	); err != nil {
 		return err
 	}
-	// A Warden-minted subject must declare the audience it is minted for. An
-	// empty/absent aud is replayable at any upstream whose trust policy does not
-	// pin aud, so require it here (enforced again at mint time, defence in depth).
-	if config[ConfigSubjectTokenSource] == SourceWardenIdentity && config[ConfigAssertionAudience] == "" {
-		return fmt.Errorf("field '%s': is required when '%s' is '%s'",
-			ConfigAssertionAudience, ConfigSubjectTokenSource, SourceWardenIdentity)
-	}
+	// A Warden-minted subject must declare the audience it is minted for — an
+	// empty/absent aud is replayable at any upstream whose trust policy does not pin
+	// aud. That check is source-aware (some source types derive the audience from
+	// their own config) and needs the source, so it runs one layer up in the core
+	// config store, not in this source-agnostic structural validator. It is enforced
+	// again at mint time, defence in depth.
 	// Projecting metadata into the assertion only makes sense when Warden mints it;
 	// on a reused/caller-supplied subject Warden does not control the claims.
 	if config[ConfigAssertionMetadataClaims] != "" && config[ConfigSubjectTokenSource] != SourceWardenIdentity {

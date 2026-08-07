@@ -367,3 +367,40 @@ func TestGCPAssertionResource(t *testing.T) {
 		assert.False(t, ok)
 	})
 }
+
+func TestGCPAssertionAudience(t *testing.T) {
+	t.Run("derives https form from provider", func(t *testing.T) {
+		aud, ok := gcpAssertionAudience(map[string]string{"auth_method": "oidc_federation", "workload_identity_provider": testWIFProvider})
+		require.True(t, ok)
+		assert.Equal(t, "https://iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/warden/providers/warden-oidc", aud)
+	})
+
+	t.Run("routed via DeriveAssertionAudience", func(t *testing.T) {
+		aud, ok := DeriveAssertionAudience(credential.SourceTypeGCP,
+			map[string]string{"auth_method": "oidc_federation", "workload_identity_provider": testWIFProvider}, map[string]string{})
+		require.True(t, ok)
+		assert.Equal(t, "https://iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/warden/providers/warden-oidc", aud)
+	})
+
+	t.Run("only the leading slashes are swapped", func(t *testing.T) {
+		// A path segment that itself contains "//" must survive intact.
+		aud, ok := gcpAssertionAudience(map[string]string{"auth_method": "oidc_federation", "workload_identity_provider": "//iam.googleapis.com/a//b"})
+		require.True(t, ok)
+		assert.Equal(t, "https://iam.googleapis.com/a//b", aud)
+	})
+
+	t.Run("empty provider yields no audience", func(t *testing.T) {
+		_, ok := gcpAssertionAudience(map[string]string{"auth_method": "oidc_federation"})
+		assert.False(t, ok)
+	})
+
+	t.Run("static source yields no audience even with a provider set", func(t *testing.T) {
+		_, ok := gcpAssertionAudience(map[string]string{"auth_method": "static", "workload_identity_provider": testWIFProvider})
+		assert.False(t, ok)
+	})
+
+	t.Run("non-gcp source returns false", func(t *testing.T) {
+		_, ok := DeriveAssertionAudience(credential.SourceTypeAWS, map[string]string{}, map[string]string{})
+		assert.False(t, ok)
+	})
+}

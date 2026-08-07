@@ -4,8 +4,56 @@ import (
 	"testing"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stretchr/testify/assert"
 )
 
+const testAudGCPProvider = "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/w"
+
+// TestDeriveAssertionAudience covers the cross-source dispatch and the invariant
+// that an audience is only ever derived for an oidc_federation source.
+func TestDeriveAssertionAudience(t *testing.T) {
+	cases := []struct {
+		name       string
+		sourceType string
+		sourceCfg  map[string]string
+		wantAud    string
+		wantOK     bool
+	}{
+		{
+			name:       "gcp federation derives https audience from provider",
+			sourceType: credential.SourceTypeGCP,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "workload_identity_provider": testAudGCPProvider},
+			wantAud:    "https://iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/w",
+			wantOK:     true,
+		},
+		{
+			name:       "gcp without provider derives nothing",
+			sourceType: credential.SourceTypeGCP,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation"},
+			wantOK:     false,
+		},
+		{
+			name:       "unknown source type derives nothing",
+			sourceType: credential.SourceTypeGitHub,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "audience": "x"},
+			wantOK:     false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			aud, ok := DeriveAssertionAudience(tc.sourceType, tc.sourceCfg, map[string]string{})
+			assert.Equal(t, tc.wantOK, ok)
+			if tc.wantOK {
+				assert.Equal(t, tc.wantAud, aud)
+			} else {
+				assert.Empty(t, aud)
+			}
+		})
+	}
+}
+
+// TestDeriveAssertionResource covers the cross-source dispatch for the resource claim.
 func TestDeriveAssertionResource(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -66,6 +114,28 @@ func TestDeriveAssertionResource(t *testing.T) {
 			name:       "azure non-bearer mint_method omits",
 			sourceType: credential.SourceTypeAzure,
 			specCfg:    map[string]string{"mint_method": "key_vault_secret"},
+			wantOK:     false,
+		},
+		{
+			name:       "gcp impersonation names the target service account",
+			sourceType: credential.SourceTypeGCP,
+			sourceCfg:  map[string]string{"workload_identity_provider": testAudGCPProvider},
+			specCfg:    map[string]string{"mint_method": "impersonated_access_token", "target_service_account": "sa@p.iam.gserviceaccount.com"},
+			want:       "gcp-iam:sa@p.iam.gserviceaccount.com",
+			wantOK:     true,
+		},
+		{
+			name:       "gcp federated names the provider from source config",
+			sourceType: credential.SourceTypeGCP,
+			sourceCfg:  map[string]string{"workload_identity_provider": testAudGCPProvider},
+			specCfg:    map[string]string{"mint_method": "federated_access_token"},
+			want:       "gcp-wif:" + testAudGCPProvider,
+			wantOK:     true,
+		},
+		{
+			name:       "gcp impersonation without target omits",
+			sourceType: credential.SourceTypeGCP,
+			specCfg:    map[string]string{"mint_method": "impersonated_access_token"},
 			wantOK:     false,
 		},
 		{
