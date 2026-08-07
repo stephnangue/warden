@@ -127,6 +127,51 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 			wantErr: true,
 			errMsg:  "role_name",
 		},
+		{
+			name: "valid oidc_federation config",
+			config: map[string]string{
+				"vault_address": "http://127.0.0.1:8200",
+				"auth_method":   "oidc_federation",
+				"jwt_role":      "warden-agents",
+				"jwt_mount":     "jwt",
+				"audience":      "https://vault.example.com/warden",
+			},
+			wantErr: false,
+		},
+		{
+			name: "oidc_federation missing jwt_role",
+			config: map[string]string{
+				"vault_address": "http://127.0.0.1:8200",
+				"auth_method":   "oidc_federation",
+			},
+			wantErr: true,
+			errMsg:  "jwt_role",
+		},
+		{
+			name: "oidc_federation rejects approle secret_id",
+			config: map[string]string{
+				"vault_address": "http://127.0.0.1:8200",
+				"auth_method":   "oidc_federation",
+				"jwt_role":      "warden-agents",
+				"secret_id":     "leftover",
+			},
+			wantErr: true,
+			errMsg:  "must not be set for auth_method=oidc_federation",
+		},
+		{
+			name: "approle rejects federation jwt_role",
+			config: map[string]string{
+				"vault_address": "http://127.0.0.1:8200",
+				"auth_method":   "approle",
+				"role_id":       "test-role-id",
+				"secret_id":     "test-secret-id",
+				"approle_mount": "warden_approle",
+				"role_name":     "test-role",
+				"jwt_role":      "warden-agents",
+			},
+			wantErr: true,
+			errMsg:  "only valid for auth_method=oidc_federation",
+		},
 	}
 
 	for _, tt := range tests {
@@ -800,4 +845,294 @@ func TestVaultDriver_FetchDynamicVaultToken_TTLExceedsMaximum(t *testing.T) {
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds maximum")
+}
+
+// federationDriver builds a VaultDriver whose client points at srv, configured as a
+// keyless oidc_federation source.
+func federationDriver(t *testing.T, srvURL string) *VaultDriver {
+	t.Helper()
+	client, err := api.NewClient(&api.Config{Address: srvURL})
+	require.NoError(t, err)
+	return &VaultDriver{
+		vault: client,
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeVault,
+			Config: map[string]string{
+				"vault_address": srvURL,
+				"auth_method":   "oidc_federation",
+				"jwt_role":      "warden-agents",
+				"jwt_mount":     "jwt",
+				"audience":      "https://vault.example.com/warden",
+			},
+		},
+	}
+}
+
+func verifiedInputs() *credential.ExchangeInputs {
+	return &credential.ExchangeInputs{
+		SubjectToken:       "eyJhbGciOiJSUzI1NiJ9.assertion.sig",
+		SubjectTokenType:   credential.TokenTypeJWT,
+		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+	}
+}
+
+func TestVaultDriver_MintCredentialWithExchange_Guards(t *testing.T) {
+	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "vault_token"}}
+
+	// Non-federation source rejects the exchange path.
+	static := &VaultDriver{credSource: &credential.CredSource{
+		Type:   credential.SourceTypeVault,
+		Config: map[string]string{"auth_method": "approle"},
+	}}
+	_, _, _, _, err := static.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires auth_method=oidc_federation")
+
+	fed := &VaultDriver{credSource: &credential.CredSource{
+		Type:   credential.SourceTypeVault,
+		Config: map[string]string{"auth_method": "oidc_federation", "jwt_role": "warden-agents"},
+	}}
+
+	// Empty subject token.
+	_, _, _, _, err = fed.MintCredentialWithExchange(context.TODO(), spec, &credential.ExchangeInputs{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no subject token")
+
+	// Unverified subject origin.
+	_, _, _, _, err = fed.MintCredentialWithExchange(context.TODO(), spec, &credential.ExchangeInputs{
+		SubjectToken:       "x",
+		SubjectTokenOrigin: credential.ExchangeOriginUnverified,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "verified subject")
+}
+
+func TestVaultDriver_MintCredentialWithExchange_VaultToken(t *testing.T) {
+	// An operator's env token must never be sent on the login request.
+	t.Setenv("VAULT_TOKEN", "env-operator-token")
+
+	var loginBody map[string]interface{}
+	var loginTokenHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/jwt/login" {
+			loginTokenHeader = r.Header.Get("X-Vault-Token")
+			_ = json.NewDecoder(r.Body).Decode(&loginBody)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"auth": map[string]interface{}{
+					"client_token":   "hvs.childtoken",
+					"accessor":       "acc-123",
+					"lease_duration": 900,
+					"policies":       []string{"default", "agent-readonly"},
+					"renewable":      true,
+					"entity_id":      "ent-1",
+				},
+			})
+			return
+		}
+		http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	driver := federationDriver(t, srv.URL)
+	spec := &credential.CredSpec{Name: "vault-session", Config: map[string]string{"mint_method": "vault_token"}}
+
+	rawData, metadata, ttl, leaseID, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+	require.NoError(t, err)
+
+	// The assertion was posted with the role and jwt.
+	assert.Equal(t, "warden-agents", loginBody["role"])
+	assert.Equal(t, "eyJhbGciOiJSUzI1NiJ9.assertion.sig", loginBody["jwt"])
+
+	// The login token itself is vended.
+	assert.Equal(t, "hvs.childtoken", rawData["token"])
+	assert.Equal(t, "hvs.childtoken", rawData["client_token"])
+	assert.Equal(t, "acc-123", rawData["accessor"])
+	assert.Equal(t, 900*time.Second, ttl)
+	assert.Equal(t, "warden-agents", metadata["role"])
+	assert.Equal(t, "ent-1", metadata["subject"])
+
+	// Keyless: no revoke-on-demand — leaseID is always empty.
+	assert.Empty(t, leaseID)
+
+	// The login request carried no token — the operator's env VAULT_TOKEN was dropped
+	// (SetToken("") on the per-request clone), so it is never presented to Vault.
+	assert.Empty(t, loginTokenHeader)
+	// The per-request login token never leaks onto the shared driver client (which
+	// keeps whatever it had — here the env token — untouched by the exchange).
+	assert.NotEqual(t, "hvs.childtoken", driver.vault.Token())
+}
+
+func TestVaultDriver_MintCredentialWithExchange_DynamicAWS_CapsTTLAndEmptyLease(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/jwt/login":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"auth": map[string]interface{}{
+					"client_token":   "hvs.childtoken",
+					"accessor":       "acc-123",
+					"lease_duration": 300, // login token shorter than the AWS lease
+				},
+			})
+		case "/v1/aws/creds/dev-role":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"lease_id":       "aws/creds/dev-role/abc123",
+				"lease_duration": 3600, // longer than the login token
+				"data":           map[string]interface{}{"access_key": "AKIA", "secret_key": "sk"},
+			})
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	driver := federationDriver(t, srv.URL)
+	spec := &credential.CredSpec{
+		Name: "aws-dynamic",
+		Config: map[string]string{
+			"mint_method": "dynamic_aws",
+			"aws_mount":   "aws",
+			"role_name":   "dev-role",
+		},
+	}
+
+	rawData, _, ttl, leaseID, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+	require.NoError(t, err)
+	assert.Equal(t, "AKIA", rawData["access_key"])
+	// TTL capped to the login token's 300s (a child lease cannot outlive its parent).
+	assert.Equal(t, 300*time.Second, ttl)
+	// leaseID empty: the dynamic lease is revoked when the parent login token expires.
+	assert.Empty(t, leaseID)
+}
+
+func TestVaultDriver_MintCredentialWithExchange_StaticKV_EmptyLease(t *testing.T) {
+	var revokeSelfToken string
+	revokedSelf := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/jwt/login":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"auth": map[string]interface{}{"client_token": "hvs.childtoken", "accessor": "acc-123", "lease_duration": 900},
+			})
+		case "/v1/secret/data/prod/aws":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"data":     map[string]interface{}{"access_key_id": "AKIA", "secret_access_key": "sk"},
+					"metadata": map[string]interface{}{"version": 1},
+				},
+			})
+		case "/v1/auth/token/revoke-self":
+			// The transient login token revokes ITSELF (default policy grants
+			// revoke-self, not revoke-accessor), so the request carries the login token.
+			revokedSelf = true
+			revokeSelfToken = r.Header.Get("X-Vault-Token")
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	driver := federationDriver(t, srv.URL)
+	spec := &credential.CredSpec{
+		Name: "kv-static",
+		Config: map[string]string{
+			"mint_method": "static_aws",
+			"kv2_mount":   "secret",
+			"secret_path": "prod/aws",
+		},
+	}
+
+	rawData, _, ttl, leaseID, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+	require.NoError(t, err)
+	assert.Equal(t, "AKIA", rawData["access_key_id"])
+	// Static read: no lease, and the empty leaseID keeps it out of the revoke path.
+	assert.Equal(t, time.Duration(0), ttl)
+	assert.Empty(t, leaseID)
+	// The transient login token is best-effort revoked (via revoke-self) after the read.
+	assert.True(t, revokedSelf)
+	assert.Equal(t, "hvs.childtoken", revokeSelfToken)
+}
+
+func TestVaultDriver_MintCredentialWithExchange_StaticKV_BatchTokenSkipsRevoke(t *testing.T) {
+	revokeAttempted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/jwt/login":
+			// A JWT role configured token_type=batch issues an hvb.-prefixed token.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"auth": map[string]interface{}{"client_token": "hvb.batchtoken", "accessor": "", "lease_duration": 900},
+			})
+		case "/v1/secret/data/prod/aws":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"data":     map[string]interface{}{"access_key_id": "AKIA", "secret_access_key": "sk"},
+					"metadata": map[string]interface{}{"version": 1},
+				},
+			})
+		case "/v1/auth/token/revoke-self":
+			revokeAttempted = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	driver := federationDriver(t, srv.URL)
+	spec := &credential.CredSpec{
+		Name: "kv-static",
+		Config: map[string]string{
+			"mint_method": "static_aws",
+			"kv2_mount":   "secret",
+			"secret_path": "prod/aws",
+		},
+	}
+
+	rawData, _, _, leaseID, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+	require.NoError(t, err)
+	assert.Equal(t, "AKIA", rawData["access_key_id"])
+	assert.Empty(t, leaseID)
+	// A batch token cannot be revoked, so no revoke-self call is attempted.
+	assert.False(t, revokeAttempted)
+}
+
+func TestVaultDriver_MintCredentialWithExchange_MissingJWTRole(t *testing.T) {
+	driver := &VaultDriver{
+		vault: func() *api.Client { c, _ := api.NewClient(&api.Config{Address: "http://127.0.0.1:8200"}); return c }(),
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeVault,
+			Config: map[string]string{
+				"auth_method": "oidc_federation",
+				// jwt_role deliberately omitted
+			},
+		},
+	}
+	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "vault_token"}}
+	_, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "jwt_role is required")
+}
+
+func TestVaultDriver_MintCredentialWithExchange_UnsupportedMintMethod(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/auth/jwt/login" {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"auth": map[string]interface{}{"client_token": "hvs.childtoken", "accessor": "acc-123", "lease_duration": 900},
+			})
+			return
+		}
+		http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	driver := federationDriver(t, srv.URL)
+	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "not_a_method"}}
+	_, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not supported over auth_method=oidc_federation")
 }
