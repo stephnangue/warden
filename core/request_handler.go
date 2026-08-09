@@ -1235,8 +1235,8 @@ func (c *Core) parseFormBody(req *logical.Request) error {
 // secrets: they are consumed here and stripped by the provider gateways before
 // any upstream forwarding, exactly like X-Warden-On-Behalf-Of.
 const (
-	headerSubjectToken = "X-Warden-Subject-Token"
-	headerActorToken   = "X-Warden-Actor-Token"
+	headerSubjectToken = credential.DefaultSubjectTokenHeader
+	headerActorToken   = credential.DefaultActorTokenHeader
 )
 
 // maxAssertionMetadataBytes bounds the JSON size of the metadata projected into a
@@ -1317,9 +1317,18 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		inputs.SubjectToken = req.ClientToken
 		inputs.SubjectTokenOrigin = credential.ExchangeOriginVerified
 	case credential.SourceHeader:
-		tok := req.HTTPRequest.Header.Get(headerSubjectToken)
+		headerName := credential.SubjectTokenHeaderName(spec.Config)
+		tok := resolveHeaderToken(req.HTTPRequest, headerName)
 		if tok == "" {
-			return nil, fmt.Errorf("spec %q requires a %s header", specName, headerSubjectToken)
+			return nil, fmt.Errorf("spec %q requires a %s header", specName, headerName)
+		}
+		// Fail closed if the subject header carries the caller's own auth token:
+		// the subject must be a distinct principal, not the agent itself. This is
+		// name-agnostic (equality means "same principal") and byte-exact — the
+		// Authorization Bearer strip above matches Warden's own token extractor —
+		// so it cannot be bypassed by header casing or a Bearer-scheme mismatch.
+		if tok == req.ClientToken {
+			return nil, fmt.Errorf("spec %q: the %s subject token must not equal the caller's own authentication token", specName, headerName)
 		}
 		inputs.SubjectToken = tok
 		inputs.SubjectTokenOrigin = credential.ExchangeOriginUnverified
@@ -1438,9 +1447,10 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 	case credential.SourceHeader:
 		// The actor token is a delegation credential, distinct from the
 		// X-Warden-On-Behalf-Of attribution label. Caller-supplied, so unverified.
-		tok := req.HTTPRequest.Header.Get(headerActorToken)
+		headerName := credential.ActorTokenHeaderName(spec.Config)
+		tok := resolveHeaderToken(req.HTTPRequest, headerName)
 		if tok == "" {
-			return nil, fmt.Errorf("spec %q requires a %s header", specName, headerActorToken)
+			return nil, fmt.Errorf("spec %q requires a %s header", specName, headerName)
 		}
 		inputs.ActorToken = tok
 		inputs.ActorTokenOrigin = credential.ExchangeOriginUnverified
@@ -1535,11 +1545,30 @@ func extractToken(r *http.Request) string {
 		return token
 	}
 	// Fall back to Authorization: Bearer
-	authHeader := r.Header.Get("Authorization")
+	return stripBearer(r.Header.Get("Authorization"))
+}
+
+// stripBearer returns the token in an Authorization-style header value, matching
+// the "Bearer " scheme case-insensitively and returning the remainder verbatim
+// (no TrimSpace). It is the single source of truth for the Bearer strip so a
+// header-sourced exchange token is byte-identical to the caller's own auth token
+// when both ride Authorization — which the fail-closed guard relies on.
+func stripBearer(authHeader string) string {
 	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
 		return authHeader[7:]
 	}
 	return ""
+}
+
+// resolveHeaderToken reads a token-exchange token from the named (already
+// canonicalized) request header, stripping the Bearer scheme via stripBearer
+// when the header is Authorization, and returning any other header verbatim.
+func resolveHeaderToken(r *http.Request, headerName string) string {
+	v := r.Header.Get(headerName)
+	if headerName == "Authorization" {
+		return stripBearer(v)
+	}
+	return v
 }
 
 // actorSubjectPattern enforces the wire-format of X-Warden-On-Behalf-Of

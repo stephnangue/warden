@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"net/textproto"
 	"strings"
 )
 
@@ -50,13 +51,65 @@ const (
 	// ConfigActorTokenType overrides the actor token's RFC 8693 type
 	// (default TokenTypeJWT).
 	ConfigActorTokenType = "actor_token_type"
+	// ConfigSubjectTokenHeader names the request header the "header" subject
+	// source reads. Absent/empty defaults to DefaultSubjectTokenHeader. Set it to
+	// "Authorization" (the Bearer scheme is stripped) to carry the subject token in
+	// the standard header when that header is otherwise free (e.g. a cert/SPIFFE-
+	// authenticated agent). Valid only with subject_token_source=header.
+	ConfigSubjectTokenHeader = "subject_token_header"
+	// ConfigActorTokenHeader names the request header the "header" actor source
+	// reads. Absent/empty defaults to DefaultActorTokenHeader. Valid only with
+	// actor_token_source=header.
+	ConfigActorTokenHeader = "actor_token_header"
 )
+
+// Default header names for the "header" token source. These preserve the
+// historical behaviour exactly: a spec that does not set a *_token_header reads
+// the same Warden header it always did, so this configurability adds no migration.
+const (
+	DefaultSubjectTokenHeader = "X-Warden-Subject-Token"
+	DefaultActorTokenHeader   = "X-Warden-Actor-Token"
+)
+
+// internalTokenHeaders lists request headers that carry Warden's own auth and so
+// must never be reused to carry an exchange token: pointing a *_token_header at
+// one would either leak the caller's own auth into the exchange or let a caller
+// smuggle a token past validation. Compared canonicalized.
+var internalTokenHeaders = map[string]struct{}{
+	textproto.CanonicalMIMEHeaderKey("X-Warden-Token"): {},
+}
+
+// SubjectTokenHeaderName returns the canonicalized header name the "header"
+// subject source reads for this spec, defaulting to DefaultSubjectTokenHeader.
+func SubjectTokenHeaderName(config map[string]string) string {
+	return canonicalTokenHeader(config[ConfigSubjectTokenHeader], DefaultSubjectTokenHeader)
+}
+
+// ActorTokenHeaderName returns the canonicalized header name the "header" actor
+// source reads for this spec, defaulting to DefaultActorTokenHeader.
+func ActorTokenHeaderName(config map[string]string) string {
+	return canonicalTokenHeader(config[ConfigActorTokenHeader], DefaultActorTokenHeader)
+}
+
+// canonicalTokenHeader canonicalizes a configured header name (falling back to
+// def when unset) so name comparisons and lookups are case-insensitive and
+// consistent with net/http's own header canonicalization.
+func canonicalTokenHeader(v, def string) string {
+	if v == "" {
+		v = def
+	}
+	return textproto.CanonicalMIMEHeaderKey(v)
+}
 
 // Accepted values for the *_source config keys.
 const (
 	SourceAuthToken = "auth_token"
-	SourceHeader    = "header"
-	SourceNone      = "none"
+	// SourceHeader reads a caller-supplied token from a request header named by
+	// ConfigSubjectTokenHeader/ConfigActorTokenHeader (default the X-Warden-*-Token
+	// headers). The token is unverified — the driver validates it against the
+	// source's configured trust.
+	SourceHeader = "header"
+	SourceNone   = "none"
 	// SourceWardenIdentity mints a fresh Warden-signed identity assertion (via
 	// the OIDC issuer) as the subject token. Used for Workload Identity
 	// Federation: Warden re-issues the resolved agent identity so an upstream
@@ -347,6 +400,37 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	if config[ConfigSubjectTokenSource] == SourceAuthToken && actorSrc == SourceAuthToken {
 		return fmt.Errorf("field '%s': cannot be '%s' when '%s' is also '%s' (one inbound token cannot be both subject and actor)",
 			ConfigActorTokenSource, SourceAuthToken, ConfigSubjectTokenSource, SourceAuthToken)
+	}
+	// A configured header name is meaningful only for the matching header source,
+	// and must not name an internal auth header.
+	if err := validateTokenHeaderKey(config, ConfigSubjectTokenHeader, ConfigSubjectTokenSource); err != nil {
+		return err
+	}
+	if err := validateTokenHeaderKey(config, ConfigActorTokenHeader, ConfigActorTokenSource); err != nil {
+		return err
+	}
+	// One header cannot carry both the subject and the actor token.
+	if config[ConfigSubjectTokenSource] == SourceHeader && actorSrc == SourceHeader &&
+		SubjectTokenHeaderName(config) == ActorTokenHeaderName(config) {
+		return fmt.Errorf("field '%s': subject and actor cannot read the same header %q",
+			ConfigActorTokenHeader, SubjectTokenHeaderName(config))
+	}
+	return nil
+}
+
+// validateTokenHeaderKey checks a *_token_header config key: it is valid only
+// when the matching *_token_source is "header", and must not name an internal
+// auth header (compared canonicalized).
+func validateTokenHeaderKey(config map[string]string, headerKey, sourceKey string) error {
+	raw := config[headerKey]
+	if raw == "" {
+		return nil
+	}
+	if config[sourceKey] != SourceHeader {
+		return fmt.Errorf("field '%s': is valid only when '%s' is '%s'", headerKey, sourceKey, SourceHeader)
+	}
+	if _, bad := internalTokenHeaders[textproto.CanonicalMIMEHeaderKey(raw)]; bad {
+		return fmt.Errorf("field '%s': %q is an internal header and cannot carry an exchange token", headerKey, raw)
 	}
 	return nil
 }
