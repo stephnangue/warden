@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -12,6 +14,33 @@ import (
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
+
+// validateIssuerURL enforces the transport for the issuer_url. Real cloud OIDC
+// providers (AWS/GCP/Azure STS) require https, so it is mandatory in general — but
+// http is permitted for loopback hosts (127.0.0.1, ::1, localhost) so a dev/test
+// Warden can federate a local upstream (e.g. an OpenBao dev server, which accepts an
+// http loopback jwks_url) without standing up TLS.
+func validateIssuerURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("issuer_url is not a valid URL: %w", err)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if host == "localhost" {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("issuer_url must be https:// (http:// is allowed only for loopback hosts like 127.0.0.1 or localhost)")
+	default:
+		return fmt.Errorf("issuer_url must be https:// (AWS/GCP/Azure require HTTPS OIDC providers)")
+	}
+}
 
 // pathOIDCIssuer exposes the OIDC issuer configuration. The issuer is a single
 // GLOBAL trust root shared by every namespace, so — unlike credential sources —
@@ -260,8 +289,8 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 			if cfg.IssuerURL == "" {
 				return logical.ErrorResponse(logical.ErrBadRequest("issuer_url is required when the issuer is enabled")), true
 			}
-			if !strings.HasPrefix(cfg.IssuerURL, "https://") {
-				return logical.ErrorResponse(logical.ErrBadRequest("issuer_url must be https:// (AWS/GCP/Azure require HTTPS OIDC providers)")), true
+			if err := validateIssuerURL(cfg.IssuerURL); err != nil {
+				return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), true
 			}
 		}
 

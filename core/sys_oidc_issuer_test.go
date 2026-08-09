@@ -462,3 +462,31 @@ func TestSysOIDCIssuerConfig_PublisherCrossTypeRejected(t *testing.T) {
 	cfg, _ := loadIssuerConfig(ctx, storage)
 	assert.Nil(t, cfg, "a rejected write must not persist")
 }
+
+// TestValidateIssuerURL covers the transport rule: https always allowed, http only
+// for loopback hosts (dev/test), everything else rejected.
+func TestValidateIssuerURL(t *testing.T) {
+	cases := []struct {
+		url string
+		ok  bool
+	}{
+		{"https://warden.example.com", true},
+		{"https://127.0.0.1:8400", true},
+		{"http://127.0.0.1:8400", true},
+		{"http://localhost:8400", true},
+		{"http://[::1]:8400", true},
+		{"http://insecure", false},
+		{"http://warden.example.com", false},
+		{"ftp://127.0.0.1", false},
+		{"://bad", false},
+	}
+	for _, c := range cases {
+		err := validateIssuerURL(c.url)
+		if c.ok && err != nil {
+			t.Errorf("%s: unexpected error: %v", c.url, err)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("%s: expected an error, got nil", c.url)
+		}
+	}
+}
