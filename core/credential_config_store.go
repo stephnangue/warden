@@ -980,9 +980,13 @@ func (s *CredentialConfigStore) validateSource(ctx context.Context, source *cred
 		return logical.ErrBadRequest("source type cannot be empty")
 	}
 
-	// Validate rotation_period is set for source types that require it
-	if source.Type == credential.SourceTypeVault && source.RotationPeriod <= 0 {
-		return logical.ErrBadRequest("rotation_period is required for hvault credential sources")
+	// Validate rotation_period is set for source types that require it. A keyless
+	// hvault federation source (auth_method=oidc_federation) holds no secret_id to
+	// rotate, so rotation_period does not apply — only the rotatable approle/token
+	// path requires it.
+	if source.Type == credential.SourceTypeVault && source.RotationPeriod <= 0 &&
+		credential.GetString(source.Config, "auth_method", "") != "oidc_federation" {
+		return logical.ErrBadRequest("rotation_period is required for hvault credential sources (except keyless auth_method=oidc_federation)")
 	}
 
 	// Validate rotation_period is within configured bounds

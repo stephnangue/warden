@@ -1505,3 +1505,70 @@ func TestCredentialConfigStore_ValidateSpec_ConnectGating(t *testing.T) {
 	require.NoError(t, store.UpdateSpec(ctx, unconnected, UpdateSpecOptions{SkipVerification: true}),
 		"UpdateSpec with SkipVerification should skip the test-mint")
 }
+
+// fakeHvaultFactory registers under the hvault source type with no-op create/validate,
+// so tests can exercise the hvault-specific rotation_period rule without a live OpenBao.
+type fakeHvaultFactory struct{}
+
+func (f *fakeHvaultFactory) Type() string { return credential.SourceTypeVault }
+func (f *fakeHvaultFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+	return &testDriver{}, nil
+}
+func (f *fakeHvaultFactory) ValidateConfig(config map[string]string) error { return nil }
+func (f *fakeHvaultFactory) SensitiveConfigFields() []string               { return nil }
+func (f *fakeHvaultFactory) InferCredentialType(_ map[string]string) (string, error) {
+	return credential.TypeVaultToken, nil
+}
+
+// TestCredentialConfigStore_ValidateSource_HvaultRotationPeriod verifies that a keyless
+// hvault federation source may omit rotation_period, while the rotatable approle/token
+// path still requires it.
+func TestCredentialConfigStore_ValidateSource_HvaultRotationPeriod(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	store.core.credentialDriverRegistry = credential.NewDriverRegistry(nil)
+	if err := store.core.credentialDriverRegistry.RegisterFactory(&fakeHvaultFactory{}); err != nil {
+		t.Fatalf("register fake hvault factory: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		config      map[string]string
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name:        "oidc_federation without rotation_period is allowed",
+			config:      map[string]string{"auth_method": "oidc_federation", "jwt_role": "warden-agents"},
+			expectError: false,
+		},
+		{
+			name:        "approle without rotation_period is rejected",
+			config:      map[string]string{"auth_method": "approle"},
+			expectError: true,
+			errorMsg:    "rotation_period is required",
+		},
+		{
+			name:        "empty auth_method without rotation_period is rejected",
+			config:      map[string]string{},
+			expectError: true,
+			errorMsg:    "rotation_period is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &credential.CredSource{Name: "src", Type: credential.SourceTypeVault, Config: tt.config}
+			err := store.ValidateSource(ctx, src)
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.errorMsg)
+				}
+				if !contains(err.Error(), tt.errorMsg) {
+					t.Errorf("expected error containing %q, got %q", tt.errorMsg, err.Error())
+				}
+			} else if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
