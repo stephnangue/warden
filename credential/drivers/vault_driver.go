@@ -10,13 +10,29 @@ import (
 	"time"
 
 	"github.com/hashicorp/vault/api"
+	"github.com/openbao/openbao/sdk/v2/helper/consts"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logger"
+)
+
+// vaultAuthMethodApprole and vaultAuthMethodOIDCFederation select how the source
+// authenticates to the upstream Vault/OpenBao. approle holds a long-lived secret_id
+// (rotatable); oidc_federation holds no secret and authenticates per request by
+// exchanging a caller-presented Warden identity assertion at Vault's JWT auth method.
+// An empty auth_method means a pre-set/environment token.
+const (
+	vaultAuthMethodApprole        = "approle"
+	vaultAuthMethodOIDCFederation = "oidc_federation"
+
+	// defaultVaultJWTMount is the conventional Vault JWT/OIDC auth mount path used
+	// when a federation source does not set jwt_mount.
+	defaultVaultJWTMount = "jwt"
 )
 
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*VaultDriver)(nil)
 var _ credential.Rotatable = (*VaultDriver)(nil)
+var _ credential.ExchangeMinter = (*VaultDriver)(nil)
 
 // VaultDriver fetches credentials from HashiCorp Vault
 // Supports: KV, AWS engine, GCP engine, IBM engine, OAuth2 engine, Vault tokens
@@ -121,15 +137,16 @@ func (f *VaultDriverFactory) ValidateConfig(config map[string]string) error {
 	if authMethod != "" {
 		if err := credential.ValidateSchema(config,
 			credential.StringField("auth_method").
-				OneOf("approle").
-				Describe("Authentication method (only 'approle' supported)").
-				Example("approle"),
+				OneOf(vaultAuthMethodApprole, vaultAuthMethodOIDCFederation).
+				Describe("Authentication method: 'approle' (secret_id) or 'oidc_federation' (keyless JWT auth)").
+				Example(vaultAuthMethodApprole),
 		); err != nil {
 			return err
 		}
 
-		// If using approle, validate required fields
-		if authMethod == "approle" {
+		switch authMethod {
+		case vaultAuthMethodApprole:
+			// AppRole requires the login + rotation fields.
 			if err := credential.ValidateSchema(config,
 				credential.StringField("role_id").
 					Required().
@@ -152,6 +169,39 @@ func (f *VaultDriverFactory) ValidateConfig(config map[string]string) error {
 					Example("warden-source-role"),
 			); err != nil {
 				return err
+			}
+			// Reject keyless-federation config on an approle source so a
+			// misconfiguration cannot silently mix modes.
+			for _, k := range []string{"jwt_role", "jwt_mount", "audience"} {
+				if config[k] != "" {
+					return fmt.Errorf("field '%s' is only valid for auth_method=%s", k, vaultAuthMethodOIDCFederation)
+				}
+			}
+
+		case vaultAuthMethodOIDCFederation:
+			// Keyless: the source holds no secret and authenticates per request by
+			// exchanging a Warden identity assertion at Vault's JWT auth method.
+			if err := credential.ValidateSchema(config,
+				credential.StringField("jwt_role").
+					Required().
+					Describe("Vault JWT-auth role name the assertion logs in as").
+					Example("warden-agents"),
+
+				credential.StringField("jwt_mount").
+					Describe("Vault JWT/OIDC auth mount path (default 'jwt')").
+					Example("jwt"),
+
+				credential.StringField("audience").
+					Describe("Assertion audience; must equal the Vault role's bound_audiences").
+					Example("https://vault.example.com/warden"),
+			); err != nil {
+				return err
+			}
+			// Reject approle/token secrets on a keyless source (symmetric guard).
+			for _, k := range []string{"role_id", "secret_id", "secret_id_accessor", "approle_mount", "role_name", "token"} {
+				if config[k] != "" {
+					return fmt.Errorf("field '%s' must not be set for auth_method=%s", k, vaultAuthMethodOIDCFederation)
+				}
 			}
 		}
 	}
@@ -203,12 +253,15 @@ func (f *VaultDriverFactory) InferCredentialType(specConfig map[string]string) (
 	}
 }
 
+// getAuthMethod returns the source's configured auth_method ("" for a pre-set token).
+func (d *VaultDriver) getAuthMethod() string {
+	return credential.GetString(d.credSource.Config, "auth_method", "")
+}
+
 // authenticate performs Vault authentication only if needed (thread-safe)
 func (d *VaultDriver) authenticate(ctx context.Context) error {
-	authMethod := credential.GetString(d.credSource.Config, "auth_method", "")
-
-	switch authMethod {
-	case "approle":
+	switch d.getAuthMethod() {
+	case vaultAuthMethodApprole:
 		d.authMu.Lock()
 		defer d.authMu.Unlock()
 
@@ -220,11 +273,16 @@ func (d *VaultDriver) authenticate(ctx context.Context) error {
 			}
 		}
 		return d.loginViaApprole(ctx)
+	case vaultAuthMethodOIDCFederation:
+		// Keyless: there is no shared source session to establish. Each request
+		// logs in with its own caller assertion via MintCredentialWithExchange, so
+		// the driver-level authenticate is a no-op.
+		return nil
 	case "":
 		// No auth method, assume token is already set
 		return nil
 	default:
-		return fmt.Errorf("unsupported auth method: %s", authMethod)
+		return fmt.Errorf("unsupported auth method: %s", d.getAuthMethod())
 	}
 }
 
@@ -279,6 +337,13 @@ func (d *VaultDriver) loginViaApprole(ctx context.Context) error {
 
 // MintCredential mints credential using Hashicorp Vault based on mint_method
 func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	// A keyless federation source has no shared session and mints only by exchanging
+	// a caller assertion — fail closed here (before authenticate) so it surfaces the
+	// real reason rather than a generic "unsupported auth method".
+	if d.getAuthMethod() == vaultAuthMethodOIDCFederation {
+		return nil, nil, 0, "", fmt.Errorf("vault: source uses auth_method=%s; the spec must set subject_token_source (e.g. %s or auth_token) to mint over the exchange path", vaultAuthMethodOIDCFederation, credential.SourceWardenIdentity)
+	}
+
 	// Re-authenticate if needed
 	if err := d.authenticate(ctx); err != nil {
 		return nil, nil, 0, "", fmt.Errorf("authentication failed: %w", err)
@@ -301,6 +366,190 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 		return d.fetchOAuth2Creds(ctx, d.vault, spec)
 	default:
 		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'dynamic_aws', 'dynamic_gcp', 'dynamic_ibm', 'vault_token', 'oauth2'", mintMethod)
+	}
+}
+
+// MintCredentialWithExchange mints a credential over Workload Identity Federation by
+// exchanging the caller's verified Warden identity assertion at Vault's JWT auth
+// method for a per-request, per-identity Vault token, then vending either that token
+// (mint_method=vault_token) or a downstream secret brokered with it.
+//
+// Every path returns an EMPTY leaseID: a keyless source holds no session with
+// authority over the login token's leases, so credentials expire by TTL, and a
+// dynamic lease — a child of the login token — is revoked by Vault when that token
+// expires. For dynamic engines the vended TTL is therefore capped to the login
+// token's remaining lifetime.
+//
+// Batch and service login tokens are both supported: a batch token cannot be revoked
+// but Vault constrains any lease it creates to expire no later than the token itself,
+// so the TTL cap still bounds the credential; the static-path login-token cleanup is
+// simply skipped for a batch token (see revokeLoginToken).
+func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if d.getAuthMethod() != vaultAuthMethodOIDCFederation {
+		return nil, nil, 0, "", fmt.Errorf("vault: workload identity federation requires auth_method=%s on the source", vaultAuthMethodOIDCFederation)
+	}
+	if inputs == nil || inputs.SubjectToken == "" {
+		return nil, nil, 0, "", fmt.Errorf("vault: no subject token in exchange inputs")
+	}
+	if inputs.SubjectTokenOrigin != credential.ExchangeOriginVerified {
+		return nil, nil, 0, "", fmt.Errorf("vault: workload identity federation requires a verified subject (subject_token_source=%s or auth_token); a caller-supplied, unverified subject is rejected", credential.SourceWardenIdentity)
+	}
+
+	// Exchange the assertion for a per-request Vault token on an isolated client.
+	client, loginAuth, err := d.loginViaJWT(ctx, spec, inputs.SubjectToken)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+	loginTTL := time.Duration(loginAuth.LeaseDuration) * time.Second
+
+	mintMethod := credential.GetString(spec.Config, "mint_method", "")
+
+	// The JWT-login token itself is the credential — never revoke it here.
+	if mintMethod == "vault_token" {
+		if loginTTL <= 0 {
+			// A role that issues a no-expiry token: give the cache/lease layer a
+			// positive lifetime rather than a zero (which would read as "static").
+			loginTTL = 1 * time.Hour
+		}
+		// The token's real validity is fixed by the Vault role, but the lease/cache
+		// lifetime must not exceed the spec's MaxTTL (mirrors the GCP federated path).
+		if spec.MaxTTL > 0 && loginTTL > spec.MaxTTL {
+			loginTTL = spec.MaxTTL
+		}
+		rawData := map[string]interface{}{
+			"token":        loginAuth.ClientToken,
+			"client_token": loginAuth.ClientToken,
+			"accessor":     loginAuth.Accessor,
+			"policies":     loginAuth.Policies,
+			"renewable":    loginAuth.Renewable,
+		}
+		metadata := map[string]interface{}{"role": d.effectiveJWTRole(spec)}
+		if loginAuth.EntityID != "" {
+			metadata["subject"] = loginAuth.EntityID
+		}
+		if d.logger != nil {
+			d.logger.Debug("minted federated Vault token",
+				logger.String("spec", spec.Name),
+				logger.String("jwt_role", d.effectiveJWTRole(spec)),
+				logger.String("accessor", loginAuth.Accessor),
+				logger.String("ttl", loginTTL.String()),
+			)
+		}
+		return rawData, metadata, loginTTL, "", nil
+	}
+
+	// Downstream engines: broker with the per-request login token.
+	var (
+		rawData  map[string]interface{}
+		metadata map[string]interface{}
+		leaseTTL time.Duration
+	)
+	switch mintMethod {
+	case "static_aws", "static_apikey":
+		rawData, metadata, leaseTTL, _, err = d.fetchStaticKVSecret(ctx, client, spec)
+		// A static read holds no lease that depends on the login token — best-effort
+		// revoke it so a transient session is not left behind.
+		defer d.revokeLoginToken(loginAuth.Accessor, client)
+	case "dynamic_aws":
+		rawData, metadata, leaseTTL, _, err = d.fetchDynamicAWSCreds(ctx, client, spec)
+	case "dynamic_gcp":
+		rawData, metadata, leaseTTL, _, err = d.fetchDynamicGCPCreds(ctx, client, spec)
+	case "dynamic_ibm":
+		rawData, metadata, leaseTTL, _, err = d.fetchDynamicIBMCreds(ctx, client, spec)
+	case "oauth2":
+		rawData, metadata, leaseTTL, _, err = d.fetchOAuth2Creds(ctx, client, spec)
+	default:
+		return nil, nil, 0, "", fmt.Errorf("vault: mint_method %q is not supported over auth_method=%s (supported: vault_token, static_aws, static_apikey, dynamic_aws, dynamic_gcp, dynamic_ibm, oauth2)", mintMethod, vaultAuthMethodOIDCFederation)
+	}
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+
+	// Cap a dynamic lease to the login token's remaining lifetime (a child lease
+	// cannot outlive its parent). A static read returns leaseTTL=0 (no lease); leave
+	// it untouched so the fetched secret is not turned into a short-lived one.
+	if leaseTTL > 0 && loginTTL > 0 && loginTTL < leaseTTL {
+		leaseTTL = loginTTL
+	}
+	// Never serve a credential (or cache entry) beyond the spec's MaxTTL.
+	if leaseTTL > 0 && spec.MaxTTL > 0 && leaseTTL > spec.MaxTTL {
+		leaseTTL = spec.MaxTTL
+	}
+	return rawData, metadata, leaseTTL, "", nil
+}
+
+// effectiveJWTRole returns the JWT-auth role for this mint: a per-spec jwt_role
+// override falls back to the source's jwt_role.
+func (d *VaultDriver) effectiveJWTRole(spec *credential.CredSpec) string {
+	if r := credential.GetString(spec.Config, "jwt_role", ""); r != "" {
+		return r
+	}
+	return credential.GetString(d.credSource.Config, "jwt_role", "")
+}
+
+// loginViaJWT builds a per-request, token-isolated Vault client and logs in at the
+// source's JWT auth mount with the caller assertion, returning the client (with the
+// login token set) and the login auth info.
+func (d *VaultDriver) loginViaJWT(ctx context.Context, spec *credential.CredSpec, assertion string) (*api.Client, *api.SecretAuth, error) {
+	// CloneWithHeaders reuses the shared transport (connection pooling) and copies the
+	// namespace header, but gives an independent token field so the per-request
+	// identity never mutates d.vault. SetToken("") drops any env-inherited VAULT_TOKEN
+	// so it is not sent on the login request.
+	client, err := d.vault.CloneWithHeaders()
+	if err != nil {
+		return nil, nil, fmt.Errorf("vault: failed to clone client for JWT login: %w", err)
+	}
+	client.SetToken("")
+
+	jwtRole := d.effectiveJWTRole(spec)
+	if jwtRole == "" {
+		return nil, nil, fmt.Errorf("vault: jwt_role is required for auth_method=%s", vaultAuthMethodOIDCFederation)
+	}
+	jwtMount := credential.GetString(d.credSource.Config, "jwt_mount", defaultVaultJWTMount)
+
+	path := fmt.Sprintf("auth/%s/login", jwtMount)
+	secret, err := client.Logical().WriteWithContext(ctx, path, map[string]interface{}{
+		"role": jwtRole,
+		"jwt":  assertion,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("vault: JWT login failed at mount %q role %q: %w", jwtMount, jwtRole, err)
+	}
+	if secret == nil || secret.Auth == nil {
+		return nil, nil, fmt.Errorf("vault: no auth info returned from JWT login at mount %q", jwtMount)
+	}
+	client.SetToken(secret.Auth.ClientToken)
+	return client, secret.Auth, nil
+}
+
+// isBatchToken reports whether a Vault token is a batch token (by prefix). Batch
+// tokens cannot be revoked (Vault rejects it) and expire on their own; any lease they
+// create is constrained by Vault to expire no later than the token itself. So there is
+// nothing to revoke and no cleanup to attempt.
+func isBatchToken(token string) bool {
+	return strings.HasPrefix(token, consts.BatchTokenPrefix) ||
+		strings.HasPrefix(token, consts.LegacyBatchTokenPrefix)
+}
+
+// revokeLoginToken best-effort revokes the per-request JWT-login token that `client`
+// holds, used after a static read that created no lease depending on it. It uses
+// revoke-self (which the default policy always grants — revoke-accessor would need an
+// extra grant the login token normally lacks) on its own short timeout and a fresh
+// context so it fires even if the caller's context is done; failures are logged only.
+// accessor is passed for logging only.
+func (d *VaultDriver) revokeLoginToken(accessor string, client *api.Client) {
+	// A batch-token login cannot be revoked (Vault would reject it) and self-expires,
+	// so skip the guaranteed-failing call rather than log a warning on every read.
+	if isBatchToken(client.Token()) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Auth().Token().RevokeSelfWithContext(ctx, ""); err != nil && d.logger != nil {
+		d.logger.Warn("failed to revoke federated JWT-login token after static read",
+			logger.String("accessor", truncateID(accessor, 8)),
+			logger.Err(err),
+		)
 	}
 }
 
@@ -743,6 +992,15 @@ func (d *VaultDriver) fetchDynamicVaultToken(ctx context.Context, client *api.Cl
 func (d *VaultDriver) Revoke(ctx context.Context, leaseID string) error {
 	if leaseID == "" {
 		return nil // Nothing to revoke
+	}
+
+	// A keyless federation source holds no session with authority over the
+	// per-request login token's leases, so it cannot revoke on demand. Its mint
+	// paths return an empty leaseID (credentials expire by TTL, and dynamic leases
+	// are revoked when their parent login token expires), so a non-empty leaseID
+	// here is unexpected — treat it as a no-op rather than erroring on authenticate.
+	if d.getAuthMethod() == vaultAuthMethodOIDCFederation {
+		return nil
 	}
 
 	if err := d.authenticate(ctx); err != nil {

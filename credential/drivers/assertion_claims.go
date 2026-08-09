@@ -75,9 +75,7 @@ func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg map[string]st
 // (approle/token) source supplies no derived audience even if a stored config record
 // somehow carries one.
 func vaultAssertionAudience(sourceCfg map[string]string) (string, bool) {
-	// Literal "oidc_federation" here mirrors the source auth_method value; the shared
-	// vaultAuthMethodOIDCFederation constant lands with the driver's federation mode.
-	if credential.GetString(sourceCfg, "auth_method", "") != "oidc_federation" {
+	if credential.GetString(sourceCfg, "auth_method", "") != vaultAuthMethodOIDCFederation {
 		return "", false
 	}
 	if aud := credential.GetString(sourceCfg, "audience", ""); aud != "" {
