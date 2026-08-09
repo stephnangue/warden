@@ -48,8 +48,7 @@ func (t *VaultTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("vault_token"),
 
 		credential.StringField("token_role").
-			Required().
-			Describe("Vault token role to use for minting").
+			Describe("Vault token role for the static path (auth/token/create/{token_role}); required unless subject_token_source is set, where the exchanged/login token is vended directly and token_role must be omitted").
 			Example("app-backend"),
 
 		credential.DurationField("ttl").
@@ -79,6 +78,21 @@ func (t *VaultTokenCredType) ValidateConfig(config map[string]string, sourceType
 	schema := t.ConfigSchema()
 	if err := credential.ValidateSchema(config, schema...); err != nil {
 		return err
+	}
+
+	// Step 3: token_role governs only the static path, where the token is minted via
+	// auth/token/create/{token_role}. Any exchange spec (subject_token_source set —
+	// warden_identity, auth_token, header) vends the exchanged/login token directly
+	// and never consults token_role, so require it off the exchange path and reject a
+	// set-but-ignored token_role on it rather than silently dropping the operator's
+	// intent (which would vend a token with the wrong policy set). The credential type
+	// sees the spec config, so it distinguishes the two without the source config.
+	if credential.SpecRequestsExchange(config) {
+		if config["token_role"] != "" {
+			return fmt.Errorf("field 'token_role' is not used when '%s' is set: an exchange-minted vault_token vends the exchanged token directly", credential.ConfigSubjectTokenSource)
+		}
+	} else if config["token_role"] == "" {
+		return fmt.Errorf("field 'token_role' is required for mint_method=vault_token")
 	}
 
 	return nil

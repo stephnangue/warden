@@ -54,6 +54,35 @@ func TestVaultTokenCredType_ValidateConfig_VaultSource(t *testing.T) {
 			errMsg:     "token_role",
 		},
 		{
+			name: "warden_identity exchange spec valid without token_role",
+			config: map[string]string{
+				"mint_method":          "vault_token",
+				"subject_token_source": credential.SourceWardenIdentity,
+			},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    false,
+		},
+		{
+			name: "auth_token exchange spec valid without token_role",
+			config: map[string]string{
+				"mint_method":          "vault_token",
+				"subject_token_source": credential.SourceAuthToken,
+			},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    false,
+		},
+		{
+			name: "exchange spec rejects an ignored token_role",
+			config: map[string]string{
+				"mint_method":          "vault_token",
+				"subject_token_source": credential.SourceWardenIdentity,
+				"token_role":           "my-role",
+			},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "not used when",
+		},
+		{
 			name: "unsupported mint_method",
 			config: map[string]string{
 				"mint_method": "invalid",
