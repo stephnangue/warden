@@ -31,6 +31,8 @@ func DeriveAssertionResource(sourceType string, sourceCfg, specCfg map[string]st
 		return tokenExchangeAssertionResource(sourceCfg, specCfg)
 	case credential.SourceTypeGCP:
 		return gcpAssertionResource(sourceCfg, specCfg)
+	case credential.SourceTypeVault:
+		return vaultAssertionResource(sourceCfg, specCfg)
 	default:
 		return "", false
 	}
@@ -55,9 +57,78 @@ func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg map[string]st
 		return awsAssertionAudience(sourceCfg)
 	case credential.SourceTypeAzure:
 		return azureAssertionAudience(sourceCfg)
+	case credential.SourceTypeVault:
+		return vaultAssertionAudience(sourceCfg)
 	default:
 		return "", false
 	}
+}
+
+// vaultAssertionAudience derives the warden_identity assertion audience for a Vault
+// (hvault) federation source: the source's explicit `audience`, or ("", false) when
+// unset. Unlike AWS/Azure there is no conventional Vault default — the audience must
+// equal the Vault JWT-auth role's bound_audiences, which the operator chooses — so an
+// unset audience forces the spec to set assertion_audience explicitly (the spec-create
+// gate enforces this, and mint fails closed otherwise).
+//
+// Gated on auth_method=oidc_federation: only a keyless source federates, so a static
+// (approle/token) source supplies no derived audience even if a stored config record
+// somehow carries one.
+func vaultAssertionAudience(sourceCfg map[string]string) (string, bool) {
+	// Literal "oidc_federation" here mirrors the source auth_method value; the shared
+	// vaultAuthMethodOIDCFederation constant lands with the driver's federation mode.
+	if credential.GetString(sourceCfg, "auth_method", "") != "oidc_federation" {
+		return "", false
+	}
+	if aud := credential.GetString(sourceCfg, "audience", ""); aud != "" {
+		return aud, true
+	}
+	return "", false
+}
+
+// vaultAssertionResource reports the canonical downstream resource a Vault federation
+// spec targets, for the warden_resource assertion claim. Pure: reads source/spec
+// config only, no network or driver state. Dispatches on the spec's mint_method, since
+// that selects which upstream engine/path the federated session actually reaches. The
+// returned value is the bare mount/path (or role) with no provider prefix; it is
+// opaque — never parse it back, as a KV path or role name can itself contain ':'.
+func vaultAssertionResource(sourceCfg, specCfg map[string]string) (string, bool) {
+	switch credential.GetString(specCfg, "mint_method", "") {
+	case "vault_token":
+		// The effective JWT-auth role: a spec override falls back to the source value.
+		role := credential.GetString(specCfg, "jwt_role", "")
+		if role == "" {
+			role = credential.GetString(sourceCfg, "jwt_role", "")
+		}
+		if role != "" {
+			return role, true
+		}
+	case "static_aws", "static_apikey":
+		mount := credential.GetString(specCfg, "kv2_mount", "")
+		path := credential.GetString(specCfg, "secret_path", "")
+		if mount != "" && path != "" {
+			return mount + "/" + path, true
+		}
+	case "dynamic_aws":
+		if mount, role := credential.GetString(specCfg, "aws_mount", ""), credential.GetString(specCfg, "role_name", ""); mount != "" && role != "" {
+			return mount + "/" + role, true
+		}
+	case "dynamic_gcp":
+		if mount, role := credential.GetString(specCfg, "gcp_mount", ""), credential.GetString(specCfg, "role_name", ""); mount != "" && role != "" {
+			return mount + "/" + role, true
+		}
+	case "dynamic_ibm":
+		if mount, role := credential.GetString(specCfg, "ibm_mount", ""), credential.GetString(specCfg, "role_name", ""); mount != "" && role != "" {
+			return mount + "/" + role, true
+		}
+	case "oauth2":
+		mount := credential.GetString(specCfg, "oauth2_mount", "")
+		name := credential.GetString(specCfg, "credential_name", "")
+		if mount != "" && name != "" {
+			return mount + "/" + name, true
+		}
+	}
+	return "", false
 }
 
 // gcpAssertionAudience derives the GCP WIF assertion audience from the source's
