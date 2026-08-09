@@ -2242,13 +2242,20 @@ func TestValidActorSubject(t *testing.T) {
 }
 
 // exchangeResolveEnv wires a credential config store into a minimal Core and
-// creates a local source, so resolveExchangeInputs can read seeded specs.
+// creates a local source plus a token_exchange source, so resolveExchangeInputs
+// can read seeded specs. Actor specs must bind to the token_exchange source
+// (only that driver consumes an actor token — enforced by ValidateSpec), so use
+// seedExchangeSpec for those.
 func exchangeResolveEnv(t *testing.T) (*Core, context.Context) {
 	t.Helper()
 	store, ctx := setupTestCredentialConfigStore(t)
 	c := store.core
 	c.credConfigStore = store
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "local-src", Type: "local"}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
+		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"},
+	}))
 	return c, ctx
 }
 
@@ -2258,6 +2265,18 @@ func seedSpec(t *testing.T, c *Core, ctx context.Context, name string, config ma
 		Name:   name,
 		Type:   "vault_token",
 		Source: "local-src",
+		Config: config,
+	}))
+}
+
+// seedExchangeSpec seeds a spec bound to the token_exchange source, required for
+// any spec that sets an actor token source.
+func seedExchangeSpec(t *testing.T, c *Core, ctx context.Context, name string, config map[string]string) {
+	t.Helper()
+	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name:   name,
+		Type:   "vault_token",
+		Source: "sts-src",
 		Config: config,
 	}))
 }
@@ -2402,7 +2421,7 @@ func TestResolveExchangeInputs_SubjectHeader_GuardBypassAttempts(t *testing.T) {
 
 func TestResolveExchangeInputs_ActorHeader_CustomName(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
-	seedSpec(t, c, ctx, "deleg-spec", map[string]string{
+	seedExchangeSpec(t, c, ctx, "deleg-spec", map[string]string{
 		credential.ConfigSubjectTokenSource: credential.SourceHeader,
 		credential.ConfigActorTokenSource:   credential.SourceHeader,
 		credential.ConfigActorTokenHeader:   "X-Actor",
@@ -2421,7 +2440,7 @@ func TestResolveExchangeInputs_ActorHeader_CustomName(t *testing.T) {
 
 func TestResolveExchangeInputs_ActorHeader(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
-	seedSpec(t, c, ctx, "deleg-spec", map[string]string{
+	seedExchangeSpec(t, c, ctx, "deleg-spec", map[string]string{
 		credential.ConfigSubjectTokenSource: credential.SourceHeader,
 		credential.ConfigActorTokenSource:   credential.SourceHeader,
 	})
@@ -2442,7 +2461,7 @@ func TestResolveExchangeInputs_ActorHeader(t *testing.T) {
 func TestResolveExchangeInputs_ActorAuthToken(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	// subject via header (a user token), actor via the agent's verified inbound JWT.
-	seedSpec(t, c, ctx, "deleg-auth", map[string]string{
+	seedExchangeSpec(t, c, ctx, "deleg-auth", map[string]string{
 		credential.ConfigSubjectTokenSource: credential.SourceHeader,
 		credential.ConfigActorTokenSource:   credential.SourceAuthToken,
 	})
@@ -2460,7 +2479,7 @@ func TestResolveExchangeInputs_ActorAuthToken(t *testing.T) {
 
 func TestResolveExchangeInputs_ActorAuthToken_OpaqueFailsClosed(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
-	seedSpec(t, c, ctx, "deleg-auth", map[string]string{
+	seedExchangeSpec(t, c, ctx, "deleg-auth", map[string]string{
 		credential.ConfigSubjectTokenSource: credential.SourceHeader,
 		credential.ConfigActorTokenSource:   credential.SourceAuthToken,
 	})
@@ -2474,7 +2493,7 @@ func TestResolveExchangeInputs_ActorAuthToken_OpaqueFailsClosed(t *testing.T) {
 
 func TestResolveExchangeInputs_ActorHeader_MissingFailsClosed(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
-	seedSpec(t, c, ctx, "deleg-spec", map[string]string{
+	seedExchangeSpec(t, c, ctx, "deleg-spec", map[string]string{
 		credential.ConfigSubjectTokenSource: credential.SourceHeader,
 		credential.ConfigActorTokenSource:   credential.SourceHeader,
 	})
@@ -2512,7 +2531,7 @@ func TestResolveExchangeInputs_WardenIdentity_MintDeferred(t *testing.T) {
 	require.NotNil(t, inputs.ResolveSubjectToken, "a lazy subject-token provider must be set")
 	assert.Equal(t, credential.TokenTypeJWT, inputs.SubjectTokenType)
 	assert.Equal(t, credential.ExchangeOriginVerified, inputs.SubjectTokenOrigin)
-	assert.Equal(t, wardenSubject(te)+"\x00"+"https://sts.example/aud", inputs.CacheIdentity)
+	assert.Equal(t, wardenSubject(te)+"\x00"+"https://sts.example/aud", inputs.SubjectCacheIdentity)
 
 	// Invoking the provider mints a real JWT assertion (what the Manager does on a miss).
 	tok, err := inputs.ResolveSubjectToken(ctx)
@@ -2522,7 +2541,52 @@ func TestResolveExchangeInputs_WardenIdentity_MintDeferred(t *testing.T) {
 	// The cache identity is stable across requests and needs no mint to compute.
 	inputs2, err := c.resolveExchangeInputs(ctx, req, te)
 	require.NoError(t, err)
-	assert.Equal(t, inputs.CacheIdentity, inputs2.CacheIdentity, "cache identity must be stable")
+	assert.Equal(t, inputs.SubjectCacheIdentity, inputs2.SubjectCacheIdentity, "cache identity must be stable")
+}
+
+// TestResolveExchangeInputs_ActorWardenIdentity_MintDeferred covers the
+// delegation shape: an eager header subject (the user) paired with a lazily-minted
+// warden_identity actor (the agent), so the STS receives sub=user, act=agent.
+func TestResolveExchangeInputs_ActorWardenIdentity_MintDeferred(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedExchangeSpec(t, c, ctx, "obo-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+		credential.ConfigActorTokenSource:   credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+	})
+
+	te := &logical.TokenEntry{
+		CredentialSpec: "obo-spec",
+		PrincipalID:    "spiffe://acme/agent/bot",
+		NamespaceID:    "ns1",
+		MountAccessor:  "auth_cert_1",
+	}
+	// cert/SPIFFE agent: the user token rides in the default header; the agent's own
+	// inbound token is an opaque session, distinct from the user token.
+	req := requestWith("s.opaque-session", map[string]string{credential.DefaultSubjectTokenHeader: "eyJ.user"})
+
+	inputs, err := c.resolveExchangeInputs(ctx, req, te)
+	require.NoError(t, err)
+	require.NotNil(t, inputs)
+
+	// Subject: the header user token — eager and unverified.
+	assert.Equal(t, "eyJ.user", inputs.SubjectToken)
+	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.SubjectTokenOrigin)
+	assert.Nil(t, inputs.ResolveSubjectToken, "the header subject resolves eagerly")
+
+	// Actor: warden_identity — minted lazily, verified, keyed on the agent identity.
+	assert.Empty(t, inputs.ActorToken, "the actor assertion must not be minted eagerly")
+	require.NotNil(t, inputs.ResolveActorToken, "a lazy actor-token provider must be set")
+	assert.Equal(t, credential.TokenTypeJWT, inputs.ActorTokenType)
+	assert.Equal(t, credential.ExchangeOriginVerified, inputs.ActorTokenOrigin)
+	assert.Equal(t, wardenSubject(te)+"\x00"+"https://sts.example/aud", inputs.ActorCacheIdentity)
+
+	// Invoking the provider mints a real JWT whose sub is the agent (the act.sub).
+	tok, err := inputs.ResolveActorToken(ctx)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(tok, "eyJ"), "the provider must mint a JWT assertion")
+	assert.Equal(t, wardenSubject(te), decodeAssertionClaims(t, tok)["sub"])
 }
 
 // TestResolveExchangeInputs_WardenIdentity_ResourceDerived proves the resource is
@@ -2552,7 +2616,7 @@ func TestResolveExchangeInputs_WardenIdentity_ResourceDerived(t *testing.T) {
 	require.NotNil(t, inputs)
 
 	const wantRes = "aws-secretsmanager:prod/db"
-	assert.Equal(t, wardenSubject(te)+"\x00"+"sts.amazonaws.com"+"\x00res="+wantRes, inputs.CacheIdentity)
+	assert.Equal(t, wardenSubject(te)+"\x00"+"sts.amazonaws.com"+"\x00res="+wantRes, inputs.SubjectCacheIdentity)
 
 	tok, err := inputs.ResolveSubjectToken(ctx)
 	require.NoError(t, err)
@@ -2588,7 +2652,7 @@ func TestResolveExchangeInputs_WardenIdentity_ResourceOverrideAndOptOut(t *testi
 	teOv := newSpecTE("wid-override", "custom:thing")
 	inOv, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque", nil), teOv)
 	require.NoError(t, err)
-	assert.Contains(t, inOv.CacheIdentity, "\x00res=custom:thing")
+	assert.Contains(t, inOv.SubjectCacheIdentity, "\x00res=custom:thing")
 	tokOv, err := inOv.ResolveSubjectToken(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "custom:thing", decodeAssertionClaims(t, tokOv)["warden_resource"])
@@ -2597,7 +2661,7 @@ func TestResolveExchangeInputs_WardenIdentity_ResourceOverrideAndOptOut(t *testi
 	teNone := newSpecTE("wid-none", credential.AssertionResourceNone)
 	inNone, err := c.resolveExchangeInputs(ctx, requestWith("s.opaque", nil), teNone)
 	require.NoError(t, err)
-	assert.Equal(t, wardenSubject(teNone)+"\x00"+"sts.amazonaws.com", inNone.CacheIdentity)
+	assert.Equal(t, wardenSubject(teNone)+"\x00"+"sts.amazonaws.com", inNone.SubjectCacheIdentity)
 	tokNone, err := inNone.ResolveSubjectToken(ctx)
 	require.NoError(t, err)
 	_, present := decodeAssertionClaims(t, tokNone)["warden_resource"]
@@ -2724,7 +2788,7 @@ func TestResolveExchangeInputs_WardenIdentity_MetadataProjected(t *testing.T) {
 	}
 	inputsStaging, err := c.resolveExchangeInputs(ctx, req, teStaging)
 	require.NoError(t, err)
-	assert.NotEqual(t, inputs.CacheIdentity, inputsStaging.CacheIdentity,
+	assert.NotEqual(t, inputs.SubjectCacheIdentity, inputsStaging.SubjectCacheIdentity,
 		"differing projected metadata must isolate the credential cache")
 }
 

@@ -44,10 +44,10 @@ func TestExchangeInputs_Validate(t *testing.T) {
 			name: "lazy subject with cache identity",
 			inputs: &ExchangeInputs{
 				// SubjectToken empty on purpose: resolved lazily on a cache miss.
-				SubjectTokenType:    TokenTypeJWT,
-				SubjectTokenOrigin:  ExchangeOriginVerified,
-				CacheIdentity:       "wid:ns:mount:alice\x00aud",
-				ResolveSubjectToken: stubResolve,
+				SubjectTokenType:     TokenTypeJWT,
+				SubjectTokenOrigin:   ExchangeOriginVerified,
+				SubjectCacheIdentity: "wid:ns:mount:alice\x00aud",
+				ResolveSubjectToken:  stubResolve,
 			},
 		},
 		{
@@ -84,6 +84,44 @@ func TestExchangeInputs_Validate(t *testing.T) {
 				SubjectTokenType:   TokenTypeJWT,
 				ActorTokenType:     TokenTypeJWT,
 				SubjectTokenOrigin: ExchangeOriginVerified,
+			},
+			wantErr: true,
+		},
+		{
+			name: "lazy actor with cache identity",
+			inputs: &ExchangeInputs{
+				// Eager header subject paired with a lazy warden_identity actor:
+				// ActorToken empty on purpose, resolved on a cache miss.
+				SubjectToken:       "eyJ.user",
+				SubjectTokenType:   TokenTypeJWT,
+				SubjectTokenOrigin: ExchangeOriginUnverified,
+				ActorTokenType:     TokenTypeJWT,
+				ActorTokenOrigin:   ExchangeOriginVerified,
+				ActorCacheIdentity: "wid:ns:mount:agent\x00aud",
+				ResolveActorToken:  stubResolve,
+			},
+		},
+		{
+			name: "lazy actor without cache identity",
+			inputs: &ExchangeInputs{
+				SubjectToken:       "eyJ.user",
+				SubjectTokenType:   TokenTypeJWT,
+				SubjectTokenOrigin: ExchangeOriginUnverified,
+				ActorTokenType:     TokenTypeJWT,
+				ActorTokenOrigin:   ExchangeOriginVerified,
+				ResolveActorToken:  stubResolve,
+			},
+			wantErr: true,
+		},
+		{
+			name: "lazy actor without token type",
+			inputs: &ExchangeInputs{
+				SubjectToken:       "eyJ.user",
+				SubjectTokenType:   TokenTypeJWT,
+				SubjectTokenOrigin: ExchangeOriginUnverified,
+				ActorTokenOrigin:   ExchangeOriginVerified,
+				ActorCacheIdentity: "wid:ns:mount:agent\x00aud",
+				ResolveActorToken:  stubResolve,
 			},
 			wantErr: true,
 		},
@@ -167,37 +205,37 @@ func TestExchangeInputs_Fingerprint_NoConcatAmbiguity(t *testing.T) {
 	}
 }
 
-// TestExchangeInputs_Fingerprint_CacheIdentity covers the Warden-minted-subject
-// caching contract: the fingerprint keys on CacheIdentity (stable) rather than
+// TestExchangeInputs_Fingerprint_SubjectCacheIdentity covers the Warden-minted-subject
+// caching contract: the fingerprint keys on SubjectCacheIdentity (stable) rather than
 // the volatile SubjectToken, so re-mints of the same identity share a cache
 // entry while distinct identities stay isolated and cannot collide with the
 // raw-subject path.
-func TestExchangeInputs_Fingerprint_CacheIdentity(t *testing.T) {
+func TestExchangeInputs_Fingerprint_SubjectCacheIdentity(t *testing.T) {
 	// Same identity, different (freshly minted) subject bytes -> same fingerprint.
-	a := &ExchangeInputs{SubjectToken: "assertion-mint-1", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, CacheIdentity: "wid:ns:mount:alice|aud"}
-	b := &ExchangeInputs{SubjectToken: "assertion-mint-2", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, CacheIdentity: "wid:ns:mount:alice|aud"}
+	a := &ExchangeInputs{SubjectToken: "assertion-mint-1", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, SubjectCacheIdentity: "wid:ns:mount:alice|aud"}
+	b := &ExchangeInputs{SubjectToken: "assertion-mint-2", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, SubjectCacheIdentity: "wid:ns:mount:alice|aud"}
 	if a.Fingerprint() != b.Fingerprint() {
-		t.Fatal("same CacheIdentity must fingerprint identically despite different subject bytes")
+		t.Fatal("same SubjectCacheIdentity must fingerprint identically despite different subject bytes")
 	}
 
 	// Different identity -> different fingerprint.
-	c := &ExchangeInputs{SubjectToken: "assertion-mint-1", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, CacheIdentity: "wid:ns:mount:bob|aud"}
+	c := &ExchangeInputs{SubjectToken: "assertion-mint-1", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, SubjectCacheIdentity: "wid:ns:mount:bob|aud"}
 	if c.Fingerprint() == a.Fingerprint() {
-		t.Fatal("distinct CacheIdentity must fingerprint differently")
+		t.Fatal("distinct SubjectCacheIdentity must fingerprint differently")
 	}
 
-	// Domain separation: CacheIdentity="X" must not collide with SubjectToken="X".
-	viaIdentity := &ExchangeInputs{SubjectToken: "assertion", SubjectTokenType: TokenTypeJWT, CacheIdentity: "X"}
+	// Domain separation: SubjectCacheIdentity="X" must not collide with SubjectToken="X".
+	viaIdentity := &ExchangeInputs{SubjectToken: "assertion", SubjectTokenType: TokenTypeJWT, SubjectCacheIdentity: "X"}
 	viaSubject := &ExchangeInputs{SubjectToken: "X", SubjectTokenType: TokenTypeJWT}
 	if viaIdentity.Fingerprint() == viaSubject.Fingerprint() {
-		t.Fatal("CacheIdentity path must be domain-separated from the raw-subject path")
+		t.Fatal("SubjectCacheIdentity path must be domain-separated from the raw-subject path")
 	}
 
-	// Setting CacheIdentity must change the fingerprint vs. keying on the subject.
-	withID := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT, CacheIdentity: "id"}
+	// Setting SubjectCacheIdentity must change the fingerprint vs. keying on the subject.
+	withID := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT, SubjectCacheIdentity: "id"}
 	withoutID := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT}
 	if withID.Fingerprint() == withoutID.Fingerprint() {
-		t.Fatal("CacheIdentity must be folded into the fingerprint")
+		t.Fatal("SubjectCacheIdentity must be folded into the fingerprint")
 	}
 }
 
@@ -206,9 +244,9 @@ func TestExchangeInputs_Fingerprint_CacheIdentity(t *testing.T) {
 // and a would-be follower must key identically so they share one cache entry.
 func TestExchangeInputs_Fingerprint_IgnoresResolveClosure(t *testing.T) {
 	base := ExchangeInputs{
-		SubjectTokenType:   TokenTypeJWT,
-		SubjectTokenOrigin: ExchangeOriginVerified,
-		CacheIdentity:      "wid:ns:mount:alice\x00aud",
+		SubjectTokenType:     TokenTypeJWT,
+		SubjectTokenOrigin:   ExchangeOriginVerified,
+		SubjectCacheIdentity: "wid:ns:mount:alice\x00aud",
 	}
 	withClosure := base
 	withClosure.ResolveSubjectToken = stubResolve
@@ -218,11 +256,51 @@ func TestExchangeInputs_Fingerprint_IgnoresResolveClosure(t *testing.T) {
 	}
 
 	// And a later-populated SubjectToken must also not change the key (the closure
-	// path keys on CacheIdentity, not the minted bytes).
+	// path keys on SubjectCacheIdentity, not the minted bytes).
 	populated := withClosure
 	populated.SubjectToken = "freshly-minted-assertion"
 	if populated.Fingerprint() != base.Fingerprint() {
-		t.Fatal("a lazily-populated SubjectToken must not change the CacheIdentity-keyed fingerprint")
+		t.Fatal("a lazily-populated SubjectToken must not change the SubjectCacheIdentity-keyed fingerprint")
+	}
+}
+
+// TestExchangeInputs_Fingerprint_ActorCacheIdentity mirrors the subject
+// cache-identity contract for a lazily-minted actor (warden_identity delegation):
+// the fingerprint keys on ActorCacheIdentity (stable), the closure and any
+// later-populated ActorToken bytes never enter the key, and the ActorCacheIdentity
+// path is domain-separated from a raw ActorToken of the same value.
+func TestExchangeInputs_Fingerprint_ActorCacheIdentity(t *testing.T) {
+	base := ExchangeInputs{
+		SubjectToken:       "eyJ.user",
+		SubjectTokenType:   TokenTypeJWT,
+		SubjectTokenOrigin: ExchangeOriginUnverified,
+		ActorTokenType:     TokenTypeJWT,
+		ActorTokenOrigin:   ExchangeOriginVerified,
+		ActorCacheIdentity: "wid:ns:mount:agent\x00aud",
+	}
+	withClosure := base
+	withClosure.ResolveActorToken = stubResolve
+	if base.Fingerprint() != withClosure.Fingerprint() {
+		t.Fatal("ResolveActorToken must not affect the fingerprint")
+	}
+	populated := withClosure
+	populated.ActorToken = "freshly-minted-actor-assertion"
+	if populated.Fingerprint() != base.Fingerprint() {
+		t.Fatal("a lazily-populated ActorToken must not change the ActorCacheIdentity-keyed fingerprint")
+	}
+
+	// Distinct actor identity -> distinct fingerprint.
+	other := base
+	other.ActorCacheIdentity = "wid:ns:mount:other-agent\x00aud"
+	if other.Fingerprint() == base.Fingerprint() {
+		t.Fatal("distinct ActorCacheIdentity must fingerprint differently")
+	}
+
+	// Domain separation: ActorCacheIdentity="X" must not collide with ActorToken="X".
+	viaIdentity := ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT, ActorTokenType: TokenTypeJWT, ActorCacheIdentity: "X"}
+	viaToken := ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT, ActorTokenType: TokenTypeJWT, ActorToken: "X"}
+	if viaIdentity.Fingerprint() == viaToken.Fingerprint() {
+		t.Fatal("ActorCacheIdentity path must be domain-separated from the raw-actor path")
 	}
 }
 
@@ -426,6 +504,41 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 				ConfigActorTokenSource:   SourceHeader,
 				ConfigSubjectTokenHeader: "X-Subject",
 				ConfigActorTokenHeader:   "X-Actor",
+			},
+		},
+		{
+			name: "actor warden_identity with header subject",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceHeader,
+				ConfigActorTokenSource:   SourceWardenIdentity,
+				ConfigAssertionAudience:  "https://sts.example/aud",
+			},
+		},
+		{
+			name: "actor warden_identity rejects auth_token subject",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceAuthToken,
+				ConfigActorTokenSource:   SourceWardenIdentity,
+				ConfigAssertionAudience:  "https://sts.example/aud",
+			},
+			wantErr: true,
+		},
+		{
+			name: "actor warden_identity rejects warden_identity subject",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceWardenIdentity,
+				ConfigActorTokenSource:   SourceWardenIdentity,
+				ConfigAssertionAudience:  "https://sts.example/aud",
+			},
+			wantErr: true,
+		},
+		{
+			name: "assertion_algorithm valid when actor is warden_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceHeader,
+				ConfigActorTokenSource:   SourceWardenIdentity,
+				ConfigAssertionAudience:  "https://sts.example/aud",
+				ConfigAssertionAlgorithm: AssertionAlgES256,
 			},
 		},
 	}

@@ -880,16 +880,37 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		return logical.ErrBadRequestf("invalid token-exchange config: %s", err.Error())
 	}
 
-	// A warden_identity assertion must declare its audience. The spec may omit it
-	// only when the source can derive one (e.g. a GCP federation source derives it
-	// from its workload_identity_provider); otherwise it is required. This check is
-	// source-aware, so it lives here rather than in the source-agnostic structural
-	// validator above. Re-checked at mint time (defence in depth).
-	if spec.Config[credential.ConfigSubjectTokenSource] == credential.SourceWardenIdentity &&
-		spec.Config[credential.ConfigAssertionAudience] == "" {
+	// Any actor token source (header, auth_token, warden_identity) is consumed only
+	// by the token_exchange driver, which forwards the actor to an RFC 8693 STS;
+	// every other driver ignores ActorToken entirely. Pin any actor source to a
+	// token_exchange source so a delegation spec can't be bound to a source that
+	// would silently drop the actor (losing the delegation and its audit
+	// attribution), and reject a grant with no actor slot — otherwise the spec is
+	// accepted but every request fails at mint time. These are source-aware, so
+	// they live here, not in the structural validator above.
+	if actorSrc := spec.Config[credential.ConfigActorTokenSource]; actorSrc != "" && actorSrc != credential.SourceNone {
+		if source.Type != credential.SourceTypeTokenExchange {
+			return logical.ErrBadRequestf("field '%s': an actor token requires a '%s' source (only token exchange consumes an actor token)",
+				credential.ConfigActorTokenSource, credential.SourceTypeTokenExchange)
+		}
+		if !drivers.TokenExchangeSupportsActor(source.Config) {
+			return logical.ErrBadRequestf("field '%s': an actor token is not supported with grant=jwt_bearer (no actor slot)",
+				credential.ConfigActorTokenSource)
+		}
+	}
+
+	// A warden_identity assertion — whether the subject or the actor — must declare
+	// its audience. The spec may omit it only when the source can derive one (e.g. a
+	// GCP federation source derives it from its workload_identity_provider);
+	// otherwise it is required. This check is source-aware, so it lives here rather
+	// than in the source-agnostic structural validator above. Re-checked at mint
+	// time (defence in depth).
+	mintsAssertion := spec.Config[credential.ConfigSubjectTokenSource] == credential.SourceWardenIdentity ||
+		spec.Config[credential.ConfigActorTokenSource] == credential.SourceWardenIdentity
+	if mintsAssertion && spec.Config[credential.ConfigAssertionAudience] == "" {
 		if _, ok := drivers.DeriveAssertionAudience(source.Type, source.Config, spec.Config); !ok {
-			return logical.ErrBadRequestf("field '%s': is required when '%s' is '%s'",
-				credential.ConfigAssertionAudience, credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity)
+			return logical.ErrBadRequestf("field '%s': is required when the subject or actor is '%s'",
+				credential.ConfigAssertionAudience, credential.SourceWardenIdentity)
 		}
 	}
 

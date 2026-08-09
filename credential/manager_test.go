@@ -1090,9 +1090,9 @@ func TestManager_IssueCredential_ExchangeInputs_NonExchangeDriver(t *testing.T) 
 // construction, while sharing the counter.
 func lazyExchangeInputsFor(cacheIdentity, token string, mintCount *atomic.Int32) *ExchangeInputs {
 	return &ExchangeInputs{
-		SubjectTokenType:   TokenTypeJWT,
-		SubjectTokenOrigin: ExchangeOriginVerified,
-		CacheIdentity:      cacheIdentity,
+		SubjectTokenType:     TokenTypeJWT,
+		SubjectTokenOrigin:   ExchangeOriginVerified,
+		SubjectCacheIdentity: cacheIdentity,
 		ResolveSubjectToken: func(context.Context) (string, error) {
 			mintCount.Add(1)
 			return token, nil
@@ -1123,6 +1123,46 @@ func TestManager_IssueCredential_LazySubject_MintOnMissZeroOnHit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, cred1.CredentialID, cred2.CredentialID, "same identity must hit cache")
 	assert.Equal(t, int32(1), mintCount.Load(), "a cache HIT must not mint")
+	assert.Equal(t, int32(1), factory.driver.exchangeCount.Load(), "a cache HIT must not exchange")
+}
+
+// A lazily-resolved ACTOR token (warden_identity delegation) is minted exactly
+// once on a cache miss, the resolved bytes reach the driver alongside the eager
+// header subject, and a subsequent request for the same identity is served from
+// cache with no further actor mint or exchange.
+func TestManager_IssueCredential_LazyActor_MintOnMissZeroOnHit(t *testing.T) {
+	manager, factory := createExchangeTestManager(t)
+	defer manager.Stop()
+
+	ctx := createNamespaceContext()
+	var actorMint atomic.Int32
+	makeInputs := func(actorTok string) *ExchangeInputs {
+		return &ExchangeInputs{
+			// Eager header subject (the user) paired with a lazy warden_identity actor.
+			SubjectToken:       "eyJ.user",
+			SubjectTokenType:   TokenTypeJWT,
+			SubjectTokenOrigin: ExchangeOriginUnverified,
+			ActorTokenType:     TokenTypeJWT,
+			ActorTokenOrigin:   ExchangeOriginVerified,
+			ActorCacheIdentity: "wid:agent\x00aud",
+			ResolveActorToken: func(context.Context) (string, error) {
+				actorMint.Add(1)
+				return actorTok, nil
+			},
+		}
+	}
+
+	cred1, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour, makeInputs("actor-1"))
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), actorMint.Load(), "a cache miss must mint the actor exactly once")
+	assert.Equal(t, "actor-1", factory.driver.gotInputs.ActorToken, "the resolved actor token must reach the driver")
+	assert.Equal(t, "eyJ.user", cred1.Data["username"], "the eager subject reaches the driver unchanged")
+
+	// Fresh inputs (per-request), same identity → cache hit, no further work.
+	cred2, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour, makeInputs("actor-2"))
+	require.NoError(t, err)
+	assert.Equal(t, cred1.CredentialID, cred2.CredentialID, "same identity must hit cache")
+	assert.Equal(t, int32(1), actorMint.Load(), "a cache HIT must not mint the actor")
 	assert.Equal(t, int32(1), factory.driver.exchangeCount.Load(), "a cache HIT must not exchange")
 }
 
@@ -1166,9 +1206,9 @@ func TestManager_IssueCredential_LazySubject_SingleflightCoalesces(t *testing.T)
 		go func(i int) {
 			defer wg.Done()
 			in := &ExchangeInputs{
-				SubjectTokenType:   TokenTypeJWT,
-				SubjectTokenOrigin: ExchangeOriginVerified,
-				CacheIdentity:      "id-shared",
+				SubjectTokenType:     TokenTypeJWT,
+				SubjectTokenOrigin:   ExchangeOriginVerified,
+				SubjectCacheIdentity: "id-shared",
 				ResolveSubjectToken: func(context.Context) (string, error) {
 					mintCount.Add(1)
 					time.Sleep(20 * time.Millisecond) // widen the singleflight window
@@ -1203,9 +1243,9 @@ func TestManager_IssueCredential_LazySubject_ResolveErrorNotCached(t *testing.T)
 	var calls atomic.Int32
 	makeInputs := func() *ExchangeInputs {
 		return &ExchangeInputs{
-			SubjectTokenType:   TokenTypeJWT,
-			SubjectTokenOrigin: ExchangeOriginVerified,
-			CacheIdentity:      "id-alice",
+			SubjectTokenType:     TokenTypeJWT,
+			SubjectTokenOrigin:   ExchangeOriginVerified,
+			SubjectCacheIdentity: "id-alice",
 			ResolveSubjectToken: func(context.Context) (string, error) {
 				if calls.Add(1) == 1 {
 					return "", fmt.Errorf("mint boom")

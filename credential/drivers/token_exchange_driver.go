@@ -33,6 +33,16 @@ const (
 // the cross-app-access flow).
 const tokenTypeIDJAG = "urn:ietf:params:oauth:token-type:id-jag"
 
+// TokenExchangeSupportsActor reports whether a token_exchange source's grant has
+// an RFC 8693 actor slot. jwt_bearer (an assertion grant) has none — the driver
+// rejects any actor there at mint time (see MintCredentialWithExchange) — while
+// rfc8693 and id_jag both carry the actor. It lets the config store reject an
+// actor spec bound to a jwt_bearer source at create time (single source of truth
+// for the grant string, mirroring DeriveAssertionAudience living here).
+func TokenExchangeSupportsActor(sourceCfg map[string]string) bool {
+	return credential.GetString(sourceCfg, "grant", tokenExchangeGrantRFC8693) != tokenExchangeGrantJWTBearer
+}
+
 // Client-authentication methods selected by the source's `client_auth` config.
 // private_key_jwt is added in a later change; the secret methods ship here.
 const (
@@ -510,7 +520,7 @@ func (d *TokenExchangeDriver) addResources(form url.Values, spec *credential.Cre
 // token-exchange spec targets, for the warden_resource assertion claim. Pure:
 // reads config maps only. It reproduces resolve()'s spec-then-source fallback for
 // the `resources` key (which is why the resource can vary with source config, not
-// just spec — see the CacheIdentity note). Only a lone resource is named; zero or
+// just spec — see the SubjectCacheIdentity note). Only a lone resource is named; zero or
 // several yield no claim, since a scalar claim can't express a set.
 func tokenExchangeAssertionResource(sourceCfg, specCfg map[string]string) (string, bool) {
 	raw := credential.GetString(specCfg, "resources", "")
@@ -536,7 +546,13 @@ func (d *TokenExchangeDriver) resolve(spec *credential.CredSpec, key string) str
 
 // subjectMetadata derives the non-secret, audit-logged identity of the exchanged
 // token: the subject (from the minted token's sub claim, falling back to the
-// subject token's), and whether the subject's origin was verified.
+// subject token's) and whether the subject's origin was verified; and — when the
+// exchange carried an actor (delegation) — the actor's sub and whether it was
+// verified, so agent-on-behalf-of delegation is attributable in the credential's
+// audit metadata. The actor sub is read from the actor token's own claims (for an
+// actor_token_source=warden_identity actor that is the Warden-minted wid:… sub);
+// like the subject it is a claim read, never a raw token byte, so no secret is
+// recorded.
 func (d *TokenExchangeDriver) subjectMetadata(resp *oauth2TokenResponse, inputs *credential.ExchangeInputs) map[string]interface{} {
 	meta := map[string]interface{}{
 		"subject_verified": strconv.FormatBool(inputs.SubjectTokenOrigin == credential.ExchangeOriginVerified),
@@ -548,6 +564,14 @@ func (d *TokenExchangeDriver) subjectMetadata(resp *oauth2TokenResponse, inputs 
 	if claims != nil {
 		if sub, ok := scalarClaim(claims["sub"]); ok && sub != "" {
 			meta["subject"] = sub
+		}
+	}
+	if inputs.ActorToken != "" {
+		meta["actor_verified"] = strconv.FormatBool(inputs.ActorTokenOrigin == credential.ExchangeOriginVerified)
+		if actorClaims := unverifiedJWTClaims(inputs.ActorToken); actorClaims != nil {
+			if sub, ok := scalarClaim(actorClaims["sub"]); ok && sub != "" {
+				meta["actor"] = sub
+			}
 		}
 	}
 	return meta

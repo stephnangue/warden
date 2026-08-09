@@ -673,7 +673,7 @@ func TestAzureDriver_MintCredentialWithExchange_HappyPath(t *testing.T) {
 // TestAzureDriver_MintCredentialWithExchange_ForwardedSubject_HappyPath drives the
 // auth_token federation topology: the subject is the caller's origin-verified inbound JWT
 // that Warden forwards untouched (not a Warden-minted assertion), so ResolveSubjectToken
-// and CacheIdentity are unset. The driver treats any verified subject the same, so this
+// and SubjectCacheIdentity are unset. The driver treats any verified subject the same, so this
 // must reach Entra and be presented as the client_assertion verbatim. It guards the
 // supported contract against a future change that re-gates federation to Warden-minted
 // subjects only.
@@ -700,7 +700,7 @@ func TestAzureDriver_MintCredentialWithExchange_ForwardedSubject_HappyPath(t *te
 		"tenant_id":   "00000000-0000-0000-0000-000000000001",
 		"client_id":   "11111111-1111-1111-1111-111111111111",
 	}}
-	// A forwarded inbound JWT: verified origin, no ResolveSubjectToken, no CacheIdentity.
+	// A forwarded inbound JWT: verified origin, no ResolveSubjectToken, no SubjectCacheIdentity.
 	inputs := &credential.ExchangeInputs{
 		SubjectToken:       "eyJ.inbound.idp.jwt",
 		SubjectTokenType:   credential.TokenTypeJWT,
