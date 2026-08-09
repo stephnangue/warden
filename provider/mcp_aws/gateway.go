@@ -22,7 +22,6 @@ var headersToStrip = []string{
 	"X-Warden-Namespace",
 	"X-Warden-Provider",
 	"X-Warden-Role",
-	"X-Warden-On-Behalf-Of",
 	"X-Warden-Subject-Token",
 	"X-Warden-Actor-Token",
 	// Cookie carries client session identity that AWS will ignore but that

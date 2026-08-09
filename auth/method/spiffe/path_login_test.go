@@ -180,7 +180,6 @@ func TestJWTSVIDLogin_GroupsAndActChain(t *testing.T) {
 	assert.Subset(t, resp.Auth.Policies, []string{"base", "group-admins", "group-ops"})
 	require.Len(t, resp.Auth.Actors, 1)
 	assert.Equal(t, "broker-beta", resp.Auth.Actors[0].Subject)
-	assert.True(t, resp.Auth.Actors[0].Verified)
 }
 
 // --- precedence + isolation ---

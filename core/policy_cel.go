@@ -50,7 +50,7 @@ import (
 //	  request.data.<k>
 //	token.principal, token.role, token.type, token.namespace,
 //	  token.policies (list), token.metadata.<k>, token.actors (list of
-//	  {subject, verified}), token.ttl_seconds, token.expires_at
+//	  {subject}), token.ttl_seconds, token.expires_at
 //	now (timestamp)
 //	call.method, call.tool, call.args.<k>, call.batch_index   (mcp{} only)
 //
@@ -529,8 +529,7 @@ func buildTokenNS(tok celTokenInput, f fieldSet) map[string]any {
 		acts := make([]any, 0, len(tok.Actors))
 		for _, a := range tok.Actors {
 			acts = append(acts, map[string]any{
-				"subject":  a.Subject,
-				"verified": a.Verified,
+				"subject": a.Subject,
 			})
 		}
 		m["actors"] = acts

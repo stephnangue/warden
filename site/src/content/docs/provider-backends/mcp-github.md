@@ -202,7 +202,7 @@ GitHub user it acted as — while the token stays salted:
 ```json
 {
   "type": "response",
-  "auth": { "principal_id": "agent-alpha", "actors": [{ "subject": "agent-alpha", "verified": true }] },
+  "auth": { "principal_id": "agent-alpha", "actors": [{ "subject": "agent-alpha" }] },
   "response": {
     "credential": {
       "type": "oauth_bearer_token",

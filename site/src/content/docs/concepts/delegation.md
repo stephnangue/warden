@@ -56,7 +56,8 @@ caller-derived tokens, each with a trust **origin**:
 The canonical delegation shape is **agent-acting-for-user**: the agent carries the user's token as
 the subject and its own verified inbound JWT as the actor, so the minted token reads "agent for
 user" — with the agent's token sent once, not re-validated. Because the actor is a real, signed
-token, it can serve as a cryptographic RFC 8693 actor; the audit label described below cannot.
+token, it can serve as a cryptographic RFC 8693 actor; the audit actor chain described below is a
+separate attribution record.
 
 See [Impersonation vs delegation](/credential-drivers/token-exchange/#impersonation-vs-delegation)
 on the driver page for the full configuration and worked examples.
@@ -64,19 +65,19 @@ on the driver page for the full configuration and worked examples.
 ## The Audit Actor Chain
 
 Independently of what is minted, Warden records who a request was *for* in the audit trail. This
-chain is an **attribution** record; each actor is a subject plus a trust flag:
+chain is an **attribution** record; each actor is a subject:
 
 | Field | Meaning |
 |-------|---------|
 | `subject` | The identity being acted for (e.g. `agents/alpha`, `user@example.com`). |
-| `verified` | Whether the actor is cryptographically attested (`true`) or self-reported (`false`). |
 
-It reaches Warden two ways, and appears as the `actors` array on the request's audit entry.
+It has a single source — the cryptographically-verified RFC 8693 `act` claim on the caller's
+token — and appears as the `actors` array on the request's audit entry.
 
-### JWT `act` claim — verified
+### JWT `act` claim
 
 A signed JWT can carry an RFC 8693 §4.1 **`act`** claim; because the IdP signed it, the chain is
-**attested** (`verified: true`) and nests to express a chain:
+attested and nests to express a chain:
 
 ```json
 { "sub": "gateway-service",
@@ -84,36 +85,12 @@ A signed JWT can carry an RFC 8693 §4.1 **`act`** claim; because the IdP signed
            "act": { "sub": "agents/alpha" } } }
 ```
 
-→ actors `[broker-beta (verified), agents/alpha (verified)]`. Warden walks the nesting up to a depth
+→ actors `[broker-beta, agents/alpha]`. Warden walks the nesting up to a depth
 of **4**, and these actors are extracted at login and **persisted on the [token](/concepts/tokens/)**
 so the chain survives transparent-token caching.
 
-### `X-Warden-On-Behalf-Of` header — unverified
-
-When the delegator cannot embed the chain in a JWT — typically a **concentrator** that
-authenticates with its own identity and serves many agents — it names the subject it acts for in
-the `X-Warden-On-Behalf-Of` header. Warden has no proof of this, so it is recorded as
-`verified: false`:
-
-```
-X-Warden-On-Behalf-Of: agents/alpha
-```
-
-The header carries a **single** subject (1–256 chars, `[A-Za-z0-9._:@/+-]`, no commas), is validated
-and dropped if malformed (never failing the request), is **per-request**, and is **stripped before
-the request is proxied upstream** so it never leaks past Warden.
-
-Being per-request, the header **wins** over the token-bound `act` chain — so a concentrator reusing
-one cached token still attributes each call to the right agent; the token's verified `act` chain is
-used only when no header is present:
-
-```
-agent alpha  ─▶ concentrator ─▶ Warden   X-Warden-On-Behalf-Of: agents/alpha
-agent beta   ─▶ concentrator ─▶ Warden   X-Warden-On-Behalf-Of: agents/beta
-```
-
-This audit chain is a string-only attribution label; unlike the signed subject/actor tokens above,
-it cannot serve as a cryptographic RFC 8693 actor token.
+Because the chain is bound to the token, it is per-token, not per-call: it attributes every request
+made with a given token to the actors that token was minted with.
 
 ## See Also
 

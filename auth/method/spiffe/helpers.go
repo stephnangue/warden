@@ -132,7 +132,7 @@ func extractActChain(claims map[string]interface{}) []logical.ActorRef {
 		if !ok || sub == "" {
 			break
 		}
-		actors = append(actors, logical.ActorRef{Subject: sub, Verified: true})
+		actors = append(actors, logical.ActorRef{Subject: sub})
 		current = act
 	}
 	return actors

@@ -30,7 +30,7 @@ The expression reads from a fixed set of namespaces:
 | Namespace | Fields |
 | --- | --- |
 | `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `namespace`, `data.<key>` |
-| `token` | `principal`, `role`, `type`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject, verified}`), `ttl_seconds`, `expires_at` |
+| `token` | `principal`, `role`, `type`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject}`), `ttl_seconds`, `expires_at` |
 | `now` | the request timestamp |
 | `call` | `method`, `tool`, `args.<key>`, `batch_index` — **`mcp { }` only** |
 
@@ -263,21 +263,21 @@ path "prod/break-glass/*" {
 
 ## Delegation
 
-### 17. Require a verified delegate
+### 17. Require a delegate
 
-`token.actors` is the on-behalf-of chain (see [Delegation](/concepts/delegation/)). Require
-at least one actor, and that **every** actor in the chain was cryptographically
-attested:
+`token.actors` is the delegation chain (see [Delegation](/concepts/delegation/)) — the
+cryptographically-verified RFC 8693 `act` chain from the caller's token. Require at
+least one actor:
 
 ```hcl
 path "prod/payments/*" {
   capabilities = ["update"]
-  condition    = "size(token.actors) > 0 && token.actors.all(a, a.verified)"
+  condition    = "size(token.actors) > 0"
 }
 ```
 
-The `size(...) > 0` guard matters: `all()` over an empty list is vacuously `true`,
-so without it a request with no delegation chain would pass.
+Because the chain comes from a signed `act` claim, every actor in it is already
+attested — presence is all you need to check.
 
 ---
 
@@ -331,7 +331,7 @@ path "mcp/payments/*" {
       && now.getHours("America/New_York") >= 9
       && now.getHours("America/New_York") <  17
       && token.metadata.env == "prod"
-      && size(token.actors) > 0 && token.actors.all(a, a.verified)
+      && size(token.actors) > 0
       && (call.tool == "create_payment" ? call.args.amount <= 2500 :
           call.tool == "refund"         ? call.args.amount <=  500 : false)
       && call.args.currency in ["USD", "EUR", "GBP"]

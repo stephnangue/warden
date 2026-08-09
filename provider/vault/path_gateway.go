@@ -22,7 +22,6 @@ var headersToRemove = []string{
 	"X-Warden-Token",         // Warden-specific auth header
 	"X-Warden-Role",          // Warden role header
 	"X-Warden-Provider",      // Warden provider-mount routing header
-	"X-Warden-On-Behalf-Of",  // Warden audit-propagation header — internal-only
 	"X-Warden-Subject-Token", // token-exchange subject token — internal-only, never forwarded
 	"X-Warden-Actor-Token",   // token-exchange actor token — internal-only, never forwarded
 	// Hop-by-hop headers

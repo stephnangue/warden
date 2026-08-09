@@ -583,7 +583,6 @@ func TestExtractActChain_SingleHop(t *testing.T) {
 	got := extractActChain(claims)
 	require.Len(t, got, 1)
 	assert.Equal(t, "agents/alpha", got[0].Subject)
-	assert.True(t, got[0].Verified)
 }
 
 func TestExtractActChain_NestedChain(t *testing.T) {
@@ -600,9 +599,6 @@ func TestExtractActChain_NestedChain(t *testing.T) {
 	require.Len(t, got, 2)
 	assert.Equal(t, "broker-beta", got[0].Subject)
 	assert.Equal(t, "agents/alpha", got[1].Subject)
-	for _, a := range got {
-		assert.True(t, a.Verified, "all act-claim actors are verified")
-	}
 }
 
 func TestExtractActChain_NonObjectAct(t *testing.T) {

@@ -38,16 +38,14 @@ and — for a brokered call — a description of the credential Warden minted. B
 the agent authenticated [as itself](/use-cases/access-brokering/), the identity on the entry
 is the real one, not a shared key.
 
-Attribution survives the extra hop. A request can carry a
+Attribution survives the extra hop. A caller's token can carry a
 [delegation](/concepts/delegation/) chain — the subjects it is being made *on
-behalf of* — and Warden records them alongside the authenticated principal, each
-flagged **verified** (cryptographically attested by a signed JWT `act` claim) or
-**unverified** (self-reported by a trusted caller). A shared MCP server that reuses
-one identity for many agents still produces correct per-call attribution, because
-the per-request actor takes precedence over the token-bound one. Attribution is
-kept deliberately orthogonal to authorization — naming who a call is for can never
-*widen* what the caller may do — so it is safe to trust the chain for forensics
-without it becoming an avenue for escalation.
+behalf of* — and Warden records them alongside the authenticated principal. The
+chain is the cryptographically-verified RFC 8693 `act` chain, attested by a signed
+JWT `act` claim, so every actor on the record is one the issuing IdP or trust
+domain vouched for. Attribution is kept deliberately orthogonal to authorization —
+naming who a call is for can never *widen* what the caller may do — so it is safe
+to trust the chain for forensics without it becoming an avenue for escalation.
 
 The record is built to be kept. Secrets are **never written in clear**: sensitive
 values are replaced with a keyed HMAC, deterministic enough to correlate
@@ -61,26 +59,26 @@ server, not just what it was blocked from doing.
 
 - **A complete forensic record** — every request, its policy decision, and the
   credential issued, tied to the identity that actually made the call.
-- **Attribution that survives the hop** — the on-behalf-of chain names the real
-  agent or user behind a shared identity or a concentrator.
+- **Attribution that survives the hop** — the verified `act` chain names the real
+  agents and users a token is acting for, behind a shared identity.
 - **Safe to ship** — secrets are HMAC-hashed, never logged in clear, so the trail
   can live in your SIEM.
 
 ## In practice
 
-A shared MCP server with the principal `mcp-gateway` forwards calls for many agents,
-each request carrying an `X-Warden-On-Behalf-Of` header naming the agent it is
-acting for. An investigation into an unexpected change reads the audit log and finds
+An agent authenticates with a token whose verified RFC 8693 `act` chain names the
+user or upstream agent it is acting for, and Warden persists that chain on the
+token. An investigation into an unexpected change reads the audit log and finds
 the offending call attributed to the principal `mcp-gateway` *and* to the actor
-`agents/alpha` — so the trail leads to the specific agent, not the shared server.
-The credential Warden issued is described in the same entry, with its secret HMAC'd;
-the investigator can confirm which value was used by hashing it the same way,
-without the log ever holding a usable key.
+`agents/alpha` — so the trail leads to the specific agent behind the call, not just
+the authenticating identity. The credential Warden issued is described in the same
+entry, with its secret HMAC'd; the investigator can confirm which value was used by
+hashing it the same way, without the log ever holding a usable key.
 
 ## See Also
 
 - [Audit](/concepts/audit/) — what is recorded, and how secrets are hashed.
-- [Delegation](/concepts/delegation/) — the on-behalf-of actor chain and how it
+- [Delegation](/concepts/delegation/) — the verified actor chain and how it
   reaches the log.
 - [Model Context Protocol](/concepts/mcp/) — per-tool-call decisions in the
   audit trail.

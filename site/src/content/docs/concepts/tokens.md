@@ -85,7 +85,7 @@ Each token record carries the context needed to authorize and audit it:
 | `CreatedAt` / `CreatedByIP` | When and from where the token was created. |
 | `ExpireAt` | When the token stops being valid. |
 | `CredentialSpec` | The credential the token is scoped to issue, if any. |
-| `Actors` | A verified on-behalf-of chain (from a JWT `act` claim), preserved so [delegation](/concepts/delegation/) survives transparent-token caching. |
+| `Actors` | The verified RFC 8693 `act` delegation chain (from the JWT `act` claim), preserved so [delegation](/concepts/delegation/) survives transparent-token caching. |
 | `Metadata` | Verified, login-derived identity attributes (e.g. `env`, `team`) mapped from the caller's JWT claims, certificate fields, or service-account attributes — never caller-supplied. Matched by [`token_metadata` policy conditions](/concepts/policies/#fine-grained-access) as `token.metadata.<key>`. |
 
 Unlike the other fields, **`Metadata` is how per-identity attributes reach
