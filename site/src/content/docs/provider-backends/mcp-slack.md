@@ -285,7 +285,7 @@ called, and the Slack user it acted as — while the token stays salted:
   "type": "response",
   "auth": {
     "principal_id": "agent-alpha",
-    "actors": [{ "subject": "agent-alpha", "verified": true }]
+    "actors": [{ "subject": "agent-alpha" }]
   },
   "response": {
     "credential": {

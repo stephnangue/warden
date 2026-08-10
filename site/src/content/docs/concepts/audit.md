@@ -109,13 +109,11 @@ the response entry records *which* credential it was — its type, the source an
 — with the secret itself HMAC'd. You can answer "what was handed out, from where,
 to whom" without the log ever holding a usable key.
 
-**On-behalf-of attribution.** A request can carry a [delegation](/concepts/delegation/)
-chain — the subjects it is being made *for* — and the audit entry records them as `actors`,
-each flagged `verified` or not. A verified actor comes from a cryptographically
-attested JWT `act` claim; an unverified one from an `X-Warden-On-Behalf-Of`
-header the caller self-reports. Per-request actors take precedence over
-token-bound ones, so a concentrator that reuses one identity for many agents
-still produces correct per-call attribution.
+**Delegation attribution.** A request can carry a [delegation](/concepts/delegation/)
+chain — the subjects it is being made *for* — and the audit entry records them as `actors`.
+The chain is the cryptographically-verified RFC 8693 `act` chain from the caller's token,
+extracted from the signed JWT `act` claim and persisted on the token, so it survives
+transparent-token caching.
 
 ## Scope
 

@@ -91,8 +91,8 @@ func TestCloneFull(t *testing.T) {
 			NamespacePath: "root/",
 			CreatedByIP:   "10.0.0.1",
 			Actors: []ActorRef{
-				{Subject: "agent-alpha@pod-xyz", Verified: false},
-				{Subject: "broker-beta", Verified: true},
+				{Subject: "agent-alpha@pod-xyz"},
+				{Subject: "broker-beta"},
 			},
 		},
 	}
@@ -147,7 +147,7 @@ func TestCloneFull(t *testing.T) {
 	if len(clone.Auth.Actors) != 2 {
 		t.Errorf("clone auth actors should have 2 entries, got %d", len(clone.Auth.Actors))
 	}
-	if !clone.Auth.Actors[1].Verified || clone.Auth.Actors[1].Subject != "broker-beta" {
+	if clone.Auth.Actors[1].Subject != "broker-beta" {
 		t.Errorf("clone auth actors[1] mismatch: %+v", clone.Auth.Actors[1])
 	}
 }

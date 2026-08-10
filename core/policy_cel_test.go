@@ -184,6 +184,30 @@ func TestCEL_ErrorKind(t *testing.T) {
 	}
 }
 
+// TestCEL_ActorVerifiedKeyDenies locks in the breaking change: the actor object
+// no longer carries a `verified` field (all actors are verified), so a policy
+// still referencing a.verified errors at evaluation (no_such_key) and fails
+// closed — a deny — rather than silently passing. The new-shape a.subject works.
+func TestCEL_ActorVerifiedKeyDenies(t *testing.T) {
+	base := mustEnv(t, false)
+	now := time.Unix(0, 0).UTC()
+	act := baseAct(celRequestInput{}, celTokenInput{Actors: []logical.ActorRef{{Subject: "agent"}}}, now)
+
+	_, err := evalCELCondition(mustCompile(t, base, "token.actors.all(a, a.verified)"), act)
+	if err == nil {
+		t.Fatal("referencing the removed a.verified key must error at eval, not pass")
+	}
+	if got := celErrorKind(err); got != "no_such_key" {
+		t.Fatalf("kind=%q want no_such_key (err: %v)", got, err)
+	}
+
+	// The surviving field still evaluates cleanly.
+	got, err := evalCELCondition(mustCompile(t, base, "token.actors.all(a, a.subject != '')"), act)
+	if err != nil || !got {
+		t.Fatalf("a.subject must evaluate true: got=%v err=%v", got, err)
+	}
+}
+
 // TestCEL_ReferencedPaths locks in the dotted request/token/call paths captured
 // for audit Inputs: clean field-selection chains are captured; has(),
 // index/optional access, and now.* are not.
@@ -244,7 +268,7 @@ func TestCEL_FieldRefs(t *testing.T) {
 		{name: "has()", src: "has(request.data.x)", req: fs("data")},
 		{name: "index", src: `request.data["k"] == "v"`, req: fs("data")},
 		{name: "optional", mcp: true, src: "call.args.?amount.orValue(0) <= 3", cal: fs("args")},
-		{name: "comprehension", src: "size(token.actors) > 0 && token.actors.all(a, a.verified)", tok: fs("actors")},
+		{name: "comprehension", src: "size(token.actors) > 0 && token.actors.all(a, a.subject != '')", tok: fs("actors")},
 		{name: "multi-field", src: "request.data.x <= 1 && request.namespace == token.namespace", req: fs("data", "namespace"), tok: fs("namespace")},
 		{name: "bare root -> all", src: "size(token) > 0 || token.metadata.env == 'x'", tok: fs("metadata"), tokAll: true},
 	}

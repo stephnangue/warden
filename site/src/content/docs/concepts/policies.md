@@ -134,7 +134,7 @@ variables built from the request:
 | Namespace | Fields |
 | --- | --- |
 | `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `namespace`, `data.<key>` |
-| `token` | `principal`, `role`, `type`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject, verified}`), `ttl_seconds`, `expires_at` |
+| `token` | `principal`, `role`, `type`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject}`), `ttl_seconds`, `expires_at` |
 | `now` | the request timestamp |
 
 Secret material (the token value, accessor) is never exposed. `request.data` is
@@ -177,7 +177,7 @@ condition = "has(request.data.owner) && request.data.tier in ['gold', 'silver'] 
 # set membership over token metadata
 condition = "token.metadata.env in ['dev', 'staging']"
 
-# require a verified on-behalf-of delegate in the chain
+# require a delegate in the act chain
 condition = "size(token.actors) > 0"
 
 # operation-conditional (capability still selects the rule)

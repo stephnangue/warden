@@ -1078,52 +1078,17 @@ func TestBuildAuditAuth_AuthOverridesTE(t *testing.T) {
 	assert.Equal(t, "new-role", result.RoleName)
 }
 
-func TestBuildAuditAuth_ActorsFromAuth(t *testing.T) {
-	auth := &logical.Auth{
-		PrincipalID: "mcp-github",
-		Actors: []logical.ActorRef{
-			{Subject: "agents/alpha", Verified: false},
-		},
-	}
-	result := buildAuditAuth(auth, nil)
-	require.NotNil(t, result)
-	require.Len(t, result.Actors, 1)
-	assert.Equal(t, "agents/alpha", result.Actors[0].Subject)
-	assert.False(t, result.Actors[0].Verified)
-}
-
 func TestBuildAuditAuth_ActorsFromTokenEntry(t *testing.T) {
 	te := &logical.TokenEntry{
 		PrincipalID: "mcp-github",
 		Actors: []logical.ActorRef{
-			{Subject: "agents/alpha", Verified: true},
+			{Subject: "agents/alpha"},
 		},
 	}
 	result := buildAuditAuth(nil, te)
 	require.NotNil(t, result)
 	require.Len(t, result.Actors, 1)
 	assert.Equal(t, "agents/alpha", result.Actors[0].Subject)
-	assert.True(t, result.Actors[0].Verified)
-}
-
-func TestBuildAuditAuth_ActorsHeaderWinsOverTokenEntry(t *testing.T) {
-	te := &logical.TokenEntry{
-		PrincipalID: "mcp-github",
-		Actors: []logical.ActorRef{
-			{Subject: "verified-default", Verified: true},
-		},
-	}
-	auth := &logical.Auth{
-		PrincipalID: "mcp-github",
-		Actors: []logical.ActorRef{
-			{Subject: "this-call-actor", Verified: false},
-		},
-	}
-	result := buildAuditAuth(auth, te)
-	require.NotNil(t, result)
-	require.Len(t, result.Actors, 1)
-	assert.Equal(t, "this-call-actor", result.Actors[0].Subject)
-	assert.False(t, result.Actors[0].Verified)
 }
 
 func TestBuildAuditAuth_NoActors(t *testing.T) {

@@ -107,20 +107,16 @@ type Auth struct {
 	// Creation context
 	CreatedByIP string `json:"created_by_ip,omitempty"`
 
-	// Actor chain — subjects this request was made on behalf of.
-	// Sources: X-Warden-On-Behalf-Of header (verified=false) and
-	// JWT "act" claim per RFC 8693 §4.1 (verified=true).
+	// Actor chain — the verified RFC 8693 "act" delegation chain from the
+	// authenticated token (the JWT "act" claim per RFC 8693 §4.1).
 	Actors []ActorRef `json:"actors,omitempty"`
 }
 
-// ActorRef identifies a subject in the on-behalf-of chain alongside
-// the authenticated principal. The Verified flag tells audit readers
-// whether the actor was cryptographically attested (true, e.g. JWT
-// "act" claim) or self-reported by the authenticated principal (false,
-// e.g. X-Warden-On-Behalf-Of header).
+// ActorRef identifies one party in the RFC 8693 "act" delegation chain
+// alongside the authenticated principal. Every actor is cryptographically
+// attested by an IdP (the JWT "act" claim), so there is no unverified variant.
 type ActorRef struct {
-	Subject  string `json:"subject"`
-	Verified bool   `json:"verified"`
+	Subject string `json:"subject"`
 }
 
 // PolicyResults captures which policies granted access

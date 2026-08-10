@@ -62,10 +62,11 @@ type Auth struct {
 
 	ClientIP string
 
-	// Actors is the on-behalf-of chain attached by ingestion paths
-	// (X-Warden-On-Behalf-Of header or JWT "act" claim). Flows
-	// through buildAuditAuth into the audit log; not used for policy
-	// decisions.
+	// Actors is the verified RFC 8693 "act" delegation chain extracted from
+	// the authenticated token (the JWT "act" claim), set on the login response.
+	// It is persisted onto the issued token (via AuthData → TokenEntry.Actors)
+	// and surfaced in the audit log from that token entry on later requests; it
+	// is not used for policy decisions.
 	Actors []ActorRef
 
 	// Metadata is a set of verified, login-derived attributes the auth
@@ -238,13 +239,11 @@ func stripControlChars(s string) string {
 	}, s)
 }
 
-// ActorRef identifies a subject in the on-behalf-of chain. Verified
-// is true when the actor was cryptographically attested by an IdP
-// (e.g. JWT "act" claim per RFC 8693 §4.1) and false for self-reported
-// subjects from request headers.
+// ActorRef identifies one party in the RFC 8693 "act" delegation chain. Every
+// actor is cryptographically attested by an IdP (the JWT "act" claim per
+// RFC 8693 §4.1), so there is no unverified variant.
 type ActorRef struct {
-	Subject  string
-	Verified bool
+	Subject string
 }
 
 // AuthData contains the authentication data used to generate a token.
@@ -263,8 +262,8 @@ type AuthData struct {
 	// names + the same credential cannot share a cache entry.
 	MountAccessor string
 
-	// Actors carries the verified on-behalf-of chain extracted at login
-	// (e.g. JWT "act" claim) so it can be persisted onto the issued
+	// Actors carries the verified RFC 8693 "act" delegation chain extracted at
+	// login (the JWT "act" claim) so it can be persisted onto the issued
 	// TokenEntry for transparent-mode cache reuse.
 	Actors []ActorRef
 

@@ -55,10 +55,9 @@ type TokenEntry struct {
 	// Credential spec for this token if any
 	CredentialSpec string
 
-	// Actors persists a verified on-behalf-of chain (JWT "act" claim)
-	// so that it survives transparent-mode token caching. Populated by
-	// the JWT auth method at login time. Header-supplied actors are
-	// per-request and are never written here.
+	// Actors persists the verified RFC 8693 "act" delegation chain (the JWT
+	// "act" claim) so that it survives transparent-mode token caching.
+	// Populated by the auth method at login time.
 	Actors []ActorRef
 }
 

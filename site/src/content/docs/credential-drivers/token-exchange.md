@@ -67,7 +67,7 @@ The driver receives one trust signal per token: its **origin**.
 - **Verified** — the token is the caller's inbound JWT that Warden already authenticated at the auth mount (`…_token_source=auth_token`). Forwarded as-is.
 - **Unverified** — the token was supplied on a request header (`…_token_source=header`). The driver **must** validate it — signature (via `subject_jwks_url`/`subject_oidc_discovery_url`), `subject_issuer`, `subject_audience`, and expiry — before forwarding, and **fails closed** if that validation config is absent. An unvalidated caller token never reaches the token endpoint.
 
-Warden authenticates the caller on the verified token, not on a self-asserted `act` claim. The `act` chain a token carries is surfaced to [policy conditions](/concepts/policies/) and the audit trail — see the [on-behalf-of chain](/concepts/delegation/).
+Warden authenticates the caller on the verified token itself, not on any `act` claim it carries. The verified `act` chain a token carries is surfaced to [policy conditions](/concepts/policies/) and the audit trail — see the [delegation actor chain](/concepts/delegation/).
 
 ## Credential issued
 

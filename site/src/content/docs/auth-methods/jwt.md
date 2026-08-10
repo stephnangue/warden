@@ -199,9 +199,9 @@ A JWT with `"department": "eng"` and a nested `resource_access.warden.env` of `"
 
 > **Note:** metadata is matched at request time against the token's own values and is never compiled into the policy, so it stays correct for every token. Use it for authorization decisions that depend on identity attributes rather than path/capability alone.
 
-## On-Behalf-Of Chain (RFC 8693 `act` Claim)
+## Delegation Chain (RFC 8693 `act` Claim)
 
-RFC 8693 §4.1 defines an `act` claim that attests a delegation chain — "this token represents X, who is acting on behalf of Y, who is acting on behalf of Z." When present, Warden extracts the chain (up to a fixed depth of 4 to guard against pathological tokens), marks each actor as verified (because the IdP signed it), and persists it on the issued token. Audit log entries for downstream requests carry the full chain.
+RFC 8693 §4.1 defines an `act` claim that attests a delegation chain — "this token represents X, who is acting on behalf of Y, who is acting on behalf of Z." When present, Warden extracts the chain (up to a fixed depth of 4 to guard against pathological tokens) and persists it on the issued token. Because the IdP signed the token, the chain is inherently attested. Audit log entries for downstream requests carry the full chain.
 
 No configuration needed — extraction happens automatically when the claim is present. Policies that want to inspect the chain can do so via the token's `actors` field.
 

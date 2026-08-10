@@ -216,9 +216,9 @@ warden write auth/spiffe/role/inventory-agent \
 
 An X.509-SVID `spiffe://prod.example.org/ns/prod/sa/ci` yields metadata `td="prod.example.org"`, `workload="/ns/prod/sa/ci"`. A JWT-SVID additionally maps its `deploy.env` claim to `env`. A policy can then gate a path with `condition = "token.metadata.env == 'prod'"`. When both mappings produce the same key, the claim value wins.
 
-## On-Behalf-Of Chain (RFC 8693 `act` Claim)
+## Delegation Chain (RFC 8693 `act` Claim)
 
-RFC 8693 §4.1 defines an `act` claim that attests a delegation chain — "this token represents X, acting on behalf of Y." When a JWT-SVID carries it, Warden extracts the chain (up to a fixed depth of 4), marks each actor as verified (the trust domain signed it), and persists it on the issued token so downstream audit entries carry the full chain. No configuration needed; extraction happens automatically when the claim is present.
+RFC 8693 §4.1 defines an `act` claim that attests a delegation chain — "this token represents X, acting on behalf of Y." When a JWT-SVID carries it, Warden extracts the chain (up to a fixed depth of 4) and persists it on the issued token so downstream audit entries carry the full chain. Because the trust domain signed the SVID, the chain is inherently attested. No configuration needed; extraction happens automatically when the claim is present.
 
 ## Discovering Assumable Roles
 

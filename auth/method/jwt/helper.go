@@ -177,8 +177,8 @@ func extractMetadata(claims map[string]interface{}, claimMappings map[string]str
 //
 // Example output:
 //
-//	[{Subject: "broker-beta", Verified: true},
-//	 {Subject: "agents/alpha", Verified: true}]
+//	[{Subject: "broker-beta"},
+//	 {Subject: "agents/alpha"}]
 func extractActChain(claims map[string]interface{}) []logical.ActorRef {
 	var actors []logical.ActorRef
 	current := claims
@@ -195,7 +195,7 @@ func extractActChain(claims map[string]interface{}) []logical.ActorRef {
 		if !ok || sub == "" {
 			break // malformed: layer must carry a non-empty string sub
 		}
-		actors = append(actors, logical.ActorRef{Subject: sub, Verified: true})
+		actors = append(actors, logical.ActorRef{Subject: sub})
 		current = act
 	}
 	return actors
