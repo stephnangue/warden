@@ -711,7 +711,7 @@ func TestAWSDriver_WebIdentity_HappyPath(t *testing.T) {
 
 // TestAWSDriver_WebIdentity_ForwardedSubject_HappyPath drives the auth_token federation
 // topology: the subject is the caller's origin-verified inbound JWT that Warden forwards
-// untouched (not a Warden-minted assertion), so ResolveSubjectToken and CacheIdentity are
+// untouched (not a Warden-minted assertion), so ResolveSubjectToken and SubjectCacheIdentity are
 // unset. The driver treats any verified subject the same, so this must reach STS and
 // forward the token verbatim. It guards the supported contract against a future change
 // that re-gates federation to Warden-minted subjects only.
@@ -755,7 +755,7 @@ func TestAWSDriver_WebIdentity_ForwardedSubject_HappyPath(t *testing.T) {
 		"ttl":         "15m",
 	}}
 	// A forwarded inbound JWT: verified origin, but no ResolveSubjectToken and no
-	// CacheIdentity (the token is eager and stable, so it keys the cache itself).
+	// SubjectCacheIdentity (the token is eager and stable, so it keys the cache itself).
 	inputs := &credential.ExchangeInputs{
 		SubjectToken:       "eyJ.inbound.idp.jwt",
 		SubjectTokenType:   credential.TokenTypeJWT,

@@ -236,8 +236,36 @@ func TestTokenExchangeDriver_ActorVerified_Forwarded(t *testing.T) {
 	inputs.ActorTokenType = credential.TokenTypeJWT
 	inputs.ActorTokenOrigin = credential.ExchangeOriginVerified
 
-	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
+	_, meta, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
 	require.NoError(t, err)
+	// The delegation is attributable in the credential metadata: subject=user (act
+	// on behalf of), actor=agent (acting), both marked verified. Never the raw bytes.
+	assert.Equal(t, "user", meta["subject"])
+	assert.Equal(t, "true", meta["subject_verified"])
+	assert.Equal(t, "agent", meta["actor"])
+	assert.Equal(t, "true", meta["actor_verified"])
+	assert.NotContains(t, meta, "actor_token")
+}
+
+// When no actor is present the metadata carries no actor keys at all, so a plain
+// (non-delegated) exchange is not mislabelled as delegation.
+func TestTokenExchangeDriver_NoActor_NoActorMetadata(t *testing.T) {
+	subject := makeUnsignedJWT(map[string]interface{}{"sub": "user-123"})
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+	}))
+	defer sts.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url": sts.URL, "client_id": "c", "client_secret": "s",
+	}, sts.Client())
+
+	_, meta, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, verifiedSubject(subject))
+	require.NoError(t, err)
+	assert.Equal(t, "user-123", meta["subject"])
+	assert.NotContains(t, meta, "actor")
+	assert.NotContains(t, meta, "actor_verified")
 }
 
 func TestTokenExchangeDriver_ActorHeader_Validated(t *testing.T) {

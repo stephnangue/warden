@@ -110,11 +110,13 @@ const (
 	// source's configured trust.
 	SourceHeader = "header"
 	SourceNone   = "none"
-	// SourceWardenIdentity mints a fresh Warden-signed identity assertion (via
-	// the OIDC issuer) as the subject token. Used for Workload Identity
-	// Federation: Warden re-issues the resolved agent identity so an upstream
-	// federates Warden's issuer once, regardless of how the agent authenticated.
-	// Valid only for the subject source.
+	// SourceWardenIdentity mints a fresh Warden-signed identity assertion (via the
+	// OIDC issuer) of the resolved agent identity, so an upstream federates
+	// Warden's issuer once regardless of how the agent authenticated. As the
+	// subject it is Workload Identity Federation (the agent IS the identity); as
+	// the actor it is RFC 8693 delegation (the agent acts on behalf of a distinct
+	// user carried in the subject header — so actor=warden_identity requires
+	// subject_token_source=header).
 	SourceWardenIdentity = "warden_identity"
 )
 
@@ -232,7 +234,7 @@ type ExchangeInputs struct {
 	// unverified actor must validate it before forwarding, exactly as for a subject.
 	ActorTokenOrigin string
 
-	// CacheIdentity, when non-empty, is the value Fingerprint() keys the
+	// SubjectCacheIdentity, when non-empty, is the value Fingerprint() keys the
 	// credential cache on IN PLACE OF SubjectToken. It exists for subjects whose
 	// SubjectToken is freshly minted on every request (a Warden-signed identity
 	// assertion carries a new jti/iat/exp each time), which would otherwise make
@@ -243,19 +245,37 @@ type ExchangeInputs struct {
 	// It MUST be set only by core (resolveExchangeInputs), never derived from a
 	// caller-supplied value, and it does not travel to drivers as a token. It is
 	// mandatory whenever ResolveSubjectToken is set (enforced by Validate).
-	CacheIdentity string
+	SubjectCacheIdentity string
 
 	// ResolveSubjectToken, when non-nil, produces SubjectToken lazily. It is
 	// invoked by the credential Manager only on a real cache MISS (inside the
 	// singleflight leader), so a per-request-expensive subject token — e.g. a
 	// Warden-signed RS256 identity assertion — is never minted just to be
 	// discarded on a cache hit. When set, SubjectToken may be empty until the
-	// Manager populates it, and CacheIdentity MUST be set so Fingerprint() is
+	// Manager populates it, and SubjectCacheIdentity MUST be set so Fingerprint() is
 	// stable without the token bytes.
 	//
 	// Set only by core (resolveExchangeInputs), never from caller input. It is
 	// not hashed by Fingerprint, never logged, and never persisted.
 	ResolveSubjectToken func(ctx context.Context) (string, error)
+
+	// ActorCacheIdentity mirrors SubjectCacheIdentity for a lazily-minted actor
+	// (actor_token_source=warden_identity): it is the stable value Fingerprint()
+	// keys on in place of the per-request-volatile ActorToken. Mandatory whenever
+	// ResolveActorToken is set (enforced by Validate). Set only by core, never
+	// from caller input; it does not travel to drivers as a token.
+	ActorCacheIdentity string
+
+	// ResolveActorToken mirrors ResolveSubjectToken for the actor slot: when
+	// non-nil it produces ActorToken lazily on a real cache MISS (inside the
+	// Manager's singleflight leader), so a Warden-signed actor assertion is minted
+	// at most once per miss rather than on every cache hit. When set, ActorToken
+	// may be empty until the Manager populates it, and ActorCacheIdentity MUST be
+	// set so Fingerprint() is stable without the token bytes.
+	//
+	// Set only by core (resolveExchangeInputs), never from caller input. It is
+	// not hashed by Fingerprint, never logged, and never persisted.
+	ResolveActorToken func(ctx context.Context) (string, error)
 }
 
 // Validate performs structural checks only. It does not verify token contents
@@ -268,12 +288,17 @@ func (e *ExchangeInputs) Validate() error {
 	if e.ResolveSubjectToken != nil {
 		// Lazy subject: the token is produced on a cache miss, so it may be empty
 		// here — but the fingerprint must not then hash an empty SubjectToken and
-		// collide across identities, so CacheIdentity is mandatory.
-		if e.CacheIdentity == "" {
-			return fmt.Errorf("cache_identity is required when the subject token is resolved lazily")
+		// collide across identities, so SubjectCacheIdentity is mandatory.
+		if e.SubjectCacheIdentity == "" {
+			return fmt.Errorf("subject_cache_identity is required when the subject token is resolved lazily")
 		}
 	} else if e.SubjectToken == "" {
 		return fmt.Errorf("subject_token is required")
+	} else if e.SubjectCacheIdentity != "" {
+		// An eager subject must key the cache on its own bytes; a stand-in cache
+		// identity without a lazy resolver would let two distinct raw subjects share
+		// one cache entry. Unreachable via core today — structural defence-in-depth.
+		return fmt.Errorf("subject_cache_identity is set without a lazy subject resolver")
 	}
 	if e.SubjectTokenType == "" {
 		return fmt.Errorf("subject_token_type is required")
@@ -281,19 +306,38 @@ func (e *ExchangeInputs) Validate() error {
 	if len(e.SubjectToken) > maxExchangeTokenBytes {
 		return fmt.Errorf("subject_token exceeds %d bytes", maxExchangeTokenBytes)
 	}
-	// RFC 8693 §2.1: actor_token_type is required when actor_token is present,
-	// and meaningless without it.
-	if e.ActorToken != "" && e.ActorTokenType == "" {
-		return fmt.Errorf("actor_token_type is required when actor_token is set")
-	}
-	if e.ActorToken == "" && e.ActorTokenType != "" {
-		return fmt.Errorf("actor_token_type set without actor_token")
+	if e.ResolveActorToken != nil {
+		// Lazy actor (warden_identity): the token is minted on a cache miss, so it
+		// may be empty here — the fingerprint keys on ActorCacheIdentity instead, so
+		// that (like the lazy subject) it is mandatory, and the empty-token pairing
+		// checks below would misfire and must be skipped.
+		if e.ActorCacheIdentity == "" {
+			return fmt.Errorf("actor_cache_identity is required when the actor token is resolved lazily")
+		}
+		if e.ActorTokenType == "" {
+			return fmt.Errorf("actor_token_type is required when the actor token is resolved lazily")
+		}
+	} else {
+		// RFC 8693 §2.1: actor_token_type is required when actor_token is present,
+		// and meaningless without it.
+		if e.ActorToken != "" && e.ActorTokenType == "" {
+			return fmt.Errorf("actor_token_type is required when actor_token is set")
+		}
+		if e.ActorToken == "" && e.ActorTokenType != "" {
+			return fmt.Errorf("actor_token_type set without actor_token")
+		}
+		if e.ActorToken == "" && e.ActorTokenOrigin != "" {
+			return fmt.Errorf("actor_token_origin set without actor_token")
+		}
+		if e.ActorToken != "" && e.ActorCacheIdentity != "" {
+			// An eager actor keys on its own bytes; a stand-in cache identity without a
+			// lazy resolver would let two distinct raw actors share one cache entry.
+			// Unreachable via core today — structural defence-in-depth.
+			return fmt.Errorf("actor_cache_identity is set without a lazy actor resolver")
+		}
 	}
 	if len(e.ActorToken) > maxExchangeTokenBytes {
 		return fmt.Errorf("actor_token exceeds %d bytes", maxExchangeTokenBytes)
-	}
-	if e.ActorToken == "" && e.ActorTokenOrigin != "" {
-		return fmt.Errorf("actor_token_origin set without actor_token")
 	}
 	if e.ActorTokenOrigin != "" {
 		switch e.ActorTokenOrigin {
@@ -317,15 +361,15 @@ func (e *ExchangeInputs) Validate() error {
 // combinations can collide by concatenation (e.g. subject "ab"/actor "c" must
 // not hash the same as subject "a"/actor "bc").
 //
-// When CacheIdentity is set, it is hashed in place of SubjectToken (so a
+// When SubjectCacheIdentity is set, it is hashed in place of SubjectToken (so a
 // per-request-volatile assertion does not defeat the cache), under a distinct
-// domain tag so the CacheIdentity path and the raw-subject path can never
+// domain tag so the SubjectCacheIdentity path and the raw-subject path can never
 // collide. Every other field — token type, actor, origins — is always folded
 // in, so a Warden-minted subject and a raw subject that happen to share a value
 // still key differently, and delegation/provenance never share a cache entry.
 //
 // ResolveSubjectToken is intentionally NOT hashed: a lazily-minted subject sets
-// CacheIdentity (mandatory per Validate), which stands in for the token here.
+// SubjectCacheIdentity (mandatory per Validate), which stands in for the token here.
 func (e *ExchangeInputs) Fingerprint() string {
 	h := sha256.New()
 	writeField := func(s string) {
@@ -335,15 +379,23 @@ func (e *ExchangeInputs) Fingerprint() string {
 		h.Write([]byte(s))
 	}
 	writeField(e.SubjectTokenType)
-	if e.CacheIdentity != "" {
-		writeField("cache-identity")
-		writeField(e.CacheIdentity)
+	if e.SubjectCacheIdentity != "" {
+		writeField("subject-cache-identity")
+		writeField(e.SubjectCacheIdentity)
 	} else {
 		writeField("subject-token")
 		writeField(e.SubjectToken)
 	}
 	writeField(e.ActorTokenType)
-	writeField(e.ActorToken)
+	// Tag the actor branch the same way as the subject so a lazy
+	// ActorCacheIdentity can never collide with a raw ActorToken of the same value.
+	if e.ActorCacheIdentity != "" {
+		writeField("actor-cache-identity")
+		writeField(e.ActorCacheIdentity)
+	} else {
+		writeField("actor-token")
+		writeField(e.ActorToken)
+	}
 	writeField(e.SubjectTokenOrigin)
 	writeField(e.ActorTokenOrigin)
 	return hex.EncodeToString(h.Sum(nil))
@@ -363,11 +415,17 @@ func SpecRequestsExchange(config map[string]string) bool {
 func ValidateExchangeSpecConfig(config map[string]string) error {
 	if err := ValidateSchema(config,
 		StringField(ConfigSubjectTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone, SourceWardenIdentity),
-		StringField(ConfigActorTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone),
+		StringField(ConfigActorTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone, SourceWardenIdentity),
 		StringField(ConfigAssertionAlgorithm).OneOf(AssertionAlgRS256, AssertionAlgES256),
 	); err != nil {
 		return err
 	}
+	// The assertion_* keys configure a Warden-minted assertion, which now can be
+	// either the subject or the actor. Since actor=warden_identity requires
+	// subject=header (enforced below), at most one slot is ever warden_identity, so
+	// these keys apply unambiguously to whichever it is.
+	mintsAssertion := config[ConfigSubjectTokenSource] == SourceWardenIdentity ||
+		config[ConfigActorTokenSource] == SourceWardenIdentity
 	// A Warden-minted subject must declare the audience it is minted for — an
 	// empty/absent aud is replayable at any upstream whose trust policy does not pin
 	// aud. That check is source-aware (some source types derive the audience from
@@ -375,20 +433,20 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	// config store, not in this source-agnostic structural validator. It is enforced
 	// again at mint time, defence in depth.
 	// Projecting metadata into the assertion only makes sense when Warden mints it;
-	// on a reused/caller-supplied subject Warden does not control the claims.
-	if config[ConfigAssertionMetadataClaims] != "" && config[ConfigSubjectTokenSource] != SourceWardenIdentity {
-		return fmt.Errorf("field '%s': is valid only when '%s' is '%s'",
-			ConfigAssertionMetadataClaims, ConfigSubjectTokenSource, SourceWardenIdentity)
+	// on a reused/caller-supplied token Warden does not control the claims.
+	if config[ConfigAssertionMetadataClaims] != "" && !mintsAssertion {
+		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
+			ConfigAssertionMetadataClaims, SourceWardenIdentity)
 	}
-	// The assertion algorithm only applies to a Warden-minted subject.
-	if config[ConfigAssertionAlgorithm] != "" && config[ConfigSubjectTokenSource] != SourceWardenIdentity {
-		return fmt.Errorf("field '%s': is valid only when '%s' is '%s'",
-			ConfigAssertionAlgorithm, ConfigSubjectTokenSource, SourceWardenIdentity)
+	// The assertion algorithm only applies to a Warden-minted assertion.
+	if config[ConfigAssertionAlgorithm] != "" && !mintsAssertion {
+		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
+			ConfigAssertionAlgorithm, SourceWardenIdentity)
 	}
 	// Naming a resource in the assertion only makes sense when Warden mints it.
-	if config[ConfigAssertionResource] != "" && config[ConfigSubjectTokenSource] != SourceWardenIdentity {
-		return fmt.Errorf("field '%s': is valid only when '%s' is '%s'",
-			ConfigAssertionResource, ConfigSubjectTokenSource, SourceWardenIdentity)
+	if config[ConfigAssertionResource] != "" && !mintsAssertion {
+		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
+			ConfigAssertionResource, SourceWardenIdentity)
 	}
 	// An actor token only has meaning alongside a subject token (RFC 8693 §2.1),
 	// so reject an actor source without a subject source.
@@ -400,6 +458,14 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	if config[ConfigSubjectTokenSource] == SourceAuthToken && actorSrc == SourceAuthToken {
 		return fmt.Errorf("field '%s': cannot be '%s' when '%s' is also '%s' (one inbound token cannot be both subject and actor)",
 			ConfigActorTokenSource, SourceAuthToken, ConfigSubjectTokenSource, SourceAuthToken)
+	}
+	// actor=warden_identity is the "agent acting on behalf of a distinct user"
+	// shape: Warden signs the agent as the actor, so the subject must be a distinct
+	// principal — only the header source carries one. auth_token/warden_identity
+	// would both make sub and act the same caller, which is not delegation.
+	if actorSrc == SourceWardenIdentity && config[ConfigSubjectTokenSource] != SourceHeader {
+		return fmt.Errorf("field '%s': '%s' requires '%s' to be '%s' (the subject must be a distinct user token)",
+			ConfigActorTokenSource, SourceWardenIdentity, ConfigSubjectTokenSource, SourceHeader)
 	}
 	// A configured header name is meaningful only for the matching header source,
 	// and must not name an internal auth header.

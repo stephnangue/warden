@@ -915,6 +915,127 @@ func TestCredentialConfigStore_ValidateSpec_ExchangeRotation(t *testing.T) {
 	}
 }
 
+// TestCredentialConfigStore_ValidateSpec_ActorWardenIdentity covers the two
+// source-aware gates for actor_token_source=warden_identity: it must bind to a
+// token_exchange source (only that driver consumes an actor token) and it must
+// have a resolvable assertion audience.
+func TestCredentialConfigStore_ValidateSpec_ActorWardenIdentity(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	store.core.credentialDriverRegistry = nil // skip the test-mint block
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
+		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"},
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "jwtbearer-src", Type: credential.SourceTypeTokenExchange,
+		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "jwt_bearer"},
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "local-src", Type: "local"}))
+
+	spec := func(name, source string, cfg map[string]string) *credential.CredSpec {
+		full := map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceHeader,
+			credential.ConfigActorTokenSource:   credential.SourceWardenIdentity,
+		}
+		for k, v := range cfg {
+			full[k] = v
+		}
+		return &credential.CredSpec{Name: name, Type: "vault_token", Source: source, Config: full}
+	}
+
+	tests := []struct {
+		name     string
+		spec     *credential.CredSpec
+		errorMsg string // empty => expect success
+	}{
+		{
+			name: "accepted on token_exchange with explicit audience",
+			spec: spec("obo-ok", "sts-src", map[string]string{
+				credential.ConfigAssertionAudience: "https://sts.example/aud",
+			}),
+		},
+		{
+			name: "rejected on a non-token_exchange source",
+			spec: spec("obo-bad-source", "local-src", map[string]string{
+				credential.ConfigAssertionAudience: "https://sts.example/aud",
+			}),
+			errorMsg: "requires a 'token_exchange' source",
+		},
+		{
+			name:     "rejected when audience missing and not derivable",
+			spec:     spec("obo-no-aud", "sts-src", map[string]string{}),
+			errorMsg: "is required when the subject or actor is",
+		},
+		{
+			name: "rejected on a jwt_bearer grant (no actor slot)",
+			spec: spec("obo-jwtbearer", "jwtbearer-src", map[string]string{
+				credential.ConfigAssertionAudience: "https://sts.example/aud",
+			}),
+			errorMsg: "grant=jwt_bearer",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := store.CreateSpec(ctx, tt.spec)
+			if tt.errorMsg == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			if !contains(err.Error(), tt.errorMsg) {
+				t.Errorf("expected error containing %q, got %q", tt.errorMsg, err.Error())
+			}
+		})
+	}
+}
+
+// TestCredentialConfigStore_ValidateSpec_ActorSourceRequiresTokenExchange locks
+// in that ANY actor token source — not just warden_identity — is pinned to a
+// token_exchange source, since only that driver consumes an actor token; every
+// other driver would silently drop it.
+func TestCredentialConfigStore_ValidateSpec_ActorSourceRequiresTokenExchange(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	store.core.credentialDriverRegistry = nil // skip the test-mint block
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
+		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"},
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "local-src", Type: "local"}))
+
+	tests := []struct {
+		name     string
+		source   string
+		actorSrc string
+		errorMsg string // empty => expect success
+	}{
+		{"header actor on local source rejected", "local-src", credential.SourceHeader, "requires a 'token_exchange' source"},
+		{"auth_token actor on local source rejected", "local-src", credential.SourceAuthToken, "requires a 'token_exchange' source"},
+		{"header actor on token_exchange accepted", "sts-src", credential.SourceHeader, ""},
+		{"auth_token actor on token_exchange accepted", "sts-src", credential.SourceAuthToken, ""},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// subject=header so the actor pairing is valid regardless of actor source.
+			err := store.CreateSpec(ctx, &credential.CredSpec{
+				Name: fmt.Sprintf("actor-spec-%d", i), Type: "vault_token", Source: tt.source,
+				Config: map[string]string{
+					credential.ConfigSubjectTokenSource: credential.SourceHeader,
+					credential.ConfigActorTokenSource:   tt.actorSrc,
+				},
+			})
+			if tt.errorMsg == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			if !contains(err.Error(), tt.errorMsg) {
+				t.Errorf("expected error containing %q, got %q", tt.errorMsg, err.Error())
+			}
+		})
+	}
+}
+
 // testCredentialType is a minimal credential type for testing
 type testCredentialType struct {
 	typeName         string

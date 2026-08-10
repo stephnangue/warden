@@ -1282,12 +1282,14 @@ func projectAssertionMetadata(md map[string]string, keys []string) (map[string]s
 // opt into exchange, so the non-exchange mint path is completely unaffected.
 //
 // The plumbing never verifies token contents — it only records provenance via
-// SubjectTokenOrigin. Every configured-but-missing input fails the request
-// closed rather than silently minting a non-exchange credential.
+// SubjectTokenOrigin/ActorTokenOrigin. Every configured-but-missing input fails
+// the request closed rather than silently minting a non-exchange credential.
 //
-// For subject_token_source=warden_identity the assertion mint is deferred to a
-// credential-cache miss (via inputs.ResolveSubjectToken) so a cache hit pays no
-// signing cost; the issuer-ready and audience checks stay eager and fail closed.
+// A warden_identity subject or actor defers its assertion mint to a
+// credential-cache miss (via inputs.ResolveSubjectToken / ResolveActorToken) so a
+// cache hit pays no signing cost; the issuer-ready and audience checks stay eager
+// and fail closed. The subject and actor resolve independently — an eager header
+// subject can pair with a lazily-minted warden_identity actor.
 func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, te *logical.TokenEntry) (*credential.ExchangeInputs, error) {
 	specName := te.CredentialSpec
 	spec, err := c.credConfigStore.GetSpec(ctx, specName)
@@ -1304,6 +1306,22 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 	}
 	if inputs.SubjectTokenType == "" {
 		inputs.SubjectTokenType = credential.TokenTypeJWT
+	}
+
+	// loadSource fetches the spec's source at most once per request, only when a
+	// warden_identity subject or actor derivation actually needs it (an unset
+	// audience or unset assertion_resource). Shared across both switches so a spec
+	// that derives from the source loads it once, not twice.
+	var srcCached *credential.CredSource
+	loadSource := func() (*credential.CredSource, error) {
+		if srcCached == nil {
+			s, err := c.credConfigStore.GetSource(ctx, spec.Source)
+			if err != nil {
+				return nil, fmt.Errorf("spec %q: failed to load source %q: %w", specName, spec.Source, err)
+			}
+			srcCached = s
+		}
+		return srcCached, nil
 	}
 
 	switch spec.Config[credential.ConfigSubjectTokenSource] {
@@ -1334,109 +1352,17 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		inputs.SubjectTokenOrigin = credential.ExchangeOriginUnverified
 	case credential.SourceWardenIdentity:
 		// Warden mints a fresh, short-lived assertion of the caller's resolved
-		// identity (origin verified — Warden signed it). Fails closed if the
-		// issuer is disabled/not-ready or the audience is missing.
-		issuer := c.OIDCIssuer()
-		if issuer == nil || !issuer.Ready() {
-			return nil, fmt.Errorf("spec %q requires subject_token_source=warden_identity but the OIDC issuer is not enabled/ready", specName)
-		}
-
-		// Load the source at most once, and only when a derivation actually needs it
-		// (an unset audience or an unset assertion_resource). A spec that sets the
-		// audience explicitly and opts out of / pins the resource never loads the
-		// source, preserving the prior behaviour and error surface for those specs.
-		var srcCached *credential.CredSource
-		loadSource := func() (*credential.CredSource, error) {
-			if srcCached == nil {
-				s, err := c.credConfigStore.GetSource(ctx, spec.Source)
-				if err != nil {
-					return nil, fmt.Errorf("spec %q: failed to load source %q: %w", specName, spec.Source, err)
-				}
-				srcCached = s
-			}
-			return srcCached, nil
-		}
-
-		// The assertion audience: an explicit spec value wins; otherwise derive it
-		// from the source (e.g. a GCP federation source derives it from its
-		// workload_identity_provider). Fails closed if neither yields one.
-		audience := spec.Config[credential.ConfigAssertionAudience]
-		if audience == "" {
-			src, srcErr := loadSource()
-			if srcErr != nil {
-				return nil, srcErr
-			}
-			audience, _ = drivers.DeriveAssertionAudience(src.Type, src.Config, spec.Config)
-		}
-		if audience == "" {
-			return nil, fmt.Errorf("spec %q with subject_token_source=warden_identity requires %s", specName, credential.ConfigAssertionAudience)
-		}
-		// Resolve the single downstream resource to name in the assertion so a
-		// verifier can pin it to one resource. Unset derives it from the source/spec
-		// config (pure, network-free — no live driver is built here); "none" opts
-		// out; any other value is emitted verbatim. Best-effort: a spec with no
-		// single static resource simply carries no warden_resource claim.
-		var resource string
-		switch r := spec.Config[credential.ConfigAssertionResource]; r {
-		case credential.AssertionResourceNone:
-			// opt-out: emit no warden_resource claim
-		case "":
-			src, srcErr := loadSource()
-			if srcErr != nil {
-				return nil, srcErr
-			}
-			resource, _ = drivers.DeriveAssertionResource(src.Type, src.Config, spec.Config)
-		default:
-			resource = r
-		}
-		// Project only the operator-allowlisted metadata keys into the assertion.
-		// Empty allowlist projects nothing (mdFingerprint is ""), so the assertion
-		// and cache key are byte-for-byte what they were before this opt-in existed.
-		projected, mdFingerprint, err := projectAssertionMetadata(te.Metadata, credential.AssertionMetadataKeys(spec.Config))
+		// identity as the subject (Workload Identity Federation). Origin verified —
+		// Warden signed it. Minted lazily on a cache miss; fails closed if the
+		// issuer is disabled/not-ready or no audience is available.
+		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, loadSource)
 		if err != nil {
-			return nil, fmt.Errorf("spec %q: %w", specName, err)
+			return nil, err
 		}
 		inputs.SubjectTokenType = credential.TokenTypeJWT
 		inputs.SubjectTokenOrigin = credential.ExchangeOriginVerified
-		// Key the credential cache on the stable identity + audience, NOT the
-		// freshly-minted assertion bytes (which change every request), so one
-		// identity reuses its cached upstream credential. When metadata is projected
-		// into the assertion, fold its fingerprint in too so two tokens sharing
-		// subject+audience but differing in projected metadata stay isolated. The
-		// fragment is appended only when non-empty, so the no-metadata cache key is
-		// byte-for-byte what it was before this opt-in existed.
-		inputs.CacheIdentity = wardenSubject(te) + "\x00" + audience
-		// Fold the resource in beside the audience. Correctness-relevant, not just
-		// defensive: a token-exchange resource can come from source config, which
-		// can change under a fixed specName (the outer cache key). Appended only
-		// when non-empty, so no-resource keys stay byte-for-byte unchanged; kept
-		// before mdFingerprint (marshalled JSON starting with '{'), so the fragments
-		// can never be confused.
-		if resource != "" {
-			inputs.CacheIdentity += "\x00res=" + resource
-		}
-		if mdFingerprint != "" {
-			inputs.CacheIdentity += "\x00" + mdFingerprint
-		}
-		// Defer the assertion mint to a credential-cache MISS. On the hot
-		// path (a cache hit) the assertion would be minted and immediately thrown
-		// away; the Manager invokes this only on a real miss, inside its
-		// singleflight leader, so at most one assertion is minted per miss. The
-		// CacheIdentity above keys the cache, so the fingerprint never needs the
-		// (not-yet-minted) assertion bytes.
-		// The spec selects the assertion signing algorithm (default RS256). The
-		// issuer maintains a keyset per algorithm, so either is available with no
-		// cold start; validation restricts it to a supported alg at spec-create.
-		alg := credential.AssertionAlgorithm(spec.Config)
-		inputs.ResolveSubjectToken = func(ctx context.Context) (string, error) {
-			return issuer.MintIdentityAssertion(ctx, te, AssertionClaims{
-				Audience: audience,
-				TTL:      issuer.AssertionTTL(),
-				Alg:      alg,
-				Metadata: projected,
-				Resource: resource,
-			})
-		}
+		inputs.SubjectCacheIdentity = setup.cacheIdentity
+		inputs.ResolveSubjectToken = setup.resolve
 	default:
 		// SpecRequestsExchange already excluded "none"/absent; any other value
 		// was rejected at spec-validation time.
@@ -1469,6 +1395,19 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		if inputs.ActorTokenType == "" {
 			inputs.ActorTokenType = credential.TokenTypeJWT
 		}
+	case credential.SourceWardenIdentity:
+		// Delegation: Warden signs the agent as the RFC 8693 actor (act), acting on
+		// behalf of the distinct user carried in the subject header (spec validation
+		// requires subject_token_source=header here). Origin verified — Warden minted
+		// it — and, like the subject assertion, minted lazily on a cache miss.
+		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, loadSource)
+		if err != nil {
+			return nil, err
+		}
+		inputs.ActorTokenType = credential.TokenTypeJWT
+		inputs.ActorTokenOrigin = credential.ExchangeOriginVerified
+		inputs.ActorCacheIdentity = setup.cacheIdentity
+		inputs.ResolveActorToken = setup.resolve
 	default:
 		// No actor requested: drop any default type so Validate's pairing holds.
 		inputs.ActorTokenType = ""
@@ -1478,6 +1417,112 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		return nil, err
 	}
 	return inputs, nil
+}
+
+// assertionSetup holds the parts resolveExchangeInputs needs to configure a
+// warden_identity slot (subject or actor): a stable cache fragment that keys the
+// credential cache in place of the per-request-volatile assertion bytes, and the
+// closure that mints the assertion lazily on a cache miss.
+type assertionSetup struct {
+	cacheIdentity string
+	resolve       func(ctx context.Context) (string, error)
+}
+
+// buildAssertionSetup validates the OIDC issuer is ready and derives the
+// audience, resource, and projected metadata for a warden_identity assertion of
+// te, returning a stable cache fragment (identity + audience [+ resource]
+// [+ metadata]) and a lazy mint closure. It is source-type agnostic, so the same
+// setup serves a WIF subject (the agent IS the identity) and a delegation actor
+// (the agent acts for the subject-header user). loadSource is passed in so the
+// spec's source is fetched at most once per request across both slots.
+//
+// It fails closed if the issuer is disabled/not-ready or no audience can be
+// determined. The audience is an explicit spec value or, failing that, one
+// derived from the source; resource is unset→derived, "none"→omitted, else
+// verbatim; metadata is the operator-allowlisted projection (empty→no claim, so
+// the cache key is byte-identical to the no-metadata case).
+func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *credential.CredSpec, te *logical.TokenEntry, loadSource func() (*credential.CredSource, error)) (*assertionSetup, error) {
+	issuer := c.OIDCIssuer()
+	if issuer == nil || !issuer.Ready() {
+		return nil, fmt.Errorf("spec %q requires warden_identity but the OIDC issuer is not enabled/ready", specName)
+	}
+
+	// The assertion audience: an explicit spec value wins; otherwise derive it
+	// from the source (e.g. a GCP federation source derives it from its
+	// workload_identity_provider). Fails closed if neither yields one.
+	audience := spec.Config[credential.ConfigAssertionAudience]
+	if audience == "" {
+		src, err := loadSource()
+		if err != nil {
+			return nil, err
+		}
+		audience, _ = drivers.DeriveAssertionAudience(src.Type, src.Config, spec.Config)
+	}
+	if audience == "" {
+		return nil, fmt.Errorf("spec %q with warden_identity requires %s", specName, credential.ConfigAssertionAudience)
+	}
+
+	// Resolve the single downstream resource to name in the assertion so a
+	// verifier can pin it to one resource. Unset derives it from the source/spec
+	// config (pure, network-free — no live driver is built here); "none" opts out;
+	// any other value is emitted verbatim. Best-effort: a spec with no single
+	// static resource simply carries no warden_resource claim.
+	var resource string
+	switch r := spec.Config[credential.ConfigAssertionResource]; r {
+	case credential.AssertionResourceNone:
+		// opt-out: emit no warden_resource claim
+	case "":
+		src, err := loadSource()
+		if err != nil {
+			return nil, err
+		}
+		resource, _ = drivers.DeriveAssertionResource(src.Type, src.Config, spec.Config)
+	default:
+		resource = r
+	}
+
+	// Project only the operator-allowlisted metadata keys into the assertion.
+	// Empty allowlist projects nothing (mdFingerprint is ""), so the assertion and
+	// cache key are byte-for-byte what they were before this opt-in existed.
+	projected, mdFingerprint, err := projectAssertionMetadata(te.Metadata, credential.AssertionMetadataKeys(spec.Config))
+	if err != nil {
+		return nil, fmt.Errorf("spec %q: %w", specName, err)
+	}
+
+	// Key the credential cache on the stable identity + audience, NOT the
+	// freshly-minted assertion bytes (which change every request), so one identity
+	// reuses its cached upstream credential. Fold in the resource (it can come from
+	// source config, which can change under a fixed specName) and the projected-
+	// metadata fingerprint. Each fragment is appended only when non-empty, so the
+	// no-resource / no-metadata cache keys stay byte-for-byte unchanged; the
+	// resource fragment is kept before mdFingerprint (marshalled JSON starting with
+	// '{') so the fragments can never be confused.
+	cacheIdentity := wardenSubject(te) + "\x00" + audience
+	if resource != "" {
+		cacheIdentity += "\x00res=" + resource
+	}
+	if mdFingerprint != "" {
+		cacheIdentity += "\x00" + mdFingerprint
+	}
+
+	// The spec selects the assertion signing algorithm (default RS256). The issuer
+	// maintains a keyset per algorithm, so either is available with no cold start;
+	// validation restricts it to a supported alg at spec-create. The mint itself is
+	// deferred to a cache MISS (invoked by the Manager's singleflight leader), so at
+	// most one assertion is minted per miss and none on the hot path.
+	alg := credential.AssertionAlgorithm(spec.Config)
+	return &assertionSetup{
+		cacheIdentity: cacheIdentity,
+		resolve: func(ctx context.Context) (string, error) {
+			return issuer.MintIdentityAssertion(ctx, te, AssertionClaims{
+				Audience: audience,
+				TTL:      issuer.AssertionTTL(),
+				Alg:      alg,
+				Metadata: projected,
+				Resource: resource,
+			})
+		},
+	}, nil
 }
 
 // mintCredentialForRequest mints credentials for requests using the credential manager

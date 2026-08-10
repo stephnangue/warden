@@ -144,9 +144,10 @@ func NewManager(
 //   - tokenTTL: The TTL of the session token (used for cache duration)
 //   - inputs: Optional caller-derived token-exchange inputs. When non-nil they
 //     are folded into the cache key so distinct exchange inputs cannot share a
-//     cached credential. When inputs.ResolveSubjectToken is set, the subject
-//     token is materialized only on a cache miss (inside the singleflight),
-//     so a cache hit incurs no subject-mint cost.
+//     cached credential. When inputs.ResolveSubjectToken and/or
+//     inputs.ResolveActorToken is set, that token is materialized only on a cache
+//     miss (inside the singleflight), so a cache hit incurs no mint cost; the two
+//     resolve independently (an eager header subject can pair with a lazy actor).
 //
 // Returns the issued credential or an error
 func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName string, tokenTTL time.Duration, inputs *ExchangeInputs) (*Credential, error) {
@@ -201,6 +202,20 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 				return nil, fmt.Errorf("failed to resolve subject token: %w", rerr)
 			}
 			inputs.SubjectToken = tok
+		}
+
+		// Materialize a lazily-resolved actor token the same way and for the same
+		// reason as the subject above. It is a separate block because the two slots
+		// are independent: a spec can pair an eager header subject with a lazy
+		// warden_identity actor, so the actor may need minting even when the subject
+		// did not. The Fingerprint keyed this entry via ActorCacheIdentity, so the
+		// (not-yet-minted) actor bytes never entered the cache key.
+		if inputs != nil && inputs.ResolveActorToken != nil && inputs.ActorToken == "" {
+			tok, rerr := inputs.ResolveActorToken(ctx)
+			if rerr != nil {
+				return nil, fmt.Errorf("failed to resolve actor token: %w", rerr)
+			}
+			inputs.ActorToken = tok
 		}
 
 		// Issue new credential from source
