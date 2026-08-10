@@ -2351,6 +2351,74 @@ func TestResolveExchangeInputs_HeaderSource_MissingFailsClosed(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestResolveExchangeInputs_SubjectHeader_Authorization(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	seedSpec(t, c, ctx, "authz-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+		credential.ConfigSubjectTokenHeader: "Authorization",
+	})
+
+	// A cert/SPIFFE-authenticated agent: ClientToken is not the user token, so the
+	// standard Authorization header is free to carry the subject. Bearer is stripped.
+	req := requestWith("spiffe-session", map[string]string{"Authorization": "Bearer eyJ.user"})
+	inputs, err := c.resolveExchangeInputs(ctx, req, teForSpec("authz-spec"))
+	require.NoError(t, err)
+	require.NotNil(t, inputs)
+	assert.Equal(t, "eyJ.user", inputs.SubjectToken, "Bearer scheme stripped from Authorization")
+	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.SubjectTokenOrigin)
+}
+
+func TestResolveExchangeInputs_SubjectHeader_FailsClosedWhenEqualsCallerToken(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	seedSpec(t, c, ctx, "authz-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+		credential.ConfigSubjectTokenHeader: "Authorization",
+	})
+
+	// A JWT-authed agent used the Authorization spec: Authorization carries its OWN
+	// auth token, so the subject would be the agent, not a distinct user. Fail closed.
+	req := requestWith("eyJ.agent", map[string]string{"Authorization": "Bearer eyJ.agent"})
+	_, err := c.resolveExchangeInputs(ctx, req, teForSpec("authz-spec"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not equal the caller's own authentication token")
+}
+
+func TestResolveExchangeInputs_SubjectHeader_GuardBypassAttempts(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	// Lowercase header name canonicalizes to Authorization.
+	seedSpec(t, c, ctx, "authz-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+		credential.ConfigSubjectTokenHeader: "authorization",
+	})
+
+	// Double space after Bearer: the shared stripBearer yields " eyJ.agent" (a
+	// leading space), byte-identical to what Warden's own token extractor sets as
+	// ClientToken at auth time — so the guard still trips and cannot be bypassed.
+	req := requestWith(" eyJ.agent", map[string]string{"Authorization": "Bearer  eyJ.agent"})
+	_, err := c.resolveExchangeInputs(ctx, req, teForSpec("authz-spec"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not equal the caller's own authentication token")
+}
+
+func TestResolveExchangeInputs_ActorHeader_CustomName(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	seedSpec(t, c, ctx, "deleg-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+		credential.ConfigActorTokenSource:   credential.SourceHeader,
+		credential.ConfigActorTokenHeader:   "X-Actor",
+	})
+
+	req := requestWith("opaque-token", map[string]string{
+		credential.DefaultSubjectTokenHeader: "eyJ.subject",
+		"X-Actor":                            "eyJ.actor",
+	})
+	inputs, err := c.resolveExchangeInputs(ctx, req, teForSpec("deleg-spec"))
+	require.NoError(t, err)
+	require.NotNil(t, inputs)
+	assert.Equal(t, "eyJ.actor", inputs.ActorToken)
+	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.ActorTokenOrigin)
+}
+
 func TestResolveExchangeInputs_ActorHeader(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	seedSpec(t, c, ctx, "deleg-spec", map[string]string{

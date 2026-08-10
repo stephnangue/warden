@@ -246,6 +246,20 @@ func TestSpecRequestsExchange(t *testing.T) {
 	}
 }
 
+func TestTokenHeaderName_Defaults(t *testing.T) {
+	// Unset falls back to the historical Warden headers, canonicalized.
+	if got := SubjectTokenHeaderName(map[string]string{}); got != DefaultSubjectTokenHeader {
+		t.Fatalf("subject default = %q, want %q", got, DefaultSubjectTokenHeader)
+	}
+	if got := ActorTokenHeaderName(map[string]string{}); got != DefaultActorTokenHeader {
+		t.Fatalf("actor default = %q, want %q", got, DefaultActorTokenHeader)
+	}
+	// A configured name is canonicalized so comparisons are case-insensitive.
+	if got := SubjectTokenHeaderName(map[string]string{ConfigSubjectTokenHeader: "authorization"}); got != "Authorization" {
+		t.Fatalf("subject override = %q, want %q", got, "Authorization")
+	}
+}
+
 func TestValidateExchangeSpecConfig(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -362,6 +376,57 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 				ConfigAssertionResource:  "aws-secretsmanager:prod/db",
 			},
 			wantErr: true,
+		},
+		{
+			name: "subject_token_header with header source",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceHeader,
+				ConfigSubjectTokenHeader: "Authorization",
+			},
+		},
+		{
+			name: "subject_token_header without header source",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceAuthToken,
+				ConfigSubjectTokenHeader: "Authorization",
+			},
+			wantErr: true,
+		},
+		{
+			name: "actor_token_header without header source",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceHeader,
+				ConfigActorTokenSource:   SourceAuthToken,
+				ConfigActorTokenHeader:   "X-Actor",
+			},
+			wantErr: true,
+		},
+		{
+			name: "subject_token_header naming an internal header",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceHeader,
+				ConfigSubjectTokenHeader: "x-warden-token",
+			},
+			wantErr: true,
+		},
+		{
+			name: "subject and actor same header rejected",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceHeader,
+				ConfigActorTokenSource:   SourceHeader,
+				ConfigSubjectTokenHeader: "Authorization",
+				ConfigActorTokenHeader:   "authorization",
+			},
+			wantErr: true,
+		},
+		{
+			name: "subject and actor distinct headers allowed",
+			config: map[string]string{
+				ConfigSubjectTokenSource: SourceHeader,
+				ConfigActorTokenSource:   SourceHeader,
+				ConfigSubjectTokenHeader: "X-Subject",
+				ConfigActorTokenHeader:   "X-Actor",
+			},
 		},
 	}
 	for _, tt := range tests {
