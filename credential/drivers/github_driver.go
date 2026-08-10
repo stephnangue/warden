@@ -33,6 +33,7 @@ const githubMaxRetryAttempts = 3
 // App mode tokens are ephemeral (1h TTL), and GitHub has no API to rotate PATs.
 var _ credential.SourceDriver = (*GitHubDriver)(nil)
 var _ credential.SpecVerifier = (*GitHubDriver)(nil)
+var _ credential.ChainedSecretMinter = (*GitHubDriver)(nil)
 
 // appTokenCache holds a cached GitHub App installation token for a specific spec
 type appTokenCache struct {
@@ -130,22 +131,71 @@ func (d *GitHubDriver) getGitHubURL() string {
 	return strings.TrimRight(credential.GetString(d.credSource.Config, "github_url", "https://api.github.com"), "/")
 }
 
-// MintCredential returns a GitHub token for the given spec.
-// Auth credentials are read from spec.Config, not from the source.
+// MintCredential returns a GitHub token for the given spec, minting directly from
+// the secret in spec.Config. Chained specs (secret_spec set) mint through
+// MintFromSecret instead — the Manager routes them there and never calls this — so
+// reaching here with secret_spec set is a misuse and fails closed rather than
+// reading a missing inline secret. Non-chained specs are unaffected.
 func (d *GitHubDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if spec.Config[credential.ConfigSecretSpec] != "" {
+		return nil, nil, 0, "", fmt.Errorf("github: spec uses secret_spec (credential chaining); it must mint from fetched secret material, not directly")
+	}
 	authMethod := credential.GetString(spec.Config, "auth_method", "app")
 	switch authMethod {
 	case "app":
-		return d.mintAppCredential(ctx, spec)
+		return d.mintAppCredentialWithKey(ctx, spec, credential.GetString(spec.Config, "private_key", ""))
 	case "pat":
-		return d.mintPATCredential(spec)
+		return d.mintPATFromToken(credential.GetString(spec.Config, "token", ""))
 	default:
 		return nil, nil, 0, "", fmt.Errorf("unsupported auth_method '%s'", authMethod)
 	}
 }
 
-// mintAppCredential mints a GitHub App installation access token using spec config
-func (d *GitHubDriver) mintAppCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+// MintFromSecret mints a GitHub token from secret material fetched via credential
+// chaining: app mode signs an installation token with the fetched private key; pat
+// mode injects the fetched token. Per-caller authorization was already enforced
+// upstream (the referenced secret-spec was minted as the caller), so the cross-caller
+// app-token cache in mintAppCredentialWithKey remains correct.
+func (d *GitHubDriver) MintFromSecret(ctx context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	authMethod := credential.GetString(spec.Config, "auth_method", "app")
+	switch authMethod {
+	case "app":
+		keyPEM := material.Secret()
+		// Fall back to the conventional key name ONLY when no field was resolved
+		// (single-key auto-detect failed / no secret_field). If a field WAS resolved
+		// but is empty, that's a misconfigured secret_field — fail loudly rather than
+		// silently substituting a different key.
+		if keyPEM == "" && material.Field == "" {
+			keyPEM = material.Data["private_key"]
+		}
+		if keyPEM == "" {
+			if material.Field != "" {
+				return nil, nil, 0, "", fmt.Errorf("github: secret_field %q is empty or absent in the fetched secret material", material.Field)
+			}
+			return nil, nil, 0, "", fmt.Errorf("github: no private key in fetched secret material (set secret_field, or store it under 'private_key')")
+		}
+		return d.mintAppCredentialWithKey(ctx, spec, keyPEM)
+	case "pat":
+		token := material.Secret()
+		if token == "" && material.Field == "" {
+			token = material.Data["token"]
+		}
+		if token == "" {
+			if material.Field != "" {
+				return nil, nil, 0, "", fmt.Errorf("github: secret_field %q is empty or absent in the fetched secret material", material.Field)
+			}
+			return nil, nil, 0, "", fmt.Errorf("github: no token in fetched secret material (set secret_field, or store it under 'token')")
+		}
+		return d.mintPATFromToken(token)
+	default:
+		return nil, nil, 0, "", fmt.Errorf("unsupported auth_method '%s'", authMethod)
+	}
+}
+
+// mintAppCredentialWithKey mints a GitHub App installation access token from the
+// given private-key PEM (read from spec config for a direct mint, or fetched via
+// credential chaining).
+func (d *GitHubDriver) mintAppCredentialWithKey(ctx context.Context, spec *credential.CredSpec, keyPEM string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	d.appTokenMu.Lock()
 	defer d.appTokenMu.Unlock()
 
@@ -159,11 +209,9 @@ func (d *GitHubDriver) mintAppCredential(ctx context.Context, spec *credential.C
 		return rawData, nil, ttl, "", nil
 	}
 
-	// Parse private key from spec config
-	keyPEM := credential.GetString(spec.Config, "private_key", "")
 	key, err := parseRSAPrivateKey(keyPEM)
 	if err != nil {
-		return nil, nil, 0, "", fmt.Errorf("failed to parse private key from spec: %w", err)
+		return nil, nil, 0, "", fmt.Errorf("failed to parse private key: %w", err)
 	}
 
 	appID := credential.GetString(spec.Config, "app_id", "")
@@ -198,11 +246,11 @@ func (d *GitHubDriver) mintAppCredential(ctx context.Context, spec *credential.C
 	return rawData, nil, ttl, "", nil
 }
 
-// mintPATCredential returns the PAT from spec config as a credential
-func (d *GitHubDriver) mintPATCredential(spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	token := credential.GetString(spec.Config, "token", "")
+// mintPATFromToken returns the given PAT as a credential (from spec config for a
+// direct mint, or fetched via credential chaining).
+func (d *GitHubDriver) mintPATFromToken(token string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	if token == "" {
-		return nil, nil, 0, "", fmt.Errorf("no GitHub PAT configured in spec")
+		return nil, nil, 0, "", fmt.Errorf("no GitHub PAT configured")
 	}
 
 	rawData := map[string]interface{}{

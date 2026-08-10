@@ -48,6 +48,11 @@ type Manager struct {
 	mintingService    *MintingService
 	credentialParser  *CredentialParser
 
+	// typeRegistry is retained for credential-chaining field discovery: resolving a
+	// referenced credential's primary field (PrimaryFieldProvider) when no explicit
+	// secret_field is set and its payload has more than one key.
+	typeRegistry *TypeRegistry
+
 	// configStore persists rotated refresh tokens back into the spec config.
 	configStore ConfigStoreAccessor
 
@@ -114,6 +119,7 @@ func NewManager(
 		mintingService:    mintingService,
 		credentialParser:  credentialParser,
 		configStore:       configStore,
+		typeRegistry:      typeRegistry,
 		issuanceTimeout:   DefaultIssuanceTimeout,
 	}
 
@@ -133,15 +139,16 @@ func NewManager(
 	return m, nil
 }
 
-// IssueCredential issues a credential for the given spec, token, and TTL.
+// IssueCredential issues a credential for the given spec on behalf of a caller.
 // Credentials are cached in memory but not persisted to storage.
 // On cache miss, a new credential is issued from the source.
 //
 // Parameters:
 //   - ctx: Context with namespace information
-//   - tokenID: The session token ID to bind the credential to
+//   - caller: The requesting principal — its TokenID binds and caches the
+//     credential, its TokenTTL bounds the cache duration, and its ResolveInputs is
+//     used by credential chaining to mint a referenced secret-spec as this caller.
 //   - specName: The name of the credential spec to use
-//   - tokenTTL: The TTL of the session token (used for cache duration)
 //   - inputs: Optional caller-derived token-exchange inputs. When non-nil they
 //     are folded into the cache key so distinct exchange inputs cannot share a
 //     cached credential. When inputs.ResolveSubjectToken and/or
@@ -150,7 +157,7 @@ func NewManager(
 //     resolve independently (an eager header subject can pair with a lazy actor).
 //
 // Returns the issued credential or an error
-func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName string, tokenTTL time.Duration, inputs *ExchangeInputs) (*Credential, error) {
+func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName string, inputs *ExchangeInputs) (*Credential, error) {
 	// Apply issuance timeout to prevent slow drivers from blocking indefinitely
 	ctx, cancel := context.WithTimeout(ctx, m.issuanceTimeout)
 	defer cancel()
@@ -163,7 +170,7 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 
 	// Build namespace-aware cache key: {namespace-uuid}:{tokenID}:{specName}
 	// Including specName allows access backends to mint different specs for the same token.
-	cacheKey := fmt.Sprintf("%s:%s:%s", ns.ID, tokenID, specName)
+	cacheKey := fmt.Sprintf("%s:%s:%s", ns.ID, caller.TokenID, specName)
 
 	// When the request carries token-exchange inputs, fold their fingerprint into
 	// the key so two callers sharing one session token (e.g. an opaque service
@@ -218,8 +225,8 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 			inputs.ActorToken = tok
 		}
 
-		// Issue new credential from source
-		cred, err := m.issueCredential(ctx, specName, inputs)
+		// Issue a new credential
+		cred, err := m.issueCredential(ctx, caller, specName, inputs)
 		if err != nil {
 			return nil, err
 		}
@@ -228,7 +235,7 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 		cred.CredentialID = uuid.New().String()
 
 		// Bind credential to token and spec
-		cred.TokenID = tokenID
+		cred.TokenID = caller.TokenID
 		cred.SpecName = specName
 
 		// Cache the credential. Bound a dynamic credential's entry by its remaining
@@ -237,10 +244,18 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 		// correctness backstop, this keeps memory from accumulating stale entries.
 		if cred.LeaseTTL > 0 {
 			ttl := cred.LeaseTTL
-			if tokenTTL > 0 && tokenTTL < ttl {
-				ttl = tokenTTL
+			if caller.TokenTTL > 0 && caller.TokenTTL < ttl {
+				ttl = caller.TokenTTL
 			}
 			m.cache.SetWithTTL(cacheKey, cred, 1, ttl)
+		} else if caller.TokenTTL > 0 {
+			// A static credential (no lease) is still bound to this session: cap its
+			// entry by the session TTL so it self-evicts at session end rather than
+			// lingering until cache pressure. This also bounds a chained static
+			// credential's staleness — a rotated upstream secret is re-fetched at most
+			// one session later. Falls back to an untimed set only when no session TTL
+			// is known (internal/non-request callers).
+			m.cache.SetWithTTL(cacheKey, cred, 1, caller.TokenTTL)
 		} else {
 			m.cache.Set(cacheKey, cred, 1)
 		}
@@ -255,7 +270,7 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 				ctx,               // Context with namespace
 				cred.CredentialID, // Unique ID for this credential instance (UUID)
 				cacheKey,          // Cache key for cache lookup/deletion
-				tokenTTL,
+				caller.TokenTTL,
 				cred.LeaseID,
 				cred.SourceName,
 				cred.SourceType,
@@ -282,12 +297,25 @@ func (m *Manager) IssueCredential(ctx context.Context, tokenID string, specName 
 	return v.(*Credential), nil
 }
 
-// issueCredential performs the actual credential issuance from the source
-func (m *Manager) issueCredential(ctx context.Context, specName string, inputs *ExchangeInputs) (*Credential, error) {
+// issueCredential performs the actual credential issuance from the source. It runs
+// on a real cache miss (or, for a chained secret-spec, on the non-caching path so
+// the fetched secret is never cached).
+func (m *Manager) issueCredential(ctx context.Context, caller Caller, specName string, inputs *ExchangeInputs) (*Credential, error) {
 	// Step 1: Resolve credential spec using SpecResolver
 	spec, err := m.specResolver.ResolveSpec(ctx, specName)
 	if err != nil {
 		return nil, err
+	}
+
+	// Credential chaining: when the spec (or its source) references another cred
+	// spec as its secret source, mint that referenced spec as the same caller and
+	// mint this credential from the fetched material. Spec-level reference wins.
+	secretRef, err := m.secretSpecRef(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	if secretRef != "" {
+		return m.issueChained(ctx, caller, spec, secretRef)
 	}
 
 	// Step 2: Get or create source driver using DriverCoordinator
@@ -312,6 +340,152 @@ func (m *Manager) issueCredential(ctx context.Context, specName string, inputs *
 func (m *Manager) mintAndParse(ctx context.Context, spec *CredSpec, driver SourceDriver, inputs *ExchangeInputs) (*Credential, error) {
 	var cred *Credential
 	err := m.mintingService.MintWithCleanup(ctx, driver, spec, inputs, func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
+		var parseErr error
+		cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, metadata, leaseTTL, leaseID, driver)
+		return parseErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return cred, nil
+}
+
+// secretSpecRef returns the referenced secret-spec name for credential chaining:
+// spec-level (ConfigSecretSpec on the spec) wins over source-level (on the source).
+// Returns "" when the spec is not chained. A source-read failure is returned rather
+// than swallowed, so a transient error can't silently route a chained spec down the
+// direct (non-chained) mint path.
+func (m *Manager) secretSpecRef(ctx context.Context, spec *CredSpec) (string, error) {
+	if ref := spec.Config[ConfigSecretSpec]; ref != "" {
+		return ref, nil
+	}
+	src, err := m.configStore.GetSource(ctx, spec.Source)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve source %q for credential chaining: %w", spec.Source, err)
+	}
+	return src.Config[ConfigSecretSpec], nil
+}
+
+// issueChained mints a consuming credential whose secret comes from a referenced
+// cred spec. It mints the referenced spec AS the caller (fresh assertion), extracts
+// the secret material, and hands it to the consuming driver. The fetched secret is
+// never cached: it is minted via the non-caching internal path and discarded after
+// material extraction.
+func (m *Manager) issueChained(ctx context.Context, caller Caller, spec *CredSpec, secretRef string) (*Credential, error) {
+	// Bound the chain to a single hop (a referenced secret-spec may not itself
+	// chain). This also breaks any config-drift reference cycle rather than letting
+	// it recurse unboundedly.
+	depth := chainDepth(ctx)
+	if depth+1 > MaxSecretChainDepth {
+		return nil, fmt.Errorf("credential chaining for spec %q exceeds max depth %d (referenced secret_spec %q)", spec.Name, MaxSecretChainDepth, secretRef)
+	}
+	ctx = withChainDepth(ctx, depth+1)
+
+	// Build exchange inputs for the referenced secret-spec, as the caller.
+	if caller.ResolveInputs == nil {
+		return nil, fmt.Errorf("credential chaining for spec %q requires a request caller context", spec.Name)
+	}
+	inputsB, err := caller.ResolveInputs(ctx, secretRef)
+	if err != nil {
+		return nil, fmt.Errorf("secret_spec %q: %w", secretRef, err)
+	}
+
+	// Materialize any lazily-minted subject/actor tokens here: the referenced spec is
+	// minted via the non-caching internal path, which — unlike the caching wrapper —
+	// does not run ResolveSubjectToken/ResolveActorToken, so a warden_identity subject
+	// or actor would otherwise be forwarded empty (the driver would fail closed on the
+	// subject; a delegation actor would be silently dropped).
+	if inputsB != nil && inputsB.ResolveSubjectToken != nil && inputsB.SubjectToken == "" {
+		tok, rerr := inputsB.ResolveSubjectToken(ctx)
+		if rerr != nil {
+			return nil, fmt.Errorf("secret_spec %q: failed to resolve subject token: %w", secretRef, rerr)
+		}
+		inputsB.SubjectToken = tok
+	}
+	if inputsB != nil && inputsB.ResolveActorToken != nil && inputsB.ActorToken == "" {
+		tok, rerr := inputsB.ResolveActorToken(ctx)
+		if rerr != nil {
+			return nil, fmt.Errorf("secret_spec %q: failed to resolve actor token: %w", secretRef, rerr)
+		}
+		inputsB.ActorToken = tok
+	}
+
+	// Mint the secret AS the caller via the non-caching path — never cached; it
+	// lives only for this mint and is discarded after material extraction below.
+	credB, err := m.issueCredential(ctx, caller, secretRef, inputsB)
+	if err != nil {
+		return nil, fmt.Errorf("secret_spec %q: %w", secretRef, err)
+	}
+
+	// A referenced secret-spec must be static/leaseless: this path skips expiration
+	// registration, so a leased credential would orphan its lease. The create-time
+	// guard forbids this; fail closed (best-effort revoke) if config drift produced
+	// one anyway.
+	if credB.LeaseID != "" || credB.LeaseTTL > 0 {
+		if credB.LeaseID != "" {
+			// Best-effort revoke on a fresh context (the request ctx may be near its
+			// issuance deadline); log rather than drop the outcome.
+			revokeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if drv, derr := m.driverCoordinator.GetOrCreateDriver(ctx, credB.SourceName); derr == nil {
+				if rerr := drv.Revoke(revokeCtx, credB.LeaseID); rerr != nil {
+					m.log.Warn("failed to revoke orphaned lease from a leased secret_spec",
+						logger.String("secret_spec", secretRef),
+						logger.String("lease_id", credB.LeaseID),
+						logger.Err(rerr))
+				}
+			}
+			cancel()
+		}
+		return nil, fmt.Errorf("secret_spec %q must reference a static/leaseless credential, but it returned a lease", secretRef)
+	}
+
+	// Extract the secret material and mint the consuming credential from it.
+	field := m.resolveSecretField(ctx, spec, credB)
+	material := SecretMaterial{Data: credB.Data, Field: field}
+
+	driver, err := m.driverCoordinator.GetOrCreateDriver(ctx, spec.Source)
+	if err != nil {
+		return nil, err
+	}
+	return m.mintFromSecret(ctx, spec, driver, material)
+}
+
+// resolveSecretField selects which key of the referenced credential's Data carries
+// the single secret: an explicit secret_field (spec-level then source-level), else a
+// single-key payload, else the referenced type's primary field. Returns "" when it
+// cannot determine one — a multi-secret consumer reads Data directly and ignores it;
+// a single-secret consumer surfaces the "set secret_field" error at use.
+func (m *Manager) resolveSecretField(ctx context.Context, spec *CredSpec, credB *Credential) string {
+	if f := spec.Config[ConfigSecretField]; f != "" {
+		return f
+	}
+	if src, err := m.configStore.GetSource(ctx, spec.Source); err == nil && src != nil {
+		if f := src.Config[ConfigSecretField]; f != "" {
+			return f
+		}
+	}
+	if len(credB.Data) == 1 {
+		for k := range credB.Data {
+			return k
+		}
+	}
+	if m.typeRegistry != nil {
+		if ct, err := m.typeRegistry.GetByName(credB.Type); err == nil {
+			if pfp, ok := ct.(PrimaryFieldProvider); ok {
+				if pf := pfp.PrimaryField(); pf != "" {
+					return pf
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// mintFromSecret mints the consuming credential from fetched secret material, with
+// orphaned-lease cleanup on failure. Mirrors mintAndParse for the chaining path.
+func (m *Manager) mintFromSecret(ctx context.Context, spec *CredSpec, driver SourceDriver, material SecretMaterial) (*Credential, error) {
+	var cred *Credential
+	err := m.mintingService.MintFromSecretWithCleanup(ctx, driver, spec, material, func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
 		var parseErr error
 		cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, metadata, leaseTTL, leaseID, driver)
 		return parseErr

@@ -92,6 +92,17 @@ type Type interface {
 	FieldSchemas() map[string]*CredentialFieldSchema
 }
 
+// PrimaryFieldProvider is an optional interface a credential Type implements to
+// expose its primary data field. Credential chaining's field discovery uses it as a
+// fallback: when a consuming spec sets no secret_field and the referenced
+// credential has more than one data key, the referenced type's primary field
+// selects the secret (e.g. api_key). Types with no single primary field (like the
+// generic key_value type) simply do not implement it.
+type PrimaryFieldProvider interface {
+	// PrimaryField returns the name of the type's primary data field, or "".
+	PrimaryField() string
+}
+
 // ConnectGated is an optional interface a credential Type implements when some of
 // its specs require a one-time interactive `cred spec connect` step before they
 // can mint (e.g. OAuth2 authorization_code). Connect-gating is derived from the

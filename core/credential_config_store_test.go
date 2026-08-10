@@ -376,6 +376,93 @@ func TestCredentialConfigStore_DeleteSource(t *testing.T) {
 	}
 }
 
+// TestCredentialConfigStore_SecretSpecReference covers credential chaining guards:
+// a referenced secret-spec cannot be deleted while a consumer points at it, and
+// the reference is validated at create time (must exist, one hop, request exchange).
+func TestCredentialConfigStore_SecretSpecReference(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+
+	// Referencing a non-existent secret-spec is rejected.
+	badConsumer := &credential.CredSpec{
+		Name: "bad", Type: "vault_token", Source: "src",
+		Config: map[string]string{credential.ConfigSecretSpec: "missing"},
+	}
+	err := store.CreateSpec(ctx, badConsumer)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+
+	// A secret-spec that does not request exchange is rejected as a reference.
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "plain-secret", Type: "vault_token", Source: "src", Config: map[string]string{},
+	}))
+	err = store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "bad2", Type: "vault_token", Source: "src",
+		Config: map[string]string{credential.ConfigSecretSpec: "plain-secret"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "subject_token_source")
+
+	// A valid referenced secret-spec requests exchange (minted as the caller).
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "secret-spec", Type: "vault_token", Source: "src",
+		Config: map[string]string{
+			"subject_token_source": "warden_identity",
+			"assertion_audience":   "test-aud",
+		},
+	}))
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "consumer", Type: "vault_token", Source: "src",
+		Config: map[string]string{credential.ConfigSecretSpec: "secret-spec"},
+	}))
+
+	// Deleting the referenced secret-spec is blocked while a consumer points at it.
+	err = store.DeleteSpec(ctx, "secret-spec")
+	require.ErrorIs(t, err, ErrSpecInUse)
+
+	// After removing the consumer, the secret-spec can be deleted.
+	require.NoError(t, store.DeleteSpec(ctx, "consumer"))
+	require.NoError(t, store.DeleteSpec(ctx, "secret-spec"))
+}
+
+// TestCredentialConfigStore_SecretSpecReference_Restrictions covers the security
+// restrictions on a chained reference: the referenced spec must use a session-pinned
+// subject (not header), and a chained consumer must not carry its own exchange config.
+func TestCredentialConfigStore_SecretSpecReference_Restrictions(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+
+	// A header-sourced referenced spec is not session-pinned → rejected as a reference.
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "header-secret", Type: "vault_token", Source: "src",
+		Config: map[string]string{"subject_token_source": "header"},
+	}))
+	err := store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "consumer-hdr", Type: "vault_token", Source: "src",
+		Config: map[string]string{credential.ConfigSecretSpec: "header-secret"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "session-pinned")
+
+	// A valid warden_identity referenced spec.
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "wid-secret", Type: "vault_token", Source: "src",
+		Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "aud"},
+	}))
+	// A chained consumer that ALSO sets its own exchange config is rejected.
+	err = store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "consumer-dbl", Type: "vault_token", Source: "src",
+		Config: map[string]string{
+			credential.ConfigSecretSpec: "wid-secret",
+			"subject_token_source":      "warden_identity",
+			"assertion_audience":        "aud",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not also set")
+}
+
 // TestCredentialConfigStore_CheckSourceReferences tests checking source references
 func TestCredentialConfigStore_CheckSourceReferences(t *testing.T) {
 	store, ctx := setupTestCredentialConfigStore(t)

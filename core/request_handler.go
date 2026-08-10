@@ -1239,9 +1239,12 @@ func projectAssertionMetadata(md map[string]string, keys []string) (map[string]s
 	return projected, string(encoded), nil
 }
 
-// resolveExchangeInputs derives the token-exchange inputs for a request from the
-// credential spec's configuration. It returns (nil, nil) when the spec does not
-// opt into exchange, so the non-exchange mint path is completely unaffected.
+// resolveExchangeInputs derives the token-exchange inputs for the named spec on
+// this request. specName is passed explicitly (rather than taken from te) so it can
+// resolve inputs for a spec other than the caller's bound one — credential chaining
+// reuses it to mint a referenced secret-spec as the same caller. It returns
+// (nil, nil) when the spec does not opt into exchange, so the non-exchange mint path
+// is completely unaffected.
 //
 // The plumbing never verifies token contents — it only records provenance via
 // SubjectTokenOrigin/ActorTokenOrigin. Every configured-but-missing input fails
@@ -1252,8 +1255,7 @@ func projectAssertionMetadata(md map[string]string, keys []string) (map[string]s
 // cache hit pays no signing cost; the issuer-ready and audience checks stay eager
 // and fail closed. The subject and actor resolve independently — an eager header
 // subject can pair with a lazily-minted warden_identity actor.
-func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, te *logical.TokenEntry) (*credential.ExchangeInputs, error) {
-	specName := te.CredentialSpec
+func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, te *logical.TokenEntry, specName string) (*credential.ExchangeInputs, error) {
 	spec, err := c.credConfigStore.GetSpec(ctx, specName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load credential spec: %w", err)
@@ -1524,16 +1526,29 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 		tokenTTL = 1 * time.Hour
 	}
 
+	// The caller carries the requesting identity through the mint pipeline so a
+	// chained secret-spec (credential chaining) is minted as this same caller.
+	// ResolveInputs resolves token-exchange inputs for an arbitrary spec as this
+	// caller (nil for non-exchange specs), reused both for the outer spec below and
+	// for any referenced secret-spec by the Manager.
+	caller := credential.Caller{
+		TokenID:  te.ID,
+		TokenTTL: tokenTTL,
+		ResolveInputs: func(ctx context.Context, specName string) (*credential.ExchangeInputs, error) {
+			return c.resolveExchangeInputs(ctx, req, te, specName)
+		},
+	}
+
 	// Resolve any caller-supplied token-exchange inputs the spec opts into.
 	// Returns nil for non-exchange specs, leaving the mint path unchanged.
-	inputs, err := c.resolveExchangeInputs(ctx, req, te)
+	inputs, err := caller.ResolveInputs(ctx, te.CredentialSpec)
 	if err != nil {
 		return logical.ErrBadRequestf("token exchange input resolution failed: %s", err.Error())
 	}
 
 	// Issue credential using the credential manager
 	// Credentials are cache-only (not persisted) - ExpirationEntry handles lease revocation
-	cred, err := c.credentialManager.IssueCredential(ctx, te.ID, te.CredentialSpec, tokenTTL, inputs)
+	cred, err := c.credentialManager.IssueCredential(ctx, caller, te.CredentialSpec, inputs)
 	if err != nil {
 		return fmt.Errorf("failed to issue credential: %w", err)
 	}

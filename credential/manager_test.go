@@ -15,6 +15,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// issueForTest adapts the pre-chaining IssueCredential calling convention
+// (tokenID + tokenTTL scalars) to the Caller-based signature, so existing tests
+// read unchanged.
+func issueForTest(m *Manager, ctx context.Context, tokenID, specName string, tokenTTL time.Duration, inputs *ExchangeInputs) (*Credential, error) {
+	return m.IssueCredential(ctx, Caller{TokenID: tokenID, TokenTTL: tokenTTL}, specName, inputs)
+}
+
 // ============================================================================
 // Mock Implementations
 // ============================================================================
@@ -343,7 +350,7 @@ func TestManager_IssueCredential_Success(t *testing.T) {
 	tokenID := "token-123"
 	tokenTTL := time.Hour
 
-	cred, err := manager.IssueCredential(ctx, tokenID, "test-spec", tokenTTL, nil)
+	cred, err := issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
 	require.NoError(t, err)
 	require.NotNil(t, cred)
 
@@ -377,11 +384,11 @@ func TestManager_IssueCredential_CacheHit(t *testing.T) {
 	tokenTTL := time.Hour
 
 	// First call - should mint
-	cred1, err := manager.IssueCredential(ctx, tokenID, "test-spec", tokenTTL, nil)
+	cred1, err := issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
 	require.NoError(t, err)
 
 	// Second call - should use cache
-	cred2, err := manager.IssueCredential(ctx, tokenID, "test-spec", tokenTTL, nil)
+	cred2, err := issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
 	require.NoError(t, err)
 
 	// Should be the same credential
@@ -410,18 +417,18 @@ func TestManager_IssueCredential_ExpiredNotServed(t *testing.T) {
 	tokenID := "token-expiry"
 	tokenTTL := time.Hour
 
-	_, err := manager.IssueCredential(ctx, tokenID, "test-spec", tokenTTL, nil)
+	_, err := issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), factory.driver.mintCalls.Load())
 
 	// Within the lease: cache hit, no re-mint.
-	_, err = manager.IssueCredential(ctx, tokenID, "test-spec", tokenTTL, nil)
+	_, err = issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), factory.driver.mintCalls.Load(), "should serve from cache before expiry")
 
 	// After the lease elapses: the expired entry is not served — re-mint.
 	time.Sleep(80 * time.Millisecond)
-	_, err = manager.IssueCredential(ctx, tokenID, "test-spec", tokenTTL, nil)
+	_, err = issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "expired credential must be re-minted, not served stale")
 }
@@ -432,7 +439,7 @@ func TestManager_IssueCredential_SpecNotFound(t *testing.T) {
 
 	ctx := createNamespaceContext()
 
-	_, err := manager.IssueCredential(ctx, "token-123", "nonexistent-spec", time.Hour, nil)
+	_, err := issueForTest(manager, ctx, "token-123", "nonexistent-spec", time.Hour, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -451,7 +458,7 @@ func TestManager_IssueCredential_SourceNotFound(t *testing.T) {
 
 	ctx := createNamespaceContext()
 
-	_, err := manager.IssueCredential(ctx, "token-123", "test-spec", time.Hour, nil)
+	_, err := issueForTest(manager, ctx, "token-123", "test-spec", time.Hour, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "source")
 	assert.Contains(t, err.Error(), "not found")
@@ -476,7 +483,7 @@ func TestManager_IssueCredential_NoNamespace(t *testing.T) {
 	// Context without namespace
 	ctx := context.Background()
 
-	_, err := manager.IssueCredential(ctx, "token-123", "test-spec", time.Hour, nil)
+	_, err := issueForTest(manager, ctx, "token-123", "test-spec", time.Hour, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "namespace")
 }
@@ -500,7 +507,7 @@ func TestManager_RevokeByExpiration_Success(t *testing.T) {
 	ctx := createNamespaceContext()
 
 	// Issue a credential first
-	cred, err := manager.IssueCredential(ctx, "token-revoke", "test-spec", time.Hour, nil)
+	cred, err := issueForTest(manager, ctx, "token-revoke", "test-spec", time.Hour, nil)
 	require.NoError(t, err)
 
 	// Driver is automatically created during IssueCredential, no need to manually create it
@@ -615,7 +622,7 @@ func TestManager_IssueCredential_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			cred, err := manager.IssueCredential(ctx, tokenID, "test-spec", time.Hour, nil)
+			cred, err := issueForTest(manager, ctx, tokenID, "test-spec", time.Hour, nil)
 			results[idx] = cred
 			errs[idx] = err
 		}(i)
@@ -680,7 +687,7 @@ func TestManager_IssueCredential_Timeout(t *testing.T) {
 
 	ctx := createNamespaceContext()
 
-	_, err := manager.IssueCredential(ctx, "token-timeout", "test-spec", time.Hour, nil)
+	_, err := issueForTest(manager, ctx, "token-timeout", "test-spec", time.Hour, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "context deadline exceeded")
 }
@@ -718,12 +725,12 @@ func TestManager_IssueCredential_ErrorNotCached(t *testing.T) {
 	}
 
 	// First request should fail
-	_, err := manager.IssueCredential(ctx, tokenID, "test-spec", time.Hour, nil)
+	_, err := issueForTest(manager, ctx, tokenID, "test-spec", time.Hour, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "transient error")
 
 	// Second request should succeed (error not cached)
-	cred, err := manager.IssueCredential(ctx, tokenID, "test-spec", time.Hour, nil)
+	cred, err := issueForTest(manager, ctx, tokenID, "test-spec", time.Hour, nil)
 	require.NoError(t, err)
 	require.NotNil(t, cred)
 
@@ -818,7 +825,7 @@ func TestManager_WriteBack_StripsReservedKeyAndPersists(t *testing.T) {
 		}, nil, time.Hour, "", nil
 	}
 
-	cred, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour, nil)
+	cred, err := issueForTest(manager, createNamespaceContext(), "tok-1", "gh", time.Hour, nil)
 	require.NoError(t, err)
 
 	// The reserved rotated-token keys must be stripped before parsing.
@@ -847,7 +854,7 @@ func TestManager_WriteBack_RotatingWithoutExpiry_KeepsPriorExpiry(t *testing.T) 
 		return map[string]interface{}{"api_key": "at-new", RawRotatedRefreshTokenKey: "rt-new"}, nil, time.Hour, "", nil
 	}
 
-	_, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour, nil)
+	_, err := issueForTest(manager, createNamespaceContext(), "tok-1", "gh", time.Hour, nil)
 	require.NoError(t, err)
 
 	require.Len(t, configStore.persisted, 1)
@@ -866,7 +873,7 @@ func TestManager_WriteBack_NonRotating_NoPersist(t *testing.T) {
 		return map[string]interface{}{"api_key": "at-1"}, nil, time.Hour, "", nil
 	}
 
-	_, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour, nil)
+	_, err := issueForTest(manager, createNamespaceContext(), "tok-1", "gh", time.Hour, nil)
 	require.NoError(t, err)
 	assert.Empty(t, configStore.persisted, "non-rotating mint must not persist")
 }
@@ -892,7 +899,7 @@ func TestManager_InvalidGrant_RetriesOnceWithReloadedSpec(t *testing.T) {
 		return map[string]interface{}{"api_key": "at-ok"}, nil, time.Hour, "", nil
 	}
 
-	cred, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour, nil)
+	cred, err := issueForTest(manager, createNamespaceContext(), "tok-1", "gh", time.Hour, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "at-ok", cred.Data["api_key"])
 	assert.Equal(t, int32(2), atomic.LoadInt32(&attempts), "must mint exactly twice (one retry)")
@@ -909,7 +916,7 @@ func TestManager_InvalidGrant_RetryFailsOnce_SurfacesError(t *testing.T) {
 		return nil, nil, 0, "", ErrRefreshTokenRejected // never recovers
 	}
 
-	_, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour, nil)
+	_, err := issueForTest(manager, createNamespaceContext(), "tok-1", "gh", time.Hour, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrRefreshTokenRejected))
 	assert.Equal(t, int32(2), atomic.LoadInt32(&attempts), "retry is bounded to exactly one extra attempt")
@@ -926,7 +933,7 @@ func TestManager_WriteBack_PersistError_DoesNotFailIssuance(t *testing.T) {
 	}
 
 	// A persist failure must not fail issuance — the access token is still valid.
-	cred, err := manager.IssueCredential(createNamespaceContext(), "tok-1", "gh", time.Hour, nil)
+	cred, err := issueForTest(manager, createNamespaceContext(), "tok-1", "gh", time.Hour, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "at-new", cred.Data["api_key"])
 }
@@ -1049,11 +1056,11 @@ func TestManager_IssueCredential_ExchangeInputs_DistinctCache(t *testing.T) {
 	inA := exchangeInputsFor("subject-A")
 	inB := exchangeInputsFor("subject-B")
 
-	credA1, err := manager.IssueCredential(ctx, sharedToken, "ex-spec", time.Hour, inA)
+	credA1, err := issueForTest(manager, ctx, sharedToken, "ex-spec", time.Hour, inA)
 	require.NoError(t, err)
-	credA2, err := manager.IssueCredential(ctx, sharedToken, "ex-spec", time.Hour, inA)
+	credA2, err := issueForTest(manager, ctx, sharedToken, "ex-spec", time.Hour, inA)
 	require.NoError(t, err)
-	credB, err := manager.IssueCredential(ctx, sharedToken, "ex-spec", time.Hour, inB)
+	credB, err := issueForTest(manager, ctx, sharedToken, "ex-spec", time.Hour, inB)
 	require.NoError(t, err)
 
 	// Same inputs → cached (one mint); different inputs → separate credential.
@@ -1074,12 +1081,12 @@ func TestManager_IssueCredential_ExchangeInputs_NonExchangeDriver(t *testing.T) 
 	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: map[string]string{}})
 
 	ctx := createNamespaceContext()
-	_, err := manager.IssueCredential(ctx, "tok", "test-spec", time.Hour, exchangeInputsFor("s"))
+	_, err := issueForTest(manager, ctx, "tok", "test-spec", time.Hour, exchangeInputsFor("s"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does not accept token-exchange inputs")
 
 	// Nothing should have been cached; a retry must error again (not serve a stale entry).
-	_, err = manager.IssueCredential(ctx, "tok", "test-spec", time.Hour, exchangeInputsFor("s"))
+	_, err = issueForTest(manager, ctx, "tok", "test-spec", time.Hour, exchangeInputsFor("s"))
 	require.Error(t, err)
 	assert.Equal(t, int32(0), factory.driver.mintCalls.Load(), "plain mint must never run for exchange inputs")
 }
@@ -1111,14 +1118,14 @@ func TestManager_IssueCredential_LazySubject_MintOnMissZeroOnHit(t *testing.T) {
 	ctx := createNamespaceContext()
 	var mintCount atomic.Int32
 
-	cred1, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour,
+	cred1, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour,
 		lazyExchangeInputsFor("id-alice", "assertion-1", &mintCount))
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), mintCount.Load(), "a cache miss must mint exactly once")
 	assert.Equal(t, "assertion-1", cred1.Data["username"], "the resolved token must reach the driver")
 
 	// Fresh inputs (per-request), same identity → cache hit.
-	cred2, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour,
+	cred2, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour,
 		lazyExchangeInputsFor("id-alice", "assertion-2", &mintCount))
 	require.NoError(t, err)
 	assert.Equal(t, cred1.CredentialID, cred2.CredentialID, "same identity must hit cache")
@@ -1152,14 +1159,14 @@ func TestManager_IssueCredential_LazyActor_MintOnMissZeroOnHit(t *testing.T) {
 		}
 	}
 
-	cred1, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour, makeInputs("actor-1"))
+	cred1, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, makeInputs("actor-1"))
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), actorMint.Load(), "a cache miss must mint the actor exactly once")
 	assert.Equal(t, "actor-1", factory.driver.gotInputs.ActorToken, "the resolved actor token must reach the driver")
 	assert.Equal(t, "eyJ.user", cred1.Data["username"], "the eager subject reaches the driver unchanged")
 
 	// Fresh inputs (per-request), same identity → cache hit, no further work.
-	cred2, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour, makeInputs("actor-2"))
+	cred2, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, makeInputs("actor-2"))
 	require.NoError(t, err)
 	assert.Equal(t, cred1.CredentialID, cred2.CredentialID, "same identity must hit cache")
 	assert.Equal(t, int32(1), actorMint.Load(), "a cache HIT must not mint the actor")
@@ -1174,10 +1181,10 @@ func TestManager_IssueCredential_LazySubject_DistinctIdentities(t *testing.T) {
 	ctx := createNamespaceContext()
 	var mintCount atomic.Int32
 
-	credA, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour,
+	credA, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour,
 		lazyExchangeInputsFor("id-alice", "assertion-A", &mintCount))
 	require.NoError(t, err)
-	credB, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour,
+	credB, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour,
 		lazyExchangeInputsFor("id-bob", "assertion-B", &mintCount))
 	require.NoError(t, err)
 
@@ -1216,7 +1223,7 @@ func TestManager_IssueCredential_LazySubject_SingleflightCoalesces(t *testing.T)
 				},
 			}
 			<-start
-			results[i], errs[i] = manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour, in)
+			results[i], errs[i] = issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, in)
 		}(i)
 	}
 	close(start)
@@ -1255,13 +1262,13 @@ func TestManager_IssueCredential_LazySubject_ResolveErrorNotCached(t *testing.T)
 		}
 	}
 
-	_, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour, makeInputs())
+	_, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, makeInputs())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to resolve subject token")
 	assert.Equal(t, int32(0), factory.driver.exchangeCount.Load(), "driver must not run when the mint fails")
 
 	// The error was not cached: a retry re-runs the closure and succeeds.
-	cred, err := manager.IssueCredential(ctx, "tok", "ex-spec", time.Hour, makeInputs())
+	cred, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, makeInputs())
 	require.NoError(t, err)
 	assert.Equal(t, "assertion-ok", cred.Data["username"])
 	assert.Equal(t, int32(1), factory.driver.exchangeCount.Load())

@@ -129,3 +129,9 @@ func (t *BaseTokenType) Revoke(ctx context.Context, cred *credential.Credential,
 func (t *BaseTokenType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
 	return t.FieldConfig.FieldSchemas
 }
+
+// PrimaryField returns the type's primary data field (credential.PrimaryFieldProvider),
+// used by credential-chaining field discovery as a fallback secret selector.
+func (t *BaseTokenType) PrimaryField() string {
+	return t.FieldConfig.PrimaryField
+}
