@@ -146,7 +146,7 @@ Mints an Microsoft Entra ID Bearer token using the client credentials flow:
 ```bash
 warden cred spec create azure-ops \
   -source azure-src \
-  -config auth_method=bearer_token \
+  -config mint_method=bearer_token \
   -config client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
   -config client_secret=workload-sp-client-secret \
   -config resource_uri=https://management.azure.com/
@@ -159,7 +159,7 @@ Fetches a secret directly from Azure Key Vault:
 ```bash
 warden cred spec create azure-kv \
   -source azure-src \
-  -config auth_method=key_vault_secret \
+  -config mint_method=key_vault_secret \
   -config client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
   -config client_secret=workload-sp-client-secret \
   -config vault_name=my-key-vault \

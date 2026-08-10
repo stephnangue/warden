@@ -50,12 +50,12 @@ func NewGitHubTokenCredType() *GitHubTokenCredType {
 func (t *GitHubTokenCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
 		// Common fields (required for github source, not for local)
-		credential.StringField("auth_method").
+		credential.StringField("mint_method").
 			OneOf("app", "pat").
-			Describe("Authentication method for GitHub (required for github source)").
+			Describe("Which credential to mint: 'app' (GitHub App installation token) or 'pat' (personal access token). Required for github source.").
 			Example("app"),
 
-		// GitHub App fields (required when auth_method=app)
+		// GitHub App fields (required when mint_method=app)
 		credential.StringField("app_id").
 			Describe("GitHub App ID (required for app auth)").
 			Example("123456"),
@@ -79,7 +79,7 @@ func (t *GitHubTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Describe("GitHub App installation ID (required for app auth)").
 			Example("12345678"),
 
-		// PAT fields (required when auth_method=pat)
+		// PAT fields (required when mint_method=pat)
 		credential.StringField("token").
 			Describe("Personal access token (required for pat auth, or for local source)").
 			Example("ghp_xxxxxxxxxxxxxxxxxxxx"),
@@ -119,9 +119,9 @@ func (t *GitHubTokenCredType) ValidateConfig(config map[string]string, sourceTyp
 		return err
 	}
 
-	// Step 3: Conditional validation based on source and auth_method
+	// Step 3: Conditional validation based on source and mint_method
 	if sourceType == credential.SourceTypeLocal {
-		// Local source: must have static token, auth_method not needed. A local
+		// Local source: must have static token, mint_method not needed. A local
 		// source has no keyless path, so credential chaining does not apply.
 		if config[credential.ConfigSecretSpec] != "" {
 			return fmt.Errorf("secret_spec (credential chaining) is not supported with a local source")
@@ -132,10 +132,16 @@ func (t *GitHubTokenCredType) ValidateConfig(config map[string]string, sourceTyp
 		return nil
 	}
 
-	// GitHub source: auth_method is required
-	authMethod := config["auth_method"]
-	if authMethod == "" {
-		return fmt.Errorf("'auth_method' is required for github source")
+	// The dispatch key was renamed auth_method -> mint_method to match the rest of
+	// the credential drivers; reject the old key with a clear migration message.
+	if config["auth_method"] != "" {
+		return fmt.Errorf("'auth_method' is no longer supported for github_token; use 'mint_method' (app or pat)")
+	}
+
+	// GitHub source: mint_method is required
+	mintMethod := config["mint_method"]
+	if mintMethod == "" {
+		return fmt.Errorf("'mint_method' is required for github source")
 	}
 
 	// When secret_spec is set, the secret (App private key or PAT) is fetched from
@@ -143,22 +149,22 @@ func (t *GitHubTokenCredType) ValidateConfig(config map[string]string, sourceTyp
 	// field must then be absent.
 	chained := config[credential.ConfigSecretSpec] != ""
 
-	// Conditional validation based on auth_method
-	switch authMethod {
+	// Conditional validation based on mint_method
+	switch mintMethod {
 	case "app":
 		// App identifiers are non-secret and always required.
 		if config["app_id"] == "" {
-			return fmt.Errorf("'app_id' is required when auth_method is app")
+			return fmt.Errorf("'app_id' is required when mint_method is app")
 		}
 		if config["installation_id"] == "" {
-			return fmt.Errorf("'installation_id' is required when auth_method is app")
+			return fmt.Errorf("'installation_id' is required when mint_method is app")
 		}
 		if chained {
 			if config["private_key"] != "" {
 				return fmt.Errorf("'private_key' and 'secret_spec' are mutually exclusive (the private key is fetched from the referenced secret_spec)")
 			}
 		} else if config["private_key"] == "" {
-			return fmt.Errorf("'private_key' (or 'secret_spec') is required when auth_method is app")
+			return fmt.Errorf("'private_key' (or 'secret_spec') is required when mint_method is app")
 		}
 	case "pat":
 		if chained {
@@ -166,7 +172,7 @@ func (t *GitHubTokenCredType) ValidateConfig(config map[string]string, sourceTyp
 				return fmt.Errorf("'token' and 'secret_spec' are mutually exclusive (the token is fetched from the referenced secret_spec)")
 			}
 		} else if config["token"] == "" {
-			return fmt.Errorf("'token' (or 'secret_spec') is required when auth_method is pat")
+			return fmt.Errorf("'token' (or 'secret_spec') is required when mint_method is pat")
 		}
 	}
 

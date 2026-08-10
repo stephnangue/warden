@@ -49,7 +49,7 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "github app - valid config",
 			config: map[string]string{
-				"auth_method":     "app",
+				"mint_method":     "app",
 				"app_id":          "12345",
 				"private_key":     testPEM,
 				"installation_id": "67890",
@@ -60,7 +60,7 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "github app - missing app_id",
 			config: map[string]string{
-				"auth_method":     "app",
+				"mint_method":     "app",
 				"private_key":     testPEM,
 				"installation_id": "67890",
 			},
@@ -71,7 +71,7 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "github app - missing private_key",
 			config: map[string]string{
-				"auth_method":     "app",
+				"mint_method":     "app",
 				"app_id":          "12345",
 				"installation_id": "67890",
 			},
@@ -82,7 +82,7 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "github app - missing installation_id",
 			config: map[string]string{
-				"auth_method": "app",
+				"mint_method": "app",
 				"app_id":      "12345",
 				"private_key": testPEM,
 			},
@@ -93,7 +93,7 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "github app - invalid PEM",
 			config: map[string]string{
-				"auth_method":     "app",
+				"mint_method":     "app",
 				"app_id":          "12345",
 				"private_key":     "not-a-pem",
 				"installation_id": "67890",
@@ -106,7 +106,7 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "github app chained - valid (no inline private_key)",
 			config: map[string]string{
-				"auth_method":               "app",
+				"mint_method":               "app",
 				"app_id":                    "12345",
 				"installation_id":           "67890",
 				credential.ConfigSecretSpec: "gh-key-secret",
@@ -117,7 +117,7 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "github app chained - inline private_key and secret_spec are mutually exclusive",
 			config: map[string]string{
-				"auth_method":               "app",
+				"mint_method":               "app",
 				"app_id":                    "12345",
 				"installation_id":           "67890",
 				"private_key":               testPEM,
@@ -130,7 +130,7 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "github pat chained - valid (no inline token)",
 			config: map[string]string{
-				"auth_method":               "pat",
+				"mint_method":               "pat",
 				credential.ConfigSecretSpec: "gh-pat-secret",
 			},
 			sourceType: credential.SourceTypeGitHub,
@@ -139,7 +139,7 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "github pat chained - inline token and secret_spec are mutually exclusive",
 			config: map[string]string{
-				"auth_method":               "pat",
+				"mint_method":               "pat",
 				"token":                     "ghp_xxxxxxx",
 				credential.ConfigSecretSpec: "gh-pat-secret",
 			},
@@ -161,7 +161,7 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "github pat - valid config",
 			config: map[string]string{
-				"auth_method": "pat",
+				"mint_method": "pat",
 				"token":       "ghp_xxxxxxx",
 			},
 			sourceType: credential.SourceTypeGitHub,
@@ -170,28 +170,40 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "github pat - missing token",
 			config: map[string]string{
-				"auth_method": "pat",
+				"mint_method": "pat",
 			},
 			sourceType: credential.SourceTypeGitHub,
 			wantErr:    true,
 			errMsg:     "token",
 		},
-		// --- GitHub source: auth_method validation ---
+		// --- GitHub source: mint_method validation ---
 		{
-			name:       "github - missing auth_method",
+			name:       "github - missing mint_method",
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeGitHub,
 			wantErr:    true,
-			errMsg:     "auth_method",
+			errMsg:     "mint_method",
 		},
 		{
-			name: "github - unsupported auth_method",
+			name: "github - unsupported mint_method",
 			config: map[string]string{
-				"auth_method": "oauth",
+				"mint_method": "oauth",
 			},
 			sourceType: credential.SourceTypeGitHub,
 			wantErr:    true,
 			errMsg:     "must be one of: app, pat",
+		},
+		{
+			// The dispatch key was renamed auth_method -> mint_method; the old key
+			// must be rejected with a migration message, not silently ignored.
+			name: "github - legacy auth_method rejected",
+			config: map[string]string{
+				"auth_method": "pat",
+				"token":       "ghp_xxxxxxx",
+			},
+			sourceType: credential.SourceTypeGitHub,
+			wantErr:    true,
+			errMsg:     "auth_method' is no longer supported",
 		},
 		// --- Local source ---
 		{

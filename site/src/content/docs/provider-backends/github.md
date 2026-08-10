@@ -102,7 +102,7 @@ Create a credential spec that references the credential source. The spec carries
 ```bash
 warden cred spec create github-ops \
   -source github-src \
-  -config auth_method=app \
+  -config mint_method=app \
   -config app_id=<your-app-id> \
   -config private_key=@/path/to/private-key.pem \
   -config installation_id=<your-installation-id>
@@ -113,7 +113,7 @@ warden cred spec create github-ops \
 ```bash
 warden cred spec create github-ops \
   -source github-src \
-  -config auth_method=pat \
+  -config mint_method=pat \
   -config token=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 

@@ -48,10 +48,10 @@ type appTokenCache struct {
 // spec config and are read at MintCredential time. This allows multiple specs
 // with different PATs or App installations to share one source.
 //
-// Two auth modes are supported (configured per-spec via auth_method):
-//   - App mode (auth_method=app): Uses a GitHub App private key to mint
+// Two mint methods are supported (configured per-spec via mint_method):
+//   - App mode (mint_method=app): Uses a GitHub App private key to mint
 //     short-lived installation access tokens (1h TTL)
-//   - PAT mode (auth_method=pat): Uses a static Personal Access Token
+//   - PAT mode (mint_method=pat): Uses a static Personal Access Token
 type GitHubDriver struct {
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
@@ -131,6 +131,17 @@ func (d *GitHubDriver) getGitHubURL() string {
 	return strings.TrimRight(credential.GetString(d.credSource.Config, "github_url", "https://api.github.com"), "/")
 }
 
+// githubMintMethod resolves the spec's mint_method. It rejects the pre-rename
+// auth_method key so a spec persisted before the rename (which skips create-time
+// validation on load) fails with a clear migration message rather than a confusing
+// downstream error (e.g. a PAT parsed as an App private key).
+func githubMintMethod(spec *credential.CredSpec) (string, error) {
+	if spec.Config["auth_method"] != "" {
+		return "", fmt.Errorf("github: 'auth_method' is no longer supported; use 'mint_method' (app or pat)")
+	}
+	return credential.GetString(spec.Config, "mint_method", "app"), nil
+}
+
 // MintCredential returns a GitHub token for the given spec, minting directly from
 // the secret in spec.Config. Chained specs (secret_spec set) mint through
 // MintFromSecret instead — the Manager routes them there and never calls this — so
@@ -140,14 +151,17 @@ func (d *GitHubDriver) MintCredential(ctx context.Context, spec *credential.Cred
 	if spec.Config[credential.ConfigSecretSpec] != "" {
 		return nil, nil, 0, "", fmt.Errorf("github: spec uses secret_spec (credential chaining); it must mint from fetched secret material, not directly")
 	}
-	authMethod := credential.GetString(spec.Config, "auth_method", "app")
-	switch authMethod {
+	mintMethod, err := githubMintMethod(spec)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+	switch mintMethod {
 	case "app":
 		return d.mintAppCredentialWithKey(ctx, spec, credential.GetString(spec.Config, "private_key", ""))
 	case "pat":
 		return d.mintPATFromToken(credential.GetString(spec.Config, "token", ""))
 	default:
-		return nil, nil, 0, "", fmt.Errorf("unsupported auth_method '%s'", authMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s'", mintMethod)
 	}
 }
 
@@ -157,8 +171,11 @@ func (d *GitHubDriver) MintCredential(ctx context.Context, spec *credential.Cred
 // upstream (the referenced secret-spec was minted as the caller), so the cross-caller
 // app-token cache in mintAppCredentialWithKey remains correct.
 func (d *GitHubDriver) MintFromSecret(ctx context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	authMethod := credential.GetString(spec.Config, "auth_method", "app")
-	switch authMethod {
+	mintMethod, err := githubMintMethod(spec)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+	switch mintMethod {
 	case "app":
 		keyPEM := material.Secret()
 		// Fall back to the conventional key name ONLY when no field was resolved
@@ -188,7 +205,7 @@ func (d *GitHubDriver) MintFromSecret(ctx context.Context, spec *credential.Cred
 		}
 		return d.mintPATFromToken(token)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("unsupported auth_method '%s'", authMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s'", mintMethod)
 	}
 }
 
@@ -344,8 +361,11 @@ func (d *GitHubDriver) Cleanup(_ context.Context) error {
 // For App mode, MintCredential already calls the GitHub API (covered by the
 // trial mint in ValidateSpec). For PAT mode, we verify with GET /user.
 func (d *GitHubDriver) VerifySpec(ctx context.Context, spec *credential.CredSpec) error {
-	authMethod := credential.GetString(spec.Config, "auth_method", "app")
-	if authMethod != "pat" {
+	mintMethod, err := githubMintMethod(spec)
+	if err != nil {
+		return err
+	}
+	if mintMethod != "pat" {
 		// App mode is verified by the trial MintCredential in ValidateSpec
 		return nil
 	}
