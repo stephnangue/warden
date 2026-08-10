@@ -240,6 +240,8 @@ func (f *VaultDriverFactory) InferCredentialType(specConfig map[string]string) (
 		return credential.TypeAWSAccessKeys, nil
 	case "static_apikey":
 		return credential.TypeAPIKey, nil
+	case "kv2_read":
+		return credential.TypeKeyValue, nil
 	case "dynamic_gcp":
 		return credential.TypeGCPAccessToken, nil
 	case "dynamic_ibm":
@@ -352,7 +354,7 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 
 	switch mintMethod {
-	case "static_aws", "static_apikey":
+	case "static_aws", "static_apikey", "kv2_read":
 		return d.fetchStaticKVSecret(ctx, d.vault, spec)
 	case "dynamic_aws":
 		return d.fetchDynamicAWSCreds(ctx, d.vault, spec)
@@ -365,7 +367,7 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	case "oauth2":
 		return d.fetchOAuth2Creds(ctx, d.vault, spec)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'dynamic_aws', 'dynamic_gcp', 'dynamic_ibm', 'vault_token', 'oauth2'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'kv2_read', 'dynamic_aws', 'dynamic_gcp', 'dynamic_ibm', 'vault_token', 'oauth2'", mintMethod)
 	}
 }
 
@@ -445,7 +447,7 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 		leaseTTL time.Duration
 	)
 	switch mintMethod {
-	case "static_aws", "static_apikey":
+	case "static_aws", "static_apikey", "kv2_read":
 		rawData, metadata, leaseTTL, _, err = d.fetchStaticKVSecret(ctx, client, spec)
 		// A static read holds no lease that depends on the login token — best-effort
 		// revoke it so a transient session is not left behind.
@@ -459,7 +461,7 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	case "oauth2":
 		rawData, metadata, leaseTTL, _, err = d.fetchOAuth2Creds(ctx, client, spec)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("vault: mint_method %q is not supported over auth_method=%s (supported: vault_token, static_aws, static_apikey, dynamic_aws, dynamic_gcp, dynamic_ibm, oauth2)", mintMethod, vaultAuthMethodOIDCFederation)
+		return nil, nil, 0, "", fmt.Errorf("vault: mint_method %q is not supported over auth_method=%s (supported: vault_token, static_aws, static_apikey, kv2_read, dynamic_aws, dynamic_gcp, dynamic_ibm, oauth2)", mintMethod, vaultAuthMethodOIDCFederation)
 	}
 	if err != nil {
 		return nil, nil, 0, "", err

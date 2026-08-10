@@ -23,6 +23,7 @@ const (
 	TypeCloudflareKeys    = "cloudflare_keys"
 	TypeIBMCloudKeys      = "ibmcloud_keys"
 	TypeAlicloudKeys      = "alicloud_keys"
+	TypeKeyValue          = "key_value"
 )
 
 // Source type constants
