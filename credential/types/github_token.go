@@ -92,6 +92,12 @@ func (t *GitHubTokenCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("permissions").
 			Describe("Comma-separated list of permissions for App installation tokens").
 			Example("contents:read,issues:write"),
+		credential.StringField(credential.ConfigSecretSpec).
+			Describe("Name of a credential spec that yields the secret (App private key or PAT) instead of storing it inline (credential chaining)").
+			Example("github-app-key"),
+		credential.StringField(credential.ConfigSecretField).
+			Describe("Which key of the referenced secret_spec's data holds the secret; optional when the payload is single-key").
+			Example("private_key"),
 	}
 }
 
@@ -115,7 +121,11 @@ func (t *GitHubTokenCredType) ValidateConfig(config map[string]string, sourceTyp
 
 	// Step 3: Conditional validation based on source and auth_method
 	if sourceType == credential.SourceTypeLocal {
-		// Local source: must have static token, auth_method not needed
+		// Local source: must have static token, auth_method not needed. A local
+		// source has no keyless path, so credential chaining does not apply.
+		if config[credential.ConfigSecretSpec] != "" {
+			return fmt.Errorf("secret_spec (credential chaining) is not supported with a local source")
+		}
 		if config["token"] == "" {
 			return fmt.Errorf("'token' is required for local source")
 		}
@@ -128,23 +138,35 @@ func (t *GitHubTokenCredType) ValidateConfig(config map[string]string, sourceTyp
 		return fmt.Errorf("'auth_method' is required for github source")
 	}
 
+	// When secret_spec is set, the secret (App private key or PAT) is fetched from
+	// the referenced spec at mint time rather than stored inline; the inline secret
+	// field must then be absent.
+	chained := config[credential.ConfigSecretSpec] != ""
+
 	// Conditional validation based on auth_method
 	switch authMethod {
 	case "app":
-		// Validate required App fields
+		// App identifiers are non-secret and always required.
 		if config["app_id"] == "" {
 			return fmt.Errorf("'app_id' is required when auth_method is app")
-		}
-		if config["private_key"] == "" {
-			return fmt.Errorf("'private_key' is required when auth_method is app")
 		}
 		if config["installation_id"] == "" {
 			return fmt.Errorf("'installation_id' is required when auth_method is app")
 		}
+		if chained {
+			if config["private_key"] != "" {
+				return fmt.Errorf("'private_key' and 'secret_spec' are mutually exclusive (the private key is fetched from the referenced secret_spec)")
+			}
+		} else if config["private_key"] == "" {
+			return fmt.Errorf("'private_key' (or 'secret_spec') is required when auth_method is app")
+		}
 	case "pat":
-		// Validate required PAT field
-		if config["token"] == "" {
-			return fmt.Errorf("'token' is required when auth_method is pat")
+		if chained {
+			if config["token"] != "" {
+				return fmt.Errorf("'token' and 'secret_spec' are mutually exclusive (the token is fetched from the referenced secret_spec)")
+			}
+		} else if config["token"] == "" {
+			return fmt.Errorf("'token' (or 'secret_spec') is required when auth_method is pat")
 		}
 	}
 

@@ -257,3 +257,20 @@ type ExchangeMinter interface {
 	// inputs. The return contract matches SourceDriver.MintCredential.
 	MintCredentialWithExchange(ctx context.Context, spec *CredSpec, inputs *ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error)
 }
+
+// ChainedSecretMinter is an optional interface for secret-backed drivers that can
+// mint a credential from secret material Warden fetched on their behalf via
+// credential chaining (secret_spec). Instead of holding a standing secret, the
+// consuming spec references another cred spec; the minting layer mints that spec as
+// the caller, extracts the material, and hands it here. The minting layer
+// type-asserts for this interface and fails closed if a chained spec targets a
+// driver that does not implement it.
+//
+// A driver implementing this interface asserts it at compile time:
+//
+//	var _ credential.ChainedSecretMinter = (*GitHubDriver)(nil)
+type ChainedSecretMinter interface {
+	// MintFromSecret mints a credential using the given fetched secret material.
+	// The return contract matches SourceDriver.MintCredential.
+	MintFromSecret(ctx context.Context, spec *CredSpec, material SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error)
+}

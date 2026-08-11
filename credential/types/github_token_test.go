@@ -102,6 +102,61 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 			wantErr:    true,
 			errMsg:     "must be valid PEM format",
 		},
+		// --- GitHub source: credential chaining (secret_spec) ---
+		{
+			name: "github app chained - valid (no inline private_key)",
+			config: map[string]string{
+				"auth_method":               "app",
+				"app_id":                    "12345",
+				"installation_id":           "67890",
+				credential.ConfigSecretSpec: "gh-key-secret",
+			},
+			sourceType: credential.SourceTypeGitHub,
+			wantErr:    false,
+		},
+		{
+			name: "github app chained - inline private_key and secret_spec are mutually exclusive",
+			config: map[string]string{
+				"auth_method":               "app",
+				"app_id":                    "12345",
+				"installation_id":           "67890",
+				"private_key":               testPEM,
+				credential.ConfigSecretSpec: "gh-key-secret",
+			},
+			sourceType: credential.SourceTypeGitHub,
+			wantErr:    true,
+			errMsg:     "mutually exclusive",
+		},
+		{
+			name: "github pat chained - valid (no inline token)",
+			config: map[string]string{
+				"auth_method":               "pat",
+				credential.ConfigSecretSpec: "gh-pat-secret",
+			},
+			sourceType: credential.SourceTypeGitHub,
+			wantErr:    false,
+		},
+		{
+			name: "github pat chained - inline token and secret_spec are mutually exclusive",
+			config: map[string]string{
+				"auth_method":               "pat",
+				"token":                     "ghp_xxxxxxx",
+				credential.ConfigSecretSpec: "gh-pat-secret",
+			},
+			sourceType: credential.SourceTypeGitHub,
+			wantErr:    true,
+			errMsg:     "mutually exclusive",
+		},
+		{
+			name: "local source rejects secret_spec",
+			config: map[string]string{
+				"token":                     "ghp_xxxxxxx",
+				credential.ConfigSecretSpec: "gh-pat-secret",
+			},
+			sourceType: credential.SourceTypeLocal,
+			wantErr:    true,
+			errMsg:     "not supported with a local source",
+		},
 		// --- GitHub source: pat mode ---
 		{
 			name: "github pat - valid config",

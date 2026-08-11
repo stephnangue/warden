@@ -197,6 +197,102 @@ func TestGitHubDriver_MintPATCredential_EmptyToken(t *testing.T) {
 	assert.Contains(t, err.Error(), "no GitHub PAT configured")
 }
 
+func TestGitHubDriver_MintCredential_FailsClosedWhenChained(t *testing.T) {
+	driver := &GitHubDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: map[string]string{"github_url": "https://api.github.com"}},
+		appTokens:  make(map[string]*appTokenCache),
+	}
+	spec := &credential.CredSpec{
+		Name: "chained",
+		Type: credential.TypeGitHubToken,
+		Config: map[string]string{
+			"auth_method":               "pat",
+			credential.ConfigSecretSpec: "gh-secret",
+		},
+	}
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secret_spec")
+}
+
+func TestGitHubDriver_MintFromSecret_PAT(t *testing.T) {
+	driver := &GitHubDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: map[string]string{"github_url": "https://api.github.com"}},
+		appTokens:  make(map[string]*appTokenCache),
+	}
+	spec := &credential.CredSpec{
+		Name:   "chained-pat",
+		Type:   credential.TypeGitHubToken,
+		Config: map[string]string{"auth_method": "pat", credential.ConfigSecretSpec: "gh-secret"},
+	}
+	material := credential.SecretMaterial{Data: map[string]string{"token": "ghp_fetched"}, Field: "token"}
+
+	rawData, _, ttl, leaseID, err := driver.MintFromSecret(context.Background(), spec, material)
+	require.NoError(t, err)
+	assert.Equal(t, "ghp_fetched", rawData["token"])
+	assert.Equal(t, time.Duration(0), ttl)
+	assert.Equal(t, "", leaseID)
+}
+
+// A resolved secret_field that is empty/absent must fail loudly rather than silently
+// falling back to the conventional key name (which would mask the misconfiguration).
+func TestGitHubDriver_MintFromSecret_MisconfiguredFieldFailsClosed(t *testing.T) {
+	driver := &GitHubDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: map[string]string{"github_url": "https://api.github.com"}},
+		appTokens:  make(map[string]*appTokenCache),
+	}
+	spec := &credential.CredSpec{
+		Name:   "chained-pat",
+		Type:   credential.TypeGitHubToken,
+		Config: map[string]string{"auth_method": "pat", credential.ConfigSecretSpec: "gh-secret"},
+	}
+	// secret_field points at "wrong", but the payload carries the token under the
+	// conventional "token" key. The old fallback would have used it silently.
+	material := credential.SecretMaterial{Data: map[string]string{"token": "ghp_fetched"}, Field: "wrong"}
+
+	_, _, _, _, err := driver.MintFromSecret(context.Background(), spec, material)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "wrong")
+}
+
+func TestGitHubDriver_MintFromSecret_App(t *testing.T) {
+	testKey := generateTestRSAKey(t)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Contains(t, r.URL.Path, "/app/installations/67890/access_tokens")
+		assert.Contains(t, r.Header.Get("Authorization"), "Bearer ")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"token":      "ghs_from_fetched_key",
+			"expires_at": time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		})
+	}))
+	defer server.Close()
+
+	driver := &GitHubDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: map[string]string{"github_url": server.URL}},
+		httpClient: server.Client(),
+		appTokens:  make(map[string]*appTokenCache),
+	}
+	// App identifiers inline (non-secret); private key comes from fetched material.
+	spec := &credential.CredSpec{
+		Name: "chained-app",
+		Type: credential.TypeGitHubToken,
+		Config: map[string]string{
+			"auth_method":               "app",
+			"app_id":                    "12345",
+			"installation_id":           "67890",
+			credential.ConfigSecretSpec: "gh-secret",
+		},
+	}
+	material := credential.SecretMaterial{Data: map[string]string{"private_key": testKey}, Field: "private_key"}
+
+	rawData, _, ttl, _, err := driver.MintFromSecret(context.Background(), spec, material)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_from_fetched_key", rawData["token"])
+	assert.True(t, ttl > 0)
+}
+
 func TestGitHubDriver_MintCredential_UnsupportedAuthMethod(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{

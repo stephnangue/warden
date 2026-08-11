@@ -29,6 +29,7 @@ var (
 	ErrSourceNotFound        = errors.New("credential source not found")
 	ErrSourceAlreadyExists   = errors.New("credential source already exists")
 	ErrSourceInUse           = errors.New("credential source is referenced by specs")
+	ErrSpecInUse             = errors.New("credential spec is referenced via secret_spec")
 	ErrNamespaceNotInContext = errors.New("namespace not found in context")
 )
 
@@ -381,6 +382,16 @@ func (s *CredentialConfigStore) DeleteSpec(ctx context.Context, name string) err
 	ns, err := s.getNamespaceFromContext(ctx)
 	if err != nil {
 		return err
+	}
+
+	// Prevent deleting a spec still referenced as a chaining secret source
+	// (secret_spec) by another source or spec.
+	refs, err := s.CheckSpecReferences(ctx, name)
+	if err != nil {
+		return err
+	}
+	if len(refs) > 0 {
+		return ErrSpecInUse
 	}
 
 	// Unregister from rotation manager first (if registered)
@@ -914,6 +925,29 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		}
 	}
 
+	// Credential chaining: when this spec (spec-level, wins) or its source
+	// (source-level) references another cred spec as its secret source, validate the
+	// referenced secret-spec. The consuming driver's eligibility (it must implement
+	// ChainedSecretMinter) is checked in the test-mint block below as a create-time
+	// fail-fast; that block is skipped when verification is disabled or the source is
+	// local, so the authoritative eligibility guard is at mint time
+	// (MintFromSecretWithCleanup fails closed if the driver isn't a ChainedSecretMinter).
+	chainedRef := spec.Config[credential.ConfigSecretSpec]
+	if chainedRef == "" {
+		chainedRef = source.Config[credential.ConfigSecretSpec]
+	}
+	if chainedRef != "" {
+		// A chained consumer's identity flows through the referenced secret-spec, so
+		// its own subject/actor exchange config would be silently ignored at mint —
+		// reject the confusing combination rather than accept dead config.
+		if credential.SpecRequestsExchange(spec.Config) {
+			return logical.ErrBadRequestf("a chained spec (secret_spec set) must not also set its own subject_token_source/actor_token_source; the caller identity is carried by the referenced secret_spec %q", chainedRef)
+		}
+		if err := s.validateSecretSpecRef(ctx, chainedRef); err != nil {
+			return err
+		}
+	}
+
 	// Test credential minting if driver registry is available.
 	// This catches invalid auth credentials early (e.g., wrong GitHub app_id,
 	// expired PAT, invalid private key) rather than failing at gateway time.
@@ -947,6 +981,17 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				// time, so it cannot be test-minted here — it mints only on a live
 				// request that carries the exchange inputs.
 				if credential.SpecRequestsExchange(spec.Config) {
+					runTestMint = false
+				}
+
+				// A chained spec (secret_spec) fetches its secret material from a
+				// referenced spec at request time as the caller, so it cannot be
+				// test-minted at create. Its consuming driver must also be able to
+				// mint from that material — reject at create rather than at first use.
+				if chainedRef != "" {
+					if _, ok := driver.(credential.ChainedSecretMinter); !ok {
+						return logical.ErrBadRequestf("source type %q does not support secret_spec chaining", source.Type)
+					}
 					runTestMint = false
 				}
 
@@ -999,6 +1044,14 @@ func (s *CredentialConfigStore) validateSource(ctx context.Context, source *cred
 
 	if source.Type == "" {
 		return logical.ErrBadRequest("source type cannot be empty")
+	}
+
+	// Credential chaining: a source-level secret_spec makes every spec on this
+	// source draw its secret from the referenced spec. Validate that reference.
+	if ref := source.Config[credential.ConfigSecretSpec]; ref != "" {
+		if err := s.validateSecretSpecRef(ctx, ref); err != nil {
+			return err
+		}
 	}
 
 	// Validate rotation_period is set for source types that require it. A keyless
@@ -1074,6 +1127,88 @@ func (s *CredentialConfigStore) CheckSourceReferences(ctx context.Context, sourc
 	}
 
 	return refs, nil
+}
+
+// CheckSpecReferences returns the names of sources and specs that reference the
+// given spec as their credential-chaining secret source (secret_spec). It scans
+// both sources (source-level secret_spec) and specs (spec-level secret_spec) so a
+// referenced secret-spec cannot be deleted while any consumer still points at it.
+func (s *CredentialConfigStore) CheckSpecReferences(ctx context.Context, specName string) ([]string, error) {
+	sources, err := s.ListSources(ctx)
+	if err != nil {
+		return nil, err
+	}
+	specs, err := s.ListSpecs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var refs []string
+	for _, src := range sources {
+		if src.Config[credential.ConfigSecretSpec] == specName {
+			refs = append(refs, "source/"+src.Name)
+		}
+	}
+	for _, spec := range specs {
+		if spec.Name == specName {
+			continue // a spec never references itself
+		}
+		if spec.Config[credential.ConfigSecretSpec] == specName {
+			refs = append(refs, "spec/"+spec.Name)
+		}
+	}
+
+	return refs, nil
+}
+
+// validateSecretSpecRef validates a credential-chaining reference: the named
+// secret-spec must exist, must not itself chain (one hop only), and must be minted
+// as the caller (subject_token_source set) so it federates per request rather than
+// degrading to the non-exchange path and failing late with an opaque backend error.
+//
+// It deliberately does NOT assert the referenced spec is leaseless here: that would
+// need per-type mint-method introspection this layer lacks, and the authoritative
+// guard is at mint time — issueChained revokes and fails closed if a referenced spec
+// ever returns a lease (including after a config-drift edit this check couldn't see).
+func (s *CredentialConfigStore) validateSecretSpecRef(ctx context.Context, ref string) error {
+	refSpec, err := s.GetSpec(ctx, ref)
+	if err != nil {
+		if errors.Is(err, ErrSpecNotFound) {
+			return logical.ErrBadRequestf("secret_spec %q not found (create the secret-yielding spec first)", ref)
+		}
+		return fmt.Errorf("failed to validate secret_spec %q: %w", ref, err)
+	}
+
+	if refSpec.Config[credential.ConfigSecretSpec] != "" {
+		return logical.ErrBadRequestf("secret_spec %q must not itself set secret_spec (chaining is limited to one hop)", ref)
+	}
+	refSource, err := s.GetSource(ctx, refSpec.Source)
+	if err != nil {
+		return fmt.Errorf("secret_spec %q: failed to load its source %q: %w", ref, refSpec.Source, err)
+	}
+	if refSource.Config[credential.ConfigSecretSpec] != "" {
+		return logical.ErrBadRequestf("secret_spec %q's source must not set secret_spec (chaining is limited to one hop)", ref)
+	}
+
+	// The referenced secret-spec must be minted as the requesting caller with a
+	// SESSION-PINNED subject: warden_identity (Warden mints an assertion for the
+	// session's principal) or auth_token (the caller's own inbound JWT). A
+	// header-sourced subject is a per-request, caller-supplied token that is NOT tied
+	// to the session token — and a chained consumer's outer cache key carries no
+	// exchange fingerprint (the exchange happens on this referenced spec, not the
+	// consumer), so under a shared session token two principals would collide on that
+	// key and one could be served the other's chained credential. Reject anything
+	// else (including an unset/"none" subject, which would otherwise degrade to the
+	// non-exchange path and fail late with an opaque backend error).
+	switch refSpec.Config[credential.ConfigSubjectTokenSource] {
+	case credential.SourceWardenIdentity, credential.SourceAuthToken:
+		// session-pinned — safe
+	default:
+		return logical.ErrBadRequestf("secret_spec %q must set subject_token_source=%s or %s (got %q); a chained secret must be minted as the session-pinned caller",
+			ref, credential.SourceWardenIdentity, credential.SourceAuthToken, refSpec.Config[credential.ConfigSubjectTokenSource])
+	}
+
+	return nil
 }
 
 // ============================================================================
