@@ -184,7 +184,7 @@ EOF
 warden cred source create github-src -type=github -rotation-period=0 \
   -config=github_url=https://api.github.com
 
-warden cred spec create github-ops -source github-src -config auth_method=pat -config token=$GH_PAT
+warden cred spec create github-ops -source github-src -config mint_method=pat -config token=$GH_PAT
 
 warden policy write mcp-github-access - <<'EOF'
 path "github-mcp/role/+/gateway*" {

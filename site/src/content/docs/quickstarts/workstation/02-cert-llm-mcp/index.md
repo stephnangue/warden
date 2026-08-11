@@ -106,7 +106,7 @@ warden cred source create github-src -type=github -rotation-period=0 \
   -config=github_url=https://api.github.com
 
 warden cred spec create github-ops -source github-src \
-  -config auth_method=pat -config token=$GH_PAT
+  -config mint_method=pat -config token=$GH_PAT
 
 # Policy + cert-auth role — same client cert (allowed_common_names="mcp-agent").
 # The mcp{} block reaches inside each tool call: read/list/search tools pass,

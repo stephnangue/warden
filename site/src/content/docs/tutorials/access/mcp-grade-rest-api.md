@@ -184,7 +184,7 @@ an environment variable, or an agent you run from this shell (Claude included) w
 
 ```bash
 warden cred spec create github-ops -source github-src \
-  -config auth_method=pat -config token=ghp_your_token_here
+  -config mint_method=pat -config token=ghp_your_token_here
 ```
 
 ### Step 5 — define the roles

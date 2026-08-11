@@ -166,7 +166,7 @@ would inherit it:
 
 ```bash
 warden cred spec create github-ops -source github-src \
-  -config auth_method=pat -config token=ghp_your_token_here
+  -config mint_method=pat -config token=ghp_your_token_here
 ```
 
 See [GitHub MCP](/provider-backends/mcp-github/) for App-based and OAuth credential options.

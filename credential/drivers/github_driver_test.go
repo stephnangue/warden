@@ -162,7 +162,7 @@ func TestGitHubDriver_MintPATCredential(t *testing.T) {
 		Name: "test-pat",
 		Type: credential.TypeGitHubToken,
 		Config: map[string]string{
-			"auth_method": "pat",
+			"mint_method": "pat",
 			"token":       "ghp_test123",
 		},
 	}
@@ -187,7 +187,7 @@ func TestGitHubDriver_MintPATCredential_EmptyToken(t *testing.T) {
 		Name: "test-pat",
 		Type: credential.TypeGitHubToken,
 		Config: map[string]string{
-			"auth_method": "pat",
+			"mint_method": "pat",
 			"token":       "",
 		},
 	}
@@ -206,7 +206,7 @@ func TestGitHubDriver_MintCredential_FailsClosedWhenChained(t *testing.T) {
 		Name: "chained",
 		Type: credential.TypeGitHubToken,
 		Config: map[string]string{
-			"auth_method":               "pat",
+			"mint_method":               "pat",
 			credential.ConfigSecretSpec: "gh-secret",
 		},
 	}
@@ -223,7 +223,7 @@ func TestGitHubDriver_MintFromSecret_PAT(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:   "chained-pat",
 		Type:   credential.TypeGitHubToken,
-		Config: map[string]string{"auth_method": "pat", credential.ConfigSecretSpec: "gh-secret"},
+		Config: map[string]string{"mint_method": "pat", credential.ConfigSecretSpec: "gh-secret"},
 	}
 	material := credential.SecretMaterial{Data: map[string]string{"token": "ghp_fetched"}, Field: "token"}
 
@@ -244,7 +244,7 @@ func TestGitHubDriver_MintFromSecret_MisconfiguredFieldFailsClosed(t *testing.T)
 	spec := &credential.CredSpec{
 		Name:   "chained-pat",
 		Type:   credential.TypeGitHubToken,
-		Config: map[string]string{"auth_method": "pat", credential.ConfigSecretSpec: "gh-secret"},
+		Config: map[string]string{"mint_method": "pat", credential.ConfigSecretSpec: "gh-secret"},
 	}
 	// secret_field points at "wrong", but the payload carries the token under the
 	// conventional "token" key. The old fallback would have used it silently.
@@ -279,7 +279,7 @@ func TestGitHubDriver_MintFromSecret_App(t *testing.T) {
 		Name: "chained-app",
 		Type: credential.TypeGitHubToken,
 		Config: map[string]string{
-			"auth_method":               "app",
+			"mint_method":               "app",
 			"app_id":                    "12345",
 			"installation_id":           "67890",
 			credential.ConfigSecretSpec: "gh-secret",
@@ -293,7 +293,7 @@ func TestGitHubDriver_MintFromSecret_App(t *testing.T) {
 	assert.True(t, ttl > 0)
 }
 
-func TestGitHubDriver_MintCredential_UnsupportedAuthMethod(t *testing.T) {
+func TestGitHubDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
@@ -306,13 +306,71 @@ func TestGitHubDriver_MintCredential_UnsupportedAuthMethod(t *testing.T) {
 		Name: "test-spec",
 		Type: credential.TypeGitHubToken,
 		Config: map[string]string{
-			"auth_method": "unknown",
+			"mint_method": "unknown",
 		},
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported auth_method")
+	assert.Contains(t, err.Error(), "unsupported mint_method")
+}
+
+// A spec persisted before the auth_method -> mint_method rename skips create-time
+// validation on load, so the mint paths themselves must reject the legacy key with
+// a migration message rather than defaulting to "app" and failing obscurely.
+func TestGitHubDriver_MintPaths_RejectLegacyAuthMethod(t *testing.T) {
+	driver := &GitHubDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: map[string]string{"github_url": "https://api.github.com"}},
+		appTokens:  make(map[string]*appTokenCache),
+	}
+	spec := &credential.CredSpec{
+		Name:   "legacy",
+		Type:   credential.TypeGitHubToken,
+		Config: map[string]string{"auth_method": "pat", "token": "ghp_legacy"},
+	}
+
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auth_method' is no longer supported")
+
+	_, _, _, _, err = driver.MintFromSecret(context.Background(), spec,
+		credential.SecretMaterial{Data: map[string]string{"token": "ghp_x"}, Field: "token"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auth_method' is no longer supported")
+
+	require.ErrorContains(t, driver.VerifySpec(context.Background(), spec), "auth_method' is no longer supported")
+}
+
+// VerifySpec dispatches on mint_method: pat verifies with GET /user; app is a no-op
+// (verified by the trial mint in ValidateSpec).
+func TestGitHubDriver_VerifySpec_Dispatch(t *testing.T) {
+	var calls int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		assert.Equal(t, "/user", r.URL.Path)
+		assert.Equal(t, "token ghp_verify", r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"login": "octocat"})
+	}))
+	defer server.Close()
+
+	driver := &GitHubDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: map[string]string{"github_url": server.URL}},
+		httpClient: server.Client(),
+		appTokens:  make(map[string]*appTokenCache),
+	}
+
+	// pat mode → hits GET /user
+	patSpec := &credential.CredSpec{Name: "v-pat", Type: credential.TypeGitHubToken,
+		Config: map[string]string{"mint_method": "pat", "token": "ghp_verify"}}
+	require.NoError(t, driver.VerifySpec(context.Background(), patSpec))
+	assert.Equal(t, 1, calls, "pat mode verifies via GET /user")
+
+	// app mode → no-op, no API call
+	appSpec := &credential.CredSpec{Name: "v-app", Type: credential.TypeGitHubToken,
+		Config: map[string]string{"mint_method": "app", "app_id": "1", "installation_id": "2"}}
+	require.NoError(t, driver.VerifySpec(context.Background(), appSpec))
+	assert.Equal(t, 1, calls, "app mode makes no verification call")
 }
 
 func TestGitHubDriver_MintAppCredential(t *testing.T) {
@@ -347,7 +405,7 @@ func TestGitHubDriver_MintAppCredential(t *testing.T) {
 		Name: "test-app",
 		Type: credential.TypeGitHubToken,
 		Config: map[string]string{
-			"auth_method":     "app",
+			"mint_method":     "app",
 			"app_id":          "12345",
 			"private_key":     testKey,
 			"installation_id": "67890",
@@ -389,7 +447,7 @@ func TestGitHubDriver_MintAppCredential_Cached(t *testing.T) {
 		Name: "test-app",
 		Type: credential.TypeGitHubToken,
 		Config: map[string]string{
-			"auth_method":     "app",
+			"mint_method":     "app",
 			"app_id":          "12345",
 			"private_key":     testKey,
 			"installation_id": "67890",
@@ -437,7 +495,7 @@ func TestGitHubDriver_MintAppCredential_PerSpecCache(t *testing.T) {
 		Name: "spec-a",
 		Type: credential.TypeGitHubToken,
 		Config: map[string]string{
-			"auth_method":     "app",
+			"mint_method":     "app",
 			"app_id":          "12345",
 			"private_key":     testKey,
 			"installation_id": "111",
@@ -447,7 +505,7 @@ func TestGitHubDriver_MintAppCredential_PerSpecCache(t *testing.T) {
 		Name: "spec-b",
 		Type: credential.TypeGitHubToken,
 		Config: map[string]string{
-			"auth_method":     "app",
+			"mint_method":     "app",
 			"app_id":          "12345",
 			"private_key":     testKey,
 			"installation_id": "222",
@@ -492,7 +550,7 @@ func TestGitHubDriver_MintInstallationToken_APIError(t *testing.T) {
 		Name: "test-app",
 		Type: credential.TypeGitHubToken,
 		Config: map[string]string{
-			"auth_method":     "app",
+			"mint_method":     "app",
 			"app_id":          "12345",
 			"private_key":     testKey,
 			"installation_id": "67890",
@@ -529,7 +587,7 @@ func TestGitHubDriver_MintInstallationToken_EmptyToken(t *testing.T) {
 		Name: "test-app",
 		Type: credential.TypeGitHubToken,
 		Config: map[string]string{
-			"auth_method":     "app",
+			"mint_method":     "app",
 			"app_id":          "12345",
 			"private_key":     testKey,
 			"installation_id": "67890",
