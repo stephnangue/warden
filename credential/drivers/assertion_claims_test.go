@@ -241,6 +241,13 @@ func TestDeriveAssertionResource(t *testing.T) {
 			wantOK:     true,
 		},
 		{
+			name:       "vault kv2_read names the KV path",
+			sourceType: credential.SourceTypeVault,
+			specCfg:    map[string]string{"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "github/ci"},
+			want:       "secret/github/ci",
+			wantOK:     true,
+		},
+		{
 			name:       "vault dynamic_aws names the engine role",
 			sourceType: credential.SourceTypeVault,
 			specCfg:    map[string]string{"mint_method": "dynamic_aws", "aws_mount": "aws", "role_name": "dev-role"},

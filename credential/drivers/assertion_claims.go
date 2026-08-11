@@ -101,7 +101,7 @@ func vaultAssertionResource(sourceCfg, specCfg map[string]string) (string, bool)
 		if role != "" {
 			return role, true
 		}
-	case "static_aws", "static_apikey":
+	case "static_aws", "static_apikey", "kv2_read":
 		mount := credential.GetString(specCfg, "kv2_mount", "")
 		path := credential.GetString(specCfg, "secret_path", "")
 		if mount != "" && path != "" {

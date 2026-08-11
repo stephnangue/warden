@@ -589,6 +589,7 @@ func TestVaultDriverFactory_InferCredentialType(t *testing.T) {
 		{"static_aws", "static_aws", credential.TypeAWSAccessKeys, false},
 		{"dynamic_aws", "dynamic_aws", credential.TypeAWSAccessKeys, false},
 		{"static_apikey", "static_apikey", credential.TypeAPIKey, false},
+		{"kv2_read", "kv2_read", credential.TypeKeyValue, false},
 		{"dynamic_gcp", "dynamic_gcp", credential.TypeGCPAccessToken, false},
 		{"dynamic_ibm", "dynamic_ibm", credential.TypeIBMCloudKeys, false},
 		{"oauth2", "oauth2", credential.TypeOAuthBearerToken, false},
