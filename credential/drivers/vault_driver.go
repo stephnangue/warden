@@ -396,10 +396,6 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	if inputs == nil || inputs.SubjectToken == "" {
 		return nil, nil, 0, "", fmt.Errorf("vault: no subject token in exchange inputs")
 	}
-	if inputs.SubjectTokenOrigin != credential.ExchangeOriginVerified {
-		return nil, nil, 0, "", fmt.Errorf("vault: workload identity federation requires a verified subject (subject_token_source=%s or auth_token); a caller-supplied, unverified subject is rejected", credential.SourceWardenIdentity)
-	}
-
 	// Exchange the assertion for a per-request Vault token on an isolated client.
 	client, loginAuth, err := d.loginViaJWT(ctx, spec, inputs.SubjectToken)
 	if err != nil {

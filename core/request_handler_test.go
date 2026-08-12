@@ -2268,12 +2268,13 @@ func teForSpec(spec string) *logical.TokenEntry {
 
 func TestCreateSpec_RejectsInvalidExchangeConfig(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
-	// actor_token_source without a subject source is rejected by validateSpec.
+	// An actor token source without subject_token_source=user_identity is rejected by
+	// validateSpec: an actor is only meaningful in the delegation shape.
 	err := c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
 		Name:   "bad-spec",
 		Type:   "vault_token",
 		Source: "local-src",
-		Config: map[string]string{credential.ConfigActorTokenSource: credential.SourceHeader},
+		Config: map[string]string{credential.ConfigActorTokenSource: credential.SourceAgentIdentity},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "token-exchange config")
@@ -2294,10 +2295,10 @@ func TestResolveExchangeInputs_NoExchangeConfig(t *testing.T) {
 	assert.Nil(t, inputs, "non-exchange specs must yield nil inputs")
 }
 
-func TestResolveExchangeInputs_AuthToken_JWT(t *testing.T) {
+func TestResolveExchangeInputs_AgentIdentity_JWT(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	seedSpec(t, c, ctx, "auth-spec", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceAuthToken,
+		credential.ConfigSubjectTokenSource: credential.SourceAgentIdentity,
 	})
 
 	inputs, err := resolveExchangeInputsForTest(c, ctx, requestWith("eyJhbGciOi.payload.sig", nil), teForSpec("auth-spec"))
@@ -2305,14 +2306,13 @@ func TestResolveExchangeInputs_AuthToken_JWT(t *testing.T) {
 	require.NotNil(t, inputs)
 	assert.Equal(t, "eyJhbGciOi.payload.sig", inputs.SubjectToken)
 	assert.Equal(t, credential.TokenTypeJWT, inputs.SubjectTokenType)
-	assert.Equal(t, credential.ExchangeOriginVerified, inputs.SubjectTokenOrigin)
 	assert.Nil(t, inputs.ResolveSubjectToken, "non-warden_identity sources resolve eagerly")
 }
 
-func TestResolveExchangeInputs_AuthToken_OpaqueFailsClosed(t *testing.T) {
+func TestResolveExchangeInputs_AgentIdentity_OpaqueFailsClosed(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	seedSpec(t, c, ctx, "auth-spec", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceAuthToken,
+		credential.ConfigSubjectTokenSource: credential.SourceAgentIdentity,
 	})
 
 	_, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque-session-token", nil), teForSpec("auth-spec"))
@@ -2320,163 +2320,68 @@ func TestResolveExchangeInputs_AuthToken_OpaqueFailsClosed(t *testing.T) {
 	assert.Contains(t, err.Error(), "not JWT-authenticated")
 }
 
-func TestResolveExchangeInputs_HeaderSource(t *testing.T) {
+func TestResolveExchangeInputs_UserIdentity(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
-	seedSpec(t, c, ctx, "hdr-spec", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+	// user_identity forwards the secondary user's validated credential, so it pins to
+	// a token_exchange source.
+	seedExchangeSpec(t, c, ctx, "user-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
 	})
 
-	req := requestWith("opaque-token", map[string]string{headerSubjectToken: "eyJ.caller.subject"})
-	inputs, err := resolveExchangeInputsForTest(c, ctx, req, teForSpec("hdr-spec"))
+	req := requestWith("opaque-token", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{}, RawToken: "eyJ.caller.subject"}
+	inputs, err := resolveExchangeInputsForTest(c, ctx, req, teForSpec("user-spec"))
 	require.NoError(t, err)
 	require.NotNil(t, inputs)
 	assert.Equal(t, "eyJ.caller.subject", inputs.SubjectToken)
-	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.SubjectTokenOrigin)
 	assert.Nil(t, inputs.ResolveSubjectToken, "non-warden_identity sources resolve eagerly")
 	assert.Empty(t, inputs.ActorToken)
 }
 
-func TestResolveExchangeInputs_HeaderSource_MissingFailsClosed(t *testing.T) {
+func TestResolveExchangeInputs_UserIdentity_MissingFailsClosed(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
-	seedSpec(t, c, ctx, "hdr-spec", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+	seedExchangeSpec(t, c, ctx, "user-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
 	})
 
-	_, err := resolveExchangeInputsForTest(c, ctx, requestWith("opaque-token", nil), teForSpec("hdr-spec"))
+	// No user principal on the request: user_identity fails closed rather than
+	// silently falling back to the agent's identity.
+	_, err := resolveExchangeInputsForTest(c, ctx, requestWith("opaque-token", nil), teForSpec("user-spec"))
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no user principal was presented")
 }
 
-func TestResolveExchangeInputs_SubjectHeader_Authorization(t *testing.T) {
+func TestResolveExchangeInputs_ActorAgentIdentity(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
-	seedSpec(t, c, ctx, "authz-spec", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceHeader,
-		credential.ConfigSubjectTokenHeader: "Authorization",
-	})
-
-	// A cert/SPIFFE-authenticated agent: ClientToken is not the user token, so the
-	// standard Authorization header is free to carry the subject. Bearer is stripped.
-	req := requestWith("spiffe-session", map[string]string{"Authorization": "Bearer eyJ.user"})
-	inputs, err := resolveExchangeInputsForTest(c, ctx, req, teForSpec("authz-spec"))
-	require.NoError(t, err)
-	require.NotNil(t, inputs)
-	assert.Equal(t, "eyJ.user", inputs.SubjectToken, "Bearer scheme stripped from Authorization")
-	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.SubjectTokenOrigin)
-}
-
-func TestResolveExchangeInputs_SubjectHeader_FailsClosedWhenEqualsCallerToken(t *testing.T) {
-	c, ctx := exchangeResolveEnv(t)
-	seedSpec(t, c, ctx, "authz-spec", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceHeader,
-		credential.ConfigSubjectTokenHeader: "Authorization",
-	})
-
-	// A JWT-authed agent used the Authorization spec: Authorization carries its OWN
-	// auth token, so the subject would be the agent, not a distinct user. Fail closed.
-	req := requestWith("eyJ.agent", map[string]string{"Authorization": "Bearer eyJ.agent"})
-	_, err := resolveExchangeInputsForTest(c, ctx, req, teForSpec("authz-spec"))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must not equal the caller's own authentication token")
-}
-
-func TestResolveExchangeInputs_SubjectHeader_GuardBypassAttempts(t *testing.T) {
-	c, ctx := exchangeResolveEnv(t)
-	// Lowercase header name canonicalizes to Authorization.
-	seedSpec(t, c, ctx, "authz-spec", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceHeader,
-		credential.ConfigSubjectTokenHeader: "authorization",
-	})
-
-	// Double space after Bearer: the shared stripBearer yields " eyJ.agent" (a
-	// leading space), byte-identical to what Warden's own token extractor sets as
-	// ClientToken at auth time — so the guard still trips and cannot be bypassed.
-	req := requestWith(" eyJ.agent", map[string]string{"Authorization": "Bearer  eyJ.agent"})
-	_, err := resolveExchangeInputsForTest(c, ctx, req, teForSpec("authz-spec"))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must not equal the caller's own authentication token")
-}
-
-func TestResolveExchangeInputs_ActorHeader_CustomName(t *testing.T) {
-	c, ctx := exchangeResolveEnv(t)
-	seedExchangeSpec(t, c, ctx, "deleg-spec", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceHeader,
-		credential.ConfigActorTokenSource:   credential.SourceHeader,
-		credential.ConfigActorTokenHeader:   "X-Actor",
-	})
-
-	req := requestWith("opaque-token", map[string]string{
-		credential.DefaultSubjectTokenHeader: "eyJ.subject",
-		"X-Actor":                            "eyJ.actor",
-	})
-	inputs, err := resolveExchangeInputsForTest(c, ctx, req, teForSpec("deleg-spec"))
-	require.NoError(t, err)
-	require.NotNil(t, inputs)
-	assert.Equal(t, "eyJ.actor", inputs.ActorToken)
-	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.ActorTokenOrigin)
-}
-
-func TestResolveExchangeInputs_ActorHeader(t *testing.T) {
-	c, ctx := exchangeResolveEnv(t)
-	seedExchangeSpec(t, c, ctx, "deleg-spec", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceHeader,
-		credential.ConfigActorTokenSource:   credential.SourceHeader,
-	})
-
-	req := requestWith("opaque-token", map[string]string{
-		headerSubjectToken: "eyJ.subject",
-		headerActorToken:   "eyJ.actor",
-	})
-	inputs, err := resolveExchangeInputsForTest(c, ctx, req, teForSpec("deleg-spec"))
-	require.NoError(t, err)
-	require.NotNil(t, inputs)
-	assert.Equal(t, "eyJ.subject", inputs.SubjectToken)
-	assert.Equal(t, "eyJ.actor", inputs.ActorToken)
-	assert.Equal(t, credential.TokenTypeJWT, inputs.ActorTokenType)
-	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.ActorTokenOrigin)
-}
-
-func TestResolveExchangeInputs_ActorAuthToken(t *testing.T) {
-	c, ctx := exchangeResolveEnv(t)
-	// subject via header (a user token), actor via the agent's verified inbound JWT.
+	// Delegation: the user is the subject, the agent's verified inbound JWT is the actor.
 	seedExchangeSpec(t, c, ctx, "deleg-auth", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceHeader,
-		credential.ConfigActorTokenSource:   credential.SourceAuthToken,
+		credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
+		credential.ConfigActorTokenSource:   credential.SourceAgentIdentity,
 	})
 
-	req := requestWith("eyJ.agent-jwt", map[string]string{headerSubjectToken: "eyJ.user"})
+	req := requestWith("eyJ.agent-jwt", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{}, RawToken: "eyJ.user"}
 	inputs, err := resolveExchangeInputsForTest(c, ctx, req, teForSpec("deleg-auth"))
 	require.NoError(t, err)
 	require.NotNil(t, inputs)
 	assert.Equal(t, "eyJ.user", inputs.SubjectToken)
-	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.SubjectTokenOrigin)
 	assert.Equal(t, "eyJ.agent-jwt", inputs.ActorToken, "the agent's inbound JWT is reused as the actor")
-	assert.Equal(t, credential.ExchangeOriginVerified, inputs.ActorTokenOrigin)
 	assert.Equal(t, credential.TokenTypeJWT, inputs.ActorTokenType)
 }
 
-func TestResolveExchangeInputs_ActorAuthToken_OpaqueFailsClosed(t *testing.T) {
+func TestResolveExchangeInputs_ActorAgentIdentity_OpaqueFailsClosed(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	seedExchangeSpec(t, c, ctx, "deleg-auth", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceHeader,
-		credential.ConfigActorTokenSource:   credential.SourceAuthToken,
+		credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
+		credential.ConfigActorTokenSource:   credential.SourceAgentIdentity,
 	})
 
 	// Non-JWT (opaque) inbound token cannot serve as the actor.
-	req := requestWith("s.opaque-session", map[string]string{headerSubjectToken: "eyJ.user"})
+	req := requestWith("s.opaque-session", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{}, RawToken: "eyJ.user"}
 	_, err := resolveExchangeInputsForTest(c, ctx, req, teForSpec("deleg-auth"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not JWT-authenticated")
-}
-
-func TestResolveExchangeInputs_ActorHeader_MissingFailsClosed(t *testing.T) {
-	c, ctx := exchangeResolveEnv(t)
-	seedExchangeSpec(t, c, ctx, "deleg-spec", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceHeader,
-		credential.ConfigActorTokenSource:   credential.SourceHeader,
-	})
-
-	req := requestWith("opaque-token", map[string]string{headerSubjectToken: "eyJ.subject"})
-	_, err := resolveExchangeInputsForTest(c, ctx, req, teForSpec("deleg-spec"))
-	require.Error(t, err)
 }
 
 func TestResolveExchangeInputs_WardenIdentity_MintDeferred(t *testing.T) {
@@ -2506,7 +2411,6 @@ func TestResolveExchangeInputs_WardenIdentity_MintDeferred(t *testing.T) {
 	assert.Empty(t, inputs.SubjectToken, "assertion must not be minted eagerly")
 	require.NotNil(t, inputs.ResolveSubjectToken, "a lazy subject-token provider must be set")
 	assert.Equal(t, credential.TokenTypeJWT, inputs.SubjectTokenType)
-	assert.Equal(t, credential.ExchangeOriginVerified, inputs.SubjectTokenOrigin)
 	assert.Equal(t, wardenSubject(te)+"\x00"+"https://sts.example/aud", inputs.SubjectCacheIdentity)
 
 	// Invoking the provider mints a real JWT assertion (what the Manager does on a miss).
@@ -2521,13 +2425,14 @@ func TestResolveExchangeInputs_WardenIdentity_MintDeferred(t *testing.T) {
 }
 
 // TestResolveExchangeInputs_ActorWardenIdentity_MintDeferred covers the
-// delegation shape: an eager header subject (the user) paired with a lazily-minted
-// warden_identity actor (the agent), so the STS receives sub=user, act=agent.
+// delegation shape: an eager user_identity subject (the user) paired with a
+// lazily-minted warden_identity actor (the agent), so the STS receives sub=user,
+// act=agent.
 func TestResolveExchangeInputs_ActorWardenIdentity_MintDeferred(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
 	seedExchangeSpec(t, c, ctx, "obo-spec", map[string]string{
-		credential.ConfigSubjectTokenSource: credential.SourceHeader,
+		credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
 		credential.ConfigActorTokenSource:   credential.SourceWardenIdentity,
 		credential.ConfigAssertionAudience:  "https://sts.example/aud",
 	})
@@ -2538,24 +2443,23 @@ func TestResolveExchangeInputs_ActorWardenIdentity_MintDeferred(t *testing.T) {
 		NamespaceID:    "ns1",
 		MountAccessor:  "auth_cert_1",
 	}
-	// cert/SPIFFE agent: the user token rides in the default header; the agent's own
+	// cert/SPIFFE agent: the user principal carries the subject token; the agent's own
 	// inbound token is an opaque session, distinct from the user token.
-	req := requestWith("s.opaque-session", map[string]string{credential.DefaultSubjectTokenHeader: "eyJ.user"})
+	req := requestWith("s.opaque-session", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{}, RawToken: "eyJ.user"}
 
 	inputs, err := resolveExchangeInputsForTest(c, ctx, req, te)
 	require.NoError(t, err)
 	require.NotNil(t, inputs)
 
-	// Subject: the header user token — eager and unverified.
+	// Subject: the user principal's token — eager.
 	assert.Equal(t, "eyJ.user", inputs.SubjectToken)
-	assert.Equal(t, credential.ExchangeOriginUnverified, inputs.SubjectTokenOrigin)
-	assert.Nil(t, inputs.ResolveSubjectToken, "the header subject resolves eagerly")
+	assert.Nil(t, inputs.ResolveSubjectToken, "the user_identity subject resolves eagerly")
 
-	// Actor: warden_identity — minted lazily, verified, keyed on the agent identity.
+	// Actor: warden_identity — minted lazily, keyed on the agent identity.
 	assert.Empty(t, inputs.ActorToken, "the actor assertion must not be minted eagerly")
 	require.NotNil(t, inputs.ResolveActorToken, "a lazy actor-token provider must be set")
 	assert.Equal(t, credential.TokenTypeJWT, inputs.ActorTokenType)
-	assert.Equal(t, credential.ExchangeOriginVerified, inputs.ActorTokenOrigin)
 	assert.Equal(t, wardenSubject(te)+"\x00"+"https://sts.example/aud", inputs.ActorCacheIdentity)
 
 	// Invoking the provider mints a real JWT whose sub is the agent (the act.sub).
@@ -2888,5 +2792,43 @@ func TestResolveExchangeInputs_WardenUserClaims(t *testing.T) {
 		_, err := resolveExchangeInputsForTest(c, ctx, req, missAgent)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "department")
+	})
+}
+
+// TestResolveExchangeInputs_RetiredSourceFailsClosedAtMint verifies the migration
+// promise: a spec PERSISTED before PR3 with a retired subject/actor source (e.g.
+// "header") — which the schema now rejects at create/update but a persisted spec
+// can still carry — fails CLOSED at mint via the switch default arms, rather than
+// silently minting without exchange/delegation. persistSpec bypasses validation to
+// simulate the pre-upgrade on-disk spec.
+func TestResolveExchangeInputs_RetiredSourceFailsClosedAtMint(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	ns, err := namespace.FromContext(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, c.credConfigStore.persistSpec(ns.UUID, &credential.CredSpec{
+		Name: "retired-subject", Type: "vault_token", Source: "local-src",
+		Config: map[string]string{credential.ConfigSubjectTokenSource: "header"},
+	}))
+	require.NoError(t, c.credConfigStore.persistSpec(ns.UUID, &credential.CredSpec{
+		Name: "retired-actor", Type: "vault_token", Source: "sts-src",
+		Config: map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
+			credential.ConfigActorTokenSource:   "header",
+		},
+	}))
+
+	t.Run("retired subject source fails closed, names the value", func(t *testing.T) {
+		_, err := resolveExchangeInputsForTest(c, ctx, requestWith("agent-tok", nil), teForSpec("retired-subject"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "header")
+	})
+
+	t.Run("retired actor source fails closed, names the value", func(t *testing.T) {
+		req := requestWith("agent-tok", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{}, RawToken: "user-raw-cred"}
+		_, err := resolveExchangeInputsForTest(c, ctx, req, teForSpec("retired-actor"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "header")
 	})
 }

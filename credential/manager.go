@@ -154,7 +154,7 @@ func NewManager(
 //     cached credential. When inputs.ResolveSubjectToken and/or
 //     inputs.ResolveActorToken is set, that token is materialized only on a cache
 //     miss (inside the singleflight), so a cache hit incurs no mint cost; the two
-//     resolve independently (an eager header subject can pair with a lazy actor).
+//     resolve independently (an eager user_identity subject can pair with a lazy actor).
 //
 // Returns the issued credential or an error
 func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName string, inputs *ExchangeInputs) (*Credential, error) {
@@ -224,7 +224,7 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 
 		// Materialize a lazily-resolved actor token the same way and for the same
 		// reason as the subject above. It is a separate block because the two slots
-		// are independent: a spec can pair an eager header subject with a lazy
+		// are independent: a spec can pair an eager user_identity subject with a lazy
 		// warden_identity actor, so the actor may need minting even when the subject
 		// did not. The Fingerprint keyed this entry via ActorCacheIdentity, so the
 		// (not-yet-minted) actor bytes never entered the cache key.

@@ -1028,7 +1028,7 @@ func createExchangeTestManager(t *testing.T) (*Manager, *exchangeDriverFactory) 
 		Name:   "ex-spec",
 		Type:   TypeVaultToken,
 		Source: "ex-source",
-		Config: map[string]string{ConfigSubjectTokenSource: SourceHeader},
+		Config: map[string]string{ConfigSubjectTokenSource: SourceUserIdentity},
 	})
 
 	manager, err := NewManager(typeRegistry, driverRegistry, configStore, log)
@@ -1038,9 +1038,8 @@ func createExchangeTestManager(t *testing.T) (*Manager, *exchangeDriverFactory) 
 
 func exchangeInputsFor(subject string) *ExchangeInputs {
 	return &ExchangeInputs{
-		SubjectToken:       subject,
-		SubjectTokenType:   TokenTypeJWT,
-		SubjectTokenOrigin: ExchangeOriginUnverified,
+		SubjectToken:     subject,
+		SubjectTokenType: TokenTypeJWT,
 	}
 }
 
@@ -1098,7 +1097,6 @@ func TestManager_IssueCredential_ExchangeInputs_NonExchangeDriver(t *testing.T) 
 func lazyExchangeInputsFor(cacheIdentity, token string, mintCount *atomic.Int32) *ExchangeInputs {
 	return &ExchangeInputs{
 		SubjectTokenType:     TokenTypeJWT,
-		SubjectTokenOrigin:   ExchangeOriginVerified,
 		SubjectCacheIdentity: cacheIdentity,
 		ResolveSubjectToken: func(context.Context) (string, error) {
 			mintCount.Add(1)
@@ -1135,7 +1133,7 @@ func TestManager_IssueCredential_LazySubject_MintOnMissZeroOnHit(t *testing.T) {
 
 // A lazily-resolved ACTOR token (warden_identity delegation) is minted exactly
 // once on a cache miss, the resolved bytes reach the driver alongside the eager
-// header subject, and a subsequent request for the same identity is served from
+// user_identity subject, and a subsequent request for the same identity is served from
 // cache with no further actor mint or exchange.
 func TestManager_IssueCredential_LazyActor_MintOnMissZeroOnHit(t *testing.T) {
 	manager, factory := createExchangeTestManager(t)
@@ -1145,12 +1143,10 @@ func TestManager_IssueCredential_LazyActor_MintOnMissZeroOnHit(t *testing.T) {
 	var actorMint atomic.Int32
 	makeInputs := func(actorTok string) *ExchangeInputs {
 		return &ExchangeInputs{
-			// Eager header subject (the user) paired with a lazy warden_identity actor.
+			// Eager user_identity subject paired with a lazy warden_identity actor.
 			SubjectToken:       "eyJ.user",
 			SubjectTokenType:   TokenTypeJWT,
-			SubjectTokenOrigin: ExchangeOriginUnverified,
 			ActorTokenType:     TokenTypeJWT,
-			ActorTokenOrigin:   ExchangeOriginVerified,
 			ActorCacheIdentity: "wid:agent\x00aud",
 			ResolveActorToken: func(context.Context) (string, error) {
 				actorMint.Add(1)
@@ -1214,7 +1210,6 @@ func TestManager_IssueCredential_LazySubject_SingleflightCoalesces(t *testing.T)
 			defer wg.Done()
 			in := &ExchangeInputs{
 				SubjectTokenType:     TokenTypeJWT,
-				SubjectTokenOrigin:   ExchangeOriginVerified,
 				SubjectCacheIdentity: "id-shared",
 				ResolveSubjectToken: func(context.Context) (string, error) {
 					mintCount.Add(1)
@@ -1251,7 +1246,6 @@ func TestManager_IssueCredential_LazySubject_ResolveErrorNotCached(t *testing.T)
 	makeInputs := func() *ExchangeInputs {
 		return &ExchangeInputs{
 			SubjectTokenType:     TokenTypeJWT,
-			SubjectTokenOrigin:   ExchangeOriginVerified,
 			SubjectCacheIdentity: "id-alice",
 			ResolveSubjectToken: func(context.Context) (string, error) {
 				if calls.Add(1) == 1 {

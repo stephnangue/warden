@@ -51,9 +51,8 @@ func newTestMintingService() *MintingService {
 
 func validExchangeInputs() *ExchangeInputs {
 	return &ExchangeInputs{
-		SubjectToken:       "eyJ.sub",
-		SubjectTokenType:   TokenTypeJWT,
-		SubjectTokenOrigin: ExchangeOriginUnverified,
+		SubjectToken:     "eyJ.sub",
+		SubjectTokenType: TokenTypeJWT,
 	}
 }
 

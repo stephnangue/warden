@@ -18,26 +18,23 @@ func TestExchangeInputs_Validate(t *testing.T) {
 		{
 			name: "valid subject only",
 			inputs: &ExchangeInputs{
-				SubjectToken:       "eyJ.sub",
-				SubjectTokenType:   TokenTypeJWT,
-				SubjectTokenOrigin: ExchangeOriginVerified,
+				SubjectToken:     "eyJ.sub",
+				SubjectTokenType: TokenTypeJWT,
 			},
 		},
 		{
 			name: "valid subject and actor",
 			inputs: &ExchangeInputs{
-				SubjectToken:       "eyJ.sub",
-				SubjectTokenType:   TokenTypeJWT,
-				ActorToken:         "eyJ.act",
-				ActorTokenType:     TokenTypeJWT,
-				SubjectTokenOrigin: ExchangeOriginUnverified,
+				SubjectToken:     "eyJ.sub",
+				SubjectTokenType: TokenTypeJWT,
+				ActorToken:       "eyJ.act",
+				ActorTokenType:   TokenTypeJWT,
 			},
 		},
 		{
 			name: "missing subject token",
 			inputs: &ExchangeInputs{
-				SubjectTokenType:   TokenTypeJWT,
-				SubjectTokenOrigin: ExchangeOriginVerified,
+				SubjectTokenType: TokenTypeJWT,
 			},
 			wantErr: true,
 		},
@@ -46,7 +43,6 @@ func TestExchangeInputs_Validate(t *testing.T) {
 			inputs: &ExchangeInputs{
 				// SubjectToken empty on purpose: resolved lazily on a cache miss.
 				SubjectTokenType:     TokenTypeJWT,
-				SubjectTokenOrigin:   ExchangeOriginVerified,
 				SubjectCacheIdentity: "wid:ns:mount:alice\x00aud",
 				ResolveSubjectToken:  stubResolve,
 			},
@@ -55,7 +51,6 @@ func TestExchangeInputs_Validate(t *testing.T) {
 			name: "lazy subject without cache identity",
 			inputs: &ExchangeInputs{
 				SubjectTokenType:    TokenTypeJWT,
-				SubjectTokenOrigin:  ExchangeOriginVerified,
 				ResolveSubjectToken: stubResolve,
 			},
 			wantErr: true,
@@ -63,41 +58,36 @@ func TestExchangeInputs_Validate(t *testing.T) {
 		{
 			name: "missing subject token type",
 			inputs: &ExchangeInputs{
-				SubjectToken:       "eyJ.sub",
-				SubjectTokenOrigin: ExchangeOriginVerified,
+				SubjectToken: "eyJ.sub",
 			},
 			wantErr: true,
 		},
 		{
 			name: "actor token without type",
 			inputs: &ExchangeInputs{
-				SubjectToken:       "eyJ.sub",
-				SubjectTokenType:   TokenTypeJWT,
-				ActorToken:         "eyJ.act",
-				SubjectTokenOrigin: ExchangeOriginVerified,
+				SubjectToken:     "eyJ.sub",
+				SubjectTokenType: TokenTypeJWT,
+				ActorToken:       "eyJ.act",
 			},
 			wantErr: true,
 		},
 		{
 			name: "actor type without token",
 			inputs: &ExchangeInputs{
-				SubjectToken:       "eyJ.sub",
-				SubjectTokenType:   TokenTypeJWT,
-				ActorTokenType:     TokenTypeJWT,
-				SubjectTokenOrigin: ExchangeOriginVerified,
+				SubjectToken:     "eyJ.sub",
+				SubjectTokenType: TokenTypeJWT,
+				ActorTokenType:   TokenTypeJWT,
 			},
 			wantErr: true,
 		},
 		{
 			name: "lazy actor with cache identity",
 			inputs: &ExchangeInputs{
-				// Eager header subject paired with a lazy warden_identity actor:
+				// Eager user_identity subject paired with a lazy warden_identity actor:
 				// ActorToken empty on purpose, resolved on a cache miss.
 				SubjectToken:       "eyJ.user",
 				SubjectTokenType:   TokenTypeJWT,
-				SubjectTokenOrigin: ExchangeOriginUnverified,
 				ActorTokenType:     TokenTypeJWT,
-				ActorTokenOrigin:   ExchangeOriginVerified,
 				ActorCacheIdentity: "wid:ns:mount:agent\x00aud",
 				ResolveActorToken:  stubResolve,
 			},
@@ -105,12 +95,10 @@ func TestExchangeInputs_Validate(t *testing.T) {
 		{
 			name: "lazy actor without cache identity",
 			inputs: &ExchangeInputs{
-				SubjectToken:       "eyJ.user",
-				SubjectTokenType:   TokenTypeJWT,
-				SubjectTokenOrigin: ExchangeOriginUnverified,
-				ActorTokenType:     TokenTypeJWT,
-				ActorTokenOrigin:   ExchangeOriginVerified,
-				ResolveActorToken:  stubResolve,
+				SubjectToken:      "eyJ.user",
+				SubjectTokenType:  TokenTypeJWT,
+				ActorTokenType:    TokenTypeJWT,
+				ResolveActorToken: stubResolve,
 			},
 			wantErr: true,
 		},
@@ -119,28 +107,16 @@ func TestExchangeInputs_Validate(t *testing.T) {
 			inputs: &ExchangeInputs{
 				SubjectToken:       "eyJ.user",
 				SubjectTokenType:   TokenTypeJWT,
-				SubjectTokenOrigin: ExchangeOriginUnverified,
-				ActorTokenOrigin:   ExchangeOriginVerified,
 				ActorCacheIdentity: "wid:ns:mount:agent\x00aud",
 				ResolveActorToken:  stubResolve,
 			},
 			wantErr: true,
 		},
 		{
-			name: "unknown origin",
-			inputs: &ExchangeInputs{
-				SubjectToken:       "eyJ.sub",
-				SubjectTokenType:   TokenTypeJWT,
-				SubjectTokenOrigin: "made-up",
-			},
-			wantErr: true,
-		},
-		{
 			name: "oversized subject token",
 			inputs: &ExchangeInputs{
-				SubjectToken:       string(make([]byte, maxExchangeTokenBytes+1)),
-				SubjectTokenType:   TokenTypeJWT,
-				SubjectTokenOrigin: ExchangeOriginVerified,
+				SubjectToken:     string(make([]byte, maxExchangeTokenBytes+1)),
+				SubjectTokenType: TokenTypeJWT,
 			},
 			wantErr: true,
 		},
@@ -166,8 +142,8 @@ func TestExchangeInputs_Validate_Nil(t *testing.T) {
 }
 
 func TestExchangeInputs_Fingerprint_Deterministic(t *testing.T) {
-	a := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified}
-	b := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified}
+	a := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT}
+	b := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT}
 	if a.Fingerprint() != b.Fingerprint() {
 		t.Fatal("identical inputs must fingerprint identically")
 	}
@@ -175,18 +151,16 @@ func TestExchangeInputs_Fingerprint_Deterministic(t *testing.T) {
 
 func TestExchangeInputs_Fingerprint_Distinct(t *testing.T) {
 	base := ExchangeInputs{
-		SubjectToken:       "sub",
-		SubjectTokenType:   TokenTypeJWT,
-		ActorToken:         "act",
-		ActorTokenType:     TokenTypeJWT,
-		SubjectTokenOrigin: ExchangeOriginVerified,
+		SubjectToken:     "sub",
+		SubjectTokenType: TokenTypeJWT,
+		ActorToken:       "act",
+		ActorTokenType:   TokenTypeJWT,
 	}
 	variants := map[string]ExchangeInputs{
-		"different subject":       {SubjectToken: "sub2", SubjectTokenType: TokenTypeJWT, ActorToken: "act", ActorTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified},
-		"different actor":         {SubjectToken: "sub", SubjectTokenType: TokenTypeJWT, ActorToken: "act2", ActorTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified},
-		"different subject type":  {SubjectToken: "sub", SubjectTokenType: TokenTypeAccessToken, ActorToken: "act", ActorTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified},
-		"different origin":        {SubjectToken: "sub", SubjectTokenType: TokenTypeJWT, ActorToken: "act", ActorTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginUnverified},
-		"swapped subject / actor": {SubjectToken: "act", SubjectTokenType: TokenTypeJWT, ActorToken: "sub", ActorTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified},
+		"different subject":       {SubjectToken: "sub2", SubjectTokenType: TokenTypeJWT, ActorToken: "act", ActorTokenType: TokenTypeJWT},
+		"different actor":         {SubjectToken: "sub", SubjectTokenType: TokenTypeJWT, ActorToken: "act2", ActorTokenType: TokenTypeJWT},
+		"different subject type":  {SubjectToken: "sub", SubjectTokenType: TokenTypeAccessToken, ActorToken: "act", ActorTokenType: TokenTypeJWT},
+		"swapped subject / actor": {SubjectToken: "act", SubjectTokenType: TokenTypeJWT, ActorToken: "sub", ActorTokenType: TokenTypeJWT},
 	}
 	baseFP := base.Fingerprint()
 	for name, v := range variants {
@@ -199,8 +173,8 @@ func TestExchangeInputs_Fingerprint_Distinct(t *testing.T) {
 // TestExchangeInputs_Fingerprint_NoConcatAmbiguity guards the length-prefixing:
 // moving a byte across a field boundary must change the fingerprint.
 func TestExchangeInputs_Fingerprint_NoConcatAmbiguity(t *testing.T) {
-	x := &ExchangeInputs{SubjectToken: "ab", SubjectTokenType: TokenTypeJWT, ActorToken: "c", ActorTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified}
-	y := &ExchangeInputs{SubjectToken: "a", SubjectTokenType: TokenTypeJWT, ActorToken: "bc", ActorTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified}
+	x := &ExchangeInputs{SubjectToken: "ab", SubjectTokenType: TokenTypeJWT, ActorToken: "c", ActorTokenType: TokenTypeJWT}
+	y := &ExchangeInputs{SubjectToken: "a", SubjectTokenType: TokenTypeJWT, ActorToken: "bc", ActorTokenType: TokenTypeJWT}
 	if x.Fingerprint() == y.Fingerprint() {
 		t.Fatal("length-prefixing must prevent concatenation ambiguity")
 	}
@@ -213,14 +187,14 @@ func TestExchangeInputs_Fingerprint_NoConcatAmbiguity(t *testing.T) {
 // raw-subject path.
 func TestExchangeInputs_Fingerprint_SubjectCacheIdentity(t *testing.T) {
 	// Same identity, different (freshly minted) subject bytes -> same fingerprint.
-	a := &ExchangeInputs{SubjectToken: "assertion-mint-1", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, SubjectCacheIdentity: "wid:ns:mount:alice|aud"}
-	b := &ExchangeInputs{SubjectToken: "assertion-mint-2", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, SubjectCacheIdentity: "wid:ns:mount:alice|aud"}
+	a := &ExchangeInputs{SubjectToken: "assertion-mint-1", SubjectTokenType: TokenTypeJWT, SubjectCacheIdentity: "wid:ns:mount:alice|aud"}
+	b := &ExchangeInputs{SubjectToken: "assertion-mint-2", SubjectTokenType: TokenTypeJWT, SubjectCacheIdentity: "wid:ns:mount:alice|aud"}
 	if a.Fingerprint() != b.Fingerprint() {
 		t.Fatal("same SubjectCacheIdentity must fingerprint identically despite different subject bytes")
 	}
 
 	// Different identity -> different fingerprint.
-	c := &ExchangeInputs{SubjectToken: "assertion-mint-1", SubjectTokenType: TokenTypeJWT, SubjectTokenOrigin: ExchangeOriginVerified, SubjectCacheIdentity: "wid:ns:mount:bob|aud"}
+	c := &ExchangeInputs{SubjectToken: "assertion-mint-1", SubjectTokenType: TokenTypeJWT, SubjectCacheIdentity: "wid:ns:mount:bob|aud"}
 	if c.Fingerprint() == a.Fingerprint() {
 		t.Fatal("distinct SubjectCacheIdentity must fingerprint differently")
 	}
@@ -246,7 +220,6 @@ func TestExchangeInputs_Fingerprint_SubjectCacheIdentity(t *testing.T) {
 func TestExchangeInputs_Fingerprint_IgnoresResolveClosure(t *testing.T) {
 	base := ExchangeInputs{
 		SubjectTokenType:     TokenTypeJWT,
-		SubjectTokenOrigin:   ExchangeOriginVerified,
 		SubjectCacheIdentity: "wid:ns:mount:alice\x00aud",
 	}
 	withClosure := base
@@ -274,9 +247,7 @@ func TestExchangeInputs_Fingerprint_ActorCacheIdentity(t *testing.T) {
 	base := ExchangeInputs{
 		SubjectToken:       "eyJ.user",
 		SubjectTokenType:   TokenTypeJWT,
-		SubjectTokenOrigin: ExchangeOriginUnverified,
 		ActorTokenType:     TokenTypeJWT,
-		ActorTokenOrigin:   ExchangeOriginVerified,
 		ActorCacheIdentity: "wid:ns:mount:agent\x00aud",
 	}
 	withClosure := base
@@ -313,8 +284,8 @@ func TestSpecRequestsExchange(t *testing.T) {
 	}{
 		{"absent", map[string]string{}, false},
 		{"none", map[string]string{ConfigSubjectTokenSource: SourceNone}, false},
-		{"auth_token", map[string]string{ConfigSubjectTokenSource: SourceAuthToken}, true},
-		{"header", map[string]string{ConfigSubjectTokenSource: SourceHeader}, true},
+		{"agent_identity", map[string]string{ConfigSubjectTokenSource: SourceAgentIdentity}, true},
+		{"user_identity", map[string]string{ConfigSubjectTokenSource: SourceUserIdentity}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -325,20 +296,6 @@ func TestSpecRequestsExchange(t *testing.T) {
 	}
 }
 
-func TestTokenHeaderName_Defaults(t *testing.T) {
-	// Unset falls back to the historical Warden headers, canonicalized.
-	if got := SubjectTokenHeaderName(map[string]string{}); got != DefaultSubjectTokenHeader {
-		t.Fatalf("subject default = %q, want %q", got, DefaultSubjectTokenHeader)
-	}
-	if got := ActorTokenHeaderName(map[string]string{}); got != DefaultActorTokenHeader {
-		t.Fatalf("actor default = %q, want %q", got, DefaultActorTokenHeader)
-	}
-	// A configured name is canonicalized so comparisons are case-insensitive.
-	if got := SubjectTokenHeaderName(map[string]string{ConfigSubjectTokenHeader: "authorization"}); got != "Authorization" {
-		t.Fatalf("subject override = %q, want %q", got, "Authorization")
-	}
-}
-
 func TestValidateExchangeSpecConfig(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -346,11 +303,19 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 		wantErr bool
 	}{
 		{"empty is valid", map[string]string{}, false},
-		{"subject auth_token", map[string]string{ConfigSubjectTokenSource: SourceAuthToken}, false},
-		{"subject header", map[string]string{ConfigSubjectTokenSource: SourceHeader}, false},
+		{"subject agent_identity", map[string]string{ConfigSubjectTokenSource: SourceAgentIdentity}, false},
+		{"subject user_identity", map[string]string{ConfigSubjectTokenSource: SourceUserIdentity}, false},
 		{
-			name:   "subject + actor header",
-			config: map[string]string{ConfigSubjectTokenSource: SourceHeader, ConfigActorTokenSource: SourceHeader},
+			// The retired "header" source is no longer accepted by the OneOf.
+			name:    "subject header rejected",
+			config:  map[string]string{ConfigSubjectTokenSource: "header"},
+			wantErr: true,
+		},
+		{
+			// The retired "auth_token" literal is no longer accepted by the OneOf.
+			name:    "subject auth_token literal rejected",
+			config:  map[string]string{ConfigSubjectTokenSource: "auth_token"},
+			wantErr: true,
 		},
 		{
 			name:    "invalid subject source",
@@ -359,21 +324,24 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 		},
 		{
 			name:    "invalid actor source",
-			config:  map[string]string{ConfigSubjectTokenSource: SourceHeader, ConfigActorTokenSource: "bogus"},
+			config:  map[string]string{ConfigSubjectTokenSource: SourceUserIdentity, ConfigActorTokenSource: "bogus"},
 			wantErr: true,
 		},
 		{
 			name:    "actor without subject",
-			config:  map[string]string{ConfigActorTokenSource: SourceHeader},
+			config:  map[string]string{ConfigActorTokenSource: SourceAgentIdentity},
 			wantErr: true,
 		},
 		{
-			name:   "subject header + actor auth_token",
-			config: map[string]string{ConfigSubjectTokenSource: SourceHeader, ConfigActorTokenSource: SourceAuthToken},
+			// The valid delegation shape: a user subject with the agent as actor.
+			name:   "subject user_identity + actor agent_identity",
+			config: map[string]string{ConfigSubjectTokenSource: SourceUserIdentity, ConfigActorTokenSource: SourceAgentIdentity},
 		},
 		{
-			name:    "subject and actor both auth_token (mutually exclusive)",
-			config:  map[string]string{ConfigSubjectTokenSource: SourceAuthToken, ConfigActorTokenSource: SourceAuthToken},
+			// An actor is only meaningful in the delegation shape (subject=user_identity),
+			// so agent_identity subject + any actor is rejected.
+			name:    "subject agent_identity + actor agent_identity rejected",
+			config:  map[string]string{ConfigSubjectTokenSource: SourceAgentIdentity, ConfigActorTokenSource: SourceAgentIdentity},
 			wantErr: true,
 		},
 		{
@@ -400,7 +368,7 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 		{
 			name: "assertion_metadata_claims without warden_identity",
 			config: map[string]string{
-				ConfigSubjectTokenSource:      SourceHeader,
+				ConfigSubjectTokenSource:      SourceAgentIdentity,
 				ConfigAssertionMetadataClaims: "team",
 			},
 			wantErr: true,
@@ -425,7 +393,7 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 		{
 			name: "assertion_algorithm without warden_identity",
 			config: map[string]string{
-				ConfigSubjectTokenSource: SourceHeader,
+				ConfigSubjectTokenSource: SourceAgentIdentity,
 				ConfigAssertionAlgorithm: AssertionAlgES256,
 			},
 			wantErr: true,
@@ -451,74 +419,24 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 		{
 			name: "assertion_resource without warden_identity",
 			config: map[string]string{
-				ConfigSubjectTokenSource: SourceHeader,
+				ConfigSubjectTokenSource: SourceAgentIdentity,
 				ConfigAssertionResource:  "aws-secretsmanager:prod/db",
 			},
 			wantErr: true,
 		},
 		{
-			name: "subject_token_header with header source",
+			// The valid delegation shape with a Warden-minted actor assertion.
+			name: "actor warden_identity with user_identity subject",
 			config: map[string]string{
-				ConfigSubjectTokenSource: SourceHeader,
-				ConfigSubjectTokenHeader: "Authorization",
-			},
-		},
-		{
-			name: "subject_token_header without header source",
-			config: map[string]string{
-				ConfigSubjectTokenSource: SourceAuthToken,
-				ConfigSubjectTokenHeader: "Authorization",
-			},
-			wantErr: true,
-		},
-		{
-			name: "actor_token_header without header source",
-			config: map[string]string{
-				ConfigSubjectTokenSource: SourceHeader,
-				ConfigActorTokenSource:   SourceAuthToken,
-				ConfigActorTokenHeader:   "X-Actor",
-			},
-			wantErr: true,
-		},
-		{
-			name: "subject_token_header naming an internal header",
-			config: map[string]string{
-				ConfigSubjectTokenSource: SourceHeader,
-				ConfigSubjectTokenHeader: "x-warden-token",
-			},
-			wantErr: true,
-		},
-		{
-			name: "subject and actor same header rejected",
-			config: map[string]string{
-				ConfigSubjectTokenSource: SourceHeader,
-				ConfigActorTokenSource:   SourceHeader,
-				ConfigSubjectTokenHeader: "Authorization",
-				ConfigActorTokenHeader:   "authorization",
-			},
-			wantErr: true,
-		},
-		{
-			name: "subject and actor distinct headers allowed",
-			config: map[string]string{
-				ConfigSubjectTokenSource: SourceHeader,
-				ConfigActorTokenSource:   SourceHeader,
-				ConfigSubjectTokenHeader: "X-Subject",
-				ConfigActorTokenHeader:   "X-Actor",
-			},
-		},
-		{
-			name: "actor warden_identity with header subject",
-			config: map[string]string{
-				ConfigSubjectTokenSource: SourceHeader,
+				ConfigSubjectTokenSource: SourceUserIdentity,
 				ConfigActorTokenSource:   SourceWardenIdentity,
 				ConfigAssertionAudience:  "https://sts.example/aud",
 			},
 		},
 		{
-			name: "actor warden_identity rejects auth_token subject",
+			name: "actor warden_identity rejects agent_identity subject",
 			config: map[string]string{
-				ConfigSubjectTokenSource: SourceAuthToken,
+				ConfigSubjectTokenSource: SourceAgentIdentity,
 				ConfigActorTokenSource:   SourceWardenIdentity,
 				ConfigAssertionAudience:  "https://sts.example/aud",
 			},
@@ -536,7 +454,7 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 		{
 			name: "assertion_algorithm valid when actor is warden_identity",
 			config: map[string]string{
-				ConfigSubjectTokenSource: SourceHeader,
+				ConfigSubjectTokenSource: SourceUserIdentity,
 				ConfigActorTokenSource:   SourceWardenIdentity,
 				ConfigAssertionAudience:  "https://sts.example/aud",
 				ConfigAssertionAlgorithm: AssertionAlgES256,
@@ -619,7 +537,7 @@ func TestValidateExchangeSpecConfig_AssertionUserClaimsGate(t *testing.T) {
 	}
 	// Rejected: a non-minting subject cannot carry warden_user.
 	err := ValidateExchangeSpecConfig(map[string]string{
-		ConfigSubjectTokenSource:  SourceAuthToken,
+		ConfigSubjectTokenSource:  SourceAgentIdentity,
 		ConfigAssertionUserClaims: "username",
 	})
 	if err == nil {

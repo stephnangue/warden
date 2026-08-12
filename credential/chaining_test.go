@@ -273,7 +273,6 @@ func TestChaining_MaterializesSubjectAndActor(t *testing.T) {
 			// Inputs for the referenced spec, with lazy subject + actor resolvers
 			// (as core would build for warden_identity subject + actor).
 			return &ExchangeInputs{
-				SubjectTokenOrigin:   ExchangeOriginVerified,
 				SubjectCacheIdentity: "id:" + specName,
 				ResolveSubjectToken:  func(_ context.Context) (string, error) { return "resolved-subject", nil },
 				ActorCacheIdentity:   "actor:" + specName,

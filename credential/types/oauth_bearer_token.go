@@ -152,8 +152,8 @@ func (t *OAuthBearerTokenCredType) ValidateConfig(config map[string]string, sour
 		// or "none") has no identity to exchange, so reject it here rather than
 		// failing opaquely at mint time.
 		if src := config[credential.ConfigSubjectTokenSource]; src == "" || src == credential.SourceNone {
-			return fmt.Errorf("'%s' is required for a token_exchange source (set '%s' or '%s')",
-				credential.ConfigSubjectTokenSource, credential.SourceAuthToken, credential.SourceHeader)
+			return fmt.Errorf("'%s' is required for a token_exchange source (set '%s', '%s', or '%s')",
+				credential.ConfigSubjectTokenSource, credential.SourceAgentIdentity, credential.SourceUserIdentity, credential.SourceWardenIdentity)
 		}
 	}
 

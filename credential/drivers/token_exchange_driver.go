@@ -7,20 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/hashicorp/cap/jwt"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/helper"
 	"github.com/stephnangue/warden/logger"
 )
-
-// subjectSigningAlgs are the JWT signing algorithms accepted when validating an
-// unverified (header-sourced) subject or actor token.
-var subjectSigningAlgs = []jwt.Alg{jwt.RS256, jwt.RS384, jwt.RS512, jwt.ES256, jwt.ES384, jwt.ES512}
 
 // Exchange grants selected by the source's `grant` config.
 const (
@@ -76,13 +69,6 @@ type TokenExchangeDriver struct {
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
 	httpClient *http.Client
-
-	// subjectValidator validates unverified (header-sourced) subject/actor tokens
-	// against the source's configured JWKS/OIDC keys. It is built lazily on first
-	// use (it performs network I/O) and reused; cap/jwt validators are safe for
-	// concurrent use.
-	validatorMu      sync.Mutex
-	subjectValidator *jwt.Validator
 }
 
 // TokenExchangeDriverFactory creates TokenExchangeDriver instances.
@@ -157,34 +143,6 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
 			Example("LS0tLS1CRUdJTi..."),
 
-		// Subject-validation keys: required at mint time to accept an unverified
-		// (subject_token_source=header) subject/actor token. Validated here for
-		// well-formedness; enforced as fail-closed in the driver.
-		credential.StringField("subject_oidc_discovery_url").
-			Custom(func(v string) error {
-				if v == "" {
-					return nil
-				}
-				return validateOAuth2SafeURL(v, "subject_oidc_discovery_url", skip)
-			}).
-			Describe("OIDC discovery URL of the issuer that signs header-sourced subject/actor tokens").
-			Example("https://login.example.com/.well-known/openid-configuration"),
-		credential.StringField("subject_jwks_url").
-			Custom(func(v string) error {
-				if v == "" {
-					return nil
-				}
-				return validateOAuth2SafeURL(v, "subject_jwks_url", skip)
-			}).
-			Describe("JWKS URL for header-sourced subject/actor token signature validation").
-			Example("https://login.example.com/keys"),
-		credential.StringField("subject_issuer").
-			Describe("Expected issuer (iss) of a header-sourced subject/actor token").
-			Example("https://login.example.com/"),
-		credential.StringField("subject_audience").
-			Describe("Expected audience (aud) of a header-sourced subject/actor token").
-			Example("api://warden"),
-
 		credential.BoolField("tls_skip_verify").
 			Describe("Skip TLS certificate verification (development only)").
 			Example("false"),
@@ -258,8 +216,8 @@ func (d *TokenExchangeDriver) Type() string {
 // means a spec without a subject source slipped past validation; never forward
 // without caller identity.
 func (d *TokenExchangeDriver) MintCredential(_ context.Context, _ *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	return nil, nil, 0, "", fmt.Errorf("token_exchange requires caller exchange inputs; set %s=%s|%s on the spec",
-		credential.ConfigSubjectTokenSource, credential.SourceAuthToken, credential.SourceHeader)
+	return nil, nil, 0, "", fmt.Errorf("token_exchange requires caller exchange inputs; set %s=%s|%s|%s on the spec",
+		credential.ConfigSubjectTokenSource, credential.SourceAgentIdentity, credential.SourceUserIdentity, credential.SourceWardenIdentity)
 }
 
 // MintCredentialWithExchange exchanges the caller-derived subject for a scoped
@@ -269,27 +227,15 @@ func (d *TokenExchangeDriver) MintCredentialWithExchange(ctx context.Context, sp
 		return nil, nil, 0, "", fmt.Errorf("token_exchange: no subject token in exchange inputs")
 	}
 
-	// Origin contract. A verified subject (Warden authenticated it inbound) is
-	// forwarded as-is. An unverified (caller-supplied header) subject MUST be
-	// validated — signature, issuer, audience, expiry — before it is forwarded to
-	// the STS, and the mint fails closed if the source lacks validation config.
-	if inputs.SubjectTokenOrigin != credential.ExchangeOriginVerified {
-		if err := d.validateUntrustedToken(ctx, inputs.SubjectToken, "subject"); err != nil {
-			return nil, nil, 0, "", err
-		}
-	}
+	// Every subject/actor Warden forwards is trusted at the source — a Warden-minted
+	// assertion, the agent's verified inbound JWT, or the user's auth-method-validated
+	// credential — so the driver forwards it to the STS as-is.
 
 	// Actor delegation (RFC 8693). jwt-bearer has no actor slot, so reject an actor
-	// there. An unverified (header-sourced) actor is validated like a subject; a
-	// verified (auth_token) actor — the agent's inbound JWT — is forwarded as-is.
+	// there.
 	if inputs.ActorToken != "" {
 		if credential.GetString(d.credSource.Config, "grant", tokenExchangeGrantRFC8693) == tokenExchangeGrantJWTBearer {
 			return nil, nil, 0, "", fmt.Errorf("token_exchange: actor tokens are not supported with grant=jwt_bearer (no actor slot)")
-		}
-		if inputs.ActorTokenOrigin != credential.ExchangeOriginVerified {
-			if err := d.validateUntrustedToken(ctx, inputs.ActorToken, "actor"); err != nil {
-				return nil, nil, 0, "", err
-			}
 		}
 	}
 
@@ -546,17 +492,14 @@ func (d *TokenExchangeDriver) resolve(spec *credential.CredSpec, key string) str
 
 // subjectMetadata derives the non-secret, audit-logged identity of the exchanged
 // token: the subject (from the minted token's sub claim, falling back to the
-// subject token's) and whether the subject's origin was verified; and — when the
-// exchange carried an actor (delegation) — the actor's sub and whether it was
-// verified, so agent-on-behalf-of delegation is attributable in the credential's
+// subject token's) and — when the exchange carried an actor (delegation) — the
+// actor's sub, so agent-on-behalf-of delegation is attributable in the credential's
 // audit metadata. The actor sub is read from the actor token's own claims (for an
 // actor_token_source=warden_identity actor that is the Warden-minted wid:… sub);
 // like the subject it is a claim read, never a raw token byte, so no secret is
 // recorded.
 func (d *TokenExchangeDriver) subjectMetadata(resp *oauth2TokenResponse, inputs *credential.ExchangeInputs) map[string]interface{} {
-	meta := map[string]interface{}{
-		"subject_verified": strconv.FormatBool(inputs.SubjectTokenOrigin == credential.ExchangeOriginVerified),
-	}
+	meta := map[string]interface{}{}
 	claims := unverifiedJWTClaims(resp.AccessToken)
 	if claims == nil {
 		claims = unverifiedJWTClaims(inputs.SubjectToken)
@@ -567,7 +510,6 @@ func (d *TokenExchangeDriver) subjectMetadata(resp *oauth2TokenResponse, inputs 
 		}
 	}
 	if inputs.ActorToken != "" {
-		meta["actor_verified"] = strconv.FormatBool(inputs.ActorTokenOrigin == credential.ExchangeOriginVerified)
 		if actorClaims := unverifiedJWTClaims(inputs.ActorToken); actorClaims != nil {
 			if sub, ok := scalarClaim(actorClaims["sub"]); ok && sub != "" {
 				meta["actor"] = sub
@@ -586,82 +528,6 @@ func (d *TokenExchangeDriver) Revoke(_ context.Context, _ string) error {
 func (d *TokenExchangeDriver) Cleanup(_ context.Context) error {
 	d.httpClient.CloseIdleConnections()
 	return nil
-}
-
-// validateUntrustedToken verifies a caller-supplied (header-sourced) token
-// against the source's configured issuer, audience and signing keys before it is
-// forwarded to the STS. It fails closed when the source lacks validation config:
-// an unvalidated caller token must never reach the token endpoint on Warden's
-// authority. `role` is "subject" or "actor" for error messages.
-func (d *TokenExchangeDriver) validateUntrustedToken(ctx context.Context, token, role string) error {
-	cfg := d.credSource.Config
-	issuer := credential.GetString(cfg, "subject_issuer", "")
-	audience := credential.GetString(cfg, "subject_audience", "")
-	if issuer == "" || audience == "" {
-		return fmt.Errorf("token_exchange: refusing an unverified %s token — subject_issuer and subject_audience must be configured on the source to validate it", role)
-	}
-
-	validator, err := d.getSubjectValidator(ctx)
-	if err != nil {
-		return fmt.Errorf("token_exchange: cannot validate the %s token (fail closed): %w", role, err)
-	}
-
-	expected := jwt.Expected{
-		SigningAlgorithms: subjectSigningAlgs,
-		Issuer:            issuer,
-		Audiences:         []string{audience},
-	}
-	if _, err := validator.Validate(ctx, token, expected); err != nil {
-		return fmt.Errorf("token_exchange: %s token failed validation: %w", role, err)
-	}
-	return nil
-}
-
-// getSubjectValidator lazily builds and caches the cap/jwt validator from the
-// source's subject_oidc_discovery_url or subject_jwks_url. A build failure is not
-// cached, so a transient network error is retried on the next request.
-func (d *TokenExchangeDriver) getSubjectValidator(ctx context.Context) (*jwt.Validator, error) {
-	d.validatorMu.Lock()
-	defer d.validatorMu.Unlock()
-	if d.subjectValidator != nil {
-		return d.subjectValidator, nil
-	}
-
-	cfg := d.credSource.Config
-	discoveryURL := credential.GetString(cfg, "subject_oidc_discovery_url", "")
-	jwksURL := credential.GetString(cfg, "subject_jwks_url", "")
-
-	// Reuse the source CA (if any) for the JWKS/discovery fetch, so a header-subject
-	// issuer behind a private CA validates instead of silently failing closed.
-	caPEM := ""
-	if caData := credential.GetString(cfg, "ca_data", ""); caData != "" {
-		decoded, err := base64.StdEncoding.DecodeString(caData)
-		if err != nil {
-			return nil, fmt.Errorf("ca_data is not valid base64: %w", err)
-		}
-		caPEM = string(decoded)
-	}
-
-	var keySet jwt.KeySet
-	var err error
-	switch {
-	case discoveryURL != "":
-		keySet, err = jwt.NewOIDCDiscoveryKeySet(ctx, discoveryURL, caPEM)
-	case jwksURL != "":
-		keySet, err = jwt.NewJSONWebKeySet(ctx, jwksURL, caPEM)
-	default:
-		return nil, fmt.Errorf("no subject_oidc_discovery_url or subject_jwks_url configured")
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	validator, err := jwt.NewValidator(keySet)
-	if err != nil {
-		return nil, err
-	}
-	d.subjectValidator = validator
-	return validator, nil
 }
 
 // subjectTokenType returns the RFC 8693 subject_token_type, defaulting to jwt.

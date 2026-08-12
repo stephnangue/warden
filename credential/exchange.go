@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"net/textproto"
 	"strings"
 )
 
@@ -22,102 +21,48 @@ const (
 	TokenTypeSAML2        = "urn:ietf:params:oauth:token-type:saml2"
 )
 
-// Subject/actor token origins record how Warden obtained a token, which is the
-// only trust signal the plumbing carries. A driver that consumes exchange
-// inputs uses this to decide whether it may forward the token as-is or must
-// validate it first.
-const (
-	// ExchangeOriginVerified marks a token Warden already verified during
-	// inbound authentication (a transparent-auth JWT reused as the subject).
-	ExchangeOriginVerified = "verified"
-	// ExchangeOriginUnverified marks a token the caller supplied on the
-	// request that Warden has NOT verified.
-	ExchangeOriginUnverified = "unverified"
-)
-
 // Spec-config keys that opt a credential spec into token exchange and describe
 // where the subject and actor tokens come from.
 const (
-	// ConfigSubjectTokenSource selects the subject-token source:
-	// "auth_token" reuses the verified inbound JWT, "header" reads a
-	// caller-supplied header, "none" (or absent) disables exchange.
+	// ConfigSubjectTokenSource selects the subject-token source: "agent_identity"
+	// reuses the agent's verified inbound JWT, "user_identity" forwards the
+	// secondary user's validated credential (delegation; token_exchange sources
+	// only), "warden_identity" mints a Warden-signed assertion of the agent, "none"
+	// (or absent) disables exchange.
 	ConfigSubjectTokenSource = "subject_token_source"
 	// ConfigSubjectTokenType overrides the subject token's RFC 8693 type
 	// (default TokenTypeJWT).
 	ConfigSubjectTokenType = "subject_token_type"
-	// ConfigActorTokenSource selects the actor-token source: "header" or
-	// "none" (or absent).
+	// ConfigActorTokenSource selects the actor-token source for the delegation shape
+	// (subject_token_source=user_identity): "agent_identity" (the agent's inbound
+	// JWT), "warden_identity" (a Warden-signed assertion of the agent), or "none".
 	ConfigActorTokenSource = "actor_token_source"
 	// ConfigActorTokenType overrides the actor token's RFC 8693 type
 	// (default TokenTypeJWT).
 	ConfigActorTokenType = "actor_token_type"
-	// ConfigSubjectTokenHeader names the request header the "header" subject
-	// source reads. Absent/empty defaults to DefaultSubjectTokenHeader. Set it to
-	// "Authorization" (the Bearer scheme is stripped) to carry the subject token in
-	// the standard header when that header is otherwise free (e.g. a cert/SPIFFE-
-	// authenticated agent). Valid only with subject_token_source=header.
-	ConfigSubjectTokenHeader = "subject_token_header"
-	// ConfigActorTokenHeader names the request header the "header" actor source
-	// reads. Absent/empty defaults to DefaultActorTokenHeader. Valid only with
-	// actor_token_source=header.
-	ConfigActorTokenHeader = "actor_token_header"
 )
-
-// Default header names for the "header" token source. These preserve the
-// historical behaviour exactly: a spec that does not set a *_token_header reads
-// the same Warden header it always did, so this configurability adds no migration.
-const (
-	DefaultSubjectTokenHeader = "X-Warden-Subject-Token"
-	DefaultActorTokenHeader   = "X-Warden-Actor-Token"
-)
-
-// internalTokenHeaders lists request headers that carry Warden's own auth and so
-// must never be reused to carry an exchange token: pointing a *_token_header at
-// one would either leak the caller's own auth into the exchange or let a caller
-// smuggle a token past validation. Compared canonicalized.
-var internalTokenHeaders = map[string]struct{}{
-	textproto.CanonicalMIMEHeaderKey("X-Warden-Token"):      {},
-	textproto.CanonicalMIMEHeaderKey("X-Warden-User-Token"): {},
-}
-
-// SubjectTokenHeaderName returns the canonicalized header name the "header"
-// subject source reads for this spec, defaulting to DefaultSubjectTokenHeader.
-func SubjectTokenHeaderName(config map[string]string) string {
-	return canonicalTokenHeader(config[ConfigSubjectTokenHeader], DefaultSubjectTokenHeader)
-}
-
-// ActorTokenHeaderName returns the canonicalized header name the "header" actor
-// source reads for this spec, defaulting to DefaultActorTokenHeader.
-func ActorTokenHeaderName(config map[string]string) string {
-	return canonicalTokenHeader(config[ConfigActorTokenHeader], DefaultActorTokenHeader)
-}
-
-// canonicalTokenHeader canonicalizes a configured header name (falling back to
-// def when unset) so name comparisons and lookups are case-insensitive and
-// consistent with net/http's own header canonicalization.
-func canonicalTokenHeader(v, def string) string {
-	if v == "" {
-		v = def
-	}
-	return textproto.CanonicalMIMEHeaderKey(v)
-}
 
 // Accepted values for the *_source config keys.
 const (
-	SourceAuthToken = "auth_token"
-	// SourceHeader reads a caller-supplied token from a request header named by
-	// ConfigSubjectTokenHeader/ConfigActorTokenHeader (default the X-Warden-*-Token
-	// headers). The token is unverified — the driver validates it against the
-	// source's configured trust.
-	SourceHeader = "header"
-	SourceNone   = "none"
+	// SourceAgentIdentity reuses the agent's own verified inbound JWT (present only
+	// for a JWT/transparent-authed agent). As the subject it federates the agent
+	// with its own IdP credential; as the actor it records the agent acting on
+	// behalf of the user subject.
+	SourceAgentIdentity = "agent_identity"
+	// SourceUserIdentity forwards the secondary (user) principal's own validated
+	// credential as the RFC 8693 subject_token — the standard "agent acting for a
+	// user" delegation to an STS. It is spec-opt-in (never derived from user
+	// presence), fails closed when no user principal is present, and is pinned to a
+	// token_exchange source. Valid only as a subject.
+	SourceUserIdentity = "user_identity"
+	SourceNone         = "none"
 	// SourceWardenIdentity mints a fresh Warden-signed identity assertion (via the
 	// OIDC issuer) of the resolved agent identity, so an upstream federates
 	// Warden's issuer once regardless of how the agent authenticated. As the
 	// subject it is Workload Identity Federation (the agent IS the identity); as
-	// the actor it is RFC 8693 delegation (the agent acts on behalf of a distinct
-	// user carried in the subject header — so actor=warden_identity requires
-	// subject_token_source=header).
+	// the actor it is RFC 8693 delegation (the agent acts on behalf of the user
+	// carried in the user_identity subject — so actor=warden_identity requires
+	// subject_token_source=user_identity).
 	SourceWardenIdentity = "warden_identity"
 )
 
@@ -250,15 +195,6 @@ type ExchangeInputs struct {
 	// ActorTokenType is the RFC 8693 §2.1 actor_token_type. Required when
 	// ActorToken is set, empty otherwise.
 	ActorTokenType string
-	// SubjectTokenOrigin is one of ExchangeOriginVerified or
-	// ExchangeOriginUnverified.
-	SubjectTokenOrigin string
-	// ActorTokenOrigin records how the actor token was obtained, mirroring
-	// SubjectTokenOrigin: ExchangeOriginVerified when it is the caller's inbound
-	// JWT (actor_token_source=auth_token), ExchangeOriginUnverified when supplied
-	// on a header. Empty when no actor token is present. A driver consuming an
-	// unverified actor must validate it before forwarding, exactly as for a subject.
-	ActorTokenOrigin string
 
 	// SubjectCacheIdentity, when non-empty, is the value Fingerprint() keys the
 	// credential cache on IN PLACE OF SubjectToken. It exists for subjects whose
@@ -360,9 +296,6 @@ func (e *ExchangeInputs) Validate() error {
 		if e.ActorToken == "" && e.ActorTokenType != "" {
 			return fmt.Errorf("actor_token_type set without actor_token")
 		}
-		if e.ActorToken == "" && e.ActorTokenOrigin != "" {
-			return fmt.Errorf("actor_token_origin set without actor_token")
-		}
 		if e.ActorToken != "" && e.ActorCacheIdentity != "" {
 			// An eager actor keys on its own bytes; a stand-in cache identity without a
 			// lazy resolver would let two distinct raw actors share one cache entry.
@@ -372,18 +305,6 @@ func (e *ExchangeInputs) Validate() error {
 	}
 	if len(e.ActorToken) > maxExchangeTokenBytes {
 		return fmt.Errorf("actor_token exceeds %d bytes", maxExchangeTokenBytes)
-	}
-	if e.ActorTokenOrigin != "" {
-		switch e.ActorTokenOrigin {
-		case ExchangeOriginVerified, ExchangeOriginUnverified:
-		default:
-			return fmt.Errorf("invalid actor_token_origin %q", e.ActorTokenOrigin)
-		}
-	}
-	switch e.SubjectTokenOrigin {
-	case ExchangeOriginVerified, ExchangeOriginUnverified:
-	default:
-		return fmt.Errorf("invalid subject_token_origin %q", e.SubjectTokenOrigin)
 	}
 	return nil
 }
@@ -398,9 +319,9 @@ func (e *ExchangeInputs) Validate() error {
 // When SubjectCacheIdentity is set, it is hashed in place of SubjectToken (so a
 // per-request-volatile assertion does not defeat the cache), under a distinct
 // domain tag so the SubjectCacheIdentity path and the raw-subject path can never
-// collide. Every other field — token type, actor, origins — is always folded
-// in, so a Warden-minted subject and a raw subject that happen to share a value
-// still key differently, and delegation/provenance never share a cache entry.
+// collide. Every other field — token type, actor — is always folded in, so a
+// Warden-minted subject and a raw subject that happen to share a value still key
+// differently, and delegation never shares a cache entry with a plain subject.
 //
 // ResolveSubjectToken is intentionally NOT hashed: a lazily-minted subject sets
 // SubjectCacheIdentity (mandatory per Validate), which stands in for the token here.
@@ -430,8 +351,6 @@ func (e *ExchangeInputs) Fingerprint() string {
 		writeField("actor-token")
 		writeField(e.ActorToken)
 	}
-	writeField(e.SubjectTokenOrigin)
-	writeField(e.ActorTokenOrigin)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -448,16 +367,16 @@ func SpecRequestsExchange(config map[string]string) bool {
 // closed at mint time instead.
 func ValidateExchangeSpecConfig(config map[string]string) error {
 	if err := ValidateSchema(config,
-		StringField(ConfigSubjectTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone, SourceWardenIdentity),
-		StringField(ConfigActorTokenSource).OneOf(SourceAuthToken, SourceHeader, SourceNone, SourceWardenIdentity),
+		StringField(ConfigSubjectTokenSource).OneOf(SourceAgentIdentity, SourceUserIdentity, SourceNone, SourceWardenIdentity),
+		StringField(ConfigActorTokenSource).OneOf(SourceAgentIdentity, SourceWardenIdentity, SourceNone),
 		StringField(ConfigAssertionAlgorithm).OneOf(AssertionAlgRS256, AssertionAlgES256),
 	); err != nil {
 		return err
 	}
-	// The assertion_* keys configure a Warden-minted assertion, which now can be
-	// either the subject or the actor. Since actor=warden_identity requires
-	// subject=header (enforced below), at most one slot is ever warden_identity, so
-	// these keys apply unambiguously to whichever it is.
+	// The assertion_* keys configure a Warden-minted assertion, which may be either
+	// the subject or the actor. Since actor≠none requires subject=user_identity
+	// (enforced below), at most one slot is ever warden_identity, so these keys apply
+	// unambiguously to whichever it is.
 	mintsAssertion := config[ConfigSubjectTokenSource] == SourceWardenIdentity ||
 		config[ConfigActorTokenSource] == SourceWardenIdentity
 	// A Warden-minted subject must declare the audience it is minted for — an
@@ -497,55 +416,22 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
 			ConfigAssertionResource, SourceWardenIdentity)
 	}
-	// An actor token only has meaning alongside a subject token (RFC 8693 §2.1),
-	// so reject an actor source without a subject source.
+	// An actor is only meaningful in the delegation shape — the agent acting on
+	// behalf of a distinct user subject — so an actor requires
+	// subject_token_source=user_identity. This subsumes both the old "actor needs a
+	// subject" rule and the old "actor=warden_identity needs a distinct-principal
+	// subject" rule.
 	actorSrc := config[ConfigActorTokenSource]
-	if actorSrc != "" && actorSrc != SourceNone && !SpecRequestsExchange(config) {
-		return fmt.Errorf("field '%s': requires '%s' to be set", ConfigActorTokenSource, ConfigSubjectTokenSource)
+	if actorSrc != "" && actorSrc != SourceNone && config[ConfigSubjectTokenSource] != SourceUserIdentity {
+		return fmt.Errorf("field '%s': an actor is only meaningful in the delegation shape, so '%s' must be '%s'",
+			ConfigActorTokenSource, ConfigSubjectTokenSource, SourceUserIdentity)
 	}
-	// A single inbound token cannot be both the subject and the actor.
-	if config[ConfigSubjectTokenSource] == SourceAuthToken && actorSrc == SourceAuthToken {
+	// Defence in depth: one inbound token cannot be both subject and actor. Under
+	// the rule above this is unreachable (actor≠none forces subject=user_identity,
+	// so subject=agent_identity ∧ actor=agent_identity cannot arrive), but keep it.
+	if config[ConfigSubjectTokenSource] == SourceAgentIdentity && actorSrc == SourceAgentIdentity {
 		return fmt.Errorf("field '%s': cannot be '%s' when '%s' is also '%s' (one inbound token cannot be both subject and actor)",
-			ConfigActorTokenSource, SourceAuthToken, ConfigSubjectTokenSource, SourceAuthToken)
-	}
-	// actor=warden_identity is the "agent acting on behalf of a distinct user"
-	// shape: Warden signs the agent as the actor, so the subject must be a distinct
-	// principal — only the header source carries one. auth_token/warden_identity
-	// would both make sub and act the same caller, which is not delegation.
-	if actorSrc == SourceWardenIdentity && config[ConfigSubjectTokenSource] != SourceHeader {
-		return fmt.Errorf("field '%s': '%s' requires '%s' to be '%s' (the subject must be a distinct user token)",
-			ConfigActorTokenSource, SourceWardenIdentity, ConfigSubjectTokenSource, SourceHeader)
-	}
-	// A configured header name is meaningful only for the matching header source,
-	// and must not name an internal auth header.
-	if err := validateTokenHeaderKey(config, ConfigSubjectTokenHeader, ConfigSubjectTokenSource); err != nil {
-		return err
-	}
-	if err := validateTokenHeaderKey(config, ConfigActorTokenHeader, ConfigActorTokenSource); err != nil {
-		return err
-	}
-	// One header cannot carry both the subject and the actor token.
-	if config[ConfigSubjectTokenSource] == SourceHeader && actorSrc == SourceHeader &&
-		SubjectTokenHeaderName(config) == ActorTokenHeaderName(config) {
-		return fmt.Errorf("field '%s': subject and actor cannot read the same header %q",
-			ConfigActorTokenHeader, SubjectTokenHeaderName(config))
-	}
-	return nil
-}
-
-// validateTokenHeaderKey checks a *_token_header config key: it is valid only
-// when the matching *_token_source is "header", and must not name an internal
-// auth header (compared canonicalized).
-func validateTokenHeaderKey(config map[string]string, headerKey, sourceKey string) error {
-	raw := config[headerKey]
-	if raw == "" {
-		return nil
-	}
-	if config[sourceKey] != SourceHeader {
-		return fmt.Errorf("field '%s': is valid only when '%s' is '%s'", headerKey, sourceKey, SourceHeader)
-	}
-	if _, bad := internalTokenHeaders[textproto.CanonicalMIMEHeaderKey(raw)]; bad {
-		return fmt.Errorf("field '%s': %q is an internal header and cannot carry an exchange token", headerKey, raw)
+			ConfigActorTokenSource, SourceAgentIdentity, ConfigSubjectTokenSource, SourceAgentIdentity)
 	}
 	return nil
 }

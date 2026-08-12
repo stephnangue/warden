@@ -63,10 +63,10 @@ func TestVaultTokenCredType_ValidateConfig_VaultSource(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name: "auth_token exchange spec valid without token_role",
+			name: "agent_identity exchange spec valid without token_role",
 			config: map[string]string{
 				"mint_method":          "vault_token",
-				"subject_token_source": credential.SourceAuthToken,
+				"subject_token_source": credential.SourceAgentIdentity,
 			},
 			sourceType: credential.SourceTypeVault,
 			wantErr:    false,

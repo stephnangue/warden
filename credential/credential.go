@@ -98,8 +98,8 @@ type Credential struct {
 	SpecName   string // Which spec created this credential (for tracking/audit)
 
 	// Metadata holds non-secret, descriptive attributes about the credential
-	// (e.g. "subject", "subject_verified") that audit logs in clear. Never put
-	// secret material here — that belongs in Data, which audit HMAC-salts.
+	// (e.g. "subject", "actor") that audit logs in clear. Never put secret material
+	// here — that belongs in Data, which audit HMAC-salts.
 	Metadata map[string]string
 }
 

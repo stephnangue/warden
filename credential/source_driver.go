@@ -244,10 +244,10 @@ type OAuth2Authorizer interface {
 // the driver does not implement this interface, minting fails closed rather than
 // dropping the caller's bearer token.
 //
-// Drivers MUST treat unverified subject tokens
-// (inputs.SubjectTokenOrigin == ExchangeOriginUnverified) as untrusted and validate
-// them (signature, audience, expiry) before forwarding to any STS — the plumbing
-// performs structural checks only.
+// Every subject/actor token reaching a driver is trusted at the source — a
+// Warden-minted assertion, the agent's verified inbound JWT, or the user's
+// auth-method-validated credential — so a driver forwards it to an STS as-is
+// without re-validating. (There is no caller-supplied, unverified token source.)
 //
 // A driver implementing this interface asserts it at compile time:
 //
