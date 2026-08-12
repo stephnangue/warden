@@ -1363,3 +1363,49 @@ func TestOAuth2Driver_ExtractMetadata_IntrospectionURL_SpecLevelIgnored(t *testi
 	assert.False(t, called, "spec-level introspection_url must not be called")
 	assert.Nil(t, metadata, "opaque token + no source introspection_url → no metadata")
 }
+
+// TestOAuth2Driver_MintFromSecret covers the ChainedSecretMinter path: minting a
+// Slack-style access token from a refresh token supplied as chained secret
+// material (e.g. a per-user refresh token read from Vault), not from spec config.
+func TestOAuth2Driver_MintFromSecret(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, "refresh_token", r.Form.Get("grant_type"))
+		assert.Equal(t, "chained-refresh-token", r.Form.Get("refresh_token"))
+		assert.Equal(t, "test-id", r.Form.Get("client_id"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "slack-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer server.Close()
+
+	d := &OAuth2Driver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeOAuth2,
+			Config: map[string]string{
+				"client_id":     "test-id",
+				"client_secret": "test-secret",
+				"token_url":     server.URL,
+			},
+		},
+		httpClient: server.Client(),
+	}
+	spec := &credential.CredSpec{Name: "slack-access", Type: credential.TypeOAuthBearerToken, Config: map[string]string{}}
+
+	t.Run("mints access token from chained refresh token", func(t *testing.T) {
+		material := credential.SecretMaterial{Data: map[string]string{"refresh_token": "chained-refresh-token"}, Field: "refresh_token"}
+		rawData, _, ttl, _, err := d.MintFromSecret(context.Background(), spec, material)
+		require.NoError(t, err)
+		assert.Equal(t, "slack-access-token", rawData["api_key"])
+		assert.Equal(t, 3600*time.Second, ttl)
+	})
+
+	t.Run("empty material fails closed", func(t *testing.T) {
+		_, _, _, _, err := d.MintFromSecret(context.Background(), spec, credential.SecretMaterial{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no refresh token")
+	})
+}

@@ -316,6 +316,9 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 			b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 				AutoAuthPath:    parsedConfig.AutoAuthPath,
 				DefaultAuthRole: parsedConfig.DefaultAuthRole,
+				UserAuthPath:    parsedConfig.UserAuthPath,
+				UserTokenHeader: parsedConfig.UserTokenHeader,
+				UserAuthRole:    parsedConfig.UserAuthRole,
 			})
 
 			// Apply TLS configuration if provided
@@ -375,9 +378,15 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 
 		autoAuthPath, _ := config["auto_auth_path"].(string)
 		defaultRole, _ := config["default_role"].(string)
+		userAuthPath, _ := config["user_auth_path"].(string)
+		userTokenHeader, _ := config["user_token_header"].(string)
+		userAuthRole, _ := config["user_auth_role"].(string)
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			AutoAuthPath:    autoAuthPath,
 			DefaultAuthRole: defaultRole,
+			UserAuthPath:    userAuthPath,
+			UserTokenHeader: userTokenHeader,
+			UserAuthRole:    userAuthRole,
 		})
 
 		// Load TLS configuration
@@ -409,6 +418,9 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 			"timeout":           b.Timeout().String(),
 			"auto_auth_path":    tc.AutoAuthPath,
 			"default_role":      tc.DefaultAuthRole,
+			"user_auth_path":    tc.UserAuthPath,
+			"user_token_header": tc.UserTokenHeader,
+			"user_auth_role":    tc.UserAuthRole,
 			"tls_skip_verify":   b.tlsSkipVerify,
 			"ca_data":           b.caData,
 		}

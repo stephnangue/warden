@@ -37,6 +37,7 @@ var headersToStrip = []string{
 	"X-Warden-Provider",
 	"X-Warden-Subject-Token",
 	"X-Warden-Actor-Token",
+	"X-Warden-User-Token",
 	// Hop-by-hop
 	"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
 	"Te", "Trailer", "Trailers", "Transfer-Encoding", "Upgrade",

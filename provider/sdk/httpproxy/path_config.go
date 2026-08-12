@@ -38,6 +38,18 @@ func (b *proxyBackend) pathConfig() *framework.Path {
 			Type:        framework.TypeString,
 			Description: "Default role to use when not specified in URL path",
 		},
+		"user_auth_path": {
+			Type:        framework.TypeString,
+			Description: "Auth mount that authenticates the secondary (user) principal from a second request header (bearer/JWT format required)",
+		},
+		"user_token_header": {
+			Type:        framework.TypeString,
+			Description: "Request header carrying the user credential (default: X-Warden-User-Token; 'Authorization' opt-in for cert/SPIFFE agents)",
+		},
+		"user_auth_role": {
+			Type:        framework.TypeString,
+			Description: "Role used to authenticate the user credential (default: the user auth mount's own default_role)",
+		},
 		"tls_skip_verify": {
 			Type:        framework.TypeBool,
 			Description: "Skip TLS certificate verification (for dev/test clusters)",
@@ -82,6 +94,9 @@ func (b *proxyBackend) handleConfigRead(_ context.Context, _ *logical.Request, _
 		"timeout":           b.Timeout().String(),
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
+		"user_auth_path":    tc.UserAuthPath,
+		"user_token_header": tc.UserTokenHeader,
+		"user_auth_role":    tc.UserAuthRole,
 		"tls_skip_verify":   b.tlsSkipVerify,
 		"ca_data":           b.caData,
 	}
@@ -159,6 +174,9 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 	tc := &framework.TransparentConfig{
 		AutoAuthPath:    current.AutoAuthPath,
 		DefaultAuthRole: current.DefaultAuthRole,
+		UserAuthPath:    current.UserAuthPath,
+		UserTokenHeader: current.UserTokenHeader,
+		UserAuthRole:    current.UserAuthRole,
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -166,11 +184,34 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 	if val, ok := d.GetOk("default_role"); ok {
 		tc.DefaultAuthRole = val.(string)
 	}
+	if val, ok := d.GetOk("user_auth_path"); ok {
+		tc.UserAuthPath = val.(string)
+	}
+	if val, ok := d.GetOk("user_token_header"); ok {
+		tc.UserTokenHeader = val.(string)
+	}
+	if val, ok := d.GetOk("user_auth_role"); ok {
+		tc.UserAuthRole = val.(string)
+	}
 
 	if tc.AutoAuthPath == "" {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        logical.ErrBadRequest("auto_auth_path is required"),
+		}, nil
+	}
+
+	// Validate the secondary (user) auth config: types, the user_token_header
+	// deny-list, and the user_auth_role → user_auth_path dependency. The
+	// bearer-format check on the mount is enforced at runtime (fail closed).
+	if err := framework.ValidateUserAuthConfig(map[string]any{
+		"user_auth_path":    tc.UserAuthPath,
+		"user_token_header": tc.UserTokenHeader,
+		"user_auth_role":    tc.UserAuthRole,
+	}); err != nil {
+		return &logical.Response{
+			StatusCode: http.StatusBadRequest,
+			Err:        logical.ErrBadRequest(err.Error()),
 		}, nil
 	}
 
@@ -258,6 +299,9 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		"timeout":           b.Timeout().String(),
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
+		"user_auth_path":    tc.UserAuthPath,
+		"user_token_header": tc.UserTokenHeader,
+		"user_auth_role":    tc.UserAuthRole,
 		"tls_skip_verify":   b.tlsSkipVerify,
 		"ca_data":           b.caData,
 	}

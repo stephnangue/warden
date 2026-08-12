@@ -368,6 +368,13 @@ type AssertionClaims struct {
 	// claim naming the single downstream resource the assertion targets, so a
 	// verifier evaluating bound claims can pin it to one resource. Opaque string.
 	Resource string
+	// UserClaims, when non-empty, is embedded under a single nested "warden_user"
+	// claim identifying the secondary (user) principal the agent acts on behalf of
+	// — its identity "sub" plus operator-allowlisted, size-capped user attributes.
+	// Nested (never splatted at the top level) so it cannot clobber a registered or
+	// warden_* claim. The assertion `sub` stays the AGENT; a verifier's templated
+	// policy scopes the authorized path on warden_user, keeping the agent binding.
+	UserClaims map[string]string
 }
 
 // MintIdentityAssertion signs a short-lived JWT with the alg-selected signing key,
@@ -409,19 +416,26 @@ func (i *OIDCIssuer) MintIdentityAssertion(ctx context.Context, te *logical.Toke
 
 	now := time.Now()
 	claims := map[string]interface{}{
-		"iss":               issuerURL,
+		"iss": issuerURL,
+		// sub is the composite Warden subject "wid:{ns_id}:{mount_accessor}:{principal_id}"; warden_sub below
+		// carries the raw principal id on its own, so a verifier can bind the principal
+		// directly without having to parse the composite sub.
 		"sub":               wardenSubject(te),
 		"aud":               c.Audience,
 		"iat":               now.Unix(),
 		"nbf":               now.Add(-leeway).Unix(),
 		"exp":               now.Add(c.TTL).Unix(),
 		"jti":               jti,
+		"warden_sub":        te.PrincipalID,
 		"warden_role":       te.RoleName,
 		"warden_namespace":  te.NamespacePath,
 		"warden_auth_mount": te.MountAccessor,
 	}
 	if len(c.Metadata) > 0 {
 		claims["warden_metadata"] = c.Metadata
+	}
+	if len(c.UserClaims) > 0 {
+		claims["warden_user"] = c.UserClaims
 	}
 	if c.Resource != "" {
 		claims["warden_resource"] = c.Resource

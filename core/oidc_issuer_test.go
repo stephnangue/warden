@@ -1005,3 +1005,49 @@ func TestRotateOIDCKey_NoFloorWithoutPublisher(t *testing.T) {
 	require.NoError(t, core.rotateOIDCKey(context.Background(), localKeySource{}, iss, nil, time.Minute, defaultRetiredKeyGrace))
 	assert.Less(t, time.Since(start), 300*time.Millisecond, "no publisher means no propagation floor")
 }
+
+// TestOIDCIssuer_Mint_WardenUserAndSubClaims verifies that warden_sub always
+// carries the raw agent principal (while sub carries the composite wid subject),
+// and that a UserClaims projection rides under a nested warden_user claim (with the
+// user's own raw sub) while the assertion's own sub/warden_sub stay the agent.
+func TestOIDCIssuer_Mint_WardenUserAndSubClaims(t *testing.T) {
+	const issuerURL = "https://warden-oidc.example.com"
+	iss := newReadyIssuer(t, issuerURL)
+	jwks := serveJWKS(t, iss)
+	te := &logical.TokenEntry{PrincipalID: "agent-principal", RoleName: "r", NamespaceID: "n", MountAccessor: "m"}
+	const audience = "https://vault.example.com"
+
+	ctx := context.Background()
+	keySet, err := jwt.NewJSONWebKeySet(ctx, jwks.URL, "")
+	require.NoError(t, err)
+	validator, err := jwt.NewValidator(keySet)
+	require.NoError(t, err)
+	expected := jwt.Expected{Issuer: issuerURL, Audiences: []string{audience}, SigningAlgorithms: []jwt.Alg{jwt.RS256}}
+
+	// warden_sub is always the raw agent principal; sub carries the composite wid:.
+	base, err := iss.MintIdentityAssertion(ctx, te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgRS256})
+	require.NoError(t, err)
+	claims, err := validator.Validate(ctx, base, expected)
+	require.NoError(t, err)
+	assert.Equal(t, "agent-principal", claims["warden_sub"], "warden_sub must be the raw principal")
+	assert.Equal(t, wardenSubject(te), claims["sub"], "sub must be the composite wid subject")
+	_, present := claims["warden_user"]
+	assert.False(t, present, "warden_user must be absent without UserClaims")
+
+	// With UserClaims: nested warden_user carries the user's own sub + projected
+	// claims, while the assertion's sub/warden_sub stay the AGENT.
+	withUser, err := iss.MintIdentityAssertion(ctx, te, AssertionClaims{
+		Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgRS256,
+		UserClaims: map[string]string{"sub": "alice-raw-sub", "username": "alice"},
+	})
+	require.NoError(t, err)
+	claims, err = validator.Validate(ctx, withUser, expected)
+	require.NoError(t, err)
+	assert.Equal(t, wardenSubject(te), claims["sub"], "assertion sub stays the agent composite")
+	assert.Equal(t, "agent-principal", claims["warden_sub"], "warden_sub stays the agent principal")
+	wu, ok := claims["warden_user"].(map[string]interface{})
+	require.True(t, ok, "warden_user missing or wrong type: %v", claims["warden_user"])
+	assert.Equal(t, "alice-raw-sub", wu["sub"])
+	assert.Equal(t, "alice", wu["username"])
+	assert.Len(t, wu, 2)
+}

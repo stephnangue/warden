@@ -1273,3 +1273,39 @@ func TestManager_IssueCredential_LazySubject_ResolveErrorNotCached(t *testing.T)
 	assert.Equal(t, "assertion-ok", cred.Data["username"])
 	assert.Equal(t, int32(1), factory.driver.exchangeCount.Load())
 }
+
+// TestManager_IssueCredential_PerUserCacheDimension verifies the ":u:" cache
+// dimension: two users sharing one agent session token get isolated credentials,
+// the same user hits cache, and a no-user caller keys distinctly (byte-identical
+// to the pre-feature key).
+func TestManager_IssueCredential_PerUserCacheDimension(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: map[string]string{}})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: map[string]string{}})
+
+	ctx := createNamespaceContext()
+	const agentTok = "shared-agent-token"
+	callerA := Caller{TokenID: agentTok, TokenTTL: time.Hour, User: &UserContext{TokenID: "user-A-tok", TokenTTL: time.Hour}}
+	callerB := Caller{TokenID: agentTok, TokenTTL: time.Hour, User: &UserContext{TokenID: "user-B-tok", TokenTTL: time.Hour}}
+
+	// Same user token → cache hit (one mint).
+	credA1, err := manager.IssueCredential(ctx, callerA, "test-spec", nil)
+	require.NoError(t, err)
+	credA2, err := manager.IssueCredential(ctx, callerA, "test-spec", nil)
+	require.NoError(t, err)
+	assert.Equal(t, credA1.CredentialID, credA2.CredentialID, "same user token should hit cache")
+
+	// Different user token on the SAME agent token → isolated credential.
+	credB, err := manager.IssueCredential(ctx, callerB, "test-spec", nil)
+	require.NoError(t, err)
+	assert.NotEqual(t, credA1.CredentialID, credB.CredentialID, "distinct user token must not share a credential")
+
+	// No user principal → keyed without the ":u:" dimension, distinct again.
+	credNoUser, err := manager.IssueCredential(ctx, Caller{TokenID: agentTok, TokenTTL: time.Hour}, "test-spec", nil)
+	require.NoError(t, err)
+	assert.NotEqual(t, credA1.CredentialID, credNoUser.CredentialID, "a no-user caller must not reuse a user-scoped entry")
+
+	assert.Equal(t, int32(3), factory.driver.mintCalls.Load(), "three distinct cache keys → three mints")
+}

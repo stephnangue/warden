@@ -2,6 +2,7 @@ package credential
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -579,5 +580,52 @@ func TestAssertionMetadataKeys(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAssertionUserClaimKeys(t *testing.T) {
+	if got := AssertionUserClaimKeys(map[string]string{}); got != nil {
+		t.Errorf("empty config: got %v, want nil", got)
+	}
+	// Trimmed, de-duplicated, order-preserving.
+	got := AssertionUserClaimKeys(map[string]string{ConfigAssertionUserClaims: " username , email , username "})
+	want := []string{"username", "email"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestValidateExchangeSpecConfig_AssertionUserClaimsGate(t *testing.T) {
+	// Valid: a warden_identity subject mints the assertion the claims ride in.
+	if err := ValidateExchangeSpecConfig(map[string]string{
+		ConfigSubjectTokenSource:  SourceWardenIdentity,
+		ConfigAssertionUserClaims: "username",
+	}); err != nil {
+		t.Fatalf("warden_identity + assertion_user_claims should be valid: %v", err)
+	}
+	// "sub" alone is valid — the identity-only opt-in.
+	if err := ValidateExchangeSpecConfig(map[string]string{
+		ConfigSubjectTokenSource:  SourceWardenIdentity,
+		ConfigAssertionUserClaims: "sub",
+	}); err != nil {
+		t.Fatalf("assertion_user_claims=sub should be valid: %v", err)
+	}
+	// A set-but-empty value (parses to zero keys) is rejected.
+	if err := ValidateExchangeSpecConfig(map[string]string{
+		ConfigSubjectTokenSource:  SourceWardenIdentity,
+		ConfigAssertionUserClaims: " , ",
+	}); err == nil {
+		t.Fatal("whitespace-only assertion_user_claims must be rejected")
+	}
+	// Rejected: a non-minting subject cannot carry warden_user.
+	err := ValidateExchangeSpecConfig(map[string]string{
+		ConfigSubjectTokenSource:  SourceAuthToken,
+		ConfigAssertionUserClaims: "username",
+	})
+	if err == nil {
+		t.Fatal("assertion_user_claims without a warden_identity subject/actor must be rejected")
+	}
+	if !strings.Contains(err.Error(), ConfigAssertionUserClaims) {
+		t.Errorf("error should name the offending field, got: %v", err)
 	}
 }

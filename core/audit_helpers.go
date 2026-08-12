@@ -293,12 +293,32 @@ func (c *Core) buildRequestAuditEntry(
 		Request:   buildAuditRequest(req, ns),
 		Auth:      buildAuditAuth(auth, te),
 	}
+	stampUserAttribution(entry, req)
 
 	if outerErr != nil {
 		entry.Error = outerErr.Error()
 	}
 
 	return entry
+}
+
+// stampUserAttribution records the secondary (user) principal onto an audit
+// entry's Auth block for per-user attribution — so a mint performed for a user is
+// traceable to that user. It is a no-op when the request carried no user
+// principal. Identity only: the raw user credential is never logged.
+func stampUserAttribution(entry *audit.LogEntry, req *logical.Request) {
+	if entry == nil || req == nil || req.User == nil || req.User.TokenEntry == nil {
+		return
+	}
+	if entry.Auth == nil {
+		entry.Auth = &audit.Auth{}
+	}
+	ute := req.User.TokenEntry
+	entry.Auth.User = &audit.UserAttribution{
+		Subject:     ute.PrincipalID,
+		TokenID:     ute.ID,
+		NamespaceID: ute.NamespaceID,
+	}
 }
 
 // buildResponseAuditEntry creates an audit.LogEntry for a response
@@ -324,6 +344,7 @@ func (c *Core) buildResponseAuditEntry(
 		Auth:      buildAuditAuth(auth, te),
 		Response:  buildAuditResponse(resp, req, cred),
 	}
+	stampUserAttribution(entry, req)
 
 	// Capture error from multiple sources:
 	// 1. outerErr - errors from request processing (e.g., routing errors)

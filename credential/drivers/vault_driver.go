@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -355,7 +356,9 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 
 	switch mintMethod {
 	case "static_aws", "static_apikey", "kv2_read":
-		return d.fetchStaticKVSecret(ctx, d.vault, spec)
+		// Non-federation path carries no user context; a templated secret_path here
+		// fails closed in resolveSecretPath (no claims to satisfy {{user.…}}).
+		return d.fetchStaticKVSecret(ctx, d.vault, spec, nil)
 	case "dynamic_aws":
 		return d.fetchDynamicAWSCreds(ctx, d.vault, spec)
 	case "dynamic_gcp":
@@ -448,7 +451,7 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	)
 	switch mintMethod {
 	case "static_aws", "static_apikey", "kv2_read":
-		rawData, metadata, leaseTTL, _, err = d.fetchStaticKVSecret(ctx, client, spec)
+		rawData, metadata, leaseTTL, _, err = d.fetchStaticKVSecret(ctx, client, spec, inputs.UserClaims)
 		// A static read holds no lease that depends on the login token — best-effort
 		// revoke it so a transient session is not left behind.
 		defer d.revokeLoginToken(loginAuth.Accessor, client)
@@ -555,13 +558,80 @@ func (d *VaultDriver) revokeLoginToken(accessor string, client *api.Client) {
 	}
 }
 
-// fetchStaticKVSecret fetches static secrets from Vault KV v2
-func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, client *api.Client, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	kv2Mount := credential.GetString(spec.Config, "kv2_mount", "")
-	secretPath := credential.GetString(spec.Config, "secret_path", "")
+// userClaimTemplate matches a {{user.<claim>}} token in secret_path. The claim
+// name is a conservative identifier (letters, digits, '_', '.', '-').
+var userClaimTemplate = regexp.MustCompile(`\{\{user\.([A-Za-z0-9_.-]+)\}\}`)
 
-	if kv2Mount == "" || secretPath == "" {
+// userClaimValuePattern is the strict allow-list a substituted claim value must
+// match before it can be placed into a KV path segment. It excludes '/' (which
+// would let one value span segments) and every other separator. '.' is allowed
+// (e.g. first.last), so a value or adjacent values could still compose a "."/".."
+// segment — that is caught after substitution by the segment check below, not here.
+var userClaimValuePattern = regexp.MustCompile(`^[A-Za-z0-9._@-]+$`)
+
+// resolveSecretPath returns the KV secret path for a kv2_read, substituting any
+// {{user.<claim>}} token from the projected per-user claims. A path with no such
+// token is returned verbatim (byte-identical to the pre-templating behaviour). It
+// FAILS CLOSED when a referenced claim is absent (project it via
+// assertion_user_claims), when a value is empty or not in the strict allow-list,
+// or when the RESOLVED path contains a "." / ".." segment or a leftover template
+// fragment. The last check is the real boundary: the Vault API client runs
+// path.Clean on the request path, so a claim value of "." (which collapses its
+// segment) or two adjacent tokens composing ".." would otherwise silently retarget
+// the read at a shared/parent path — the per-user secret_path must deny instead.
+func resolveSecretPath(rawPath string, userClaims map[string]string) (string, error) {
+	if !strings.Contains(rawPath, "{{user.") {
+		return rawPath, nil
+	}
+	var subErr error
+	resolved := userClaimTemplate.ReplaceAllStringFunc(rawPath, func(match string) string {
+		claim := userClaimTemplate.FindStringSubmatch(match)[1]
+		v, ok := userClaims[claim]
+		if !ok {
+			subErr = fmt.Errorf("secret_path references {{user.%s}} but that claim is absent (project it via assertion_user_claims)", claim)
+			return ""
+		}
+		// The value becomes path bytes: a single non-empty allow-listed token that
+		// cannot span segments (no '/'). Dot-only / traversal segments it might
+		// compose are rejected after substitution.
+		if v == "" || !userClaimValuePattern.MatchString(v) {
+			subErr = fmt.Errorf("secret_path claim %q has a value rejected by the path allow-list", claim)
+			return ""
+		}
+		return v
+	})
+	if subErr != nil {
+		return "", subErr
+	}
+	// A leftover fragment means a malformed token (e.g. a missing brace or an empty
+	// claim name) — fail closed rather than read a literal "{{user.…" path.
+	if strings.Contains(resolved, "{{user.") {
+		return "", fmt.Errorf("secret_path has an unresolved template fragment after substitution")
+	}
+	// Reject any "." or ".." segment the substituted value(s) may have composed —
+	// path.Clean would otherwise resolve it into a different (shared/parent) path.
+	for _, seg := range strings.Split(resolved, "/") {
+		if seg == "." || seg == ".." {
+			return "", fmt.Errorf("secret_path resolves to a %q path segment (traversal)", seg)
+		}
+	}
+	return resolved, nil
+}
+
+// fetchStaticKVSecret fetches static secrets from Vault KV v2. userClaims, when
+// non-nil (a per-user chained mint), supplies the values for any {{user.<claim>}}
+// token in secret_path so the read is scoped to one user's secret.
+func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, client *api.Client, spec *credential.CredSpec, userClaims map[string]string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	kv2Mount := credential.GetString(spec.Config, "kv2_mount", "")
+	rawPath := credential.GetString(spec.Config, "secret_path", "")
+
+	if kv2Mount == "" || rawPath == "" {
 		return nil, nil, 0, "", fmt.Errorf("kv2_mount and secret_path are required for static KV credentials")
+	}
+
+	secretPath, err := resolveSecretPath(rawPath, userClaims)
+	if err != nil {
+		return nil, nil, 0, "", err
 	}
 
 	secret, err := client.KVv2(kv2Mount).Get(ctx, secretPath)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net/textproto"
 	"net/url"
 	"sort"
 	"strconv"
@@ -257,4 +258,57 @@ func ValidateCommonConfig(conf map[string]any) error {
 		return err
 	}
 	return ValidateStringField(conf, "default_role")
+}
+
+// wardenControlHeaders are request headers Warden reads for its own auth/control
+// or token-exchange transport plane. user_token_header must not alias one of these
+// — doing so would either collide with the agent's own credential, feed one header
+// into two consumers, or let a caller smuggle control state. Compared canonicalized.
+// Authorization is intentionally absent: it is a valid (opt-in) user_token_header
+// for cert/SPIFFE-authenticated agents.
+var wardenControlHeaders = map[string]struct{}{
+	textproto.CanonicalMIMEHeaderKey("X-Warden-Token"):         {},
+	textproto.CanonicalMIMEHeaderKey("X-Warden-Role"):          {},
+	textproto.CanonicalMIMEHeaderKey("X-Warden-Namespace"):     {},
+	textproto.CanonicalMIMEHeaderKey("X-Warden-Provider"):      {},
+	textproto.CanonicalMIMEHeaderKey("X-Warden-Request"):       {},
+	textproto.CanonicalMIMEHeaderKey("X-Warden-Subject-Token"): {},
+	textproto.CanonicalMIMEHeaderKey("X-Warden-Actor-Token"):   {},
+}
+
+// ValidateUserAuthConfig validates the secondary (user) transparent-auth config
+// fields: user_auth_path, user_token_header, and user_auth_role. It enforces
+// their types, the user_token_header deny-list, and the user_token_header /
+// user_auth_role → user_auth_path dependency (both are meaningless without a
+// user_auth_path and would otherwise be silently discarded). The bearer-format
+// requirement on the referenced mount (a header cannot carry an X.509 client
+// certificate) is enforced at runtime, where mount visibility exists — config
+// validation here has none.
+func ValidateUserAuthConfig(conf map[string]any) error {
+	if err := ValidateStringField(conf, "user_auth_path"); err != nil {
+		return err
+	}
+	if err := ValidateStringField(conf, "user_token_header"); err != nil {
+		return err
+	}
+	if err := ValidateStringField(conf, "user_auth_role"); err != nil {
+		return err
+	}
+
+	path, _ := conf["user_auth_path"].(string)
+
+	if hdr, _ := conf["user_token_header"].(string); hdr != "" {
+		if _, bad := wardenControlHeaders[textproto.CanonicalMIMEHeaderKey(hdr)]; bad {
+			return fmt.Errorf("user_token_header must not alias a Warden control header (%q)", hdr)
+		}
+		if path == "" {
+			return fmt.Errorf("user_token_header requires user_auth_path")
+		}
+	}
+
+	if role, _ := conf["user_auth_role"].(string); role != "" && path == "" {
+		return fmt.Errorf("user_auth_role requires user_auth_path")
+	}
+
+	return nil
 }

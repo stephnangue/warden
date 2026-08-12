@@ -10,6 +10,7 @@ var BaseHeadersToRemove = []string{
 	"X-Warden-Provider",
 	"X-Warden-Subject-Token",
 	"X-Warden-Actor-Token",
+	"X-Warden-User-Token",
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",

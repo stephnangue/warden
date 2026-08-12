@@ -338,3 +338,59 @@ func TestValidateCommonConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), "default_role must be a string")
 	})
 }
+
+func TestValidateUserAuthConfig(t *testing.T) {
+	t.Run("empty config is valid (feature off)", func(t *testing.T) {
+		assert.NoError(t, ValidateUserAuthConfig(map[string]any{}))
+	})
+
+	t.Run("all valid fields", func(t *testing.T) {
+		err := ValidateUserAuthConfig(map[string]any{
+			"user_auth_path":    "auth/user-jwt/",
+			"user_token_header": "X-Warden-User-Token",
+			"user_auth_role":    "slack-user",
+		})
+		assert.NoError(t, err)
+	})
+
+	t.Run("Authorization is an allowed user_token_header", func(t *testing.T) {
+		err := ValidateUserAuthConfig(map[string]any{
+			"user_auth_path":    "auth/user-jwt/",
+			"user_token_header": "Authorization",
+		})
+		assert.NoError(t, err)
+	})
+
+	t.Run("non-string user_auth_path", func(t *testing.T) {
+		err := ValidateUserAuthConfig(map[string]any{"user_auth_path": 123})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "user_auth_path must be a string")
+	})
+
+	t.Run("user_token_header aliasing a control header is rejected", func(t *testing.T) {
+		// Includes the token-exchange transport headers, which Warden also reads.
+		for _, h := range []string{
+			"X-Warden-Token", "x-warden-token", "X-Warden-Role", "X-Warden-Namespace",
+			"X-Warden-Subject-Token", "X-Warden-Actor-Token",
+		} {
+			err := ValidateUserAuthConfig(map[string]any{
+				"user_auth_path":    "auth/user-jwt/",
+				"user_token_header": h,
+			})
+			require.Errorf(t, err, "header %q must be rejected", h)
+			assert.Contains(t, err.Error(), "must not alias a Warden control header")
+		}
+	})
+
+	t.Run("user_token_header without user_auth_path is rejected", func(t *testing.T) {
+		err := ValidateUserAuthConfig(map[string]any{"user_token_header": "X-User-Jwt"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "user_token_header requires user_auth_path")
+	})
+
+	t.Run("user_auth_role without user_auth_path is rejected", func(t *testing.T) {
+		err := ValidateUserAuthConfig(map[string]any{"user_auth_role": "slack-user"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "user_auth_role requires user_auth_path")
+	})
+}

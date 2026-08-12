@@ -155,6 +155,28 @@ type TransparentModeProvider interface {
 	IsTransparentPath(path string) bool
 }
 
+// UserAuthConfigProvider is implemented by transparent providers that additionally
+// authenticate a secondary, per-request USER principal from a second request header
+// (secondary transparent authentication). It is deliberately kept separate from
+// TransparentModeProvider so that adding per-user auth does not force every
+// transparent provider (and every test fake) to implement it: a provider that does
+// not opt in simply does not satisfy this interface, and req.User stays nil (feature
+// off, request unchanged).
+type UserAuthConfigProvider interface {
+	// GetUserAuthPath returns the auth mount path that authenticates user
+	// credentials (e.g., "auth/user-jwt/"), or "" when per-user auth is not
+	// configured — in which case the feature is off and the request is unchanged.
+	GetUserAuthPath() string
+
+	// GetUserTokenHeader returns the request header carrying the user credential.
+	// Empty means the default (X-Warden-User-Token).
+	GetUserTokenHeader() string
+
+	// GetUserAuthRole returns the role used to authenticate the user credential,
+	// or "" to fall back to the user auth mount's own default_role.
+	GetUserAuthRole() string
+}
+
 // TransparentAuthRoleExtractor can be implemented by providers that extract
 // the auth role from protocol-specific request data (Authorization headers,
 // Basic Auth username, etc.) rather than the URL path. Used by SigV4-compatible
