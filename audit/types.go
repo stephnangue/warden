@@ -110,6 +110,25 @@ type Auth struct {
 	// Actor chain — the verified RFC 8693 "act" delegation chain from the
 	// authenticated token (the JWT "act" claim per RFC 8693 §4.1).
 	Actors []ActorRef `json:"actors,omitempty"`
+
+	// User is the secondary (user) principal the agent acted for, captured by
+	// secondary transparent authentication. Present only when a user credential
+	// was resolved for the request; nil otherwise. Identity only — the raw user
+	// credential is never logged.
+	User *UserAttribution `json:"user,omitempty"`
+}
+
+// UserAttribution records the secondary (user) principal in an audit entry so a
+// per-user credential mint is attributable to the human it was performed for. It
+// carries identity only — the raw user credential is never logged.
+type UserAttribution struct {
+	// Subject is the user's raw principal (their auth-method subject, e.g. the
+	// JWT sub) — the same value carried as warden_user.sub in the assertion.
+	Subject string `json:"subject,omitempty"`
+	// TokenID is the user token's hash-based ID (safe to log).
+	TokenID string `json:"token_id,omitempty"`
+	// NamespaceID is the user token's namespace.
+	NamespaceID string `json:"namespace_id,omitempty"`
 }
 
 // ActorRef identifies one party in the RFC 8693 "act" delegation chain

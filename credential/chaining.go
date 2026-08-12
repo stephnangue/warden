@@ -57,6 +57,37 @@ type Caller struct {
 	// is nil on non-request code paths, in which case a chained secret-spec that
 	// needs exchange fails closed at mint time.
 	ResolveInputs func(ctx context.Context, specName string) (*ExchangeInputs, error)
+
+	// User is the secondary (user) principal for per-user credential chaining, or
+	// nil for an agent-only request. It is identity for scoping only — never an
+	// authorizer — and carries just the user token id, the one datum the manager
+	// (this package) needs and cannot reach across the import boundary. The user's
+	// identity (wardenSubject) and login-derived metadata are NOT duplicated here:
+	// core reads them from the request's user token entry at the point of use (the
+	// warden_user assertion claim and the audit stamp). Built by core.
+	User *UserContext
+}
+
+// UserContext identifies the secondary (user) principal to the mint pipeline. It
+// deliberately carries only the token id and TTL, NOT a *logical.TokenEntry: the
+// logical package already imports credential (logical.Request.Credential is a
+// *credential.Credential), so a token entry on a credential type would form a
+// credential→logical→credential import cycle. Anything richer about the user
+// (identity subject, metadata) is read by core from the request's user token entry
+// where it is consumed (the warden_user assertion claim), not projected here.
+type UserContext struct {
+	// TokenID is the user token's ID — the per-user credential-cache dimension,
+	// mirroring the agent's Caller.TokenID (both principals keyed by token id, not
+	// identity, so the entry is bound to the token lifecycle: revoking or
+	// re-logging-in the user yields a new id and thus a fresh mint).
+	TokenID string
+
+	// TokenTTL is the user token's remaining lifetime, mirroring the agent's
+	// Caller.TokenTTL. The manager bounds the chained credential's cache/lease
+	// duration by it alongside the agent's TokenTTL, so revoking or expiring EITHER
+	// principal evicts the entry and stops new mints. Zero means "no bound from the
+	// user side".
+	TokenTTL time.Duration
 }
 
 // chainDepthCtxKey carries the current secret_spec recursion depth on the context.

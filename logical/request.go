@@ -81,6 +81,16 @@ type Request struct {
 
 	tokenEntry *TokenEntry
 
+	// User is the secondary, per-request principal — the human on whose behalf the
+	// agent acts — resolved by secondary transparent authentication from a second
+	// request header when the provider/namespace configures user_auth_path. It is
+	// IDENTITY-ONLY: it never authorizes the request (the primary/agent token entry
+	// alone does that) and is never SetTokenEntry'd. It scopes per-user credential
+	// chaining: the warden_user assertion claim, the per-user credential-cache
+	// dimension, and audit attribution. Nil when the feature is unconfigured, which
+	// keeps the request byte-identical to before.
+	User *UserPrincipal `json:"-"`
+
 	// TokenMetadata carries the authenticating token's verified, login-derived
 	// Metadata into policy evaluation so token_metadata conditions can match
 	// against it. Set from the token entry at the policy-check seam; never
@@ -154,4 +164,29 @@ func (r *Request) TokenEntry() *TokenEntry {
 
 func (r *Request) SetTokenEntry(te *TokenEntry) {
 	r.tokenEntry = te
+}
+
+// DefaultUserTokenHeader is the default request header carrying the secondary
+// (user) credential for secondary transparent authentication. Providers may
+// override it via user_token_header. It is a bearer secret and is stripped from
+// every upstream-forwarding header list.
+const DefaultUserTokenHeader = "X-Warden-User-Token"
+
+// UserPrincipal is a request's secondary (user) principal: a first-class Warden
+// TokenEntry resolved from a second request header via the existing auth methods,
+// exactly as the primary/agent credential is. It carries both the validated token
+// entry — the source of the user's identity and login-derived metadata — and the
+// raw user credential, which the token-exchange driver forwards verbatim as an
+// RFC 8693 subject_token. It is identity-only: it is never the request's primary
+// principal and never authorizes the request on its own.
+type UserPrincipal struct {
+	// TokenEntry is the validated user token entry — the source of the user's
+	// identity and its login-derived Metadata.
+	TokenEntry *TokenEntry
+
+	// RawToken is the raw user credential as presented in the request header,
+	// retained so the token-exchange driver can forward it as an RFC 8693
+	// subject_token. It is a bearer secret: kept off audit serialization and
+	// stripped from every upstream-forwarding header list.
+	RawToken string
 }

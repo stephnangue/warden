@@ -954,6 +954,7 @@ func TestPrepareHeaders(t *testing.T) {
 		req.Header.Set("X-Warden-Token", "warden-token")
 		req.Header.Set("X-Warden-Subject-Token", "eyJ.subject")
 		req.Header.Set("X-Warden-Actor-Token", "eyJ.actor")
+		req.Header.Set("X-Warden-User-Token", "user-credential")
 		req.Header.Set("X-Custom-Remove", "should-go")
 		req.Header.Set("X-Keep", "keep-me")
 
@@ -964,6 +965,8 @@ func TestPrepareHeaders(t *testing.T) {
 		// Token-exchange inputs are internal secrets and must never reach upstream.
 		assert.Empty(t, req.Header.Get("X-Warden-Subject-Token"))
 		assert.Empty(t, req.Header.Get("X-Warden-Actor-Token"))
+		// The secondary user credential is a bearer secret and must not proxy upstream.
+		assert.Empty(t, req.Header.Get("X-Warden-User-Token"))
 		assert.Empty(t, req.Header.Get("X-Custom-Remove"))
 		assert.Equal(t, "keep-me", req.Header.Get("X-Keep"))
 	})

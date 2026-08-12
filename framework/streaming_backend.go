@@ -58,6 +58,19 @@ type TransparentConfig struct {
 	// PathRewriter converts transparent paths to standard paths (optional)
 	// If nil, uses DefaultPathRewriter: role/X/gateway/... -> gateway/...
 	PathRewriter func(path string) string
+
+	// UserAuthPath is the auth mount that authenticates the secondary (user)
+	// principal from a second request header (secondary transparent auth). Empty
+	// disables per-user auth for this provider. See logical.UserAuthConfigProvider.
+	UserAuthPath string
+
+	// UserTokenHeader is the request header carrying the user credential. Empty
+	// means the default (logical.DefaultUserTokenHeader).
+	UserTokenHeader string
+
+	// UserAuthRole is the role used to authenticate the user credential. Empty
+	// falls back to the user auth mount's own default_role.
+	UserAuthRole string
 }
 
 // unauthPathsEntry holds parsed unauthenticated paths for efficient matching
@@ -655,6 +668,40 @@ func (b *StreamingBackend) GetDefaultAuthRole() string {
 		return ""
 	}
 	return tc.DefaultAuthRole
+}
+
+// UserAuthConfigProvider interface implementation. A StreamingBackend always
+// satisfies logical.UserAuthConfigProvider; per-user auth is off (all getters
+// return "") until a provider's config sets the fields on TransparentConfig.
+
+// GetUserAuthPath returns the auth mount that authenticates the secondary (user)
+// principal, or "" when per-user auth is not configured.
+func (b *StreamingBackend) GetUserAuthPath() string {
+	tc := b.transparentConfig.Load()
+	if tc == nil {
+		return ""
+	}
+	return tc.UserAuthPath
+}
+
+// GetUserTokenHeader returns the request header carrying the user credential,
+// or "" for the default (logical.DefaultUserTokenHeader).
+func (b *StreamingBackend) GetUserTokenHeader() string {
+	tc := b.transparentConfig.Load()
+	if tc == nil {
+		return ""
+	}
+	return tc.UserTokenHeader
+}
+
+// GetUserAuthRole returns the role used to authenticate the user credential,
+// or "" to fall back to the user auth mount's own default_role.
+func (b *StreamingBackend) GetUserAuthRole() string {
+	tc := b.transparentConfig.Load()
+	if tc == nil {
+		return ""
+	}
+	return tc.UserAuthRole
 }
 
 // RewriteTransparentPath rewrites a transparent path to standard path

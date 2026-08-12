@@ -181,6 +181,17 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 		cacheKey += ":x:" + inputs.Fingerprint()
 	}
 
+	// Scope the entry to the secondary (user) principal when present, mirroring the
+	// outer key's use of the AGENT's token id (caller.TokenID): both principals are
+	// keyed by token id, not identity, so the entry is bound to the token lifecycle
+	// — revoking or re-logging-in the user yields a new token id and thus a fresh
+	// mint. This dimension is independent of the exchange fingerprint, so a chained
+	// consumer (whose outer key carries no ":x:" fragment) still gets per-user
+	// isolation. Byte-identical when caller.User == nil.
+	if caller.User != nil {
+		cacheKey += ":u:" + caller.User.TokenID
+	}
+
 	// Check cache first. A cached credential that has outlived its lease is
 	// treated as a miss and re-minted: the cache carries no read-time expiry of
 	// its own, and non-revocable credentials (e.g. exchanged bearer tokens) are
@@ -238,24 +249,36 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 		cred.TokenID = caller.TokenID
 		cred.SpecName = specName
 
+		// sessionTTL bounds the cached credential's lifetime by the requesting
+		// principals' token lifetimes: the agent (caller.TokenTTL) always caps it,
+		// and for per-user chaining the user (caller.User.TokenTTL) caps it too, so a
+		// cached credential is never served past EITHER principal's expiry. (A
+		// principal revoked mid-session drives no new mint regardless — the request
+		// presenting it fails auth before the cache is consulted.) Zero means "no
+		// session bound" (internal/non-request callers).
+		sessionTTL := caller.TokenTTL
+		if caller.User != nil && caller.User.TokenTTL > 0 && (sessionTTL <= 0 || caller.User.TokenTTL < sessionTTL) {
+			sessionTTL = caller.User.TokenTTL
+		}
+
 		// Cache the credential. Bound a dynamic credential's entry by its remaining
 		// lifetime (capped by the session TTL) so an expired token is actively
 		// evicted rather than lingering; the IsExpired guard on the read path is the
 		// correctness backstop, this keeps memory from accumulating stale entries.
 		if cred.LeaseTTL > 0 {
 			ttl := cred.LeaseTTL
-			if caller.TokenTTL > 0 && caller.TokenTTL < ttl {
-				ttl = caller.TokenTTL
+			if sessionTTL > 0 && sessionTTL < ttl {
+				ttl = sessionTTL
 			}
 			m.cache.SetWithTTL(cacheKey, cred, 1, ttl)
-		} else if caller.TokenTTL > 0 {
+		} else if sessionTTL > 0 {
 			// A static credential (no lease) is still bound to this session: cap its
 			// entry by the session TTL so it self-evicts at session end rather than
 			// lingering until cache pressure. This also bounds a chained static
 			// credential's staleness — a rotated upstream secret is re-fetched at most
 			// one session later. Falls back to an untimed set only when no session TTL
 			// is known (internal/non-request callers).
-			m.cache.SetWithTTL(cacheKey, cred, 1, caller.TokenTTL)
+			m.cache.SetWithTTL(cacheKey, cred, 1, sessionTTL)
 		} else {
 			m.cache.Set(cacheKey, cred, 1)
 		}
@@ -270,7 +293,7 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 				ctx,               // Context with namespace
 				cred.CredentialID, // Unique ID for this credential instance (UUID)
 				cacheKey,          // Cache key for cache lookup/deletion
-				caller.TokenTTL,
+				sessionTTL,
 				cred.LeaseID,
 				cred.SourceName,
 				cred.SourceType,

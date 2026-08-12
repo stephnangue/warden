@@ -2804,3 +2804,89 @@ func TestResolveExchangeInputs_WardenIdentity_IssuerNotReadyFailsClosed(t *testi
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not enabled/ready")
 }
+
+// parseJWTClaimsForTest decodes a JWT's (unverified) claim set for assertions.
+func parseJWTClaimsForTest(t *testing.T, token string) map[string]interface{} {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3)
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims map[string]interface{}
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return claims
+}
+
+// TestResolveExchangeInputs_WardenUserClaims covers the per-user federation path:
+// a warden_identity subject spec with assertion_user_claims projects the user into
+// inputs.UserClaims (for driver templating) and into the assertion's warden_user
+// claim, while the assertion's own sub stays the AGENT. It also covers the sub-only
+// opt-in and the fail-closed cases.
+func TestResolveExchangeInputs_WardenUserClaims(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "wid-user", map[string]string{
+		credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:   "https://vault.example/aud",
+		credential.ConfigAssertionUserClaims: "username",
+	})
+	seedSpec(t, c, ctx, "wid-subonly", map[string]string{
+		credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:   "https://vault.example/aud",
+		credential.ConfigAssertionUserClaims: "sub",
+	})
+
+	agentTE := &logical.TokenEntry{CredentialSpec: "wid-user", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1"}
+	userTE := &logical.TokenEntry{PrincipalID: "alice-sub", NamespaceID: "ns1", MountAccessor: "auth_user", Metadata: map[string]string{"username": "alice"}}
+
+	t.Run("projects user claims and emits warden_user; sub stays the agent", func(t *testing.T) {
+		req := requestWith("s.opaque-session", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: userTE}
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
+		require.NoError(t, err)
+		require.NotNil(t, inputs)
+		// UserClaims (driver templating): projected metadata + the user's raw principal.
+		assert.Equal(t, "alice", inputs.UserClaims["username"])
+		assert.Equal(t, "alice-sub", inputs.UserClaims["sub"], "warden_user.sub is the user's raw principal")
+
+		tok, err := inputs.ResolveSubjectToken(ctx)
+		require.NoError(t, err)
+		claims := parseJWTClaimsForTest(t, tok)
+		assert.Equal(t, wardenSubject(agentTE), claims["sub"], "assertion sub stays the AGENT composite")
+		assert.Equal(t, "agent-bot", claims["warden_sub"], "warden_sub is the agent's raw principal")
+		wu, ok := claims["warden_user"].(map[string]interface{})
+		require.True(t, ok, "warden_user missing: %v", claims["warden_user"])
+		assert.Equal(t, "alice", wu["username"])
+		assert.Equal(t, "alice-sub", wu["sub"])
+	})
+
+	t.Run("sub-only opt-in yields identity-only warden_user", func(t *testing.T) {
+		subOnlyAgent := &logical.TokenEntry{CredentialSpec: "wid-subonly", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1"}
+		req := requestWith("s.opaque-session", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: userTE}
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, subOnlyAgent)
+		require.NoError(t, err)
+		require.Equal(t, map[string]string{"sub": "alice-sub"}, inputs.UserClaims, "sub-only opt-in needs no metadata key named sub")
+	})
+
+	t.Run("assertion_user_claims set but no user principal fails closed", func(t *testing.T) {
+		req := requestWith("s.opaque-session", nil) // no req.User
+		_, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no user principal")
+	})
+
+	t.Run("absent named claim fails closed", func(t *testing.T) {
+		seedSpec(t, c, ctx, "wid-missing", map[string]string{
+			credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:   "https://vault.example/aud",
+			credential.ConfigAssertionUserClaims: "department",
+		})
+		missAgent := &logical.TokenEntry{CredentialSpec: "wid-missing", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1"}
+		req := requestWith("s.opaque-session", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: userTE} // has username, not department
+		_, err := resolveExchangeInputsForTest(c, ctx, req, missAgent)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "department")
+	})
+}

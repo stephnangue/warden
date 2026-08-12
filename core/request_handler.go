@@ -901,6 +901,24 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 				}
 			}
 		}
+
+		// Secondary transparent authentication: resolve the per-request USER
+		// principal (identity only) from a second request header when the
+		// provider or namespace configures user_auth_path. It runs upfront —
+		// before CheckToken and thus before the CBP decision — so the user is a
+		// first-class, already-validated principal by the time authorization and
+		// minting run. Skipped for stream-unauthenticated requests, which bypass
+		// CheckToken, minting, and audit entirely.
+		if !req.StreamUnauthenticated {
+			if err := c.captureUserContext(ctx, req, matchingBackend); err != nil {
+				c.logger.Warn("secondary user authentication failed",
+					logger.Err(err),
+					logger.String("path", req.Path),
+					logger.String("request_id", req.RequestID),
+				)
+				return logical.ErrorResponse(logical.ErrUnauthorized(err.Error())), nil, nil
+			}
+		}
 	}
 
 	var auth *logical.Auth
@@ -1239,6 +1257,35 @@ func projectAssertionMetadata(md map[string]string, keys []string) (map[string]s
 	return projected, string(encoded), nil
 }
 
+// projectUserClaims selects the operator-allowlisted keys from the secondary
+// (user) principal's login-derived metadata for the nested warden_user assertion
+// claim and for per-user secret_path templating. Unlike projectAssertionMetadata it
+// FAILS CLOSED on an absent key: warden_user scopes a security-sensitive downstream
+// path (a templated policy / a per-user secret path), so a named-but-missing claim
+// must deny rather than silently widen the scope. Returns the projected map, which
+// is empty-key → nil.
+func projectUserClaims(md map[string]string, keys []string) (map[string]string, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	projected := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, ok := md[k]
+		if !ok {
+			return nil, fmt.Errorf("assertion_user_claims names %q but the user token has no such claim", k)
+		}
+		projected[k] = v
+	}
+	encoded, err := json.Marshal(projected)
+	if err != nil {
+		return nil, fmt.Errorf("marshal user claims: %w", err)
+	}
+	if len(encoded) > maxAssertionMetadataBytes {
+		return nil, fmt.Errorf("user claims exceed %d bytes", maxAssertionMetadataBytes)
+	}
+	return projected, nil
+}
+
 // resolveExchangeInputs derives the token-exchange inputs for the named spec on
 // this request. specName is passed explicitly (rather than taken from te) so it can
 // resolve inputs for a spec other than the caller's bound one — credential chaining
@@ -1288,6 +1335,15 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		return srcCached, nil
 	}
 
+	// The secondary (user) principal, when the request captured one, feeds the
+	// warden_user assertion claim and per-user secret_path templating. Read from the
+	// request — the same object the chaining closure captures, so it is present for a
+	// chained secret-spec too.
+	var userTE *logical.TokenEntry
+	if req.User != nil {
+		userTE = req.User.TokenEntry
+	}
+
 	switch spec.Config[credential.ConfigSubjectTokenSource] {
 	case credential.SourceAuthToken:
 		// Reuse the JWT Warden verified during inbound authentication. It lives
@@ -1319,7 +1375,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// identity as the subject (Workload Identity Federation). Origin verified —
 		// Warden signed it. Minted lazily on a cache miss; fails closed if the
 		// issuer is disabled/not-ready or no audience is available.
-		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, loadSource)
+		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, userTE, loadSource)
 		if err != nil {
 			return nil, err
 		}
@@ -1327,6 +1383,10 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		inputs.SubjectTokenOrigin = credential.ExchangeOriginVerified
 		inputs.SubjectCacheIdentity = setup.cacheIdentity
 		inputs.ResolveSubjectToken = setup.resolve
+		// Surface the projected user claims so the driver can template a per-user
+		// request (e.g. kv2_read's secret_path) — the same projection embedded in the
+		// assertion's warden_user claim. Nil unless the spec set assertion_user_claims.
+		inputs.UserClaims = setup.userClaims
 	default:
 		// SpecRequestsExchange already excluded "none"/absent; any other value
 		// was rejected at spec-validation time.
@@ -1363,7 +1423,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// behalf of the distinct user carried in the subject header (spec validation
 		// requires subject_token_source=header here). Origin verified — Warden minted
 		// it — and, like the subject assertion, minted lazily on a cache miss.
-		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, loadSource)
+		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, userTE, loadSource)
 		if err != nil {
 			return nil, err
 		}
@@ -1371,6 +1431,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		inputs.ActorTokenOrigin = credential.ExchangeOriginVerified
 		inputs.ActorCacheIdentity = setup.cacheIdentity
 		inputs.ResolveActorToken = setup.resolve
+		inputs.UserClaims = setup.userClaims
 	default:
 		// No actor requested: drop any default type so Validate's pairing holds.
 		inputs.ActorTokenType = ""
@@ -1384,11 +1445,18 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 
 // assertionSetup holds the parts resolveExchangeInputs needs to configure a
 // warden_identity slot (subject or actor): a stable cache fragment that keys the
-// credential cache in place of the per-request-volatile assertion bytes, and the
-// closure that mints the assertion lazily on a cache miss.
+// credential cache in place of the per-request-volatile assertion bytes, the
+// closure that mints the assertion lazily on a cache miss, and the projected
+// secondary-user claims (empty when the spec discloses no user) that a driver
+// templates its per-user request from.
 type assertionSetup struct {
 	cacheIdentity string
 	resolve       func(ctx context.Context) (string, error)
+	// userClaims is the projected assertion_user_claims map (the same values
+	// embedded in the assertion's warden_user claim), surfaced so the driver can
+	// template a per-user path from them. Nil when the spec sets no
+	// assertion_user_claims.
+	userClaims map[string]string
 }
 
 // buildAssertionSetup validates the OIDC issuer is ready and derives the
@@ -1404,7 +1472,7 @@ type assertionSetup struct {
 // derived from the source; resource is unset→derived, "none"→omitted, else
 // verbatim; metadata is the operator-allowlisted projection (empty→no claim, so
 // the cache key is byte-identical to the no-metadata case).
-func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *credential.CredSpec, te *logical.TokenEntry, loadSource func() (*credential.CredSource, error)) (*assertionSetup, error) {
+func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *credential.CredSpec, te *logical.TokenEntry, userTE *logical.TokenEntry, loadSource func() (*credential.CredSource, error)) (*assertionSetup, error) {
 	issuer := c.OIDCIssuer()
 	if issuer == nil || !issuer.Ready() {
 		return nil, fmt.Errorf("spec %q requires warden_identity but the OIDC issuer is not enabled/ready", specName)
@@ -1452,6 +1520,46 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 		return nil, fmt.Errorf("spec %q: %w", specName, err)
 	}
 
+	// Project the secondary (user) principal into the nested warden_user claim, but
+	// only when the spec opts into disclosure via assertion_user_claims — like
+	// assertion_metadata_claims, a spec that does not ask never leaks user identity
+	// into its assertion. When it asks, a user principal MUST be present and every
+	// named claim MUST resolve; both fail closed, since warden_user scopes a
+	// security-sensitive downstream path. userClaims (the projected values) is
+	// surfaced on the setup so a driver can template a per-user path from it; the
+	// assertion's warden_user additionally carries the user's original sub (the raw
+	// principal, as warden_sub does for the agent — never the Warden composite).
+	// Per-user cache isolation is the manager's ":u:" token-id dimension, so the
+	// user does not enter cacheIdentity here.
+	var userClaims map[string]string
+	if userKeys := credential.AssertionUserClaimKeys(spec.Config); len(userKeys) > 0 {
+		if userTE == nil {
+			return nil, fmt.Errorf("spec %q sets assertion_user_claims but no user principal was presented", specName)
+		}
+		// "sub" names the user's identity principal, not a metadata key — exclude it
+		// from the metadata projection so an operator can list it (to bind
+		// warden_user.sub / template {{user.sub}}) without needing a metadata key
+		// literally named "sub". Listing only "sub" yields an identity-only warden_user.
+		metaKeys := make([]string, 0, len(userKeys))
+		for _, k := range userKeys {
+			if k != "sub" {
+				metaKeys = append(metaKeys, k)
+			}
+		}
+		projectedUser, perr := projectUserClaims(userTE.Metadata, metaKeys)
+		if perr != nil {
+			return nil, fmt.Errorf("spec %q: %w", specName, perr)
+		}
+		// One warden_user map serves BOTH the assertion claim and secret_path
+		// templating, so {{user.sub}} templates exactly the value the policy binds.
+		// The identity sub (the raw principal) is authoritative and set last.
+		userClaims = make(map[string]string, len(projectedUser)+1)
+		for k, v := range projectedUser {
+			userClaims[k] = v
+		}
+		userClaims["sub"] = userTE.PrincipalID
+	}
+
 	// Key the credential cache on the stable identity + audience, NOT the
 	// freshly-minted assertion bytes (which change every request), so one identity
 	// reuses its cached upstream credential. Fold in the resource (it can come from
@@ -1476,13 +1584,15 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	alg := credential.AssertionAlgorithm(spec.Config)
 	return &assertionSetup{
 		cacheIdentity: cacheIdentity,
+		userClaims:    userClaims,
 		resolve: func(ctx context.Context) (string, error) {
 			return issuer.MintIdentityAssertion(ctx, te, AssertionClaims{
-				Audience: audience,
-				TTL:      issuer.AssertionTTL(),
-				Alg:      alg,
-				Metadata: projected,
-				Resource: resource,
+				Audience:   audience,
+				TTL:        issuer.AssertionTTL(),
+				Alg:        alg,
+				Metadata:   projected,
+				Resource:   resource,
+				UserClaims: userClaims,
 			})
 		},
 	}, nil
@@ -1526,6 +1636,29 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 		tokenTTL = 1 * time.Hour
 	}
 
+	// Identify the secondary (user) principal to the mint pipeline for per-user
+	// credential chaining (identity only). Only the user token id and TTL cross into
+	// the credential package — the token id is the ":u:" cache dimension, and the
+	// manager bounds the credential's cache duration by BOTH principals' TTLs so
+	// revoking or expiring EITHER stops new mints. The user TTL is computed exactly
+	// like the agent's above (1h default for a non-expiring token; expired is an
+	// error). The user's identity/metadata are read from req.User where they are
+	// consumed (the warden_user assertion), not duplicated here.
+	var userCtx *credential.UserContext
+	if req.User != nil && req.User.TokenEntry != nil {
+		ute := req.User.TokenEntry
+		var userTTL time.Duration
+		if !ute.ExpireAt.IsZero() {
+			userTTL = time.Until(ute.ExpireAt)
+			if userTTL <= 0 {
+				return fmt.Errorf("user token has expired")
+			}
+		} else {
+			userTTL = 1 * time.Hour
+		}
+		userCtx = &credential.UserContext{TokenID: ute.ID, TokenTTL: userTTL}
+	}
+
 	// The caller carries the requesting identity through the mint pipeline so a
 	// chained secret-spec (credential chaining) is minted as this same caller.
 	// ResolveInputs resolves token-exchange inputs for an arbitrary spec as this
@@ -1534,6 +1667,7 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 	caller := credential.Caller{
 		TokenID:  te.ID,
 		TokenTTL: tokenTTL,
+		User:     userCtx,
 		ResolveInputs: func(ctx context.Context, specName string) (*credential.ExchangeInputs, error) {
 			return c.resolveExchangeInputs(ctx, req, te, specName)
 		},
@@ -1674,10 +1808,152 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 	return c.performImplicitAuth(ctx, req, autoAuthPath, authRole)
 }
 
-// performImplicitAuth performs implicit authentication by routing through the
-// auth mount the caller's namespace/provider points at, looking up cached
-// tokens, and performing login if needed. Used by both gateway requests and
-// transparent operations.
+// captureUserContext resolves the request's secondary (user) principal and
+// attaches it to req.User when the provider or namespace configures per-user auth
+// (user_auth_path) AND the request actually carries a user credential. It runs
+// upfront — before CheckToken, and therefore before the CBP decision — so the
+// user is a first-class, already-validated principal by the time authorization
+// and minting run. It is IDENTITY-ONLY: it never sets the request's primary token
+// entry (never calls req.SetTokenEntry) and never authorizes the request; the
+// primary/agent token alone does that.
+//
+// A missing user credential is NOT an error here: per-user auth being configured
+// on a provider does not mean every request through it needs a user principal. An
+// absent credential simply leaves req.User nil, and the credential/policy layer
+// fails closed only for flows that actually require the user context (a spec with
+// assertion_user_claims or a templated secret_path). This keeps user-less requests
+// working. What IS fail-closed here is a user credential that is present but
+// unusable: invalid/unauthenticable, cross-namespace, or identical to the agent's
+// own credential. An unset user_auth_path is a no-op — req.User stays nil and the
+// request is byte-identical to before the feature.
+func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, backend logical.Backend) error {
+	userAuthPath, userTokenHeader, userAuthRole := c.resolveUserAuthConfig(ctx, backend)
+	if userAuthPath == "" {
+		return nil // per-user auth not configured — feature off
+	}
+
+	if userTokenHeader == "" {
+		userTokenHeader = logical.DefaultUserTokenHeader
+	}
+	userTokenHeader = http.CanonicalHeaderKey(userTokenHeader)
+
+	userCred := resolveHeaderToken(req.HTTPRequest, userTokenHeader)
+	if userCred == "" {
+		// No user credential presented. Leave req.User nil and let a downstream
+		// flow that genuinely needs the user (assertion_user_claims, a templated
+		// secret_path) fail closed on its own; a flow that does not is unaffected.
+		return nil
+	}
+
+	// Fail closed if the user credential is the agent's own token — a
+	// misconfiguration (or an Authorization-header collision for a JWT-bearer
+	// agent) that would otherwise authenticate the agent as the user.
+	if userCred == req.ClientToken {
+		return fmt.Errorf("the user credential must differ from the agent credential")
+	}
+
+	// The user credential is a bearer secret. Strip it from the request now that it
+	// is captured, so it never proxies to an upstream or lands in an audit header
+	// copy: this covers a custom user_token_header that the static per-provider
+	// strip lists cannot name, and any forwarding path without a Warden strip list.
+	// req.User.RawToken retains the value for the RFC 8693 subject_token path.
+	req.HTTPRequest.Header.Del(userTokenHeader)
+
+	userTE, _, err := c.resolveTransparentIdentity(ctx, req, userAuthPath, userAuthRole, userCred)
+	if err != nil {
+		return fmt.Errorf("user authentication failed: %w", err)
+	}
+
+	// Cross-namespace guard (defense-in-depth): the user must live in the
+	// request's namespace. resolveTransparentIdentity routes through the mount in
+	// the request namespace, so a mismatch should not arise — fail closed if it does.
+	if ns, nsErr := namespace.FromContext(ctx); nsErr == nil && ns != nil && userTE.NamespaceID != ns.ID {
+		return fmt.Errorf("user token namespace %q does not match request namespace %q", userTE.NamespaceID, ns.ID)
+	}
+
+	req.User = &logical.UserPrincipal{
+		TokenEntry: userTE,
+		RawToken:   userCred,
+	}
+	return nil
+}
+
+// resolveUserAuthConfig resolves the secondary (user) auth configuration for a
+// gateway request. The provider is consulted first (a backend that implements
+// logical.UserAuthConfigProvider), then the request namespace's custom metadata
+// (user_auth_path / user_token_header / user_auth_role) — mirroring how primary
+// transparent auth resolves auto_auth_path from the provider or the namespace.
+// Returns an empty path when per-user auth is not configured anywhere.
+func (c *Core) resolveUserAuthConfig(ctx context.Context, backend logical.Backend) (userAuthPath, userTokenHeader, userAuthRole string) {
+	if p, ok := backend.(logical.UserAuthConfigProvider); ok {
+		userAuthPath = p.GetUserAuthPath()
+		userTokenHeader = p.GetUserTokenHeader()
+		userAuthRole = p.GetUserAuthRole()
+	}
+	if userAuthPath == "" {
+		if ns, _ := namespace.FromContext(ctx); ns != nil {
+			userAuthPath = ns.CustomMetadata["user_auth_path"]
+			userTokenHeader = ns.CustomMetadata["user_token_header"]
+			userAuthRole = ns.CustomMetadata["user_auth_role"]
+		}
+	}
+	return userAuthPath, userTokenHeader, userAuthRole
+}
+
+// performImplicitAuth performs implicit authentication for the PRIMARY principal
+// (the agent) by routing the request's own credential through the auth mount the
+// caller's namespace/provider points at. It delegates the credential→TokenEntry
+// resolution to resolveTransparentIdentity and then applies the request mutations
+// that mark the resolved token as this request's primary principal
+// (req.Transparent, req.SetTokenEntry, and the ClientToken assignment). Used by
+// both gateway requests and transparent operations.
+func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, autoAuthPath, authRole string) error {
+	// Mark request as implicit auth
+	req.Transparent = true
+
+	te, clearClientToken, err := c.resolveTransparentIdentity(ctx, req, autoAuthPath, authRole, "")
+	if err != nil {
+		return err
+	}
+
+	// The X.509-SVID case authenticates via a forwarded/TLS cert; drop any stray
+	// non-SVID bearer so the cert-minted token ID becomes ClientToken below.
+	if clearClientToken {
+		req.ClientToken = ""
+	}
+	req.SetTokenEntry(te)
+	// Ensure ClientToken is set so downstream policy checks (fetchCBPAndTokenEntry)
+	// don't short-circuit on the empty-token guard. For JWT transparent auth the
+	// JWT string is already in ClientToken, but for cert transparent auth there is
+	// no token in the request — only a certificate.
+	if req.ClientToken == "" {
+		req.ClientToken = te.ID
+	}
+	return nil
+}
+
+// resolveTransparentIdentity turns a credential into a cached-or-freshly-minted
+// TokenEntry by routing through the auth mount at autoAuthPath: it resolves the
+// mount, selects the registered TransparentTokenType, dispatches on the credential
+// format, checks the transparent-token cache, and performs a singleflight login on
+// a miss. It is the credential→TokenEntry core shared by performImplicitAuth (the
+// primary/agent principal) and the secondary user-principal capture.
+//
+// It performs NO request mutation — no req.Transparent, no req.ClientToken write,
+// no req.SetTokenEntry. Those belong to the primary principal alone and stay in
+// performImplicitAuth; leaking any of them here would promote a secondary principal
+// to primary. req is read only for the login HTTP context (TLS/forwarded cert),
+// client IP, request ID, and cert extraction.
+//
+// credential, when non-empty, is the bearer token to authenticate — the secondary
+// user path passes its header credential here, and the mount must be a bearer
+// format (cert/X.509-SVID are rejected: a header can't carry a client cert). When
+// empty, the credential is taken from the request the way the primary path expects
+// (req.ClientToken for JWT/JWT-SVID, the forwarded/TLS cert for cert/X.509-SVID).
+//
+// clearClientToken is true only for the X.509-SVID (spiffe-cert) case; it signals
+// the primary caller to drop a stray bearer so the cert-minted token ID becomes
+// req.ClientToken. It is meaningless for (and ignored by) the secondary path.
 //
 // Transparent mode precedence rules:
 //
@@ -1714,10 +1990,7 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 //
 // IMPORTANT: The auth role is validated when reusing cached tokens. A token created for
 // credential+Role1 cannot be reused for credential+Role2, as they may have different policies.
-func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, autoAuthPath, authRole string) error {
-	// Mark request as implicit auth
-	req.Transparent = true
-
+func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Request, autoAuthPath, authRole, credential string) (te *TokenEntry, clearClientToken bool, err error) {
 	// Inject client IP into context so validateIPBinding can read it
 	// during cached token lookups. Without this, implicitly-authed tokens
 	// bypass IP binding because the context has no client IP.
@@ -1725,12 +1998,16 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		ctx = context.WithValue(ctx, logical.ClientIPKey, req.ClientIP)
 	}
 
+	// A non-empty credential is the secondary (user) path: the mount must be a
+	// bearer format, and the credential is used verbatim as the bearer token.
+	explicitCred := credential != ""
+
 	// Resolve the auth mount once. mountEntry tells us which TransparentTokenType
 	// serves this mount (via the registry) and supplies the stable mount accessor
 	// that transparent types fold into their cache key.
 	authMountEntry := c.router.MatchingMountEntry(ctx, autoAuthPath)
 	if authMountEntry == nil {
-		return fmt.Errorf("no auth mount registered at %q for implicit auth", autoAuthPath)
+		return nil, false, fmt.Errorf("no auth mount registered at %q for implicit auth", autoAuthPath)
 	}
 	mountAccessor := authMountEntry.Accessor
 
@@ -1740,7 +2017,7 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 	// credential-format sniffing.
 	ttype := c.tokenStore.GetTransparentTokenTypeForAuthMethod(authMountEntry.Type)
 	if ttype == nil {
-		return fmt.Errorf("auth method %q at %q does not support implicit auth", authMountEntry.Type, autoAuthPath)
+		return nil, false, fmt.Errorf("auth method %q at %q does not support implicit auth", authMountEntry.Type, autoAuthPath)
 	}
 
 	var singleflightKey string
@@ -1757,9 +2034,12 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 	// type-specific even when two formats share an extraction case.
 	switch ttype.CredentialFormat() {
 	case "cert":
+		if explicitCred {
+			return nil, false, fmt.Errorf("auth method %q at %q requires a bearer credential, not a TLS client certificate", authMountEntry.Type, autoAuthPath)
+		}
 		clientCert := extractTransparentClientCert(req)
 		if clientCert == nil {
-			return fmt.Errorf("auth method %q at %q requires a TLS client certificate", authMountEntry.Type, autoAuthPath)
+			return nil, false, fmt.Errorf("auth method %q at %q requires a TLS client certificate", authMountEntry.Type, autoAuthPath)
 		}
 		hash := sha256.Sum256(clientCert.Raw)
 		fingerprint := hex.EncodeToString(hash[:])
@@ -1767,14 +2047,23 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		singleflightKey = hex.EncodeToString(sfHash[:])
 		loginData = map[string]any{"role": authRole}
 		credKey = fingerprint
+		// Authenticate via the client certificate, not any bearer. Signal the
+		// primary caller to drop a stray Authorization bearer (ExtractToken falls
+		// back to Authorization, so a cert request that also carries a bearer —
+		// e.g. a secondary user token on Authorization — would otherwise leave that
+		// bearer, not the cert-minted token ID, in ClientToken).
+		clearClientToken = true
 		lookupFunc = func() (*TokenEntry, error) {
 			return c.LookupTransparentTokenWithRole(ctx, ttype, fingerprint, mountAccessor, authRole)
 		}
 
 	case "jwt", "k8s_sa_jwt":
-		clientToken := req.ClientToken
+		clientToken := credential
+		if clientToken == "" {
+			clientToken = req.ClientToken
+		}
 		if !strings.HasPrefix(clientToken, "eyJ") {
-			return fmt.Errorf("auth method %q at %q requires a JWT bearer token", authMountEntry.Type, autoAuthPath)
+			return nil, false, fmt.Errorf("auth method %q at %q requires a JWT bearer token", authMountEntry.Type, autoAuthPath)
 		}
 		sfHash := sha256.Sum256([]byte("jwt:" + mountAccessor + ":" + clientToken + ":" + authRole))
 		singleflightKey = hex.EncodeToString(sfHash[:])
@@ -1792,7 +2081,11 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		// the JWT path and mis-attribute a JWT-SVID workload to the cert
 		// identity. A JWT-SVID is a bearer JWT whose (unverified) sub is a
 		// spiffe:// ID; the mount re-verifies it against the trust-domain bundle.
-		if clientToken := req.ClientToken; isSPIFFEJWTSVID(clientToken) {
+		clientToken := credential
+		if clientToken == "" {
+			clientToken = req.ClientToken
+		}
+		if isSPIFFEJWTSVID(clientToken) {
 			sfHash := sha256.Sum256([]byte("spiffe-jwt:" + mountAccessor + ":" + clientToken + ":" + authRole))
 			singleflightKey = hex.EncodeToString(sfHash[:])
 			loginData = map[string]any{"jwt": clientToken, "role": authRole}
@@ -1800,6 +2093,10 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 			lookupFunc = func() (*TokenEntry, error) {
 				return c.LookupTransparentTokenWithRole(ctx, ttype, clientToken, mountAccessor, authRole)
 			}
+		} else if explicitCred {
+			// The secondary (user) path is bearer-only; an X.509-SVID can't ride a
+			// header, so a non-SVID credential here is a misconfigured user mount.
+			return nil, false, fmt.Errorf("auth method %q at %q requires a JWT-SVID bearer credential", authMountEntry.Type, autoAuthPath)
 		} else if clientCert := extractTransparentClientCert(req); clientCert != nil {
 			hash := sha256.Sum256(clientCert.Raw)
 			fingerprint := hex.EncodeToString(hash[:])
@@ -1807,19 +2104,19 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 			singleflightKey = hex.EncodeToString(sfHash[:])
 			loginData = map[string]any{"role": authRole}
 			credKey = fingerprint
-			// Authenticate via the X.509-SVID, not any bearer. Clear a stray
-			// non-SVID bearer so the cert-minted token ID becomes ClientToken
-			// downstream (the shared reset below only fires when it is empty).
-			req.ClientToken = ""
+			// Authenticate via the X.509-SVID, not any bearer. Signal the primary
+			// caller to clear a stray non-SVID bearer so the cert-minted token ID
+			// becomes ClientToken (this function performs no request mutation).
+			clearClientToken = true
 			lookupFunc = func() (*TokenEntry, error) {
 				return c.LookupTransparentTokenWithRole(ctx, ttype, fingerprint, mountAccessor, authRole)
 			}
 		} else {
-			return fmt.Errorf("auth method %q at %q requires an X.509-SVID (TLS/forwarded cert) or a JWT-SVID bearer token", authMountEntry.Type, autoAuthPath)
+			return nil, false, fmt.Errorf("auth method %q at %q requires an X.509-SVID (TLS/forwarded cert) or a JWT-SVID bearer token", authMountEntry.Type, autoAuthPath)
 		}
 
 	default:
-		return fmt.Errorf("auth method %q has unsupported credential format %q for implicit auth", authMountEntry.Type, ttype.CredentialFormat())
+		return nil, false, fmt.Errorf("auth method %q has unsupported credential format %q for implicit auth", authMountEntry.Type, ttype.CredentialFormat())
 	}
 
 	// Step 1: Try cached lookup
@@ -1828,21 +2125,15 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 	// the token TTL (default 1h) bounds the exposure window. Explicit login requests
 	// always perform full revocation checks. To reduce exposure for revoked certs,
 	// configure a shorter token_ttl on cert roles.
-	te, err := lookupFunc()
+	te, err = lookupFunc()
 	if err == nil && te != nil {
-		req.SetTokenEntry(te)
-		// For cert auth, ClientToken is empty since the client only sends a certificate.
-		// Set it to the token ID so downstream policy checks don't reject it.
-		if req.ClientToken == "" {
-			req.ClientToken = te.ID
-		}
-		return nil
+		return te, clearClientToken, nil
 	}
 
 	// IP binding violation means the token exists but the client IP doesn't match.
 	// Return the error immediately — don't fall through and create a new token.
 	if err == ErrOriginViolation {
-		return err
+		return nil, false, err
 	}
 
 	// Step 2: Token not found — perform implicit auth with singleflight
@@ -1898,21 +2189,13 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 
 	if err != nil {
 		c.transparentAuthGroup.Forget(singleflightKey)
-		return err
+		return nil, false, err
 	}
 
 	te = result.(*TokenEntry)
 	_ = shared
 
-	req.SetTokenEntry(te)
-	// Ensure ClientToken is set so downstream policy checks (fetchCBPAndTokenEntry)
-	// don't short-circuit on the empty-token guard. For JWT transparent auth the
-	// JWT string is already in ClientToken, but for cert transparent auth there is
-	// no token in the request — only a certificate.
-	if req.ClientToken == "" {
-		req.ClientToken = te.ID
-	}
-	return nil
+	return te, clearClientToken, nil
 }
 
 // isSPIFFEJWTSVID reports whether token is a JWT whose unverified subject is a

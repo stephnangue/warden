@@ -24,6 +24,7 @@ var headersToRemove = []string{
 	"X-Warden-Provider",      // Warden provider-mount routing header
 	"X-Warden-Subject-Token", // token-exchange subject token — internal-only, never forwarded
 	"X-Warden-Actor-Token",   // token-exchange actor token — internal-only, never forwarded
+	"X-Warden-User-Token",    // secondary user credential — internal-only, never forwarded
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",

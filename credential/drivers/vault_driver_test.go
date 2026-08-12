@@ -1137,3 +1137,48 @@ func TestVaultDriver_MintCredentialWithExchange_UnsupportedMintMethod(t *testing
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not supported over auth_method=oidc_federation")
 }
+
+// TestResolveSecretPath covers per-user secret_path templating and its fail-closed
+// sanitization (the security boundary that keeps one user from reading another's
+// secret or escaping the intended path).
+func TestResolveSecretPath(t *testing.T) {
+	claims := map[string]string{"username": "alice", "email": "alice@example.com", "dept": "eng-team"}
+	tests := []struct {
+		name    string
+		path    string
+		claims  map[string]string
+		want    string
+		wantErr string
+	}{
+		{"no template returned verbatim", "slack/refresh_token", claims, "slack/refresh_token", ""},
+		{"no template needs no claims", "slack/refresh_token", nil, "slack/refresh_token", ""},
+		{"single substitution", "slack/{{user.username}}/refresh_token", claims, "slack/alice/refresh_token", ""},
+		{"multiple tokens resolved", "{{user.username}}/{{user.dept}}", claims, "alice/eng-team", ""},
+		{"email value allowed", "kv/{{user.email}}", claims, "kv/alice@example.com", ""},
+		{"hyphen value allowed", "kv/{{user.dept}}", claims, "kv/eng-team", ""},
+		{"literal dots within a segment allowed", "kv/{{user.username}}", map[string]string{"username": "a..b"}, "kv/a..b", ""},
+		{"absent claim fails closed", "slack/{{user.missing}}/x", claims, "", "absent"},
+		{"nil claims with template fails closed", "slack/{{user.username}}/x", nil, "", "absent"},
+		{"slash in value rejected", "kv/{{user.username}}", map[string]string{"username": "a/b"}, "", "allow-list"},
+		{"curly brace in value rejected", "kv/{{user.username}}", map[string]string{"username": "a{b"}, "", "allow-list"},
+		{"empty value rejected", "kv/{{user.username}}", map[string]string{"username": ""}, "", "allow-list"},
+		// The security boundary: values that compose a "." or ".." segment which the
+		// Vault client's path.Clean would resolve into a shared/parent path.
+		{"dot value collapses a segment", "slack/{{user.username}}/rt", map[string]string{"username": "."}, "", "traversal"},
+		{"dotdot value traverses", "slack/{{user.username}}/rt", map[string]string{"username": ".."}, "", "traversal"},
+		{"adjacent tokens compose dotdot", "slack/{{user.a}}{{user.b}}/rt", map[string]string{"a": ".", "b": "."}, "", "traversal"},
+		{"unresolved fragment fails closed", "slack/{{user.username}/rt", map[string]string{"username": "alice"}, "", "unresolved"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveSecretPath(tt.path, tt.claims)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

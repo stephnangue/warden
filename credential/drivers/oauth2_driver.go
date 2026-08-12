@@ -46,6 +46,7 @@ const (
 var _ credential.SourceDriver = (*OAuth2Driver)(nil)
 var _ credential.SpecVerifier = (*OAuth2Driver)(nil)
 var _ credential.OAuth2Authorizer = (*OAuth2Driver)(nil)
+var _ credential.ChainedSecretMinter = (*OAuth2Driver)(nil)
 
 // OAuth2Driver exchanges OAuth2 credentials for bearer tokens.
 //
@@ -321,6 +322,16 @@ func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credentia
 		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 spec %q is not connected — run `warden cred spec connect %s`", name, spec.Name, spec.Name)
 	}
 
+	return d.refreshGrant(ctx, spec, refreshToken)
+}
+
+// refreshGrant exchanges a refresh token for a fresh access token
+// (grant_type=refresh_token). The refresh token is passed in explicitly so the
+// same grant serves both the spec-sealed refresh token (mintFromRefreshToken) and
+// a chained refresh token fetched from another spec (MintFromSecret).
+func (d *OAuth2Driver) refreshGrant(ctx context.Context, spec *credential.CredSpec, refreshToken string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	name := d.displayName()
+
 	clientID := d.resolve(spec, "client_id", "")
 	clientSecret := d.resolve(spec, "client_secret", "")
 	if clientID == "" || clientSecret == "" {
@@ -358,6 +369,37 @@ func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credentia
 		}
 	}
 	return rawData, d.extractMetadata(ctx, spec, tokenResp.AccessToken), ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
+}
+
+// MintFromSecret implements credential.ChainedSecretMinter: it mints a Slack-style
+// OAuth2 access token from a refresh token supplied as chained secret material
+// (e.g. a per-user refresh token read from Vault by an upstream kv2_read spec)
+// rather than from the spec's own sealed config. Rotation write-back is not
+// supported for the chained path (the material is read-only), so this works with
+// non-rotating refresh tokens; a rotated token is surfaced in rawData but the
+// minting layer has nowhere to persist it back to.
+func (d *OAuth2Driver) MintFromSecret(ctx context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	refreshToken := material.Secret()
+	if refreshToken == "" {
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 chained mint: the referenced secret_spec yielded no refresh token", d.displayName())
+	}
+	rawData, metadata, ttl, leaseID, err := d.refreshGrant(ctx, spec, refreshToken)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+	// The chained refresh token is read-only material fetched from another spec, so
+	// a provider-rotated replacement has nowhere to be persisted back to. Strip the
+	// reserved rotation keys (the chained mint path has no write-back consumer for
+	// them) and warn loudly — this path works only with non-rotating refresh tokens.
+	if _, rotated := rawData[credential.RawRotatedRefreshTokenKey]; rotated {
+		delete(rawData, credential.RawRotatedRefreshTokenKey)
+		delete(rawData, credential.RawRotatedRefreshTokenExpiresAtKey)
+		if d.logger != nil {
+			d.logger.Warn(fmt.Sprintf("%s OAuth2 provider rotated the chained refresh token, but the secret_spec chain cannot persist it; the next mint reuses the stored token and may fail once the provider invalidates the old one", d.displayName()),
+				logger.String("spec", spec.Name))
+		}
+	}
+	return rawData, metadata, ttl, leaseID, nil
 }
 
 // ExchangeAuthorizationCode exchanges an authorization code for tokens using the
