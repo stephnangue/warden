@@ -599,10 +599,19 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 		return err
 	}
 
-	// Check if source exists
+	// Check if source exists, and pin its type: a source's Type is immutable once
+	// created. Bound specs are validated against the source type (e.g. the
+	// user_identity subject and any actor source require a token_exchange source),
+	// so letting Type change in place would silently invalidate those guards for
+	// already-bound specs. The API handler already forces the type; this defends the
+	// invariant at the store layer for any other caller.
 	cacheKey := s.buildSourceCacheKey(ns.UUID, source.Name)
-	if _, err := s.loadSource(ns.UUID, source.Name); err != nil {
+	existing, err := s.loadSource(ns.UUID, source.Name)
+	if err != nil {
 		return ErrSourceNotFound
+	}
+	if source.Type != existing.Type {
+		return logical.ErrBadRequestf("cannot change the type of source %q (%s → %s); source type is immutable", source.Name, existing.Type, source.Type)
 	}
 
 	// Close old driver instance since config has changed
@@ -891,9 +900,9 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		return logical.ErrBadRequestf("invalid token-exchange config: %s", err.Error())
 	}
 
-	// Any actor token source (header, auth_token, warden_identity) is consumed only
-	// by the token_exchange driver, which forwards the actor to an RFC 8693 STS;
-	// every other driver ignores ActorToken entirely. Pin any actor source to a
+	// Any actor token source (agent_identity, warden_identity) is consumed only by
+	// the token_exchange driver, which forwards the actor to an RFC 8693 STS; every
+	// other driver ignores ActorToken entirely. Pin any actor source to a
 	// token_exchange source so a delegation spec can't be bound to a source that
 	// would silently drop the actor (losing the delegation and its audit
 	// attribution), and reject a grant with no actor slot — otherwise the spec is
@@ -908,6 +917,16 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 			return logical.ErrBadRequestf("field '%s': an actor token is not supported with grant=jwt_bearer (no actor slot)",
 				credential.ConfigActorTokenSource)
 		}
+	}
+
+	// subject_token_source=user_identity forwards the raw user credential as the
+	// RFC 8693 subject_token, which only the token_exchange driver consumes. Pin it
+	// to a token_exchange source so a federation driver (gcp/aws/azure/vault) can
+	// never be handed the raw user JWT as its own federation login token.
+	if spec.Config[credential.ConfigSubjectTokenSource] == credential.SourceUserIdentity &&
+		source.Type != credential.SourceTypeTokenExchange {
+		return logical.ErrBadRequestf("field '%s': '%s' requires a '%s' source",
+			credential.ConfigSubjectTokenSource, credential.SourceUserIdentity, credential.SourceTypeTokenExchange)
 	}
 
 	// A warden_identity assertion — whether the subject or the actor — must declare
@@ -1192,20 +1211,20 @@ func (s *CredentialConfigStore) validateSecretSpecRef(ctx context.Context, ref s
 
 	// The referenced secret-spec must be minted as the requesting caller with a
 	// SESSION-PINNED subject: warden_identity (Warden mints an assertion for the
-	// session's principal) or auth_token (the caller's own inbound JWT). A
-	// header-sourced subject is a per-request, caller-supplied token that is NOT tied
-	// to the session token — and a chained consumer's outer cache key carries no
-	// exchange fingerprint (the exchange happens on this referenced spec, not the
-	// consumer), so under a shared session token two principals would collide on that
-	// key and one could be served the other's chained credential. Reject anything
-	// else (including an unset/"none" subject, which would otherwise degrade to the
+	// session's principal) or agent_identity (the caller's own inbound JWT). A
+	// user_identity subject is a per-request, per-user token that is NOT tied to the
+	// session token — and a chained consumer's outer cache key carries no exchange
+	// fingerprint (the exchange happens on this referenced spec, not the consumer),
+	// so under a shared session token two principals would collide on that key and
+	// one could be served the other's chained credential. Reject anything else
+	// (including an unset/"none" subject, which would otherwise degrade to the
 	// non-exchange path and fail late with an opaque backend error).
 	switch refSpec.Config[credential.ConfigSubjectTokenSource] {
-	case credential.SourceWardenIdentity, credential.SourceAuthToken:
+	case credential.SourceWardenIdentity, credential.SourceAgentIdentity:
 		// session-pinned — safe
 	default:
 		return logical.ErrBadRequestf("secret_spec %q must set subject_token_source=%s or %s (got %q); a chained secret must be minted as the session-pinned caller",
-			ref, credential.SourceWardenIdentity, credential.SourceAuthToken, refSpec.Config[credential.ConfigSubjectTokenSource])
+			ref, credential.SourceWardenIdentity, credential.SourceAgentIdentity, refSpec.Config[credential.ConfigSubjectTokenSource])
 	}
 
 	return nil

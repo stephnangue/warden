@@ -127,20 +127,11 @@ func TestGCPDriver_MintCredentialWithExchange_RejectsStaticSource(t *testing.T) 
 		Type:   credential.SourceTypeGCP,
 		Config: map[string]string{"auth_method": "static"},
 	}}
-	inputs := &credential.ExchangeInputs{SubjectToken: "tok", SubjectTokenOrigin: credential.ExchangeOriginVerified}
+	inputs := &credential.ExchangeInputs{SubjectToken: "tok"}
 	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "access_token"}}
 	_, _, _, _, err := d.MintCredentialWithExchange(context.TODO(), spec, inputs)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "auth_method=oidc_federation")
-}
-
-func TestGCPDriver_MintCredentialWithExchange_RejectsUnverified(t *testing.T) {
-	d := newFederationDriver(testWIFProvider, "", "")
-	inputs := &credential.ExchangeInputs{SubjectToken: "tok", SubjectTokenOrigin: credential.ExchangeOriginUnverified}
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "access_token"}}
-	_, _, _, _, err := d.MintCredentialWithExchange(context.TODO(), spec, inputs)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "verified subject")
 }
 
 func TestGCPDriver_ExchangeWIFToken(t *testing.T) {
@@ -242,7 +233,7 @@ func TestGCPDriver_MintCredentialWithExchange_Impersonation(t *testing.T) {
 	defer iam.Close()
 
 	d := newFederationDriver(testWIFProvider, sts.URL, iam.URL)
-	inputs := &credential.ExchangeInputs{SubjectToken: "SUBJECT-JWT", SubjectTokenOrigin: credential.ExchangeOriginVerified}
+	inputs := &credential.ExchangeInputs{SubjectToken: "SUBJECT-JWT"}
 	spec := &credential.CredSpec{
 		Name:   "s",
 		MaxTTL: 24 * time.Hour,
@@ -279,7 +270,7 @@ func TestGCPDriver_MintCredentialWithExchange_ImpersonationIAMError(t *testing.T
 	defer iam.Close()
 
 	d := newFederationDriver(testWIFProvider, sts.URL, iam.URL)
-	inputs := &credential.ExchangeInputs{SubjectToken: "jwt", SubjectTokenOrigin: credential.ExchangeOriginVerified}
+	inputs := &credential.ExchangeInputs{SubjectToken: "jwt"}
 	spec := &credential.CredSpec{Name: "s", MaxTTL: time.Hour, Config: map[string]string{
 		"mint_method":            "impersonated_access_token",
 		"target_service_account": "bq@proj.iam.gserviceaccount.com",
@@ -290,7 +281,7 @@ func TestGCPDriver_MintCredentialWithExchange_ImpersonationIAMError(t *testing.T
 
 func TestGCPDriver_MintCredentialWithExchange_ImpersonationLifetimeBounds(t *testing.T) {
 	d := newFederationDriver(testWIFProvider, "", "")
-	inputs := &credential.ExchangeInputs{SubjectToken: "jwt", SubjectTokenOrigin: credential.ExchangeOriginVerified}
+	inputs := &credential.ExchangeInputs{SubjectToken: "jwt"}
 	spec := &credential.CredSpec{
 		Name:   "s",
 		MaxTTL: 15 * time.Minute,
@@ -312,7 +303,7 @@ func TestGCPDriver_MintCredentialWithExchange_Federated_TTLCap(t *testing.T) {
 	defer sts.Close()
 
 	d := newFederationDriver(testWIFProvider, sts.URL, "")
-	inputs := &credential.ExchangeInputs{SubjectToken: "jwt", SubjectTokenOrigin: credential.ExchangeOriginVerified}
+	inputs := &credential.ExchangeInputs{SubjectToken: "jwt"}
 	spec := &credential.CredSpec{
 		Name:   "s",
 		MaxTTL: 15 * time.Minute,
@@ -332,7 +323,7 @@ func TestGCPDriver_MintCredentialWithExchange_DefaultsToAccessToken(t *testing.T
 	defer sts.Close()
 
 	d := newFederationDriver(testWIFProvider, sts.URL, "")
-	inputs := &credential.ExchangeInputs{SubjectToken: "jwt", SubjectTokenOrigin: credential.ExchangeOriginVerified}
+	inputs := &credential.ExchangeInputs{SubjectToken: "jwt"}
 	// No mint_method set: federation defaults to access_token (the federated token itself).
 	spec := &credential.CredSpec{Name: "s", Config: map[string]string{}}
 
@@ -343,7 +334,7 @@ func TestGCPDriver_MintCredentialWithExchange_DefaultsToAccessToken(t *testing.T
 
 func TestGCPDriver_MintCredentialWithExchange_UnsupportedMethod(t *testing.T) {
 	d := newFederationDriver(testWIFProvider, "", "")
-	inputs := &credential.ExchangeInputs{SubjectToken: "jwt", SubjectTokenOrigin: credential.ExchangeOriginVerified}
+	inputs := &credential.ExchangeInputs{SubjectToken: "jwt"}
 	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "impersonated_service_account"}}
 	_, _, _, _, err := d.MintCredentialWithExchange(context.TODO(), spec, inputs)
 	require.Error(t, err)

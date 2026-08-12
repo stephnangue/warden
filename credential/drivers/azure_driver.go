@@ -369,7 +369,7 @@ func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	// caller-scoped assertion. Fail closed here to avoid silently minting with
 	// no credential material.
 	if credential.GetString(d.credSource.Config, "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
-		return nil, nil, 0, "", fmt.Errorf("azure: source uses auth_method=oidc_federation; the spec must set subject_token_source (warden_identity or auth_token)")
+		return nil, nil, 0, "", fmt.Errorf("azure: source uses auth_method=oidc_federation; the spec must set subject_token_source (warden_identity or agent_identity)")
 	}
 
 	mintMethod := credential.GetString(spec.Config, "mint_method", "bearer_token")
@@ -386,21 +386,18 @@ func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredS
 
 // MintCredentialWithExchange mints a bearer token via Azure AD Workload Identity
 // Federation: the subject in inputs is presented to Entra as a client_assertion, so a
-// keyless source needs no stored secret. Gated on a federation source and a verified
+// keyless source needs no stored secret. Gated on a federation source and a trusted
 // subject, of which there are two shapes: a Warden-minted assertion
 // (subject_token_source=warden_identity, the app federates Warden's issuer) or the
-// caller's origin-verified inbound JWT forwarded untouched (subject_token_source=auth_token,
-// the app's federated credential must trust the origin IdP directly). An unverified caller
-// token (subject_token_source=header) is never forwarded on Warden's authority.
+// agent's verified inbound JWT forwarded untouched (subject_token_source=agent_identity,
+// the app's federated credential must trust the origin IdP directly). There is no
+// caller-supplied, unverified subject token.
 func (d *AzureDriver) MintCredentialWithExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	if credential.GetString(d.credSource.Config, "auth_method", azureAuthMethodStatic) != azureAuthMethodOIDCFederation {
 		return nil, nil, 0, "", fmt.Errorf("azure: workload identity federation requires auth_method=oidc_federation on the source")
 	}
 	if inputs == nil || inputs.SubjectToken == "" {
 		return nil, nil, 0, "", fmt.Errorf("azure: no subject token in exchange inputs")
-	}
-	if inputs.SubjectTokenOrigin != credential.ExchangeOriginVerified {
-		return nil, nil, 0, "", fmt.Errorf("azure: workload identity federation requires a verified subject (subject_token_source=warden_identity or auth_token); a caller-supplied, unverified subject is rejected")
 	}
 
 	mintMethod := credential.GetString(spec.Config, "mint_method", "bearer_token")

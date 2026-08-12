@@ -477,9 +477,6 @@ func (d *GCPDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 	if inputs == nil || inputs.SubjectToken == "" {
 		return nil, nil, 0, "", fmt.Errorf("gcp: no subject token in exchange inputs")
 	}
-	if inputs.SubjectTokenOrigin != credential.ExchangeOriginVerified {
-		return nil, nil, 0, "", fmt.Errorf("gcp: workload identity federation requires a verified subject (subject_token_source=warden_identity or auth_token); a caller-supplied, unverified subject is rejected")
-	}
 
 	mintMethod := credential.GetString(spec.Config, "mint_method", "access_token")
 	switch mintMethod {

@@ -871,9 +871,8 @@ func federationDriver(t *testing.T, srvURL string) *VaultDriver {
 
 func verifiedInputs() *credential.ExchangeInputs {
 	return &credential.ExchangeInputs{
-		SubjectToken:       "eyJhbGciOiJSUzI1NiJ9.assertion.sig",
-		SubjectTokenType:   credential.TokenTypeJWT,
-		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+		SubjectToken:     "eyJhbGciOiJSUzI1NiJ9.assertion.sig",
+		SubjectTokenType: credential.TokenTypeJWT,
 	}
 }
 
@@ -899,13 +898,6 @@ func TestVaultDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no subject token")
 
-	// Unverified subject origin.
-	_, _, _, _, err = fed.MintCredentialWithExchange(context.TODO(), spec, &credential.ExchangeInputs{
-		SubjectToken:       "x",
-		SubjectTokenOrigin: credential.ExchangeOriginUnverified,
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "verified subject")
 }
 
 func TestVaultDriver_MintCredentialWithExchange_VaultToken(t *testing.T) {

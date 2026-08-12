@@ -602,7 +602,7 @@ func TestAWSDriver_MintGuards(t *testing.T) {
 	for _, mm := range []string{"secrets_manager", "sts_assume_role"} {
 		_, _, _, _, err := wifDrv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": mm}})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "requires subject_token_source on the spec (warden_identity or auth_token)")
+		assert.Contains(t, err.Error(), "requires subject_token_source on the spec (warden_identity or agent_identity)")
 	}
 }
 
@@ -615,7 +615,7 @@ func TestAWSDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 		logger:     log,
 	}
 	roleSpec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::1:role/x"}}
-	verified := &credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenOrigin: credential.ExchangeOriginVerified}
+	verified := &credential.ExchangeInputs{SubjectToken: "eyJ"}
 
 	// A static source must not reach the federation path.
 	staticDrv := &AWSDriver{
@@ -634,11 +634,6 @@ func TestAWSDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 	// Missing subject.
 	_, _, _, _, err = drv.MintCredentialWithExchange(context.TODO(), roleSpec, &credential.ExchangeInputs{})
 	require.Error(t, err)
-
-	// Unverified origin must be rejected (only Warden-minted assertions allowed).
-	_, _, _, _, err = drv.MintCredentialWithExchange(context.TODO(), roleSpec, &credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenOrigin: credential.ExchangeOriginUnverified})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "verified subject")
 
 	// For sts_assume_role, the requested TTL is bound-checked before any STS call.
 	boundedSpec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::1:role/x", "ttl": "2h"}, MaxTTL: time.Hour}
@@ -691,9 +686,8 @@ func TestAWSDriver_WebIdentity_HappyPath(t *testing.T) {
 		"ttl":         "15m",
 	}}
 	inputs := &credential.ExchangeInputs{
-		SubjectToken:       "eyJ.warden.assertion",
-		SubjectTokenType:   credential.TokenTypeJWT,
-		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+		SubjectToken:     "eyJ.warden.assertion",
+		SubjectTokenType: credential.TokenTypeJWT,
 	}
 
 	rawData, metadata, ttl, leaseID, err := drv.MintCredentialWithExchange(context.TODO(), spec, inputs)
@@ -709,12 +703,11 @@ func TestAWSDriver_WebIdentity_HappyPath(t *testing.T) {
 	assert.Greater(t, ttl, time.Duration(0))
 }
 
-// TestAWSDriver_WebIdentity_ForwardedSubject_HappyPath drives the auth_token federation
-// topology: the subject is the caller's origin-verified inbound JWT that Warden forwards
-// untouched (not a Warden-minted assertion), so ResolveSubjectToken and SubjectCacheIdentity are
-// unset. The driver treats any verified subject the same, so this must reach STS and
-// forward the token verbatim. It guards the supported contract against a future change
-// that re-gates federation to Warden-minted subjects only.
+// TestAWSDriver_WebIdentity_ForwardedSubject_HappyPath drives the agent_identity
+// federation topology: the subject is the caller's inbound JWT that Warden forwards
+// untouched (not a Warden-minted assertion), so ResolveSubjectToken and SubjectCacheIdentity
+// are unset. The driver forwards any subject it is given the same way, so this must reach
+// STS and forward the token verbatim.
 func TestAWSDriver_WebIdentity_ForwardedSubject_HappyPath(t *testing.T) {
 	var gotToken string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -754,12 +747,11 @@ func TestAWSDriver_WebIdentity_ForwardedSubject_HappyPath(t *testing.T) {
 		"role_arn":    "arn:aws:iam::123456789012:role/App",
 		"ttl":         "15m",
 	}}
-	// A forwarded inbound JWT: verified origin, but no ResolveSubjectToken and no
-	// SubjectCacheIdentity (the token is eager and stable, so it keys the cache itself).
+	// A forwarded inbound JWT: eager, with no ResolveSubjectToken and no
+	// SubjectCacheIdentity (the token is stable, so it keys the cache itself).
 	inputs := &credential.ExchangeInputs{
-		SubjectToken:       "eyJ.inbound.idp.jwt",
-		SubjectTokenType:   credential.TokenTypeJWT,
-		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+		SubjectToken:     "eyJ.inbound.idp.jwt",
+		SubjectTokenType: credential.TokenTypeJWT,
 	}
 
 	rawData, _, _, _, err := drv.MintCredentialWithExchange(context.TODO(), spec, inputs)
@@ -820,9 +812,8 @@ func TestAWSDriver_SecretsManager_WebIdentity_HappyPath(t *testing.T) {
 		"role_arn":    "arn:aws:iam::123456789012:role/WardenSecretsReader",
 	}}
 	inputs := &credential.ExchangeInputs{
-		SubjectToken:       "eyJ.warden.assertion",
-		SubjectTokenType:   credential.TokenTypeJWT,
-		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+		SubjectToken:     "eyJ.warden.assertion",
+		SubjectTokenType: credential.TokenTypeJWT,
 	}
 
 	rawData, metadata, ttl, leaseID, err := drv.MintCredentialWithExchange(context.TODO(), spec, inputs)
@@ -891,9 +882,8 @@ func TestAWSDriver_SecretsManager_APIKey_RoundTrip(t *testing.T) {
 		"role_arn":        "arn:aws:iam::123456789012:role/WardenSecretsReader",
 	}}
 	inputs := &credential.ExchangeInputs{
-		SubjectToken:       "eyJ.warden.assertion",
-		SubjectTokenType:   credential.TokenTypeJWT,
-		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+		SubjectToken:     "eyJ.warden.assertion",
+		SubjectTokenType: credential.TokenTypeJWT,
 	}
 
 	// Mint: the driver fetches the raw secret, shape-agnostic.

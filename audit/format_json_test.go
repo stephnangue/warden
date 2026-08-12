@@ -1403,7 +1403,7 @@ func TestJSONFormatCredentialMetadata(t *testing.T) {
 					Type:         "oauth_bearer_token",
 					TokenID:      "tok-1",
 					Data:         map[string]string{"api_key": "secret-token"},
-					Metadata:     map[string]string{"subject": "alice@example.com", "subject_verified": "true"},
+					Metadata:     map[string]string{"subject": "alice@example.com", "actor": "agent@example.com"},
 				},
 			},
 		}
@@ -1445,8 +1445,8 @@ func TestJSONFormatCredentialMetadata(t *testing.T) {
 		if !containsBytes([]byte(c.Metadata["subject"]), "hmac-sha256:") {
 			t.Errorf("subject should be salted, got %q", c.Metadata["subject"])
 		}
-		if c.Metadata["subject_verified"] != "true" {
-			t.Errorf("subject_verified should stay clear, got %q", c.Metadata["subject_verified"])
+		if c.Metadata["actor"] != "agent@example.com" {
+			t.Errorf("actor should stay clear, got %q", c.Metadata["actor"])
 		}
 	})
 
@@ -1455,8 +1455,8 @@ func TestJSONFormatCredentialMetadata(t *testing.T) {
 		if !containsBytes([]byte(c.Metadata["subject"]), "hmac-sha256:") {
 			t.Error("subject should be salted")
 		}
-		if !containsBytes([]byte(c.Metadata["subject_verified"]), "hmac-sha256:") {
-			t.Error("subject_verified should be salted")
+		if !containsBytes([]byte(c.Metadata["actor"]), "hmac-sha256:") {
+			t.Error("actor should be salted")
 		}
 	})
 }

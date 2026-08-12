@@ -63,14 +63,14 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 			errMsg:     "require an oauth2, vault, ibm, or token_exchange source",
 		},
 		{
-			name:       "token_exchange source - auth_token subject",
-			config:     map[string]string{credential.ConfigSubjectTokenSource: credential.SourceAuthToken},
+			name:       "token_exchange source - agent_identity subject",
+			config:     map[string]string{credential.ConfigSubjectTokenSource: credential.SourceAgentIdentity},
 			sourceType: credential.SourceTypeTokenExchange,
 			wantErr:    false,
 		},
 		{
-			name:       "token_exchange source - header subject",
-			config:     map[string]string{credential.ConfigSubjectTokenSource: credential.SourceHeader, "audience": "https://api.example.com"},
+			name:       "token_exchange source - user_identity subject",
+			config:     map[string]string{credential.ConfigSubjectTokenSource: credential.SourceUserIdentity, "audience": "https://api.example.com"},
 			sourceType: credential.SourceTypeTokenExchange,
 			wantErr:    false,
 		},

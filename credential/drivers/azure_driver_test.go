@@ -571,7 +571,7 @@ func TestAzureDriver_MintCredential_Federation_FailsClosed(t *testing.T) {
 	}
 	_, _, _, _, err := drv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "bearer_token"}})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "subject_token_source (warden_identity or auth_token)")
+	assert.Contains(t, err.Error(), "subject_token_source (warden_identity or agent_identity)")
 }
 
 // TestAzureDriver_MintCredentialWithExchange_Guards covers the exchange-path guards
@@ -581,7 +581,7 @@ func TestAzureDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: map[string]string{"auth_method": "oidc_federation"}},
 	}
 	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "bearer_token", "tenant_id": "00000000-0000-0000-0000-000000000001", "client_id": "app"}}
-	verified := &credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenOrigin: credential.ExchangeOriginVerified}
+	verified := &credential.ExchangeInputs{SubjectToken: "eyJ"}
 
 	// A static source must not reach the federation path.
 	staticDrv := &AzureDriver{
@@ -595,11 +595,6 @@ func TestAzureDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 	_, _, _, _, err = fedDrv.MintCredentialWithExchange(context.TODO(), spec, &credential.ExchangeInputs{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no subject token")
-
-	// Unverified origin must be rejected (only Warden-minted assertions allowed).
-	_, _, _, _, err = fedDrv.MintCredentialWithExchange(context.TODO(), spec, &credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenOrigin: credential.ExchangeOriginUnverified})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "verified subject")
 
 	// An unsupported mint_method is rejected before any network call.
 	kvSpec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "key_vault_secret", "tenant_id": "00000000-0000-0000-0000-000000000001", "client_id": "app"}}
@@ -646,9 +641,8 @@ func TestAzureDriver_MintCredentialWithExchange_HappyPath(t *testing.T) {
 		"resource_uri": "https://management.azure.com/",
 	}}
 	inputs := &credential.ExchangeInputs{
-		SubjectToken:       "eyJ.warden.assertion",
-		SubjectTokenType:   credential.TokenTypeJWT,
-		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+		SubjectToken:     "eyJ.warden.assertion",
+		SubjectTokenType: credential.TokenTypeJWT,
 	}
 
 	rawData, metadata, ttl, leaseID, err := drv.MintCredentialWithExchange(context.TODO(), spec, inputs)
@@ -671,12 +665,10 @@ func TestAzureDriver_MintCredentialWithExchange_HappyPath(t *testing.T) {
 }
 
 // TestAzureDriver_MintCredentialWithExchange_ForwardedSubject_HappyPath drives the
-// auth_token federation topology: the subject is the caller's origin-verified inbound JWT
-// that Warden forwards untouched (not a Warden-minted assertion), so ResolveSubjectToken
-// and SubjectCacheIdentity are unset. The driver treats any verified subject the same, so this
-// must reach Entra and be presented as the client_assertion verbatim. It guards the
-// supported contract against a future change that re-gates federation to Warden-minted
-// subjects only.
+// agent_identity federation topology: the subject is the caller's inbound JWT that Warden
+// forwards untouched (not a Warden-minted assertion), so ResolveSubjectToken and
+// SubjectCacheIdentity are unset. The driver forwards any subject it is given the same way,
+// so this must reach Entra and be presented as the client_assertion verbatim.
 func TestAzureDriver_MintCredentialWithExchange_ForwardedSubject_HappyPath(t *testing.T) {
 	var gotAssertion, gotAssertionType string
 	var sawSecretKey bool
@@ -700,11 +692,10 @@ func TestAzureDriver_MintCredentialWithExchange_ForwardedSubject_HappyPath(t *te
 		"tenant_id":   "00000000-0000-0000-0000-000000000001",
 		"client_id":   "11111111-1111-1111-1111-111111111111",
 	}}
-	// A forwarded inbound JWT: verified origin, no ResolveSubjectToken, no SubjectCacheIdentity.
+	// A forwarded inbound JWT: eager, no ResolveSubjectToken, no SubjectCacheIdentity.
 	inputs := &credential.ExchangeInputs{
-		SubjectToken:       "eyJ.inbound.idp.jwt",
-		SubjectTokenType:   credential.TokenTypeJWT,
-		SubjectTokenOrigin: credential.ExchangeOriginVerified,
+		SubjectToken:     "eyJ.inbound.idp.jwt",
+		SubjectTokenType: credential.TokenTypeJWT,
 	}
 
 	rawData, _, _, _, err := drv.MintCredentialWithExchange(context.TODO(), spec, inputs)

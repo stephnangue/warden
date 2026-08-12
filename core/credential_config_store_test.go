@@ -428,19 +428,24 @@ func TestCredentialConfigStore_SecretSpecReference(t *testing.T) {
 
 // TestCredentialConfigStore_SecretSpecReference_Restrictions covers the security
 // restrictions on a chained reference: the referenced spec must use a session-pinned
-// subject (not header), and a chained consumer must not carry its own exchange config.
+// subject (not user_identity), and a chained consumer must not carry its own exchange config.
 func TestCredentialConfigStore_SecretSpecReference_Restrictions(t *testing.T) {
 	store, ctx := setupTestCredentialConfigStore(t)
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
+		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"},
+	}))
 
-	// A header-sourced referenced spec is not session-pinned → rejected as a reference.
+	// A user_identity referenced spec is per-request/per-user, not session-pinned →
+	// rejected as a reference.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
-		Name: "header-secret", Type: "vault_token", Source: "src",
-		Config: map[string]string{"subject_token_source": "header"},
+		Name: "user-secret", Type: "vault_token", Source: "sts-src",
+		Config: map[string]string{"subject_token_source": "user_identity"},
 	}))
 	err := store.CreateSpec(ctx, &credential.CredSpec{
-		Name: "consumer-hdr", Type: "vault_token", Source: "src",
-		Config: map[string]string{credential.ConfigSecretSpec: "header-secret"},
+		Name: "consumer-user", Type: "vault_token", Source: "src",
+		Config: map[string]string{credential.ConfigSecretSpec: "user-secret"},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "session-pinned")
@@ -1021,7 +1026,7 @@ func TestCredentialConfigStore_ValidateSpec_ActorWardenIdentity(t *testing.T) {
 
 	spec := func(name, source string, cfg map[string]string) *credential.CredSpec {
 		full := map[string]string{
-			credential.ConfigSubjectTokenSource: credential.SourceHeader,
+			credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
 			credential.ConfigActorTokenSource:   credential.SourceWardenIdentity,
 		}
 		for k, v := range cfg {
@@ -1077,6 +1082,39 @@ func TestCredentialConfigStore_ValidateSpec_ActorWardenIdentity(t *testing.T) {
 	}
 }
 
+// TestCredentialConfigStore_ValidateSpec_UserIdentitySubjectRequiresTokenExchange
+// isolates the subject pin that makes retiring the federation-driver origin guards
+// safe: subject_token_source=user_identity forwards the raw user credential as the
+// RFC 8693 subject, so it must bind ONLY to a token_exchange source — a federation
+// driver (vault/gcp/aws/azure) must never be handed the user's raw JWT as its own
+// login token. Tested with NO actor, so the separate actor pin cannot mask it.
+func TestCredentialConfigStore_ValidateSpec_UserIdentitySubjectRequiresTokenExchange(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	store.core.credentialDriverRegistry = nil // skip the test-mint block
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
+		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"},
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "local-src", Type: "local"}))
+
+	// Accepted on a token_exchange source (no actor, no assertion → no audience).
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "user-subj-ok", Type: "vault_token", Source: "sts-src",
+		Config: map[string]string{credential.ConfigSubjectTokenSource: credential.SourceUserIdentity},
+	}))
+
+	// Rejected on a non-token_exchange (federation) source — the subject pin fires
+	// on its own, no actor present to mask it.
+	err := store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "user-subj-bad", Type: "vault_token", Source: "local-src",
+		Config: map[string]string{credential.ConfigSubjectTokenSource: credential.SourceUserIdentity},
+	})
+	require.Error(t, err)
+	if !contains(err.Error(), "user_identity") || !contains(err.Error(), "token_exchange") {
+		t.Errorf("expected the subject pin to name user_identity + token_exchange, got %q", err.Error())
+	}
+}
+
 // TestCredentialConfigStore_ValidateSpec_ActorSourceRequiresTokenExchange locks
 // in that ANY actor token source — not just warden_identity — is pinned to a
 // token_exchange source, since only that driver consumes an actor token; every
@@ -1096,19 +1134,20 @@ func TestCredentialConfigStore_ValidateSpec_ActorSourceRequiresTokenExchange(t *
 		actorSrc string
 		errorMsg string // empty => expect success
 	}{
-		{"header actor on local source rejected", "local-src", credential.SourceHeader, "requires a 'token_exchange' source"},
-		{"auth_token actor on local source rejected", "local-src", credential.SourceAuthToken, "requires a 'token_exchange' source"},
-		{"header actor on token_exchange accepted", "sts-src", credential.SourceHeader, ""},
-		{"auth_token actor on token_exchange accepted", "sts-src", credential.SourceAuthToken, ""},
+		{"agent_identity actor on local source rejected", "local-src", credential.SourceAgentIdentity, "requires a 'token_exchange' source"},
+		{"warden_identity actor on local source rejected", "local-src", credential.SourceWardenIdentity, "requires a 'token_exchange' source"},
+		{"agent_identity actor on token_exchange accepted", "sts-src", credential.SourceAgentIdentity, ""},
+		{"warden_identity actor on token_exchange accepted", "sts-src", credential.SourceWardenIdentity, ""},
 	}
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// subject=header so the actor pairing is valid regardless of actor source.
+			// subject=user_identity so the actor pairing is valid regardless of actor source.
 			err := store.CreateSpec(ctx, &credential.CredSpec{
 				Name: fmt.Sprintf("actor-spec-%d", i), Type: "vault_token", Source: tt.source,
 				Config: map[string]string{
-					credential.ConfigSubjectTokenSource: credential.SourceHeader,
+					credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
 					credential.ConfigActorTokenSource:   tt.actorSrc,
+					credential.ConfigAssertionAudience:  "https://sts.example/aud",
 				},
 			})
 			if tt.errorMsg == "" {
