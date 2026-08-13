@@ -23,6 +23,16 @@ const (
 	// chain (one hop only). This also breaks any config-drift reference cycle rather
 	// than letting the recursive mint recurse unboundedly.
 	MaxSecretChainDepth = 1
+
+	// ConfigSecretCacheTTL opts a chained consumer into source-scoped caching of the
+	// fetched secret material for the given duration (parsed with GetDuration, e.g.
+	// "30m"). It may sit on the consuming spec (spec-level, wins) or its source. Unset
+	// or <=0 means no caching — the referenced secret-spec is re-minted on every
+	// consuming-credential cache miss (the default, and the correct choice for a
+	// rotation-sensitive referenced secret such as a single-use refresh token). When
+	// set, the fetched material is shared across a caller's requests (per agent
+	// identity, and per user when the referenced fetch is user-scoped) for the TTL.
+	ConfigSecretCacheTTL = "secret_cache_ttl"
 )
 
 // SecretMaterial carries the referenced secret-spec's minted data to a consuming

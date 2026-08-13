@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	ristretto "github.com/dgraph-io/ristretto/v2"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
@@ -964,6 +965,16 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		}
 		if err := s.validateSecretSpecRef(ctx, chainedRef); err != nil {
 			return err
+		}
+		// secret_cache_ttl (spec or source) must parse as a duration; otherwise a typo
+		// (e.g. "30min") would silently disable caching, so an operator who meant to opt
+		// in gets no signal. GetDuration swallows the parse error at mint, so reject here.
+		for _, cfg := range []map[string]string{spec.Config, source.Config} {
+			if raw, ok := cfg[credential.ConfigSecretCacheTTL]; ok && raw != "" {
+				if _, perr := time.ParseDuration(raw); perr != nil {
+					return logical.ErrBadRequestf("field '%s': %q is not a valid duration: %v", credential.ConfigSecretCacheTTL, raw, perr)
+				}
+			}
 		}
 	}
 
