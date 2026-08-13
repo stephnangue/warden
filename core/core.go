@@ -1285,6 +1285,31 @@ func (c *Core) oidcKeyRotationLoop(ctx context.Context, done chan struct{}, keyS
 // promoted key was persisted as `next` by the previous rotation and the fresh next
 // is persisted here before it can ever be promoted, so Warden never signs with a
 // key absent from storage.
+// propagationFloor returns how long key rotation must wait so a fresh next key is published
+// at least cacheTTL before it signs (giving any CDN cache and verifier time to refresh the
+// JWKS). It returns 0 when there is no external publisher (the built-in endpoint serves
+// live) or cacheTTL <= 0, and 0 once the youngest next key across algorithms is already
+// older than cacheTTL — the steady state, where each next is ~one rotation period old. `now`
+// is passed in so the computation is deterministic and unit-testable without wall-clock.
+// Iterating the supported alg set (not whatever storage held) means a stray/unknown held
+// alg can never break rotation of the healthy ones.
+func propagationFloor(now time.Time, keysets map[string]*algKeyset, publisher JWKSPublisher, cacheTTL time.Duration) (time.Duration, error) {
+	if publisher == nil || cacheTTL <= 0 {
+		return 0, nil
+	}
+	var wait time.Duration
+	for _, alg := range oidcSupportedAlgs {
+		ks := keysets[alg]
+		if ks == nil || ks.next == nil {
+			return 0, fmt.Errorf("oidc issuer: cannot rotate without a next %s key", alg)
+		}
+		if rem := cacheTTL - now.Sub(ks.next.createdAt); rem > wait {
+			wait = rem
+		}
+	}
+	return wait, nil
+}
+
 func (c *Core) rotateOIDCKey(ctx context.Context, keySource oidcKeySource, issuer *OIDCIssuer, publisher JWKSPublisher, cacheTTL, grace time.Duration) error {
 	if issuer == nil || !issuer.Ready() {
 		return nil
@@ -1301,33 +1326,20 @@ func (c *Core) rotateOIDCKey(ctx context.Context, keySource oidcKeySource, issue
 		return fmt.Errorf("oidc issuer: cannot rotate with no keys")
 	}
 
-	// Propagation floor: a fresh next key must be published at least cacheTTL before
-	// it signs, so any CDN cache and verifier have refreshed the JWKS. Wait out the
-	// youngest next key across algorithms (same-age in practice, so usually a single
-	// wait). In steady state each next is ~one rotation period old, so the remainder
-	// is <= 0 and there is no wait; the floor only bites on cold start / a shrunk
-	// period. Skipped when there is no external publisher (the endpoint serves live).
-	// Only the supported algorithms are rotated (each is generatable). Iterating the
-	// supported set rather than whatever storage held means a stray/unknown held alg
-	// can never break rotation of the healthy ones; it is left untouched in the map.
-	if publisher != nil && cacheTTL > 0 {
-		var wait time.Duration
-		for _, alg := range oidcSupportedAlgs {
-			ks := keysets[alg]
-			if ks == nil || ks.next == nil {
-				return fmt.Errorf("oidc issuer: cannot rotate without a next %s key", alg)
-			}
-			if rem := cacheTTL - time.Since(ks.next.createdAt); rem > wait {
-				wait = rem
-			}
-		}
-		if wait > 0 {
-			select {
-			case <-ctx.Done():
-				// Nothing to roll back — the next keys are durable and stay published.
-				return ctx.Err()
-			case <-time.After(wait):
-			}
+	// Propagation floor: a fresh next key must be published at least cacheTTL before it
+	// signs, so any CDN cache and verifier have refreshed the JWKS. propagationFloor
+	// computes how long to wait (0 with no external publisher, or once the next keys are
+	// already old enough — the steady state, where each next is ~one rotation period old).
+	wait, err := propagationFloor(time.Now(), keysets, publisher, cacheTTL)
+	if err != nil {
+		return err
+	}
+	if wait > 0 {
+		select {
+		case <-ctx.Done():
+			// Nothing to roll back — the next keys are durable and stay published.
+			return ctx.Err()
+		case <-time.After(wait):
 		}
 	}
 	// Bail if leadership was lost during the wait — a demoted node must not
