@@ -963,47 +963,79 @@ func TestOIDCKeyRotation_FirstTickAnchor(t *testing.T) {
 	assert.LessOrEqual(t, time.Until(active.createdAt.Add(period)), time.Minute)
 }
 
-// TestRotateOIDCKey_PropagationFloor verifies the floor waits only when the next
-// key is younger than the cache TTL, and skips the wait when it is old enough. The
-// cache TTL is set well above the cost of a rotation (RSA keygen + persist) so the
-// wait/no-wait separation stays robust under parallel test load.
-func TestRotateOIDCKey_PropagationFloor(t *testing.T) {
+// TestRotateOIDCKey_AppliesFloor is the one end-to-end check that the computed floor is
+// actually waited out: a young next key (created ~now) with a publisher must delay rotation
+// by most of the cache TTL. It asserts only a LOWER bound, so a slow/parallel runner can't
+// make it flaky. The floor's *no-wait* cases (which conflated "no floor" with "rotation is
+// fast" and were flaky on loaded runners) are covered deterministically — no wall-clock, no
+// RSA keygen — by TestPropagationFloor below.
+func TestRotateOIDCKey_AppliesFloor(t *testing.T) {
 	const cacheTTL = 600 * time.Millisecond
-
-	t.Run("young next waits", func(t *testing.T) {
-		core := createTestCore(t)
-		defer core.tokenStore.Close()
-		iss := enableIssuer(t, core) // next created ~now
-		start := time.Now()
-		require.NoError(t, core.rotateOIDCKey(context.Background(), localKeySource{}, iss, &spyPublisher{}, cacheTTL, defaultRetiredKeyGrace))
-		assert.GreaterOrEqual(t, time.Since(start), 450*time.Millisecond, "a young next key must wait out most of the floor")
-	})
-
-	t.Run("old next does not wait", func(t *testing.T) {
-		core := createTestCore(t)
-		defer core.tokenStore.Close()
-		iss := enableIssuer(t, core)
-		// Age the next key past the cache TTL so the floor is already satisfied.
-		active, next, retired := rs256Keys(iss)
-		next.createdAt = time.Now().Add(-time.Hour)
-		iss.RestoreKeys(rs256Keyset(active, next, retired))
-		start := time.Now()
-		require.NoError(t, core.rotateOIDCKey(context.Background(), localKeySource{}, iss, &spyPublisher{}, cacheTTL, defaultRetiredKeyGrace))
-		assert.Less(t, time.Since(start), 300*time.Millisecond, "an old-enough next key must not wait")
-	})
-}
-
-// TestRotateOIDCKey_NoFloorWithoutPublisher verifies that with no external
-// publisher the floor is skipped entirely (the built-in endpoint serves live).
-func TestRotateOIDCKey_NoFloorWithoutPublisher(t *testing.T) {
 	core := createTestCore(t)
 	defer core.tokenStore.Close()
 	iss := enableIssuer(t, core) // next created ~now
 	start := time.Now()
-	// Large cache TTL, but publisher == nil -> no wait. The bound sits well below
-	// the TTL yet above a rotation's RSA-keygen cost so the check is not flaky.
-	require.NoError(t, core.rotateOIDCKey(context.Background(), localKeySource{}, iss, nil, time.Minute, defaultRetiredKeyGrace))
-	assert.Less(t, time.Since(start), 300*time.Millisecond, "no publisher means no propagation floor")
+	require.NoError(t, core.rotateOIDCKey(context.Background(), localKeySource{}, iss, &spyPublisher{}, cacheTTL, defaultRetiredKeyGrace))
+	assert.GreaterOrEqual(t, time.Since(start), 450*time.Millisecond, "a young next key must wait out most of the floor")
+}
+
+// TestPropagationFloor covers the floor computation deterministically: 0 with no publisher /
+// non-positive TTL / an old-enough next key, the full remaining TTL for a young next key
+// (the youngest across algorithms wins), and an error for a missing next key.
+func TestPropagationFloor(t *testing.T) {
+	const cacheTTL = 600 * time.Millisecond
+	now := time.Now()
+	pub := &spyPublisher{}
+
+	// keysets builds a next key per supported alg, each aged by the given amount.
+	keysets := func(ages map[string]time.Duration) map[string]*algKeyset {
+		m := make(map[string]*algKeyset, len(oidcSupportedAlgs))
+		for _, alg := range oidcSupportedAlgs {
+			m[alg] = &algKeyset{next: &signingKey{createdAt: now.Add(-ages[alg])}}
+		}
+		return m
+	}
+	sameAge := func(age time.Duration) map[string]time.Duration {
+		out := map[string]time.Duration{}
+		for _, alg := range oidcSupportedAlgs {
+			out[alg] = age
+		}
+		return out
+	}
+
+	t.Run("no publisher means no floor", func(t *testing.T) {
+		wait, err := propagationFloor(now, keysets(sameAge(0)), nil, cacheTTL)
+		require.NoError(t, err)
+		assert.Zero(t, wait)
+	})
+	t.Run("non-positive cacheTTL means no floor", func(t *testing.T) {
+		wait, err := propagationFloor(now, keysets(sameAge(0)), pub, 0)
+		require.NoError(t, err)
+		assert.Zero(t, wait)
+	})
+	t.Run("old-enough next key does not wait", func(t *testing.T) {
+		wait, err := propagationFloor(now, keysets(sameAge(time.Hour)), pub, cacheTTL)
+		require.NoError(t, err)
+		assert.Zero(t, wait)
+	})
+	t.Run("young next key waits out the full remaining TTL", func(t *testing.T) {
+		wait, err := propagationFloor(now, keysets(sameAge(0)), pub, cacheTTL)
+		require.NoError(t, err)
+		assert.Equal(t, cacheTTL, wait)
+	})
+	t.Run("youngest next across algorithms wins", func(t *testing.T) {
+		ages := map[string]time.Duration{oidcAlgRS256: 500 * time.Millisecond, oidcAlgES256: 0}
+		wait, err := propagationFloor(now, keysets(ages), pub, cacheTTL)
+		require.NoError(t, err)
+		assert.Equal(t, cacheTTL, wait) // ES256 is youngest → the full TTL remains
+	})
+	t.Run("missing next key is an error", func(t *testing.T) {
+		m := keysets(sameAge(0))
+		m[oidcAlgES256].next = nil
+		_, err := propagationFloor(now, m, pub, cacheTTL)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "next")
+	})
 }
 
 // TestOIDCIssuer_Mint_WardenUserAndSubClaims verifies that warden_sub always
