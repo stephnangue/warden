@@ -1174,3 +1174,54 @@ func TestResolveSecretPath(t *testing.T) {
 		})
 	}
 }
+
+// TestVaultDriver_OAuth2_PerUserCredentialName proves the oauth2 mint method templates
+// credential_name from the caller's projected claims — one spec, per-user OpenBao OAuth
+// engine credentials (scoped by a templated policy on oauth2/creds/<sub>).
+func TestVaultDriver_OAuth2_PerUserCredentialName(t *testing.T) {
+	future := time.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339)
+	var credsPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/jwt/login":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"auth": map[string]interface{}{"client_token": "hvs.child", "accessor": "acc", "lease_duration": 900},
+			})
+		default: // the oauth2/creds/<name> read
+			credsPath = r.URL.Path
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{"access_token": "at-alice", "expire_time": future},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	driver := federationDriver(t, srv.URL)
+	spec := &credential.CredSpec{Name: "gh-oauth", Config: map[string]string{
+		"mint_method": "oauth2", "oauth2_mount": "oauth2", "credential_name": "{{user.sub}}",
+	}}
+	inputs := &credential.ExchangeInputs{
+		SubjectToken:     "eyJhbGciOiJSUzI1NiJ9.assertion.sig",
+		SubjectTokenType: credential.TokenTypeJWT,
+		UserClaims:       map[string]string{"sub": "alice"},
+	}
+
+	rawData, _, ttl, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, inputs)
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/oauth2/creds/alice", credsPath, "credential_name resolved to the caller's own sub")
+	assert.Equal(t, "at-alice", rawData["access_token"])
+	assert.Greater(t, ttl, time.Duration(0), "TTL derived from expire_time")
+}
+
+// A templated credential_name on the non-federation path (no user claims) fails closed.
+func TestVaultDriver_OAuth2_TemplatedNameFailsClosedWithoutClaims(t *testing.T) {
+	driver := &VaultDriver{credSource: &credential.CredSource{Type: credential.SourceTypeVault, Config: map[string]string{}}}
+	spec := &credential.CredSpec{Name: "s", Config: map[string]string{
+		"mint_method": "oauth2", "oauth2_mount": "oauth2", "credential_name": "{{user.sub}}",
+	}}
+	_, _, _, _, err := driver.fetchOAuth2Creds(context.TODO(), nil, spec, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential_name")
+	assert.Contains(t, err.Error(), "absent")
+}
