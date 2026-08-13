@@ -413,6 +413,29 @@ func (m *Manager) issueChained(ctx context.Context, caller Caller, spec *CredSpe
 		return nil, fmt.Errorf("secret_spec %q: %w", secretRef, err)
 	}
 
+	// Fetch the referenced secret credential (minted as the caller, never cached).
+	credB, err := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract the secret material and mint the consuming credential from it.
+	field := m.resolveSecretField(ctx, spec, credB)
+	material := SecretMaterial{Data: credB.Data, Field: field}
+
+	driver, err := m.driverCoordinator.GetOrCreateDriver(ctx, spec.Source)
+	if err != nil {
+		return nil, err
+	}
+	return m.mintFromSecret(ctx, spec, driver, material)
+}
+
+// fetchChainedSecret mints the referenced secret-spec AS the caller and returns its
+// credential. The caller owns the one-hop depth guard and building inputsB (via
+// caller.ResolveInputs); this function materializes any lazily-minted subject/actor
+// tokens, mints via the non-caching internal path (so the fetched secret is never
+// cached), and enforces that the referenced credential is static/leaseless.
+func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretRef string, inputsB *ExchangeInputs) (*Credential, error) {
 	// Materialize any lazily-minted subject/actor tokens here: the referenced spec is
 	// minted via the non-caching internal path, which — unlike the caching wrapper —
 	// does not run ResolveSubjectToken/ResolveActorToken, so a warden_identity subject
@@ -434,7 +457,7 @@ func (m *Manager) issueChained(ctx context.Context, caller Caller, spec *CredSpe
 	}
 
 	// Mint the secret AS the caller via the non-caching path — never cached; it
-	// lives only for this mint and is discarded after material extraction below.
+	// lives only for this mint and is discarded after material extraction by the caller.
 	credB, err := m.issueCredential(ctx, caller, secretRef, inputsB)
 	if err != nil {
 		return nil, fmt.Errorf("secret_spec %q: %w", secretRef, err)
@@ -462,15 +485,7 @@ func (m *Manager) issueChained(ctx context.Context, caller Caller, spec *CredSpe
 		return nil, fmt.Errorf("secret_spec %q must reference a static/leaseless credential, but it returned a lease", secretRef)
 	}
 
-	// Extract the secret material and mint the consuming credential from it.
-	field := m.resolveSecretField(ctx, spec, credB)
-	material := SecretMaterial{Data: credB.Data, Field: field}
-
-	driver, err := m.driverCoordinator.GetOrCreateDriver(ctx, spec.Source)
-	if err != nil {
-		return nil, err
-	}
-	return m.mintFromSecret(ctx, spec, driver, material)
+	return credB, nil
 }
 
 // resolveSecretField selects which key of the referenced credential's Data carries
