@@ -496,6 +496,31 @@ func TestCredentialConfigStore_SecretCacheTTLValidation(t *testing.T) {
 	}))
 }
 
+// TestCredentialConfigStore_ChainedExchangeAccepted: a token_exchange consumer may set
+// BOTH secret_spec (chained client secret) AND its own subject_token_source — the combo
+// that is rejected for any other source type (see consumer-dbl).
+func TestCredentialConfigStore_ChainedExchangeAccepted(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+	// Referenced secret-spec: session-pinned (warden_identity), as required. Must exist
+	// before the source that references it.
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "wid-secret", Type: "vault_token", Source: "src",
+		Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
+		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693", "client_id": "warden-gateway", credential.ConfigSecretSpec: "wid-secret"},
+	}))
+
+	// A token_exchange consumer with secret_spec (source-level) + its own subject source
+	// is accepted (unlike consumer-dbl on a non-exchange source).
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "internal-api", Type: "oauth_bearer_token", Source: "sts-src",
+		Config: map[string]string{"subject_token_source": "user_identity", "audience": "https://api.internal.example.com"},
+	}))
+}
+
 // TestCredentialConfigStore_CheckSourceReferences tests checking source references
 func TestCredentialConfigStore_CheckSourceReferences(t *testing.T) {
 	store, ctx := setupTestCredentialConfigStore(t)

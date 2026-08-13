@@ -217,9 +217,10 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 	// outer key's use of the AGENT's token id (caller.TokenID): both principals are
 	// keyed by token id, not identity, so the entry is bound to the token lifecycle
 	// — revoking or re-logging-in the user yields a new token id and thus a fresh
-	// mint. This dimension is independent of the exchange fingerprint, so a chained
-	// consumer (whose outer key carries no ":x:" fragment) still gets per-user
-	// isolation. Byte-identical when caller.User == nil.
+	// mint. This dimension is independent of the exchange fingerprint, so it applies
+	// whether or not the consumer requested exchange: a plain chained consumer (no
+	// ":x:" fragment) and a chained token-exchange consumer (which does carry ":x:")
+	// both get per-user isolation. Byte-identical when caller.User == nil.
 	if caller.User != nil {
 		cacheKey += ":u:" + caller.User.TokenID
 	}
@@ -370,6 +371,13 @@ func (m *Manager) issueCredential(ctx context.Context, caller Caller, specName s
 		return nil, err
 	}
 	if secretRef != "" {
+		// When the chained consumer is ITSELF an exchange spec (it requested exchange, so
+		// inputs != nil), it needs both its own subject/actor inputs AND a fetched
+		// client-auth secret — route to the exchange-aware chaining path. Otherwise the
+		// plain chaining path (mint directly from the fetched material) applies.
+		if inputs != nil {
+			return m.issueChainedExchange(ctx, caller, spec, secretRef, inputs)
+		}
 		return m.issueChained(ctx, caller, spec, secretRef)
 	}
 
@@ -427,22 +435,9 @@ func (m *Manager) secretSpecRef(ctx context.Context, spec *CredSpec) (string, er
 // secret is not cached (re-minted on every consuming-credential miss); a consumer may
 // opt into source-scoped caching via secret_cache_ttl (see resolveChainedSecretData).
 func (m *Manager) issueChained(ctx context.Context, caller Caller, spec *CredSpec, secretRef string) (*Credential, error) {
-	// Bound the chain to a single hop (a referenced secret-spec may not itself
-	// chain). This also breaks any config-drift reference cycle rather than letting
-	// it recurse unboundedly.
-	depth := chainDepth(ctx)
-	if depth+1 > MaxSecretChainDepth {
-		return nil, fmt.Errorf("credential chaining for spec %q exceeds max depth %d (referenced secret_spec %q)", spec.Name, MaxSecretChainDepth, secretRef)
-	}
-	ctx = withChainDepth(ctx, depth+1)
-
-	// Build exchange inputs for the referenced secret-spec, as the caller.
-	if caller.ResolveInputs == nil {
-		return nil, fmt.Errorf("credential chaining for spec %q requires a request caller context", spec.Name)
-	}
-	inputsB, err := caller.ResolveInputs(ctx, secretRef)
+	ctx, inputsB, err := m.chainPreamble(ctx, caller, spec, secretRef)
 	if err != nil {
-		return nil, fmt.Errorf("secret_spec %q: %w", secretRef, err)
+		return nil, err
 	}
 
 	return m.resolveAndMintChained(ctx, caller, spec, secretRef, inputsB,
@@ -453,6 +448,51 @@ func (m *Manager) issueChained(ctx context.Context, caller Caller, spec *CredSpe
 			}
 			return m.mintFromSecret(ctx, spec, driver, material)
 		})
+}
+
+// issueChainedExchange mints a consuming credential that is ITSELF a token-exchange spec
+// AND sources its client-auth secret via chaining. It resolves the referenced secret
+// (cached per secret_cache_ttl) and performs the exchange using the consuming spec's own
+// exchange inputs plus the fetched material. Reuses resolveAndMintChained, so caching,
+// per-agent/per-user isolation, and evict-and-retry are inherited from the generic path.
+func (m *Manager) issueChainedExchange(ctx context.Context, caller Caller, spec *CredSpec, secretRef string, inputs *ExchangeInputs) (*Credential, error) {
+	ctx, inputsB, err := m.chainPreamble(ctx, caller, spec, secretRef)
+	if err != nil {
+		return nil, err
+	}
+
+	return m.resolveAndMintChained(ctx, caller, spec, secretRef, inputsB,
+		func(ctx context.Context, spec *CredSpec, material SecretMaterial) (*Credential, error) {
+			driver, err := m.driverCoordinator.GetOrCreateDriver(ctx, spec.Source)
+			if err != nil {
+				return nil, err
+			}
+			return m.mintFromSecretWithExchange(ctx, spec, driver, inputs, material)
+		})
+}
+
+// chainPreamble enforces the one-hop depth guard and builds the referenced secret-spec's
+// exchange inputs as the caller. It returns a context carrying the incremented chain
+// depth (used by the recursive referenced mint), shared by both the plain and
+// exchange-aware chaining paths.
+func (m *Manager) chainPreamble(ctx context.Context, caller Caller, spec *CredSpec, secretRef string) (context.Context, *ExchangeInputs, error) {
+	// Bound the chain to a single hop (a referenced secret-spec may not itself chain).
+	// This also breaks any config-drift reference cycle rather than recursing unboundedly.
+	depth := chainDepth(ctx)
+	if depth+1 > MaxSecretChainDepth {
+		return nil, nil, fmt.Errorf("credential chaining for spec %q exceeds max depth %d (referenced secret_spec %q)", spec.Name, MaxSecretChainDepth, secretRef)
+	}
+	ctx = withChainDepth(ctx, depth+1)
+
+	// Build exchange inputs for the referenced secret-spec, as the caller.
+	if caller.ResolveInputs == nil {
+		return nil, nil, fmt.Errorf("credential chaining for spec %q requires a request caller context", spec.Name)
+	}
+	inputsB, err := caller.ResolveInputs(ctx, secretRef)
+	if err != nil {
+		return nil, nil, fmt.Errorf("secret_spec %q: %w", secretRef, err)
+	}
+	return ctx, inputsB, nil
 }
 
 // resolveAndMintChained resolves the referenced secret material (through the opt-in
@@ -723,6 +763,23 @@ func (m *Manager) resolveSecretField(ctx context.Context, spec *CredSpec, credB 
 func (m *Manager) mintFromSecret(ctx context.Context, spec *CredSpec, driver SourceDriver, material SecretMaterial) (*Credential, error) {
 	var cred *Credential
 	err := m.mintingService.MintFromSecretWithCleanup(ctx, driver, spec, material, func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
+		var parseErr error
+		cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, metadata, leaseTTL, leaseID, driver)
+		return parseErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return cred, nil
+}
+
+// mintFromSecretWithExchange mints the consuming credential via the exchange-aware
+// chained path — both the caller's exchange inputs and the fetched client-auth material
+// — with orphaned-lease cleanup on failure. Mirrors mintFromSecret for the
+// token-exchange chaining path.
+func (m *Manager) mintFromSecretWithExchange(ctx context.Context, spec *CredSpec, driver SourceDriver, inputs *ExchangeInputs, material SecretMaterial) (*Credential, error) {
+	var cred *Credential
+	err := m.mintingService.MintFromSecretWithExchangeCleanup(ctx, driver, spec, inputs, material, func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error {
 		var parseErr error
 		cred, parseErr = m.credentialParser.ParseAndValidate(ctx, spec, rawData, metadata, leaseTTL, leaseID, driver)
 		return parseErr

@@ -271,6 +271,30 @@ type ExchangeMinter interface {
 //	var _ credential.ChainedSecretMinter = (*GitHubDriver)(nil)
 type ChainedSecretMinter interface {
 	// MintFromSecret mints a credential using the given fetched secret material.
-	// The return contract matches SourceDriver.MintCredential.
+	// The return contract matches SourceDriver.MintCredential. A driver may wrap
+	// credential.ErrChainedSecretRejected when the downstream rejects the fetched
+	// secret, so the minting layer evicts any cached secret and retries once.
 	MintFromSecret(ctx context.Context, spec *CredSpec, material SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error)
+}
+
+// ChainedExchangeMinter is an ExchangeMinter whose client-authentication secret
+// (client_secret, or the private_key for private_key_jwt) is itself sourced via
+// credential chaining (secret_spec) rather than stored on the source. Warden fetches
+// the referenced secret material and performs the RFC 8693 / 7523 exchange in one call,
+// so nothing about the client secret is stored in Warden.
+//
+// It is distinct from ChainedSecretMinter (which mints directly from the material with
+// no exchange) and from ExchangeMinter (which reads client auth from its own config).
+// A driver implementing it asserts so at compile time:
+//
+//	var _ credential.ChainedExchangeMinter = (*TokenExchangeDriver)(nil)
+//
+// As with the other chained interfaces, a driver may wrap
+// credential.ErrChainedSecretRejected (e.g. mapping an upstream invalid_client) so the
+// minting layer evicts a cached secret and retries once.
+type ChainedExchangeMinter interface {
+	// MintCredentialWithExchangeFromSecret mints a credential using both the caller's
+	// exchange inputs and the fetched client-auth secret. The return contract matches
+	// SourceDriver.MintCredential.
+	MintCredentialWithExchangeFromSecret(ctx context.Context, spec *CredSpec, inputs *ExchangeInputs, material SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error)
 }
