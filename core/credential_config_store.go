@@ -957,11 +957,28 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		chainedRef = source.Config[credential.ConfigSecretSpec]
 	}
 	if chainedRef != "" {
-		// A chained consumer's identity flows through the referenced secret-spec, so
-		// its own subject/actor exchange config would be silently ignored at mint —
-		// reject the confusing combination rather than accept dead config.
-		if credential.SpecRequestsExchange(spec.Config) {
+		// For token_exchange, client-secret chaining is a SOURCE concern (client auth
+		// lives on the source, and the factory only sees source config). A spec-level
+		// secret_spec would leave the source's inline client_secret as dead config at
+		// mint — reject it with clear guidance.
+		if source.Type == credential.SourceTypeTokenExchange && spec.Config[credential.ConfigSecretSpec] != "" {
+			return logical.ErrBadRequestf("for a token_exchange source, set secret_spec on the source (client authentication is a source concern), not on the spec")
+		}
+		// A chained consumer's identity normally flows through the referenced secret-spec,
+		// so its own subject/actor exchange config would be dead — reject that confusing
+		// combination. The token_exchange driver is the exception: it is itself an
+		// exchange spec whose *client secret* is chained (ChainedExchangeMinter), so it
+		// legitimately sets both. (Driver-free type gate; the ChainedExchangeMinter
+		// capability is asserted in the test-mint block and at mint time.)
+		if credential.SpecRequestsExchange(spec.Config) && source.Type != credential.SourceTypeTokenExchange {
 			return logical.ErrBadRequestf("a chained spec (secret_spec set) must not also set its own subject_token_source/actor_token_source; the caller identity is carried by the referenced secret_spec %q", chainedRef)
+		}
+		// Conversely, a token_exchange spec whose client secret is chained still needs a
+		// subject to exchange: without subject_token_source it would route to the plain
+		// (non-exchange) chaining path and fail with a misleading "does not support
+		// secret_spec chaining" at mint. Guide the operator here instead.
+		if source.Type == credential.SourceTypeTokenExchange && !credential.SpecRequestsExchange(spec.Config) {
+			return logical.ErrBadRequestf("a token_exchange spec whose client secret is chained (source secret_spec %q) must set subject_token_source; the exchange still needs a subject", chainedRef)
 		}
 		if err := s.validateSecretSpecRef(ctx, chainedRef); err != nil {
 			return err
@@ -1016,10 +1033,16 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 
 				// A chained spec (secret_spec) fetches its secret material from a
 				// referenced spec at request time as the caller, so it cannot be
-				// test-minted at create. Its consuming driver must also be able to
-				// mint from that material — reject at create rather than at first use.
+				// test-minted at create. Its consuming driver must also be able to mint
+				// from that material — reject at create rather than at first use. An
+				// exchange consumer (token_exchange) needs ChainedExchangeMinter (exchange
+				// + fetched secret); a plain consumer needs ChainedSecretMinter.
 				if chainedRef != "" {
-					if _, ok := driver.(credential.ChainedSecretMinter); !ok {
+					if credential.SpecRequestsExchange(spec.Config) {
+						if _, ok := driver.(credential.ChainedExchangeMinter); !ok {
+							return logical.ErrBadRequestf("source type %q does not support secret_spec chaining with token exchange", source.Type)
+						}
+					} else if _, ok := driver.(credential.ChainedSecretMinter); !ok {
 						return logical.ErrBadRequestf("source type %q does not support secret_spec chaining", source.Type)
 					}
 					runTestMint = false
@@ -1224,10 +1247,12 @@ func (s *CredentialConfigStore) validateSecretSpecRef(ctx context.Context, ref s
 	// SESSION-PINNED subject: warden_identity (Warden mints an assertion for the
 	// session's principal) or agent_identity (the caller's own inbound JWT). A
 	// user_identity subject is a per-request, per-user token that is NOT tied to the
-	// session token — and a chained consumer's outer cache key carries no exchange
-	// fingerprint (the exchange happens on this referenced spec, not the consumer),
-	// so under a shared session token two principals would collide on that key and
-	// one could be served the other's chained credential. Reject anything else
+	// session token, so it cannot key a stable per-caller secret. (A plain chained
+	// consumer's outer cache key carries no exchange fingerprint — the exchange happens
+	// on this referenced spec, not the consumer — so under a shared session token two
+	// principals would otherwise collide and one could be served the other's chained
+	// credential. A token_exchange chained consumer does carry an :x: fragment, but this
+	// session-pinned requirement is on the REFERENCED spec regardless.) Reject anything else
 	// (including an unset/"none" subject, which would otherwise degrade to the
 	// non-exchange path and fail late with an opaque backend error).
 	switch refSpec.Config[credential.ConfigSubjectTokenSource] {

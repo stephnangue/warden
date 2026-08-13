@@ -345,6 +345,142 @@ func TestTokenExchangeDriver_PrivateKeyJWT(t *testing.T) {
 	assert.NotEmpty(t, claims.ID, "assertion should carry a jti")
 }
 
+// chainedMaterial wraps a single secret value as SecretMaterial (as credential chaining
+// would hand it to the driver).
+func chainedMaterial(secret string) credential.SecretMaterial {
+	return credential.SecretMaterial{Data: map[string]string{"value": secret}, Field: "value"}
+}
+
+// The chained client secret (from secret_spec) is used as client_secret in the form,
+// with no inline client_secret on the source.
+func TestTokenExchangeDriver_ChainedClientSecret_Post(t *testing.T) {
+	subject := makeUnsignedJWT(map[string]interface{}{"sub": "u"})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, "warden-gateway", r.Form.Get("client_id"))
+		assert.Equal(t, "chained-secret", r.Form.Get("client_secret"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+	}))
+	defer server.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url":   server.URL,
+		"client_auth": clientAuthSecretPost,
+		"client_id":   "warden-gateway",
+		"secret_spec": "idp-client-secret", // no inline client_secret
+	}, server.Client())
+
+	rawData, _, _, _, err := d.MintCredentialWithExchangeFromSecret(
+		context.Background(), &credential.CredSpec{}, subjectInputs(subject), chainedMaterial("chained-secret"))
+	require.NoError(t, err)
+	assert.Equal(t, "t", rawData["api_key"])
+}
+
+// The chained secret is used for client_secret_basic (Authorization header).
+func TestTokenExchangeDriver_ChainedClientSecret_Basic(t *testing.T) {
+	subject := makeUnsignedJWT(map[string]interface{}{"sub": "u"})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		require.True(t, ok, "expected Basic auth header")
+		assert.Equal(t, "warden-gateway", user)
+		assert.Equal(t, "chained-secret", pass)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+	}))
+	defer server.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url":   server.URL,
+		"client_auth": clientAuthSecretBasic,
+		"client_id":   "warden-gateway",
+		"secret_spec": "idp-client-secret",
+	}, server.Client())
+
+	_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(
+		context.Background(), &credential.CredSpec{}, subjectInputs(subject), chainedMaterial("chained-secret"))
+	require.NoError(t, err)
+}
+
+// For private_key_jwt, the chained material is the PEM key that signs the assertion.
+func TestTokenExchangeDriver_ChainedPrivateKeyJWT(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	require.NoError(t, err)
+	privPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+
+	var gotAssertion string
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Empty(t, r.Form.Get("client_secret"))
+		gotAssertion = r.Form.Get("client_assertion")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+	}))
+	defer sts.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url":   sts.URL,
+		"client_auth": clientAuthPrivateKeyJWT,
+		"client_id":   "warden-gateway",
+		"secret_spec": "idp-key", // no inline private_key
+	}, sts.Client())
+
+	_, _, _, _, err = d.MintCredentialWithExchangeFromSecret(
+		context.Background(), &credential.CredSpec{}, subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u"})), chainedMaterial(privPEM))
+	require.NoError(t, err)
+
+	require.NotEmpty(t, gotAssertion)
+	parsed, err := josejwt.ParseSigned(gotAssertion)
+	require.NoError(t, err)
+	var claims josejwt.Claims
+	require.NoError(t, parsed.Claims(&priv.PublicKey, &claims), "assertion signed with the chained key")
+	assert.Equal(t, "warden-gateway", claims.Issuer)
+}
+
+// An empty chained secret is a configuration error, surfaced before any token request.
+func TestTokenExchangeDriver_ChainedEmptySecretErrors(t *testing.T) {
+	called := false
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer sts.Close()
+	d := newExchangeDriver(map[string]string{
+		"token_url": sts.URL, "client_auth": clientAuthSecretPost, "client_id": "c", "secret_spec": "s",
+	}, sts.Client())
+	_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(
+		context.Background(), &credential.CredSpec{}, subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u"})), chainedMaterial(""))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty")
+	assert.False(t, called, "no token request when the chained secret is empty")
+}
+
+// An upstream invalid_client on the CHAINED path maps to ErrChainedSecretRejected (so the
+// manager evicts + retries); the non-chained path does NOT wrap the sentinel.
+func TestTokenExchangeDriver_ChainedInvalidClientSentinel(t *testing.T) {
+	sts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_client"})
+	}))
+	defer sts.Close()
+
+	cfg := map[string]string{"token_url": sts.URL, "client_auth": clientAuthSecretPost, "client_id": "c"}
+	subject := subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u"}))
+
+	// Chained: wraps the sentinel.
+	dChained := newExchangeDriver(cfg, sts.Client())
+	_, _, _, _, err := dChained.MintCredentialWithExchangeFromSecret(context.Background(), &credential.CredSpec{}, subject, chainedMaterial("stale"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, credential.ErrChainedSecretRejected, "chained invalid_client -> evict-and-retry sentinel")
+
+	// Non-chained (inline secret): same upstream error, but NOT the chained sentinel.
+	cfg2 := map[string]string{"token_url": sts.URL, "client_auth": clientAuthSecretPost, "client_id": "c", "client_secret": "s"}
+	dInline := newExchangeDriver(cfg2, sts.Client())
+	_, _, _, _, err = dInline.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, subject)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected, "non-chained path must not request an evict-and-retry")
+}
+
 func TestTokenExchangeDriver_IDJAG(t *testing.T) {
 	subject := makeUnsignedJWT(map[string]interface{}{"sub": "user"})
 

@@ -145,6 +145,43 @@ func (s *MintingService) MintFromSecretWithCleanup(
 	return nil
 }
 
+// MintFromSecretWithExchangeCleanup mints a credential from BOTH caller-derived exchange
+// inputs and fetched chained-secret material, with the same orphaned-lease cleanup as
+// MintWithCleanup. The driver must implement ChainedExchangeMinter; a driver that does
+// not fails closed rather than silently minting under a chained token-exchange spec.
+func (s *MintingService) MintFromSecretWithExchangeCleanup(
+	ctx context.Context,
+	driver SourceDriver,
+	spec *CredSpec,
+	inputs *ExchangeInputs,
+	material SecretMaterial,
+	onSuccess func(rawData, metadata map[string]interface{}, leaseTTL time.Duration, leaseID string) error,
+) error {
+	cem, ok := driver.(ChainedExchangeMinter)
+	if !ok {
+		return fmt.Errorf("source driver %q does not support secret_spec chaining with token exchange", driver.Type())
+	}
+
+	rawData, metadata, leaseTTL, leaseID, err := cem.MintCredentialWithExchangeFromSecret(ctx, spec, inputs, material)
+	if err != nil {
+		return fmt.Errorf("failed to mint from secret with exchange: %w", err)
+	}
+
+	success := false
+	defer func() {
+		if !success && leaseID != "" {
+			s.revokeOrphanedLease(driver, leaseID, spec.Source)
+		}
+	}()
+
+	if err := onSuccess(rawData, metadata, leaseTTL, leaseID); err != nil {
+		return err
+	}
+
+	success = true
+	return nil
+}
+
 // revokeOrphanedLease attempts to revoke a lease that was minted but not successfully processed.
 // This is a best-effort operation that logs errors but does not fail the overall operation.
 // Uses a fresh background context since the original context may have been cancelled.

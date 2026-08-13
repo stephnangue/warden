@@ -87,14 +87,55 @@ func (f *mockExchangeSecretFactory) InferCredentialType(_ map[string]string) (st
 	return "", fmt.Errorf("n/a")
 }
 
+// mockChainedExchangeDriver implements SourceDriver + ChainedExchangeMinter: it performs
+// an "exchange" using BOTH the caller's exchange inputs and the fetched secret material.
+type mockChainedExchangeDriver struct {
+	driverType   string
+	calls        atomic.Int32
+	gotSubject   string
+	lastMaterial SecretMaterial
+	// rejectIf, when set and returning true for the handed material, fails with
+	// ErrChainedSecretRejected (simulating an upstream invalid_client on a stale secret).
+	rejectIf func(SecretMaterial) bool
+}
+
+func (d *mockChainedExchangeDriver) MintCredential(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	return nil, nil, 0, "", fmt.Errorf("mockChainedExchangeDriver: exchange required")
+}
+func (d *mockChainedExchangeDriver) MintCredentialWithExchangeFromSecret(_ context.Context, _ *CredSpec, inputs *ExchangeInputs, material SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	d.calls.Add(1)
+	d.gotSubject = inputs.SubjectToken
+	d.lastMaterial = material
+	if d.rejectIf != nil && d.rejectIf(material) {
+		return nil, nil, 0, "", fmt.Errorf("upstream rejected client auth: %w", ErrChainedSecretRejected)
+	}
+	return map[string]interface{}{"token": "exch:" + inputs.SubjectToken + ":" + material.Secret()}, nil, 0, "", nil
+}
+func (d *mockChainedExchangeDriver) Revoke(_ context.Context, _ string) error { return nil }
+func (d *mockChainedExchangeDriver) Type() string                            { return d.driverType }
+func (d *mockChainedExchangeDriver) Cleanup(_ context.Context) error         { return nil }
+
+type mockChainedExchangeFactory struct{ driver *mockChainedExchangeDriver }
+
+func (f *mockChainedExchangeFactory) Type() string { return f.driver.driverType }
+func (f *mockChainedExchangeFactory) Create(_ map[string]string, _ *logger.GatedLogger) (SourceDriver, error) {
+	return f.driver, nil
+}
+func (f *mockChainedExchangeFactory) ValidateConfig(_ map[string]string) error { return nil }
+func (f *mockChainedExchangeFactory) SensitiveConfigFields() []string          { return nil }
+func (f *mockChainedExchangeFactory) InferCredentialType(_ map[string]string) (string, error) {
+	return "", fmt.Errorf("n/a")
+}
+
 // chainingEnv wires a secret source (leaseless, returns {token: THE-SECRET}) and a
 // consumer source that implements ChainedSecretMinter.
 type chainingEnv struct {
-	manager        *Manager
-	store          *mockConfigStore
-	secretDriver   *mockSourceDriver
-	consumerDriver *mockChainedDriver
-	exchangeDriver *mockExchangeSecretDriver
+	manager                *Manager
+	store                  *mockConfigStore
+	secretDriver           *mockSourceDriver
+	consumerDriver         *mockChainedDriver
+	exchangeDriver         *mockExchangeSecretDriver
+	exchangeConsumerDriver *mockChainedExchangeDriver
 }
 
 func newChainingEnv(t *testing.T) *chainingEnv {
@@ -119,6 +160,9 @@ func newChainingEnv(t *testing.T) *chainingEnv {
 	exchange := &mockExchangeSecretDriver{driverType: "exchangesrc"}
 	require.NoError(t, driverRegistry.RegisterFactory(&mockExchangeSecretFactory{driver: exchange}))
 
+	exchangeConsumer := &mockChainedExchangeDriver{driverType: "exchangeconsumersrc"}
+	require.NoError(t, driverRegistry.RegisterFactory(&mockChainedExchangeFactory{driver: exchangeConsumer}))
+
 	store := newMockConfigStore()
 	manager, err := NewManager(typeRegistry, driverRegistry, store, log)
 	require.NoError(t, err)
@@ -130,8 +174,10 @@ func newChainingEnv(t *testing.T) *chainingEnv {
 	store.AddSource(&CredSource{Name: "consumersource", Type: "consumersrc", Config: map[string]string{}})
 	// Exchange-consuming secret source (for materialization tests).
 	store.AddSource(&CredSource{Name: "exchangesource", Type: "exchangesrc", Config: map[string]string{}})
+	// Consumer source whose driver is a ChainedExchangeMinter (token_exchange-shaped).
+	store.AddSource(&CredSource{Name: "exchangeconsumersource", Type: "exchangeconsumersrc", Config: map[string]string{}})
 
-	return &chainingEnv{manager: manager, store: store, secretDriver: secretFactory.driver, consumerDriver: consumer, exchangeDriver: exchange}
+	return &chainingEnv{manager: manager, store: store, secretDriver: secretFactory.driver, consumerDriver: consumer, exchangeDriver: exchange, exchangeConsumerDriver: exchangeConsumer}
 }
 
 // caller with a no-op ResolveInputs (the referenced secret-spec does not request
@@ -309,6 +355,76 @@ func TestChaining_RequiresCallerContext(t *testing.T) {
 	_, err := env.manager.IssueCredential(ctx, caller, "consumer", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires a request caller context")
+}
+
+// TestChaining_ExchangeConsumerRoutes: a chained consumer that ITSELF requests exchange
+// (inputs != nil) routes to issueChainedExchange — the fetched secret becomes the mint
+// material AND the consumer's own subject token drives the exchange.
+func TestChaining_ExchangeConsumerRoutes(t *testing.T) {
+	env := newChainingEnv(t)
+	env.store.AddSpec(&CredSpec{Name: "exch-consumer", Type: TypeVaultToken, Source: "exchangeconsumersource",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+
+	ctx := createNamespaceContext()
+	inputs := &ExchangeInputs{SubjectToken: "subj-user", SubjectTokenType: TokenTypeJWT}
+	cred, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "exch-consumer", inputs)
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(1), env.exchangeConsumerDriver.calls.Load(), "routed to the exchange-chaining mint")
+	assert.Equal(t, "THE-SECRET", env.exchangeConsumerDriver.lastMaterial.Secret(), "fetched secret handed to the driver")
+	assert.Equal(t, "subj-user", env.exchangeConsumerDriver.gotSubject, "consumer's own subject drove the exchange")
+	assert.Equal(t, "exch:subj-user:THE-SECRET", cred.Data["token"])
+}
+
+// TestChaining_ExchangeConsumerFailsClosed: a chained consumer that requests exchange but
+// whose driver is only a ChainedSecretMinter (not ChainedExchangeMinter) fails closed.
+func TestChaining_ExchangeConsumerFailsClosed(t *testing.T) {
+	env := newChainingEnv(t)
+	env.store.AddSpec(&CredSpec{Name: "bad-exch", Type: TypeVaultToken, Source: "consumersource",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+
+	ctx := createNamespaceContext()
+	inputs := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT}
+	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "bad-exch", inputs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not support secret_spec chaining with token exchange")
+}
+
+// TestChaining_ExchangeConsumerRetriesOnRejection: the exchange path inherits PR2's
+// evict-and-retry — a cached client secret rejected upstream (invalid_client) is evicted
+// and the exchange retries once with a fresh fetch.
+func TestChaining_ExchangeConsumerRetriesOnRejection(t *testing.T) {
+	env := newChainingEnv(t)
+	// Secret driver returns "v1" then "v2" (a rotation at the source).
+	var fetches atomic.Int32
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		val := "v1"
+		if fetches.Add(1) > 1 {
+			val = "v2"
+		}
+		return map[string]interface{}{"token": val}, nil, 0, "", nil
+	}
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "exch1", Type: TypeVaultToken, Source: "exchangeconsumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "exch2", Type: TypeVaultToken, Source: "exchangeconsumersource", Config: cfg})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+	inputs1 := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT}
+
+	// Prime the cache with "v1".
+	_, err := env.manager.IssueCredential(ctx, caller, "exch1", inputs1)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), fetches.Load())
+
+	// "v1" now stale: reject it. A second exchange consumer hits the cached "v1", is
+	// rejected, evicts + re-fetches "v2", and succeeds.
+	env.exchangeConsumerDriver.rejectIf = func(m SecretMaterial) bool { return m.Secret() == "v1" }
+	inputs2 := &ExchangeInputs{SubjectToken: "s2", SubjectTokenType: TokenTypeJWT}
+	cred, err := env.manager.IssueCredential(ctx, caller, "exch2", inputs2)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), fetches.Load(), "stale client secret evicted and re-fetched once")
+	assert.Equal(t, "exch:s2:v2", cred.Data["token"], "exchange retried with the fresh secret")
 }
 
 // exchangeChainCaller builds a Caller whose referenced-spec inputs carry a per-agent
