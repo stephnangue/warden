@@ -18,6 +18,9 @@ type mockChainedDriver struct {
 	driverType    string
 	mintFromCalls atomic.Int32
 	lastMaterial  SecretMaterial
+	// rejectIf, when set and returning true for the handed material, makes MintFromSecret
+	// fail with ErrChainedSecretRejected (simulating a downstream rejecting a stale secret).
+	rejectIf func(SecretMaterial) bool
 }
 
 func (d *mockChainedDriver) MintCredential(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
@@ -27,6 +30,9 @@ func (d *mockChainedDriver) MintCredential(_ context.Context, _ *CredSpec) (map[
 func (d *mockChainedDriver) MintFromSecret(_ context.Context, _ *CredSpec, material SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	d.mintFromCalls.Add(1)
 	d.lastMaterial = material
+	if d.rejectIf != nil && d.rejectIf(material) {
+		return nil, nil, 0, "", fmt.Errorf("downstream rejected the secret: %w", ErrChainedSecretRejected)
+	}
 	return map[string]interface{}{"token": "consumer-token:" + material.Secret()}, nil, 0, "", nil
 }
 
@@ -53,12 +59,14 @@ type mockExchangeSecretDriver struct {
 	driverType string
 	gotSubject string
 	gotActor   string
+	mintCalls  atomic.Int32
 }
 
 func (d *mockExchangeSecretDriver) MintCredential(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	return nil, nil, 0, "", fmt.Errorf("mockExchangeSecretDriver: exchange required")
 }
 func (d *mockExchangeSecretDriver) MintCredentialWithExchange(_ context.Context, _ *CredSpec, inputs *ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	d.mintCalls.Add(1)
 	d.gotSubject = inputs.SubjectToken
 	d.gotActor = inputs.ActorToken
 	return map[string]interface{}{"token": "SECRET-" + inputs.SubjectToken}, nil, 0, "", nil
@@ -301,4 +309,198 @@ func TestChaining_RequiresCallerContext(t *testing.T) {
 	_, err := env.manager.IssueCredential(ctx, caller, "consumer", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires a request caller context")
+}
+
+// exchangeChainCaller builds a Caller whose referenced-spec inputs carry a per-agent
+// SubjectCacheIdentity (so the secret-cache key is per agent identity) and optionally a
+// user principal + UserClaims (so a user-scoped referenced fetch keys per user).
+func exchangeChainCaller(agentToken, agentIdentity, userToken string, userClaims map[string]string) Caller {
+	c := Caller{
+		TokenID:  agentToken,
+		TokenTTL: time.Hour,
+		ResolveInputs: func(_ context.Context, specName string) (*ExchangeInputs, error) {
+			return &ExchangeInputs{
+				SubjectCacheIdentity: agentIdentity,
+				ResolveSubjectToken:  func(_ context.Context) (string, error) { return "subj-" + agentIdentity, nil },
+				UserClaims:           userClaims,
+			}, nil
+		},
+	}
+	if userToken != "" {
+		c.User = &UserContext{TokenID: userToken, TokenTTL: time.Hour}
+	}
+	return c
+}
+
+// TestChaining_CacheSharesAcrossConsumers: with secret_cache_ttl set, two consumer specs
+// referencing the same secret-spec under one caller fetch the secret only ONCE (shared
+// via the secret cache) — versus TestChaining_SecretNotCached's two fetches without a
+// TTL. Also exercises the nil-inputs ("noexchange") cache-key path without panicking.
+func TestChaining_CacheSharesAcrossConsumers(t *testing.T) {
+	env := newChainingEnv(t)
+	ttl := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: ttl})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: ttl})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA") // nil inputs -> "noexchange" key segment
+
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), env.secretDriver.mintCalls.Load(), "secret_cache_ttl shares the fetched secret across consumers")
+}
+
+// TestChaining_CacheIsolatesPerAgent: even with caching on, two distinct agent
+// identities never share a cached secret (the per-agent Fingerprint dimension). Two
+// consumer specs referencing the same secret-spec would collapse to one fetch if the
+// cache were agent-blind; keyed per agent they fetch twice.
+func TestChaining_CacheIsolatesPerAgent(t *testing.T) {
+	env := newChainingEnv(t)
+	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: map[string]string{}})
+	cfg := map[string]string{ConfigSecretSpec: "exchange-secret", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+
+	ctx := createNamespaceContext()
+	_, err := env.manager.IssueCredential(ctx, exchangeChainCaller("tokA", "agentA", "", nil), "consumer1", nil)
+	require.NoError(t, err)
+	_, err = env.manager.IssueCredential(ctx, exchangeChainCaller("tokB", "agentB", "", nil), "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.exchangeDriver.mintCalls.Load(), "distinct agents do not share a cached secret")
+}
+
+// TestChaining_CacheIsolatesPerUser (P0 regression): a user-scoped referenced fetch
+// (UserClaims populated) is cached per user. The same user shares across consumer specs;
+// a different user never receives the first user's secret.
+func TestChaining_CacheIsolatesPerUser(t *testing.T) {
+	env := newChainingEnv(t)
+	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: map[string]string{}})
+	cfg := map[string]string{ConfigSecretSpec: "exchange-secret", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+
+	ctx := createNamespaceContext()
+	claims := map[string]string{"sub": "alice"}
+
+	// User A, two consumer specs, one agent -> shared within the user (one fetch).
+	_, err := env.manager.IssueCredential(ctx, exchangeChainCaller("agentTok", "agentA", "userA", claims), "consumer1", nil)
+	require.NoError(t, err)
+	_, err = env.manager.IssueCredential(ctx, exchangeChainCaller("agentTok", "agentA", "userA", claims), "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), env.exchangeDriver.mintCalls.Load(), "same user shares the cached secret across consumers")
+
+	// User B, same agent + secret-spec -> its own fetch (never served user A's secret).
+	_, err = env.manager.IssueCredential(ctx, exchangeChainCaller("agentTok", "agentA", "userB", map[string]string{"sub": "bob"}), "consumer1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.exchangeDriver.mintCalls.Load(), "a different user fetches its own secret (no cross-user leak)")
+}
+
+// TestChaining_RetryEvictsStaleCachedSecret: when a cached secret is rejected downstream
+// (ErrChainedSecretRejected), the manager evicts it and retries once with a fresh fetch.
+func TestChaining_RetryEvictsStaleCachedSecret(t *testing.T) {
+	env := newChainingEnv(t)
+	// Secret driver returns "v1" first, "v2" after (a rotation at the source).
+	var fetches atomic.Int32
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		n := fetches.Add(1)
+		val := "v1"
+		if n > 1 {
+			val = "v2"
+		}
+		return map[string]interface{}{"token": val}, nil, 0, "", nil
+	}
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+
+	// Prime the cache with "v1".
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), fetches.Load())
+
+	// Now "v1" is stale: reject it downstream. A second consumer (outer miss) hits the
+	// cached "v1", is rejected, evicts + re-fetches "v2", and succeeds.
+	env.consumerDriver.rejectIf = func(m SecretMaterial) bool { return m.Secret() == "v1" }
+	cred, err := env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), fetches.Load(), "stale cached secret evicted and re-fetched once")
+	assert.Equal(t, "consumer-token:v2", cred.Data["token"], "retry minted from the fresh secret")
+}
+
+// TestChaining_NoRetryWhenSecretFresh: with caching off (ttl<=0) a downstream rejection
+// is NOT retried — the just-fetched secret can't be stale, so re-fetching is pointless.
+func TestChaining_NoRetryWhenSecretFresh(t *testing.T) {
+	env := newChainingEnv(t)
+	env.consumerDriver.rejectIf = func(SecretMaterial) bool { return true } // always reject
+	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec"}}) // no secret_cache_ttl
+
+	ctx := createNamespaceContext()
+	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrChainedSecretRejected)
+	assert.Equal(t, int32(1), env.secretDriver.mintCalls.Load(), "no cache -> no retry (secret fetched once)")
+	assert.Equal(t, int32(1), env.consumerDriver.mintFromCalls.Load(), "mint attempted once, not retried")
+}
+
+// TestChaining_NoRetryOnFreshFetchWithTTL: even with caching ON, a rejection of a
+// freshly fetched secret (a cache MISS, fromCache=false) is not retried — only a cached
+// (potentially stale) secret is. Guards the fromCache gate.
+func TestChaining_NoRetryOnFreshFetchWithTTL(t *testing.T) {
+	env := newChainingEnv(t)
+	env.consumerDriver.rejectIf = func(SecretMaterial) bool { return true }
+	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}})
+
+	ctx := createNamespaceContext()
+	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrChainedSecretRejected)
+	assert.Equal(t, int32(1), env.secretDriver.mintCalls.Load(), "fresh (miss) secret not retried, even with ttl>0")
+	assert.Equal(t, int32(1), env.consumerDriver.mintFromCalls.Load(), "mint attempted once")
+}
+
+// TestChaining_CacheTTLSourceLevel: a source-level secret_cache_ttl enables caching for
+// its consumer specs (no spec-level TTL), resolved spec-then-source.
+func TestChaining_CacheTTLSourceLevel(t *testing.T) {
+	env := newChainingEnv(t)
+	env.store.AddSource(&CredSource{Name: "consumersource-cached", Type: "consumersrc",
+		Config: map[string]string{ConfigSecretCacheTTL: "30m"}})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource-cached",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource-cached",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), env.secretDriver.mintCalls.Load(), "source-level secret_cache_ttl caches")
+}
+
+// TestChaining_CacheTTLSpecOptOut: a spec-level secret_cache_ttl "0" opts OUT of a
+// source-level TTL (presence wins), so the secret is fetched every time.
+func TestChaining_CacheTTLSpecOptOut(t *testing.T) {
+	env := newChainingEnv(t)
+	env.store.AddSource(&CredSource{Name: "consumersource-cached", Type: "consumersrc",
+		Config: map[string]string{ConfigSecretCacheTTL: "30m"}})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource-cached",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "0"}})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource-cached",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "0"}})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(), "spec-level 0 opts out of source TTL")
 }

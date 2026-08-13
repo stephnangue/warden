@@ -468,6 +468,34 @@ func TestCredentialConfigStore_SecretSpecReference_Restrictions(t *testing.T) {
 	assert.Contains(t, err.Error(), "must not also set")
 }
 
+// TestCredentialConfigStore_SecretCacheTTLValidation: an unparsable secret_cache_ttl on
+// a chained consumer is rejected at create (so a typo can't silently disable caching).
+func TestCredentialConfigStore_SecretCacheTTLValidation(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "secret-spec", Type: "vault_token", Source: "src",
+		Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "aud"},
+	}))
+
+	err := store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "bad-ttl", Type: "vault_token", Source: "src",
+		Config: map[string]string{credential.ConfigSecretSpec: "secret-spec", credential.ConfigSecretCacheTTL: "30min"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a valid duration")
+
+	// A valid duration (and "0" to opt out) are accepted.
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "ok-ttl", Type: "vault_token", Source: "src",
+		Config: map[string]string{credential.ConfigSecretSpec: "secret-spec", credential.ConfigSecretCacheTTL: "30m"},
+	}))
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "optout-ttl", Type: "vault_token", Source: "src",
+		Config: map[string]string{credential.ConfigSecretSpec: "secret-spec", credential.ConfigSecretCacheTTL: "0"},
+	}))
+}
+
 // TestCredentialConfigStore_CheckSourceReferences tests checking source references
 func TestCredentialConfigStore_CheckSourceReferences(t *testing.T) {
 	store, ctx := setupTestCredentialConfigStore(t)

@@ -38,4 +38,12 @@ var (
 	// the sealed token may have been rotated by another node, so it should
 	// re-read the latest spec and retry the refresh once.
 	ErrRefreshTokenRejected = errors.New("oauth2 refresh token rejected")
+
+	// ErrChainedSecretRejected is returned (wrapped) by a chained-secret consuming
+	// driver when the downstream rejects the fetched secret — e.g. an OAuth
+	// invalid_client, or a 401 from a resource. It signals the manager that a
+	// cached chained secret may be stale (rotated at the source): the manager
+	// evicts the cache entry and retries the mint once. A consuming driver wraps
+	// it via fmt.Errorf("...: %w", credential.ErrChainedSecretRejected).
+	ErrChainedSecretRejected = errors.New("chained secret rejected by downstream")
 )

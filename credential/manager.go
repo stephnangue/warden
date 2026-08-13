@@ -37,10 +37,18 @@ const DefaultIssuanceTimeout = 30 * time.Second
 //   - DriverCoordinator: Handles driver lifecycle (get/create/close)
 //   - MintingService: Handles credential minting with automatic cleanup
 //   - CredentialParser: Handles credential parsing and validation
+
 type Manager struct {
 	log   *logger.GatedLogger
 	cache *ristretto.Cache[string, *Credential] // key: {namespace-uuid}:{tokenID} -> value: Credential
-	group singleflight.Group
+	// secretCache holds referenced secret-spec material for credential chaining,
+	// opt-in per consumer via ConfigSecretCacheTTL. It is a separate instance from the
+	// credential cache: its entries are keyed by (namespace, secret_spec, agent
+	// identity [, user]) and TTL'd by secret_cache_ttl, not by the credential cache's
+	// per-token/session lifetime. Fetched secrets are held in memory only, never
+	// persisted.
+	secretCache *ristretto.Cache[string, chainedSecret]
+	group       singleflight.Group
 
 	// Focused components (extracted from Manager for better testability)
 	specResolver      *SpecResolver
@@ -99,6 +107,16 @@ type ExpirationRegistrar interface {
 	RegisterCredential(ctx context.Context, credentialID, cacheKey string, ttl time.Duration, leaseID, sourceName, sourceType, specName string, revocable bool) error
 }
 
+// chainedSecret is the cached payload of a referenced secret-spec: the minted
+// credential's Data plus its Type. Type is retained because resolveSecretField uses it
+// for the PrimaryFieldProvider fallback, so a cache hit resolves the secret_field
+// identically to a fresh fetch. It never contains a lease (the referenced spec is
+// static/leaseless) and is held in memory only, never persisted.
+type chainedSecret struct {
+	Data map[string]string
+	Type string
+}
+
 // NewManager creates a new global credential manager
 func NewManager(
 	typeRegistry *TypeRegistry,
@@ -135,6 +153,20 @@ func NewManager(
 	}
 
 	m.cache = cache
+
+	// Separate cache for credential-chaining secret material (opt-in via
+	// ConfigSecretCacheTTL). Entries are (namespace, secret_spec, agent identity [,
+	// user]) tuples — far fewer than issued credentials. Each entry has cost 1, so
+	// MaxCost bounds the entry COUNT; NumCounters is ~10x that for TinyLFU admission.
+	secretCache, err := ristretto.NewCache(&ristretto.Config[string, chainedSecret]{
+		NumCounters: 100_000,
+		MaxCost:     10_000,
+		BufferItems: 64,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create secret cache: %w", err)
+	}
+	m.secretCache = secretCache
 
 	return m, nil
 }
@@ -391,9 +423,9 @@ func (m *Manager) secretSpecRef(ctx context.Context, spec *CredSpec) (string, er
 
 // issueChained mints a consuming credential whose secret comes from a referenced
 // cred spec. It mints the referenced spec AS the caller (fresh assertion), extracts
-// the secret material, and hands it to the consuming driver. The fetched secret is
-// never cached: it is minted via the non-caching internal path and discarded after
-// material extraction.
+// the secret material, and hands it to the consuming driver. By default the fetched
+// secret is not cached (re-minted on every consuming-credential miss); a consumer may
+// opt into source-scoped caching via secret_cache_ttl (see resolveChainedSecretData).
 func (m *Manager) issueChained(ctx context.Context, caller Caller, spec *CredSpec, secretRef string) (*Credential, error) {
 	// Bound the chain to a single hop (a referenced secret-spec may not itself
 	// chain). This also breaks any config-drift reference cycle rather than letting
@@ -413,21 +445,59 @@ func (m *Manager) issueChained(ctx context.Context, caller Caller, spec *CredSpe
 		return nil, fmt.Errorf("secret_spec %q: %w", secretRef, err)
 	}
 
-	// Fetch the referenced secret credential (minted as the caller, never cached).
-	credB, err := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
+	return m.resolveAndMintChained(ctx, caller, spec, secretRef, inputsB,
+		func(ctx context.Context, spec *CredSpec, material SecretMaterial) (*Credential, error) {
+			driver, err := m.driverCoordinator.GetOrCreateDriver(ctx, spec.Source)
+			if err != nil {
+				return nil, err
+			}
+			return m.mintFromSecret(ctx, spec, driver, material)
+		})
+}
+
+// resolveAndMintChained resolves the referenced secret material (through the opt-in
+// source-scoped cache) and mints the consuming credential via mintFn. When the material
+// came from the cache and the downstream rejects it (ErrChainedSecretRejected or the
+// pre-existing ErrRefreshTokenRejected), the cached value may be stale (rotated at the
+// source): it evicts the entry and retries once with a fresh fetch. It does not retry a
+// freshly fetched secret — that would just re-fetch identical data.
+//
+// It is shared by issueChained and (with an exchange-aware mintFn) the token_exchange
+// chaining path, so caching and rejection-retry cover every ChainedSecretMinter driver.
+func (m *Manager) resolveAndMintChained(
+	ctx context.Context,
+	caller Caller,
+	spec *CredSpec,
+	secretRef string,
+	inputsB *ExchangeInputs,
+	mintFn func(ctx context.Context, spec *CredSpec, material SecretMaterial) (*Credential, error),
+) (*Credential, error) {
+	data, typ, fromCache, key, err := m.resolveChainedSecretData(ctx, caller, spec, secretRef, inputsB)
 	if err != nil {
 		return nil, err
 	}
+	material := m.buildSecretMaterial(ctx, spec, data, typ)
 
-	// Extract the secret material and mint the consuming credential from it.
-	field := m.resolveSecretField(ctx, spec, credB)
-	material := SecretMaterial{Data: credB.Data, Field: field}
-
-	driver, err := m.driverCoordinator.GetOrCreateDriver(ctx, spec.Source)
-	if err != nil {
-		return nil, err
+	cred, err := mintFn(ctx, spec, material)
+	if err != nil && fromCache && (errors.Is(err, ErrChainedSecretRejected) || errors.Is(err, ErrRefreshTokenRejected)) {
+		// A cached secret was rejected downstream — evict it and retry once with a
+		// fresh fetch, in case it was rotated at the source after we cached it.
+		m.invalidateChainedSecret(key)
+		data, typ, _, _, rerr := m.resolveChainedSecretData(ctx, caller, spec, secretRef, inputsB)
+		if rerr != nil {
+			return nil, rerr
+		}
+		return mintFn(ctx, spec, m.buildSecretMaterial(ctx, spec, data, typ))
 	}
-	return m.mintFromSecret(ctx, spec, driver, material)
+	return cred, err
+}
+
+// buildSecretMaterial resolves the secret_field for the consuming spec and wraps the
+// fetched data as SecretMaterial. The field is resolved per-consumer (not cached),
+// using a synthetic Credential so resolveSecretField's type-based fallback still works.
+func (m *Manager) buildSecretMaterial(ctx context.Context, spec *CredSpec, data map[string]string, typ string) SecretMaterial {
+	field := m.resolveSecretField(ctx, spec, &Credential{Data: data, Type: typ})
+	return SecretMaterial{Data: data, Field: field}
 }
 
 // fetchChainedSecret mints the referenced secret-spec AS the caller and returns its
@@ -486,6 +556,135 @@ func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretR
 	}
 
 	return credB, nil
+}
+
+// resolveChainedSecretData returns the referenced secret-spec's material (Data + Type),
+// using the source-scoped secret cache when the consumer opts in via secret_cache_ttl.
+// fromCache is true only when the value came from a pre-existing cache entry (so the
+// caller retries on a downstream rejection only when a stale cached value could be the
+// cause). key is the cache key (empty when caching is disabled), for invalidation on
+// retry. A ttl <= 0, or a context without a namespace, disables caching and fetches
+// directly — the behaviour-preserving default.
+func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, spec *CredSpec, secretRef string, inputsB *ExchangeInputs) (data map[string]string, typ string, fromCache bool, key string, err error) {
+	ttl := m.secretCacheTTL(ctx, spec)
+	if ttl <= 0 {
+		credB, ferr := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
+		if ferr != nil {
+			return nil, "", false, "", ferr
+		}
+		return credB.Data, credB.Type, false, "", nil
+	}
+
+	ns, nerr := namespace.FromContext(ctx)
+	if nerr != nil {
+		// No namespace to scope the cache key (internal/non-request path): fall back to
+		// a direct, uncached fetch rather than risk a cross-namespace key collision.
+		credB, ferr := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
+		if ferr != nil {
+			return nil, "", false, "", ferr
+		}
+		return credB.Data, credB.Type, false, "", nil
+	}
+	key = chainedSecretCacheKey(ns.ID, secretRef, caller, inputsB)
+	if key == "" {
+		// Caching refused for safety (user-scoped fetch without a user principal): fetch
+		// directly, uncached.
+		credB, ferr := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
+		if ferr != nil {
+			return nil, "", false, "", ferr
+		}
+		return credB.Data, credB.Type, false, "", nil
+	}
+
+	if cs, ok := m.secretCache.Get(key); ok {
+		return copyStringMap(cs.Data), cs.Type, true, key, nil
+	}
+
+	// Miss: coalesce concurrent fetches for this key. A followed (non-leader) request
+	// receives the leader's freshly fetched value, so fromCache stays false for the
+	// whole group — the value is fresh this round, not a pre-existing cached entry.
+	v, ferr, _ := m.group.Do(key, func() (interface{}, error) {
+		if cs, ok := m.secretCache.Get(key); ok { // another goroutine populated it
+			return cs, nil
+		}
+		credB, e := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
+		if e != nil {
+			return nil, e
+		}
+		cs := chainedSecret{Data: credB.Data, Type: credB.Type}
+		m.secretCache.SetWithTTL(key, cs, 1, ttl)
+		m.secretCache.Wait() // Ristretto sets are async; shrink the window vs a concurrent Del.
+		return cs, nil
+	})
+	if ferr != nil {
+		return nil, "", false, key, ferr
+	}
+	cs := v.(chainedSecret)
+	return copyStringMap(cs.Data), cs.Type, false, key, nil
+}
+
+// secretCacheTTL resolves ConfigSecretCacheTTL spec-then-source (matching how
+// secret_spec / secret_field resolve). Returns 0 (no caching) when unset. A spec-level
+// value is authoritative by PRESENCE, so an explicit spec-level "0" opts out of a
+// source-level TTL (e.g. a rotation-sensitive consumer under a source that caches).
+func (m *Manager) secretCacheTTL(ctx context.Context, spec *CredSpec) time.Duration {
+	if _, ok := spec.Config[ConfigSecretCacheTTL]; ok {
+		return GetDuration(spec.Config, ConfigSecretCacheTTL, 0)
+	}
+	if src, err := m.configStore.GetSource(ctx, spec.Source); err == nil && src != nil {
+		return GetDuration(src.Config, ConfigSecretCacheTTL, 0)
+	}
+	return 0
+}
+
+// invalidateChainedSecret evicts a cached secret and forgets any in-flight singleflight
+// entry for its key, so an immediate retry re-fetches rather than joining a stale fetch.
+func (m *Manager) invalidateChainedSecret(key string) {
+	if key == "" {
+		return
+	}
+	m.secretCache.Del(key)
+	m.group.Forget(key)
+}
+
+// chainedSecretCacheKey scopes a cached secret to (namespace, secret_spec, agent
+// identity). inputsB.Fingerprint keys on SubjectCacheIdentity — stable across an agent's
+// sessions — so the store's per-agent authorization is honoured (agent B is never served
+// agent A's fetched secret). When the referenced fetch is user-scoped (the referenced
+// spec sets assertion_user_claims, so inputsB.UserClaims is populated), the user token id
+// is folded in so one user's per-user secret is never served to another; a source-global
+// fetch (no user claims) omits it and is shared across users under the agent. A nil
+// inputsB (a referenced spec that requests no exchange) uses a fixed sentinel.
+//
+// It returns "" — meaning "do not cache" — for a user-scoped fetch that lacks the user
+// principal to key on. That combination cannot arise from the current request path, but
+// refusing to cache is the safe failure mode: it never shares one user's secret
+// namespace-wide.
+func chainedSecretCacheKey(nsID, secretRef string, caller Caller, inputsB *ExchangeInputs) string {
+	fp := "noexchange"
+	if inputsB != nil {
+		fp = inputsB.Fingerprint()
+	}
+	if inputsB != nil && len(inputsB.UserClaims) > 0 {
+		if caller.User == nil {
+			return ""
+		}
+		return "chainsecret:" + nsID + ":" + secretRef + ":" + fp + ":u:" + caller.User.TokenID
+	}
+	return "chainsecret:" + nsID + ":" + secretRef + ":" + fp
+}
+
+// copyStringMap returns a shallow copy so a cached secret's Data map is never shared
+// with (and mutated by) a consumer. Returns nil for a nil input.
+func copyStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // resolveSecretField selects which key of the referenced credential's Data carries
@@ -689,6 +888,9 @@ func (m *Manager) SetIssuanceTimeout(timeout time.Duration) {
 // Stop gracefully shuts down the manager
 func (m *Manager) Stop() {
 	m.cache.Close()
+	if m.secretCache != nil {
+		m.secretCache.Close()
+	}
 	m.log.Trace("credential manager cache closed")
 }
 
