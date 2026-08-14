@@ -64,7 +64,7 @@ Set these on the **consuming** source/spec:
 |---|---|
 | `secret_spec` | The cred spec to mint and read the secret from. |
 | `secret_field` | Which field of the referenced spec's credential holds the secret, when its payload has multiple keys. |
-| `secret_cache_ttl` | Opt-in: cache the fetched material for a bounded TTL, keyed on the source, to avoid re-fetching a shared secret every request. Off unless set. |
+| `secret_cache_ttl` | Opt-in: cache the fetched material for a bounded TTL to avoid re-fetching every request. The cache entry is **per caller** (keyed on the namespace, referenced spec, and the agent identity — plus the user when present), not a single shared entry. Off unless set. |
 
 ## Guarantees
 

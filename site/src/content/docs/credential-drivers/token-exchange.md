@@ -30,7 +30,8 @@ The token endpoint requires client authentication (`client_secret_*` or a
 — or the `private_key` for `client_auth=private_key_jwt` — from another cred spec at mint
 time. `client_id` stays in config and the inline secret is omitted, so the exchange
 becomes **keyless at Warden**. The same keys cover `client_secret_basic`/`_post`,
-`private_key_jwt`, and both legs of an ID-JAG exchange. See
+`private_key_jwt`, and both legs of an ID-JAG exchange. Set `secret_spec` on the
+**source** (client authentication is a source concern) — not on the spec. See
 [credential chaining](/federation/credential-chaining/).
 
 ## Grant modes
@@ -48,10 +49,10 @@ becomes **keyless at Warden**. The same keys cover `client_secret_basic`/`_post`
 ## Subject and actor: identities by source
 
 :::caution[Upgrading from v0.18.0]
-`auth_token` is renamed to `agent_identity`; the `header` source, the
-`subject_token_header` / `actor_token_header` keys, and the `subject_issuer` /
-`subject_audience` / `subject_jwks_url` / `subject_oidc_discovery_url` trust keys are
-removed. See [Upgrading from v0.18.0](/upgrade/from-v0-18/#3-rfc-8693-token-exchange-reshaped-around-the-user).
+`auth_token` is renamed to `agent_identity`; the `header` source (which read the
+`X-Warden-Subject-Token` / `X-Warden-Actor-Token` request headers) and its subject-trust
+keys `subject_issuer` / `subject_audience` / `subject_jwks_url` / `subject_oidc_discovery_url`
+are removed. See [Upgrading from v0.18.0](/upgrade/from-v0-18/#3-rfc-8693-token-exchange-reshaped-around-the-user).
 :::
 
 Every exchange has a **subject** — the identity the new token will *represent* — and may
@@ -67,7 +68,9 @@ no caller-supplied, per-request-validated token path):
 | `agent_identity` | The agent's own verified inbound JWT (the identity it authenticated to Warden with). |
 | `user_identity` | The [user principal's](/concepts/delegation/) own auth-method-validated credential — the human the agent acts for. Valid only on a `token_exchange` source. |
 | `warden_identity` | A [Warden-minted assertion](/federation/oidc-issuer/) for the caller. |
-| `none` | No subject. |
+
+A token exchange always needs a subject, so `subject_token_source=none` is not usable here —
+the exchange fails at mint without one.
 
 `actor_token_source` is `agent_identity`, `warden_identity`, or `none`. An actor is only
 meaningful in the delegation shape, so **`actor_token_source ≠ none` requires
@@ -84,10 +87,10 @@ actor_token_source=warden_identity    # act = the agent
 [Delegation page](/concepts/delegation/) is the canonical reference for the dual-principal
 model and how the user principal is presented; this page covers the exchange mechanics.
 
-> **Delegation is `rfc8693`-only.** The `jwt_bearer`/Entra grant has no slot for an actor
-> token, so an actor is rejected there. Impersonation works with both grants. A subject
-> that is *itself* already a delegated token (it carries an embedded `act`) yields a
-> delegation result on its own.
+> **Delegation needs an actor slot, which `jwt_bearer` lacks.** The `rfc8693` and `id_jag`
+> grants both carry an actor token; the `jwt_bearer`/Entra grant has no slot for one, so an
+> actor is rejected there. Impersonation works with every grant. A subject that is *itself*
+> already a delegated token (it carries an embedded `act`) yields a delegation result on its own.
 
 ## Credential issued
 
@@ -211,7 +214,7 @@ Keys for `warden cred source create <name> -type=token_exchange -config=key=valu
 | `secret_spec` | No | — | Source the `client_secret`/`private_key` from another cred spec via [credential chaining](/federation/credential-chaining/) instead of storing it inline. |
 | `secret_field` | No | — | Field of the referenced `secret_spec`'s credential holding the secret (when its payload has multiple keys). |
 | `secret_cache_ttl` | No | *(off)* | Cache the chained secret for a bounded TTL, keyed on the source. |
-| `client_assertion_alg` | No | `RS256` | Signing algorithm for the client assertion. |
+| `client_assertion_alg` | No | `RS256` | Signing algorithm for the client assertion. `RS256` is the only supported value. |
 | `client_assertion_kid` | No | — | Optional `kid` header for the client assertion. |
 | `resource_token_url` | For `id_jag` | — | Resource authorization-server token endpoint (HTTPS) for ID-JAG leg 2. |
 | `ca_data` | No | — | Base64-encoded PEM CA certificate for custom/self-signed CAs (masked). |
@@ -228,11 +231,11 @@ Every `token_exchange` spec **must** set `subject_token_source`. Keys operators 
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `subject_token_source` | Yes | — | Subject origin: `agent_identity`, `user_identity`, `warden_identity`, or `none`. |
+| `subject_token_source` | Yes | — | Subject origin: `agent_identity`, `user_identity`, or `warden_identity` (a subject is required — `none` fails at mint). |
 | `subject_token_type` | No | `…:token-type:jwt` | RFC 8693 subject token type. Some STSs are strict — e.g. Keycloak's Standard Token Exchange accepts only `urn:ietf:params:oauth:token-type:access_token`. |
 | `actor_token_source` | No | `none` | Delegation actor: `none`, `agent_identity`, or `warden_identity`. Non-`none` requires `subject_token_source=user_identity`. |
 | `actor_token_type` | No | `…:token-type:jwt` | RFC 8693 actor token type. |
-| `audience` | No | — | Target audience for the exchanged token (the resource AS for `id_jag`). |
+| `audience` | For `id_jag` | — | Target audience for the exchanged token. **Required** for `id_jag` (the resource AS, bound on leg 1). **Not accepted** for `jwt_bearer` — target via `scope`/`resources`, or `token_param.audience` if your IdP requires it. Optional for `rfc8693`. |
 | `scope` | No | — | Scope requested for the exchanged token. |
 | `resources` | No | — | RFC 8707 resource indicator(s) — space-separated absolute URIs, sent as repeated `resource` parameters. For `id_jag`, on leg 2 (the final access token). |
 
