@@ -99,10 +99,12 @@ Spec-config keys set with `warden cred spec create ... -config=key=value`:
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `mint_method` | Yes | — | Which token to mint: `app` or `pat`. |
-| `private_key` | For `app` | — | PEM-encoded RSA private key for the GitHub App (PKCS1 or PKCS8). |
+| `private_key` | For `app` (inline) | — | PEM-encoded RSA private key for the GitHub App (PKCS1 or PKCS8). Omit when chained via `secret_spec`. |
 | `app_id` | For `app` | — | GitHub App ID (JWT issuer). |
 | `installation_id` | For `app` | — | Installation ID the token is minted for. |
-| `token` | For `pat` | — | The Personal Access Token to pass through. |
+| `token` | For `pat` (inline) | — | The Personal Access Token to pass through. Omit when chained via `secret_spec`. |
+| `secret_spec` | No | — | Source the App private key / PAT from another cred spec via [credential chaining](/federation/credential-chaining/) (keyless). |
+| `secret_field` | No | — | Field of the referenced `secret_spec`'s credential holding the key/PAT, when its payload has multiple keys. |
 
 ## See Also
 

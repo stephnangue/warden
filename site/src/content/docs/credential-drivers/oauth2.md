@@ -4,21 +4,29 @@ title: "OAuth2"
 
 > Source `type`: `oauth2`
 
-:::tip[Prefer keyless]
-This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (via chaining)](#keyless-via-chaining).
-:::
-
 The **OAuth2 driver** exchanges OAuth2 credentials for short-lived **bearer tokens** against any standards-compliant provider. It supports two flows: the **client_credentials** flow (machine-to-machine, no user present) and the **authorization_code** flow with refresh-token rotation (acting on behalf of a user who granted consent once). Reach for it when a workload needs an OAuth2 access token and no purpose-built driver exists for the provider.
 
 The token endpoint and connection options live in the **source** config (`token_url` required). The `client_id` and `client_secret` may live on the source — natural for `client_credentials` — or be supplied per **spec**, resolved spec-over-source. For the `authorization_code` flow, per-user tokens are sealed onto the spec by a one-time interactive consent step, and the driver refreshes them at mint time.
 
-## Keyless (via chaining)
+## Acting on behalf of a user
 
-The `client_secret` does not have to be stored inline: set `secret_spec` to source it from
-another cred spec via [credential chaining](/federation/credential-chaining/), so Warden
-fetches it from a keyless-federated vault at mint time and stores nothing. Combined with the
-[user principal](/concepts/delegation/), the `credential_name` may template `{{user.<claim>}}`
-so a per-user token is selected by a verified user claim.
+:::tip[Prefer the Vault/OpenBao OAuth-app engine, via chaining]
+The recommended way to act on behalf of a user is a **per-user OAuth token vended by an
+[OAuth-app secrets engine](/concepts/delegation/)** and fetched **keylessly via
+[chaining](/federation/credential-chaining/)** — Warden federates to the vault with a per-request
+identity assertion, and the engine returns a fresh token. Prefer it **even once this driver gains a
+native keyless mode**, because the engine **owns and rotates the refresh token** internally. When a
+provider rotates the refresh token on use, this driver's own chaining path **cannot write the rotated
+token back** to the referenced spec — so the next mint reuses the stale token and eventually fails.
+The secrets engine has no such problem: it holds the refresh token and rotates it in place.
+:::
+
+This driver can also **source a refresh token from another cred spec** directly: set `secret_spec`
+(and `secret_field`), and at mint time Warden fetches that spec's material and refreshes it into a
+fresh access token. This mode still requires an **inline `client_id` and `client_secret`** — the
+refresh grant is authenticated with them, so chaining supplies the *refresh token*, not the client
+secret, and it is **not keyless**. It also inherits the write-back limitation above: use it only when
+the provider does **not** rotate the refresh token on each use.
 
 ## Credential issued
 
@@ -32,26 +40,6 @@ Always `oauth_bearer_token`. It is **dynamic** when the provider returns an expi
 No source rotation — the source secret is not rotated by the driver.
 
 ## Examples
-
-### Keyless (via chaining, recommended)
-
-The `client_secret` is not stored inline; it is chained from another cred spec, fetched at mint time.
-
-```bash
-warden cred source create pagerduty-keyless \
-  -type=oauth2 \
-  -config=token_url=https://identity.pagerduty.com/oauth/token \
-  -config=client_id=your-client-id \
-  -config=secret_spec=pagerduty-client-secret \
-  -config=default_scopes="read"
-
-warden cred spec create pagerduty-readonly \
-  -source=pagerduty-keyless \
-  -config=auth_method=client_credentials \
-  -config=scope="read"
-```
-
-### Inline secret (discouraged)
 
 **client_credentials** — machine-to-machine, client credentials on the source:
 
@@ -101,7 +89,7 @@ Keys for `warden cred source create <name> -type=oauth2 -config=key=value ...`:
 |-----|----------|---------|-------------|
 | `token_url` | Yes | — | OAuth2 token endpoint (HTTPS). |
 | `client_id` | No | — | OAuth2 client ID (source-level for client_credentials; may be set per-spec). |
-| `client_secret` | No | — | OAuth2 client secret (secret, masked on read). |
+| `client_secret` | No | — | OAuth2 client secret (masked). Required for the refresh grant even when a refresh token is chained. |
 | `auth_url` | No | — | Authorization endpoint (HTTPS); required for authorization_code specs. |
 | `introspection_url` | No | — | Userinfo/introspection endpoint called at mint to fetch identity fields for opaque tokens. |
 | `metadata_fields` | No | `sub` | Comma-separated identity fields copied into the credential's non-secret, audit-logged metadata (empty disables). |
@@ -135,6 +123,12 @@ Keys operators set with `warden cred spec create ... -config=key=value`:
 | `access_token` | No | — | Sealed static access token for providers that issue no refresh token (set by consent). |
 | `access_token_expires_at` | No | — | RFC3339 expiry of a sealed static access token. |
 | `refresh_token_expires_at` | No | — | RFC3339 expiry of a sealed refresh token. |
+| `scopes` | No | — | Scopes requested at the consent (`connect`) step for `authorization_code`. |
+| `redirect_uri` | No | — | Loopback redirect used by the consent step. |
+| `pkce` | No | `false` | Enable PKCE (`code_challenge`/`code_verifier`) in the consent step. |
+| `secret_spec` | No | — | Chain a **refresh token** from another cred spec via [credential chaining](/federation/credential-chaining/) instead of sealing one by consent. Still needs inline `client_id`/`client_secret`; not keyless. |
+| `secret_field` | No | — | Field of the referenced spec's credential holding the refresh token. |
+| `secret_cache_ttl` | No | *(off)* | Cache the chained refresh token for a bounded TTL, keyed on the source. |
 
 For `authorization_code`, do not set the token keys by hand — they are populated by the one-time consent flow (see Capabilities). When the provider rotates the refresh token during a refresh, the driver surfaces the new value to the minting layer automatically, so the sealed grant stays current.
 

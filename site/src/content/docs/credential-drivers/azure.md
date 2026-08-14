@@ -70,8 +70,13 @@ warden cred spec create arm-token \
   -source=azure-keyless \
   -config=mint_method=bearer_token \
   -config=subject_token_source=warden_identity \
+  -config=client_id=22222222-2222-2222-2222-222222222222 \
   -config=resource_uri=https://management.azure.com/
 ```
+
+The spec's `client_id` is the **workload** service principal — the Entra app that trusts
+Warden's issuer as a federated credential. It carries no `client_secret`; the assertion is
+presented as its `client_assertion`. `tenant_id` defaults to the source's.
 
 ### Inline secret (discouraged)
 
@@ -131,10 +136,12 @@ Keys for `warden cred source create <name> -type=azure -config=key=value ...`:
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
+| `auth_method` | No | `static` | How the source authenticates: `static` (stored client secret) or `oidc_federation` ([keyless](/federation/keyless-credentials/) — presents an assertion to Entra as a `client_assertion`). |
 | `tenant_id` | Yes | — | Azure AD tenant ID (UUID). |
 | `client_id` | Yes | — | Azure AD application (client) ID for the source service principal. |
-| `client_secret` | Yes | — | Client secret for the source service principal (secret, masked on read). |
-| `secret_id` | Yes | — | Key ID of the current client secret, tracked so rotation can retire the old one. |
+| `client_secret` | For `static` | — | Client secret for the source service principal (masked). Omit for keyless. |
+| `secret_id` | For `static` | — | Key ID of the current client secret, tracked so rotation can retire the old one. |
+| `audience` | For keyless | — | Assertion audience presented to Entra (e.g. `api://AzureADTokenExchange`). |
 | `ca_data` | No | — | Base64-encoded PEM CA bundle for custom/self-signed CAs (secret, masked on read). |
 | `tls_skip_verify` | No | `false` | Skip TLS certificate verification (development only). |
 
@@ -153,9 +160,10 @@ Keys set with `warden cred spec create ... -config=key=value`:
 | Key | Required | Default | Meaning |
 |-----|----------|---------|---------|
 | `mint_method` | No | `bearer_token` | Which credential to mint. |
+| `subject_token_source` | For keyless | — | On an `oidc_federation` source: the federated subject — `warden_identity` or `agent_identity`. (`key_vault_secret` is not federated.) |
 | `tenant_id` | No | source `tenant_id` | Tenant of the workload service principal. |
 | `client_id` | Yes | — | Workload service-principal application (client) ID. |
-| `client_secret` | Yes | — | Workload service-principal client secret (secret). |
+| `client_secret` | For inline | — | Workload service-principal client secret. **Omit for keyless** (`subject_token_source` set) — the assertion is the `client_assertion`. |
 | `secret_id` | No | — | Key ID of the spec's client secret, tracked for spec rotation. |
 | `resource_uri` | No | `https://management.azure.com/` | Resource the bearer token targets (`bearer_token` only). |
 | `vault_name` | Yes* | — | Key Vault name (`key_vault_secret` only). |
@@ -163,6 +171,11 @@ Keys set with `warden cred spec create ... -config=key=value`:
 | `secret_version` | No | latest | Specific secret version (`key_vault_secret` only). |
 
 \* Required when `mint_method=key_vault_secret`.
+
+A `subject_token_source=warden_identity` spec also accepts the assertion-shaping keys
+(`assertion_audience`, `assertion_resource`, `assertion_metadata_claims`,
+`assertion_user_claims`, `assertion_algorithm`) — see
+[Assertion claims](/federation/assertion-claims/).
 
 ## See Also
 

@@ -116,11 +116,13 @@ Keys for `warden cred source create <name> -type=aws -config=key=value ...`:
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `access_key_id` | Yes | — | AWS IAM access key ID for the source. |
-| `secret_access_key` | Yes | — | AWS IAM secret access key (secret, masked on read). |
+| `auth_method` | No | `static` | How the source authenticates: `static` (stored IAM key) or `oidc_federation` ([keyless](/federation/keyless-credentials/), no stored secret). |
+| `access_key_id` | For `static` | — | AWS IAM access key ID for the source. Omit for keyless. |
+| `secret_access_key` | For `static` | — | AWS IAM secret access key (masked). Omit for keyless. |
 | `region` | Yes | — | AWS region for API calls (e.g. `us-east-1`). |
-| `assume_role_arn` | No | — | Optional IAM role ARN to assume for elevated permissions. |
-| `session_name` | No | `warden-source-session` | Session name for AssumeRole operations. |
+| `audience` | For keyless | — | Audience minted into the `warden_identity` assertion for this source (`oidc_federation` only; default `sts.amazonaws.com`). Rejected on a `static` source. |
+| `assume_role_arn` | No | — | Optional IAM role ARN to assume for elevated permissions. **Static sources only** — not supported for `oidc_federation`. |
+| `session_name` | No | `warden-source-session` | Session name for AssumeRole operations (with `assume_role_arn`). |
 | `session_duration` | No | `1h` | Duration for AssumeRole sessions. |
 | `external_id` | No | — | Optional external ID for AssumeRole operations. |
 
@@ -138,6 +140,8 @@ Spec-config keys set with `warden cred spec create ... -config=key=value`:
 | Key | Required | Default | Meaning |
 |-----|----------|---------|---------|
 | `mint_method` | Yes | — | Which minting path to use — one of the four values above. Must be set explicitly; there is no default. |
+| `subject_token_source` | For keyless | — | On an `oidc_federation` source: the federated subject — `warden_identity` or `agent_identity`. |
+| `credential_type` | No | `aws_access_keys` | Shape a Secrets Manager read vends: `aws_access_keys` or `api_key`. **Valid only with `mint_method=secrets_manager`** — rejected on any other mint method. |
 | `role_arn` | Yes (`sts_assume_role`) | — | Role the session assumes. |
 | `ttl` | No | `1h` | STS session lifetime; bounded by the spec's MinTTL/MaxTTL. |
 | `session_name` | No | `warden-<spec>` | STS role session name. |
@@ -156,6 +160,11 @@ Spec-config keys set with `warden cred spec create ... -config=key=value`:
 | `db_name` | No | — | Target database name for Redshift. |
 | `duration_seconds` | No | `900` | Redshift token lifetime, 900–3600 seconds. |
 | `region` | No | source `region` | Overrides the source region for the DB token. |
+
+A `subject_token_source=warden_identity` spec also accepts the assertion-shaping keys —
+`assertion_audience`, `assertion_resource`, `assertion_metadata_claims`,
+`assertion_user_claims`, `assertion_algorithm` — documented on
+[Assertion claims](/federation/assertion-claims/).
 
 ## See Also
 

@@ -89,10 +89,11 @@ warden cred source create aws-legacy \
 ```
 
 Sources live at `sys/cred/sources/<name>`, scoped to the current
-[namespace](/concepts/namespaces/). `-rotation-period` is required for a source that holds
-a rotatable secret (use `0` for none) and is **not needed for a keyless or chained
-source** — there is no stored secret to rotate. Config fields that hold secrets are masked
-on read.
+[namespace](/concepts/namespaces/). `-rotation-period` is **required** where Warden rotates
+a stored secret in place — an AppRole-backed OpenBao/Vault source, and specs whose credential
+type embeds a rotatable secret — and is **not needed for a keyless or chained source** (no
+stored secret to rotate), nor for a per-request exchange spec (where it is rejected). Config
+fields that hold secrets are masked on read.
 
 ### Specs
 
@@ -149,19 +150,19 @@ whether it can be **revoked** early.
 records this as `Revocable`:
 
 - **Revocable** — Warden can destroy the credential upstream ahead of its TTL, and does so
-  when the bound token ends. Vault, GitHub, and GitLab tokens are revocable.
-- **Not revocable** — the upstream gives no way to cancel an issued credential, so it can
-  only run out its TTL. GCP, Azure, and Kubernetes access tokens and database IAM tokens
-  are **dynamic but not revocable** — short-lived by design, yet Warden cannot end them
-  early.
+  when the bound token ends. Vault and GitLab tokens are revocable.
+- **Not revocable** — Warden holds no revocation handle for the credential, so it can only
+  run out its TTL. GCP, Azure, and Kubernetes access tokens, database IAM tokens, and
+  **GitHub App installation tokens** are **dynamic but not revocable** — short-lived by
+  design, yet Warden cannot end them early (GitHub's ~1h tokens are simply left to expire).
 
 So a dynamic credential **need not be revocable**: a short TTL and active revocation are
 separate guarantees. The two axes combine into three real combinations:
 
 | Kind | Expires | `Revocable` | Ends by | Examples |
 |------|---------|-------------|---------|----------|
-| Dynamic, revocable | yes | `true` | expiry **or** early revocation | Vault, GitHub, GitLab tokens |
-| Dynamic, not revocable | yes | `false` | expiry only | GCP, Azure, Kubernetes access tokens |
+| Dynamic, revocable | yes | `true` | expiry **or** early revocation | Vault, GitLab tokens |
+| Dynamic, not revocable | yes | `false` | expiry only | GCP, Azure, Kubernetes, GitHub App tokens |
 | Static | no | `false` | rotation or manual change upstream | API keys, stored PATs |
 
 (There is no static-and-revocable kind: with no lease there is nothing to revoke.) When

@@ -72,11 +72,13 @@ Orthogonal to storage:
 - **Federated identity (agent + user)** — with native federation the assertion
   channels the agent (and, when present, the [user](/concepts/delegation/) via
   `warden_user`), so the upstream authorizes the real agent, and can gate on the user.
-- **Delegated / on-behalf-of** — the [`token_exchange`/`oauth2`](/credential-drivers/token-exchange/)
-  drivers forward the caller's token so the downstream token carries `sub`=user /
-  `act`=agent (RFC 7523 / 8693 / ID-JAG). See [Delegation](/concepts/delegation/) for
-  the flows and diagrams. `token_exchange` is *just another driver on Axis 1* — inline
-  or keyless-via-chaining, like GitHub.
+- **Delegated / on-behalf-of** — the upstream authorizes the *caller*, by one of two
+  mechanisms (both on the [Delegation](/concepts/delegation/) page): **`token_exchange`**
+  forwards the caller's token so the downstream token carries `sub`=user / `act`=agent
+  (RFC 7523 / 8693 / ID-JAG); **`oauth2`** injects a per-user OAuth token (from a
+  consent-sealed or [chained](/federation/credential-chaining/) per-user refresh token).
+  `token_exchange` is *just another driver on Axis 1* — inline or keyless-via-chaining,
+  like GitHub.
 
 ## Capability matrix
 
@@ -90,7 +92,7 @@ view. **Keyless** columns are best; **Inline: static** is discouraged.
 | `gcp` | ✓ | | ✓ | | |
 | `hvault` | ✓ | | ✓ | ✓ | |
 | `token_exchange` | | ✓ | ✓ | | ✓ |
-| `oauth2` | | ✓ | ✓ | | ✓ |
+| `oauth2` | | | ✓ | | ✓ |
 | `github` | | ✓ | ✓ | ✓ | |
 | `gitlab` | | | ✓ | | |
 | `kubernetes` | | | ✓ | | |
@@ -100,7 +102,7 @@ view. **Keyless** columns are best; **Inline: static** is discouraged.
 | `ibm` | | | ✓ | | |
 | `elastic` | | | ✓ | | |
 | `grafana` | | | ✓ | | |
-| `honeycomb` | | | | ✓ | |
+| `honeycomb` | | | ✓ | | |
 | `local` | | | | ✓ | |
 | `apikey` | | | | ✓ | |
 
@@ -113,9 +115,10 @@ Two questions, in order:
 
 1. **Whose identity should the upstream see?** A **shared service identity** (an
    inline mint), the **agent ± user** via a [federation assertion](/federation/keyless-credentials/),
-   or the **user on-behalf-of** — via native token exchange when the upstream supports
-   it ([`token_exchange`/`oauth2`](/credential-drivers/token-exchange/)), or, for
-   upstreams without ID-JAG (GitHub, Slack), a per-user OpenBao/Vault OAuth token via
+   or the **user on-behalf-of** — via [`token_exchange`](/credential-drivers/token-exchange/)
+   (RFC 8693 / 7523 / ID-JAG) when the upstream supports it, an
+   [`oauth2`](/credential-drivers/oauth2/) per-user refresh token, or — for upstreams with
+   no native OBO flow (GitHub, Slack) — a per-user OpenBao/Vault OAuth token via
    [templated policies](/concepts/delegation/#per-user-oauth-token-from-openbao--vault).
 2. **Does Warden store a secret?** Prefer **keyless** (federation or
    [chaining](/federation/credential-chaining/)); fall back to **inline secret** only
