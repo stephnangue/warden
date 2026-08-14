@@ -59,6 +59,8 @@ Warden can broker access while storing nothing.
   for a short-lived cloud credential, holding no stored secret.
 - [Assertion claims](/federation/assertion-claims/) — how the assertion is scoped:
   audience, resource, metadata, and per-user.
+- [Credential chaining](/federation/credential-chaining/) — source a standing secret from
+  a keyless-federated vault per request, storing nothing at Warden.
 
 ## For AI agents
 

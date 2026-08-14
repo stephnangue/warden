@@ -90,6 +90,7 @@ export default defineConfig({
             { slug: 'federation/oidc-issuer' },
             { slug: 'federation/keyless-credentials' },
             { slug: 'federation/assertion-claims' },
+            { slug: 'federation/credential-chaining' },
           ],
         },
         { label: 'Use cases', autogenerate: { directory: 'use-cases' } },

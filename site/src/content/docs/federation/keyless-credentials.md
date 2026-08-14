@@ -79,9 +79,9 @@ federates Warden's issuer. See [AWS driver](/credential-drivers/aws/).
 ## Chaining a secret keylessly
 
 Federation mints a credential the cloud issues. When the upstream instead needs a
-**standing secret** Warden would otherwise store, *credential chaining* sources that
-secret from a keyless-federated vault per request — so a secret-backed provider becomes
-keyless at Warden too. The two features are designed to be used together.
+**standing secret** Warden would otherwise store, [credential chaining](/federation/credential-chaining/)
+sources that secret from a keyless-federated vault per request — so a secret-backed
+provider becomes keyless at Warden too. The two features are designed to be used together.
 
 ## See also
 

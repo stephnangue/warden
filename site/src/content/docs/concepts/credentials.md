@@ -164,8 +164,22 @@ Drivers fall into two families by *how* they obtain that credential:
   short-lived credential from the upstream's token service and injects that.
 - **Token exchange** — the driver forwards the *caller's own* identity and
   exchanges it, at an identity provider or security token service, for a
-  downstream credential scoped to that caller; the source holds only the client
-  credentials for the exchange, not a privileged upstream secret.
+  downstream credential scoped to that caller.
+
+Cutting across those is the **storage axis** — *what, if anything, Warden holds* —
+set per source with `auth_method`:
+
+- **Keyless** (`auth_method=oidc_federation`) — the source stores **no secret**.
+  Warden federates an [identity assertion](/federation/oidc-issuer/) for a short-lived
+  credential, or [chains](/federation/credential-chaining/) the secret from a
+  keyless-federated vault per request. This is the recommended mode, and it is coming to
+  every provider. See [keyless credential sources](/federation/keyless-credentials/).
+- **Inline secret** — the source stores the secret in Warden (a stored key, minted
+  short-lived on the *dynamic* path, or injected directly on the *static* path).
+  Storing a secret is attack surface, so this is a fallback — prefer keyless.
+
+Whose identity the upstream sees (a service identity vs. the caller, on-behalf-of) is a
+separate, orthogonal question — see the driver reference for the full two-axis model.
 
 Warden ships drivers for:
 

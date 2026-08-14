@@ -23,6 +23,9 @@ Everything else builds on that:
   credential, holding no stored secret (AWS, Azure, GCP, OpenBao/Vault).
 - **[Assertion claims](/federation/assertion-claims/)** — how the assertion is scoped:
   audience, `warden_resource`, login metadata, per-user, and the signing algorithm.
+- **[Credential chaining](/federation/credential-chaining/)** — source a provider's
+  standing secret from a keyless-federated vault per request (`secret_spec`), so a
+  secret-backed provider stores nothing at Warden.
 
 ## See also
 
