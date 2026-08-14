@@ -26,13 +26,13 @@ but is never forwarded upstream.
 **Static** — the driver holds a long-lived secret and injects it into the outbound
 request unchanged.
 
-<p align="center"><img alt="An agent presents its identity to Warden; the driver injects a static key into the request to the LLM API" src="/images/warden-cred-service-account-static.png" width="760"></p>
+<p align="center"><img alt="An agent presents its identity to Warden; the driver injects a static key into the request to the LLM API" src="/images/warden-cred-inline-static-shared-service.png" width="760"></p>
 
 **Dynamic** — the driver holds a secret it uses to mint a short-lived credential
 from the upstream's security token service, then injects that. The held secret can
 itself be [rotated](/concepts/credentials/#rotation) on a schedule.
 
-<p align="center"><img alt="The driver uses a dynamic key to call AWS STS, receives a short-lived token, and injects it into the request to the AWS API" src="/images/warden-cred-service-account-dynamic.png" width="760"></p>
+<p align="center"><img alt="The driver uses a dynamic key to call AWS STS, receives a short-lived token, and injects it into the request to the AWS API" src="/images/warden-cred-inline-dynamic-shared-service.png" width="760"></p>
 
 ### Token exchange
 
@@ -44,19 +44,19 @@ exchange — not a privileged upstream secret.
 **RFC 7523 — JWT bearer.** The driver exchanges the caller's ID token for an access
 token at the identity provider.
 
-<p align="center"><img alt="The driver sends the caller's ID token to the identity provider, receives an access token, and injects it into the request to the MCP server" src="/images/warden-cred-token-exchange-rfc7523.png" width="760"></p>
+<p align="center"><img alt="The driver sends the caller's ID token to the identity provider, receives an access token, and injects it into the request to the MCP server" src="/images/warden-cred-keyless-delegated-rfc7523.png" width="760"></p>
 
 **RFC 8693 — token exchange (on-behalf-of).** The driver presents the user's
 subject token together with the agent's actor token; the returned access token
 preserves the on-behalf-of chain.
 
-<p align="center"><img alt="The driver presents the user's subject token and the agent's actor token to the identity provider and receives an access token for the MCP server" src="/images/warden-cred-token-exchange-rfc8693.png" width="760"></p>
+<p align="center"><img alt="The driver presents the user's subject token and the agent's actor token to the identity provider and receives an access token for the MCP server" src="/images/warden-cred-keyless-delegated-rfc8693.png" width="760"></p>
 
 **ID-JAG — identity assertion authorization grant.** The identity provider issues
 an ID-JAG from the user and agent identities; the driver presents it to the
 resource's authorization server for the final access token.
 
-<p align="center"><img alt="The identity provider issues an ID-JAG from the user and agent identities; the driver exchanges it at the authorization server for an access token to reach the MCP server" src="/images/warden-cred-token-exchange-id-jag.png" width="820"></p>
+<p align="center"><img alt="The identity provider issues an ID-JAG from the user and agent identities; the driver exchanges it at the authorization server for an access token to reach the MCP server" src="/images/warden-cred-keyless-delegated-id-jag.png" width="820"></p>
 
 ## Choosing a family
 

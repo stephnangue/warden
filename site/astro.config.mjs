@@ -81,6 +81,15 @@ export default defineConfig({
             { slug: 'concepts/high-availability' },
           ],
         },
+        {
+          // Federation & keyless identity: the OIDC issuer and the keyless
+          // credential story that builds on it. Curated reading order.
+          label: 'Federation & keyless identity',
+          items: [
+            { slug: 'federation' },
+            { slug: 'federation/oidc-issuer' },
+          ],
+        },
         { label: 'Use cases', autogenerate: { directory: 'use-cases' } },
         {
           // Grouped by upstream theme, mirroring the README "Supported systems"
@@ -256,6 +265,7 @@ export default defineConfig({
               ],
             },
             { slug: 'configuration/audit' },
+            { slug: 'configuration/signer' },
           ],
         },
         { label: 'Audit devices', autogenerate: { directory: 'audit-devices' } },
