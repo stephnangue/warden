@@ -7,8 +7,8 @@ An [identity assertion](/federation/oidc-issuer/) is a JWT, and what an upstream
 policy can gate on is *its claims*. This page covers the claims Warden puts in a
 `warden_identity` assertion and the spec keys that shape them.
 
-Every assertion carries the standard `iss`, `aud`, `iat`, `exp`, and a subject that
-names the agent:
+Every assertion carries the standard `iss`, `aud`, `iat`, `nbf` (backdated by a small
+skew leeway), `exp`, `jti`, and a subject that names the agent:
 
 | Claim | Value |
 |---|---|
@@ -49,12 +49,15 @@ touches the network):
 |---|---|
 | AWS `secrets_manager` | `aws-secretsmanager:<secret_id>` |
 | AWS `sts_assume_role` | `aws-iam:<role_arn>` |
-| Azure `bearer_token` | `azure:<resource_uri>` |
+| Azure `bearer_token` | `azure:<resource_uri>` (always emitted — `resource_uri` defaults to `https://management.azure.com/`) |
+| GCP `impersonated_access_token` | `gcp-iam:<target_service_account>` |
+| GCP `access_token` | `gcp-wif:<workload_identity_provider>` |
+| Vault (`hvault`) | an **unprefixed** value per mint method — the `<kv2_mount>/<secret_path>`, `<aws_mount>/<role_name>`, `jwt_role`, etc. |
 | `token_exchange` (single RFC 8707 resource) | `oauth-resource:<uri>` |
 
 Override the derived value with **`assertion_resource=<value>`**, or suppress the claim
-with **`assertion_resource=none`**. The value is opaque — its provider prefix is
-human-readable but never parsed, since a resource id may itself contain `:`.
+with **`assertion_resource=none`**. Treat the value as **opaque** — never parse it (a
+resource id may itself contain `:`, and Vault values carry no prefix at all).
 
 > Enforcement is verifier-side. AWS/Azure federation trust policies bind only on
 > `sub`/`aud`, so there the claim is informational; it is enforced by a verifier that

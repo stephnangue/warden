@@ -23,12 +23,13 @@ Two config keys carry the whole idea, and they answer different questions:
 
 | `subject_token_source` | The upstream sees | Needs the Warden issuer? |
 |---|---|---|
-| `warden_identity` *(default)* | A Warden-issued assertion naming the agent (and, if present, the user). | Yes — the issuer must be configured and its keys reachable. |
+| `warden_identity` | A Warden-issued assertion naming the agent (and, if present, the user). | Yes — the issuer must be configured and its keys reachable. |
 | `agent_identity` | The **agent's own inbound JWT**, federated directly at the cloud's web-identity endpoint. | No — the cloud trusts the agent's original IdP. |
 
-Use `warden_identity` for the full Warden identity model (per-user claims, resource
-pinning); use `agent_identity` when the agent already carries a JWT the cloud can trust
-and you want no Warden-issued hop.
+A keyless spec **must set `subject_token_source`** — it has no default, and a spec that
+omits it fails closed at mint. Use `warden_identity` for the full Warden identity model
+(per-user claims, resource pinning); use `agent_identity` when the agent already carries a
+JWT the cloud can trust and you want no Warden-issued hop.
 
 For a **public-cloud** upstream, the assertion is verified against the JWKS at the
 issuer's discovery URL — which a [publisher](/federation/oidc-issuer/#publishers-reaching-internet-facing-upstreams)
@@ -54,8 +55,9 @@ federates Warden's issuer. See [AWS driver](/credential-drivers/aws/).
 ### Azure
 
 - **`bearer_token`** — Warden presents the assertion to Entra as a `client_assertion`
-  (JWT-bearer grant) instead of a `client_secret`. The source sets
-  `auth_method=oidc_federation`, `tenant_id`, `client_id`, and the `audience`.
+  (JWT-bearer grant) instead of a `client_secret`. The source sets just
+  `auth_method=oidc_federation`; the **spec** carries the workload `client_id` and
+  `tenant_id`, and `audience` is optional (defaults to `api://AzureADTokenExchange`).
 - **`key_vault_secret`** is **not** federated — a keyless source that targets it fails
   closed. See [Azure driver](/credential-drivers/azure/).
 
