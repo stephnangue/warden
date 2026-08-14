@@ -4,9 +4,25 @@ title: "HashiCorp Vault"
 
 > Source `type`: `hvault`
 
+:::tip[Prefer keyless]
+This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (OIDC federation)](#keyless-oidc-federation).
+:::
+
 The `hvault` driver brokers credentials out of **HashiCorp Vault** (or **OpenBao**). The **source** holds how Warden authenticates to the Vault server — typically an **AppRole** identity (`role_id` + `secret_id`) — plus the server address and optional namespace. That one source can back many **specs**, each of which selects a **mint method** naming which Vault engine to draw from and what shape of credential to hand back to the workload.
 
 Reach for it when your secrets already live in Vault: static KV entries, dynamic cloud credentials from the AWS/GCP/IBM engines, OAuth2 bearer tokens from the oauthapp engine, or freshly minted Vault tokens. Warden authenticates once with the source's privileged AppRole, then mints per request against whatever engine the spec points at.
+
+## Keyless (OIDC federation)
+
+Set `auth_method = "oidc_federation"` on the source to hold **no Vault credential**:
+Warden logs in **per request** against Vault's own JWT auth method
+(`auth/<jwt_mount>/login` with `jwt_role`) using an
+[identity assertion](/federation/oidc-issuer/), then vends that login token
+(`mint_method=vault_token`) or brokers a downstream secret with it. Set `jwt_role`,
+`jwt_mount` (default `jwt`), and `audience` (which must equal the Vault role's
+`bound_audiences`). A keyless source needs no `rotation_period`, and a keyless
+`vault_token` spec needs no `token_role`. See
+[Keyless credential sources](/federation/keyless-credentials/).
 
 ## Credential issued
 
@@ -21,6 +37,27 @@ Static KV secrets are **static** — no lease, no TTL, not revocable. Every dyna
 No spec verification. Static KV mints only fetch and revoke.
 
 ## Examples
+
+### Keyless (recommended)
+
+The source stores no Vault credential; Warden logs in per request against Vault's JWT auth method with an identity assertion.
+
+```bash
+warden cred source create vault-keyless \
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=oidc_federation \
+  -config=jwt_mount=jwt \
+  -config=jwt_role=warden \
+  -config=audience=https://vault.example.com
+
+warden cred spec create app-token \
+  -source=vault-keyless \
+  -config=mint_method=vault_token \
+  -config=subject_token_source=warden_identity
+```
+
+### Inline secret (discouraged)
 
 One source holds the standing AppRole identity; each spec below picks a `mint_method`.
 
@@ -117,18 +154,6 @@ Keys for `warden cred source create <name> -type=hvault -config=key=value ...`:
 | `tls_skip_verify` | No | `false` | Disable TLS verification on those outbound upstream calls (test only). Does not affect the Vault/OpenBao connection. |
 
 The `token` and `secret_id_accessor` fields are also treated as sensitive and masked on read.
-
-## Keyless (OIDC federation)
-
-Set `auth_method = "oidc_federation"` on the source to hold **no Vault credential**:
-Warden logs in **per request** against Vault's own JWT auth method
-(`auth/<jwt_mount>/login` with `jwt_role`) using an
-[identity assertion](/federation/oidc-issuer/), then vends that login token
-(`mint_method=vault_token`) or brokers a downstream secret with it. Set `jwt_role`,
-`jwt_mount` (default `jwt`), and `audience` (which must equal the Vault role's
-`bound_audiences`). A keyless source needs no `rotation_period`, and a keyless
-`vault_token` spec needs no `token_role`. See
-[Keyless credential sources](/federation/keyless-credentials/).
 
 ## Specs and mint methods
 

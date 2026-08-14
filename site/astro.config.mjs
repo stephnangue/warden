@@ -190,54 +190,29 @@ export default defineConfig({
           ],
         },
         {
-          // Grouped by the categories in credential-drivers/index.md, not
-          // alphabetical. Subgroups collapse by default; the active page's
-          // group opens.
+          // A flat A–Z list: drivers are multi-mode, so the index page's
+          // capability matrix — not the sidebar — is the real map.
           label: 'Credential drivers',
           items: [
             { slug: 'credential-drivers' },
-            {
-              label: 'Generic',
-              collapsed: true,
-              items: [
-                { slug: 'credential-drivers/local' },
-                { slug: 'credential-drivers/apikey' },
-              ],
-            },
-            {
-              label: 'Platform',
-              collapsed: true,
-              items: [
-                { slug: 'credential-drivers/vault' },
-                { slug: 'credential-drivers/kubernetes' },
-                { slug: 'credential-drivers/oauth2' },
-                { slug: 'credential-drivers/token-exchange' },
-              ],
-            },
-            {
-              label: 'Cloud',
-              collapsed: true,
-              items: [
-                { slug: 'credential-drivers/aws' },
-                { slug: 'credential-drivers/azure' },
-                { slug: 'credential-drivers/gcp' },
-                { slug: 'credential-drivers/ibm' },
-                { slug: 'credential-drivers/alicloud' },
-                { slug: 'credential-drivers/scaleway' },
-                { slug: 'credential-drivers/ovh' },
-              ],
-            },
-            {
-              label: 'SaaS',
-              collapsed: true,
-              items: [
-                { slug: 'credential-drivers/github' },
-                { slug: 'credential-drivers/gitlab' },
-                { slug: 'credential-drivers/elastic' },
-                { slug: 'credential-drivers/grafana' },
-                { slug: 'credential-drivers/honeycomb' },
-              ],
-            },
+            { slug: 'credential-drivers/alicloud' },
+            { slug: 'credential-drivers/aws' },
+            { slug: 'credential-drivers/azure' },
+            { slug: 'credential-drivers/elastic' },
+            { slug: 'credential-drivers/gcp' },
+            { slug: 'credential-drivers/github' },
+            { slug: 'credential-drivers/gitlab' },
+            { slug: 'credential-drivers/grafana' },
+            { slug: 'credential-drivers/vault' },
+            { slug: 'credential-drivers/honeycomb' },
+            { slug: 'credential-drivers/ibm' },
+            { slug: 'credential-drivers/kubernetes' },
+            { slug: 'credential-drivers/local' },
+            { slug: 'credential-drivers/oauth2' },
+            { slug: 'credential-drivers/ovh' },
+            { slug: 'credential-drivers/scaleway' },
+            { slug: 'credential-drivers/apikey' },
+            { slug: 'credential-drivers/token-exchange' },
           ],
         },
         { label: 'Auth methods', autogenerate: { directory: 'auth-methods' } },

@@ -4,9 +4,21 @@ title: "OAuth2"
 
 > Source `type`: `oauth2`
 
+:::tip[Prefer keyless]
+This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (via chaining)](#keyless-via-chaining).
+:::
+
 The **OAuth2 driver** exchanges OAuth2 credentials for short-lived **bearer tokens** against any standards-compliant provider. It supports two flows: the **client_credentials** flow (machine-to-machine, no user present) and the **authorization_code** flow with refresh-token rotation (acting on behalf of a user who granted consent once). Reach for it when a workload needs an OAuth2 access token and no purpose-built driver exists for the provider.
 
 The token endpoint and connection options live in the **source** config (`token_url` required). The `client_id` and `client_secret` may live on the source — natural for `client_credentials` — or be supplied per **spec**, resolved spec-over-source. For the `authorization_code` flow, per-user tokens are sealed onto the spec by a one-time interactive consent step, and the driver refreshes them at mint time.
+
+## Keyless (via chaining)
+
+The `client_secret` does not have to be stored inline: set `secret_spec` to source it from
+another cred spec via [credential chaining](/federation/credential-chaining/), so Warden
+fetches it from a keyless-federated vault at mint time and stores nothing. Combined with the
+[user principal](/concepts/delegation/), the `credential_name` may template `{{user.<claim>}}`
+so a per-user token is selected by a verified user claim.
 
 ## Credential issued
 
@@ -20,6 +32,26 @@ Always `oauth_bearer_token`. It is **dynamic** when the provider returns an expi
 No source rotation — the source secret is not rotated by the driver.
 
 ## Examples
+
+### Keyless (via chaining, recommended)
+
+The `client_secret` is not stored inline; it is chained from another cred spec, fetched at mint time.
+
+```bash
+warden cred source create pagerduty-keyless \
+  -type=oauth2 \
+  -config=token_url=https://identity.pagerduty.com/oauth/token \
+  -config=client_id=your-client-id \
+  -config=secret_spec=pagerduty-client-secret \
+  -config=default_scopes="read"
+
+warden cred spec create pagerduty-readonly \
+  -source=pagerduty-keyless \
+  -config=auth_method=client_credentials \
+  -config=scope="read"
+```
+
+### Inline secret (discouraged)
 
 **client_credentials** — machine-to-machine, client credentials on the source:
 

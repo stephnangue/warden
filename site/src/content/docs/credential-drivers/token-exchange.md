@@ -5,6 +5,10 @@ description: "Broker a downstream bearer token by exchanging the caller's identi
 
 > Source `type`: `token_exchange`
 
+:::tip[Prefer keyless]
+This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (by chaining the client secret)](#sourcing-the-client-secret-keylessly).
+:::
+
 The **token-exchange driver** brokers a downstream bearer token by **exchanging a
 caller's identity** at an identity provider's token endpoint — RFC 8693 token-exchange,
 RFC 7523 `jwt-bearer` (Microsoft Entra OBO), or the ID-JAG cross-app-access flow. The
@@ -17,6 +21,17 @@ where the subject comes from, and the driver mints solely from that caller-deriv
 subject (and an optional actor). The token endpoint, client identity, and grant live on
 the **source**; the target audience, scope, and token-exchange wiring live on the
 **spec**.
+
+## Sourcing the client secret keylessly
+
+The token endpoint requires client authentication (`client_secret_*` or a
+`private_key_jwt` client assertion). Rather than storing that secret inline, a source can
+**chain it**: set `secret_spec` (and optional `secret_field`) to fetch the `client_secret`
+— or the `private_key` for `client_auth=private_key_jwt` — from another cred spec at mint
+time. `client_id` stays in config and the inline secret is omitted, so the exchange
+becomes **keyless at Warden**. The same keys cover `client_secret_basic`/`_post`,
+`private_key_jwt`, and both legs of an ID-JAG exchange. See
+[credential chaining](/federation/credential-chaining/).
 
 ## Grant modes
 
@@ -67,17 +82,6 @@ model and how the user principal is presented; this page covers the exchange mec
 > that is *itself* already a delegated token (it carries an embedded `act`) yields a
 > delegation result on its own.
 
-## Sourcing the client secret keylessly
-
-The token endpoint requires client authentication (`client_secret_*` or a
-`private_key_jwt` client assertion). Rather than storing that secret inline, a source can
-**chain it**: set `secret_spec` (and optional `secret_field`) to fetch the `client_secret`
-— or the `private_key` for `client_auth=private_key_jwt` — from another cred spec at mint
-time. `client_id` stays in config and the inline secret is omitted, so the exchange
-becomes **keyless at Warden**. The same keys cover `client_secret_basic`/`_post`,
-`private_key_jwt`, and both legs of an ID-JAG exchange. See
-[credential chaining](/federation/credential-chaining/).
-
 ## Credential issued
 
 Always `oauth_bearer_token`. It is **dynamic** when the token endpoint returns an expiry
@@ -92,6 +96,21 @@ credential's audit metadata records the exchanged `subject`.
 - `tls_skip_verify` is for development only (a cleartext IdP would expose caller tokens).
 
 ## Examples
+
+### Keyless (recommended)
+
+**Chained client secret (`private_key_jwt`)** — Warden signs a client assertion with a private key fetched from another cred spec, so no secret is stored inline.
+
+```bash
+warden cred source create idp-pkjwt \
+  -type=token_exchange \
+  -config=token_url=https://idp.example.com/oauth2/v1/token \
+  -config=client_auth=private_key_jwt \
+  -config=client_id=warden-gateway \
+  -config=secret_spec=idp-client-key
+```
+
+### Inline secret (discouraged)
 
 **RFC 8693 OBO of the agent's own identity** — the agent's verified inbound JWT is exchanged for a token scoped to an internal API.
 
@@ -144,17 +163,6 @@ warden cred spec create graph \
   -source=entra-obo \
   -config=subject_token_source=agent_identity \
   -config=scope=https://graph.microsoft.com/.default
-```
-
-**Chained client secret (`private_key_jwt`)** — Warden signs a client assertion with a private key fetched from another cred spec, so no secret is stored inline.
-
-```bash
-warden cred source create idp-pkjwt \
-  -type=token_exchange \
-  -config=token_url=https://idp.example.com/oauth2/v1/token \
-  -config=client_auth=private_key_jwt \
-  -config=client_id=warden-gateway \
-  -config=secret_spec=idp-client-key
 ```
 
 **ID-JAG cross-app access** — two legs in one mint: an ID-JAG from the home IdP, redeemed at the resource authorization server.

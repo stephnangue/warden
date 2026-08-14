@@ -4,9 +4,21 @@ title: "GitHub"
 
 > Source `type`: `github`
 
+:::tip[Prefer keyless]
+This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (via chaining)](#keyless-via-chaining).
+:::
+
 The GitHub driver mints **GitHub tokens** for workloads that call the GitHub REST API — github.com or a GitHub Enterprise instance. Unusually, the privileged auth material does **not** live on the **source**. The source config holds only connection details (`github_url` plus TLS options); the actual credentials — a GitHub App private key or a Personal Access Token — are supplied per **spec** and read at mint time. This means many specs, each carrying a different PAT or App installation, can share a single source.
 
 Each spec picks a **`mint_method`**: `app` uses a GitHub App private key to mint short-lived installation access tokens (~1h TTL), while `pat` passes through a static Personal Access Token. An operator reaches for this driver whenever a workload needs to authenticate to GitHub without holding the long-lived App key or PAT itself.
+
+## Keyless (via chaining)
+
+The App private key or PAT does not have to be stored: set `secret_spec` on the spec to
+source it from another cred spec via [credential chaining](/federation/credential-chaining/).
+Warden fetches the key/PAT from a keyless-federated vault at mint time — `app` signs an
+installation token with it, `pat` passes it through — so nothing is stored at Warden. Use
+`secret_field` when the referenced credential's payload has more than one key.
 
 ## Credential issued
 
@@ -18,6 +30,21 @@ The driver always issues the `github_token` type. In `app` mode the token is **d
 - **Not rotatable — by design.** GitHub App installation tokens are ephemeral (~1h) and are simply re-minted on demand, and GitHub exposes no API to rotate a PAT. There is nothing long-lived on the source to rotate, so the driver does not implement source rotation.
 
 ## Examples
+
+### Keyless (via chaining, recommended)
+
+The App private key / PAT is not stored on the spec; it is chained from another cred spec (e.g. a keyless Vault `kv2_read`), fetched at mint time.
+
+```bash
+warden cred spec create ci-deploy-keyless \
+  -source=github-prod \
+  -config=mint_method=app \
+  -config=app_id=123456 \
+  -config=installation_id=7891011 \
+  -config=secret_spec=github-app-key
+```
+
+### Inline secret (discouraged)
 
 One source holds only connection details; each spec below picks a `mint_method`.
 

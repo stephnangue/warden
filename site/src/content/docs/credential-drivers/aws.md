@@ -4,9 +4,24 @@ title: "AWS"
 
 > Source `type`: `aws`
 
+:::tip[Prefer keyless]
+This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (OIDC federation)](#keyless-oidc-federation).
+:::
+
 The AWS driver brokers credentials from **Amazon Web Services**. The **source** holds a long-lived IAM **access key** (`access_key_id` / `secret_access_key`) and a region; it can optionally chain into an elevated session by assuming a role. From that authenticated base, each **spec** picks a `mint_method` to produce one of several credential shapes — temporary STS session credentials, a secret pulled from Secrets Manager, or a short-lived database IAM auth token for RDS or Redshift.
 
 Reach for this driver when workloads need scoped, time-bounded access to AWS APIs or to IAM-authenticated databases without ever handling the operator's standing IAM key. The privileged key lives only in the source config; specs carry the per-request details (which role, which secret, which database).
+
+## Keyless (OIDC federation)
+
+Set `auth_method = "oidc_federation"` on the source to hold **no AWS secret**: instead
+of `access_key_id`/`secret_access_key`, Warden mints an
+[identity assertion](/federation/oidc-issuer/) and exchanges it via
+`sts:AssumeRoleWithWebIdentity` for a short-lived session. The IAM role's trust policy
+federates Warden's issuer. Works for `sts_assume_role` and for keyless
+`secrets_manager` reads. The spec sets `subject_token_source` (`warden_identity` or
+`agent_identity`). See [Keyless credential sources](/federation/keyless-credentials/)
+for the full model.
 
 ## Credential issued
 
@@ -22,6 +37,26 @@ STS credentials are **dynamic** — they carry a lease and TTL — but are **not
 No spec verification.
 
 ## Examples
+
+### Keyless (recommended)
+
+The source stores no AWS secret; the IAM role's trust policy federates Warden's issuer.
+
+```bash
+warden cred source create prod-aws-keyless \
+  -type=aws \
+  -config=auth_method=oidc_federation \
+  -config=region=us-east-1
+
+warden cred spec create deploy-role \
+  -source=prod-aws-keyless \
+  -config=mint_method=sts_assume_role \
+  -config=subject_token_source=warden_identity \
+  -config=role_arn=arn:aws:iam::123456789012:role/DeployRole \
+  -config=ttl=1h
+```
+
+### Inline secret (discouraged)
 
 One source holds the standing IAM key; each spec below picks a `mint_method`.
 
@@ -88,17 +123,6 @@ Keys for `warden cred source create <name> -type=aws -config=key=value ...`:
 | `session_name` | No | `warden-source-session` | Session name for AssumeRole operations. |
 | `session_duration` | No | `1h` | Duration for AssumeRole sessions. |
 | `external_id` | No | — | Optional external ID for AssumeRole operations. |
-
-## Keyless (OIDC federation)
-
-Set `auth_method = "oidc_federation"` on the source to hold **no AWS secret**: instead
-of `access_key_id`/`secret_access_key`, Warden mints an
-[identity assertion](/federation/oidc-issuer/) and exchanges it via
-`sts:AssumeRoleWithWebIdentity` for a short-lived session. The IAM role's trust policy
-federates Warden's issuer. Works for `sts_assume_role` and for keyless
-`secrets_manager` reads. The spec sets `subject_token_source` (`warden_identity` or
-`agent_identity`). See [Keyless credential sources](/federation/keyless-credentials/)
-for the full model.
 
 ## Specs and mint methods
 

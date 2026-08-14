@@ -4,6 +4,10 @@ title: "Azure"
 
 > Source `type`: `azure`
 
+:::tip[Prefer keyless]
+This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (OIDC federation)](#keyless-oidc-federation).
+:::
+
 The Azure driver brokers credentials against **Azure AD** and **Azure Key Vault**. Its
 **source** holds a privileged service-principal login (tenant, client id, and client
 secret) that Warden uses to authenticate to Azure AD and to call the **Microsoft Graph**
@@ -17,6 +21,16 @@ This driver is unusual in two ways. First, the credentials it mints are supplied
 `client_secret`, and the source login is used only to authenticate and to rotate. Second,
 it is the only driver that rotates **both** its own source secret **and** the secret
 embedded in a spec, both through Microsoft Graph.
+
+## Keyless (OIDC federation)
+
+Set `auth_method = "oidc_federation"` on the source to hold **no Azure secret**: instead
+of a `client_secret`, Warden presents an [identity assertion](/federation/oidc-issuer/)
+to Entra as a `client_assertion` (JWT-bearer grant) for a short-lived `bearer_token`.
+The source sets `tenant_id`, `client_id`, and the `audience`; the spec sets
+`subject_token_source` (`warden_identity` or `agent_identity`). Note `key_vault_secret`
+is **not** federated — a keyless source targeting it fails closed. See
+[Keyless credential sources](/federation/keyless-credentials/).
 
 ## Credential issued
 
@@ -39,6 +53,27 @@ the secret value as a **static** credential with no lease or TTL. See
 No spec verification.
 
 ## Examples
+
+### Keyless (recommended)
+
+The source stores no client secret; Warden presents an identity assertion to Entra as a `client_assertion`.
+
+```bash
+warden cred source create azure-keyless \
+  -type=azure \
+  -config=auth_method=oidc_federation \
+  -config=tenant_id=00000000-0000-0000-0000-000000000000 \
+  -config=client_id=11111111-1111-1111-1111-111111111111 \
+  -config=audience=api://AzureADTokenExchange
+
+warden cred spec create arm-token \
+  -source=azure-keyless \
+  -config=mint_method=bearer_token \
+  -config=subject_token_source=warden_identity \
+  -config=resource_uri=https://management.azure.com/
+```
+
+### Inline secret (discouraged)
 
 One source holds the privileged service-principal login; each spec below picks a
 `mint_method` and carries its own workload service-principal credentials.
@@ -105,16 +140,6 @@ Keys for `warden cred source create <name> -type=azure -config=key=value ...`:
 
 Source rotation also reads an optional `activation_delay` (duration) that tunes the
 propagation wait described under Capabilities.
-
-## Keyless (OIDC federation)
-
-Set `auth_method = "oidc_federation"` on the source to hold **no Azure secret**: instead
-of a `client_secret`, Warden presents an [identity assertion](/federation/oidc-issuer/)
-to Entra as a `client_assertion` (JWT-bearer grant) for a short-lived `bearer_token`.
-The source sets `tenant_id`, `client_id`, and the `audience`; the spec sets
-`subject_token_source` (`warden_identity` or `agent_identity`). Note `key_vault_secret`
-is **not** federated — a keyless source targeting it fails closed. See
-[Keyless credential sources](/federation/keyless-credentials/).
 
 ## Specs and mint methods
 

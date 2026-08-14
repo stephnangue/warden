@@ -4,6 +4,10 @@ title: "GCP"
 
 > Source `type`: `gcp`
 
+:::tip[Prefer keyless]
+This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (OIDC federation)](#keyless-oidc-federation).
+:::
+
 The GCP driver brokers **Google Cloud** access. It holds a **service-account JSON key**
 in the **source** config and exchanges that key for short-lived **OAuth2 access tokens**,
 either for the source service account itself or, by **impersonation**, for another service
@@ -14,6 +18,16 @@ The privileged secret — the SA key — lives only in the source config and is 
 read. Each **spec** selects a `mint_method` and the scopes, target account, and lifetime
 of the token to issue. An operator reaches for this driver to hand workloads scoped,
 expiring Google Cloud tokens without ever exposing the underlying key.
+
+## Keyless (OIDC federation)
+
+Set `auth_method = "oidc_federation"` on the source to hold **no service-account key**:
+Warden exchanges an [identity assertion](/federation/oidc-issuer/) through **Workload
+Identity Federation** at `sts.googleapis.com` for a Google access token. Set the full
+`workload_identity_provider` resource name on the source; the spec's `mint_method` is
+`access_token` or `impersonated_access_token` (the latter impersonates a
+`target_service_account`), and it sets `subject_token_source` (`warden_identity` or
+`agent_identity`). See [Keyless credential sources](/federation/keyless-credentials/).
 
 ## Credential issued
 
@@ -33,6 +47,24 @@ token cannot be invalidated early and simply expires. See
 No spec verification.
 
 ## Examples
+
+### Keyless (recommended)
+
+The source stores no service-account key; Warden exchanges an identity assertion through Workload Identity Federation.
+
+```bash
+warden cred source create gcp-keyless \
+  -type=gcp \
+  -config=auth_method=oidc_federation \
+  -config=workload_identity_provider=projects/123456/locations/global/workloadIdentityPools/warden/providers/warden
+
+warden cred spec create viewer-token \
+  -source=gcp-keyless \
+  -config=mint_method=access_token \
+  -config=subject_token_source=warden_identity
+```
+
+### Inline secret (discouraged)
 
 One source holds the service-account JSON key; each spec below picks a `mint_method`.
 
@@ -72,16 +104,6 @@ Keys for `warden cred source create <name> -type=gcp -config=key=value ...`:
 | `service_account_key` | Yes | — | GCP service-account key in JSON format; must contain `client_email` and `private_key` (secret, masked on read) |
 | `ca_data` | No | — | Base64-encoded PEM CA certificate for custom/self-signed CAs (secret, masked on read) |
 | `tls_skip_verify` | No | `false` | Skip TLS certificate verification (development only) |
-
-## Keyless (OIDC federation)
-
-Set `auth_method = "oidc_federation"` on the source to hold **no service-account key**:
-Warden exchanges an [identity assertion](/federation/oidc-issuer/) through **Workload
-Identity Federation** at `sts.googleapis.com` for a Google access token. Set the full
-`workload_identity_provider` resource name on the source; the spec's `mint_method` is
-`access_token` or `impersonated_access_token` (the latter impersonates a
-`target_service_account`), and it sets `subject_token_source` (`warden_identity` or
-`agent_identity`). See [Keyless credential sources](/federation/keyless-credentials/).
 
 ## Specs and mint methods
 
