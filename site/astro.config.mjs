@@ -250,6 +250,7 @@ export default defineConfig({
         { label: 'Quickstarts', autogenerate: { directory: 'quickstarts' } },
         { label: 'Tutorials', autogenerate: { directory: 'tutorials' } },
         { label: 'Install', autogenerate: { directory: 'install' } },
+        { label: 'Upgrade', autogenerate: { directory: 'upgrade' } },
       ],
     }),
   ],

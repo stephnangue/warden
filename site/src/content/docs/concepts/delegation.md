@@ -43,6 +43,12 @@ actor decides the outcome (RFC 8693 §1.1):
 
 ## Subject and actor, by source
 
+:::caution[Upgrading from v0.18.0]
+The `auth_token` source value is renamed to `agent_identity`, and the `header` token
+source (with `X-Warden-Subject-Token` / `X-Warden-Actor-Token` and the `subject_*` trust
+keys) is removed. See [Upgrading from v0.18.0](/upgrade/from-v0-18/#3-rfc-8693-token-exchange-reshaped-around-the-user).
+:::
+
 The subject (who the token is *for*) and the optional actor (who is *acting*) are each
 drawn from a **source** — and every source is trusted at origin (there is no
 caller-supplied, per-request-validated token path):

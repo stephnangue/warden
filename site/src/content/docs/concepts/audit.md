@@ -103,6 +103,12 @@ flaky sink degrades but does not block; losing *all* of them does.
 
 Two parts of the log are particular to what Warden does.
 
+:::caution[Upgrading from v0.18.0]
+Actor entries are now verified-only: `actors[]` drops the `verified` key, and the
+credential-metadata keys `subject_verified` / `actor_verified` are no longer emitted. See
+[Upgrading from v0.18.0](/upgrade/from-v0-18/).
+:::
+
 **Credential issuance.** When Warden injects a credential into a proxied request,
 the response entry records *which* credential it was — its type, the source and
 [spec](/concepts/credentials/) that produced it, its lease, and the token it is bound to

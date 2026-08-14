@@ -47,6 +47,13 @@ becomes **keyless at Warden**. The same keys cover `client_secret_basic`/`_post`
 
 ## Subject and actor: identities by source
 
+:::caution[Upgrading from v0.18.0]
+`auth_token` is renamed to `agent_identity`; the `header` source, the
+`subject_token_header` / `actor_token_header` keys, and the `subject_issuer` /
+`subject_audience` / `subject_jwks_url` / `subject_oidc_discovery_url` trust keys are
+removed. See [Upgrading from v0.18.0](/upgrade/from-v0-18/#3-rfc-8693-token-exchange-reshaped-around-the-user).
+:::
+
 Every exchange has a **subject** — the identity the new token will *represent* — and may
 name an **actor** — a second identity recorded as *acting on behalf of* the subject.
 Whether the minted token names an actor decides the outcome (RFC 8693 §1.1): a token with
