@@ -106,6 +106,16 @@ Keys for `warden cred source create <name> -type=azure -config=key=value ...`:
 Source rotation also reads an optional `activation_delay` (duration) that tunes the
 propagation wait described under Capabilities.
 
+## Keyless (OIDC federation)
+
+Set `auth_method = "oidc_federation"` on the source to hold **no Azure secret**: instead
+of a `client_secret`, Warden presents an [identity assertion](/federation/oidc-issuer/)
+to Entra as a `client_assertion` (JWT-bearer grant) for a short-lived `bearer_token`.
+The source sets `tenant_id`, `client_id`, and the `audience`; the spec sets
+`subject_token_source` (`warden_identity` or `agent_identity`). Note `key_vault_secret`
+is **not** federated — a keyless source targeting it fails closed. See
+[Keyless credential sources](/federation/keyless-credentials/).
+
 ## Specs and mint methods
 
 | `mint_method` | Issues | Notable spec config |

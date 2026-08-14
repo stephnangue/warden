@@ -89,6 +89,17 @@ Keys for `warden cred source create <name> -type=aws -config=key=value ...`:
 | `session_duration` | No | `1h` | Duration for AssumeRole sessions. |
 | `external_id` | No | — | Optional external ID for AssumeRole operations. |
 
+## Keyless (OIDC federation)
+
+Set `auth_method = "oidc_federation"` on the source to hold **no AWS secret**: instead
+of `access_key_id`/`secret_access_key`, Warden mints an
+[identity assertion](/federation/oidc-issuer/) and exchanges it via
+`sts:AssumeRoleWithWebIdentity` for a short-lived session. The IAM role's trust policy
+federates Warden's issuer. Works for `sts_assume_role` and for keyless
+`secrets_manager` reads. The spec sets `subject_token_source` (`warden_identity` or
+`agent_identity`). See [Keyless credential sources](/federation/keyless-credentials/)
+for the full model.
+
 ## Specs and mint methods
 
 | `mint_method` | Issues | Notable spec config |

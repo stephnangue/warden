@@ -88,6 +88,8 @@ export default defineConfig({
           items: [
             { slug: 'federation' },
             { slug: 'federation/oidc-issuer' },
+            { slug: 'federation/keyless-credentials' },
+            { slug: 'federation/assertion-claims' },
           ],
         },
         { label: 'Use cases', autogenerate: { directory: 'use-cases' } },

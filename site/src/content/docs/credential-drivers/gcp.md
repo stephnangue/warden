@@ -73,6 +73,16 @@ Keys for `warden cred source create <name> -type=gcp -config=key=value ...`:
 | `ca_data` | No | — | Base64-encoded PEM CA certificate for custom/self-signed CAs (secret, masked on read) |
 | `tls_skip_verify` | No | `false` | Skip TLS certificate verification (development only) |
 
+## Keyless (OIDC federation)
+
+Set `auth_method = "oidc_federation"` on the source to hold **no service-account key**:
+Warden exchanges an [identity assertion](/federation/oidc-issuer/) through **Workload
+Identity Federation** at `sts.googleapis.com` for a Google access token. Set the full
+`workload_identity_provider` resource name on the source; the spec's `mint_method` is
+`access_token` or `impersonated_access_token` (the latter impersonates a
+`target_service_account`), and it sets `subject_token_source` (`warden_identity` or
+`agent_identity`). See [Keyless credential sources](/federation/keyless-credentials/).
+
 ## Specs and mint methods
 
 | `mint_method` | Issues | Notable spec config |

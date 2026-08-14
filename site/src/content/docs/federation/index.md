@@ -18,10 +18,11 @@ Everything else builds on that:
 - **[Warden as an OIDC issuer](/federation/oidc-issuer/)** — how the issuer mints and
   signs assertions, where the signing key lives (in-process or an external KMS), and
   how the public keys reach internet-facing upstreams through a publisher.
-
-More pages join this section as the keyless story is documented — keyless credential
-sources, assertion claims, and credential chaining. For the security property that
-makes it all work, start with the issuer.
+- **[Keyless credential sources](/federation/keyless-credentials/)** — set
+  `auth_method=oidc_federation` to federate an assertion for a short-lived cloud
+  credential, holding no stored secret (AWS, Azure, GCP, OpenBao/Vault).
+- **[Assertion claims](/federation/assertion-claims/)** — how the assertion is scoped:
+  audience, `warden_resource`, login metadata, per-user, and the signing algorithm.
 
 ## See also
 

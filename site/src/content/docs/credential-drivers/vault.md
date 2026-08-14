@@ -118,6 +118,18 @@ Keys for `warden cred source create <name> -type=hvault -config=key=value ...`:
 
 The `token` and `secret_id_accessor` fields are also treated as sensitive and masked on read.
 
+## Keyless (OIDC federation)
+
+Set `auth_method = "oidc_federation"` on the source to hold **no Vault credential**:
+Warden logs in **per request** against Vault's own JWT auth method
+(`auth/<jwt_mount>/login` with `jwt_role`) using an
+[identity assertion](/federation/oidc-issuer/), then vends that login token
+(`mint_method=vault_token`) or brokers a downstream secret with it. Set `jwt_role`,
+`jwt_mount` (default `jwt`), and `audience` (which must equal the Vault role's
+`bound_audiences`). A keyless source needs no `rotation_period`, and a keyless
+`vault_token` spec needs no `token_role`. See
+[Keyless credential sources](/federation/keyless-credentials/).
+
 ## Specs and mint methods
 
 Each spec sets a `mint_method` that picks the Vault engine and the credential shape:

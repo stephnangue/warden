@@ -55,6 +55,10 @@ Warden can broker access while storing nothing.
 - [Warden as an OIDC issuer](/federation/oidc-issuer/) — mint short-lived, signed
   identity assertions, sign them with a key that can live in an external KMS, and publish
   the verification keys to internet-facing upstreams.
+- [Keyless credential sources](/federation/keyless-credentials/) — federate an assertion
+  for a short-lived cloud credential, holding no stored secret.
+- [Assertion claims](/federation/assertion-claims/) — how the assertion is scoped:
+  audience, resource, metadata, and per-user.
 
 ## For AI agents
 
