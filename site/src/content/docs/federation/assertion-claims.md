@@ -3,9 +3,14 @@ title: "Assertion claims"
 description: "How Warden shapes and scopes the identity assertion an upstream verifies — audience, resource, metadata, and per-user."
 ---
 
-An [identity assertion](/federation/oidc-issuer/) is a JWT, and what an upstream trust
-policy can gate on is *its claims*. This page covers the claims Warden puts in a
-`warden_identity` assertion and the spec keys that shape them.
+When an upstream trusts Warden's issuer, it decides *whether* to honor an
+[identity assertion](/federation/oidc-issuer/) — and *how narrowly* to scope what it hands
+back — by reading the assertion's **claims**. Shaping those claims is how you hold access to
+least privilege at the token level: disclose only what a trust policy needs, pin one
+assertion to a single resource, and carry the user when acting on their behalf.
+
+This page covers the claims Warden puts in a `warden_identity` assertion and the spec keys
+that shape them.
 
 Every assertion carries the standard `iss`, `aud`, `iat`, `nbf` (backdated by a small
 skew leeway), `exp`, `jti`, and a subject that names the agent:

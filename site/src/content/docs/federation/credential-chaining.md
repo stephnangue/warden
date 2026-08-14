@@ -3,17 +3,36 @@ title: "Credential chaining"
 description: "Source a provider's secret from another cred spec per request — keyless secret-backed providers, nothing stored at rest."
 ---
 
-Some upstreams need a **standing secret** — an API key, a client secret, a token —
-that has no short-lived-token mechanism. **Credential chaining** lets Warden supply that
-secret **without storing it**: a consuming spec names another cred spec via
-`secret_spec`, and at request time Warden mints the referenced spec, extracts the
-material, and hands it to the consuming driver. Nothing is persisted in Warden's barrier
-for a chained spec — the secret only transits memory at mint time.
+Some upstreams still require a **long-lived secret** — an API key, a client secret, a
+token — with no short-lived-token option. Normally that means *something* has to keep that
+secret on hand. **Credential chaining** lets that something stay the **external vault you
+already trust to hold secrets**, instead of Warden.
 
-This is the mechanism that turns an otherwise secret-storing driver into a **keyless**
-one. It is the second on-ramp to [keyless federation](/federation/keyless-credentials/):
-where a cloud source federates for a credential the cloud issues, a secret-backed source
-**chains** its secret from a keyless-federated vault.
+Rather than copying the secret into Warden, you point Warden at **where the secret already
+lives**. On each request Warden **fetches the secret just in time, uses it to serve that one
+request, and immediately forgets it** — nothing is ever written to Warden's own storage.
+
+**What makes this especially powerful: Warden holds no secret to reach the vault, either.**
+It authenticates to the vault with a **per-request proof of identity** — a short-lived,
+signed [identity assertion](/federation/oidc-issuer/) — not a stored vault token or password.
+So there is no "secret to get the secret," no bootstrap credential to steal. And because that
+proof carries the **real caller's identity**, the vault sees *who* read the secret — the
+actual agent, and the user when one is present — so the read is **attributable on the vault
+side**, not an anonymous pull by a shared service account.
+
+**Why it matters.** Warden becomes a **pass-through, not a vault**. Breach it and there is no
+upstream secret sitting inside to take — and no vault credential either; the secret stays in
+the system built to protect it, and every fetch is a per-request, authorized event, audited on
+**both** sides. This is what turns an otherwise secret-storing driver into a **keyless** one —
+the second on-ramp to [keyless federation](/federation/keyless-credentials/): where a cloud
+source federates for a credential the cloud issues, a secret-backed source **chains** its
+secret from a keyless-federated vault.
+
+**In Warden's terms.** The spec that needs the secret points at another spec that produces
+it, using the `secret_spec` setting. At request time Warden runs that referenced spec **as
+the same caller**, takes the secret it yields, hands it to the driver that needed it, and
+keeps nothing. (The rest of this page uses "consuming spec" for the one that needs the
+secret and "referenced spec" for the one that supplies it.)
 
 **Without chaining.** Warden holds the provider's secret in its own barrier — a stored secret to protect and rotate.
 

@@ -3,12 +3,12 @@ title: "Keyless credential sources"
 description: "Federate a Warden identity assertion for a short-lived cloud credential — no stored cloud secret."
 ---
 
-A credential source normally holds a secret Warden authenticates with — an access
-key, a service-account key, a token. A **keyless** source holds **none**. Instead it
-sets `auth_method = "oidc_federation"`: on each request Warden mints an
-[identity assertion](/federation/oidc-issuer/) for the caller and exchanges it at the
-cloud for a short-lived credential. The cloud is configured to trust Warden's issuer,
-so it verifies the assertion and issues the credential itself.
+A credential source normally has to hold a secret to reach its upstream — an access key,
+a service-account key, a token. A **keyless** source holds **none**. Instead of presenting
+a stored secret, on each request Warden proves *who the caller is* to the cloud with a
+short-lived [identity assertion](/federation/oidc-issuer/); the cloud — set up to trust
+Warden's issuer — verifies it and issues a short-lived credential itself. The secret that
+used to sit in Warden simply no longer exists, so there is nothing there to leak or rotate.
 
 Two config keys carry the whole idea, and they answer different questions:
 

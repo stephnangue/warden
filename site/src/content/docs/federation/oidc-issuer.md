@@ -3,16 +3,18 @@ title: "Warden as an OIDC Issuer"
 description: "Warden mints short-lived, signed identity assertions and publishes the keys to verify them — the foundation for keyless federation."
 ---
 
-Warden can act as its own **OpenID Connect issuer**. It mints short-lived, signed JWT
-**identity assertions** that describe the authenticated caller, and publishes the
-matching **JWKS** and **OIDC discovery** document so anything that trusts an OIDC
-issuer can verify those assertions on its own.
+Keyless access rests on a simple shift: instead of Warden holding a long-lived secret for
+an upstream, the upstream is set up to **trust Warden's word about who the caller is**. On
+each request Warden vouches for the caller with a short-lived, **signed statement of
+identity**; the upstream — a cloud STS, an identity provider, a secrets vault — verifies
+that statement on its own and hands back a short-lived credential. **No secret is stored on
+either side.**
 
-That single capability is what makes *keyless* access possible. Instead of Warden
-holding a long-lived secret for an upstream, the upstream is configured to trust
-Warden's issuer; on each request Warden mints an assertion for the caller, and the
-upstream — a cloud STS, an identity provider, a secrets vault — exchanges that
-assertion for a short-lived credential. No secret is stored on either side.
+Warden does this by acting as its own **OpenID Connect (OIDC) issuer**. The signed
+statements are JWT **identity assertions** describing the authenticated caller, and Warden
+publishes the public keys to verify them — the **JWKS** and **OIDC discovery** documents.
+This is the same mechanism any OIDC provider uses, so anything that already trusts an OIDC
+issuer can verify a Warden assertion with no custom integration.
 
 **The issuer at a glance** (both add-ons below are optional — the defaults are an
 in-process key and no publisher). The **signer** can hold the private key in an external

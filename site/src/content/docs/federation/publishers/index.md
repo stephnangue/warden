@@ -3,10 +3,12 @@ title: "Publishers"
 description: "Push the OIDC issuer's public discovery + JWKS to a bucket or CDN so internet-facing upstreams can verify assertions."
 ---
 
-A **publisher** pushes the [OIDC issuer's](/federation/oidc-issuer/) public **discovery**
-and **JWKS** documents to an external location — a bucket or CDN — and *that* public
-location becomes the `issuer_url` upstreams fetch from. So a public-cloud STS (AWS, GCP,
-Entra) can verify Warden's assertions **without Warden being internet-facing**.
+A public cloud — AWS, GCP, Entra — verifies Warden's [identity assertions](/federation/oidc-issuer/)
+by fetching its public keys **over the internet**. But you usually don't want to put Warden
+itself on the internet to be reached. A **publisher** resolves that tension: it pushes the
+issuer's public **discovery** and **JWKS** documents out to a location the cloud *can* reach —
+a bucket or CDN — and *that* location becomes the `issuer_url` upstreams fetch from. So a
+public-cloud STS verifies Warden's assertions **without Warden ever being internet-facing**.
 
 A publisher is **runtime** configuration, set through the API with
 [`warden oidc-issuer set-publisher`](/cli/oidc-issuer/) (not a server-config stanza).
