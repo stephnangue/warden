@@ -258,6 +258,7 @@ export default defineConfig({
             { slug: 'configuration/audit' },
           ],
         },
+        { label: 'Audit devices', autogenerate: { directory: 'audit-devices' } },
         { label: 'Quickstarts', autogenerate: { directory: 'quickstarts' } },
         { label: 'Tutorials', autogenerate: { directory: 'tutorials' } },
         { label: 'Install', autogenerate: { directory: 'install' } },
