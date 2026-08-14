@@ -20,8 +20,10 @@ Between them they capture:
 - **Identity** — the [token](/concepts/tokens/) ID and accessor, token type, principal
   and [role](/concepts/roles/), the granted policies, the [namespace](/concepts/namespaces/), and —
   when the token carries them — its verified, login-derived **metadata** attributes
-  (clearance, team, on-behalf-of user), so a decision that turned on a
-  [`token.metadata`](/concepts/policies/#fine-grained-access) value is explainable.
+  (clearance, team, department), so a decision that turned on a
+  [`token.metadata`](/concepts/policies/#fine-grained-access) value is explainable. The
+  human an agent acts for is a separate **user principal**, recorded as `Auth.User` (below),
+  not a token-metadata attribute.
 - **Request** — operation, path, HTTP method, client IP, mount point and type,
   and whether it was transparent/unauthenticated/streamed.
 - **Response** — status, any warnings, the upstream URL for a proxied request,
@@ -120,8 +122,7 @@ chain — the subjects it is being made *for* — and the audit entry records th
 The chain is the cryptographically-verified RFC 8693 `act` chain from the caller's token,
 extracted from the signed JWT `act` claim and persisted on the token, so it survives
 transparent-token caching. Because every actor is verified at source, each `actors[]`
-entry is just `{subject}` — there is no `verified` field, and the credential-metadata
-keys `subject_verified` / `actor_verified` are no longer emitted.
+entry is just `{subject}` — there is no `verified` field.
 
 **User attribution.** When a request carries a [user principal](/concepts/delegation/)
 — a human or another agent the agent acts for, presented by secondary transparent
