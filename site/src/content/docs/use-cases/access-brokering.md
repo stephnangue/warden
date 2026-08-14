@@ -29,12 +29,16 @@ rotating those keys quietly becomes the dominant cost of running agents at all.
 ## Warden holds the secret; the agent carries only an identity
 
 Warden's purpose is to keep secrets out of workloads. Instead of handing the agent
-a key, Warden **brokers access**: it holds the privileged upstream secret itself
-and, at request time, mints or retrieves a scoped, short-lived
-[credential](/concepts/credentials/) for the upstream the agent is trying to
-reach — then injects it into the proxied request rather than handing it over. The
-agent presents **only its own identity** and never receives a credential of its
-own.
+a key, Warden **brokers access**: at request time it mints or retrieves a scoped,
+short-lived [credential](/concepts/credentials/) for the upstream the agent is trying
+to reach — then injects it into the proxied request rather than handing it over. The
+agent presents **only its own identity** and never receives a credential of its own.
+
+And, increasingly, Warden holds no standing secret to broker *from*: a
+[keyless](/federation/keyless-credentials/) source federates the caller's identity for
+a credential the upstream issues, or [chains](/federation/credential-chaining/) the
+secret it needs from an external vault per request — so the privileged secret is stored
+neither in the agent nor in Warden.
 
 The identity is something the agent already has — a JWT, an mTLS client
 certificate, or a SPIFFE SVID. The agent points an ordinary client at a Warden
