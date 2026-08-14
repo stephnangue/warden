@@ -26,11 +26,14 @@ Everything else builds on that:
 - **[Credential chaining](/federation/credential-chaining/)** — source a provider's
   standing secret from a keyless-federated vault per request (`secret_spec`), so a
   secret-backed provider stores nothing at Warden.
+- **[Signer](/configuration/signer/)** — hold the issuer's signing key in an external KMS
+  (transit today), so the private key never enters Warden.
+- **[Publishers](/federation/publishers/)** — push the public keys to a bucket/CDN
+  (`s3`, `gcs`, `azure_blob`, `http_put`, `local_file`) so internet-facing upstreams can
+  verify assertions.
 
 ## See also
 
-- [Signer configuration](/configuration/signer/) — hold the issuer's signing key in an
-  external KMS.
 - [`warden oidc-issuer`](/cli/oidc-issuer/) — configure the issuer, its signing key,
   and its publisher.
 - [Credentials](/concepts/credentials/) — the source / spec / credential model the

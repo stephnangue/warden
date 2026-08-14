@@ -57,6 +57,7 @@ export default defineConfig({
             { slug: 'architecture' },
           ],
         },
+        { label: 'Use cases', autogenerate: { directory: 'use-cases' } },
         {
           // Concepts follow the curated reading order from concepts/index.md,
           // not alphabetical.
@@ -91,9 +92,31 @@ export default defineConfig({
             { slug: 'federation/keyless-credentials' },
             { slug: 'federation/assertion-claims' },
             { slug: 'federation/credential-chaining' },
+            {
+              // The signing key lives in an external KMS (also listed under
+              // Configuration, since it is a server-config stanza).
+              label: 'Signer',
+              collapsed: true,
+              items: [
+                { slug: 'configuration/signer' },
+                { slug: 'configuration/signer/transit' },
+              ],
+            },
+            {
+              // Push the issuer's public keys to a bucket/CDN (runtime config).
+              label: 'Publishers',
+              collapsed: true,
+              items: [
+                { slug: 'federation/publishers' },
+                { slug: 'federation/publishers/s3' },
+                { slug: 'federation/publishers/gcs' },
+                { slug: 'federation/publishers/azure-blob' },
+                { slug: 'federation/publishers/http-put' },
+                { slug: 'federation/publishers/local-file' },
+              ],
+            },
           ],
         },
-        { label: 'Use cases', autogenerate: { directory: 'use-cases' } },
         {
           // Grouped by upstream theme, mirroring the README "Supported systems"
           // table. Subgroups collapse by default; the active page's group opens.
@@ -243,7 +266,15 @@ export default defineConfig({
               ],
             },
             { slug: 'configuration/audit' },
-            { slug: 'configuration/signer' },
+            {
+              // The signer stanza; also surfaced under Federation.
+              label: 'Signer',
+              collapsed: true,
+              items: [
+                { slug: 'configuration/signer' },
+                { slug: 'configuration/signer/transit' },
+              ],
+            },
           ],
         },
         { label: 'Audit devices', autogenerate: { directory: 'audit-devices' } },

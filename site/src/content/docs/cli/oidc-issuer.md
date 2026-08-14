@@ -29,31 +29,32 @@ Global flags apply to every subcommand — see the [CLI overview](/cli/#global-f
 
 ### `oidc-issuer configure`
 
-Enable the issuer and set its runtime settings. On first enable, `--issuer-url` is
+Enable the issuer and set its runtime settings. On first enable, `-issuer-url` is
 required; later calls change only the flags you pass and keep the rest.
 
 ```bash
 # First enable
-warden oidc-issuer configure --issuer-url=https://warden.example.com
+warden oidc-issuer configure -issuer-url=https://warden.example.com
 
 # Change just the rotation cadence later (issuer_url and the rest are kept)
-warden oidc-issuer configure --key-rotation-period=168h
+warden oidc-issuer configure -key-rotation-period=168h
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--issuer-url` | *(required on first enable)* | Public HTTPS URL upstreams fetch discovery/JWKS from; also the `iss` claim. An `http://` loopback host is allowed for local dev. |
-| `--assertion-ttl` | `5m` | Lifetime of a minted identity assertion. |
-| `--key-rotation-period` | *(none)* | Signing-key rotation cadence. `0` disables automatic rotation. |
-| `--jwks-cache-ttl` | `1m` | `Cache-Control` max-age of the published JWKS; also the minimum pre-publication age of a new key. |
-| `--retired-key-grace` | `1h` | Margin beyond the assertion TTL before a retired key is pruned from the JWKS. |
-| `--json`, `-j` | | Full JSON payload (`<json>`, `@file.json`, or `-` for stdin). Mutually exclusive with the typed flags. |
+| `-issuer-url` | *(required on first enable)* | Public HTTPS URL upstreams fetch discovery/JWKS from; also the `iss` claim. An `http://` loopback host is allowed for local dev. |
+| `-assertion-ttl` | `5m` | Lifetime of a minted identity assertion. |
+| `-key-rotation-period` | *(none)* | Signing-key rotation cadence. `0` disables automatic rotation. |
+| `-jwks-cache-ttl` | `1m` | `Cache-Control` max-age of the published JWKS; also the minimum pre-publication age of a new key. |
+| `-retired-key-grace` | `1h` | Margin beyond the assertion TTL before a retired key is pruned from the JWKS. |
+| `-json`, `-j` | | Full JSON payload (`<json>`, `@file.json`, or `-` for stdin). Mutually exclusive with the typed flags. |
 
 ### `oidc-issuer read`
 
 Show the issuer's state — whether it is enabled and ready, the `issuer_url`, the
-runtime settings, the **signing-key location** (in-process or the KMS handle from the
-[`signer` stanza](/configuration/signer/)), and a `key_rotation` status block.
+runtime settings, the signing **mode** (`in_process` or `external_kms`, plus the
+`backend` when external — from the [`signer` stanza](/configuration/signer/)), and a
+`key_rotation` status block.
 
 ```bash
 warden oidc-issuer read
@@ -94,12 +95,16 @@ warden oidc-issuer set-publisher -type=none
 | `-type` | Publisher type: `none`, `local_file`, `http_put`, `s3`, `azure_blob`, or `gcs`. |
 | `-config` | Type-specific config as `key=value` (repeatable). `@file` reads a value from a file. |
 | `-rotation-period` | Cadence for self-rotating the publisher's own write credential. |
-| `--json`, `-j` | Full publisher JSON block (mutually exclusive with `-type`/`-config`). |
+| `-json`, `-j` | Full publisher JSON block (mutually exclusive with `-type`/`-config`). |
 
 Switching `-type` drops the previous type's fields; secrets are preserved when omitted
 (or may be sent masked). The publisher's write credential is self-rotated on the
 `-rotation-period`, and the JWKS is automatically re-published when the signing key
 rotates.
+
+#### Publisher parameters
+
+Every field except `-type` is passed as a `-config=key=value`; secret fields are masked on read. Each type's parameters are documented on its own page under [Publishers](/federation/publishers/): [`s3`](/federation/publishers/s3/), [`gcs`](/federation/publishers/gcs/), [`azure_blob`](/federation/publishers/azure-blob/), [`http_put`](/federation/publishers/http-put/), and [`local_file`](/federation/publishers/local-file/). `-type=none` removes the publisher.
 
 ### `oidc-issuer disable`
 
