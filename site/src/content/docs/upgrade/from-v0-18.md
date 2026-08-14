@@ -22,9 +22,9 @@ dropped everywhere.
 ```
 
 Note the empty-chain semantics also flip: the old expression was vacuously *true* (allow)
-for a token with no actors; the rewrite is *false* (deny). To keep the previous
-allow-when-empty behavior, use `size(token.actors) == 0 || size(token.actors) > 0` — or,
-more simply, drop the condition if you did not mean to require an actor.
+for a token with no actors; the rewrite is *false* (deny). If you did **not** mean to
+require an actor — the old expression allowed every request, since it also passed when the
+chain was empty — simply **drop the condition**.
 
 **Audit shape.** Audit `actors[]` objects lose the `"verified"` key (`{subject, verified}`
 → `{subject}`).
@@ -57,15 +57,17 @@ change on `token_exchange` specs and sources.
   + -config=subject_token_source=agent_identity
   ```
 
-- **The `header` token source is removed.** Agent-acting-for-a-user delegation now uses
-  **`subject_token_source=user_identity`**, which forwards the secondary
-  [user principal's](/concepts/delegation/) own validated credential as the RFC 8693
-  `subject_token` — replacing the old caller-supplied `X-Warden-Subject-Token` header.
-  Configure the user principal with a `user_auth_path` (see [Delegation](/concepts/delegation/)).
+- **The `header` token source is removed.** The `subject_token_source` / `actor_token_source`
+  value `header` — which read the caller-supplied `X-Warden-Subject-Token` /
+  `X-Warden-Actor-Token` request headers as an *unverified* token — is gone.
+  Agent-acting-for-a-user delegation now uses **`subject_token_source=user_identity`**, which
+  forwards the secondary [user principal's](/concepts/delegation/) own validated credential as
+  the RFC 8693 `subject_token`. Configure the user principal with a `user_auth_path` (see
+  [Delegation](/concepts/delegation/)).
 
-- **Removed spec/source keys.** `subject_token_header` / `actor_token_header` and the
-  subject-trust keys `subject_issuer` / `subject_audience` / `subject_jwks_url` /
-  `subject_oidc_discovery_url` are removed.
+- **Removed subject-trust keys.** The keys that pinned trust for a header-sourced token —
+  `subject_issuer` / `subject_audience` / `subject_jwks_url` / `subject_oidc_discovery_url` —
+  are removed along with the `header` source.
 
 - **Delegation rule.** `actor_token_source ≠ none` now requires
   `subject_token_source=user_identity`.
