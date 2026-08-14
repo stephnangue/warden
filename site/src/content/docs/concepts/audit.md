@@ -113,7 +113,15 @@ to whom" without the log ever holding a usable key.
 chain — the subjects it is being made *for* — and the audit entry records them as `actors`.
 The chain is the cryptographically-verified RFC 8693 `act` chain from the caller's token,
 extracted from the signed JWT `act` claim and persisted on the token, so it survives
-transparent-token caching.
+transparent-token caching. Because every actor is verified at source, each `actors[]`
+entry is just `{subject}` — there is no `verified` field, and the credential-metadata
+keys `subject_verified` / `actor_verified` are no longer emitted.
+
+**User attribution.** When a request carries a [user principal](/concepts/delegation/)
+— a human or another agent the agent acts for, presented by secondary transparent
+authentication — both the request and response entries stamp `Auth.User` with the user's
+`subject`, token ID, and namespace. The mint the user scopes is thereby traceable to that
+user, while the **raw user credential is never logged** — only the identity is recorded.
 
 ## Scope
 

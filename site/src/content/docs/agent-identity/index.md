@@ -6,9 +6,12 @@ Before Warden can broker access for an agent, it has to know *who the agent is*.
 The agent presents an **identity vehicle** — a JWT, a SPIFFE SVID, a client
 certificate, a platform-issued token — and Warden validates it, attaches the
 resulting principal to the policy decision and the audit trail, and mints the
-upstream credential on the agent's behalf. Warden never issues or mints the
-agent's own identity; it only consumes one the agent (or its platform) already
-holds.
+upstream credential on the agent's behalf. Warden never issues the agent's
+**inbound** identity — it only consumes one the agent (or its platform) already
+holds. (Separately, once an agent is authenticated, Warden can mint a *federated
+outbound* [identity assertion](/federation/oidc-issuer/) derived from that inbound
+identity, so an upstream can verify the agent directly — that is a keyless
+credentialling mechanism, not a source of the agent's own identity.)
 
 This section is about the **shape of that presentation**: who attaches the
 credential, and how it reaches Warden. The validation mechanics — the auth

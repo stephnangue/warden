@@ -33,6 +33,22 @@ EOF
 | `auto_auth_path` | string | Required | Path to the auth mount used for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`). See [JWT auth](/auth-methods/jwt/) and [Certificate auth](/auth-methods/cert/). |
 | `default_role` | string | — | Default auth role to use when the request doesn't specify one. When set, it takes precedence over any role encoded in the request. |
 
+## Secondary user authentication
+
+To let an agent act on behalf of a [user](/concepts/delegation/) — a human or another
+agent — a provider (or namespace) can resolve a **second** principal from a separate
+request header, in addition to the agent's own credential. This is opt-in: with
+`user_auth_path` unset, no user principal is resolved and behavior is unchanged.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `user_auth_path` | string | — | Auth mount that validates the user credential. **Bearer-format mounts only.** Absent ⇒ no user principal. |
+| `user_token_header` | string | `X-Warden-User-Token` | Request header carrying the user credential. `X-Warden-User-Token` is a reserved Warden control header. |
+| `user_auth_role` | string | *(mount default)* | Role the user auth uses. |
+
+The user principal is **identity-only** — it never authorizes the request. See
+[Delegation](/concepts/delegation/) for the full model and the fail-closed rules.
+
 ## TLS options
 
 These two fields control how Warden makes its outbound TLS connection to the
