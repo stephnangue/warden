@@ -20,8 +20,10 @@ Between them they capture:
 - **Identity** — the [token](/concepts/tokens/) ID and accessor, token type, principal
   and [role](/concepts/roles/), the granted policies, the [namespace](/concepts/namespaces/), and —
   when the token carries them — its verified, login-derived **metadata** attributes
-  (clearance, team, on-behalf-of user), so a decision that turned on a
-  [`token.metadata`](/concepts/policies/#fine-grained-access) value is explainable.
+  (clearance, team, department), so a decision that turned on a
+  [`token.metadata`](/concepts/policies/#fine-grained-access) value is explainable. The
+  human an agent acts for is a separate **user principal**, recorded as `Auth.User` (below),
+  not a token-metadata attribute.
 - **Request** — operation, path, HTTP method, client IP, mount point and type,
   and whether it was transparent/unauthenticated/streamed.
 - **Response** — status, any warnings, the upstream URL for a proxied request,
@@ -103,6 +105,12 @@ flaky sink degrades but does not block; losing *all* of them does.
 
 Two parts of the log are particular to what Warden does.
 
+:::caution[Upgrading from v0.18.0]
+Actor entries are now verified-only: `actors[]` drops the `verified` key, and the
+credential-metadata keys `subject_verified` / `actor_verified` are no longer emitted. See
+[Upgrading from v0.18.0](/upgrade/from-v0-18/).
+:::
+
 **Credential issuance.** When Warden injects a credential into a proxied request,
 the response entry records *which* credential it was — its type, the source and
 [spec](/concepts/credentials/) that produced it, its lease, and the token it is bound to
@@ -113,7 +121,14 @@ to whom" without the log ever holding a usable key.
 chain — the subjects it is being made *for* — and the audit entry records them as `actors`.
 The chain is the cryptographically-verified RFC 8693 `act` chain from the caller's token,
 extracted from the signed JWT `act` claim and persisted on the token, so it survives
-transparent-token caching.
+transparent-token caching. Because every actor is verified at source, each `actors[]`
+entry is just `{subject}` — there is no `verified` field.
+
+**User attribution.** When a request carries a [user principal](/concepts/delegation/)
+— a human or another agent the agent acts for, presented by secondary transparent
+authentication — both the request and response entries stamp `Auth.User` with the user's
+`subject`, token ID, and namespace. The mint the user scopes is thereby traceable to that
+user, while the **raw user credential is never logged** — only the identity is recorded.
 
 ## Scope
 

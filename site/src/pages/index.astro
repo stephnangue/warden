@@ -73,7 +73,7 @@ const nav = [
           </div>
 
           <div class="hero-visual">
-            <svg class="flow" viewBox="0 0 340 366" role="img" aria-label="An AI agent presents only its identity to Warden, which authenticates it, authorizes the call, mints a fresh short-lived credential, and proxies the request to upstream systems.">
+            <svg class="flow" viewBox="0 0 340 366" role="img" aria-label="An AI agent presents its own identity and the identity of the user it acts for to Warden, which authenticates them, authorizes the call, mints a fresh short-lived credential, and proxies the request to upstream systems.">
               <defs>
                 <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
                   <path d="M0 0 L10 5 L0 10 z" fill="#cdd4e6" />
@@ -81,10 +81,11 @@ const nav = [
               </defs>
               <rect class="box" x="60" y="14" width="220" height="72" rx="12" />
               <text class="t" x="170" y="46">AI Agent</text>
-              <text class="s" x="170" y="66">presents only its identity</text>
+              <text class="s" x="170" y="66">presents agent + user identity</text>
 
               <line class="line" x1="170" y1="90" x2="170" y2="142" marker-end="url(#ar)" />
-              <text class="e" x="196" y="120" style="text-anchor:start">identity only</text>
+              <text class="e" x="150" y="120" style="text-anchor:end">agent identity</text>
+              <text class="e" x="190" y="120" style="text-anchor:start">user identity</text>
 
               <rect class="box box-warden" x="60" y="146" width="220" height="84" rx="14" />
               <text class="t t-warden" x="170" y="182">Warden</text>
@@ -117,14 +118,17 @@ const nav = [
           <div class="pillar-list">
             <article class="pillar">
               <div class="pillar-copy">
-                <p class="pillar-tag">Beyond short-lived credentials</p>
-                <h3>Remove every secret from the agent environment</h3>
+                <p class="pillar-tag">Keyless by design</p>
+                <h3>No secret in the agent — and none at the gateway</h3>
                 <p>
-                  A short-lived token is still a secret sitting in the agent's environment —
-                  just one that expires. Warden removes it entirely. The agent presents only its
-                  own identity; Warden authenticates it, mints the credential, and injects it on
-                  the way through, so the agent never sees a key. Prompt-injected or jailbroken,
-                  it has nothing to exfiltrate — because there was never anything there to take.
+                  A short-lived token is still a secret in the agent's environment — just one
+                  that expires. Warden removes it. The agent holds no upstream key: it presents
+                  only identities — its own, and (when it acts for someone) the user's — and Warden
+                  authenticates them, mints a scoped credential, and injects it on the way through.
+                  Jailbroken or prompt-injected, it has nothing to exfiltrate, because it never held
+                  anything. And in its keyless modes the gateway is no honeypot in its place:
+                  federation lets Warden hold no standing secret, and chaining fetches what it needs
+                  from an external vault per request — so there is no key-trove to breach.
                 </p>
                 <a class="pillar-link" href="/concepts/credentials/">How credentials work <span class="arw" aria-hidden="true">→</span></a>
               </div>
@@ -153,7 +157,7 @@ const nav = [
             <article class="pillar">
               <div class="pillar-copy">
                 <p class="pillar-tag">Beyond static API specs</p>
-                <h3>Let agents discover exactly what they can call</h3>
+                <h3>Agents discover exactly what they can call</h3>
                 <p>
                   An MCP server advertises its tools; a plain REST API just hands over a
                   sprawling spec and leaves the agent to guess. Warden gives every non-MCP
@@ -237,11 +241,11 @@ const nav = [
             <article class="pillar">
               <div class="pillar-copy">
                 <p class="pillar-tag">Beyond scope-based access</p>
-                <h3>Control what the agent can do, down to the argument</h3>
+                <h3>Authorize every call, down to the argument</h3>
                 <p>
                   OAuth scopes and IAM roles hand out broad, session-wide access, then trust the
                   agent to stay inside it. Warden decides each call as it happens — which action,
-                  which tool, and which arguments are allowed for that step. Least privilege on
+                  which tool, which arguments, and on whose behalf it acts. Least privilege on
                   every request, never a coarse grant the agent can wander around inside.
                 </p>
                 <a class="pillar-link" href="/concepts/policies/">How policies work <span class="arw" aria-hidden="true">→</span></a>
@@ -276,9 +280,9 @@ const nav = [
                 <p>
                   MCP standardizes one kind of connection, but your agents also need LLMs,
                   clouds, code hosts, SaaS, and any other REST API — each with its own way in.
-                  Warden puts a single identity in front of all of them, so one policy reaches
-                  every system it permits. Nothing to distribute per integration, nothing to
-                  rotate in a dozen places, no static keys left in process environments.
+                  Warden fronts them all with a single identity and one policy surface. Nothing to
+                  distribute per integration, nothing to rotate in a dozen places — and with
+                  keyless sources, no standing key anywhere to begin with.
                 </p>
                 <a class="pillar-link" href="/provider-backends/">Browse supported providers <span class="arw" aria-hidden="true">→</span></a>
               </div>

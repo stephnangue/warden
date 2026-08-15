@@ -36,7 +36,11 @@ bounded event rather than a catastrophic one:
 - **Nothing to steal.** Because [access is brokered](/use-cases/access-brokering/), the
   agent never holds an upstream credential. A compromised agent can leak only what
   it has, and all it has is its own identity — useless to an attacker without
-  Warden in front of it.
+  Warden in front of it. And increasingly there is nothing to steal at the broker
+  either: with [keyless](/federation/keyless-credentials/) sources Warden holds no
+  standing secret, and [chaining](/federation/credential-chaining/) fetches a secret
+  from an external vault per request — so there is no key-trove to compromise, the very
+  honeypot a central broker would otherwise become.
 - **Every call is still bounded.** Authority rides on each request and is checked
   at runtime against the agent's [policy](/concepts/policies/), which is
   **default-deny**. A request that exceeds what the agent is allowed is refused

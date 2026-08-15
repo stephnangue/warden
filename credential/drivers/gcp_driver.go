@@ -260,7 +260,7 @@ func (d *GCPDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	// caller-scoped assertion. Fail closed here to avoid the misleading
 	// "service_account_key is empty" error a federation source would otherwise hit.
 	if d.getAuthMethod() == gcpAuthMethodOIDCFederation {
-		return nil, nil, 0, "", fmt.Errorf("gcp: source uses auth_method=oidc_federation; the spec must set subject_token_source (warden_identity or auth_token)")
+		return nil, nil, 0, "", fmt.Errorf("gcp: source uses auth_method=oidc_federation; the spec must set subject_token_source (warden_identity or agent_identity)")
 	}
 
 	mintMethod := credential.GetString(spec.Config, "mint_method", "access_token")

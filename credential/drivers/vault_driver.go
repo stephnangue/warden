@@ -344,7 +344,7 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	// a caller assertion — fail closed here (before authenticate) so it surfaces the
 	// real reason rather than a generic "unsupported auth method".
 	if d.getAuthMethod() == vaultAuthMethodOIDCFederation {
-		return nil, nil, 0, "", fmt.Errorf("vault: source uses auth_method=%s; the spec must set subject_token_source (e.g. %s or auth_token) to mint over the exchange path", vaultAuthMethodOIDCFederation, credential.SourceWardenIdentity)
+		return nil, nil, 0, "", fmt.Errorf("vault: source uses auth_method=%s; the spec must set subject_token_source (e.g. %s or agent_identity) to mint over the exchange path", vaultAuthMethodOIDCFederation, credential.SourceWardenIdentity)
 	}
 
 	// Re-authenticate if needed

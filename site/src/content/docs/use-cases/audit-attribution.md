@@ -43,7 +43,10 @@ Attribution survives the extra hop. A caller's token can carry a
 behalf of* — and Warden records them alongside the authenticated principal. The
 chain is the cryptographically-verified RFC 8693 `act` chain, attested by a signed
 JWT `act` claim, so every actor on the record is one the issuing IdP or trust
-domain vouched for. Attribution is kept deliberately orthogonal to authorization —
+domain vouched for. When an agent acts for a verified **[user principal](/concepts/delegation/)**
+— a human, or another agent, presented per request — every mint it scopes is stamped
+with that user (`Auth.User`), so a per-user action is attributed to the person behind it,
+never the raw user credential. Attribution is kept deliberately orthogonal to authorization —
 naming who a call is for can never *widen* what the caller may do — so it is safe
 to trust the chain for forensics without it becoming an avenue for escalation.
 

@@ -1,100 +1,171 @@
 ---
-title: "Delegation and Impersonation"
+title: "Delegation, Impersonation & the User Principal"
+description: "How an agent acts on behalf of a verified user — the dual-principal model, the on-behalf-of chain, and per-user access."
 ---
 
-A request is made *by* an authenticated principal, but it is often made *on behalf of*
-someone else — an AI agent acting for a user. Warden supports this at the **credential
-boundary**: when the [token-exchange driver](/credential-drivers/token-exchange/) mints a
-downstream credential, it exchanges the caller's identity for a token that either *is* the
-subject (impersonation) or names the acting party in a signed **`act` claim** (delegation),
-which the upstream API and its authorization server enforce.
+A request is made *by* an authenticated agent, but it is often made *on behalf of*
+someone else — a human, or another agent, that the agent is acting for. Warden models
+this with **two principals per request**, so the upstream can be told *who the request is
+for*, not just which agent made it.
 
-Separately, Warden records an **actor chain** in its [audit log](/concepts/audit/) so attribution
-survives the hop — covered [at the end](#the-audit-actor-chain).
+Throughout this page the second principal is called the **user** — read it as *a human
+or another agent the agent acts for*, not necessarily a person.
 
-## Supported Standards
+## The dual-principal model
 
-Warden does not invent a delegation protocol — it speaks the established ones, selected per
-[credential source](/concepts/credentials/) by the `grant` setting so it interoperates with whatever
-the upstream's authorization server expects:
+Every gateway request resolves up to two principals:
 
-| Standard | Role | Selected by |
-|----------|------|-------------|
-| **RFC 8693** — OAuth 2.0 Token Exchange | exchange a subject (and optional actor) for a scoped token | `grant=rfc8693` |
-| **RFC 7523** — JWT Bearer assertion | present the subject as a signed `assertion` | `grant=jwt_bearer` |
-| **Microsoft Entra ID On-Behalf-Of** | Entra's OBO (a jwt-bearer variant) | `grant=jwt_bearer` + `token_param.requested_token_use=on_behalf_of` |
-| **ID-JAG** — Identity Assertion Authorization Grant | cross-app access: chain an ID-JAG from the home IdP to a resource authorization server | `grant=id_jag` |
+- The **agent** — the caller's own credential. It is authenticated, and **today it is
+  the sole authorizer**: it alone drives the [policy](/concepts/policies/) decision.
+- The **user** — a second, first-class token resolved from a separate request header
+  (`X-Warden-User-Token` by default) through the same [auth methods](/auth-methods/), via
+  **secondary transparent authentication**. The user is **identity-only**: it does not
+  authorize the request and never appears in the policy engine.
 
-Warden authenticates itself to the token endpoint with a client secret
-(`client_secret_basic`/`client_secret_post`) or a signed **private_key_jwt** client assertion
-(RFC 7523 §2.2) — configured independently of the grant.
+> **Present behavior, not a permanent guarantee.** Today the user principal is used only
+> for *attribution and scoping* — never authorization. The roadmap is for authorization
+> to become the **intersection of the agent's and the user's permissions** (both must
+> permit the request). Read "the user does not authorize" as *today*, not *never*.
 
-## Impersonation vs Delegation
+The feature is opt-in and fail-closed: with no `user_auth_path` configured, the user
+principal is absent and the request behaves exactly as before. When configured, a
+present-but-invalid, cross-namespace, or agent-equal user credential fails closed.
 
-RFC 8693 §1.1 distinguishes the two by whether the **minted token carries an `act` claim**:
+## Impersonation vs delegation
 
-- **Impersonation** — the minted token represents *only the subject*; no acting party is recorded.
-  Warden exchanges the caller's identity (or a user token the agent carries) for a downstream token
-  that *is* that principal, with no trace of the agent.
-- **Delegation** — the minted token carries an `act` chain ("agent A acting for user B"), so the
-  downstream sees, and can enforce policy on, both the subject and the actor.
+When Warden brokers a downstream token via the
+[token-exchange driver](/credential-drivers/token-exchange/), whether that token names an
+actor decides the outcome (RFC 8693 §1.1):
 
-An `act` claim arises when Warden sends an `actor_token` during the exchange, **or** when the
-subject token already carries an embedded `act` (a subject that is itself a delegated token yields
-a delegated result even with no actor).
+- **Impersonation** — the token represents **only the subject**; no acting party is recorded.
+- **Delegation** — the token carries an **`act` claim** ("agent A acting for user B"), so
+  the upstream sees, and can authorize on, both.
 
-## The Subject and the Actor
+## Subject and actor, by source
 
-Both the subject (who the action is *for*) and the optional actor (who is *acting*) are
-caller-derived tokens, each with a trust **origin**:
+:::caution[Upgrading from v0.18.0]
+The `auth_token` source value is renamed to `agent_identity`, and the `header` token
+source (with `X-Warden-Subject-Token` / `X-Warden-Actor-Token` and the `subject_*` trust
+keys) is removed. See [Upgrading from v0.18.0](/upgrade/from-v0-18/#3-rfc-8693-token-exchange-reshaped-around-the-user).
+:::
 
-| Origin | Source | Handling |
-|--------|--------|----------|
-| **Verified** | the caller's inbound JWT Warden authenticated at the auth mount (`…_token_source=auth_token`) | forwarded as-is |
-| **Unverified** | a request header (`X-Warden-Subject-Token` / `X-Warden-Actor-Token`, `…_token_source=header`) | the driver validates signature, issuer, audience and expiry, or **fails closed** |
+The subject (who the token is *for*) and the optional actor (who is *acting*) are each
+drawn from a **source** — and every source is trusted at origin (there is no
+caller-supplied, per-request-validated token path):
 
-The canonical delegation shape is **agent-acting-for-user**: the agent carries the user's token as
-the subject and its own verified inbound JWT as the actor, so the minted token reads "agent for
-user" — with the agent's token sent once, not re-validated. Because the actor is a real, signed
-token, it can serve as a cryptographic RFC 8693 actor; the audit actor chain described below is a
-separate attribution record.
+| Source value | Identity |
+|---|---|
+| `agent_identity` | The agent's verified inbound JWT. |
+| `user_identity` | The user principal's own auth-method-validated credential. Valid only on a `token_exchange` source. |
+| `warden_identity` | A [Warden-minted assertion](/federation/oidc-issuer/) for the caller. |
+| `none` | Omitted. |
 
-See [Impersonation vs delegation](/credential-drivers/token-exchange/#impersonation-vs-delegation)
-on the driver page for the full configuration and worked examples.
+An actor is only meaningful in the delegation shape, so **`actor_token_source ≠ none`
+requires `subject_token_source=user_identity`.** The canonical **agent-on-behalf-of-user**
+shape puts the user as the subject and the agent as the actor:
 
-## The Audit Actor Chain
-
-Independently of what is minted, Warden records who a request was *for* in the audit trail. This
-chain is an **attribution** record; each actor is a subject:
-
-| Field | Meaning |
-|-------|---------|
-| `subject` | The identity being acted for (e.g. `agents/alpha`, `user@example.com`). |
-
-It has a single source — the cryptographically-verified RFC 8693 `act` claim on the caller's
-token — and appears as the `actors` array on the request's audit entry.
-
-### JWT `act` claim
-
-A signed JWT can carry an RFC 8693 §4.1 **`act`** claim; because the IdP signed it, the chain is
-attested and nests to express a chain:
-
-```json
-{ "sub": "gateway-service",
-  "act": { "sub": "broker-beta",
-           "act": { "sub": "agents/alpha" } } }
+```
+subject_token_source=user_identity     # sub = the user
+actor_token_source=warden_identity      # act = the agent (a Warden-minted assertion)
 ```
 
-→ actors `[broker-beta, agents/alpha]`. Warden walks the nesting up to a depth
-of **4**, and these actors are extracted at login and **persisted on the [token](/concepts/tokens/)**
-so the chain survives transparent-token caching.
+The actor may instead be `agent_identity` — the agent's **own inbound JWT** — for agents
+authenticated via a JWT/bearer auth method:
 
-Because the chain is bound to the token, it is per-token, not per-call: it attributes every request
-made with a given token to the actors that token was minted with.
+```
+subject_token_source=user_identity     # sub = the user
+actor_token_source=agent_identity       # act = the agent's inbound JWT
+```
 
-## See Also
+Either way the minted token carries `sub`=user, `act`=agent, keyless.
 
-- [Token Exchange](/credential-drivers/token-exchange/) — minting delegated/impersonated downstream tokens.
-- [Audit](/concepts/audit/) — where the actor chain is recorded.
-- [Authentication](/concepts/authentication/) — the principal the actors act alongside.
+## Two ways to act on behalf of a user
+
+Not every upstream speaks the same on-behalf-of protocol. Warden supports two mechanisms.
+
+### Native token exchange
+
+When the upstream or its IdP supports it, the [token-exchange driver](/credential-drivers/token-exchange/)
+forwards the user's token so the downstream token carries `sub`=user / `act`=agent — RFC
+7523 `jwt-bearer`, RFC 8693 token-exchange, or ID-JAG cross-app access.
+
+**RFC 7523 (`jwt-bearer`).** Warden exchanges the user's ID token at the IdP for an upstream access token — a single identity, no actor.
+
+<p align="center"><img alt="RFC 7523 jwt-bearer: Warden exchanges the user's ID token at the IdP for an access token and injects it" src="/images/warden-cred-keyless-delegated-rfc7523.png" width="760"></p>
+
+**RFC 8693 token exchange.** The user's token is the subject and the agent's is the actor, so the minted token reads `sub`=user, `act`=agent.
+
+<p align="center"><img alt="RFC 8693: Warden presents the user's subject token and the agent's actor token and receives a token carrying sub=user, act=agent" src="/images/warden-cred-keyless-delegated-rfc8693.png" width="760"></p>
+
+**ID-JAG cross-app access.** The home IdP issues an ID-JAG from the user and agent identities; Warden redeems it at the resource's authorization server for the final token.
+
+<p align="center"><img alt="ID-JAG: the IdP issues an ID-JAG from the user and agent identities; Warden redeems it at the resource authorization server" src="/images/warden-cred-keyless-delegated-id-jag.png" width="820"></p>
+
+### Per-user OAuth token from OpenBao / Vault
+
+Many upstreams — GitHub, Slack, and more — do not (yet) support ID-JAG. For those, lean
+on **OpenBao/Vault's OAuth-app secrets engine + templated policies** to mint a genuine
+**per-user** OAuth access token: Warden authenticates to the vault keylessly with a
+per-user identity assertion, the vault's templated policy scopes the read to that user,
+and Warden injects the returned token — so the agent acts on behalf of the user against
+an upstream with no native on-behalf-of flow.
+
+**OpenBao/Vault are uniquely suited to do this at scale**: a single **templated policy**
+scopes every user, so there is no per-user role explosion.
+
+**Per-user OAuth from a vault.** A per-user identity assertion unlocks that user's OAuth token through a templated policy, which Warden injects into the non-ID-JAG upstream.
+
+<p align="center"><img alt="Warden presents a per-user identity assertion to the secrets vault, whose templated policy returns that user's OAuth token, injected to the upstream" src="/images/warden-fed-per-user-secrets.png" width="760"></p>
+
+## What pairing the user principal with federation unlocks
+
+- **Per-user cloud credentials** — a `warden_identity` spec with
+  [`assertion_user_claims`](/federation/assertion-claims/#the-user--warden_user) mints an
+  assertion where the agent is `sub`/`warden_sub` but a nested `warden_user` claim names
+  the user, so an upstream trust policy scopes access to that user while still binding the
+  agent.
+- **Per-user secrets** — a `kv2_read` `secret_path` and the `oauth2` mint method's
+  `credential_name` may template `{{user.<claim>}}`, so a per-user secret or token is
+  selected by a verified user claim.
+- **Per-user cache & audit** — the minted credential is cached per user, bounded by *both*
+  principals' TTLs (revoke or expire either and new mints stop), and every mint is
+  attributed to the user via `Auth.User` in the [audit log](/concepts/audit/) — without
+  the raw user credential ever being logged.
+
+## The audit actor chain
+
+Independently of what is minted, Warden records who a request was *for* in the audit
+trail. The chain has a **single source — the cryptographically-verified RFC 8693 `act`
+claim** on the caller's token — and appears as the `actors` array on the request's audit
+entry. Each actor is `{subject}`; because every actor is verified, there is no `verified`
+field.
+
+A signed JWT can carry a nested `act` claim, so the chain expresses "gateway → broker →
+agent"; Warden walks the nesting and persists the extracted actors on the
+[token](/concepts/tokens/), so the chain survives transparent-token caching.
+
+## Configuration
+
+Set on the provider mount or namespace:
+
+| Key | Default | Description |
+|---|---|---|
+| `user_auth_path` | *(off)* | The auth mount that validates the user credential. Bearer-format mounts only. Absent ⇒ no user principal. |
+| `user_token_header` | `X-Warden-User-Token` | Request header carrying the user credential. |
+| `user_auth_role` | *(mount default)* | Role the user auth uses. |
+
+On a `warden_identity` spec, `assertion_user_claims` (comma-separated) discloses the user
+under the `warden_user` claim.
+
+**Fail-closed matrix** — the request is denied when: the user credential equals the
+agent's; the user token is from another namespace; the user mount is not bearer-format; a
+named user claim is absent; a `{{user.*}}` template resolves to an unsafe path segment; or
+either token has expired.
+
+## See also
+
+- [Token Exchange](/credential-drivers/token-exchange/) — the exchange mechanics.
+- [Credential chaining](/federation/credential-chaining/) — per-user secrets from a keyless vault.
+- [Assertion claims](/federation/assertion-claims/) — the `warden_user` claim.
+- [Audit](/concepts/audit/) — where the actor chain and `Auth.User` are recorded.
 - [Tokens](/concepts/tokens/) — where a verified `act` chain is persisted.

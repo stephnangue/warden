@@ -4,13 +4,29 @@ title: "HashiCorp Vault"
 
 > Source `type`: `hvault`
 
+:::tip[Prefer keyless]
+This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (OIDC federation)](#keyless-oidc-federation).
+:::
+
 The `hvault` driver brokers credentials out of **HashiCorp Vault** (or **OpenBao**). The **source** holds how Warden authenticates to the Vault server — typically an **AppRole** identity (`role_id` + `secret_id`) — plus the server address and optional namespace. That one source can back many **specs**, each of which selects a **mint method** naming which Vault engine to draw from and what shape of credential to hand back to the workload.
 
 Reach for it when your secrets already live in Vault: static KV entries, dynamic cloud credentials from the AWS/GCP/IBM engines, OAuth2 bearer tokens from the oauthapp engine, or freshly minted Vault tokens. Warden authenticates once with the source's privileged AppRole, then mints per request against whatever engine the spec points at.
 
+## Keyless (OIDC federation)
+
+Set `auth_method = "oidc_federation"` on the source to hold **no Vault credential**:
+Warden logs in **per request** against Vault's own JWT auth method
+(`auth/<jwt_mount>/login` with `jwt_role`) using an
+[identity assertion](/federation/oidc-issuer/), then vends that login token
+(`mint_method=vault_token`) or brokers a downstream secret with it. Set `jwt_role`,
+`jwt_mount` (default `jwt`), and `audience` (which must equal the Vault role's
+`bound_audiences`). A keyless source needs no `rotation_period`, and a keyless
+`vault_token` spec needs no `token_role`. See
+[Keyless credential sources](/federation/keyless-credentials/).
+
 ## Credential issued
 
-The credential `type` depends on the mint method: `static_aws`/`dynamic_aws` issue `aws_access_keys`, `static_apikey` issues `api_key`, `dynamic_gcp` issues `gcp_access_token`, `dynamic_ibm` issues `ibmcloud_keys`, `oauth2` issues `oauth_bearer_token`, and `vault_token` issues `vault_token`.
+The credential `type` depends on the mint method: `static_aws`/`dynamic_aws` issue `aws_access_keys`, `static_apikey` issues `api_key`, `kv2_read` issues `key_value` (the verbatim KV v2 payload), `dynamic_gcp` issues `gcp_access_token`, `dynamic_ibm` issues `ibmcloud_keys`, `oauth2` issues `oauth_bearer_token`, and `vault_token` issues `vault_token`.
 
 Static KV secrets are **static** — no lease, no TTL, not revocable. Every dynamic method (`dynamic_aws`, `dynamic_gcp`, `dynamic_ibm`, `oauth2`, `vault_token`) is **dynamic** — it carries a lease/TTL and is **revocable**: Vault leases are revoked by lease ID and Vault tokens by accessor. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
 
@@ -21,6 +37,27 @@ Static KV secrets are **static** — no lease, no TTL, not revocable. Every dyna
 No spec verification. Static KV mints only fetch and revoke.
 
 ## Examples
+
+### Keyless (recommended)
+
+The source stores no Vault credential; Warden logs in per request against Vault's JWT auth method with an identity assertion.
+
+```bash
+warden cred source create vault-keyless \
+  -type=hvault \
+  -config=vault_address=https://vault.example.com \
+  -config=auth_method=oidc_federation \
+  -config=jwt_mount=jwt \
+  -config=jwt_role=warden \
+  -config=audience=https://vault.example.com
+
+warden cred spec create app-token \
+  -source=vault-keyless \
+  -config=mint_method=vault_token \
+  -config=subject_token_source=warden_identity
+```
+
+### Inline secret (discouraged)
 
 One source holds the standing AppRole identity; each spec below picks a `mint_method`.
 
@@ -108,11 +145,14 @@ Keys for `warden cred source create <name> -type=hvault -config=key=value ...`:
 |-----|----------|---------|-------------|
 | `vault_address` | Yes | — | Vault/OpenBao server URL (`http://` or `https://`), e.g. `https://vault.example.com`. |
 | `vault_namespace` | No | — | Namespace to scope all requests to. |
-| `auth_method` | No | — | Authentication method; only `approle` is supported. Omit to use a pre-set token. |
+| `auth_method` | No | — | Authentication method: `approle` (stored `secret_id`), or `oidc_federation` ([keyless](/federation/keyless-credentials/) — per-request JWT-auth login). Omit to use a pre-set token. |
 | `role_id` | If approle | — | AppRole role ID. |
 | `secret_id` | If approle | — | AppRole secret ID (secret, masked on read). |
 | `approle_mount` | If approle | — | Mount path of the AppRole auth backend, e.g. `approle`. |
 | `role_name` | If approle | — | AppRole role name; required so the source can rotate its own secret ID. |
+| `jwt_role` | If keyless | — | Vault JWT-auth role the assertion logs in as (can be overridden per spec). |
+| `jwt_mount` | No | `jwt` | Vault JWT/OIDC auth mount path (keyless). |
+| `audience` | No | — | Assertion audience (keyless only). When set, must equal the Vault role's `bound_audiences`. |
 | `ca_data` | No | — | Base64-encoded PEM CA bundle for outbound upstream calls (e.g. the IBM IAM token exchange used by `dynamic_ibm`). Does not affect the connection to the Vault/OpenBao server itself. |
 | `tls_skip_verify` | No | `false` | Disable TLS verification on those outbound upstream calls (test only). Does not affect the Vault/OpenBao connection. |
 
@@ -126,25 +166,30 @@ Each spec sets a `mint_method` that picks the Vault engine and the credential sh
 |---------------|--------|---------------------|
 | `static_aws` | AWS access keys | `kv2_mount`, `secret_path` |
 | `static_apikey` | API key | `kv2_mount`, `secret_path` |
+| `kv2_read` | Key/value (verbatim KV v2 payload) | `kv2_mount`, `secret_path` |
 | `dynamic_aws` | AWS access keys | `aws_mount`, `role_name`, `role_arn`, `role_session_name`, `ttl` |
 | `dynamic_gcp` | GCP access token | `gcp_mount`, `role_name`, `role_type` |
 | `dynamic_ibm` | IBM Cloud keys | `ibm_mount`, `role_name`, `ttl`, `iam_endpoint`, `access_key_id`, `secret_access_key` |
-| `vault_token` (or unset) | Vault token | `token_role`, `ttl`, `display_name`, `meta` |
+| `vault_token` | Vault token | `token_role`, `ttl`, `display_name`, `meta` |
 | `oauth2` | OAuth bearer token | `oauth2_mount`, `credential_name` |
+
+`mint_method` is **required** — there is no default; an unset value is rejected at mint.
 
 Spec-config keys set with `warden cred spec create ... -config=key=value`:
 
 | Key | Required | Default | Meaning |
 |-----|----------|---------|---------|
+| `subject_token_source` | For keyless | — | On an `oidc_federation` source: the federated subject — `warden_identity` or `agent_identity`. A keyless `vault_token` spec needs no `token_role`. |
+| `jwt_role` | No | source `jwt_role` | Per-spec override of the keyless Vault JWT-auth role. |
 | `kv2_mount` | For static | — | KV v2 mount holding the secret. |
-| `secret_path` | For static | — | Path of the secret within the KV mount. |
+| `secret_path` | For static | — | Path of the secret within the KV mount. Supports `{{user.<claim>}}` [per-user templating](/concepts/delegation/). |
 | `aws_mount` | For `dynamic_aws` | — | Mount of the AWS secrets engine. |
 | `gcp_mount` | For `dynamic_gcp` | — | Mount of the GCP secrets engine. |
 | `ibm_mount` | For `dynamic_ibm` | — | Mount of the IBM secrets engine. |
 | `oauth2_mount` | For `oauth2` | — | Mount of the OAuth2 (oauthapp) engine. |
 | `role_name` | For dynamic aws/gcp/ibm | — | Engine role to generate credentials from. |
 | `role_type` | No | `roleset` | GCP role kind: `roleset` or `static-account`. |
-| `credential_name` | For `oauth2` | — | Named credential on the OAuth2 mount. |
+| `credential_name` | For `oauth2` | — | Named credential on the OAuth2 mount. Supports `{{user.<claim>}}` [per-user templating](/concepts/delegation/). |
 | `token_role` | For `vault_token` | — | Token role for `auth/token/create/<role>`. |
 | `ttl` | No | — | Requested lease TTL; validated against the spec's min/max bounds. |
 | `iam_endpoint` | No | IBM IAM default | Endpoint used to exchange the IBM API key for a bearer token. |

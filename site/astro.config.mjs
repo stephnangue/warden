@@ -57,6 +57,7 @@ export default defineConfig({
             { slug: 'architecture' },
           ],
         },
+        { label: 'Use cases', autogenerate: { directory: 'use-cases' } },
         {
           // Concepts follow the curated reading order from concepts/index.md,
           // not alphabetical.
@@ -81,7 +82,41 @@ export default defineConfig({
             { slug: 'concepts/high-availability' },
           ],
         },
-        { label: 'Use cases', autogenerate: { directory: 'use-cases' } },
+        {
+          // Federation & keyless identity: the OIDC issuer and the keyless
+          // credential story that builds on it. Curated reading order.
+          label: 'Federation & keyless identity',
+          items: [
+            { slug: 'federation' },
+            { slug: 'federation/oidc-issuer' },
+            { slug: 'federation/keyless-credentials' },
+            { slug: 'federation/assertion-claims' },
+            { slug: 'federation/credential-chaining' },
+            {
+              // The signing key lives in an external KMS (also listed under
+              // Configuration, since it is a server-config stanza).
+              label: 'Signer',
+              collapsed: true,
+              items: [
+                { slug: 'configuration/signer' },
+                { slug: 'configuration/signer/transit' },
+              ],
+            },
+            {
+              // Push the issuer's public keys to a bucket/CDN (runtime config).
+              label: 'Publishers',
+              collapsed: true,
+              items: [
+                { slug: 'federation/publishers' },
+                { slug: 'federation/publishers/s3' },
+                { slug: 'federation/publishers/gcs' },
+                { slug: 'federation/publishers/azure-blob' },
+                { slug: 'federation/publishers/http-put' },
+                { slug: 'federation/publishers/local-file' },
+              ],
+            },
+          ],
+        },
         {
           // Grouped by upstream theme, mirroring the README "Supported systems"
           // table. Subgroups collapse by default; the active page's group opens.
@@ -178,54 +213,29 @@ export default defineConfig({
           ],
         },
         {
-          // Grouped by the categories in credential-drivers/index.md, not
-          // alphabetical. Subgroups collapse by default; the active page's
-          // group opens.
+          // A flat A–Z list: drivers are multi-mode, so the index page's
+          // capability matrix — not the sidebar — is the real map.
           label: 'Credential drivers',
           items: [
             { slug: 'credential-drivers' },
-            {
-              label: 'Generic',
-              collapsed: true,
-              items: [
-                { slug: 'credential-drivers/local' },
-                { slug: 'credential-drivers/apikey' },
-              ],
-            },
-            {
-              label: 'Platform',
-              collapsed: true,
-              items: [
-                { slug: 'credential-drivers/vault' },
-                { slug: 'credential-drivers/kubernetes' },
-                { slug: 'credential-drivers/oauth2' },
-                { slug: 'credential-drivers/token-exchange' },
-              ],
-            },
-            {
-              label: 'Cloud',
-              collapsed: true,
-              items: [
-                { slug: 'credential-drivers/aws' },
-                { slug: 'credential-drivers/azure' },
-                { slug: 'credential-drivers/gcp' },
-                { slug: 'credential-drivers/ibm' },
-                { slug: 'credential-drivers/alicloud' },
-                { slug: 'credential-drivers/scaleway' },
-                { slug: 'credential-drivers/ovh' },
-              ],
-            },
-            {
-              label: 'SaaS',
-              collapsed: true,
-              items: [
-                { slug: 'credential-drivers/github' },
-                { slug: 'credential-drivers/gitlab' },
-                { slug: 'credential-drivers/elastic' },
-                { slug: 'credential-drivers/grafana' },
-                { slug: 'credential-drivers/honeycomb' },
-              ],
-            },
+            { slug: 'credential-drivers/alicloud' },
+            { slug: 'credential-drivers/aws' },
+            { slug: 'credential-drivers/azure' },
+            { slug: 'credential-drivers/elastic' },
+            { slug: 'credential-drivers/gcp' },
+            { slug: 'credential-drivers/github' },
+            { slug: 'credential-drivers/gitlab' },
+            { slug: 'credential-drivers/grafana' },
+            { slug: 'credential-drivers/vault' },
+            { slug: 'credential-drivers/honeycomb' },
+            { slug: 'credential-drivers/ibm' },
+            { slug: 'credential-drivers/kubernetes' },
+            { slug: 'credential-drivers/local' },
+            { slug: 'credential-drivers/oauth2' },
+            { slug: 'credential-drivers/ovh' },
+            { slug: 'credential-drivers/scaleway' },
+            { slug: 'credential-drivers/apikey' },
+            { slug: 'credential-drivers/token-exchange' },
           ],
         },
         { label: 'Auth methods', autogenerate: { directory: 'auth-methods' } },
@@ -256,11 +266,22 @@ export default defineConfig({
               ],
             },
             { slug: 'configuration/audit' },
+            {
+              // The signer stanza; also surfaced under Federation.
+              label: 'Signer',
+              collapsed: true,
+              items: [
+                { slug: 'configuration/signer' },
+                { slug: 'configuration/signer/transit' },
+              ],
+            },
           ],
         },
+        { label: 'Audit devices', autogenerate: { directory: 'audit-devices' } },
         { label: 'Quickstarts', autogenerate: { directory: 'quickstarts' } },
         { label: 'Tutorials', autogenerate: { directory: 'tutorials' } },
         { label: 'Install', autogenerate: { directory: 'install' } },
+        { label: 'Upgrade', autogenerate: { directory: 'upgrade' } },
       ],
     }),
   ],

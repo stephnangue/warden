@@ -47,6 +47,21 @@ a credential of its own.
 - [Model Context Protocol](/concepts/mcp/) — fronting MCP servers and authorizing
   individual tool calls.
 
+## Federation and keyless identity
+
+Letting an upstream trust *who the caller is* instead of *what secret Warden holds* — so
+Warden can broker access while storing nothing.
+
+- [Warden as an OIDC issuer](/federation/oidc-issuer/) — mint short-lived, signed
+  identity assertions, sign them with a key that can live in an external KMS, and publish
+  the verification keys to internet-facing upstreams.
+- [Keyless credential sources](/federation/keyless-credentials/) — federate an assertion
+  for a short-lived cloud credential, holding no stored secret.
+- [Assertion claims](/federation/assertion-claims/) — how the assertion is scoped:
+  audience, resource, metadata, and per-user.
+- [Credential chaining](/federation/credential-chaining/) — source a standing secret from
+  a keyless-federated vault per request, storing nothing at Warden.
+
 ## For AI agents
 
 - [Agent Identity](/agent-identity/) — how an agent presents its
