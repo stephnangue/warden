@@ -156,6 +156,68 @@ const nav = [
 
             <article class="pillar">
               <div class="pillar-copy">
+                <p class="pillar-tag">Beyond a shared service identity</p>
+                <h3>One agent — and every user is still themselves</h3>
+                <p>
+                  An agent often acts for many people at once. Warden carries each person's
+                  verified identity alongside the agent's, so the upstream authorizes the real
+                  human — with their own scope — and every action is attributed to them, not a
+                  shared service account. One agent connects to every system; the person behind
+                  each request is never collapsed into it. It works even for systems with no
+                  built-in way to act on someone's behalf, and scales to a whole fleet of users
+                  without a role per person.
+                </p>
+                <a class="pillar-link" href="/use-cases/per-user-access/">See per-user access <span class="arw" aria-hidden="true">→</span></a>
+              </div>
+              <div class="pillar-visual">
+                <svg viewBox="0 0 320 190" role="img" aria-label="Three users each keep their own identity; a single agent carries each identity through Warden to every system, where each user is authorized and audited as themselves.">
+                  <!-- users converge into the agent -->
+                  <line x1="35" y1="44" x2="112" y2="86" stroke="#cbd2e0" stroke-width="1.6" />
+                  <line x1="35" y1="95" x2="112" y2="95" stroke="#cbd2e0" stroke-width="1.6" />
+                  <line x1="35" y1="146" x2="112" y2="104" stroke="#cbd2e0" stroke-width="1.6" />
+                  <!-- agent carries each identity out to the systems -->
+                  <line x1="176" y1="86" x2="248" y2="66" stroke="#cbd2e0" stroke-width="1.6" />
+                  <line x1="176" y1="95" x2="248" y2="95" stroke="#cbd2e0" stroke-width="1.6" />
+                  <line x1="176" y1="104" x2="248" y2="124" stroke="#cbd2e0" stroke-width="1.6" />
+                  <!-- systems -->
+                  <rect x="248" y="50" width="64" height="90" rx="12" fill="#f6f7f9" stroke="#cbd2e0" stroke-width="1.4" />
+                  <g font-family="sans-serif" font-size="10.5" fill="#1a2233">
+                    <text x="280" y="72" text-anchor="middle">Cloud</text>
+                    <text x="280" y="92" text-anchor="middle">Code</text>
+                    <text x="280" y="112" text-anchor="middle">SaaS</text>
+                    <text x="280" y="131" text-anchor="middle">…</text>
+                  </g>
+                  <!-- the agent: one identity -->
+                  <rect x="112" y="68" width="64" height="54" rx="13" fill="#0b1020" />
+                  <text x="144" y="92" text-anchor="middle" fill="#fff" font-family="sans-serif" font-weight="700" font-size="13">Agent</text>
+                  <text x="144" y="107" text-anchor="middle" fill="#aab2c5" font-family="sans-serif" font-size="8.2" letter-spacing="0.4">one identity</text>
+                  <!-- three users, each their own identity -->
+                  <g font-family="sans-serif" font-weight="700" font-size="11" fill="#1a2233">
+                    <circle cx="22" cy="42" r="13" fill="#fff" stroke="#1a2233" stroke-width="1.6" />
+                    <text x="22" y="46" text-anchor="middle">A</text>
+                    <circle cx="22" cy="95" r="13" fill="#fff" stroke="#1a2233" stroke-width="1.6" />
+                    <text x="22" y="99" text-anchor="middle">B</text>
+                    <circle cx="22" cy="148" r="13" fill="#fff" stroke="#1a2233" stroke-width="1.6" />
+                    <text x="22" y="152" text-anchor="middle">C</text>
+                  </g>
+                  <text x="22" y="176" text-anchor="middle" fill="#5b6478" font-family="sans-serif" font-size="8" letter-spacing="0.5">USERS</text>
+                  <!-- the same identities, carried through the one agent -->
+                  <g font-family="sans-serif" font-weight="700" font-size="8" fill="#1a2233">
+                    <circle cx="206" cy="78" r="8" fill="#fff" stroke="#1a2233" stroke-width="1.3" />
+                    <text x="206" y="81" text-anchor="middle">A</text>
+                    <circle cx="206" cy="95" r="8" fill="#fff" stroke="#1a2233" stroke-width="1.3" />
+                    <text x="206" y="98" text-anchor="middle">B</text>
+                    <circle cx="206" cy="112" r="8" fill="#fff" stroke="#1a2233" stroke-width="1.3" />
+                    <text x="206" y="115" text-anchor="middle">C</text>
+                  </g>
+                  <text x="280" y="155" text-anchor="middle" fill="#5b6478" font-family="sans-serif" font-size="8">authorized &amp; audited</text>
+                  <text x="280" y="166" text-anchor="middle" fill="#5b6478" font-family="sans-serif" font-size="8">as the real user</text>
+                </svg>
+              </div>
+            </article>
+
+            <article class="pillar">
+              <div class="pillar-copy">
                 <p class="pillar-tag">Beyond static API specs</p>
                 <h3>Agents discover exactly what they can call</h3>
                 <p>
@@ -268,48 +330,6 @@ const nav = [
                     <path d="M60 129 l8 8 M68 129 l-8 8" stroke="#fff" stroke-width="1.8" fill="none" stroke-linecap="round" />
                     <text x="84" y="137" fill="#1a2233">env = "production"</text>
                     <text x="266" y="137" text-anchor="end" fill="#e01e1e" font-size="10.5">blocked</text>
-                  </g>
-                </svg>
-              </div>
-            </article>
-
-            <article class="pillar">
-              <div class="pillar-copy">
-                <p class="pillar-tag">Beyond MCP servers</p>
-                <h3>Reach every system with one identity</h3>
-                <p>
-                  MCP standardizes one kind of connection, but your agents also need LLMs,
-                  clouds, code hosts, SaaS, and any other REST API — each with its own way in.
-                  Warden fronts them all with a single identity and one policy surface. Nothing to
-                  distribute per integration, nothing to rotate in a dozen places — and with
-                  keyless sources, no standing key anywhere to begin with.
-                </p>
-                <a class="pillar-link" href="/provider-backends/">Browse supported providers <span class="arw" aria-hidden="true">→</span></a>
-              </div>
-              <div class="pillar-visual">
-                <svg viewBox="0 0 320 190" role="img" aria-label="One identity fans out to MCP, LLMs, cloud, code hosts, SaaS, and REST APIs.">
-                  <line x1="66" y1="95" x2="196" y2="20" stroke="#cbd2e0" stroke-width="1.6" />
-                  <line x1="66" y1="95" x2="196" y2="49" stroke="#cbd2e0" stroke-width="1.6" />
-                  <line x1="66" y1="95" x2="196" y2="78" stroke="#cbd2e0" stroke-width="1.6" />
-                  <line x1="66" y1="95" x2="196" y2="107" stroke="#cbd2e0" stroke-width="1.6" />
-                  <line x1="66" y1="95" x2="196" y2="136" stroke="#cbd2e0" stroke-width="1.6" />
-                  <line x1="66" y1="95" x2="196" y2="165" stroke="#cbd2e0" stroke-width="1.6" />
-                  <circle cx="52" cy="95" r="30" fill="#0b1020" />
-                  <text x="52" y="92" text-anchor="middle" fill="#fff" font-family="sans-serif" font-weight="700" font-size="17">1</text>
-                  <text x="52" y="108" text-anchor="middle" fill="#aab2c5" font-family="sans-serif" font-size="8.5" letter-spacing="0.5">IDENTITY</text>
-                  <g font-family="sans-serif" font-size="11.5" fill="#1a2233">
-                    <rect x="196" y="8" width="98" height="24" rx="12" fill="#fff" stroke="#cbd2e0" stroke-width="1.4" />
-                    <text x="245" y="24" text-anchor="middle">MCP</text>
-                    <rect x="196" y="37" width="98" height="24" rx="12" fill="#fff" stroke="#cbd2e0" stroke-width="1.4" />
-                    <text x="245" y="53" text-anchor="middle">LLMs</text>
-                    <rect x="196" y="66" width="98" height="24" rx="12" fill="#fff" stroke="#cbd2e0" stroke-width="1.4" />
-                    <text x="245" y="82" text-anchor="middle">Cloud</text>
-                    <rect x="196" y="95" width="98" height="24" rx="12" fill="#fff" stroke="#cbd2e0" stroke-width="1.4" />
-                    <text x="245" y="111" text-anchor="middle">Code hosts</text>
-                    <rect x="196" y="124" width="98" height="24" rx="12" fill="#fff" stroke="#cbd2e0" stroke-width="1.4" />
-                    <text x="245" y="140" text-anchor="middle">SaaS</text>
-                    <rect x="196" y="153" width="98" height="24" rx="12" fill="#fff" stroke="#cbd2e0" stroke-width="1.4" />
-                    <text x="245" y="169" text-anchor="middle">REST APIs</text>
                   </g>
                 </svg>
               </div>
