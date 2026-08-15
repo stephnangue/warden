@@ -12,6 +12,13 @@ assertion to a single resource, and carry the user when acting on their behalf.
 This page covers the claims Warden puts in a `warden_identity` assertion and the spec keys
 that shape them.
 
+:::note[Internal use only]
+An identity assertion is an **internal, per-request artifact**. Warden mints it and exchanges
+it at the upstream itself — it is **never handed to the agent**. Agents present only their own
+identity to Warden and never see, hold, or send a `warden_identity` assertion. The decoded
+example below is here to explain what a *verifier* receives, not something a caller handles.
+:::
+
 Every assertion carries the standard `iss`, `aud`, `iat`, `nbf` (backdated by a small
 skew leeway), `exp`, `jti`, and a subject that names the agent:
 
@@ -24,6 +31,59 @@ skew leeway), `exp`, `jti`, and a subject that names the agent:
 | `warden_auth_mount` | The auth mount accessor the agent authenticated through. |
 
 Everything below is opt-in scoping on top of that.
+
+## A full assertion
+
+A minted assertion is a signed JWT — `header.payload.signature`, base64url-encoded. Decoded,
+a fully-populated one (an agent acting for a user, with metadata and a pinned resource) looks
+like this.
+
+**Header:**
+
+```json
+{
+  "alg": "RS256",
+  "typ": "JWT",
+  "kid": "warden-oidc-rs256-1"
+}
+```
+
+**Payload:**
+
+```json
+{
+  "iss": "https://warden.example.com",
+  "sub": "wid:ns-3f2a1b:auth_jwt_9c1e:agent-checkout-7",
+  "aud": "sts.amazonaws.com",
+  "iat": 1755248400,
+  "nbf": 1755248370,
+  "exp": 1755248700,
+  "jti": "a3d9f0c2-8b41-4e77-9f2a-1c6b5e0d4a88",
+  "warden_sub": "agent-checkout-7",
+  "warden_role": "orders-reader",
+  "warden_namespace": "team-payments/",
+  "warden_auth_mount": "auth_jwt_9c1e",
+  "warden_resource": "aws-iam:arn:aws:iam::123456789012:role/OrdersReader",
+  "warden_metadata": {
+    "team": "payments",
+    "env": "prod"
+  },
+  "warden_user": {
+    "sub": "alice@example.com",
+    "username": "alice"
+  }
+}
+```
+
+The standard and `warden_*` identity claims (down to `warden_auth_mount`) are **always**
+present. `nbf` is `iat` minus the skew leeway and `exp` is `iat` plus the assertion TTL
+(5 minutes by default). `sub` is the composite `wid:<namespaceID>:<mountAccessor>:<principalID>`,
+while `warden_sub` carries the raw principal on its own so a verifier can bind it without
+parsing the composite.
+
+The final three — `warden_resource`, `warden_metadata`, and `warden_user` — are the
+**opt-in scoping** the rest of this page explains. Each is omitted entirely when not
+configured, so a minimal assertion stops at `warden_auth_mount`.
 
 ## Audience
 
