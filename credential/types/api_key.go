@@ -105,6 +105,20 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("version_id").
 			Describe("Specific Secrets Manager version ID (optional)").
 			Example("uuid-version-id"),
+
+		// Credential chaining (apikey source): source the api_key from another cred spec
+		// instead of storing it inline, making the spec keyless.
+		credential.StringField(credential.ConfigSecretSpec).
+			Describe("Name of a cred spec that yields the api_key instead of storing it inline (credential chaining)").
+			Example("openai-key-in-vault"),
+
+		credential.StringField(credential.ConfigSecretField).
+			Describe("Which key of the referenced secret_spec's data holds the api_key; optional when the payload is single-key").
+			Example("api_key"),
+
+		credential.DurationField(credential.ConfigSecretCacheTTL).
+			Describe("Cache the chained api_key source-wide for this duration (e.g. 30m); omit to fetch on every mint").
+			Example("30m"),
 	}
 }
 
@@ -125,6 +139,14 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 	schema := t.ConfigSchema()
 	if err := credential.ValidateSchema(config, schema...); err != nil {
 		return err
+	}
+
+	// Credential chaining is only meaningful for the apikey source, whose key is
+	// otherwise stored inline in the spec. The other source types fetch the key from
+	// their own backend (Vault KV / Secrets Manager), and local has no keyless path —
+	// reject secret_spec there rather than letting it fail late at mint time.
+	if config[credential.ConfigSecretSpec] != "" && sourceType != credential.SourceTypeAPIKey {
+		return fmt.Errorf("secret_spec (credential chaining) is not supported with a %s source", sourceType)
 	}
 
 	// Step 3: Source-specific validation
@@ -149,7 +171,15 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 		}
 		return validateAWSSecretsManagerSpecConfig(config)
 	default:
-		if config["api_key"] == "" {
+		// apikey source: the api_key lives inline in the spec, unless it is sourced from
+		// another cred spec via credential chaining (secret_spec) — the two are mutually
+		// exclusive. (local reaches here only when secret_spec is unset; the guard above
+		// rejects a chained local spec.)
+		if config[credential.ConfigSecretSpec] != "" {
+			if config["api_key"] != "" {
+				return fmt.Errorf("'api_key' and 'secret_spec' are mutually exclusive (the key is fetched from the referenced secret_spec)")
+			}
+		} else if config["api_key"] == "" {
 			return fmt.Errorf("'api_key' is required")
 		}
 	}

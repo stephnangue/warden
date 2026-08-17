@@ -282,6 +282,100 @@ func TestStaticAPIKeyDriver_MintCredential_OptionalMetadata(t *testing.T) {
 }
 
 // =============================================================================
+// Chained Secret (MintFromSecret) Tests
+// =============================================================================
+
+func TestStaticAPIKeyDriver_ImplementsChainedSecretMinter(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{})
+	var sd credential.SourceDriver = d
+	_, ok := sd.(credential.ChainedSecretMinter)
+	assert.True(t, ok, "StaticAPIKeyDriver should implement credential.ChainedSecretMinter")
+}
+
+func TestStaticAPIKeyDriver_MintFromSecret(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{})
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Type:   credential.TypeAPIKey,
+		Config: map[string]string{"secret_spec": "openai-key-in-vault", "secret_field": "api_key"},
+	}
+	material := credential.SecretMaterial{
+		Data:  map[string]string{"api_key": "sk-chained-key"},
+		Field: "api_key",
+	}
+	rawData, _, ttl, leaseID, err := d.MintFromSecret(context.Background(), spec, material)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-chained-key", rawData["api_key"])
+	assert.Equal(t, time.Duration(0), ttl)
+	assert.Empty(t, leaseID)
+}
+
+func TestStaticAPIKeyDriver_MintFromSecret_AutoDetectSingleKey(t *testing.T) {
+	// No secret_field resolved (Field == ""): fall back to the conventional "api_key" key.
+	d := createTestAPIKeyDriver(t, map[string]string{})
+	spec := &credential.CredSpec{Name: "test", Config: map[string]string{"secret_spec": "ref"}}
+	material := credential.SecretMaterial{Data: map[string]string{"api_key": "sk-fallback"}, Field: ""}
+	rawData, _, _, _, err := d.MintFromSecret(context.Background(), spec, material)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-fallback", rawData["api_key"])
+}
+
+func TestStaticAPIKeyDriver_MintFromSecret_OptionalMetadata(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{"optional_metadata": "organization_id"})
+	spec := &credential.CredSpec{
+		Name: "test",
+		Config: map[string]string{
+			"secret_spec":     "ref",
+			"secret_field":    "api_key",
+			"organization_id": "org-999",
+		},
+	}
+	material := credential.SecretMaterial{Data: map[string]string{"api_key": "sk-x"}, Field: "api_key"}
+	rawData, _, _, _, err := d.MintFromSecret(context.Background(), spec, material)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-x", rawData["api_key"])
+	assert.Equal(t, "org-999", rawData["organization_id"])
+}
+
+func TestStaticAPIKeyDriver_MintFromSecret_EmptyField(t *testing.T) {
+	// secret_field resolved but empty/absent → fail loudly, do NOT fall back.
+	d := createTestAPIKeyDriver(t, map[string]string{"display_name": "OpenAI"})
+	spec := &credential.CredSpec{Name: "test", Config: map[string]string{"secret_spec": "ref", "secret_field": "api_key"}}
+	material := credential.SecretMaterial{Data: map[string]string{"other": "x"}, Field: "api_key"}
+	_, _, _, _, err := d.MintFromSecret(context.Background(), spec, material)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `secret_field "api_key"`)
+}
+
+func TestStaticAPIKeyDriver_MintFromSecret_NoKey(t *testing.T) {
+	// No field resolved and no conventional "api_key" key present.
+	d := createTestAPIKeyDriver(t, map[string]string{"display_name": "OpenAI"})
+	spec := &credential.CredSpec{Name: "test", Config: map[string]string{"secret_spec": "ref"}}
+	material := credential.SecretMaterial{Data: map[string]string{"token": "x"}, Field: ""}
+	_, _, _, _, err := d.MintFromSecret(context.Background(), spec, material)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no API key in fetched secret material")
+}
+
+func TestStaticAPIKeyDriver_MintCredential_ChainedFailsClosed(t *testing.T) {
+	t.Run("spec-level secret_spec", func(t *testing.T) {
+		d := createTestAPIKeyDriver(t, map[string]string{})
+		spec := &credential.CredSpec{Name: "test", Config: map[string]string{"secret_spec": "ref"}}
+		_, _, _, _, err := d.MintCredential(context.Background(), spec)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "credential chaining")
+	})
+
+	t.Run("source-level secret_spec", func(t *testing.T) {
+		d := createTestAPIKeyDriver(t, map[string]string{"secret_spec": "ref"})
+		spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+		_, _, _, _, err := d.MintCredential(context.Background(), spec)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "credential chaining")
+	})
+}
+
+// =============================================================================
 // VerifySpec Tests
 // =============================================================================
 

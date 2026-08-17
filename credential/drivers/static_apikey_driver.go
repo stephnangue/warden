@@ -29,6 +29,7 @@ const (
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*StaticAPIKeyDriver)(nil)
 var _ credential.SpecVerifier = (*StaticAPIKeyDriver)(nil)
+var _ credential.ChainedSecretMinter = (*StaticAPIKeyDriver)(nil)
 
 // StaticAPIKeyDriver provides API key credentials configured entirely via
 // the source config map. Auth credentials (api_key) live in the credential
@@ -161,14 +162,51 @@ func (d *StaticAPIKeyDriver) getAPIURL() string {
 	return strings.TrimRight(credential.GetString(d.credSource.Config, "api_url", ""), "/")
 }
 
-// MintCredential returns the API key from spec config.
-// The key is static — no TTL, no lease.
+// MintCredential returns the API key from spec config, minting directly from the
+// inline secret. Chained specs (secret_spec set on the spec or its source) mint through
+// MintFromSecret instead — the Manager routes them there and never calls this — so
+// reaching here with secret_spec set is a misuse and fails closed rather than reading a
+// missing inline key. Non-chained specs are unaffected. The key is static — no TTL, no lease.
 func (d *StaticAPIKeyDriver) MintCredential(_ context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if spec.Config[credential.ConfigSecretSpec] != "" || d.credSource.Config[credential.ConfigSecretSpec] != "" {
+		return nil, nil, 0, "", fmt.Errorf("%s: spec uses secret_spec (credential chaining); it must mint from fetched secret material, not directly", d.displayName())
+	}
+
 	apiKey := credential.GetString(spec.Config, "api_key", "")
 	if apiKey == "" {
 		return nil, nil, 0, "", fmt.Errorf("no %s API key configured in spec", d.displayName())
 	}
 
+	return d.buildAPIKeyData(spec, apiKey), nil, 0, "", nil // Static — no TTL, no lease
+}
+
+// MintFromSecret mints an API key credential from secret material fetched via credential
+// chaining (secret_spec), instead of reading it inline from spec config. Per-caller
+// authorization was already enforced upstream (the referenced secret-spec was minted as
+// the caller). The key is static — no TTL, no lease.
+func (d *StaticAPIKeyDriver) MintFromSecret(_ context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	apiKey := material.Secret()
+	// Fall back to the conventional key name ONLY when no field was resolved
+	// (single-key auto-detect failed / no secret_field). If a field WAS resolved but
+	// is empty, that's a misconfigured secret_field — fail loudly rather than silently
+	// substituting a different key.
+	if apiKey == "" && material.Field == "" {
+		apiKey = material.Data["api_key"]
+	}
+	if apiKey == "" {
+		if material.Field != "" {
+			return nil, nil, 0, "", fmt.Errorf("%s: secret_field %q is empty or absent in the fetched secret material", d.displayName(), material.Field)
+		}
+		return nil, nil, 0, "", fmt.Errorf("%s: no API key in fetched secret material (set secret_field, or store it under 'api_key')", d.displayName())
+	}
+
+	return d.buildAPIKeyData(spec, apiKey), nil, 0, "", nil // Static — no TTL, no lease
+}
+
+// buildAPIKeyData assembles the credential data map from the resolved API key plus any
+// optional metadata fields copied from spec config. Shared by the inline and chained
+// mint paths.
+func (d *StaticAPIKeyDriver) buildAPIKeyData(spec *credential.CredSpec, apiKey string) map[string]interface{} {
 	rawData := map[string]interface{}{
 		"api_key": apiKey,
 	}
@@ -180,7 +218,7 @@ func (d *StaticAPIKeyDriver) MintCredential(_ context.Context, spec *credential.
 		}
 	}
 
-	return rawData, nil, 0, "", nil // Static — no TTL, no lease
+	return rawData
 }
 
 // Revoke is a no-op for static API keys.
