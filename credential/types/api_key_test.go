@@ -206,6 +206,55 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			wantErr:    true,
 			errMsg:     "'secret_path' is required",
 		},
+		// --- Credential chaining (secret_spec) ---
+		{
+			name: "apikey source - chained (secret_spec, no api_key)",
+			config: map[string]string{
+				"secret_spec":  "openai-key-in-vault",
+				"secret_field": "api_key",
+			},
+			sourceType: credential.SourceTypeAPIKey,
+			wantErr:    false,
+		},
+		{
+			name: "apikey source - chained without secret_field (single-key auto-detect)",
+			config: map[string]string{
+				"secret_spec": "openai-key-in-vault",
+			},
+			sourceType: credential.SourceTypeAPIKey,
+			wantErr:    false,
+		},
+		{
+			name: "apikey source - api_key and secret_spec are mutually exclusive",
+			config: map[string]string{
+				"api_key":     "sk-inline",
+				"secret_spec": "openai-key-in-vault",
+			},
+			sourceType: credential.SourceTypeAPIKey,
+			wantErr:    true,
+			errMsg:     "mutually exclusive",
+		},
+		{
+			name: "local source - secret_spec not supported",
+			config: map[string]string{
+				"secret_spec": "openai-key-in-vault",
+			},
+			sourceType: credential.SourceTypeLocal,
+			wantErr:    true,
+			errMsg:     "not supported with a local source",
+		},
+		{
+			name: "vault source - secret_spec not supported",
+			config: map[string]string{
+				"mint_method": "static_apikey",
+				"kv2_mount":   "secret",
+				"secret_path": "apikeys/my-service",
+				"secret_spec": "openai-key-in-vault",
+			},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "not supported with a hvault source",
+		},
 	}
 
 	for _, tt := range tests {
