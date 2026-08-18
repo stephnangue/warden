@@ -93,7 +93,7 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 				Help:           spec.HelpText,
 				BackendType:    spec.Name,
 				BackendClass:   logical.ClassProvider,
-				TokenExtractor: extractToken,
+				TokenExtractor: extractTokens,
 				Paths:          b.paths(),
 			},
 		}

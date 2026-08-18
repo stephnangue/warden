@@ -33,21 +33,42 @@ type awsBackend struct {
 	caData            string
 }
 
-// extractToken extracts the client token from the request.
+// extractTokens resolves the principals on an AWS gateway request.
+//
+// Agent-only: the user leg is not wired for AWS in this cut. Structurally the
+// slot exists — in cert-transparent mode X-Amz-Security-Token is empty and could
+// carry a user JWT while the access_key_id keeps naming the agent's role — but
+// AWS SDK clients have no 401 -> protected-resource-metadata -> OAuth loop, so
+// they would gain the user leg without the interactive bootstrap that motivates
+// it. Always returns user == "".
+//
 // Handles two implicit auth modes:
 //   - JWT transparent: JWT in X-Amz-Security-Token (core detects "eyJ" prefix)
 //   - Cert transparent: access_key_id (role name) from SigV4 header
-func extractToken(r *http.Request) string {
+//
+// Extraction matrix. "-" means nothing extracted; an empty agent under a
+// client certificate means the certificate authenticates the agent
+// downstream. Off the user leg there is never a user.
+//
+//	request carries                     agent(off)  agent(on)  user(on)
+//	Authorization: Bearer u             -           -          -
+//	X-Warden-Token: w + Bearer u        -           -          -
+//	X-Warden-Agent-Token: a + Bearer u  -           -          -
+//	client cert + Bearer u              -           -          -
+//	client cert only                    -           -          -
+//	X-Amz-Security-Token: eyJn          eyJn        eyJn       -
+//	X-Amz-Security-Token: eyJn + cert   eyJn        eyJn       -
+func extractTokens(r *http.Request, _ bool) (agent, user string) {
 	// JWT auth: JWT in X-Amz-Security-Token
 	if secToken := r.Header.Get("X-Amz-Security-Token"); strings.HasPrefix(secToken, "eyJ") {
-		return secToken
+		return secToken, ""
 	}
 	// Cert transparent: access_key_id (role name) from SigV4 header
 	authHeader := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authHeader, "AWS4-HMAC-SHA256") {
-		return ""
+		return "", ""
 	}
-	return sigv4.ExtractAccessKeyID(authHeader)
+	return sigv4.ExtractAccessKeyID(authHeader), ""
 }
 
 // Compile-time interface assertion
@@ -93,7 +114,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			Help:           awsBackendHelp,
 			BackendType:    "aws",
 			BackendClass:   logical.ClassProvider,
-			TokenExtractor: extractToken,
+			TokenExtractor: extractTokens,
 			Paths:          b.paths(),
 		},
 	}

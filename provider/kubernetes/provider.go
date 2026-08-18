@@ -6,23 +6,31 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultKubernetesTimeout is the default request timeout for Kubernetes API calls
 const DefaultKubernetesTimeout = 30 * time.Second
 
-// extractToken extracts the Warden session token from incoming HTTP requests.
-// It checks X-Warden-Token first, then falls back to Authorization: Bearer.
-func extractToken(r *http.Request) string {
-	if token := r.Header.Get("X-Warden-Token"); token != "" {
-		return token
-	}
-	authHeader := r.Header.Get("Authorization")
-	if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
-		return authHeader[7:]
-	}
-	return ""
+// extractTokens resolves the two principals on a Kubernetes gateway request.
+//
+// The only agent channel is X-Warden-Token. On a protected-resource mount an
+// agent presented out of band — X-Warden-Agent-Token or a trusted client
+// certificate — frees Authorization to carry the user.
+//
+// Extraction matrix. "-" means nothing extracted; an empty agent under a
+// client certificate means the certificate authenticates the agent
+// downstream. Off the user leg there is never a user.
+//
+//	request carries                     agent(off)  agent(on)  user(on)
+//	Authorization: Bearer u             u           u          -
+//	X-Warden-Token: w + Bearer u        w           w          -
+//	X-Warden-Agent-Token: a + Bearer u  u           a          u
+//	client cert + Bearer u              u           -          u
+//	client cert only                    -           -          -
+func extractTokens(r *http.Request, userLeg bool) (agent, user string) {
+	return logical.ExtractTokensWithChannels(r, userLeg, "X-Warden-Token")
 }
 
 // Spec defines the Kubernetes provider configuration for the httpproxy framework.
@@ -37,7 +45,7 @@ var Spec = &httpproxy.ProviderSpec{
 	ExtractCredentials: httpproxy.TypedTokenExtractor(
 		credential.TypeKubernetesToken, "token", "Authorization", "Bearer ",
 	),
-	ExtractToken: extractToken,
+	ExtractToken: extractTokens,
 	ValidateExtraConfig: func(conf map[string]any) error {
 		addr, ok := conf["kubernetes_url"].(string)
 		if !ok || addr == "" {

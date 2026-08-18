@@ -5,28 +5,51 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
 // DefaultSplunkTimeout is the default request timeout for Splunk API calls
 const DefaultSplunkTimeout = 30 * time.Second
 
-// extractToken extracts the Warden session token from incoming HTTP requests.
-// It checks X-Warden-Token first, then Authorization: Splunk (since Splunk
-// clients natively use this format for session tokens), then falls back to
-// Authorization: Bearer (JWT tokens).
-func extractToken(r *http.Request) string {
-	if token := r.Header.Get("X-Warden-Token"); token != "" {
-		return token
+// extractTokens resolves the two principals on a Splunk gateway request.
+//
+// Splunk's own agent credential rides Authorization under the native
+// "Splunk" scheme, so agent and user can share the header only by dispatching
+// on scheme: "Splunk" is always the agent, "Bearer" is the user once an agent
+// has arrived out of band. Precedence matches the pre-0.20 extractor when
+// userLeg is false — X-Warden-Token, then Splunk, then Bearer.
+//
+// Extraction matrix. "-" means nothing extracted; an empty agent under a
+// client certificate means the certificate authenticates the agent
+// downstream. Off the user leg there is never a user.
+//
+//	request carries                     agent(off)  agent(on)  user(on)
+//	Authorization: Bearer u             u           u          -
+//	X-Warden-Token: w + Bearer u        w           w          -
+//	X-Warden-Agent-Token: a + Bearer u  u           a          u
+//	client cert + Bearer u              u           -          u
+//	client cert only                    -           -          -
+//	Authorization: Splunk n             n           n          -
+//	Authorization: Splunk n + cert      n           n          -
+func extractTokens(r *http.Request, userLeg bool) (agent, user string) {
+	// X-Warden-Token is the operator credential and never opens the user leg.
+	// See logical.ExtractTokensDefault.
+	if token := r.Header.Get(logical.HeaderWardenToken); token != "" {
+		return token, ""
 	}
 	authHeader := r.Header.Get("Authorization")
-	if len(authHeader) > 7 && authHeader[:7] == "Splunk " {
-		return authHeader[7:]
+
+	// The native scheme is the agent's own channel. It occupies Authorization,
+	// so there is no slot left for a user credential on this request.
+	if token := logical.StripScheme(authHeader, "Splunk "); token != "" {
+		return token, ""
 	}
-	if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
-		return authHeader[7:]
+
+	if a, ok := logical.AgentOutOfBand(r, userLeg); ok {
+		return a, logical.StripBearer(authHeader)
 	}
-	return ""
+	return logical.StripBearer(authHeader), ""
 }
 
 // Spec defines the Splunk provider configuration for the httpproxy framework.
@@ -39,7 +62,7 @@ var Spec = &httpproxy.ProviderSpec{
 	UserAgent:          "warden-splunk-proxy",
 	HelpText:           splunkBackendHelp,
 	ExtractCredentials: httpproxy.BearerAPIKeyExtractor,
-	ExtractToken:       extractToken,
+	ExtractToken:       extractTokens,
 	ValidateExtraConfig: func(conf map[string]any) error {
 		addr, ok := conf["splunk_url"].(string)
 		if !ok || addr == "" {

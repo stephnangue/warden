@@ -42,10 +42,6 @@ func (b *proxyBackend) pathConfig() *framework.Path {
 			Type:        framework.TypeString,
 			Description: "Auth mount that authenticates the secondary (user) principal from a second request header (bearer/JWT format required)",
 		},
-		"user_token_header": {
-			Type:        framework.TypeString,
-			Description: "Request header carrying the user credential (default: X-Warden-User-Token; 'Authorization' opt-in for cert/SPIFFE agents)",
-		},
 		"user_auth_role": {
 			Type:        framework.TypeString,
 			Description: "Role used to authenticate the user credential (default: the user auth mount's own default_role)",
@@ -95,7 +91,6 @@ func (b *proxyBackend) handleConfigRead(_ context.Context, _ *logical.Request, _
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
 		"user_auth_path":    tc.UserAuthPath,
-		"user_token_header": tc.UserTokenHeader,
 		"user_auth_role":    tc.UserAuthRole,
 		"tls_skip_verify":   b.tlsSkipVerify,
 		"ca_data":           b.caData,
@@ -175,7 +170,6 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		AutoAuthPath:    current.AutoAuthPath,
 		DefaultAuthRole: current.DefaultAuthRole,
 		UserAuthPath:    current.UserAuthPath,
-		UserTokenHeader: current.UserTokenHeader,
 		UserAuthRole:    current.UserAuthRole,
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
@@ -186,9 +180,6 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 	}
 	if val, ok := d.GetOk("user_auth_path"); ok {
 		tc.UserAuthPath = val.(string)
-	}
-	if val, ok := d.GetOk("user_token_header"); ok {
-		tc.UserTokenHeader = val.(string)
 	}
 	if val, ok := d.GetOk("user_auth_role"); ok {
 		tc.UserAuthRole = val.(string)
@@ -201,13 +192,12 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		}, nil
 	}
 
-	// Validate the secondary (user) auth config: types, the user_token_header
-	// deny-list, and the user_auth_role → user_auth_path dependency. The
-	// bearer-format check on the mount is enforced at runtime (fail closed).
+	// Validate the secondary (user) auth config: types and the
+	// user_auth_role → user_auth_path dependency. The bearer-format check on
+	// the referenced mount is enforced at runtime (fail closed).
 	if err := framework.ValidateUserAuthConfig(map[string]any{
-		"user_auth_path":    tc.UserAuthPath,
-		"user_token_header": tc.UserTokenHeader,
-		"user_auth_role":    tc.UserAuthRole,
+		"user_auth_path": tc.UserAuthPath,
+		"user_auth_role": tc.UserAuthRole,
 	}); err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
@@ -300,7 +290,6 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
 		"user_auth_path":    tc.UserAuthPath,
-		"user_token_header": tc.UserTokenHeader,
 		"user_auth_role":    tc.UserAuthRole,
 		"tls_skip_verify":   b.tlsSkipVerify,
 		"ca_data":           b.caData,

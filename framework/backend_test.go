@@ -308,23 +308,42 @@ func TestBackend_Route(t *testing.T) {
 	})
 }
 
-func TestBackend_ExtractToken(t *testing.T) {
+func TestBackend_ExtractTokens(t *testing.T) {
 	t.Run("default extractor", func(t *testing.T) {
 		b := &Backend{}
 		req, _ := http.NewRequest("GET", "/", nil)
 		req.Header.Set("X-Warden-Token", "my-token")
-		assert.Equal(t, "my-token", b.ExtractToken(req))
+		agent, user := b.ExtractTokens(req, false)
+		assert.Equal(t, "my-token", agent)
+		assert.Empty(t, user)
 	})
 
 	t.Run("custom extractor", func(t *testing.T) {
 		b := &Backend{
-			TokenExtractor: func(r *http.Request) string {
-				return r.Header.Get("X-Custom")
+			TokenExtractor: func(r *http.Request, userLeg bool) (string, string) {
+				return r.Header.Get("X-Custom"), ""
 			},
 		}
 		req, _ := http.NewRequest("GET", "/", nil)
 		req.Header.Set("X-Custom", "custom-token")
-		assert.Equal(t, "custom-token", b.ExtractToken(req))
+		agent, user := b.ExtractTokens(req, false)
+		assert.Equal(t, "custom-token", agent)
+		assert.Empty(t, user)
+	})
+
+	t.Run("custom extractor receives userLeg", func(t *testing.T) {
+		b := &Backend{
+			TokenExtractor: func(r *http.Request, userLeg bool) (string, string) {
+				if userLeg {
+					return "agent", "user"
+				}
+				return "agent", ""
+			},
+		}
+		req, _ := http.NewRequest("GET", "/", nil)
+		agent, user := b.ExtractTokens(req, true)
+		assert.Equal(t, "agent", agent)
+		assert.Equal(t, "user", user)
 	})
 }
 
@@ -348,7 +367,11 @@ func TestDefaultTokenExtractor(t *testing.T) {
 			for k, v := range tc.headers {
 				req.Header.Set(k, v)
 			}
-			assert.Equal(t, tc.expected, DefaultTokenExtractor(req))
+			// userLeg=false must stay byte-identical to the pre-0.20 rule and
+			// never produce a user.
+			agent, user := DefaultTokenExtractor(req, false)
+			assert.Equal(t, tc.expected, agent)
+			assert.Empty(t, user)
 		})
 	}
 }

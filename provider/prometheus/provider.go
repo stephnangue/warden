@@ -50,12 +50,12 @@ func prometheusExtractor(req *logical.Request) (map[string]string, error) {
 // (Grafana Mimir, Amazon Managed Prometheus, Thanos, Cortex, VictoriaMetrics)
 // by mounting multiple instances with different prometheus_url values.
 var Spec = &httpproxy.ProviderSpec{
-	Name:            "prometheus",
-	URLConfigKey:    "prometheus_url",
-	DefaultTimeout:  DefaultPrometheusTimeout,
-	ParseStreamBody: true,
-	UserAgent:       "warden-prometheus-proxy",
-	HelpText:        prometheusBackendHelp,
+	Name:               "prometheus",
+	URLConfigKey:       "prometheus_url",
+	DefaultTimeout:     DefaultPrometheusTimeout,
+	ParseStreamBody:    true,
+	UserAgent:          "warden-prometheus-proxy",
+	HelpText:           prometheusBackendHelp,
 	ExtractCredentials: prometheusExtractor,
 }
 

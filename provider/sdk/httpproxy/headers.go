@@ -6,11 +6,15 @@ var BaseHeadersToRemove = []string{
 	// Security headers (replaced with provider credentials)
 	"Authorization",
 	"X-Warden-Token",
+	"X-Warden-Agent-Token",
+	// Retired in 0.20: the user credential now rides Authorization. Still
+	// stripped so a client that keeps sending the old header cannot leak the
+	// credential to the upstream.
+	"X-Warden-User-Token",
 	"X-Warden-Role",
 	"X-Warden-Provider",
 	"X-Warden-Subject-Token",
 	"X-Warden-Actor-Token",
-	"X-Warden-User-Token",
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",

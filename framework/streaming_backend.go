@@ -64,10 +64,6 @@ type TransparentConfig struct {
 	// disables per-user auth for this provider. See logical.UserAuthConfigProvider.
 	UserAuthPath string
 
-	// UserTokenHeader is the request header carrying the user credential. Empty
-	// means the default (logical.DefaultUserTokenHeader).
-	UserTokenHeader string
-
 	// UserAuthRole is the role used to authenticate the user credential. Empty
 	// falls back to the user auth mount's own default_role.
 	UserAuthRole string
@@ -616,12 +612,12 @@ func (b *StreamingBackend) Class() logical.BackendClass {
 	return logical.ClassUnknown
 }
 
-// ExtractToken delegates to the embedded Backend
-func (b *StreamingBackend) ExtractToken(r *http.Request) string {
+// ExtractTokens delegates to the embedded Backend
+func (b *StreamingBackend) ExtractTokens(r *http.Request, userLeg bool) (agent, user string) {
 	if b.Backend != nil {
-		return b.Backend.ExtractToken(r)
+		return b.Backend.ExtractTokens(r, userLeg)
 	}
-	return ""
+	return "", ""
 }
 
 // TransparentModeProvider interface implementation
@@ -682,16 +678,6 @@ func (b *StreamingBackend) GetUserAuthPath() string {
 		return ""
 	}
 	return tc.UserAuthPath
-}
-
-// GetUserTokenHeader returns the request header carrying the user credential,
-// or "" for the default (logical.DefaultUserTokenHeader).
-func (b *StreamingBackend) GetUserTokenHeader() string {
-	tc := b.transparentConfig.Load()
-	if tc == nil {
-		return ""
-	}
-	return tc.UserTokenHeader
 }
 
 // GetUserAuthRole returns the role used to authenticate the user credential,

@@ -279,8 +279,8 @@ func (d *device) Initialize(ctx context.Context) error {
 	return nil
 }
 
-func (d *device) ExtractToken(r *http.Request) string {
-	return ""
+func (d *device) ExtractTokens(r *http.Request, userLeg bool) (agent, user string) {
+	return "", ""
 }
 
 func (d *device) HandleExistenceCheck(ctx context.Context, req *logical.Request) (checkFound bool, exists bool, err error) {
