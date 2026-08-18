@@ -80,6 +80,13 @@ func Handler(props *HandlerProperties) http.Handler {
 	mux.Handle(oidcDiscoveryPath, handleOIDCDiscovery(core, log))
 	mux.Handle(oidcJWKSPath, handleOIDCJWKS(core, log))
 
+	// RFC 9728 protected resource metadata. Also origin-root and
+	// unauthenticated — a client fetches it precisely because it has no user
+	// credential yet. Registered twice: the bare path, and the subtree, because
+	// the resource's own path is appended to the well-known prefix.
+	mux.Handle(prmPath, handlePRM(core, log))
+	mux.Handle(prmPath+"/", handlePRM(core, log))
+
 	// MCP discovery interface — Warden answering MCP for its own
 	// capabilities (list_roles, get_skill). Registered before the /v1/sys/
 	// catch-all. Not in standbyAllowedPaths: it reads live mount/skill/
@@ -339,6 +346,24 @@ func (f *standbyForwarder) currentServerName() string {
 // and that check observes the mutated URL in any persistent state.
 func wrapGenericHandler(c *core.Core, handler http.Handler, log *logger.GatedLogger, forwarder *standbyForwarder) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Origin-root well-known documents are resolved FIRST, before the
+		// X-Warden-Provider rewrite below. Those documents live outside /v1/ by
+		// specification, and a client that sets X-Warden-Provider as a
+		// connection-wide default would otherwise have its discovery fetch
+		// rewritten to /v1/.well-known/... and 404 — silently breaking the very
+		// bootstrap the document exists to drive.
+		//
+		// A standby forwards: only the active node holds the signing key and the
+		// live mount table these documents are derived from.
+		if isOIDCIssuerPath(r.URL.Path) || isPRMPath(r.URL.Path) {
+			if c != nil && c.Standby() {
+				forwardToActive(c, forwarder, w, r)
+				return
+			}
+			handler.ServeHTTP(w, r)
+			return
+		}
+
 		// X-Warden-Provider /v1/ exemption. Only rewrites when the
 		// header is non-empty AND the path is missing /v1/. Empty
 		// header values (Header.Get returns "" for both absent and
@@ -361,19 +386,6 @@ func wrapGenericHandler(c *core.Core, handler http.Handler, log *logger.GatedLog
 			// core/request_handler.go:367.
 			r.URL.Path = "/v1" + r.URL.Path
 			r.URL.RawPath = ""
-		}
-
-		// OIDC issuer discovery/JWKS live at the origin root, not under /v1/, so an
-		// upstream can fetch them at the standard well-known path. Exempt them from
-		// the /v1/ check. A standby forwards to the active node (only the active
-		// holds the signing key/config).
-		if isOIDCIssuerPath(r.URL.Path) {
-			if c != nil && c.Standby() {
-				forwardToActive(c, forwarder, w, r)
-				return
-			}
-			handler.ServeHTTP(w, r)
-			return
 		}
 
 		// Validate request path

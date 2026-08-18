@@ -69,6 +69,9 @@ func (b *SystemBackend) paths() []*framework.Path {
 	// OIDC issuer (Workload Identity Federation) — root-namespace-only
 	paths = append(paths, b.pathOIDCIssuer()...)
 
+	// RFC 9728 protected resource metadata — root-namespace-only
+	paths = append(paths, b.pathProtectedResource()...)
+
 	// Skill registry paths
 	paths = append(paths, b.pathSkills()...)
 

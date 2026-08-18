@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -266,4 +267,52 @@ func verifyJWKSURLReachable(ctx context.Context, jwksURL string, caPEM string) e
 func verifyOIDCDiscoveryURLReachable(ctx context.Context, oidcDiscoveryURL string, caPEM string) error {
 	wellKnown := strings.TrimSuffix(oidcDiscoveryURL, "/") + "/.well-known/openid-configuration"
 	return verifyURLReachable(ctx, wellKnown, caPEM)
+}
+
+// Compile-time assertion: the metadata endpoint reaches this backend only
+// through the interface, since the concrete type is unexported.
+var _ logical.AuthorizationServerProvider = (*jwtAuthBackend)(nil)
+
+// AuthorizationServerURL implements logical.AuthorizationServerProvider.
+//
+// Prefers the OIDC discovery URL, which is by construction the issuer a client
+// can run discovery against. Falls back to bound_issuer when it is an absolute
+// https URL — an operator who pins an issuer without configuring discovery has
+// still named one, and OIDC requires the issuer to host its own discovery
+// document, so a client can proceed from it.
+//
+// Returns ok=false for a mount that verifies with a bare JWKS URL or static
+// public keys: those authenticate tokens without knowing who issues them, so
+// there is nothing for a client to discover and guessing would send it to the
+// wrong authorization server.
+func (b *jwtAuthBackend) AuthorizationServerURL() (string, bool) {
+	b.configMu.RLock()
+	defer b.configMu.RUnlock()
+	if b.config == nil {
+		return "", false
+	}
+	if u := b.config.OIDCDiscoveryURL; u != "" {
+		return u, true
+	}
+	if u := b.config.BoundIssuer; u != "" {
+		if err := validateAuthorizationServerURL(u); err == nil {
+			return u, true
+		}
+	}
+	return "", false
+}
+
+// validateAuthorizationServerURL accepts only an absolute https URL with a
+// host. bound_issuer is a free-form string that is often an opaque identifier
+// rather than a URL, so it must be checked before being published as somewhere
+// a client should send credentials.
+func validateAuthorizationServerURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "https" || u.Host == "" {
+		return fmt.Errorf("not an absolute https URL")
+	}
+	return nil
 }

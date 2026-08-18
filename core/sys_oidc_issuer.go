@@ -21,12 +21,27 @@ import (
 // Warden can federate a local upstream (e.g. an OpenBao dev server, which accepts an
 // http loopback jwks_url) without standing up TLS.
 func validateIssuerURL(raw string) error {
+	return validateExternalHTTPSURL(raw, "issuer_url",
+		"AWS/GCP/Azure require HTTPS OIDC providers")
+}
+
+// validateExternalHTTPSURL checks that raw is an absolute https:// URL suitable
+// for publication to an external party. field names the config key in error
+// messages; httpsReason explains, in the caller's terms, why plain http is not
+// acceptable.
+//
+// http is permitted for loopback hosts (127.0.0.1, ::1, localhost) so a dev/test
+// Warden can serve a local consumer without standing up TLS.
+func validateExternalHTTPSURL(raw, field, httpsReason string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("issuer_url is not a valid URL: %w", err)
+		return fmt.Errorf("%s is not a valid URL: %w", field, err)
 	}
 	switch u.Scheme {
 	case "https":
+		if u.Host == "" {
+			return fmt.Errorf("%s must include a host", field)
+		}
 		return nil
 	case "http":
 		host := u.Hostname()
@@ -36,9 +51,9 @@ func validateIssuerURL(raw string) error {
 		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 			return nil
 		}
-		return fmt.Errorf("issuer_url must be https:// (http:// is allowed only for loopback hosts like 127.0.0.1 or localhost)")
+		return fmt.Errorf("%s must be https:// (http:// is allowed only for loopback hosts like 127.0.0.1 or localhost)", field)
 	default:
-		return fmt.Errorf("issuer_url must be https:// (AWS/GCP/Azure require HTTPS OIDC providers)")
+		return fmt.Errorf("%s must be https:// (%s)", field, httpsReason)
 	}
 }
 
@@ -112,20 +127,22 @@ func oidcIssuerReady(c *Core) bool {
 }
 
 // requireRootNamespace returns an error response unless the request is in the
-// root namespace.
-func (b *SystemBackend) requireRootNamespace(ctx context.Context) (*logical.Response, bool) {
+// root namespace. subject names the configuration in the error, so an operator
+// who lands in the wrong namespace is told which global setting they hit.
+func (b *SystemBackend) requireRootNamespace(ctx context.Context, subject string) (*logical.Response, bool) {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil || ns == nil {
 		return logical.ErrorResponse(logical.ErrBadRequest("no namespace in context")), false
 	}
 	if ns.ID != namespace.RootNamespaceID {
-		return logical.ErrorResponse(logical.ErrForbidden("the OIDC issuer is global and can only be configured in the root namespace")), false
+		return logical.ErrorResponse(logical.ErrForbiddenf(
+			"%s is global and can only be configured in the root namespace", subject)), false
 	}
 	return nil, true
 }
 
 func (b *SystemBackend) handleOIDCIssuerConfigRead(ctx context.Context, _ *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	if resp, ok := b.requireRootNamespace(ctx); !ok {
+	if resp, ok := b.requireRootNamespace(ctx, "the OIDC issuer"); !ok {
 		return resp, nil
 	}
 
@@ -224,7 +241,7 @@ func (b *SystemBackend) signerSummary() map[string]any {
 }
 
 func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	if resp, ok := b.requireRootNamespace(ctx); !ok {
+	if resp, ok := b.requireRootNamespace(ctx, "the OIDC issuer"); !ok {
 		return resp, nil
 	}
 

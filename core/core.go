@@ -251,6 +251,10 @@ type Core struct {
 	// oidcConfigMu serializes the load-modify-save of the issuer config doc so a
 	// rotation persist and an operator config write cannot lost-update each other.
 	oidcConfigMu sync.Mutex
+
+	// protectedResourceMu serializes load-modify-save of the RFC 9728 metadata
+	// config so two concurrent partial updates cannot lost-update each other.
+	protectedResourceMu sync.Mutex
 	// oidcSetupMu serializes setupOIDCIssuer/stopOIDCIssuer so two concurrent config
 	// writes (or a write racing seal/promotion) cannot interleave loop start/stop and
 	// leak a rotation goroutine that outlives its cancel func. Distinct from oidcConfigMu
