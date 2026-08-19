@@ -335,6 +335,14 @@ func (e *LogEntry) Clone() *LogEntry {
 			clone.Auth.Actors = make([]ActorRef, len(e.Auth.Actors))
 			copy(clone.Auth.Actors, e.Auth.Actors)
 		}
+		// The secondary (user) principal. Omitting it here silently dropped
+		// per-user attribution from every written entry, because the JSON
+		// formatter clones before serialising — the field was set correctly in
+		// memory and lost on the way to disk.
+		if e.Auth.User != nil {
+			user := *e.Auth.User
+			clone.Auth.User = &user
+		}
 	}
 
 	return clone

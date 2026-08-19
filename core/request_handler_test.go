@@ -2348,7 +2348,9 @@ func TestResolveExchangeInputs_UserIdentity_MissingFailsClosed(t *testing.T) {
 	// silently falling back to the agent's identity.
 	_, err := resolveExchangeInputsForTest(c, ctx, requestWith("opaque-token", nil), teForSpec("user-spec"))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no user principal was presented")
+	// The sentinel is what carries the 401 and the WWW-Authenticate challenge, so
+	// assert on it rather than on prose.
+	assert.ErrorIs(t, err, credential.ErrUserRequired)
 }
 
 func TestResolveExchangeInputs_ActorAgentIdentity(t *testing.T) {
@@ -2777,7 +2779,7 @@ func TestResolveExchangeInputs_WardenUserClaims(t *testing.T) {
 		req := requestWith("s.opaque-session", nil) // no req.User
 		_, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no user principal")
+		assert.ErrorIs(t, err, credential.ErrUserRequired)
 	})
 
 	t.Run("absent named claim fails closed", func(t *testing.T) {

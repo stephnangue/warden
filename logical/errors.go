@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/credential"
 )
 
 // CodedError is an error that carries an HTTP status code.
@@ -138,6 +139,13 @@ func GetErrorCode(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, sdklogical.ErrInvalidRequest):
 		return http.StatusBadRequest
+	// A spec that needs a user principal and got none. The credential package
+	// cannot construct a CodedError (logical imports credential, so the reverse
+	// would cycle), so the status is attached here. 401 is what lets a client
+	// acquire a user identity and retry; core pairs it with a WWW-Authenticate
+	// challenge naming where to go.
+	case errors.Is(err, credential.ErrUserRequired):
+		return http.StatusUnauthorized
 	}
 	// Check if the error wraps a CodedError. Only recurse when there is an inner
 	// error: an error that implements Unwrap() but returns nil (e.g. a token

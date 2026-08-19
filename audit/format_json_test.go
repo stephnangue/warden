@@ -1460,3 +1460,86 @@ func TestJSONFormatCredentialMetadata(t *testing.T) {
 		}
 	})
 }
+
+// TestJSONFormatPreservesUserAttribution guards a whole class of silent data
+// loss: the formatter clones every entry before serialising, so any field
+// Clone() forgets is set correctly in memory and then dropped on the way to
+// disk. Per-user attribution was lost this way from the day it was added —
+// invisible to tests that assert on the in-memory entry, because those sit
+// above the layer that loses it.
+func TestJSONFormatPreservesUserAttribution(t *testing.T) {
+	format := NewJSONFormat()
+
+	newEntry := func() *LogEntry {
+		return &LogEntry{
+			Timestamp: time.Now(),
+			Request:   &Request{ID: "req-1", Operation: "read", Path: "/v1/vault/gateway/x"},
+			Auth: &Auth{
+				TokenID:     "agent-token",
+				PrincipalID: "agent-workload",
+				User: &UserAttribution{
+					Subject:     "alice@example.com",
+					TokenID:     "user-token",
+					NamespaceID: "root",
+				},
+			},
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		format func(*LogEntry) ([]byte, error)
+	}{
+		{"request", func(e *LogEntry) ([]byte, error) {
+			return format.FormatRequest(context.Background(), e)
+		}},
+		{"response", func(e *LogEntry) ([]byte, error) {
+			return format.FormatResponse(context.Background(), e)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := tc.format(newEntry())
+			if err != nil {
+				t.Fatalf("format: %v", err)
+			}
+			var out LogEntry
+			if err := json.Unmarshal(data, &out); err != nil {
+				t.Fatalf("unmarshal: %v\n%s", err, string(data))
+			}
+			if out.Auth == nil || out.Auth.User == nil {
+				t.Fatalf("user attribution lost between the entry and the wire: %s", string(data))
+			}
+			if out.Auth.User.Subject != "alice@example.com" {
+				t.Errorf("subject = %q, want alice@example.com", out.Auth.User.Subject)
+			}
+			// The agent must still be there: attribution records the user
+			// alongside the agent, never in place of it.
+			if out.Auth.PrincipalID != "agent-workload" {
+				t.Errorf("agent principal lost: %s", string(data))
+			}
+		})
+	}
+}
+
+// TestCloneCopiesUserAttribution pins the specific omission at its source, so a
+// future field added to Auth without a matching Clone() line fails here rather
+// than silently vanishing from every audit log.
+func TestCloneCopiesUserAttribution(t *testing.T) {
+	orig := &LogEntry{
+		Auth: &Auth{User: &UserAttribution{Subject: "alice", TokenID: "t", NamespaceID: "root"}},
+	}
+	clone := orig.Clone()
+
+	if clone.Auth == nil || clone.Auth.User == nil {
+		t.Fatal("Clone dropped Auth.User")
+	}
+	if clone.Auth.User.Subject != "alice" {
+		t.Errorf("subject = %q, want alice", clone.Auth.User.Subject)
+	}
+	// Must be a copy, not a shared pointer: entries are cloned precisely so
+	// parallel devices cannot race on them.
+	clone.Auth.User.Subject = "mallory"
+	if orig.Auth.User.Subject != "alice" {
+		t.Error("Clone shares the UserAttribution pointer, defeating the race protection it exists for")
+	}
+}

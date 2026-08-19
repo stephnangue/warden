@@ -18,7 +18,11 @@ import (
 //
 // It lives at the origin root, outside /v1/, because a client fetches it before
 // it has any credential and without knowing Warden's API layout.
-const prmPath = "/.well-known/oauth-protected-resource"
+//
+// Taken from core rather than restated: core builds the WWW-Authenticate
+// challenge that points here, and a challenge naming a URL this layer does not
+// serve would break the bootstrap silently.
+const prmPath = core.PRMWellKnownPath
 
 // isPRMPath reports whether p addresses protected-resource metadata: the bare
 // prefix or anything beneath it. Unlike the OIDC issuer paths this is a subtree,

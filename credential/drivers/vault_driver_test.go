@@ -1149,6 +1149,10 @@ func TestResolveSecretPath(t *testing.T) {
 		{"email value allowed", "kv/{{user.email}}", claims, "kv/alice@example.com", ""},
 		{"hyphen value allowed", "kv/{{user.dept}}", claims, "kv/eng-team", ""},
 		{"literal dots within a segment allowed", "kv/{{user.username}}", map[string]string{"username": "a..b"}, "kv/a..b", ""},
+		// Both are spec/config mismatches, not missing-user cases: claims are
+		// projected only when the spec asks for them, and core rejects a
+		// user-less request before the driver runs. Neither is fixed by
+		// authenticating, so neither may carry a 401 challenge.
 		{"absent claim fails closed", "slack/{{user.missing}}/x", claims, "", "absent"},
 		{"nil claims with template fails closed", "slack/{{user.username}}/x", nil, "", "absent"},
 		{"slash in value rejected", "kv/{{user.username}}", map[string]string{"username": "a/b"}, "", "allow-list"},
@@ -1224,4 +1228,8 @@ func TestVaultDriver_OAuth2_TemplatedNameFailsClosedWithoutClaims(t *testing.T) 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential_name")
 	assert.Contains(t, err.Error(), "absent")
+	// A spec that cannot project claims is an operator config error. Carrying
+	// the missing-user sentinel here would turn it into a 401 challenge and send
+	// the caller into an OAuth loop that cannot fix a spec.
+	assert.NotErrorIs(t, err, credential.ErrUserRequired)
 }
