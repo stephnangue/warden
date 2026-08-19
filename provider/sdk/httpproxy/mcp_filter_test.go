@@ -231,7 +231,9 @@ func BenchmarkFilterMCPListResponse(b *testing.B) {
 		if i%2 == 1 {
 			name = "delete_tool_" + strconv.Itoa(i)
 		}
-		sb.WriteString(`{"name":"` + name + `","description":"a tool that does a thing","inputSchema":{"type":"object","properties":{}}}`)
+		sb.WriteString(`{"name":"`)
+		sb.WriteString(name)
+		sb.WriteString(`","description":"a tool that does a thing","inputSchema":{"type":"object","properties":{}}}`)
 	}
 	sb.WriteString(`]}}`)
 	body := sb.String()

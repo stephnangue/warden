@@ -189,6 +189,23 @@ type UserAuthConfigProvider interface {
 	GetUserAuthRole() string
 }
 
+// AuthorizationServerProvider is implemented by auth methods that can name the
+// OAuth authorization server issuing the credentials they accept. It exists so
+// the protected-resource metadata endpoint can derive `authorization_servers`
+// from the auth mount an operator already configured, instead of asking them to
+// restate the issuer.
+//
+// It is an interface rather than a concrete type assertion because auth backends
+// are unexported in their own packages and reached only as logical.Backend.
+type AuthorizationServerProvider interface {
+	// AuthorizationServerURL returns the issuer URL a client should run OAuth
+	// against, and whether one could be determined. ok is false when the mount
+	// verifies tokens without knowing an issuer — a static-key or bare-JWKS
+	// configuration — in which case there is nothing a client could discover
+	// and the metadata endpoint must not guess.
+	AuthorizationServerURL() (string, bool)
+}
+
 // TransparentAuthRoleExtractor can be implemented by providers that extract
 // the auth role from protocol-specific request data (Authorization headers,
 // Basic Auth username, etc.) rather than the URL path. Used by SigV4-compatible
