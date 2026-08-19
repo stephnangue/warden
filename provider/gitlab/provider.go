@@ -183,9 +183,33 @@ deliberately.
 On a mount configured with user_auth_path the roles shift — the
 certificate becomes the agent and the password slot carries the
 per-request USER identity, while the username keeps naming the
-agent's role:
+agent's role.
 
-  git clone https://<agent-role>:$USER_JWT@<warden-addr>/v1/...
+Git sends no credentials until it is challenged, so the password slot
+is filled only after a 401. Where the agent is a certificate, the
+opening request passes through and the upstream issues that challenge;
+where it arrives on X-Warden-Agent-Token, Warden issues it, since that
+request carries no Basic username to resolve a role from. Either way
+Git retries with the role in the username and the user identity in the
+password. Setting X-Warden-Role or the mount's default_role lets the
+first request succeed outright and skips the round trip.
+
+Keep credentials out of the clone URL. Git writes the remote verbatim
+into .git/config, so anything embedded there persists in plaintext in
+every clone and shows up in "git remote -v" output. Let Git prompt
+instead, and pin an empty credential helper into the clone so a
+short-lived token is not cached and replayed once it expires — a stale
+replay surfaces only as "Authentication failed", indistinguishable
+from a wrong credential:
+
+  git clone --config credential.helper= \
+      https://<agent-role>@<warden-addr>/v1/...
+
+The role may also travel in the path rather than the username. Git's
+helpers ignore the path unless credential.useHttpPath is set, so every
+role then shares one cache entry:
+
+  git clone https://<warden-addr>/v1/gitlab/role/<agent-role>/gateway/...
 
 A cert-authenticated client with no user identity still has to put
 something in the password slot, since Git requires one for Basic

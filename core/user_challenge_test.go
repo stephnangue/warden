@@ -290,3 +290,95 @@ func TestAttachUserChallenge(t *testing.T) {
 		assert.Empty(t, otherErr.Headers.Get("WWW-Authenticate"))
 	})
 }
+
+// TestAttachGitBasicChallenge covers the transparent-auth failure, which is a
+// different 401 from the user-required one: the agent is what failed, so there
+// is no metadata pointer to offer. On git the client can still fix it by
+// retrying with Basic, which is where the role and any user credential ride.
+//
+// Reached only when an out-of-band agent forced authentication. A probe with no
+// agent at all passes through and collects the upstream's own challenge.
+func TestAttachGitBasicChallenge(t *testing.T) {
+	newReq := func(path string) *logical.Request {
+		return &logical.Request{
+			Path:        path,
+			MountPoint:  "github/",
+			HTTPRequest: httptest.NewRequest(http.MethodGet, "/v1/"+path, nil),
+		}
+	}
+
+	t.Run("git smart-HTTP gets a Basic challenge", func(t *testing.T) {
+		resp := logical.ErrorResponse(logical.ErrUnauthorized("missing role"))
+		attachGitBasicChallenge(newReq("github/gateway/o/r.git/info/refs"), resp)
+		assert.Equal(t, `Basic realm="warden"`, resp.Headers.Get("WWW-Authenticate"))
+	})
+
+	t.Run("no Bearer scheme is offered", func(t *testing.T) {
+		// Advertising the user leg here would send the client to acquire an
+		// identity that cannot fix an agent failure.
+		resp := logical.ErrorResponse(logical.ErrUnauthorized("missing role"))
+		attachGitBasicChallenge(newReq("github/gateway/o/r.git/git-upload-pack"), resp)
+		assert.NotContains(t, resp.Headers.Get("WWW-Authenticate"), "Bearer")
+	})
+
+	t.Run("a non-git gateway path gets no challenge", func(t *testing.T) {
+		resp := logical.ErrorResponse(logical.ErrUnauthorized("missing role"))
+		attachGitBasicChallenge(newReq("github/gateway/user"), resp)
+		assert.Empty(t, resp.Headers.Get("WWW-Authenticate"))
+	})
+
+	t.Run("a non-gateway path ending in a git suffix gets none either", func(t *testing.T) {
+		resp := logical.ErrorResponse(logical.ErrUnauthorized("missing role"))
+		attachGitBasicChallenge(newReq("github/config/o/r.git/info/refs"), resp)
+		assert.Empty(t, resp.Headers.Get("WWW-Authenticate"))
+	})
+
+	t.Run("nil arguments are inert", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			attachGitBasicChallenge(nil, logical.ErrorResponse(logical.ErrUnauthorized("x")))
+			attachGitBasicChallenge(newReq("github/gateway/o/r.git/info/refs"), nil)
+		})
+	})
+}
+
+// TestTransparentAuthFailureCarriesGitChallenge pins the wiring rather than the
+// helper. A request that reaches transparent auth was not passed through, so no
+// upstream response will be relayed and this 401 is the only thing that can tell
+// the client to retry with credentials. Without the header git simply gives up.
+func TestTransparentAuthFailureCarriesGitChallenge(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	// autoAuthPath names a mount that does not exist, so the implicit login
+	// fails — standing in for the real failure, a probe with no resolvable role.
+	backend := &mockTransparentModeProvider{transparentMode: true, autoAuthPath: "auth/agent-jwt/"}
+	require.NoError(t, core.router.Mount("github/", backend, &MountEntry{
+		Path:        "github/",
+		Type:        "github",
+		Class:       mountClassProvider,
+		UUID:        "github-challenge-uuid",
+		Accessor:    "github_challenge_acc",
+		NamespaceID: namespace.RootNamespaceID,
+		namespace:   namespace.RootNamespace,
+	}, &mockBarrierView{prefix: "provider/github-challenge-uuid/"}))
+
+	handle := func(t *testing.T, path string) *logical.Response {
+		t.Helper()
+		hr := httptest.NewRequest(http.MethodGet, "/v1/"+path, nil)
+		resp, _, _ := core.handleNonLoginRequest(ctx,
+			&logical.Request{Path: path, Operation: logical.ReadOperation, HTTPRequest: hr})
+		require.NotNil(t, resp)
+		return resp
+	}
+
+	t.Run("git smart-HTTP failure carries the Basic challenge", func(t *testing.T) {
+		resp := handle(t, "github/gateway/o/r.git/info/refs")
+		assert.Equal(t, `Basic realm="warden"`, resp.Headers.Get("WWW-Authenticate"))
+	})
+
+	t.Run("a non-git failure carries none", func(t *testing.T) {
+		resp := handle(t, "github/gateway/user")
+		assert.Empty(t, resp.Headers.Get("WWW-Authenticate"),
+			"only git needs telling which scheme to retry with")
+	})
+}

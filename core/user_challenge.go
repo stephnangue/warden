@@ -64,6 +64,23 @@ func (c *Core) attachUserChallenge(ctx context.Context, req *logical.Request, re
 	resp.AddHeader("WWW-Authenticate", challenge)
 }
 
+// attachGitBasicChallenge attaches a Basic challenge to a transparent-auth
+// failure on a git smart-HTTP path.
+//
+// Git's opening info/refs carries no Authorization, so the role (Basic
+// username) and any user credential (Basic password) are both absent and auth
+// fails for want of a role. Where the request passed through instead, the
+// upstream issues this challenge; where an out-of-band agent forced
+// authentication there is no upstream response to relay, and a bare 401 leaves
+// the client nothing to act on. Basic only: the agent is what failed, and the
+// user leg has nothing to fix.
+func attachGitBasicChallenge(req *logical.Request, resp *logical.Response) {
+	if req == nil || resp == nil || !isGitSmartHTTP(req) {
+		return
+	}
+	resp.AddHeader("WWW-Authenticate", `Basic realm="warden"`)
+}
+
 // prmMetadataURL renders the absolute URL of a mount's protected resource
 // metadata, or "" when none would be served.
 //

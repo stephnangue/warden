@@ -209,15 +209,15 @@ func BuildHooks(opts Options) Hooks {
 	// Returns false (so normal auth runs) when r is nil, when r carries any
 	// Authorization header, or when the path is not a Git smart-HTTP
 	// endpoint. The Authorization-header check looks redundant — core only
-	// consults IsUnauthenticatedPath when ClientToken == "", which already
-	// implies ExtractTokens found no usable agent credential. But several
-	// edge cases reach here with Authorization set yet ClientToken empty:
-	// malformed Bearer ("Bearer " with no token), Basic with an empty
-	// password slot, Negotiate (Kerberos) and other unrecognised schemes,
-	// and — on a protected-resource mount — a client certificate acting as
-	// the agent, which leaves the agent empty by design. Without this guard
-	// those all silently get probe-passthrough; with it they fall through to
-	// implicit-auth-fail → 401, which is the honest answer.
+	// consults IsUnauthenticatedPath when ExtractTokens yielded no credential
+	// of either kind. But several edge cases reach here with Authorization
+	// set and still nothing extracted: malformed Bearer ("Bearer " with no
+	// token), Basic with an empty password slot, and Negotiate (Kerberos) or
+	// other unrecognised schemes. Without this guard those all silently get
+	// probe-passthrough; with it they fall through to implicit-auth-fail →
+	// 401, which is the honest answer. A certificate agent presenting a user
+	// credential no longer reaches here at all — the extracted user stops it
+	// at the gate.
 	isUnauthenticatedGitProbe := func(r *http.Request, path string) bool {
 		if r == nil || r.Header.Get("Authorization") != "" {
 			return false

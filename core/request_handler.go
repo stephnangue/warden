@@ -904,21 +904,14 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 
 		// Check for unauthenticated paths on streaming backends.
 		//
-		// An empty ClientToken alone no longer implies "no agent credential":
-		// on a protected-resource mount the extractor returns an empty agent to
-		// mean "the TLS client certificate is the agent". Treating that as
-		// unauthenticated would skip CheckToken, minting, user capture and
-		// audit for a request that carried two credentials.
-		//
-		// Scoped to userLeg so non-opted-in mounts keep 0.19 behaviour exactly:
-		// only there can a cert produce an empty agent, and public token-less
-		// endpoints (e.g. Vault's PKI CRL paths) must stay reachable from an
-		// mTLS listener or behind a mesh proxy, where a trusted cert is present
-		// on every request. The git providers can also return an empty agent
-		// under a cert on a non-opted-in mount, but githttp's own probe gate
-		// refuses passthrough whenever Authorization is set, which it is there.
-		certIsAgent := userLeg && logical.HasTrustedClientCert(req.HTTPRequest)
-		if req.ClientToken == "" && !certIsAgent {
+		// A user credential is what makes passthrough unsafe: it would skip
+		// CheckToken, minting, user capture and audit for a principal we must
+		// record. A credential-less probe mints and injects nothing, so it
+		// still passes through — git's opening info/refs carries no
+		// Authorization and needs the upstream's challenge to learn to retry
+		// with one. Providers declaring unauthenticated paths must therefore
+		// surface Authorization-borne user credentials from ExtractTokens.
+		if req.ClientToken == "" && userCred == "" {
 			if tmp, ok := matchingBackend.(logical.TransparentModeProvider); ok {
 				relativePath := req.Path
 				if req.MountPoint != "" {
@@ -945,7 +938,9 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 						logger.String("request_id", req.RequestID),
 					)
 
-					return logical.ErrorResponse(logical.ErrUnauthorized(err.Error())), nil, nil
+					errResp := logical.ErrorResponse(logical.ErrUnauthorized(err.Error()))
+					attachGitBasicChallenge(req, errResp)
+					return errResp, nil, nil
 				}
 			}
 		}
