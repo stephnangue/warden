@@ -43,11 +43,27 @@ type Backend interface {
 	// at the end.
 	SpecialPaths() *Paths
 
-	// ExtractToken extracts token value from request (just extraction, no validation).
-	// Returns empty string if no token found.
-	// Each provider has it own way to pass token.
-	// This will be used by the core to extract the provided token.
-	ExtractToken(r *http.Request) string
+	// ExtractTokens extracts the two principals a request may carry (just
+	// extraction, no validation). Each provider has its own way to pass them.
+	//
+	//   agent — the primary principal's credential, which authorizes the
+	//           request. "" means either no credential at all or "the TLS
+	//           client certificate is the agent"; the distinction is resolved
+	//           downstream by the core, which reads the cert from the request
+	//           context.
+	//   user  — the secondary, identity-only principal's credential, or "".
+	//
+	// userLeg reports whether this is a streaming gateway request on a mount
+	// with an effective user_auth_path. When userLeg is false an implementation
+	// MUST return user == "" and MUST resolve agent exactly as it did before
+	// the user leg existed, including its own channel precedence.
+	//
+	// One sanctioned exception to that byte-identity rule: Authorization scheme
+	// names are now matched case-insensitively everywhere, per RFC 7235, where
+	// several providers previously compared them exactly. This widens what is
+	// accepted (a lowercase "bearer"/"apikey"/"splunk" now resolves) and never
+	// narrows it, so no request that worked before stops working.
+	ExtractTokens(r *http.Request, userLeg bool) (agent, user string)
 }
 
 // BackendClass is the class of backend that is being implemented
@@ -167,10 +183,6 @@ type UserAuthConfigProvider interface {
 	// credentials (e.g., "auth/user-jwt/"), or "" when per-user auth is not
 	// configured — in which case the feature is off and the request is unchanged.
 	GetUserAuthPath() string
-
-	// GetUserTokenHeader returns the request header carrying the user credential.
-	// Empty means the default (X-Warden-User-Token).
-	GetUserTokenHeader() string
 
 	// GetUserAuthRole returns the role used to authenticate the user credential,
 	// or "" to fall back to the user auth mount's own default_role.

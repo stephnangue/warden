@@ -166,12 +166,6 @@ func (r *Request) SetTokenEntry(te *TokenEntry) {
 	r.tokenEntry = te
 }
 
-// DefaultUserTokenHeader is the default request header carrying the secondary
-// (user) credential for secondary transparent authentication. Providers may
-// override it via user_token_header. It is a bearer secret and is stripped from
-// every upstream-forwarding header list.
-const DefaultUserTokenHeader = "X-Warden-User-Token"
-
 // UserPrincipal is a request's secondary (user) principal: a first-class Warden
 // TokenEntry resolved from a second request header via the existing auth methods,
 // exactly as the primary/agent credential is. It carries both the validated token

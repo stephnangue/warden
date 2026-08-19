@@ -143,8 +143,8 @@ func (m *mockAuditDevice) SpecialPaths() *logical.Paths {
 	return nil
 }
 
-func (m *mockAuditDevice) ExtractToken(r *http.Request) string {
-	return ""
+func (m *mockAuditDevice) ExtractTokens(r *http.Request, userLeg bool) (agent, user string) {
+	return "", ""
 }
 
 // mockAuditFactory implements audit.Factory for testing
@@ -404,8 +404,8 @@ func (m *mockAuthMethod) SpecialPaths() *logical.Paths {
 	return nil
 }
 
-func (m *mockAuthMethod) ExtractToken(r *http.Request) string {
-	return ""
+func (m *mockAuthMethod) ExtractTokens(r *http.Request, userLeg bool) (agent, user string) {
+	return "", ""
 }
 
 func newMockAuthMethod() *mockAuthMethod {
@@ -504,8 +504,8 @@ func (m *mockProvider) SpecialPaths() *logical.Paths {
 	return nil
 }
 
-func (m *mockProvider) ExtractToken(r *http.Request) string {
-	return ""
+func (m *mockProvider) ExtractTokens(r *http.Request, userLeg bool) (agent, user string) {
+	return "", ""
 }
 
 func newMockProvider() *mockProvider {

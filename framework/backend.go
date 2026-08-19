@@ -49,8 +49,9 @@ type Backend struct {
 	// BackendType is a string identifier for the backend type (e.g., "jwt", "aws")
 	BackendType string
 
-	// TokenExtractor is the warden-specific token extraction function
-	TokenExtractor func(r *http.Request) string
+	// TokenExtractor is the warden-specific two-principal extraction function.
+	// Nil means the default rule (logical.ExtractTokensDefault).
+	TokenExtractor func(r *http.Request, userLeg bool) (agent, user string)
 
 	// config stores the backend configuration
 	config  map[string]any
@@ -262,30 +263,19 @@ func (b *Backend) Class() logical.BackendClass {
 	return b.BackendClass
 }
 
-// ExtractToken extracts token from HTTP request using the configured extractor.
-// If no custom extractor is set, uses the default extraction logic:
-// 1. X-Warden-Token header
-// 2. Authorization: Bearer <token>
-func (b *Backend) ExtractToken(r *http.Request) string {
+// ExtractTokens extracts the agent and user principals from an HTTP request
+// using the configured extractor, falling back to the default rule.
+func (b *Backend) ExtractTokens(r *http.Request, userLeg bool) (agent, user string) {
 	if b.TokenExtractor != nil {
-		return b.TokenExtractor(r)
+		return b.TokenExtractor(r, userLeg)
 	}
-	return DefaultTokenExtractor(r)
+	return DefaultTokenExtractor(r, userLeg)
 }
 
-// DefaultTokenExtractor is the default token extraction function.
-// It checks X-Warden-Token header first, then falls back to Authorization: Bearer.
-func DefaultTokenExtractor(r *http.Request) string {
-	// Try X-Warden-Token header first
-	if token := r.Header.Get("X-Warden-Token"); token != "" {
-		return token
-	}
-	// Fall back to Authorization: Bearer
-	authHeader := r.Header.Get("Authorization")
-	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
-		return authHeader[7:]
-	}
-	return ""
+// DefaultTokenExtractor is the default two-principal extraction function. See
+// logical.ExtractTokensDefault for the rule it implements.
+func DefaultTokenExtractor(r *http.Request, userLeg bool) (agent, user string) {
+	return logical.ExtractTokensDefault(r, userLeg)
 }
 
 // Route looks up the path that would be used for a given path string.

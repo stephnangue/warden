@@ -3,7 +3,6 @@ package httpproxy
 import (
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logical"
@@ -107,15 +106,9 @@ func TypedTokenExtractor(credType string, credField string, headerName string, h
 	}
 }
 
-// DefaultTokenExtractor extracts the Warden session token from X-Warden-Token
-// or Authorization: Bearer headers. This is the default for most providers.
-func DefaultTokenExtractor(r *http.Request) string {
-	if token := r.Header.Get("X-Warden-Token"); token != "" {
-		return token
-	}
-	authHeader := r.Header.Get("Authorization")
-	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
-		return authHeader[7:]
-	}
-	return ""
+// DefaultTokenExtractor resolves the agent and user principals from the standard
+// Warden channels. This is the default for providers with no native credential
+// header of their own. See logical.ExtractTokensDefault for the rule.
+func DefaultTokenExtractor(r *http.Request, userLeg bool) (agent, user string) {
+	return logical.ExtractTokensDefault(r, userLeg)
 }

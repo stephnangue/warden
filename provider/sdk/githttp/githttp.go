@@ -59,6 +59,47 @@ func IsSmartHTTPPath(apiPath string) bool {
 	return false
 }
 
+// UserCredential returns the user principal's credential from a git
+// smart-HTTP request whose agent already arrived out of band (a trusted client
+// certificate or X-Warden-Agent-Token). Both of the slots git can carry a
+// secret in are then free for the user:
+//
+//   - Authorization: Bearer <token>, for clients configured via
+//     http.extraHeader.
+//   - The HTTP Basic password, which is the native git shape. The Basic
+//     username keeps its usual meaning — the AGENT's auth role, read by
+//     GetAuthRoleFromRequest — so "https://<agent-role>:<user-token>@host/..."
+//     works with no client configuration at all.
+//
+// The two are alternatives, not a precedence: both ride the Authorization
+// header, so a request can only ever carry one. Returns "" when it carries
+// neither.
+//
+// The Basic password is only taken when it is JWT-shaped. Git mandates a
+// password whenever it does Basic auth, so a cert-authenticated client with no
+// user token still has to send something — conventionally a placeholder like
+// "x". Treating that placeholder as a user credential would fail validation and
+// 401 a request that should simply proceed agent-only, which is how the same
+// request behaves on a mount without user_auth_path. Requiring the JWT shape
+// costs nothing: the user leg is bearer-only and every mount format that can
+// authenticate it (jwt, k8s_sa_jwt, a SPIFFE JWT-SVID) requires a JWT, so a
+// non-JWT password could never have resolved to a user anyway.
+//
+// An explicit Authorization: Bearer is taken verbatim. That is unambiguous
+// intent, so a malformed value there fails closed rather than being ignored.
+func UserCredential(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if token := logical.StripBearer(r.Header.Get("Authorization")); token != "" {
+		return token
+	}
+	if _, pwd, ok := r.BasicAuth(); ok && logical.IsJWT(pwd) {
+		return pwd
+	}
+	return ""
+}
+
 // pathAfterGateway extracts the API-shaped path slice from a routed gateway
 // request URL. Wraps the httpproxy helper with a fall-back to the input
 // when no "/gateway" segment is present (defensive — routed gateway
@@ -169,14 +210,14 @@ func BuildHooks(opts Options) Hooks {
 	// Authorization header, or when the path is not a Git smart-HTTP
 	// endpoint. The Authorization-header check looks redundant — core only
 	// consults IsUnauthenticatedPath when ClientToken == "", which already
-	// implies ExtractToken found no usable credential. But several edge
-	// cases reach here with Authorization set yet ClientToken empty:
+	// implies ExtractTokens found no usable agent credential. But several
+	// edge cases reach here with Authorization set yet ClientToken empty:
 	// malformed Bearer ("Bearer " with no token), Basic with an empty
 	// password slot, Negotiate (Kerberos) and other unrecognised schemes,
-	// and Basic when X-SSL-Client-Cert is also present (some providers'
-	// ExtractToken deliberately skips Basic in that case). Without this
-	// guard those all silently get probe-passthrough; with it they fall
-	// through to implicit-auth-fail → 401, which is the honest answer.
+	// and — on a protected-resource mount — a client certificate acting as
+	// the agent, which leaves the agent empty by design. Without this guard
+	// those all silently get probe-passthrough; with it they fall through to
+	// implicit-auth-fail → 401, which is the honest answer.
 	isUnauthenticatedGitProbe := func(r *http.Request, path string) bool {
 		if r == nil || r.Header.Get("Authorization") != "" {
 			return false

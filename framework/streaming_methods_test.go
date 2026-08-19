@@ -114,17 +114,21 @@ func TestStreamingBackend_Cleanup_NilBackend(t *testing.T) {
 	sb.Cleanup(context.Background()) // should not panic
 }
 
-func TestStreamingBackend_ExtractToken(t *testing.T) {
+func TestStreamingBackend_ExtractTokens(t *testing.T) {
 	sb := testStreamingBackend()
 	req, _ := http.NewRequest("GET", "/", nil)
 	req.Header.Set("X-Warden-Token", "test-token")
-	assert.Equal(t, "test-token", sb.ExtractToken(req))
+	agent, user := sb.ExtractTokens(req, false)
+	assert.Equal(t, "test-token", agent)
+	assert.Empty(t, user)
 }
 
-func TestStreamingBackend_ExtractToken_NilBackend(t *testing.T) {
+func TestStreamingBackend_ExtractTokens_NilBackend(t *testing.T) {
 	sb := &StreamingBackend{}
 	req, _ := http.NewRequest("GET", "/", nil)
-	assert.Equal(t, "", sb.ExtractToken(req))
+	agent, user := sb.ExtractTokens(req, false)
+	assert.Empty(t, agent)
+	assert.Empty(t, user)
 }
 
 func TestStreamingBackend_HandleExistenceCheck_NilBackend(t *testing.T) {

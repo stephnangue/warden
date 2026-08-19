@@ -56,14 +56,27 @@ func TestExtractToken(t *testing.T) {
 		assert.Equal(t, "jwt-as-password", extractToken(r))
 	})
 
-	t.Run("Basic password skipped when X-SSL-Client-Cert set", func(t *testing.T) {
-		// Cert-auth case: Git protocol forces a placeholder password slot, but
-		// the cert is the real credential. Reading the placeholder would hand
-		// it to the JWT validator and break the flow.
+	t.Run("Basic password stays the agent even under a client cert", func(t *testing.T) {
+		// An explicitly-presented credential beats an ambient one. A mesh
+		// sidecar puts a cert on nearly every request; letting it suppress a
+		// JWT the client deliberately placed in the password slot would
+		// mis-attribute the workload to the sidecar. The certificate only takes
+		// over as the agent on a protected-resource mount, where it is presented
+		// to free the slot for the user.
 		r := httptest.NewRequest("GET", "/v1/github/gateway/owner/repo.git/info/refs", nil)
-		r.SetBasicAuth("role-name", "placeholder")
+		r.SetBasicAuth("role-name", "jwt-as-password")
+		assert.Equal(t, "jwt-as-password", extractToken(withClientCert(r)))
+	})
+
+	t.Run("raw cert headers do not suppress Basic", func(t *testing.T) {
+		// The listener middleware strips these before any provider runs, so a
+		// forged header must not influence extraction. Keying the skip on the
+		// header (as this provider used to) made the branch dead code and let
+		// cert-authenticated clients have their placeholder consumed.
+		r := httptest.NewRequest("GET", "/v1/github/gateway/owner/repo.git/info/refs", nil)
+		r.SetBasicAuth("role-name", "jwt-as-password")
 		r.Header.Set("X-SSL-Client-Cert", "<pem>")
-		assert.Empty(t, extractToken(r))
+		assert.Equal(t, "jwt-as-password", extractToken(r))
 	})
 
 	t.Run("no auth → empty", func(t *testing.T) {

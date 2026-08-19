@@ -11,11 +11,16 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
 
-// TokenExtractorFunc extracts the Warden session token from an incoming HTTP request.
-type TokenExtractorFunc func(r *http.Request) string
+// TokenExtractorFunc resolves the agent and user principals carried by an
+// incoming HTTP request. See logical.Backend.ExtractTokens for the contract
+// every implementation must honor — in particular, when userLeg is false it
+// MUST return user == "" and MUST resolve agent exactly as it did before the
+// user leg existed.
+type TokenExtractorFunc func(r *http.Request, userLeg bool) (agent, user string)
 
 // Dispatch carries per-request overrides returned by ProviderSpec.ResolveUpstream.
 // Zero values mean "fall through to the spec/mount default." Used by providers
@@ -317,7 +322,6 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 				AutoAuthPath:    parsedConfig.AutoAuthPath,
 				DefaultAuthRole: parsedConfig.DefaultAuthRole,
 				UserAuthPath:    parsedConfig.UserAuthPath,
-				UserTokenHeader: parsedConfig.UserTokenHeader,
 				UserAuthRole:    parsedConfig.UserAuthRole,
 			})
 
@@ -379,13 +383,17 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 		autoAuthPath, _ := config["auto_auth_path"].(string)
 		defaultRole, _ := config["default_role"].(string)
 		userAuthPath, _ := config["user_auth_path"].(string)
-		userTokenHeader, _ := config["user_token_header"].(string)
 		userAuthRole, _ := config["user_auth_role"].(string)
+		// A persisted user_token_header from a pre-0.20 config is ignored: the
+		// user credential now always rides Authorization.
+		if hdr, _ := config["user_token_header"].(string); hdr != "" {
+			b.Logger.Warn("ignoring retired user_token_header config key; the user credential now rides Authorization",
+				logger.String("user_token_header", hdr))
+		}
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			AutoAuthPath:    autoAuthPath,
 			DefaultAuthRole: defaultRole,
 			UserAuthPath:    userAuthPath,
-			UserTokenHeader: userTokenHeader,
 			UserAuthRole:    userAuthRole,
 		})
 
@@ -419,7 +427,6 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 			"auto_auth_path":    tc.AutoAuthPath,
 			"default_role":      tc.DefaultAuthRole,
 			"user_auth_path":    tc.UserAuthPath,
-			"user_token_header": tc.UserTokenHeader,
 			"user_auth_role":    tc.UserAuthRole,
 			"tls_skip_verify":   b.tlsSkipVerify,
 			"ca_data":           b.caData,

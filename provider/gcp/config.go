@@ -11,6 +11,8 @@ type ProviderConfig struct {
 	MaxBodySize     int64
 	Timeout         time.Duration
 	AutoAuthPath    string
+	UserAuthPath    string
+	UserAuthRole    string
 	DefaultAuthRole string
 	TLSSkipVerify   bool
 	CAData          string
@@ -23,6 +25,8 @@ func parseConfig(conf map[string]any) ProviderConfig {
 		MaxBodySize:     framework.ParseMaxBodySize(conf),
 		Timeout:         framework.ParseTimeout(conf, framework.DefaultTimeout),
 		AutoAuthPath:    framework.GetConfigString(conf, "auto_auth_path", ""),
+		UserAuthPath:    framework.GetConfigString(conf, "user_auth_path", ""),
+		UserAuthRole:    framework.GetConfigString(conf, "user_auth_role", ""),
 		DefaultAuthRole: framework.GetConfigString(conf, "default_role", ""),
 		TLSSkipVerify:   tlsSkipVerify,
 		CAData:          caData,

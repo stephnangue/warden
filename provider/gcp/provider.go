@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
@@ -19,20 +18,24 @@ type gcpBackend struct {
 	caData        string
 }
 
-// extractToken extracts Warden token from Authorization Bearer header or X-Warden-Token header
-func extractToken(r *http.Request) string {
-	// First, check X-Warden-Token header (explicit Warden token)
-	if token := r.Header.Get("X-Warden-Token"); token != "" {
-		return token
-	}
-
-	// Then check Authorization header for Bearer token
-	authHeader := r.Header.Get("Authorization")
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		return strings.TrimPrefix(authHeader, "Bearer ")
-	}
-
-	return ""
+// extractTokens resolves the two principals on a GCP gateway request.
+//
+// The only agent channel is X-Warden-Token. On a protected-resource mount an
+// agent presented out of band — X-Warden-Agent-Token or a trusted client
+// certificate — frees Authorization to carry the user.
+//
+// Extraction matrix. "-" means nothing extracted; an empty agent under a
+// client certificate means the certificate authenticates the agent
+// downstream. Off the user leg there is never a user.
+//
+//	request carries                     agent(off)  agent(on)  user(on)
+//	Authorization: Bearer u             u           u          -
+//	X-Warden-Token: w + Bearer u        w           w          -
+//	X-Warden-Agent-Token: a + Bearer u  u           a          u
+//	client cert + Bearer u              u           -          u
+//	client cert only                    -           -          -
+func extractTokens(r *http.Request, userLeg bool) (agent, user string) {
+	return logical.ExtractTokensWithChannels(r, userLeg, "X-Warden-Token")
 }
 
 // Factory creates a new GCP provider backend using the logical.Factory pattern
@@ -72,7 +75,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			Help:           gcpBackendHelp,
 			BackendType:    "gcp",
 			BackendClass:   logical.ClassProvider,
-			TokenExtractor: extractToken,
+			TokenExtractor: extractTokens,
 			Paths:          b.paths(),
 		},
 	}
@@ -123,6 +126,8 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			AutoAuthPath:    parsedConfig.AutoAuthPath,
+			UserAuthPath:    parsedConfig.UserAuthPath,
+			UserAuthRole:    parsedConfig.UserAuthRole,
 			DefaultAuthRole: parsedConfig.DefaultAuthRole,
 		})
 	}
@@ -148,6 +153,8 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 			TLSSkipVerify   bool   `json:"tls_skip_verify"`
 			CAData          string `json:"ca_data"`
 			AutoAuthPath    string `json:"auto_auth_path"`
+			UserAuthPath    string `json:"user_auth_path"`
+			UserAuthRole    string `json:"user_auth_role"`
 			DefaultAuthRole string `json:"default_role"`
 		}
 		if err := entry.DecodeJSON(&config); err != nil {
@@ -172,6 +179,8 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			AutoAuthPath:    config.AutoAuthPath,
+			UserAuthPath:    config.UserAuthPath,
+			UserAuthRole:    config.UserAuthRole,
 			DefaultAuthRole: config.DefaultAuthRole,
 		})
 	} else {
@@ -185,6 +194,8 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 			"ca_data":         b.caData,
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
+			"user_auth_path":  tc.UserAuthPath,
+			"user_auth_role":  tc.UserAuthRole,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create default config entry: %w", err)
@@ -232,10 +243,16 @@ func (b *gcpBackend) handleTransparentGatewayStreaming(ctx context.Context, req 
 func ValidateConfig(config map[string]any) error {
 	if err := framework.ValidateAllowedKeys(config,
 		"max_body_size", "timeout", "tls_skip_verify", "ca_data",
-		"auto_auth_path", "default_role"); err != nil {
+		"auto_auth_path", "default_role", "user_auth_path", "user_auth_role"); err != nil {
 		return err
 	}
 	if err := framework.ValidateCommonConfig(config); err != nil {
+		return err
+	}
+	// Validate the secondary (user) auth fields at mount-enable too, not only
+	// on the config-write endpoint, so a role without a path is rejected rather
+	// than silently ignored at runtime.
+	if err := framework.ValidateUserAuthConfig(config); err != nil {
 		return err
 	}
 	return framework.ValidateTLSConfig(config)

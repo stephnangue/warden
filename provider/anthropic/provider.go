@@ -2,9 +2,9 @@ package anthropic
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
+	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
@@ -14,20 +14,27 @@ const DefaultAnthropicURL = "https://api.anthropic.com"
 // DefaultAnthropicTimeout is the default request timeout for AI inference
 const DefaultAnthropicTimeout = 120 * time.Second
 
-// extractToken extracts Warden token from X-Warden-Token, x-api-key, or Authorization: Bearer headers.
-// Anthropic clients typically send credentials via x-api-key, so we accept that as a Warden token source.
-func extractToken(r *http.Request) string {
-	if token := r.Header.Get("X-Warden-Token"); token != "" {
-		return token
-	}
-	if token := r.Header.Get("x-api-key"); token != "" {
-		return token
-	}
-	authHeader := r.Header.Get("Authorization")
-	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
-		return authHeader[7:]
-	}
-	return ""
+// extractTokens resolves the two principals on an Anthropic gateway request.
+//
+// Agent channels, in the provider's existing order: X-Warden-Token, then the
+// native x-api-key header. On a protected-resource mount an agent presented out
+// of band — X-Warden-Agent-Token or a trusted client certificate — frees
+// Authorization to carry the user.
+//
+// Extraction matrix. "-" means nothing extracted; an empty agent under a
+// client certificate means the certificate authenticates the agent
+// downstream. Off the user leg there is never a user.
+//
+//	request carries                     agent(off)  agent(on)  user(on)
+//	Authorization: Bearer u             u           u          -
+//	X-Warden-Token: w + Bearer u        w           w          -
+//	X-Warden-Agent-Token: a + Bearer u  u           a          u
+//	client cert + Bearer u              u           -          u
+//	client cert only                    -           -          -
+//	x-api-key: n + Bearer u             n           n          u
+//	x-api-key: n + Bearer u + cert      n           n          u
+func extractTokens(r *http.Request, userLeg bool) (agent, user string) {
+	return logical.ExtractTokensWithChannels(r, userLeg, "X-Warden-Token", "x-api-key")
 }
 
 // Spec defines the Anthropic provider configuration for the httpproxy framework.
@@ -40,7 +47,7 @@ var Spec = &httpproxy.ProviderSpec{
 	UserAgent:            "warden-anthropic-proxy",
 	HelpText:             anthropicBackendHelp,
 	ExtractCredentials:   httpproxy.HeaderAPIKeyExtractor("x-api-key"),
-	ExtractToken:         extractToken,
+	ExtractToken:         extractTokens,
 	ExtraHeadersToRemove: []string{"x-api-key", "anthropic-version"},
 	DefaultHeaders:       map[string]string{"anthropic-version": "2023-06-01"},
 }

@@ -47,30 +47,49 @@ func (b *alicloudBackend) getProxyDomains() []string {
 // (for cert-based implicit auth).
 var _ logical.TransparentAuthRoleExtractor = (*alicloudBackend)(nil)
 
-// extractToken extracts the client token from the request.
-// For Alicloud, the JWT is embedded in Alicloud's own auth protocol (mirroring AWS):
+// extractTokens resolves the principals on an Alibaba Cloud gateway request.
+//
+// Agent-only: the user leg is not wired for Alibaba Cloud in this cut, for the
+// same reason as AWS — the security-token slot is structurally free in
+// cert-transparent mode, but ACS3/OSS SDK clients have no interactive
+// protected-resource bootstrap. Always returns user == "".
+//
+// Handles four implicit auth modes:
 //   - ACS3 JWT: JWT in x-acs-security-token (eyJ prefix)
 //   - ACS3 cert: role name as access_key_id in ACS3 Credential field
 //   - OSS/SigV4 JWT: JWT in X-Amz-Security-Token (eyJ prefix)
 //   - OSS/SigV4 cert: role name as access_key_id in SigV4 Credential field
-func extractToken(r *http.Request) string {
+//
+// Extraction matrix. "-" means nothing extracted; an empty agent under a
+// client certificate means the certificate authenticates the agent
+// downstream. Off the user leg there is never a user.
+//
+//	request carries                     agent(off)  agent(on)  user(on)
+//	Authorization: Bearer u             -           -          -
+//	X-Warden-Token: w + Bearer u        -           -          -
+//	X-Warden-Agent-Token: a + Bearer u  -           -          -
+//	client cert + Bearer u              -           -          -
+//	client cert only                    -           -          -
+//	x-acs-security-token: eyJn          eyJn        eyJn       -
+//	x-acs-security-token: eyJn + cert   eyJn        eyJn       -
+func extractTokens(r *http.Request, _ bool) (agent, user string) {
 	// ACS3 JWT transparent
 	if tok := r.Header.Get(HeaderACSSecurityToken); strings.HasPrefix(tok, "eyJ") {
-		return tok
+		return tok, ""
 	}
 	// OSS/SigV4 JWT transparent
 	if tok := r.Header.Get("X-Amz-Security-Token"); strings.HasPrefix(tok, "eyJ") {
-		return tok
+		return tok, ""
 	}
 	// ACS3 cert transparent
 	if IsACS3Request(r) {
-		return ExtractACS3AccessKeyID(r.Header.Get(HeaderAuthorization))
+		return ExtractACS3AccessKeyID(r.Header.Get(HeaderAuthorization)), ""
 	}
 	// OSS/SigV4 cert transparent
 	if sigv4.IsSigV4Request(r) {
-		return sigv4.ExtractAccessKeyID(r.Header.Get(HeaderAuthorization))
+		return sigv4.ExtractAccessKeyID(r.Header.Get(HeaderAuthorization)), ""
 	}
-	return ""
+	return "", ""
 }
 
 // GetAuthRoleFromRequest extracts the auth role from the ACS3 or SigV4
@@ -133,7 +152,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			Help:           alicloudBackendHelp,
 			BackendType:    "alicloud",
 			BackendClass:   logical.ClassProvider,
-			TokenExtractor: extractToken,
+			TokenExtractor: extractTokens,
 			Paths:          b.paths(),
 		},
 	}

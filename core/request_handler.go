@@ -867,10 +867,58 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// the type assertion and skip the extractor entirely.
 		c.extractMCPDescriptor(ctx, req, matchingBackend)
 
-		req.ClientToken = matchingBackend.ExtractToken(req.HTTPRequest)
+		// Resolve the secondary (user) auth config once, before extraction:
+		// whether this mount is a protected resource decides how the extractor
+		// reads Authorization. On a mount with no effective user_auth_path the
+		// rule collapses to the pre-0.20 behaviour and userCred stays empty.
+		userAuthPath, userAuthRole := c.resolveUserAuthConfig(ctx, matchingBackend)
+		userLeg := userAuthPath != ""
 
-		// Check for unauthenticated paths on streaming backends
-		if req.ClientToken == "" {
+		// Reject the one genuinely ambiguous credential combination rather than
+		// resolving it silently. X-Warden-Token is the operator credential and
+		// never carries a user (see logical.ExtractTokensDefault), while on a
+		// protected-resource mount Authorization is where the user rides. A
+		// request bearing both is mixing the operator and workload surfaces:
+		// whichever way the provider's precedence falls, one of the two
+		// credentials gets dropped without comment. Say so instead.
+		//
+		// Presenting X-Warden-Token alone stays valid — that is explicit
+		// (non-transparent) agent auth, and it works here exactly as it does on
+		// a mount that is not a protected resource.
+		if userLeg && req.HTTPRequest != nil &&
+			req.HTTPRequest.Header.Get(logical.HeaderWardenToken) != "" &&
+			req.HTTPRequest.Header.Get("Authorization") != "" {
+			c.logger.Warn("ambiguous credentials on a protected-resource mount",
+				logger.String("path", req.Path),
+				logger.String("request_id", req.RequestID),
+			)
+			return logical.ErrorResponse(logical.ErrBadRequest(
+				"X-Warden-Token cannot be combined with an Authorization credential on a mount " +
+					"with user_auth_path: it is the operator credential and carries no user principal. " +
+					"Present the agent via X-Warden-Agent-Token or a client certificate to let " +
+					"Authorization carry the user, or drop the Authorization header.")), nil, nil
+		}
+
+		var userCred string
+		req.ClientToken, userCred = matchingBackend.ExtractTokens(req.HTTPRequest, userLeg)
+
+		// Check for unauthenticated paths on streaming backends.
+		//
+		// An empty ClientToken alone no longer implies "no agent credential":
+		// on a protected-resource mount the extractor returns an empty agent to
+		// mean "the TLS client certificate is the agent". Treating that as
+		// unauthenticated would skip CheckToken, minting, user capture and
+		// audit for a request that carried two credentials.
+		//
+		// Scoped to userLeg so non-opted-in mounts keep 0.19 behaviour exactly:
+		// only there can a cert produce an empty agent, and public token-less
+		// endpoints (e.g. Vault's PKI CRL paths) must stay reachable from an
+		// mTLS listener or behind a mesh proxy, where a trusted cert is present
+		// on every request. The git providers can also return an empty agent
+		// under a cert on a non-opted-in mount, but githttp's own probe gate
+		// refuses passthrough whenever Authorization is set, which it is there.
+		certIsAgent := userLeg && logical.HasTrustedClientCert(req.HTTPRequest)
+		if req.ClientToken == "" && !certIsAgent {
 			if tmp, ok := matchingBackend.(logical.TransparentModeProvider); ok {
 				relativePath := req.Path
 				if req.MountPoint != "" {
@@ -902,15 +950,15 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 			}
 		}
 
-		// Secondary transparent authentication: resolve the per-request USER
-		// principal (identity only) from a second request header when the
-		// provider or namespace configures user_auth_path. It runs upfront —
-		// before CheckToken and thus before the CBP decision — so the user is a
+		// Secondary transparent authentication: validate the per-request USER
+		// principal (identity only) already extracted above, when the provider
+		// or namespace configures user_auth_path. It runs upfront — before
+		// CheckToken and thus before the CBP decision — so the user is a
 		// first-class, already-validated principal by the time authorization and
 		// minting run. Skipped for stream-unauthenticated requests, which bypass
 		// CheckToken, minting, and audit entirely.
 		if !req.StreamUnauthenticated {
-			if err := c.captureUserContext(ctx, req, matchingBackend); err != nil {
+			if err := c.captureUserContext(ctx, req, userAuthPath, userAuthRole, userCred); err != nil {
 				c.logger.Warn("secondary user authentication failed",
 					logger.Err(err),
 					logger.String("path", req.Path),
@@ -1668,10 +1716,18 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 	return nil
 }
 
-// It checks X-Warden-Token header first, then falls back to Authorization: Bearer.
+// extractToken resolves the agent credential for a NON-streaming request. It
+// checks X-Warden-Token first, then falls back to Authorization: Bearer.
+//
+// The two-principal rule deliberately does not apply here: nothing on the
+// non-streaming path consumes a user credential (captureUserContext runs only in
+// the streaming branch), so reinterpreting Authorization would change agent
+// resolution — on provider config paths and transparent operations alike —
+// while producing a user nobody reads. Streaming gateway requests use the
+// routed backend's ExtractTokens instead.
 func extractToken(r *http.Request) string {
 	// Try X-Warden-Token header first
-	if token := r.Header.Get("X-Warden-Token"); token != "" {
+	if token := r.Header.Get(logical.HeaderWardenToken); token != "" {
 		return token
 	}
 	// Fall back to Authorization: Bearer
@@ -1680,26 +1736,11 @@ func extractToken(r *http.Request) string {
 
 // stripBearer returns the token in an Authorization-style header value, matching
 // the "Bearer " scheme case-insensitively and returning the remainder verbatim
-// (no TrimSpace). It is the single source of truth for the Bearer strip so an
-// Authorization-borne user token (the opt-in user_token_header) is byte-identical
-// to the agent's own auth token when both ride Authorization — which the
-// captureUserContext "user must differ from the agent" guard relies on.
+// (no TrimSpace). It delegates to logical.StripBearer, the single source of
+// truth for the strip, so core and every provider extractor agree byte-for-byte
+// on where a token starts.
 func stripBearer(authHeader string) string {
-	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
-		return authHeader[7:]
-	}
-	return ""
-}
-
-// resolveHeaderToken reads a token-exchange token from the named (already
-// canonicalized) request header, stripping the Bearer scheme via stripBearer
-// when the header is Authorization, and returning any other header verbatim.
-func resolveHeaderToken(r *http.Request, headerName string) string {
-	v := r.Header.Get(headerName)
-	if headerName == "Authorization" {
-		return stripBearer(v)
-	}
-	return v
+	return logical.StripBearer(authHeader)
 }
 
 // isTransparentRequest checks if this request needs implicit authentication.
@@ -1735,7 +1776,14 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 	// Explicit X-Warden-Token means the client wants explicit auth — skip
 	// transparent auth entirely so the standard token-validation path runs.
 	// Mirrors the same short-circuit on the transparent-ops path at line 743.
-	if req.HTTPRequest != nil && req.HTTPRequest.Header.Get("X-Warden-Token") != "" {
+	//
+	// X-Warden-Agent-Token deliberately does NOT short-circuit here. It carries
+	// a JWT or JWT-SVID that still needs a transparent login, and the token
+	// store only looks tokens up — it never logs one in — so skipping this path
+	// would fail every fresh credential presented on that header. An agent
+	// holding an opaque session token has no reason to use it: X-Warden-Token
+	// already frees Authorization for the user under extraction rule 1.
+	if req.HTTPRequest != nil && req.HTTPRequest.Header.Get(logical.HeaderWardenToken) != "" {
 		return false, ""
 	}
 
@@ -1802,18 +1850,14 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 // unusable: invalid/unauthenticable, cross-namespace, or identical to the agent's
 // own credential. An unset user_auth_path is a no-op — req.User stays nil and the
 // request is byte-identical to before the feature.
-func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, backend logical.Backend) error {
-	userAuthPath, userTokenHeader, userAuthRole := c.resolveUserAuthConfig(ctx, backend)
+// The user credential is supplied by the caller rather than read here: the
+// backend's ExtractTokens already decided which wire slot carries the user for
+// this provider and this request shape, and the two must not disagree.
+func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, userAuthPath, userAuthRole, userCred string) error {
 	if userAuthPath == "" {
 		return nil // per-user auth not configured — feature off
 	}
 
-	if userTokenHeader == "" {
-		userTokenHeader = logical.DefaultUserTokenHeader
-	}
-	userTokenHeader = http.CanonicalHeaderKey(userTokenHeader)
-
-	userCred := resolveHeaderToken(req.HTTPRequest, userTokenHeader)
 	if userCred == "" {
 		// No user credential presented. Leave req.User nil and let a downstream
 		// flow that genuinely needs the user (assertion_user_claims, a templated
@@ -1821,19 +1865,21 @@ func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, bac
 		return nil
 	}
 
-	// Fail closed if the user credential is the agent's own token — a
-	// misconfiguration (or an Authorization-header collision for a JWT-bearer
-	// agent) that would otherwise authenticate the agent as the user.
+	// Fail closed if the user credential is the agent's own token. The two legs
+	// now occupy different wire slots, but a client that defensively sets both
+	// X-Warden-Token and Authorization to the same JWT would otherwise have the
+	// agent double-resolved as its own "user".
 	if userCred == req.ClientToken {
 		return fmt.Errorf("the user credential must differ from the agent credential")
 	}
 
-	// The user credential is a bearer secret. Strip it from the request now that it
-	// is captured, so it never proxies to an upstream or lands in an audit header
-	// copy: this covers a custom user_token_header that the static per-provider
-	// strip lists cannot name, and any forwarding path without a Warden strip list.
-	// req.User.RawToken retains the value for the RFC 8693 subject_token path.
-	req.HTTPRequest.Header.Del(userTokenHeader)
+	// The user credential is a bearer secret riding Authorization (either as a
+	// Bearer token or, for git smart-HTTP, in the Basic password slot). Strip the
+	// header now that it is captured, so it never proxies to an upstream or lands
+	// in an audit header copy — this covers any forwarding path without a Warden
+	// strip list. req.User.RawToken retains the value for the RFC 8693
+	// subject_token path.
+	req.HTTPRequest.Header.Del("Authorization")
 
 	userTE, _, err := c.resolveTransparentIdentity(ctx, req, userAuthPath, userAuthRole, userCred)
 	if err != nil {
@@ -1855,25 +1901,25 @@ func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, bac
 }
 
 // resolveUserAuthConfig resolves the secondary (user) auth configuration for a
-// gateway request. The provider is consulted first (a backend that implements
-// logical.UserAuthConfigProvider), then the request namespace's custom metadata
-// (user_auth_path / user_token_header / user_auth_role) — mirroring how primary
-// transparent auth resolves auto_auth_path from the provider or the namespace.
-// Returns an empty path when per-user auth is not configured anywhere.
-func (c *Core) resolveUserAuthConfig(ctx context.Context, backend logical.Backend) (userAuthPath, userTokenHeader, userAuthRole string) {
+// gateway request from the mount's own config (a backend that implements
+// logical.UserAuthConfigProvider). Returns an empty path when per-user auth is
+// not configured on this mount.
+//
+// Deliberately mount-only, unlike auto_auth_path, which also falls back to the
+// namespace's custom metadata. Agent identity genuinely is namespace-scoped —
+// every workload in a namespace authenticates the same way — but user_auth_path
+// marks THIS mount as a protected resource: it decides whether Authorization
+// carries the user rather than the agent, and it binds one resource to one
+// identity provider and audience. A namespace-wide fallback would opt in every
+// mount in the namespace, including ones that never intended to reinterpret
+// Authorization, and would force a single user_auth_role's bound_audiences to
+// cover every resource at once.
+func (c *Core) resolveUserAuthConfig(_ context.Context, backend logical.Backend) (userAuthPath, userAuthRole string) {
 	if p, ok := backend.(logical.UserAuthConfigProvider); ok {
 		userAuthPath = p.GetUserAuthPath()
-		userTokenHeader = p.GetUserTokenHeader()
 		userAuthRole = p.GetUserAuthRole()
 	}
-	if userAuthPath == "" {
-		if ns, _ := namespace.FromContext(ctx); ns != nil {
-			userAuthPath = ns.CustomMetadata["user_auth_path"]
-			userTokenHeader = ns.CustomMetadata["user_token_header"]
-			userAuthRole = ns.CustomMetadata["user_auth_role"]
-		}
-	}
-	return userAuthPath, userTokenHeader, userAuthRole
+	return userAuthPath, userAuthRole
 }
 
 // performImplicitAuth performs implicit authentication for the PRIMARY principal

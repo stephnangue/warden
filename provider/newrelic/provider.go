@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
@@ -13,21 +14,28 @@ const DefaultNewRelicURL = "https://api.newrelic.com"
 // DefaultNewRelicTimeout is the default request timeout for New Relic API calls
 const DefaultNewRelicTimeout = 30 * time.Second
 
-// extractToken extracts the Warden session token from the Api-Key header,
-// allowing New Relic clients to authenticate naturally. Falls back to
-// X-Warden-Token and Authorization: Bearer for standard Warden clients.
-func extractToken(r *http.Request) string {
-	if token := r.Header.Get("Api-Key"); token != "" {
-		return token
-	}
-	if token := r.Header.Get("X-Warden-Token"); token != "" {
-		return token
-	}
-	authHeader := r.Header.Get("Authorization")
-	if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
-		return authHeader[7:]
-	}
-	return ""
+// extractTokens resolves the two principals on a New Relic gateway request.
+//
+// Agent channels, in the provider's existing order: the native Api-Key header
+// first, then X-Warden-Token — Api-Key must keep winning so New Relic clients
+// authenticate naturally. On a protected-resource mount an agent presented out
+// of band — X-Warden-Agent-Token or a trusted client certificate — frees
+// Authorization to carry the user.
+//
+// Extraction matrix. "-" means nothing extracted; an empty agent under a
+// client certificate means the certificate authenticates the agent
+// downstream. Off the user leg there is never a user.
+//
+//	request carries                     agent(off)  agent(on)  user(on)
+//	Authorization: Bearer u             u           u          -
+//	X-Warden-Token: w + Bearer u        w           w          -
+//	X-Warden-Agent-Token: a + Bearer u  u           a          u
+//	client cert + Bearer u              u           -          u
+//	client cert only                    -           -          -
+//	Api-Key: n + Bearer u               n           n          u
+//	Api-Key: n + Bearer u + cert        n           n          u
+func extractTokens(r *http.Request, userLeg bool) (agent, user string) {
+	return logical.ExtractTokensWithChannels(r, userLeg, "Api-Key", "X-Warden-Token")
 }
 
 // Spec defines the New Relic provider configuration for the httpproxy framework.
@@ -36,7 +44,7 @@ var Spec = &httpproxy.ProviderSpec{
 	DefaultURL:         DefaultNewRelicURL,
 	URLConfigKey:       "newrelic_url",
 	DefaultTimeout:     DefaultNewRelicTimeout,
-	ExtractToken:       extractToken,
+	ExtractToken:       extractTokens,
 	ParseStreamBody:    true,
 	UserAgent:          "warden-newrelic-proxy",
 	HelpText:           newrelicBackendHelp,

@@ -16,15 +16,19 @@ import (
 // Headers to remove before proxying
 var headersToRemove = []string{
 	// Security headers (will be replaced with real values)
-	"Authorization",          // Remove Warden auth token to prevent leakage
-	"X-Vault-Token",          // Will be replaced with real Vault token
-	"X-Vault-Request",        // Internal Vault header
-	"X-Warden-Token",         // Warden-specific auth header
+	"Authorization",   // Remove Warden auth token to prevent leakage
+	"X-Vault-Token",   // Will be replaced with real Vault token
+	"X-Vault-Request", // Internal Vault header
+	"X-Warden-Token",
+	"X-Warden-Agent-Token", // Warden-specific auth header
+	// Retired in 0.20: the user credential now rides Authorization. Still
+	// stripped so a client that keeps sending the old header cannot leak the
+	// credential to the upstream.
+	"X-Warden-User-Token",
 	"X-Warden-Role",          // Warden role header
 	"X-Warden-Provider",      // Warden provider-mount routing header
 	"X-Warden-Subject-Token", // token-exchange subject token — internal-only, never forwarded
 	"X-Warden-Actor-Token",   // token-exchange actor token — internal-only, never forwarded
-	"X-Warden-User-Token",    // secondary user credential — internal-only, never forwarded
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",

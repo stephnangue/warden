@@ -87,8 +87,10 @@ func (b *introspectMockBackend) Class() logical.BackendClass          { return l
 func (b *introspectMockBackend) HandleExistenceCheck(ctx context.Context, req *logical.Request) (bool, bool, error) {
 	return false, false, nil
 }
-func (b *introspectMockBackend) SpecialPaths() *logical.Paths        { return nil }
-func (b *introspectMockBackend) ExtractToken(r *http.Request) string { return "" }
+func (b *introspectMockBackend) SpecialPaths() *logical.Paths { return nil }
+func (b *introspectMockBackend) ExtractTokens(r *http.Request, userLeg bool) (string, string) {
+	return "", ""
+}
 
 // jwtRequest builds a system-backend request with an Authorization: Bearer
 // header, which the aggregator interprets as CredentialFormat = "jwt".

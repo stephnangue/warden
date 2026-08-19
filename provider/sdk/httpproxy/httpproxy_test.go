@@ -131,7 +131,9 @@ func TestDefaultTokenExtractor(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			req := mustNewRequest(t, "GET", "/", tc.headers)
-			assert.Equal(t, tc.expected, DefaultTokenExtractor(req))
+			agent, user := DefaultTokenExtractor(req, false)
+			assert.Equal(t, tc.expected, agent)
+			assert.Empty(t, user)
 		})
 	}
 }
@@ -413,8 +415,8 @@ func TestNewFactory_ValidateExtraConfig(t *testing.T) {
 
 func TestNewFactory_CustomTokenExtractor(t *testing.T) {
 	spec := testSpec()
-	spec.ExtractToken = func(r *http.Request) string {
-		return r.Header.Get("X-Custom-Token")
+	spec.ExtractToken = func(r *http.Request, userLeg bool) (string, string) {
+		return r.Header.Get("X-Custom-Token"), ""
 	}
 	b := setupBackend(t, spec)
 	pb := b.(*proxyBackend)

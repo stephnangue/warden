@@ -2,10 +2,10 @@ package github
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/githttp"
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
@@ -16,30 +16,61 @@ const DefaultGitHubURL = "https://api.github.com"
 // DefaultAPIVersion is the default GitHub REST API version
 const DefaultAPIVersion = "2022-11-28"
 
-// extractToken extracts the Warden token from one of:
-//  1. X-Warden-Token header
-//  2. Authorization: Bearer <token>
-//  3. HTTP Basic Auth password (Git smart-HTTP carries the JWT this way)
+// extractTokens resolves the two principals on a GitHub gateway request.
 //
-// The Basic Auth branch is suppressed when X-SSL-Client-Cert is present:
-// cert-based implicit auth takes precedence in the core flow, and the Git
-// protocol requires a placeholder password slot that the JWT validator
-// would otherwise reject. Reading the placeholder would actively harm
-// correctness for cert-authenticated clients.
-func extractToken(r *http.Request) string {
-	if token := r.Header.Get("X-Warden-Token"); token != "" {
-		return token
+// Agent channels, in the provider's existing order: X-Warden-Token, then
+// Authorization: Bearer, then the HTTP Basic password (Git smart-HTTP carries
+// the agent JWT that way, with the role in the Basic username).
+//
+// On a protected-resource mount an agent presented out of band —
+// X-Warden-Agent-Token or a trusted client certificate — frees BOTH remaining
+// slots for the user: the Bearer and the Basic password. See
+// githttp.UserCredential.
+//
+// Off the user leg the Basic password is ALWAYS the agent, even under a client
+// certificate. An explicitly-presented credential beats an ambient one: a
+// service-mesh sidecar puts a cert on nearly every request, and letting that
+// suppress a JWT the client deliberately placed in the password slot would
+// mis-attribute the workload to the sidecar — the same hazard that orders
+// X-Warden-Agent-Token ahead of the cert in the shared rule. This is also
+// exactly the pre-0.20 behaviour, so no request that worked before changes.
+//
+// The certificate only takes over as the agent on a protected-resource mount,
+// where it is presented deliberately to free the password slot for the user.
+//
+// Extraction matrix. "-" means nothing extracted; an empty agent under a
+// client certificate means the certificate authenticates the agent
+// downstream. Off the user leg there is never a user.
+// "eyJp" stands for a JWT-shaped secret, "x" for the placeholder git
+// requires when the client has no token for the password slot.
+//
+//	request carries                            agent(off)  agent(on)  user(on)
+//	Authorization: Bearer u                    u           u          -
+//	X-Warden-Token: w + Bearer u               w           w          -
+//	X-Warden-Agent-Token: a + Bearer u         u           a          u
+//	client cert + Bearer u                     u           -          u
+//	client cert only                           -           -          -
+//	Basic role:eyJp (JWT)                      eyJp        eyJp       -
+//	Basic role:eyJp + client cert              eyJp        -          eyJp
+//	Basic role:x (placeholder)                 x           x          -
+//	Basic role:x + client cert                 x           -          -
+//	X-Warden-Agent-Token: a + Basic role:eyJp  eyJp        a          eyJp
+func extractTokens(r *http.Request, userLeg bool) (agent, user string) {
+	// X-Warden-Token is the operator credential and never opens the user leg.
+	// See logical.ExtractTokensDefault.
+	if token := r.Header.Get(logical.HeaderWardenToken); token != "" {
+		return token, ""
 	}
-	authHeader := r.Header.Get("Authorization")
-	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
-		return authHeader[7:]
+	if a, ok := logical.AgentOutOfBand(r, userLeg); ok {
+		return a, githttp.UserCredential(r)
 	}
-	if r.Header.Get("X-SSL-Client-Cert") == "" {
-		if _, pwd, ok := r.BasicAuth(); ok && pwd != "" {
-			return pwd
-		}
+	if token := logical.StripBearer(r.Header.Get("Authorization")); token != "" {
+		return token, ""
 	}
-	return ""
+	if _, pwd, ok := r.BasicAuth(); ok && pwd != "" {
+		return pwd, ""
+	}
+	return "", ""
 }
 
 // Spec defines the GitHub provider configuration for the httpproxy framework.
@@ -52,7 +83,7 @@ var Spec = &httpproxy.ProviderSpec{
 	UserAgent:          "warden-github-proxy",
 	HelpText:           githubBackendHelp,
 	ExtractCredentials: httpproxy.TypedTokenExtractor(credential.TypeGitHubToken, "token", "Authorization", "token "),
-	ExtractToken:       extractToken,
+	ExtractToken:       extractTokens,
 	DefaultAccept:      "application/vnd.github+json",
 	ExtraConfigFields: map[string]*framework.FieldSchema{
 		"api_version": {
@@ -141,9 +172,27 @@ and the Warden JWT in the password:
   git clone https://<role>:$JWT@<warden-addr>/v1/github/gateway/<owner>/<repo>.git
 
 Git's credential helpers cache on URL + username, so each role gets a
-distinct credential entry. Cert-auth clients pass any placeholder in
-the password slot; the token extractor skips the placeholder when
-X-SSL-Client-Cert is present.
+distinct credential entry.
+
+The password slot always carries the agent credential, including for
+clients that also present a TLS certificate: an explicitly-presented
+credential takes precedence over an ambient one, so a service-mesh
+sidecar certificate never displaces a JWT the client put there
+deliberately.
+
+On a mount configured with user_auth_path the roles shift — the
+certificate becomes the agent and the password slot carries the
+per-request USER identity, while the username keeps naming the
+agent's role:
+
+  git clone https://<agent-role>:$USER_JWT@<warden-addr>/v1/...
+
+A cert-authenticated client with no user identity still has to put
+something in the password slot, since Git requires one for Basic
+auth. Any non-JWT value is treated as that placeholder and ignored,
+so the request proceeds with the agent alone:
+
+  git clone https://<agent-role>:x@<warden-addr>/v1/...
 
 For GitHub Enterprise Server:
   Configure github_url to point to your GHE instance API endpoint

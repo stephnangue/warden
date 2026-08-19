@@ -226,8 +226,8 @@ func TestDeviceBackendMethods(t *testing.T) {
 		t.Errorf("Initialize should return nil: %v", err)
 	}
 
-	if token := d.ExtractToken(&http.Request{}); token != "" {
-		t.Errorf("expected empty token, got %s", token)
+	if agent, user := d.ExtractTokens(&http.Request{}, false); agent != "" || user != "" {
+		t.Errorf("expected empty tokens, got agent=%s user=%s", agent, user)
 	}
 
 	found, exists, err := d.HandleExistenceCheck(context.Background(), nil)

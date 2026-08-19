@@ -19,12 +19,16 @@ import (
 var headersToStrip = []string{
 	"Authorization",
 	"X-Warden-Token",
+	"X-Warden-Agent-Token",
+	// Retired in 0.20: the user credential now rides Authorization. Still
+	// stripped so a client that keeps sending the old header cannot leak the
+	// credential to the upstream.
+	"X-Warden-User-Token",
 	"X-Warden-Namespace",
 	"X-Warden-Provider",
 	"X-Warden-Role",
 	"X-Warden-Subject-Token",
 	"X-Warden-Actor-Token",
-	"X-Warden-User-Token",
 	// Cookie carries client session identity that AWS will ignore but that
 	// would otherwise bleed across the trust boundary. Strip explicitly —
 	// sigv4.NormalizeRequest doesn't touch it.

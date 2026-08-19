@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/framework"
@@ -48,20 +47,27 @@ type vaultBackend struct {
 	caData        string
 }
 
-// extractToken extracts the client token from the request.
-// Checks X-Warden-Token, X-Vault-Token, and Authorization: Bearer.
-func extractToken(r *http.Request) string {
-	if token := r.Header.Get("X-Warden-Token"); token != "" {
-		return token
-	}
-	if token := r.Header.Get("X-Vault-Token"); token != "" {
-		return token
-	}
-	authHeader := r.Header.Get("Authorization")
-	if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
-		return authHeader[7:]
-	}
-	return ""
+// extractTokens resolves the two principals on a Vault gateway request.
+//
+// Agent channels, in the provider's existing order: X-Warden-Token, then
+// X-Vault-Token (the native Vault client header). On a protected-resource mount
+// an agent presented out of band — X-Warden-Agent-Token or a trusted client
+// certificate — frees Authorization to carry the user.
+//
+// Extraction matrix. "-" means nothing extracted; an empty agent under a
+// client certificate means the certificate authenticates the agent
+// downstream. Off the user leg there is never a user.
+//
+//	request carries                     agent(off)  agent(on)  user(on)
+//	Authorization: Bearer u             u           u          -
+//	X-Warden-Token: w + Bearer u        w           w          -
+//	X-Warden-Agent-Token: a + Bearer u  u           a          u
+//	client cert + Bearer u              u           -          u
+//	client cert only                    -           -          -
+//	X-Vault-Token: n + Bearer u         n           n          u
+//	X-Vault-Token: n + Bearer u + cert  n           n          u
+func extractTokens(r *http.Request, userLeg bool) (agent, user string) {
+	return logical.ExtractTokensWithChannels(r, userLeg, "X-Warden-Token", "X-Vault-Token")
 }
 
 // Factory creates a new Vault provider backend using the logical.Factory pattern
@@ -103,7 +109,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			Help:           vaultBackendHelp,
 			BackendType:    "vault",
 			BackendClass:   logical.ClassProvider,
-			TokenExtractor: extractToken,
+			TokenExtractor: extractTokens,
 			Paths:          b.paths(),
 		},
 	}
@@ -113,7 +119,8 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	b.StorageView = conf.StorageView
 
 	// Seed an empty transparent config so isTransparentRequest can route
-	// once auto_auth_path is configured via handleConfigWrite.
+	// once auto_auth_path is configured via handleConfigWrite. Mount-enable
+	// config, if any, overwrites it below.
 	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{})
 
 	// Initialize reverse proxy with Vault transport (lazily created on first use)
@@ -141,6 +148,16 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		b.SetTimeout(parsedConfig.Timeout)
 		b.tlsSkipVerify = parsedConfig.TLSSkipVerify
 		b.caData = parsedConfig.CAData
+
+		// Honour transparent + per-user auth supplied at mount-enable time, not
+		// only via the config-write endpoint. Without this the fields are
+		// silently dropped from `warden provider enable vault -json ...`.
+		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
+			AutoAuthPath:    parsedConfig.AutoAuthPath,
+			DefaultAuthRole: parsedConfig.DefaultAuthRole,
+			UserAuthPath:    parsedConfig.UserAuthPath,
+			UserAuthRole:    parsedConfig.UserAuthRole,
+		})
 
 		// Update transport if custom TLS config is set
 		if b.tlsSkipVerify || b.caData != "" {
@@ -174,6 +191,8 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 			TLSSkipVerify   bool   `json:"tls_skip_verify"`
 			CAData          string `json:"ca_data"`
 			AutoAuthPath    string `json:"auto_auth_path"`
+			UserAuthPath    string `json:"user_auth_path"`
+			UserAuthRole    string `json:"user_auth_role"`
 			DefaultAuthRole string `json:"default_role"`
 		}
 		if err := entry.DecodeJSON(&config); err != nil {
@@ -200,6 +219,8 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			AutoAuthPath:    config.AutoAuthPath,
+			UserAuthPath:    config.UserAuthPath,
+			UserAuthRole:    config.UserAuthRole,
 			DefaultAuthRole: config.DefaultAuthRole,
 		})
 	}

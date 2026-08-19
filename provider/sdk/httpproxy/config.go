@@ -14,7 +14,6 @@ type BaseConfig struct {
 	AutoAuthPath    string
 	DefaultAuthRole string
 	UserAuthPath    string
-	UserTokenHeader string
 	UserAuthRole    string
 	TLSSkipVerify   bool
 	CAData          string // base64-encoded PEM CA certificate
@@ -31,7 +30,6 @@ func ParseConfig(conf map[string]any, urlKey string, defaultURL string, defaultT
 		AutoAuthPath:    framework.GetConfigString(conf, "auto_auth_path", ""),
 		DefaultAuthRole: framework.GetConfigString(conf, "default_role", ""),
 		UserAuthPath:    framework.GetConfigString(conf, "user_auth_path", ""),
-		UserTokenHeader: framework.GetConfigString(conf, "user_token_header", ""),
 		UserAuthRole:    framework.GetConfigString(conf, "user_auth_role", ""),
 		TLSSkipVerify:   tlsSkipVerify,
 		CAData:          caData,
@@ -54,8 +52,8 @@ func ValidateConfig(conf map[string]any, urlKey string) error {
 	}
 
 	// Validate the secondary (user) auth fields at mount-enable too, not only on
-	// the config-write endpoint, so an invalid user_token_header / role→path is
-	// rejected before it can be parsed and applied.
+	// the config-write endpoint, so an invalid role→path pairing is rejected
+	// before it can be parsed and applied.
 	if err := framework.ValidateUserAuthConfig(conf); err != nil {
 		return err
 	}

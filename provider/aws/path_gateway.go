@@ -110,12 +110,28 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		return nil, nil, fmt.Errorf("signature mismatch")
 	}
 
-	// Step 5: Clean up security token before re-signing.
+	// Step 5: Clean up inbound credential headers before re-signing.
 	// X-Amz-Security-Token contains the JWT (or is absent for cert auth).
 	// Remove it so it doesn't leak into the proxied request.
 	// The real AWS session token (if any) will be added by resignRequest when
 	// the minted credentials include a SessionToken.
+	//
+	// The X-Warden-* headers are stripped for the same reason: each carries a
+	// caller credential that has no meaning to AWS and must not reach it. AWS
+	// keeps its own list rather than sharing the httpproxy one because its
+	// requests are SigV4-signed — the strip has to happen here, after the
+	// inbound signature has been verified against the original header set and
+	// before resignRequest computes a new signature over the modified one.
 	req.HTTPRequest.Header.Del("X-Amz-Security-Token")
+	for _, h := range []string{
+		"X-Warden-Token",
+		"X-Warden-Agent-Token",
+		"X-Warden-User-Token",
+		"X-Warden-Subject-Token",
+		"X-Warden-Actor-Token",
+	} {
+		req.HTTPRequest.Header.Del(h)
+	}
 
 	// Step 6: Get AWS credentials
 	awsCreds, err := b.getCredentials(req)

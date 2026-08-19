@@ -353,10 +353,13 @@ func TestValidateUserAuthConfig(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("Authorization is an allowed user_token_header", func(t *testing.T) {
+	t.Run("a persisted user_token_header is tolerated and ignored", func(t *testing.T) {
+		// Retired in 0.20 — the user credential now rides Authorization, decided
+		// by request transport rather than mount config. An existing mount must
+		// still load rather than failing validation on the stale key.
 		err := ValidateUserAuthConfig(map[string]any{
 			"user_auth_path":    "auth/user-jwt/",
-			"user_token_header": "Authorization",
+			"user_token_header": "X-Warden-User-Token",
 		})
 		assert.NoError(t, err)
 	})
@@ -365,27 +368,6 @@ func TestValidateUserAuthConfig(t *testing.T) {
 		err := ValidateUserAuthConfig(map[string]any{"user_auth_path": 123})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "user_auth_path must be a string")
-	})
-
-	t.Run("user_token_header aliasing a control header is rejected", func(t *testing.T) {
-		// Includes the token-exchange transport headers, which Warden also reads.
-		for _, h := range []string{
-			"X-Warden-Token", "x-warden-token", "X-Warden-Role", "X-Warden-Namespace",
-			"X-Warden-Subject-Token", "X-Warden-Actor-Token",
-		} {
-			err := ValidateUserAuthConfig(map[string]any{
-				"user_auth_path":    "auth/user-jwt/",
-				"user_token_header": h,
-			})
-			require.Errorf(t, err, "header %q must be rejected", h)
-			assert.Contains(t, err.Error(), "must not alias a Warden control header")
-		}
-	})
-
-	t.Run("user_token_header without user_auth_path is rejected", func(t *testing.T) {
-		err := ValidateUserAuthConfig(map[string]any{"user_token_header": "X-User-Jwt"})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "user_token_header requires user_auth_path")
 	})
 
 	t.Run("user_auth_role without user_auth_path is rejected", func(t *testing.T) {
