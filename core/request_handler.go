@@ -964,7 +964,12 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 					logger.String("path", req.Path),
 					logger.String("request_id", req.RequestID),
 				)
-				return logical.ErrorResponse(logical.ErrUnauthorized(err.Error())), nil, nil
+				// A user credential WAS presented and rejected, so the challenge
+				// carries error="invalid_token" — the client should replace it
+				// rather than assume it simply forgot to send one.
+				errResp := logical.ErrorResponse(logical.ErrUnauthorized(err.Error()))
+				c.attachUserChallenge(ctx, req, errResp, true)
+				return errResp, nil, nil
 			}
 		}
 	}
@@ -1067,7 +1072,9 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 				logger.Err(err),
 				logger.String("path", req.Path),
 			)
-			return logical.ErrorResponse(err), auth, nil
+			errResp := logical.ErrorResponse(err)
+			c.attachUserRequiredChallenge(ctx, req, errResp, err)
+			return errResp, auth, nil
 		}
 	}
 
@@ -1093,7 +1100,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		if err := c.mintCredentialForRequest(ctx, req, te); err != nil {
 			c.logger.Error("failed to mint credential for access request",
 				logger.Err(err), logger.String("path", req.Path))
-			return logical.ErrorResponse(err), auth, nil
+			return logical.ErrorResponse(accessPathMintError(err)), auth, nil
 		}
 		resp.Data = ad.ResponseBuilder(req.Credential)
 		resp.AccessData = nil
@@ -1401,7 +1408,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// forwards it as-is. Fail closed when no user principal was captured: this is
 		// spec-opt-in delegation, never a silent fallback to the agent's identity.
 		if req.User == nil || req.User.RawToken == "" {
-			return nil, fmt.Errorf("spec %q requires subject_token_source=user_identity but no user principal was presented", specName)
+			return nil, fmt.Errorf("spec %q requires subject_token_source=user_identity: %w", specName, credential.ErrUserRequired)
 		}
 		inputs.SubjectToken = req.User.RawToken
 	case credential.SourceWardenIdentity:
@@ -1557,7 +1564,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	var userClaims map[string]string
 	if userKeys := credential.AssertionUserClaimKeys(spec.Config); len(userKeys) > 0 {
 		if userTE == nil {
-			return nil, fmt.Errorf("spec %q sets assertion_user_claims but no user principal was presented", specName)
+			return nil, fmt.Errorf("spec %q sets assertion_user_claims: %w", specName, credential.ErrUserRequired)
 		}
 		// "sub" names the user's identity principal, not a metadata key — exclude it
 		// from the metadata projection so an operator can list it (to bind
@@ -1700,7 +1707,7 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 	// Returns nil for non-exchange specs, leaving the mint path unchanged.
 	inputs, err := caller.ResolveInputs(ctx, te.CredentialSpec)
 	if err != nil {
-		return logical.ErrBadRequestf("token exchange input resolution failed: %s", err.Error())
+		return exchangeInputError(err)
 	}
 
 	// Issue credential using the credential manager

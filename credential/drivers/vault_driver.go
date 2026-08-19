@@ -588,12 +588,25 @@ func resolveUserTemplate(raw string, userClaims map[string]string, field string)
 	if !strings.Contains(raw, "{{user.") {
 		return raw, nil
 	}
+	// Deliberately NOT an ErrUserRequired case, however tempting: an empty claim
+	// map does not mean the request lacked a user. Claims are projected only when
+	// the spec sets assertion_user_claims, and when it does, core has already
+	// rejected a user-less request before the driver runs — and a present user
+	// always yields at least "sub". So reaching here with no claims means the
+	// spec structurally cannot project any, which no amount of authenticating
+	// will change. Returning a 401 challenge would send the caller into an OAuth
+	// loop it cannot escape while hiding the real fix from the operator.
 	var subErr error
 	resolved := userClaimTemplate.ReplaceAllStringFunc(raw, func(match string) string {
 		claim := userClaimTemplate.FindStringSubmatch(match)[1]
 		v, ok := userClaims[claim]
 		if !ok {
-			subErr = fmt.Errorf("%s references {{user.%s}} but that claim is absent (project it via assertion_user_claims)", field, claim)
+			// The user IS present; this claim was simply never projected. Note
+			// that assertion_user_claims only applies to a warden_identity
+			// subject — pairing {{user.…}} with subject_token_source=user_identity
+			// cannot populate claims at all, which is the likelier mistake.
+			subErr = fmt.Errorf("%s references {{user.%s}} but that claim is absent from the user's projected claims "+
+				"(list it in assertion_user_claims, which requires subject_token_source=warden_identity)", field, claim)
 			return ""
 		}
 		// The value becomes path bytes: a single non-empty allow-listed token that
