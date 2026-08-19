@@ -163,6 +163,12 @@ type TransparentModeProvider interface {
 	// implicit auth. The request reaches the streaming handler with
 	// req.Credential == nil — handlers that previously assumed a credential
 	// is always present must guard accordingly.
+	//
+	// Core consults this only when ExtractTokens yielded neither an agent nor
+	// a user credential. An implementation that declares unauthenticated paths
+	// must therefore surface Authorization-borne user credentials from its
+	// ExtractTokens: one dropped there is discarded here rather than
+	// authenticated, captured and audited.
 	IsUnauthenticatedPath(r *http.Request, path string) bool
 
 	// IsTransparentPath checks if the given path (relative to mount) should trigger

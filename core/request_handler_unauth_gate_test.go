@@ -31,19 +31,27 @@ func (m *mockUnauthPathBackend) IsUnauthenticatedPath(_ *http.Request, _ string)
 func (m *mockUnauthPathBackend) GetUserAuthPath() string { return m.userAuthPath }
 func (m *mockUnauthPathBackend) GetUserAuthRole() string { return "" }
 
-// TestStreamUnauthenticatedGate guards the hole opened by letting an empty agent
-// mean "the TLS client certificate is the agent", and pins the scope of that
-// guard.
+// ExtractTokens replaces the base mock's stub, which returns no credentials at
+// all. The gate now turns on the extracted user credential, so a stub would
+// make every case look credential-less and the test would pass regardless of
+// what the gate does.
+func (m *mockUnauthPathBackend) ExtractTokens(r *http.Request, userLeg bool) (agent, user string) {
+	return logical.ExtractTokensDefault(r, userLeg)
+}
+
+// TestStreamUnauthenticatedGate pins what disqualifies a request from
+// passthrough: an extracted user credential, not a client certificate.
 //
 // The gate is entered on ClientToken == "", which used to imply "no credential
-// at all". On a protected-resource mount that is now a routine state, so without
-// the cert check a cert-authenticated request carrying a user credential would
-// be marked StreamUnauthenticated and skip CheckToken, minting, user capture and
-// audit entirely.
+// at all". On a protected-resource mount that is now routine, since an empty
+// agent there means "the certificate is the agent" — so a request carrying a
+// user credential must not be marked StreamUnauthenticated and skip CheckToken,
+// minting, user capture and audit.
 //
-// The check is deliberately scoped to such mounts. Only there can a cert produce
-// an empty agent, and public token-less endpoints must stay reachable from an
-// mTLS listener or behind a mesh proxy, where a trusted cert rides every request.
+// A certificate alone must not disqualify it. Git's opening info/refs probe is
+// exactly that shape — cert agent, no Authorization — and it has to reach the
+// upstream to collect the WWW-Authenticate that teaches the client to retry
+// with credentials. Gating on the certificate broke every cert-agent git clone.
 func TestStreamUnauthenticatedGate(t *testing.T) {
 	core := createTestCore(t)
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
@@ -65,9 +73,12 @@ func TestStreamUnauthenticatedGate(t *testing.T) {
 	mount(t, "protected/", "protected-uuid", "auth/user-jwt/")
 	mount(t, "plain/", "plain-uuid", "")
 
-	newReq := func(mountPath string, withCert bool) *logical.Request {
+	newReq := func(mountPath string, withCert bool, authz string) *logical.Request {
 		p := mountPath + "gateway/messages"
 		hr := httptest.NewRequest(http.MethodPost, "/v1/"+p, nil)
+		if authz != "" {
+			hr.Header.Set("Authorization", authz)
+		}
 		if withCert {
 			hr = hr.WithContext(listener.WithForwardedClientCert(hr.Context(), &x509.Certificate{}))
 		}
@@ -75,27 +86,50 @@ func TestStreamUnauthenticatedGate(t *testing.T) {
 	}
 
 	t.Run("protected resource: no credential and no cert is still unauthenticated", func(t *testing.T) {
-		req := newReq("protected/", false)
+		req := newReq("protected/", false, "")
 		_, _, _ = core.handleNonLoginRequest(ctx, req)
 		assert.True(t, req.StreamUnauthenticated,
 			"a genuinely credential-less probe must keep passing through")
 	})
 
-	t.Run("protected resource: trusted cert disqualifies the unauthenticated path", func(t *testing.T) {
-		req := newReq("protected/", true)
+	t.Run("protected resource: a cert with no user credential still passes through", func(t *testing.T) {
+		// The git probe shape. Nothing is minted or injected, so the upstream
+		// sees an unauthenticated request and answers with the challenge the
+		// client needs. Requiring auth here fails for want of a role, because
+		// for git the role travels in the Basic username the probe has not sent.
+		req := newReq("protected/", true, "")
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+		assert.True(t, req.StreamUnauthenticated,
+			"a credential-less probe must reach the upstream even under a certificate")
+	})
+
+	t.Run("protected resource: a cert plus a user credential disqualifies it", func(t *testing.T) {
+		// The actual hazard: passthrough here would skip CheckToken, minting,
+		// user capture and audit for a request that carried a principal we are
+		// meant to record.
+		req := newReq("protected/", true, "Bearer user-jwt")
 		_, _, _ = core.handleNonLoginRequest(ctx, req)
 		assert.False(t, req.StreamUnauthenticated,
-			"an empty agent means the cert IS the agent; treating it as unauthenticated "+
-				"would skip CheckToken, minting, user capture and audit")
+			"a user credential must never be dropped by an unauthenticated-path match")
 	})
 
 	t.Run("plain mount: a trusted cert does not disqualify it", func(t *testing.T) {
 		// 0.19 behaviour, preserved. A cert cannot yield an empty agent here, so
 		// an empty ClientToken still means "no credential" — and public
 		// token-less endpoints must keep working behind mTLS or a mesh proxy.
-		req := newReq("plain/", true)
+		req := newReq("plain/", true, "")
 		_, _, _ = core.handleNonLoginRequest(ctx, req)
 		assert.True(t, req.StreamUnauthenticated,
-			"scoping the cert check to protected resources keeps non-opted-in mounts byte-identical")
+			"non-opted-in mounts stay byte-identical")
+	})
+
+	t.Run("plain mount: Authorization is the agent, so it does not disqualify it", func(t *testing.T) {
+		// Off the user leg Authorization resolves to the agent, so ClientToken
+		// is non-empty and the gate is never entered — the same outcome as 0.19
+		// but for the agent's sake, not the user's.
+		req := newReq("plain/", false, "Bearer agent-jwt")
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+		assert.False(t, req.StreamUnauthenticated,
+			"an agent credential off the user leg must still be authenticated")
 	})
 }
