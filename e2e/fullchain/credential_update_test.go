@@ -20,8 +20,12 @@ import (
 func setSpecAPIKey(t *testing.T, env h.ProviderEnv, key, restore string) {
 	t.Helper()
 
+	// PUT, not POST: creating a spec that already exists is a 409. The update
+	// merges config rather than replacing it, which is the same thing here only
+	// because splunk's spec holds api_key and nothing else — a multi-field spec
+	// would need every field it wants to keep.
 	write := func(v string) {
-		body := `{"type":"api_key","source":"` + env.Source() + `","config":{"api_key":"` + v + `"}}`
+		body := `{"config":{"api_key":"` + v + `"}}`
 		status, resp := h.APIRequest(t, "PUT", "sys/cred/specs/"+env.Spec(), leaderPort, body)
 		switch status {
 		case 200, 201, 204:
@@ -69,11 +73,16 @@ func TestFullChain_UpdatedSpecReachesUpstream(t *testing.T) {
 // This is deliberate — a credential is issued to a session, and re-minting on
 // every request would defeat the point of issuing one — but it is the part
 // operators are most likely to be surprised by, because it means rewriting a
-// spec does not immediately stop the old secret being sent. What bounds the
-// staleness is the session's own lifetime.
+// spec does not immediately stop the old secret being sent.
 //
-// Both requests reuse one certificate, which is what makes them one session; the
-// row above mints a fresh one precisely to be a different session.
+// Both the certificate *and* the user JWT are captured once and reused, and both
+// are load-bearing: a minted credential is keyed on the agent token and the user
+// token together, so re-fetching either would change the key and mint afresh.
+// Calling h.FullChainUserJWT at each request site would look harmless and
+// silently turn this into the row above, since every call issues a new JWT.
+//
+// What bounds the staleness is the session's own lifetime: the entry is cached
+// for the session TTL. No row here checks that bound.
 func TestFullChain_LiveSessionKeepsItsCredential(t *testing.T) {
 	ensureEnv(t)
 
