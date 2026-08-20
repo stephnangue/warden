@@ -34,8 +34,16 @@ import (
 // allEnvs is every provider the package sets up, in setup and teardown order.
 // Between them they cover each token-extractor family — default, channels,
 // channels with the native header first, scheme dispatch, and the git dual-slot
-// on its REST path — and five different credential extractors.
-var allEnvs = []h.ProviderEnv{openaiEnv, anthropicEnv, newrelicEnv, elasticEnv, githubEnv}
+// on its REST path — and all four shared SDK credential extractors.
+//
+// Four providers hand-roll an extractor and are not here: mcp, which needs
+// request bodies the harness cannot yet send, and atlassian, honeycomb and
+// prometheus, whose distinctive branches read credential fields nothing can
+// supply.
+var allEnvs = []h.ProviderEnv{
+	openaiEnv, anthropicEnv, newrelicEnv, elasticEnv, githubEnv,
+	splunkEnv, datadogEnv, restEnv, dynatraceEnv, dynatraceOAuthEnv,
+}
 
 var (
 	envOnce    sync.Once
