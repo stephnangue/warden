@@ -33,9 +33,9 @@ import (
 
 // allEnvs is every provider the package sets up, in setup and teardown order.
 // Between them they cover each token-extractor family — default, channels,
-// channels with the native header first, and scheme dispatch — and four
-// different credential extractors.
-var allEnvs = []h.ProviderEnv{openaiEnv, anthropicEnv, newrelicEnv, elasticEnv}
+// channels with the native header first, scheme dispatch, and the git dual-slot
+// on its REST path — and five different credential extractors.
+var allEnvs = []h.ProviderEnv{openaiEnv, anthropicEnv, newrelicEnv, elasticEnv, githubEnv}
 
 var (
 	envOnce    sync.Once
