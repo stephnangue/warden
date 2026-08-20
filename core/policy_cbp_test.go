@@ -5,6 +5,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -47,11 +48,18 @@ func TestCBP_ConditionIsIdentityIndependent(t *testing.T) {
 	assert.False(t, cbp.AllowOperation(ctx, req, dev, false).Allowed)
 }
 
-// TestCBP_CompiledConditionCacheSharedAcrossCallers confirms a conditioned policy
-// set compiles once and the cached compiled CBP is reused across callers — the
-// compiled program is keyed by the policy set, not by any token identity (the
-// no-templated-policies invariant).
-func TestCBP_CompiledConditionCacheSharedAcrossCallers(t *testing.T) {
+// TestCBP_CompiledConditionSharedAcrossCallers confirms a conditioned policy is
+// parsed — and therefore its CEL program compiled — exactly once, and reused by
+// every caller. That reuse is what the no-templated-policies invariant buys: the
+// compiled program depends on the policy set alone, never on token identity, so
+// one copy can serve everyone.
+//
+// The CBP assembled from those policies is deliberately *not* shared. Building it
+// is microseconds, and a cache of assembled CBPs previously outlived the policy
+// it was built from, so a deleted grant went on being enforced. What must be
+// shared is the expensive part; what must be fresh is the part that has to
+// reflect the current policy.
+func TestCBP_CompiledConditionSharedAcrossCallers(t *testing.T) {
 	core := createTestCore(t)
 	ps := core.policyStore
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
@@ -66,7 +74,16 @@ func TestCBP_CompiledConditionCacheSharedAcrossCallers(t *testing.T) {
 	require.NoError(t, err)
 	second, err := ps.CBP(ctx, names)
 	require.NoError(t, err)
-	assert.Same(t, first, second, "same policy set → one cached compiled CBP, shared regardless of caller")
+
+	assert.NotSame(t, first, second, "each caller assembles its own CBP from the current policies")
+
+	// Both assemblies drew on the same parsed policy, which is what holds the
+	// compiled CEL program — so the condition was compiled once, not per call.
+	cached, ok := ps.tokenPoliciesLRU.Get(ps.cacheKey(namespace.RootNamespace, "cond"))
+	require.True(t, ok, "the parsed policy must stay cached")
+	require.Len(t, cached.Paths, 1)
+	assert.NotEmpty(t, cached.Paths[0].Permissions.Conditions,
+		"the cached policy carries the compiled condition shared by every caller")
 }
 
 // =============================================================================
@@ -1188,70 +1205,105 @@ func TestCBP_ParsesAdditionalPolicyWithoutPaths(t *testing.T) {
 }
 
 // =============================================================================
-// Compiled-CBP cache
+// CBP compilation is never served from a stale cache
 // =============================================================================
 
-// TestCBP_CompiledCacheHit verifies that compiling the same policy set twice
-// returns the cached compiled CBP (identical pointer) instead of recompiling.
-func TestCBP_CompiledCacheHit(t *testing.T) {
-	core := createTestCore(t)
-	ps := core.policyStore
-	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
-
-	p := testParsePolicy(t, `path "secret/a" { capabilities = ["read"] }`)
-	p.Name = "cached-set"
+// setStoredPolicy writes a policy under the given name and returns nothing —
+// the point is the side effect on the store, which is what these tests vary.
+func setStoredPolicy(t *testing.T, ps *PolicyStore, ctx context.Context, name, rules string) {
+	t.Helper()
+	p := testParsePolicy(t, rules)
+	p.Name = name
 	p.Type = PolicyTypeCBP
 	require.NoError(t, ps.SetPolicy(ctx, p, nil))
-
-	names := map[string][]string{namespace.RootNamespaceID: {"cached-set"}}
-	first, err := ps.CBP(ctx, names)
-	require.NoError(t, err)
-	second, err := ps.CBP(ctx, names)
-	require.NoError(t, err)
-
-	assert.Same(t, first, second, "identical policy set should return the cached compiled CBP")
 }
 
-// TestCBP_CompiledCacheInvalidatesOnVersionBump verifies that editing a policy
-// (which bumps its DataVersion) yields a new key, so the stale compiled CBP is
-// never served.
-func TestCBP_CompiledCacheInvalidatesOnVersionBump(t *testing.T) {
+// TestCBP_RecreatedPolicyIsEnforced is the regression test for a compiled-policy
+// cache that was keyed on policy identity and version. Deleting a policy resets
+// its version, so recreating it under the same name collided with the entry
+// compiled before the delete — and the deleted policy went on being enforced.
+//
+// The consequence was that removing a permission did not revoke it, while
+// reading the policy back returned the new text: the stored policy and the
+// enforced policy disagreed, and the API confirmed the operator's intent.
+func TestCBP_RecreatedPolicyIsEnforced(t *testing.T) {
 	core := createTestCore(t)
 	ps := core.policyStore
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	p := testParsePolicy(t, `path "secret/a" { capabilities = ["read"] }`)
-	p.Name = "versioned"
-	p.Type = PolicyTypeCBP
-	require.NoError(t, ps.SetPolicy(ctx, p, nil))
+	names := map[string][]string{namespace.RootNamespaceID: {"recreated"}}
 
-	names := map[string][]string{namespace.RootNamespaceID: {"versioned"}}
+	setStoredPolicy(t, ps, ctx, "recreated", `path "secret/old" { capabilities = ["read"] }`)
 	first, err := ps.CBP(ctx, names)
 	require.NoError(t, err)
-	assert.Contains(t, first.Capabilities(ctx, "secret/a"), ReadCapability)
+	require.Contains(t, first.Capabilities(ctx, "secret/old"), ReadCapability)
 
-	// Edit the policy: now grants secret/b instead. SetPolicy bumps DataVersion.
-	updated := testParsePolicy(t, `path "secret/b" { capabilities = ["read"] }`)
-	updated.Name = "versioned"
-	updated.Type = PolicyTypeCBP
-	require.NoError(t, ps.SetPolicy(ctx, updated, nil))
+	// Delete and recreate under the same name with a different grant. The
+	// version counter restarts here, which is what made the old key collide.
+	require.NoError(t, ps.DeletePolicy(ctx, "recreated", PolicyTypeCBP))
+	setStoredPolicy(t, ps, ctx, "recreated", `path "secret/new" { capabilities = ["read"] }`)
 
 	second, err := ps.CBP(ctx, names)
 	require.NoError(t, err)
-	assert.NotSame(t, first, second, "version bump must recompile")
+	assert.Contains(t, second.Capabilities(ctx, "secret/new"), ReadCapability,
+		"the recreated policy must be the one enforced")
+	assert.NotContains(t, second.Capabilities(ctx, "secret/old"), ReadCapability,
+		"the deleted policy's grant must not survive its deletion")
+}
+
+// TestCBP_DeletedPolicyIsNotEnforced covers the plainer half: a deletion with no
+// replacement. The policy simply leaves the set, and nothing it granted remains.
+func TestCBP_DeletedPolicyIsNotEnforced(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	setStoredPolicy(t, ps, ctx, "keeper", `path "secret/keep" { capabilities = ["read"] }`)
+	setStoredPolicy(t, ps, ctx, "goner", `path "secret/gone" { capabilities = ["read"] }`)
+
+	names := map[string][]string{namespace.RootNamespaceID: {"keeper", "goner"}}
+	before, err := ps.CBP(ctx, names)
+	require.NoError(t, err)
+	require.Contains(t, before.Capabilities(ctx, "secret/gone"), ReadCapability)
+
+	require.NoError(t, ps.DeletePolicy(ctx, "goner", PolicyTypeCBP))
+
+	after, err := ps.CBP(ctx, map[string][]string{namespace.RootNamespaceID: {"keeper"}})
+	require.NoError(t, err)
+	assert.Contains(t, after.Capabilities(ctx, "secret/keep"), ReadCapability)
+	assert.NotContains(t, after.Capabilities(ctx, "secret/gone"), ReadCapability)
+}
+
+// TestCBP_EditedPolicyIsEnforced pins the case that always worked, so a
+// regression in the ordinary edit path is not mistaken for the delete-recreate
+// bug returning.
+func TestCBP_EditedPolicyIsEnforced(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	names := map[string][]string{namespace.RootNamespaceID: {"edited"}}
+
+	setStoredPolicy(t, ps, ctx, "edited", `path "secret/a" { capabilities = ["read"] }`)
+	_, err := ps.CBP(ctx, names)
+	require.NoError(t, err)
+
+	setStoredPolicy(t, ps, ctx, "edited", `path "secret/b" { capabilities = ["read"] }`)
+	second, err := ps.CBP(ctx, names)
+	require.NoError(t, err)
+
 	assert.Contains(t, second.Capabilities(ctx, "secret/b"), ReadCapability)
 	assert.NotContains(t, second.Capabilities(ctx, "secret/a"), ReadCapability)
 }
 
-// TestCBP_CompiledCacheExpiresWithPath verifies that a per-path expiration
-// bounds the cached compiled CBP: once it elapses the entry is recompiled and
-// the expired path is dropped.
-func TestCBP_CompiledCacheExpiresWithPath(t *testing.T) {
+// TestCBP_ExpiredPathIsDropped verifies a per-path expiration takes effect. This
+// was previously entangled with a cache time-bound; without the cache it is just
+// a property of compilation, which is where it belonged.
+func TestCBP_ExpiredPathIsDropped(t *testing.T) {
 	core := createTestCore(t)
 	ps := core.policyStore
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	exp := time.Now().Add(50 * time.Millisecond)
 	p := &Policy{
 		Name:      "expiring",
 		Type:      PolicyTypeCBP,
@@ -1260,68 +1312,35 @@ func TestCBP_CompiledCacheExpiresWithPath(t *testing.T) {
 			Path:         "secret/temp",
 			Capabilities: []string{ReadCapability},
 			Permissions:  &CBPPermissions{CapabilitiesBitmap: ReadCapabilityInt},
-			Expiration:   exp,
+			Expiration:   time.Now().Add(50 * time.Millisecond),
 		}},
 	}
-	idx := ps.cacheKey(namespace.RootNamespace, "expiring")
-	ps.tokenPoliciesLRU.Add(idx, p)
+	ps.tokenPoliciesLRU.Add(ps.cacheKey(namespace.RootNamespace, "expiring"), p)
 
 	names := map[string][]string{namespace.RootNamespaceID: {"expiring"}}
 	first, err := ps.CBP(ctx, names)
 	require.NoError(t, err)
-	assert.Contains(t, first.Capabilities(ctx, "secret/temp"), ReadCapability)
+	require.Contains(t, first.Capabilities(ctx, "secret/temp"), ReadCapability)
 
-	// The cached entry must carry a time bound derived from the path expiration.
-	entry, ok := ps.compiledCBPLRU.Get(compiledCBPCacheKey([]*Policy{p}))
-	require.True(t, ok)
-	assert.False(t, entry.validUntil.IsZero(), "entry should carry a validUntil bound")
-
-	// After the path expires, the entry is recompiled and the path is gone.
 	time.Sleep(80 * time.Millisecond)
+
 	second, err := ps.CBP(ctx, names)
 	require.NoError(t, err)
-	assert.NotSame(t, first, second, "expired entry must be recompiled")
 	assert.NotContains(t, second.Capabilities(ctx, "secret/temp"), ReadCapability,
-		"expired path must be dropped after recompile")
+		"an expired path must not be granted")
 }
 
-// TestCBP_CompiledCacheBypassedWithAdditionalPolicies verifies that prefetched
-// policies bypass the compiled cache entirely (no sharing, no caching).
-func TestCBP_CompiledCacheBypassedWithAdditionalPolicies(t *testing.T) {
+// TestCBP_ConcurrentCompilation exercises compilation and evaluation from many
+// goroutines at once, under the race detector.
+func TestCBP_ConcurrentCompilation(t *testing.T) {
 	core := createTestCore(t)
 	ps := core.policyStore
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	extra := &Policy{
-		Name:      "prefetched",
-		Type:      PolicyTypeCBP,
-		Raw:       `path "secret/extra" { capabilities = ["read"] }`,
-		namespace: namespace.RootNamespace,
-	}
-
-	first, err := ps.CBP(ctx, map[string][]string{}, extra)
-	require.NoError(t, err)
-	second, err := ps.CBP(ctx, map[string][]string{}, extra)
-	require.NoError(t, err)
-
-	assert.NotSame(t, first, second, "additional policies must bypass the compiled cache")
-	assert.Equal(t, 0, ps.compiledCBPLRU.Len(), "nothing should be cached when additional policies are present")
-}
-
-// TestCBP_CompiledCacheConcurrent exercises concurrent CBP() compilation and
-// evaluation of a shared cached CBP under the race detector.
-func TestCBP_CompiledCacheConcurrent(t *testing.T) {
-	core := createTestCore(t)
-	ps := core.policyStore
-	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
-
-	p := testParsePolicy(t, `
+	setStoredPolicy(t, ps, ctx, "concurrent", `
 		path "secret/a" { capabilities = ["read", "list"] }
 		path "secret/b/*" { capabilities = ["read"] }
 	`)
-	p.Name = "concurrent"
-	p.Type = PolicyTypeCBP
-	require.NoError(t, ps.SetPolicy(ctx, p, nil))
 
 	names := map[string][]string{namespace.RootNamespaceID: {"concurrent"}}
 
@@ -1341,4 +1360,40 @@ func TestCBP_CompiledCacheConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// BenchmarkNewCBP measures what a compiled-CBP cache would save. It is kept so
+// the next person to propose one has the number: a cache here previously cost a
+// revocation bug, and the work it avoided is small enough to be noise beside the
+// credential mint and upstream round trip on the same request.
+func BenchmarkNewCBP(b *testing.B) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	rules := `
+path "prov/gateway*" {
+  capabilities = ["read","create","update","delete","list"]
+}
+path "prov/role/+/gateway*" {
+  capabilities = ["read","create","update","delete","list"]
+}
+path "other/*" { capabilities = ["read"] }
+`
+	for _, n := range []int{1, 3} {
+		policies := make([]*Policy, 0, n)
+		for i := 0; i < n; i++ {
+			p, err := ParseCBPPolicy(namespace.RootNamespace, rules)
+			if err != nil {
+				b.Fatal(err)
+			}
+			p.Name = fmt.Sprintf("p%d", i)
+			policies = append(policies, p)
+		}
+		b.Run(fmt.Sprintf("%d-policies", n), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				if _, err := NewCBP(ctx, policies); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }
