@@ -1397,3 +1397,62 @@ path "other/*" { capabilities = ["read"] }
 		})
 	}
 }
+
+// TestCBP_CompilationIsOrderIndependent pins that a token's policies compile to
+// the same result however they were gathered.
+//
+// Compilation is not commutative: for a given path, the first policy carrying a
+// list_scan_response_keys_filter_path wins. Policies are gathered by ranging a
+// map keyed by namespace, so when a token draws policies from more than one
+// namespace their relative order is randomised per call — and two policies
+// disagreeing on that field would otherwise yield a different filter from one
+// request to the next.
+//
+// Within a single namespace the order comes from a slice and is already stable,
+// which is why this test spans two.
+func TestCBP_CompilationIsOrderIndependent(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	rootCtx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	otherNS := &namespace.Namespace{Path: "other/"}
+	require.NoError(t, core.namespaceStore.SetNamespace(rootCtx, otherNS))
+	otherCtx := namespace.ContextWithNamespace(context.Background(), otherNS)
+
+	filterPolicy := func(which string) string {
+		return `
+path "secret/shared" {
+  capabilities = ["list"]
+  list_scan_response_keys_filter_path = "secret/from-` + which + `/{{ .key }}"
+}`
+	}
+
+	// One policy per namespace, disagreeing on the filter for the same path.
+	setStoredPolicy(t, ps, rootCtx, "filter-root", filterPolicy("root"))
+
+	otherPolicy := testParsePolicy(t, filterPolicy("other"))
+	otherPolicy.Name = "filter-other"
+	otherPolicy.Type = PolicyTypeCBP
+	otherPolicy.namespace = otherNS
+	require.NoError(t, ps.SetPolicy(otherCtx, otherPolicy, nil))
+
+	names := map[string][]string{
+		namespace.RootNamespaceID: {"filter-root"},
+		otherNS.ID:                {"filter-other"},
+	}
+
+	// Repeat: an order-dependent result shows up as disagreement across runs,
+	// since the map range that gathers these is randomised each time.
+	seen := map[string]int{}
+	for i := 0; i < 64; i++ {
+		cbp, err := ps.CBP(rootCtx, names)
+		require.NoError(t, err)
+		res := cbp.AllowOperation(rootCtx,
+			&logical.Request{Operation: logical.ListOperation, Path: "secret/shared"}, nil, false)
+		require.True(t, res.Allowed, "the shared path must be listable")
+		seen[res.ResponseKeysFilterPath]++
+	}
+
+	assert.Len(t, seen, 1,
+		"the filter path must not depend on the order policies were gathered in, got %v", seen)
+}

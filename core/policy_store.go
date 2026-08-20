@@ -501,6 +501,15 @@ func (ps *PolicyStore) switchedDeletePolicy(ctx context.Context, name string, po
 	return nil
 }
 
+// policyNamespaceUUID returns a policy's namespace UUID, or "" when it carries
+// no namespace, so ordering stays total over a mixed set.
+func policyNamespaceUUID(p *Policy) string {
+	if p == nil || p.namespace == nil {
+		return ""
+	}
+	return p.namespace.UUID
+}
+
 // CBP is used to return an CBP which is built using the
 // named policies and pre-fetched policies if given.
 func (ps *PolicyStore) CBP(ctx context.Context, policyNames map[string][]string, additionalPolicies ...*Policy) (*CBP, error) {
@@ -527,7 +536,22 @@ func (ps *PolicyStore) CBP(ctx context.Context, policyNames map[string][]string,
 		}
 	}
 
-	// Append any pre-fetched policies that were given
+	// Order the named policies before anything depends on their sequence. They
+	// were gathered by ranging a map, so their order is randomised per call, and
+	// compilation is not order-independent: the first policy carrying a
+	// list_scan_response_keys_filter_path for a path wins. Left unordered, a
+	// token whose policies disagree on that field would get a different filter
+	// from one request to the next.
+	slices.SortFunc(allPolicies, func(a, b *Policy) int {
+		if c := strings.Compare(policyNamespaceUUID(a), policyNamespaceUUID(b)); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	// Pre-fetched policies keep their caller-given order, appended after the
+	// named ones. The caller chose that sequence; sorting it would be discarding
+	// information rather than adding determinism.
 	allPolicies = append(allPolicies, additionalPolicies...)
 
 	for i, policy := range allPolicies {
