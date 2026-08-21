@@ -922,6 +922,12 @@ func TeardownFullChainCommonBestEffort(port int) {
 	time.Sleep(time.Second)
 }
 
+// RootTokenBestEffort reads the root token without a *testing.T, for teardown
+// from TestMain where a zero-value T cannot be used.
+func RootTokenBestEffort() string {
+	return rootTokenBestEffort()
+}
+
 func bestEffortDeleter(port int) func(string) {
 	token := rootTokenBestEffort()
 	return func(path string) {
