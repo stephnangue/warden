@@ -60,6 +60,10 @@ func TestMain(m *testing.M) {
 		for _, env := range allEnvs {
 			h.TeardownFullChainProviderBestEffort(leaderPort, env)
 		}
+		// Removes the namespace and everything mounted inside it. Deleting a
+		// namespace is asynchronous, which is why it is built once per package
+		// rather than per test.
+		teardownNamespaceEnvBestEffort(leaderPort)
 		h.TeardownFullChainCommonBestEffort(leaderPort)
 	}
 	if upstream != nil {
