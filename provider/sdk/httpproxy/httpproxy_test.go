@@ -177,10 +177,24 @@ func TestHeaderAPIKeyExtractor(t *testing.T) {
 		_, err := extractor(&logical.Request{})
 		assert.Error(t, err)
 	})
+	t.Run("wrong type", func(t *testing.T) {
+		_, err := extractor(&logical.Request{Credential: &credential.Credential{Type: "other"}})
+		assert.ErrorContains(t, err, "unsupported credential type")
+	})
+	t.Run("missing api_key", func(t *testing.T) {
+		_, err := extractor(&logical.Request{
+			Credential: &credential.Credential{Type: credential.TypeAPIKey, Data: map[string]string{}},
+		})
+		assert.ErrorContains(t, err, "missing api_key")
+	})
 }
 
 func TestTypedTokenExtractor(t *testing.T) {
 	extractor := TypedTokenExtractor(credential.TypeGitHubToken, "token", "Authorization", "token ")
+	t.Run("nil credential", func(t *testing.T) {
+		_, err := extractor(&logical.Request{})
+		assert.ErrorContains(t, err, "no credential")
+	})
 	t.Run("valid", func(t *testing.T) {
 		headers, err := extractor(&logical.Request{
 			Credential: &credential.Credential{Type: credential.TypeGitHubToken, Data: map[string]string{"token": "ghp_abc"}},
@@ -228,12 +242,23 @@ func TestMultiFieldAPIKeyExtractor(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "key1", headers["X-Api-Key"])
 		assert.Empty(t, headers["X-Org"])
+		// Omitted rather than emitted empty: an empty header still reaches the
+		// upstream as a set value.
+		assert.NotContains(t, headers, "X-Org")
 	})
 	t.Run("required missing", func(t *testing.T) {
 		_, err := extractor(&logical.Request{
 			Credential: &credential.Credential{Type: credential.TypeAPIKey, Data: map[string]string{}},
 		})
 		assert.ErrorContains(t, err, "missing api_key")
+	})
+	t.Run("nil credential", func(t *testing.T) {
+		_, err := extractor(&logical.Request{})
+		assert.ErrorContains(t, err, "no credential")
+	})
+	t.Run("wrong type", func(t *testing.T) {
+		_, err := extractor(&logical.Request{Credential: &credential.Credential{Type: "other"}})
+		assert.ErrorContains(t, err, "unsupported credential type")
 	})
 }
 
