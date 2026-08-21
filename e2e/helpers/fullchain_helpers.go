@@ -577,11 +577,31 @@ func chainBody(o ChainOpts) io.Reader {
 func ChainRequest(t *testing.T, port int, p ProviderEnv, o ChainOpts) (int, []byte, http.Header) {
 	t.Helper()
 
-	headers := chainHeaders(t, o)
-	method := chainMethod(o)
-	u := chainURL(port, p, o)
-	status, body, respHeaders := DoRequestWithResponseHeaders(t, method, u, headers, o.Body)
-	return status, body, http.Header(respHeaders)
+	req, err := http.NewRequest(chainMethod(o), chainURL(port, p, o), chainBody(o))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	for k, v := range chainHeaders(t, o) {
+		req.Header.Set(k, v)
+	}
+	if o.Body != "" && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	// Deliberately not DoRequestWithResponseHeaders: that client is shared with
+	// other suites and follows redirects, which would hide a follower falling
+	// back to one. See chainClient.
+	resp, err := chainClient().Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	return resp.StatusCode, body, resp.Header
 }
 
 // ChainStream drives a full-chain request and returns the live response without
@@ -606,20 +626,35 @@ func ChainStream(t *testing.T, port int, p ProviderEnv, o ChainOpts) *http.Respo
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // self-signed e2e cert
-			// Compression would coalesce the upstream's chunks, hiding exactly
-			// the boundaries this exists to observe.
-			DisableCompression: true,
-		},
-	}
-	resp, err := client.Do(req)
+	resp, err := chainClient().Do(req)
 	if err != nil {
 		t.Fatalf("streaming request failed: %v", err)
 	}
 	return resp
+}
+
+// chainClient is the HTTP client both chain paths use.
+//
+// Redirects are surfaced rather than followed. A follower that cannot reach the
+// leader answers 307 pointing at the leader's own address, and Go would follow
+// it — re-sending Authorization, and X-SSL-Client-Cert too, since that is not a
+// header Go treats as sensitive. Every row aimed at a follower would then
+// quietly exercise the direct path and still pass, unable to fail for the
+// absence of the hop it exists to cover. Surfaced, the 307 fails the status
+// assertion instead.
+func chainClient() *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // self-signed e2e cert
+			// Compression would coalesce an upstream's chunks, hiding the
+			// boundaries the streaming rows exist to observe.
+			DisableCompression: true,
+		},
+	}
 }
 
 // ChainWant is what a full-chain request is expected to have produced.
