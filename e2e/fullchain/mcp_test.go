@@ -139,22 +139,18 @@ func TestMCP_DeniedToolIsRefusedBeforeTheUpstream(t *testing.T) {
 }
 
 // TestMCP_MalformedBodyIsRefused checks that a truncated body is refused with
-// nothing forwarded. It does NOT test the mcp { } filter, despite the shape:
-// the request never reaches policy evaluation, because the body is unmarshalled
-// into a map while the agent is still being authenticated, and a truncated body
-// fails that decode first. The same request would 401 with no mcp { } block at
-// all.
+// nothing forwarded, and that the refusal comes from the filter.
 //
-// What it is worth having as a row: refusal reaches the caller with nothing
-// proxied, which is the property that must survive whatever happens to the
-// authorization path. The status is the generic 401 of a failed agent login, not
-// the 403 the filter returns. That early decode into a map is also why a valid
-// JSON-RPC batch cannot be proxied at all: a top-level JSON array does not fit
-// the shape, so it fails the same way before policy is ever consulted.
+// It used to answer 401. The agent's implicit login reused the caller's HTTP
+// request and decoded its body while resolving the agent's identity, so a body
+// the generic decoder could not read failed the login — telling the caller to
+// renew a credential that was never the problem. The login no longer reads the
+// caller's body, so the request authenticates and the strict JSON-RPC parser is
+// what rejects it: a 403 carrying the policy deny challenge.
 func TestMCP_MalformedBodyIsRefused(t *testing.T) {
 	ensureEnv(t)
 
-	status, body, _ := h.ChainRequest(t, leaderPort, mcpEnv, h.ChainOpts{
+	status, body, respHeaders := h.ChainRequest(t, leaderPort, mcpEnv, h.ChainOpts{
 		AgentCertPEM: agentCert(t),
 		Bearer:       h.FullChainUserJWT(t),
 		Role:         mcpEnv.CertRole(),
@@ -162,20 +158,26 @@ func TestMCP_MalformedBodyIsRefused(t *testing.T) {
 	})
 
 	h.AssertChain(t, upstream, status, body, h.ChainWant{
-		Status:        401,
+		Status:        403,
 		UpstreamCalls: 0,
 	})
+
+	// Without this the row would pass on any refusal for any reason, which is
+	// exactly how it read as correct while answering 401.
+	if challenge := respHeaders.Get("WWW-Authenticate"); !strings.Contains(challenge, "insufficient_permissions") {
+		t.Errorf("want the policy deny challenge, got WWW-Authenticate: %q", challenge)
+	}
 }
 
-// TestMCP_ValidJSONButInvalidJSONRPCIsDeniedByPolicy is the fail-closed row the
-// truncated-body case cannot be. A duplicate key is accepted by the generic
-// decoder — last one wins — so the request survives authentication and reaches
-// the filter, where the strict JSON-RPC parser rejects it.
+// TestMCP_ValidJSONButInvalidJSONRPCIsDeniedByPolicy pins the same fail-closed
+// property from the other side: a body that is well-formed JSON but not
+// well-formed JSON-RPC. A duplicate key is what separates the two parsers —
+// last-one-wins for a generic decoder, a refusal for the strict one.
 //
 // That is the property worth pinning: a body the filter cannot interpret is
 // denied rather than waved through as "no rule matched", which is how a filter
-// of this shape usually breaks. Unlike the truncated body, this row would pass
-// differently with the mcp { } block removed.
+// of this shape usually breaks. This row would pass differently with the
+// mcp { } block removed.
 func TestMCP_ValidJSONButInvalidJSONRPCIsDeniedByPolicy(t *testing.T) {
 	ensureEnv(t)
 
