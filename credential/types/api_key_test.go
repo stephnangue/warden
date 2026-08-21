@@ -352,11 +352,17 @@ func TestAPIKeyCredType_Parse(t *testing.T) {
 	}
 }
 
-func TestAPIKeyCredType_Parse_OptionalFields(t *testing.T) {
+// TestAPIKeyCredType_Parse_CarriesOnlyTheKey pins that this type owns exactly one
+// field. Adjuncts reach a credential through operator-declared carriage, applied
+// by the parser after Parse — not through a list here, which could only ever hold
+// the fields anticipated when the type was written.
+//
+// The inversion is the point: these same names used to be copied, and a
+// reinstated OptionalFields list would make this test fail rather than silently
+// reintroduce the ceiling that left provider extractors unreachable.
+func TestAPIKeyCredType_Parse_CarriesOnlyTheKey(t *testing.T) {
 	ct := NewAPIKeyCredType()
 
-	// The static-API-key driver places these descriptive fields in rawData; the
-	// api_key type's OptionalFields copy them into cred.Data (matching production).
 	rawData := map[string]interface{}{
 		"api_key":         "sk-xxxxxxxxxxxxxxxxxxxx",
 		"key_id":          "key-123",
@@ -369,10 +375,7 @@ func TestAPIKeyCredType_Parse_OptionalFields(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "sk-xxxxxxxxxxxxxxxxxxxx", cred.Data["api_key"])
-	assert.Equal(t, "key-123", cred.Data["key_id"])
-	assert.Equal(t, "production-key", cred.Data["key_name"])
-	assert.Equal(t, "org-456", cred.Data["organization_id"])
-	assert.Equal(t, "proj-789", cred.Data["project_id"])
+	assert.Len(t, cred.Data, 1, "Parse must carry api_key and nothing else: %v", cred.Data)
 }
 
 func TestAPIKeyCredType_Validate(t *testing.T) {
@@ -450,8 +453,59 @@ func TestAPIKeyCredType_RequiresSpecRotation(t *testing.T) {
 func TestAPIKeyCredType_SensitiveConfigFields(t *testing.T) {
 	ct := NewAPIKeyCredType()
 	fields := ct.SensitiveConfigFields()
-	assert.Len(t, fields, 1)
+	assert.Len(t, fields, 2)
 	assert.Contains(t, fields, "api_key")
+	// A second secret, so it must be named: masking is the one thing an operator
+	// cannot be asked to declare, since forgetting would print the key.
+	assert.Contains(t, fields, "application_key")
+}
+
+// TestAPIKeyCredType_SensitiveConfigFieldsFor covers the three outcomes of
+// config-aware masking, which a fixed list cannot express.
+func TestAPIKeyCredType_SensitiveConfigFieldsFor(t *testing.T) {
+	ct := NewAPIKeyCredType()
+
+	fields := ct.SensitiveConfigFieldsFor(map[string]string{
+		"api_key":         "sk-xxxx",
+		"application_key": "app-xxxx",
+		"organization_id": "org-1",
+		"mint_method":     "static_apikey",
+		"secret_path":     "apikeys/thing",
+		"totally_unknown": "could be anything",
+	})
+
+	// Known secrets.
+	assert.Contains(t, fields, "api_key")
+	assert.Contains(t, fields, "application_key")
+
+	// Declared adjunct: readable, because the type knows what it is.
+	assert.NotContains(t, fields, "organization_id")
+
+	// Mint locators: readable, because masking where a credential comes from
+	// hides useful information and protects nothing.
+	assert.NotContains(t, fields, "mint_method")
+	assert.NotContains(t, fields, "secret_path")
+
+	// Undeclared: the type cannot vouch for it, so it fails safe.
+	assert.Contains(t, fields, "totally_unknown")
+}
+
+// TestAPIKeyCredType_SensitiveConfigFieldsFor_UnderscorePrefixIsNotTrusted pins
+// the one exemption that must not apply here.
+//
+// The "__" namespace belongs to the mint pipeline, and carriage treats it as
+// reserved for exactly that reason. Spec config is different: nothing rejects a
+// key called "__whatever", so trusting the prefix would leave the single shape of
+// unknown key that reads back in the clear.
+func TestAPIKeyCredType_SensitiveConfigFieldsFor_UnderscorePrefixIsNotTrusted(t *testing.T) {
+	ct := NewAPIKeyCredType()
+	fields := ct.SensitiveConfigFieldsFor(map[string]string{
+		"api_key":          "sk-xxxx",
+		"__adjunct_fields": "organization_id",
+		"__anything":       "could be a secret",
+	})
+	assert.Contains(t, fields, "__adjunct_fields")
+	assert.Contains(t, fields, "__anything")
 }
 
 func TestAPIKeyCredType_FieldSchemas(t *testing.T) {
@@ -462,15 +516,25 @@ func TestAPIKeyCredType_FieldSchemas(t *testing.T) {
 	assert.True(t, schemas["api_key"].Sensitive)
 	assert.NotEmpty(t, schemas["api_key"].Description)
 
-	assert.Contains(t, schemas, "key_id")
-	assert.False(t, schemas["key_id"].Sensitive)
+	// The adjuncts are no longer type-owned data fields, so they have no schema
+	// here — they are declared in ConfigSchema, which is what documents them and
+	// keeps them readable on a spec read.
+	assert.Len(t, schemas, 1)
+}
 
-	assert.Contains(t, schemas, "key_name")
-	assert.False(t, schemas["key_name"].Sensitive)
+// TestAPIKeyCredType_KnownAdjunctFieldsAreDeclared keeps the two lists in step.
+// A name in KnownAdjunctFields but not in ConfigSchema would be rejected as
+// undeclared when set, yet masked as unknown when read — a field the type both
+// insists on and refuses to recognise.
+func TestAPIKeyCredType_KnownAdjunctFieldsAreDeclared(t *testing.T) {
+	ct := NewAPIKeyCredType()
 
-	assert.Contains(t, schemas, "organization_id")
-	assert.False(t, schemas["organization_id"].Sensitive)
+	declared := make(map[string]bool)
+	for _, v := range ct.ConfigSchema() {
+		declared[v.FieldName()] = true
+	}
 
-	assert.Contains(t, schemas, "project_id")
-	assert.False(t, schemas["project_id"].Sensitive)
+	for _, field := range ct.KnownAdjunctFields() {
+		assert.True(t, declared[field], "adjunct %q must be declared in ConfigSchema", field)
+	}
 }

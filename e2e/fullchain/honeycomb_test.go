@@ -27,7 +27,7 @@ const (
 // The apikey source is deliberate, not incidental. On a local source every field
 // of the spec config reaches the credential, so a management row would pass
 // without naming key_id anywhere — and would hide the fact that the apikey driver
-// carries only api_key plus the fields optional_metadata lists. Getting that wrong
+// carries only api_key plus the fields credential_fields lists. Getting that wrong
 // is silent: the credential mints, key_id is absent, and the mount quietly serves
 // the ingest branch instead.
 var honeycombEnv = h.ProviderEnv{
@@ -36,7 +36,7 @@ var honeycombEnv = h.ProviderEnv{
 	URLKey:       "honeycomb_url",
 	CredType:     "api_key",
 	SourceType:   "apikey",
-	SourceConfig: map[string]string{"optional_metadata": "key_id"},
+	SourceConfig: map[string]string{"credential_fields": "key_id"},
 	CredConfig:   map[string]string{"api_key": honeycombIngestKey},
 	Variants: map[string]map[string]string{
 		"mgmt": {"api_key": honeycombKeySecret, "key_id": honeycombKeyID},

@@ -24,27 +24,23 @@ func NewAPIKeyCredType() *APIKeyCredType {
 			FieldConfig: TokenFieldConfig{
 				PrimaryField:      "api_key",
 				AlternativeFields: []string{},
-				OptionalFields:    []string{"key_id", "key_name", "organization_id", "project_id"},
+
+				// Empty by design. api_key is the only field this type owns;
+				// every adjunct — an organization, a second key, an account
+				// identity — is named by the operator in the source's
+				// credential_fields and carried by the parser.
+				//
+				// A fixed list here could only hold fields anticipated when the
+				// type was written, which is what left several provider
+				// extractors reading credential data nothing could supply. The
+				// declared route has no such ceiling: a new provider field costs
+				// no change to this type.
+				OptionalFields: []string{},
+
 				FieldSchemas: map[string]*credential.CredentialFieldSchema{
 					"api_key": {
 						Description: "API key for authentication",
 						Sensitive:   true,
-					},
-					"key_id": {
-						Description: "Key identifier (if available from provider)",
-						Sensitive:   false,
-					},
-					"key_name": {
-						Description: "Human-readable key name",
-						Sensitive:   false,
-					},
-					"organization_id": {
-						Description: "Organization identifier",
-						Sensitive:   false,
-					},
-					"project_id": {
-						Description: "Project identifier",
-						Sensitive:   false,
 					},
 				},
 			},
@@ -61,6 +57,11 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 			Describe("API key for provider authentication").
 			Example("sk-xxxxxxxxxxxxxxxxxxxx"),
 
+		// Adjunct fields: everything a credential carries beyond api_key. Declaring
+		// one here documents it and marks it known — which is what keeps it
+		// readable, since masking treats an undeclared spec-config key as a
+		// possible secret. Declaring does NOT carry it: on an apikey source a field
+		// travels only when the source's credential_fields names it.
 		credential.StringField("organization_id").
 			Describe("Organization ID (optional)").
 			Example("org-xxxxxxxxxxxx"),
@@ -68,6 +69,22 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("project_id").
 			Describe("Project ID (optional)").
 			Example("proj-xxxxxxxxxxxx"),
+
+		credential.StringField("key_id").
+			Describe("Key identifier (optional; honeycomb uses it to select management-key mode)").
+			Example("hcaik_xxxxxxxxxxxx"),
+
+		credential.StringField("key_name").
+			Describe("Human-readable key name (optional)").
+			Example("warden-prod"),
+
+		credential.StringField("email").
+			Describe("Account identity paired with the key (optional; atlassian uses it for Basic auth)").
+			Example("svc@example.com"),
+
+		credential.StringField("application_key").
+			Describe("Second API key some providers require alongside api_key (optional; datadog)").
+			Example("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
 
 		// Store-backed sources (vault static_apikey, aws secrets_manager)
 		credential.StringField("mint_method").
@@ -192,7 +209,58 @@ func (t *APIKeyCredType) RequiresSpecRotation() bool {
 	return false
 }
 
-// SensitiveConfigFields returns spec config keys that should be masked in output
+// apiKeyAdjunctFields are the spec-config keys that describe the credential
+// rather than the mint. Declared in ConfigSchema so they read back unmasked, and
+// listed here so a spec setting one that its source will not carry is rejected
+// instead of minting a credential silently missing it.
+//
+// A provider needing a field absent from this list still works — the operator
+// names it in credential_fields and it is carried. The list only decides which
+// names Warden can give a helpful error about.
+var apiKeyAdjunctFields = []string{
+	"organization_id", "project_id", "key_id", "key_name", "email", "application_key",
+}
+
+// KnownAdjunctFields implements credential.AdjunctCarrier.
+func (t *APIKeyCredType) KnownAdjunctFields() []string { return apiKeyAdjunctFields }
+
+// SensitiveConfigFields returns spec config keys that should be masked in output.
+// The known secrets — see SensitiveConfigFieldsFor for the fields an operator adds
+// that this list cannot anticipate.
 func (t *APIKeyCredType) SensitiveConfigFields() []string {
-	return []string{"api_key"}
+	return []string{"api_key", "application_key"}
+}
+
+// SensitiveConfigFieldsFor masks the known secrets plus every spec-config key the
+// type does not recognise (credential.ConfigSensitivity).
+//
+// An api_key spec may carry adjunct fields declared by the operator rather than by
+// this type, so a fixed list cannot say which are secret. An unrecognised key is
+// therefore masked: it was put there to be part of the credential, and the type
+// has no basis for calling it public. Declaring a field in ConfigSchema is how it
+// becomes readable — which is why the non-secret adjuncts are declared there.
+//
+// Reserved keys stay visible: mint locators and chaining references address the
+// mint rather than describing the credential, and masking a secret_path would hide
+// where a credential comes from while protecting nothing.
+func (t *APIKeyCredType) SensitiveConfigFieldsFor(config map[string]string) []string {
+	fields := t.SensitiveConfigFields()
+
+	known := make(map[string]bool, len(t.ConfigSchema()))
+	for _, v := range t.ConfigSchema() {
+		known[v.FieldName()] = true
+	}
+
+	for key := range config {
+		// Named reserved keys only. IsReservedSpecConfigKey also matches the "__"
+		// prefix, which is right for carriage — those belong to the mint pipeline
+		// — but wrong here: nothing rejects a spec-config key called "__whatever",
+		// so exempting the prefix would leave the one shape of unknown key that
+		// reads back in the clear.
+		if known[key] || credential.IsReservedSpecConfigName(key) {
+			continue
+		}
+		fields = append(fields, key)
+	}
+	return fields
 }

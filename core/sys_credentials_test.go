@@ -462,18 +462,24 @@ func TestSystemBackend_HandleCredentialSpecUpdate(t *testing.T) {
 func TestSystemBackend_HandleCredentialSpecUpdate_MaskedValueIsNotPersisted(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
+	// An apikey source declaring the adjunct, because the spec below sets one and
+	// only that source type carries anything beyond the credential's own field.
 	sourceSchema := backend.pathCredentials()[0].Fields
-	sourceRaw := map[string]interface{}{"name": "local-src", "type": "local"}
+	sourceRaw := map[string]interface{}{
+		"name":   "apikey-src",
+		"type":   "apikey",
+		"config": map[string]interface{}{"credential_fields": "organization_id"},
+	}
 	sourceFieldData := createFieldData(sourceSchema, sourceRaw)
 	_, err := backend.handleCredentialSourceCreate(ctx,
-		createTestRequest(logical.CreateOperation, "cred/sources/local-src", sourceRaw), sourceFieldData)
+		createTestRequest(logical.CreateOperation, "cred/sources/apikey-src", sourceRaw), sourceFieldData)
 	require.NoError(t, err)
 
 	specSchema := backend.pathCredentials()[2].Fields
 	specRaw := map[string]interface{}{
 		"name":   "masked-spec",
 		"type":   "api_key",
-		"source": "local-src",
+		"source": "apikey-src",
 		"config": map[string]interface{}{
 			"api_key":         "sk-real-secret",
 			"organization_id": "org-1",

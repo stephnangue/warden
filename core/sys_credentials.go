@@ -240,11 +240,18 @@ func (b *SystemBackend) maskSpecConfig(specType string, config map[string]string
 		return nil
 	}
 
-	// Get sensitive config fields from credential type
+	// Get sensitive config fields from credential type. A type whose specs can
+	// carry operator-declared fields decides per config instead of from a fixed
+	// list — it cannot know in advance whether an adjunct someone added is a
+	// second secret, so it errs towards masking.
 	var sensitiveFields []string
 	if b.core.credentialTypeRegistry != nil {
 		if credType, err := b.core.credentialTypeRegistry.GetByName(specType); err == nil {
-			sensitiveFields = credType.SensitiveConfigFields()
+			if dynamic, ok := credType.(credential.ConfigSensitivity); ok {
+				sensitiveFields = dynamic.SensitiveConfigFieldsFor(config)
+			} else {
+				sensitiveFields = credType.SensitiveConfigFields()
+			}
 		}
 	}
 

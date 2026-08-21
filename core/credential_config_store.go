@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -615,6 +616,15 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 		return logical.ErrBadRequestf("cannot change the type of source %q (%s → %s); source type is immutable", source.Name, existing.Type, source.Type)
 	}
 
+	// Narrowing credential_fields strands the specs that relied on it. The
+	// spec-level guard cannot catch this: it runs when a spec is written, and here
+	// the specs are untouched — they simply start minting without a field, and the
+	// provider takes its fallback branch. Reject rather than let a source edit
+	// silently narrow credentials bound to it.
+	if err := s.checkBoundSpecsStillCarried(ctx, source); err != nil {
+		return err
+	}
+
 	// Close old driver instance since config has changed
 	// This ensures the driver will be recreated with the new config on next use
 	if err := s.core.credentialManager.CloseDriver(ctx, source.Name); err != nil {
@@ -869,6 +879,22 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		} else {
 			if err := credType.ValidateConfig(spec.Config, source.Type); err != nil {
 				return logical.ErrBadRequestf("invalid config for type '%s': %s", spec.Type, err.Error())
+			}
+
+			// A credential field the source will not carry is dead config: the
+			// spec mints without it and the provider takes its fallback branch,
+			// which looks like a working mount rather than a misconfigured one.
+			// Rejecting here is the only point that sees both the spec and its
+			// source, and so the only one that can say what to add.
+			if missing, carriable := credential.UncarriedAdjunctFields(credType, spec.Config, source.Config, source.Type); len(missing) > 0 {
+				if !carriable {
+					return logical.ErrBadRequestf(
+						"spec sets credential field(s) %s, but a '%s' source carries only the credential's primary field: use an apikey source and name them in its credential_fields",
+						strings.Join(missing, ", "), source.Type)
+				}
+				return logical.ErrBadRequestf(
+					"spec sets credential field(s) %s that source '%s' does not carry: add them to the source's credential_fields (currently %q)",
+					strings.Join(missing, ", "), spec.Source, source.Config["credential_fields"])
 			}
 
 			// A token-exchange spec (subject_token_source set) is minted fresh per
@@ -1180,6 +1206,45 @@ func (s *CredentialConfigStore) CheckSourceReferences(ctx context.Context, sourc
 	}
 
 	return refs, nil
+}
+
+// checkBoundSpecsStillCarried rejects a source edit that would stop a bound spec's
+// credential fields from travelling.
+//
+// The spec-level guard runs when a spec is written and so cannot see this: the
+// specs are not being touched. Without the check, removing a name from
+// credential_fields leaves every spec that set that field minting without it —
+// and the symptom is a provider using its fallback branch, which reads as a
+// working mount. The operator is told which specs to fix.
+//
+// Widening is always fine; only a name that disappears can strand anything.
+func (s *CredentialConfigStore) checkBoundSpecsStillCarried(ctx context.Context, source *credential.CredSource) error {
+	if s.core == nil || s.core.credentialTypeRegistry == nil {
+		return nil
+	}
+
+	refs, err := s.CheckSourceReferences(ctx, source.Name)
+	if err != nil {
+		// A listing failure must not block an unrelated source edit; the
+		// spec-level guard still covers every future write.
+		s.logger.Warn("could not check specs bound to this source for uncarried fields",
+			logger.String("source_name", source.Name), logger.Err(err))
+		return nil
+	}
+
+	for _, spec := range refs {
+		credType, err := s.core.credentialTypeRegistry.GetByName(spec.Type)
+		if err != nil {
+			continue
+		}
+		missing, _ := credential.UncarriedAdjunctFields(credType, spec.Config, source.Config, source.Type)
+		if len(missing) > 0 {
+			return logical.ErrBadRequestf(
+				"spec %q sets credential field(s) %s that this source would no longer carry: keep them in credential_fields, or remove them from the spec first",
+				spec.Name, strings.Join(missing, ", "))
+		}
+	}
+	return nil
 }
 
 // CheckSpecReferences returns the names of sources and specs that reference the

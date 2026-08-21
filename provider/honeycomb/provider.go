@@ -104,7 +104,7 @@ proxied request. Auth mode is detected automatically from the credential data:
 
     key_id is what selects the mode, so setting it on an ingest credential
     switches the mount to management mode. On an apikey source it must also
-    be listed in the source's optional_metadata, since that driver copies
+    be listed in the source's credential_fields, since that driver copies
     only api_key and the fields named there into the credential; a local
     source carries it without further configuration.
 

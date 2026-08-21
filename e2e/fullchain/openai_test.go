@@ -25,12 +25,20 @@ const (
 
 // Each optional field needs its own spec, because a role binds exactly one —
 // hence the variants rather than one spec mutated between rows.
+//
+// The apikey source with credential_fields is the documented shape for a
+// credential carrying more than a key, and the only one that carries adjuncts:
+// api_key owns exactly one field, and everything beside it travels because the
+// source names it. Four specs share one declaration, which is the point of
+// putting it on the source.
 var openaiEnv = h.ProviderEnv{
-	Mount:      "fc-openai",
-	Type:       "openai",
-	URLKey:     "openai_url",
-	CredType:   "api_key",
-	CredConfig: map[string]string{"api_key": openaiKey},
+	Mount:        "fc-openai",
+	Type:         "openai",
+	URLKey:       "openai_url",
+	CredType:     "api_key",
+	SourceType:   "apikey",
+	SourceConfig: map[string]string{"credential_fields": "organization_id,project_id"},
+	CredConfig:   map[string]string{"api_key": openaiKey},
 	Variants: map[string]map[string]string{
 		"org":  {"api_key": openaiKey, "organization_id": openaiOrg},
 		"proj": {"api_key": openaiKey, "project_id": openaiProject},
