@@ -4,6 +4,7 @@ package fullchain
 
 import (
 	"testing"
+	"time"
 
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
@@ -81,8 +82,8 @@ func TestFullChain_UpdatedSpecReachesUpstream(t *testing.T) {
 // Calling h.FullChainUserJWT at each request site would look harmless and
 // silently turn this into the row above, since every call issues a new JWT.
 //
-// What bounds the staleness is the session's own lifetime: the entry is cached
-// for the session TTL. No row here checks that bound.
+// What bounds the staleness is the session's own lifetime, which the row below
+// checks.
 func TestFullChain_LiveSessionKeepsItsCredential(t *testing.T) {
 	ensureEnv(t)
 
@@ -116,6 +117,74 @@ func TestFullChain_LiveSessionKeepsItsCredential(t *testing.T) {
 		Status: 200,
 		// The credential issued to this session, not the rewritten spec.
 		Injected:      map[string]string{"Authorization": "Bearer " + splunkKey},
+		Absent:        h.AlwaysAbsent(),
+		UpstreamCalls: 1,
+	})
+}
+
+// TestFullChain_CredentialStalenessIsBoundedBySessionTTL pins the bound an
+// operator actually experiences: with the same certificate presented throughout,
+// a rewritten spec takes effect once the session expires, rather than never.
+//
+// The row above shows a live session keeping its credential, which on its own is
+// equally consistent with caching it forever — the difference between a rotation
+// delayed and one that never happens. A role whose tokens last two seconds
+// settles that.
+//
+// It pins the observable bound, not the mechanism. Once the token expires the
+// next request authenticates afresh and mints under a new cache key, so a
+// manager that also kept the old entry indefinitely would pass this row
+// identically. Distinguishing the key becoming unreachable from the entry being
+// evicted on its own TTL is an in-process question, not one a client can ask.
+func TestFullChain_CredentialStalenessIsBoundedBySessionTTL(t *testing.T) {
+	ensureEnv(t)
+
+	const (
+		shortRole  = "fc-splunk-shorttl"
+		rotated    = "fc-splunk-rotated-after-expiry"
+		sessionTTL = 2 * time.Second
+	)
+
+	// A dedicated role, so shortening the session cannot affect other rows.
+	h.APIRequest(t, "DELETE", "auth/cert/role/"+shortRole, leaderPort, "")
+	status, resp := h.APIRequest(t, "POST", "auth/cert/role/"+shortRole, leaderPort,
+		`{"allowed_common_names":["`+h.FullChainAgentCN+`"],`+
+			`"token_policies":["`+splunkEnv.Policy()+`"],`+
+			`"cred_spec_name":"`+splunkEnv.Spec()+`","token_ttl":2}`)
+	switch status {
+	case 200, 201, 204:
+	default:
+		t.Fatalf("create short-TTL role (status %d): %s", status, resp)
+	}
+	t.Cleanup(func() { h.APIRequest(t, "DELETE", "auth/cert/role/"+shortRole, leaderPort, "") })
+
+	cert := agentCert(t)
+	user := h.FullChainUserJWT(t)
+
+	// Establish the session against the current spec.
+	status, body, _ := h.ChainRequest(t, leaderPort, splunkEnv, h.ChainOpts{
+		AgentCertPEM: cert, Bearer: user, Role: shortRole,
+	})
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status:        200,
+		Injected:      map[string]string{"Authorization": "Bearer " + splunkKey},
+		UpstreamCalls: 1,
+	})
+
+	setSpecAPIKey(t, splunkEnv, rotated, splunkKey)
+
+	// Past the session's lifetime, the cached credential can no longer be
+	// reached — the token it was keyed to has expired — so the next request
+	// mints against the spec as it now stands.
+	time.Sleep(sessionTTL + time.Second)
+
+	upstream.Reset()
+	status, body, _ = h.ChainRequest(t, leaderPort, splunkEnv, h.ChainOpts{
+		AgentCertPEM: cert, Bearer: user, Role: shortRole,
+	})
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status:        200,
+		Injected:      map[string]string{"Authorization": "Bearer " + rotated},
 		Absent:        h.AlwaysAbsent(),
 		UpstreamCalls: 1,
 	})
