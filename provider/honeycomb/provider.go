@@ -16,14 +16,21 @@ const DefaultHoneycombURL = "https://api.honeycomb.io"
 // DefaultHoneycombTimeout is the default request timeout for Honeycomb API calls.
 const DefaultHoneycombTimeout = 30 * time.Second
 
-// honeycombExtractor injects credentials as the appropriate Honeycomb auth header
-// depending on the credential data fields:
+// honeycombExtractor injects credentials as the appropriate Honeycomb auth header.
+// key_id selects the mode; api_key carries the secret in both:
 //
-//   - key_id + key_secret present → Authorization: Bearer <key_id>:<key_secret>
-//     Used for: Management key operations (V2 key management API).
+//   - key_id present → Authorization: Bearer <key_id>:<api_key>
+//     Used for: Management key operations (V2 key management API), where
+//     Honeycomb's own UI calls api_key the "key secret".
 //
-//   - api_key only → X-Honeycomb-Team: <api_key>
+//   - key_id absent → X-Honeycomb-Team: <api_key>
 //     Used for: Ingest and Configuration key operations (V1/V2 data APIs).
+//
+// The secret half is api_key rather than a separate key_secret field because
+// api_key is what the credential type carries as its secret, and the type
+// guarantees it is non-empty. A distinct key_secret would have to travel
+// alongside a meaningless api_key just to satisfy that guarantee, so management
+// mode could never be configured without one.
 func honeycombExtractor(req *logical.Request) (map[string]string, error) {
 	if req.Credential == nil {
 		return nil, fmt.Errorf("no credential available")
@@ -32,22 +39,19 @@ func honeycombExtractor(req *logical.Request) (map[string]string, error) {
 		return nil, fmt.Errorf("unsupported credential type: %s", req.Credential.Type)
 	}
 
-	// Management key mode: key_id + key_secret
-	if keyID := req.Credential.Data["key_id"]; keyID != "" {
-		keySecret := req.Credential.Data["key_secret"]
-		if keySecret == "" {
-			return nil, fmt.Errorf("management key credential missing key_secret field")
-		}
-		return map[string]string{
-			"Authorization": "Bearer " + keyID + ":" + keySecret,
-		}, nil
-	}
-
-	// Ingest/configuration key mode: api_key → X-Honeycomb-Team header
 	apiKey := req.Credential.Data["api_key"]
 	if apiKey == "" {
 		return nil, fmt.Errorf("credential missing api_key field")
 	}
+
+	// Management key mode: key_id names the key, api_key is its secret.
+	if keyID := req.Credential.Data["key_id"]; keyID != "" {
+		return map[string]string{
+			"Authorization": "Bearer " + keyID + ":" + apiKey,
+		}, nil
+	}
+
+	// Ingest/configuration key mode: api_key → X-Honeycomb-Team header
 	return map[string]string{"X-Honeycomb-Team": apiKey}, nil
 }
 
@@ -65,6 +69,13 @@ var Spec = &httpproxy.ProviderSpec{
 	UserAgent:          "warden-honeycomb-proxy",
 	HelpText:           honeycombBackendHelp,
 	ExtractCredentials: honeycombExtractor,
+
+	// X-Honeycomb-Team is injected only in ingest mode, so in management mode a
+	// caller's own value would otherwise ride through untouched alongside the
+	// Authorization header Warden sets — an inbound credential reaching the
+	// upstream under the mount's identity. Headers injected on every branch need
+	// no strip, since injection overwrites; conditionally injected ones do.
+	ExtraHeadersToRemove: []string{"X-Honeycomb-Team"},
 }
 
 // Factory creates a new Honeycomb provider backend.
@@ -78,15 +89,24 @@ Warden performs implicit authentication on every request and obtains a
 Honeycomb credential from the credential manager, injecting it into the
 proxied request. Auth mode is detected automatically from the credential data:
 
-  Ingest/Configuration key (default):
+  Ingest/Configuration key (default, no key_id on the credential):
     Injected as X-Honeycomb-Team header.
     Used for: sending events, querying data, managing datasets, triggers,
     boards, SLOs, and other environment-scoped operations.
 
-  Management key (key_id + key_secret present):
-    Injected as Authorization: Bearer <key_id>:<key_secret> header.
+  Management key (key_id present on the credential):
+    Injected as Authorization: Bearer <key_id>:<api_key> header.
     Used for: creating, listing, and deleting API keys via the V2
     key management API.
+
+    Put Honeycomb's "Key ID" in key_id and its "Key Secret" in api_key --
+    api_key is the credential's secret field whichever mode is in use.
+
+    key_id is what selects the mode, so setting it on an ingest credential
+    switches the mount to management mode. On an apikey source it must also
+    be listed in the source's credential_fields, since that driver copies
+    only api_key and the fields named there into the credential; a local
+    source carries it without further configuration.
 
 This provider supports both Honeycomb regions by mounting multiple
 instances with different honeycomb_url values:
