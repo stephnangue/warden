@@ -616,7 +616,7 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 		return logical.ErrBadRequestf("cannot change the type of source %q (%s → %s); source type is immutable", source.Name, existing.Type, source.Type)
 	}
 
-	// Narrowing optional_metadata strands the specs that relied on it. The
+	// Narrowing credential_fields strands the specs that relied on it. The
 	// spec-level guard cannot catch this: it runs when a spec is written, and here
 	// the specs are untouched — they simply start minting without a field, and the
 	// provider takes its fallback branch. Reject rather than let a source edit
@@ -889,12 +889,12 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 			if missing, carriable := credential.UncarriedAdjunctFields(credType, spec.Config, source.Config, source.Type); len(missing) > 0 {
 				if !carriable {
 					return logical.ErrBadRequestf(
-						"spec sets credential field(s) %s, but a '%s' source carries only the credential's primary field: use an apikey source and name them in its optional_metadata",
+						"spec sets credential field(s) %s, but a '%s' source carries only the credential's primary field: use an apikey source and name them in its credential_fields",
 						strings.Join(missing, ", "), source.Type)
 				}
 				return logical.ErrBadRequestf(
-					"spec sets credential field(s) %s that source '%s' does not carry: add them to the source's optional_metadata (currently %q)",
-					strings.Join(missing, ", "), spec.Source, source.Config["optional_metadata"])
+					"spec sets credential field(s) %s that source '%s' does not carry: add them to the source's credential_fields (currently %q)",
+					strings.Join(missing, ", "), spec.Source, source.Config["credential_fields"])
 			}
 
 			// A token-exchange spec (subject_token_source set) is minted fresh per
@@ -1213,7 +1213,7 @@ func (s *CredentialConfigStore) CheckSourceReferences(ctx context.Context, sourc
 //
 // The spec-level guard runs when a spec is written and so cannot see this: the
 // specs are not being touched. Without the check, removing a name from
-// optional_metadata leaves every spec that set that field minting without it —
+// credential_fields leaves every spec that set that field minting without it —
 // and the symptom is a provider using its fallback branch, which reads as a
 // working mount. The operator is told which specs to fix.
 //
@@ -1240,7 +1240,7 @@ func (s *CredentialConfigStore) checkBoundSpecsStillCarried(ctx context.Context,
 		missing, _ := credential.UncarriedAdjunctFields(credType, spec.Config, source.Config, source.Type)
 		if len(missing) > 0 {
 			return logical.ErrBadRequestf(
-				"spec %q sets credential field(s) %s that this source would no longer carry: keep them in optional_metadata, or remove them from the spec first",
+				"spec %q sets credential field(s) %s that this source would no longer carry: keep them in credential_fields, or remove them from the spec first",
 				spec.Name, strings.Join(missing, ", "))
 		}
 	}

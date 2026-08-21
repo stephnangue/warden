@@ -80,7 +80,7 @@ func (f *StaticAPIKeyDriverFactory) ValidateConfig(config map[string]string) err
 			Describe("Additional static headers as comma-separated key:value pairs").
 			Example("anthropic-version:2023-06-01"),
 
-		credential.StringField("optional_metadata").
+		credential.StringField("credential_fields").
 			Describe("Comma-separated field names to carry into credential data beside api_key. Each resolves from the fetched secret material first, then spec config. Mint locators (mint_method, secret_path, ...) are rejected").
 			Example("organization_id,project_id"),
 
@@ -114,14 +114,22 @@ func (f *StaticAPIKeyDriverFactory) ValidateConfig(config map[string]string) err
 		}
 	}
 
-	// optional_metadata names credential fields, so it must not name a mint
+	// optional_metadata was this key's former name. It is not accepted silently:
+	// an ignored config key would leave the source declaring nothing, its specs
+	// minting without the fields they set, and the providers reading them taking
+	// their fallback branch — a working-looking mount. Fail on the write instead.
+	if _, ok := config["optional_metadata"]; ok {
+		return fmt.Errorf("optional_metadata has been renamed to credential_fields (the fields land in the credential's data, which may be secret, not in its non-secret metadata)")
+	}
+
+	// credential_fields names credential fields, so it must not name a mint
 	// locator or a chaining key. Nothing travels unless an operator wrote its
 	// name down, which makes this a typo check rather than a security boundary —
 	// but a locator copied into credential data would be sent upstream by
 	// whichever provider reads that field name.
-	for _, field := range parseOptionalMetadata(config) {
+	for _, field := range parseCredentialFields(config) {
 		if credential.IsReservedSpecConfigKey(field) {
-			return fmt.Errorf("optional_metadata cannot name %q: it configures the mint rather than describing the credential", field)
+			return fmt.Errorf("credential_fields cannot name %q: it configures the mint rather than describing the credential", field)
 		}
 	}
 
@@ -219,7 +227,7 @@ func (d *StaticAPIKeyDriver) MintFromSecret(_ context.Context, spec *credential.
 }
 
 // buildAPIKeyData assembles the credential data map from the resolved API key plus
-// the optional_metadata fields the source declares. Shared by the inline and
+// the credential_fields fields the source declares. Shared by the inline and
 // chained mint paths; material is the zero value on the inline one, whose nil map
 // reads safely.
 //
@@ -240,7 +248,7 @@ func (d *StaticAPIKeyDriver) buildAPIKeyData(
 	}
 
 	var carried []string
-	for _, field := range parseOptionalMetadata(d.credSource.Config) {
+	for _, field := range parseCredentialFields(d.credSource.Config) {
 		if credential.IsReservedSpecConfigKey(field) {
 			// Rejected at source-config write; skipped here too, so a source
 			// stored before that check cannot smuggle a locator into the
@@ -377,11 +385,11 @@ func parseExtraHeaders(raw string) (map[string]string, error) {
 	return headers, nil
 }
 
-// parseOptionalMetadata parses comma-separated field names from source config.
+// parseCredentialFields parses comma-separated field names from source config.
 // Delegates to the shared splitter so the names this driver writes into the
 // declaration are split exactly as the parser splits them reading it back.
-func parseOptionalMetadata(config map[string]string) []string {
-	return credential.ParseAdjunctNames(credential.GetString(config, "optional_metadata", ""))
+func parseCredentialFields(config map[string]string) []string {
+	return credential.ParseAdjunctNames(credential.GetString(config, "credential_fields", ""))
 }
 
 // validateAPIKeyOptionalURL validates that api_url, if non-empty, is a well-formed HTTPS URL.

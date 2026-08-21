@@ -9,7 +9,7 @@ import "strings"
 // author did not anticipate reads something no configuration can supply — the
 // branch is live code with no reachable input.
 //
-// The apikey source already lets an operator name extra fields (optional_metadata)
+// The apikey source already lets an operator name extra fields (credential_fields)
 // and copies them into rawData. What was missing is that the type filter then
 // discarded them. Carriage closes that gap: the driver records which names it
 // resolved under RawAdjunctFieldsKey, and the parser copies exactly those into the
@@ -38,8 +38,8 @@ type AdjunctCarrier interface {
 //
 // Two different failures, and telling them apart matters. A source that could
 // carry the field but was not told to needs a line adding to its
-// optional_metadata. A source whose driver has no such mechanism cannot carry it
-// at all, and pointing that operator at optional_metadata would send them to add
+// credential_fields. A source whose driver has no such mechanism cannot carry it
+// at all, and pointing that operator at credential_fields would send them to add
 // a key that changes nothing — the same silent divergence this check exists to
 // prevent, one layer up.
 //
@@ -50,13 +50,13 @@ func UncarriedAdjunctFields(credType interface{}, specConfig, sourceConfig map[s
 		return nil, true
 	}
 
-	// Only the apikey driver resolves optional_metadata and tells the parser what
+	// Only the apikey driver resolves credential_fields and tells the parser what
 	// it carried; the parser honours the declaration from that driver alone.
 	carriable = sourceType == SourceTypeAPIKey
 
 	declared := make(map[string]bool)
 	if carriable {
-		for _, name := range ParseAdjunctNames(sourceConfig["optional_metadata"]) {
+		for _, name := range ParseAdjunctNames(sourceConfig["credential_fields"]) {
 			declared[name] = true
 		}
 	}

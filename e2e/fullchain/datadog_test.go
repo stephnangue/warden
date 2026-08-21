@@ -31,7 +31,7 @@ var datadogEnv = h.ProviderEnv{
 	URLKey:       "datadog_url",
 	CredType:     "api_key",
 	SourceType:   "apikey",
-	SourceConfig: map[string]string{"optional_metadata": "application_key"},
+	SourceConfig: map[string]string{"credential_fields": "application_key"},
 	CredConfig:   map[string]string{"api_key": datadogAPIKey},
 	Variants: map[string]map[string]string{
 		"app": {"api_key": datadogAPIKey, "application_key": datadogAppKey},

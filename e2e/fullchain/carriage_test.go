@@ -10,7 +10,7 @@ import (
 )
 
 // A credential carries api_key plus whatever its source declares in
-// optional_metadata. Everything here is about the boundary of that declaration:
+// credential_fields. Everything here is about the boundary of that declaration:
 // what an operator can put in it, and what happens to a field nobody declared.
 //
 // The rows drive the public API rather than the parser, because the interesting
@@ -35,7 +35,7 @@ func TestCarriage_ReservedNameIsRejectedOnTheSource(t *testing.T) {
 
 	for _, field := range []string{"secret_path", "mint_method", "secret_spec", "__adjunct_fields"} {
 		status, body := h.APIRequest(t, "POST", "sys/cred/sources/"+name, leaderPort,
-			`{"type":"apikey","config":{"optional_metadata":"`+field+`"}}`)
+			`{"type":"apikey","config":{"credential_fields":"`+field+`"}}`)
 		if status < 400 || status >= 500 {
 			t.Errorf("declaring %q as a credential field: got status %d, want a 4xx (body: %s)", field, status, body)
 			h.APIRequest(t, "DELETE", "sys/cred/sources/"+name, leaderPort, "")
@@ -78,7 +78,7 @@ func TestCarriage_UndeclaredAdjunctIsRejectedOnTheSpec(t *testing.T) {
 
 	// Following the advice makes the same spec valid.
 	mustWrite("PUT", "sys/cred/sources/"+srcName,
-		`{"config":{"optional_metadata":"organization_id"}}`, "declare organization_id on the source")
+		`{"config":{"credential_fields":"organization_id"}}`, "declare organization_id on the source")
 	mustWrite("POST", "sys/cred/specs/"+specName, specBody, "spec with a declared credential field")
 }
 
@@ -86,7 +86,7 @@ func TestCarriage_UndeclaredAdjunctIsRejectedOnTheSpec(t *testing.T) {
 // guard.
 //
 // That guard runs when a spec is written. Removing a name from the source's
-// optional_metadata touches no spec at all, so every spec that set the field would
+// credential_fields touches no spec at all, so every spec that set the field would
 // quietly start minting without it — the guard's own failure mode, reached through
 // the front door. Widening stays free; only a disappearing name can strand anything.
 func TestCarriage_NarrowingASourceStrandsNothing(t *testing.T) {
@@ -111,16 +111,16 @@ func TestCarriage_NarrowingASourceStrandsNothing(t *testing.T) {
 	}
 
 	mustWrite("POST", "sys/cred/sources/"+srcName,
-		`{"type":"apikey","config":{"optional_metadata":"organization_id"}}`, "create source")
+		`{"type":"apikey","config":{"credential_fields":"organization_id"}}`, "create source")
 	mustWrite("POST", "sys/cred/specs/"+specName,
 		`{"type":"api_key","source":"`+srcName+`","config":{"api_key":"k","organization_id":"org-1"}}`,
 		"create spec")
 
 	// Dropping the declaration the spec depends on.
 	status, body := h.APIRequest(t, "PUT", "sys/cred/sources/"+srcName, leaderPort,
-		`{"config":{"optional_metadata":""}}`)
+		`{"config":{"credential_fields":""}}`)
 	if status < 400 || status >= 500 {
-		t.Fatalf("narrowing optional_metadata under a bound spec: got status %d, want a 4xx (body: %s)", status, body)
+		t.Fatalf("narrowing credential_fields under a bound spec: got status %d, want a 4xx (body: %s)", status, body)
 	}
 	if !strings.Contains(string(body), specName) {
 		t.Errorf("the error must name the spec left stranded, got: %s", body)
@@ -128,16 +128,16 @@ func TestCarriage_NarrowingASourceStrandsNothing(t *testing.T) {
 
 	// Widening is unaffected.
 	mustWrite("PUT", "sys/cred/sources/"+srcName,
-		`{"config":{"optional_metadata":"organization_id,project_id"}}`, "widen optional_metadata")
+		`{"config":{"credential_fields":"organization_id,project_id"}}`, "widen credential_fields")
 }
 
 // TestCarriage_NonAPIKeySourceCannotCarryAdjuncts covers the failure the guard
 // would otherwise describe wrongly.
 //
-// Only the apikey driver resolves optional_metadata and tells the parser what it
+// Only the apikey driver resolves credential_fields and tells the parser what it
 // carried. A local source has no such mechanism, so a credential field set beside
 // api_key can never travel — and an error pointing that operator at
-// optional_metadata would send them to add a key that changes nothing, which is
+// credential_fields would send them to add a key that changes nothing, which is
 // the same silent divergence one layer up. The rejection has to name the source
 // type, and a declaration on such a source must not satisfy it.
 func TestCarriage_NonAPIKeySourceCannotCarryAdjuncts(t *testing.T) {
@@ -155,7 +155,7 @@ func TestCarriage_NonAPIKeySourceCannotCarryAdjuncts(t *testing.T) {
 	// A local source that declares the field anyway. The declaration is inert
 	// here, and the spec must still be refused.
 	status, body := h.APIRequest(t, "POST", "sys/cred/sources/"+srcName, leaderPort,
-		`{"type":"local","config":{"optional_metadata":"organization_id"}}`)
+		`{"type":"local","config":{"credential_fields":"organization_id"}}`)
 	switch status {
 	case 200, 201, 204:
 	default:

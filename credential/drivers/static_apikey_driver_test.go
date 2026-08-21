@@ -62,7 +62,7 @@ func TestStaticAPIKeyDriverFactory_ValidateConfig(t *testing.T) {
 				"auth_header_type":  "custom_header",
 				"auth_header_name":  "x-api-key",
 				"extra_headers":     "anthropic-version:2023-06-01",
-				"optional_metadata": "organization_id",
+				"credential_fields": "organization_id",
 				"display_name":      "Anthropic",
 			},
 			wantErr: false,
@@ -231,13 +231,13 @@ func TestStaticAPIKeyDriver_GetAPIURL_Empty(t *testing.T) {
 }
 
 // =============================================================================
-// Optional Metadata Tests
+// Credential Fields Tests
 // =============================================================================
 
-func TestStaticAPIKeyDriver_MintCredential_OptionalMetadata(t *testing.T) {
+func TestStaticAPIKeyDriver_MintCredential_CredentialFields(t *testing.T) {
 	t.Run("copies configured metadata fields", func(t *testing.T) {
 		d := createTestAPIKeyDriver(t, map[string]string{
-			"optional_metadata": "organization_id,project_id",
+			"credential_fields": "organization_id,project_id",
 		})
 		spec := &credential.CredSpec{
 			Name: "test",
@@ -255,7 +255,7 @@ func TestStaticAPIKeyDriver_MintCredential_OptionalMetadata(t *testing.T) {
 
 	t.Run("skips empty metadata fields", func(t *testing.T) {
 		d := createTestAPIKeyDriver(t, map[string]string{
-			"optional_metadata": "organization_id",
+			"credential_fields": "organization_id",
 		})
 		spec := &credential.CredSpec{
 			Name:   "test",
@@ -320,8 +320,8 @@ func TestStaticAPIKeyDriver_MintFromSecret_AutoDetectSingleKey(t *testing.T) {
 	assert.Equal(t, "sk-fallback", rawData["api_key"])
 }
 
-func TestStaticAPIKeyDriver_MintFromSecret_OptionalMetadata(t *testing.T) {
-	d := createTestAPIKeyDriver(t, map[string]string{"optional_metadata": "organization_id"})
+func TestStaticAPIKeyDriver_MintFromSecret_CredentialFields(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{"credential_fields": "organization_id"})
 	spec := &credential.CredSpec{
 		Name: "test",
 		Config: map[string]string{
@@ -344,7 +344,7 @@ func TestStaticAPIKeyDriver_MintFromSecret_OptionalMetadata(t *testing.T) {
 // nothing in the spec. Before, MintFromSecret took the selected value and
 // discarded the rest of the payload, so the second field was unreachable.
 func TestStaticAPIKeyDriver_MintFromSecret_AdjunctFromMaterial(t *testing.T) {
-	d := createTestAPIKeyDriver(t, map[string]string{"optional_metadata": "application_key"})
+	d := createTestAPIKeyDriver(t, map[string]string{"credential_fields": "application_key"})
 	spec := &credential.CredSpec{
 		Name:   "test",
 		Config: map[string]string{"secret_spec": "ref"},
@@ -366,7 +366,7 @@ func TestStaticAPIKeyDriver_MintFromSecret_AdjunctFromMaterial(t *testing.T) {
 // The fetched payload wins over spec config, which is what lets one declaration
 // serve both a keyless spec and one that pins a value inline.
 func TestStaticAPIKeyDriver_MintFromSecret_MaterialBeatsSpecConfig(t *testing.T) {
-	d := createTestAPIKeyDriver(t, map[string]string{"optional_metadata": "application_key"})
+	d := createTestAPIKeyDriver(t, map[string]string{"credential_fields": "application_key"})
 	spec := &credential.CredSpec{
 		Name: "test",
 		Config: map[string]string{
@@ -387,7 +387,7 @@ func TestStaticAPIKeyDriver_MintFromSecret_MaterialBeatsSpecConfig(t *testing.T)
 // The mixed shape: secrets from the vault, a non-secret adjunct inline. The
 // declared field is absent from the payload, so it falls back to spec config.
 func TestStaticAPIKeyDriver_MintFromSecret_AdjunctFallsBackToSpecConfig(t *testing.T) {
-	d := createTestAPIKeyDriver(t, map[string]string{"optional_metadata": "email"})
+	d := createTestAPIKeyDriver(t, map[string]string{"credential_fields": "email"})
 	spec := &credential.CredSpec{
 		Name: "test",
 		Config: map[string]string{
@@ -411,7 +411,7 @@ func TestStaticAPIKeyDriver_MintFromSecret_AdjunctFallsBackToSpecConfig(t *testi
 // Copying it would silently mint a different secret than the spec asked for, and
 // the parser's own overwrite guard cannot see it: the damage is done before Parse.
 func TestStaticAPIKeyDriver_MintFromSecret_DeclaredAPIKeyCannotClobberSelection(t *testing.T) {
-	d := createTestAPIKeyDriver(t, map[string]string{"optional_metadata": "api_key"})
+	d := createTestAPIKeyDriver(t, map[string]string{"credential_fields": "api_key"})
 	spec := &credential.CredSpec{
 		Name:   "test",
 		Config: map[string]string{"secret_spec": "ref", "secret_field": "prod_key"},
@@ -426,22 +426,39 @@ func TestStaticAPIKeyDriver_MintFromSecret_DeclaredAPIKeyCannotClobberSelection(
 	assert.Equal(t, "sk-selected", rawData["api_key"], "secret_field's selection must survive the declaration")
 }
 
-// A source whose optional_metadata names a mint locator is rejected at write.
+// A source whose credential_fields names a mint locator is rejected at write.
 // The driver skips it at mint too, so a source stored before that check cannot
 // move a locator into credential data.
-func TestStaticAPIKeyDriver_ValidateConfig_RejectsReservedOptionalMetadata(t *testing.T) {
+// TestStaticAPIKeyDriverFactory_RejectsFormerKeyName keeps a rename from being a
+// silent narrowing.
+//
+// optional_metadata was this key's former name. Ignoring it as an unknown key
+// would leave the source declaring nothing, its specs minting without the fields
+// they set, and the providers reading those fields taking their fallback branch —
+// which looks like a working mount. The write fails instead.
+func TestStaticAPIKeyDriverFactory_RejectsFormerKeyName(t *testing.T) {
+	f := &StaticAPIKeyDriverFactory{}
+
+	err := f.ValidateConfig(map[string]string{"optional_metadata": "organization_id"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential_fields", "the error must name the key to use instead")
+
+	assert.NoError(t, f.ValidateConfig(map[string]string{"credential_fields": "organization_id"}))
+}
+
+func TestStaticAPIKeyDriver_ValidateConfig_RejectsReservedCredentialFields(t *testing.T) {
 	f := &StaticAPIKeyDriverFactory{}
 
 	for _, name := range []string{"secret_path", "mint_method", "secret_spec", "json_key_map", "__adjunct_fields"} {
-		err := f.ValidateConfig(map[string]string{"optional_metadata": name})
-		assert.ErrorContains(t, err, "optional_metadata cannot name", "name %q", name)
+		err := f.ValidateConfig(map[string]string{"credential_fields": name})
+		assert.ErrorContains(t, err, "credential_fields cannot name", "name %q", name)
 	}
 
-	assert.NoError(t, f.ValidateConfig(map[string]string{"optional_metadata": "organization_id,email"}))
+	assert.NoError(t, f.ValidateConfig(map[string]string{"credential_fields": "organization_id,email"}))
 }
 
-func TestStaticAPIKeyDriver_MintCredential_SkipsReservedOptionalMetadata(t *testing.T) {
-	d := createTestAPIKeyDriver(t, map[string]string{"optional_metadata": "secret_path"})
+func TestStaticAPIKeyDriver_MintCredential_SkipsReservedCredentialFields(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{"credential_fields": "secret_path"})
 	spec := &credential.CredSpec{
 		Name:   "test",
 		Config: map[string]string{"api_key": "sk-x", "secret_path": "apikeys/prod"},

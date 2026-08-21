@@ -28,7 +28,7 @@ func NewAPIKeyCredType() *APIKeyCredType {
 				// Empty by design. api_key is the only field this type owns;
 				// every adjunct — an organization, a second key, an account
 				// identity — is named by the operator in the source's
-				// optional_metadata and carried by the parser.
+				// credential_fields and carried by the parser.
 				//
 				// A fixed list here could only hold fields anticipated when the
 				// type was written, which is what left several provider
@@ -61,7 +61,7 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 		// one here documents it and marks it known — which is what keeps it
 		// readable, since masking treats an undeclared spec-config key as a
 		// possible secret. Declaring does NOT carry it: on an apikey source a field
-		// travels only when the source's optional_metadata names it.
+		// travels only when the source's credential_fields names it.
 		credential.StringField("organization_id").
 			Describe("Organization ID (optional)").
 			Example("org-xxxxxxxxxxxx"),
@@ -215,7 +215,7 @@ func (t *APIKeyCredType) RequiresSpecRotation() bool {
 // instead of minting a credential silently missing it.
 //
 // A provider needing a field absent from this list still works — the operator
-// names it in optional_metadata and it is carried. The list only decides which
+// names it in credential_fields and it is carried. The list only decides which
 // names Warden can give a helpful error about.
 var apiKeyAdjunctFields = []string{
 	"organization_id", "project_id", "key_id", "key_name", "email", "application_key",

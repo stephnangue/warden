@@ -24,7 +24,7 @@ const DefaultPrometheusTimeout = 30 * time.Second
 //     Prometheus, Thanos, Cortex) that accept bearer tokens.
 //
 // To forward the auth_type field from a spec config into credential data,
-// configure the apikey source with optional_metadata=auth_type.
+// configure the apikey source with credential_fields=auth_type.
 func prometheusExtractor(req *logical.Request) (map[string]string, error) {
 	if req.Credential == nil {
 		return nil, fmt.Errorf("no credential available")
@@ -78,7 +78,7 @@ proxied request. Auth mode is detected automatically from the credential data:
     Used for self-hosted Prometheus instances configured with
     --web.config.file basic auth. api_key must be the base64-encoded
     "username:password" string (e.g. base64("admin:secret")).
-    Configure your apikey source with optional_metadata=auth_type and
+    Configure your apikey source with credential_fields=auth_type and
     set auth_type=basic on the credential spec.
 
 This provider type supports the full Prometheus ecosystem by mounting
@@ -114,7 +114,7 @@ Example API paths:
 
 Credential source type:
 - apikey: Static bearer token or pre-encoded basic auth credentials.
-  For basic auth, set optional_metadata=auth_type on the source and
+  For basic auth, set credential_fields=auth_type on the source and
   include auth_type=basic in the spec config.
 
 Configuration:

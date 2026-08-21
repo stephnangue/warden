@@ -74,17 +74,17 @@ key. Both travel in one credential, and the source declares the second one:
 
   warden cred source create datadog -type=apikey \
     -config=api_url=https://api.datadoghq.com \
-    -config=optional_metadata=application_key
+    -config=credential_fields=application_key
 
   warden cred spec create datadog-prod -source=datadog \
     -config=api_key=<DD_API_KEY> \
     -config=application_key=<DD_APP_KEY>
 
 api_key is the only field a credential carries on its own; anything beside it
-travels because optional_metadata names it, and a spec setting application_key
+travels because credential_fields names it, and a spec setting application_key
 against a source that does not declare it is rejected at write.
 
-Only the apikey source resolves optional_metadata, so the spec that Warden
+Only the apikey source resolves credential_fields, so the spec that Warden
 mints must sit on one. Keeping the keys in a vault does not change that — it
 changes where the values come from. Point the spec at a referenced secret with
 credential chaining, and the apikey source resolves its declared fields from

@@ -66,7 +66,7 @@ func (p *CredentialParser) warnUncarried(credType Type, spec *CredSpec, rawData 
 		return
 	}
 
-	p.logger.Warn("credential field(s) available but not carried; declare them in the source's optional_metadata (an apikey source is required to carry them)",
+	p.logger.Warn("credential field(s) available but not carried; declare them in the source's credential_fields (an apikey source is required to carry them)",
 		logger.String("spec", spec.Name),
 		logger.String("source", spec.Source),
 		logger.String("fields", strings.Join(dropped, ",")),
@@ -111,7 +111,7 @@ func (p *CredentialParser) ParseAndValidate(
 	// Step 2: Take the driver's adjunct declaration out of rawData before parsing.
 	//
 	// Removal is unconditional, but the names are honoured only from the driver
-	// that owns optional_metadata. Both halves are load-bearing. The vault and aws
+	// that owns credential_fields. Both halves are load-bearing. The vault and aws
 	// drivers return fetched secret payloads verbatim, so this key can arrive from
 	// someone's stored secret rather than from Warden — honouring it there would
 	// let whoever writes that secret decide what becomes credential data. And

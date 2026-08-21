@@ -223,7 +223,7 @@ const RawRotatedRefreshTokenExpiresAtKey = "__rotated_refresh_token_expires_at"
 
 // RawAdjunctFieldsKey is a reserved key a driver sets in the rawData returned by
 // MintCredential to name the fields it resolved beyond the credential's primary
-// one — the comma-separated names an operator declared in optional_metadata.
+// one — the comma-separated names an operator declared in credential_fields.
 //
 // The parser consumes and strips it before the credential is parsed, then copies
 // exactly those fields into the credential's Data map. Stripping first matters:

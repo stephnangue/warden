@@ -30,7 +30,7 @@ const DefaultAtlassianTimeout = 30 * time.Second
 //
 // api_key is the only field the credential type carries on its own, so email
 // reaches the credential because the apikey source declares it in
-// optional_metadata. Its value resolves from a chained secret's payload first,
+// credential_fields. Its value resolves from a chained secret's payload first,
 // then from spec config.
 func atlassianExtractor(req *logical.Request) (map[string]string, error) {
 	if req.Credential == nil {
@@ -87,7 +87,7 @@ proxied request. Auth mode is detected automatically from the credential data:
 
       warden cred source create atlassian -type=apikey \
         -config=api_url=https://<domain>.atlassian.net \
-        -config=optional_metadata=email
+        -config=credential_fields=email
 
       warden cred spec create jira-svc -source=atlassian \
         -config=api_key=<ATLASSIAN_TOKEN> \
@@ -159,7 +159,7 @@ Example API paths (Bitbucket Cloud):
 
 Credential source type:
 - apikey: Static Atlassian API token, PAT, app password, or OAuth access token.
-  For Cloud personal tokens, declare optional_metadata=email on the source and
+  For Cloud personal tokens, declare credential_fields=email on the source and
   set email on the spec to enable Basic Auth mode; the token itself may be
   inline or reached from a vault by credential chaining (see above).
 

@@ -111,7 +111,7 @@ func TestCarriage_ForgedDeclarationFromAnotherDriverIsIgnored(t *testing.T) {
 				t.Context(), carriageSpec(), strict, nil, 0, "", carriageDriver(driverType))
 			require.NoError(t, err)
 			assert.NotContains(t, cred.Data, "application_key",
-				"a declaration from a driver that does not own optional_metadata must not be honoured")
+				"a declaration from a driver that does not own credential_fields must not be honoured")
 			assert.NotContains(t, cred.Data, "owner")
 			assert.Len(t, cred.Data, 1)
 
@@ -263,7 +263,7 @@ func TestUncarriedAdjunctFields(t *testing.T) {
 	// Declared: carried, so not reported.
 	fields, _ = UncarriedAdjunctFields(carrier,
 		map[string]string{"api_key": "k", "organization_id": "org"},
-		map[string]string{"optional_metadata": "organization_id"}, SourceTypeAPIKey)
+		map[string]string{"credential_fields": "organization_id"}, SourceTypeAPIKey)
 	assert.Empty(t, fields)
 
 	// A source whose driver has no declaration mechanism cannot carry the field
@@ -272,7 +272,7 @@ func TestUncarriedAdjunctFields(t *testing.T) {
 	for _, srcType := range []string{SourceTypeLocal, SourceTypeVault, SourceTypeAWS} {
 		fields, carriable = UncarriedAdjunctFields(carrier,
 			map[string]string{"api_key": "k", "organization_id": "org"},
-			map[string]string{"optional_metadata": "organization_id"}, srcType)
+			map[string]string{"credential_fields": "organization_id"}, srcType)
 		assert.Equal(t, []string{"organization_id"}, fields, "source type %q", srcType)
 		assert.False(t, carriable, "source type %q", srcType)
 	}
