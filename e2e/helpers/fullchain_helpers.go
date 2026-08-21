@@ -3,6 +3,7 @@
 package helpers
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/tls"
 	"encoding/json"
@@ -158,6 +159,10 @@ type UpstreamRequest struct {
 	Path     string
 	RawQuery string
 	Header   http.Header
+	// Body is what the upstream was sent, byte for byte. Warden buffers and
+	// re-serves the request body on the way through, so this is the only place
+	// from which "the caller's body survived that round trip" can be checked.
+	Body []byte
 }
 
 // RecordingUpstream stands in for a provider's real API. It keeps what it was
@@ -203,12 +208,18 @@ func StartRecordingUpstream(t *testing.T) *RecordingUpstream {
 	t.Helper()
 	u := &RecordingUpstream{}
 	u.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Buffer the body to record it, then put it back: a handler installed by
+		// SetHandler reads the same request, and it must not find it drained.
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+
 		u.mu.Lock()
 		u.reqs = append(u.reqs, UpstreamRequest{
 			Method:   r.Method,
 			Path:     r.URL.Path,
 			RawQuery: r.URL.RawQuery,
 			Header:   r.Header.Clone(),
+			Body:     body,
 		})
 		custom := u.handler
 		u.mu.Unlock()

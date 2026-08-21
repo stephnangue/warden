@@ -197,6 +197,79 @@ func TestFullChain_AuthorizationNeverReachesUpstream(t *testing.T) {
 	}
 }
 
+// TestFullChain_ArrayBodyIsProxied covers the request shape that no mount could
+// carry: a body whose top-level JSON value is an array. Batch endpoints, bulk
+// writes and metrics series all send one, and the authorization path decoded every
+// body into a string-keyed map — a shape an array cannot satisfy — so the request
+// died with the decoder's own message before it was ever authorised.
+//
+// Two carriers rather than one because the fault was in code every mount shares: a
+// fix that only reached the mount it was tested against would not be one.
+func TestFullChain_ArrayBodyIsProxied(t *testing.T) {
+	ensureEnv(t)
+
+	cases := []struct {
+		env  h.ProviderEnv
+		want map[string]string
+		body string
+	}{
+		{openaiEnv, map[string]string{"Authorization": "Bearer " + openaiKey},
+			`[{"custom_id":"a","method":"POST"},{"custom_id":"b","method":"POST"}]`},
+		{datadogEnv, map[string]string{"DD-API-KEY": datadogAPIKey},
+			`[{"metric":"e2e.probe","points":[[1,2]]}]`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.env.Mount, func(t *testing.T) {
+			upstream.Reset()
+
+			status, body, _ := h.ChainRequest(t, leaderPort, tc.env, h.ChainOpts{
+				AgentCertPEM: agentCert(t),
+				Bearer:       h.FullChainUserJWT(t),
+				Role:         tc.env.CertRole(),
+				Body:         tc.body,
+			})
+
+			h.AssertChain(t, upstream, status, body, h.ChainWant{
+				Status:        200,
+				Injected:      tc.want,
+				Absent:        h.AlwaysAbsent(),
+				UpstreamCalls: 1,
+			})
+
+			// A 200 would also be returned for a body Warden mangled on the way
+			// through, and an array is only worth carrying if it arrives intact.
+			reqs := upstream.Requests()
+			if got := string(reqs[len(reqs)-1].Body); got != tc.body {
+				t.Errorf("upstream body: got %s, want %s", got, tc.body)
+			}
+		})
+	}
+}
+
+// TestFullChain_MalformedBodyIsARequestError pins what a caller is told when their
+// body is not JSON at all. It used to be a 500 quoting a Go type name: the wrong
+// party blamed, and an internal type handed over as if it were the API contract.
+func TestFullChain_MalformedBodyIsARequestError(t *testing.T) {
+	ensureEnv(t)
+	upstream.Reset()
+
+	status, body, _ := h.ChainRequest(t, leaderPort, openaiEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         openaiEnv.CertRole(),
+		Body:         `{"truncated":`,
+	})
+
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status:        400,
+		UpstreamCalls: 0,
+	})
+	if strings.Contains(string(body), "map[string]") || strings.Contains(string(body), "interface {}") {
+		t.Errorf("response hands the caller a Go type name as an API contract: %s", body)
+	}
+}
+
 // TestFullChain_OperatorTokenPlusUserIsRejected pins the gate that fires before
 // any token extractor runs. The operator credential carries no user principal,
 // so combining it with an Authorization credential on a mount that expects one
