@@ -221,6 +221,21 @@ const RawRotatedRefreshTokenKey = "__rotated_refresh_token"
 // is parsed — so it never reaches the credential's Data map.
 const RawRotatedRefreshTokenExpiresAtKey = "__rotated_refresh_token_expires_at"
 
+// RawAdjunctFieldsKey is a reserved key a driver sets in the rawData returned by
+// MintCredential to name the fields it resolved beyond the credential's primary
+// one — the comma-separated names an operator declared in optional_metadata.
+//
+// The parser consumes and strips it before the credential is parsed, then copies
+// exactly those fields into the credential's Data map. Stripping first matters:
+// a lenient type such as key_value copies every string key it is given, so a key
+// left in rawData would land in Data itself.
+//
+// Only the apikey driver sets it, and the parser honours it only from that
+// driver. Two drivers return fetched secret payloads verbatim, so a key appearing
+// in rawData is not proof that Warden put it there — it may be a field of someone's
+// Vault secret.
+const RawAdjunctFieldsKey = "__adjunct_fields"
+
 // OAuth2Authorizer is an optional interface for drivers that support an OAuth2
 // authorization-code consent flow. The CLI captures only the authorization code
 // on a loopback redirect; the server builds the authorize URL and performs the

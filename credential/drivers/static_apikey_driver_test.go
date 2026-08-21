@@ -335,6 +335,122 @@ func TestStaticAPIKeyDriver_MintFromSecret_OptionalMetadata(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "sk-x", rawData["api_key"])
 	assert.Equal(t, "org-999", rawData["organization_id"])
+	assert.Equal(t, "organization_id", rawData[credential.RawAdjunctFieldsKey],
+		"the driver must name what it resolved, or the parser cannot tell a credential field from a payload key")
+}
+
+// TestStaticAPIKeyDriver_MintFromSecret_AdjunctFromMaterial covers the keyless
+// shape: a multi-field credential living entirely in one fetched secret, with
+// nothing in the spec. Before, MintFromSecret took the selected value and
+// discarded the rest of the payload, so the second field was unreachable.
+func TestStaticAPIKeyDriver_MintFromSecret_AdjunctFromMaterial(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{"optional_metadata": "application_key"})
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Config: map[string]string{"secret_spec": "ref"},
+	}
+	material := credential.SecretMaterial{Data: map[string]string{
+		"api_key":         "sk-from-vault",
+		"application_key": "app-from-vault",
+		"owner":           "not-declared",
+	}}
+
+	rawData, _, _, _, err := d.MintFromSecret(context.Background(), spec, material)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-from-vault", rawData["api_key"])
+	assert.Equal(t, "app-from-vault", rawData["application_key"])
+	assert.NotContains(t, rawData, "owner", "an undeclared payload field is not credential material")
+	assert.Equal(t, "application_key", rawData[credential.RawAdjunctFieldsKey])
+}
+
+// The fetched payload wins over spec config, which is what lets one declaration
+// serve both a keyless spec and one that pins a value inline.
+func TestStaticAPIKeyDriver_MintFromSecret_MaterialBeatsSpecConfig(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{"optional_metadata": "application_key"})
+	spec := &credential.CredSpec{
+		Name: "test",
+		Config: map[string]string{
+			"secret_spec":     "ref",
+			"application_key": "app-from-spec",
+		},
+	}
+	material := credential.SecretMaterial{Data: map[string]string{
+		"api_key":         "sk-from-vault",
+		"application_key": "app-from-vault",
+	}}
+
+	rawData, _, _, _, err := d.MintFromSecret(context.Background(), spec, material)
+	require.NoError(t, err)
+	assert.Equal(t, "app-from-vault", rawData["application_key"])
+}
+
+// The mixed shape: secrets from the vault, a non-secret adjunct inline. The
+// declared field is absent from the payload, so it falls back to spec config.
+func TestStaticAPIKeyDriver_MintFromSecret_AdjunctFallsBackToSpecConfig(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{"optional_metadata": "email"})
+	spec := &credential.CredSpec{
+		Name: "test",
+		Config: map[string]string{
+			"secret_spec": "ref",
+			"email":       "svc@corp.com",
+		},
+	}
+	material := credential.SecretMaterial{Data: map[string]string{"api_key": "sk-from-vault"}}
+
+	rawData, _, _, _, err := d.MintFromSecret(context.Background(), spec, material)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-from-vault", rawData["api_key"])
+	assert.Equal(t, "svc@corp.com", rawData["email"])
+}
+
+// TestStaticAPIKeyDriver_MintFromSecret_DeclaredAPIKeyCannotClobberSelection is
+// the reason the loop skips a field rawData already holds.
+//
+// api_key is not a reserved name — an operator may declare it — and on the chained
+// path the payload can hold an api_key alongside whatever secret_field selected.
+// Copying it would silently mint a different secret than the spec asked for, and
+// the parser's own overwrite guard cannot see it: the damage is done before Parse.
+func TestStaticAPIKeyDriver_MintFromSecret_DeclaredAPIKeyCannotClobberSelection(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{"optional_metadata": "api_key"})
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Config: map[string]string{"secret_spec": "ref", "secret_field": "prod_key"},
+	}
+	material := credential.SecretMaterial{
+		Data:  map[string]string{"prod_key": "sk-selected", "api_key": "sk-other"},
+		Field: "prod_key",
+	}
+
+	rawData, _, _, _, err := d.MintFromSecret(context.Background(), spec, material)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-selected", rawData["api_key"], "secret_field's selection must survive the declaration")
+}
+
+// A source whose optional_metadata names a mint locator is rejected at write.
+// The driver skips it at mint too, so a source stored before that check cannot
+// move a locator into credential data.
+func TestStaticAPIKeyDriver_ValidateConfig_RejectsReservedOptionalMetadata(t *testing.T) {
+	f := &StaticAPIKeyDriverFactory{}
+
+	for _, name := range []string{"secret_path", "mint_method", "secret_spec", "json_key_map", "__adjunct_fields"} {
+		err := f.ValidateConfig(map[string]string{"optional_metadata": name})
+		assert.ErrorContains(t, err, "optional_metadata cannot name", "name %q", name)
+	}
+
+	assert.NoError(t, f.ValidateConfig(map[string]string{"optional_metadata": "organization_id,email"}))
+}
+
+func TestStaticAPIKeyDriver_MintCredential_SkipsReservedOptionalMetadata(t *testing.T) {
+	d := createTestAPIKeyDriver(t, map[string]string{"optional_metadata": "secret_path"})
+	spec := &credential.CredSpec{
+		Name:   "test",
+		Config: map[string]string{"api_key": "sk-x", "secret_path": "apikeys/prod"},
+	}
+
+	rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.NotContains(t, rawData, "secret_path")
+	assert.NotContains(t, rawData, credential.RawAdjunctFieldsKey, "nothing carried, so nothing declared")
 }
 
 func TestStaticAPIKeyDriver_MintFromSecret_EmptyField(t *testing.T) {

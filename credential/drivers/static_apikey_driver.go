@@ -81,7 +81,7 @@ func (f *StaticAPIKeyDriverFactory) ValidateConfig(config map[string]string) err
 			Example("anthropic-version:2023-06-01"),
 
 		credential.StringField("optional_metadata").
-			Describe("Comma-separated spec config fields to copy into credential data").
+			Describe("Comma-separated field names to carry into credential data beside api_key. Each resolves from the fetched secret material first, then spec config. Mint locators (mint_method, secret_path, ...) are rejected").
 			Example("organization_id,project_id"),
 
 		credential.StringField("display_name").
@@ -111,6 +111,17 @@ func (f *StaticAPIKeyDriverFactory) ValidateConfig(config map[string]string) err
 	if raw := credential.GetString(config, "extra_headers", ""); raw != "" {
 		if _, err := parseExtraHeaders(raw); err != nil {
 			return err
+		}
+	}
+
+	// optional_metadata names credential fields, so it must not name a mint
+	// locator or a chaining key. Nothing travels unless an operator wrote its
+	// name down, which makes this a typo check rather than a security boundary —
+	// but a locator copied into credential data would be sent upstream by
+	// whichever provider reads that field name.
+	for _, field := range parseOptionalMetadata(config) {
+		if credential.IsReservedSpecConfigKey(field) {
+			return fmt.Errorf("optional_metadata cannot name %q: it configures the mint rather than describing the credential", field)
 		}
 	}
 
@@ -177,7 +188,8 @@ func (d *StaticAPIKeyDriver) MintCredential(_ context.Context, spec *credential.
 		return nil, nil, 0, "", fmt.Errorf("no %s API key configured in spec", d.displayName())
 	}
 
-	return d.buildAPIKeyData(spec, apiKey), nil, 0, "", nil // Static — no TTL, no lease
+	// No fetched material on the inline path — every adjunct resolves from spec config.
+	return d.buildAPIKeyData(spec, apiKey, credential.SecretMaterial{}), nil, 0, "", nil // Static — no TTL, no lease
 }
 
 // MintFromSecret mints an API key credential from secret material fetched via credential
@@ -200,22 +212,60 @@ func (d *StaticAPIKeyDriver) MintFromSecret(_ context.Context, spec *credential.
 		return nil, nil, 0, "", fmt.Errorf("%s: no API key in fetched secret material (set secret_field, or store it under 'api_key')", d.displayName())
 	}
 
-	return d.buildAPIKeyData(spec, apiKey), nil, 0, "", nil // Static — no TTL, no lease
+	// The whole payload is passed on, not just the selected value: a multi-field
+	// credential stored as one secret has its other fields in there, and the
+	// declaration decides which of them travel.
+	return d.buildAPIKeyData(spec, apiKey, material), nil, 0, "", nil // Static — no TTL, no lease
 }
 
-// buildAPIKeyData assembles the credential data map from the resolved API key plus any
-// optional metadata fields copied from spec config. Shared by the inline and chained
-// mint paths.
-func (d *StaticAPIKeyDriver) buildAPIKeyData(spec *credential.CredSpec, apiKey string) map[string]interface{} {
+// buildAPIKeyData assembles the credential data map from the resolved API key plus
+// the optional_metadata fields the source declares. Shared by the inline and
+// chained mint paths; material is the zero value on the inline one, whose nil map
+// reads safely.
+//
+// Each declared field resolves from the fetched secret material first and from
+// spec config second. That order is what lets one declaration serve both shapes: a
+// keyless spec whose whole credential lives in one Vault secret, and a spec that
+// keeps a non-secret adjunct inline while the secrets come from the vault.
+//
+// The names actually resolved are recorded under RawAdjunctFieldsKey. Without it
+// the parser would have to guess which rawData keys were meant as credential
+// fields — and for a fetched payload it cannot, since every key of someone's
+// secret arrives the same way.
+func (d *StaticAPIKeyDriver) buildAPIKeyData(
+	spec *credential.CredSpec, apiKey string, material credential.SecretMaterial,
+) map[string]interface{} {
 	rawData := map[string]interface{}{
 		"api_key": apiKey,
 	}
 
-	// Copy optional metadata from spec config
+	var carried []string
 	for _, field := range parseOptionalMetadata(d.credSource.Config) {
-		if val := credential.GetString(spec.Config, field, ""); val != "" {
-			rawData[field] = val
+		if credential.IsReservedSpecConfigKey(field) {
+			// Rejected at source-config write; skipped here too, so a source
+			// stored before that check cannot smuggle a locator into the
+			// credential.
+			continue
 		}
+		if _, taken := rawData[field]; taken {
+			// Never rewrite the resolved key. On the chained path the payload
+			// may hold an api_key alongside the one secret_field selected, and
+			// overwriting here would silently mint a different secret than the
+			// spec asked for — before Parse, so the parser's own overwrite guard
+			// could not see it.
+			continue
+		}
+		val := material.Data[field]
+		if val == "" {
+			val = credential.GetString(spec.Config, field, "")
+		}
+		if val != "" {
+			rawData[field] = val
+			carried = append(carried, field)
+		}
+	}
+	if len(carried) > 0 {
+		rawData[credential.RawAdjunctFieldsKey] = strings.Join(carried, ",")
 	}
 
 	return rawData
@@ -328,19 +378,10 @@ func parseExtraHeaders(raw string) (map[string]string, error) {
 }
 
 // parseOptionalMetadata parses comma-separated field names from source config.
+// Delegates to the shared splitter so the names this driver writes into the
+// declaration are split exactly as the parser splits them reading it back.
 func parseOptionalMetadata(config map[string]string) []string {
-	raw := credential.GetString(config, "optional_metadata", "")
-	if raw == "" {
-		return nil
-	}
-	var fields []string
-	for _, f := range strings.Split(raw, ",") {
-		f = strings.TrimSpace(f)
-		if f != "" {
-			fields = append(fields, f)
-		}
-	}
-	return fields
+	return credential.ParseAdjunctNames(credential.GetString(config, "optional_metadata", ""))
 }
 
 // validateAPIKeyOptionalURL validates that api_url, if non-empty, is a well-formed HTTPS URL.

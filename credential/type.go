@@ -117,3 +117,19 @@ type ConnectGated interface {
 	// config (e.g. a refresh token or static access token has been sealed).
 	IsConnected(config map[string]string) bool
 }
+
+// ConfigSensitivity is an optional interface a credential Type implements when
+// which of its spec-config keys are secret depends on the config itself.
+//
+// SensitiveConfigFields is a fixed list, which is enough for a type whose config
+// keys are all known at compile time. It is not enough for a type an operator can
+// extend: a spec may carry adjunct fields the type has never heard of, and one of
+// them may be a second secret. A type implementing this decides per config, and
+// should fail safe — mask what it cannot vouch for, since over-masking costs a
+// reader some clarity while under-masking leaks a key.
+type ConfigSensitivity interface {
+	// SensitiveConfigFieldsFor returns the spec-config keys to mask for this
+	// config. It supersedes SensitiveConfigFields rather than adding to it, so an
+	// implementation must include everything that list would have returned.
+	SensitiveConfigFieldsFor(config map[string]string) []string
+}
