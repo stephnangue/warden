@@ -606,9 +606,19 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request, isI
 		req.MountAccessor = entry.Accessor
 	}
 
-	// Parse request body before CheckToken since req.Data may be used during token validation
-	if err := c.parseRequestBody(req); err != nil {
-		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil, err
+	// Parse request body before CheckToken since req.Data may be used during token validation.
+	//
+	// An internal login is exempt: its Data is not the caller's, it is the credential
+	// and role this request's own auth precedence resolved, and the HTTP request it
+	// carries belongs to the gateway call that triggered the login. Parsing here would
+	// merge that caller's query params and body keys into the resolved map — a body of
+	// {"role":"other"} or a ?role=other would pick the role the login authenticates
+	// against, through a channel that never reaches req.Path and so is invisible to
+	// both policy and the audit log.
+	if !isInternalLogin {
+		if err := c.parseRequestBody(req); err != nil {
+			return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil, err
+		}
 	}
 
 	// Do an unauth check.
