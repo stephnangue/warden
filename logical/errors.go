@@ -127,9 +127,10 @@ func GetErrorCode(err error) int {
 	// Recognise the SDK sentinel errors so their HTTP status survives being
 	// wrapped in an ErrorResponse — otherwise a permission denial (or any
 	// sentinel) recorded in the audit log falls through to 500 even though the
-	// wire response is correct. Mirrors http.errorToStatusCode so the audit
-	// status and the wire status can't drift. errors.Is traverses wrapping,
-	// including multierror, so a wrapped or appended sentinel still matches.
+	// wire response is correct. This is the single mapping: http's
+	// errorToStatusCode calls straight through to it, so the audit status and the
+	// wire status cannot drift. errors.Is traverses wrapping, including
+	// multierror, so a wrapped or appended sentinel still matches.
 	switch {
 	case errors.Is(err, sdklogical.ErrPermissionDenied):
 		return http.StatusForbidden

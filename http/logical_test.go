@@ -662,6 +662,22 @@ func TestErrorToStatusCode_WrappedErrors(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, errorToStatusCode(wrapped4))
 }
 
+// TestErrorToStatusCode_CodedError covers the class this function used to drop on
+// the floor. A handler that returns an error carrying its own status was answered
+// with a 500, while the audit entry for the same request recorded the status the
+// handler asked for — the two mappings had drifted apart. They are one mapping now,
+// so these cases hold by construction rather than by both being edited together.
+func TestErrorToStatusCode_CodedError(t *testing.T) {
+	assert.Equal(t, http.StatusBadRequest, errorToStatusCode(logical.ErrBadRequest("bad")))
+	assert.Equal(t, http.StatusNotFound, errorToStatusCode(logical.ErrNotFoundf("no handler for path %q", "x")))
+	assert.Equal(t, http.StatusConflict, errorToStatusCode(logical.ErrConflict("exists")))
+	assert.Equal(t, http.StatusUnauthorized, errorToStatusCode(logical.ErrUnauthorized("who")))
+
+	// Wrapped, because a coded error rarely reaches here bare.
+	assert.Equal(t, http.StatusBadRequest,
+		errorToStatusCode(logical.WrapWithCode(http.StatusBadRequest, errors.New("inner"))))
+}
+
 // =============================================================================
 // writeLogicalResponse Tests (Err, Data, Streamed)
 // =============================================================================
