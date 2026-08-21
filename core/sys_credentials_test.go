@@ -454,6 +454,113 @@ func TestSystemBackend_HandleCredentialSpecUpdate(t *testing.T) {
 	assert.Contains(t, resp.Data["message"], "Successfully updated")
 }
 
+// TestSystemBackend_HandleCredentialSpecUpdate_MaskedValueIsNotPersisted pins the
+// read-edit-resend flow. Reads mask sensitive config, so a caller who reads a spec,
+// changes one field and sends the whole map back is holding the mask sentinel for
+// every field they did not touch. Persisting it would replace the secret with
+// "***********" and break every subsequent mint, while the API reported success.
+func TestSystemBackend_HandleCredentialSpecUpdate_MaskedValueIsNotPersisted(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	sourceSchema := backend.pathCredentials()[0].Fields
+	sourceRaw := map[string]interface{}{"name": "local-src", "type": "local"}
+	sourceFieldData := createFieldData(sourceSchema, sourceRaw)
+	_, err := backend.handleCredentialSourceCreate(ctx,
+		createTestRequest(logical.CreateOperation, "cred/sources/local-src", sourceRaw), sourceFieldData)
+	require.NoError(t, err)
+
+	specSchema := backend.pathCredentials()[2].Fields
+	specRaw := map[string]interface{}{
+		"name":   "masked-spec",
+		"type":   "api_key",
+		"source": "local-src",
+		"config": map[string]interface{}{
+			"api_key":         "sk-real-secret",
+			"organization_id": "org-1",
+		},
+	}
+	specReq := createTestRequest(logical.CreateOperation, "cred/specs/masked-spec", specRaw)
+	_, err = backend.handleCredentialSpecCreate(ctx, specReq, createFieldData(specSchema, specRaw))
+	require.NoError(t, err)
+
+	// Read it back the way a client would: api_key comes out masked.
+	readRaw := map[string]interface{}{"name": "masked-spec"}
+	readResp, err := backend.handleCredentialSpecRead(ctx,
+		createTestRequest(logical.ReadOperation, "cred/specs/masked-spec", readRaw),
+		createFieldData(specSchema, readRaw))
+	require.NoError(t, err)
+	readConfig, ok := readResp.Data["config"].(map[string]string)
+	require.True(t, ok, "config in read response: %#v", readResp.Data["config"])
+	require.Equal(t, maskValue, readConfig["api_key"], "read must mask api_key, else this test proves nothing")
+
+	// Send that config straight back, editing only the non-secret field.
+	resend := make(map[string]interface{}, len(readConfig))
+	for k, v := range readConfig {
+		resend[k] = v
+	}
+	resend["organization_id"] = "org-2"
+
+	updateRaw := map[string]interface{}{"name": "masked-spec", "config": resend}
+	updateResp, err := backend.handleCredentialSpecUpdate(ctx,
+		createTestRequest(logical.UpdateOperation, "cred/specs/masked-spec", updateRaw),
+		createFieldData(specSchema, updateRaw))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, updateResp.StatusCode)
+
+	// The stored secret must survive; the edited field must land.
+	stored, err := backend.core.credConfigStore.GetSpec(ctx, "masked-spec")
+	require.NoError(t, err)
+	assert.Equal(t, "sk-real-secret", stored.Config["api_key"], "resending the mask destroyed the stored secret")
+	assert.Equal(t, "org-2", stored.Config["organization_id"])
+}
+
+// TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted is the
+// same hazard on the source path, where the sensitive fields are the driver's.
+func TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	sourceSchema := backend.pathCredentials()[0].Fields
+	sourceRaw := map[string]interface{}{
+		"name":            "vault-src",
+		"type":            "hvault",
+		"rotation_period": 86400,
+		"config": map[string]interface{}{
+			"vault_address": "http://localhost:8200",
+			"secret_id":     "real-secret-id",
+		},
+	}
+	_, err := backend.handleCredentialSourceCreate(ctx,
+		createTestRequest(logical.CreateOperation, "cred/sources/vault-src", sourceRaw),
+		createFieldData(sourceSchema, sourceRaw))
+	require.NoError(t, err)
+
+	readRaw := map[string]interface{}{"name": "vault-src"}
+	readResp, err := backend.handleCredentialSourceRead(ctx,
+		createTestRequest(logical.ReadOperation, "cred/sources/vault-src", readRaw),
+		createFieldData(sourceSchema, readRaw))
+	require.NoError(t, err)
+	readConfig, ok := readResp.Data["config"].(map[string]string)
+	require.True(t, ok, "config in read response: %#v", readResp.Data["config"])
+	require.Equal(t, maskValue, readConfig["secret_id"], "read must mask secret_id, else this test proves nothing")
+
+	resend := make(map[string]interface{}, len(readConfig))
+	for k, v := range readConfig {
+		resend[k] = v
+	}
+	resend["vault_address"] = "http://localhost:8300"
+
+	updateRaw := map[string]interface{}{"name": "vault-src", "config": resend}
+	_, err = backend.handleCredentialSourceUpdate(ctx,
+		createTestRequest(logical.UpdateOperation, "cred/sources/vault-src", updateRaw),
+		createFieldData(sourceSchema, updateRaw))
+	require.NoError(t, err)
+
+	stored, err := backend.core.credConfigStore.GetSource(ctx, "vault-src")
+	require.NoError(t, err)
+	assert.Equal(t, "real-secret-id", stored.Config["secret_id"], "resending the mask destroyed the stored secret")
+	assert.Equal(t, "http://localhost:8300", stored.Config["vault_address"])
+}
+
 func TestSystemBackend_HandleCredentialSpecDelete(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
