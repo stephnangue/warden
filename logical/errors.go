@@ -59,6 +59,11 @@ func ErrNotFoundf(format string, args ...any) *CodedError {
 	return &CodedError{Status: http.StatusNotFound, Message: fmt.Sprintf(format, args...)}
 }
 
+// ErrRequestEntityTooLargef creates a formatted 413 Request Entity Too Large error.
+func ErrRequestEntityTooLargef(format string, args ...any) *CodedError {
+	return &CodedError{Status: http.StatusRequestEntityTooLarge, Message: fmt.Sprintf(format, args...)}
+}
+
 // ErrConflict creates a 409 Conflict error.
 func ErrConflict(message string) *CodedError {
 	return &CodedError{Status: http.StatusConflict, Message: message}

@@ -617,7 +617,7 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request, isI
 	// both policy and the audit log.
 	if !isInternalLogin {
 		if err := c.parseRequestBody(req); err != nil {
-			return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil, err
+			return logical.ErrorResponse(err), nil, nil
 		}
 	}
 
@@ -807,7 +807,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 
 	if !isStreaming {
 		if err := c.parseRequestBody(req); err != nil {
-			return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil, err
+			return logical.ErrorResponse(err), nil, nil
 		}
 		req.ClientToken = extractToken(req.HTTPRequest)
 
@@ -865,7 +865,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// so the streaming handler can still read it.
 		if parser, ok := matchingBackend.(logical.StreamBodyParser); ok && parser.ShouldParseStreamBody(req.HTTPRequest) {
 			if err := c.parseRequestBody(req); err != nil {
-				return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil, err
+				return logical.ErrorResponse(err), nil, nil
 			}
 		}
 
@@ -1200,7 +1200,41 @@ func (c *Core) parseBody(req *logical.Request) error {
 	}
 }
 
-// parseJSONBody parses the JSON body of the request into req.Data
+// readAndRestoreBody buffers the request body under the size cap and puts it back, so
+// everything downstream — the proxy to the upstream, the MCP extractor, audit — still
+// reads it whole.
+//
+// Its errors are coded. A body Warden cannot buffer or parse is the caller's problem,
+// and an uncoded error reaches the wire as a 500 that blames Warden for it.
+func (c *Core) readAndRestoreBody(req *logical.Request) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(req.HTTPRequest.Body, maxRequestBodySize+1))
+	if err != nil {
+		c.logger.Debug("failed to read request body",
+			logger.Err(err),
+			logger.String("path", req.Path),
+		)
+		return nil, logical.ErrBadRequest("failed to read request body")
+	}
+	req.HTTPRequest.Body.Close()
+
+	if int64(len(body)) > maxRequestBodySize {
+		return nil, logical.ErrRequestEntityTooLargef("request body exceeds maximum size of %d bytes", maxRequestBodySize)
+	}
+
+	// Restore body for potential re-reading (audit, streaming, etc.)
+	req.HTTPRequest.Body = io.NopCloser(bytes.NewReader(body))
+
+	return body, nil
+}
+
+// parseJSONBody parses the JSON body of the request into req.Data.
+//
+// Only a top-level object contributes fields. A top-level array or scalar is
+// legitimate JSON — it is the request shape for batch, bulk and series endpoints, and
+// for JSON-RPC batches — so it parses successfully and contributes nothing: req.Data
+// keeps the query params alone, and the body reaches the upstream as the bytes
+// restored above. Decoding straight into req.Data would instead fail those requests
+// against the map's shape, before they were even authorised.
 func (c *Core) parseJSONBody(req *logical.Request) error {
 	if req.HTTPRequest.Body == nil {
 		return nil
@@ -1211,24 +1245,35 @@ func (c *Core) parseJSONBody(req *logical.Request) error {
 		return nil // Not JSON, skip
 	}
 
-	body, err := io.ReadAll(io.LimitReader(req.HTTPRequest.Body, maxRequestBodySize+1))
+	body, err := c.readAndRestoreBody(req)
 	if err != nil {
-		return fmt.Errorf("failed to read request body: %w", err)
+		return err
 	}
-	req.HTTPRequest.Body.Close()
-
-	if int64(len(body)) > maxRequestBodySize {
-		return fmt.Errorf("request body exceeds maximum size of %d bytes", maxRequestBodySize)
-	}
-
-	// Restore body for potential re-reading (audit, streaming, etc.)
-	req.HTTPRequest.Body = io.NopCloser(bytes.NewReader(body))
 
 	if len(body) == 0 {
 		return nil
 	}
 
-	return json.Unmarshal(body, &req.Data)
+	var root any
+	if err := json.Unmarshal(body, &root); err != nil {
+		// The decoder's message names Go types. That is a diagnostic, not an API
+		// contract — keep it in the log and answer with a stable one.
+		c.logger.Debug("request body is not valid JSON",
+			logger.Err(err),
+			logger.String("path", req.Path),
+		)
+		return logical.ErrBadRequest("request body is not valid JSON")
+	}
+
+	obj, ok := root.(map[string]any)
+	if !ok {
+		return nil
+	}
+	for k, v := range obj {
+		req.Data[k] = v
+	}
+
+	return nil
 }
 
 // parseFormBody parses application/x-www-form-urlencoded body into req.Data.
@@ -1238,18 +1283,10 @@ func (c *Core) parseFormBody(req *logical.Request) error {
 		return nil
 	}
 
-	body, err := io.ReadAll(io.LimitReader(req.HTTPRequest.Body, maxRequestBodySize+1))
+	body, err := c.readAndRestoreBody(req)
 	if err != nil {
-		return fmt.Errorf("failed to read request body: %w", err)
+		return err
 	}
-	req.HTTPRequest.Body.Close()
-
-	if int64(len(body)) > maxRequestBodySize {
-		return fmt.Errorf("request body exceeds maximum size of %d bytes", maxRequestBodySize)
-	}
-
-	// Restore body for potential re-reading (audit, streaming, etc.)
-	req.HTTPRequest.Body = io.NopCloser(bytes.NewReader(body))
 
 	if len(body) == 0 {
 		return nil
@@ -1257,7 +1294,11 @@ func (c *Core) parseFormBody(req *logical.Request) error {
 
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
-		return fmt.Errorf("failed to parse form body: %w", err)
+		c.logger.Debug("request body is not valid form data",
+			logger.Err(err),
+			logger.String("path", req.Path),
+		)
+		return logical.ErrBadRequest("request body is not valid form data")
 	}
 
 	for k, v := range values {
