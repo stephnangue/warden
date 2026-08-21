@@ -36,13 +36,14 @@ import (
 // channels with the native header first, scheme dispatch, and the git dual-slot
 // on its REST path — and all four shared SDK credential extractors.
 //
-// Three providers hand-roll an extractor and are not here: atlassian, honeycomb
-// and prometheus, whose distinctive branches read credential fields nothing can
-// supply, so a row could only cover the fallback each degrades to.
+// Two providers hand-roll an extractor and are not here: honeycomb and
+// prometheus. atlassian used to be a third — its Basic branch read a credential
+// field nothing could supply, so a row could only cover the Bearer fallback it
+// degraded to.
 var allEnvs = []h.ProviderEnv{
 	openaiEnv, anthropicEnv, newrelicEnv, elasticEnv, githubEnv,
 	splunkEnv, datadogEnv, restEnv, dynatraceEnv, dynatraceOAuthEnv, mcpEnv, mcpGitHubEnv,
-	mcpAWSEnv, mcpAWSWrongCredEnv,
+	mcpAWSEnv, mcpAWSWrongCredEnv, atlassianEnv,
 }
 
 var (

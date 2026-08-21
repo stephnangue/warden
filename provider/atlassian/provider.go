@@ -28,8 +28,10 @@ const DefaultAtlassianTimeout = 30 * time.Second
 //     Used for: Atlassian Data Center Personal Access Tokens (PATs),
 //     OAuth 2.0 access tokens, and Atlassian Admin API org keys.
 //
-// To forward the email field from a spec config into credential data, configure
-// the apikey source with optional_metadata=email.
+// api_key is the only field the credential type carries on its own, so email
+// reaches the credential because the apikey source declares it in
+// optional_metadata. Its value resolves from a chained secret's payload first,
+// then from spec config.
 func atlassianExtractor(req *logical.Request) (map[string]string, error) {
 	if req.Credential == nil {
 		return nil, fmt.Errorf("no credential available")
@@ -77,8 +79,41 @@ proxied request. Auth mode is detected automatically from the credential data:
 
   Basic Auth (email + api_key):
     Used for Atlassian Cloud personal API tokens, Bitbucket app passwords,
-    and Data Center basic auth. Configure your apikey source with
-    optional_metadata=email to forward the email field into credential data.
+    and Data Center basic auth — which is what Atlassian Cloud tokens
+    require, so this is the usual mode rather than the exception.
+
+    api_key is the only field a credential carries on its own, so the email
+    must be declared on the source:
+
+      warden cred source create atlassian -type=apikey \
+        -config=api_url=https://<domain>.atlassian.net \
+        -config=optional_metadata=email
+
+      warden cred spec create jira-svc -source=atlassian \
+        -config=api_key=<ATLASSIAN_TOKEN> \
+        -config=email=svc@example.com
+
+    Without the declaration the spec is rejected at write, rather than
+    minting a credential with no email and quietly falling back to Bearer.
+
+    To keep the token in a vault, reference it with credential chaining. The
+    spec still sits on the apikey source — that is what declares email and
+    resolves it — while the referenced spec holds the secret:
+
+      warden cred spec create atlassian-token -type=key_value \
+        -source=corp-vault -config=mint_method=kv2_read \
+        -config=kv2_mount=secret -config=secret_path=apikeys/atlassian
+
+      warden cred spec create jira-keyless -source=atlassian \
+        -config=secret_spec=atlassian-token \
+        -config=email=svc@example.com
+
+    A declared field resolves from the fetched secret first and from spec
+    config second, so the email can stay inline as above, or move into the
+    secret alongside the token. What will not work is mint_method=static_apikey
+    against the hvault source directly: there the hvault source mints the
+    credential, the apikey driver is never in the path, and nothing can
+    declare a second field.
 
   Bearer (api_key only):
     Used for Atlassian Data Center Personal Access Tokens (PATs, DC 8.14+/7.9+),
@@ -124,8 +159,9 @@ Example API paths (Bitbucket Cloud):
 
 Credential source type:
 - apikey: Static Atlassian API token, PAT, app password, or OAuth access token.
-  For Cloud personal tokens, set optional_metadata=email on the source and
-  include email in the spec config to enable Basic Auth mode.
+  For Cloud personal tokens, declare optional_metadata=email on the source and
+  set email on the spec to enable Basic Auth mode; the token itself may be
+  inline or reached from a vault by credential chaining (see above).
 
 Configuration:
 - atlassian_url: Atlassian product API base URL (required — no universal default)
