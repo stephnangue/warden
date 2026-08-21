@@ -81,10 +81,21 @@ type ProviderEnv struct {
 	// JSON, so booleans and numbers keep their types.
 	ExtraConfig map[string]any
 
-	// CredType is the credential type the spec mints, e.g. "api_key". It must
-	// accept a local source — only api_key, github_token, aws_access_keys,
-	// cloudflare_keys and scaleway_keys do.
+	// CredType is the credential type the spec mints, e.g. "api_key".
 	CredType string
+
+	// SourceType is the credential source backing the mount. Defaults to
+	// "local", which holds the credential statically and calls nothing.
+	//
+	// Credential types are validated against their source, and only api_key,
+	// github_token, aws_access_keys, cloudflare_keys and scaleway_keys accept a
+	// local one — so any other type needs a source that will have it. Pick one
+	// whose mint path can be satisfied without a real upstream.
+	SourceType string
+
+	// SourceConfig is the source's own configuration, needed when SourceType is
+	// not "local".
+	SourceConfig map[string]string
 
 	// CredConfig is the spec config. For a local source these values are copied
 	// verbatim into the minted credential, which is what lets a test assert on
@@ -258,8 +269,16 @@ func SetupFullChainProvider(t *testing.T, port int, upstreamURL string, p Provid
 	}
 	mustAPI(t, port, "PUT", p.Mount+"/config", mustJSON(t, cfg), "configure "+p.Type+" provider")
 
+	sourceType := p.SourceType
+	if sourceType == "" {
+		sourceType = "local"
+	}
+	source := map[string]any{"type": sourceType}
+	if len(p.SourceConfig) > 0 {
+		source["config"] = p.SourceConfig
+	}
 	mustAPI(t, port, "POST", "sys/cred/sources/"+p.Source(),
-		`{"type":"local"}`, "create credential source for "+p.Mount)
+		mustJSON(t, source), "create credential source for "+p.Mount)
 
 	mustAPI(t, port, "POST", "sys/cred/specs/"+p.Spec(),
 		mustJSON(t, map[string]any{

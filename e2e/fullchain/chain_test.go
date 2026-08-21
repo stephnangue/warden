@@ -30,6 +30,11 @@ var injections = []injection{
 	{newrelicEnv, map[string]string{"Api-Key": newrelicKey}},
 	{elasticEnv, map[string]string{"Authorization": "ApiKey " + elasticKey}},
 	{githubEnv, map[string]string{"Authorization": "token " + githubPAT}},
+	{splunkEnv, map[string]string{"Authorization": "Bearer " + splunkKey}},
+	{datadogEnv, map[string]string{"DD-API-KEY": datadogAPIKey}},
+	{restEnv, map[string]string{"X-Custom-Auth": "Token " + restToken}},
+	{dynatraceEnv, map[string]string{"Authorization": "Api-Token " + dynatraceAPIToken}},
+	{dynatraceOAuthEnv, map[string]string{"Authorization": "Bearer " + dynatraceOAuthToken}},
 }
 
 // TestFullChain_CertAgentWithUser is the reference shape the suite exists for:
