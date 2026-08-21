@@ -9,7 +9,8 @@ import (
 
 // Git smart-HTTP support: the github provider mount carries two protocols
 // at once. REST paths (/repos, /user, /orgs, ...) proxy to api.github.com
-// with a Bearer token. Git smart-HTTP paths (<owner>/<repo>.git/info/refs,
+// under GitHub's own "token" scheme, not Bearer — see the extractor on
+// Spec. Git smart-HTTP paths (<owner>/<repo>.git/info/refs,
 // .git/git-upload-pack, .git/git-receive-pack) proxy to github.com with
 // HTTP Basic Auth carrying the PAT as the password.
 //

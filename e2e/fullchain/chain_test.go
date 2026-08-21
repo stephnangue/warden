@@ -29,6 +29,7 @@ var injections = []injection{
 	{anthropicEnv, map[string]string{"x-api-key": anthropicKey}},
 	{newrelicEnv, map[string]string{"Api-Key": newrelicKey}},
 	{elasticEnv, map[string]string{"Authorization": "ApiKey " + elasticKey}},
+	{githubEnv, map[string]string{"Authorization": "token " + githubPAT}},
 }
 
 // TestFullChain_CertAgentWithUser is the reference shape the suite exists for:
