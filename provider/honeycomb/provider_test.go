@@ -28,8 +28,8 @@ func TestHoneycombExtractor_ManagementKey(t *testing.T) {
 		Credential: &credential.Credential{
 			Type: credential.TypeAPIKey,
 			Data: map[string]string{
-				"key_id":     "hcxmk_01abc123",
-				"key_secret": "mgmt-secret-value",
+				"key_id":  "hcxmk_01abc123",
+				"api_key": "mgmt-secret-value",
 			},
 		},
 	})
@@ -38,7 +38,30 @@ func TestHoneycombExtractor_ManagementKey(t *testing.T) {
 	assert.Empty(t, headers["X-Honeycomb-Team"])
 }
 
-func TestHoneycombExtractor_ManagementKey_MissingSecret(t *testing.T) {
+// TestHoneycombExtractor_ManagementKeyNeedsNoSeparateSecret pins the reason
+// management mode is reachable at all: the secret half is api_key, which the
+// credential type guarantees. Reading a distinct key_secret made this branch
+// unconfigurable — the field could not be carried, so a mount with key_id set
+// failed every request with "missing key_secret field".
+func TestHoneycombExtractor_ManagementKeyNeedsNoSeparateSecret(t *testing.T) {
+	headers, err := honeycombExtractor(&logical.Request{
+		Credential: &credential.Credential{
+			Type: credential.TypeAPIKey,
+			Data: map[string]string{
+				"key_id":  "hcxmk_01abc123",
+				"api_key": "mgmt-secret-value",
+				// No key_secret, and none needed.
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer hcxmk_01abc123:mgmt-secret-value", headers["Authorization"])
+}
+
+// TestHoneycombExtractor_ManagementKeyWithoutAPIKey fails closed rather than
+// emitting "Bearer <key_id>:". Not reachable in production — Parse and Validate
+// both require a non-empty api_key — but the extractor must not assume it.
+func TestHoneycombExtractor_ManagementKeyWithoutAPIKey(t *testing.T) {
 	_, err := honeycombExtractor(&logical.Request{
 		Credential: &credential.Credential{
 			Type: credential.TypeAPIKey,
@@ -47,7 +70,7 @@ func TestHoneycombExtractor_ManagementKey_MissingSecret(t *testing.T) {
 			},
 		},
 	})
-	assert.ErrorContains(t, err, "missing key_secret")
+	assert.ErrorContains(t, err, "missing api_key")
 }
 
 func TestHoneycombExtractor_NoCredential(t *testing.T) {
@@ -78,4 +101,12 @@ func TestSpec(t *testing.T) {
 	assert.Equal(t, "honeycomb_url", Spec.URLConfigKey)
 	assert.NotNil(t, Spec.ExtractCredentials)
 	assert.NotNil(t, Factory)
+}
+
+// TestSpec_StripsNativeCredentialHeader pins the strip. X-Honeycomb-Team is
+// injected only in ingest mode, so without it a caller's own value would reach
+// the upstream in management mode, pairing an inbound credential with the
+// mount's identity.
+func TestSpec_StripsNativeCredentialHeader(t *testing.T) {
+	assert.Contains(t, Spec.ExtraHeadersToRemove, "X-Honeycomb-Team")
 }
