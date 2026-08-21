@@ -97,6 +97,11 @@ type ProviderEnv struct {
 	// not "local".
 	SourceConfig map[string]string
 
+	// ExtraPolicyRules are appended inside the mount's gateway path stanza,
+	// for providers whose authorization is finer-grained than a capability —
+	// a body-authoritative rule set, say, which cannot be expressed as one.
+	ExtraPolicyRules string
+
 	// CredConfig is the spec config. For a local source these values are copied
 	// verbatim into the minted credential, which is what lets a test assert on
 	// an exact upstream header value.
@@ -289,7 +294,7 @@ func SetupFullChainProvider(t *testing.T, port int, upstreamURL string, p Provid
 		"create credential spec for "+p.Mount)
 
 	mustAPI(t, port, "POST", "sys/policies/cbp/"+p.Policy(),
-		mustJSON(t, map[string]any{"policy": gatewayPolicy(p.Mount)}),
+		mustJSON(t, map[string]any{"policy": gatewayPolicy(p.Mount, p.ExtraPolicyRules)}),
 		"create policy for "+p.Mount)
 
 	mustAPI(t, port, "POST", "auth/cert/role/"+p.CertRole(),
@@ -356,12 +361,18 @@ func SetupFullChainProvider(t *testing.T, port int, upstreamURL string, p Provid
 }
 
 // gatewayPolicy grants both gateway shapes: the bare one, used when the role
-// arrives in a header, and the role-in-path one.
-func gatewayPolicy(mount string) string {
-	return fmt.Sprintf(
-		"path %q {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}\n"+
-			"path %q {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}",
-		mount+"/gateway*", mount+"/role/+/gateway*")
+// arrives in a header, and the role-in-path one. extraRules is appended inside
+// each stanza, so a provider's finer-grained rules apply however the role was
+// selected.
+func gatewayPolicy(mount, extraRules string) string {
+	stanza := func(path string) string {
+		body := "  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n"
+		if extraRules != "" {
+			body += extraRules + "\n"
+		}
+		return fmt.Sprintf("path %q {\n%s}\n", path, body)
+	}
+	return stanza(mount+"/gateway*") + stanza(mount+"/role/+/gateway*")
 }
 
 // CertAgentPath is the default agent leg: the agent proves itself with a client
@@ -441,8 +452,16 @@ type ChainOpts struct {
 	// Path is appended after the gateway prefix. Defaults to "probe".
 	Path string
 
-	// Method defaults to GET.
+	// Method defaults to GET, or POST when Body is set.
 	Method string
+
+	// Body is the request body. Sending one matters beyond the payload itself:
+	// policy that reads the body only engages on a request that has one, so a
+	// rule about what a caller may ask for cannot be exercised without it.
+	//
+	// Content-Type defaults to application/json, which is also what decides
+	// whether a provider opts the request into body-authoritative policy.
+	Body string
 }
 
 // ChainRequest drives one request through the whole chain and returns the
@@ -483,6 +502,9 @@ func ChainRequest(t *testing.T, port int, p ProviderEnv, o ChainOpts) (int, []by
 	method := o.Method
 	if method == "" {
 		method = "GET"
+		if o.Body != "" {
+			method = "POST"
+		}
 	}
 	path := o.Path
 	if path == "" {
@@ -490,7 +512,7 @@ func ChainRequest(t *testing.T, port int, p ProviderEnv, o ChainOpts) (int, []by
 	}
 
 	u := fmt.Sprintf("%s/v1/%s/gateway/%s", NodeURL(port), p.Mount, path)
-	status, body, respHeaders := DoRequestWithResponseHeaders(t, method, u, headers, "")
+	status, body, respHeaders := DoRequestWithResponseHeaders(t, method, u, headers, o.Body)
 	return status, body, http.Header(respHeaders)
 }
 
