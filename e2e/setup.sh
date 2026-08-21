@@ -306,6 +306,16 @@ vault_api POST "secret/data/e2e/app-config" \
 vault_api POST "secret/data/e2e/database" \
   '{"data":{"username":"e2e-user","password":"e2e-password-secure","host":"db.example.com","port":"5432"}}'
 
+# A whole multi-field credential in one secret, for credential chaining: an
+# api_key spec references this and its source declares which of the other keys
+# travel. "owner" is the sort of bookkeeping operators keep beside a key, here so
+# the payload is a realistic blob rather than exactly what one consumer wants.
+# What proves undeclared fields stay behind is the control row in
+# e2e/fullchain/credential_chaining_test.go, which drives this same secret through
+# a source declaring nothing and asserts the application key never ships.
+vault_api POST "secret/data/e2e/datadog-keys" \
+  '{"data":{"api_key":"e2e-dd-chained-not-a-real-key","application_key":"e2e-dd-chained-not-a-real-app-key","owner":"e2e-undeclared-field"}}'
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \
@@ -386,6 +396,49 @@ else
   echo "  $JWT_RESPONSE"
 fi
 
+# Vault JWT auth trusting Hydra, for workload-identity federation.
+#
+# Configured here rather than with the rest of the Vault setup because Vault
+# fetches the JWKS when this is written, and Hydra is only known-responsive once
+# the token above has been issued.
+#
+# A credential spec referenced through secret_spec must be minted as the
+# session-pinned caller, which forces the exchange path — and on an hvault source
+# that path requires auth_method=oidc_federation. So the AppRole source above
+# cannot back a chained secret; this is the second, keyless source that can.
+echo "  Enabling Vault JWT auth (workload identity federation)..."
+vault_api POST "sys/auth/jwt" '{"type":"jwt"}' || true
+
+# The issuer is what Hydra stamps into its tokens; the JWKS is fetched over the
+# compose network, where that hostname does not resolve. They differ on purpose.
+vault_api POST "auth/jwt/config" \
+  '{"jwks_url":"http://hydra:4444/.well-known/jwks.json","bound_issuer":"http://localhost:4444"}'
+
+# Hydra client-credentials tokens carry an empty aud, so the role binds the
+# subject instead — which for those tokens is the client id.
+vault_api POST "auth/jwt/role/warden-e2e-fed" \
+  '{"role_type":"jwt","bound_subject":"e2e-agent","user_claim":"sub","bound_issuer":"http://localhost:4444","token_policies":["e2e-secrets-reader"],"token_ttl":"1h"}'
+
+# Verify the federation login works, so a later gateway 401 is not mistaken for
+# a chaining bug.
+echo "  Verifying Vault JWT federation login..."
+# `|| true` is not decoration: under `set -euo pipefail` a failed decode would
+# abort the whole script here, so a transient Hydra hiccup — which the issuance
+# check above deliberately treats as a warning — would silently skip every
+# remaining step and leave a half-configured cluster.
+FED_TOKEN=$(echo "$JWT_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])" 2>/dev/null || true)
+if [ -z "$FED_TOKEN" ]; then
+  echo "  WARNING: no JWT to verify federation login with (see the issuance warning above)"
+else
+  FED_LOGIN=$(vault_api POST "auth/jwt/login" "{\"role\":\"warden-e2e-fed\",\"jwt\":\"$FED_TOKEN\"}")
+  if echo "$FED_LOGIN" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('auth',{}).get('client_token')" 2>/dev/null; then
+    echo "  Vault JWT federation login verified."
+  else
+    echo "  WARNING: Vault JWT federation login failed"
+    echo "  $FED_LOGIN"
+  fi
+fi
+
 # Step 9: Configure Warden with Vault provider
 echo ""
 echo "[9/10] Configuring Warden with Vault provider..."
@@ -405,6 +458,14 @@ warden_api PUT "vault/config" \
 echo "  Creating credential source 'vault-e2e'..."
 warden_api POST "sys/cred/sources/vault-e2e" \
   "{\"type\":\"hvault\",\"rotation_period\":300,\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"auth_method\":\"approle\",\"role_id\":\"$VAULT_APPROLE_ROLE_ID\",\"secret_id\":\"$VAULT_APPROLE_SECRET_ID\",\"approle_mount\":\"e2e_approle\",\"role_name\":\"warden-e2e-role\"}}"
+
+# 9c-bis. Keyless federation source, for credential chaining.
+#
+# No rotation_period and no role_id/secret_id: a keyless source has no shared
+# session to rotate, and the driver rejects the AppRole fields outright.
+echo "  Creating credential source 'vault-fed-e2e' (OIDC federation)..."
+warden_api POST "sys/cred/sources/vault-fed-e2e" \
+  "{\"type\":\"hvault\",\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"auth_method\":\"oidc_federation\",\"jwt_role\":\"warden-e2e-fed\",\"jwt_mount\":\"jwt\"}}"
 
 # 9d. Create credential spec (mint Vault tokens via token role)
 echo "  Creating credential spec 'vault-token-reader'..."
