@@ -3,11 +3,17 @@
 package fullchain
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
+
+// maskedValue is what a read substitutes for a sensitive config field. It mirrors
+// maskValue in core; duplicated rather than imported because the e2e suites drive
+// the API from outside and must see what a client sees.
+const maskedValue = "***********"
 
 // Whether a configuration change reaches the request path is its own class of
 // question, separate from whether the change was stored. A compiled-policy cache
@@ -63,6 +69,65 @@ func TestFullChain_UpdatedSpecReachesUpstream(t *testing.T) {
 	h.AssertChain(t, upstream, status, body, h.ChainWant{
 		Status:        200,
 		Injected:      map[string]string{"Authorization": "Bearer " + rotated},
+		Absent:        h.AlwaysAbsent(),
+		UpstreamCalls: 1,
+	})
+}
+
+// TestFullChain_ResendingAMaskedConfigKeepsTheSecret drives the read-edit-resend
+// flow an operator or a declarative tool actually performs: read the spec, change
+// something, send the config back.
+//
+// A read masks sensitive config, so the caller is holding "***********" for every
+// field they did not touch. Persisting that would replace the key with the mask
+// and break every subsequent mint — while the write reported success and the next
+// read looked identical, since the stored mask and a masked real key render the
+// same. Only a request driven afterwards can tell the two apart, which is why this
+// row belongs here rather than in a unit test of the merge.
+//
+// No masking assertion existed anywhere in the e2e suites before this row.
+func TestFullChain_ResendingAMaskedConfigKeepsTheSecret(t *testing.T) {
+	ensureEnv(t)
+
+	specPath := "sys/cred/specs/" + splunkEnv.Spec()
+
+	// Read the spec back the way a client would.
+	status, body := h.APIRequest(t, "GET", specPath, leaderPort, "")
+	if status != 200 {
+		t.Fatalf("read spec (status %d): %s", status, body)
+	}
+	readConfig, ok := h.JSONPath(h.ParseJSON(t, body), "data.config").(map[string]any)
+	if !ok {
+		t.Fatalf("no data.config in spec read: %s", body)
+	}
+
+	// The row is only meaningful if the read really masks the key — otherwise
+	// resending it would be resending the real value and prove nothing.
+	if readConfig["api_key"] != maskedValue {
+		t.Fatalf("api_key read back as %v, want the mask %q — this row assumes reads mask it",
+			readConfig["api_key"], maskedValue)
+	}
+
+	// Send the masked config straight back, as an edit of some other field would.
+	resend, err := json.Marshal(map[string]any{"config": readConfig})
+	if err != nil {
+		t.Fatalf("encode update: %v", err)
+	}
+	if status, body := h.APIRequest(t, "PUT", specPath, leaderPort, string(resend)); status != 200 {
+		t.Fatalf("resend masked config (status %d): %s", status, body)
+	}
+
+	// A fresh session mints from the stored spec: the upstream must still see the
+	// real key, not the mask.
+	status, respBody, _ := h.ChainRequest(t, leaderPort, splunkEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         splunkEnv.CertRole(),
+	})
+
+	h.AssertChain(t, upstream, status, respBody, h.ChainWant{
+		Status:        200,
+		Injected:      map[string]string{"Authorization": "Bearer " + splunkKey},
 		Absent:        h.AlwaysAbsent(),
 		UpstreamCalls: 1,
 	})

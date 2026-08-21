@@ -375,10 +375,15 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 		mergedConfig[k] = v
 	}
 
-	// Merge new config values
+	// Merge new config values. See the same guard on the spec path: a value equal
+	// to the mask sentinel came from a read, not from the caller, and overwriting a
+	// stored secret with the literal mask would break every mint from this source.
 	if configAny != nil {
 		newConfig := convertToStringMap(configAny)
 		for key, value := range newConfig {
+			if value == maskValue {
+				continue
+			}
 			mergedConfig[key] = value
 		}
 	}
@@ -606,10 +611,18 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		mergedConfig[k] = v
 	}
 
-	// Merge new config values
+	// Merge new config values. A value equal to the mask sentinel is the one the
+	// caller just read back, not one they typed: reads mask sensitive fields, so an
+	// edit-and-resend of a whole config would otherwise persist the literal mask and
+	// destroy the secret. Skipping it keeps the stored value, which is what the
+	// caller meant by leaving the field as they found it. Clearing a field is still
+	// possible with an empty string, which is not the sentinel.
 	if configAny, ok := d.GetOk("config"); ok {
 		newConfig := convertToStringMap(configAny.(map[string]any))
 		for k, v := range newConfig {
+			if v == maskValue {
+				continue
+			}
 			mergedConfig[k] = v
 		}
 	}

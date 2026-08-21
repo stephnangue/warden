@@ -43,7 +43,7 @@ import (
 var allEnvs = []h.ProviderEnv{
 	openaiEnv, anthropicEnv, newrelicEnv, elasticEnv, githubEnv,
 	splunkEnv, datadogEnv, restEnv, dynatraceEnv, dynatraceOAuthEnv, mcpEnv, mcpGitHubEnv,
-	mcpAWSEnv, mcpAWSWrongCredEnv, atlassianEnv,
+	mcpAWSEnv, mcpAWSWrongCredEnv, atlassianEnv, honeycombEnv
 }
 
 var (
