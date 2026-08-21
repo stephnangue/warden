@@ -37,14 +37,14 @@ import (
 // on its REST path — and all four shared SDK credential extractors.
 //
 // Two providers hand-roll an extractor and are not here: atlassian and
-// prometheus, whose distinctive branches read credential fields nothing can
-// supply, so a row could only cover the fallback each degrades to. honeycomb was
-// in that group until its management branch stopped requiring an uncarriable
-// field.
+// honeycomb, whose distinctive branches read credential fields nothing can
+// supply, so a row could only cover the fallback each degrades to. prometheus was
+// in that group until its scheme moved from credential data to mount config,
+// which is also why it appears twice — the scheme is per mount.
 var allEnvs = []h.ProviderEnv{
 	openaiEnv, anthropicEnv, newrelicEnv, elasticEnv, githubEnv,
 	splunkEnv, datadogEnv, restEnv, dynatraceEnv, dynatraceOAuthEnv, mcpEnv, mcpGitHubEnv,
-	mcpAWSEnv, mcpAWSWrongCredEnv, honeycombEnv,
+	mcpAWSEnv, mcpAWSWrongCredEnv, honeycombEnv, prometheusEnv, prometheusBasicEnv,
 }
 
 var (
