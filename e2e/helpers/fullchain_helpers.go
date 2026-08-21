@@ -4,8 +4,10 @@ package helpers
 
 import (
 	"crypto/ecdsa"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -158,16 +160,39 @@ type UpstreamRequest struct {
 	Header   http.Header
 }
 
-// RecordingUpstream stands in for a provider's real API. It answers everything
-// with a canned 200 and keeps what it was sent, which is the only vantage point
-// from which "the minted credential went out and the caller's did not" can be
-// checked.
+// RecordingUpstream stands in for a provider's real API. It keeps what it was
+// sent, which is the only vantage point from which "the minted credential went
+// out and the caller's did not" can be checked, and by default answers a canned
+// 200.
+//
+// A test that cares about the response half of the chain can replace the handler
+// with SetHandler — streaming, in particular, cannot be observed through a
+// buffered canned reply.
 type RecordingUpstream struct {
 	URL string
 
-	server *httptest.Server
-	mu     sync.Mutex
-	reqs   []UpstreamRequest
+	server  *httptest.Server
+	mu      sync.Mutex
+	reqs    []UpstreamRequest
+	handler http.HandlerFunc
+}
+
+// SetHandler replaces what the upstream returns, for the remainder of the test
+// that sets it. Requests are still recorded. Passing nil restores the default.
+//
+// Registered as a cleanup rather than left in place: the upstream is shared by
+// the whole package, so a handler that outlived its test would silently change
+// what every later row is proxying.
+func (u *RecordingUpstream) SetHandler(t *testing.T, h http.HandlerFunc) {
+	t.Helper()
+	u.mu.Lock()
+	u.handler = h
+	u.mu.Unlock()
+	t.Cleanup(func() {
+		u.mu.Lock()
+		u.handler = nil
+		u.mu.Unlock()
+	})
 }
 
 // StartRecordingUpstream starts the upstream. The caller owns its lifetime via
@@ -185,7 +210,13 @@ func StartRecordingUpstream(t *testing.T) *RecordingUpstream {
 			RawQuery: r.URL.RawQuery,
 			Header:   r.Header.Clone(),
 		})
+		custom := u.handler
 		u.mu.Unlock()
+
+		if custom != nil {
+			custom(w, r)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -207,6 +238,21 @@ func (u *RecordingUpstream) Requests() []UpstreamRequest {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return append([]UpstreamRequest(nil), u.reqs...)
+}
+
+// Last returns the most recent request. Fails the test if there was none.
+//
+// Most rows go through AssertChain, which inspects the last request itself. This
+// is for the streaming rows, where the response has to be read before the
+// exchange is complete, so the request cannot be asserted in the same breath as
+// the status.
+func (u *RecordingUpstream) Last(t *testing.T) UpstreamRequest {
+	t.Helper()
+	reqs := u.Requests()
+	if len(reqs) == 0 {
+		t.Fatal("upstream received no requests")
+	}
+	return reqs[len(reqs)-1]
 }
 
 // Reset clears the recorded requests so one test's traffic cannot be read as
@@ -464,11 +510,9 @@ type ChainOpts struct {
 	Body string
 }
 
-// ChainRequest drives one request through the whole chain and returns the
-// response status, body and headers. Response headers matter here because the
-// user leg is largely a header protocol: WWW-Authenticate carries the challenge
-// that says which principal was rejected.
-func ChainRequest(t *testing.T, port int, p ProviderEnv, o ChainOpts) (int, []byte, http.Header) {
+// chainHeaders turns the credential-bearing options into request headers. Shared
+// by the buffered and streaming paths so a row means the same thing either way.
+func chainHeaders(t *testing.T, o ChainOpts) map[string]string {
 	t.Helper()
 
 	headers := map[string]string{}
@@ -498,22 +542,84 @@ func ChainRequest(t *testing.T, port int, p ProviderEnv, o ChainOpts) (int, []by
 	for k, v := range o.Headers {
 		headers[k] = v
 	}
+	return headers
+}
 
-	method := o.Method
-	if method == "" {
-		method = "GET"
-		if o.Body != "" {
-			method = "POST"
-		}
+func chainMethod(o ChainOpts) string {
+	if o.Method != "" {
+		return o.Method
 	}
+	if o.Body != "" {
+		return "POST"
+	}
+	return "GET"
+}
+
+func chainURL(port int, p ProviderEnv, o ChainOpts) string {
 	path := o.Path
 	if path == "" {
 		path = "probe"
 	}
+	return fmt.Sprintf("%s/v1/%s/gateway/%s", NodeURL(port), p.Mount, path)
+}
 
-	u := fmt.Sprintf("%s/v1/%s/gateway/%s", NodeURL(port), p.Mount, path)
+func chainBody(o ChainOpts) io.Reader {
+	if o.Body == "" {
+		return nil
+	}
+	return strings.NewReader(o.Body)
+}
+
+// ChainRequest drives one request through the whole chain and returns the
+// response status, body and headers. Response headers matter here because the
+// user leg is largely a header protocol: WWW-Authenticate carries the challenge
+// that says which principal was rejected.
+func ChainRequest(t *testing.T, port int, p ProviderEnv, o ChainOpts) (int, []byte, http.Header) {
+	t.Helper()
+
+	headers := chainHeaders(t, o)
+	method := chainMethod(o)
+	u := chainURL(port, p, o)
 	status, body, respHeaders := DoRequestWithResponseHeaders(t, method, u, headers, o.Body)
 	return status, body, http.Header(respHeaders)
+}
+
+// ChainStream drives a full-chain request and returns the live response without
+// reading its body, so a test can observe chunks as they arrive.
+//
+// Every other row reads the body to completion, which cannot tell a streamed
+// response from a buffered one: both end with the same bytes in hand. The
+// difference is only visible in when they arrive, so it needs the response open.
+//
+// The caller owns resp.Body and must close it.
+func ChainStream(t *testing.T, port int, p ProviderEnv, o ChainOpts) *http.Response {
+	t.Helper()
+
+	req, err := http.NewRequest(chainMethod(o), chainURL(port, p, o), chainBody(o))
+	if err != nil {
+		t.Fatalf("build streaming request: %v", err)
+	}
+	for k, v := range chainHeaders(t, o) {
+		req.Header.Set(k, v)
+	}
+	if o.Body != "" && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // self-signed e2e cert
+			// Compression would coalesce the upstream's chunks, hiding exactly
+			// the boundaries this exists to observe.
+			DisableCompression: true,
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("streaming request failed: %v", err)
+	}
+	return resp
 }
 
 // ChainWant is what a full-chain request is expected to have produced.
