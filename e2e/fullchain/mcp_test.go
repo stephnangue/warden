@@ -3,6 +3,7 @@
 package fullchain
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -60,7 +61,11 @@ var mcpGitHubEnv = h.ProviderEnv{
 }
 
 func mcpToolCall(tool string) string {
-	return `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tool + `"}}`
+	return mcpToolCallID(tool, 1)
+}
+
+func mcpToolCallID(tool string, id int) string {
+	return `{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"tools/call","params":{"name":"` + tool + `"}}`
 }
 
 // TestMCP_AllowedToolReachesUpstream is the positive half. It also confirms the
@@ -82,6 +87,65 @@ func TestMCP_AllowedToolReachesUpstream(t *testing.T) {
 		Injected:      map[string]string{"Authorization": "Bearer " + mcpAPIKey},
 		Absent:        h.AlwaysAbsent(),
 		UpstreamCalls: 1,
+	})
+}
+
+// TestMCP_BatchIsProxied is the end-to-end half of core's TestMCPE2E_BatchAllAllowed.
+//
+// A JSON-RPC batch is a top-level JSON array, and no mount could carry one: the
+// authorization path decoded every request body into a string-keyed map, which an
+// array cannot be, and the request died there. The unit tests exercised batches by
+// calling the extractor directly, so they passed throughout — this row is the only
+// place the wiring is checked.
+//
+// Every call names the allowed tool, so the batch is allowed whole. It must also
+// arrive whole: a batch that authorised but reached the upstream re-serialised or in
+// pieces would be a different bug wearing the same 200.
+func TestMCP_BatchIsProxied(t *testing.T) {
+	ensureEnv(t)
+	upstream.Reset()
+
+	batch := `[` + mcpToolCallID(mcpAllowedTool, 1) + `,` + mcpToolCallID(mcpAllowedTool, 2) + `]`
+
+	status, body, _ := h.ChainRequest(t, leaderPort, mcpEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         mcpEnv.CertRole(),
+		Body:         batch,
+	})
+
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status:        200,
+		Injected:      map[string]string{"Authorization": "Bearer " + mcpAPIKey},
+		Absent:        h.AlwaysAbsent(),
+		UpstreamCalls: 1,
+	})
+
+	reqs := upstream.Requests()
+	if got := string(reqs[len(reqs)-1].Body); got != batch {
+		t.Errorf("upstream body: got %s, want %s", got, batch)
+	}
+}
+
+// TestMCP_BatchWithDeniedCallIsRefused is the counterpart, and the reason the row
+// above is not enough on its own: now that a batch can be carried, the filter has to
+// still read every call in it. One denied tool among allowed ones refuses the whole
+// batch, before anything is forwarded — a filter that inspected only the first call
+// would pass the row above and leak here.
+func TestMCP_BatchWithDeniedCallIsRefused(t *testing.T) {
+	ensureEnv(t)
+	upstream.Reset()
+
+	status, body, _ := h.ChainRequest(t, leaderPort, mcpEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         mcpEnv.CertRole(),
+		Body:         `[` + mcpToolCallID(mcpAllowedTool, 1) + `,` + mcpToolCallID(mcpDeniedTool, 2) + `]`,
+	})
+
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status:        403,
+		UpstreamCalls: 0,
 	})
 }
 

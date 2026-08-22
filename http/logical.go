@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/middleware"
-	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/core"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -158,19 +157,14 @@ func extractClientIP(r *http.Request) string {
 }
 
 // errorToStatusCode maps errors to appropriate HTTP status codes.
+//
+// It defers to logical.GetErrorCode rather than keeping its own switch. The two
+// used to be maintained as mirrors, and had drifted: the audit side honours an
+// error carrying its own status, this side did not, so a handler that returned
+// one as its error was recorded with the status it asked for and answered 500 on
+// the wire. Sharing the mapping is what stops that recurring.
 func errorToStatusCode(err error) int {
-	switch {
-	case errors.Is(err, sdklogical.ErrUnsupportedOperation):
-		return http.StatusMethodNotAllowed
-	case errors.Is(err, sdklogical.ErrUnsupportedPath):
-		return http.StatusNotFound
-	case errors.Is(err, sdklogical.ErrPermissionDenied):
-		return http.StatusForbidden
-	case errors.Is(err, sdklogical.ErrInvalidRequest):
-		return http.StatusBadRequest
-	default:
-		return http.StatusInternalServerError
-	}
+	return logical.GetErrorCode(err)
 }
 
 // writeLogicalResponse writes the logical.Response to the HTTP response.

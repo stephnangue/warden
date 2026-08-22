@@ -744,6 +744,87 @@ func TestParseJSONBody(t *testing.T) {
 	})
 }
 
+// TestParseJSONBody_NonObjectTopLevel covers the request shapes that used to die
+// against req.Data's map type: a top-level array — the body of a batch, a bulk write,
+// a metrics series submission, a JSON-RPC batch — and top-level scalars. None of them
+// can contribute fields to a map keyed by string, so none of them does; what matters
+// is that they parse, leave the query params alone, and reach the upstream unchanged.
+func TestParseJSONBody_NonObjectTopLevel(t *testing.T) {
+	core := createTestCore(t)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"array of objects", `[{"any":"array"}]`},
+		{"jsonrpc batch", `[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]`},
+		{"empty array", `[]`},
+		{"string", `"scalar"`},
+		{"number", `42`},
+		{"bool", `true`},
+		{"null", `null`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			httpReq := httptest.NewRequest(http.MethodPost, "/v1/test?q=1", strings.NewReader(tc.body))
+			httpReq.Header.Set("Content-Type", "application/json")
+			req := &logical.Request{HTTPRequest: httpReq}
+
+			require.NoError(t, core.parseRequestBody(req))
+			assert.Equal(t, map[string]any{"q": "1"}, req.Data,
+				"a non-object body contributes no fields, and invents none")
+
+			restored, err := io.ReadAll(req.HTTPRequest.Body)
+			require.NoError(t, err)
+			assert.Equal(t, tc.body, string(restored), "the upstream must receive the body unchanged")
+		})
+	}
+}
+
+// TestParseRequestBody_ErrorsAreCodedAndOpaque pins both halves of the answer a caller
+// gets for a body Warden will not take: a status that says whose fault it is, and a
+// message that does not hand them a Go type name as an API contract.
+func TestParseRequestBody_ErrorsAreCodedAndOpaque(t *testing.T) {
+	core := createTestCore(t)
+
+	t.Run("malformed JSON is 400", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(`{"invalid json`))
+		httpReq.Header.Set("Content-Type", "application/json")
+		req := &logical.Request{HTTPRequest: httpReq}
+
+		err := core.parseRequestBody(req)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
+		assert.NotContains(t, err.Error(), "map[string]")
+		assert.NotContains(t, err.Error(), "interface {}")
+	})
+
+	t.Run("malformed form body is 400", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(`name=%zz`))
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req := &logical.Request{HTTPRequest: httpReq}
+
+		err := core.parseRequestBody(req)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
+	})
+
+	// 413, not 400: the request is well-formed, it is only too big, and the caller
+	// needs to know shrinking it is the remedy. An uncoded error here would reach the
+	// wire as a 500 and blame Warden for the caller's payload.
+	t.Run("oversized body is 413", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test",
+			bytes.NewReader(bytes.Repeat([]byte("a"), maxRequestBodySize+1)))
+		httpReq.Header.Set("Content-Type", "application/json")
+		req := &logical.Request{HTTPRequest: httpReq}
+
+		err := core.parseRequestBody(req)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusRequestEntityTooLarge, logical.GetErrorCode(err))
+	})
+}
+
 // TestIsStreamingRequest tests the isStreamingRequest function
 func TestIsStreamingRequest(t *testing.T) {
 	core := createTestCore(t)
