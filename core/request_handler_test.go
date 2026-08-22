@@ -893,6 +893,75 @@ func TestHandleLoginRequest(t *testing.T) {
 	})
 }
 
+// TestHandleLoginRequest_InternalLoginIgnoresCallerBody pins the boundary between an
+// internal login's resolved Data and the caller's HTTP request.
+//
+// An internal login is built with Data already holding the credential and role that
+// the gateway request's own auth precedence resolved, and it reuses that request's
+// *http.Request for its TLS and forwarded-cert context. Parsing the body here would
+// merge the caller's query params and body keys into that resolved map, letting a
+// request body pick the role the login authenticates against. The substitution would
+// be invisible: unlike X-Warden-Role or a /role/{name}/ path segment, it never reaches
+// req.Path, so neither policy nor the audit entry would record which role was used.
+func TestHandleLoginRequest_InternalLoginIgnoresCallerBody(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	cases := []struct {
+		name   string
+		target string
+		body   string
+	}{
+		{"role in body", "/v1/gw/gateway/mcp", `{"role":"escalated"}`},
+		{"role in query", "/v1/gw/gateway/mcp?role=escalated", `{}`},
+		{"jwt in body", "/v1/gw/gateway/mcp", `{"jwt":"attacker-supplied"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The shape resolveTransparentIdentity builds.
+			httpReq := httptest.NewRequest(http.MethodPost, tc.target, strings.NewReader(tc.body))
+			httpReq.Header.Set("Content-Type", "application/json")
+			req := &logical.Request{
+				Path:        "auth/jwt/login",
+				Operation:   logical.UpdateOperation,
+				HTTPRequest: httpReq,
+				Data:        map[string]any{"jwt": "resolved-jwt", "role": "resolved-role"},
+			}
+
+			// The login itself fails — no mount is registered here — but the parse
+			// decision is made before that, which is what this asserts.
+			_, _, _ = core.handleLoginRequest(ctx, req, true)
+
+			assert.Equal(t, "resolved-role", req.Data["role"])
+			assert.Equal(t, "resolved-jwt", req.Data["jwt"])
+			assert.Len(t, req.Data, 2, "internal login Data must carry only what Warden resolved")
+		})
+	}
+}
+
+// TestHandleLoginRequest_ExplicitLoginParsesBody is the counterpart, and guards
+// against fixing the above too broadly: a real POST to auth/<mount>/login arrives with
+// no Data at all, and its body is the only place its credentials can come from.
+func TestHandleLoginRequest_ExplicitLoginParsesBody(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/auth/jwt/login",
+		strings.NewReader(`{"jwt":"caller-jwt","role":"caller-role"}`))
+	httpReq.Header.Set("Content-Type", "application/json")
+	req := &logical.Request{
+		Path:        "auth/jwt/login",
+		Operation:   logical.UpdateOperation,
+		HTTPRequest: httpReq,
+	}
+
+	_, _, _ = core.handleLoginRequest(ctx, req, false)
+
+	assert.Equal(t, "caller-jwt", req.Data["jwt"])
+	assert.Equal(t, "caller-role", req.Data["role"])
+}
+
 // TestHandleNonLoginRequest_ParsesBody tests that handleNonLoginRequest parses body before CheckToken
 func TestHandleNonLoginRequest_ParsesBody(t *testing.T) {
 	core := createTestCore(t)
