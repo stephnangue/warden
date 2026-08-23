@@ -177,6 +177,27 @@ func (t *OAuthBearerTokenCredType) SensitiveConfigFields() []string {
 // Compile-time assertion that the type is connect-gated for authorization_code.
 var _ credential.ConnectGated = (*OAuthBearerTokenCredType)(nil)
 
+// Compile-time assertion that the sealed keys are enforced, not just documented.
+var _ credential.SystemManagedConfig = (*OAuthBearerTokenCredType)(nil)
+
+// SystemManagedConfigFields returns the keys sealed by `cred spec connect` and
+// by the refresh-token write-back. They are the credential itself: an operator
+// who could set one could mint against a token the server never issued, and the
+// spec would report itself connected on the strength of it.
+//
+// These four are read from the spec config directly at mint time, never resolved
+// spec-over-source, which is why guarding the spec write paths is sufficient. A
+// change that starts resolving any of them from the source would need the source
+// write path guarded too.
+func (t *OAuthBearerTokenCredType) SystemManagedConfigFields() []string {
+	return []string{
+		"refresh_token",
+		"access_token",
+		"refresh_token_expires_at",
+		"access_token_expires_at",
+	}
+}
+
 // RequiresConnect reports whether the spec uses the authorization_code flow, which
 // needs a one-time `cred spec connect` before it can mint.
 func (t *OAuthBearerTokenCredType) RequiresConnect(config map[string]string) bool {

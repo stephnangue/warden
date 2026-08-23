@@ -234,6 +234,45 @@ func (b *SystemBackend) maskSourceConfig(sourceType string, config map[string]st
 	return masked
 }
 
+// checkSystemManagedSpecConfig refuses an operator write to a spec-config key
+// the credential type declares the server owns. existing is the stored config,
+// or nil on create.
+//
+// A key passes when the caller is not really setting it: absent, empty (an
+// explicit clear, which cannot forge anything), identical to what is stored, or
+// the mask sentinel standing in for a stored secret the caller read back. Any
+// other value is refused, because on create there is nothing to have read back
+// and on update it differs from what the server sealed.
+func (b *SystemBackend) checkSystemManagedSpecConfig(specType string, incoming, existing map[string]string) error {
+	if b.core.credentialTypeRegistry == nil {
+		return nil
+	}
+	credType, err := b.core.credentialTypeRegistry.GetByName(specType)
+	if err != nil {
+		// An unknown type is rejected by validation further along, with a better
+		// message than this check could give.
+		return nil
+	}
+	managed, ok := credType.(credential.SystemManagedConfig)
+	if !ok {
+		return nil
+	}
+
+	for _, key := range managed.SystemManagedConfigFields() {
+		value, present := incoming[key]
+		if !present || value == "" || value == existing[key] {
+			continue
+		}
+		if value == maskValue && existing[key] != "" {
+			continue
+		}
+		return logical.ErrBadRequestf(
+			"config key %q is sealed by the server and cannot be set through this API; "+
+				"run `warden cred spec connect` to establish it", key)
+	}
+	return nil
+}
+
 // maskSpecConfig masks sensitive config fields based on the credential type
 func (b *SystemBackend) maskSpecConfig(specType string, config map[string]string) map[string]string {
 	if config == nil {
@@ -508,6 +547,12 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 		}
 	}
 
+	// Refuse operator-set values for keys the server seals. Checked once the type
+	// is known, since the type is what declares them.
+	if err := b.checkSystemManagedSpecConfig(specType, specConfig, nil); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+
 	b.logger.Info("creating credential spec",
 		logger.String("name", name),
 		logger.String("type", specType),
@@ -619,6 +664,11 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 	// possible with an empty string, which is not the sentinel.
 	if configAny, ok := d.GetOk("config"); ok {
 		newConfig := convertToStringMap(configAny.(map[string]any))
+		// Refuse operator-set values for keys the server seals, before merging —
+		// afterwards the caller's input and the stored value are indistinguishable.
+		if err := b.checkSystemManagedSpecConfig(spec.Type, newConfig, spec.Config); err != nil {
+			return logical.ErrorResponse(err), nil
+		}
 		for k, v := range newConfig {
 			if v == maskValue {
 				continue

@@ -133,3 +133,21 @@ type ConfigSensitivity interface {
 	// implementation must include everything that list would have returned.
 	SensitiveConfigFieldsFor(config map[string]string) []string
 }
+
+// SystemManagedConfig is an optional interface a credential Type implements when
+// some of its spec-config keys are written by the server rather than by an
+// operator — sealed during an interactive connect, or replaced by the mint
+// pipeline as it rotates them. Such a key is documented as not operator-set, and
+// this is what makes that documentation true.
+//
+// Enforcement belongs to the spec create and update handlers, because they are
+// the only place the caller's own input is still distinguishable from stored
+// state; by the time a write reaches the config store the two have merged.
+// Internal writers therefore bypass it by construction rather than by opting
+// out. Any new operator-facing surface that writes spec config must route
+// through the same check, or the guarantee is only as wide as the paths that
+// remember it.
+type SystemManagedConfig interface {
+	// SystemManagedConfigFields returns the spec-config keys the server owns.
+	SystemManagedConfigFields() []string
+}
