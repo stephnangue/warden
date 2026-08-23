@@ -112,6 +112,34 @@ func TestNewFactory_InvalidConfig(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknown configuration key")
 }
 
+// B5: the transparent-auth settings are part of mount-time config like any
+// other key. Accepting them and applying only the URL left the agent leg
+// reachable solely through a later config write — which, before B4 was fixed,
+// reset the URL. There was no order that configured both.
+func TestNewFactory_AppliesTransparentConfig(t *testing.T) {
+	b := createBackendWithConfig(t, headerAuthSpec, map[string]any{
+		"test_url":       "https://custom.test.com",
+		"auto_auth_path": "auth/cert/",
+		"default_role":   "reader",
+	})
+
+	tc := b.TransparentConfig()
+	assert.Equal(t, "auth/cert/", tc.AutoAuthPath)
+	assert.Equal(t, "reader", tc.DefaultAuthRole)
+	assert.Equal(t, "https://custom.test.com", b.providerURL, "the URL must not be lost to it")
+}
+
+// An unconfigured mount still has to resolve its defaults. A zero max body size
+// is read downstream as "no limit", not as "use the default", so leaving it
+// unset would silently remove the cap.
+func TestNewFactory_NoConfig_ResolvesDefaults(t *testing.T) {
+	b := createBackendWithConfig(t, headerAuthSpec, nil)
+
+	assert.Equal(t, framework.DefaultMaxBodySize, b.MaxBodySize())
+	assert.Equal(t, 30*time.Second, b.Timeout())
+	assert.Equal(t, "https://api.test.com", b.providerURL)
+}
+
 // --- TransparentAuthRoleExtractor ---
 
 func TestGetAuthRoleFromRequest(t *testing.T) {

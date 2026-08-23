@@ -32,7 +32,7 @@ func validateConfig(spec *ProviderSpec, config map[string]any) error {
 		spec.URLConfigKey, "max_body_size", "timeout", "auto_auth_path", "default_role",
 		"tls_skip_verify", "ca_data",
 	}
-	allowedKeys = append(allowedKeys, spec.ExtraConfigKeys...)
+	allowedKeys = append(allowedKeys, specExtraConfigKeys(spec)...)
 	if err := framework.ValidateAllowedKeys(config, allowedKeys...); err != nil {
 		return err
 	}

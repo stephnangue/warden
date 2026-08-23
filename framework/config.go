@@ -1,6 +1,8 @@
 package framework
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -208,6 +210,41 @@ func ValidateTLSConfig(conf map[string]any) error {
 		}
 	}
 	return nil
+}
+
+// NewTLSClientConfig builds the client TLS settings for an upstream connection
+// from the two config fields ValidateTLSConfig checks: a base64-encoded PEM
+// bundle to trust, and whether to verify at all.
+//
+// caData replaces the system roots rather than adding to them: a mount naming a
+// private authority is saying which authority signs its upstream, and silently
+// continuing to accept every public CA would not be that.
+//
+// The caller owns HTTP/2 setup. ConfigureTransport binds to whichever
+// tls.Config is installed when it runs, so a transport must assign the result
+// of this call before configuring h2, never after.
+func NewTLSClientConfig(caData string, skipVerify bool) (*tls.Config, error) {
+	cfg := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		ClientSessionCache: tls.NewLRUClientSessionCache(100),
+		InsecureSkipVerify: skipVerify,
+	}
+
+	if caData == "" {
+		return cfg, nil
+	}
+
+	pemBytes, err := base64.StdEncoding.DecodeString(caData)
+	if err != nil {
+		return nil, fmt.Errorf("ca_data is not valid base64: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("ca_data contains no valid PEM certificates")
+	}
+	cfg.RootCAs = pool
+
+	return cfg, nil
 }
 
 // ValidateURL validates that a URL is well-formed with an https:// scheme.

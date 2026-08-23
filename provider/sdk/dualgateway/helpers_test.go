@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -86,7 +87,8 @@ func makeFieldData(path *framework.Path, raw map[string]interface{}) *framework.
 
 // --- test specs ---
 
-// headerAuthSpec mimics Scaleway: injects a custom header, doesn't strip Authorization.
+// headerAuthSpec mimics Scaleway: authenticates with a custom header rather
+// than Authorization.
 var headerAuthSpec = &ProviderSpec{
 	Name:           "testprovider",
 	HelpText:       "test provider help",
@@ -105,7 +107,7 @@ var headerAuthSpec = &ProviderSpec{
 	},
 }
 
-// bearerAuthSpec mimics OVH: injects Authorization: Bearer, strips incoming Authorization.
+// bearerAuthSpec mimics OVH: injects its own Authorization: Bearer.
 var bearerAuthSpec = &ProviderSpec{
 	Name:           "testbearer",
 	HelpText:       "test bearer provider help",
@@ -115,13 +117,44 @@ var bearerAuthSpec = &ProviderSpec{
 	DefaultTimeout: 30 * time.Second,
 	UserAgent:      "warden-bearer-proxy",
 	APIAuth: APIAuthStrategy{
-		HeaderName:         "Authorization",
-		HeaderValueFormat:  "Bearer %s",
-		CredentialField:    "api_token",
-		StripAuthorization: true,
+		HeaderName:        "Authorization",
+		HeaderValueFormat: "Bearer %s",
+		CredentialField:   "api_token",
 	},
 	S3Endpoint: func(_ map[string]any, region string) string {
 		return fmt.Sprintf("s3.%s.bearer.net", region)
+	},
+}
+
+// extraKeySpec mimics Cloudflare: a provider-specific config key the S3 endpoint
+// is built from, declared as a full field schema rather than a bare name.
+var extraKeySpec = &ProviderSpec{
+	Name:           "testextra",
+	HelpText:       "test extra-key provider help",
+	CredentialType: "extra_keys",
+	DefaultURL:     "https://api.extra.com",
+	URLConfigKey:   "extra_url",
+	DefaultTimeout: 30 * time.Second,
+	UserAgent:      "warden-extra-proxy",
+	APIAuth: APIAuthStrategy{
+		HeaderName:        "X-Auth-Token",
+		HeaderValueFormat: "%s",
+		CredentialField:   "secret_key",
+	},
+	S3Endpoint: func(state map[string]any, _ string) string {
+		id, _ := state["account_id"].(string)
+		return id + ".s3.extra.cloud"
+	},
+	ExtraConfigFields: map[string]*framework.FieldSchema{
+		"account_id": {
+			Type:        framework.TypeString,
+			Description: "account ID",
+		},
+	},
+	OnConfigParsed: func(config map[string]any) map[string]any {
+		return map[string]any{
+			"account_id": framework.GetConfigString(config, "account_id", ""),
+		}
 	},
 }
 
@@ -129,11 +162,36 @@ var bearerAuthSpec = &ProviderSpec{
 
 func createBackend(t *testing.T, spec *ProviderSpec) *dualgatewayBackend {
 	t.Helper()
+	return createBackendWithConfig(t, spec, nil)
+}
+
+// createBackendWithConfig mounts a backend with mount-time configuration, the
+// path a provider is enabled through in production.
+func createBackendWithConfig(t *testing.T, spec *ProviderSpec, conf map[string]any) *dualgatewayBackend {
+	t.Helper()
 	factory := NewFactory(spec)
 	b, err := factory(context.Background(), &logical.BackendConfig{
 		StorageView: newInmemStorage(),
 		Logger:      createTestLogger(),
+		Config:      conf,
 	})
 	require.NoError(t, err)
 	return b.(*dualgatewayBackend)
+}
+
+// writeConfig drives the config path the way an operator does, and fails on any
+// non-200 so a test asserting on the result cannot mistake a rejected write for
+// a config that did not change.
+func writeConfig(t *testing.T, b *dualgatewayBackend, raw map[string]any) {
+	t.Helper()
+	resp, err := b.handleConfigWrite(context.Background(), &logical.Request{}, makeFieldData(b.pathConfig(), raw))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "config write rejected: %v", resp.Err)
+}
+
+func readConfig(t *testing.T, b *dualgatewayBackend) map[string]any {
+	t.Helper()
+	resp, err := b.handleConfigRead(context.Background(), &logical.Request{}, makeFieldData(b.pathConfig(), nil))
+	require.NoError(t, err)
+	return resp.Data
 }
