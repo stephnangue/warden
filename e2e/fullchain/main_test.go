@@ -42,11 +42,15 @@ import (
 // row could cover only the fallback each degraded to. All three are reachable
 // now, and both branches of each are pinned. prometheus appears twice because
 // its scheme is mount config, so covering both means two mounts.
+// The four dual-mode gateways join the list from ensureEnv rather than here:
+// ibmcloud's source needs the IAM stub's URL, which is not known until the stub
+// is listening. Keeping all four together makes the reason legible.
 var allEnvs = []h.ProviderEnv{
 	openaiEnv, anthropicEnv, newrelicEnv, elasticEnv, githubEnv,
 	splunkEnv, datadogEnv, restEnv, dynatraceEnv, dynatraceOAuthEnv, mcpEnv, mcpGitHubEnv,
 	mcpAWSEnv, mcpAWSWrongCredEnv, atlassianEnv, honeycombEnv,
 	prometheusEnv, prometheusBasicEnv,
+	scalewayEnv, cloudflareEnv, ovhEnv,
 }
 
 var (
@@ -73,6 +77,9 @@ func TestMain(m *testing.M) {
 	if upstream != nil {
 		upstream.Close()
 	}
+	if ibmIAMStub != nil {
+		ibmIAMStub.Close()
+	}
 	os.Exit(code)
 }
 
@@ -82,6 +89,14 @@ func ensureEnv(t *testing.T) {
 	envOnce.Do(func() {
 		leaderPort = h.GetLeaderPort(t)
 		upstream = h.StartRecordingUpstream(t)
+
+		// ibmcloud mints by exchanging an API key at IBM's IAM endpoint, a
+		// vendor-specific grant no general-purpose issuer serves, so a stub
+		// stands in. Its URL is source config, hence the env is built here.
+		ibmIAMStub = startIBMIAMStub()
+		ibmcloudEnv = buildIBMCloudEnv(ibmIAMStub.URL)
+		allEnvs = append(allEnvs, ibmcloudEnv)
+
 		agentCAPEM, agentCAKey = h.SetupFullChainCommon(t, leaderPort)
 		for _, env := range allEnvs {
 			h.SetupFullChainProvider(t, leaderPort, upstream.URL, env)

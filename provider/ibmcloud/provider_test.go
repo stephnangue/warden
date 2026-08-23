@@ -22,7 +22,6 @@ func TestSpec_APIAuth(t *testing.T) {
 	assert.Equal(t, "Authorization", Spec.APIAuth.HeaderName)
 	assert.Equal(t, "Bearer %s", Spec.APIAuth.HeaderValueFormat)
 	assert.Equal(t, "access_token", Spec.APIAuth.CredentialField)
-	assert.True(t, Spec.APIAuth.StripAuthorization)
 }
 
 func TestSpec_S3Endpoint(t *testing.T) {
@@ -132,7 +131,7 @@ func TestRewriteAPITarget_HappyPaths(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Spec.RewriteAPITarget("unused", tt.apiPath, defaultState())
+			got, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, tt.apiPath, defaultState())
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, got)
 		})
@@ -140,25 +139,25 @@ func TestRewriteAPITarget_HappyPaths(t *testing.T) {
 }
 
 func TestRewriteAPITarget_HostOnlyPathGetsRoot(t *testing.T) {
-	got, err := Spec.RewriteAPITarget("unused", "/containers.cloud.ibm.com", defaultState())
+	got, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/containers.cloud.ibm.com", defaultState())
 	require.NoError(t, err)
 	assert.Equal(t, "https://containers.cloud.ibm.com/", got)
 }
 
 func TestRewriteAPITarget_RejectsEmptyPath(t *testing.T) {
-	_, err := Spec.RewriteAPITarget("unused", "/", defaultState())
+	_, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/", defaultState())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing target host")
 }
 
 func TestRewriteAPITarget_RejectsCompletelyEmpty(t *testing.T) {
-	_, err := Spec.RewriteAPITarget("unused", "", defaultState())
+	_, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "", defaultState())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing target host")
 }
 
 func TestRewriteAPITarget_DisallowedSuffix(t *testing.T) {
-	_, err := Spec.RewriteAPITarget("unused", "/evil.example.com/x", defaultState())
+	_, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/evil.example.com/x", defaultState())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not in allowed_host_suffixes")
 }
@@ -167,25 +166,25 @@ func TestRewriteAPITarget_BlocksEvilSubdomainTrick(t *testing.T) {
 	// Without the leading-dot enforcement, "evilcloud.ibm.com" could match a
 	// suffix like "cloud.ibm.com". Our normalization drops non-dot suffixes
 	// so the default allowlist entries all start with a dot.
-	_, err := Spec.RewriteAPITarget("unused", "/evilcloud.ibm.com/x", defaultState())
+	_, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/evilcloud.ibm.com/x", defaultState())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not in allowed_host_suffixes")
 }
 
 func TestRewriteAPITarget_RejectsHostWithPort(t *testing.T) {
-	_, err := Spec.RewriteAPITarget("unused", "/containers.cloud.ibm.com:8080/x", defaultState())
+	_, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/containers.cloud.ibm.com:8080/x", defaultState())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid target host")
 }
 
 func TestRewriteAPITarget_RejectsHostWithUserinfo(t *testing.T) {
-	_, err := Spec.RewriteAPITarget("unused", "/user@containers.cloud.ibm.com/x", defaultState())
+	_, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/user@containers.cloud.ibm.com/x", defaultState())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid target host")
 }
 
 func TestRewriteAPITarget_RejectsIPv4Literal(t *testing.T) {
-	_, err := Spec.RewriteAPITarget("unused", "/169.254.169.254/x", defaultState())
+	_, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/169.254.169.254/x", defaultState())
 	require.Error(t, err)
 	// Either IP rejection or regex rejection is acceptable; both are safe.
 	assert.True(t,
@@ -195,7 +194,7 @@ func TestRewriteAPITarget_RejectsIPv4Literal(t *testing.T) {
 }
 
 func TestRewriteAPITarget_RejectsUppercaseHost(t *testing.T) {
-	_, err := Spec.RewriteAPITarget("unused", "/Containers.Cloud.IBM.com/x", defaultState())
+	_, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/Containers.Cloud.IBM.com/x", defaultState())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "lowercase")
 }
@@ -204,18 +203,18 @@ func TestRewriteAPITarget_CustomSuffixesOverrideDefault(t *testing.T) {
 	state := map[string]any{"allowed_host_suffixes": []string{".example.internal"}}
 
 	// Default-allowed host now disallowed
-	_, err := Spec.RewriteAPITarget("unused", "/resource-controller.cloud.ibm.com/x", state)
+	_, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/resource-controller.cloud.ibm.com/x", state)
 	require.Error(t, err)
 
 	// Custom-allowed host now allowed
-	got, err := Spec.RewriteAPITarget("unused", "/svc.example.internal/x", state)
+	got, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/svc.example.internal/x", state)
 	require.NoError(t, err)
 	assert.Equal(t, "https://svc.example.internal/x", got)
 }
 
 func TestRewriteAPITarget_Wildcard(t *testing.T) {
 	state := map[string]any{"allowed_host_suffixes": []string{"*"}}
-	got, err := Spec.RewriteAPITarget("unused", "/any.host.example/x", state)
+	got, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/any.host.example/x", state)
 	require.NoError(t, err)
 	assert.Equal(t, "https://any.host.example/x", got)
 }
@@ -223,12 +222,75 @@ func TestRewriteAPITarget_Wildcard(t *testing.T) {
 func TestRewriteAPITarget_EmptySuffixesFallsBackToDefault(t *testing.T) {
 	// If state somehow arrives without allowed_host_suffixes populated,
 	// the hook falls back to the default closed allowlist.
-	got, err := Spec.RewriteAPITarget("unused", "/resource-controller.cloud.ibm.com/x", map[string]any{})
+	got, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/resource-controller.cloud.ibm.com/x", map[string]any{})
 	require.NoError(t, err)
 	assert.Equal(t, "https://resource-controller.cloud.ibm.com/x", got)
 
-	_, err = Spec.RewriteAPITarget("unused", "/evil.example.com/x", map[string]any{})
+	_, err = Spec.RewriteAPITarget(DefaultIBMCloudURL, "/evil.example.com/x", map[string]any{})
 	require.Error(t, err)
+}
+
+// --- ibmcloud_url as an egress base ---
+
+// A configured URL takes over from per-service hostnames, which is what a VPC
+// private endpoint or an enterprise egress gateway looks like. Without it the
+// mount can only ever reach public IBM hostnames on 443.
+func TestRewriteAPITarget_ConfiguredURLBecomesTheEgressBase(t *testing.T) {
+	got, err := Spec.RewriteAPITarget("https://egress.internal:8443",
+		"/resource-controller.cloud.ibm.com/v2/resource_instances", defaultState())
+	require.NoError(t, err)
+	assert.Equal(t, "https://egress.internal:8443/resource-controller.cloud.ibm.com/v2/resource_instances", got)
+}
+
+// The mount addresses several services by definition, so the egress hop has to
+// be told which one. Collapsing them onto the base would make every service the
+// same URL and leave the allowlist checking a value nothing downstream sees.
+func TestRewriteAPITarget_EgressBaseKeepsTheRoutingHost(t *testing.T) {
+	state := defaultState()
+
+	rc, err := Spec.RewriteAPITarget("https://egress.internal", "/resource-controller.cloud.ibm.com/x", state)
+	require.NoError(t, err)
+	iks, err := Spec.RewriteAPITarget("https://egress.internal", "/containers.cloud.ibm.com/x", state)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, rc, iks, "two services must not collapse onto one upstream URL")
+	assert.Contains(t, rc, "resource-controller.cloud.ibm.com")
+	assert.Contains(t, iks, "containers.cloud.ibm.com")
+}
+
+func TestRewriteAPITarget_ConfiguredURLTrailingSlash(t *testing.T) {
+	got, err := Spec.RewriteAPITarget("https://egress.internal/",
+		"/resource-controller.cloud.ibm.com/x", defaultState())
+	require.NoError(t, err)
+	assert.Equal(t, "https://egress.internal/resource-controller.cloud.ibm.com/x", got,
+		"no doubled slash where base meets host")
+}
+
+// The host segment is still required and still allow-listed when a base is
+// configured. An override that skipped those checks would be a way around the
+// allowlist, and would make the same client code behave differently depending
+// on how the mount happens to be configured.
+func TestRewriteAPITarget_ConfiguredURLStillValidatesTheHost(t *testing.T) {
+	_, err := Spec.RewriteAPITarget("https://egress.internal", "/evil.example.com/x", defaultState())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "allowed_host_suffixes")
+
+	_, err = Spec.RewriteAPITarget("https://egress.internal", "/169.254.169.254/x", defaultState())
+	require.Error(t, err)
+
+	_, err = Spec.RewriteAPITarget("https://egress.internal", "/", defaultState())
+	require.Error(t, err)
+}
+
+// The default is the sentinel, so an unconfigured mount keeps routing by path.
+func TestRewriteAPITarget_DefaultURLKeepsPathRouting(t *testing.T) {
+	got, err := Spec.RewriteAPITarget(DefaultIBMCloudURL, "/containers.cloud.ibm.com/x", defaultState())
+	require.NoError(t, err)
+	assert.Equal(t, "https://containers.cloud.ibm.com/x", got)
+
+	got, err = Spec.RewriteAPITarget("", "/containers.cloud.ibm.com/x", defaultState())
+	require.NoError(t, err)
+	assert.Equal(t, "https://containers.cloud.ibm.com/x", got)
 }
 
 // --- parseHostSuffixes ---

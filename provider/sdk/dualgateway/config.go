@@ -30,6 +30,7 @@ func parseConfig(spec *ProviderSpec, conf map[string]any) providerConfig {
 func validateConfig(spec *ProviderSpec, config map[string]any) error {
 	allowedKeys := []string{
 		spec.URLConfigKey, "max_body_size", "timeout", "auto_auth_path", "default_role",
+		"user_auth_path", "user_auth_role",
 		"tls_skip_verify", "ca_data",
 	}
 	allowedKeys = append(allowedKeys, specExtraConfigKeys(spec)...)
@@ -45,6 +46,9 @@ func validateConfig(spec *ProviderSpec, config map[string]any) error {
 	}
 
 	if err := framework.ValidateCommonConfig(config); err != nil {
+		return err
+	}
+	if err := framework.ValidateUserAuthConfig(config); err != nil {
 		return err
 	}
 	return framework.ValidateTLSConfig(config)

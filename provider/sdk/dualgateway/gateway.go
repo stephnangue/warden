@@ -15,6 +15,40 @@ import (
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
 
+// wardenCredentialHeaders are the inbound channels that carry a credential for
+// Warden. None of them is the upstream's business, in either mode: an operator
+// token, an agent token and a user's bearer are all Warden's to hold, and a
+// vendor that received one could replay it.
+//
+// Authorization is in the list because whatever it held inbound was one of
+// those too. A provider that injects into Authorization overwrites it a few
+// lines later; one that authenticates with some other header used to forward it
+// untouched, which is how a caller's Warden token reached the vendor.
+var wardenCredentialHeaders = []string{
+	"Authorization",
+	"X-Warden-Token", "X-Warden-Agent-Token", "X-Warden-Role", "X-Warden-Provider",
+	"X-Warden-Subject-Token", "X-Warden-Actor-Token", "X-Warden-User-Token",
+}
+
+// hopByHopHeaders do not survive a proxy hop by definition, plus the forwarding
+// metadata this hop has no reason to pass on.
+var hopByHopHeaders = []string{
+	"Connection", "Keep-Alive", "Transfer-Encoding", "Upgrade",
+	"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
+	"X-Forwarded-Port", "X-Real-Ip", "Forwarded",
+	"Proxy-Authenticate", "Proxy-Authorization",
+}
+
+// stripInboundCredentials removes every channel that carried a Warden
+// credential. Both modes call it: an S3 request reaches the vendor too, and
+// re-signing replaces only Authorization — the rest would ride along, signed
+// into the new signature by whatever headers happen to be present.
+func stripInboundCredentials(h http.Header) {
+	for _, name := range wardenCredentialHeaders {
+		h.Del(name)
+	}
+}
+
 // requestSnapshot holds a snapshot of mutable backend state for a single request.
 type requestSnapshot struct {
 	providerURL string
@@ -144,18 +178,8 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 		}
 	}
 
-	headersToRemove := []string{
-		"X-Warden-Token", "X-Warden-Agent-Token", "X-Warden-Role", "X-Warden-Provider",
-		"X-Warden-Subject-Token", "X-Warden-Actor-Token", "X-Warden-User-Token",
-		"Connection", "Keep-Alive", "Transfer-Encoding", "Upgrade",
-		"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
-		"X-Forwarded-Port", "X-Real-Ip", "Forwarded",
-		"Proxy-Authenticate", "Proxy-Authorization",
-	}
-	if b.spec.APIAuth.StripAuthorization {
-		headersToRemove = append(headersToRemove, "Authorization")
-	}
-	for _, h := range headersToRemove {
+	stripInboundCredentials(outReq.Header)
+	for _, h := range hopByHopHeaders {
 		outReq.Header.Del(h)
 	}
 
@@ -314,7 +338,15 @@ func (b *dualgatewayBackend) handleS3Request(ctx context.Context, req *logical.R
 		logger.String("request_id", req.RequestID),
 	)
 
-	// Step 7: Normalize request
+	// Step 7: Drop the caller's Warden credentials, then normalize.
+	//
+	// After verification, because the incoming signature is computed over the
+	// incoming headers — removing one the client signed would fail a request
+	// that was correctly formed. Before re-signing, so the new signature covers
+	// what actually goes on the wire. Authorization needs no special handling
+	// here: ResignRequest replaces it outright.
+	stripInboundCredentials(req.HTTPRequest.Header)
+
 	bodyBytes = sigv4.NormalizeRequest(b.Logger, req.HTTPRequest, bodyBytes)
 
 	// Step 8: Re-sign with real provider credentials

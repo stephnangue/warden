@@ -138,11 +138,16 @@ func TestHandleAPIRequest_BearerAuth(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "nichandle")
 }
 
-// --- StripAuthorization: false (header auth keeps original Authorization) ---
+// --- inbound Authorization never reaches the upstream ---
 
-func TestHandleAPIRequest_StripAuthorization_False(t *testing.T) {
+// Whatever Authorization carried inbound was a credential for Warden — an agent
+// bearer, or a user's on a protected-resource mount. A provider that
+// authenticates with some other header used to forward it untouched, which sent
+// the caller's Warden token on to the vendor.
+func TestHandleAPIRequest_InboundAuthorizationIsNotForwarded(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "Bearer original-jwt", r.Header.Get("Authorization"))
+		assert.Empty(t, r.Header.Get("Authorization"),
+			"the caller's Warden credential must not reach the upstream")
 		assert.Equal(t, "injected-secret", r.Header.Get("X-Auth-Token"))
 		w.WriteHeader(http.StatusOK)
 	}))

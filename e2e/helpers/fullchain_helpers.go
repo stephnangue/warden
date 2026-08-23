@@ -288,6 +288,13 @@ func SetupFullChainCommon(t *testing.T, port int) (caCertPEM string, caKey *ecds
 	// that hides it.
 	TeardownFullChainCommonBestEffort(port)
 
+	// Unmounting an auth method and remounting it in the same breath races the
+	// auth table update, which answers 500. SetupCertAuth fatals on that, and
+	// because this runs under the package's sync.Once every later test then
+	// fails instantly with "environment is not available" — one transient
+	// conflict presenting as the whole suite collapsing.
+	time.Sleep(time.Second)
+
 	caCertPEM, caKey = SetupCertAuth(t, port)
 
 	mustAPI(t, port, "POST", "sys/auth/fullchain-user-jwt", `{"type":"jwt"}`, "mount fullchain-user-jwt auth")
