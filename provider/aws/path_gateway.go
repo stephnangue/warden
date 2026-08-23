@@ -244,6 +244,10 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 }
 
 func (b *awsBackend) getCredentials(req *logical.Request) (awssdk.Credentials, error) {
+	if req.Credential == nil {
+		return awssdk.Credentials{}, fmt.Errorf("no credential available")
+	}
+
 	switch req.Credential.Type {
 	case credential.TypeAWSAccessKeys:
 		if req.Credential.LeaseTTL == 0 {

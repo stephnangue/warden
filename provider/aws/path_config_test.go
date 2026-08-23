@@ -401,6 +401,15 @@ func TestGetCredentials(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "unsupported")
 	})
+
+	// A request reaches the backend without a credential whenever nothing minted
+	// one — an unauthenticated branch, or a mint core declined to run. The caller
+	// turns this error into a 401; without the guard the type switch panics.
+	t.Run("nil credential", func(t *testing.T) {
+		_, err := b.getCredentials(&logical.Request{Credential: nil})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no credential available")
+	})
 }
 
 // --- extractAccessKeyID tests ---
