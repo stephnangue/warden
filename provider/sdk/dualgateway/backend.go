@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"time"
 
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/stephnangue/warden/framework"
@@ -20,9 +19,28 @@ type dualgatewayBackend struct {
 	spec     *ProviderSpec
 	s3Signer *v4.Signer // SigV4 signer with DisableURIPathEscaping for S3
 
-	mu          sync.RWMutex   // protects mutable fields below
-	providerURL string         // upstream REST API base URL
-	extraState  map[string]any // provider-specific state from OnConfigParsed
+	// configWriteMu serialises the config-write handler. mu guards individual
+	// field reads and writes; this guards the whole read-merge-apply-persist
+	// sequence, which mu cannot since the apply must not hold it.
+	configWriteMu sync.Mutex
+
+	mu            sync.RWMutex   // protects mutable fields below
+	providerURL   string         // upstream REST API base URL
+	extraState    map[string]any // provider-specific state from OnConfigParsed
+	extraRaw      map[string]any // provider-specific config as the operator gave it
+	tlsSkipVerify bool
+	caData        string
+
+	// installedTransport is the per-mount transport currently in use, or nil
+	// when this mount rides the shared one. The framework's Transport() returns
+	// a stable wrapper rather than what was installed, so a replacement cannot
+	// otherwise be found again to close.
+	installedTransport *http.Transport
+
+	// configErr records a stored configuration that could not be applied at
+	// load. Core logs an Initialize failure and carries on, so without this the
+	// mount would keep serving on spec defaults — the vendor's public endpoint.
+	configErr error
 }
 
 // Compile-time interface assertion
@@ -101,10 +119,6 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 		b.Logger = conf.Logger.WithSubsystem(spec.Name)
 		b.StorageView = conf.StorageView
 
-		// Seed an empty transparent config so isTransparentRequest can route
-		// once auto_auth_path is configured via handleConfigWrite.
-		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{})
-
 		initTransport()
 		b.StreamingBackend.InitProxy(sharedTransport)
 
@@ -120,20 +134,15 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 			if err := validateConfig(spec, conf.Config); err != nil {
 				return nil, fmt.Errorf("invalid configuration: %w", err)
 			}
-			parsed := parseConfig(spec, conf.Config)
-			b.providerURL = parsed.ProviderURL
-			b.SetMaxBodySize(parsed.MaxBodySize)
-			b.SetTimeout(parsed.Timeout)
-			if spec.OnConfigParsed != nil {
-				b.extraState = spec.OnConfigParsed(conf.Config)
-			}
 		}
 
-		if b.MaxBodySize() <= 0 {
-			b.SetMaxBodySize(framework.DefaultMaxBodySize)
-		}
-		if b.Timeout() <= 0 {
-			b.SetTimeout(spec.DefaultTimeout)
+		// Applied unconditionally, and only after InitProxy: an empty config
+		// still has to resolve the defaults (a zero max body size reads as
+		// unlimited downstream, not as "use the default"), and applying before
+		// InitProxy would see a mount-time TLS transport overwritten by the
+		// shared one.
+		if _, err := b.applyParsedConfig(conf.Config); err != nil {
+			return nil, fmt.Errorf("invalid configuration: %w", err)
 		}
 
 		return b, nil
@@ -159,33 +168,22 @@ func (b *dualgatewayBackend) Initialize(ctx context.Context) error {
 		return fmt.Errorf("failed to decode config: %w", err)
 	}
 
+	// The stored entry is authoritative and complete — a config write persists
+	// the whole key set — so it replaces the mount-time configuration wholesale
+	// rather than being layered over it. Routing through applyParsedConfig is
+	// what makes a private CA survive a restart: rebuilt here, or the mount
+	// quietly falls back to the system roots on the next unseal.
+	if _, err := b.applyParsedConfig(config); err != nil {
+		wrapped := fmt.Errorf("failed to apply stored config: %w", err)
+		b.mu.Lock()
+		b.configErr = wrapped
+		b.mu.Unlock()
+		return wrapped
+	}
+
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if urlVal, ok := config[b.spec.URLConfigKey].(string); ok && urlVal != "" {
-		b.providerURL = urlVal
-	}
-
-	if maxSize, ok := config["max_body_size"].(float64); ok && maxSize > 0 {
-		b.SetMaxBodySize(int64(maxSize))
-	}
-
-	if timeoutStr, ok := config["timeout"].(string); ok && timeoutStr != "" {
-		if timeout, err := time.ParseDuration(timeoutStr); err == nil {
-			b.SetTimeout(timeout)
-		}
-	}
-
-	autoAuthPath, _ := config["auto_auth_path"].(string)
-	defaultRole, _ := config["default_role"].(string)
-	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-		AutoAuthPath:    autoAuthPath,
-		DefaultAuthRole: defaultRole,
-	})
-
-	if b.spec.OnConfigParsed != nil {
-		b.extraState = b.spec.OnConfigParsed(config)
-	}
+	b.configErr = nil
+	b.mu.Unlock()
 
 	return nil
 }

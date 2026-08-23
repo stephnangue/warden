@@ -2,15 +2,14 @@ package httpproxy
 
 import (
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"time"
 
 	"golang.org/x/net/http2"
+
+	"github.com/stephnangue/warden/framework"
 )
 
 // newBaseTransport creates an HTTP transport with shared pool/dialer/timeout
@@ -64,22 +63,9 @@ func NewTransport() *http.Transport {
 func NewTransportWithTLS(caData string, skipVerify bool) (*http.Transport, error) {
 	t := newBaseTransport()
 
-	tlsConfig := &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		ClientSessionCache: tls.NewLRUClientSessionCache(100),
-		InsecureSkipVerify: skipVerify,
-	}
-
-	if caData != "" {
-		pemBytes, err := base64.StdEncoding.DecodeString(caData)
-		if err != nil {
-			return nil, fmt.Errorf("ca_data is not valid base64: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pemBytes) {
-			return nil, fmt.Errorf("ca_data contains no valid PEM certificates")
-		}
-		tlsConfig.RootCAs = pool
+	tlsConfig, err := framework.NewTLSClientConfig(caData, skipVerify)
+	if err != nil {
+		return nil, err
 	}
 
 	t.TLSClientConfig = tlsConfig

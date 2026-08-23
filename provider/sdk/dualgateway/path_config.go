@@ -36,6 +36,15 @@ func (b *dualgatewayBackend) pathConfig() *framework.Path {
 			Type:        framework.TypeString,
 			Description: "Default auth role when not specified in the request",
 		},
+		"tls_skip_verify": {
+			Type:        framework.TypeBool,
+			Description: "Skip TLS certificate verification (dev/test only).",
+			Default:     false,
+		},
+		"ca_data": {
+			Type:        framework.TypeString,
+			Description: "Base64-encoded PEM CA certificate, for an upstream signed by a private authority.",
+		},
 	}
 
 	// Add provider-specific extra fields
@@ -81,7 +90,12 @@ func (b *dualgatewayBackend) handleConfigRead(ctx context.Context, req *logical.
 		"timeout":           b.Timeout().String(),
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
+		"tls_skip_verify":   b.tlsSkipVerify,
+		"ca_data":           b.caData,
 	}
+	// Extra keys are reported as resolved, which is what the mount is actually
+	// using. A partial write merges against extraRaw instead, so this staying
+	// the resolved view costs nothing.
 	for k, v := range b.extraState {
 		data[k] = v
 	}
@@ -94,83 +108,66 @@ func (b *dualgatewayBackend) handleConfigRead(ctx context.Context, req *logical.
 }
 
 // handleConfigWrite handles writing the provider configuration.
+//
+// The write is a partial update: it starts from what the mount is currently
+// using and overlays only the keys the request actually named. Building the
+// config from the request alone would resolve every unnamed key to its default,
+// so setting a default role on a working mount would repoint it at the vendor's
+// public endpoint and report success.
 func (b *dualgatewayBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	conf := make(map[string]any)
+	// A partial update is a read-modify-write, so two of them racing would lose
+	// one writer's keys against the other's snapshot, and could leave live state
+	// mixing both while storage records only one. Serialising the handler makes
+	// each write see the previous one whole. It is not on any request path.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
-	if val, ok := d.GetOk(b.spec.URLConfigKey); ok {
-		conf[b.spec.URLConfigKey] = val
-	}
-	if val, ok := d.GetOk("max_body_size"); ok {
-		conf["max_body_size"] = val
-	}
-	if val, ok := d.GetOk("timeout"); ok {
-		conf["timeout"] = val
-	}
+	conf := b.snapshotForMerge()
 
-	// Read extra config fields before validation
-	for _, k := range b.spec.ExtraConfigKeys {
+	keys := []string{
+		b.spec.URLConfigKey, "max_body_size", "timeout",
+		"auto_auth_path", "default_role", "tls_skip_verify", "ca_data",
+	}
+	keys = append(keys, b.extraConfigKeys()...)
+	for _, k := range keys {
 		if val, ok := d.GetOk(k); ok {
 			conf[k] = val
+		}
+	}
+
+	// A mount serving only the non-transparent leg has no auto_auth_path and
+	// must stay configurable, so absence is not the failure — clearing one that
+	// was set is, since that silently takes transparent auth away from a mount
+	// serving it. GetOk reports a present-but-empty value as set, which is what
+	// separates the two.
+	if val, ok := d.GetOk("auto_auth_path"); ok {
+		if s, _ := val.(string); s == "" && b.TransparentConfig().AutoAuthPath != "" {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        logical.ErrBadRequest("auto_auth_path cannot be cleared while transparent auth is configured"),
+			}, nil
 		}
 	}
 
 	if err := validateConfig(b.spec, conf); err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
-			Err:        err,
+			Err:        logical.ErrBadRequest(err.Error()),
 		}, nil
 	}
 
-	parsed := parseConfig(b.spec, conf)
-
-	// Read current transparent config — TransparentConfig() is atomic, no lock needed.
-	current := b.TransparentConfig()
-	tc := &framework.TransparentConfig{
-		AutoAuthPath:    current.AutoAuthPath,
-		DefaultAuthRole: current.DefaultAuthRole,
-	}
-
-	if val, ok := d.GetOk("auto_auth_path"); ok {
-		tc.AutoAuthPath = val.(string)
-	}
-	if val, ok := d.GetOk("default_role"); ok {
-		tc.DefaultAuthRole = val.(string)
-	}
-
-	if tc.AutoAuthPath == "" {
+	persistData, err := b.applyParsedConfig(conf)
+	if err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
-			Err:        logical.ErrBadRequest("auto_auth_path is required"),
+			Err:        logical.ErrBadRequest(err.Error()),
 		}, nil
 	}
 
-	// All validation passed — apply framework-side atomics then provider-local fields under write lock.
-	b.SetMaxBodySize(parsed.MaxBodySize)
-	b.SetTimeout(parsed.Timeout)
-	b.mu.Lock()
-	b.providerURL = parsed.ProviderURL
-	if b.spec.OnConfigParsed != nil {
-		b.extraState = b.spec.OnConfigParsed(conf)
-	}
-	b.mu.Unlock()
-
-	b.StreamingBackend.SetTransparentConfig(tc)
-
-	// Persist config to storage
+	// Persist what this write resolved to, computed from the merged config
+	// alone — not read back off the backend, where a concurrent writer could
+	// tear it.
 	if b.StorageView != nil {
-		b.mu.RLock()
-		persistData := map[string]any{
-			b.spec.URLConfigKey: b.providerURL,
-			"max_body_size":     b.MaxBodySize(),
-			"timeout":           b.Timeout().String(),
-			"auto_auth_path":    tc.AutoAuthPath,
-			"default_role":      tc.DefaultAuthRole,
-		}
-		for k, v := range b.extraState {
-			persistData[k] = v
-		}
-		b.mu.RUnlock()
-
 		entry, err := sdklogical.StorageEntryJSON("config", persistData)
 		if err != nil {
 			return &logical.Response{

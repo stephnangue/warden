@@ -61,6 +61,23 @@ func extractAPIPath(fullPath string) string {
 
 // handleGateway auto-detects the request type and delegates accordingly.
 func (b *dualgatewayBackend) handleGateway(ctx context.Context, req *logical.Request) {
+	// A mount whose stored configuration would not load is not a mount with
+	// slightly stale settings — it has fallen back to the spec defaults, which
+	// point at the vendor's public endpoint, while still holding real
+	// credentials to inject. Refuse rather than egress somewhere the operator
+	// never configured.
+	b.mu.RLock()
+	initErr := b.configErr
+	b.mu.RUnlock()
+	if initErr != nil {
+		b.Logger.Error("refusing request: stored configuration failed to load",
+			logger.Err(initErr),
+			logger.String("request_id", req.RequestID),
+		)
+		http.Error(req.ResponseWriter, "Service Unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	if sigv4.IsSigV4Request(req.HTTPRequest) {
 		b.handleS3Request(ctx, req)
 	} else {
