@@ -81,6 +81,16 @@ func (f *OVHDriverFactory) ValidateConfig(config map[string]string) error {
 			Describe("OVH regional endpoint (default: ovh-eu)").
 			Example("ovh-eu"),
 
+		credential.StringField("api_url").
+			Custom(validateOVHEndpointOverride(config)).
+			Describe("Override the API base URL the endpoint would resolve to. For a private egress gateway fronting the OVH API, or a test double.").
+			Example("https://ovh-gateway.internal/1.0"),
+
+		credential.StringField("token_url").
+			Custom(validateOVHEndpointOverride(config)).
+			Describe("Override the OAuth2 token URL the endpoint would resolve to. Set it to the token endpoint of whatever issues the service account's tokens.").
+			Example("https://ovh-gateway.internal/auth/oauth2/token"),
+
 		credential.StringField("project_id").
 			Describe("Default Public Cloud project ID for S3 credential management").
 			Example("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
@@ -98,6 +108,31 @@ func (f *OVHDriverFactory) ValidateConfig(config map[string]string) error {
 			Describe("Skip TLS certificate verification (development only)").
 			Example("false"),
 	)
+}
+
+// validateOVHEndpointOverride checks a URL an operator has substituted for one
+// of the regional defaults. The client secret is posted to token_url and the
+// bearer it returns is used against api_url, so plaintext is only permitted
+// alongside the same tls_skip_verify a caller must already have set to mean it
+// — matching how the IBM source gates iam_endpoint.
+func validateOVHEndpointOverride(config map[string]string) func(string) error {
+	return func(v string) error {
+		if v == "" {
+			return nil
+		}
+		skipTLS := credential.GetBool(config, "tls_skip_verify", false)
+		if !strings.HasPrefix(v, "https://") && !(strings.HasPrefix(v, "http://") && skipTLS) {
+			return fmt.Errorf("must use https scheme, got: %s", v)
+		}
+		parsed, err := url.Parse(v)
+		if err != nil {
+			return fmt.Errorf("is not a valid URL: %w", err)
+		}
+		if parsed.Host == "" {
+			return fmt.Errorf("must include a host, got: %s", v)
+		}
+		return nil
+	}
 }
 
 // SensitiveConfigFields returns source config keys that should be masked.
@@ -118,6 +153,14 @@ func (f *OVHDriverFactory) Create(config map[string]string, log *logger.GatedLog
 		return nil, fmt.Errorf("unknown ovh_endpoint: %s (expected ovh-eu, ovh-ca, or ovh-us)", endpointName)
 	}
 
+	// The regional endpoint is a shorthand for two URLs, and either can be
+	// pointed elsewhere: a private egress gateway fronting the OVH API, or a
+	// deployment whose service-account tokens are issued by something other
+	// than ovh.com. Overriding one leaves the other on the regional default,
+	// since the two are reached independently.
+	apiURL := credential.GetString(config, "api_url", ep.apiURL)
+	tokenURL := credential.GetString(config, "token_url", ep.tokenURL)
+
 	httpClient, err := BuildHTTPClient(config, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
@@ -130,8 +173,8 @@ func (f *OVHDriverFactory) Create(config map[string]string, log *logger.GatedLog
 		},
 		logger:     log.WithSubsystem(credential.SourceTypeOVH),
 		httpClient: httpClient,
-		apiURL:     ep.apiURL,
-		tokenURL:   ep.tokenURL,
+		apiURL:     apiURL,
+		tokenURL:   tokenURL,
 	}
 
 	return driver, nil

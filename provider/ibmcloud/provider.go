@@ -14,8 +14,9 @@ import (
 	"github.com/stephnangue/warden/provider/sdk/dualgateway"
 )
 
-// DefaultIBMCloudURL is a placeholder — ignored in API mode when RewriteAPITarget routes
-// by path. Kept only because the dualgateway framework requires DefaultURL + URLConfigKey.
+// DefaultIBMCloudURL is the sentinel meaning "route by path". While ibmcloud_url
+// holds this value, API mode derives each target host from the request path;
+// setting it to anything else makes that value the single egress base instead.
 const DefaultIBMCloudURL = "https://cloud.ibm.com"
 
 // DefaultIBMCloudTimeout is the default request timeout for IBM Cloud API calls.
@@ -50,10 +51,9 @@ var Spec = &dualgateway.ProviderSpec{
 	UserAgent:      "warden-ibmcloud-proxy",
 
 	APIAuth: dualgateway.APIAuthStrategy{
-		HeaderName:         "Authorization",
-		HeaderValueFormat:  "Bearer %s",
-		CredentialField:    "access_token",
-		StripAuthorization: true,
+		HeaderName:        "Authorization",
+		HeaderValueFormat: "Bearer %s",
+		CredentialField:   "access_token",
 	},
 
 	ExtraConfigKeys: []string{"cos_endpoint_type", "allowed_host_suffixes"},
@@ -104,6 +104,21 @@ var Spec = &dualgateway.ProviderSpec{
 		if !hostAllowed(host, suffixes) {
 			return "", fmt.Errorf("host %q not in allowed_host_suffixes", host)
 		}
+
+		// A configured ibmcloud_url sends every service through one egress
+		// hop instead of straight to its own IBM hostname — a VPC private
+		// endpoint, or an enterprise gateway.
+		//
+		// The host stays in the path rather than being dropped for the base.
+		// A gateway fronting more than one service has to know which was
+		// asked for, and this mount addresses several by definition; collapse
+		// them and every service becomes the same URL, with the allowlist
+		// checking a value nothing downstream can act on. Keeping it means
+		// the gateway sees exactly what the caller addressed.
+		if base := strings.TrimRight(providerURL, "/"); base != "" && base != DefaultIBMCloudURL {
+			return base + "/" + host + rest, nil
+		}
+
 		return "https://" + host + rest, nil
 	},
 
@@ -278,7 +293,12 @@ Two credential source types are supported:
 - hvault (dynamic_ibm): Dynamic API key from Vault IBM engine + IAM token exchange + static COS HMAC
 
 Configuration:
-- ibmcloud_url: Retained for compatibility; ignored in API mode (path encodes the host)
+- ibmcloud_url: Egress base. Left unset, API mode connects to the host named in the
+  request path. Set, every service is sent to that base instead, with the host kept
+  as the leading path segment so the gateway there can route — for a VPC private
+  endpoint or an enterprise egress proxy. The host is validated and checked against
+  allowed_host_suffixes either way. COS mode is unaffected: it always uses the
+  cos_endpoint_type endpoint.
 - cos_endpoint_type: 'public' (default), 'private', or 'direct'
 - allowed_host_suffixes: Comma-separated hostname suffixes permitted as API targets
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)

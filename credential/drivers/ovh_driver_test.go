@@ -178,6 +178,47 @@ func TestOVHDriverFactory_Create(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unknown ovh_endpoint")
 	})
+
+	// The regional endpoint is shorthand for two URLs reached independently, so
+	// overriding one must leave the other on its regional default — a source
+	// whose tokens come from elsewhere still talks to the regional API.
+	t.Run("token_url override leaves api_url regional", func(t *testing.T) {
+		driver, err := f.Create(map[string]string{
+			"client_id":     "test-id",
+			"client_secret": "test-secret",
+			"token_url":     "https://issuer.internal/oauth2/token",
+		}, log)
+		require.NoError(t, err)
+		ovhDriver := driver.(*OVHDriver)
+		assert.Equal(t, "https://issuer.internal/oauth2/token", ovhDriver.tokenURL)
+		assert.Equal(t, "https://eu.api.ovh.com/1.0", ovhDriver.apiURL)
+	})
+
+	t.Run("api_url override leaves token_url regional", func(t *testing.T) {
+		driver, err := f.Create(map[string]string{
+			"client_id":     "test-id",
+			"client_secret": "test-secret",
+			"api_url":       "https://egress.internal/1.0",
+		}, log)
+		require.NoError(t, err)
+		ovhDriver := driver.(*OVHDriver)
+		assert.Equal(t, "https://egress.internal/1.0", ovhDriver.apiURL)
+		assert.Equal(t, "https://www.ovh.com/auth/oauth2/token", ovhDriver.tokenURL)
+	})
+
+	t.Run("overrides compose with a non-default endpoint", func(t *testing.T) {
+		driver, err := f.Create(map[string]string{
+			"client_id":     "test-id",
+			"client_secret": "test-secret",
+			"ovh_endpoint":  "ovh-us",
+			"api_url":       "https://egress.internal/1.0",
+			"token_url":     "https://issuer.internal/oauth2/token",
+		}, log)
+		require.NoError(t, err)
+		ovhDriver := driver.(*OVHDriver)
+		assert.Equal(t, "https://egress.internal/1.0", ovhDriver.apiURL)
+		assert.Equal(t, "https://issuer.internal/oauth2/token", ovhDriver.tokenURL)
+	})
 }
 
 // --- OAuth2 token mint tests ---

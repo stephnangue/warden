@@ -28,12 +28,6 @@ type APIAuthStrategy struct {
 	// CredentialField is the field name to extract from the credential's Data map
 	// (e.g., "secret_key", "api_token"). Used by the default ExtractAPICredential.
 	CredentialField string
-
-	// StripAuthorization controls whether the incoming Authorization header
-	// is removed before injecting the provider's auth header.
-	// true  = strip it (OVH: replaces Authorization with its own Bearer token)
-	// false = keep it (Scaleway: uses X-Auth-Token, leaves Authorization alone)
-	StripAuthorization bool
 }
 
 // ProviderSpec fully describes a dual-mode gateway provider.

@@ -59,6 +59,8 @@ func (b *dualgatewayBackend) applyParsedConfig(conf map[string]any) (map[string]
 
 	autoAuthPath := framework.GetConfigString(conf, "auto_auth_path", "")
 	defaultRole := framework.GetConfigString(conf, "default_role", "")
+	userAuthPath := framework.GetConfigString(conf, "user_auth_path", "")
+	userAuthRole := framework.GetConfigString(conf, "user_auth_role", "")
 
 	extraKeys := b.extraConfigKeys()
 	extraRaw := make(map[string]any, len(extraKeys))
@@ -79,6 +81,8 @@ func (b *dualgatewayBackend) applyParsedConfig(conf map[string]any) (map[string]
 		"timeout":           parsed.Timeout.String(),
 		"auto_auth_path":    autoAuthPath,
 		"default_role":      defaultRole,
+		"user_auth_path":    userAuthPath,
+		"user_auth_role":    userAuthRole,
 		"tls_skip_verify":   parsed.TLSSkipVerify,
 		"ca_data":           parsed.CAData,
 	}
@@ -107,6 +111,8 @@ func (b *dualgatewayBackend) applyParsedConfig(conf map[string]any) (map[string]
 	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 		AutoAuthPath:    autoAuthPath,
 		DefaultAuthRole: defaultRole,
+		UserAuthPath:    userAuthPath,
+		UserAuthRole:    userAuthRole,
 	})
 
 	// Release the connections of the transport just replaced. Only a per-mount
@@ -140,6 +146,8 @@ func (b *dualgatewayBackend) snapshotForMerge() map[string]any {
 		"timeout":           b.Timeout().String(),
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
+		"user_auth_path":    tc.UserAuthPath,
+		"user_auth_role":    tc.UserAuthRole,
 		"tls_skip_verify":   b.tlsSkipVerify,
 		"ca_data":           b.caData,
 	}

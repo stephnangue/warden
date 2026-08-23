@@ -20,10 +20,9 @@ var Spec = &dualgateway.ProviderSpec{
 	UserAgent:      "warden-ovh-proxy",
 
 	APIAuth: dualgateway.APIAuthStrategy{
-		HeaderName:         "Authorization",
-		HeaderValueFormat:  "Bearer %s",
-		CredentialField:    "api_token",
-		StripAuthorization: true,
+		HeaderName:        "Authorization",
+		HeaderValueFormat: "Bearer %s",
+		CredentialField:   "api_token",
 	},
 
 	S3Endpoint: func(_ map[string]any, region string) string {

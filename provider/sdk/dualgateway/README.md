@@ -110,7 +110,7 @@ Not enforced by validation, but every default code path reads them — leaving t
 | `CredentialType` | Default `ExtractAPICredential` and `ExtractS3Credentials` reject any credential whose `Type` does not match. Leave empty only when you supply both extractor overrides. |
 | `DefaultTimeout` | Used when `config.timeout` is unset. `0` makes every request fail with a deadline-exceeded error. |
 | `UserAgent` | Sent on every proxied request. Convention: `"warden-<name>-proxy"`. |
-| `APIAuth.StripAuthorization` | `true` if the provider's auth uses `Authorization: Bearer …` (so the incoming Warden Authorization header must be removed); `false` if the provider uses a separate header (e.g., `X-Auth-Token`) and the incoming Authorization header is harmless. See [APIAuthStrategy patterns](#apiauthstrategy-patterns). |
+| `APIAuth.HeaderName` | The header the credential is injected into. See [APIAuthStrategy patterns](#apiauthstrategy-patterns). The caller's own `Authorization` is always removed before forwarding, whichever header you inject into — it held a credential for Warden, not for the upstream. |
 
 ### Optional extensibility hooks
 
@@ -127,27 +127,25 @@ Not enforced by validation, but every default code path reads them — leaving t
 
 There are two real-world recipes, and the choice hinges on whether the provider's own auth uses the standard `Authorization` header or a custom one.
 
-**Bearer-style** — provider uses `Authorization: Bearer <token>`. Strip the incoming Warden Authorization header so the injected one is the only `Authorization` upstream sees:
+**Bearer-style** — provider uses `Authorization: Bearer <token>`. The injected value is the only `Authorization` the upstream sees:
 
 ```go
 APIAuth: dualgateway.APIAuthStrategy{
-    HeaderName:         "Authorization",
-    HeaderValueFormat:  "Bearer %s",
-    CredentialField:    "api_token",
-    StripAuthorization: true,
+    HeaderName:        "Authorization",
+    HeaderValueFormat: "Bearer %s",
+    CredentialField:   "api_token",
 },
 ```
 
 Used by OVH, Cloudflare, IBM Cloud.
 
-**Custom-header-style** — provider uses a separate header (e.g., `X-Auth-Token`). The incoming Warden Authorization header is not in the way and can be left alone:
+**Custom-header-style** — provider uses a separate header (e.g., `X-Auth-Token`). Nothing displaces the caller's `Authorization`, so the framework removes it:
 
 ```go
 APIAuth: dualgateway.APIAuthStrategy{
     HeaderName:        "X-Auth-Token",
     HeaderValueFormat: "%s",
     CredentialField:   "secret_key",
-    // StripAuthorization defaults to false
 },
 ```
 

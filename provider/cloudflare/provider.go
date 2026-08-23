@@ -29,10 +29,9 @@ var Spec = &dualgateway.ProviderSpec{
 	UserAgent:      "warden-cloudflare-proxy",
 
 	APIAuth: dualgateway.APIAuthStrategy{
-		HeaderName:         "Authorization",
-		HeaderValueFormat:  "Bearer %s",
-		CredentialField:    "api_token",
-		StripAuthorization: true,
+		HeaderName:        "Authorization",
+		HeaderValueFormat: "Bearer %s",
+		CredentialField:   "api_token",
 	},
 
 	ExtraConfigKeys: []string{"account_id", "r2_jurisdiction"},
