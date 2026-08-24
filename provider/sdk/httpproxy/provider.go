@@ -209,8 +209,36 @@ type proxyBackend struct {
 	caData        string
 }
 
+// ValidateSpec checks that required ProviderSpec fields are set.
+//
+// DefaultURL is deliberately not required: an empty value is how a provider
+// declares that its upstream is per-deployment and must be configured on the
+// mount, and buildTargetURL refuses a request that arrives with neither.
+func ValidateSpec(spec *ProviderSpec) error {
+	if spec == nil {
+		return fmt.Errorf("provider spec is nil")
+	}
+	if spec.Name == "" {
+		return fmt.Errorf("provider spec Name is required")
+	}
+	if spec.URLConfigKey == "" {
+		return fmt.Errorf("provider spec URLConfigKey is required")
+	}
+	if spec.ExtractCredentials == nil {
+		return fmt.Errorf("provider spec ExtractCredentials is required")
+	}
+	return nil
+}
+
 // NewFactory creates a logical.Factory from a ProviderSpec.
 func NewFactory(spec *ProviderSpec) logical.Factory {
+	if err := ValidateSpec(spec); err != nil {
+		// Return a factory that always fails — catches spec bugs at mount time
+		return func(_ context.Context, _ *logical.BackendConfig) (logical.Backend, error) {
+			return nil, err
+		}
+	}
+
 	newTransport := spec.NewTransport
 	if newTransport == nil {
 		newTransport = DefaultNewTransport
