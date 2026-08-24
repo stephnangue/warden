@@ -3,6 +3,8 @@
 package fullchain
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	h "github.com/stephnangue/warden/e2e/helpers"
@@ -17,8 +19,11 @@ import (
 // Neither arm had any test at all before this.
 
 const (
-	dynatraceAPIToken   = "fc-dynatrace-not-a-real-token"
-	dynatraceOAuthToken = "fc-dynatrace-not-a-real-oauth-token"
+	dynatraceAPIToken = "fc-dynatrace-not-a-real-token"
+
+	// The harness issuer's client secret for the OAuth arm. Asserted against, so
+	// that handing it through unexchanged cannot pass for a minted token.
+	dynatraceOAuthClientSecret = "agent-secret"
 )
 
 var dynatraceEnv = h.ProviderEnv{
@@ -30,17 +35,17 @@ var dynatraceEnv = h.ProviderEnv{
 }
 
 // The OAuth arm needs an oauth_bearer_token credential, which no local source
-// will hold — so it uses an oauth2 source, configured for the one mint path that
-// touches no network.
+// will hold — so it uses an oauth2 source against the harness issuer and mints
+// for real, under the default client_credentials grant.
 //
-// The default grant is client_credentials, which really does call the token
-// endpoint; pointed at the harness's issuer it mints a live token whose value no
-// assertion can predict, and the row would then be testing the OAuth2 driver
-// rather than this provider's extractor. Under authorization_code the driver
-// instead returns the spec's static access token verbatim — the path a provider
-// that issues no refresh token takes — which keeps the assertion exact and the
-// subject the extractor. token_url is required of the source either way and is
-// never called here.
+// It used to take the authorization_code path instead, whose driver returns the
+// spec's static access_token verbatim, because that made the proxied header an
+// exact constant. That relied on writing access_token into the spec by hand —
+// a key the server seals at connect time and now refuses from an operator, so
+// the shortcut is gone along with the hole it depended on. A live mint costs the
+// exact assertion and buys a real token-endpoint round trip; what this row is
+// actually for, that the credential *type* selects the scheme, is carried by the
+// Bearer prefix, which no api_key credential would ever produce.
 var dynatraceOAuthEnv = h.ProviderEnv{
 	Mount:      "fc-dynatrace-oauth",
 	Type:       "dynatrace",
@@ -49,17 +54,9 @@ var dynatraceOAuthEnv = h.ProviderEnv{
 	SourceType: "oauth2",
 	SourceConfig: map[string]string{
 		"token_url":       h.HydraIssuer + "/oauth2/token",
+		"client_id":       "e2e-agent",
+		"client_secret":   dynatraceOAuthClientSecret,
 		"tls_skip_verify": "true",
-	},
-	// auth_method belongs on the spec, where it is a declared field; the source
-	// schema does not define it and would carry it only because unknown keys are
-	// ignored. access_token is documented as sealed at connect time rather than
-	// operator-set, but IsConnected accepts a hand-written value, so nothing
-	// enforces it — this fixture leans on that gap to mint an OAuth credential
-	// without a network call.
-	CredConfig: map[string]string{
-		"auth_method":  "authorization_code",
-		"access_token": dynatraceOAuthToken,
 	},
 }
 
@@ -73,31 +70,100 @@ var dynatraceOAuthEnv = h.ProviderEnv{
 func TestDynatrace_CredentialTypeSelectsScheme(t *testing.T) {
 	ensureEnv(t)
 
-	cases := []struct {
-		name string
-		env  h.ProviderEnv
-		want string
-	}{
-		{"api token", dynatraceEnv, "Api-Token " + dynatraceAPIToken},
-		{"oauth token", dynatraceOAuthEnv, "Bearer " + dynatraceOAuthToken},
-	}
+	// The API arm's credential is a constant, so the whole header is.
+	t.Run("api token", func(t *testing.T) {
+		upstream.Reset()
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			upstream.Reset()
+		status, body, _ := h.ChainRequest(t, leaderPort, dynatraceEnv, h.ChainOpts{
+			AgentCertPEM: agentCert(t),
+			Bearer:       h.FullChainUserJWT(t),
+			Role:         dynatraceEnv.CertRole(),
+		})
 
-			status, body, _ := h.ChainRequest(t, leaderPort, tc.env, h.ChainOpts{
-				AgentCertPEM: agentCert(t),
-				Bearer:       h.FullChainUserJWT(t),
-				Role:         tc.env.CertRole(),
+		h.AssertChain(t, upstream, status, body, h.ChainWant{
+			Status:        200,
+			Injected:      map[string]string{"Authorization": "Api-Token " + dynatraceAPIToken},
+			Absent:        h.AlwaysAbsent(),
+			UpstreamCalls: 1,
+		})
+	})
+
+	// The OAuth arm's is whatever the issuer minted this run, so the assertions
+	// are on shape: the scheme, which is the thing under test, and enough about
+	// the value to rule out anything the request already carried arriving in its
+	// place.
+	t.Run("oauth token", func(t *testing.T) {
+		upstream.Reset()
+
+		status, body, _ := h.ChainRequest(t, leaderPort, dynatraceOAuthEnv, h.ChainOpts{
+			AgentCertPEM: agentCert(t),
+			Bearer:       h.FullChainUserJWT(t),
+			Role:         dynatraceOAuthEnv.CertRole(),
+		})
+
+		h.AssertChain(t, upstream, status, body, h.ChainWant{
+			Status:        200,
+			Absent:        h.AlwaysAbsent(),
+			UpstreamCalls: 1,
+		})
+
+		authz := upstream.Last(t).Header.Get("Authorization")
+		token, ok := strings.CutPrefix(authz, "Bearer ")
+		if !ok || token == "" {
+			t.Fatalf("Authorization = %q, want a Bearer token — the scheme is what the credential type selects", authz)
+		}
+		if token == h.FullChainUserJWT(t) {
+			t.Error("the caller's own JWT was forwarded as the credential")
+		}
+		if token == dynatraceOAuthClientSecret {
+			t.Error("the client secret was forwarded unexchanged")
+		}
+		// The harness issuer signs JWTs, so a minted token is one. Anything else
+		// means the mint was skipped and some other value rode through.
+		if !strings.HasPrefix(token, "ey") {
+			t.Errorf("credential %q is not a minted JWT", token)
+		}
+	})
+}
+
+// TestDynatrace_SealedOAuthKeysAreRefused pins the guard the fixture above used
+// to depend on. access_token is documented as sealed at connect time; until the
+// write path enforced that, this create returned 200 and the spec reported
+// itself connected on the strength of a value an operator had typed.
+//
+// It is here rather than beside the other credential rows because this is the
+// mount whose fixture the guard cost — leaving the two apart is how the reason
+// for the conversion above gets lost.
+func TestDynatrace_SealedOAuthKeysAreRefused(t *testing.T) {
+	ensureEnv(t)
+
+	for _, key := range []string{"access_token", "refresh_token"} {
+		t.Run(key, func(t *testing.T) {
+			specName := "fc-dynatrace-forged-" + key
+			// A create that is refused leaves nothing, which is the point of the
+			// row. Clean up anyway: on a binary without the guard it succeeds, and
+			// the spec left behind pins the source and breaks the next run's setup
+			// with a 409 rather than a readable failure.
+			t.Cleanup(func() {
+				h.APIRequest(t, "DELETE", "sys/cred/specs/"+specName, leaderPort, "")
 			})
 
-			h.AssertChain(t, upstream, status, body, h.ChainWant{
-				Status:        200,
-				Injected:      map[string]string{"Authorization": tc.want},
-				Absent:        h.AlwaysAbsent(),
-				UpstreamCalls: 1,
-			})
+			payload := fmt.Sprintf(
+				`{"type":"oauth_bearer_token","source":%q,"config":{"auth_method":"authorization_code","client_id":"e2e-agent",%q:"forged-by-the-operator"}}`,
+				dynatraceOAuthEnv.Source(), key)
+
+			status, body := h.APIRequest(t, "POST", "sys/cred/specs/"+specName, leaderPort, payload)
+
+			if status != 400 {
+				t.Fatalf("spec create with a sealed %s: status %d, want 400 — body %s", key, status, body)
+			}
+			// The status alone is not enough. A forged refresh_token also draws a
+			// 400 from the create-time test-mint, which fails when the issuer
+			// rejects it — so a row asserting only the code would pass against a
+			// binary with no guard at all. The refusal has to be this one.
+			if !strings.Contains(string(body), "sealed") || !strings.Contains(string(body), key) {
+				t.Errorf("want the sealed-key refusal naming %s; body = %s", key, body)
+			}
 		})
 	}
 }

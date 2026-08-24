@@ -19,22 +19,29 @@ import (
 type injection struct {
 	env  h.ProviderEnv
 	want map[string]string
+
+	// wantPrefix is used instead of want when the credential is minted live and
+	// its value cannot be a constant. The scheme is still pinned exactly; only
+	// the token after it is left open, and the provider's own file carries the
+	// stronger assertions about what that token may not be.
+	wantPrefix map[string]string
 }
 
 // injections pins one positive credential-extractor branch per provider. The
 // header names differ by provider by design: that difference is most of what the
 // credential extractors do.
 var injections = []injection{
-	{openaiEnv, map[string]string{"Authorization": "Bearer " + openaiKey}},
-	{anthropicEnv, map[string]string{"x-api-key": anthropicKey}},
-	{newrelicEnv, map[string]string{"Api-Key": newrelicKey}},
-	{elasticEnv, map[string]string{"Authorization": "ApiKey " + elasticKey}},
-	{githubEnv, map[string]string{"Authorization": "token " + githubPAT}},
-	{splunkEnv, map[string]string{"Authorization": "Bearer " + splunkKey}},
-	{datadogEnv, map[string]string{"DD-API-KEY": datadogAPIKey}},
-	{restEnv, map[string]string{"X-Custom-Auth": "Token " + restToken}},
-	{dynatraceEnv, map[string]string{"Authorization": "Api-Token " + dynatraceAPIToken}},
-	{dynatraceOAuthEnv, map[string]string{"Authorization": "Bearer " + dynatraceOAuthToken}},
+	{env: openaiEnv, want: map[string]string{"Authorization": "Bearer " + openaiKey}},
+	{env: anthropicEnv, want: map[string]string{"x-api-key": anthropicKey}},
+	{env: newrelicEnv, want: map[string]string{"Api-Key": newrelicKey}},
+	{env: elasticEnv, want: map[string]string{"Authorization": "ApiKey " + elasticKey}},
+	{env: githubEnv, want: map[string]string{"Authorization": "token " + githubPAT}},
+	{env: splunkEnv, want: map[string]string{"Authorization": "Bearer " + splunkKey}},
+	{env: datadogEnv, want: map[string]string{"DD-API-KEY": datadogAPIKey}},
+	{env: restEnv, want: map[string]string{"X-Custom-Auth": "Token " + restToken}},
+	{env: dynatraceEnv, want: map[string]string{"Authorization": "Api-Token " + dynatraceAPIToken}},
+	// Minted live against the harness issuer, so only the scheme is a constant.
+	{env: dynatraceOAuthEnv, wantPrefix: map[string]string{"Authorization": "Bearer "}},
 }
 
 // TestFullChain_CertAgentWithUser is the reference shape the suite exists for:
@@ -64,6 +71,13 @@ func TestFullChain_CertAgentWithUser(t *testing.T) {
 				Absent:        h.AlwaysAbsent(),
 				UpstreamCalls: 1,
 			})
+
+			for header, prefix := range tc.wantPrefix {
+				got := upstream.Last(t).Header.Get(header)
+				if !strings.HasPrefix(got, prefix) || got == prefix {
+					t.Errorf("upstream %s = %q, want %q followed by a credential", header, got, prefix)
+				}
+			}
 		})
 	}
 }

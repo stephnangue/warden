@@ -1,6 +1,7 @@
 package types
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -314,4 +315,33 @@ func TestOAuthBearerTokenCredType_FieldSchemas(t *testing.T) {
 
 	assert.Contains(t, schemas, "token_type")
 	assert.False(t, schemas["token_type"].Sensitive)
+}
+
+// TestOAuthBearerTokenCredType_SystemManagedFields pins the sealed keys against
+// the schema that documents them. The declaration is a plain slice and the
+// enforcement it drives is elsewhere, so nothing else would notice a fifth
+// sealed field being added to ConfigSchema and left off this list — it would
+// simply ship operator-settable.
+func TestOAuthBearerTokenCredType_SystemManagedFields(t *testing.T) {
+	ct := NewOAuthBearerTokenCredType()
+
+	managed := make(map[string]bool)
+	for _, f := range ct.SystemManagedConfigFields() {
+		managed[f] = true
+	}
+
+	assert.Equal(t, map[string]bool{
+		"refresh_token":            true,
+		"access_token":             true,
+		"refresh_token_expires_at": true,
+		"access_token_expires_at":  true,
+	}, managed)
+
+	// Every field whose description calls itself sealed must be in the list.
+	for _, field := range ct.ConfigSchema() {
+		if strings.Contains(field.Description(), "not operator-set") {
+			assert.True(t, managed[field.FieldName()],
+				"%q is documented as sealed but is not declared system-managed", field.FieldName())
+		}
+	}
 }

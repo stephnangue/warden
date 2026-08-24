@@ -835,3 +835,152 @@ func TestSystemBackend_HandleCredentialSpecAuthorize_PinnedRedirectURI(t *testin
 	require.NotNil(t, resp.Err)
 	assert.Contains(t, resp.Err.Error(), "does not match")
 }
+
+// --- sealed spec-config keys ---
+
+// connectedOAuthSpec creates an authorization_code spec and runs a real connect
+// against a mock token endpoint, so the sealed keys arrive the way the server
+// writes them rather than the way a test would.
+func connectedOAuthSpec(t *testing.T, backend *SystemBackend, ctx context.Context, name string) {
+	t.Helper()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "at", "refresh_token": "rt-sealed", "expires_in": 28800})
+	}))
+	t.Cleanup(server.Close)
+
+	createOAuth2Source(t, backend, ctx, name+"-src", "https://example.com/authorize", server.URL, true)
+	createAuthCodeSpec(t, backend, ctx, name, name+"-src", nil)
+
+	schema := backend.pathCredentials()[5].Fields // .../connect
+	raw := map[string]interface{}{
+		"name":          name,
+		"code":          "the-code",
+		"redirect_uri":  "http://127.0.0.1:8765/callback",
+		"code_verifier": "the-verifier",
+	}
+	resp, err := backend.handleCredentialSpecConnect(ctx, createTestRequest(logical.CreateOperation, "cred/specs/"+name+"/connect", raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.Nil(t, resp.Err, "connect must still work — enforcement guards the operator path only: %+v", resp.Data)
+}
+
+// TestSystemBackend_HandleCredentialSpecCreate_RejectsSealedKeys pins that the
+// keys documented as sealed at connect time cannot be supplied at create. Before
+// this guard a hand-written access_token made a spec report itself connected and
+// mint that token verbatim, so a documented invariant was not one.
+func TestSystemBackend_HandleCredentialSpecCreate_RejectsSealedKeys(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	createOAuth2Source(t, backend, ctx, "oauth-src", "https://example.com/authorize", "https://example.com/token", false)
+
+	schema := backend.pathCredentials()[2].Fields
+	for _, key := range []string{"refresh_token", "access_token", "refresh_token_expires_at", "access_token_expires_at"} {
+		t.Run(key, func(t *testing.T) {
+			raw := map[string]interface{}{
+				"name":   "forged-" + key,
+				"type":   "oauth_bearer_token",
+				"source": "oauth-src",
+				"config": map[string]interface{}{
+					"auth_method": "authorization_code",
+					"client_id":   "cid",
+					key:           "forged-value",
+				},
+			}
+			resp, err := backend.handleCredentialSpecCreate(ctx,
+				createTestRequest(logical.CreateOperation, "cred/specs/forged", raw),
+				createFieldData(schema, raw))
+			require.NoError(t, err)
+			require.NotNil(t, resp.Err, "create must be refused")
+			assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(resp.Err))
+			assert.Contains(t, resp.Err.Error(), key)
+
+			// And nothing was stored under that name.
+			_, err = backend.core.credConfigStore.GetSpec(ctx, "forged-"+key)
+			assert.Error(t, err)
+		})
+	}
+}
+
+// TestSystemBackend_HandleCredentialSpecUpdate_RejectsSealedKeys pins the same
+// on update, where the stored value is what an operator would be overwriting.
+func TestSystemBackend_HandleCredentialSpecUpdate_RejectsSealedKeys(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	connectedOAuthSpec(t, backend, ctx, "gh")
+
+	schema := backend.pathCredentials()[2].Fields
+	raw := map[string]interface{}{
+		"name":   "gh",
+		"config": map[string]interface{}{"refresh_token": "rt-forged"},
+	}
+	resp, err := backend.handleCredentialSpecUpdate(ctx,
+		createTestRequest(logical.UpdateOperation, "cred/specs/gh", raw),
+		createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, resp.Err, "update must be refused")
+	assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(resp.Err))
+	assert.Contains(t, resp.Err.Error(), "refresh_token")
+
+	// The sealed value is untouched.
+	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
+	require.NoError(t, err)
+	assert.Equal(t, "rt-sealed", spec.Config["refresh_token"])
+}
+
+// TestSystemBackend_HandleCredentialSpecUpdate_SealedKeysSurviveResend is the
+// over-rejection guard: a caller who reads a spec, edits one field and sends the
+// whole map back is holding the mask sentinel for the sealed secret. Refusing
+// that would make read-edit-resend impossible on every connected spec.
+func TestSystemBackend_HandleCredentialSpecUpdate_SealedKeysSurviveResend(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	connectedOAuthSpec(t, backend, ctx, "gh")
+
+	schema := backend.pathCredentials()[2].Fields
+	readRaw := map[string]interface{}{"name": "gh"}
+	readResp, err := backend.handleCredentialSpecRead(ctx,
+		createTestRequest(logical.ReadOperation, "cred/specs/gh", readRaw),
+		createFieldData(schema, readRaw))
+	require.NoError(t, err)
+	readConfig, ok := readResp.Data["config"].(map[string]string)
+	require.True(t, ok, "config in read response: %#v", readResp.Data["config"])
+	require.Equal(t, maskValue, readConfig["refresh_token"], "read must mask refresh_token, else this test proves nothing")
+
+	// Resend the read verbatim, changing only a field the operator owns.
+	resend := make(map[string]interface{}, len(readConfig))
+	for k, v := range readConfig {
+		resend[k] = v
+	}
+	resend["scope"] = "read:everything"
+	updateRaw := map[string]interface{}{"name": "gh", "config": resend}
+	resp, err := backend.handleCredentialSpecUpdate(ctx,
+		createTestRequest(logical.UpdateOperation, "cred/specs/gh", updateRaw),
+		createFieldData(schema, updateRaw))
+	require.NoError(t, err)
+	require.Nil(t, resp.Err, "resending a masked read must be accepted: %+v", resp.Data)
+
+	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
+	require.NoError(t, err)
+	assert.Equal(t, "rt-sealed", spec.Config["refresh_token"], "the secret must survive the round trip")
+	assert.Equal(t, "read:everything", spec.Config["scope"])
+}
+
+// TestSystemBackend_HandleCredentialSpecUpdate_SealedKeyCanBeCleared keeps the
+// one operator lever that does not forge anything: emptying a sealed key
+// disconnects the spec without deleting it.
+func TestSystemBackend_HandleCredentialSpecUpdate_SealedKeyCanBeCleared(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	connectedOAuthSpec(t, backend, ctx, "gh")
+
+	schema := backend.pathCredentials()[2].Fields
+	raw := map[string]interface{}{
+		"name":   "gh",
+		"config": map[string]interface{}{"refresh_token": ""},
+	}
+	resp, err := backend.handleCredentialSpecUpdate(ctx,
+		createTestRequest(logical.UpdateOperation, "cred/specs/gh", raw),
+		createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.Nil(t, resp.Err, "clearing must stay possible: %+v", resp.Data)
+
+	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
+	require.NoError(t, err)
+	assert.Empty(t, spec.Config["refresh_token"])
+}
