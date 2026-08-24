@@ -1,7 +1,10 @@
 log_format  = "standard"
 log_level   = "trace"
 
-min_cred_source_rotation_period = "5m"
+# A source floor low enough that a test can watch a rotation complete rather than
+# infer it from configuration. The scheduler ticks every 5s, so a 15s-period
+# source rotates within about 25s of being created.
+min_cred_source_rotation_period = "10s"
 min_cred_spec_rotation_period   = "5m"
 
 ip_binding_policy = "disabled"

@@ -51,6 +51,7 @@ var allEnvs = []h.ProviderEnv{
 	mcpAWSEnv, mcpAWSWrongCredEnv, atlassianEnv, honeycombEnv,
 	prometheusEnv, prometheusBasicEnv,
 	scalewayEnv, cloudflareEnv, ovhEnv,
+	vaultEnv,
 }
 
 var (
@@ -96,6 +97,11 @@ func ensureEnv(t *testing.T) {
 		ibmIAMStub = startIBMIAMStub()
 		ibmcloudEnv = buildIBMCloudEnv(ibmIAMStub.URL)
 		allEnvs = append(allEnvs, ibmcloudEnv)
+
+		// vault's source is the one that authenticates against something real: it
+		// verifies its AppRole role and logs in while being created, so the role
+		// has to exist in Vault before the setup loop reaches that mount.
+		seedVaultApproleRole(t, vaultApproleRole, vaultRoleID, vaultSecretID)
 
 		agentCAPEM, agentCAKey = h.SetupFullChainCommon(t, leaderPort)
 		for _, env := range allEnvs {
