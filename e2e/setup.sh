@@ -316,6 +316,14 @@ vault_api POST "secret/data/e2e/database" \
 vault_api POST "secret/data/e2e/datadog-keys" \
   '{"data":{"api_key":"e2e-dd-chained-not-a-real-key","application_key":"e2e-dd-chained-not-a-real-app-key","owner":"e2e-undeclared-field"}}'
 
+# The personal access token a keyless gitlab source mints with. Chained the same
+# way as the datadog keys above, but consumed by a driver that calls an API with
+# it rather than one that passes it through — so what the gitlab row in
+# e2e/fullchain/gitlab_test.go proves is that this value authenticated a real
+# mint, having reached the driver from here and nowhere else.
+vault_api POST "secret/data/e2e/gitlab-pat" \
+  '{"data":{"pat":"e2e-gl-chained-not-a-real-pat"}}'
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \

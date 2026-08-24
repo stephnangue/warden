@@ -1872,3 +1872,70 @@ func TestCredentialConfigStore_ValidateSource_HvaultRotationPeriod(t *testing.T)
 		})
 	}
 }
+
+// TestCredentialConfigStore_GitLabChaining covers the two gitlab-specific chaining
+// guards: chaining is a source concern (never spec-level), and a chained source
+// owns no secret so it has nothing to rotate.
+func TestCredentialConfigStore_GitLabChaining(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+
+	// Referenced secret-spec: session-pinned, as validateSecretSpecRef requires.
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "gl-pat", Type: "vault_token", Source: "src",
+		Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+	}))
+
+	gitlabSource := func(name string, extra map[string]string) *credential.CredSource {
+		cfg := map[string]string{
+			"gitlab_address":            "https://gitlab.example.com",
+			"auth_method":               "pat",
+			credential.ConfigSecretSpec: "gl-pat",
+		}
+		for k, v := range extra {
+			cfg[k] = v
+		}
+		return &credential.CredSource{Name: name, Type: credential.SourceTypeGitLab, Config: cfg}
+	}
+
+	// A chained gitlab source carries no inline token and is accepted.
+	require.NoError(t, store.CreateSource(ctx, gitlabSource("gl-keyless", nil)))
+
+	// Rotation belongs to whoever owns the referenced secret, not to this source.
+	rotating := gitlabSource("gl-rotating", nil)
+	rotating.RotationPeriod = 24 * time.Hour
+	err := store.CreateSource(ctx, rotating)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rotation_period does not apply to a chained source")
+
+	specConfig := func(extra map[string]string) map[string]string {
+		cfg := map[string]string{
+			"mint_method":  "project_access_token",
+			"project_id":   "42",
+			"token_name":   "warden-minted",
+			"scopes":       "api",
+			"access_level": "30",
+		}
+		for k, v := range extra {
+			cfg[k] = v
+		}
+		return cfg
+	}
+
+	// An ordinary spec on a chained source is unchanged — it inherits the chain from
+	// the source and needs no chaining config of its own.
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "gl-backend", Type: credential.TypeGitLabAccessToken, Source: "gl-keyless",
+		Config: specConfig(nil),
+	}))
+
+	// Spec-level secret_spec would leave the source's inline token as dead config
+	// and slip past the source-level auth_method gate, so it is rejected with
+	// guidance rather than silently accepted.
+	err = store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "gl-spec-level", Type: credential.TypeGitLabAccessToken, Source: "gl-keyless",
+		Config: specConfig(map[string]string{credential.ConfigSecretSpec: "gl-pat"}),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "set secret_spec on the source")
+}

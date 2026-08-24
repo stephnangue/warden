@@ -983,12 +983,19 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		chainedRef = source.Config[credential.ConfigSecretSpec]
 	}
 	if chainedRef != "" {
-		// For token_exchange, client-secret chaining is a SOURCE concern (client auth
-		// lives on the source, and the factory only sees source config). A spec-level
-		// secret_spec would leave the source's inline client_secret as dead config at
-		// mint — reject it with clear guidance.
-		if source.Type == credential.SourceTypeTokenExchange && spec.Config[credential.ConfigSecretSpec] != "" {
-			return logical.ErrBadRequestf("for a token_exchange source, set secret_spec on the source (client authentication is a source concern), not on the spec")
+		// For token_exchange and gitlab, chaining is a SOURCE concern: the secret being
+		// chained authenticates the source itself (client auth, a personal access
+		// token), and the factory only sees source config. A spec-level secret_spec
+		// would leave the source's inline secret as dead config at mint, and would
+		// slip past the source-level validation that gates which auth methods may
+		// chain at all — so reject it with clear guidance.
+		if spec.Config[credential.ConfigSecretSpec] != "" {
+			switch source.Type {
+			case credential.SourceTypeTokenExchange:
+				return logical.ErrBadRequestf("for a token_exchange source, set secret_spec on the source (client authentication is a source concern), not on the spec")
+			case credential.SourceTypeGitLab:
+				return logical.ErrBadRequestf("for a gitlab source, set secret_spec on the source (the personal access token authenticates the source), not on the spec")
+			}
 		}
 		// A chained consumer's identity normally flows through the referenced secret-spec,
 		// so its own subject/actor exchange config would be dead — reject that confusing
@@ -1130,6 +1137,13 @@ func (s *CredentialConfigStore) validateSource(ctx context.Context, source *cred
 	if ref := source.Config[credential.ConfigSecretSpec]; ref != "" {
 		if err := s.validateSecretSpecRef(ctx, ref); err != nil {
 			return err
+		}
+		// A chained source holds no secret of its own, so there is nothing here to
+		// rotate — the referenced spec's owner rotates it at the source of truth.
+		// Accepting a rotation_period would schedule a rotation that either no-ops or
+		// invalidates someone else's secret.
+		if source.RotationPeriod > 0 {
+			return logical.ErrBadRequestf("rotation_period does not apply to a chained source (secret_spec %q); the referenced spec's owner rotates the secret", ref)
 		}
 	}
 

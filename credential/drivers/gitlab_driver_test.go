@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -794,4 +795,331 @@ func TestGitLabDriver_MintHonoursServerExpiry(t *testing.T) {
 	assert.Equal(t, clamped, rawData["expires_at"], "the server's date must be the one reported")
 	assert.Less(t, ttl, 48*time.Hour, "the lease must follow the server's date, not the request")
 	assert.Greater(t, ttl, time.Duration(0))
+}
+
+func TestGitLabDriverFactory_ValidateConfig_Chaining(t *testing.T) {
+	factory := &GitLabDriverFactory{}
+
+	tests := []struct {
+		name    string
+		config  map[string]string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "chained PAT source needs no inline token",
+			config: map[string]string{
+				"gitlab_address": "https://gitlab.example.com",
+				"auth_method":    "pat",
+				"secret_spec":    "gitlab-pat-from-vault",
+				"secret_field":   "pat",
+			},
+		},
+		{
+			name: "chained source accepts a cache ttl",
+			config: map[string]string{
+				"gitlab_address":   "https://gitlab.example.com",
+				"secret_spec":      "gitlab-pat-from-vault",
+				"secret_cache_ttl": "30m",
+			},
+		},
+		{
+			name: "non-chained source still requires the inline token",
+			config: map[string]string{
+				"gitlab_address": "https://gitlab.example.com",
+				"auth_method":    "pat",
+			},
+			wantErr: true,
+			errMsg:  "personal_access_token",
+		},
+		{
+			name: "chaining plus an inline token leaves a secret at rest",
+			config: map[string]string{
+				"gitlab_address":        "https://gitlab.example.com",
+				"auth_method":           "pat",
+				"secret_spec":           "gitlab-pat-from-vault",
+				"personal_access_token": "glpat-still-here",
+			},
+			wantErr: true,
+			errMsg:  "must be omitted when secret_spec is set",
+		},
+		{
+			name: "oauth2 cannot chain",
+			config: map[string]string{
+				"gitlab_address":     "https://gitlab.example.com",
+				"auth_method":        "oauth2",
+				"application_id":     "app-123",
+				"application_secret": "secret-456",
+				"secret_spec":        "gitlab-app-secret",
+			},
+			wantErr: true,
+			errMsg:  "only for auth_method=pat",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := factory.ValidateConfig(tt.config)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestGitLabDriverFactory_Create_ChainedSkipsVerifyAuth(t *testing.T) {
+	// A chained source has no token at construction time, so Create must not try to
+	// authenticate — there is nothing to authenticate with until a request arrives.
+	var calls int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	factory := &GitLabDriverFactory{}
+	driver, err := factory.Create(map[string]string{
+		"gitlab_address":  server.URL,
+		"auth_method":     "pat",
+		"secret_spec":     "gitlab-pat-from-vault",
+		"tls_skip_verify": "true",
+	}, log)
+
+	require.NoError(t, err)
+	require.NotNil(t, driver)
+	assert.Zero(t, calls, "chained Create must not call the API")
+}
+
+func TestGitLabDriver_MintCredential_FailsClosedWhenChained(t *testing.T) {
+	// The manager routes chained specs to MintFromSecret. Reaching MintCredential
+	// means that routing was bypassed, so it must not fall through to an inline
+	// token the source does not have.
+	tests := []struct {
+		name         string
+		sourceConfig map[string]string
+		specConfig   map[string]string
+	}{
+		{
+			name: "secret_spec on the source",
+			sourceConfig: map[string]string{
+				"gitlab_address": "https://gitlab.example.com",
+				"auth_method":    "pat",
+				"secret_spec":    "gitlab-pat-from-vault",
+			},
+			specConfig: map[string]string{"mint_method": "project_access_token", "project_id": "42"},
+		},
+		{
+			name: "secret_spec on the spec",
+			sourceConfig: map[string]string{
+				"gitlab_address":        "https://gitlab.example.com",
+				"auth_method":           "pat",
+				"personal_access_token": "test-pat",
+			},
+			specConfig: map[string]string{
+				"mint_method": "project_access_token",
+				"project_id":  "42",
+				"secret_spec": "gitlab-pat-from-vault",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			driver := &GitLabDriver{
+				credSource: &credential.CredSource{Type: credential.SourceTypeGitLab, Config: tt.sourceConfig},
+				httpClient: &http.Client{Timeout: 30 * time.Second},
+			}
+			spec := &credential.CredSpec{Name: "test-spec", Type: credential.TypeGitLabAccessToken, Config: tt.specConfig}
+
+			_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "must mint from fetched secret material")
+		})
+	}
+}
+
+// newChainedGitLabDriver builds a chained (secret_spec, no inline token) driver
+// pointed at the given test server.
+func newChainedGitLabDriver(server *httptest.Server) *GitLabDriver {
+	return &GitLabDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeGitLab,
+			Config: map[string]string{
+				"gitlab_address": server.URL,
+				"auth_method":    "pat",
+				"secret_spec":    "gitlab-pat-from-vault",
+			},
+		},
+		httpClient: server.Client(),
+	}
+}
+
+func projectTokenSpec() *credential.CredSpec {
+	return &credential.CredSpec{
+		Name: "test-spec",
+		Type: credential.TypeGitLabAccessToken,
+		Config: map[string]string{
+			"mint_method":  "project_access_token",
+			"project_id":   "42",
+			"token_name":   "warden-test",
+			"scopes":       "api",
+			"access_level": "30",
+			"ttl":          "24h",
+		},
+	}
+}
+
+func TestGitLabDriver_MintFromSecret(t *testing.T) {
+	var gotToken string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.Header.Get("PRIVATE-TOKEN")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{"id": 99, "token": "glpat-minted-token"})
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name      string
+		material  credential.SecretMaterial
+		wantToken string
+	}{
+		{
+			name:      "resolved field",
+			material:  credential.SecretMaterial{Data: map[string]string{"pat": "glpat-from-vault"}, Field: "pat"},
+			wantToken: "glpat-from-vault",
+		},
+		{
+			name:      "conventional key when no field resolved",
+			material:  credential.SecretMaterial{Data: map[string]string{"personal_access_token": "glpat-conventional"}},
+			wantToken: "glpat-conventional",
+		},
+		{
+			name:      "short conventional key when no field resolved",
+			material:  credential.SecretMaterial{Data: map[string]string{"pat": "glpat-short"}},
+			wantToken: "glpat-short",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotToken = ""
+			driver := newChainedGitLabDriver(server)
+
+			rawData, _, ttl, leaseID, err := driver.MintFromSecret(context.Background(), projectTokenSpec(), tt.material)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantToken, gotToken, "fetched token must authenticate the mint")
+			assert.Equal(t, "glpat-minted-token", rawData["access_token"])
+			assert.GreaterOrEqual(t, ttl, 24*time.Hour)
+			// Chained mints are leaseless: revocation runs with no caller and could
+			// not re-fetch the token needed to authenticate the delete.
+			assert.Empty(t, leaseID)
+		})
+	}
+}
+
+func TestGitLabDriver_MintFromSecret_Errors(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("must not reach the API without a token")
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name       string
+		authMethod string
+		material   credential.SecretMaterial
+		errMsg     string
+	}{
+		{
+			// A resolved-but-empty field is a misconfigured secret_field, not an
+			// invitation to authenticate with some other value in the payload.
+			name:     "resolved field is empty",
+			material: credential.SecretMaterial{Data: map[string]string{"pat": "", "other": "glpat-wrong"}, Field: "pat"},
+			errMsg:   `secret_field "pat" is empty or absent`,
+		},
+		{
+			name:     "no field and no conventional key",
+			material: credential.SecretMaterial{Data: map[string]string{"unexpected": "glpat-wrong"}},
+			errMsg:   "no personal access token in fetched secret material",
+		},
+		{
+			name:       "auth_method drifted to oauth2",
+			authMethod: "oauth2",
+			material:   credential.SecretMaterial{Data: map[string]string{"pat": "glpat-from-vault"}, Field: "pat"},
+			errMsg:     "requires auth_method=pat",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			driver := newChainedGitLabDriver(server)
+			if tt.authMethod != "" {
+				driver.credSource.Config["auth_method"] = tt.authMethod
+			}
+
+			_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(), tt.material)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errMsg)
+		})
+	}
+}
+
+func TestGitLabDriver_MintFromSecret_RejectedTokenIsRetryable(t *testing.T) {
+	// A token rotated at its source goes stale in the chained-secret cache. Marking
+	// the rejection lets the minting layer evict it and retry once, instead of
+	// failing every request until the entry ages out.
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+
+			driver := newChainedGitLabDriver(server)
+			material := credential.SecretMaterial{Data: map[string]string{"pat": "glpat-stale"}, Field: "pat"}
+
+			_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(), material)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, credential.ErrChainedSecretRejected)
+		})
+	}
+}
+
+func TestGitLabDriver_MintFromSecret_OtherFailuresAreNotRetryable(t *testing.T) {
+	// Only an authentication rejection implicates the fetched token. A 404 means the
+	// project is wrong; evicting and refetching would not help.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	driver := newChainedGitLabDriver(server)
+	material := credential.SecretMaterial{Data: map[string]string{"pat": "glpat-fine"}, Field: "pat"}
+
+	_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(), material)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
+
+func TestGitLabDriver_SupportsRotation_ChainedSourceOwnsNothing(t *testing.T) {
+	for _, authMethod := range []string{"pat", "oauth2"} {
+		t.Run(authMethod, func(t *testing.T) {
+			driver := &GitLabDriver{
+				credSource: &credential.CredSource{
+					Type: credential.SourceTypeGitLab,
+					Config: map[string]string{
+						"gitlab_address": "https://gitlab.example.com",
+						"auth_method":    authMethod,
+						"secret_spec":    "gitlab-pat-from-vault",
+					},
+				},
+				httpClient: &http.Client{Timeout: 30 * time.Second},
+			}
+			assert.False(t, driver.SupportsRotation())
+		})
+	}
 }
