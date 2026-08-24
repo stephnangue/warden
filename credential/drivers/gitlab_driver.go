@@ -23,6 +23,13 @@ const gitlabMaxResponseBodySize = 1 << 20 // 1MB
 // gitlabMaxRetryAttempts for retryable API operations
 const gitlabMaxRetryAttempts = 3
 
+// maxTokenLifetime bounds the expiry date a mint may ask for. The server rejects
+// anything beyond its configured maximum token lifetime, which defaults to 365
+// days; an administrator can change it, so this is the documented default rather
+// than a value we can know. Asking for less than an instance permits costs at most
+// a day of lifetime, where asking for more fails the mint outright.
+const maxTokenLifetime = 365 * 24 * time.Hour
+
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*GitLabDriver)(nil)
 var _ credential.Rotatable = (*GitLabDriver)(nil)
@@ -195,6 +202,78 @@ func (d *GitLabDriver) verifyAuth(ctx context.Context) error {
 	return err
 }
 
+// tokenExpiry resolves a requested lifetime to the expiry date the API accepts and
+// the lifetime that date actually grants.
+//
+// expires_at is an ISO date and the token dies at midnight UTC on it, so the
+// granted lifetime lands on a UTC day boundary and is never exactly the requested
+// ttl. Two consequences.
+//
+// The boundary is computed in UTC, not the server's local zone: a server running
+// ahead of UTC otherwise names the wrong day.
+//
+// The boundary is rounded up — the earliest midnight at or after now+ttl — making
+// ttl a floor. Rounding down is the tempting alternative, since it never grants
+// more than asked, but it can grant almost nothing: a 24h request issued at 23:00
+// would truncate to a boundary one hour out. A token that dies long before its
+// stated lifetime is a harder failure than one that outlives it by under a day, so
+// the floor wins. Callers therefore get a lifetime in [ttl, ttl+24h).
+//
+// Rounding up is capped at maxTokenLifetime, because it can otherwise push a
+// request past the limit the server enforces on expires_at and turn a mint that
+// used to succeed into a 400. The cap costs the floor only for a ttl within a day
+// of the limit, where the shortfall is under a day out of a year.
+//
+// The returned duration is what the caller reports as the lease TTL when the
+// server does not say otherwise. It is a request, not a fact: an instance
+// configured with a shorter limit may hand back a nearer date, which is why
+// callers derive the lease from the response's expires_at and fall back to this.
+func tokenExpiry(now time.Time, ttl time.Duration) (string, time.Duration) {
+	now = now.UTC()
+
+	deadline := now.Add(ttl)
+	if limit := now.Add(maxTokenLifetime); deadline.After(limit) {
+		deadline = limit
+	}
+
+	expiry := time.Date(deadline.Year(), deadline.Month(), deadline.Day(), 0, 0, 0, 0, time.UTC)
+	if expiry.Before(deadline) {
+		next := expiry.AddDate(0, 0, 1)
+		// Only round up while that stays inside the limit. At the very top of the
+		// range the truncated date is the best available answer.
+		if !next.After(now.Add(maxTokenLifetime)) {
+			expiry = next
+		}
+	}
+
+	return expiry.Format("2006-01-02"), expiry.Sub(now)
+}
+
+// grantedExpiry reports what the server actually granted, given the date it
+// returned and what we asked for.
+//
+// The response carries its own expires_at, and it is authoritative: an instance
+// whose maximum token lifetime is shorter than the request answers with a nearer
+// date. Deriving the lease from the request instead would leave the credential
+// cached past the point the token stops working — the one failure the expiry math
+// exists to prevent. An absent or unparseable date falls back to the request,
+// which is the best available answer and no worse than not looking.
+func grantedExpiry(now time.Time, requested string, requestedTTL time.Duration, granted string) (string, time.Duration) {
+	if granted == "" || granted == requested {
+		return requested, requestedTTL
+	}
+	parsed, err := time.ParseInLocation("2006-01-02", granted, time.UTC)
+	if err != nil {
+		return requested, requestedTTL
+	}
+	return granted, parsed.Sub(now.UTC())
+}
+
+// resolveExpiry applies tokenExpiry to a spec's requested ttl.
+func (d *GitLabDriver) resolveExpiry(spec *credential.CredSpec) (string, time.Duration) {
+	return tokenExpiry(time.Now(), credential.GetDuration(spec.Config, "ttl", 24*time.Hour))
+}
+
 // MintCredential mints credentials based on the spec's mint_method
 func (d *GitLabDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
@@ -216,13 +295,7 @@ func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credent
 	scopes := credential.GetString(spec.Config, "scopes", "api")
 	accessLevel := credential.GetInt(spec.Config, "access_level", 30) // 30 = developer
 
-	// Calculate expiry: default 1 day, max 365 days
-	ttlStr := credential.GetString(spec.Config, "ttl", "24h")
-	ttl, err := time.ParseDuration(ttlStr)
-	if err != nil {
-		ttl = 24 * time.Hour
-	}
-	expiresAt := time.Now().Add(ttl).Format("2006-01-02")
+	expiresAt, ttl := d.resolveExpiry(spec)
 
 	body := map[string]interface{}{
 		"name":         tokenName,
@@ -243,8 +316,9 @@ func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credent
 	}
 
 	var result struct {
-		ID    int    `json:"id"`
-		Token string `json:"token"`
+		ID        int    `json:"id"`
+		Token     string `json:"token"`
+		ExpiresAt string `json:"expires_at"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, nil, 0, "", fmt.Errorf("failed to parse response: %w", err)
@@ -253,6 +327,8 @@ func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credent
 	if result.Token == "" {
 		return nil, nil, 0, "", fmt.Errorf("GitLab API returned empty token")
 	}
+
+	expiresAt, ttl = grantedExpiry(time.Now(), expiresAt, ttl, result.ExpiresAt)
 
 	tokenIDStr := strconv.Itoa(result.ID)
 	leaseID := fmt.Sprintf("project_access_token:%s:%s", projectID, tokenIDStr)
@@ -282,12 +358,7 @@ func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credentia
 	scopes := credential.GetString(spec.Config, "scopes", "api")
 	accessLevel := credential.GetInt(spec.Config, "access_level", 30)
 
-	ttlStr := credential.GetString(spec.Config, "ttl", "24h")
-	ttl, err := time.ParseDuration(ttlStr)
-	if err != nil {
-		ttl = 24 * time.Hour
-	}
-	expiresAt := time.Now().Add(ttl).Format("2006-01-02")
+	expiresAt, ttl := d.resolveExpiry(spec)
 
 	body := map[string]interface{}{
 		"name":         tokenName,
@@ -308,8 +379,9 @@ func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credentia
 	}
 
 	var result struct {
-		ID    int    `json:"id"`
-		Token string `json:"token"`
+		ID        int    `json:"id"`
+		Token     string `json:"token"`
+		ExpiresAt string `json:"expires_at"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, nil, 0, "", fmt.Errorf("failed to parse response: %w", err)
@@ -318,6 +390,8 @@ func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credentia
 	if result.Token == "" {
 		return nil, nil, 0, "", fmt.Errorf("GitLab API returned empty token")
 	}
+
+	expiresAt, ttl = grantedExpiry(time.Now(), expiresAt, ttl, result.ExpiresAt)
 
 	tokenIDStr := strconv.Itoa(result.ID)
 	leaseID := fmt.Sprintf("group_access_token:%s:%s", groupID, tokenIDStr)

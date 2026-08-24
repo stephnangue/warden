@@ -304,7 +304,10 @@ func TestGitLabDriver_MintProjectAccessToken(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "glpat-minted-token", rawData["access_token"])
 	assert.Equal(t, "99", rawData["token_id"])
-	assert.Equal(t, 24*time.Hour, ttl)
+	// Expiry is a date, so the lease runs to the first UTC midnight at or after the
+	// requested 24h — at least the request, under a day more.
+	assert.GreaterOrEqual(t, ttl, 24*time.Hour)
+	assert.Less(t, ttl, 48*time.Hour)
 	assert.Equal(t, "project_access_token:42:99", leaseID)
 }
 
@@ -600,4 +603,195 @@ func TestGitLabDriver_PrepareRotation_OAuth2_FastPath(t *testing.T) {
 	assert.Equal(t, "new-rotated-secret", driver.credSource.Config["application_secret"],
 		"driver config must be eagerly updated since old secret is already invalidated")
 	// Token cache generation should be invalidated (internal state, can't easily test directly)
+}
+
+func TestGitLabTokenExpiry(t *testing.T) {
+	// The API expresses expiry as a date and kills the token at midnight UTC on it,
+	// so the granted lifetime always lands on a day boundary at or after now+ttl.
+	tests := []struct {
+		name        string
+		now         time.Time
+		ttl         time.Duration
+		wantDate    string
+		wantGranted time.Duration
+	}{
+		{
+			name:        "deadline already on a boundary grants exactly the ttl",
+			now:         time.Date(2026, 8, 24, 0, 0, 0, 0, time.UTC),
+			ttl:         24 * time.Hour,
+			wantDate:    "2026-08-25",
+			wantGranted: 24 * time.Hour,
+		},
+		{
+			name:        "mid-day deadline rounds up to the next boundary",
+			now:         time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC),
+			ttl:         24 * time.Hour,
+			wantDate:    "2026-08-26",
+			wantGranted: 39 * time.Hour,
+		},
+		{
+			name:        "late-day mint still clears the requested ttl",
+			now:         time.Date(2026, 8, 24, 23, 0, 0, 0, time.UTC),
+			ttl:         24 * time.Hour,
+			wantDate:    "2026-08-26",
+			wantGranted: 25 * time.Hour,
+		},
+		{
+			// Truncating instead of rounding up would name today's midnight, which
+			// has already passed — a token dead on arrival.
+			name:        "sub-day ttl lands on tomorrow, never a past boundary",
+			now:         time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC),
+			ttl:         time.Hour,
+			wantDate:    "2026-08-25",
+			wantGranted: 15 * time.Hour,
+		},
+		{
+			name:        "multi-day ttl",
+			now:         time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC),
+			ttl:         72 * time.Hour,
+			wantDate:    "2026-08-28",
+			wantGranted: 87 * time.Hour,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			date, granted := tokenExpiry(tt.now, tt.ttl)
+			assert.Equal(t, tt.wantDate, date)
+			assert.Equal(t, tt.wantGranted, granted)
+		})
+	}
+}
+
+func TestGitLabTokenExpiry_IgnoresServerTimezone(t *testing.T) {
+	// Formatting in the server's local zone rather than UTC lands on the wrong day
+	// for a server running ahead of UTC. Same instant, two zones, one answer.
+	instant := time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC)
+	ahead := instant.In(time.FixedZone("UTC+10", 10*60*60))
+	behind := instant.In(time.FixedZone("UTC-7", -7*60*60))
+
+	wantDate, wantGranted := tokenExpiry(instant, 24*time.Hour)
+
+	for name, now := range map[string]time.Time{"ahead": ahead, "behind": behind} {
+		t.Run(name, func(t *testing.T) {
+			date, granted := tokenExpiry(now, 24*time.Hour)
+			assert.Equal(t, wantDate, date)
+			assert.Equal(t, wantGranted, granted)
+		})
+	}
+}
+
+func TestGitLabTokenExpiry_Invariants(t *testing.T) {
+	// Across every mint hour and a spread of ttls: the token always outlives the
+	// requested ttl, by under a day, and the date is always in the future.
+	for hour := 0; hour < 24; hour++ {
+		now := time.Date(2026, 8, 24, hour, 30, 0, 0, time.UTC)
+		for _, ttl := range []time.Duration{time.Minute, time.Hour, 12 * time.Hour, 24 * time.Hour, 72 * time.Hour} {
+			date, granted := tokenExpiry(now, ttl)
+
+			assert.GreaterOrEqual(t, granted, ttl,
+				"hour=%d ttl=%s: token must live at least the requested ttl", hour, ttl)
+			assert.Less(t, granted, ttl+24*time.Hour,
+				"hour=%d ttl=%s: overshoot must stay under a day", hour, ttl)
+
+			parsed, err := time.ParseInLocation("2006-01-02", date, time.UTC)
+			require.NoError(t, err)
+			assert.True(t, parsed.After(now),
+				"hour=%d ttl=%s: expiry %s must be in the future", hour, ttl, date)
+		}
+	}
+}
+
+func TestGitLabTokenExpiry_StaysInsideTheLifetimeLimit(t *testing.T) {
+	// Rounding up must not push the request past the maximum lifetime the server
+	// enforces: a ttl at the limit used to mint fine, and asking for a day more
+	// would fail it outright.
+	now := time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC)
+
+	for _, ttl := range []time.Duration{maxTokenLifetime - time.Hour, maxTokenLifetime, maxTokenLifetime + 30*24*time.Hour} {
+		t.Run(ttl.String(), func(t *testing.T) {
+			date, granted := tokenExpiry(now, ttl)
+
+			parsed, err := time.ParseInLocation("2006-01-02", date, time.UTC)
+			require.NoError(t, err)
+			assert.False(t, parsed.After(now.Add(maxTokenLifetime)),
+				"expiry %s exceeds the limit %s", date, now.Add(maxTokenLifetime).Format("2006-01-02"))
+			assert.True(t, parsed.After(now), "expiry %s must be in the future", date)
+			assert.Equal(t, parsed.Sub(now), granted)
+		})
+	}
+}
+
+func TestGitLabGrantedExpiry(t *testing.T) {
+	// The response's expires_at is authoritative: an instance with a shorter
+	// maximum lifetime answers with a nearer date, and a lease derived from the
+	// request would then outlive the token it names.
+	now := time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC)
+	const requested = "2026-08-26"
+	requestedTTL := 39 * time.Hour
+
+	tests := []struct {
+		name        string
+		granted     string
+		wantDate    string
+		wantGranted time.Duration
+	}{
+		{"server agrees", "2026-08-26", requested, requestedTTL},
+		{"server says nothing", "", requested, requestedTTL},
+		{"server clamps to a nearer date", "2026-08-25", "2026-08-25", 15 * time.Hour},
+		{"server grants a later date", "2026-08-28", "2026-08-28", 87 * time.Hour},
+		{"unparseable falls back to the request", "not-a-date", requested, requestedTTL},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			date, granted := grantedExpiry(now, requested, requestedTTL, tt.granted)
+			assert.Equal(t, tt.wantDate, date)
+			assert.Equal(t, tt.wantGranted, granted)
+		})
+	}
+}
+
+func TestGitLabDriver_MintHonoursServerExpiry(t *testing.T) {
+	// End to end through a mint: a server that clamps the date must shorten the
+	// lease and the reported expires_at with it, not leave the credential cached
+	// past the point it stops working.
+	clamped := time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02")
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": 99, "token": "glpat-minted-token", "expires_at": clamped,
+		})
+	}))
+	defer server.Close()
+
+	driver := &GitLabDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeGitLab,
+			Config: map[string]string{
+				"gitlab_address":        server.URL,
+				"auth_method":           "pat",
+				"personal_access_token": "test-pat",
+			},
+		},
+		httpClient: server.Client(),
+	}
+
+	spec := &credential.CredSpec{
+		Name: "test-spec", Type: credential.TypeGitLabAccessToken,
+		Config: map[string]string{
+			"mint_method": "project_access_token", "project_id": "42",
+			"token_name": "warden-test", "scopes": "api", "access_level": "30",
+			// Long enough that the driver would have asked for a much later date.
+			"ttl": "720h",
+		},
+	}
+
+	rawData, _, ttl, _, err := driver.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+
+	assert.Equal(t, clamped, rawData["expires_at"], "the server's date must be the one reported")
+	assert.Less(t, ttl, 48*time.Hour, "the lease must follow the server's date, not the request")
+	assert.Greater(t, ttl, time.Duration(0))
 }
