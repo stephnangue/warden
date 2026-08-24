@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	h "github.com/stephnangue/warden/e2e/helpers"
@@ -55,6 +56,25 @@ const (
 	gitlabChainSource     = "fc-gl-keyless-src"
 	gitlabChainSpec       = "fc-gl-keyless-cred"
 	gitlabChainAgentRole  = "fc-gl-keyless-agent"
+
+	// The cache row's own chain. It cannot share the keyless row's resources:
+	// its source must carry secret_cache_ttl, and it needs two consuming specs
+	// where that row needs one.
+	gitlabCacheSecretSpec = "fc-gl-cache-pat-from-vault"
+	gitlabCacheSource     = "fc-gl-cache-src"
+	gitlabCacheSpecA      = "fc-gl-cache-cred-a"
+	gitlabCacheSpecB      = "fc-gl-cache-cred-b"
+	gitlabCacheAgentRoleA = "fc-gl-cache-agent-a"
+	gitlabCacheAgentRoleB = "fc-gl-cache-agent-b"
+
+	// What the Vault secret is rotated to mid-test on the cache row. Like the
+	// seeded value, it appears in no config anywhere.
+	gitlabRotatedPAT = "e2e-gl-rotated-not-a-real-pat"
+
+	// Where setup.sh seeds the chained token in the harness Vault, as a KV2
+	// data path. The cache row writes here to simulate a rotation happening at
+	// the source, behind Warden's back.
+	gitlabPATVaultPath = "secret/data/e2e/gitlab-pat"
 )
 
 // setupGitLabEnv builds the mount and its inline source, per test rather than
@@ -173,14 +193,23 @@ func TestGitLab_RESTLegInjectsMintedToken(t *testing.T) {
 	}
 }
 
-// setupGitLabKeylessChain builds the keyless half: a source holding no token,
-// naming a spec that reads one out of Vault.
+// gitlabChainConsumer names one consuming spec and the JWT agent role bound to
+// it, for setupGitLabChain.
+type gitlabChainConsumer struct {
+	spec, role string
+}
+
+// setupGitLabChain builds a keyless chain: a source holding no token, naming a
+// spec that reads one out of Vault, and one consuming spec plus agent role per
+// entry in consumers. cacheTTL, when non-empty, becomes the source's
+// secret_cache_ttl, so every consumer under it shares the fetched token for
+// that long.
 //
 // Order is load-bearing both ways — a source naming a secret_spec that does not
 // exist is refused at create, and a referenced spec cannot be deleted while
 // something names it — so cleanup runs consumer-first, and the same order clears
 // whatever a killed run left behind.
-func setupGitLabKeylessChain(t *testing.T, gitlabEnv h.ProviderEnv) {
+func setupGitLabChain(t *testing.T, gitlabEnv h.ProviderEnv, secretSpec, source, cacheTTL string, consumers []gitlabChainConsumer) {
 	t.Helper()
 
 	mustWrite := func(method, path, body, what string) {
@@ -193,10 +222,12 @@ func setupGitLabKeylessChain(t *testing.T, gitlabEnv h.ProviderEnv) {
 	}
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+gitlabChainAgentRole, leaderPort, "")
-		h.APIRequest(t, "DELETE", "sys/cred/specs/"+gitlabChainSpec, leaderPort, "")
-		h.APIRequest(t, "DELETE", "sys/cred/sources/"+gitlabChainSource, leaderPort, "")
-		h.APIRequest(t, "DELETE", "sys/cred/specs/"+gitlabChainSecretSpec, leaderPort, "")
+		for _, c := range consumers {
+			h.APIRequest(t, "DELETE", "auth/jwt/role/"+c.role, leaderPort, "")
+			h.APIRequest(t, "DELETE", "sys/cred/specs/"+c.spec, leaderPort, "")
+		}
+		h.APIRequest(t, "DELETE", "sys/cred/sources/"+source, leaderPort, "")
+		h.APIRequest(t, "DELETE", "sys/cred/specs/"+secretSpec, leaderPort, "")
 	}
 	clear()
 	t.Cleanup(clear)
@@ -204,7 +235,7 @@ func setupGitLabKeylessChain(t *testing.T, gitlabEnv h.ProviderEnv) {
 	// The referenced spec. subject_token_source is not optional: a chained secret
 	// must be minted as the session-pinned caller, and the store refuses the
 	// reference otherwise.
-	mustWrite("POST", "sys/cred/specs/"+gitlabChainSecretSpec, `{
+	mustWrite("POST", "sys/cred/specs/"+secretSpec, `{
 		"type":"key_value","source":"vault-fed-e2e","config":{
 			"mint_method":"kv2_read","kv2_mount":"secret","secret_path":"e2e/gitlab-pat",
 			"subject_token_source":"agent_identity"}}`,
@@ -213,27 +244,41 @@ func setupGitLabKeylessChain(t *testing.T, gitlabEnv h.ProviderEnv) {
 	// The keyless source: same address as the inline one, but carrying no
 	// personal_access_token — validation rejects a source that keeps one while
 	// also naming a chain.
-	mustWrite("POST", "sys/cred/sources/"+gitlabChainSource, fmt.Sprintf(`{
+	ttlField := ""
+	if cacheTTL != "" {
+		ttlField = fmt.Sprintf(`,"secret_cache_ttl":%q`, cacheTTL)
+	}
+	mustWrite("POST", "sys/cred/sources/"+source, fmt.Sprintf(`{
 		"type":"gitlab","config":{
 			"gitlab_address":%q,"auth_method":"pat",
-			"secret_spec":%q,"secret_field":"pat"}}`, upstream.URL, gitlabChainSecretSpec),
+			"secret_spec":%q,"secret_field":"pat"%s}}`, upstream.URL, secretSpec, ttlField),
 		"create the keyless gitlab source")
 
-	// The consuming spec is ordinary: it inherits the chain from its source and
-	// carries no chaining config of its own, which is what source-level chaining
-	// means.
-	mustWrite("POST", "sys/cred/specs/"+gitlabChainSpec, `{
-		"type":"gitlab_access_token","source":"`+gitlabChainSource+`","config":{
-			"mint_method":"project_access_token","project_id":"`+gitlabProjectID+`",
-			"token_name":"warden-e2e-keyless","scopes":"api","access_level":"30","ttl":"24h"}}`,
-		"create the keyless consuming spec")
+	for _, c := range consumers {
+		// The consuming spec is ordinary: it inherits the chain from its source and
+		// carries no chaining config of its own, which is what source-level chaining
+		// means.
+		mustWrite("POST", "sys/cred/specs/"+c.spec, `{
+			"type":"gitlab_access_token","source":"`+source+`","config":{
+				"mint_method":"project_access_token","project_id":"`+gitlabProjectID+`",
+				"token_name":"warden-e2e-keyless","scopes":"api","access_level":"30","ttl":"24h"}}`,
+			"create the keyless consuming spec "+c.spec)
 
-	// The mount's own role binds its default spec, so this row needs one bound to
-	// the keyless spec instead.
-	mustWrite("POST", "auth/jwt/role/"+gitlabChainAgentRole, `{
-		"token_policies":["`+gitlabEnv.Policy()+`"],"cred_spec_name":"`+gitlabChainSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the keyless agent role")
+		// The mount's own role binds its default spec, so each consumer needs one
+		// bound to its own spec instead.
+		mustWrite("POST", "auth/jwt/role/"+c.role, `{
+			"token_policies":["`+gitlabEnv.Policy()+`"],"cred_spec_name":"`+c.spec+`",
+			"user_claim":"sub","token_ttl":3600}`,
+			"create the keyless agent role "+c.role)
+	}
+}
+
+// setupGitLabKeylessChain builds the single-consumer, uncached chain the
+// keyless rows use.
+func setupGitLabKeylessChain(t *testing.T, gitlabEnv h.ProviderEnv) {
+	t.Helper()
+	setupGitLabChain(t, gitlabEnv, gitlabChainSecretSpec, gitlabChainSource, "",
+		[]gitlabChainConsumer{{gitlabChainSpec, gitlabChainAgentRole}})
 }
 
 // TestGitLab_KeylessChainMintsWithVaultHeldToken is the row this file exists
@@ -328,5 +373,140 @@ func TestGitLab_KeylessSourceRefusesConfigThatContradictsIt(t *testing.T) {
 				t.Errorf("error should mention %q, got: %s", tt.errMsg, body)
 			}
 		})
+	}
+}
+
+// TestGitLab_StaleCachedSecretIsEvictedAndRetried covers the join that makes
+// the driver's ErrChainedSecretRejected worth returning at all: the driver's
+// unit test stops at the error value, and the minting layer's eviction tests
+// reject from a fake driver, so no test anywhere shows a real 401 from the API
+// turning into an eviction, a fresh Vault read and a mint that succeeds. Without
+// that join, a token rotated at its source would fail every request under it
+// until the cache entry aged out on its own.
+//
+// Two consuming specs on one source, deliberately. A minted credential is
+// cached per (caller, spec), so a second request against the same spec would be
+// answered from that cache and never reach the mint this row exists to observe;
+// a different spec under the same caller misses it while still sharing the
+// source-scoped secret cache, whose key carries no spec name.
+//
+// One JWT for both requests, also deliberately. The secret cache's per-agent
+// dimension is the agent's inbound JWT itself, and Hydra issues a fresh token
+// per call — fetched twice, the second request would read as a different agent
+// and miss the cache, and the row would pass without the cache ever being hit.
+func TestGitLab_StaleCachedSecretIsEvictedAndRetried(t *testing.T) {
+	ensureEnv(t)
+	gitlabEnv := setupGitLabEnv(t)
+	useJWTAgentLeg(t, gitlabEnv)
+	setupGitLabChain(t, gitlabEnv, gitlabCacheSecretSpec, gitlabCacheSource, "5m",
+		[]gitlabChainConsumer{
+			{gitlabCacheSpecA, gitlabCacheAgentRoleA},
+			{gitlabCacheSpecB, gitlabCacheAgentRoleB},
+		})
+
+	// The Vault secret is shared state: the other rows here, and every later
+	// run, expect the seeded value. Registered before anything can rewrite it,
+	// so a failure between the rotation below and the end of the test still
+	// puts it back.
+	t.Cleanup(func() {
+		if status, resp := h.VaultDirectRequest(t, "POST", gitlabPATVaultPath,
+			`{"data":{"pat":"`+gitlabChainedPAT+`"}}`); status >= 400 {
+			t.Errorf("restoring the seeded gitlab pat in Vault failed (status %d): %s — later gitlab rows will mint with the wrong token", status, resp)
+		}
+	})
+
+	// Unlike serveGitLabMint, this handler checks the mint's token: the whole
+	// row turns on the upstream accepting only the token Vault currently holds,
+	// so which value that is has to change mid-test when the secret rotates.
+	// The guard is for the race detector — the handler runs on the server's
+	// goroutines.
+	var mu sync.Mutex
+	acceptedPAT := gitlabChainedPAT
+	setAcceptedPAT := func(pat string) { mu.Lock(); acceptedPAT = pat; mu.Unlock() }
+	upstream.SetHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == gitlabMintPath {
+			mu.Lock()
+			ok := r.Header.Get("PRIVATE-TOKEN") == acceptedPAT
+			mu.Unlock()
+			if !ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"message":"401 Unauthorized"}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":99,"token":"` + gitlabMintedToken + `"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	upstream.Reset()
+
+	jwt := h.GetDefaultJWT(t)
+
+	// The first request populates the secret cache on its way through: the
+	// token is fetched from Vault, cached under the chain's key, and spent on
+	// the mint. Fresh fetches are not retried on rejection, so this request
+	// proves nothing about eviction — it exists to plant the entry the second
+	// request must trip over.
+	status, body, _ := h.ChainRequest(t, leaderPort, gitlabEnv, h.ChainOpts{
+		AgentToken: jwt,
+		Role:       gitlabCacheAgentRoleA,
+	})
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status:        200,
+		Injected:      map[string]string{"Authorization": "Bearer " + gitlabMintedToken},
+		UpstreamCalls: 2,
+	})
+	if got := findGitLabMint(t).Header.Get("PRIVATE-TOKEN"); got != gitlabChainedPAT {
+		t.Fatalf("cache-populating mint authenticated with %q, want the Vault-held token %q", got, gitlabChainedPAT)
+	}
+
+	// The rotation happens where a real one would: at the source, with Warden
+	// not told. The upstream flips with it, because a rotated token's defining
+	// property is that the old one stops working.
+	if status, resp := h.VaultDirectRequest(t, "POST", gitlabPATVaultPath,
+		`{"data":{"pat":"`+gitlabRotatedPAT+`"}}`); status >= 400 {
+		t.Fatalf("rotating the gitlab pat in Vault failed (status %d): %s", status, resp)
+	}
+	setAcceptedPAT(gitlabRotatedPAT)
+	upstream.Reset()
+
+	// Three calls where the first request made two: the mint that fails, the
+	// mint that succeeds after the eviction, and the proxied request. The
+	// caller sees none of it — the retry has to make the rotation invisible.
+	status, body, _ = h.ChainRequest(t, leaderPort, gitlabEnv, h.ChainOpts{
+		AgentToken: jwt,
+		Role:       gitlabCacheAgentRoleB,
+	})
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status:        200,
+		Injected:      map[string]string{"Authorization": "Bearer " + gitlabMintedToken},
+		UpstreamCalls: 3,
+	})
+
+	var mints []h.UpstreamRequest
+	for _, req := range upstream.Requests() {
+		if req.Method == http.MethodPost && req.Path == gitlabMintPath {
+			mints = append(mints, req)
+		}
+	}
+	if len(mints) != 2 {
+		t.Fatalf("second request made %d mint attempts, want 2 (rejected then retried)", len(mints))
+	}
+	// The first attempt must carry the token Vault no longer holds. That is the
+	// proof the cache was consulted at all — on a miss the fetch would have
+	// found the rotated token and the mint would have succeeded first try, and
+	// the row would pass against a build with no cache in it.
+	if got := mints[0].Header.Get("PRIVATE-TOKEN"); got != gitlabChainedPAT {
+		t.Errorf("first mint attempt authenticated with %q, want the stale cached token %q", got, gitlabChainedPAT)
+	}
+	// And the second must carry the rotated one, which it can only have gotten
+	// by evicting the stale entry and reading Vault again.
+	if got := mints[1].Header.Get("PRIVATE-TOKEN"); got != gitlabRotatedPAT {
+		t.Errorf("retried mint authenticated with %q, want the freshly fetched token %q", got, gitlabRotatedPAT)
 	}
 }
