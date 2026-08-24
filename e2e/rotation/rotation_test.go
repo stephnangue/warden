@@ -39,12 +39,18 @@ func TestVaultSourceRotationConfig(t *testing.T) {
 	cleanupSource(t, port, "e2e-rot-test")
 }
 
-// TestRotationPeriodBelowMinimum verifies rotation_period below 5m (300s) is rejected (T-034).
+// TestRotationPeriodBelowMinimum verifies a rotation_period below the configured
+// floor is rejected (T-034).
+//
+// The floor is min_cred_source_rotation_period in the node config, and this
+// cluster runs a deliberately low one so other suites can watch a rotation
+// complete rather than infer it. The period below is therefore small; keep it
+// under whatever that config says, or this stops testing a refusal.
 func TestRotationPeriodBelowMinimum(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	cleanupSource(t, port, "e2e-rot-invalid")
 
-	body := `{"type":"hvault","rotation_period":10,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+	body := `{"type":"hvault","rotation_period":5,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 	status, _ := h.APIRequest(t, "POST", "sys/cred/sources/e2e-rot-invalid", port, body)
 	if status != 400 {
 		t.Fatalf("expected 400 for rotation_period below minimum, got %d", status)

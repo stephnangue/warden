@@ -100,6 +100,14 @@ type ProviderEnv struct {
 	// not "local".
 	SourceConfig map[string]string
 
+	// SourceRotationPeriod is emitted as rotation_period, in seconds. Zero omits
+	// the field, which is what every static source wants. Some source types
+	// refuse to exist without one, so it is not optional for them — and a source
+	// that carries a period really does rotate, so keep it long enough that the
+	// package's shared environment never rotates out from under an unrelated
+	// test. A test that means to observe a rotation brings its own source.
+	SourceRotationPeriod int
+
 	// ExtraPolicyRules are appended inside the mount's gateway path stanza,
 	// for providers whose authorization is finer-grained than a capability —
 	// a body-authoritative rule set, say, which cannot be expressed as one.
@@ -345,6 +353,9 @@ func SetupFullChainProvider(t *testing.T, port int, upstreamURL string, p Provid
 	source := map[string]any{"type": sourceType}
 	if len(p.SourceConfig) > 0 {
 		source["config"] = p.SourceConfig
+	}
+	if p.SourceRotationPeriod > 0 {
+		source["rotation_period"] = p.SourceRotationPeriod
 	}
 	mustAPI(t, port, "POST", "sys/cred/sources/"+p.Source(),
 		mustJSON(t, source), "create credential source for "+p.Mount)
