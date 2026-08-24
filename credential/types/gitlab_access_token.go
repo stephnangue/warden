@@ -86,9 +86,9 @@ func (t *GitLabAccessTokenCredType) ConfigSchema() []*credential.FieldValidator 
 			Example("30"),
 
 		// Optional fields
-		credential.DurationField("expires_in").
-			Describe("Token expiration duration from now").
-			Example("720h"),
+		credential.DurationField("ttl").
+			Describe("Minimum token lifetime. Expiry is a date, so the token lives until the first UTC midnight at or after this").
+			Example("24h"),
 	}
 }
 
