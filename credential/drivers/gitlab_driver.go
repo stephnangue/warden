@@ -543,7 +543,18 @@ func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credentia
 	return rawData, nil, ttl, leaseID, nil
 }
 
-// Revoke revokes a previously minted access token
+// Revoke revokes a previously minted access token.
+//
+// It authenticates with the source's inline token, which is the only one it can
+// reach: revocation runs when a lease expires, with no caller to mint a chained
+// token as. Chained sources therefore issue no leases and never arrive here.
+//
+// One case does: a source converted from inline to chained, whose leases were
+// issued before the conversion. Those revocations fail with a 401, since the
+// inline token is gone by then, and the tokens they name stay live until their own
+// expires_at. Nothing can be done about it here — the token that would authorise
+// the delete no longer exists anywhere Warden can read it — and the exposure is
+// bounded by the expiry already set on them.
 func (d *GitLabDriver) Revoke(ctx context.Context, leaseID string) error {
 	if leaseID == "" {
 		return nil
