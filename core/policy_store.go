@@ -14,6 +14,7 @@ import (
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 )
 
 const (
@@ -190,17 +191,21 @@ func (ps *PolicyStore) setPolicyInternal(ctx context.Context, p *Policy, casVers
 		}
 	}
 
+	// A failed check-and-set is the caller's race to lose, not a server fault.
+	// These carry their own status because a plain error falls through the wire
+	// mapping's default and answers 500, which tells a caller who was overtaken
+	// that the server broke.
 	casRequired := existing.CASRequired || p.CASRequired
 	if casVersion == nil && casRequired {
-		return fmt.Errorf("check-and-set parameter required for this call")
+		return logical.ErrBadRequest("check-and-set parameter required for this call")
 	}
 	if casVersion != nil {
 		if *casVersion == -1 && existingEntry != nil {
-			return fmt.Errorf("check-and-set parameter set to -1 on existing entry")
+			return logical.ErrBadRequest("check-and-set parameter set to -1 on existing entry")
 		}
 
 		if *casVersion != -1 && *casVersion != existing.DataVersion {
-			return fmt.Errorf("check-and-set parameter did not match the current version")
+			return logical.ErrBadRequest("check-and-set parameter did not match the current version")
 		}
 	}
 
@@ -578,40 +583,6 @@ func (ps *PolicyStore) CBP(ctx context.Context, policyNames map[string][]string,
 	}
 
 	return cbp, nil
-}
-
-// loadCBPPolicy is used to load default CBP policies in a specific
-// namespace.
-func (ps *PolicyStore) loadCBPPolicy(ctx context.Context, policyName, policyText string) error {
-	ns, err := namespace.FromContext(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Check if the policy already exists
-	policy, err := ps.GetPolicy(ctx, policyName, PolicyTypeCBP)
-	if err != nil {
-		return fmt.Errorf("error fetching %s policy from store: %w", policyName, err)
-	}
-	if policy != nil {
-		if !slices.Contains(immutablePolicies, policyName) || policyText == policy.Raw {
-			return nil
-		}
-	}
-
-	policy, err = ParseCBPPolicy(ns, policyText)
-	if err != nil {
-		return fmt.Errorf("error parsing %s policy: %w", policyName, err)
-	}
-
-	if policy == nil {
-		return fmt.Errorf("parsing %q policy resulted in nil policy", policyName)
-	}
-
-	cas := &policy.DataVersion
-	policy.Name = policyName
-	policy.Type = PolicyTypeCBP
-	return ps.setPolicyInternal(ctx, policy, cas)
 }
 
 func (ps *PolicyStore) sanitizeName(name string) string {

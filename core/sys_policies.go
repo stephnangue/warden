@@ -30,6 +30,10 @@ func (b *SystemBackend) pathPolicies() []*framework.Path {
 					Type:        framework.TypeInt,
 					Description: "Check-and-set parameter for optimistic locking",
 				},
+				"cas_required": {
+					Type:        framework.TypeBool,
+					Description: "Require every write to this policy to carry a matching 'cas'. Persisted with the policy, and taken from each write: send false alongside a valid 'cas' to lift it.",
+				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
 				logical.CreateOperation: &framework.PathOperation{
@@ -100,6 +104,11 @@ func (b *SystemBackend) handlePolicyCreate(ctx context.Context, req *logical.Req
 		casVersion = &v
 	}
 
+	// Taken from the request on every write rather than carried over, so a policy
+	// that requires check-and-set can also stop requiring it — the store still
+	// demands a matching cas for the write that lifts the flag.
+	policy.CASRequired = d.Get("cas_required").(bool)
+
 	// Store the policy
 	if err := b.core.policyStore.SetPolicy(ctx, policy, casVersion); err != nil {
 		return logical.ErrorResponse(err), nil
@@ -160,6 +169,11 @@ func (b *SystemBackend) handlePolicyUpdate(ctx context.Context, req *logical.Req
 		v := cas.(int)
 		casVersion = &v
 	}
+
+	// Taken from the request on every write rather than carried over, so a policy
+	// that requires check-and-set can also stop requiring it — the store still
+	// demands a matching cas for the write that lifts the flag.
+	policy.CASRequired = d.Get("cas_required").(bool)
 
 	// Store the policy
 	if err := b.core.policyStore.SetPolicy(ctx, policy, casVersion); err != nil {
