@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -588,8 +589,11 @@ func TestGitLabDriver_PrepareRotation_OAuth2_FastPath(t *testing.T) {
 		httpClient: server.Client(),
 	}
 
-	// Pre-set a cached OAuth2 token so the driver can authenticate API calls
-	driver.tokenCache.Set("oauth2_token", "cached-bearer-token", time.Now().Add(1*time.Hour))
+	// Pre-set a cached OAuth2 token so the driver can authenticate API calls without
+	// the test server having to serve the grant. The key is the fingerprint of the
+	// credentials the bearer was granted from, so it must be built the same way the
+	// driver builds it.
+	driver.tokenCache.Set(oauth2CacheKey("app-123", "old-secret"), "cached-bearer-token", time.Now().Add(1*time.Hour))
 
 	newConfig, cleanupConfig, activateAfter, err := driver.PrepareRotation(context.Background())
 	require.NoError(t, err)
@@ -844,7 +848,17 @@ func TestGitLabDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 			errMsg:  "must be omitted when secret_spec is set",
 		},
 		{
-			name: "oauth2 cannot chain",
+			name: "oauth2 chained without an inline secret",
+			config: map[string]string{
+				"gitlab_address": "https://gitlab.example.com",
+				"auth_method":    "oauth2",
+				"application_id": "app-123",
+				"secret_spec":    "gitlab-app-secret",
+			},
+			wantErr: false,
+		},
+		{
+			name: "oauth2 chained but secret still inline",
 			config: map[string]string{
 				"gitlab_address":     "https://gitlab.example.com",
 				"auth_method":        "oauth2",
@@ -853,7 +867,19 @@ func TestGitLabDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 				"secret_spec":        "gitlab-app-secret",
 			},
 			wantErr: true,
-			errMsg:  "only for auth_method=pat",
+			errMsg:  "application_secret must be omitted when secret_spec is set",
+		},
+		{
+			// The id is not a secret and the grant needs it, so chaining does not
+			// excuse leaving it out.
+			name: "oauth2 chained without an application id",
+			config: map[string]string{
+				"gitlab_address": "https://gitlab.example.com",
+				"auth_method":    "oauth2",
+				"secret_spec":    "gitlab-app-secret",
+			},
+			wantErr: true,
+			errMsg:  "application_id",
 		},
 	}
 
@@ -1047,10 +1073,22 @@ func TestGitLabDriver_MintFromSecret_Errors(t *testing.T) {
 			errMsg:   "no personal access token in fetched secret material",
 		},
 		{
-			name:       "auth_method drifted to oauth2",
+			name:       "oauth2 resolved field is empty",
 			authMethod: "oauth2",
+			material:   credential.SecretMaterial{Data: map[string]string{"application_secret": "", "other": "wrong"}, Field: "application_secret"},
+			errMsg:     `secret_field "application_secret" is empty or absent`,
+		},
+		{
+			name:       "oauth2 with no field and no conventional key",
+			authMethod: "oauth2",
+			material:   credential.SecretMaterial{Data: map[string]string{"unexpected": "wrong"}},
+			errMsg:     "no application secret in fetched secret material",
+		},
+		{
+			name:       "auth_method drifted to something neither method understands",
+			authMethod: "mtls",
 			material:   credential.SecretMaterial{Data: map[string]string{"pat": "glpat-from-vault"}, Field: "pat"},
-			errMsg:     "requires auth_method=pat",
+			errMsg:     "supports auth_method=pat or oauth2",
 		},
 	}
 
@@ -1122,4 +1160,238 @@ func TestGitLabDriver_SupportsRotation_ChainedSourceOwnsNothing(t *testing.T) {
 			assert.False(t, driver.SupportsRotation())
 		})
 	}
+}
+
+// --- oauth2 credential chaining ---
+
+// gitlabOAuth2Fake stands in for the GitLab instance across the oauth2 chaining
+// tests: it grants a bearer per application secret and accepts that bearer on the
+// mint. Both halves are swappable so a test can rotate the secret mid-run, and both
+// call counts are recorded because the point of most of these tests is how many
+// grants happened.
+type gitlabOAuth2Fake struct {
+	mu sync.Mutex
+
+	acceptedSecret  string
+	bearerForSecret map[string]string
+
+	grantSecrets []string // client_secret seen on each /oauth/token call
+	mintBearers  []string // Authorization seen on each mint call
+	mintStatus   int      // when non-zero, the status the mint answers instead of 200
+}
+
+func newGitLabOAuth2Fake(acceptedSecret, bearer string) *gitlabOAuth2Fake {
+	return &gitlabOAuth2Fake{
+		acceptedSecret:  acceptedSecret,
+		bearerForSecret: map[string]string{acceptedSecret: bearer},
+	}
+}
+
+func (f *gitlabOAuth2Fake) server(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		switch {
+		case r.URL.Path == "/oauth/token":
+			require.NoError(t, r.ParseForm())
+			assert.Equal(t, "client_credentials", r.Form.Get("grant_type"))
+			secret := r.Form.Get("client_secret")
+			f.grantSecrets = append(f.grantSecrets, secret)
+
+			if secret != f.acceptedSecret {
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_client"})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token": f.bearerForSecret[secret],
+				"token_type":   "bearer",
+				"expires_in":   7200,
+			})
+
+		default:
+			f.mintBearers = append(f.mintBearers, r.Header.Get("Authorization"))
+			if f.mintStatus != 0 {
+				w.WriteHeader(f.mintStatus)
+				json.NewEncoder(w).Encode(map[string]interface{}{"message": "401 Unauthorized"})
+				return
+			}
+			if got, want := r.Header.Get("Authorization"), "Bearer "+f.bearerForSecret[f.acceptedSecret]; got != want {
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(map[string]interface{}{"message": "401 Unauthorized"})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"id": 99, "token": "glpat-minted-token"})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// rotate swaps the secret the fake accepts and the bearer it grants for it,
+// standing in for the secret being rotated wherever it is held.
+func (f *gitlabOAuth2Fake) rotate(secret, bearer string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.acceptedSecret = secret
+	f.bearerForSecret[secret] = bearer
+}
+
+func (f *gitlabOAuth2Fake) snapshot() (grants []string, mints []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.grantSecrets...), append([]string(nil), f.mintBearers...)
+}
+
+func newChainedOAuth2GitLabDriver(server *httptest.Server) *GitLabDriver {
+	return &GitLabDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeGitLab,
+			Config: map[string]string{
+				"gitlab_address": server.URL,
+				"auth_method":    "oauth2",
+				"application_id": "app-123",
+				"secret_spec":    "gitlab-app-secret",
+			},
+		},
+		tokenCache: NewTokenCache(),
+		httpClient: server.Client(),
+	}
+}
+
+func TestGitLabDriver_MintFromSecret_OAuth2_ChainedSecretReachesGrant(t *testing.T) {
+	fake := newGitLabOAuth2Fake("app-secret-from-store", "bearer-for-store-secret")
+	driver := newChainedOAuth2GitLabDriver(fake.server(t))
+
+	rawData, _, ttl, leaseID, err := driver.MintFromSecret(context.Background(), projectTokenSpec(),
+		credential.SecretMaterial{Data: map[string]string{"application_secret": "app-secret-from-store"}})
+	require.NoError(t, err)
+
+	grants, mints := fake.snapshot()
+	require.Len(t, grants, 1, "the mint must be preceded by exactly one grant")
+	assert.Equal(t, "app-secret-from-store", grants[0],
+		"the grant must carry the chained secret, which appears in no config")
+	require.Len(t, mints, 1)
+	assert.Equal(t, "Bearer bearer-for-store-secret", mints[0])
+
+	assert.Equal(t, "glpat-minted-token", rawData["access_token"])
+	assert.GreaterOrEqual(t, ttl, 24*time.Hour)
+	assert.Empty(t, leaseID, "a chained mint is leaseless: it has no secret of its own to revoke with")
+}
+
+func TestGitLabDriver_OAuth2CacheKeyIsolation(t *testing.T) {
+	// The bearer cache is keyed by the credentials it was granted from. Two callers
+	// whose chained secret resolves differently must each get their own grant —
+	// under a single fixed key the second would be served the first's bearer.
+	fake := newGitLabOAuth2Fake("secret-a", "bearer-a")
+	fake.bearerForSecret["secret-b"] = "bearer-b"
+	driver := newChainedOAuth2GitLabDriver(fake.server(t))
+
+	mintWith := func(secret string) error {
+		_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(),
+			credential.SecretMaterial{Data: map[string]string{"application_secret": secret}})
+		return err
+	}
+
+	require.NoError(t, mintWith("secret-a"))
+
+	// Same secret again: this one must be served from cache.
+	require.NoError(t, mintWith("secret-a"))
+	grants, _ := fake.snapshot()
+	assert.Len(t, grants, 1, "a repeated secret must reuse the cached bearer")
+
+	// A different secret must not reuse it. Accept it upstream so the mint succeeds
+	// and the bearer it carried can be inspected.
+	fake.rotate("secret-b", "bearer-b")
+	require.NoError(t, mintWith("secret-b"))
+
+	grants, mints := fake.snapshot()
+	require.Len(t, grants, 2, "a different secret must trigger its own grant")
+	assert.Equal(t, []string{"secret-a", "secret-b"}, grants)
+	require.Len(t, mints, 3)
+	assert.Equal(t, "Bearer bearer-b", mints[2], "the second caller must not be served the first's bearer")
+}
+
+func TestGitLabDriver_OAuth2ChainedSecretRejectionIsRetryable(t *testing.T) {
+	// A secret rotated where it is held goes stale in the chained-secret cache. The
+	// token endpoint is where that surfaces in oauth2 mode — one call earlier than
+	// in pat mode — so the marking has to happen there for the minting layer to
+	// evict and retry.
+	fake := newGitLabOAuth2Fake("current-secret", "bearer-current")
+	driver := newChainedOAuth2GitLabDriver(fake.server(t))
+
+	_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(),
+		credential.SecretMaterial{Data: map[string]string{"application_secret": "stale-secret"}})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
+
+func TestGitLabDriver_OAuth2InlineSecretRejectionIsNotRetryable(t *testing.T) {
+	// An inline source owns its secret: nothing upstream can refetch a fresher one,
+	// so marking the error would buy a pointless retry of the same credentials.
+	fake := newGitLabOAuth2Fake("current-secret", "bearer-current")
+	server := fake.server(t)
+
+	driver := &GitLabDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeGitLab,
+			Config: map[string]string{
+				"gitlab_address":     server.URL,
+				"auth_method":        "oauth2",
+				"application_id":     "app-123",
+				"application_secret": "stale-secret",
+			},
+		},
+		tokenCache: NewTokenCache(),
+		httpClient: server.Client(),
+	}
+
+	_, _, _, _, err := driver.MintCredential(context.Background(), projectTokenSpec())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
+
+func TestGitLabDriver_OAuth2BearerEvictedOnUnauthorized(t *testing.T) {
+	// A bearer the upstream refuses must not stay cached: the minting layer's one
+	// retry would replay it and fail identically, and an inline source would keep
+	// failing until the bearer expired on its own.
+	fake := newGitLabOAuth2Fake("app-secret", "bearer-one")
+	driver := newChainedOAuth2GitLabDriver(fake.server(t))
+
+	material := credential.SecretMaterial{Data: map[string]string{"application_secret": "app-secret"}}
+
+	// First mint: grant succeeds and caches a bearer with a long expiry, but the
+	// upstream refuses it — as it would for a bearer revoked out of band.
+	fake.mu.Lock()
+	fake.mintStatus = http.StatusUnauthorized
+	fake.mu.Unlock()
+
+	_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(), material)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, credential.ErrChainedSecretRejected)
+
+	// Second mint with the same secret: the cached bearer is gone, so this must
+	// re-grant rather than reuse it.
+	fake.mu.Lock()
+	fake.mintStatus = 0
+	fake.mu.Unlock()
+
+	_, _, _, _, err = driver.MintFromSecret(context.Background(), projectTokenSpec(), material)
+	require.NoError(t, err)
+
+	grants, _ := fake.snapshot()
+	assert.Len(t, grants, 2, "the refused bearer must have been evicted, forcing a fresh grant")
+}
+
+func TestGitLabOAuth2CacheKey(t *testing.T) {
+	// The key must separate every distinct pair, including pairs that would collide
+	// if the two fields were simply concatenated.
+	assert.Equal(t, oauth2CacheKey("app", "secret"), oauth2CacheKey("app", "secret"))
+	assert.NotEqual(t, oauth2CacheKey("app", "secret"), oauth2CacheKey("app", "other"))
+	assert.NotEqual(t, oauth2CacheKey("app", "secret"), oauth2CacheKey("other", "secret"))
+	assert.NotEqual(t, oauth2CacheKey("ab", "c"), oauth2CacheKey("a", "bc"))
+
+	assert.NotContains(t, oauth2CacheKey("app", "secret"), "secret", "the raw secret must not sit in the key")
 }

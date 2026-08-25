@@ -5,6 +5,7 @@ package fullchain
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -75,6 +76,41 @@ const (
 	// data path. The cache row writes here to simulate a rotation happening at
 	// the source, behind Warden's back.
 	gitlabPATVaultPath = "secret/data/e2e/gitlab-pat"
+
+	// --- oauth2 chaining ---
+
+	// The application id a keyless oauth2 source authenticates as. Unlike the
+	// secret it pairs with, it is not sensitive and stays in source config.
+	gitlabApplicationID = "e2e-gl-app-id"
+
+	// Written to secret/data/e2e/gitlab-app-secret by setup.sh. Where the pat
+	// rows' chained value authenticates the mint directly, this one is spent on
+	// the token grant, and the bearer that grant returns authenticates the mint.
+	gitlabChainedAppSecret = "e2e-gl-app-secret-not-a-real-secret"
+
+	// What the stand-in grants for the seeded secret, and for the rotated one.
+	// Neither is in any config: like the minted token, they are issued.
+	gitlabAppBearer        = "e2e-gl-bearer-for-seeded-secret"
+	gitlabRotatedAppBearer = "e2e-gl-bearer-for-rotated-secret"
+
+	// What the application secret is rotated to mid-test on the oauth2 cache row.
+	gitlabRotatedAppSecret = "e2e-gl-rotated-app-secret-not-a-real-secret"
+
+	gitlabTokenPath          = "/oauth/token"
+	gitlabAppSecretVaultPath = "secret/data/e2e/gitlab-app-secret"
+
+	// The oauth2 rows' own chains, test-local for the same reason the pat ones are.
+	gitlabOAuthSecretSpec = "fc-gl-oauth-secret-from-vault"
+	gitlabOAuthSource     = "fc-gl-oauth-keyless-src"
+	gitlabOAuthSpec       = "fc-gl-oauth-keyless-cred"
+	gitlabOAuthAgentRole  = "fc-gl-oauth-keyless-agent"
+
+	gitlabOAuthCacheSecretSpec = "fc-gl-oauth-cache-secret-from-vault"
+	gitlabOAuthCacheSource     = "fc-gl-oauth-cache-src"
+	gitlabOAuthCacheSpecA      = "fc-gl-oauth-cache-cred-a"
+	gitlabOAuthCacheSpecB      = "fc-gl-oauth-cache-cred-b"
+	gitlabOAuthCacheAgentRoleA = "fc-gl-oauth-cache-agent-a"
+	gitlabOAuthCacheAgentRoleB = "fc-gl-oauth-cache-agent-b"
 )
 
 // setupGitLabEnv builds the mount and its inline source, per test rather than
@@ -209,7 +245,32 @@ type gitlabChainConsumer struct {
 // exist is refused at create, and a referenced spec cannot be deleted while
 // something names it — so cleanup runs consumer-first, and the same order clears
 // whatever a killed run left behind.
-func setupGitLabChain(t *testing.T, gitlabEnv h.ProviderEnv, secretSpec, source, cacheTTL string, consumers []gitlabChainConsumer) {
+// gitlabChainMode describes what a keyless source chains and how it spends it.
+// The two modes differ only in which secret is fetched and which config keys the
+// source carries; everything else about the chain is identical, which is the point
+// worth holding constant between the pat rows and the oauth2 ones.
+type gitlabChainMode struct {
+	secretPath  string // KV2 path setup.sh seeded
+	secretField string // which field of that secret holds the value
+	authConfig  string // the source's auth keys, as a JSON fragment
+}
+
+var (
+	gitlabPATChain = gitlabChainMode{
+		secretPath:  "e2e/gitlab-pat",
+		secretField: "pat",
+		authConfig:  `"auth_method":"pat"`,
+	}
+	gitlabOAuth2Chain = gitlabChainMode{
+		secretPath:  "e2e/gitlab-app-secret",
+		secretField: "application_secret",
+		// The application id is an identifier rather than a secret, so it stays in
+		// config; only the secret half is chained.
+		authConfig: `"auth_method":"oauth2","application_id":"` + gitlabApplicationID + `"`,
+	}
+)
+
+func setupGitLabChain(t *testing.T, gitlabEnv h.ProviderEnv, mode gitlabChainMode, secretSpec, source, cacheTTL string, consumers []gitlabChainConsumer) {
 	t.Helper()
 
 	mustWrite := func(method, path, body, what string) {
@@ -235,23 +296,24 @@ func setupGitLabChain(t *testing.T, gitlabEnv h.ProviderEnv, secretSpec, source,
 	// The referenced spec. subject_token_source is not optional: a chained secret
 	// must be minted as the session-pinned caller, and the store refuses the
 	// reference otherwise.
-	mustWrite("POST", "sys/cred/specs/"+secretSpec, `{
+	mustWrite("POST", "sys/cred/specs/"+secretSpec, fmt.Sprintf(`{
 		"type":"key_value","source":"vault-fed-e2e","config":{
-			"mint_method":"kv2_read","kv2_mount":"secret","secret_path":"e2e/gitlab-pat",
-			"subject_token_source":"agent_identity"}}`,
+			"mint_method":"kv2_read","kv2_mount":"secret","secret_path":%q,
+			"subject_token_source":"agent_identity"}}`, mode.secretPath),
 		"create the referenced secret spec")
 
-	// The keyless source: same address as the inline one, but carrying no
-	// personal_access_token — validation rejects a source that keeps one while
-	// also naming a chain.
+	// The keyless source: same address as the inline one, but carrying none of the
+	// secret its auth method would normally need — validation rejects a source
+	// that keeps one while also naming a chain.
 	ttlField := ""
 	if cacheTTL != "" {
 		ttlField = fmt.Sprintf(`,"secret_cache_ttl":%q`, cacheTTL)
 	}
 	mustWrite("POST", "sys/cred/sources/"+source, fmt.Sprintf(`{
 		"type":"gitlab","config":{
-			"gitlab_address":%q,"auth_method":"pat",
-			"secret_spec":%q,"secret_field":"pat"%s}}`, upstream.URL, secretSpec, ttlField),
+			"gitlab_address":%q,%s,
+			"secret_spec":%q,"secret_field":%q%s}}`,
+		upstream.URL, mode.authConfig, secretSpec, mode.secretField, ttlField),
 		"create the keyless gitlab source")
 
 	for _, c := range consumers {
@@ -277,7 +339,7 @@ func setupGitLabChain(t *testing.T, gitlabEnv h.ProviderEnv, secretSpec, source,
 // keyless rows use.
 func setupGitLabKeylessChain(t *testing.T, gitlabEnv h.ProviderEnv) {
 	t.Helper()
-	setupGitLabChain(t, gitlabEnv, gitlabChainSecretSpec, gitlabChainSource, "",
+	setupGitLabChain(t, gitlabEnv, gitlabPATChain, gitlabChainSecretSpec, gitlabChainSource, "",
 		[]gitlabChainConsumer{{gitlabChainSpec, gitlabChainAgentRole}})
 }
 
@@ -398,7 +460,7 @@ func TestGitLab_StaleCachedSecretIsEvictedAndRetried(t *testing.T) {
 	ensureEnv(t)
 	gitlabEnv := setupGitLabEnv(t)
 	useJWTAgentLeg(t, gitlabEnv)
-	setupGitLabChain(t, gitlabEnv, gitlabCacheSecretSpec, gitlabCacheSource, "5m",
+	setupGitLabChain(t, gitlabEnv, gitlabPATChain, gitlabCacheSecretSpec, gitlabCacheSource, "5m",
 		[]gitlabChainConsumer{
 			{gitlabCacheSpecA, gitlabCacheAgentRoleA},
 			{gitlabCacheSpecB, gitlabCacheAgentRoleB},
@@ -508,5 +570,250 @@ func TestGitLab_StaleCachedSecretIsEvictedAndRetried(t *testing.T) {
 	// by evicting the stale entry and reading Vault again.
 	if got := mints[1].Header.Get("PRIVATE-TOKEN"); got != gitlabRotatedPAT {
 		t.Errorf("retried mint authenticated with %q, want the freshly fetched token %q", got, gitlabRotatedPAT)
+	}
+}
+
+// serveGitLabOAuth2 makes the stand-in behave like an OAuth application's GitLab:
+// it grants a bearer to whoever presents the secret it currently accepts, and
+// accepts on the mint only the bearer it last granted. Both halves move together
+// through setAccepted, because a rotated secret's defining property is that the
+// old one stops working — and so does anything granted from it.
+//
+// The guard is for the race detector: the handler runs on the server's goroutines
+// while the test rotates from its own.
+func serveGitLabOAuth2(t *testing.T, secret, bearer string) (setAccepted func(secret, bearer string)) {
+	t.Helper()
+
+	var mu sync.Mutex
+	acceptedSecret, acceptedBearer := secret, bearer
+
+	upstream.SetHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == gitlabTokenPath:
+			if err := r.ParseForm(); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			ok := r.Form.Get("client_secret") == acceptedSecret
+			granted := acceptedBearer
+			mu.Unlock()
+			if !ok {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":"invalid_client"}`))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"access_token":"` + granted + `","token_type":"bearer","expires_in":7200}`))
+
+		case r.Method == http.MethodPost && r.URL.Path == gitlabMintPath:
+			mu.Lock()
+			ok := r.Header.Get("Authorization") == "Bearer "+acceptedBearer
+			mu.Unlock()
+			if !ok {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"message":"401 Unauthorized"}`))
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":99,"token":"` + gitlabMintedToken + `"}`))
+
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	})
+
+	return func(secret, bearer string) {
+		mu.Lock()
+		acceptedSecret, acceptedBearer = secret, bearer
+		mu.Unlock()
+	}
+}
+
+// gitlabGrantForm parses a recorded token-grant call's form body. The upstream
+// records bodies byte for byte, so the grant's parameters have to be decoded here
+// rather than read off a parsed request.
+func gitlabGrantForm(t *testing.T, req h.UpstreamRequest) url.Values {
+	t.Helper()
+	form, err := url.ParseQuery(string(req.Body))
+	if err != nil {
+		t.Fatalf("token grant body is not a form: %v (body %q)", err, req.Body)
+	}
+	return form
+}
+
+// gitlabRequestsTo returns every recorded call to one path, in order.
+func gitlabRequestsTo(path string) []h.UpstreamRequest {
+	var found []h.UpstreamRequest
+	for _, req := range upstream.Requests() {
+		if req.Method == http.MethodPost && req.Path == path {
+			found = append(found, req)
+		}
+	}
+	return found
+}
+
+// TestGitLab_OAuth2KeylessChainMintsWithVaultHeldSecret is the oauth2 counterpart
+// of the pat keyless row, and it proves the chain reaches one call further back.
+//
+// In pat mode the chained value authenticates the mint, so the mint's header is
+// where the chain shows up. Here the chained value is spent on the token grant
+// instead, and what authenticates the mint is a bearer the stand-in issued — so
+// the row only passes if the secret travelled from Vault to the grant, and the
+// grant's answer travelled on to the mint.
+func TestGitLab_OAuth2KeylessChainMintsWithVaultHeldSecret(t *testing.T) {
+	ensureEnv(t)
+	gitlabEnv := setupGitLabEnv(t)
+	useJWTAgentLeg(t, gitlabEnv)
+	serveGitLabOAuth2(t, gitlabChainedAppSecret, gitlabAppBearer)
+	setupGitLabChain(t, gitlabEnv, gitlabOAuth2Chain, gitlabOAuthSecretSpec, gitlabOAuthSource, "",
+		[]gitlabChainConsumer{{gitlabOAuthSpec, gitlabOAuthAgentRole}})
+	upstream.Reset()
+
+	status, body, _ := h.ChainRequest(t, leaderPort, gitlabEnv, h.ChainOpts{
+		AgentToken: h.GetDefaultJWT(t),
+		Role:       gitlabOAuthAgentRole,
+	})
+
+	// Three calls where the pat keyless row makes two. The extra one is the grant:
+	// a pat source spends its chained secret directly, an oauth2 source has to
+	// trade it for a bearer first. Still no construction-time check, which is what
+	// keeps this at three rather than the inline row's four.
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status:        200,
+		Injected:      map[string]string{"Authorization": "Bearer " + gitlabMintedToken},
+		UpstreamCalls: 3,
+	})
+
+	grants := gitlabRequestsTo(gitlabTokenPath)
+	if len(grants) != 1 {
+		t.Fatalf("upstream received %d token grants, want exactly 1", len(grants))
+	}
+	// The half no driver test can show: the secret the grant spent came out of
+	// Vault, not out of config.
+	if got := gitlabGrantForm(t, grants[0]).Get("client_secret"); got != gitlabChainedAppSecret {
+		t.Errorf("grant presented %q, want the Vault-held application secret %q", got, gitlabChainedAppSecret)
+	}
+	if got := gitlabGrantForm(t, grants[0]).Get("client_id"); got != gitlabApplicationID {
+		t.Errorf("grant presented client_id %q, want the source's %q", got, gitlabApplicationID)
+	}
+
+	// And the mint rode the bearer that grant returned, not the secret itself.
+	mint := findGitLabMint(t)
+	if got := mint.Header.Get("Authorization"); got != "Bearer "+gitlabAppBearer {
+		t.Errorf("mint authenticated with %q, want the granted bearer %q", got, "Bearer "+gitlabAppBearer)
+	}
+	if strings.Contains(string(mint.Body), gitlabChainedAppSecret) {
+		t.Errorf("the application secret leaked into the mint body: %s", mint.Body)
+	}
+}
+
+// TestGitLab_OAuth2StaleCachedSecretIsEvictedAndRetried is the oauth2 counterpart
+// of the pat stale-secret row, and it covers a join that mode does not have.
+//
+// Two caches sit between a rotation and a successful mint here, not one. The
+// minting layer caches the fetched application secret for secret_cache_ttl, and
+// the driver caches the bearer it granted from that secret for the grant's
+// expires_in — which the stand-in sets long enough to outlive this test. So the
+// first mint after a rotation goes out under a bearer that is doubly stale, and
+// what this row pins is that the caller never sees it: the 401 is marked as a
+// rejected chained secret, the minting layer evicts and refetches, and the retry
+// succeeds.
+//
+// It does not pin the driver's own eviction of the refused bearer. Once the
+// refetch returns the rotated secret the bearer cache key changes with it, so the
+// grant re-runs whether or not the old entry was dropped. The eviction matters for
+// a bearer refused while its secret is unchanged — no key rollover to save it —
+// and that case is pinned in the driver's unit tests, where the secret is held
+// constant.
+//
+// The two-specs-one-JWT arrangement is the pat row's, for the reasons it gives.
+func TestGitLab_OAuth2StaleCachedSecretIsEvictedAndRetried(t *testing.T) {
+	ensureEnv(t)
+	gitlabEnv := setupGitLabEnv(t)
+	useJWTAgentLeg(t, gitlabEnv)
+	setAccepted := serveGitLabOAuth2(t, gitlabChainedAppSecret, gitlabAppBearer)
+	setupGitLabChain(t, gitlabEnv, gitlabOAuth2Chain, gitlabOAuthCacheSecretSpec, gitlabOAuthCacheSource, "5m",
+		[]gitlabChainConsumer{
+			{gitlabOAuthCacheSpecA, gitlabOAuthCacheAgentRoleA},
+			{gitlabOAuthCacheSpecB, gitlabOAuthCacheAgentRoleB},
+		})
+
+	// Shared state, restored before anything can rewrite it — see the pat row.
+	t.Cleanup(func() {
+		if status, resp := h.VaultDirectRequest(t, "POST", gitlabAppSecretVaultPath,
+			`{"data":{"application_secret":"`+gitlabChainedAppSecret+`"}}`); status >= 400 {
+			t.Errorf("restoring the seeded gitlab application secret in Vault failed (status %d): %s — later gitlab rows will grant with the wrong secret", status, resp)
+		}
+	})
+	upstream.Reset()
+
+	jwt := h.GetDefaultJWT(t)
+
+	// The priming request: fetches the secret from Vault into the minting layer's
+	// cache, grants a bearer into the driver's, and spends it. It proves nothing
+	// about eviction — it plants both entries the second request must trip over.
+	status, body, _ := h.ChainRequest(t, leaderPort, gitlabEnv, h.ChainOpts{
+		AgentToken: jwt,
+		Role:       gitlabOAuthCacheAgentRoleA,
+	})
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status:        200,
+		Injected:      map[string]string{"Authorization": "Bearer " + gitlabMintedToken},
+		UpstreamCalls: 3,
+	})
+
+	// The rotation happens where a real one would: at the source, with Warden not
+	// told. The stand-in stops honouring the old secret and the bearer granted
+	// from it at the same moment.
+	if status, resp := h.VaultDirectRequest(t, "POST", gitlabAppSecretVaultPath,
+		`{"data":{"application_secret":"`+gitlabRotatedAppSecret+`"}}`); status >= 400 {
+		t.Fatalf("rotating the gitlab application secret in Vault failed (status %d): %s", status, resp)
+	}
+	setAccepted(gitlabRotatedAppSecret, gitlabRotatedAppBearer)
+	upstream.Reset()
+
+	// Four calls where the priming request made three: the mint under the stale
+	// bearer that fails, the grant that replaces it, the mint that succeeds, and
+	// the proxied request. Note there is no grant before the first mint — the
+	// driver had a cached bearer and saw no reason to ask for another, which is
+	// exactly the state this row exists to get into.
+	status, body, _ = h.ChainRequest(t, leaderPort, gitlabEnv, h.ChainOpts{
+		AgentToken: jwt,
+		Role:       gitlabOAuthCacheAgentRoleB,
+	})
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status:        200,
+		Injected:      map[string]string{"Authorization": "Bearer " + gitlabMintedToken},
+		UpstreamCalls: 4,
+	})
+
+	mints := gitlabRequestsTo(gitlabMintPath)
+	if len(mints) != 2 {
+		t.Fatalf("second request made %d mint attempts, want 2 (rejected then retried)", len(mints))
+	}
+	// The first attempt carrying the stale bearer is the proof both caches were
+	// consulted: without the driver's, the mint would have been preceded by a
+	// fresh grant and succeeded first try, and this row would pass against a
+	// build that caches nothing.
+	if got := mints[0].Header.Get("Authorization"); got != "Bearer "+gitlabAppBearer {
+		t.Errorf("first mint attempt authenticated with %q, want the stale cached bearer %q", got, "Bearer "+gitlabAppBearer)
+	}
+	if got := mints[1].Header.Get("Authorization"); got != "Bearer "+gitlabRotatedAppBearer {
+		t.Errorf("retried mint authenticated with %q, want the freshly granted bearer %q", got, "Bearer "+gitlabRotatedAppBearer)
+	}
+
+	// And exactly one grant, carrying the rotated secret — which the driver can
+	// only have gotten by the minting layer evicting its cached copy and reading
+	// Vault again.
+	grants := gitlabRequestsTo(gitlabTokenPath)
+	if len(grants) != 1 {
+		t.Fatalf("second request made %d token grants, want exactly 1 (after the stale bearer was evicted)", len(grants))
+	}
+	if got := gitlabGrantForm(t, grants[0]).Get("client_secret"); got != gitlabRotatedAppSecret {
+		t.Errorf("grant presented %q, want the freshly fetched application secret %q", got, gitlabRotatedAppSecret)
 	}
 }

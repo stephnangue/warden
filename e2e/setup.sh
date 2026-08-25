@@ -324,6 +324,13 @@ vault_api POST "secret/data/e2e/datadog-keys" \
 vault_api POST "secret/data/e2e/gitlab-pat" \
   '{"data":{"pat":"e2e-gl-chained-not-a-real-pat"}}'
 
+# The same arrangement for a gitlab source authenticating as an OAuth application
+# instead. What is chained here is the application secret, which the driver spends
+# on a token grant rather than on the mint itself — so the oauth2 rows prove the
+# chain reached one call earlier than the pat rows do.
+vault_api POST "secret/data/e2e/gitlab-app-secret" \
+  '{"data":{"application_secret":"e2e-gl-app-secret-not-a-real-secret"}}'
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \
