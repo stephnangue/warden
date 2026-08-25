@@ -935,6 +935,14 @@ func (d *GitLabDriver) doGitLabRequest(ctx context.Context, method, path string,
 // The inputs are hashed rather than used raw — a map key outlives the request in
 // memory and surfaces in dumps and test output — and length-prefixed so no two
 // pairs can collide by concatenating differently.
+//
+// SHA-256 rather than a password KDF, deliberately: this derives a cache key, not a
+// stored verifier. No digest is kept, nothing is ever compared against one, and the
+// result never leaves this process. The slowness a KDF buys is protection against
+// guessing a low-entropy human password from a stolen digest — here the input is a
+// high-entropy machine credential, and anything able to read this key can already
+// read the secret it was derived from, so that slowness would cost every lookup and
+// protect nothing.
 func oauth2CacheKey(applicationID, clientSecret string) string {
 	h := sha256.New()
 	for _, field := range []string{applicationID, clientSecret} {
