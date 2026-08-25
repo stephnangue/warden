@@ -79,8 +79,9 @@ const (
 
 	// --- oauth2 chaining ---
 
-	// The application id a keyless oauth2 source authenticates as. Unlike the
-	// secret it pairs with, it is not sensitive and stays in source config.
+	// The application id a keyless oauth2 source authenticates as. Written to the
+	// store beside its secret and absent from every config, because the two
+	// authenticate as a pair and a chained source is refused either half.
 	gitlabApplicationID = "e2e-gl-app-id"
 
 	// Written to secret/data/e2e/gitlab-app-secret by setup.sh. Where the pat
@@ -262,11 +263,13 @@ var (
 		authConfig:  `"auth_method":"pat"`,
 	}
 	gitlabOAuth2Chain = gitlabChainMode{
-		secretPath:  "e2e/gitlab-app-secret",
+		secretPath: "e2e/gitlab-app-secret",
+		// secret_field names the secret; the id travels beside it under a
+		// conventional key, because the two authenticate as a pair.
 		secretField: "application_secret",
-		// The application id is an identifier rather than a secret, so it stays in
-		// config; only the secret half is chained.
-		authConfig: `"auth_method":"oauth2","application_id":"` + gitlabApplicationID + `"`,
+		// The source carries neither half — that is what makes one source able to
+		// front several applications, since the pair is resolved per mint.
+		authConfig: `"auth_method":"oauth2"`,
 	}
 )
 
@@ -573,6 +576,16 @@ func TestGitLab_StaleCachedSecretIsEvictedAndRetried(t *testing.T) {
 	}
 }
 
+// gitlabAppSecretPayload is the store payload a chained oauth2 source expects: the
+// whole client credential, not just its secret half.
+//
+// A write to the store replaces the entry's data outright, so a rotation that sent
+// only the secret would silently drop the id and leave the next mint unable to name
+// an application at all.
+func gitlabAppSecretPayload(secret string) string {
+	return `{"data":{"application_id":"` + gitlabApplicationID + `","application_secret":"` + secret + `"}}`
+}
+
 // serveGitLabOAuth2 makes the stand-in behave like an OAuth application's GitLab:
 // it grants a bearer to whoever presents the secret it currently accepts, and
 // accepts on the mint only the bearer it last granted. Both halves move together
@@ -692,13 +705,16 @@ func TestGitLab_OAuth2KeylessChainMintsWithVaultHeldSecret(t *testing.T) {
 	if len(grants) != 1 {
 		t.Fatalf("upstream received %d token grants, want exactly 1", len(grants))
 	}
-	// The half no driver test can show: the secret the grant spent came out of
-	// Vault, not out of config.
-	if got := gitlabGrantForm(t, grants[0]).Get("client_secret"); got != gitlabChainedAppSecret {
-		t.Errorf("grant presented %q, want the Vault-held application secret %q", got, gitlabChainedAppSecret)
+	// The half no driver test can show: BOTH halves the grant spent came out of the
+	// store. Neither appears in any spec or source config, so the row fails if
+	// either link breaks — and the id being fetched rather than configured is what
+	// lets one source front several applications.
+	form := gitlabGrantForm(t, grants[0])
+	if got := form.Get("client_secret"); got != gitlabChainedAppSecret {
+		t.Errorf("grant presented %q, want the store-held application secret %q", got, gitlabChainedAppSecret)
 	}
-	if got := gitlabGrantForm(t, grants[0]).Get("client_id"); got != gitlabApplicationID {
-		t.Errorf("grant presented client_id %q, want the source's %q", got, gitlabApplicationID)
+	if got := form.Get("client_id"); got != gitlabApplicationID {
+		t.Errorf("grant presented client_id %q, want the store-held application id %q", got, gitlabApplicationID)
 	}
 
 	// And the mint rode the bearer that grant returned, not the secret itself.
@@ -745,8 +761,8 @@ func TestGitLab_OAuth2StaleCachedSecretIsEvictedAndRetried(t *testing.T) {
 	// Shared state, restored before anything can rewrite it — see the pat row.
 	t.Cleanup(func() {
 		if status, resp := h.VaultDirectRequest(t, "POST", gitlabAppSecretVaultPath,
-			`{"data":{"application_secret":"`+gitlabChainedAppSecret+`"}}`); status >= 400 {
-			t.Errorf("restoring the seeded gitlab application secret in Vault failed (status %d): %s — later gitlab rows will grant with the wrong secret", status, resp)
+			gitlabAppSecretPayload(gitlabChainedAppSecret)); status >= 400 {
+			t.Errorf("restoring the seeded gitlab client credential failed (status %d): %s — later gitlab rows will grant with the wrong secret", status, resp)
 		}
 	})
 	upstream.Reset()
@@ -770,8 +786,8 @@ func TestGitLab_OAuth2StaleCachedSecretIsEvictedAndRetried(t *testing.T) {
 	// told. The stand-in stops honouring the old secret and the bearer granted
 	// from it at the same moment.
 	if status, resp := h.VaultDirectRequest(t, "POST", gitlabAppSecretVaultPath,
-		`{"data":{"application_secret":"`+gitlabRotatedAppSecret+`"}}`); status >= 400 {
-		t.Fatalf("rotating the gitlab application secret in Vault failed (status %d): %s", status, resp)
+		gitlabAppSecretPayload(gitlabRotatedAppSecret)); status >= 400 {
+		t.Fatalf("rotating the gitlab application secret in the store failed (status %d): %s", status, resp)
 	}
 	setAccepted(gitlabRotatedAppSecret, gitlabRotatedAppBearer)
 	upstream.Reset()

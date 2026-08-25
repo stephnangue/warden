@@ -848,11 +848,12 @@ func TestGitLabDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 			errMsg:  "must be omitted when secret_spec is set",
 		},
 		{
-			name: "oauth2 chained without an inline secret",
+			// A chained oauth2 source holds neither half: the referenced spec
+			// supplies the pair.
+			name: "oauth2 chained holding neither half",
 			config: map[string]string{
 				"gitlab_address": "https://gitlab.example.com",
 				"auth_method":    "oauth2",
-				"application_id": "app-123",
 				"secret_spec":    "gitlab-app-secret",
 			},
 			wantErr: false,
@@ -862,7 +863,6 @@ func TestGitLabDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 			config: map[string]string{
 				"gitlab_address":     "https://gitlab.example.com",
 				"auth_method":        "oauth2",
-				"application_id":     "app-123",
 				"application_secret": "secret-456",
 				"secret_spec":        "gitlab-app-secret",
 			},
@@ -870,16 +870,17 @@ func TestGitLabDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 			errMsg:  "application_secret must be omitted when secret_spec is set",
 		},
 		{
-			// The id is not a secret and the grant needs it, so chaining does not
-			// excuse leaving it out.
-			name: "oauth2 chained without an application id",
+			// The id follows the secret out of config. Keeping it would name one
+			// application while presenting a secret fetched for another.
+			name: "oauth2 chained but id still inline",
 			config: map[string]string{
 				"gitlab_address": "https://gitlab.example.com",
 				"auth_method":    "oauth2",
+				"application_id": "app-123",
 				"secret_spec":    "gitlab-app-secret",
 			},
 			wantErr: true,
-			errMsg:  "application_id",
+			errMsg:  "application_id must be omitted when secret_spec is set",
 		},
 	}
 
@@ -1176,6 +1177,7 @@ type gitlabOAuth2Fake struct {
 	bearerForSecret map[string]string
 
 	grantSecrets []string // client_secret seen on each /oauth/token call
+	grantIDs     []string // client_id seen on each /oauth/token call
 	mintBearers  []string // Authorization seen on each mint call
 	mintStatus   int      // when non-zero, the status the mint answers instead of 200
 }
@@ -1199,6 +1201,7 @@ func (f *gitlabOAuth2Fake) server(t *testing.T) *httptest.Server {
 			assert.Equal(t, "client_credentials", r.Form.Get("grant_type"))
 			secret := r.Form.Get("client_secret")
 			f.grantSecrets = append(f.grantSecrets, secret)
+			f.grantIDs = append(f.grantIDs, r.Form.Get("client_id"))
 
 			if secret != f.acceptedSecret {
 				w.WriteHeader(http.StatusUnauthorized)
@@ -1245,6 +1248,14 @@ func (f *gitlabOAuth2Fake) snapshot() (grants []string, mints []string) {
 	return append([]string(nil), f.grantSecrets...), append([]string(nil), f.mintBearers...)
 }
 
+func (f *gitlabOAuth2Fake) grantClientIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.grantIDs...)
+}
+
+// A chained oauth2 source carries neither half of the client credential — config
+// validation refuses both — so the fixture holds no application_id either.
 func newChainedOAuth2GitLabDriver(server *httptest.Server) *GitLabDriver {
 	return &GitLabDriver{
 		credSource: &credential.CredSource{
@@ -1252,7 +1263,6 @@ func newChainedOAuth2GitLabDriver(server *httptest.Server) *GitLabDriver {
 			Config: map[string]string{
 				"gitlab_address": server.URL,
 				"auth_method":    "oauth2",
-				"application_id": "app-123",
 				"secret_spec":    "gitlab-app-secret",
 			},
 		},
@@ -1261,12 +1271,20 @@ func newChainedOAuth2GitLabDriver(server *httptest.Server) *GitLabDriver {
 	}
 }
 
+// chainedPair is the payload a chained oauth2 source expects: both halves together.
+func chainedPair(applicationID, secret string) credential.SecretMaterial {
+	return credential.SecretMaterial{Data: map[string]string{
+		"application_id":     applicationID,
+		"application_secret": secret,
+	}}
+}
+
 func TestGitLabDriver_MintFromSecret_OAuth2_ChainedSecretReachesGrant(t *testing.T) {
 	fake := newGitLabOAuth2Fake("app-secret-from-store", "bearer-for-store-secret")
 	driver := newChainedOAuth2GitLabDriver(fake.server(t))
 
 	rawData, _, ttl, leaseID, err := driver.MintFromSecret(context.Background(), projectTokenSpec(),
-		credential.SecretMaterial{Data: map[string]string{"application_secret": "app-secret-from-store"}})
+		chainedPair("app-123", "app-secret-from-store"))
 	require.NoError(t, err)
 
 	grants, mints := fake.snapshot()
@@ -1291,7 +1309,7 @@ func TestGitLabDriver_OAuth2CacheKeyIsolation(t *testing.T) {
 
 	mintWith := func(secret string) error {
 		_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(),
-			credential.SecretMaterial{Data: map[string]string{"application_secret": secret}})
+			chainedPair("app-123", secret))
 		return err
 	}
 
@@ -1323,7 +1341,7 @@ func TestGitLabDriver_OAuth2ChainedSecretRejectionIsRetryable(t *testing.T) {
 	driver := newChainedOAuth2GitLabDriver(fake.server(t))
 
 	_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(),
-		credential.SecretMaterial{Data: map[string]string{"application_secret": "stale-secret"}})
+		chainedPair("app-123", "stale-secret"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, credential.ErrChainedSecretRejected)
 }
@@ -1360,7 +1378,7 @@ func TestGitLabDriver_OAuth2BearerEvictedOnUnauthorized(t *testing.T) {
 	fake := newGitLabOAuth2Fake("app-secret", "bearer-one")
 	driver := newChainedOAuth2GitLabDriver(fake.server(t))
 
-	material := credential.SecretMaterial{Data: map[string]string{"application_secret": "app-secret"}}
+	material := chainedPair("app-123", "app-secret")
 
 	// First mint: grant succeeds and caches a bearer with a long expiry, but the
 	// upstream refuses it — as it would for a bearer revoked out of band.
@@ -1394,4 +1412,104 @@ func TestGitLabOAuth2CacheKey(t *testing.T) {
 	assert.NotEqual(t, oauth2CacheKey("ab", "c"), oauth2CacheKey("a", "bc"))
 
 	assert.NotContains(t, oauth2CacheKey("app", "secret"), "secret", "the raw secret must not sit in the key")
+}
+
+// --- the client id travels with its secret ---
+
+// TestGitLabDriver_OAuth2_ChainedPairReachesGrant is what carrying the id in the
+// payload is for: the grant presents a client identity that appears in no config at
+// all, so one source and one spec can front many applications.
+func TestGitLabDriver_OAuth2_ChainedPairReachesGrant(t *testing.T) {
+	fake := newGitLabOAuth2Fake("secret-from-store", "bearer-for-store")
+	driver := newChainedOAuth2GitLabDriver(fake.server(t))
+
+	_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(),
+		chainedPair("app-from-store", "secret-from-store"))
+	require.NoError(t, err)
+
+	grants, _ := fake.snapshot()
+	require.Len(t, grants, 1)
+	assert.Equal(t, "secret-from-store", grants[0])
+	assert.Equal(t, []string{"app-from-store"}, fake.grantClientIDs(),
+		"the grant must present the payload's id; the source holds none")
+}
+
+// Two applications over one source and one spec — the arrangement the pair-in-payload
+// design exists to allow. Their bearers must not be shared: the cache key covers both
+// halves, so a differing id alone is enough to separate them.
+func TestGitLabDriver_OAuth2_DistinctClientsDoNotShareABearer(t *testing.T) {
+	fake := newGitLabOAuth2Fake("shared-secret", "bearer-a")
+	driver := newChainedOAuth2GitLabDriver(fake.server(t))
+
+	mintAs := func(appID string) error {
+		_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(),
+			chainedPair(appID, "shared-secret"))
+		return err
+	}
+
+	require.NoError(t, mintAs("app-one"))
+	require.NoError(t, mintAs("app-one"))
+	grants, _ := fake.snapshot()
+	assert.Len(t, grants, 1, "the same pair must reuse the cached bearer")
+
+	require.NoError(t, mintAs("app-two"))
+	assert.Equal(t, []string{"app-one", "app-two"}, fake.grantClientIDs(),
+		"a different application must grant its own bearer even when the secret matches")
+}
+
+// The id has nowhere to fall back to, so a payload without one is a broken payload —
+// caught before any request rather than surfacing as an opaque invalid_client.
+func TestGitLabDriver_OAuth2_PayloadWithoutAnIDFailsBeforeAnyRequest(t *testing.T) {
+	fake := newGitLabOAuth2Fake("secret", "bearer")
+	driver := newChainedOAuth2GitLabDriver(fake.server(t))
+
+	for _, tc := range []struct {
+		name string
+		data map[string]string
+	}{
+		{"id absent", map[string]string{"application_secret": "secret"}},
+		{"id present but empty", map[string]string{"application_secret": "secret", "application_id": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(),
+				credential.SecretMaterial{Data: tc.data})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "no application id in fetched secret material")
+
+			grants, _ := fake.snapshot()
+			assert.Empty(t, grants, "a payload missing the id must not reach the token endpoint")
+		})
+	}
+}
+
+// client_id is accepted as the conventional alternative, mirroring client_secret.
+func TestGitLabDriver_OAuth2_ClientIDIsAConventionalAlternative(t *testing.T) {
+	fake := newGitLabOAuth2Fake("s", "b")
+	driver := newChainedOAuth2GitLabDriver(fake.server(t))
+
+	_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(),
+		credential.SecretMaterial{Data: map[string]string{"client_id": "app-alt", "client_secret": "s"}})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"app-alt"}, fake.grantClientIDs())
+}
+
+// A payload carrying both conventional names is ambiguous, and the order the driver
+// tries them decides which application it authenticates as — so pin it rather than
+// leave a silent grant-as-the-wrong-client available to a reordering.
+func TestGitLabDriver_OAuth2_ConventionalKeyPrecedence(t *testing.T) {
+	fake := newGitLabOAuth2Fake("secret-preferred", "bearer")
+	driver := newChainedOAuth2GitLabDriver(fake.server(t))
+
+	_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(),
+		credential.SecretMaterial{Data: map[string]string{
+			"application_id":     "app-preferred",
+			"client_id":          "app-fallback",
+			"application_secret": "secret-preferred",
+			"client_secret":      "secret-fallback",
+		}})
+	require.NoError(t, err)
+
+	grants, _ := fake.snapshot()
+	assert.Equal(t, []string{"secret-preferred"}, grants, "application_secret precedes client_secret")
+	assert.Equal(t, []string{"app-preferred"}, fake.grantClientIDs(), "application_id precedes client_id")
 }
