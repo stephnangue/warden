@@ -324,6 +324,17 @@ vault_api POST "secret/data/e2e/datadog-keys" \
 vault_api POST "secret/data/e2e/gitlab-pat" \
   '{"data":{"pat":"e2e-gl-chained-not-a-real-pat"}}'
 
+# The same arrangement for a gitlab source authenticating as an OAuth application
+# instead. What is chained here is the whole client credential, which the driver
+# spends on a token grant rather than on the mint itself — so the oauth2 rows prove
+# the chain reached one call earlier than the pat rows do.
+#
+# Both halves, because they authenticate as a pair: a chained oauth2 source is
+# refused an inline application_id precisely so an id cannot name one application
+# while the secret beside it belongs to another.
+vault_api POST "secret/data/e2e/gitlab-app-secret" \
+  '{"data":{"application_id":"e2e-gl-app-id","application_secret":"e2e-gl-app-secret-not-a-real-secret"}}'
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \

@@ -2,9 +2,12 @@ package drivers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -53,6 +56,20 @@ type GitLabDriver struct {
 
 	// Mutex for protecting config updates during rotation
 	configMu sync.Mutex
+}
+
+// gitlabChainedAuth carries the per-mint values fetched via credential chaining.
+//
+// A single value sufficed while only the personal access token was chained. An
+// oauth2 source needs both halves of a client credential, and they have to come
+// from the same place: pairing an application id held in config with a secret from
+// the chain would authenticate as one application using another's secret.
+//
+// nil still means "inline source", and the auth method still lives in config —
+// this carries fetched values only, so it duplicates neither.
+type gitlabChainedAuth struct {
+	secret        string
+	applicationID string // oauth2 only; empty in pat mode, which has no id
 }
 
 // GitLabDriverFactory creates GitLabDriver instances
@@ -105,15 +122,15 @@ func (f *GitLabDriverFactory) ValidateConfig(config map[string]string) error {
 	// Validate credential-chaining fields
 	if err := credential.ValidateSchema(config,
 		credential.StringField("secret_spec").
-			Describe("Source the personal access token from another cred spec via credential chaining instead of storing it inline (personal_access_token then omitted)").
-			Example("gitlab-pat-from-vault"),
+			Describe("Source the credentials that authenticate this source from another cred spec via credential chaining instead of storing them inline; the keys they replace are then omitted — personal_access_token in pat mode, and both application_id and application_secret in oauth2 mode, where the referenced spec supplies the whole client credential").
+			Example("gitlab-pat-from-store"),
 
 		credential.StringField("secret_field").
-			Describe("Which field of the referenced secret_spec's credential holds the personal access token (when its payload has multiple keys)").
+			Describe("Which field of the referenced secret_spec's credential holds that secret (when its payload has multiple keys)").
 			Example("pat"),
 
 		credential.StringField("secret_cache_ttl").
-			Describe("Cache the chained personal access token source-wide for this duration (e.g. 30m); omit to fetch it on every mint").
+			Describe("Cache the chained secret source-wide for this duration (e.g. 30m); omit to fetch it on every mint").
 			Example("30m"),
 	); err != nil {
 		return err
@@ -151,13 +168,25 @@ func (f *GitLabDriverFactory) ValidateConfig(config map[string]string) error {
 				Example("glpat-xxxxx"),
 		)
 	case "oauth2":
-		// The client-credentials flow caches one bearer token per driver under a fixed
-		// key, which is only sound while the application secret is a single
-		// source-level constant. A chained secret can resolve per user, so a cached
-		// bearer minted for one caller would be served to the next. Until that cache is
-		// keyed by the resolved secret, chaining stays PAT-only.
+		// A chained source holds NEITHER half of the client credential. The secret is
+		// excluded for the reason pat mode excludes its token — a source would read as
+		// keyless while storing the very secret chaining removes — and the id follows
+		// it, for a different reason: the two authenticate as a pair. An id kept here
+		// beside a secret fetched from the chain would name one application while
+		// presenting another's secret, which the token endpoint answers with
+		// invalid_client, and which the chained path then reads as a rejected secret
+		// and retries pointlessly.
+		//
+		// Requiring both from the payload also lets one source and one spec serve many
+		// applications, since the pair is resolved per mint rather than pinned to the
+		// source.
 		if chained {
-			return fmt.Errorf("credential chaining (secret_spec) is supported only for auth_method=pat, not oauth2")
+			for _, key := range []string{"application_secret", "application_id"} {
+				if credential.GetString(config, key, "") != "" {
+					return fmt.Errorf("%s must be omitted when secret_spec is set; the referenced spec supplies both halves of the client credential", key)
+				}
+			}
+			return nil
 		}
 		return credential.ValidateSchema(config,
 			credential.StringField("application_id").
@@ -241,12 +270,12 @@ func (d *GitLabDriver) isChained() bool {
 }
 
 // verifyAuth validates the source credentials by calling a simple GitLab API endpoint
-func (d *GitLabDriver) verifyAuth(ctx context.Context, patOverride *string) error {
-	_, _, err := d.doGitLabRequest(ctx, http.MethodGet, "/api/v4/personal_access_tokens/self", nil, patOverride)
+func (d *GitLabDriver) verifyAuth(ctx context.Context, chained *gitlabChainedAuth) error {
+	_, _, err := d.doGitLabRequest(ctx, http.MethodGet, "/api/v4/personal_access_tokens/self", nil, chained)
 	if err != nil {
 		// For OAuth2 mode, try a different endpoint
 		if d.getAuthMethod() == "oauth2" {
-			_, _, err = d.doGitLabRequest(ctx, http.MethodGet, "/api/v4/user", nil, patOverride)
+			_, _, err = d.doGitLabRequest(ctx, http.MethodGet, "/api/v4/user", nil, chained)
 		}
 	}
 	return err
@@ -338,19 +367,23 @@ func (d *GitLabDriver) resolveExpiry(spec *credential.CredSpec) (string, time.Du
 // end together, so dropping the lease removes a revoke call that would have found
 // the token already dead. What is genuinely given up is early revocation on
 // demand, which is not something that happens today.
-func mintLeaseID(tokenType, resourceID, tokenID string, patOverride *string) string {
-	if patOverride != nil {
+func mintLeaseID(tokenType, resourceID, tokenID string, chained *gitlabChainedAuth) string {
+	if chained != nil {
 		return ""
 	}
 	return fmt.Sprintf("%s:%s:%s", tokenType, resourceID, tokenID)
 }
 
 // mintError wraps a failed mint, marking an authentication rejection on the
-// chained path so the minting layer treats a cached token as stale, evicts it and
-// retries once with a fresh fetch. Without this a token rotated at its source
+// chained path so the minting layer treats a cached secret as stale, evicts it and
+// retries once with a fresh fetch. Without this a secret rotated at its source
 // would fail every request until the cache entry aged out on its own.
-func mintError(msg string, err error, status int, patOverride *string) error {
-	if patOverride != nil && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+//
+// In oauth2 mode a stale secret is refused by the token endpoint instead, one call
+// earlier. That path marks the error itself and reaches here with status 0, which
+// falls through the branch below — so the two paths cannot both mark it.
+func mintError(msg string, err error, status int, chained *gitlabChainedAuth) error {
+	if chained != nil && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
 		return fmt.Errorf("gitlab: %s: %w (%w)", msg, credential.ErrChainedSecretRejected, err)
 	}
 	return fmt.Errorf("%s: %w", msg, err)
@@ -367,45 +400,76 @@ func (d *GitLabDriver) MintCredential(ctx context.Context, spec *credential.Cred
 	return d.mint(ctx, spec, nil)
 }
 
-// MintFromSecret mints a token using a personal access token fetched via
-// credential chaining, rather than one stored in source config.
+// MintFromSecret mints a token using the source secret fetched via credential
+// chaining, rather than one stored in source config. Which secret that is depends
+// on the auth method: a personal access token in pat mode, the OAuth application
+// secret in oauth2 mode.
 func (d *GitLabDriver) MintFromSecret(ctx context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	// Config could have drifted to oauth2 after creation, where validation rejects
-	// chaining. The fetched material is a personal access token and means nothing to
-	// the client-credentials flow, so stop rather than authenticate with it.
-	if d.getAuthMethod() != "pat" {
-		return nil, nil, 0, "", fmt.Errorf("gitlab: credential chaining requires auth_method=pat, got %q", d.getAuthMethod())
+	secret := material.Secret()
+	var applicationID string
+
+	// Each method names its secret differently, so the conventional keys and the
+	// guidance in the error differ. In both, fall back to a conventional key ONLY
+	// when no field was resolved: a field that resolved to empty is a misconfigured
+	// secret_field — say so, rather than silently authenticating with some other
+	// value from the payload.
+	switch d.getAuthMethod() {
+	case "pat":
+		if secret == "" && material.Field == "" {
+			if secret = material.Data["personal_access_token"]; secret == "" {
+				secret = material.Data["pat"]
+			}
+		}
+		if secret == "" {
+			if material.Field != "" {
+				return nil, nil, 0, "", fmt.Errorf("gitlab: secret_field %q is empty or absent in the fetched secret material", material.Field)
+			}
+			return nil, nil, 0, "", fmt.Errorf("gitlab: no personal access token in fetched secret material (set secret_field, or store it under 'personal_access_token')")
+		}
+	case "oauth2":
+		if secret == "" && material.Field == "" {
+			if secret = material.Data["application_secret"]; secret == "" {
+				secret = material.Data["client_secret"]
+			}
+		}
+		if secret == "" {
+			if material.Field != "" {
+				return nil, nil, 0, "", fmt.Errorf("gitlab: secret_field %q is empty or absent in the fetched secret material", material.Field)
+			}
+			return nil, nil, 0, "", fmt.Errorf("gitlab: no application secret in fetched secret material (set secret_field, or store it under 'application_secret')")
+		}
+
+		// The id travels with its secret. secret_field names the secret alone, so the
+		// id is read by convention — and there is nowhere to fall back to, since a
+		// chained source is refused an inline one. Absent and empty are the same
+		// failure for that reason.
+		applicationID = material.Data["application_id"]
+		if applicationID == "" {
+			applicationID = material.Data["client_id"]
+		}
+		if applicationID == "" {
+			return nil, nil, 0, "", fmt.Errorf("gitlab: no application id in fetched secret material (store it under 'application_id' alongside the secret)")
+		}
+	default:
+		// auth_method is validated to one of the two above, so reaching here means
+		// config drifted after creation. The material's meaning is defined by the
+		// method, so with an unknown method there is no safe way to use it.
+		return nil, nil, 0, "", fmt.Errorf("gitlab: credential chaining supports auth_method=pat or oauth2, got %q", d.getAuthMethod())
 	}
 
-	pat := material.Secret()
-	// Fall back to a conventional key ONLY when no field was resolved. A field that
-	// resolved to empty is a misconfigured secret_field — say so, rather than
-	// silently authenticating with some other value from the payload.
-	if pat == "" && material.Field == "" {
-		if pat = material.Data["personal_access_token"]; pat == "" {
-			pat = material.Data["pat"]
-		}
-	}
-	if pat == "" {
-		if material.Field != "" {
-			return nil, nil, 0, "", fmt.Errorf("gitlab: secret_field %q is empty or absent in the fetched secret material", material.Field)
-		}
-		return nil, nil, 0, "", fmt.Errorf("gitlab: no personal access token in fetched secret material (set secret_field, or store it under 'personal_access_token')")
-	}
-
-	return d.mint(ctx, spec, &pat)
+	return d.mint(ctx, spec, &gitlabChainedAuth{secret: secret, applicationID: applicationID})
 }
 
-// mint dispatches on the spec's mint_method. patOverride is nil for an inline
+// mint dispatches on the spec's mint_method. chained is nil for an inline
 // source and set for a chained one.
-func (d *GitLabDriver) mint(ctx context.Context, spec *credential.CredSpec, patOverride *string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+func (d *GitLabDriver) mint(ctx context.Context, spec *credential.CredSpec, chained *gitlabChainedAuth) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 
 	switch mintMethod {
 	case "project_access_token":
-		return d.mintProjectAccessToken(ctx, spec, patOverride)
+		return d.mintProjectAccessToken(ctx, spec, chained)
 	case "group_access_token":
-		return d.mintGroupAccessToken(ctx, spec, patOverride)
+		return d.mintGroupAccessToken(ctx, spec, chained)
 	default:
 		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for GitLab driver; use 'project_access_token' or 'group_access_token'", mintMethod)
 	}
@@ -413,9 +477,9 @@ func (d *GitLabDriver) mint(ctx context.Context, spec *credential.CredSpec, patO
 
 // mintProjectAccessToken creates a project access token via the GitLab API.
 //
-// patOverride carries the token fetched via credential chaining (nil for an inline
-// source). A chained mint is also leaseless: see mintLeaseID.
-func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credential.CredSpec, patOverride *string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+// chained carries the source credentials fetched via credential chaining (nil for
+// an inline source). A chained mint is also leaseless: see mintLeaseID.
+func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credential.CredSpec, chained *gitlabChainedAuth) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	projectID := credential.GetString(spec.Config, "project_id", "")
 	tokenName := credential.GetString(spec.Config, "token_name", "warden-minted")
 	scopes := credential.GetString(spec.Config, "scopes", "api")
@@ -436,9 +500,9 @@ func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credent
 	}
 
 	path := fmt.Sprintf("/api/v4/projects/%s/access_tokens", url.PathEscape(projectID))
-	respBody, status, err := d.doGitLabRequest(ctx, http.MethodPost, path, bodyBytes, patOverride)
+	respBody, status, err := d.doGitLabRequest(ctx, http.MethodPost, path, bodyBytes, chained)
 	if err != nil {
-		return nil, nil, 0, "", mintError("failed to create project access token", err, status, patOverride)
+		return nil, nil, 0, "", mintError("failed to create project access token", err, status, chained)
 	}
 
 	var result struct {
@@ -457,7 +521,7 @@ func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credent
 	expiresAt, ttl = grantedExpiry(time.Now(), expiresAt, ttl, result.ExpiresAt)
 
 	tokenIDStr := strconv.Itoa(result.ID)
-	leaseID := mintLeaseID("project_access_token", projectID, tokenIDStr, patOverride)
+	leaseID := mintLeaseID("project_access_token", projectID, tokenIDStr, chained)
 
 	rawData := map[string]interface{}{
 		"access_token": result.Token,
@@ -479,9 +543,9 @@ func (d *GitLabDriver) mintProjectAccessToken(ctx context.Context, spec *credent
 
 // mintGroupAccessToken creates a group access token via the GitLab API.
 //
-// patOverride carries the token fetched via credential chaining (nil for an inline
-// source). A chained mint is also leaseless: see mintLeaseID.
-func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credential.CredSpec, patOverride *string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+// chained carries the source credentials fetched via credential chaining (nil for
+// an inline source). A chained mint is also leaseless: see mintLeaseID.
+func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credential.CredSpec, chained *gitlabChainedAuth) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	groupID := credential.GetString(spec.Config, "group_id", "")
 	tokenName := credential.GetString(spec.Config, "token_name", "warden-minted")
 	scopes := credential.GetString(spec.Config, "scopes", "api")
@@ -502,9 +566,9 @@ func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credentia
 	}
 
 	path := fmt.Sprintf("/api/v4/groups/%s/access_tokens", url.PathEscape(groupID))
-	respBody, status, err := d.doGitLabRequest(ctx, http.MethodPost, path, bodyBytes, patOverride)
+	respBody, status, err := d.doGitLabRequest(ctx, http.MethodPost, path, bodyBytes, chained)
 	if err != nil {
-		return nil, nil, 0, "", mintError("failed to create group access token", err, status, patOverride)
+		return nil, nil, 0, "", mintError("failed to create group access token", err, status, chained)
 	}
 
 	var result struct {
@@ -523,7 +587,7 @@ func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credentia
 	expiresAt, ttl = grantedExpiry(time.Now(), expiresAt, ttl, result.ExpiresAt)
 
 	tokenIDStr := strconv.Itoa(result.ID)
-	leaseID := mintLeaseID("group_access_token", groupID, tokenIDStr, patOverride)
+	leaseID := mintLeaseID("group_access_token", groupID, tokenIDStr, chained)
 
 	rawData := map[string]interface{}{
 		"access_token": result.Token,
@@ -788,15 +852,19 @@ func (d *GitLabDriver) CleanupRotation(_ context.Context, cleanupConfig map[stri
 
 // doGitLabRequest executes an HTTP request to the GitLab API with authentication.
 //
-// patOverride supplies the token for a single request instead of reading it from
-// source config, which is how a chained mint passes the token fetched from its
-// referenced spec without touching shared driver state. Nil means "use the inline
-// token", the behaviour for every non-chained call site.
+// chained supplies the source credentials for a single request instead of reading
+// them from source config, which is how a chained mint passes what it fetched from
+// its referenced spec without touching shared driver state. Nil means "use the
+// inline credentials", the behaviour for every non-chained call site.
+//
+// What it carries depends on the auth method: in pat mode a token that authenticates
+// the request directly, in oauth2 mode the application id and secret the request's
+// bearer is granted from.
 //
 // The response status is returned alongside the body because the retry helper
 // reports failures as an opaque message; a caller that must distinguish an
 // authentication rejection from any other error has no other way to see it.
-func (d *GitLabDriver) doGitLabRequest(ctx context.Context, method, path string, body []byte, patOverride *string) ([]byte, int, error) {
+func (d *GitLabDriver) doGitLabRequest(ctx context.Context, method, path string, body []byte, chained *gitlabChainedAuth) ([]byte, int, error) {
 	apiURL := d.getGitLabAddress() + path
 
 	// Prepare headers
@@ -806,19 +874,21 @@ func (d *GitLabDriver) doGitLabRequest(ctx context.Context, method, path string,
 	}
 
 	// Set authentication based on auth method
+	var bearerKey string
 	switch d.getAuthMethod() {
 	case "pat":
-		if patOverride != nil {
-			headers["PRIVATE-TOKEN"] = *patOverride
+		if chained != nil {
+			headers["PRIVATE-TOKEN"] = chained.secret
 		} else {
 			headers["PRIVATE-TOKEN"] = d.getPAT()
 		}
 	case "oauth2":
-		token, err := d.getOAuth2Token(ctx)
+		token, key, err := d.getOAuth2Token(ctx, chained)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to set auth: %w", err)
 		}
 		headers["Authorization"] = "Bearer " + token
+		bearerKey = key
 	}
 
 	// Configure retry behavior (only retry on rate limiting)
@@ -838,64 +908,118 @@ func (d *GitLabDriver) doGitLabRequest(ctx context.Context, method, path string,
 	}
 
 	respBody, status, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+
+	// A 401 means the bearer itself was refused — revoked, or granted from a secret
+	// that has since been rotated. Left cached it would fail every call until it
+	// expired on its own; dropping it makes the next call run a fresh grant. A 403 is
+	// deliberately excluded: it means the authenticated application lacks the
+	// permission, which granting the same bearer again cannot change.
+	if bearerKey != "" && status == http.StatusUnauthorized {
+		d.tokenCache.Delete(bearerKey)
+	}
+
 	if err != nil && d.logger != nil {
 		d.logger.Warn("GitLab API request failed", logger.String("error", err.Error()))
 	}
 	return respBody, status, err
 }
 
-// getOAuth2Token returns a cached or fresh OAuth2 access token
-func (d *GitLabDriver) getOAuth2Token(ctx context.Context) (string, error) {
-	const cacheKey = "oauth2_token"
+// oauth2CacheKey keys a cached bearer by the credentials it was granted from, so a
+// bearer is only ever served to a caller whose credentials resolve to the same pair.
+//
+// The client-credentials grant takes no caller-specific input, which is what once
+// made a single fixed key per driver correct. Credential chaining breaks that: the
+// application secret is resolved per mint and can differ between callers, so a
+// fixed key would hand one caller's bearer to the next.
+//
+// The inputs are hashed rather than used raw — a map key outlives the request in
+// memory and surfaces in dumps and test output — and length-prefixed so no two
+// pairs can collide by concatenating differently.
+//
+// SHA-256 rather than a password KDF, deliberately: this derives a cache key, not a
+// stored verifier. No digest is kept, nothing is ever compared against one, and the
+// result never leaves this process. The slowness a KDF buys is protection against
+// guessing a low-entropy human password from a stolen digest — here the input is a
+// high-entropy machine credential, and anything able to read this key can already
+// read the secret it was derived from, so that slowness would cost every lookup and
+// protect nothing.
+func oauth2CacheKey(applicationID, clientSecret string) string {
+	h := sha256.New()
+	for _, field := range []string{applicationID, clientSecret} {
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(len(field)))
+		h.Write(length[:])
+		h.Write([]byte(field))
+	}
+	return "oauth2:" + hex.EncodeToString(h.Sum(nil))
+}
+
+// isClientSecretRejection reports whether a token-endpoint error means the client
+// credentials were refused: an explicit invalid_client code, or — when the body
+// carried no code to read — the statuses this driver already treats as an
+// authentication rejection elsewhere (see mintError).
+func isClientSecretRejection(err error) bool {
+	var endpointErr *tokenEndpointError
+	if !errors.As(err, &endpointErr) {
+		return false
+	}
+	if endpointErr.code != "" {
+		return endpointErr.code == "invalid_client"
+	}
+	return endpointErr.status == http.StatusUnauthorized || endpointErr.status == http.StatusForbidden
+}
+
+// getOAuth2Token returns a cached or freshly granted OAuth2 access token, along
+// with the cache key holding it so the caller can evict that entry if the upstream
+// later refuses the bearer.
+//
+// chained, when non-nil, supplies BOTH halves of the client credential in place of
+// source config. Never one from each: a chained source holds neither half — config
+// validation refuses both — so an id read from config there would be empty, and one
+// mixed in from a source that still had it would name a different application than
+// the secret belongs to.
+func (d *GitLabDriver) getOAuth2Token(ctx context.Context, chained *gitlabChainedAuth) (string, string, error) {
+	applicationID := credential.GetString(d.credSource.Config, "application_id", "")
+	applicationSecret := credential.GetString(d.credSource.Config, "application_secret", "")
+	if chained != nil {
+		applicationID = chained.applicationID
+		applicationSecret = chained.secret
+	}
+	cacheKey := oauth2CacheKey(applicationID, applicationSecret)
 
 	// Check cache (with 30s refresh buffer)
 	if token, _, ok := d.tokenCache.Get(cacheKey, 30*time.Second); ok {
-		return token, nil
+		return token, cacheKey, nil
 	}
 
-	// Acquire new token via client credentials flow
-	applicationID := credential.GetString(d.credSource.Config, "application_id", "")
-	applicationSecret := credential.GetString(d.credSource.Config, "application_secret", "")
-
-	tokenURL := d.getGitLabAddress() + "/oauth/token"
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {applicationID},
 		"client_secret": {applicationSecret},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	tokenResp, err := postOAuthTokenForm(ctx, d.httpClient, d.getGitLabAddress()+"/oauth/token", form, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to create OAuth2 token request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := d.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("OAuth2 token request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, gitlabMaxResponseBodySize))
-	if err != nil {
-		return "", fmt.Errorf("failed to read OAuth2 token response: %w", err)
+		// A refused secret on the chained path means the chained material may be
+		// stale — rotated wherever it is held — so mark it and let the minting layer
+		// evict its copy and retry once with a fresh fetch. There is nothing to evict
+		// here: the grant only runs on a cache miss.
+		if chained != nil && isClientSecretRejection(err) {
+			return "", "", fmt.Errorf("gitlab: OAuth2 token endpoint rejected the chained application secret: %w (%w)", credential.ErrChainedSecretRejected, err)
+		}
+		return "", "", fmt.Errorf("OAuth2 token request failed: %w", err)
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("OAuth2 token request failed with status %d: %s", resp.StatusCode, string(respBody))
+	if tokenResp.AccessToken == "" {
+		return "", "", fmt.Errorf("OAuth2 token response contained no access_token")
 	}
 
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
-	}
-	if err := json.Unmarshal(respBody, &tokenResp); err != nil {
-		return "", fmt.Errorf("failed to parse OAuth2 token response: %w", err)
+	// Without expires_in there is no lifetime to cache against, and an entry written
+	// with a zero expiry is one Get always refuses. Grant per call instead.
+	if tokenResp.ExpiresIn > 0 {
+		expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+		d.tokenCache.Set(cacheKey, tokenResp.AccessToken, expiresAt)
 	}
 
-	// Cache the token
-	expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
-	d.tokenCache.Set(cacheKey, tokenResp.AccessToken, expiresAt)
-
-	return tokenResp.AccessToken, nil
+	return tokenResp.AccessToken, cacheKey, nil
 }

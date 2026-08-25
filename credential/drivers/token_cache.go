@@ -52,16 +52,41 @@ func (tc *TokenCache) Get(key string, refreshBuffer time.Duration) (string, time
 	return entry.Token, entry.ExpiresAt, true
 }
 
-// Set stores a token in the cache with its expiry time
+// Set stores a token in the cache with its expiry time.
+//
+// Entries Get would already refuse — expired, or from a superseded generation —
+// are swept first. A caller may key entries by a fingerprint of the credentials
+// that minted them, in which case a retired credential's entry is never read
+// again and would otherwise sit in the map for the process lifetime. Set runs
+// once per token acquisition, so the sweep stays off the read path.
 func (tc *TokenCache) Set(key string, token string, expiresAt time.Time) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
+
+	now := time.Now()
+	for k, entry := range tc.cache {
+		if entry.Generation != tc.generation || now.After(entry.ExpiresAt) {
+			delete(tc.cache, k)
+		}
+	}
 
 	tc.cache[key] = &TokenCacheEntry{
 		Token:      token,
 		ExpiresAt:  expiresAt,
 		Generation: tc.generation,
 	}
+}
+
+// Delete removes a single cached token.
+//
+// Callers use this when the upstream has refused a token that has not yet
+// expired: without it the cache keeps serving the dead token until its expiry,
+// failing every request in between.
+func (tc *TokenCache) Delete(key string) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+
+	delete(tc.cache, key)
 }
 
 // InvalidateGeneration bumps the generation counter, effectively invalidating

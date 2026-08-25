@@ -994,7 +994,7 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 			case credential.SourceTypeTokenExchange:
 				return logical.ErrBadRequestf("for a token_exchange source, set secret_spec on the source (client authentication is a source concern), not on the spec")
 			case credential.SourceTypeGitLab:
-				return logical.ErrBadRequestf("for a gitlab source, set secret_spec on the source (the personal access token authenticates the source), not on the spec")
+				return logical.ErrBadRequestf("for a gitlab source, set secret_spec on the source (the chained secret — a personal access token, or an OAuth application secret — authenticates the source), not on the spec")
 			}
 		}
 		// A chained consumer's identity normally flows through the referenced secret-spec,
