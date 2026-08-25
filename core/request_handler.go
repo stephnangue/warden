@@ -1350,6 +1350,35 @@ func projectAssertionMetadata(md map[string]string, keys []string) (map[string]s
 	return projected, string(encoded), nil
 }
 
+// projectAgentClaims builds the primary principal's {{agent.<claim>}} template map
+// for a subject source that mints no assertion, and so has no projection to borrow.
+//
+// It mirrors what buildAssertionSetup composes for the warden_identity path — the
+// allow-listed metadata plus an authoritative "sub" — so one spec templates the same
+// way whichever source it uses. Absent keys are skipped rather than rejected, matching
+// projectAssertionMetadata: a claim that is named but missing fails at template time in
+// the driver, and only when a path actually references it.
+func projectAgentClaims(te *logical.TokenEntry, keys []string) (map[string]string, error) {
+	projected, _, err := projectAssertionMetadata(te.Metadata, keys)
+	if err != nil {
+		return nil, err
+	}
+	return agentTemplateClaims(projected, te.PrincipalID), nil
+}
+
+// agentTemplateClaims composes the {{agent.<claim>}} map from an allow-listed
+// metadata projection. Both subject sources compose through here so they cannot
+// drift apart. The identity sub is authoritative and set last: a metadata key
+// literally named "sub" still reaches the assertion, but never the template.
+func agentTemplateClaims(projected map[string]string, principalID string) map[string]string {
+	claims := make(map[string]string, len(projected)+1)
+	for k, v := range projected {
+		claims[k] = v
+	}
+	claims["sub"] = principalID
+	return claims
+}
+
 // projectUserClaims selects the operator-allowlisted keys from the secondary
 // (user) principal's login-derived metadata for the nested warden_user assertion
 // claim and for per-user secret_path templating. Unlike projectAssertionMetadata it
@@ -1447,6 +1476,15 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 			return nil, fmt.Errorf("spec %q requires an inbound JWT subject token but the request was not JWT-authenticated", specName)
 		}
 		inputs.SubjectToken = req.ClientToken
+		// No assertion is minted here, so nothing has projected the agent's claims
+		// yet — do it for templating alone. Read the token entry rather than
+		// re-parsing the JWT: the entry is the auth mount's already-verified view,
+		// and a second parse could disagree with what authenticated the request.
+		agentClaims, err := projectAgentClaims(te, credential.AssertionMetadataKeys(spec.Config))
+		if err != nil {
+			return nil, fmt.Errorf("spec %q: %w", specName, err)
+		}
+		inputs.AgentClaims = agentClaims
 	case credential.SourceUserIdentity:
 		// Forward the secondary (user) principal's own validated credential as the
 		// RFC 8693 subject_token — the standard "agent acting for a user" delegation.
@@ -1473,6 +1511,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// request (e.g. kv2_read's secret_path) — the same projection embedded in the
 		// assertion's warden_user claim. Nil unless the spec set assertion_user_claims.
 		inputs.UserClaims = setup.userClaims
+		inputs.AgentClaims = setup.agentClaims
 	default:
 		// SpecRequestsExchange already excluded "none"/absent; any other value
 		// (including a persisted, now-retired "header") fails closed at mint.
@@ -1504,6 +1543,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		inputs.ActorCacheIdentity = setup.cacheIdentity
 		inputs.ResolveActorToken = setup.resolve
 		inputs.UserClaims = setup.userClaims
+		inputs.AgentClaims = setup.agentClaims
 	case credential.SourceNone, "":
 		// No actor requested: drop any default type so Validate's pairing holds.
 		inputs.ActorTokenType = ""
@@ -1533,6 +1573,13 @@ type assertionSetup struct {
 	// template a per-user path from them. Nil when the spec sets no
 	// assertion_user_claims.
 	userClaims map[string]string
+	// agentClaims is the primary principal's template map: the projected
+	// assertion_metadata_claims plus "sub" (the raw principal). Every value is
+	// already embedded in the assertion — warden_metadata and warden_sub — and
+	// already inside cacheIdentity, via mdFingerprint and wardenSubject
+	// respectively, so templating from it discloses nothing the assertion does not
+	// and needs no cache dimension of its own. Never nil: "sub" is unconditional.
+	agentClaims map[string]string
 }
 
 // buildAssertionSetup validates the OIDC issuer is ready and derives the
@@ -1595,6 +1642,11 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	if err != nil {
 		return nil, fmt.Errorf("spec %q: %w", specName, err)
 	}
+
+	// The same projection serves the assertion claim and {{agent.<claim>}}
+	// templating, so a template resolves exactly the value a downstream policy can
+	// bind — the property the user side states below for warden_user.
+	agentClaims := agentTemplateClaims(projected, te.PrincipalID)
 
 	// Project the secondary (user) principal into the nested warden_user claim, but
 	// only when the spec opts into disclosure via assertion_user_claims — like
@@ -1661,6 +1713,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	return &assertionSetup{
 		cacheIdentity: cacheIdentity,
 		userClaims:    userClaims,
+		agentClaims:   agentClaims,
 		resolve: func(ctx context.Context) (string, error) {
 			return issuer.MintIdentityAssertion(ctx, te, AssertionClaims{
 				Audience:   audience,

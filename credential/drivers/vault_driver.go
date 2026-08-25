@@ -356,9 +356,10 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 
 	switch mintMethod {
 	case "static_aws", "static_apikey", "kv2_read":
-		// Non-federation path carries no user context; a templated secret_path here
-		// fails closed in resolveSecretPath (no claims to satisfy {{user.…}}).
-		return d.fetchStaticKVSecret(ctx, d.vault, spec, nil)
+		// Non-federation path carries neither principal's claims; a templated
+		// secret_path here fails closed in resolveSecretPath (nothing to satisfy
+		// {{user.…}} or {{agent.…}} with).
+		return d.fetchStaticKVSecret(ctx, d.vault, spec, nil, nil)
 	case "dynamic_aws":
 		return d.fetchDynamicAWSCreds(ctx, d.vault, spec)
 	case "dynamic_gcp":
@@ -368,9 +369,10 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	case "vault_token":
 		return d.fetchDynamicVaultToken(ctx, d.vault, spec)
 	case "oauth2":
-		// Non-federation path carries no user context; a templated credential_name here
-		// fails closed in resolveUserTemplate (no claims to satisfy {{user.…}}).
-		return d.fetchOAuth2Creds(ctx, d.vault, spec, nil)
+		// Non-federation path carries neither principal's claims; a templated
+		// credential_name here fails closed in resolveClaimTemplate (nothing to
+		// satisfy {{user.…}} or {{agent.…}} with).
+		return d.fetchOAuth2Creds(ctx, d.vault, spec, nil, nil)
 	default:
 		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'kv2_read', 'dynamic_aws', 'dynamic_gcp', 'dynamic_ibm', 'vault_token', 'oauth2'", mintMethod)
 	}
@@ -449,7 +451,7 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	)
 	switch mintMethod {
 	case "static_aws", "static_apikey", "kv2_read":
-		rawData, metadata, leaseTTL, _, err = d.fetchStaticKVSecret(ctx, client, spec, inputs.UserClaims)
+		rawData, metadata, leaseTTL, _, err = d.fetchStaticKVSecret(ctx, client, spec, inputs.UserClaims, inputs.AgentClaims)
 		// A static read holds no lease that depends on the login token — best-effort
 		// revoke it so a transient session is not left behind.
 		defer d.revokeLoginToken(loginAuth.Accessor, client)
@@ -460,7 +462,7 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	case "dynamic_ibm":
 		rawData, metadata, leaseTTL, _, err = d.fetchDynamicIBMCreds(ctx, client, spec)
 	case "oauth2":
-		rawData, metadata, leaseTTL, _, err = d.fetchOAuth2Creds(ctx, client, spec, inputs.UserClaims)
+		rawData, metadata, leaseTTL, _, err = d.fetchOAuth2Creds(ctx, client, spec, inputs.UserClaims, inputs.AgentClaims)
 	default:
 		return nil, nil, 0, "", fmt.Errorf("vault: mint_method %q is not supported over auth_method=%s (supported: vault_token, static_aws, static_apikey, kv2_read, dynamic_aws, dynamic_gcp, dynamic_ibm, oauth2)", mintMethod, vaultAuthMethodOIDCFederation)
 	}
@@ -556,63 +558,111 @@ func (d *VaultDriver) revokeLoginToken(accessor string, client *api.Client) {
 	}
 }
 
-// userClaimTemplate matches a {{user.<claim>}} token in secret_path. The claim
-// name is a conservative identifier (letters, digits, '_', '.', '-').
-var userClaimTemplate = regexp.MustCompile(`\{\{user\.([A-Za-z0-9_.-]+)\}\}`)
+// claimTemplate matches a {{user.<claim>}} or {{agent.<claim>}} token in a request
+// path. The claim name is a conservative identifier (letters, digits, '_', '.', '-').
+//
+// One expression rather than one per principal: every rule that follows a
+// substitution — the value allow-list, the traversal check, the leftover-fragment
+// check — is the same whichever principal supplied the value, and a single pass makes
+// a path mixing both namespaces order-independent.
+var claimTemplate = regexp.MustCompile(`\{\{(user|agent)\.([A-Za-z0-9_.-]+)\}\}`)
 
-// userClaimValuePattern is the strict allow-list a substituted claim value must
+// claimTemplatePrefixes are the literal openings claimTemplate can match. Both the
+// fast path and the leftover check scan for them, so a malformed token (a missing
+// brace, an empty claim name) is refused rather than sent as literal path bytes.
+var claimTemplatePrefixes = []string{"{{user.", "{{agent."}
+
+// claimValuePattern is the strict allow-list a substituted claim value must
 // match before it can be placed into a KV path segment. It excludes '/' (which
 // would let one value span segments) and every other separator. '.' is allowed
 // (e.g. first.last), so a value or adjacent values could still compose a "."/".."
 // segment — that is caught after substitution by the segment check below, not here.
-var userClaimValuePattern = regexp.MustCompile(`^[A-Za-z0-9._@-]+$`)
+var claimValuePattern = regexp.MustCompile(`^[A-Za-z0-9._@-]+$`)
 
 // resolveSecretPath returns the KV secret path for a kv2_read, substituting any
-// {{user.<claim>}} token from the projected per-user claims. See resolveUserTemplate
-// for the fail-closed rules.
-func resolveSecretPath(rawPath string, userClaims map[string]string) (string, error) {
-	return resolveUserTemplate(rawPath, userClaims, "secret_path")
+// {{user.<claim>}} or {{agent.<claim>}} token from the projected claims. See
+// resolveClaimTemplate for the fail-closed rules.
+func resolveSecretPath(rawPath string, userClaims, agentClaims map[string]string) (string, error) {
+	return resolveClaimTemplate(rawPath, userClaims, agentClaims, "secret_path")
 }
 
-// resolveUserTemplate substitutes any {{user.<claim>}} token in raw from the projected
-// per-user claims, for a Vault request path segment (a KV secret_path, an OAuth engine
-// credential_name, …). A value with no such token is returned verbatim (byte-identical to
-// the pre-templating behaviour). It FAILS CLOSED when a referenced claim is absent (project
-// it via assertion_user_claims), when a value is empty or not in the strict allow-list, or
-// when the RESOLVED value contains a "." / ".." segment or a leftover template fragment. The
-// last check is the real boundary: the Vault API client runs path.Clean on the request path,
-// so a claim value of "." (which collapses its segment) or two adjacent tokens composing
-// ".." would otherwise silently retarget the request at a shared/parent path — the per-user
-// value must deny instead. field names the config key for error messages.
-func resolveUserTemplate(raw string, userClaims map[string]string, field string) (string, error) {
-	if !strings.Contains(raw, "{{user.") {
+// containsClaimTemplate reports whether raw opens either namespace's token.
+func containsClaimTemplate(raw string) bool {
+	for _, prefix := range claimTemplatePrefixes {
+		if strings.Contains(raw, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveClaimTemplate substitutes any {{user.<claim>}} or {{agent.<claim>}} token in
+// raw from the projected claims of the principal each names, for a Vault request path
+// segment (a KV secret_path, an OAuth engine credential_name, …). A value with no such
+// token is returned verbatim (byte-identical to the pre-templating behaviour). It FAILS
+// CLOSED when a referenced claim is absent, when a value is empty or not in the strict
+// allow-list, or when the RESOLVED value contains a "." / ".." segment or a leftover
+// template fragment. The last check is the real boundary: the Vault API client runs
+// path.Clean on the request path, so a claim value of "." (which collapses its segment)
+// or two adjacent tokens composing ".." would otherwise silently retarget the request at
+// a shared/parent path — the per-principal value must deny instead. field names the
+// config key for error messages.
+func resolveClaimTemplate(raw string, userClaims, agentClaims map[string]string, field string) (string, error) {
+	if !containsClaimTemplate(raw) {
 		return raw, nil
 	}
 	// Deliberately NOT an ErrUserRequired case, however tempting: an empty claim
-	// map does not mean the request lacked a user. Claims are projected only when
-	// the spec sets assertion_user_claims, and when it does, core has already
-	// rejected a user-less request before the driver runs — and a present user
+	// map does not mean the request lacked a principal. Claims are projected only
+	// when the spec opts in, and when it does, core has already rejected a
+	// principal-less request before the driver runs — and a present principal
 	// always yields at least "sub". So reaching here with no claims means the
 	// spec structurally cannot project any, which no amount of authenticating
 	// will change. Returning a 401 challenge would send the caller into an OAuth
-	// loop it cannot escape while hiding the real fix from the operator.
+	// loop it cannot escape while hiding the real fix from the operator. That
+	// holds doubly for the agent, which is present on every request.
 	var subErr error
-	resolved := userClaimTemplate.ReplaceAllStringFunc(raw, func(match string) string {
-		claim := userClaimTemplate.FindStringSubmatch(match)[1]
-		v, ok := userClaims[claim]
+	resolved := claimTemplate.ReplaceAllStringFunc(raw, func(match string) string {
+		groups := claimTemplate.FindStringSubmatch(match)
+		principal, claim := groups[1], groups[2]
+
+		claims, fix := userClaims, "list it in assertion_user_claims, which requires subject_token_source=warden_identity"
+		if principal == "agent" {
+			claims = agentClaims
+			switch {
+			case len(agentClaims) == 0:
+				// Nothing was projected at all, so the subject source is the fault,
+				// not the list — and for "sub", which needs no listing, it is the
+				// only possible fault. Sending an operator to the allow-list here
+				// would have them add an entry that changes nothing.
+				fix = "the agent's claims are projected only when subject_token_source is agent_identity or warden_identity"
+			case claim == "sub":
+				// Projection ran and still produced no sub. It is written
+				// unconditionally from the principal, so this is unreachable
+				// short of a construction bug — say that rather than blame config.
+				fix = "the agent's principal is always projected, so this indicates an internal error rather than a configuration one"
+			default:
+				// Projection ran without this claim. Listing it is necessary but
+				// may not be sufficient: an absent metadata key is skipped rather
+				// than rejected, so the login may simply not carry it.
+				fix = "list it in assertion_metadata_claims, and check the agent's login provides it"
+			}
+		}
+
+		v, ok := claims[claim]
 		if !ok {
-			// The user IS present; this claim was simply never projected. Note
-			// that assertion_user_claims only applies to a warden_identity
-			// subject — pairing {{user.…}} with subject_token_source=user_identity
-			// cannot populate claims at all, which is the likelier mistake.
-			subErr = fmt.Errorf("%s references {{user.%s}} but that claim is absent from the user's projected claims "+
-				"(list it in assertion_user_claims, which requires subject_token_source=warden_identity)", field, claim)
+			// The principal IS present; this claim was simply never projected. For
+			// the user, note that assertion_user_claims only applies to a
+			// warden_identity subject — pairing {{user.…}} with
+			// subject_token_source=user_identity cannot populate claims at all,
+			// which is the likelier mistake.
+			subErr = fmt.Errorf("%s references {{%s.%s}} but that claim is absent from the %s's projected claims (%s)",
+				field, principal, claim, principal, fix)
 			return ""
 		}
 		// The value becomes path bytes: a single non-empty allow-listed token that
 		// cannot span segments (no '/'). Dot-only / traversal segments it might
 		// compose are rejected after substitution.
-		if v == "" || !userClaimValuePattern.MatchString(v) {
+		if v == "" || !claimValuePattern.MatchString(v) {
 			subErr = fmt.Errorf("%s claim %q has a value rejected by the allow-list", field, claim)
 			return ""
 		}
@@ -623,7 +673,7 @@ func resolveUserTemplate(raw string, userClaims map[string]string, field string)
 	}
 	// A leftover fragment means a malformed token (e.g. a missing brace or an empty
 	// claim name) — fail closed rather than use a literal "{{user.…" value.
-	if strings.Contains(resolved, "{{user.") {
+	if containsClaimTemplate(resolved) {
 		return "", fmt.Errorf("%s has an unresolved template fragment after substitution", field)
 	}
 	// Reject any "." or ".." segment the substituted value(s) may have composed —
@@ -636,10 +686,11 @@ func resolveUserTemplate(raw string, userClaims map[string]string, field string)
 	return resolved, nil
 }
 
-// fetchStaticKVSecret fetches static secrets from Vault KV v2. userClaims, when
-// non-nil (a per-user chained mint), supplies the values for any {{user.<claim>}}
-// token in secret_path so the read is scoped to one user's secret.
-func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, client *api.Client, spec *credential.CredSpec, userClaims map[string]string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+// fetchStaticKVSecret fetches static secrets from Vault KV v2. userClaims and
+// agentClaims, when non-nil, supply the values for any {{user.<claim>}} or
+// {{agent.<claim>}} token in secret_path, so the read is scoped to one
+// principal's secret.
+func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, client *api.Client, spec *credential.CredSpec, userClaims, agentClaims map[string]string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	kv2Mount := credential.GetString(spec.Config, "kv2_mount", "")
 	rawPath := credential.GetString(spec.Config, "secret_path", "")
 
@@ -647,7 +698,7 @@ func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, client *api.Clien
 		return nil, nil, 0, "", fmt.Errorf("kv2_mount and secret_path are required for static KV credentials")
 	}
 
-	secretPath, err := resolveSecretPath(rawPath, userClaims)
+	secretPath, err := resolveSecretPath(rawPath, userClaims, agentClaims)
 	if err != nil {
 		return nil, nil, 0, "", err
 	}
@@ -825,7 +876,7 @@ func (d *VaultDriver) fetchDynamicGCPCreds(ctx context.Context, client *api.Clie
 
 // fetchOAuth2Creds fetches OAuth2 credentials from an OpenBao/Vault OAuth2 secret engine
 // (compatible with openbao-plugin-secrets-oauthapp)
-func (d *VaultDriver) fetchOAuth2Creds(ctx context.Context, client *api.Client, spec *credential.CredSpec, userClaims map[string]string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+func (d *VaultDriver) fetchOAuth2Creds(ctx context.Context, client *api.Client, spec *credential.CredSpec, userClaims, agentClaims map[string]string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	oauth2Mount := credential.GetString(spec.Config, "oauth2_mount", "")
 	rawCredentialName := credential.GetString(spec.Config, "credential_name", "")
 
@@ -833,11 +884,11 @@ func (d *VaultDriver) fetchOAuth2Creds(ctx context.Context, client *api.Client, 
 		return nil, nil, 0, "", fmt.Errorf("oauth2_mount and credential_name are required for oauth2 credentials")
 	}
 
-	// credential_name may template {{user.<claim>}} (per-user OAuth engine credentials): the
-	// federation login resolves it to the caller's own credential, scoped by a templated
-	// OpenBao policy. userClaims is nil on the non-federation path, where a templated name
-	// fails closed (no claims to satisfy it).
-	credentialName, err := resolveUserTemplate(rawCredentialName, userClaims, "credential_name")
+	// credential_name may template {{user.<claim>}} (per-user OAuth engine credentials) or
+	// {{agent.<claim>}} (per-agent ones): the federation login resolves it to the caller's
+	// own credential, scoped by a templated policy on the store side. Both maps are nil on
+	// the non-federation path, where a templated name fails closed.
+	credentialName, err := resolveClaimTemplate(rawCredentialName, userClaims, agentClaims, "credential_name")
 	if err != nil {
 		return nil, nil, 0, "", err
 	}
