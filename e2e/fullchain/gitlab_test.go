@@ -833,3 +833,223 @@ func TestGitLab_OAuth2StaleCachedSecretIsEvictedAndRetried(t *testing.T) {
 		t.Errorf("grant presented %q, want the freshly fetched application secret %q", got, gitlabRotatedAppSecret)
 	}
 }
+
+// --- per-tenant OAuth applications via {{agent.sub}} ---
+
+const (
+	// One templated path, one client credential per agent beneath it. Each is a
+	// DIFFERENT OAuth application: id and secret both vary, which is the shape the
+	// pair-in-payload design exists to allow and a shared application_id could not
+	// express.
+	gitlabPerAgentKeyPath = "e2e/fc-gl-agent-clients"
+
+	gitlabPerAgentSecretSpec = "fc-gl-per-agent-client"
+	gitlabPerAgentSource     = "fc-gl-per-agent-src"
+	gitlabPerAgentSpec       = "fc-gl-per-agent-cred"
+	gitlabPerAgentRole       = "fc-gl-per-agent"
+
+	gitlabAgentA = "e2e-agent"
+	gitlabAgentB = "e2e-pipeline"
+)
+
+// gitlabClient is one tenant's OAuth application, as the stand-in sees it.
+type gitlabClient struct {
+	id, secret, bearer, minted string
+}
+
+// serveGitLabPerAgentOAuth2 grants a bearer only to a client whose id AND secret
+// match one it knows, and answers the mint with a token tied to that same client.
+//
+// Matching on the pair is the point: a build that took the id from one place and the
+// secret from another would present a mismatched pair here and be refused, and one
+// that shared a bearer across tenants would mint the wrong tenant's token.
+func serveGitLabPerAgentOAuth2(t *testing.T, clients []gitlabClient) {
+	t.Helper()
+
+	byBearer := make(map[string]gitlabClient, len(clients))
+	for _, c := range clients {
+		byBearer["Bearer "+c.bearer] = c
+	}
+
+	upstream.SetHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == gitlabTokenPath:
+			if err := r.ParseForm(); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			for _, c := range clients {
+				if r.Form.Get("client_id") == c.id && r.Form.Get("client_secret") == c.secret {
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"access_token":"` + c.bearer + `","token_type":"bearer","expires_in":7200}`))
+					return
+				}
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid_client"}`))
+
+		case r.Method == http.MethodPost && r.URL.Path == gitlabMintPath:
+			c, ok := byBearer[r.Header.Get("Authorization")]
+			if !ok {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"message":"401 Unauthorized"}`))
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":99,"token":"` + c.minted + `"}`))
+
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	})
+}
+
+// setupGitLabPerAgentChain parks one client credential per agent under the templated
+// path, then builds a single source and a single spec that both agents mint through.
+func setupGitLabPerAgentChain(t *testing.T, gitlabEnv h.ProviderEnv, clientByAgent map[string]gitlabClient) {
+	t.Helper()
+
+	mustWrite := func(method, path, body, what string) {
+		t.Helper()
+		switch status, resp := h.APIRequest(t, method, path, leaderPort, body); status {
+		case 200, 201, 204:
+		default:
+			t.Fatalf("%s (status %d): %s", what, status, resp)
+		}
+	}
+
+	clear := func() {
+		h.APIRequest(t, "DELETE", "auth/jwt/role/"+gitlabPerAgentRole, leaderPort, "")
+		h.APIRequest(t, "DELETE", "sys/cred/specs/"+gitlabPerAgentSpec, leaderPort, "")
+		h.APIRequest(t, "DELETE", "sys/cred/sources/"+gitlabPerAgentSource, leaderPort, "")
+		h.APIRequest(t, "DELETE", "sys/cred/specs/"+gitlabPerAgentSecretSpec, leaderPort, "")
+	}
+	clear()
+	t.Cleanup(clear)
+
+	for agent, c := range clientByAgent {
+		path := "secret/data/" + gitlabPerAgentKeyPath + "/" + agent
+		body := `{"data":{"application_id":"` + c.id + `","application_secret":"` + c.secret + `"}}`
+		if status, resp := h.VaultDirectRequest(t, "POST", path, body); status >= 400 {
+			t.Fatalf("parking %s's client credential (status %d): %s", agent, status, resp)
+		}
+	}
+
+	// The templated referenced spec. {{agent.sub}} needs no assertion_metadata_claims
+	// entry, and the principal it resolves is already inside the cache identity.
+	mustWrite("POST", "sys/cred/specs/"+gitlabPerAgentSecretSpec, `{
+		"type":"key_value","source":"vault-fed-e2e","config":{
+			"mint_method":"kv2_read","kv2_mount":"secret",
+			"secret_path":"`+gitlabPerAgentKeyPath+`/{{agent.sub}}",
+			"subject_token_source":"agent_identity"}}`,
+		"create the templated client-credential spec")
+
+	// One source for every tenant — the consolidation the payload-carried id buys.
+	// It holds neither half, so nothing about it names an application.
+	mustWrite("POST", "sys/cred/sources/"+gitlabPerAgentSource, fmt.Sprintf(`{
+		"type":"gitlab","config":{
+			"gitlab_address":%q,"auth_method":"oauth2",
+			"secret_spec":%q,"secret_field":"application_secret"}}`,
+		upstream.URL, gitlabPerAgentSecretSpec),
+		"create the per-agent gitlab source")
+
+	mustWrite("POST", "sys/cred/specs/"+gitlabPerAgentSpec, `{
+		"type":"gitlab_access_token","source":"`+gitlabPerAgentSource+`","config":{
+			"mint_method":"project_access_token","project_id":"`+gitlabProjectID+`",
+			"token_name":"warden-e2e-per-agent","scopes":"api","access_level":"30","ttl":"24h"}}`,
+		"create the per-agent consuming spec")
+
+	mustWrite("POST", "auth/jwt/role/"+gitlabPerAgentRole, `{
+		"token_policies":["`+gitlabEnv.Policy()+`"],"cred_spec_name":"`+gitlabPerAgentSpec+`",
+		"user_claim":"sub","token_ttl":3600}`,
+		"create the shared per-agent role")
+}
+
+// TestGitLab_PerAgentOAuthClient is the row that needs both halves of this work: a
+// path templated on the agent, and a client credential carried whole in the payload.
+//
+// Its counterpart in github_test.go proves per-agent divergence through an App JWT
+// signature. This proves it one hop further back, through a client-credentials
+// grant: the id and secret both vary, so two agents authenticate as two different
+// OAuth applications, and the pair has to arrive at the token endpoint intact — the
+// source names no application at all, which is what lets it front both.
+//
+// What it does not pin is the id's part in the bearer cache key. These tenants
+// differ in their secret too, so a key that ignored the id would still separate
+// them; only a shared-secret pair isolates that dimension, which the driver's unit
+// tests do. Here the grant assertions are the proof, and the injected tokens show
+// the bearers were not crossed.
+//
+// Two agents, one role, one spec, one source.
+func TestGitLab_PerAgentOAuthClient(t *testing.T) {
+	ensureEnv(t)
+	gitlabEnv := setupGitLabEnv(t)
+	useJWTAgentLeg(t, gitlabEnv)
+
+	clientA := gitlabClient{
+		id: "gl-app-for-agent-a", secret: "gl-secret-a-not-real",
+		bearer: "gl-bearer-a", minted: "glpat-e2e-minted-for-agent-a",
+	}
+	clientB := gitlabClient{
+		id: "gl-app-for-agent-b", secret: "gl-secret-b-not-real",
+		bearer: "gl-bearer-b", minted: "glpat-e2e-minted-for-agent-b",
+	}
+
+	serveGitLabPerAgentOAuth2(t, []gitlabClient{clientA, clientB})
+	setupGitLabPerAgentChain(t, gitlabEnv, map[string]gitlabClient{
+		gitlabAgentA: clientA,
+		gitlabAgentB: clientB,
+	})
+	upstream.Reset()
+
+	mintAs := func(clientID, secret string) {
+		t.Helper()
+		status, body, _ := h.ChainRequest(t, leaderPort, gitlabEnv, h.ChainOpts{
+			AgentToken: h.GetJWT(t, clientID, secret),
+			Role:       gitlabPerAgentRole,
+		})
+		if status != 200 {
+			t.Fatalf("%s got status %d: %s", clientID, status, body)
+		}
+	}
+
+	// A first, warming every cache on the way, so B has something to be wrongly
+	// served if any of them collapses the two.
+	mintAs(gitlabAgentA, "agent-secret")
+	mintAs(gitlabAgentB, "pipeline-secret")
+
+	// Each agent's grant presented its own application — the pair reaching the token
+	// endpoint together is what the source cannot supply and the payload must.
+	grants := gitlabRequestsTo(gitlabTokenPath)
+	if len(grants) != 2 {
+		t.Fatalf("upstream received %d token grants, want one per agent", len(grants))
+	}
+	for i, want := range []gitlabClient{clientA, clientB} {
+		form := gitlabGrantForm(t, grants[i])
+		if got := form.Get("client_id"); got != want.id {
+			t.Errorf("grant %d presented client_id %q, want %q", i, got, want.id)
+		}
+		if got := form.Get("client_secret"); got != want.secret {
+			t.Errorf("grant %d presented client_secret %q, want %q", i, got, want.secret)
+		}
+	}
+
+	// And each proxied request carried the token minted under its own agent's
+	// application. B receiving A's would mean a bearer was shared across tenants.
+	var injected []string
+	for _, req := range upstream.Requests() {
+		if req.Method == http.MethodPost && (req.Path == gitlabTokenPath || req.Path == gitlabMintPath) {
+			continue
+		}
+		if got := req.Header.Get("Authorization"); got != "" {
+			injected = append(injected, got)
+		}
+	}
+	want := []string{"Bearer " + clientA.minted, "Bearer " + clientB.minted}
+	if len(injected) != 2 || injected[0] != want[0] || injected[1] != want[1] {
+		t.Errorf("proxied requests carried %v, want %v", injected, want)
+	}
+}
