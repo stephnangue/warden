@@ -1303,3 +1303,80 @@ func TestManager_IssueCredential_PerUserCacheDimension(t *testing.T) {
 
 	assert.Equal(t, int32(3), factory.driver.mintCalls.Load(), "three distinct cache keys → three mints")
 }
+
+// TestChainedSecretCacheKey_AgentClaimsDimension pins the invariant the templating
+// feature depends on: anything that can select which secret is fetched has to key
+// the entry that answers for it.
+//
+// The fingerprint alone does not cover the agent's claims. Where the subject is the
+// agent's raw token it hashes the token bytes, but the claims are derived from those
+// bytes AND the auth role's mapping — so one token under two roles yields two claim
+// sets behind one fingerprint. Without the ":a:" dimension those two share an entry
+// and one is served the other's secret.
+func TestChainedSecretCacheKey_AgentClaimsDimension(t *testing.T) {
+	caller := Caller{TokenID: "agent-token"}
+	base := func(agentClaims map[string]string) *ExchangeInputs {
+		return &ExchangeInputs{
+			SubjectToken:     "the.same.jwt",
+			SubjectTokenType: TokenTypeJWT,
+			AgentClaims:      agentClaims,
+		}
+	}
+
+	t.Run("same token, different resolved claims, different keys", func(t *testing.T) {
+		viaRoleA := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "build-runner"}))
+		viaRoleB := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "deploy-bot"}))
+
+		require.NotEmpty(t, viaRoleA)
+		assert.NotEqual(t, viaRoleA, viaRoleB,
+			"one token presented under two roles resolves two principals; sharing a key would serve one the other's secret")
+	})
+
+	t.Run("same claims give the same key", func(t *testing.T) {
+		first := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "a", "team": "platform"}))
+		second := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"team": "platform", "sub": "a"}))
+		assert.Equal(t, first, second, "map iteration order must not change the key")
+	})
+
+	t.Run("a metadata claim changing moves the key", func(t *testing.T) {
+		before := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "a", "team": "platform"}))
+		after := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "a", "team": "infra"}))
+		assert.NotEqual(t, before, after)
+	})
+
+	t.Run("no agent claims keeps the key byte-identical", func(t *testing.T) {
+		withNone := chainedSecretCacheKey("ns", "ref", caller, base(nil))
+		legacy := "chainsecret:ns:ref:" + base(nil).Fingerprint()
+		assert.Equal(t, legacy, withNone,
+			"a spec not carrying agent claims must not have its cache key perturbed")
+	})
+}
+
+// The agent and user dimensions are independent: a per-user chained fetch under two
+// agents must still separate by agent.
+func TestChainedSecretCacheKey_AgentAndUserDimensionsCompose(t *testing.T) {
+	caller := Caller{TokenID: "agent-token", User: &UserContext{TokenID: "user-token"}}
+	key := func(sub string) string {
+		return chainedSecretCacheKey("ns", "ref", caller, &ExchangeInputs{
+			SubjectToken:     "the.same.jwt",
+			SubjectTokenType: TokenTypeJWT,
+			AgentClaims:      map[string]string{"sub": sub},
+			UserClaims:       map[string]string{"sub": "alice"},
+		})
+	}
+	a, b := key("build-runner"), key("deploy-bot")
+	require.Contains(t, a, ":u:user-token")
+	assert.NotEqual(t, a, b)
+}
+
+// claimsFingerprint must not let two different maps collide by running their bytes
+// together differently.
+func TestClaimsFingerprint_NoConcatenationCollisions(t *testing.T) {
+	assert.NotEqual(t,
+		claimsFingerprint(map[string]string{"ab": "c"}),
+		claimsFingerprint(map[string]string{"a": "bc"}))
+	assert.NotEqual(t,
+		claimsFingerprint(map[string]string{"a": "b", "c": "d"}),
+		claimsFingerprint(map[string]string{"a": "bcd"}))
+	assert.NotContains(t, claimsFingerprint(map[string]string{"sub": "SECRETVALUE"}), "SECRETVALUE")
+}

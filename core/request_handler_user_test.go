@@ -294,3 +294,70 @@ func TestProjectUserClaims(t *testing.T) {
 		assert.Contains(t, err.Error(), "exceed")
 	})
 }
+
+// TestProjectAgentClaims covers the primary principal's template map. Unlike the
+// user projection it skips absent keys rather than denying — it shares
+// projectAssertionMetadata's semantics so the two subject sources compose the same
+// map, and a named-but-missing claim fails at template time in the driver instead,
+// and only when a path actually references it.
+func TestProjectAgentClaims(t *testing.T) {
+	te := &logical.TokenEntry{
+		PrincipalID: "build-runner",
+		Metadata:    map[string]string{"team": "platform", "env": "prod"},
+	}
+
+	t.Run("sub needs no allow-list", func(t *testing.T) {
+		got, err := projectAgentClaims(te, nil)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"sub": "build-runner"}, got)
+	})
+	t.Run("projects allow-listed metadata alongside sub", func(t *testing.T) {
+		got, err := projectAgentClaims(te, []string{"team"})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"sub": "build-runner", "team": "platform"}, got)
+	})
+	t.Run("unlisted metadata is not templatable", func(t *testing.T) {
+		got, err := projectAgentClaims(te, []string{"team"})
+		require.NoError(t, err)
+		assert.NotContains(t, got, "env",
+			"a claim outside the allow-list is outside mdFingerprint, so templating it would escape the cache key")
+	})
+	t.Run("absent key is skipped, not denied", func(t *testing.T) {
+		got, err := projectAgentClaims(te, []string{"team", "missing"})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"sub": "build-runner", "team": "platform"}, got)
+	})
+	t.Run("identity sub wins over a metadata key named sub", func(t *testing.T) {
+		shadowed := &logical.TokenEntry{
+			PrincipalID: "build-runner",
+			Metadata:    map[string]string{"sub": "not-the-principal"},
+		}
+		got, err := projectAgentClaims(shadowed, []string{"sub"})
+		require.NoError(t, err)
+		assert.Equal(t, "build-runner", got["sub"],
+			"{{agent.sub}} must mean the principal, which is what the assertion's warden_sub carries")
+	})
+	t.Run("oversized projection fails closed", func(t *testing.T) {
+		big := &logical.TokenEntry{
+			PrincipalID: "a",
+			Metadata:    map[string]string{"k": strings.Repeat("x", maxAssertionMetadataBytes)},
+		}
+		_, err := projectAgentClaims(big, []string{"k"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceed")
+	})
+}
+
+// The two subject sources must compose the same map from the same inputs, or one
+// spec would template differently depending on how its subject travels.
+func TestAgentTemplateClaims_ComposesIdenticallyForBothSources(t *testing.T) {
+	projected := map[string]string{"team": "platform"}
+
+	fromAssertion := agentTemplateClaims(projected, "build-runner")
+
+	te := &logical.TokenEntry{PrincipalID: "build-runner", Metadata: map[string]string{"team": "platform"}}
+	fromForwardedToken, err := projectAgentClaims(te, []string{"team"})
+	require.NoError(t, err)
+
+	assert.Equal(t, fromAssertion, fromForwardedToken)
+}

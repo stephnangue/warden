@@ -2,8 +2,12 @@ package credential
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -705,13 +709,51 @@ func chainedSecretCacheKey(nsID, secretRef string, caller Caller, inputsB *Excha
 	if inputsB != nil {
 		fp = inputsB.Fingerprint()
 	}
+
+	// The agent's claims can select which secret is fetched — a templated path
+	// resolves from them — so they must key the entry that answers for it. The
+	// fingerprint alone does not cover them: where the subject is the agent's raw
+	// token, it hashes the token bytes, while the claims are derived from those
+	// bytes AND the auth role's own mapping (which claim names the principal, which
+	// become metadata). One token presented under two roles therefore resolves two
+	// sets of claims behind one fingerprint, and editing a role's mapping changes
+	// them under a fingerprint that does not move at all.
+	agent := ""
+	if inputsB != nil && len(inputsB.AgentClaims) > 0 {
+		agent = ":a:" + claimsFingerprint(inputsB.AgentClaims)
+	}
+
 	if inputsB != nil && len(inputsB.UserClaims) > 0 {
 		if caller.User == nil {
 			return ""
 		}
-		return "chainsecret:" + nsID + ":" + secretRef + ":" + fp + ":u:" + caller.User.TokenID
+		return "chainsecret:" + nsID + ":" + secretRef + ":" + fp + agent + ":u:" + caller.User.TokenID
 	}
-	return "chainsecret:" + nsID + ":" + secretRef + ":" + fp
+	return "chainsecret:" + nsID + ":" + secretRef + ":" + fp + agent
+}
+
+// claimsFingerprint hashes a claim map stably: keys sorted so map order cannot
+// change the result, and each field length-prefixed so no two maps can collide by
+// running their bytes together differently.
+func claimsFingerprint(claims map[string]string) string {
+	keys := make([]string, 0, len(claims))
+	for k := range claims {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	h := sha256.New()
+	writeField := func(s string) {
+		var lenBuf [4]byte
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s)))
+		h.Write(lenBuf[:])
+		h.Write([]byte(s))
+	}
+	for _, k := range keys {
+		writeField(k)
+		writeField(claims[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // copyStringMap returns a shallow copy so a cached secret's Data map is never shared

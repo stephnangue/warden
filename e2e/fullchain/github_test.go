@@ -409,3 +409,204 @@ func TestGitHub_ChainedAppKeyMintsWithStoreHeldKey(t *testing.T) {
 		}
 	}
 }
+
+// --- per-agent keys via {{agent.sub}} ---
+
+const (
+	// A templated path: each agent reads its own key. The Warden-side spec holds
+	// one string; which secret it resolves to is decided by who is asking.
+	githubPerAgentKeyPath = "e2e/fc-gh-agent-keys"
+
+	githubPerAgentSecretSpec = "fc-gh-per-agent-key"
+	githubPerAgentSpec       = "fc-gh-per-agent-cred"
+
+	// One role, both agents. A role pins the spec its callers mint, and nothing
+	// about it enters a cache key — so sharing it removes the last variable that
+	// could be mistaken for what isolates the two agents.
+	githubPerAgentRole = "fc-gh-per-agent"
+
+	// The two agents. Both are seeded Hydra clients; the second doubles as the
+	// fullchain user principal elsewhere, which is unrelated to its use here.
+	githubAgentA = "e2e-agent"
+	githubAgentB = "e2e-pipeline"
+)
+
+// serveGitHubPerAgentInstallToken answers the installation-token call with a token
+// derived from whichever key signed the assertion. That mapping is what turns the
+// row from "a token came back" into "this agent's own key minted it" — and it is
+// what a cache keyed by anything less than the key would collapse.
+func serveGitHubPerAgentInstallToken(t *testing.T, tokenForKey map[*rsa.PrivateKey]string) {
+	t.Helper()
+	upstream.SetHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.Method == http.MethodPost && r.URL.Path == githubInstallPath {
+			assertion := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			for key, token := range tokenForKey {
+				if assertionSignedBy(assertion, key) {
+					w.WriteHeader(http.StatusCreated)
+					_, _ = w.Write([]byte(`{"token":"` + token +
+						`","expires_at":"` + time.Now().Add(time.Hour).UTC().Format(time.RFC3339) + `"}`))
+					return
+				}
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+}
+
+// setupGitHubPerAgentChain parks one key per agent under the templated path and
+// builds a single consuming spec, reached through a single role, that both agents
+// mint through.
+func setupGitHubPerAgentChain(t *testing.T, env h.ProviderEnv, keyPEMByAgent map[string]string) {
+	t.Helper()
+
+	mustWrite := func(method, path, body, what string) {
+		t.Helper()
+		switch status, resp := h.APIRequest(t, method, path, leaderPort, body); status {
+		case 200, 201, 204:
+		default:
+			t.Fatalf("%s (status %d): %s", what, status, resp)
+		}
+	}
+
+	clear := func() {
+		h.APIRequest(t, "DELETE", "auth/jwt/role/"+githubPerAgentRole, leaderPort, "")
+		h.APIRequest(t, "DELETE", "sys/cred/specs/"+githubPerAgentSpec, leaderPort, "")
+		h.APIRequest(t, "DELETE", "sys/cred/specs/"+githubPerAgentSecretSpec, leaderPort, "")
+	}
+	clear()
+	t.Cleanup(clear)
+
+	for agent, keyPEM := range keyPEMByAgent {
+		body, err := json.Marshal(map[string]any{"data": map[string]string{"private_key": keyPEM}})
+		if err != nil {
+			t.Fatalf("encoding %s's App private key: %v", agent, err)
+		}
+		path := "secret/data/" + githubPerAgentKeyPath + "/" + agent
+		if status, resp := h.VaultDirectRequest(t, "POST", path, string(body)); status >= 400 {
+			t.Fatalf("parking %s's App private key (status %d): %s", agent, status, resp)
+		}
+	}
+
+	// The templated referenced spec. {{agent.sub}} needs no assertion_metadata_claims
+	// entry — the principal is not an opt-in disclosure, and it is already inside the
+	// cache identity, so nothing can be served across agents.
+	mustWrite("POST", "sys/cred/specs/"+githubPerAgentSecretSpec, `{
+		"type":"key_value","source":"vault-fed-e2e","config":{
+			"mint_method":"kv2_read","kv2_mount":"secret",
+			"secret_path":"`+githubPerAgentKeyPath+`/{{agent.sub}}",
+			"subject_token_source":"agent_identity"}}`,
+		"create the templated secret spec")
+
+	// secret_cache_ttl belongs to the consumer, which is what the minting layer reads
+	// it from. It routes the fetch through the chained-secret cache rather than
+	// around it, so the row exercises that branch at all — without it the cache is
+	// never consulted here.
+	//
+	// It does not by itself prove the cache key separates two agents: these two
+	// present different tokens, so their fingerprints differ whatever else the key
+	// carries. What the key must ALSO cover is the claims a templated path resolves
+	// from, which are a function of the auth role's mapping and not of the token
+	// alone — two roles over one token would otherwise share an entry. That is
+	// pinned where it can be constructed, in the manager's own tests.
+	mustWrite("POST", "sys/cred/specs/"+githubPerAgentSpec, `{
+		"type":"github_token","source":"`+env.Source()+`","config":{
+			"mint_method":"app","app_id":"`+githubAppID+`",
+			"installation_id":"`+githubInstallationID+`",
+			"secret_spec":"`+githubPerAgentSecretSpec+`","secret_field":"private_key",
+			"secret_cache_ttl":"5m"}}`,
+		"create the per-agent consuming spec")
+
+	// The role binds no subject, so any agent the issuer vouches for reaches this
+	// one spec — which is the arrangement the row is about.
+	mustWrite("POST", "auth/jwt/role/"+githubPerAgentRole, `{
+		"token_policies":["`+env.Policy()+`"],"cred_spec_name":"`+githubPerAgentSpec+`",
+		"user_claim":"sub","token_ttl":3600}`,
+		"create the shared per-agent role")
+}
+
+// TestGitHub_PerAgentChainedKey is what {{agent.sub}} exists for: one spec, holding
+// one path, resolving a different key for each agent that mints through it.
+//
+// Two things are proved at once, and neither is reachable without the other. That
+// the template resolved per agent at all — agent B's assertion is signed by B's
+// key, which lives at a path A's request never touched. And that nothing between
+// the two collapsed them: agent A mints first, warming every cache on the way, so a
+// cache keyed by less than the key material would hand B agent A's token.
+//
+// A JWT agent leg rather than a certificate, because agent_identity forwards the
+// agent's own inbound JWT as the exchange subject and fails closed otherwise.
+func TestGitHub_PerAgentChainedKey(t *testing.T) {
+	ensureEnv(t)
+
+	keyPEMA, keyA := githubAppKeyPEM(t)
+	keyPEMB, keyB := githubAppKeyPEM(t)
+	const tokenA = "ghs_fc_e2e_for_agent_a_not_a_real_token"
+	const tokenB = "ghs_fc_e2e_for_agent_b_not_a_real_token"
+
+	// The mount's own source and spec still need an inline key to be created with;
+	// the per-agent chain below is what the row actually drives.
+	seedPEM, seedKey := githubAppKeyPEM(t)
+	env, _ := setupGitHubAppEnv(t, seedPEM, seedKey)
+	useJWTAgentLeg(t, env)
+
+	serveGitHubPerAgentInstallToken(t, map[*rsa.PrivateKey]string{keyA: tokenA, keyB: tokenB})
+	setupGitHubPerAgentChain(t, env, map[string]string{
+		githubAgentA: keyPEMA,
+		githubAgentB: keyPEMB,
+	})
+	upstream.Reset()
+
+	// Same role, same spec, same path — only the agent differs.
+	mintAs := func(clientID, secret string) {
+		t.Helper()
+		status, body, _ := h.ChainRequest(t, leaderPort, env, h.ChainOpts{
+			AgentToken: h.GetJWT(t, clientID, secret),
+			Role:       githubPerAgentRole,
+		})
+		if status != 200 {
+			t.Fatalf("%s got status %d: %s", clientID, status, body)
+		}
+	}
+
+	mintAs(githubAgentA, "agent-secret")
+	mintAs(githubAgentB, "pipeline-secret")
+
+	// Each agent's proxied request must carry the token minted from its own key.
+	var injected []string
+	for _, req := range upstream.Requests() {
+		if req.Method == http.MethodPost && req.Path == githubInstallPath {
+			continue
+		}
+		if got := req.Header.Get("Authorization"); got != "" {
+			injected = append(injected, got)
+		}
+	}
+	if len(injected) != 2 {
+		t.Fatalf("expected 2 proxied requests, got %d: %v", len(injected), injected)
+	}
+	if injected[0] != "token "+tokenA {
+		t.Errorf("agent A was injected %q, want the token minted from its own key", injected[0])
+	}
+	if injected[1] != "token "+tokenB {
+		t.Errorf("agent B was injected %q, want the token minted from its own key — "+
+			"receiving agent A's would mean a cache collapsed two agents onto one entry", injected[1])
+	}
+
+	// And each mint really ran: two distinct keys cannot share one installation call.
+	var mints int
+	for _, req := range upstream.Requests() {
+		if req.Method == http.MethodPost && req.Path == githubInstallPath {
+			mints++
+		}
+	}
+	if mints != 2 {
+		t.Errorf("upstream saw %d installation-token mints, want one per agent", mints)
+	}
+}

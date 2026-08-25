@@ -366,9 +366,21 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 			},
 		},
 		{
-			name: "assertion_metadata_claims without warden_identity",
+			// agent_identity mints no assertion, so nothing is projected into one —
+			// but the same list names what {{agent.<claim>}} may template, and that
+			// works on a forwarded agent token too.
+			name: "assertion_metadata_claims with agent_identity",
 			config: map[string]string{
 				ConfigSubjectTokenSource:      SourceAgentIdentity,
+				ConfigAssertionMetadataClaims: "team",
+			},
+		},
+		{
+			// user_identity carries neither job: no assertion is minted, and the
+			// agent's claims are not what a user-subject spec templates on.
+			name: "assertion_metadata_claims with user_identity",
+			config: map[string]string{
+				ConfigSubjectTokenSource:      SourceUserIdentity,
 				ConfigAssertionMetadataClaims: "team",
 			},
 			wantErr: true,

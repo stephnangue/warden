@@ -435,8 +435,15 @@ vault_api POST "auth/jwt/config" \
 
 # Hydra client-credentials tokens carry an empty aud, so the role binds the
 # subject instead — which for those tokens is the client id.
+#
+# A list rather than one subject, because a chained secret fetched with
+# agent_identity federates as the calling agent: a row proving two agents resolve
+# different secrets needs both of them able to log in here. Still a closed list —
+# an unknown client is refused exactly as before. bound_subject is cleared in the
+# same write on purpose: a role write merges, so leaving it set would silently keep
+# the single-subject restriction in force.
 vault_api POST "auth/jwt/role/warden-e2e-fed" \
-  '{"role_type":"jwt","bound_subject":"e2e-agent","user_claim":"sub","bound_issuer":"http://localhost:4444","token_policies":["e2e-secrets-reader"],"token_ttl":"1h"}'
+  '{"role_type":"jwt","bound_subject":"","bound_claims":{"sub":["e2e-agent","e2e-pipeline"]},"user_claim":"sub","bound_issuer":"http://localhost:4444","token_policies":["e2e-secrets-reader"],"token_ttl":"1h"}'
 
 # Verify the federation login works, so a later gateway 401 is not mistaken for
 # a chaining bug.

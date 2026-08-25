@@ -73,11 +73,21 @@ const (
 const ConfigAssertionAudience = "assertion_audience"
 
 // ConfigAssertionMetadataClaims is the spec-config key naming which of the
-// caller's login-derived metadata keys to project into a warden_identity
-// assertion (comma-separated). Absent/empty projects nothing — the assertion
-// crosses a trust boundary to a third-party upstream, so disclosure is opt-in and
-// operator-chosen, never the whole metadata map. Valid only when
-// subject_token_source=warden_identity.
+// caller's login-derived metadata keys to project (comma-separated). Absent/empty
+// projects nothing.
+//
+// It gates two things, which is why it is valid under more than one subject source.
+// Under warden_identity the projection is embedded in the assertion, which crosses
+// a trust boundary to a third-party upstream — so disclosure is opt-in and
+// operator-chosen, never the whole metadata map. On both warden_identity and
+// agent_identity the same list also names which claims a request path may template
+// via {{agent.<claim>}}; there the list is what keeps a templated value inside the
+// cache key, since only the projected set is fingerprinted.
+//
+// The values are the operator's assertion that a claim is fit to select a secret
+// by. Warden verifies them at login and no caller can supply them, but whether a
+// claim is one an agent could influence at its identity provider is a property of
+// that provider, invisible here.
 const ConfigAssertionMetadataClaims = "assertion_metadata_claims"
 
 // AssertionMetadataKeys parses the comma-separated ConfigAssertionMetadataClaims
@@ -246,6 +256,20 @@ type ExchangeInputs struct {
 	// already isolated per user by the ":u:" key dimension); nil for an agent-only
 	// request.
 	UserClaims map[string]string
+
+	// AgentClaims carries the primary (agent) principal's claims so a driver can
+	// scope its request per agent — the same {{agent.<claim>}} templating the user
+	// claims above serve for their own principal. Always carries "sub" (the raw
+	// principal); metadata claims are those the spec allow-listed.
+	//
+	// Not hashed by Fingerprint, for the same reason UserClaims is not, but by a
+	// different mechanism: the agent IS the exchange subject, so every value here is
+	// already a function of what the fingerprint keys on — the raw subject token
+	// under agent_identity, or SubjectCacheIdentity (which folds the same allow-listed
+	// projection) under warden_identity. Anything templatable that fell outside that
+	// coverage could be served across sessions of one principal, which is why the
+	// allow-list and the fingerprinted projection must stay the same set.
+	AgentClaims map[string]string
 }
 
 // Validate performs structural checks only. It does not verify token contents
@@ -385,11 +409,17 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	// their own config) and needs the source, so it runs one layer up in the core
 	// config store, not in this source-agnostic structural validator. It is enforced
 	// again at mint time, defence in depth.
-	// Projecting metadata into the assertion only makes sense when Warden mints it;
-	// on a reused/caller-supplied token Warden does not control the claims.
-	if config[ConfigAssertionMetadataClaims] != "" && !mintsAssertion {
-		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
-			ConfigAssertionMetadataClaims, SourceWardenIdentity)
+	// The key has two jobs, and they permit different subject sources. Projecting
+	// metadata INTO an assertion only makes sense when Warden mints it — on a
+	// reused/caller-supplied token Warden does not control the claims. But the same
+	// list also names which claims may be templated into a request path
+	// ({{agent.<claim>}}), and that holds for a forwarded agent token too: the values
+	// are login-derived and Warden-verified whichever way the subject travels. So
+	// agent_identity is permitted, where it gates templating alone.
+	if config[ConfigAssertionMetadataClaims] != "" &&
+		!mintsAssertion && config[ConfigSubjectTokenSource] != SourceAgentIdentity {
+		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s', or the subject is '%s'",
+			ConfigAssertionMetadataClaims, SourceWardenIdentity, SourceAgentIdentity)
 	}
 	// Projecting user claims into the assertion's warden_user claim (which also
 	// scopes a per-user secret_path) only makes sense when Warden mints the assertion.
