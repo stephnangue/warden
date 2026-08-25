@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -35,10 +38,37 @@ var _ credential.SourceDriver = (*GitHubDriver)(nil)
 var _ credential.SpecVerifier = (*GitHubDriver)(nil)
 var _ credential.ChainedSecretMinter = (*GitHubDriver)(nil)
 
-// appTokenCache holds a cached GitHub App installation token for a specific spec
+// appTokenCache holds a cached GitHub App installation token
 type appTokenCache struct {
 	token     string
 	expiresAt time.Time
+}
+
+// appTokenCacheKey keys a cached installation token by the inputs it was minted
+// from, rather than by the spec that asked for it.
+//
+// The spec name alone was sound only while those inputs were fixed for the life of
+// the spec. Two things break that. A chained private key is resolved per mint and
+// can differ between callers, so the first caller's token would be served to the
+// second without their key ever being exercised — and a key revoked upstream would
+// go on working for whoever shares the spec. And the key or installation can change
+// under an unchanged spec name, with nothing here to notice: unlike sources, a spec
+// update does not rebuild the driver, and this driver has no rotation hook to clear
+// a cache from.
+//
+// Deriving the key from the content instead makes both cases self-correcting — any
+// change of input is simply a different entry. The inputs are hashed, so a private
+// key never sits in a map key, and length-prefixed so no two input sets can collide
+// by concatenating differently.
+func appTokenCacheKey(appID, installationID, keyPEM string) string {
+	h := sha256.New()
+	for _, field := range []string{appID, installationID, keyPEM} {
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(len(field)))
+		h.Write(length[:])
+		h.Write([]byte(field))
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // GitHubDriver mints credentials from GitHub.
@@ -57,7 +87,8 @@ type GitHubDriver struct {
 	logger     *logger.GatedLogger
 	httpClient *http.Client
 
-	// Per-spec App installation token cache (keyed by spec name)
+	// App installation token cache, keyed by appTokenCacheKey over the inputs each
+	// token was minted from
 	appTokens  map[string]*appTokenCache
 	appTokenMu sync.Mutex
 }
@@ -157,7 +188,7 @@ func (d *GitHubDriver) MintCredential(ctx context.Context, spec *credential.Cred
 	}
 	switch mintMethod {
 	case "app":
-		return d.mintAppCredentialWithKey(ctx, spec, credential.GetString(spec.Config, "private_key", ""))
+		return d.mintAppCredentialWithKey(ctx, spec, credential.GetString(spec.Config, "private_key", ""), false)
 	case "pat":
 		return d.mintPATFromToken(credential.GetString(spec.Config, "token", ""))
 	default:
@@ -167,9 +198,13 @@ func (d *GitHubDriver) MintCredential(ctx context.Context, spec *credential.Cred
 
 // MintFromSecret mints a GitHub token from secret material fetched via credential
 // chaining: app mode signs an installation token with the fetched private key; pat
-// mode injects the fetched token. Per-caller authorization was already enforced
-// upstream (the referenced secret-spec was minted as the caller), so the cross-caller
-// app-token cache in mintAppCredentialWithKey remains correct.
+// mode injects the fetched token.
+//
+// Per-caller authorization is enforced before this runs — the referenced spec was
+// minted as the caller, and a caller who may not do that never reaches here. What
+// that does not establish is that the fetched key is the one a cached token was
+// minted from, which is why the cache in mintAppCredentialWithKey keys on the key
+// itself rather than on the spec.
 func (d *GitHubDriver) MintFromSecret(ctx context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	mintMethod, err := githubMintMethod(spec)
 	if err != nil {
@@ -191,7 +226,7 @@ func (d *GitHubDriver) MintFromSecret(ctx context.Context, spec *credential.Cred
 			}
 			return nil, nil, 0, "", fmt.Errorf("github: no private key in fetched secret material (set secret_field, or store it under 'private_key')")
 		}
-		return d.mintAppCredentialWithKey(ctx, spec, keyPEM)
+		return d.mintAppCredentialWithKey(ctx, spec, keyPEM, true)
 	case "pat":
 		token := material.Secret()
 		if token == "" && material.Field == "" {
@@ -210,14 +245,19 @@ func (d *GitHubDriver) MintFromSecret(ctx context.Context, spec *credential.Cred
 }
 
 // mintAppCredentialWithKey mints a GitHub App installation access token from the
-// given private-key PEM (read from spec config for a direct mint, or fetched via
-// credential chaining).
-func (d *GitHubDriver) mintAppCredentialWithKey(ctx context.Context, spec *credential.CredSpec, keyPEM string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+// given private-key PEM. chained says where that PEM came from: spec config for a
+// direct mint, or credential chaining — which decides whether a refusal from the
+// API is worth marking as retryable.
+func (d *GitHubDriver) mintAppCredentialWithKey(ctx context.Context, spec *credential.CredSpec, keyPEM string, chained bool) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	appID := credential.GetString(spec.Config, "app_id", "")
+	installationID := credential.GetString(spec.Config, "installation_id", "")
+	cacheKey := appTokenCacheKey(appID, installationID, keyPEM)
+
 	d.appTokenMu.Lock()
 	defer d.appTokenMu.Unlock()
 
 	// Return cached token if still valid (with 5min buffer)
-	if cached, ok := d.appTokens[spec.Name]; ok && time.Now().Add(5*time.Minute).Before(cached.expiresAt) {
+	if cached, ok := d.appTokens[cacheKey]; ok && time.Now().Add(5*time.Minute).Before(cached.expiresAt) {
 		rawData := map[string]interface{}{
 			"token":      cached.token,
 			"expires_at": cached.expiresAt.Format(time.RFC3339),
@@ -231,17 +271,22 @@ func (d *GitHubDriver) mintAppCredentialWithKey(ctx context.Context, spec *crede
 		return nil, nil, 0, "", fmt.Errorf("failed to parse private key: %w", err)
 	}
 
-	appID := credential.GetString(spec.Config, "app_id", "")
-	installationID := credential.GetString(spec.Config, "installation_id", "")
-
 	// Mint a fresh installation token
-	token, expiresAt, err := d.mintInstallationToken(ctx, key, appID, installationID)
+	token, expiresAt, err := d.mintInstallationToken(ctx, key, appID, installationID, chained)
 	if err != nil {
 		return nil, nil, 0, "", fmt.Errorf("failed to mint installation token: %w", err)
 	}
 
-	// Cache per spec
-	d.appTokens[spec.Name] = &appTokenCache{
+	// Entries keyed by content are never read again once any input changes, so
+	// sweep what a read would already refuse rather than leaving one behind per
+	// rotation. This runs only on a cache miss, off the hit path.
+	for k, entry := range d.appTokens {
+		if time.Now().After(entry.expiresAt) {
+			delete(d.appTokens, k)
+		}
+	}
+
+	d.appTokens[cacheKey] = &appTokenCache{
 		token:     token,
 		expiresAt: expiresAt,
 	}
@@ -279,7 +324,7 @@ func (d *GitHubDriver) mintPATFromToken(token string) (map[string]interface{}, m
 }
 
 // mintInstallationToken creates a new installation access token via the GitHub API
-func (d *GitHubDriver) mintInstallationToken(ctx context.Context, key *rsa.PrivateKey, appID, installationID string) (string, time.Time, error) {
+func (d *GitHubDriver) mintInstallationToken(ctx context.Context, key *rsa.PrivateKey, appID, installationID string, chained bool) (string, time.Time, error) {
 	// Generate JWT for GitHub App authentication
 	jwt, err := generateAppJWT(key, appID)
 	if err != nil {
@@ -310,6 +355,17 @@ func (d *GitHubDriver) mintInstallationToken(ctx context.Context, key *rsa.Priva
 	}
 
 	if resp.StatusCode != http.StatusCreated {
+		// A key rotated where it is held leaves the chain handing over one the app
+		// no longer recognises. Marking that refusal is what lets the minting layer
+		// treat its cached copy as stale, evict it and retry once with a fresh
+		// fetch; unmarked, every request under that spec fails until the entry ages
+		// out on its own. Only the chained path can be retried this way — an inline
+		// key has no fresher copy to fetch — so the caller decides by passing
+		// chained.
+		if chained && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+			return "", time.Time{}, fmt.Errorf("github: installation token request rejected: %w (status %d: %s)",
+				credential.ErrChainedSecretRejected, resp.StatusCode, string(respBody))
+		}
 		return "", time.Time{}, fmt.Errorf("GitHub API returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
