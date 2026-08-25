@@ -60,6 +60,13 @@ type appTokenCache struct {
 // change of input is simply a different entry. The inputs are hashed, so a private
 // key never sits in a map key, and length-prefixed so no two input sets can collide
 // by concatenating differently.
+//
+// SHA-256 rather than a password KDF, deliberately: this derives a cache key, not a
+// stored verifier. No digest is kept, nothing is ever compared against one, and the
+// result never leaves this process. The slowness a KDF buys is protection against
+// guessing a low-entropy human password from a stolen digest — here the input is an
+// RSA private key, and anything able to read this key can already read the key it
+// was derived from, so that slowness would cost every lookup and protect nothing.
 func appTokenCacheKey(appID, installationID, keyPEM string) string {
 	h := sha256.New()
 	for _, field := range []string{appID, installationID, keyPEM} {
