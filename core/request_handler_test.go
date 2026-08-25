@@ -2984,3 +2984,182 @@ func TestResolveExchangeInputs_RetiredSourceFailsClosedAtMint(t *testing.T) {
 		assert.Contains(t, err.Error(), "header")
 	})
 }
+
+// TestResolveExchangeInputs_WardenIdentity_RoleIsolatesCacheIdentity pins the role
+// fragment. The assertion asserts warden_role and a downstream is invited to
+// authorize on it, so two roles can get different answers from the same store while
+// subject, audience, resource and metadata are identical — and the chained-secret
+// cache shares a fetch across an agent's sessions rather than asking again. Without
+// this fragment those two roles are one agent to it.
+func TestResolveExchangeInputs_WardenIdentity_RoleIsolatesCacheIdentity(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "wid-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+	})
+
+	req := requestWith("s.opaque-session", nil)
+	entry := func(role string) *logical.TokenEntry {
+		return &logical.TokenEntry{
+			CredentialSpec: "wid-spec",
+			PrincipalID:    "spiffe://acme/agent/bot",
+			NamespaceID:    "ns1",
+			MountAccessor:  "auth_jwt_1",
+			RoleName:       role,
+		}
+	}
+	identityFor := func(te *logical.TokenEntry) *credential.ExchangeInputs {
+		t.Helper()
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, te)
+		require.NoError(t, err)
+		return inputs
+	}
+
+	readTE, writeTE := entry("reader"), entry("writer")
+	read, write := identityFor(readTE), identityFor(writeTE)
+
+	assert.Equal(t,
+		wardenSubject(readTE)+"\x00"+"https://sts.example/aud"+"\x00role=reader",
+		read.SubjectCacheIdentity)
+	assert.NotEqual(t, read.SubjectCacheIdentity, write.SubjectCacheIdentity,
+		"one principal under two roles must not share a cache identity")
+
+	// The fingerprint is what the caches actually key on, so the isolation has to
+	// survive that far — a fragment the fingerprint ignored would prove nothing.
+	assert.NotEqual(t, read.Fingerprint(), write.Fingerprint())
+
+	// A token carrying no role keeps the pre-fragment bytes. This is the byte
+	// stability the conditional buys, and what lets every older pinned literal in
+	// this file stand unchanged.
+	noRole := entry("")
+	assert.Equal(t,
+		wardenSubject(noRole)+"\x00"+"https://sts.example/aud",
+		identityFor(noRole).SubjectCacheIdentity)
+}
+
+// A role value shaped like another fragment's lead must not be readable as that
+// fragment. Each carries a fixed, mutually non-prefix prefix for exactly this.
+func TestResolveExchangeInputs_WardenIdentity_RoleCannotImpersonateAnotherFragment(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "wid-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+		credential.ConfigAssertionResource:  "https://api.example/db",
+	})
+
+	req := requestWith("s.opaque-session", nil)
+	base := func(role string) *logical.TokenEntry {
+		return &logical.TokenEntry{
+			CredentialSpec: "wid-spec",
+			PrincipalID:    "spiffe://acme/agent/bot",
+			NamespaceID:    "ns1",
+			MountAccessor:  "auth_jwt_1",
+			RoleName:       role,
+		}
+	}
+	identity := func(te *logical.TokenEntry) string {
+		t.Helper()
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, te)
+		require.NoError(t, err)
+		return inputs.SubjectCacheIdentity
+	}
+
+	// Ordering is part of the contract: role precedes the resource fragment.
+	spoof := base("x\x00res=https://api.example/other")
+	assert.Equal(t,
+		wardenSubject(spoof)+"\x00"+"https://sts.example/aud"+
+			"\x00role=x\x00res=https://api.example/other"+
+			"\x00res=https://api.example/db",
+		identity(spoof),
+		"a role carrying another fragment's lead must still sit behind its own prefix")
+
+	assert.NotEqual(t, identity(base("x")), identity(spoof))
+}
+
+// The delegation shape keys the actor on the same identity, so the fragment has to
+// reach it too — the agent whose role varies is the actor there, not the subject.
+func TestResolveExchangeInputs_ActorWardenIdentity_RoleIsolatesCacheIdentity(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	// An actor token requires a token_exchange source, so seed that shape.
+	seedExchangeSpec(t, c, ctx, "deleg-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
+		credential.ConfigActorTokenSource:   credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+	})
+
+	req := requestWith("s.opaque-session", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{}, RawToken: "eyJ.user"}
+
+	actorIdentity := func(role string) string {
+		t.Helper()
+		te := &logical.TokenEntry{
+			CredentialSpec: "deleg-spec",
+			PrincipalID:    "spiffe://acme/agent/bot",
+			NamespaceID:    "ns1",
+			MountAccessor:  "auth_jwt_1",
+			RoleName:       role,
+		}
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, te)
+		require.NoError(t, err)
+		return inputs.ActorCacheIdentity
+	}
+
+	assert.NotEqual(t, actorIdentity("reader"), actorIdentity("writer"),
+		"the actor slot keys on the same identity, so the role must isolate it too")
+}
+
+// TestResolveExchangeInputs_ChainedReferencedSpec_CarriesCallerRole pins the seam
+// the per-role isolation actually depends on.
+//
+// A chained mint resolves the REFERENCED spec's inputs through the caller closure,
+// with a spec name that is not the caller's own. The manager keys the chained-secret
+// cache on whatever identity that returns, and treats it opaquely — so if this
+// resolution ever stopped carrying the live token entry (re-fetching it, or
+// rebuilding one from principal and mount without the role), two roles would collapse
+// to one cached secret again while every other test stayed green: the direct-path
+// tests would still pass, and the manager's own tests build identities by hand.
+func TestResolveExchangeInputs_ChainedReferencedSpec_CarriesCallerRole(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+
+	// The consumer chains; the referenced spec is what mints the assertion.
+	seedSpec(t, c, ctx, "referenced-secret", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+	})
+	seedSpec(t, c, ctx, "consumer", map[string]string{
+		credential.ConfigSecretSpec: "referenced-secret",
+	})
+
+	req := requestWith("s.opaque-session", nil)
+	referencedInputs := func(role string) *credential.ExchangeInputs {
+		t.Helper()
+		te := &logical.TokenEntry{
+			CredentialSpec: "consumer",
+			PrincipalID:    "spiffe://acme/agent/bot",
+			NamespaceID:    "ns1",
+			MountAccessor:  "auth_jwt_1",
+			RoleName:       role,
+		}
+		// Through the caller the mint pipeline actually builds, resolving the
+		// REFERENCED spec rather than the caller's own — the shape the closure
+		// exists for. Calling resolveExchangeInputs directly would bypass the very
+		// seam this pins.
+		inputs, err := c.callerFor(req, te, time.Hour, nil).ResolveInputs(ctx, "referenced-secret")
+		require.NoError(t, err)
+		require.NotNil(t, inputs)
+		return inputs
+	}
+
+	reader, writer := referencedInputs("reader"), referencedInputs("writer")
+
+	// Format-independent: the manager only ever sees the fingerprint, so that is
+	// what has to diverge. Asserting bytes here would restate core's own literals.
+	assert.NotEqual(t, reader.Fingerprint(), writer.Fingerprint(),
+		"a chained fetch must resolve a different identity per caller role")
+	assert.Equal(t, reader.Fingerprint(), referencedInputs("reader").Fingerprint(),
+		"the same role must resolve a stable identity, or the cache could never share")
+}

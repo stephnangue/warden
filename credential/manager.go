@@ -694,7 +694,15 @@ func (m *Manager) invalidateChainedSecret(key string) {
 // chainedSecretCacheKey scopes a cached secret to (namespace, secret_spec, agent
 // identity). inputsB.Fingerprint keys on SubjectCacheIdentity — stable across an agent's
 // sessions — so the store's per-agent authorization is honoured (agent B is never served
-// agent A's fetched secret). When the referenced fetch is user-scoped (the referenced
+// agent A's fetched secret).
+//
+// "Agent identity" has to mean everything the store was shown, since sharing a fetch
+// across sessions means never asking it again. Where an assertion is minted, that is
+// what SubjectCacheIdentity carries: subject, audience, role, resource and the projected
+// metadata — every claim a store may bind. Where the agent's own token is forwarded
+// instead, the store reads that token and the fingerprint hashes its bytes, so the only
+// inputs left to cover are the claims a templated path resolves from, which the agent
+// dimension below carries. When the referenced fetch is user-scoped (the referenced
 // spec sets assertion_user_claims, so inputsB.UserClaims is populated), the user token id
 // is folded in so one user's per-user secret is never served to another; a source-global
 // fetch (no user claims) omits it and is shared across users under the agent. A nil

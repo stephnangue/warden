@@ -620,3 +620,44 @@ func TestChaining_CacheTTLSpecOptOut(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(), "spec-level 0 opts out of source TTL")
 }
+
+// TestChaining_CacheIsolatesPerRole: one principal authenticating under two roles
+// must not share a cached secret, even though everything else about its identity
+// matches.
+//
+// This is the cache that shares a fetch across an agent's sessions rather than
+// asking the store again, so "agent identity" has to mean everything the store was
+// shown. The assertion asserts warden_role and a downstream is invited to authorize
+// on it, so the answer can differ per role — and the second role would otherwise
+// receive a secret fetched under the first's authorization without the store ever
+// being asked. Core folds the role into the cache identity for exactly this; here
+// that shows up as the differing identity the two callers carry.
+func TestChaining_CacheIsolatesPerRole(t *testing.T) {
+	env := newChainingEnv(t)
+	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: map[string]string{}})
+	cfg := map[string]string{ConfigSecretSpec: "exchange-secret", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+
+	ctx := createNamespaceContext()
+
+	// The identities differ only by the role fragment core appends — same subject,
+	// same audience, same everything else.
+	const subject = "wid:ns1:auth_jwt_1:bot\x00https://sts.example/aud"
+	reader := exchangeChainCaller("tokReader", subject+"\x00role=reader", "", nil)
+	writer := exchangeChainCaller("tokWriter", subject+"\x00role=writer", "", nil)
+
+	_, err := env.manager.IssueCredential(ctx, reader, "consumer1", nil)
+	require.NoError(t, err)
+	_, err = env.manager.IssueCredential(ctx, writer, "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.exchangeDriver.mintCalls.Load(),
+		"a second role must fetch its own secret, not inherit the first role's")
+
+	// The same role across sessions still shares — dropping that would trade this
+	// bug for the loss of the cross-session sharing the cache exists to provide.
+	_, err = env.manager.IssueCredential(ctx, exchangeChainCaller("tokReader2", subject+"\x00role=reader", "", nil), "consumer1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.exchangeDriver.mintCalls.Load(),
+		"one role across two sessions must still share its cached secret")
+}

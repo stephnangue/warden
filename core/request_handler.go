@@ -1584,8 +1584,8 @@ type assertionSetup struct {
 
 // buildAssertionSetup validates the OIDC issuer is ready and derives the
 // audience, resource, and projected metadata for a warden_identity assertion of
-// te, returning a stable cache fragment (identity + audience [+ resource]
-// [+ metadata]) and a lazy mint closure. It is source-type agnostic, so the same
+// te, returning a stable cache fragment (identity + audience [+ role]
+// [+ resource] [+ metadata]) and a lazy mint closure. It is source-type agnostic, so the same
 // setup serves a WIF subject (the agent IS the identity) and a delegation actor
 // (the agent acts for the subject-header user). loadSource is passed in so the
 // spec's source is fetched at most once per request across both slots.
@@ -1694,9 +1694,32 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// source config, which can change under a fixed specName) and the projected-
 	// metadata fingerprint. Each fragment is appended only when non-empty, so the
 	// no-resource / no-metadata cache keys stay byte-for-byte unchanged; the
-	// resource fragment is kept before mdFingerprint (marshalled JSON starting with
-	// '{') so the fragments can never be confused.
+	// fragments carry mutually non-prefix leads — "role=", "res=", and the '{' of
+	// the marshalled metadata JSON — so one fragment's start cannot be read as
+	// another's.
+	//
+	// That disambiguates starts, not contents: a value holding a NUL could spell a
+	// later fragment that is itself absent. Nothing can reach it — role names are
+	// restricted to word characters at creation, and audience and resource come from
+	// one spec's config — so the alternative, length-prefixing every fragment, would
+	// buy an unreachable case at the cost of changing every existing key.
+	//
+	// The role is folded in because the assertion asserts it (warden_role) and a
+	// downstream is invited to authorize on it, so the answer it gives can differ
+	// per role while subject, audience, resource and metadata are all identical.
+	// Leaving it out let a caller be served a secret fetched under a role it never
+	// presented — the chained-secret cache shares a fetch across an agent's
+	// sessions by design, and without this fragment two roles are one agent to it.
+	// Appended only when set. Minting needs a principal, not a role, so a role-less
+	// entry can mint — every auth method simply requires a role at login today, which
+	// is what makes the empty case unreachable rather than anything here. Should that
+	// ever change, role-less tokens share one key and assert an empty role, which is
+	// still consistent; and until then the conditional keeps every key that predates
+	// this fragment byte-identical.
 	cacheIdentity := wardenSubject(te) + "\x00" + audience
+	if te.RoleName != "" {
+		cacheIdentity += "\x00role=" + te.RoleName
+	}
 	if resource != "" {
 		cacheIdentity += "\x00res=" + resource
 	}
@@ -1728,6 +1751,27 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 }
 
 // mintCredentialForRequest mints credentials for requests using the credential manager
+// callerFor carries the requesting identity through the mint pipeline so a chained
+// secret-spec (credential chaining) is minted as this same caller.
+//
+// ResolveInputs resolves token-exchange inputs for an arbitrary spec as this caller
+// (nil for non-exchange specs), reused both for the request's own spec and, by the
+// Manager, for any referenced secret-spec. It must resolve from THIS token entry:
+// the identity it derives keys the chained-secret cache, which shares one fetch
+// across an agent's sessions rather than asking the store again, so an entry
+// reconstructed from anything less than the live one — losing the role, say — would
+// hand a caller a secret fetched under an identity it never presented.
+func (c *Core) callerFor(req *logical.Request, te *logical.TokenEntry, tokenTTL time.Duration, userCtx *credential.UserContext) credential.Caller {
+	return credential.Caller{
+		TokenID:  te.ID,
+		TokenTTL: tokenTTL,
+		User:     userCtx,
+		ResolveInputs: func(ctx context.Context, specName string) (*credential.ExchangeInputs, error) {
+			return c.resolveExchangeInputs(ctx, req, te, specName)
+		},
+	}
+}
+
 func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Request, te *logical.TokenEntry) error {
 	if te == nil {
 		return logical.ErrInternal("cannot mint credential since token entry is nil")
@@ -1788,19 +1832,7 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 		userCtx = &credential.UserContext{TokenID: ute.ID, TokenTTL: userTTL}
 	}
 
-	// The caller carries the requesting identity through the mint pipeline so a
-	// chained secret-spec (credential chaining) is minted as this same caller.
-	// ResolveInputs resolves token-exchange inputs for an arbitrary spec as this
-	// caller (nil for non-exchange specs), reused both for the outer spec below and
-	// for any referenced secret-spec by the Manager.
-	caller := credential.Caller{
-		TokenID:  te.ID,
-		TokenTTL: tokenTTL,
-		User:     userCtx,
-		ResolveInputs: func(ctx context.Context, specName string) (*credential.ExchangeInputs, error) {
-			return c.resolveExchangeInputs(ctx, req, te, specName)
-		},
-	}
+	caller := c.callerFor(req, te, tokenTTL, userCtx)
 
 	// Resolve any caller-supplied token-exchange inputs the spec opts into.
 	// Returns nil for non-exchange specs, leaving the mint path unchanged.
