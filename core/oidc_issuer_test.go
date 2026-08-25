@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 
@@ -1082,4 +1083,74 @@ func TestOIDCIssuer_Mint_WardenUserAndSubClaims(t *testing.T) {
 	assert.Equal(t, "alice-raw-sub", wu["sub"])
 	assert.Equal(t, "alice", wu["username"])
 	assert.Len(t, wu, 2)
+}
+
+// TestMintIdentityAssertion_ClaimRoster is a tripwire, not a behaviour test.
+//
+// Every claim below is something a downstream may bind its authorization to, so
+// every one of them has to be inside a cache key — otherwise a cached answer can be
+// served to a caller who would have been told something different. warden_role was
+// exactly that defect: minted, documented as bindable, and in no key, so one
+// principal's two roles shared a chained-secret entry.
+//
+// Adding a claim without a matching cache dimension re-opens that class, and nothing
+// else would notice. This fails when the roster changes, so whoever adds a claim has
+// to come here and record which dimension covers it.
+//
+// It can only see what this mint emits, so a claim gated behind a new input would
+// ship past it silently: enable any new conditional claim in the mint below, or the
+// tripwire is blind to exactly the case it exists for.
+//
+//	iss/iat/nbf/exp/jti  volatile or constant by design — the reason cacheIdentity
+//	                     exists at all, rather than keying on the assertion bytes
+//	sub                  cacheIdentity's first fragment (wardenSubject)
+//	aud                  cacheIdentity's second fragment
+//	warden_sub           inside wardenSubject
+//	warden_namespace     inside wardenSubject, which carries the namespace ID while
+//	                     this claim carries the path — sound only because a namespace
+//	                     cannot be renamed, so path and ID move together (a rename API
+//	                     would make this claim uncovered)
+//	warden_auth_mount    inside wardenSubject
+//	warden_role          cacheIdentity's "role=" fragment
+//	warden_resource      cacheIdentity's "res=" fragment
+//	warden_metadata      cacheIdentity's metadata fingerprint
+//	warden_user          the ":u:" token-id dimension on the manager's cache keys,
+//	                     deliberately not in cacheIdentity (see buildAssertionSetup)
+func TestMintIdentityAssertion_ClaimRoster(t *testing.T) {
+	iss := newReadyIssuer(t, "https://warden-oidc.example")
+	te := &logical.TokenEntry{
+		PrincipalID:   "spiffe://acme.internal/agent/refund-bot",
+		RoleName:      "payments-agent",
+		NamespaceID:   "ns-1234",
+		NamespacePath: "/acme/prod/",
+		MountAccessor: "auth_jwt_abc",
+	}
+
+	// Every optional claim populated, so the roster is the full surface rather than
+	// whatever a minimal mint happens to emit.
+	token, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{
+		Audience:   "https://sts.example/aud",
+		TTL:        5 * time.Minute,
+		Alg:        oidcAlgRS256,
+		Metadata:   map[string]string{"team": "payments"},
+		Resource:   "https://api.example/db",
+		UserClaims: map[string]string{"sub": "alice"},
+	})
+	require.NoError(t, err)
+
+	claims := decodeAssertionClaims(t, token)
+
+	got := make([]string, 0, len(claims))
+	for k := range claims {
+		got = append(got, k)
+	}
+	sort.Strings(got)
+
+	want := []string{
+		"aud", "exp", "iat", "iss", "jti", "nbf", "sub",
+		"warden_auth_mount", "warden_metadata", "warden_namespace",
+		"warden_resource", "warden_role", "warden_sub", "warden_user",
+	}
+	assert.Equal(t, want, got,
+		"the assertion's claims changed: add the new claim to a cache dimension (see the table above), then update this roster")
 }
