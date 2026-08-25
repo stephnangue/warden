@@ -158,9 +158,10 @@ const (
 	githubChainSpec       = "fc-gh-chained-cred"
 	githubChainAgentRole  = "fc-gh-chained-agent"
 
-	// A second role bound to the SAME spec. Logging in through it yields a
-	// distinct caller token, which is what makes the minted-credential cache miss
-	// while the spec — and so a spec-keyed driver cache — stays the same.
+	// A second role bound to the SAME spec, for a second agent to mint through.
+	// A role pins the spec its callers mint, so two agents sharing one spec need
+	// one role each; the role itself does not enter any cache key, so it is the
+	// differing agent, not the differing role, that makes a mint re-run.
 	githubChainAgentRoleB = "fc-gh-chained-agent-b"
 
 	// Where this test parks the App private key. Unlike the gitlab secrets this
