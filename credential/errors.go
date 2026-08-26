@@ -58,4 +58,18 @@ var (
 	// evicts the cache entry and retries the mint once. A consuming driver wraps
 	// it via fmt.Errorf("...: %w", credential.ErrChainedSecretRejected).
 	ErrChainedSecretRejected = errors.New("chained secret rejected by downstream")
+
+	// ErrChainedSecretIncomplete is returned (wrapped) by a chained-secret consuming
+	// driver when the fetched payload is missing something the driver needs — a half
+	// of a client credential, say — and so cannot be spent at all. Unlike
+	// ErrChainedSecretRejected nothing downstream refused it; the material never
+	// reached a request.
+	//
+	// It evicts for the same reason a rejection does, and this is the case where the
+	// distinction matters: a cached payload that predates the key it now has to carry
+	// would otherwise fail every mint for the whole of secret_cache_ttl, with the one
+	// mechanism that could recover it never firing. Refetching costs a single read and
+	// answers the question the cache cannot — whether the payload has since been
+	// completed at the source.
+	ErrChainedSecretIncomplete = errors.New("chained secret material is incomplete")
 )

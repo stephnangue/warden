@@ -61,6 +61,20 @@ var _ credential.SourceDriver = (*TokenExchangeDriver)(nil)
 var _ credential.ExchangeMinter = (*TokenExchangeDriver)(nil)
 var _ credential.ChainedExchangeMinter = (*TokenExchangeDriver)(nil)
 
+// tokenExchangeChainedAuth carries the client credential a single mint fetched
+// through credential chaining. A nil pointer means the inline source config.
+//
+// secret is whichever half client_auth calls for: the client secret for
+// client_secret_post/basic, or the PEM private key for private_key_jwt. kid is the
+// optional key id naming that private key, and is empty for the secret methods. It
+// holds fetched values only — never the mode — and is threaded by parameter rather than
+// stored on the driver, so concurrent mints resolving different pairs cannot cross.
+type tokenExchangeChainedAuth struct {
+	clientID string
+	secret   string
+	kid      string
+}
+
 // TokenExchangeDriver exchanges a caller-derived identity (a subject token, and
 // optionally an actor token) for a scoped downstream bearer at an RFC 8693 / RFC
 // 7523 token endpoint. It is exchange-only: it never mints from static source
@@ -112,11 +126,11 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 			Example("client_secret_post"),
 
 		credential.StringField("client_id").
-			Describe("OAuth2 client ID Warden presents to the token endpoint").
+			Describe("OAuth2 client ID Warden presents to the token endpoint (inline only; omit when secret_spec is set)").
 			Example("warden-gateway"),
 
 		credential.StringField("client_secret").
-			Describe("OAuth2 client secret (masked on read; for client_secret_* auth)").
+			Describe("OAuth2 client secret (masked on read; for client_secret_* auth; omit when secret_spec is set)").
 			Example("****"),
 
 		credential.StringField("private_key").
@@ -127,7 +141,7 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 				_, err := parseRSAPrivateKey(v)
 				return err
 			}).
-			Describe("PEM RSA private key for private_key_jwt client authentication (masked on read)").
+			Describe("PEM RSA private key for private_key_jwt client authentication (masked on read; omit when secret_spec is set)").
 			Example("-----BEGIN PRIVATE KEY----- ..."),
 
 		credential.StringField("client_assertion_alg").
@@ -136,7 +150,7 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 			Example("RS256"),
 
 		credential.StringField("client_assertion_kid").
-			Describe("Optional key id (kid) header for the client assertion").
+			Describe("Optional key id (kid) header for the client assertion (inline only; when secret_spec is set it travels in the referenced payload beside the key, under 'client_assertion_kid' or 'kid')").
 			Example("key-1"),
 
 		credential.StringField("ca_data").
@@ -149,12 +163,12 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 			Example("false"),
 
 		credential.StringField("secret_spec").
-			Describe("Source the client secret from another cred spec via credential chaining instead of storing it inline (client_secret / private_key then omitted)").
+			Describe("Source the whole client credential from another cred spec via credential chaining instead of storing it inline (client_id and client_secret / private_key then omitted; the referenced payload supplies both)").
 			Example("idp-client-secret"),
 
 		credential.StringField("secret_field").
-			Describe("Which field of the referenced secret_spec's credential holds the client secret (when its payload has multiple keys)").
-			Example("value"),
+			Describe("Which field of the referenced secret_spec's credential holds the client secret (when its payload has multiple keys); the client id travels beside it under 'client_id'").
+			Example("client_secret"),
 
 		credential.StringField("secret_cache_ttl").
 			Describe("Cache the chained client secret source-wide for this duration (e.g. 30m); omit to fetch it on every mint").
@@ -170,24 +184,48 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 		}
 	}
 
-	// Client-auth method determines which credentials are required. When the client
-	// secret is sourced via credential chaining (secret_spec set on the source), the
-	// inline client_secret / private_key is supplied at mint time, so only client_id is
-	// required here.
+	// Client-auth method determines which credentials are required. A source in
+	// chaining mode (secret_spec set) holds NEITHER half of the client credential: the
+	// secret is excluded because a source that reads as keyless must not still store the
+	// very secret chaining exists to remove, and the id follows it because the two
+	// authenticate as a pair. An id kept here beside a secret fetched from the chain
+	// would name one client while presenting another's, which the token endpoint answers
+	// with invalid_client, and which the chained path then reads as a rejected secret and
+	// retries pointlessly.
+	//
+	// Requiring both from the payload also lets one source and one spec serve many
+	// clients, since the pair is resolved per mint rather than pinned to the source.
 	chained := credential.GetString(config, credential.ConfigSecretSpec, "") != ""
 	switch credential.GetString(config, "client_auth", clientAuthSecretPost) {
 	case clientAuthSecretBasic, clientAuthSecretPost, "":
+		if chained {
+			if err := rejectInlineClientCredential(config, "client_secret"); err != nil {
+				return err
+			}
+			break
+		}
 		if credential.GetString(config, "client_id", "") == "" {
 			return fmt.Errorf("client_id is required for a secret-based client_auth")
 		}
-		if !chained && credential.GetString(config, "client_secret", "") == "" {
+		if credential.GetString(config, "client_secret", "") == "" {
 			return fmt.Errorf("client_secret (or secret_spec) is required for a secret-based client_auth")
 		}
 	case clientAuthPrivateKeyJWT:
+		if chained {
+			// The key id goes with the key. A kid identifies one key among the several
+			// an authorization server may hold for a client, so it is only true of the
+			// key it was stored beside — kept here, it would stamp assertions signed by
+			// every agent's key with one agent's kid, and an AS that selects its
+			// verification key by kid would refuse all but that one.
+			if err := rejectInlineClientCredential(config, "private_key", "client_assertion_kid"); err != nil {
+				return err
+			}
+			break
+		}
 		if credential.GetString(config, "client_id", "") == "" {
 			return fmt.Errorf("client_id is required for client_auth=private_key_jwt")
 		}
-		if !chained && credential.GetString(config, "private_key", "") == "" {
+		if credential.GetString(config, "private_key", "") == "" {
 			return fmt.Errorf("private_key (or secret_spec) is required for client_auth=private_key_jwt")
 		}
 	}
@@ -202,6 +240,19 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 	for key := range credential.GetPrefixed(config, "token_param.") {
 		if protected[key] {
 			return fmt.Errorf("token_param.%s cannot override a core token-exchange field", key)
+		}
+	}
+	return nil
+}
+
+// rejectInlineClientCredential refuses anything naming a client left in the config of a
+// source that fetches its client credential per mint. keys are whatever the chosen
+// client_auth calls for; client_id is always checked, since none of the rest are
+// meaningful apart from the client they belong to.
+func rejectInlineClientCredential(config map[string]string, keys ...string) error {
+	for _, key := range append(keys, "client_id") {
+		if credential.GetString(config, key, "") != "" {
+			return fmt.Errorf("%s must be omitted when secret_spec is set; the referenced spec supplies the whole client credential", key)
 		}
 	}
 	return nil
@@ -251,21 +302,93 @@ func (d *TokenExchangeDriver) MintCredentialWithExchange(ctx context.Context, sp
 }
 
 // MintCredentialWithExchangeFromSecret performs the same exchange as
-// MintCredentialWithExchange, but its client-authentication secret comes from
-// credential-chaining material (secret_spec) instead of source config. The relevant
-// field (client_secret for secret_post/basic, or the PEM private_key for
-// private_key_jwt) is taken from material; client_id and everything else stay in config.
+// MintCredentialWithExchange, but its client credential — both halves — comes from
+// credential-chaining material (secret_spec) instead of source config. A chained
+// source stores neither half, so the id and the secret are read together from the
+// fetched payload.
 func (d *TokenExchangeDriver) MintCredentialWithExchangeFromSecret(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	secret := material.Secret()
-	if secret == "" {
-		return nil, nil, 0, "", fmt.Errorf("token_exchange: chained client secret is empty (check the referenced secret_spec and secret_field)")
+	chained, err := tokenExchangeChainedAuthFromMaterial(d.credSource.Config, material)
+	if err != nil {
+		return nil, nil, 0, "", err
 	}
-	return d.mintExchange(ctx, spec, inputs, &secret)
+	return d.mintExchange(ctx, spec, inputs, chained)
 }
 
-// mintExchange runs the exchange for the configured grant. secretOverride, when non-nil,
-// supplies the client-auth secret (from credential chaining) in place of source config.
-func (d *TokenExchangeDriver) mintExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, secretOverride *string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+// tokenExchangeChainedAuthFromMaterial reads a whole client credential out of fetched
+// secret material. client_auth decides which half the secret is — a client secret or a
+// PEM private key — and so which conventional key names apply.
+//
+// secret_field names the secret alone, so a field that resolved to nothing is a
+// misconfigured source rather than an invitation to look elsewhere: the conventional
+// keys are consulted only when no field was resolved at all. The id is read by
+// convention for the same reason, and has nowhere to fall back to — a source in
+// chaining mode holds no client_id — so its absence is an error raised here, before any
+// request is sent.
+//
+// Every "the payload lacks what I need" error carries ErrChainedSecretIncomplete, so a
+// cached payload that predates a key it now has to hold is refetched once rather than
+// failing for the rest of its secret_cache_ttl.
+func tokenExchangeChainedAuthFromMaterial(cfg map[string]string, material credential.SecretMaterial) (*tokenExchangeChainedAuth, error) {
+	// The id is never the secret. A payload holding nothing but an id resolves that
+	// lone key as the secret field — the single-key shortcut has no way to know
+	// better — and without this the same value would be spent as both halves of the
+	// pair, which the endpoint answers with invalid_client and the chained path then
+	// misreads as a rotated secret.
+	if material.Field == "client_id" {
+		return nil, fmt.Errorf("token_exchange: the fetched secret material holds a client id but no secret: %w", credential.ErrChainedSecretIncomplete)
+	}
+
+	secret := material.Secret()
+	var kid string
+
+	switch credential.GetString(cfg, "client_auth", clientAuthSecretPost) {
+	case clientAuthSecretPost, clientAuthSecretBasic, "":
+		if secret == "" && material.Field == "" {
+			secret = material.Data["client_secret"]
+		}
+		if secret == "" {
+			if material.Field != "" {
+				return nil, fmt.Errorf("token_exchange: secret_field %q is empty or absent in the fetched secret material: %w", material.Field, credential.ErrChainedSecretIncomplete)
+			}
+			return nil, fmt.Errorf("token_exchange: no client secret in fetched secret material (set secret_field, or store it under 'client_secret'): %w", credential.ErrChainedSecretIncomplete)
+		}
+	case clientAuthPrivateKeyJWT:
+		if secret == "" && material.Field == "" {
+			secret = material.Data["private_key"]
+		}
+		if secret == "" {
+			if material.Field != "" {
+				return nil, fmt.Errorf("token_exchange: secret_field %q is empty or absent in the fetched secret material: %w", material.Field, credential.ErrChainedSecretIncomplete)
+			}
+			return nil, fmt.Errorf("token_exchange: no private key in fetched secret material (set secret_field, or store it under 'private_key'): %w", credential.ErrChainedSecretIncomplete)
+		}
+		// Optional, and read by convention like the id: an authorization server that
+		// resolves the key from the client id alone needs none. When it is present it
+		// has to be the one stored beside this key, which is why a chained source is
+		// refused an inline client_assertion_kid rather than falling back to it.
+		kid = material.Data["client_assertion_kid"]
+		if kid == "" {
+			kid = material.Data["kid"]
+		}
+	default:
+		// A source-config error, not a payload one: refetching cannot change the answer,
+		// so this must not carry the sentinel that asks the manager to try again.
+		return nil, fmt.Errorf("token_exchange: credential chaining supports client_auth=%s, %s or %s, got %q",
+			clientAuthSecretPost, clientAuthSecretBasic, clientAuthPrivateKeyJWT,
+			credential.GetString(cfg, "client_auth", ""))
+	}
+
+	clientID := material.Data["client_id"]
+	if clientID == "" {
+		return nil, fmt.Errorf("token_exchange: no client id in fetched secret material (store it under 'client_id' alongside the secret): %w", credential.ErrChainedSecretIncomplete)
+	}
+
+	return &tokenExchangeChainedAuth{clientID: clientID, secret: secret, kid: kid}, nil
+}
+
+// mintExchange runs the exchange for the configured grant. chained, when non-nil,
+// supplies the client credential (from credential chaining) in place of source config.
+func (d *TokenExchangeDriver) mintExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, chained *tokenExchangeChainedAuth) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	if inputs == nil || inputs.SubjectToken == "" {
 		return nil, nil, 0, "", fmt.Errorf("token_exchange: no subject token in exchange inputs")
 	}
@@ -287,9 +410,9 @@ func (d *TokenExchangeDriver) mintExchange(ctx context.Context, spec *credential
 		err  error
 	)
 	if credential.GetString(d.credSource.Config, "grant", tokenExchangeGrantRFC8693) == tokenExchangeGrantIDJAG {
-		resp, err = d.mintIDJAG(ctx, spec, inputs, secretOverride)
+		resp, err = d.mintIDJAG(ctx, spec, inputs, chained)
 	} else {
-		resp, err = d.exchangeOnce(ctx, spec, inputs, secretOverride)
+		resp, err = d.exchangeOnce(ctx, spec, inputs, chained)
 	}
 	if err != nil {
 		return nil, nil, 0, "", err
@@ -301,21 +424,21 @@ func (d *TokenExchangeDriver) mintExchange(ctx context.Context, spec *credential
 	return accessTokenRawData(resp), d.subjectMetadata(resp, inputs), ttlFromExpiresIn(resp.ExpiresIn), "", nil
 }
 
-// exchangeOnce performs a single-hop exchange (rfc8693 or jwt_bearer). secretOverride,
-// when non-nil, supplies the client-auth secret from credential chaining.
-func (d *TokenExchangeDriver) exchangeOnce(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, secretOverride *string) (*oauth2TokenResponse, error) {
+// exchangeOnce performs a single-hop exchange (rfc8693 or jwt_bearer). chained,
+// when non-nil, supplies the client credential from credential chaining.
+func (d *TokenExchangeDriver) exchangeOnce(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, chained *tokenExchangeChainedAuth) (*oauth2TokenResponse, error) {
 	form, err := d.buildExchangeForm(spec, inputs)
 	if err != nil {
 		return nil, err
 	}
 	tokenURL := credential.GetString(d.credSource.Config, "token_url", "")
 	headers := map[string]string{}
-	if err := d.applyClientAuth(form, headers, tokenURL, secretOverride); err != nil {
+	if err := d.applyClientAuth(form, headers, tokenURL, chained); err != nil {
 		return nil, err
 	}
 	resp, err := postOAuthTokenForm(ctx, d.httpClient, tokenURL, form, headers)
 	if err != nil {
-		return nil, chainedClientAuthError(err, secretOverride != nil)
+		return nil, chainedClientAuthError(err, chained != nil)
 	}
 	return resp, nil
 }
@@ -329,7 +452,7 @@ func (d *TokenExchangeDriver) exchangeOnce(ctx context.Context, spec *credential
 //
 // Client auth runs on both legs (each with its own endpoint as the assertion
 // audience). Only the final access token is returned; the ID-JAG is single-use.
-func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, secretOverride *string) (*oauth2TokenResponse, error) {
+func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, chained *tokenExchangeChainedAuth) (*oauth2TokenResponse, error) {
 	cfg := d.credSource.Config
 
 	// Leg 1: exchange the subject for an ID-JAG at the home IdP. The ID-JAG must be
@@ -354,12 +477,12 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 		leg1.Set(k, v)
 	}
 	h1 := map[string]string{}
-	if err := d.applyClientAuth(leg1, h1, idpURL, secretOverride); err != nil {
+	if err := d.applyClientAuth(leg1, h1, idpURL, chained); err != nil {
 		return nil, err
 	}
 	jag, err := postOAuthTokenForm(ctx, d.httpClient, idpURL, leg1, h1)
 	if err != nil {
-		return nil, chainedClientAuthError(err, secretOverride != nil)
+		return nil, chainedClientAuthError(err, chained != nil)
 	}
 	if jag.AccessToken == "" {
 		return nil, fmt.Errorf("id_jag: leg 1 returned no ID-JAG assertion")
@@ -381,12 +504,12 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 	// leg 2 (the resource-AS redemption), not leg 1 (which mints the ID-JAG).
 	d.addResources(leg2, spec)
 	h2 := map[string]string{}
-	if err := d.applyClientAuth(leg2, h2, resURL, secretOverride); err != nil {
+	if err := d.applyClientAuth(leg2, h2, resURL, chained); err != nil {
 		return nil, err
 	}
 	final, err := postOAuthTokenForm(ctx, d.httpClient, resURL, leg2, h2)
 	if err != nil {
-		return nil, chainedClientAuthError(err, secretOverride != nil)
+		return nil, chainedClientAuthError(err, chained != nil)
 	}
 	return final, nil
 }
@@ -436,15 +559,19 @@ func (d *TokenExchangeDriver) buildExchangeForm(spec *credential.CredSpec, input
 
 // applyClientAuth decorates the request with the configured client
 // authentication. tokenEndpoint is the audience for a private_key_jwt assertion
-// (each ID-JAG leg authenticates against its own endpoint). secretOverride, when
-// non-nil, supplies the client-auth secret from credential chaining (the client_secret
-// for secret_post/basic, or the PEM private_key for private_key_jwt) in place of config.
-func (d *TokenExchangeDriver) applyClientAuth(form url.Values, headers map[string]string, tokenEndpoint string, secretOverride *string) error {
+// (each ID-JAG leg authenticates against its own endpoint). chained, when non-nil,
+// supplies the whole client credential from credential chaining in place of config.
+//
+// Both halves move together: an id from config beside a secret from the chain would
+// name one client while presenting another's, which the token endpoint answers with
+// invalid_client.
+func (d *TokenExchangeDriver) applyClientAuth(form url.Values, headers map[string]string, tokenEndpoint string, chained *tokenExchangeChainedAuth) error {
 	cfg := d.credSource.Config
 	clientID := credential.GetString(cfg, "client_id", "")
 	clientSecret := credential.GetString(cfg, "client_secret", "")
-	if secretOverride != nil {
-		clientSecret = *secretOverride
+	if chained != nil {
+		clientID = chained.clientID
+		clientSecret = chained.secret
 	}
 
 	switch credential.GetString(cfg, "client_auth", clientAuthSecretPost) {
@@ -456,7 +583,7 @@ func (d *TokenExchangeDriver) applyClientAuth(form url.Values, headers map[strin
 		creds := url.QueryEscape(clientID) + ":" + url.QueryEscape(clientSecret)
 		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
 	case clientAuthPrivateKeyJWT:
-		assertion, err := d.buildClientAssertion(clientID, tokenEndpoint, secretOverride)
+		assertion, err := d.buildClientAssertion(clientID, tokenEndpoint, chained)
 		if err != nil {
 			return err
 		}
@@ -471,12 +598,15 @@ func (d *TokenExchangeDriver) applyClientAuth(form url.Values, headers map[strin
 
 // buildClientAssertion builds and signs an RFC 7523 client-assertion JWT: a
 // short-lived JWT with iss=sub=client_id and aud=tokenEndpoint, signed with the RSA
-// private key. keyOverride, when non-nil, supplies the PEM key from credential chaining
-// in place of the source-configured private_key.
-func (d *TokenExchangeDriver) buildClientAssertion(clientID, tokenEndpoint string, keyOverride *string) (string, error) {
+// private key. chained, when non-nil, supplies the PEM key and its key id from
+// credential chaining in place of the source-configured ones; clientID is then the
+// chained id its caller already substituted, so the assertion names the client whose key
+// signs it, under the key id that key was stored beside.
+func (d *TokenExchangeDriver) buildClientAssertion(clientID, tokenEndpoint string, chained *tokenExchangeChainedAuth) (string, error) {
 	pemKey := credential.GetString(d.credSource.Config, "private_key", "")
-	if keyOverride != nil {
-		pemKey = *keyOverride
+	kid := credential.GetString(d.credSource.Config, "client_assertion_kid", "")
+	if chained != nil {
+		pemKey, kid = chained.secret, chained.kid
 	}
 	key, err := parseRSAPrivateKey(pemKey)
 	if err != nil {
@@ -488,7 +618,7 @@ func (d *TokenExchangeDriver) buildClientAssertion(clientID, tokenEndpoint strin
 	}
 	now := time.Now()
 	header := map[string]string{}
-	if kid := credential.GetString(d.credSource.Config, "client_assertion_kid", ""); kid != "" {
+	if kid != "" {
 		header["kid"] = kid
 	}
 	claims := map[string]interface{}{
@@ -621,13 +751,16 @@ func classifyExchangeError(err error) error {
 	return fmt.Errorf("token_exchange failed: %w", err)
 }
 
-// chainedClientAuthError classifies a token-endpoint failure, but when the client secret
-// came from credential chaining (chained) and the endpoint rejected the client
+// chainedClientAuthError classifies a token-endpoint failure, but when the client
+// credential came from credential chaining (chained) and the endpoint rejected the client
 // authentication (invalid_client — 400 for client_secret_post, 401 for
 // client_secret_basic, or a rejected private_key_jwt assertion), it wraps
 // credential.ErrChainedSecretRejected so the minting layer evicts the cached secret and
 // retries once with a fresh fetch. This must run BEFORE classifyExchangeError, whose
 // broad 400/401 branch would otherwise mask invalid_client as a subject-token problem.
+//
+// invalid_client does not say which half was refused, and it does not need to: the
+// eviction refetches the payload, so the id and the secret are replaced together.
 func chainedClientAuthError(err error, chained bool) error {
 	if chained {
 		var tee *tokenEndpointError
