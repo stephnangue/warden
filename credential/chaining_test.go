@@ -37,8 +37,8 @@ func (d *mockChainedDriver) MintFromSecret(_ context.Context, _ *CredSpec, mater
 }
 
 func (d *mockChainedDriver) Revoke(_ context.Context, _ string) error { return nil }
-func (d *mockChainedDriver) Type() string                            { return d.driverType }
-func (d *mockChainedDriver) Cleanup(_ context.Context) error         { return nil }
+func (d *mockChainedDriver) Type() string                             { return d.driverType }
+func (d *mockChainedDriver) Cleanup(_ context.Context) error          { return nil }
 
 type mockChainedFactory struct{ driver *mockChainedDriver }
 
@@ -46,8 +46,8 @@ func (f *mockChainedFactory) Type() string { return f.driver.driverType }
 func (f *mockChainedFactory) Create(_ map[string]string, _ *logger.GatedLogger) (SourceDriver, error) {
 	return f.driver, nil
 }
-func (f *mockChainedFactory) ValidateConfig(_ map[string]string) error   { return nil }
-func (f *mockChainedFactory) SensitiveConfigFields() []string            { return nil }
+func (f *mockChainedFactory) ValidateConfig(_ map[string]string) error { return nil }
+func (f *mockChainedFactory) SensitiveConfigFields() []string          { return nil }
 func (f *mockChainedFactory) InferCredentialType(_ map[string]string) (string, error) {
 	return "", fmt.Errorf("n/a")
 }
@@ -72,8 +72,8 @@ func (d *mockExchangeSecretDriver) MintCredentialWithExchange(_ context.Context,
 	return map[string]interface{}{"token": "SECRET-" + inputs.SubjectToken}, nil, 0, "", nil
 }
 func (d *mockExchangeSecretDriver) Revoke(_ context.Context, _ string) error { return nil }
-func (d *mockExchangeSecretDriver) Type() string                            { return d.driverType }
-func (d *mockExchangeSecretDriver) Cleanup(_ context.Context) error         { return nil }
+func (d *mockExchangeSecretDriver) Type() string                             { return d.driverType }
+func (d *mockExchangeSecretDriver) Cleanup(_ context.Context) error          { return nil }
 
 type mockExchangeSecretFactory struct{ driver *mockExchangeSecretDriver }
 
@@ -118,8 +118,8 @@ func (d *mockChainedExchangeDriver) MintCredentialWithExchangeFromSecret(_ conte
 	return map[string]interface{}{"token": "exch:" + inputs.SubjectToken + ":" + material.Secret()}, nil, 0, "", nil
 }
 func (d *mockChainedExchangeDriver) Revoke(_ context.Context, _ string) error { return nil }
-func (d *mockChainedExchangeDriver) Type() string                            { return d.driverType }
-func (d *mockChainedExchangeDriver) Cleanup(_ context.Context) error         { return nil }
+func (d *mockChainedExchangeDriver) Type() string                             { return d.driverType }
+func (d *mockChainedExchangeDriver) Cleanup(_ context.Context) error          { return nil }
 
 type mockChainedExchangeFactory struct{ driver *mockChainedExchangeDriver }
 
@@ -654,6 +654,93 @@ func TestChaining_CacheIsolatesPerAgentClaims(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), env.exchangeDriver.mintCalls.Load(),
 		"two principals behind one fingerprint must not share a fetch")
+}
+
+// TestChaining_EditingTheReferencedSpecInvalidates drives the referenced-spec dimension
+// through IssueCredential. The spec name is a label: editing what it points at — here a
+// templated secret_path — must move the key, or the entry filled from the old location
+// keeps answering under a name that did not change.
+func TestChaining_EditingTheReferencedSpecInvalidates(t *testing.T) {
+	env := newChainingEnv(t)
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	for _, name := range []string{"consumer1", "consumer2", "consumer3"} {
+		env.store.AddSpec(&CredSpec{Name: name, Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	}
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+
+	// Distinct consumer specs throughout: one consumer asked twice is answered by the
+	// consumer credential cache and never reaches the chained fetch at all.
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), env.secretDriver.mintCalls.Load())
+
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), env.secretDriver.mintCalls.Load(), "unchanged config still shares the entry")
+
+	// The operator repoints the referenced spec at a different location.
+	env.store.AddSpec(&CredSpec{Name: "secret-spec", Type: TypeVaultToken, Source: "secretsource",
+		Config: map[string]string{"secret_path": "prod-teams/{{user.team}}/db"}})
+
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer3", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
+		"the fetch now resolves elsewhere, so the previous location's material must not answer for it")
+}
+
+// The same holds one level out: moving the source the referenced spec names changes
+// where the fetch lands even when the spec itself is untouched.
+func TestChaining_EditingTheReferencedSourceInvalidates(t *testing.T) {
+	env := newChainingEnv(t)
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), env.secretDriver.mintCalls.Load())
+
+	env.store.AddSource(&CredSource{Name: "secretsource", Type: "secretsrc",
+		Config: map[string]string{"vault_address": "https://vault-dr.internal:8200"}})
+
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
+		"a source pointed somewhere else is a different fetch")
+}
+
+// TestChaining_RotatingTheSourceCredentialDoesNotInvalidate is the other half, and the
+// reason the fingerprint excludes proof material rather than hashing the config
+// wholesale. Rotation replaces an authenticator, not the identity it authenticates, so
+// dumping every secret cached under the source would be pure churn.
+func TestChaining_RotatingTheSourceCredentialDoesNotInvalidate(t *testing.T) {
+	env := newChainingEnv(t)
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSource(&CredSource{Name: "secretsource", Type: "secretsrc",
+		Config: map[string]string{"vault_address": "https://vault.internal:8200", "secret_id": "sid-1"}})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), env.secretDriver.mintCalls.Load())
+
+	// A routine source rotation: same address, new proof.
+	env.store.AddSource(&CredSource{Name: "secretsource", Type: "secretsrc",
+		Config: map[string]string{"vault_address": "https://vault.internal:8200", "secret_id": "sid-2"}})
+
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), env.secretDriver.mintCalls.Load(),
+		"rotating the source's own credential reaches the same secret in the same place")
 }
 
 // TestChaining_RetryEvictsStaleCachedSecret: when a cached secret is rejected downstream

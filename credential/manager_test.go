@@ -1324,8 +1324,8 @@ func TestChainedSecretCacheKey_AgentClaimsDimension(t *testing.T) {
 	}
 
 	t.Run("same token, different resolved claims, different keys", func(t *testing.T) {
-		viaRoleA := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "build-runner"}))
-		viaRoleB := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "deploy-bot"}))
+		viaRoleA := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "build-runner"}))
+		viaRoleB := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "deploy-bot"}))
 
 		require.NotEmpty(t, viaRoleA)
 		assert.NotEqual(t, viaRoleA, viaRoleB,
@@ -1333,20 +1333,20 @@ func TestChainedSecretCacheKey_AgentClaimsDimension(t *testing.T) {
 	})
 
 	t.Run("same claims give the same key", func(t *testing.T) {
-		first := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "a", "team": "platform"}))
-		second := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"team": "platform", "sub": "a"}))
+		first := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "a", "team": "platform"}))
+		second := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"team": "platform", "sub": "a"}))
 		assert.Equal(t, first, second, "map iteration order must not change the key")
 	})
 
 	t.Run("a metadata claim changing moves the key", func(t *testing.T) {
-		before := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "a", "team": "platform"}))
-		after := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "a", "team": "infra"}))
+		before := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "a", "team": "platform"}))
+		after := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "a", "team": "infra"}))
 		assert.NotEqual(t, before, after)
 	})
 
 	t.Run("no agent claims keeps the key byte-identical", func(t *testing.T) {
-		withNone := chainedSecretCacheKey("ns", "ref", caller, base(nil))
-		legacy := "chainsecret:ns:ref:" + base(nil).Fingerprint()
+		withNone := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(nil))
+		legacy := "chainsecret:ns:ref:s:" + testRefFP + ":" + base(nil).Fingerprint()
 		assert.Equal(t, legacy, withNone,
 			"a spec not carrying agent claims must not have its cache key perturbed")
 	})
@@ -1357,7 +1357,7 @@ func TestChainedSecretCacheKey_AgentClaimsDimension(t *testing.T) {
 func TestChainedSecretCacheKey_AgentAndUserDimensionsCompose(t *testing.T) {
 	caller := Caller{TokenID: "agent-token", User: &UserContext{TokenID: "user-token"}}
 	key := func(sub string) string {
-		return chainedSecretCacheKey("ns", "ref", caller, &ExchangeInputs{
+		return chainedSecretCacheKey("ns", "ref", testRefFP, caller, &ExchangeInputs{
 			SubjectToken:     "the.same.jwt",
 			SubjectTokenType: TokenTypeJWT,
 			AgentClaims:      map[string]string{"sub": sub},
@@ -1390,8 +1390,8 @@ func TestChainedSecretCacheKey_UserClaimsDimension(t *testing.T) {
 	}
 
 	t.Run("same user token, remapped claims, different keys", func(t *testing.T) {
-		beforeEdit := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "alice", "team": "platform"}))
-		afterEdit := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "alice", "team": "infra"}))
+		beforeEdit := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "alice", "team": "platform"}))
+		afterEdit := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "alice", "team": "infra"}))
 
 		require.NotEmpty(t, beforeEdit)
 		assert.NotEqual(t, beforeEdit, afterEdit,
@@ -1399,31 +1399,128 @@ func TestChainedSecretCacheKey_UserClaimsDimension(t *testing.T) {
 	})
 
 	t.Run("same claims give the same key", func(t *testing.T) {
-		first := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "alice", "team": "platform"}))
-		second := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"team": "platform", "sub": "alice"}))
+		first := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "alice", "team": "platform"}))
+		second := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"team": "platform", "sub": "alice"}))
 		assert.Equal(t, first, second, "map iteration order must not change the key")
 	})
 
 	t.Run("two users still separate", func(t *testing.T) {
 		other := Caller{TokenID: "agent-token", User: &UserContext{TokenID: "other-user-token"}}
-		mine := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "alice"}))
-		theirs := chainedSecretCacheKey("ns", "ref", other, base(map[string]string{"sub": "alice"}))
+		mine := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "alice"}))
+		theirs := chainedSecretCacheKey("ns", "ref", testRefFP, other, base(map[string]string{"sub": "alice"}))
 		assert.NotEqual(t, mine, theirs,
 			"the token id still binds the entry to a principal even when claims coincide")
 	})
 
 	t.Run("no user claims keeps the key byte-identical", func(t *testing.T) {
-		withNone := chainedSecretCacheKey("ns", "ref", caller, base(nil))
-		legacy := "chainsecret:ns:ref:" + base(nil).Fingerprint()
+		withNone := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(nil))
+		legacy := "chainsecret:ns:ref:s:" + testRefFP + ":" + base(nil).Fingerprint()
 		assert.Equal(t, legacy, withNone,
 			"a source-global fetch must not have its cache key perturbed")
 	})
 
 	t.Run("a user-scoped fetch with no user principal refuses to cache", func(t *testing.T) {
 		agentOnly := Caller{TokenID: "agent-token"}
-		assert.Empty(t, chainedSecretCacheKey("ns", "ref", agentOnly, base(map[string]string{"sub": "alice"})),
+		assert.Empty(t, chainedSecretCacheKey("ns", "ref", testRefFP, agentOnly, base(map[string]string{"sub": "alice"})),
 			"sharing a user-scoped fetch namespace-wide is never the safe failure mode")
 	})
+}
+
+// testRefFP stands in for chainedSpecFingerprint in the subtests above, which pin the
+// agent and user dimensions and must be unaffected by the referenced-spec one.
+const testRefFP = "0000000000000000000000000000000000000000000000000000000000000000"
+
+// TestChainedSpecFingerprint pins what the referenced spec contributes to the key. The
+// spec NAME is a label an operator can repoint; the fingerprint is what the name
+// resolved to when the entry was filled, so an edit cannot inherit the old answer.
+func TestChainedSpecFingerprint(t *testing.T) {
+	spec := func(cfg map[string]string) *CredSpec {
+		return &CredSpec{Name: "ref", Type: TypeVaultToken, Source: "vault-main", Config: cfg}
+	}
+	src := func(cfg map[string]string) *CredSource {
+		return &CredSource{Name: "vault-main", Type: "vault", Config: cfg}
+	}
+	basePath := map[string]string{"kv2_mount": "kv", "secret_path": "teams/{{user.team}}/db"}
+	baseSrc := map[string]string{"vault_address": "https://vault.internal:8200", "approle_mount": "approle"}
+
+	t.Run("editing the templated path moves the fingerprint", func(t *testing.T) {
+		before := chainedSpecFingerprint(spec(basePath), src(baseSrc))
+		after := chainedSpecFingerprint(spec(map[string]string{
+			"kv2_mount": "kv", "secret_path": "prod-teams/{{user.team}}/db",
+		}), src(baseSrc))
+		assert.NotEqual(t, before, after,
+			"the fetch moved to a different location, so the entry filled from the old one must not answer for it")
+	})
+
+	t.Run("repointing the spec at another source moves it", func(t *testing.T) {
+		other := &CredSpec{Name: "ref", Type: TypeVaultToken, Source: "vault-other", Config: basePath}
+		assert.NotEqual(t, chainedSpecFingerprint(spec(basePath), src(baseSrc)),
+			chainedSpecFingerprint(other, src(baseSrc)))
+	})
+
+	t.Run("moving the source itself moves it", func(t *testing.T) {
+		moved := src(map[string]string{"vault_address": "https://vault-dr.internal:8200", "approle_mount": "approle"})
+		assert.NotEqual(t, chainedSpecFingerprint(spec(basePath), src(baseSrc)),
+			chainedSpecFingerprint(spec(basePath), moved))
+	})
+
+	t.Run("rotating the source credential does not move it", func(t *testing.T) {
+		before := chainedSpecFingerprint(spec(basePath), src(map[string]string{
+			"vault_address": "https://vault.internal:8200", "approle_mount": "approle",
+			"secret_id": "sid-1", "secret_id_accessor": "acc-1",
+		}))
+		after := chainedSpecFingerprint(spec(basePath), src(map[string]string{
+			"vault_address": "https://vault.internal:8200", "approle_mount": "approle",
+			"secret_id": "sid-2", "secret_id_accessor": "acc-2",
+		}))
+		assert.Equal(t, before, after,
+			"a rotation replaces an authenticator, not the identity it authenticates — dumping the cache buys nothing")
+	})
+
+	t.Run("a rotating refresh_token does not move it", func(t *testing.T) {
+		// This one is not merely churn: refresh_token is rewritten on every use, so a
+		// moving key would mean no entry is ever read once and caching is silently dead.
+		withRT := func(rt string) *CredSpec {
+			return spec(map[string]string{"oauth2_mount": "oauth2", "credential_name": "cred", "refresh_token": rt})
+		}
+		assert.Equal(t, chainedSpecFingerprint(withRT("rt-1"), src(baseSrc)),
+			chainedSpecFingerprint(withRT("rt-2"), src(baseSrc)))
+	})
+
+	t.Run("stable across map iteration order", func(t *testing.T) {
+		a := chainedSpecFingerprint(spec(map[string]string{"kv2_mount": "kv", "secret_path": "p"}), src(baseSrc))
+		b := chainedSpecFingerprint(spec(map[string]string{"secret_path": "p", "kv2_mount": "kv"}), src(baseSrc))
+		assert.Equal(t, a, b)
+	})
+
+	t.Run("config values never appear in the clear", func(t *testing.T) {
+		fp := chainedSpecFingerprint(
+			spec(map[string]string{"secret_path": "teams/SECRETPATH/db"}),
+			src(map[string]string{"vault_address": "https://SECRETHOST:8200"}))
+		assert.NotContains(t, fp, "SECRETPATH")
+		assert.NotContains(t, fp, "SECRETHOST")
+	})
+
+	t.Run("no concatenation collisions across sections", func(t *testing.T) {
+		// The same k/v moved between the spec's config and the source's must not
+		// produce the same digest.
+		inSpec := chainedSpecFingerprint(spec(map[string]string{"mount": "kv"}), src(nil))
+		inSrc := chainedSpecFingerprint(spec(nil), src(map[string]string{"mount": "kv"}))
+		assert.NotEqual(t, inSpec, inSrc)
+
+		// Nor may a value bleed into the neighbouring field.
+		assert.NotEqual(t,
+			chainedSpecFingerprint(&CredSpec{Type: "ab", Source: "c", Config: nil}, nil),
+			chainedSpecFingerprint(&CredSpec{Type: "a", Source: "bc", Config: nil}, nil))
+	})
+}
+
+// An unresolvable referenced spec has no identity to key on, so the key function must
+// refuse to cache rather than let whatever the name points at now share one entry.
+func TestChainedSecretCacheKey_NoFingerprintRefusesToCache(t *testing.T) {
+	caller := Caller{TokenID: "agent-token"}
+	assert.Empty(t, chainedSecretCacheKey("ns", "ref", "", caller,
+		&ExchangeInputs{SubjectToken: "jwt", SubjectTokenType: TokenTypeJWT}))
 }
 
 // claimsFingerprint must not let two different maps collide by running their bytes

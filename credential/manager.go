@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"sort"
 	"sync"
 	"time"
@@ -613,32 +614,36 @@ func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretR
 func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, spec *CredSpec, secretRef string, inputsB *ExchangeInputs) (data map[string]string, typ string, fromCache bool, key string, err error) {
 	ttl := m.secretCacheTTL(ctx, spec)
 	if ttl <= 0 {
-		credB, ferr := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
-		if ferr != nil {
-			return nil, "", false, "", ferr
-		}
-		return credB.Data, credB.Type, false, "", nil
+		return m.fetchUncached(ctx, caller, secretRef, inputsB)
 	}
 
 	ns, nerr := namespace.FromContext(ctx)
 	if nerr != nil {
 		// No namespace to scope the cache key (internal/non-request path): fall back to
 		// a direct, uncached fetch rather than risk a cross-namespace key collision.
-		credB, ferr := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
-		if ferr != nil {
-			return nil, "", false, "", ferr
-		}
-		return credB.Data, credB.Type, false, "", nil
+		return m.fetchUncached(ctx, caller, secretRef, inputsB)
 	}
-	key = chainedSecretCacheKey(ns.ID, secretRef, caller, inputsB)
+
+	// The referenced spec's own config decides which secret is fetched and from where,
+	// so it has to key the entry that answers for it — resolve it before keying. Both
+	// reads are served from the config store's cache, which this request has already
+	// populated (resolveExchangeInputs read the same spec to build inputsB). If either
+	// cannot be resolved, decline to cache rather than key on an identity we could not
+	// establish; the fetch below reports the real error.
+	specB, serr := m.specResolver.ResolveSpec(ctx, secretRef)
+	if serr != nil {
+		return m.fetchUncached(ctx, caller, secretRef, inputsB)
+	}
+	srcB, serr := m.configStore.GetSource(ctx, specB.Source)
+	if serr != nil {
+		return m.fetchUncached(ctx, caller, secretRef, inputsB)
+	}
+
+	key = chainedSecretCacheKey(ns.ID, secretRef, chainedSpecFingerprint(specB, srcB), caller, inputsB)
 	if key == "" {
 		// Caching refused for safety (user-scoped fetch without a user principal): fetch
 		// directly, uncached.
-		credB, ferr := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
-		if ferr != nil {
-			return nil, "", false, "", ferr
-		}
-		return credB.Data, credB.Type, false, "", nil
+		return m.fetchUncached(ctx, caller, secretRef, inputsB)
 	}
 
 	if cs, ok := m.secretCache.Get(key); ok {
@@ -668,6 +673,17 @@ func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, s
 	return copyStringMap(cs.Data), cs.Type, false, key, nil
 }
 
+// fetchUncached performs the referenced fetch without consulting or populating the
+// cache, for every path that declines to cache. It reports fromCache=false and an empty
+// key, so the caller neither retries on a rejection nor tries to invalidate.
+func (m *Manager) fetchUncached(ctx context.Context, caller Caller, secretRef string, inputsB *ExchangeInputs) (map[string]string, string, bool, string, error) {
+	credB, err := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
+	if err != nil {
+		return nil, "", false, "", err
+	}
+	return credB.Data, credB.Type, false, "", nil
+}
+
 // secretCacheTTL resolves ConfigSecretCacheTTL spec-then-source (matching how
 // secret_spec / secret_field resolve). Returns 0 (no caching) when unset. A spec-level
 // value is authoritative by PRESENCE, so an explicit spec-level "0" opts out of a
@@ -692,8 +708,8 @@ func (m *Manager) invalidateChainedSecret(key string) {
 	m.group.Forget(key)
 }
 
-// chainedSecretCacheKey scopes a cached secret to (namespace, secret_spec, agent
-// identity). inputsB.Fingerprint keys on SubjectCacheIdentity — stable across an agent's
+// chainedSecretCacheKey scopes a cached secret to (namespace, secret_spec, what that
+// spec fetches, agent identity). inputsB.Fingerprint keys on SubjectCacheIdentity — stable across an agent's
 // sessions — so the store's per-agent authorization is honoured (agent B is never served
 // agent A's fetched secret).
 //
@@ -711,11 +727,22 @@ func (m *Manager) invalidateChainedSecret(key string) {
 // fetch (no user claims) omits both and is shared across users under the agent. A nil
 // inputsB (a referenced spec that requests no exchange) uses a fixed sentinel.
 //
+// refFP is chainedSpecFingerprint over the referenced spec and its source: the spec name
+// says which entry to look under, and refFP says what that name resolved to when the
+// entry was filled, so an operator repointing the name does not inherit the old answer.
+//
 // It returns "" — meaning "do not cache" — for a user-scoped fetch that lacks the user
-// principal to key on. That combination cannot arise from the current request path, but
+// principal to key on, or a referenced spec that could not be resolved. That combination cannot arise from the current request path, but
 // refusing to cache is the safe failure mode: it never shares one user's secret
 // namespace-wide.
-func chainedSecretCacheKey(nsID, secretRef string, caller Caller, inputsB *ExchangeInputs) string {
+func chainedSecretCacheKey(nsID, secretRef, refFP string, caller Caller, inputsB *ExchangeInputs) string {
+	// No fingerprint means the referenced spec could not be resolved, so there is no
+	// identity to key on. Refuse to cache rather than share an entry across whatever
+	// the name points at now.
+	if refFP == "" {
+		return ""
+	}
+
 	fp := "noexchange"
 	if inputsB != nil {
 		fp = inputsB.Fingerprint()
@@ -746,33 +773,109 @@ func chainedSecretCacheKey(nsID, secretRef string, caller Caller, inputsB *Excha
 		if caller.User == nil {
 			return ""
 		}
-		return "chainsecret:" + nsID + ":" + secretRef + ":" + fp + agent +
+		return "chainsecret:" + nsID + ":" + secretRef + ":s:" + refFP + ":" + fp + agent +
 			":u:" + caller.User.TokenID + ":uc:" + claimsFingerprint(inputsB.UserClaims)
 	}
-	return "chainsecret:" + nsID + ":" + secretRef + ":" + fp + agent
+	return "chainsecret:" + nsID + ":" + secretRef + ":s:" + refFP + ":" + fp + agent
 }
 
 // claimsFingerprint hashes a claim map stably: keys sorted so map order cannot
 // change the result, and each field length-prefixed so no two maps can collide by
 // running their bytes together differently.
 func claimsFingerprint(claims map[string]string) string {
-	keys := make([]string, 0, len(claims))
-	for k := range claims {
+	h := sha256.New()
+	hashStringMap(h, claims, nil)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// writeHashField writes s into h length-prefixed, so no two sequences of fields can
+// collide by running their bytes together differently.
+func writeHashField(h hash.Hash, s string) {
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s)))
+	h.Write(lenBuf[:])
+	h.Write([]byte(s))
+}
+
+// hashStringMap folds a map into h with its keys sorted, so iteration order cannot
+// change the result. Keys present in exclude are skipped.
+func hashStringMap(h hash.Hash, m map[string]string, exclude map[string]struct{}) {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		if _, skip := exclude[k]; skip {
+			continue
+		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 
-	h := sha256.New()
-	writeField := func(s string) {
-		var lenBuf [4]byte
-		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s)))
-		h.Write(lenBuf[:])
-		h.Write([]byte(s))
-	}
 	for _, k := range keys {
-		writeField(k)
-		writeField(claims[k])
+		writeHashField(h, k)
+		writeHashField(h, m[k])
 	}
+}
+
+// rotatedProofFields are config keys carrying proof of an identity rather than naming
+// what is fetched or where it lives. Each is rewritten by a rotation — source-side by a
+// driver's PrepareRotation, spec-side by the refresh-token write-back — while the
+// credential goes on reaching the same secret in the same place.
+//
+// They are excluded from chainedSpecFingerprint for two reasons. Including them would
+// dump every secret cached under a source each time that source rotated, buying nothing:
+// the Rotatable contract is that a rotation replaces an authenticator, never the identity
+// it authenticates. And for a referenced spec whose refresh_token rotates on every use it
+// would be worse than churn — the key would move on each fetch, so no entry would ever be
+// read once, and caching would be silently dead for exactly the specs that ask for it.
+//
+// Drift is safe in the direction it drifts: a rotating field missing from this set is
+// fingerprinted, which costs cache churn, never a stale secret.
+var rotatedProofFields = map[string]struct{}{
+	"refresh_token":         {}, // spec-side write-back (persistRotatedRefreshToken)
+	"secret_id":             {}, // vault approle, azure client secret id
+	"secret_id_accessor":    {}, // vault approle
+	"token":                 {}, // vault token auth
+	"client_secret":         {}, // azure
+	"access_key_id":         {}, // aws, alicloud — rotated in lockstep with its secret
+	"secret_access_key":     {}, // aws
+	"access_key_secret":     {}, // alicloud
+	"api_key":               {}, // elastic, ibm
+	"api_key_id":            {}, // elastic
+	"service_account_key":   {}, // gcp
+	"application_secret":    {}, // gitlab oauth application
+	"personal_access_token": {}, // gitlab
+	"management_access_key": {}, // scaleway
+	"management_secret_key": {}, // scaleway
+}
+
+// chainedSpecFingerprint hashes what the referenced spec and its source say about which
+// secret is fetched and where it lives: the spec's type, the source it names, and both
+// configs minus the proof material above.
+//
+// The spec NAME alone cannot stand for this. A name is a label an operator can point
+// somewhere else — editing secret_path, swapping the mount, repointing the spec at
+// another source, or moving the source to a different address all change what a fetch
+// returns while the name stays put, and the entry filled before the edit would go on
+// answering for it. Deriving the key from the content instead makes every such edit
+// self-correcting, on every node, with no invalidation to coordinate — the same standard
+// the driver-level token caches are held to.
+//
+// Config values are only ever hashed, never placed in the key in the clear.
+func chainedSpecFingerprint(spec *CredSpec, src *CredSource) string {
+	h := sha256.New()
+	writeHashField(h, "chained-spec-v1")
+
+	if spec != nil {
+		writeHashField(h, "spec")
+		writeHashField(h, spec.Type)
+		writeHashField(h, spec.Source)
+		hashStringMap(h, spec.Config, rotatedProofFields)
+	}
+	if src != nil {
+		writeHashField(h, "src")
+		writeHashField(h, src.Type)
+		hashStringMap(h, src.Config, rotatedProofFields)
+	}
+
 	return hex.EncodeToString(h.Sum(nil))
 }
 
