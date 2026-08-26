@@ -523,9 +523,10 @@ func (m *Manager) resolveAndMintChained(
 	material := m.buildSecretMaterial(ctx, spec, data, typ)
 
 	cred, err := mintFn(ctx, spec, material)
-	if err != nil && fromCache && (errors.Is(err, ErrChainedSecretRejected) || errors.Is(err, ErrRefreshTokenRejected)) {
-		// A cached secret was rejected downstream — evict it and retry once with a
-		// fresh fetch, in case it was rotated at the source after we cached it.
+	if err != nil && fromCache && (errors.Is(err, ErrChainedSecretRejected) || errors.Is(err, ErrRefreshTokenRejected) || errors.Is(err, ErrChainedSecretIncomplete)) {
+		// A cached secret was rejected downstream, or turned out to be missing
+		// something the driver needs — evict it and retry once with a fresh fetch, in
+		// case it was rotated or completed at the source after we cached it.
 		m.invalidateChainedSecret(key)
 		data, typ, _, _, rerr := m.resolveChainedSecretData(ctx, caller, spec, secretRef, inputsB)
 		if rerr != nil {

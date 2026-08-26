@@ -510,7 +510,9 @@ func TestCredentialConfigStore_ChainedExchangeAccepted(t *testing.T) {
 	}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
-		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693", "client_id": "warden-gateway", credential.ConfigSecretSpec: "wid-secret"},
+		// No client_id: a chained source holds neither half of the client credential,
+		// so both come from the referenced spec's payload.
+		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693", credential.ConfigSecretSpec: "wid-secret"},
 	}))
 
 	// A token_exchange consumer with secret_spec (source-level) + its own subject source

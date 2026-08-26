@@ -97,6 +97,9 @@ type mockChainedExchangeDriver struct {
 	// rejectIf, when set and returning true for the handed material, fails with
 	// ErrChainedSecretRejected (simulating an upstream invalid_client on a stale secret).
 	rejectIf func(SecretMaterial) bool
+	// incompleteIf, when set and returning true, fails with ErrChainedSecretIncomplete
+	// before anything is sent (simulating a payload missing a half of a credential).
+	incompleteIf func(SecretMaterial) bool
 }
 
 func (d *mockChainedExchangeDriver) MintCredential(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
@@ -108,6 +111,9 @@ func (d *mockChainedExchangeDriver) MintCredentialWithExchangeFromSecret(_ conte
 	d.lastMaterial = material
 	if d.rejectIf != nil && d.rejectIf(material) {
 		return nil, nil, 0, "", fmt.Errorf("upstream rejected client auth: %w", ErrChainedSecretRejected)
+	}
+	if d.incompleteIf != nil && d.incompleteIf(material) {
+		return nil, nil, 0, "", fmt.Errorf("payload missing a half: %w", ErrChainedSecretIncomplete)
 	}
 	return map[string]interface{}{"token": "exch:" + inputs.SubjectToken + ":" + material.Secret()}, nil, 0, "", nil
 }
@@ -425,6 +431,65 @@ func TestChaining_ExchangeConsumerRetriesOnRejection(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), fetches.Load(), "stale client secret evicted and re-fetched once")
 	assert.Equal(t, "exch:s2:v2", cred.Data["token"], "exchange retried with the fresh secret")
+}
+
+// TestChaining_ExchangeConsumerRetriesOnIncompletePayload covers the migration case a
+// rejection cannot: a cached payload that is missing a key the driver has since come to
+// need. Nothing downstream refuses it — it never reaches a request — so without its own
+// sentinel the entry would sit in the cache failing every mint for the whole TTL, and
+// completing the secret at the source would have no effect until it expired.
+func TestChaining_ExchangeConsumerRetriesOnIncompletePayload(t *testing.T) {
+	env := newChainingEnv(t)
+	// The referenced spec yields the old payload first, the completed one after.
+	var fetches atomic.Int32
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		val := "old"
+		if fetches.Add(1) > 1 {
+			val = "completed"
+		}
+		return map[string]interface{}{"token": val}, nil, 0, "", nil
+	}
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "exch1", Type: TypeVaultToken, Source: "exchangeconsumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "exch2", Type: TypeVaultToken, Source: "exchangeconsumersource", Config: cfg})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+
+	// Prime the cache with the old payload.
+	_, err := env.manager.IssueCredential(ctx, caller, "exch1", &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), fetches.Load())
+
+	// The driver now needs something the cached payload lacks. The second consumer hits
+	// that entry, reports it incomplete, and the manager refetches once.
+	env.exchangeConsumerDriver.incompleteIf = func(m SecretMaterial) bool { return m.Secret() == "old" }
+	cred, err := env.manager.IssueCredential(ctx, caller, "exch2", &ExchangeInputs{SubjectToken: "s2", SubjectTokenType: TokenTypeJWT})
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), fetches.Load(), "incomplete cached payload evicted and re-fetched once")
+	assert.Equal(t, "exch:s2:completed", cred.Data["token"])
+}
+
+// TestChaining_IncompleteFreshPayloadIsNotRetried pins the other half of the contract:
+// only a CACHED payload is worth refetching. Re-reading one just fetched would cost a
+// second read to be told the same thing.
+func TestChaining_IncompleteFreshPayloadIsNotRetried(t *testing.T) {
+	env := newChainingEnv(t)
+	var fetches atomic.Int32
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		fetches.Add(1)
+		return map[string]interface{}{"token": "always-incomplete"}, nil, 0, "", nil
+	}
+	// No secret_cache_ttl: every mint fetches, so the material is never "from cache".
+	env.store.AddSpec(&CredSpec{Name: "exch1", Type: TypeVaultToken, Source: "exchangeconsumersource",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+	env.exchangeConsumerDriver.incompleteIf = func(SecretMaterial) bool { return true }
+
+	_, err := env.manager.IssueCredential(createNamespaceContext(), chainCaller("tokA"), "exch1",
+		&ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrChainedSecretIncomplete)
+	assert.Equal(t, int32(1), fetches.Load(), "a freshly fetched payload is not re-fetched")
 }
 
 // exchangeChainCaller builds a Caller whose referenced-spec inputs carry a per-agent
