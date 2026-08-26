@@ -1941,3 +1941,76 @@ func TestCredentialConfigStore_GitLabChaining(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "set secret_spec on the source")
 }
+
+// TestCredentialConfigStore_OAuth2Chaining covers the guards on an oauth2 source that
+// fetches its whole client credential per mint: chaining is a source concern, the pair
+// must not be half-configured, and the consent flow cannot reach chained material.
+func TestCredentialConfigStore_OAuth2Chaining(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+
+	// Referenced secret-spec: session-pinned, as validateSecretSpecRef requires.
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "idp-client-credential", Type: "vault_token", Source: "src",
+		Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+	}))
+
+	// The keyless source stores neither half of the client credential.
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "oauth-keyless", Type: credential.SourceTypeOAuth2,
+		Config: map[string]string{
+			"token_url":                  "https://identity.example.com/oauth/token",
+			credential.ConfigSecretSpec:  "idp-client-credential",
+			credential.ConfigSecretField: "client_secret",
+		},
+	}))
+
+	// Rotation belongs to whoever owns the referenced secret, not to this source.
+	rotating := &credential.CredSource{
+		Name: "oauth-rotating", Type: credential.SourceTypeOAuth2,
+		Config: map[string]string{
+			"token_url":                 "https://identity.example.com/oauth/token",
+			credential.ConfigSecretSpec: "idp-client-credential",
+		},
+		RotationPeriod: 24 * time.Hour,
+	}
+	err := store.CreateSource(ctx, rotating)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rotation_period does not apply to a chained source")
+
+	// An ordinary spec on a chained source inherits the chain and needs no chaining
+	// config of its own.
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "api", Type: credential.TypeOAuthBearerToken, Source: "oauth-keyless",
+		Config: map[string]string{"scope": "read"},
+	}))
+
+	// Spec-level secret_spec would shadow the source's and leave the mint with no
+	// client credential.
+	err = store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "spec-level", Type: credential.TypeOAuthBearerToken, Source: "oauth-keyless",
+		Config: map[string]string{credential.ConfigSecretSpec: "idp-client-credential"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "for an oauth2 source, set secret_spec on the source")
+
+	// The consent steps run on the system backend with no caller, so they have no
+	// identity to fetch the chained pair as.
+	err = store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "consent", Type: credential.TypeOAuthBearerToken, Source: "oauth-keyless",
+		Config: map[string]string{"auth_method": "authorization_code"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "supports auth_method=client_credentials only")
+
+	// client_id/client_secret resolve spec-over-source, so a half left on the spec
+	// would be presented against the other half fetched from the chain.
+	for _, key := range []string{"client_id", "client_secret"} {
+		err = store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "inline-" + key, Type: credential.TypeOAuthBearerToken, Source: "oauth-keyless",
+			Config: map[string]string{key: "inline-value"},
+		})
+		require.Error(t, err, key)
+		assert.Contains(t, err.Error(), key+" must be omitted when the source sets secret_spec")
+	}
+}
