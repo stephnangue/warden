@@ -86,3 +86,31 @@ func TestTokenCache_SetPrunesSupersededGenerations(t *testing.T) {
 	assert.NotContains(t, tc.cache, "old-generation", "a superseded entry must be swept")
 	assert.Contains(t, tc.cache, "new-generation")
 }
+
+func TestTokenCache_SetIfGenerationRefusesRotatedMint(t *testing.T) {
+	tc := NewTokenCache()
+
+	// A caller reads the generation, then mints. Nothing rotates, so the store lands.
+	gen := tc.GetGeneration()
+	require.True(t, tc.SetIfGeneration("key", "fresh", time.Now().Add(time.Hour), gen))
+
+	token, _, ok := tc.Get("key", 30*time.Second)
+	require.True(t, ok)
+	assert.Equal(t, "fresh", token)
+
+	// Now the credentials rotate while a second mint is in flight: the caller still
+	// holds the pre-rotation generation, so its result must be refused rather than
+	// filed under the new one, where Get would happily serve it.
+	stale := tc.GetGeneration()
+	tc.InvalidateGeneration()
+	assert.False(t, tc.SetIfGeneration("key", "minted-by-retired-credential", time.Now().Add(time.Hour), stale))
+
+	_, _, ok = tc.Get("key", 30*time.Second)
+	assert.False(t, ok, "the retired credential's token must not be readable after rotation")
+
+	// A mint that started after the rotation stores normally.
+	require.True(t, tc.SetIfGeneration("key", "post-rotation", time.Now().Add(time.Hour), tc.GetGeneration()))
+	token, _, ok = tc.Get("key", 30*time.Second)
+	require.True(t, ok)
+	assert.Equal(t, "post-rotation", token)
+}

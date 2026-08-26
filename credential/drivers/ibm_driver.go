@@ -47,10 +47,15 @@ type IBMDriver struct {
 	// HTTP client for IBM Cloud API calls
 	httpClient *http.Client
 
-	// authMu protects iamID, apiKeyID, and credSource.Config writes during rotation.
-	// These fields are read by SupportsRotation/PrepareRotation and written by
-	// CommitRotation/discoverAPIKeyDetails concurrently.
+	// authMu serializes rotation and protects iamID/apiKeyID. It is held across the
+	// upstream calls a rotation makes, which can run to minutes under retry.
 	authMu sync.Mutex
+
+	// configMu guards credSource.Config, which CommitRotation replaces wholesale.
+	// It is deliberately NOT authMu: a mint reads its credentials out of this map, and
+	// sharing the rotation lock would park every concurrent mint behind that rotation's
+	// HTTP work. Held only across the map access itself, never across an upstream call.
+	configMu sync.RWMutex
 
 	// iamID is the IAM identity associated with the source API key
 	// Discovered at creation time, required for rotation
@@ -310,17 +315,15 @@ func (d *IBMDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 	oldAPIKeyID := d.apiKeyID
 
 	// Build new config
-	newConfig := make(map[string]string)
-	for k, v := range d.credSource.Config {
-		newConfig[k] = v
-	}
+	newConfig := d.configSnapshot()
 	newConfig["api_key"] = newAPIKey
 
 	cleanupConfig := map[string]string{
 		"api_key_id": oldAPIKeyID,
 	}
 
-	activateAfter := credential.GetDuration(d.credSource.Config, "activation_delay", DefaultIBMActivationDelay)
+	// Rotation does not touch activation_delay, so the snapshot carries the live value.
+	activateAfter := credential.GetDuration(newConfig, "activation_delay", DefaultIBMActivationDelay)
 
 	if d.logger != nil {
 		d.logger.Debug("prepared source API key rotation",
@@ -335,33 +338,34 @@ func (d *IBMDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 
 // CommitRotation activates new credentials in the driver.
 //
-// Thread-safety: authMu protects credSource.Config writes and iamID/apiKeyID updates.
-// The rotated field (api_key) is only read by acquireIAMToken, which is always called
-// either under authMu or during initial creation (single-threaded).
+// Thread-safety: authMu is held across the whole swap, so the config write, the
+// generation bump and the exchange that verifies the new key are one critical section
+// and no mint can observe a half-applied rotation. The lock alone does not stop a token
+// minted by the outgoing key from outliving the rotation, though — an exchange already
+// in flight holds no lock. That is what the generation retired here is for, which
+// iamToken re-checks before it stores.
 func (d *IBMDriver) CommitRotation(ctx context.Context, newConfig map[string]string) error {
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
 	// Save old config for rollback on failure
-	oldConfig := d.credSource.Config
+	oldConfig := d.configSnapshot()
 
-	// Update config
-	d.credSource.Config = newConfig
-
-	// Invalidate all cached tokens from previous generation
-	d.tokenCache.InvalidateGeneration()
+	// Publish the new key and retire every token the old one minted
+	d.swapConfig(newConfig)
 
 	// Verify new credentials work
 	if _, _, err := d.acquireIAMToken(ctx); err != nil {
-		d.credSource.Config = oldConfig
-		d.tokenCache.InvalidateGeneration()
+		// Roll back, bumping the generation a second time: discovery may already have
+		// cached a token minted by the key we are abandoning, and it is filed under the
+		// current generation, so restoring the config alone would leave it readable.
+		d.swapConfig(oldConfig)
 		return fmt.Errorf("failed to authenticate with new API key: %w", err)
 	}
 
 	// Re-discover API key details with new key
 	if err := d.discoverAPIKeyDetailsLocked(ctx); err != nil {
-		d.credSource.Config = oldConfig
-		d.tokenCache.InvalidateGeneration()
+		d.swapConfig(oldConfig)
 		return fmt.Errorf("failed to discover new API key details: %w", err)
 	}
 
@@ -405,29 +409,98 @@ func (d *IBMDriver) CleanupRotation(ctx context.Context, cleanupConfig map[strin
 // ============================================================================
 
 // getIAMToken returns a cached or freshly acquired IAM bearer token.
-// Thread-safe via TokenCache.
+//
+// The entry is keyed by a fixed string, so the generation is the only thing
+// distinguishing a token minted by the current API key from one minted by a retired
+// one. Reading it before the credentials and storing conditionally keeps that
+// distinction honest: an exchange that was in flight when CommitRotation landed is
+// discarded rather than filed under the new generation, where it would be served until
+// its own expiry — IBM does not revoke outstanding IAM tokens when CleanupRotation
+// deletes the key that minted them.
+//
+// The generation must be read BEFORE the credentials, so that a rotation landing in
+// between is always visible as a change at store time rather than producing a token
+// whose key and generation disagree.
 func (d *IBMDriver) getIAMToken(ctx context.Context) (string, time.Time, error) {
-	// Check cache (with 30s refresh buffer)
-	if token, expiry, ok := d.tokenCache.Get("iam", 30*time.Second); ok {
-		return token, expiry, nil
+	for {
+		gen := d.tokenCache.GetGeneration()
+
+		// Check cache (with 30s refresh buffer)
+		if token, expiry, ok := d.tokenCache.Get("iam", 30*time.Second); ok {
+			return token, expiry, nil
+		}
+
+		// Acquire fresh token
+		token, expiry, err := d.acquireIAMToken(ctx)
+		if err != nil {
+			return "", time.Time{}, err
+		}
+
+		// Cache it, unless the API key rotated while we were exchanging it
+		if d.tokenCache.SetIfGeneration("iam", token, expiry, gen) {
+			return token, expiry, nil
+		}
 	}
-
-	// Acquire fresh token
-	token, expiry, err := d.acquireIAMToken(ctx)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-
-	// Cache it
-	d.tokenCache.Set("iam", token, expiry)
-
-	return token, expiry, nil
 }
 
 // acquireIAMToken exchanges the source API key for an IAM bearer token.
 func (d *IBMDriver) acquireIAMToken(ctx context.Context) (string, time.Time, error) {
-	apiKey := credential.GetString(d.credSource.Config, "api_key", "")
-	return exchangeIBMAPIKeyForIAMToken(ctx, d.httpClient, apiKey, d.getIAMEndpoint())
+	return exchangeIBMAPIKeyForIAMToken(ctx, d.httpClient, d.getAPIKey(), d.getIAMEndpoint())
+}
+
+// Config accessors — single source of truth is credSource.Config, read under configMu
+// because CommitRotation replaces the map wholesale.
+
+// getAPIKey reads the source API key.
+func (d *IBMDriver) getAPIKey() string {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	return credential.GetString(d.credSource.Config, "api_key", "")
+}
+
+// getAccountID reads the configured or discovered account id.
+func (d *IBMDriver) getAccountID() string {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	return credential.GetString(d.credSource.Config, "account_id", "")
+}
+
+// configSnapshot copies the source config, so a caller reading several keys sees one
+// consistent view rather than racing a rotation between lookups.
+func (d *IBMDriver) configSnapshot() map[string]string {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+
+	snapshot := make(map[string]string, len(d.credSource.Config))
+	for k, v := range d.credSource.Config {
+		snapshot[k] = v
+	}
+	return snapshot
+}
+
+// setAccountIDIfUnset records an account id learned from discovery, leaving an
+// operator-configured one alone.
+func (d *IBMDriver) setAccountIDIfUnset(accountID string) {
+	if accountID == "" {
+		return
+	}
+	d.configMu.Lock()
+	defer d.configMu.Unlock()
+	if credential.GetString(d.credSource.Config, "account_id", "") == "" {
+		d.credSource.Config["account_id"] = accountID
+	}
+}
+
+// swapConfig publishes a config and retires every token the previous one minted, as one
+// step. The generation bump follows the write under the same lock, so a mint that read
+// the outgoing credentials also captured the outgoing generation and cannot store under
+// the new one.
+func (d *IBMDriver) swapConfig(newConfig map[string]string) {
+	d.configMu.Lock()
+	defer d.configMu.Unlock()
+
+	d.credSource.Config = newConfig
+	d.tokenCache.InvalidateGeneration()
 }
 
 // ============================================================================
@@ -451,7 +524,7 @@ func (d *IBMDriver) discoverAPIKeyDetailsLocked(ctx context.Context) error {
 	}
 
 	iamEndpoint := d.getIAMEndpoint()
-	apiKey := credential.GetString(d.credSource.Config, "api_key", "")
+	apiKey := d.getAPIKey()
 
 	// Use POST with API key in request body (more secure than GET with IAM-Apikey header)
 	reqBody, err := json.Marshal(map[string]string{
@@ -493,9 +566,7 @@ func (d *IBMDriver) discoverAPIKeyDetailsLocked(ctx context.Context) error {
 	d.apiKeyID = detailsResp.ID
 
 	// Set account_id from discovery if not already configured
-	if credential.GetString(d.credSource.Config, "account_id", "") == "" && detailsResp.AccountID != "" {
-		d.credSource.Config["account_id"] = detailsResp.AccountID
-	}
+	d.setAccountIDIfUnset(detailsResp.AccountID)
 
 	if d.logger != nil {
 		d.logger.Trace("discovered IBM API key details",
@@ -507,10 +578,11 @@ func (d *IBMDriver) discoverAPIKeyDetailsLocked(ctx context.Context) error {
 	return nil
 }
 
-// createAPIKey creates a new API key for the same IAM identity
+// createAPIKey creates a new API key for the same IAM identity.
+// Caller must hold authMu (PrepareRotation).
 func (d *IBMDriver) createAPIKey(ctx context.Context, iamToken string) (string, string, error) {
 	iamEndpoint := d.getIAMEndpoint()
-	accountID := credential.GetString(d.credSource.Config, "account_id", "")
+	accountID := d.getAccountID()
 
 	reqBody, err := json.Marshal(map[string]interface{}{
 		"name":        fmt.Sprintf("warden-rotated-%d", time.Now().Unix()),
@@ -570,8 +642,10 @@ func (d *IBMDriver) deleteAPIKey(ctx context.Context, iamToken, apiKeyID string)
 // Helpers
 // ============================================================================
 
-// getIAMEndpoint returns the configured IAM endpoint or the default
+// getIAMEndpoint returns the configured IAM endpoint or the default.
 func (d *IBMDriver) getIAMEndpoint() string {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
 	return credential.GetString(d.credSource.Config, "iam_endpoint", defaultIBMIAMEndpoint)
 }
 

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -602,4 +604,165 @@ func TestIBMDriver_MintIAMWithCOS_InvalidKey(t *testing.T) {
 
 func TestIBMDriver_ImplementsSpecVerifier(t *testing.T) {
 	var _ credential.SpecVerifier = (*IBMDriver)(nil)
+}
+
+// TestIBMDriver_RotationDuringMintDiscardsStaleToken pins the generation guard in
+// getIAMToken. The IAM entry is keyed by a fixed string, so the generation is the only
+// thing separating a token minted by the current API key from one minted by a key that
+// has since been retired. A plain Set stamps the entry with whatever generation is
+// current when it lands, which files the retired key's token under the new generation —
+// and IBM does not revoke outstanding IAM tokens when CleanupRotation deletes the key
+// that minted them, so it would be served for its full hour.
+func TestIBMDriver_RotationDuringMintDiscardsStaleToken(t *testing.T) {
+	var d *IBMDriver
+	var callCount int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/identity/token" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		n := atomic.AddInt32(&callCount, 1)
+		// Retire the key that is minting this very token, mid-exchange. This is what
+		// CommitRotation does to a mint that is already in flight.
+		if n == 1 {
+			d.tokenCache.InvalidateGeneration()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": fmt.Sprintf("token-call-%d", n),
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+			"expiration":   time.Now().Add(1 * time.Hour).Unix(),
+		})
+	}))
+	defer srv.Close()
+
+	d = newTestIBMDriver(t, srv.URL)
+	d.tokenCache.Clear()
+
+	token, _, err := d.getIAMToken(context.TODO())
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount), "the in-flight token belonged to the retired key, so it must be minted again")
+	assert.Equal(t, "token-call-2", token, "the retired key's token must not be returned")
+
+	cached, _, ok := d.tokenCache.Get("iam", 30*time.Second)
+	require.True(t, ok, "the re-minted token is cached")
+	assert.Equal(t, "token-call-2", cached, "the retired key's token must never reach the cache")
+}
+
+// TestIBMDriver_ConcurrentRotationAndMintIsRaceFree covers the locking half:
+// CommitRotation replaces credSource.Config while mints read api_key and iam_endpoint
+// out of it. The assertions are modest — this test earns its keep under -race, which is
+// what catches the mint path reading the config without the lock that guards the swap.
+func TestIBMDriver_ConcurrentRotationAndMintIsRaceFree(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.tokenCache.Clear()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := d.getIAMToken(context.TODO())
+			assert.NoError(t, err)
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		assert.NoError(t, d.CommitRotation(context.TODO(), map[string]string{
+			"api_key":      "rotated-key",
+			"iam_endpoint": srv.URL,
+		}))
+	}()
+
+	wg.Wait()
+
+	assert.Equal(t, "rotated-key", d.getAPIKey(), "the driver ends on the rotated key whatever the interleaving")
+
+	// Whether an entry survives depends on the interleaving, but if one did it cannot
+	// be the retired key's: the config write and the generation bump share a critical
+	// section, so a mint that read the old key also captured the old generation.
+	// CommitRotation's own discovery repopulates the entry under the final generation,
+	// so an entry must exist — requiring it keeps this assertion from silently
+	// vanishing if that ever stops being true.
+	token, _, ok := d.tokenCache.Get("iam", 30*time.Second)
+	require.True(t, ok, "rotation leaves a usable entry behind")
+	assert.Equal(t, "test-iam-token-rotated-key", token,
+		"a token the retired key minted must never remain readable after rotation")
+}
+
+// TestIBMDriver_TokenFromRetiredKeyIsNeverServed drives the real interleaving rather
+// than simulating it: a mint's exchange is held open until an actual CommitRotation has
+// swapped the API key underneath it, so the response genuinely carries a token the
+// retired key minted. That token must never be returned or cached — the caller must
+// discard it and mint again against the key now in force.
+func TestIBMDriver_TokenFromRetiredKeyIsNeverServed(t *testing.T) {
+	mintStarted := make(chan struct{})
+	rotationDone := make(chan struct{})
+	var once sync.Once
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/identity/token", func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		apiKey := r.FormValue("apikey")
+
+		// Hold the outgoing key's exchange open until the rotation has landed. The
+		// rotated key's own exchanges pass straight through, so CommitRotation's
+		// verify is not deadlocked behind this.
+		if apiKey == "test-key" {
+			once.Do(func() { close(mintStarted) })
+			<-rotationDone
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "test-iam-token-" + apiKey,
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+			"expiration":   time.Now().Add(1 * time.Hour).Unix(),
+		})
+	})
+	mux.HandleFunc("/v1/apikeys/details", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": "ApiKey-12345", "iam_id": "iam-ServiceId-abcdef", "account_id": "acc-123456",
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.tokenCache.Clear()
+
+	var token string
+	var mintErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		token, _, mintErr = d.getIAMToken(context.TODO())
+	}()
+
+	<-mintStarted
+	require.NoError(t, d.CommitRotation(context.TODO(), map[string]string{
+		"api_key":      "rotated-key",
+		"iam_endpoint": srv.URL,
+	}))
+	close(rotationDone)
+	wg.Wait()
+
+	require.NoError(t, mintErr)
+	assert.Equal(t, "test-iam-token-rotated-key", token,
+		"the exchange completed against the retired key; its token must be discarded, not served")
+
+	cached, _, ok := d.tokenCache.Get("iam", 30*time.Second)
+	require.True(t, ok)
+	assert.NotEqual(t, "test-iam-token-test-key", cached, "the retired key's token must never reach the cache")
 }
