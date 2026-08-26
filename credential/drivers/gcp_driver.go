@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/oauth2/google"
@@ -84,7 +85,13 @@ type GCPDriver struct {
 	// HTTP client for GCP API calls
 	httpClient *http.Client
 
+	// authMu guards credSource.Config and sourceVerified against the rewrite in
+	// CommitRotation. It is held only across those field accesses and never across a
+	// token mint, so a slow acquisition cannot block a config reader.
+	authMu sync.Mutex
+
 	// Flag to track if source credentials have been verified
+	// Protected by authMu
 	sourceVerified bool
 
 	// API hosts, defaulting to the public GCP endpoints. Overridden in tests to
@@ -93,18 +100,38 @@ type GCPDriver struct {
 	iamCredentialsHost string
 }
 
-// Config accessors — single source of truth is credSource.Config.
+// Config accessors — single source of truth is credSource.Config. Each takes authMu,
+// since CommitRotation replaces the whole map underneath them.
 
 func (d *GCPDriver) getServiceAccountKey() string {
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
 	return credential.GetString(d.credSource.Config, "service_account_key", "")
 }
 
 func (d *GCPDriver) getAuthMethod() string {
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
 	return credential.GetString(d.credSource.Config, "auth_method", gcpAuthMethodStatic)
 }
 
 func (d *GCPDriver) getWorkloadIdentityProvider() string {
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
 	return credential.GetString(d.credSource.Config, "workload_identity_provider", "")
+}
+
+// configSnapshot copies the source config under authMu, so a caller reading several
+// keys sees one consistent view rather than racing a rotation between lookups.
+func (d *GCPDriver) configSnapshot() map[string]string {
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+
+	snapshot := make(map[string]string, len(d.credSource.Config))
+	for k, v := range d.credSource.Config {
+		snapshot[k] = v
+	}
+	return snapshot
 }
 
 func (d *GCPDriver) parseServiceAccountKey() (*serviceAccountKey, error) {
@@ -699,10 +726,7 @@ func (d *GCPDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 	}
 
 	// Build new config
-	newConfig := make(map[string]string)
-	for k, v := range d.credSource.Config {
-		newConfig[k] = v
-	}
+	newConfig := d.configSnapshot()
 	newConfig["service_account_key"] = newKeyJSON
 
 	cleanupConfig := map[string]string{
@@ -711,7 +735,8 @@ func (d *GCPDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 		"project_id":            saKey.ProjectID,
 	}
 
-	activateAfter := credential.GetDuration(d.credSource.Config, "activation_delay", DefaultGCPActivationDelay)
+	// Rotation does not touch activation_delay, so the snapshot carries the live value.
+	activateAfter := credential.GetDuration(newConfig, "activation_delay", DefaultGCPActivationDelay)
 
 	if d.logger != nil {
 		d.logger.Debug("prepared source SA key rotation",
@@ -725,19 +750,26 @@ func (d *GCPDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 
 // CommitRotation activates new credentials in the driver
 func (d *GCPDriver) CommitRotation(ctx context.Context, newConfig map[string]string) error {
-	// Update config (single source of truth for credentials)
+	// Publish the new key and retire every token the old one minted, as one step. The
+	// generation bump follows the config write under the same lock, so a mint already
+	// in flight against the retired key cannot file its result under the new
+	// generation — getSourceToken reads the generation before it reads the key.
+	d.authMu.Lock()
 	d.credSource.Config = newConfig
-
-	// Invalidate all cached tokens from previous generation
 	d.tokenCache.InvalidateGeneration()
 	d.sourceVerified = false
+	d.authMu.Unlock()
 
-	// Verify new credentials work
+	// Verify new credentials work. Deliberately not under authMu: acquireToken reads
+	// the config through the accessors, which take the lock themselves.
 	_, _, err := d.acquireToken(ctx, []string{"https://www.googleapis.com/auth/cloud-platform"})
 	if err != nil {
 		return fmt.Errorf("failed to authenticate with new SA key: %w", err)
 	}
+
+	d.authMu.Lock()
 	d.sourceVerified = true
+	d.authMu.Unlock()
 
 	if d.logger != nil {
 		d.logger.Debug("committed source SA key rotation")
@@ -784,21 +816,28 @@ func (d *GCPDriver) CleanupRotation(ctx context.Context, cleanupConfig map[strin
 func (d *GCPDriver) getSourceToken(ctx context.Context, scopes []string) (string, time.Time, error) {
 	scopeKey := strings.Join(scopes, ",")
 
-	// Check cache (with 60s refresh buffer)
-	if token, expiry, ok := d.tokenCache.Get(scopeKey, 60*time.Second); ok {
-		return token, expiry, nil
+	for {
+		// Read the generation before the SA key, so a rotation landing while the mint
+		// is in flight is always visible as a change by the time we store.
+		gen := d.tokenCache.GetGeneration()
+
+		// Check cache (with 60s refresh buffer)
+		if token, expiry, ok := d.tokenCache.Get(scopeKey, 60*time.Second); ok {
+			return token, expiry, nil
+		}
+
+		// Acquire fresh token
+		token, expiry, err := d.acquireToken(ctx, scopes)
+		if err != nil {
+			return "", time.Time{}, err
+		}
+
+		// A refused store means the SA key rotated during the mint, so this token may
+		// have come from the retired key. Drop it and mint against the current one.
+		if d.tokenCache.SetIfGeneration(scopeKey, token, expiry, gen) {
+			return token, expiry, nil
+		}
 	}
-
-	// Acquire fresh token
-	token, expiry, err := d.acquireToken(ctx, scopes)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-
-	// Cache it
-	d.tokenCache.Set(scopeKey, token, expiry)
-
-	return token, expiry, nil
 }
 
 // acquireToken gets a fresh OAuth2 token using the SA key.

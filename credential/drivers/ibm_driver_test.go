@@ -603,3 +603,49 @@ func TestIBMDriver_MintIAMWithCOS_InvalidKey(t *testing.T) {
 func TestIBMDriver_ImplementsSpecVerifier(t *testing.T) {
 	var _ credential.SpecVerifier = (*IBMDriver)(nil)
 }
+
+// TestIBMDriver_RotationDuringMintDiscardsStaleToken pins the generation guard in
+// getIAMToken. The IAM entry is keyed by a fixed string, so the generation is the only
+// thing separating a token minted by the current API key from one minted by a key that
+// has since been retired. A plain Set stamps the entry with whatever generation is
+// current when it lands, which files the retired key's token under the new generation —
+// and IBM does not revoke outstanding IAM tokens when CleanupRotation deletes the key
+// that minted them, so it would be served for its full hour.
+func TestIBMDriver_RotationDuringMintDiscardsStaleToken(t *testing.T) {
+	var d *IBMDriver
+	callCount := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/identity/token" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		callCount++
+		// Retire the key that is minting this very token, mid-exchange. This is what
+		// CommitRotation does to a mint that is already in flight.
+		if callCount == 1 {
+			d.tokenCache.InvalidateGeneration()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": fmt.Sprintf("token-call-%d", callCount),
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+			"expiration":   time.Now().Add(1 * time.Hour).Unix(),
+		})
+	}))
+	defer srv.Close()
+
+	d = newTestIBMDriver(t, srv.URL)
+	d.tokenCache.Clear()
+
+	token, _, err := d.getIAMToken(context.TODO())
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, callCount, "the in-flight token belonged to the retired key, so it must be minted again")
+	assert.Equal(t, "token-call-2", token, "the retired key's token must not be returned")
+
+	cached, _, ok := d.tokenCache.Get("iam", 30*time.Second)
+	require.True(t, ok, "the re-minted token is cached")
+	assert.Equal(t, "token-call-2", cached, "the retired key's token must never reach the cache")
+}

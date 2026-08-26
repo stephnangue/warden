@@ -2,6 +2,16 @@ package drivers
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -278,4 +288,118 @@ func TestSplitScopes(t *testing.T) {
 			"https://www.googleapis.com/auth/devstorage.read_only",
 		}, scopes)
 	})
+}
+
+// newTestGCPSAKey builds a usable service-account key whose token_uri points at a local
+// server, so the oauth2 library performs a real signed JWT exchange against it.
+func newTestGCPSAKey(t *testing.T, tokenURI string) string {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	require.NoError(t, err)
+
+	saKey := map[string]string{
+		"type":         "service_account",
+		"project_id":   "test-project",
+		"private_key":  string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+		"client_email": "sa@test-project.iam.gserviceaccount.com",
+		"token_uri":    tokenURI,
+	}
+	encoded, err := json.Marshal(saKey)
+	require.NoError(t, err)
+	return string(encoded)
+}
+
+// TestGCPDriver_RotationDuringMintDiscardsStaleToken pins the generation guard in
+// getSourceToken. The scope key carries nothing about which SA key minted the token, so
+// the generation is the sole barrier: without the guard, a token whose exchange was in
+// flight when CommitRotation landed is stamped with the new generation and served for
+// its full lifetime, defeating the rotation it outlived.
+func TestGCPDriver_RotationDuringMintDiscardsStaleToken(t *testing.T) {
+	var d *GCPDriver
+	var callCount int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		// Retire the SA key that is minting this very token, mid-exchange.
+		if n == 1 {
+			d.tokenCache.InvalidateGeneration()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": fmt.Sprintf("token-call-%d", n),
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	d = &GCPDriver{
+		credSource: &credential.CredSource{
+			Type:   credential.SourceTypeGCP,
+			Config: map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL)},
+		},
+		tokenCache: NewTokenCache(),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	token, _, err := d.getSourceToken(context.TODO(), []string{"https://www.googleapis.com/auth/cloud-platform"})
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount), "the in-flight token belonged to the retired SA key, so it must be minted again")
+	assert.Equal(t, "token-call-2", token, "the retired SA key's token must not be returned")
+}
+
+// TestGCPDriver_ConcurrentRotationAndMintIsRaceFree covers the other half: CommitRotation
+// replaces credSource.Config wholesale while mints are reading it. The assertions are
+// incidental — this test earns its keep under -race, which is what catches the driver
+// losing the lock that makes the swap safe.
+func TestGCPDriver_ConcurrentRotationAndMintIsRaceFree(t *testing.T) {
+	var callCount int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": fmt.Sprintf("token-call-%d", n),
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	d := &GCPDriver{
+		credSource: &credential.CredSource{
+			Type:   credential.SourceTypeGCP,
+			Config: map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL)},
+		},
+		tokenCache: NewTokenCache(),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	rotatedKey := newTestGCPSAKey(t, srv.URL)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := d.getSourceToken(context.TODO(), []string{"https://www.googleapis.com/auth/cloud-platform"})
+			assert.NoError(t, err)
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		assert.NoError(t, d.CommitRotation(context.TODO(), map[string]string{"service_account_key": rotatedKey}))
+	}()
+
+	wg.Wait()
+
+	// Whatever the interleaving, the driver ends on the rotated key and reports verified.
+	assert.Equal(t, rotatedKey, d.getServiceAccountKey())
+	assert.True(t, d.sourceVerified)
 }

@@ -63,6 +63,34 @@ func (tc *TokenCache) Set(key string, token string, expiresAt time.Time) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 
+	tc.setLocked(key, token, expiresAt)
+}
+
+// SetIfGeneration stores a token only while the cache is still on the generation the
+// caller minted under, reporting whether it did.
+//
+// A caller that reads its source credentials, mints, then stores the result races
+// rotation: the credentials can be retired while the mint is in flight, and Set stamps
+// the entry with whatever generation is current when it lands — so a token minted by
+// the retired credential is filed under the *new* generation and served until it
+// expires of its own accord, long after rotation reported success. Reading the
+// generation before the credentials and passing it here closes that window: the store
+// is refused and the caller mints again against the current credentials.
+func (tc *TokenCache) SetIfGeneration(key string, token string, expiresAt time.Time, generation uint64) bool {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+
+	if tc.generation != generation {
+		return false
+	}
+
+	tc.setLocked(key, token, expiresAt)
+	return true
+}
+
+// setLocked sweeps the entries Get would already refuse and files the new one.
+// The caller holds mu.
+func (tc *TokenCache) setLocked(key string, token string, expiresAt time.Time) {
 	now := time.Now()
 	for k, entry := range tc.cache {
 		if entry.Generation != tc.generation || now.After(entry.ExpiresAt) {
@@ -104,7 +132,9 @@ func (tc *TokenCache) Clear() {
 	tc.cache = make(map[string]*TokenCacheEntry)
 }
 
-// GetGeneration returns the current generation (for testing/debugging)
+// GetGeneration returns the current generation. Callers read it before the
+// credentials they are about to mint with and hand it back to SetIfGeneration, so a
+// rotation landing in between is visible as a change at store time.
 func (tc *TokenCache) GetGeneration() uint64 {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()

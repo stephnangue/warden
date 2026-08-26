@@ -336,8 +336,10 @@ func (d *IBMDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 // CommitRotation activates new credentials in the driver.
 //
 // Thread-safety: authMu protects credSource.Config writes and iamID/apiKeyID updates.
-// The rotated field (api_key) is only read by acquireIAMToken, which is always called
-// either under authMu or during initial creation (single-threaded).
+// acquireIAMToken also reaches api_key from the uncontended mint path (getIAMToken) —
+// what stops a token minted by the outgoing key from outliving the rotation is not
+// this lock but the generation the cache is keyed on, which the bump below retires
+// and getIAMToken re-checks before it stores.
 func (d *IBMDriver) CommitRotation(ctx context.Context, newConfig map[string]string) error {
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
@@ -406,22 +408,34 @@ func (d *IBMDriver) CleanupRotation(ctx context.Context, cleanupConfig map[strin
 
 // getIAMToken returns a cached or freshly acquired IAM bearer token.
 // Thread-safe via TokenCache.
+//
+// The entry is keyed by a fixed string, so the generation is the only thing
+// distinguishing a token minted by the current API key from one minted by a retired
+// one. Reading it before the mint and storing conditionally keeps that distinction
+// honest: an exchange that was in flight when CommitRotation landed is discarded
+// rather than filed under the new generation, where it would be served until its own
+// expiry — IBM does not revoke outstanding IAM tokens when CleanupRotation deletes
+// the key that minted them.
 func (d *IBMDriver) getIAMToken(ctx context.Context) (string, time.Time, error) {
-	// Check cache (with 30s refresh buffer)
-	if token, expiry, ok := d.tokenCache.Get("iam", 30*time.Second); ok {
-		return token, expiry, nil
+	for {
+		gen := d.tokenCache.GetGeneration()
+
+		// Check cache (with 30s refresh buffer)
+		if token, expiry, ok := d.tokenCache.Get("iam", 30*time.Second); ok {
+			return token, expiry, nil
+		}
+
+		// Acquire fresh token
+		token, expiry, err := d.acquireIAMToken(ctx)
+		if err != nil {
+			return "", time.Time{}, err
+		}
+
+		// Cache it, unless the API key rotated while we were exchanging it
+		if d.tokenCache.SetIfGeneration("iam", token, expiry, gen) {
+			return token, expiry, nil
+		}
 	}
-
-	// Acquire fresh token
-	token, expiry, err := d.acquireIAMToken(ctx)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-
-	// Cache it
-	d.tokenCache.Set("iam", token, expiry)
-
-	return token, expiry, nil
 }
 
 // acquireIAMToken exchanges the source API key for an IAM bearer token.
