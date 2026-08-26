@@ -1464,6 +1464,44 @@ func TestChainedSpecFingerprint(t *testing.T) {
 			chainedSpecFingerprint(spec(basePath), moved))
 	})
 
+	t.Run("an arbitrary spec config key moves it", func(t *testing.T) {
+		// The named cases below are the ones we thought of. This is the general rule:
+		// anything an operator can put in a referenced spec's config can change what the
+		// fetch returns, so a regression to an allow-list of known fields fails here.
+		assert.NotEqual(t,
+			chainedSpecFingerprint(spec(map[string]string{"anything": "1"}), src(baseSrc)),
+			chainedSpecFingerprint(spec(map[string]string{"anything": "2"}), src(baseSrc)))
+	})
+
+	t.Run("an arbitrary source config key moves it", func(t *testing.T) {
+		assert.NotEqual(t,
+			chainedSpecFingerprint(spec(basePath), src(map[string]string{"anything": "1"})),
+			chainedSpecFingerprint(spec(basePath), src(map[string]string{"anything": "2"})))
+	})
+
+	t.Run("the spec type moves it", func(t *testing.T) {
+		other := &CredSpec{Name: "ref", Type: TypeAPIKey, Source: "vault-main", Config: basePath}
+		assert.NotEqual(t, chainedSpecFingerprint(spec(basePath), src(baseSrc)),
+			chainedSpecFingerprint(other, src(baseSrc)))
+	})
+
+	// Several names are proof material on the source side and the fetch coordinate — or
+	// the vended credential itself — on the spec side. Excluding them from the spec's
+	// config would serve an operator the value they had just replaced.
+	t.Run("spec-side names that are content are not excluded", func(t *testing.T) {
+		for _, field := range []string{
+			"secret_id", // names which AWS Secrets Manager secret to fetch
+			"api_key",   // IS the credential a static_apikey spec vends
+			"token",     // IS the credential a github PAT-mode spec vends
+			"anything",  // the local driver returns spec.Config wholesale
+		} {
+			assert.NotEqual(t,
+				chainedSpecFingerprint(spec(map[string]string{field: "old"}), src(baseSrc)),
+				chainedSpecFingerprint(spec(map[string]string{field: "new"}), src(baseSrc)),
+				"replacing a spec's %q must not keep serving the old value", field)
+		}
+	})
+
 	t.Run("rotating the source credential does not move it", func(t *testing.T) {
 		before := chainedSpecFingerprint(spec(basePath), src(map[string]string{
 			"vault_address": "https://vault.internal:8200", "approle_mount": "approle",
@@ -1477,14 +1515,30 @@ func TestChainedSpecFingerprint(t *testing.T) {
 			"a rotation replaces an authenticator, not the identity it authenticates — dumping the cache buys nothing")
 	})
 
-	t.Run("a rotating refresh_token does not move it", func(t *testing.T) {
-		// This one is not merely churn: refresh_token is rewritten on every use, so a
-		// moving key would mean no entry is ever read once and caching is silently dead.
-		withRT := func(rt string) *CredSpec {
-			return spec(map[string]string{"oauth2_mount": "oauth2", "credential_name": "cred", "refresh_token": rt})
+	t.Run("the per-mint refresh fields do not move it", func(t *testing.T) {
+		// Not merely churn: both are rewritten on every use by the refresh-token
+		// write-back, so a moving key would mean no entry is ever read once and caching
+		// is silently dead. They must be excluded together — one alone still moves it.
+		withRT := func(rt, exp string) *CredSpec {
+			return spec(map[string]string{
+				"oauth2_mount": "oauth2", "credential_name": "cred",
+				"refresh_token": rt, "refresh_token_expires_at": exp,
+			})
 		}
-		assert.Equal(t, chainedSpecFingerprint(withRT("rt-1"), src(baseSrc)),
-			chainedSpecFingerprint(withRT("rt-2"), src(baseSrc)))
+		assert.Equal(t,
+			chainedSpecFingerprint(withRT("rt-1", "2030-01-01T00:00:00Z"), src(baseSrc)),
+			chainedSpecFingerprint(withRT("rt-2", "2031-01-01T00:00:00Z"), src(baseSrc)))
+	})
+
+	t.Run("a pinned digest, so nondeterminism cannot creep in", func(t *testing.T) {
+		// The iteration-order subtest compares two calls in one process, which a
+		// per-process-seeded hash would satisfy. This pins the bytes themselves.
+		fp := chainedSpecFingerprint(
+			&CredSpec{Name: "ref", Type: "vault_token", Source: "vault-main",
+				Config: map[string]string{"kv2_mount": "kv", "secret_path": "teams/a/db"}},
+			&CredSource{Name: "vault-main", Type: "vault",
+				Config: map[string]string{"vault_address": "https://vault.internal:8200"}})
+		assert.Equal(t, "858b2859308fc79fa46a539f40e6110c56ed111994f7e08c8867ced2a63116b0", fp)
 	})
 
 	t.Run("stable across map iteration order", func(t *testing.T) {

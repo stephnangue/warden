@@ -799,6 +799,10 @@ func writeHashField(h hash.Hash, s string) {
 
 // hashStringMap folds a map into h with its keys sorted, so iteration order cannot
 // change the result. Keys present in exclude are skipped.
+//
+// The entry count is written first: without it the fields run together with whatever
+// surrounds them, so a config key named like an adjacent literal could move a pair across
+// that boundary without changing the digest.
 func hashStringMap(h hash.Hash, m map[string]string, exclude map[string]struct{}) {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -809,31 +813,33 @@ func hashStringMap(h hash.Hash, m map[string]string, exclude map[string]struct{}
 	}
 	sort.Strings(keys)
 
+	var countBuf [4]byte
+	binary.BigEndian.PutUint32(countBuf[:], uint32(len(keys)))
+	h.Write(countBuf[:])
+
 	for _, k := range keys {
 		writeHashField(h, k)
 		writeHashField(h, m[k])
 	}
 }
 
-// rotatedProofFields are config keys carrying proof of an identity rather than naming
-// what is fetched or where it lives. Each is rewritten by a rotation — source-side by a
-// driver's PrepareRotation, spec-side by the refresh-token write-back — while the
-// credential goes on reaching the same secret in the same place.
+// rotatedSourceProofFields are SOURCE config keys carrying proof of an identity rather
+// than naming what is fetched or where it lives. Every one is written back by some
+// driver's PrepareRotation while the source goes on reaching the same secret in the same
+// place, so hashing them would dump every secret cached under a source each time that
+// source rotated, buying nothing: the Rotatable contract is that a rotation replaces an
+// authenticator, never the identity it authenticates.
 //
-// They are excluded from chainedSpecFingerprint for two reasons. Including them would
-// dump every secret cached under a source each time that source rotated, buying nothing:
-// the Rotatable contract is that a rotation replaces an authenticator, never the identity
-// it authenticates. And for a referenced spec whose refresh_token rotates on every use it
-// would be worse than churn — the key would move on each fetch, so no entry would ever be
-// read once, and caching would be silently dead for exactly the specs that ask for it.
+// This set applies to the SOURCE side only. Key names do not mean the same thing on both
+// sides — on the spec side several of these ARE the fetch coordinate or the vended
+// material itself (see perMintSpecFields), and excluding them there would serve an
+// operator the value they had just replaced.
 //
 // Drift is safe in the direction it drifts: a rotating field missing from this set is
 // fingerprinted, which costs cache churn, never a stale secret.
-var rotatedProofFields = map[string]struct{}{
-	"refresh_token":         {}, // spec-side write-back (persistRotatedRefreshToken)
+var rotatedSourceProofFields = map[string]struct{}{
 	"secret_id":             {}, // vault approle, azure client secret id
 	"secret_id_accessor":    {}, // vault approle
-	"token":                 {}, // vault token auth
 	"client_secret":         {}, // azure
 	"access_key_id":         {}, // aws, alicloud — rotated in lockstep with its secret
 	"secret_access_key":     {}, // aws
@@ -847,9 +853,32 @@ var rotatedProofFields = map[string]struct{}{
 	"management_secret_key": {}, // scaleway
 }
 
+// perMintSpecFields are the only SPEC config keys excluded from the fingerprint, and they
+// are excluded because the refresh-token write-back rewrites them on every single mint
+// (persistRotatedRefreshToken). Hashing them would move the key on each fetch, so no entry
+// would ever be read once and caching would be silently dead for exactly the specs that
+// ask for it — worse than the churn the source-side set avoids.
+//
+// Nothing else is excluded on this side. A spec's config is frequently the fetch
+// coordinate (a Secrets Manager secret_id, a templated secret_path) or the vended material
+// itself (a static api_key, a PAT under "token", anything at all for the local driver,
+// which returns spec.Config wholesale), so an exclusion here means an operator replacing a
+// leaked credential keeps handing out the leaked one until the entry expires. Scheduled
+// spec rotation (SpecRotatable) does move the key, which is correct rather than churn:
+// rotated spec material is genuinely different material being vended.
+//
+// The residual: reconnecting a spec to a DIFFERENT account changes only the refresh token,
+// so the key does not move and the previous account's material is served for the rest of
+// the TTL. Keying cannot close that — it needs eviction on the write-back, or a stable
+// grant identifier captured at connect time.
+var perMintSpecFields = map[string]struct{}{
+	"refresh_token":            {},
+	"refresh_token_expires_at": {},
+}
+
 // chainedSpecFingerprint hashes what the referenced spec and its source say about which
 // secret is fetched and where it lives: the spec's type, the source it names, and both
-// configs minus the proof material above.
+// configs — the spec's entire, the source's minus the credentials rotation rewrites.
 //
 // The spec NAME alone cannot stand for this. A name is a label an operator can point
 // somewhere else — editing secret_path, swapping the mount, repointing the spec at
@@ -868,12 +897,12 @@ func chainedSpecFingerprint(spec *CredSpec, src *CredSource) string {
 		writeHashField(h, "spec")
 		writeHashField(h, spec.Type)
 		writeHashField(h, spec.Source)
-		hashStringMap(h, spec.Config, rotatedProofFields)
+		hashStringMap(h, spec.Config, perMintSpecFields)
 	}
 	if src != nil {
 		writeHashField(h, "src")
 		writeHashField(h, src.Type)
-		hashStringMap(h, src.Config, rotatedProofFields)
+		hashStringMap(h, src.Config, rotatedSourceProofFields)
 	}
 
 	return hex.EncodeToString(h.Sum(nil))

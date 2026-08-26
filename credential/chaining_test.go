@@ -686,8 +686,16 @@ func TestChaining_EditingTheReferencedSpecInvalidates(t *testing.T) {
 
 	_, err = env.manager.IssueCredential(ctx, caller, "consumer3", nil)
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
+	require.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
 		"the fetch now resolves elsewhere, so the previous location's material must not answer for it")
+
+	// The new key must itself be shared, or the test above would also pass with caching
+	// simply switched off — every path that declines to cache mints every time.
+	env.store.AddSpec(&CredSpec{Name: "consumer4", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer4", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
+		"the edit moved the key to a new entry, it did not stop the cache working")
 }
 
 // The same holds one level out: moving the source the referenced spec names changes
@@ -710,8 +718,14 @@ func TestChaining_EditingTheReferencedSourceInvalidates(t *testing.T) {
 
 	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
+	require.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
 		"a source pointed somewhere else is a different fetch")
+
+	env.store.AddSpec(&CredSpec{Name: "consumer3", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer3", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
+		"the edit moved the key to a new entry, it did not stop the cache working")
 }
 
 // TestChaining_RotatingTheSourceCredentialDoesNotInvalidate is the other half, and the
@@ -741,6 +755,43 @@ func TestChaining_RotatingTheSourceCredentialDoesNotInvalidate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), env.secretDriver.mintCalls.Load(),
 		"rotating the source's own credential reaches the same secret in the same place")
+}
+
+// TestChaining_EditingPassThroughSpecMaterialInvalidates is the sharpest form of the
+// defect. Several drivers vend the referenced spec's config as the credential itself —
+// the local driver returns spec.Config wholesale, a static api-key spec returns its
+// api_key, a github PAT spec its token. Replacing a leaked value there changes what the
+// fetch returns, so the key has to move: nothing downstream will reject the old value
+// (these drivers validate nothing), so no retry can rescue it and the leaked credential
+// would be handed out for the rest of the TTL.
+func TestChaining_EditingPassThroughSpecMaterialInvalidates(t *testing.T) {
+	env := newChainingEnv(t)
+	// The referenced spec's own config carries the material, under the conventional name.
+	env.secretDriver.mintFunc = func(_ context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"token": spec.Config["api_key"]}, nil, 0, "", nil
+	}
+	env.store.AddSpec(&CredSpec{Name: "secret-spec", Type: TypeVaultToken, Source: "secretsource",
+		Config: map[string]string{"api_key": "key-v1"}})
+
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+
+	cred, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+	require.Equal(t, "consumer-token:key-v1", cred.Data["token"])
+
+	// The key leaks; the operator replaces it in place.
+	env.store.AddSpec(&CredSpec{Name: "secret-spec", Type: TypeVaultToken, Source: "secretsource",
+		Config: map[string]string{"api_key": "key-v2"}})
+
+	cred, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "consumer-token:key-v2", cred.Data["token"],
+		"the replaced credential must be the one vended, not the leaked one it replaced")
 }
 
 // TestChaining_RetryEvictsStaleCachedSecret: when a cached secret is rejected downstream
