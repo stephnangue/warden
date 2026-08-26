@@ -5,11 +5,13 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -292,7 +294,7 @@ func TestSplitScopes(t *testing.T) {
 
 // newTestGCPSAKey builds a usable service-account key whose token_uri points at a local
 // server, so the oauth2 library performs a real signed JWT exchange against it.
-func newTestGCPSAKey(t *testing.T, tokenURI string) string {
+func newTestGCPSAKey(t *testing.T, tokenURI, clientEmail string) string {
 	t.Helper()
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -305,7 +307,7 @@ func newTestGCPSAKey(t *testing.T, tokenURI string) string {
 		"type":         "service_account",
 		"project_id":   "test-project",
 		"private_key":  string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
-		"client_email": "sa@test-project.iam.gserviceaccount.com",
+		"client_email": clientEmail,
 		"token_uri":    tokenURI,
 	}
 	encoded, err := json.Marshal(saKey)
@@ -340,7 +342,7 @@ func TestGCPDriver_RotationDuringMintDiscardsStaleToken(t *testing.T) {
 	d = &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL)},
+			Config: map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL, "sa@test-project.iam.gserviceaccount.com")},
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -374,12 +376,12 @@ func TestGCPDriver_ConcurrentRotationAndMintIsRaceFree(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL)},
+			Config: map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL, "sa@test-project.iam.gserviceaccount.com")},
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
-	rotatedKey := newTestGCPSAKey(t, srv.URL)
+	rotatedKey := newTestGCPSAKey(t, srv.URL, "sa@test-project.iam.gserviceaccount.com")
 
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
@@ -402,4 +404,85 @@ func TestGCPDriver_ConcurrentRotationAndMintIsRaceFree(t *testing.T) {
 	// Whatever the interleaving, the driver ends on the rotated key and reports verified.
 	assert.Equal(t, rotatedKey, d.getServiceAccountKey())
 	assert.True(t, d.sourceVerified)
+}
+
+// gcpAssertionIssuer reads the client_email out of the signed JWT the oauth2 library
+// sends, so a test server can tell which service-account key minted a given request.
+// The signature is irrelevant here — only which key was used.
+func gcpAssertionIssuer(t *testing.T, r *http.Request) string {
+	t.Helper()
+	require.NoError(t, r.ParseForm())
+
+	parts := strings.Split(r.FormValue("assertion"), ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+
+	var claims struct {
+		Iss string `json:"iss"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return claims.Iss
+}
+
+// TestGCPDriver_TokenFromRetiredKeyIsNeverServed is the GCP twin of the IBM test: a real
+// CommitRotation lands while a mint's exchange is held open, so the response genuinely
+// carries a token the retired SA key minted. That token must be discarded, not served.
+func TestGCPDriver_TokenFromRetiredKeyIsNeverServed(t *testing.T) {
+	const oldSA = "old-sa@test-project.iam.gserviceaccount.com"
+	const newSA = "new-sa@test-project.iam.gserviceaccount.com"
+
+	mintStarted := make(chan struct{})
+	rotationDone := make(chan struct{})
+	var once sync.Once
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		issuer := gcpAssertionIssuer(t, r)
+
+		// Hold the outgoing key's exchange open until the rotation has landed; the
+		// rotated key's exchanges (including CommitRotation's own verify) pass through.
+		if issuer == oldSA {
+			once.Do(func() { close(mintStarted) })
+			<-rotationDone
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "token-from-" + issuer,
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	d := &GCPDriver{
+		credSource: &credential.CredSource{
+			Type:   credential.SourceTypeGCP,
+			Config: map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL, oldSA)},
+		},
+		tokenCache: NewTokenCache(),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	rotatedKey := newTestGCPSAKey(t, srv.URL, newSA)
+	scopes := []string{"https://www.googleapis.com/auth/cloud-platform"}
+
+	var token string
+	var mintErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		token, _, mintErr = d.getSourceToken(context.TODO(), scopes)
+	}()
+
+	<-mintStarted
+	require.NoError(t, d.CommitRotation(context.TODO(), map[string]string{"service_account_key": rotatedKey}))
+	close(rotationDone)
+	wg.Wait()
+
+	require.NoError(t, mintErr)
+	assert.Equal(t, "token-from-"+newSA, token,
+		"the exchange completed against the retired SA key; its token must be discarded, not served")
 }
