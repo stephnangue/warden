@@ -705,8 +705,10 @@ func (m *Manager) invalidateChainedSecret(key string) {
 // inputs left to cover are the claims a templated path resolves from, which the agent
 // dimension below carries. When the referenced fetch is user-scoped (the referenced
 // spec sets assertion_user_claims, so inputsB.UserClaims is populated), the user token id
-// is folded in so one user's per-user secret is never served to another; a source-global
-// fetch (no user claims) omits it and is shared across users under the agent. A nil
+// and a fingerprint of those claims are folded in — the first so one user's per-user
+// secret is never served to another, the second so a user whose claims have changed
+// under a stable token id is not served what the old ones fetched; a source-global
+// fetch (no user claims) omits both and is shared across users under the agent. A nil
 // inputsB (a referenced spec that requests no exchange) uses a fixed sentinel.
 //
 // It returns "" — meaning "do not cache" — for a user-scoped fetch that lacks the user
@@ -732,11 +734,20 @@ func chainedSecretCacheKey(nsID, secretRef string, caller Caller, inputsB *Excha
 		agent = ":a:" + claimsFingerprint(inputsB.AgentClaims)
 	}
 
+	// The user's claims select a path the same way the agent's do, so they key the
+	// entry the same way. The user token id alone is a proxy, not a cover: it hashes
+	// the presented credential, the mount and the role name, but not the role's
+	// mapping. Re-authenticating after an operator edits that mapping returns the
+	// identical token id carrying different claims, which renders a different path
+	// under a key that never moved. The token id stays because it is what binds the
+	// entry to a principal's lifecycle; the fingerprint is what tracks what the
+	// store was actually shown.
 	if inputsB != nil && len(inputsB.UserClaims) > 0 {
 		if caller.User == nil {
 			return ""
 		}
-		return "chainsecret:" + nsID + ":" + secretRef + ":" + fp + agent + ":u:" + caller.User.TokenID
+		return "chainsecret:" + nsID + ":" + secretRef + ":" + fp + agent +
+			":u:" + caller.User.TokenID + ":uc:" + claimsFingerprint(inputsB.UserClaims)
 	}
 	return "chainsecret:" + nsID + ":" + secretRef + ":" + fp + agent
 }

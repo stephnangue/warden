@@ -1369,6 +1369,63 @@ func TestChainedSecretCacheKey_AgentAndUserDimensionsCompose(t *testing.T) {
 	assert.NotEqual(t, a, b)
 }
 
+// TestChainedSecretCacheKey_UserClaimsDimension is the user-side mirror of
+// TestChainedSecretCacheKey_AgentClaimsDimension, and it closes the same hole.
+//
+// The user token id looks like it already covers this, but it hashes the presented
+// credential, the mount and the role *name* — not the role's claim mapping. An operator
+// editing that mapping leaves every token id untouched while changing what the claims
+// resolve to, so a templated path renders somewhere new under a key that never moved,
+// and the previous location's secret keeps being served for the rest of the cache TTL.
+// Unlike the consumer credential cache, the chained-secret TTL is not bounded by either
+// principal's token lifetime, so nothing else closes the window.
+func TestChainedSecretCacheKey_UserClaimsDimension(t *testing.T) {
+	caller := Caller{TokenID: "agent-token", User: &UserContext{TokenID: "user-token"}}
+	base := func(userClaims map[string]string) *ExchangeInputs {
+		return &ExchangeInputs{
+			SubjectToken:     "the.same.jwt",
+			SubjectTokenType: TokenTypeJWT,
+			UserClaims:       userClaims,
+		}
+	}
+
+	t.Run("same user token, remapped claims, different keys", func(t *testing.T) {
+		beforeEdit := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "alice", "team": "platform"}))
+		afterEdit := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "alice", "team": "infra"}))
+
+		require.NotEmpty(t, beforeEdit)
+		assert.NotEqual(t, beforeEdit, afterEdit,
+			"the same user token resolving a different team must not read the old team's secret")
+	})
+
+	t.Run("same claims give the same key", func(t *testing.T) {
+		first := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "alice", "team": "platform"}))
+		second := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"team": "platform", "sub": "alice"}))
+		assert.Equal(t, first, second, "map iteration order must not change the key")
+	})
+
+	t.Run("two users still separate", func(t *testing.T) {
+		other := Caller{TokenID: "agent-token", User: &UserContext{TokenID: "other-user-token"}}
+		mine := chainedSecretCacheKey("ns", "ref", caller, base(map[string]string{"sub": "alice"}))
+		theirs := chainedSecretCacheKey("ns", "ref", other, base(map[string]string{"sub": "alice"}))
+		assert.NotEqual(t, mine, theirs,
+			"the token id still binds the entry to a principal even when claims coincide")
+	})
+
+	t.Run("no user claims keeps the key byte-identical", func(t *testing.T) {
+		withNone := chainedSecretCacheKey("ns", "ref", caller, base(nil))
+		legacy := "chainsecret:ns:ref:" + base(nil).Fingerprint()
+		assert.Equal(t, legacy, withNone,
+			"a source-global fetch must not have its cache key perturbed")
+	})
+
+	t.Run("a user-scoped fetch with no user principal refuses to cache", func(t *testing.T) {
+		agentOnly := Caller{TokenID: "agent-token"}
+		assert.Empty(t, chainedSecretCacheKey("ns", "ref", agentOnly, base(map[string]string{"sub": "alice"})),
+			"sharing a user-scoped fetch namespace-wide is never the safe failure mode")
+	})
+}
+
 // claimsFingerprint must not let two different maps collide by running their bytes
 // together differently.
 func TestClaimsFingerprint_NoConcatenationCollisions(t *testing.T) {

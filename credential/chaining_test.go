@@ -578,6 +578,84 @@ func TestChaining_CacheIsolatesPerUser(t *testing.T) {
 	assert.Equal(t, int32(2), env.exchangeDriver.mintCalls.Load(), "a different user fetches its own secret (no cross-user leak)")
 }
 
+// TestChaining_CacheIsolatesPerUserClaims covers what the token id cannot: the same
+// user, the same token id, different claims.
+//
+// TestChaining_CacheIsolatesPerUser above proves two *users* never share an entry, and
+// the token id is what proves it. But a token id hashes the presented credential, the
+// mount and the role name — not the role's claim mapping. When an operator edits that
+// mapping, a user re-authenticating gets the identical token id while their claims, and
+// so the path a templated fetch renders, have moved. Keyed on the token id alone the
+// entry the old claims filled would keep answering for the new ones.
+func TestChaining_CacheIsolatesPerUserClaims(t *testing.T) {
+	env := newChainingEnv(t)
+	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: map[string]string{}})
+	cfg := map[string]string{ConfigSecretSpec: "exchange-secret", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+
+	ctx := createNamespaceContext()
+
+	// Alice, on the platform team, fills the cache.
+	_, err := env.manager.IssueCredential(ctx,
+		exchangeChainCaller("agentTok", "agentA", "userA", map[string]string{"sub": "alice", "team": "platform"}),
+		"consumer1", nil)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), env.exchangeDriver.mintCalls.Load())
+
+	// The role is remapped to infra. Same user, same token id, different claims.
+	_, err = env.manager.IssueCredential(ctx,
+		exchangeChainCaller("agentTok", "agentA", "userA", map[string]string{"sub": "alice", "team": "infra"}),
+		"consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.exchangeDriver.mintCalls.Load(),
+		"remapped claims resolve a different secret, so the entry the old ones filled must not answer for them")
+}
+
+// agentClaimsChainCaller pins the agent's cache identity while varying the claims a
+// templated path resolves from — the one token, two roles case, which the fingerprint
+// alone cannot tell apart.
+func agentClaimsChainCaller(agentToken, agentIdentity string, agentClaims map[string]string) Caller {
+	return Caller{
+		TokenID:  agentToken,
+		TokenTTL: time.Hour,
+		ResolveInputs: func(_ context.Context, _ string) (*ExchangeInputs, error) {
+			return &ExchangeInputs{
+				SubjectCacheIdentity: agentIdentity,
+				ResolveSubjectToken:  func(_ context.Context) (string, error) { return "subj-" + agentIdentity, nil },
+				AgentClaims:          agentClaims,
+			}, nil
+		},
+	}
+}
+
+// TestChaining_CacheIsolatesPerAgentClaims drives the agent dimension through
+// IssueCredential rather than asserting on the key function. The unit tests pin what
+// chainedSecretCacheKey computes; this pins that the manager actually keys the fetch on
+// it, so dropping the dimension is caught here even where the key literal is not read.
+func TestChaining_CacheIsolatesPerAgentClaims(t *testing.T) {
+	env := newChainingEnv(t)
+	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: map[string]string{}})
+	cfg := map[string]string{ConfigSecretSpec: "exchange-secret", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+
+	ctx := createNamespaceContext()
+
+	// Identical cache identity — so an identical fingerprint — but the claims behind it
+	// name two different principals, as one token presented under two roles does.
+	_, err := env.manager.IssueCredential(ctx,
+		agentClaimsChainCaller("agentTok", "agentA", map[string]string{"sub": "build-runner"}), "consumer1", nil)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), env.exchangeDriver.mintCalls.Load())
+
+	_, err = env.manager.IssueCredential(ctx,
+		agentClaimsChainCaller("agentTok", "agentA", map[string]string{"sub": "deploy-bot"}), "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.exchangeDriver.mintCalls.Load(),
+		"two principals behind one fingerprint must not share a fetch")
+}
+
 // TestChaining_RetryEvictsStaleCachedSecret: when a cached secret is rejected downstream
 // (ErrChainedSecretRejected), the manager evicts it and retries once with a fresh fetch.
 func TestChaining_RetryEvictsStaleCachedSecret(t *testing.T) {
