@@ -54,13 +54,23 @@ var _ credential.ChainedSecretMinter = (*OAuth2Driver)(nil)
 // required; auth_url, default_scopes, verify_url, verify_method, auth_header_type,
 // auth_header_name, display_name, ca_data, tls_skip_verify optional). client_id and
 // client_secret may live on the source (client_credentials) or the spec, resolved
-// spec-over-source. The spec's auth_method selects the flow (default
+// spec-over-source, or be fetched per mint from another cred spec (secret_spec,
+// source-level). The spec's auth_method selects the flow (default
 // client_credentials); the driver POSTs to the token endpoint and returns the
 // resulting access_token as an api_key field.
 type OAuth2Driver struct {
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
 	httpClient *http.Client
+}
+
+// oauth2ChainedAuth carries the client credential a single mint fetched through
+// credential chaining. It is threaded by parameter rather than held on the driver,
+// which is shared: two concurrent mints resolving different pairs must not see each
+// other's. nil means the credential comes from config.
+type oauth2ChainedAuth struct {
+	clientID     string
+	clientSecret string
 }
 
 // OAuth2DriverFactory creates OAuth2Driver instances.
@@ -73,7 +83,8 @@ func (f *OAuth2DriverFactory) Type() string {
 
 // ValidateConfig validates source configuration. token_url is required.
 // client_id/client_secret are optional here because the authorization_code flow
-// keeps them on the spec; presence is checked at mint time.
+// keeps them on the spec, and a chained source (secret_spec) holds neither;
+// presence is checked at mint time.
 func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 	if err := credential.ValidateSchema(config,
 		credential.StringField("client_id").
@@ -156,8 +167,44 @@ func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 		credential.BoolField("tls_skip_verify").
 			Describe("Skip TLS certificate verification (development only)").
 			Example("false"),
+
+		credential.StringField("secret_spec").
+			Describe("Source the whole client credential from another cred spec via credential chaining instead of storing it inline (client_id and client_secret then omitted; the referenced payload supplies both). client_credentials only").
+			Example("idp-client-credential"),
+
+		credential.StringField("secret_field").
+			Describe("Which field of the referenced secret_spec's credential holds the client secret (when its payload has multiple keys); the client id travels beside it under 'client_id'").
+			Example("client_secret"),
+
+		credential.StringField("secret_cache_ttl").
+			Describe("Cache the chained client credential source-wide for this duration (e.g. 30m); omit to fetch it on every mint").
+			Example("30m"),
 	); err != nil {
 		return err
+	}
+
+	// A source in chaining mode holds NEITHER half of the client credential. The secret
+	// is excluded because a source that reads as keyless must not still store the very
+	// secret chaining exists to remove, and the id follows it because the two
+	// authenticate as a pair: an id kept here beside a secret fetched from the chain
+	// would name one client while presenting another's, which the token endpoint answers
+	// with invalid_client and the chained path then reads as a rejected secret and
+	// retries pointlessly.
+	//
+	// Requiring both from the payload also lets one source and one spec serve many
+	// clients, since the pair is resolved per mint rather than pinned to the source.
+	if credential.GetString(config, credential.ConfigSecretSpec, "") != "" {
+		if err := rejectInlineClientCredential(config, "client_secret"); err != nil {
+			return err
+		}
+		// auth_method resolves spec-over-source, and the spec-side rule lives in the
+		// config store, which sees only spec config. Catch the source side here, or a
+		// source setting it would leave every spec beneath it creating cleanly and
+		// failing at mint.
+		if am := credential.GetString(config, "auth_method", ""); am != "" && am != oauth2AuthMethodClientCredentials {
+			return fmt.Errorf("auth_method=%s is not supported when secret_spec is set (chaining supports %s only); the consent flow runs without a caller and cannot fetch the chained client credential",
+				am, oauth2AuthMethodClientCredentials)
+		}
 	}
 
 	// Validate token_param.* keys don't override core form fields
@@ -251,13 +298,33 @@ func (d *OAuth2Driver) resolve(spec *credential.CredSpec, key, def string) strin
 	return credential.GetString(d.credSource.Config, key, def)
 }
 
+// rejectConsentOnChainedSource refuses the consent steps on a source that fetches its
+// client credential per mint. They run on the system backend with no caller, so they
+// have no identity to fetch the pair as — and without this an operator could complete a
+// whole consent dance and seal tokens that no mint could ever spend, since minting from
+// such a source is client_credentials only.
+func (d *OAuth2Driver) rejectConsentOnChainedSource() error {
+	if credential.GetString(d.credSource.Config, credential.ConfigSecretSpec, "") != "" {
+		return fmt.Errorf("%s OAuth2 source uses secret_spec (credential chaining), which supports auth_method=%s only; the consent flow runs without a caller and cannot fetch the chained client credential",
+			d.displayName(), oauth2AuthMethodClientCredentials)
+	}
+	return nil
+}
+
 // MintCredential mints a bearer token using the flow selected by auth_method
 // (default client_credentials).
 func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	// A chained source holds no client credential, so minting here would fail on a
+	// missing pair rather than saying why. Reaching this means the manager routed a
+	// chained spec down the direct path; fail closed and name the cause.
+	if credential.GetString(d.credSource.Config, credential.ConfigSecretSpec, "") != "" {
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 source uses secret_spec (credential chaining); it must mint from fetched secret material, not directly", d.displayName())
+	}
+
 	authMethod := d.resolve(spec, "auth_method", oauth2AuthMethodClientCredentials)
 	switch authMethod {
 	case oauth2AuthMethodClientCredentials:
-		return d.mintFromClientCredentials(ctx, spec)
+		return d.mintFromClientCredentials(ctx, spec, nil)
 	case oauth2AuthMethodAuthorizationCode:
 		return d.mintFromRefreshToken(ctx, spec)
 	default:
@@ -265,13 +332,25 @@ func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.Cred
 	}
 }
 
-// mintFromClientCredentials exchanges client credentials for a bearer token.
-func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+// mintFromClientCredentials exchanges client credentials for a bearer token. chained,
+// when non-nil, supplies both halves of the pair from credential-chaining material
+// instead of config.
+func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *credential.CredSpec, chained *oauth2ChainedAuth) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	config := d.credSource.Config
 	name := d.displayName()
 
 	clientID := d.resolve(spec, "client_id", "")
 	clientSecret := d.resolve(spec, "client_secret", "")
+	if chained != nil {
+		// Validation refuses a chained source or spec that also names a client, so a
+		// leftover here means config drifted past it. Refusing beats presenting a pair
+		// half from config and half from the chain, which the endpoint rejects as
+		// invalid_client and the chained path then misreads as a stale secret.
+		if clientID != "" || clientSecret != "" {
+			return nil, nil, 0, "", fmt.Errorf("%s OAuth2 chained mint: client_id/client_secret must not be configured when secret_spec is set; the referenced spec supplies the whole client credential", name)
+		}
+		clientID, clientSecret = chained.clientID, chained.clientSecret
+	}
 	if clientID == "" || clientSecret == "" {
 		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 source missing client_id or client_secret", name)
 	}
@@ -296,7 +375,7 @@ func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *cred
 
 	tokenResp, err := d.postTokenRequest(ctx, d.tokenURL(), form)
 	if err != nil {
-		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 token exchange failed: %w", name, err)
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 token exchange failed: %w", name, oauth2ChainedClientAuthError(err, chained != nil))
 	}
 	if tokenResp.AccessToken == "" {
 		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 token response missing access_token", name)
@@ -326,9 +405,8 @@ func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credentia
 }
 
 // refreshGrant exchanges a refresh token for a fresh access token
-// (grant_type=refresh_token). The refresh token is passed in explicitly so the
-// same grant serves both the spec-sealed refresh token (mintFromRefreshToken) and
-// a chained refresh token fetched from another spec (MintFromSecret).
+// (grant_type=refresh_token). The refresh token is passed in explicitly rather than
+// read from the spec so the sealing and the spending stay separable.
 func (d *OAuth2Driver) refreshGrant(ctx context.Context, spec *credential.CredSpec, refreshToken string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	name := d.displayName()
 
@@ -371,41 +449,131 @@ func (d *OAuth2Driver) refreshGrant(ctx context.Context, spec *credential.CredSp
 	return rawData, d.extractMetadata(ctx, spec, tokenResp.AccessToken), ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
 }
 
-// MintFromSecret implements credential.ChainedSecretMinter: it mints a Slack-style
-// OAuth2 access token from a refresh token supplied as chained secret material
-// (e.g. a per-user refresh token read from Vault by an upstream kv2_read spec)
-// rather than from the spec's own sealed config. Rotation write-back is not
-// supported for the chained path (the material is read-only), so this works with
-// non-rotating refresh tokens; a rotated token is surfaced in rawData but the
-// minting layer has nowhere to persist it back to.
+// MintFromSecret implements credential.ChainedSecretMinter: it mints a bearer token
+// whose client credential — both halves — comes from credential-chaining material
+// (source-level secret_spec) instead of source config. A chained source stores
+// neither half, so the id and the secret are read together from the fetched payload,
+// which lets one source and one spec serve an OAuth client per agent.
 func (d *OAuth2Driver) MintFromSecret(ctx context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	refreshToken := material.Secret()
-	if refreshToken == "" {
-		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 chained mint: the referenced secret_spec yielded no refresh token", d.displayName())
+	name := d.displayName()
+
+	// Chaining on an oauth2 spec used to mean "the material is a refresh token"; it now
+	// means the client credential, and it is a source concern, so validation keeps the
+	// reference on the source. A spec written before that change still carries the key,
+	// and would otherwise fail here reporting a payload with no client id — say what
+	// actually has to move instead.
+	if credential.GetString(spec.Config, credential.ConfigSecretSpec, "") != "" {
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 spec %q sets %s: chaining a refresh token is no longer supported, and a chained client credential belongs on the source; move %s to the source and clear it from the spec",
+			name, spec.Name, credential.ConfigSecretSpec, credential.ConfigSecretSpec)
 	}
-	rawData, metadata, ttl, leaseID, err := d.refreshGrant(ctx, spec, refreshToken)
+
+	// The consent steps that seal an authorization_code grant run without a caller, so
+	// they cannot reach chained material and validation refuses the combination. Reaching
+	// it means config drifted past that check.
+	if authMethod := d.resolve(spec, "auth_method", oauth2AuthMethodClientCredentials); authMethod != oauth2AuthMethodClientCredentials {
+		// A source-config error, not a payload one: refetching cannot change the answer,
+		// so this must not carry the sentinel that asks the manager to try again.
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 credential chaining supports auth_method=%s only, got %q",
+			name, oauth2AuthMethodClientCredentials, authMethod)
+	}
+
+	chained, err := oauth2ChainedAuthFromMaterial(material)
 	if err != nil {
-		return nil, nil, 0, "", err
+		// %w, so the ErrChainedSecretIncomplete the manager acts on survives the wrap.
+		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 chained mint: %w", name, err)
 	}
-	// The chained refresh token is read-only material fetched from another spec, so
-	// a provider-rotated replacement has nowhere to be persisted back to. Strip the
-	// reserved rotation keys (the chained mint path has no write-back consumer for
-	// them) and warn loudly — this path works only with non-rotating refresh tokens.
-	if _, rotated := rawData[credential.RawRotatedRefreshTokenKey]; rotated {
-		delete(rawData, credential.RawRotatedRefreshTokenKey)
-		delete(rawData, credential.RawRotatedRefreshTokenExpiresAtKey)
-		if d.logger != nil {
-			d.logger.Warn(fmt.Sprintf("%s OAuth2 provider rotated the chained refresh token, but the secret_spec chain cannot persist it; the next mint reuses the stored token and may fail once the provider invalidates the old one", d.displayName()),
-				logger.String("spec", spec.Name))
+	return d.mintFromClientCredentials(ctx, spec, chained)
+}
+
+// oauth2ChainedAuthFromMaterial reads a whole client credential out of fetched secret
+// material.
+//
+// secret_field names the secret alone, so a field that resolved to nothing is a
+// misconfigured source rather than an invitation to look elsewhere: the conventional
+// client_secret key is consulted only when no field was resolved at all. The id is read
+// by convention for the same reason, and has nowhere to fall back to — a source in
+// chaining mode holds no client_id — so its absence is an error raised here, before any
+// request is sent.
+//
+// Every "the payload lacks what I need" error carries ErrChainedSecretIncomplete, so a
+// cached payload that predates a key it now has to hold is refetched once rather than
+// failing for the rest of its secret_cache_ttl.
+func oauth2ChainedAuthFromMaterial(material credential.SecretMaterial) (*oauth2ChainedAuth, error) {
+	// The id is never the secret. A payload holding nothing but an id resolves that lone
+	// key as the secret field — the single-key shortcut has no way to know better — and
+	// without this the same value would be spent as both halves of the pair, which the
+	// endpoint answers with invalid_client and the chained path then misreads as a
+	// rotated secret.
+	if material.Field == "client_id" {
+		return nil, fmt.Errorf("secret_field resolved to 'client_id', which names the id and never the secret: %w", credential.ErrChainedSecretIncomplete)
+	}
+
+	secret := material.Secret()
+	if secret == "" && material.Field == "" {
+		secret = material.Data["client_secret"]
+	}
+	if secret == "" {
+		if material.Field != "" {
+			return nil, fmt.Errorf("secret_field %q is empty or absent in the fetched secret material: %w", material.Field, credential.ErrChainedSecretIncomplete)
 		}
+		return nil, fmt.Errorf("no client secret in fetched secret material (set secret_field, or store it under 'client_secret'): %w", credential.ErrChainedSecretIncomplete)
 	}
-	return rawData, metadata, ttl, leaseID, nil
+
+	clientID := material.Data["client_id"]
+	if clientID == "" {
+		return nil, fmt.Errorf("no client id in fetched secret material (store it under 'client_id' alongside the secret): %w", credential.ErrChainedSecretIncomplete)
+	}
+
+	return &oauth2ChainedAuth{clientID: clientID, clientSecret: secret}, nil
+}
+
+// oauth2ChainedClientAuthError reports a token endpoint error as a rejected chained
+// client credential, or returns it unchanged when it is anything else. Wrapping
+// ErrChainedSecretRejected asks the minting layer to evict the cached secret and retry
+// once with a fresh fetch.
+//
+// This is deliberately narrower than isRefreshTokenRejection, which treats a bare 400 as
+// a rejected grant: on this path a bare 400 is far more likely invalid_scope or
+// unsupported_grant_type, and refetching the secret cannot fix either.
+//
+// invalid_client does not say which half was refused, and it does not need to: the
+// eviction refetches the payload, so the id and the secret are replaced together.
+func oauth2ChainedClientAuthError(err error, chained bool) error {
+	if chained && isChainedClientAuthRejection(err) {
+		// Keep the underlying error (the IdP's code / description) in the chain
+		// alongside the sentinel for legible diagnostics.
+		return fmt.Errorf("client authentication rejected: %w (%w)", credential.ErrChainedSecretRejected, err)
+	}
+	return err
+}
+
+// isChainedClientAuthRejection reports whether a token endpoint error says the client
+// credential itself was refused, rather than something about the grant being asked for.
+//
+// invalid_client is reported as HTTP 400 (credentials in the form body) or 401; a
+// nonstandard IdP may return a bare 401 with no error code. Per RFC 6749 §5.2, 401 at the
+// token endpoint is client-authentication-specific, so either signal counts.
+//
+// A bare 400 deliberately does not: on a chained path it is far more likely invalid_scope
+// or unsupported_grant_type, and refetching the secret cannot fix either. That is what
+// separates this from isRefreshTokenRejection, which is about the grant and does count a
+// bare 400.
+func isChainedClientAuthRejection(err error) bool {
+	var tee *tokenEndpointError
+	if !errors.As(err, &tee) {
+		return false
+	}
+	return tee.code == "invalid_client" || tee.status == http.StatusUnauthorized
 }
 
 // ExchangeAuthorizationCode exchanges an authorization code for tokens using the
 // client secret the server holds, and returns the spec-config keys to seal.
 func (d *OAuth2Driver) ExchangeAuthorizationCode(ctx context.Context, spec *credential.CredSpec, code, redirectURI, codeVerifier string) (map[string]string, error) {
 	name := d.displayName()
+
+	if err := d.rejectConsentOnChainedSource(); err != nil {
+		return nil, err
+	}
 
 	clientID := d.resolve(spec, "client_id", "")
 	clientSecret := d.resolve(spec, "client_secret", "")
@@ -453,6 +621,10 @@ func (d *OAuth2Driver) ExchangeAuthorizationCode(ctx context.Context, spec *cred
 // BuildAuthorizeURL assembles the provider authorize URL. Scopes are read as
 // already-normalized (space-separated) but commas are tolerated defensively.
 func (d *OAuth2Driver) BuildAuthorizeURL(spec *credential.CredSpec, redirectURI, state, codeChallenge string) (string, error) {
+	if err := d.rejectConsentOnChainedSource(); err != nil {
+		return "", err
+	}
+
 	authURL := credential.GetString(d.credSource.Config, "auth_url", "")
 	if authURL == "" {
 		return "", fmt.Errorf("%s OAuth2 source missing auth_url (required for authorization_code)", d.displayName())

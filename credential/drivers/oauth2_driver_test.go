@@ -255,6 +255,52 @@ func TestOAuth2DriverFactory_ValidateConfig(t *testing.T) {
 			wantErr: true,
 			errMsg:  "token_param.client_id cannot override core OAuth2 field",
 		},
+		{
+			// A keyless source: neither half of the client credential is stored.
+			name: "chained, no inline client credential",
+			config: map[string]string{
+				"token_url":        "https://auth.example.com/token",
+				"secret_spec":      "idp-client-credential",
+				"secret_field":     "client_secret",
+				"secret_cache_ttl": "30m",
+			},
+			wantErr: false,
+		},
+		{
+			name: "chained, client_secret still inline",
+			config: map[string]string{
+				"token_url":     "https://auth.example.com/token",
+				"client_secret": "test-client-secret",
+				"secret_spec":   "idp-client-credential",
+			},
+			wantErr: true,
+			errMsg:  "client_secret must be omitted when secret_spec is set",
+		},
+		{
+			// The id follows the secret: the two authenticate as a pair, so an id kept
+			// here would name one client while presenting another's.
+			name: "chained, client_id still inline",
+			config: map[string]string{
+				"token_url":   "https://auth.example.com/token",
+				"client_id":   "test-client-id",
+				"secret_spec": "idp-client-credential",
+			},
+			wantErr: true,
+			errMsg:  "client_id must be omitted when secret_spec is set",
+		},
+		{
+			// auth_method resolves spec-over-source; the spec side is caught by the
+			// config store, which never sees source config. Catching it here keeps a
+			// source from creating cleanly and failing every mint beneath it.
+			name: "chained, source-level authorization_code",
+			config: map[string]string{
+				"token_url":   "https://auth.example.com/token",
+				"auth_method": "authorization_code",
+				"secret_spec": "idp-client-credential",
+			},
+			wantErr: true,
+			errMsg:  "auth_method=authorization_code is not supported when secret_spec is set",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1364,21 +1410,305 @@ func TestOAuth2Driver_ExtractMetadata_IntrospectionURL_SpecLevelIgnored(t *testi
 	assert.Nil(t, metadata, "opaque token + no source introspection_url → no metadata")
 }
 
-// TestOAuth2Driver_MintFromSecret covers the ChainedSecretMinter path: minting a
-// Slack-style access token from a refresh token supplied as chained secret
-// material (e.g. a per-user refresh token read from Vault), not from spec config.
-func TestOAuth2Driver_MintFromSecret(t *testing.T) {
+// chainedClientCredential builds the payload a referenced spec yields for a keyless
+// oauth2 source: both halves together, the secret named by secret_field.
+func chainedClientCredential(clientID, secret string) credential.SecretMaterial {
+	return credential.SecretMaterial{
+		Data:  map[string]string{"client_id": clientID, "client_secret": secret},
+		Field: "client_secret",
+	}
+}
+
+// keylessOAuth2Driver builds a driver over a source that stores neither half of the
+// client credential — everything comes from the fetched payload.
+func keylessOAuth2Driver(t *testing.T, tokenURL string, client *http.Client) *OAuth2Driver {
+	t.Helper()
+	return &OAuth2Driver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeOAuth2,
+			Config: map[string]string{
+				"token_url":   tokenURL,
+				"secret_spec": "idp-client-credential",
+			},
+		},
+		httpClient: client,
+	}
+}
+
+func TestOAuth2Driver_MintFromSecret_ChainedClientCredential(t *testing.T) {
+	var gotForm url.Values
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, r.ParseForm())
-		assert.Equal(t, "refresh_token", r.Form.Get("grant_type"))
-		assert.Equal(t, "chained-refresh-token", r.Form.Get("refresh_token"))
-		assert.Equal(t, "test-id", r.Form.Get("client_id"))
+		gotForm = r.Form
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token": "slack-access-token",
+			"access_token": "pagerduty-access-token",
 			"token_type":   "Bearer",
 			"expires_in":   3600,
 		})
+	}))
+	defer server.Close()
+
+	d := keylessOAuth2Driver(t, server.URL, server.Client())
+	d.credSource.Config["default_scopes"] = "read"
+	d.credSource.Config["token_param.account"] = "acct-1"
+	spec := &credential.CredSpec{Name: "pagerduty-api", Type: credential.TypeOAuthBearerToken, Config: map[string]string{}}
+
+	rawData, _, ttl, _, err := d.MintFromSecret(context.Background(), spec, chainedClientCredential("agent-client-id", "agent-client-secret"))
+	require.NoError(t, err)
+	assert.Equal(t, "pagerduty-access-token", rawData["api_key"])
+	assert.Equal(t, 3600*time.Second, ttl)
+
+	// The pair travels together, and the rest of the source config still applies.
+	assert.Equal(t, "client_credentials", gotForm.Get("grant_type"))
+	assert.Equal(t, "agent-client-id", gotForm.Get("client_id"))
+	assert.Equal(t, "agent-client-secret", gotForm.Get("client_secret"))
+	assert.Equal(t, "read", gotForm.Get("scope"))
+	assert.Equal(t, "acct-1", gotForm.Get("account"))
+}
+
+// The pair is resolved per mint, not pinned to the source, so one source and one spec
+// serve a distinct OAuth client per caller.
+func TestOAuth2Driver_MintFromSecret_PairIsPerMint(t *testing.T) {
+	var seen []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		seen = append(seen, r.Form.Get("client_id")+":"+r.Form.Get("client_secret"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "expires_in": 60})
+	}))
+	defer server.Close()
+
+	d := keylessOAuth2Driver(t, server.URL, server.Client())
+	spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: map[string]string{}}
+
+	for _, agent := range []string{"alice", "bob"} {
+		_, _, _, _, err := d.MintFromSecret(context.Background(), spec, chainedClientCredential(agent+"-id", agent+"-secret"))
+		require.NoError(t, err)
+	}
+	assert.Equal(t, []string{"alice-id:alice-secret", "bob-id:bob-secret"}, seen)
+}
+
+func TestOAuth2Driver_MintFromSecret_IncompletePayload(t *testing.T) {
+	// No request must be sent for any of these — the payload is judged first.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("token endpoint must not be called for an incomplete payload")
+	}))
+	defer server.Close()
+
+	d := keylessOAuth2Driver(t, server.URL, server.Client())
+	spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: map[string]string{}}
+
+	tests := []struct {
+		name     string
+		material credential.SecretMaterial
+		errMsg   string
+	}{
+		{
+			// A single-key payload resolves its lone key as the secret field; without
+			// the guard the id would be spent as both halves.
+			name:     "id resolved as the secret field",
+			material: credential.SecretMaterial{Data: map[string]string{"client_id": "abc"}, Field: "client_id"},
+			errMsg:   "'client_id', which names the id and never the secret",
+		},
+		{
+			name:     "named field empty",
+			material: credential.SecretMaterial{Data: map[string]string{"client_id": "abc", "client_secret": ""}, Field: "client_secret"},
+			errMsg:   `secret_field "client_secret" is empty or absent`,
+		},
+		{
+			// A resolved field that named nothing is a misconfigured source, not an
+			// invitation to look elsewhere.
+			name:     "named field absent, conventional key present",
+			material: credential.SecretMaterial{Data: map[string]string{"client_id": "abc", "client_secret": "s"}, Field: "secret"},
+			errMsg:   `secret_field "secret" is empty or absent`,
+		},
+		{
+			name:     "no secret at all",
+			material: credential.SecretMaterial{Data: map[string]string{"client_id": "abc"}},
+			errMsg:   "no client secret in fetched secret material",
+		},
+		{
+			name:     "secret without an id",
+			material: credential.SecretMaterial{Data: map[string]string{"client_secret": "s"}, Field: "client_secret"},
+			errMsg:   "no client id in fetched secret material",
+		},
+		{
+			name:     "empty material",
+			material: credential.SecretMaterial{},
+			errMsg:   "no client secret in fetched secret material",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, _, err := d.MintFromSecret(context.Background(), spec, tt.material)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errMsg)
+			// The sentinel asks the manager to refetch once: a cached payload that
+			// predates a key it now has to hold should not fail for its whole TTL.
+			assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+		})
+	}
+}
+
+// With no secret_field resolved at all, the conventional key is the fallback.
+func TestOAuth2Driver_MintFromSecret_ConventionalKeys(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, "conv-id", r.Form.Get("client_id"))
+		assert.Equal(t, "conv-secret", r.Form.Get("client_secret"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "expires_in": 60})
+	}))
+	defer server.Close()
+
+	d := keylessOAuth2Driver(t, server.URL, server.Client())
+	spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: map[string]string{}}
+
+	_, _, _, _, err := d.MintFromSecret(context.Background(), spec,
+		credential.SecretMaterial{Data: map[string]string{"client_id": "conv-id", "client_secret": "conv-secret"}})
+	require.NoError(t, err)
+}
+
+func TestOAuth2Driver_MintFromSecret_RejectionSentinel(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantsRetry bool
+	}{
+		{
+			name:       "invalid_client at 400",
+			status:     http.StatusBadRequest,
+			body:       `{"error":"invalid_client","error_description":"bad secret"}`,
+			wantsRetry: true,
+		},
+		{
+			name:       "invalid_client at 401",
+			status:     http.StatusUnauthorized,
+			body:       `{"error":"invalid_client"}`,
+			wantsRetry: true,
+		},
+		{
+			// RFC 6749 §5.2: a 401 at the token endpoint is client-authentication
+			// specific, so a nonstandard IdP omitting the code still means the pair.
+			name:       "bare 401 with no code",
+			status:     http.StatusUnauthorized,
+			body:       `not json`,
+			wantsRetry: true,
+		},
+		{
+			// A bare 400 is far more likely invalid_scope or unsupported_grant_type;
+			// refetching the secret cannot fix either.
+			name:       "bare 400 with no code",
+			status:     http.StatusBadRequest,
+			body:       `not json`,
+			wantsRetry: false,
+		},
+		{
+			name:       "invalid_scope",
+			status:     http.StatusBadRequest,
+			body:       `{"error":"invalid_scope"}`,
+			wantsRetry: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			d := keylessOAuth2Driver(t, server.URL, server.Client())
+			spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: map[string]string{}}
+
+			_, _, _, _, err := d.MintFromSecret(context.Background(), spec, chainedClientCredential("id", "stale-secret"))
+			require.Error(t, err)
+			if tt.wantsRetry {
+				assert.ErrorIs(t, err, credential.ErrChainedSecretRejected)
+			} else {
+				assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+			}
+		})
+	}
+}
+
+// The consent steps run without a caller, so they cannot fetch the chained pair.
+// Validation refuses the combination; this is the guard behind it.
+func TestOAuth2Driver_MintFromSecret_AuthorizationCodeRejected(t *testing.T) {
+	d := keylessOAuth2Driver(t, "https://auth.example.com/token", nil)
+	spec := &credential.CredSpec{
+		Name: "api", Type: credential.TypeOAuthBearerToken,
+		Config: map[string]string{"auth_method": "authorization_code"},
+	}
+
+	_, _, _, _, err := d.MintFromSecret(context.Background(), spec, chainedClientCredential("id", "secret"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "supports auth_method=client_credentials only")
+	// A source-config error: refetching cannot change the answer, so the manager must
+	// not be asked to try again.
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
+
+// Chaining on an oauth2 spec used to mean "the material is a refresh token". A spec
+// written before that changed still carries the key; say what has to move.
+func TestOAuth2Driver_MintFromSecret_SpecLevelRefIsRetired(t *testing.T) {
+	d := keylessOAuth2Driver(t, "https://auth.example.com/token", nil)
+	spec := &credential.CredSpec{
+		Name: "slack-access", Type: credential.TypeOAuthBearerToken,
+		Config: map[string]string{"secret_spec": "user-refresh-token"},
+	}
+
+	_, _, _, _, err := d.MintFromSecret(context.Background(), spec,
+		credential.SecretMaterial{Data: map[string]string{"refresh_token": "rt"}, Field: "refresh_token"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "chaining a refresh token is no longer supported")
+	assert.Contains(t, err.Error(), "belongs on the source")
+}
+
+// A chained source holds no client credential, so the direct path has nothing to mint
+// with; fail closed naming the cause rather than reporting a missing pair.
+func TestOAuth2Driver_MintCredential_ChainedSourceFailsClosed(t *testing.T) {
+	d := keylessOAuth2Driver(t, "https://auth.example.com/token", nil)
+	spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: map[string]string{}}
+
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must mint from fetched secret material, not directly")
+}
+
+// The consent steps run on the system backend with no caller, so a chained source must
+// refuse them outright: without this an operator could complete a whole consent dance and
+// seal tokens that no mint could ever spend.
+func TestOAuth2Driver_ConsentRefusedOnChainedSource(t *testing.T) {
+	d := keylessOAuth2Driver(t, "https://auth.example.com/token", nil)
+	d.credSource.Config["auth_url"] = "https://auth.example.com/authorize"
+	spec := &credential.CredSpec{
+		Name: "api", Type: credential.TypeOAuthBearerToken,
+		Config: map[string]string{"auth_method": "authorization_code"},
+	}
+
+	_, err := d.BuildAuthorizeURL(spec, "http://127.0.0.1:9999/cb", "state", "challenge")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot fetch the chained client credential")
+
+	_, err = d.ExchangeAuthorizationCode(context.Background(), spec, "code", "http://127.0.0.1:9999/cb", "verifier")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot fetch the chained client credential")
+}
+
+// The rejection sentinel belongs to the chained path alone: a non-chained mint that the
+// endpoint refuses must not ask the manager to evict a secret it never fetched.
+func TestOAuth2Driver_InvalidClientIsNotASentinelWhenUnchained(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"invalid_client"}`))
 	}))
 	defer server.Close()
 
@@ -1386,26 +1716,26 @@ func TestOAuth2Driver_MintFromSecret(t *testing.T) {
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
 			Config: map[string]string{
-				"client_id":     "test-id",
-				"client_secret": "test-secret",
-				"token_url":     server.URL,
+				"client_id": "id", "client_secret": "secret", "token_url": server.URL,
 			},
 		},
 		httpClient: server.Client(),
 	}
-	spec := &credential.CredSpec{Name: "slack-access", Type: credential.TypeOAuthBearerToken, Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: map[string]string{}}
 
-	t.Run("mints access token from chained refresh token", func(t *testing.T) {
-		material := credential.SecretMaterial{Data: map[string]string{"refresh_token": "chained-refresh-token"}, Field: "refresh_token"}
-		rawData, _, ttl, _, err := d.MintFromSecret(context.Background(), spec, material)
-		require.NoError(t, err)
-		assert.Equal(t, "slack-access-token", rawData["api_key"])
-		assert.Equal(t, 3600*time.Second, ttl)
-	})
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
 
-	t.Run("empty material fails closed", func(t *testing.T) {
-		_, _, _, _, err := d.MintFromSecret(context.Background(), spec, credential.SecretMaterial{})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no refresh token")
-	})
+// Config drifting past validation must not present a pair half from config and half
+// from the chain.
+func TestOAuth2Driver_MintFromSecret_InlinePairRefused(t *testing.T) {
+	d := keylessOAuth2Driver(t, "https://auth.example.com/token", nil)
+	d.credSource.Config["client_id"] = "stale-inline-id"
+	spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: map[string]string{}}
+
+	_, _, _, _, err := d.MintFromSecret(context.Background(), spec, chainedClientCredential("chained-id", "chained-secret"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not be configured when secret_spec is set")
 }

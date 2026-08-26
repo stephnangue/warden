@@ -502,10 +502,13 @@ func (m *Manager) chainPreamble(ctx context.Context, caller Caller, spec *CredSp
 
 // resolveAndMintChained resolves the referenced secret material (through the opt-in
 // source-scoped cache) and mints the consuming credential via mintFn. When the material
-// came from the cache and the downstream rejects it (ErrChainedSecretRejected or the
-// pre-existing ErrRefreshTokenRejected), the cached value may be stale (rotated at the
-// source): it evicts the entry and retries once with a fresh fetch. It does not retry a
-// freshly fetched secret — that would just re-fetch identical data.
+// came from the cache and the downstream rejects it, the cached value may be stale
+// (rotated at the source): it evicts the entry and retries once with a fresh fetch. It
+// does not retry a freshly fetched secret — that would just re-fetch identical data.
+//
+// ErrRefreshTokenRejected is kept in the retry set defensively: no chained minter
+// returns it today (the oauth2 driver's chained path mints from a client credential, not
+// a refresh token), but a driver chaining a refresh grant would want the same eviction.
 //
 // It is shared by issueChained and (with an exchange-aware mintFn) the token_exchange
 // chaining path, so caching and rejection-retry cover every ChainedSecretMinter driver.

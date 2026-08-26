@@ -762,17 +762,13 @@ func classifyExchangeError(err error) error {
 // invalid_client does not say which half was refused, and it does not need to: the
 // eviction refetches the payload, so the id and the secret are replaced together.
 func chainedClientAuthError(err error, chained bool) error {
-	if chained {
-		var tee *tokenEndpointError
-		// invalid_client is reported as HTTP 400 (client_secret_post) or 401
-		// (client_secret_basic / a rejected private_key_jwt assertion); a nonstandard IdP
-		// may return a bare 401 with no error code. Per RFC 6749 §5.2, 401 at the token
-		// endpoint is client-authentication-specific, so on the chained path treat either
-		// signal as a stale-secret rejection. Keep the underlying error (the IdP's code /
-		// description) in the chain alongside the sentinel for legible diagnostics.
-		if errors.As(err, &tee) && (tee.code == "invalid_client" || tee.status == http.StatusUnauthorized) {
-			return fmt.Errorf("token_exchange: client authentication rejected: %w (%w)", credential.ErrChainedSecretRejected, err)
-		}
+	// The rejection test itself is shared with the oauth2 driver
+	// (isChainedClientAuthRejection); here it covers client_secret_post's 400,
+	// client_secret_basic's 401, and a rejected private_key_jwt assertion. Keep the
+	// underlying error (the IdP's code / description) in the chain alongside the sentinel
+	// for legible diagnostics.
+	if chained && isChainedClientAuthRejection(err) {
+		return fmt.Errorf("token_exchange: client authentication rejected: %w (%w)", credential.ErrChainedSecretRejected, err)
 	}
 	return classifyExchangeError(err)
 }

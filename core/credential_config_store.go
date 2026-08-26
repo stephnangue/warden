@@ -983,8 +983,8 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		chainedRef = source.Config[credential.ConfigSecretSpec]
 	}
 	if chainedRef != "" {
-		// For token_exchange and gitlab, chaining is a SOURCE concern: the secret being
-		// chained authenticates the source itself (client auth, a personal access
+		// For token_exchange, gitlab and oauth2, chaining is a SOURCE concern: the secret
+		// being chained authenticates the source itself (client auth, a personal access
 		// token), and the factory only sees source config. A spec-level secret_spec
 		// would leave the source's inline secret as dead config at mint, and would
 		// slip past the source-level validation that gates which auth methods may
@@ -995,6 +995,27 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				return logical.ErrBadRequestf("for a token_exchange source, set secret_spec on the source (client authentication is a source concern), not on the spec")
 			case credential.SourceTypeGitLab:
 				return logical.ErrBadRequestf("for a gitlab source, set secret_spec on the source (the chained secret — a personal access token, or an OAuth application secret — authenticates the source), not on the spec")
+			case credential.SourceTypeOAuth2:
+				return logical.ErrBadRequestf("for an oauth2 source, set secret_spec on the source (the chained client credential authenticates the source), not on the spec")
+			}
+		}
+		// An oauth2 source that chains its client credential resolves the pair per mint,
+		// as the calling agent. Two spec-level settings cannot survive that.
+		if source.Type == credential.SourceTypeOAuth2 && source.Config[credential.ConfigSecretSpec] != "" {
+			// The consent steps that seal an authorization_code grant run on the system
+			// backend with no caller, so they have no identity to fetch the chained pair
+			// as and would fall back to a client credential the source does not hold.
+			// Read from config rather than through ConnectGated: credType is nil when the
+			// type registry is unavailable, and this guard must not be the one that skips.
+			if credential.GetString(spec.Config, "auth_method", "") == "authorization_code" {
+				return logical.ErrBadRequestf("a chained oauth2 source (secret_spec %q) supports auth_method=client_credentials only; the consent flow runs without a caller and cannot fetch the chained client credential", chainedRef)
+			}
+			// client_id/client_secret resolve spec-over-source, so a half left here would
+			// be presented against the other half fetched from the chain.
+			for _, key := range []string{"client_id", "client_secret"} {
+				if credential.GetString(spec.Config, key, "") != "" {
+					return logical.ErrBadRequestf("%s must be omitted when the source sets secret_spec (%q); the referenced spec supplies the whole client credential", key, chainedRef)
+				}
 			}
 		}
 		// A chained consumer's identity normally flows through the referenced secret-spec,
