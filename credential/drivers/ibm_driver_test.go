@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -648,4 +649,50 @@ func TestIBMDriver_RotationDuringMintDiscardsStaleToken(t *testing.T) {
 	cached, _, ok := d.tokenCache.Get("iam", 30*time.Second)
 	require.True(t, ok, "the re-minted token is cached")
 	assert.Equal(t, "token-call-2", cached, "the retired key's token must never reach the cache")
+}
+
+// TestIBMDriver_ConcurrentRotationAndMintIsRaceFree covers the locking half:
+// CommitRotation replaces credSource.Config while mints read api_key and iam_endpoint
+// out of it. The assertions are modest — this test earns its keep under -race, which is
+// what catches the mint path reading the config without the lock that guards the swap.
+func TestIBMDriver_ConcurrentRotationAndMintIsRaceFree(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.tokenCache.Clear()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := d.getIAMToken(context.TODO())
+			assert.NoError(t, err)
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		assert.NoError(t, d.CommitRotation(context.TODO(), map[string]string{
+			"api_key":      "rotated-key",
+			"iam_endpoint": srv.URL,
+		}))
+	}()
+
+	wg.Wait()
+
+	d.authMu.Lock()
+	apiKey := d.apiKeyLocked()
+	d.authMu.Unlock()
+	assert.Equal(t, "rotated-key", apiKey, "the driver ends on the rotated key whatever the interleaving")
+
+	// Whether an entry survives depends on the interleaving, but if one did it cannot
+	// be the retired key's: the config write and the generation bump share a critical
+	// section, so a mint that read the old key also captured the old generation.
+	if token, _, ok := d.tokenCache.Get("iam", 30*time.Second); ok {
+		assert.Equal(t, "test-iam-token-rotated-key", token,
+			"a token the retired key minted must never remain readable after rotation")
+	}
 }
