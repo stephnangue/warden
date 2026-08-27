@@ -237,7 +237,9 @@ func (s *CredentialConfigStore) CreateSpec(ctx context.Context, spec *credential
 	s.specsByID.Set(cacheKey, spec, 1)
 	s.specsByID.Wait()
 
-	// Register with rotation manager if RotationPeriod is configured
+	// Register with rotation manager if RotationPeriod is configured. A chained
+	// spec never gets this far: the check above rejects that combination, and
+	// re-deriving it here would cost another source read for no new protection.
 	if spec.RotationPeriod > 0 {
 		if s.rotationManager != nil {
 			if err := s.rotationManager.RegisterSpec(ctx, spec.Name, spec.Source, spec.RotationPeriod); err != nil {
@@ -499,8 +501,10 @@ func (s *CredentialConfigStore) CreateSource(ctx context.Context, source *creden
 	s.sourcesByID.Set(cacheKey, source, 1)
 	s.sourcesByID.Wait()
 
-	// Register with rotation manager if RotationPeriod is configured
-	if source.RotationPeriod > 0 {
+	// Register with rotation manager if RotationPeriod is configured. A federated
+	// source is never enrolled: CreateSource rejects the combination outright, so
+	// this only guards a caller that reaches here another way.
+	if source.RotationPeriod > 0 && !isFederationSource(source.Config) {
 		if s.rotationManager != nil {
 			if err := s.rotationManager.RegisterSource(ctx, source.Name, source.Type, source.RotationPeriod); err != nil {
 				s.logger.Warn("failed to register source for rotation",
@@ -983,6 +987,14 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		chainedRef = source.Config[credential.ConfigSecretSpec]
 	}
 	if chainedRef != "" {
+		// A chained spec mints from material fetched at request time, so it embeds no
+		// secret of its own and a rotation_period schedules a rotation that can never
+		// succeed — the same reasoning that rejects one on a token-exchange spec and
+		// on a chained source. Whoever owns the referenced spec rotates it there.
+		if spec.RotationPeriod > 0 {
+			return logical.ErrBadRequestf("rotation_period does not apply to a chained credential spec (secret_spec %q); the referenced spec's owner rotates the secret", chainedRef)
+		}
+
 		// For token_exchange, gitlab and oauth2, chaining is a SOURCE concern: the secret
 		// being chained authenticates the source itself (client auth, a personal access
 		// token), and the factory only sees source config. A spec-level secret_spec
@@ -1136,6 +1148,25 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 	return nil
 }
 
+// authMethodOIDCFederation is the auth_method every federation-capable source type
+// sets. The drivers each define their own copy for their config schema; this is
+// core's, for the rules that hold across types regardless of the provider behind
+// them.
+const authMethodOIDCFederation = "oidc_federation"
+
+// isFederationSource reports whether a source authenticates by presenting a
+// caller's identity assertion. Every such driver — aws, azure, gcp, hvault,
+// kubernetes — spells it the same way, so one predicate covers them all and covers
+// a new one the day it lands.
+//
+// This is narrower than "holds no secret", which also describes a chained source
+// or spec (secret_spec), whose secret lives in the spec it references. Those are
+// gated separately, by the chained-source rule in validateSource and the
+// chained-spec rule in CreateSpec.
+func isFederationSource(config map[string]string) bool {
+	return credential.GetString(config, "auth_method", "") == authMethodOIDCFederation
+}
+
 // ValidateSource validates a source before creation/update
 func (s *CredentialConfigStore) ValidateSource(ctx context.Context, source *credential.CredSource) error {
 	return s.validateSource(ctx, source, false)
@@ -1175,6 +1206,17 @@ func (s *CredentialConfigStore) validateSource(ctx context.Context, source *cred
 	if source.Type == credential.SourceTypeVault && source.RotationPeriod <= 0 &&
 		credential.GetString(source.Config, "auth_method", "") != "oidc_federation" {
 		return logical.ErrBadRequest("rotation_period is required for hvault credential sources (except keyless auth_method=oidc_federation)")
+	}
+
+	// The other direction, and for every type rather than one: a federated source
+	// authenticates with a caller assertion and holds no secret, so its driver
+	// reports SupportsRotation false and the manager can never complete a cycle. It
+	// errors, retries to MaxRotateAttempts, parks the entry as failed, comes back
+	// after FailedMinAge, and repeats for the life of the source.
+	if isFederationSource(source.Config) && source.RotationPeriod > 0 {
+		return logical.ErrBadRequestf(
+			"rotation_period does not apply to a federated credential source (auth_method=%s); it holds no secret of its own to rotate",
+			authMethodOIDCFederation)
 	}
 
 	// Validate rotation_period is within configured bounds

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,10 +46,13 @@ func setupTestCredentialConfigStore(t *testing.T) (*CredentialConfigStore, conte
 	// Create storage view
 	storage := NewBarrierView(barrier, credentialConfigStorePath)
 
-	// Create minimal Core for testing
+	// Create minimal Core for testing. rawConfig must be non-nil even with nothing
+	// stored in it: any validation path that checks rotation-period bounds loads it,
+	// and a nil pointer there panics rather than falling back to the defaults.
 	core := &Core{
-		barrier: barrier,
-		logger:  log,
+		barrier:   barrier,
+		logger:    log,
+		rawConfig: new(atomic.Value),
 	}
 
 	// Create credential config store
@@ -1873,6 +1877,159 @@ func TestCredentialConfigStore_ValidateSource_HvaultRotationPeriod(t *testing.T)
 			}
 		})
 	}
+}
+
+// fakeFederationFactory registers under an arbitrary source type with no-op
+// create/validate, so the cross-type federation rule can be exercised without a
+// live provider behind any of them.
+type fakeFederationFactory struct{ sourceType string }
+
+func (f *fakeFederationFactory) Type() string { return f.sourceType }
+func (f *fakeFederationFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+	return &testDriver{}, nil
+}
+func (f *fakeFederationFactory) ValidateConfig(config map[string]string) error { return nil }
+func (f *fakeFederationFactory) SensitiveConfigFields() []string               { return nil }
+func (f *fakeFederationFactory) InferCredentialType(_ map[string]string) (string, error) {
+	return credential.TypeAPIKey, nil
+}
+
+// TestCredentialConfigStore_FederationSourceRejectsRotationPeriod covers the rule
+// across every federation-capable source type, not just the one that prompted it.
+//
+// A federated source holds no secret, so the driver reports SupportsRotation false
+// and the manager can never complete a cycle: it retries, parks the entry as
+// failed, and comes back an hour later, forever. Rejecting at create is what keeps
+// that entry from existing.
+func TestCredentialConfigStore_FederationSourceRejectsRotationPeriod(t *testing.T) {
+	federationTypes := []string{
+		credential.SourceTypeAWS,
+		credential.SourceTypeAzure,
+		credential.SourceTypeGCP,
+		credential.SourceTypeVault,
+		credential.SourceTypeKubernetes,
+	}
+
+	for _, sourceType := range federationTypes {
+		t.Run(sourceType, func(t *testing.T) {
+			store, ctx := setupTestCredentialConfigStore(t)
+			store.core.credentialDriverRegistry = credential.NewDriverRegistry(nil)
+			require.NoError(t, store.core.credentialDriverRegistry.RegisterFactory(
+				&fakeFederationFactory{sourceType: sourceType}))
+
+			err := store.CreateSource(ctx, &credential.CredSource{
+				Name:           "fed-src",
+				Type:           sourceType,
+				Config:         map[string]string{"auth_method": "oidc_federation"},
+				RotationPeriod: 48 * time.Hour,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "rotation_period does not apply to a federated credential source")
+
+			// Without the period the same source is fine, and is not enrolled.
+			require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+				Name:   "fed-src",
+				Type:   sourceType,
+				Config: map[string]string{"auth_method": "oidc_federation"},
+			}))
+		})
+	}
+}
+
+// TestCredentialConfigStore_FederationRotationGateRunsOnUpdate pins that the rule
+// is in the shared validator, so an edit cannot slip a rotation_period onto a
+// federated source that create would have refused.
+func TestCredentialConfigStore_FederationRotationGateRunsOnUpdate(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	store.core.credentialDriverRegistry = credential.NewDriverRegistry(nil)
+	require.NoError(t, store.core.credentialDriverRegistry.RegisterFactory(
+		&fakeFederationFactory{sourceType: credential.SourceTypeAWS}))
+
+	// The update path presents the whole record, carrying rotation_period over from
+	// the stored entry — so this is the shape every edit of such a source takes.
+	updated := &credential.CredSource{
+		Name:           "fed-src",
+		Type:           credential.SourceTypeAWS,
+		Config:         map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"},
+		RotationPeriod: 48 * time.Hour,
+	}
+
+	err := store.validateSource(ctx, updated, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rotation_period does not apply to a federated credential source")
+
+	// Clearing the period is what makes the record editable again.
+	updated.RotationPeriod = 0
+	require.NoError(t, store.validateSource(ctx, updated, false))
+}
+
+// TestCredentialConfigStore_ChainedSpecRejectsRotationPeriod covers the spec half
+// of the same rule.
+//
+// A chained source was already refused a rotation_period; a chained *spec* was not,
+// though it embeds no secret either — its material is fetched per request from the
+// spec it references. Such a spec was accepted and enrolled, then failed every
+// cycle because its driver is not a SpecRotatable.
+//
+// Both places a spec can be chained are covered: on the spec itself, and inherited
+// from its source. They resolve spec-over-source, matching the minting path.
+func TestCredentialConfigStore_ChainedSpecRejectsRotationPeriod(t *testing.T) {
+	setup := func(t *testing.T) (*CredentialConfigStore, context.Context) {
+		t.Helper()
+		store, ctx := setupTestCredentialConfigStore(t)
+		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+		// Session-pinned, as validateSecretSpecRef requires of a referenced spec.
+		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "ref-secret", Type: "vault_token", Source: "src",
+			Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+		}))
+		return store, ctx
+	}
+
+	t.Run("chained on the spec", func(t *testing.T) {
+		store, ctx := setup(t)
+		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+			Name: "apikey-src", Type: credential.SourceTypeAPIKey, Config: map[string]string{},
+		}))
+
+		chained := &credential.CredSpec{
+			Name: "chained-rotating", Type: credential.TypeAPIKey, Source: "apikey-src",
+			Config: map[string]string{
+				credential.ConfigSecretSpec:  "ref-secret",
+				credential.ConfigSecretField: "api_key",
+			},
+			RotationPeriod: 24 * time.Hour,
+		}
+		err := store.CreateSpec(ctx, chained)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rotation_period does not apply to a chained credential spec")
+
+		// Without the period the same spec is fine.
+		chained.RotationPeriod = 0
+		require.NoError(t, store.CreateSpec(ctx, chained))
+
+		// And the rule is in the shared validator, so an edit cannot add one back.
+		chained.RotationPeriod = 24 * time.Hour
+		err = store.validateSpec(ctx, chained, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rotation_period does not apply to a chained credential spec")
+	})
+
+	t.Run("chained on the source", func(t *testing.T) {
+		store, ctx := setup(t)
+		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+			Name: "apikey-chained-src", Type: credential.SourceTypeAPIKey,
+			Config: map[string]string{credential.ConfigSecretSpec: "ref-secret"},
+		}))
+
+		err := store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "inherits-chaining", Type: credential.TypeAPIKey, Source: "apikey-chained-src",
+			Config:         map[string]string{credential.ConfigSecretField: "api_key"},
+			RotationPeriod: 24 * time.Hour,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rotation_period does not apply to a chained credential spec")
+	})
 }
 
 // TestCredentialConfigStore_GitLabChaining covers the two gitlab-specific chaining
