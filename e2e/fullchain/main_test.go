@@ -44,7 +44,9 @@ import (
 // its scheme is mount config, so covering both means two mounts.
 // The four dual-mode gateways join the list from ensureEnv rather than here:
 // ibmcloud's source needs the IAM stub's URL, which is not known until the stub
-// is listening. Keeping all four together makes the reason legible.
+// is listening. Keeping all four together makes the reason legible. kubernetes
+// joins there for the same reason — its keyless source names the recording
+// upstream as its API server, so it cannot be described until that is up.
 var allEnvs = []h.ProviderEnv{
 	openaiEnv, anthropicEnv, newrelicEnv, elasticEnv, githubEnv,
 	splunkEnv, datadogEnv, restEnv, dynatraceEnv, dynatraceOAuthEnv, mcpEnv, mcpGitHubEnv,
@@ -97,6 +99,11 @@ func ensureEnv(t *testing.T) {
 		ibmIAMStub = startIBMIAMStub()
 		ibmcloudEnv = buildIBMCloudEnv(ibmIAMStub.URL)
 		allEnvs = append(allEnvs, ibmcloudEnv)
+
+		// The keyless kubernetes source names the recording upstream as its API
+		// server, so like ibmcloud its env cannot be built until the listener is up.
+		kubernetesEnv = buildKubernetesEnv(upstream.URL)
+		allEnvs = append(allEnvs, kubernetesEnv)
 
 		// vault's source is the one that authenticates against something real: it
 		// verifies its AppRole role and logs in while being created, so the role
