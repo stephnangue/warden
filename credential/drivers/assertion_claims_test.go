@@ -85,6 +85,31 @@ func TestDeriveAssertionAudience(t *testing.T) {
 			wantOK:     false,
 		},
 		{
+			name:       "kubernetes federation derives explicit audience",
+			sourceType: credential.SourceTypeKubernetes,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "audience": "https://kubernetes.example.com"},
+			wantAud:    "https://kubernetes.example.com",
+			wantOK:     true,
+		},
+		{
+			name:       "kubernetes federation without audience derives nothing (no default)",
+			sourceType: credential.SourceTypeKubernetes,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation"},
+			wantOK:     false,
+		},
+		{
+			name:       "kubernetes static derives nothing even with audience",
+			sourceType: credential.SourceTypeKubernetes,
+			sourceCfg:  map[string]string{"auth_method": "static", "audience": "https://kubernetes.example.com"},
+			wantOK:     false,
+		},
+		{
+			name:       "kubernetes absent auth_method derives nothing",
+			sourceType: credential.SourceTypeKubernetes,
+			sourceCfg:  map[string]string{"audience": "https://kubernetes.example.com"},
+			wantOK:     false,
+		},
+		{
 			name:       "unknown source type derives nothing",
 			sourceType: credential.SourceTypeGitHub,
 			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "audience": "x"},
@@ -188,6 +213,25 @@ func TestDeriveAssertionResource(t *testing.T) {
 			name:       "gcp impersonation without target omits",
 			sourceType: credential.SourceTypeGCP,
 			specCfg:    map[string]string{"mint_method": "impersonated_access_token"},
+			wantOK:     false,
+		},
+		{
+			name:       "kubernetes names the target service account",
+			sourceType: credential.SourceTypeKubernetes,
+			specCfg:    map[string]string{"namespace": "prod", "service_account": "payments"},
+			want:       "prod/payments",
+			wantOK:     true,
+		},
+		{
+			name:       "kubernetes without namespace omits",
+			sourceType: credential.SourceTypeKubernetes,
+			specCfg:    map[string]string{"service_account": "payments"},
+			wantOK:     false,
+		},
+		{
+			name:       "kubernetes without service_account omits",
+			sourceType: credential.SourceTypeKubernetes,
+			specCfg:    map[string]string{"namespace": "prod"},
 			wantOK:     false,
 		},
 		{

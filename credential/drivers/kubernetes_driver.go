@@ -2,8 +2,10 @@ package drivers
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,10 +20,30 @@ import (
 // k8sMaxResponseBodySize limits response body reads to prevent OOM
 const k8sMaxResponseBodySize = 1 << 20 // 1MB
 
+// kubernetesAuthMethodStatic and kubernetesAuthMethodOIDCFederation select how the
+// source authenticates to the API server. static holds a long-lived bearer token
+// with permission to create tokens for the target service accounts (rotatable);
+// oidc_federation holds no secret and presents the caller's identity assertion as
+// the bearer token on every request. An empty auth_method means static, so records
+// written before federation existed keep working.
+//
+// Federation needs no token-exchange hop: an API server configured to trust
+// Warden's issuer accepts the assertion as an ordinary bearer token and authorizes
+// the claims it maps to a user and groups.
+const (
+	kubernetesAuthMethodStatic         = "static"
+	kubernetesAuthMethodOIDCFederation = "oidc_federation"
+)
+
+// defaultK8sTLSPort is the port a TLS handshake probe dials when kubernetes_url
+// names none.
+const defaultK8sTLSPort = "443"
+
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*KubernetesDriver)(nil)
 var _ credential.SpecVerifier = (*KubernetesDriver)(nil)
 var _ credential.Rotatable = (*KubernetesDriver)(nil)
+var _ credential.ExchangeMinter = (*KubernetesDriver)(nil)
 
 // KubernetesDriver mints ServiceAccount tokens via the Kubernetes TokenRequest API.
 // It uses raw HTTP calls to POST /api/v1/namespaces/{ns}/serviceaccounts/{sa}/token
@@ -49,7 +71,7 @@ func (f *KubernetesDriverFactory) Type() string {
 
 // ValidateConfig validates Kubernetes driver configuration using declarative schema
 func (f *KubernetesDriverFactory) ValidateConfig(config map[string]string) error {
-	return credential.ValidateSchema(config,
+	if err := credential.ValidateSchema(config,
 		credential.StringField("kubernetes_url").
 			Required().
 			Custom(func(v string) error {
@@ -69,10 +91,18 @@ func (f *KubernetesDriverFactory) ValidateConfig(config map[string]string) error
 			Describe("Kubernetes API server URL").
 			Example("https://my-cluster.example.com:6443"),
 
+		credential.StringField("auth_method").
+			OneOf(kubernetesAuthMethodStatic, kubernetesAuthMethodOIDCFederation).
+			Describe("How the source authenticates: 'static' (stored bearer token) or 'oidc_federation' (keyless, presents the caller's identity assertion)").
+			Example(kubernetesAuthMethodStatic),
+
 		credential.StringField("token").
-			Required().
-			Describe("Bearer token for authenticating to the Kubernetes API server").
+			Describe("Bearer token for authenticating to the Kubernetes API server (required for auth_method=static)").
 			Example("eyJhbGciOiJSUzI1NiIs..."),
+
+		credential.StringField("audience").
+			Describe("Assertion audience; must match an entry in the cluster authenticator's audiences (auth_method=oidc_federation)").
+			Example("https://kubernetes.example.com"),
 
 		credential.StringField("ca_data").
 			Custom(ValidateCAData).
@@ -110,7 +140,37 @@ func (f *KubernetesDriverFactory) ValidateConfig(config map[string]string) error
 			}).
 			Describe("TTL for rotated source tokens (default: 24h, min: 10m, max: 48h)").
 			Example("24h"),
-	)
+	); err != nil {
+		return err
+	}
+
+	// Cross-field rules per auth_method. Each mode rejects the other's fields, so a
+	// half-converted source fails at write rather than behaving as the mode the
+	// operator did not intend.
+	//
+	// Present-but-empty is validated as static, not skipped. GetString returns a
+	// stored "" rather than the default, and the schema pass above skips empty
+	// values too — so a switch that only matched the two named modes would let a
+	// source through carrying neither a token nor a federation config, and it is
+	// static that such a source then behaves as.
+	switch credential.GetString(config, "auth_method", kubernetesAuthMethodStatic) {
+	case "", kubernetesAuthMethodStatic:
+		if credential.GetString(config, "token", "") == "" {
+			return fmt.Errorf("token is required for auth_method=%s", kubernetesAuthMethodStatic)
+		}
+		if credential.GetString(config, "audience", "") != "" {
+			return fmt.Errorf("audience is only valid for auth_method=%s", kubernetesAuthMethodOIDCFederation)
+		}
+	case kubernetesAuthMethodOIDCFederation:
+		// A federation source holds no token of its own, so it has nothing to rotate
+		// and no service account to rotate as.
+		for _, k := range []string{"token", "source_service_account", "source_namespace", "source_token_ttl"} {
+			if config[k] != "" {
+				return fmt.Errorf("field '%s' must not be set for auth_method=%s", k, kubernetesAuthMethodOIDCFederation)
+			}
+		}
+	}
+	return nil
 }
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
@@ -139,10 +199,22 @@ func (f *KubernetesDriverFactory) Create(config map[string]string, log *logger.G
 	}
 	driver.httpClient = httpClient
 
-	// Verify source credentials by checking API server connectivity
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// A federation source holds no credential, so the eager probe cannot check
+	// authority — but the transport config is still worth checking, and a
+	// handshake does that without one. kubernetes_url and ca_data are typed by
+	// the operator and are the two things most likely to be wrong; catching them
+	// here beats surfacing them at the first mint.
+	if credential.GetString(config, "auth_method", kubernetesAuthMethodStatic) == kubernetesAuthMethodOIDCFederation {
+		if err := driver.probeTLS(ctx); err != nil {
+			return nil, err
+		}
+		return driver, nil
+	}
+
+	// Verify source credentials by checking API server connectivity
 	if err := driver.verifyConnection(ctx); err != nil {
 		return nil, fmt.Errorf("Kubernetes API server connection failed: %w", err)
 	}
@@ -154,7 +226,8 @@ func (f *KubernetesDriverFactory) Create(config map[string]string, log *logger.G
 // SourceDriver Interface Implementation
 // ============================================================================
 
-// MintCredential creates a new ServiceAccount token via the Kubernetes TokenRequest API.
+// MintCredential creates a new ServiceAccount token via the Kubernetes TokenRequest
+// API, authenticating with the source's stored bearer token.
 //
 // Spec config fields:
 //   - service_account: Target service account name (required)
@@ -162,6 +235,47 @@ func (f *KubernetesDriverFactory) Create(config map[string]string, log *logger.G
 //   - audiences: Comma-separated token audiences (optional)
 //   - ttl: Token TTL duration, e.g. "1h" (optional, default: 1h)
 func (d *KubernetesDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if d.getAuthMethod() == kubernetesAuthMethodOIDCFederation {
+		return nil, nil, 0, "", fmt.Errorf("kubernetes: a source with auth_method=%s mints only from a caller assertion: set subject_token_source on the spec", kubernetesAuthMethodOIDCFederation)
+	}
+	k8sURL, token := d.configSnapshot()
+	return d.mintServiceAccountToken(ctx, k8sURL, token, spec)
+}
+
+// MintCredentialWithExchange mints a ServiceAccount token over workload identity
+// federation: the caller's identity assertion is the bearer token on the
+// TokenRequest call, so the source stores no credential of its own and the API
+// server sees, and audits, the identity behind each request rather than one shared
+// service account.
+//
+// Unlike the STS-backed drivers there is no exchange hop to make. An API server
+// configured to trust the assertion's issuer accepts it directly, so the assertion
+// is handed to the same mint path a stored token would take.
+//
+// The minted token outliving the assertion is expected and harmless: its lifetime
+// is fixed by the API server when it is issued and does not depend on the assertion
+// that asked for it.
+func (d *KubernetesDriver) MintCredentialWithExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if d.getAuthMethod() != kubernetesAuthMethodOIDCFederation {
+		return nil, nil, 0, "", fmt.Errorf("kubernetes: workload identity federation requires auth_method=%s on the source", kubernetesAuthMethodOIDCFederation)
+	}
+	if inputs == nil || inputs.SubjectToken == "" {
+		return nil, nil, 0, "", fmt.Errorf("kubernetes: no subject token in exchange inputs")
+	}
+	k8sURL, _ := d.configSnapshot()
+	return d.mintServiceAccountToken(ctx, k8sURL, inputs.SubjectToken, spec)
+}
+
+// mintServiceAccountToken calls the TokenRequest API for the spec's service account
+// with the given bearer token, which is the source's stored token under static auth
+// and the caller's assertion under federation. Everything below this point is
+// identical in both modes.
+//
+// The URL is passed in rather than read here so that the static path pairs a token
+// with the URL from the same config snapshot: reading them separately would let a
+// rotation land between the two and mint with one config's token against another's
+// address.
+func (d *KubernetesDriver) mintServiceAccountToken(ctx context.Context, k8sURL, bearer string, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	sa := credential.GetString(spec.Config, "service_account", "")
 	namespace := credential.GetString(spec.Config, "namespace", "")
 	audiencesStr := credential.GetString(spec.Config, "audiences", "")
@@ -195,7 +309,7 @@ func (d *KubernetesDriver) MintCredential(ctx context.Context, spec *credential.
 	path := fmt.Sprintf("/api/v1/namespaces/%s/serviceaccounts/%s/token",
 		url.PathEscape(namespace), url.PathEscape(sa))
 
-	respBody, statusCode, err := d.doK8sRequest(ctx, http.MethodPost, path, body)
+	respBody, statusCode, err := d.doK8sRequestWith(ctx, k8sURL, bearer, http.MethodPost, path, body)
 	if err != nil {
 		return nil, nil, 0, "", d.mapError(err, statusCode, sa, namespace)
 	}
@@ -300,7 +414,15 @@ func (d *KubernetesDriver) Cleanup(_ context.Context) error {
 }
 
 // VerifySpec validates that the target service account exists.
+//
+// A federation source has no ambient credential to look it up with — assertions
+// are per caller, per request — so verification is skipped and a missing service
+// account surfaces at the first mint instead.
 func (d *KubernetesDriver) VerifySpec(ctx context.Context, spec *credential.CredSpec) error {
+	if d.getAuthMethod() == kubernetesAuthMethodOIDCFederation {
+		return nil
+	}
+
 	sa := credential.GetString(spec.Config, "service_account", "")
 	namespace := credential.GetString(spec.Config, "namespace", "")
 
@@ -329,7 +451,15 @@ func (d *KubernetesDriver) VerifySpec(ctx context.Context, spec *credential.Cred
 // SupportsRotation returns true if the driver can rotate its source token.
 // Rotation requires source_service_account and source_namespace to be configured
 // so the driver knows which SA to mint a new token for.
+//
+// A federation source holds no token, so there is nothing to rotate. ValidateConfig
+// already keeps the rotation fields off such a source, which would make the check
+// below false anyway; stating it here keeps the invariant independent of that.
 func (d *KubernetesDriver) SupportsRotation() bool {
+	if d.getAuthMethod() == kubernetesAuthMethodOIDCFederation {
+		return false
+	}
+
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 	sa := credential.GetString(d.credSource.Config, "source_service_account", "")
@@ -341,6 +471,10 @@ func (d *KubernetesDriver) SupportsRotation() bool {
 // current (still valid) source token. Kubernetes has immediate consistency,
 // so activateAfter is 0.
 func (d *KubernetesDriver) PrepareRotation(ctx context.Context) (map[string]string, map[string]string, time.Duration, error) {
+	if d.getAuthMethod() == kubernetesAuthMethodOIDCFederation {
+		return nil, nil, 0, fmt.Errorf("kubernetes: a source with auth_method=%s holds no token to rotate", kubernetesAuthMethodOIDCFederation)
+	}
+
 	// Snapshot config under lock, then release before making HTTP calls.
 	d.authMu.Lock()
 	sa := credential.GetString(d.credSource.Config, "source_service_account", "")
@@ -477,6 +611,67 @@ func buildTokenRequestBody(expirationSeconds int64, audiences []string) ([]byte,
 	return json.Marshal(reqBody)
 }
 
+// getAuthMethod returns the source's configured auth_method, normalising both an
+// absent key and a stored empty string to static — the former so a record written
+// before federation existed keeps its old behaviour, the latter because GetString
+// hands back a stored "" rather than the default. It reads under authMu because
+// CommitRotation swaps the whole config map under that lock.
+func (d *KubernetesDriver) getAuthMethod() string {
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	if method := credential.GetString(d.credSource.Config, "auth_method", kubernetesAuthMethodStatic); method != "" {
+		return method
+	}
+	return kubernetesAuthMethodStatic
+}
+
+// probeTLS completes a TLS handshake against the API server and closes the
+// connection, sending no HTTP request. It is the credential-free half of
+// verifyConnection: it proves the host resolves and answers, and that its
+// certificate verifies against ca_data, which is all a source with no token of
+// its own can check.
+//
+// It runs only against an https URL. ValidateConfig permits a plain-HTTP
+// kubernetes_url when tls_skip_verify is set, and a handshake with a plain HTTP
+// listener fails whatever InsecureSkipVerify says — so probing one would reject
+// every dev cluster.
+//
+// Known limitation: it dials the host directly and so ignores HTTPS_PROXY, which
+// the client's own transport would honour. A deployment reaching the API server
+// only through a proxy therefore fails source creation here even though its mints
+// would succeed.
+func (d *KubernetesDriver) probeTLS(ctx context.Context) error {
+	k8sURL, _ := d.configSnapshot()
+
+	parsed, err := url.Parse(k8sURL)
+	if err != nil {
+		return fmt.Errorf("kubernetes_url is not a valid URL: %w", err)
+	}
+	if parsed.Scheme != "https" {
+		return nil
+	}
+
+	port := parsed.Port()
+	if port == "" {
+		port = defaultK8sTLSPort
+	}
+
+	// The client carries the CA pool and skip-verify flag built from config. Its
+	// Transport is nil when neither is set (BuildHTTPClient returns a bare client
+	// then), which leaves a nil config and the system roots — the right default.
+	var tlsConfig *tls.Config
+	if transport, ok := d.httpClient.Transport.(*http.Transport); ok && transport != nil {
+		tlsConfig = transport.TLSClientConfig
+	}
+
+	dialer := &tls.Dialer{Config: tlsConfig}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(parsed.Hostname(), port))
+	if err != nil {
+		return fmt.Errorf("cannot establish a TLS connection to the Kubernetes API server at %s: %w (check kubernetes_url and ca_data)", parsed.Host, err)
+	}
+	return conn.Close()
+}
+
 // verifyConnection checks API server connectivity using the /version endpoint,
 // which requires no RBAC permissions.
 func (d *KubernetesDriver) verifyConnection(ctx context.Context) error {
@@ -545,6 +740,14 @@ func defaultK8sRetryConfig() httputil.HTTPRetryConfig {
 func (d *KubernetesDriver) mapError(err error, statusCode int, sa, namespace string) error {
 	switch statusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
+		// Under federation the assertion carries the identity, so a refusal is as
+		// likely to be a trust or audience mismatch as a missing grant. Naming all
+		// three saves an operator from auditing RBAC for what is a config problem.
+		if d.getAuthMethod() == kubernetesAuthMethodOIDCFederation {
+			return fmt.Errorf("kubernetes API server rejected the identity assertion (HTTP %d) when creating a token for service account %q in namespace %q: "+
+				"check that the cluster trusts Warden's issuer, that the source's audience matches the authenticator's audiences, "+
+				"and that the mapped user or groups may create serviceaccounts/token there: %w", statusCode, sa, namespace, err)
+		}
 		return fmt.Errorf("insufficient permissions to create token for service account %q in namespace %q: %w", sa, namespace, err)
 	case http.StatusNotFound:
 		return fmt.Errorf("service account %q not found in namespace %q: %w", sa, namespace, err)

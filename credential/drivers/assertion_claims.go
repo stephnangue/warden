@@ -33,6 +33,8 @@ func DeriveAssertionResource(sourceType string, sourceCfg, specCfg map[string]st
 		return gcpAssertionResource(sourceCfg, specCfg)
 	case credential.SourceTypeVault:
 		return vaultAssertionResource(sourceCfg, specCfg)
+	case credential.SourceTypeKubernetes:
+		return kubernetesAssertionResource(specCfg)
 	default:
 		return "", false
 	}
@@ -59,9 +61,47 @@ func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg map[string]st
 		return azureAssertionAudience(sourceCfg)
 	case credential.SourceTypeVault:
 		return vaultAssertionAudience(sourceCfg)
+	case credential.SourceTypeKubernetes:
+		return kubernetesAssertionAudience(sourceCfg)
 	default:
 		return "", false
 	}
+}
+
+// kubernetesAssertionAudience derives the warden_identity assertion audience for a
+// keyless Kubernetes source: the source's explicit `audience`, or ("", false) when
+// unset. There is no conventional default — the value must appear in the cluster
+// authenticator's own audiences list, which the operator chooses — so an unset
+// audience forces the spec to set assertion_audience (the spec-create gate enforces
+// this, and mint fails closed otherwise).
+//
+// Gated on auth_method=oidc_federation: only a keyless source federates, so a
+// static source supplies no derived audience even if a stored config record somehow
+// carries one.
+func kubernetesAssertionAudience(sourceCfg map[string]string) (string, bool) {
+	if credential.GetString(sourceCfg, "auth_method", kubernetesAuthMethodStatic) != kubernetesAuthMethodOIDCFederation {
+		return "", false
+	}
+	if aud := credential.GetString(sourceCfg, "audience", ""); aud != "" {
+		return aud, true
+	}
+	return "", false
+}
+
+// kubernetesAssertionResource reports the service account a federation spec mints
+// for, as "namespace/service_account", for the warden_resource claim. Pure: reads
+// spec config only, no network or driver state. The driver has a single mint path,
+// so unlike the multi-engine sources there is no mint_method to dispatch on.
+//
+// The returned value is opaque — never parse it back, since a Kubernetes name can
+// in principle carry the separator.
+func kubernetesAssertionResource(specCfg map[string]string) (string, bool) {
+	namespace := credential.GetString(specCfg, "namespace", "")
+	sa := credential.GetString(specCfg, "service_account", "")
+	if namespace != "" && sa != "" {
+		return namespace + "/" + sa, true
+	}
+	return "", false
 }
 
 // vaultAssertionAudience derives the warden_identity assertion audience for a Vault
