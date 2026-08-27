@@ -65,9 +65,22 @@ fi
 
 if [ ! -f "$NGINX_CERT_DIR/server.crt" ]; then
   echo "Generating nginx server certificate..."
+  # SANs matter: a client that verifies rejects a certificate carrying only a CN,
+  # so without them this certificate is usable only with -k. The issuer documents
+  # are served through this listener, and a verifier fetching them (a Kubernetes
+  # API server, say) does verify. e2e-nginx/nginx are the container name and
+  # service alias, for a verifier inside the compose network.
   openssl ecparam -genkey -name prime256v1 -noout -out "$NGINX_CERT_DIR/server.key" 2>/dev/null
-  openssl req -x509 -new -key "$NGINX_CERT_DIR/server.key" -out "$NGINX_CERT_DIR/server.crt" \
-    -days 365 -subj "/CN=e2e-nginx-lb" 2>/dev/null
+  openssl req -new -key "$NGINX_CERT_DIR/server.key" -out "$NGINX_CERT_DIR/server.csr" \
+    -subj "/CN=e2e-nginx-lb" 2>/dev/null
+  openssl x509 -req -sha256 -in "$NGINX_CERT_DIR/server.csr" -signkey "$NGINX_CERT_DIR/server.key" \
+    -out "$NGINX_CERT_DIR/server.crt" -days 365 \
+    -extfile <(printf "subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:e2e-nginx,DNS:nginx") 2>/dev/null
+  rm -f "$NGINX_CERT_DIR/server.csr"
+  if [ ! -s "$NGINX_CERT_DIR/server.crt" ]; then
+    echo "ERROR: failed to generate nginx server certificate"
+    exit 1
+  fi
 fi
 
 # Step 1: Start infrastructure (PostgreSQL + Vault + Hydra + Nginx)
@@ -523,6 +536,35 @@ warden_api POST "auth/jwt/role/e2e-reader" \
 echo "  Enabling transparent mode..."
 warden_api POST "vault/config" \
   '{"auto_auth_path":"auth/jwt/"}'
+
+# 9j. Enable Warden's own OIDC issuer (workload identity federation).
+#
+# Suites minting Warden-signed identity assertions (subject_token_source=
+# warden_identity) need the issuer enabled and ready. With the signer "transit"
+# stanza in every node's config, this write provisions the signing keys IN
+# transit — the private key is created there and never enters Warden. The write
+# is a partial update and idempotent: re-applying it regenerates no keys, so the
+# JWKS kids stay stable across setup re-runs.
+#
+# issuer_url is the `iss` claim and the origin verifiers fetch discovery/JWKS
+# from, so it must outlive any single node: the load balancer fronts all three
+# and proxies every path, whereas a node origin goes dark whenever that node is
+# killed — which the HA suites do deliberately.
+#
+# Unlike the checks above this one aborts rather than warns. The issuer is part
+# of the harness contract now, and a silent failure here surfaces far from its
+# cause: suites that re-apply the config without an issuer_url would fail with
+# "issuer_url is required", saying nothing about setup having skipped this step.
+echo "  Enabling Warden OIDC issuer..."
+ISSUER_RESULT=$(warden_api POST "sys/oidc-issuer/config" \
+  '{"enabled":true,"issuer_url":"https://127.0.0.1:8000"}')
+if echo "$ISSUER_RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['data']['ready'] is True" 2>/dev/null; then
+  echo "  OIDC issuer enabled and ready."
+else
+  echo "ERROR: OIDC issuer enable failed or not ready"
+  echo "  $ISSUER_RESULT"
+  exit 1
+fi
 
 # Step 10: Verify Vault integration
 echo ""
