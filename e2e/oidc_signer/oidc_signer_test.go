@@ -1,10 +1,11 @@
 //go:build e2e
 
 // Package oidc_signer exercises the OIDC issuer's external signer (remote signing):
-// the private signing key lives in Vault transit and never leaves it. It proves the
-// keys are provisioned in transit and are non-exportable, and that an HA promotion
-// serves the same JWKS without moving any key material (the promoted node just
-// points at the same transit keys).
+// the private signing key lives in Vault transit and never leaves it. The harness
+// enables the issuer (e2e/setup.sh step 9j); this suite proves the keys it
+// provisioned are in transit and non-exportable, that re-applying the config
+// regenerates nothing, and that an HA promotion serves the same JWKS without moving
+// any key material (the promoted node just points at the same transit keys).
 package oidc_signer
 
 import (
@@ -68,12 +69,16 @@ func waitForIssuerReady(t *testing.T, port int) map[string]string {
 func TestOIDCSigner_RemoteTransit_And_HAPromotion(t *testing.T) {
 	leader := h.GetLeaderPort(t)
 
-	// 1. Enable the issuer on the active node. With the signer "transit" stanza in
-	//    each node's config, this provisions the signing keys IN transit — the
-	//    private key is created there and never enters Warden.
-	body := `{"enabled":true,"issuer_url":"` + h.NodeURL(leader) + `","key_rotation_period":0}`
+	// 1. Re-apply the enable the harness already performed (e2e/setup.sh step 9j).
+	//    issuer_url is deliberately absent: a config write is a partial update, so
+	//    the harness value survives for every other suite, and validation runs on
+	//    the merged config rather than the request. The stored keyset is complete,
+	//    so nothing is regenerated — the kids captured below are the ones setup
+	//    provisioned. Re-applying is the point: it proves an operator re-enable
+	//    leaves key material alone, which step 3 then depends on.
+	body := `{"enabled":true,"key_rotation_period":0}`
 	if status, resp := h.APIRequest(t, "POST", "sys/oidc-issuer/config", leader, body); status != 200 {
-		t.Fatalf("enable issuer = %d: %s", status, resp)
+		t.Fatalf("re-apply issuer config = %d: %s", status, resp)
 	}
 	kids := waitForIssuerReady(t, leader)
 
