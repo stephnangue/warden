@@ -59,6 +59,27 @@ func NodeURL(port int) string {
 
 // --- HTTP Helpers ---
 
+// applyHeaders copies a header map onto req.
+//
+// A "Host" entry is applied to req.Host rather than to the header map. net/http
+// reads the Host from that field and silently drops a "Host" header, so a caller
+// asking for one would otherwise get no host and no error — the request would go
+// out named after whatever the URL says. Honouring it is what lets a test present
+// the foreign Host a real client sends: an Alicloud or AWS gateway request names
+// its service host, and the provider resolves its target from exactly that.
+//
+// Every request builder in this package goes through here, so the trap cannot be
+// reintroduced by adding another one.
+func applyHeaders(req *http.Request, headers map[string]string) {
+	for k, v := range headers {
+		if http.CanonicalHeaderKey(k) == "Host" {
+			req.Host = v
+			continue
+		}
+		req.Header.Set(k, v)
+	}
+}
+
 // DoRequest makes an HTTP request and returns status code and body.
 // Fatals on connection errors — use TryRequest when the node may be down.
 func DoRequest(t *testing.T, method, rawURL string, headers map[string]string, body string) (int, []byte) {
@@ -87,9 +108,7 @@ func doHTTP(method, rawURL string, headers map[string]string, body string) (int,
 	if err != nil {
 		return 0, nil, err
 	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
+	applyHeaders(req, headers)
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -673,9 +692,7 @@ func doLBHTTP(method, rawURL string, headers map[string]string, body string, cli
 	if err != nil {
 		return 0, nil, err
 	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
+	applyHeaders(req, headers)
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -828,9 +845,7 @@ func doMTLSHTTP(method, rawURL string, headers map[string]string, body string, c
 	if err != nil {
 		return 0, nil, err
 	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
+	applyHeaders(req, headers)
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
