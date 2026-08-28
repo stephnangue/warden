@@ -649,6 +649,17 @@ type ramServer struct {
 	actionSeq     []string // action names in the order received, for ordering assertions
 }
 
+// writeEntityNotExist replies as RAM does for an access key that is not there:
+// an error envelope on HTTP 404, not a bare status.
+func (s *ramServer) writeEntityNotExist(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusNotFound)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"Code":      "EntityNotExist.User.AccessKey",
+		"Message":   "The specified access key does not exist.",
+		"RequestId": "req-not-exist",
+	})
+}
+
 func (s *ramServer) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	action := r.URL.Query().Get("Action")
@@ -688,7 +699,7 @@ func (s *ramServer) handle(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("UserAccessKeyId")
 		status := r.URL.Query().Get("Status")
 		if _, ok := s.keys[id]; !ok {
-			http.Error(w, "no such key", http.StatusBadRequest)
+			s.writeEntityNotExist(w)
 			return
 		}
 		s.keys[id] = status
@@ -698,6 +709,10 @@ func (s *ramServer) handle(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"RequestId": "req"})
 	case "DeleteAccessKey":
 		id := r.URL.Query().Get("UserAccessKeyId")
+		if _, ok := s.keys[id]; !ok {
+			s.writeEntityNotExist(w)
+			return
+		}
 		delete(s.keys, id)
 		s.deleted = append(s.deleted, id)
 		_ = json.NewEncoder(w).Encode(map[string]any{"RequestId": "req"})
@@ -766,36 +781,120 @@ func TestAlicloudDriver_Rotation_HappyPath(t *testing.T) {
 	assert.Less(t, updateIdx, deleteIdx, "UpdateAccessKey(Inactive) must precede DeleteAccessKey")
 }
 
-func TestAlicloudDriver_Rotation_OrphanCleanup(t *testing.T) {
-	// Simulate a previous failed rotation that left an orphan key behind.
+// newRotationDriver builds a driver pointed at a ramServer, holding keyID as its
+// current management key.
+func newRotationDriver(t *testing.T, srvURL, keyID string) *AlicloudDriver {
+	t.Helper()
+	f := &AlicloudDriverFactory{}
+	d, err := f.Create(map[string]string{
+		"access_key_id":        keyID,
+		"access_key_secret":    "secret-" + keyID,
+		"management_user_name": "warden-management",
+		"ram_endpoint":         srvURL,
+	}, createAlicloudTestLogger())
+	require.NoError(t, err)
+	return d.(*AlicloudDriver)
+}
+
+// An Inactive orphan is what Warden's own interrupted cleanup leaves behind
+// (CleanupRotation deactivates before it deletes), so it can be reclaimed
+// immediately.
+func TestAlicloudDriver_Rotation_SweepsInactiveOrphanAtCap(t *testing.T) {
 	ram := &ramServer{
 		user: "warden-management",
 		keys: map[string]string{
 			"LTAI-old":    "Active",
-			"LTAI-orphan": "Active", // at the RAM two-key limit
+			"LTAI-orphan": "Inactive", // at the RAM two-key limit
 		},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(ram.handle))
 	defer srv.Close()
 
-	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
-		"access_key_id":        "LTAI-old",
-		"access_key_secret":    "old-secret",
-		"management_user_name": "warden-management",
-		"ram_endpoint":         srv.URL,
-	}, createAlicloudTestLogger())
-	drv := d.(*AlicloudDriver)
-
-	newConfig, _, _, err := drv.PrepareRotation(context.Background())
+	newConfig, _, _, err := newRotationDriver(t, srv.URL, "LTAI-old").
+		PrepareRotation(context.Background())
 	require.NoError(t, err)
 
-	// Orphan should have been deleted before create
-	assert.Contains(t, ram.deleted, "LTAI-orphan")
-	// Current key must not be touched by orphan cleanup
-	assert.NotContains(t, ram.deleted, "LTAI-old")
-	// New key should have been created
+	assert.Equal(t, []string{"LTAI-orphan"}, ram.deleted)
+	assert.NotContains(t, ram.deleted, "LTAI-old", "the current key must never be swept")
 	assert.Equal(t, "LTAI-rotated-1", newConfig["access_key_id"])
+}
+
+// An Active non-current key is not one Warden can attribute to itself, so it is
+// deactivated rather than deleted and the cycle stops. The next cycle finds it
+// Inactive and reclaims the slot — rotation heals itself without ever destroying
+// a key outright.
+func TestAlicloudDriver_Rotation_DeactivatesActiveKeyThenSweepsNextCycle(t *testing.T) {
+	ram := &ramServer{
+		user: "warden-management",
+		keys: map[string]string{
+			"LTAI-old":        "Active",
+			"LTAI-breakglass": "Active", // at the cap, and not ours
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(ram.handle))
+	defer srv.Close()
+	drv := newRotationDriver(t, srv.URL, "LTAI-old")
+
+	// First cycle: deactivate, refuse to go further, create nothing.
+	_, _, _, err := drv.PrepareRotation(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deactivated")
+	assert.Equal(t, []string{"LTAI-breakglass"}, ram.deactivated)
+	assert.Empty(t, ram.deleted, "an active key must never be deleted outright")
+	assert.Empty(t, ram.created, "no key may be created while the user is at the cap")
+	assert.Equal(t, "Inactive", ram.keys["LTAI-breakglass"])
+
+	// Second cycle: the slot is now reclaimable and rotation proceeds.
+	newConfig, _, _, err := drv.PrepareRotation(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"LTAI-breakglass"}, ram.deleted)
+	assert.Equal(t, "LTAI-rotated-1", newConfig["access_key_id"])
+}
+
+// Below the cap there is a free slot already, so nothing is swept whatever its
+// status — the only reason to remove a key is to make room.
+func TestAlicloudDriver_Rotation_BelowCapSweepsNothing(t *testing.T) {
+	for _, status := range []string{"Active", "Inactive"} {
+		t.Run("sole key is "+status, func(t *testing.T) {
+			ram := &ramServer{
+				user: "warden-management",
+				keys: map[string]string{"LTAI-old": status},
+			}
+			srv := httptest.NewServer(http.HandlerFunc(ram.handle))
+			defer srv.Close()
+
+			_, _, _, err := newRotationDriver(t, srv.URL, "LTAI-old").
+				PrepareRotation(context.Background())
+			require.NoError(t, err)
+
+			assert.Empty(t, ram.deleted)
+			assert.Empty(t, ram.deactivated)
+			assert.Equal(t, []string{"LTAI-rotated-1"}, ram.created)
+		})
+	}
+}
+
+// If the configured key is not among the user's own, every key listed belongs to
+// someone else — most likely management_user_name is wrong. Touch none of them.
+func TestAlicloudDriver_Rotation_RefusesWhenCurrentKeyIsNotTheUsers(t *testing.T) {
+	ram := &ramServer{
+		user: "warden-management",
+		keys: map[string]string{
+			"LTAI-someone-else":   "Active",
+			"LTAI-someone-else-2": "Active",
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(ram.handle))
+	defer srv.Close()
+
+	_, _, _, err := newRotationDriver(t, srv.URL, "LTAI-not-on-this-user").
+		PrepareRotation(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "management_user_name")
+	assert.Empty(t, ram.deleted)
+	assert.Empty(t, ram.deactivated)
+	assert.Empty(t, ram.created)
 }
 
 func TestAlicloudDriver_Rotation_MissingConfig(t *testing.T) {
@@ -834,6 +933,54 @@ func TestAlicloudDriver_Rotation_CleanupRefusesCurrentKey(t *testing.T) {
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "currently active")
+}
+
+// Cleanup is retried for days after a failure, and the next rotation's
+// slot-freeing sweep can delete the very key a pending cleanup is still chasing.
+// Cleaning up an already-deleted key must therefore succeed: otherwise those
+// retries fail daily until the manager logs an abandonment for a key that no
+// longer exists.
+func TestAlicloudDriver_Rotation_CleanupIsIdempotent(t *testing.T) {
+	ram := &ramServer{
+		user: "warden-management",
+		keys: map[string]string{"LTAI-new": "Active"}, // LTAI-old already gone
+	}
+	srv := httptest.NewServer(http.HandlerFunc(ram.handle))
+	defer srv.Close()
+
+	err := newRotationDriver(t, srv.URL, "LTAI-new").
+		CleanupRotation(context.Background(), map[string]string{
+			"access_key_id":        "LTAI-old",
+			"management_user_name": "warden-management",
+		})
+
+	require.NoError(t, err, "cleaning up an already-deleted key is the outcome we wanted")
+	assert.Empty(t, ram.deleted)
+	assert.Equal(t, "Active", ram.keys["LTAI-new"], "the live key must be untouched")
+}
+
+// Idempotency must not swallow a real failure: only the not-there family counts
+// as already-done.
+func TestAlicloudDriver_Rotation_CleanupStillFailsOnOtherErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Code":      "NoPermission",
+			"Message":   "ram:UpdateAccessKey is not granted.",
+			"RequestId": "req-denied",
+		})
+	}))
+	defer srv.Close()
+
+	err := newRotationDriver(t, srv.URL, "LTAI-new").
+		CleanupRotation(context.Background(), map[string]string{
+			"access_key_id":        "LTAI-old",
+			"management_user_name": "warden-management",
+		})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "NoPermission")
 }
 
 // The defect this PR fixes, at the level it actually bites. CleanupRotation
