@@ -610,9 +610,7 @@ func ChainRequest(t *testing.T, port int, p ProviderEnv, o ChainOpts) (int, []by
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
-	for k, v := range chainHeaders(t, o) {
-		req.Header.Set(k, v)
-	}
+	applyHeaders(req, chainHeaders(t, o))
 	if o.Body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -648,9 +646,7 @@ func ChainStream(t *testing.T, port int, p ProviderEnv, o ChainOpts) *http.Respo
 	if err != nil {
 		t.Fatalf("build streaming request: %v", err)
 	}
-	for k, v := range chainHeaders(t, o) {
-		req.Header.Set(k, v)
-	}
+	applyHeaders(req, chainHeaders(t, o))
 	if o.Body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}

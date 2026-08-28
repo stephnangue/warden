@@ -229,9 +229,7 @@ func DoRequestWithResponseHeaders(t *testing.T, method, rawURL string, headers m
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
+	applyHeaders(req, headers)
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
