@@ -248,6 +248,11 @@ func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.Cr
 		return nil, nil, 0, "", fmt.Errorf("STS returned empty credentials")
 	}
 
+	leaseTTL, err := d.stsLeaseTTL(resp.Credentials.Expiration, duration)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+
 	d.logger.Info("issued STS temporary credentials",
 		logger.String("access_key", truncateID(resp.Credentials.AccessKeyID, 8)),
 		logger.String("role_arn", roleARN),
@@ -258,7 +263,46 @@ func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.Cr
 		"access_key_id":     resp.Credentials.AccessKeyID,
 		"access_key_secret": resp.Credentials.AccessKeySecret,
 		"security_token":    resp.Credentials.SecurityToken,
-	}, nil, duration, "", nil // STS tokens are self-expiring; no leaseID
+	}, nil, leaseTTL, "", nil // STS tokens are self-expiring; no leaseID
+}
+
+// stsLeaseTTL converts the Expiration STS reports into a lease TTL.
+//
+// The requested duration alone is the wrong answer: it is measured before the
+// round trip, so the lease outlives the credential by however long the call took,
+// and it ignores an expiry STS shortened for its own reasons. The credential is
+// cached for its whole lease, so an over-long lease means a cache hit near the
+// end hands out a token that dies mid-request. The aws, gcp, ibm, elastic and
+// github drivers all derive their TTL from the server's expiry for this reason.
+//
+// The reported expiry is also capped at the requested duration, because it is
+// only as trustworthy as the agreement between two clocks. A local clock running
+// behind Alibaba's would otherwise reintroduce the very over-long lease this
+// exists to prevent, just bounded by skew rather than by round-trip time. STS
+// never issues longer than asked, so a longer expiry means skew, not generosity.
+//
+// An unparseable Expiration falls back to the requested duration: a usable
+// credential should not be thrown away over a timestamp format, and the fallback
+// is no worse than the behaviour this replaces. An expiry already in the past is
+// a different matter — there is no usable credential to return.
+func (d *AlicloudDriver) stsLeaseTTL(expiration string, requested time.Duration) (time.Duration, error) {
+	expiry, err := time.Parse(time.RFC3339, expiration)
+	if err != nil {
+		d.logger.Warn("STS returned an Expiration that is not RFC3339; falling back to the requested duration",
+			logger.String("expiration", expiration),
+			logger.String("requested", requested.String()),
+		)
+		return requested, nil
+	}
+
+	ttl := time.Until(expiry)
+	if ttl <= 0 {
+		return 0, fmt.Errorf("STS returned credentials that already expired at %s", expiration)
+	}
+	if ttl > requested {
+		return requested, nil
+	}
+	return ttl, nil
 }
 
 // Revoke is a no-op: the driver's only supported mint method (assume_role)

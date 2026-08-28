@@ -66,10 +66,15 @@ func signACS3(r *http.Request, accessKeyID, accessKeySecret, securityToken strin
 		rawQuery = r.URL.RawQuery
 	}
 
+	canonicalQuery, err := acs3CanonicalQuery(rawQuery)
+	if err != nil {
+		return err
+	}
+
 	canonicalRequest := strings.Join([]string{
 		r.Method,
 		canonicalURI,
-		acs3CanonicalQuery(rawQuery),
+		canonicalQuery,
 		canonicalHdrs,
 		signedHeadersStr,
 		bodyHash,
@@ -157,13 +162,17 @@ func acs3CanonicalHeaders(r *http.Request, signed []string) (canonical, signedSt
 	return b.String(), strings.Join(normalized, ";")
 }
 
-func acs3CanonicalQuery(rawQuery string) string {
+// acs3CanonicalQuery renders rawQuery in ACS3 canonical form. A query that will
+// not parse is reported rather than rendered as empty: signing an empty query for
+// a request that has one produces a signature the server cannot reproduce, so the
+// caller would see a remote SignatureDoesNotMatch instead of the local defect.
+func acs3CanonicalQuery(rawQuery string) (string, error) {
 	if rawQuery == "" {
-		return ""
+		return "", nil
 	}
 	values, err := url.ParseQuery(rawQuery)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("malformed query string: %w", err)
 	}
 	keys := make([]string, 0, len(values))
 	for k := range values {
@@ -180,7 +189,7 @@ func acs3CanonicalQuery(rawQuery string) string {
 			parts = append(parts, acs3Encode(k)+"="+acs3Encode(v))
 		}
 	}
-	return strings.Join(parts, "&")
+	return strings.Join(parts, "&"), nil
 }
 
 func acs3Encode(s string) string {

@@ -127,15 +127,19 @@ func generateNonce() (string, error) {
 }
 
 // canonicalQueryString builds the canonical query string per ACS3 rules:
-// parameters sorted by key (then value), keys and values percent-encoded with
-// unreserved characters preserved, '=' appended for keys with empty values.
-func canonicalQueryString(rawQuery string) string {
+// parameters sorted by name, keys and values percent-encoded with unreserved
+// characters preserved, '=' appended for keys with empty values.
+// A query that will not parse is reported rather than rendered as empty: an
+// empty canonical query for a request that has one yields a signature neither
+// side can reproduce, surfacing as a remote SignatureDoesNotMatch on the signing
+// path and an unexplained rejection on the verifying one.
+func canonicalQueryString(rawQuery string) (string, error) {
 	if rawQuery == "" {
-		return ""
+		return "", nil
 	}
 	values, err := url.ParseQuery(rawQuery)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("malformed query string: %w", err)
 	}
 
 	keys := make([]string, 0, len(values))
@@ -146,13 +150,17 @@ func canonicalQueryString(rawQuery string) string {
 
 	var parts []string
 	for _, k := range keys {
-		vs := values[k]
-		sort.Strings(vs)
-		for _, v := range vs {
+		// Sorted by name only. ACS3 has no notion of a repeated parameter — an
+		// array is flattened into indexed names (InstanceId.1, InstanceId.2), so
+		// every name is distinct and ordering values would never come up. A
+		// request that does repeat a name is signed by Alibaba in the order it
+		// arrived, so sorting the values here would compute a different string
+		// from the one the server derives and the signature would be rejected.
+		for _, v := range values[k] {
 			parts = append(parts, acs3Encode(k)+"="+acs3Encode(v))
 		}
 	}
-	return strings.Join(parts, "&")
+	return strings.Join(parts, "&"), nil
 }
 
 // acs3Encode percent-encodes s per ACS3 rules: unreserved characters stay as-is,
@@ -286,10 +294,15 @@ func SignACS3(r *http.Request, accessKeyID, accessKeySecret, securityToken strin
 		rawQuery = r.URL.RawQuery
 	}
 
+	canonicalQuery, err := canonicalQueryString(rawQuery)
+	if err != nil {
+		return err
+	}
+
 	canonicalRequest := strings.Join([]string{
 		r.Method,
 		canonicalURI,
-		canonicalQueryString(rawQuery),
+		canonicalQuery,
 		canonicalHdrs,
 		signedHeadersStr,
 		hashSHA256(body),
@@ -336,10 +349,15 @@ func VerifyACS3(r *http.Request, accessKeySecret string, body []byte) (bool, err
 		return false, fmt.Errorf("body hash does not match x-acs-content-sha256 header")
 	}
 
+	canonicalQuery, err := canonicalQueryString(rawQuery)
+	if err != nil {
+		return false, err
+	}
+
 	canonicalRequest := strings.Join([]string{
 		r.Method,
 		canonicalURI,
-		canonicalQueryString(rawQuery),
+		canonicalQuery,
 		canonicalHdrs,
 		signedHeadersStr,
 		contentHash,
