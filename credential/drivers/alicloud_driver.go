@@ -63,6 +63,7 @@ var _ credential.SourceDriver = (*AlicloudDriver)(nil)
 var _ credential.SpecVerifier = (*AlicloudDriver)(nil)
 var _ credential.Rotatable = (*AlicloudDriver)(nil)
 var _ credential.ExchangeMinter = (*AlicloudDriver)(nil)
+var _ credential.RotationConfigValidator = (*AlicloudDriverFactory)(nil)
 
 // AlicloudDriver mints credentials from Alibaba Cloud STS.
 //
@@ -851,6 +852,26 @@ func (d *AlicloudDriver) callJSON(
 }
 
 // --- Rotatable interface (management key rotation) ---
+
+// ValidateRotationConfig rejects a rotation_period on a source that could never
+// rotate, so the operator hears about it at write time rather than never.
+//
+// It mirrors SupportsRotation exactly, from the config map instead of live driver
+// state. The two must stay in step: anything SupportsRotation requires and this
+// does not becomes a source that is accepted and then fails every cycle forever.
+func (f *AlicloudDriverFactory) ValidateRotationConfig(config map[string]string) error {
+	var missing []string
+	for _, key := range []string{"access_key_id", "access_key_secret", "management_user_name"} {
+		if credential.GetString(config, key, "") == "" {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("rotating an alicloud source requires %s; without them the rotation manager can never complete a cycle",
+			strings.Join(missing, ", "))
+	}
+	return nil
+}
 
 // SupportsRotation returns true if the source has enough config to rotate the
 // management access key: an existing access_key_id + access_key_secret plus

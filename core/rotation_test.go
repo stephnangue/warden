@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -943,4 +944,72 @@ func TestRotation_FailedStateHasNextAction(t *testing.T) {
 	assert.True(t, entry.NextAction.After(before),
 		"NextAction should be in the future for failed entry")
 	assert.Equal(t, StateFailed, entry.State)
+}
+
+// An entry is shared: worker goroutines mutate its state while the tick loop reads
+// it and persistEntry marshals every field. UpdateRotationPeriod used to write
+// RotationPeriod and NextAction, then marshal the whole struct, holding no lock at
+// all. Run under -race: this reports on the unguarded version and is quiet on the
+// guarded one.
+func TestRotationManager_UpdateRotationPeriodIsRaceFree(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	rm := NewRotationManager(nil, log.WithSubsystem("rotation"), nil)
+	rm.Start()
+	defer rm.Stop()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	require.NoError(t, rm.RegisterSource(ctx, "racy-source", "vault", 1*time.Hour))
+
+	key := buildRotationKey(namespace.RootNamespace.UUID, "racy-source")
+	val, _ := rm.entries.Load(key)
+	entry := val.(*RotationEntry)
+
+	var wg sync.WaitGroup
+
+	// Writer: the config path an operator drives by updating a source.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			assert.NoError(t, rm.UpdateRotationPeriod(ctx, "racy-source", time.Duration(i+1)*time.Minute))
+		}
+	}()
+
+	// Writers: what a rotation job does to the same entry as it completes.
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				entry.mu.Lock()
+				entry.State = StateStaged
+				entry.Attempts++
+				entry.applyStaged(&stagedRotation{
+					NewConfig:       map[string]string{"access_key_id": "rotated"},
+					CleanupConfig:   map[string]string{"access_key_id": "old"},
+					ActivationDelay: time.Minute,
+					PreparedAt:      time.Now(),
+				})
+				entry.clearStagedFields()
+				entry.State = StateIdle
+				entry.mu.Unlock()
+			}
+		}()
+	}
+
+	// Readers: what the tick loop does on every pass.
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_ = entry.GetState()
+				_ = entry.GetNextAction()
+				_ = entry.GetAttempts()
+				_ = entry.GetNewConfig()
+			}
+		}()
+	}
+
+	wg.Wait()
 }

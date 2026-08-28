@@ -447,6 +447,65 @@ func TestAlicloudAssertionClaims(t *testing.T) {
 	})
 }
 
+// A rotation_period the driver could never honour is refused at write time.
+// Accepting it means the manager retries, parks the entry as failed, comes back
+// after FailedMinAge and repeats for the life of the source, all of it visible
+// only in the server log.
+//
+// The rules must match SupportsRotation exactly — anything required there but not
+// here is a source that is accepted and then fails every cycle forever — so the
+// same configs are asserted against both.
+func TestAlicloudDriverFactory_ValidateRotationConfig(t *testing.T) {
+	f := &AlicloudDriverFactory{}
+
+	tests := []struct {
+		name    string
+		config  map[string]string
+		wantErr string
+	}{
+		{
+			name: "complete rotation config",
+			config: map[string]string{
+				"access_key_id":        "LTAI-mgmt",
+				"access_key_secret":    "secret",
+				"management_user_name": "warden-management",
+			},
+		},
+		{
+			name: "missing management_user_name",
+			config: map[string]string{
+				"access_key_id":     "LTAI-mgmt",
+				"access_key_secret": "secret",
+			},
+			wantErr: "management_user_name",
+		},
+		{
+			name:    "missing everything",
+			config:  map[string]string{},
+			wantErr: "access_key_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := f.ValidateRotationConfig(tt.config)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
+
+			// The config-time check and the live check must agree, or a source
+			// slips past one and stalls on the other.
+			d, createErr := f.Create(tt.config, createAlicloudTestLogger())
+			require.NoError(t, createErr)
+			assert.Equal(t, err == nil, d.(*AlicloudDriver).SupportsRotation(),
+				"ValidateRotationConfig and SupportsRotation must agree")
+		})
+	}
+}
+
 func TestAlicloudDriverFactory_Create(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 	log := createAlicloudTestLogger()
