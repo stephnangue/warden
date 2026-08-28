@@ -12,7 +12,8 @@ func TestRegisterBuiltinDrivers(t *testing.T) {
 	err := RegisterBuiltinDrivers(registry)
 	require.NoError(t, err)
 
-	// Verify all expected drivers are registered
+	// Every builtin driver, not a subset — an under-enumerated list reads as
+	// "all registered" while silently skipping whatever was added last.
 	expectedTypes := []string{
 		credential.SourceTypeLocal,
 		credential.SourceTypeVault,
@@ -23,6 +24,15 @@ func TestRegisterBuiltinDrivers(t *testing.T) {
 		credential.SourceTypeGitHub,
 		credential.SourceTypeAPIKey,
 		credential.SourceTypeOAuth2,
+		credential.SourceTypeAlicloud,
+		credential.SourceTypeElastic,
+		credential.SourceTypeGrafana,
+		credential.SourceTypeHoneycomb,
+		credential.SourceTypeIBM,
+		credential.SourceTypeKubernetes,
+		credential.SourceTypeOVH,
+		credential.SourceTypeScaleway,
+		credential.SourceTypeTokenExchange,
 	}
 	for _, typeName := range expectedTypes {
 		factory, err := registry.GetFactory(typeName)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -67,6 +68,382 @@ func TestAlicloudDriverFactory_ValidateConfig(t *testing.T) {
 			"sts_endpoint":      "https://sts.aliyuncs.com",
 			"ram_endpoint":      "https://ram.aliyuncs.com",
 		}))
+	})
+}
+
+// --- Keyless (auth_method=oidc_federation) ---
+
+func TestAlicloudDriverFactory_ValidateConfig_AuthMethod(t *testing.T) {
+	f := &AlicloudDriverFactory{}
+
+	tests := []struct {
+		name    string
+		config  map[string]string
+		wantErr string
+	}{
+		{
+			name: "federation with a provider arn",
+			config: map[string]string{
+				"auth_method":       "oidc_federation",
+				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+				"audience":          "https://warden.example.com",
+			},
+		},
+		{
+			name:    "federation without a provider arn",
+			config:  map[string]string{"auth_method": "oidc_federation"},
+			wantErr: "oidc_provider_arn is required",
+		},
+		{
+			name: "unknown auth_method",
+			config: map[string]string{
+				"auth_method": "instance_role",
+			},
+			wantErr: "auth_method",
+		},
+		{
+			// The static source's fields are exactly what federation removes, so
+			// carrying either is a half-converted source.
+			name: "federation carrying a key pair",
+			config: map[string]string{
+				"auth_method":       "oidc_federation",
+				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+				"access_key_id":     "LTAI-mgmt",
+			},
+			wantErr: "access_key_id",
+		},
+		{
+			name: "federation carrying rotation config",
+			config: map[string]string{
+				"auth_method":          "oidc_federation",
+				"oidc_provider_arn":    "acs:ram::123456789012:oidc-provider/warden",
+				"management_user_name": "warden-management",
+			},
+			wantErr: "management_user_name",
+		},
+		{
+			// ram_endpoint is read only by the rotation calls, which federation
+			// forecloses.
+			name: "federation carrying a ram endpoint",
+			config: map[string]string{
+				"auth_method":       "oidc_federation",
+				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+				"ram_endpoint":      "https://ram.aliyuncs.com",
+			},
+			wantErr: "ram_endpoint",
+		},
+		{
+			name: "static carrying a provider arn",
+			config: map[string]string{
+				"access_key_id":     "LTAI-mgmt",
+				"access_key_secret": "secret",
+				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+			},
+			wantErr: "oidc_provider_arn",
+		},
+		{
+			name: "static carrying an audience",
+			config: map[string]string{
+				"access_key_id":     "LTAI-mgmt",
+				"access_key_secret": "secret",
+				"audience":          "https://warden.example.com",
+			},
+			wantErr: "audience",
+		},
+		{
+			// A stored empty auth_method is validated as static, not skipped —
+			// GetString hands back the stored "" rather than the default.
+			name: "explicit empty auth_method is treated as static",
+			config: map[string]string{
+				"auth_method":       "",
+				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+			},
+			wantErr: "oidc_provider_arn",
+		},
+		{
+			// Unchanged from before federation existed: nothing is required.
+			name:   "empty config is still valid",
+			config: map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := f.ValidateConfig(tt.config)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// newFederationDriver builds a keyless driver pointed at an STS stub.
+func newAlicloudFederationDriver(t *testing.T, stsURL string) *AlicloudDriver {
+	t.Helper()
+	f := &AlicloudDriverFactory{}
+	d, err := f.Create(map[string]string{
+		"auth_method":       "oidc_federation",
+		"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+		"audience":          "https://warden.example.com",
+		"sts_endpoint":      stsURL,
+	}, createAlicloudTestLogger())
+	require.NoError(t, err)
+	return d.(*AlicloudDriver)
+}
+
+func federationSpec() *credential.CredSpec {
+	return &credential.CredSpec{
+		Name: "prod",
+		Config: map[string]string{
+			"mint_method":      "assume_role",
+			"role_arn":         "acs:ram::123456789012:role/warden-prod",
+			"duration_seconds": "1800s",
+		},
+	}
+}
+
+// A keyless source has no key to sign with and no ambient identity, so the
+// non-exchange path must fail closed rather than fall back to anything. This is
+// also what makes the spec-create test-mint reject a non-exchange spec on such a
+// source.
+func TestAlicloudDriver_Federation_MintCredentialFailsClosed(t *testing.T) {
+	drv := newAlicloudFederationDriver(t, "https://sts.example.invalid")
+
+	_, _, _, _, err := drv.MintCredential(context.Background(), federationSpec())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "subject_token_source")
+}
+
+func TestAlicloudDriver_Federation_MintWithExchange(t *testing.T) {
+	const assertion = "eyJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qifq.payload.signature"
+
+	var gotQuery url.Values
+	var gotForm url.Values
+	var gotAuth, gotRawQuery, gotContentType string
+
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRawQuery = r.URL.RawQuery
+		gotQuery = r.URL.Query()
+		gotAuth = r.Header.Get("Authorization")
+		gotContentType = r.Header.Get("Content-Type")
+		require.NoError(t, r.ParseForm())
+		gotForm = r.PostForm
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Credentials": map[string]any{
+				"AccessKeyId":     "STS.federated",
+				"AccessKeySecret": "federated-secret",
+				"SecurityToken":   "federated-token",
+				"Expiration":      time.Now().Add(1800 * time.Second).UTC().Format(time.RFC3339),
+			},
+		})
+	}))
+	defer sts.Close()
+
+	drv := newAlicloudFederationDriver(t, sts.URL)
+	raw, metadata, ttl, leaseID, err := drv.MintCredentialWithExchange(
+		context.Background(), federationSpec(),
+		&credential.ExchangeInputs{SubjectToken: assertion})
+	require.NoError(t, err)
+
+	// The RPC common parameters identify the call and stay in the query, as
+	// Alibaba's own RRSA client sends them — Timestamp included, which is part of
+	// that convention and which no stub can prove optional.
+	assert.Equal(t, "AssumeRoleWithOIDC", gotQuery.Get("Action"))
+	assert.Equal(t, alicloudSTSVersion, gotQuery.Get("Version"))
+	assert.Equal(t, "JSON", gotQuery.Get("Format"))
+	stamp, tsErr := time.Parse(alicloudTimestampFormat, gotQuery.Get("Timestamp"))
+	require.NoError(t, tsErr, "Timestamp must be ISO 8601 UTC")
+	assert.WithinDuration(t, time.Now(), stamp, time.Minute)
+
+	// The exchange parameters travel in the form body.
+	assert.Equal(t, "application/x-www-form-urlencoded", gotContentType)
+	assert.Equal(t, assertion, gotForm.Get("OIDCToken"))
+	assert.Equal(t, "acs:ram::123456789012:oidc-provider/warden", gotForm.Get("OIDCProviderArn"))
+	assert.Equal(t, "acs:ram::123456789012:role/warden-prod", gotForm.Get("RoleArn"))
+	assert.Equal(t, "1800", gotForm.Get("DurationSeconds"))
+
+	// The two load-bearing negatives. AssumeRoleWithOIDC is anonymous, and the
+	// assertion must never reach the URL — *url.Error prints the whole thing on
+	// any transport failure.
+	assert.Empty(t, gotAuth, "AssumeRoleWithOIDC is an anonymous call")
+	assert.NotContains(t, gotRawQuery, assertion, "the assertion must not be in the query string")
+	assert.NotContains(t, gotRawQuery, "OIDCToken")
+
+	assert.Equal(t, "STS.federated", raw["access_key_id"])
+	assert.Equal(t, "federated-secret", raw["access_key_secret"])
+	assert.Equal(t, "federated-token", raw["security_token"])
+	assert.Equal(t, "acs:ram::123456789012:role/warden-prod", metadata["role_arn"])
+	assert.InDelta(t, 1800, ttl.Seconds(), 5)
+	assert.Empty(t, leaseID, "STS sessions are self-expiring")
+}
+
+// Pins the body-not-query decision against a future refactor: point the driver at
+// a dead port so client.Do fails, and check the assertion is not in the error.
+// With the token in the query string, *url.Error would print it verbatim.
+func TestAlicloudDriver_Federation_TransportErrorDoesNotLeakAssertion(t *testing.T) {
+	const assertion = "eyJhbGciOiJSUzI1NiJ9.super-secret-payload.signature"
+
+	// A listener closed immediately gives us an address nothing answers on.
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := closed.URL
+	closed.Close()
+
+	drv := newAlicloudFederationDriver(t, deadURL)
+	_, _, _, _, err := drv.MintCredentialWithExchange(
+		context.Background(), federationSpec(),
+		&credential.ExchangeInputs{SubjectToken: assertion})
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), assertion,
+		"a transport error must not print the caller's assertion")
+	assert.NotContains(t, err.Error(), "super-secret-payload")
+}
+
+func TestAlicloudDriver_Federation_ExchangeRejections(t *testing.T) {
+	t.Run("rejected on a static source", func(t *testing.T) {
+		f := &AlicloudDriverFactory{}
+		d, _ := f.Create(map[string]string{
+			"access_key_id":     "LTAI-mgmt",
+			"access_key_secret": "secret",
+		}, createAlicloudTestLogger())
+
+		_, _, _, _, err := d.(*AlicloudDriver).MintCredentialWithExchange(
+			context.Background(), federationSpec(),
+			&credential.ExchangeInputs{SubjectToken: "assertion"})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "oidc_federation")
+	})
+
+	t.Run("rejected with no subject token", func(t *testing.T) {
+		drv := newAlicloudFederationDriver(t, "https://sts.example.invalid")
+
+		_, _, _, _, err := drv.MintCredentialWithExchange(context.Background(), federationSpec(), nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no subject token")
+
+		_, _, _, _, err = drv.MintCredentialWithExchange(
+			context.Background(), federationSpec(), &credential.ExchangeInputs{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no subject token")
+	})
+
+	t.Run("rejected for an unsupported mint_method", func(t *testing.T) {
+		drv := newAlicloudFederationDriver(t, "https://sts.example.invalid")
+		spec := federationSpec()
+		spec.Config["mint_method"] = "dynamic_keys"
+
+		_, _, _, _, err := drv.MintCredentialWithExchange(
+			context.Background(), spec, &credential.ExchangeInputs{SubjectToken: "assertion"})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "assume_role")
+	})
+}
+
+// The three things most likely to be misconfigured are the issuer trust, the
+// audience, and the role's trust policy; the raw envelope names none of them.
+func TestAlicloudDriver_Federation_ErrorMappingNamesTheTrustChain(t *testing.T) {
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Code":      "AuthenticationFail.OIDCToken.Invalid",
+			"Message":   "The OIDC token is invalid.",
+			"RequestId": "req-oidc",
+		})
+	}))
+	defer sts.Close()
+
+	drv := newAlicloudFederationDriver(t, sts.URL)
+	_, _, _, _, err := drv.MintCredentialWithExchange(
+		context.Background(), federationSpec(),
+		&credential.ExchangeInputs{SubjectToken: "assertion"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AuthenticationFail.OIDCToken.Invalid", "the upstream code survives")
+	assert.Contains(t, err.Error(), "issuer")
+	assert.Contains(t, err.Error(), "client_ids")
+	assert.Contains(t, err.Error(), "trust policy")
+}
+
+// A federation source holds no key, so there is nothing to rotate and no RAM user
+// to rotate as.
+func TestAlicloudDriver_Federation_RotationRefused(t *testing.T) {
+	drv := newAlicloudFederationDriver(t, "https://sts.example.invalid")
+
+	assert.False(t, drv.SupportsRotation())
+
+	_, _, _, err := drv.PrepareRotation(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no key to rotate")
+}
+
+// VerifySpec has no ambient credential to dry-run with under federation. The
+// guard is unreachable in practice — the spec-create test-mint is skipped for
+// exchange specs — but it must not attempt a network call if it is ever reached.
+func TestAlicloudDriver_Federation_VerifySpecMakesNoCall(t *testing.T) {
+	sts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("VerifySpec must not call STS on a federation source")
+	}))
+	defer sts.Close()
+
+	drv := newAlicloudFederationDriver(t, sts.URL)
+	assert.NoError(t, drv.VerifySpec(context.Background(), federationSpec()))
+}
+
+func TestAlicloudAssertionClaims(t *testing.T) {
+	federationSource := map[string]string{
+		"auth_method":       "oidc_federation",
+		"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+		"audience":          "https://warden.example.com",
+	}
+
+	t.Run("audience comes from the source", func(t *testing.T) {
+		aud, ok := DeriveAssertionAudience(credential.SourceTypeAlicloud, federationSource, nil)
+		assert.True(t, ok)
+		assert.Equal(t, "https://warden.example.com", aud)
+	})
+
+	t.Run("no audience without one configured", func(t *testing.T) {
+		// Alibaba matches aud against the provider's registered client_ids, which
+		// the operator chooses, so there is no default to fall back to. Returning
+		// false is what makes spec-create demand assertion_audience.
+		_, ok := DeriveAssertionAudience(credential.SourceTypeAlicloud, map[string]string{
+			"auth_method":       "oidc_federation",
+			"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+		}, nil)
+		assert.False(t, ok)
+	})
+
+	t.Run("a static source derives no audience", func(t *testing.T) {
+		_, ok := DeriveAssertionAudience(credential.SourceTypeAlicloud, map[string]string{
+			"access_key_id": "LTAI-mgmt",
+			"audience":      "https://warden.example.com",
+		}, nil)
+		assert.False(t, ok)
+	})
+
+	t.Run("resource is the role arn", func(t *testing.T) {
+		res, ok := DeriveAssertionResource(credential.SourceTypeAlicloud, federationSource, map[string]string{
+			"mint_method": "assume_role",
+			"role_arn":    "acs:ram::123456789012:role/warden-prod",
+		})
+		assert.True(t, ok)
+		assert.Equal(t, "alicloud-ram:acs:ram::123456789012:role/warden-prod", res)
+	})
+
+	t.Run("no resource without a role arn", func(t *testing.T) {
+		_, ok := DeriveAssertionResource(credential.SourceTypeAlicloud, federationSource, map[string]string{
+			"mint_method": "assume_role",
+		})
+		assert.False(t, ok)
 	})
 }
 
