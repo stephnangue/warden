@@ -88,72 +88,18 @@ func TestCloudflareKeysCredType_ValidateConfig_LocalSource(t *testing.T) {
 	}
 }
 
-func TestCloudflareKeysCredType_ValidateConfig_VaultSource(t *testing.T) {
+// A vault source needed a static_cloudflare mint method that the Vault driver
+// never implemented, so such a spec passed validation here and then failed at its
+// first mint. It is refused at create now.
+func TestCloudflareKeysCredType_ValidateConfig_VaultSourceRejected(t *testing.T) {
 	ct := &CloudflareKeysCredType{}
-	tests := []struct {
-		name    string
-		config  map[string]string
-		wantErr bool
-		errMsg  string
-	}{
-		{
-			name: "valid vault config",
-			config: map[string]string{
-				"mint_method": "static_cloudflare",
-				"kv2_mount":   "secret",
-				"secret_path": "cloudflare/prod/keys",
-			},
-			wantErr: false,
-		},
-		{
-			name: "missing mint_method",
-			config: map[string]string{
-				"kv2_mount":   "secret",
-				"secret_path": "cloudflare/prod/keys",
-			},
-			wantErr: true,
-			errMsg:  "mint_method",
-		},
-		{
-			name: "wrong mint_method",
-			config: map[string]string{
-				"mint_method": "static_keys",
-				"kv2_mount":   "secret",
-				"secret_path": "cloudflare/prod/keys",
-			},
-			wantErr: true,
-			errMsg:  "mint_method",
-		},
-		{
-			name: "missing kv2_mount",
-			config: map[string]string{
-				"mint_method": "static_cloudflare",
-				"secret_path": "cloudflare/prod/keys",
-			},
-			wantErr: true,
-			errMsg:  "kv2_mount",
-		},
-		{
-			name: "missing secret_path",
-			config: map[string]string{
-				"mint_method": "static_cloudflare",
-				"kv2_mount":   "secret",
-			},
-			wantErr: true,
-			errMsg:  "secret_path",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, credential.SourceTypeVault)
-			if tt.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errMsg)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
+	err := ct.ValidateConfig(map[string]string{
+		"mint_method": "static_cloudflare",
+		"kv2_mount":   "secret",
+		"secret_path": "cloudflare/prod/keys",
+	}, credential.SourceTypeVault)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "local source")
 }
 
 func TestCloudflareKeysCredType_ValidateConfig_UnsupportedSource(t *testing.T) {
@@ -164,7 +110,7 @@ func TestCloudflareKeysCredType_ValidateConfig_UnsupportedSource(t *testing.T) {
 		"api_token":         "test-api-token",
 	}, credential.SourceTypeAWS)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "local or vault")
+	assert.Contains(t, err.Error(), "local source")
 }
 
 func TestCloudflareKeysCredType_Parse(t *testing.T) {

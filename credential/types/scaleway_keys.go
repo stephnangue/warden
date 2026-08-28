@@ -37,18 +37,9 @@ func (t *ScalewayKeysCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"),
 
 		credential.StringField("mint_method").
-			OneOf("static_scaleway", "static_keys", "dynamic_keys").
+			OneOf("static_keys", "dynamic_keys").
 			Describe("Mint method for credential minting").
 			Example("static_keys"),
-
-		// Vault source fields
-		credential.StringField("kv2_mount").
-			Describe("Vault KV2 mount path (required for static_scaleway)").
-			Example("secret"),
-
-		credential.StringField("secret_path").
-			Describe("Path to secret in KV2 (required for static_scaleway)").
-			Example("scaleway/prod/keys"),
 
 		// Scaleway dynamic_keys fields
 		credential.StringField("application_id").
@@ -71,11 +62,14 @@ func (t *ScalewayKeysCredType) ConfigSchema() []*credential.FieldValidator {
 
 // ValidateConfig validates the Config for a Scaleway credential spec
 func (t *ScalewayKeysCredType) ValidateConfig(config map[string]string, sourceType string) error {
+	// A vault source is not supported: it would need a static_scaleway mint method,
+	// which the Vault driver has never implemented. It used to be accepted here and
+	// then failed at the first mint.
 	switch sourceType {
-	case credential.SourceTypeLocal, credential.SourceTypeVault, credential.SourceTypeScaleway:
+	case credential.SourceTypeLocal, credential.SourceTypeScaleway:
 		// Supported
 	default:
-		return fmt.Errorf("scaleway_keys credentials require a local, vault, or scaleway source, got: %s", sourceType)
+		return fmt.Errorf("scaleway_keys credentials require a local or scaleway source, got: %s", sourceType)
 	}
 
 	schema := t.ConfigSchema()
@@ -84,16 +78,6 @@ func (t *ScalewayKeysCredType) ValidateConfig(config map[string]string, sourceTy
 	}
 
 	switch sourceType {
-	case credential.SourceTypeVault:
-		if config["mint_method"] != "static_scaleway" {
-			return fmt.Errorf("'mint_method' must be 'static_scaleway' for vault source, got: %s", config["mint_method"])
-		}
-		if config["kv2_mount"] == "" {
-			return fmt.Errorf("'kv2_mount' is required when mint_method is static_scaleway")
-		}
-		if config["secret_path"] == "" {
-			return fmt.Errorf("'secret_path' is required when mint_method is static_scaleway")
-		}
 	case credential.SourceTypeScaleway:
 		mintMethod := config["mint_method"]
 		switch mintMethod {
