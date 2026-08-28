@@ -69,3 +69,17 @@ temp/
 
 # E2E generated certs
 e2e/loadbalancer/certs/
+
+# E2E cluster runtime state. All of it is produced by e2e/setup.sh and is local
+# to one machine: a built binary, the cluster's root token, node PIDs, and the
+# API listener's TLS material.
+#
+# The certs matter beyond tidiness. *.key is ignored above but *.crt was not, so
+# committing this directory publishes a certificate without its key — and
+# setup.sh skips generation when it finds server.crt, leaving a fresh checkout
+# with a cert it has no key for and a listener that cannot start.
+e2e/.bin/
+e2e/.certs/
+e2e/.logs/
+e2e/.pids/
+e2e/.root_token
