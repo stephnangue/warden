@@ -3,15 +3,8 @@
 package fullchain
 
 import (
-	"crypto"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rsa"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"net/http"
 	"strings"
 	"testing"
@@ -389,135 +382,10 @@ func bearerOf(t *testing.T, header string) string {
 // verifyAssertion checks a Warden-minted assertion against the issuer's published
 // JWKS and returns its claims — the same two steps a cluster's JWT authenticator
 // takes, which is why this is worth doing here rather than decoding and trusting.
+//
+// The mechanics moved to e2e/helpers once a second federation source needed them;
+// this stays as the package's one-argument form.
 func verifyAssertion(t *testing.T, token string) map[string]any {
 	t.Helper()
-
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		t.Fatalf("assertion is not a three-part JWT (%d parts)", len(parts))
-	}
-
-	var header struct {
-		Alg string `json:"alg"`
-		Kid string `json:"kid"`
-	}
-	if err := json.Unmarshal(decodeSegment(t, parts[0]), &header); err != nil {
-		t.Fatalf("parse assertion header: %v", err)
-	}
-
-	key := jwksKey(t, header.Kid, header.Alg)
-	signed := parts[0] + "." + parts[1]
-	verifySignature(t, header.Alg, key, signed, decodeSegment(t, parts[2]))
-
-	var claims map[string]any
-	if err := json.Unmarshal(decodeSegment(t, parts[1]), &claims); err != nil {
-		t.Fatalf("parse assertion claims: %v", err)
-	}
-	return claims
-}
-
-func decodeSegment(t *testing.T, segment string) []byte {
-	t.Helper()
-	decoded, err := base64.RawURLEncoding.DecodeString(segment)
-	if err != nil {
-		t.Fatalf("decode JWT segment: %v", err)
-	}
-	return decoded
-}
-
-// jwksKey fetches the issuer's published JWKS and rebuilds the key the assertion
-// names. Going through the published document rather than any internal handle is
-// the point: it is what a cluster would fetch.
-func jwksKey(t *testing.T, kid, alg string) any {
-	t.Helper()
-
-	status, body := h.DoRequest(t, "GET", h.NodeURL(leaderPort)+"/oidc/jwks", nil, "")
-	if status != 200 {
-		t.Fatalf("GET /oidc/jwks = %d: %s", status, body)
-	}
-
-	var doc struct {
-		Keys []struct {
-			Kid string `json:"kid"`
-			Alg string `json:"alg"`
-			Kty string `json:"kty"`
-			N   string `json:"n"`
-			E   string `json:"e"`
-			Crv string `json:"crv"`
-			X   string `json:"x"`
-			Y   string `json:"y"`
-		} `json:"keys"`
-	}
-	if err := json.Unmarshal(body, &doc); err != nil {
-		t.Fatalf("parse jwks: %v (%s)", err, body)
-	}
-
-	for _, k := range doc.Keys {
-		if k.Kid != kid {
-			continue
-		}
-		switch k.Kty {
-		case "RSA":
-			return &rsa.PublicKey{
-				N: new(big.Int).SetBytes(decodeSegment(t, k.N)),
-				E: int(new(big.Int).SetBytes(decodeSegment(t, k.E)).Int64()),
-			}
-		case "EC":
-			return &ecdsa.PublicKey{
-				Curve: ecCurve(t, k.Crv),
-				X:     new(big.Int).SetBytes(decodeSegment(t, k.X)),
-				Y:     new(big.Int).SetBytes(decodeSegment(t, k.Y)),
-			}
-		default:
-			t.Fatalf("jwk %s has unsupported kty %q", kid, k.Kty)
-		}
-	}
-
-	t.Fatalf("assertion names kid %q (alg %s), which the published JWKS does not carry", kid, alg)
-	return nil
-}
-
-func ecCurve(t *testing.T, crv string) elliptic.Curve {
-	t.Helper()
-	if crv != "P-256" {
-		t.Fatalf("unsupported EC curve %q", crv)
-	}
-	return elliptic.P256()
-}
-
-// verifySignature checks the assertion's signature with the published key. A
-// cluster that could not do this would reject the token, so a row that skipped it
-// could pass on an assertion no cluster would accept.
-func verifySignature(t *testing.T, alg string, key any, signed string, sig []byte) {
-	t.Helper()
-
-	digest := sha256.Sum256([]byte(signed))
-
-	switch alg {
-	case "RS256":
-		pub, ok := key.(*rsa.PublicKey)
-		if !ok {
-			t.Fatalf("alg RS256 but the JWKS key is %T", key)
-		}
-		if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, digest[:], sig); err != nil {
-			t.Fatalf("assertion signature does not verify against the published JWKS: %v", err)
-		}
-	case "ES256":
-		pub, ok := key.(*ecdsa.PublicKey)
-		if !ok {
-			t.Fatalf("alg ES256 but the JWKS key is %T", key)
-		}
-		// JWS packs ES256 as r||s fixed-width, not as the ASN.1 form ecdsa.Verify
-		// would take.
-		if len(sig) != 64 {
-			t.Fatalf("ES256 signature is %d bytes, want 64", len(sig))
-		}
-		r := new(big.Int).SetBytes(sig[:32])
-		s := new(big.Int).SetBytes(sig[32:])
-		if !ecdsa.Verify(pub, digest[:], r, s) {
-			t.Fatal("assertion signature does not verify against the published JWKS")
-		}
-	default:
-		t.Fatalf("unsupported assertion alg %q", alg)
-	}
+	return h.VerifyAssertion(t, leaderPort, token)
 }
