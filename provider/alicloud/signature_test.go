@@ -134,13 +134,50 @@ func TestSignWithSecurityToken(t *testing.T) {
 
 func TestCanonicalQueryString(t *testing.T) {
 	// Canonical form sorts keys and percent-encodes values.
-	got := canonicalQueryString("b=2&a=1&c=hello%20world")
+	got, err := canonicalQueryString("b=2&a=1&c=hello%20world")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	want := "a=1&b=2&c=hello%20world"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
-	if got := canonicalQueryString(""); got != "" {
+
+	got, err = canonicalQueryString("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
 		t.Errorf("empty query should produce empty canonical, got %q", got)
+	}
+}
+
+// ACS3 sorts by parameter name only; a repeated name keeps the order it arrived
+// in, because that is the order the server signs. Sorting the values would
+// compute a canonical string the server does not derive.
+func TestCanonicalQueryString_RepeatedNameKeepsRequestOrder(t *testing.T) {
+	got, err := canonicalQueryString("k=b&k=a&j=1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "j=1&k=b&k=a"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// A query that will not parse must be reported, not silently rendered as empty:
+// signing an empty canonical query for a request that has one produces a
+// signature the server cannot reproduce.
+func TestCanonicalQueryString_MalformedQueryIsReported(t *testing.T) {
+	if _, err := canonicalQueryString("a=%zz"); err == nil {
+		t.Errorf("expected an error for a malformed query")
+	}
+
+	r := httptest.NewRequest("GET", "https://sts.aliyuncs.com/", nil)
+	r.URL.RawQuery = "a=%zz"
+	if err := SignACS3(r, "LTAI-test-id", "test-secret", "", nil); err == nil {
+		t.Errorf("SignACS3 should surface a malformed query rather than sign an empty one")
 	}
 }
 

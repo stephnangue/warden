@@ -118,9 +118,8 @@ Credential type: cloudflare_keys (at least one mode required)
   - access_key_id: R2 access key ID for Object Storage (R2 mode)
   - secret_access_key: R2 secret access key for Object Storage (R2 mode)
 
-Two credential source types are supported:
+One credential source type is supported:
 - local (static_keys): Static credentials stored on the spec
-- hvault (static_cloudflare): Keys fetched from a Vault/OpenBao KV v2 secret
 
 Configuration:
 - cloudflare_url: Cloudflare API base URL (default: https://api.cloudflare.com/client/v4)

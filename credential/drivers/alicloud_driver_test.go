@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logger"
@@ -126,6 +127,7 @@ func TestAlicloudDriver_MintAssumeRole(t *testing.T) {
 	var receivedAuth string
 	var receivedRoleArn string
 
+	expiry := time.Now().Add(1800 * time.Second).UTC().Format(time.RFC3339)
 	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAction = r.URL.Query().Get("Action")
 		receivedRoleArn = r.URL.Query().Get("RoleArn")
@@ -136,7 +138,7 @@ func TestAlicloudDriver_MintAssumeRole(t *testing.T) {
 				"AccessKeyId":     "STS.tempid",
 				"AccessKeySecret": "tempsecret",
 				"SecurityToken":   "tempstsToken",
-				"Expiration":      "2099-01-01T00:00:00Z",
+				"Expiration":      expiry,
 			},
 		})
 	}))
@@ -164,7 +166,10 @@ func TestAlicloudDriver_MintAssumeRole(t *testing.T) {
 	assert.Equal(t, "STS.tempid", raw["access_key_id"])
 	assert.Equal(t, "tempsecret", raw["access_key_secret"])
 	assert.Equal(t, "tempstsToken", raw["security_token"])
-	assert.Equal(t, 1800, int(ttl.Seconds()), "ttl should match duration_seconds")
+	// Derived from the Expiration STS reported, so it is at most the requested
+	// 1800s — never more, whatever the round trip cost.
+	assert.InDelta(t, 1800, ttl.Seconds(), 5, "ttl should track the reported expiry")
+	assert.LessOrEqual(t, ttl, 1800*time.Second)
 	assert.Equal(t, "", leaseID, "STS has no leaseID")
 
 	// Verify the request was signed with ACS3 and had the right params
@@ -172,6 +177,87 @@ func TestAlicloudDriver_MintAssumeRole(t *testing.T) {
 	assert.Equal(t, "acs:ram::123:role/ops", receivedRoleArn)
 	assert.True(t, strings.HasPrefix(receivedAuth, "ACS3-HMAC-SHA256"), "must be ACS3 signed: %q", receivedAuth)
 	assert.Contains(t, receivedAuth, "Credential=LTAI-mgmt")
+}
+
+// mintWithExpiration mints one credential against an STS stub that reports the
+// given Expiration verbatim, and returns the resulting lease TTL.
+func mintWithExpiration(t *testing.T, expiration, durationSeconds string) (time.Duration, error) {
+	t.Helper()
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Credentials": map[string]any{
+				"AccessKeyId":     "STS.tempid",
+				"AccessKeySecret": "tempsecret",
+				"SecurityToken":   "tempstsToken",
+				"Expiration":      expiration,
+			},
+		})
+	}))
+	t.Cleanup(sts.Close)
+
+	f := &AlicloudDriverFactory{}
+	d, err := f.Create(map[string]string{
+		"access_key_id":     "LTAI-mgmt",
+		"access_key_secret": "mgmt-secret",
+		"sts_endpoint":      sts.URL,
+	}, createAlicloudTestLogger())
+	require.NoError(t, err)
+
+	_, _, ttl, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
+		Config: map[string]string{
+			"mint_method":      "assume_role",
+			"role_arn":         "acs:ram::123:role/ops",
+			"duration_seconds": durationSeconds,
+		},
+	})
+	return ttl, err
+}
+
+// The lease must follow the credential, not the request. STS is free to issue a
+// shorter session than was asked for; caching for the requested duration would
+// then serve a dead token to whoever hits the cache near the end.
+func TestAlicloudDriver_MintAssumeRole_TTLFollowsServerExpiry(t *testing.T) {
+	shortened := time.Now().Add(600 * time.Second).UTC().Format(time.RFC3339)
+
+	ttl, err := mintWithExpiration(t, shortened, "3600s")
+
+	require.NoError(t, err)
+	assert.InDelta(t, 600, ttl.Seconds(), 5, "the reported expiry wins over the requested duration")
+}
+
+// The reported expiry is only as good as the agreement between two clocks. A
+// local clock running behind Alibaba's reports a remaining lifetime longer than
+// was ever requested, which would reintroduce the over-long lease this fix
+// exists to prevent — so the requested duration is the ceiling. STS never issues
+// longer than asked, so a longer expiry means skew, not generosity.
+func TestAlicloudDriver_MintAssumeRole_TTLCappedAtRequestedDuration(t *testing.T) {
+	skewed := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+
+	ttl, err := mintWithExpiration(t, skewed, "1800s")
+
+	require.NoError(t, err)
+	assert.Equal(t, 1800*time.Second, ttl, "an expiry beyond the requested duration must be capped")
+}
+
+// A credential that is usable should not be discarded over a timestamp format,
+// so an unparseable Expiration falls back to the requested duration — no worse
+// than the behaviour this replaced.
+func TestAlicloudDriver_MintAssumeRole_UnparseableExpiryFallsBack(t *testing.T) {
+	ttl, err := mintWithExpiration(t, "not-a-timestamp", "1800s")
+
+	require.NoError(t, err)
+	assert.Equal(t, 1800*time.Second, ttl)
+}
+
+// An expiry already in the past leaves nothing usable to hand back.
+func TestAlicloudDriver_MintAssumeRole_ExpiredCredentialIsRejected(t *testing.T) {
+	past := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+
+	_, err := mintWithExpiration(t, past, "1800s")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already expired")
 }
 
 func TestAlicloudDriver_MintAssumeRole_MissingRoleArn(t *testing.T) {
@@ -1130,4 +1216,36 @@ func TestSignACS3_KnownAnswer(t *testing.T) {
 		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 		r.Header.Get("x-acs-content-sha256"),
 	)
+}
+
+// ACS3 sorts by parameter name only. A repeated name keeps the order it arrived
+// in, because that is the order the server signs; sorting the values would
+// compute a canonical string the server does not derive. This matches the
+// identical helper in provider/alicloud/signature.go.
+func TestACS3CanonicalQuery(t *testing.T) {
+	got, err := acs3CanonicalQuery("b=2&a=1&c=hello%20world")
+	require.NoError(t, err)
+	assert.Equal(t, "a=1&b=2&c=hello%20world", got)
+
+	got, err = acs3CanonicalQuery("k=b&k=a&j=1")
+	require.NoError(t, err)
+	assert.Equal(t, "j=1&k=b&k=a", got, "values for a repeated name keep request order")
+
+	got, err = acs3CanonicalQuery("")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// A query that will not parse must be reported, not silently rendered as empty:
+// signing an empty canonical query for a request that has one produces a
+// signature the server cannot reproduce, surfacing as a confusing remote
+// SignatureDoesNotMatch instead of the local defect.
+func TestACS3CanonicalQuery_MalformedQueryIsReported(t *testing.T) {
+	_, err := acs3CanonicalQuery("a=%zz")
+	require.Error(t, err)
+
+	r, _ := http.NewRequest("POST", "https://sts.aliyuncs.com/", nil)
+	r.URL.RawQuery = "a=%zz"
+	assert.Error(t, signACS3(r, "LTAItest", "secret", "", nil),
+		"signACS3 should surface a malformed query rather than sign an empty one")
 }

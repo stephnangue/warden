@@ -72,72 +72,18 @@ func TestScalewayKeysCredType_ValidateConfig_LocalSource(t *testing.T) {
 	}
 }
 
-func TestScalewayKeysCredType_ValidateConfig_VaultSource(t *testing.T) {
+// A vault source needed a static_scaleway mint method that the Vault driver never
+// implemented, so such a spec passed validation here and then failed at its first
+// mint. It is refused at create now.
+func TestScalewayKeysCredType_ValidateConfig_VaultSourceRejected(t *testing.T) {
 	ct := &ScalewayKeysCredType{}
-	tests := []struct {
-		name    string
-		config  map[string]string
-		wantErr bool
-		errMsg  string
-	}{
-		{
-			name: "valid vault config",
-			config: map[string]string{
-				"mint_method": "static_scaleway",
-				"kv2_mount":   "secret",
-				"secret_path": "scaleway/prod/keys",
-			},
-			wantErr: false,
-		},
-		{
-			name: "missing mint_method",
-			config: map[string]string{
-				"kv2_mount":   "secret",
-				"secret_path": "scaleway/prod/keys",
-			},
-			wantErr: true,
-			errMsg:  "mint_method",
-		},
-		{
-			name: "wrong mint_method",
-			config: map[string]string{
-				"mint_method": "dynamic_aws",
-				"kv2_mount":   "secret",
-				"secret_path": "scaleway/prod/keys",
-			},
-			wantErr: true,
-			errMsg:  "mint_method",
-		},
-		{
-			name: "missing kv2_mount",
-			config: map[string]string{
-				"mint_method": "static_scaleway",
-				"secret_path": "scaleway/prod/keys",
-			},
-			wantErr: true,
-			errMsg:  "kv2_mount",
-		},
-		{
-			name: "missing secret_path",
-			config: map[string]string{
-				"mint_method": "static_scaleway",
-				"kv2_mount":   "secret",
-			},
-			wantErr: true,
-			errMsg:  "secret_path",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, credential.SourceTypeVault)
-			if tt.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errMsg)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
+	err := ct.ValidateConfig(map[string]string{
+		"mint_method": "static_scaleway",
+		"kv2_mount":   "secret",
+		"secret_path": "scaleway/prod/keys",
+	}, credential.SourceTypeVault)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "local or scaleway")
 }
 
 func TestScalewayKeysCredType_ValidateConfig_ScalewaySource(t *testing.T) {
@@ -210,7 +156,7 @@ func TestScalewayKeysCredType_ValidateConfig_UnsupportedSource(t *testing.T) {
 		"secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
 	}, credential.SourceTypeAWS)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "local, vault, or scaleway")
+	assert.Contains(t, err.Error(), "local or scaleway")
 }
 
 func TestScalewayKeysCredType_Parse(t *testing.T) {
