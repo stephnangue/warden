@@ -531,11 +531,123 @@ func (d *AlicloudDriver) SupportsRotation() bool {
 		credential.GetString(d.credSource.Config, "management_user_name", "") != ""
 }
 
+// alicloudAccessKey is one entry of a RAM ListAccessKeys response.
+type alicloudAccessKey struct {
+	AccessKeyID string `json:"AccessKeyId"`
+	Status      string `json:"Status"`
+}
+
+// alicloudAccessKeyInactive is the RAM status of a disabled access key. A key
+// Warden left behind mid-cleanup carries it, because CleanupRotation always
+// deactivates before deleting.
+const alicloudAccessKeyInactive = "Inactive"
+
+// alicloudCodeEntityNotExist is the RAM error-code family for a subject that is
+// not there — EntityNotExist.User, EntityNotExist.User.AccessKey, and so on.
+const alicloudCodeEntityNotExist = "EntityNotExist"
+
+// alicloudMaxRAMKeysPerUser is the number of access keys RAM allows one user to
+// hold. Rotation needs a free slot to create the new key in, which is the only
+// reason it ever removes an existing one.
+const alicloudMaxRAMKeysPerUser = 2
+
+// makeRoomForNewKey frees a slot so CreateAccessKey can succeed, and does so
+// without destroying a key it cannot attribute to Warden.
+//
+// It acts only when the user is at the cap, removes at most one key per attempt,
+// and deletes only a key that is already Inactive — the state Warden's own
+// interrupted cleanup leaves behind, since CleanupRotation deactivates before it
+// deletes. An Active key that is not the current one is deactivated instead, and
+// the attempt stops with an error; the retry finds it Inactive and reclaims the
+// slot. The rotation manager retries a failed prepare on an exponential backoff
+// starting around twenty seconds, so that detour costs one short retry, not a
+// rotation period.
+//
+// It exists because rotation must still be able to heal itself. Two paths leave
+// an Active key of Warden's own behind — a crash between CreateAccessKey and the
+// staged-rotation persist, and a staged activation exhausting its attempts, after
+// which the manager resets to idle and prepares afresh — so refusing to touch
+// Active keys at all would wedge rotation permanently once either happened.
+// Deactivating a genuine third-party key is disruptive but reversible; deleting
+// one is not, which is the trade this makes.
+func (d *AlicloudDriver) makeRoomForNewKey(
+	ctx context.Context,
+	ramEndpoint, mgmtID, mgmtSecret, userName string,
+	keys []alicloudAccessKey,
+) error {
+	if len(keys) < alicloudMaxRAMKeysPerUser {
+		return nil
+	}
+
+	// The current key must be among the user's own. If it is not, the source is
+	// pointed at the wrong management_user_name (or the key belongs to another
+	// user), and every key listed here belongs to someone else — so touch none of
+	// them and say why.
+	var candidate *alicloudAccessKey
+	currentFound := false
+	for i := range keys {
+		switch {
+		case keys[i].AccessKeyID == mgmtID:
+			currentFound = true
+		case candidate == nil:
+			candidate = &keys[i]
+		}
+	}
+	if !currentFound {
+		return fmt.Errorf(
+			"RAM user %q holds %d access keys, none of them the configured access_key_id %s: "+
+				"refusing to remove a key this source does not own (check management_user_name)",
+			userName, len(keys), truncateID(mgmtID, 8))
+	}
+	if candidate == nil {
+		return nil
+	}
+
+	if candidate.Status == alicloudAccessKeyInactive {
+		d.logger.Warn("deleting inactive orphaned RAM access key from an interrupted rotation",
+			logger.String("orphaned_key_id", truncateID(candidate.AccessKeyID, 8)),
+			logger.String("ram_user", userName),
+		)
+		del := url.Values{}
+		del.Set("Action", "DeleteAccessKey")
+		del.Set("Version", alicloudRAMVersion)
+		del.Set("Format", "JSON")
+		del.Set("UserName", userName)
+		del.Set(ramParamUserAccessKeyID, candidate.AccessKeyID)
+		if _, err := d.callSignedJSON(ctx, http.MethodPost, ramEndpoint, del, mgmtID, mgmtSecret, ""); err != nil {
+			return fmt.Errorf("failed to delete orphaned access key %s: %w", truncateID(candidate.AccessKeyID, 8), err)
+		}
+		return nil
+	}
+
+	d.logger.Warn("deactivating an active non-current RAM access key to free a rotation slot; "+
+		"it will be deleted on the next rotation attempt",
+		logger.String("key_id", truncateID(candidate.AccessKeyID, 8)),
+		logger.String("ram_user", userName),
+	)
+	inactivate := url.Values{}
+	inactivate.Set("Action", "UpdateAccessKey")
+	inactivate.Set("Version", alicloudRAMVersion)
+	inactivate.Set("Format", "JSON")
+	inactivate.Set("UserName", userName)
+	inactivate.Set(ramParamUserAccessKeyID, candidate.AccessKeyID)
+	inactivate.Set("Status", alicloudAccessKeyInactive)
+	if _, err := d.callSignedJSON(ctx, http.MethodPost, ramEndpoint, inactivate, mgmtID, mgmtSecret, ""); err != nil {
+		return fmt.Errorf("failed to deactivate non-current access key %s: %w", truncateID(candidate.AccessKeyID, 8), err)
+	}
+
+	return fmt.Errorf(
+		"RAM user %q is at the %d-key limit and the non-current key %s was still active; "+
+			"it has been deactivated and will be removed on the next rotation attempt. "+
+			"If it is not Warden's, reactivate it and give this source a dedicated RAM user",
+		userName, alicloudMaxRAMKeysPerUser, truncateID(candidate.AccessKeyID, 8))
+}
+
 // PrepareRotation creates a new RAM access key for the configured management
-// user while the existing key remains valid. Before creating, it deletes any
-// orphaned keys from previous failed rotations (RAM allows at most 2 keys per
-// user). Returns the new config, a cleanup config (with the old access_key_id),
-// and the activation delay to let RAM eventual consistency propagate.
+// user while the existing key remains valid. If the user is at RAM's two-key
+// limit it first frees a slot (see makeRoomForNewKey). Returns the new config, a
+// cleanup config (with the old access_key_id), and the activation delay to let
+// RAM eventual consistency propagate.
 func (d *AlicloudDriver) PrepareRotation(ctx context.Context) (map[string]string, map[string]string, time.Duration, error) {
 	d.configMu.RLock()
 	mgmtID := credential.GetString(d.credSource.Config, "access_key_id", "")
@@ -556,9 +668,8 @@ func (d *AlicloudDriver) PrepareRotation(ctx context.Context) (map[string]string
 		return nil, nil, 0, fmt.Errorf("management_user_name is required for rotation")
 	}
 
-	// Step 1: clean up orphaned keys from previous failed rotations.
-	// RAM users can hold at most 2 access keys; if there are already 2, remove
-	// any that aren't our current management key before creating the new one.
+	// Step 1: list the user's keys, so a slot can be freed if the RAM two-key
+	// limit would otherwise make CreateAccessKey fail.
 	listParams := url.Values{}
 	listParams.Set("Action", "ListAccessKeys")
 	listParams.Set("Version", alicloudRAMVersion)
@@ -571,33 +682,15 @@ func (d *AlicloudDriver) PrepareRotation(ctx context.Context) (map[string]string
 	}
 	var listResp struct {
 		AccessKeys struct {
-			AccessKey []struct {
-				AccessKeyID string `json:"AccessKeyId"`
-				Status      string `json:"Status"`
-			} `json:"AccessKey"`
+			AccessKey []alicloudAccessKey `json:"AccessKey"`
 		} `json:"AccessKeys"`
 	}
 	if err := json.Unmarshal(listBody, &listResp); err != nil {
 		return nil, nil, 0, fmt.Errorf("parse ListAccessKeys response: %w", err)
 	}
 
-	for _, k := range listResp.AccessKeys.AccessKey {
-		if k.AccessKeyID == mgmtID {
-			continue
-		}
-		d.logger.Warn("deleting orphaned RAM access key from previous failed rotation",
-			logger.String("orphaned_key_id", truncateID(k.AccessKeyID, 8)),
-			logger.String("ram_user", userName),
-		)
-		del := url.Values{}
-		del.Set("Action", "DeleteAccessKey")
-		del.Set("Version", alicloudRAMVersion)
-		del.Set("Format", "JSON")
-		del.Set("UserName", userName)
-		del.Set(ramParamUserAccessKeyID, k.AccessKeyID)
-		if _, err := d.callSignedJSON(ctx, http.MethodPost, ramEndpoint, del, mgmtID, mgmtSecret, ""); err != nil {
-			return nil, nil, 0, fmt.Errorf("failed to delete orphaned access key %s: %w", truncateID(k.AccessKeyID, 8), err)
-		}
+	if err := d.makeRoomForNewKey(ctx, ramEndpoint, mgmtID, mgmtSecret, userName, listResp.AccessKeys.AccessKey); err != nil {
+		return nil, nil, 0, err
 	}
 
 	// Step 2: create a new access key for the same user.
@@ -691,9 +784,22 @@ func (d *AlicloudDriver) CleanupRotation(ctx context.Context, cleanupConfig map[
 	inactivate.Set("Format", "JSON")
 	inactivate.Set("UserName", userName)
 	inactivate.Set(ramParamUserAccessKeyID, oldKeyID)
-	inactivate.Set("Status", "Inactive")
+	inactivate.Set("Status", alicloudAccessKeyInactive)
 
 	if _, err := d.callSignedJSON(ctx, http.MethodPost, ramEndpoint, inactivate, mgmtID, mgmtSecret, ""); err != nil {
+		// A key that is already gone is the outcome this is working towards, so
+		// it is success, not failure. Cleanup is retried for days after a failure,
+		// and the next rotation's slot-freeing sweep can delete the very key a
+		// pending cleanup is still chasing — without this, those retries would
+		// fail daily and eventually log an abandonment for a key that no longer
+		// exists.
+		if alicloudErrorHasCodePrefix(err, alicloudCodeEntityNotExist) {
+			d.logger.Info("old management access key was already removed; cleanup is complete",
+				logger.String("old_key_id", truncateID(oldKeyID, 8)),
+				logger.String("ram_user", userName),
+			)
+			return nil
+		}
 		return fmt.Errorf("RAM UpdateAccessKey (Inactive) failed: %w", err)
 	}
 	d.logger.Info("disabled old management access key",
@@ -710,7 +816,10 @@ func (d *AlicloudDriver) CleanupRotation(ctx context.Context, cleanupConfig map[
 	del.Set(ramParamUserAccessKeyID, oldKeyID)
 
 	if _, err := d.callSignedJSON(ctx, http.MethodPost, ramEndpoint, del, mgmtID, mgmtSecret, ""); err != nil {
-		return fmt.Errorf("RAM DeleteAccessKey (old management key) failed: %w", err)
+		// Same reasoning as the Inactive step: deleted is deleted, whoever did it.
+		if !alicloudErrorHasCodePrefix(err, alicloudCodeEntityNotExist) {
+			return fmt.Errorf("RAM DeleteAccessKey (old management key) failed: %w", err)
+		}
 	}
 
 	d.logger.Info("deleted old management access key after rotation",
