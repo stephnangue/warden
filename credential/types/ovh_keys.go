@@ -102,12 +102,15 @@ func (t *OVHKeysCredType) Parse(rawData, metadata map[string]interface{}, leaseT
 	}
 
 	return &credential.Credential{
-		Type:      credential.TypeOVHKeys,
-		Category:  credential.CategoryCloudIAM,
-		LeaseTTL:  leaseTTL,
-		LeaseID:   leaseID,
-		IssuedAt:  time.Now(),
-		Revocable: leaseTTL > 0,
+		Type:     credential.TypeOVHKeys,
+		Category: credential.CategoryCloudIAM,
+		LeaseTTL: leaseTTL,
+		LeaseID:  leaseID,
+		IssuedAt: time.Now(),
+		// Revoking means releasing a lease at the source, which needs a handle to
+		// release. The OVH driver's bare OAuth2-token path returns no leaseID; the
+		// S3 paths carry one.
+		Revocable: leaseTTL > 0 && leaseID != "",
 		Data:      data,
 		Metadata:  meta,
 	}, nil

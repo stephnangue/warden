@@ -136,12 +136,15 @@ func (t *IBMCloudKeysCredType) Parse(rawData, metadata map[string]interface{}, l
 	}
 
 	return &credential.Credential{
-		Type:      credential.TypeIBMCloudKeys,
-		Category:  credential.CategoryCloudIAM,
-		LeaseTTL:  leaseTTL,
-		LeaseID:   leaseID,
-		IssuedAt:  time.Now(),
-		Revocable: leaseTTL > 0,
+		Type:     credential.TypeIBMCloudKeys,
+		Category: credential.CategoryCloudIAM,
+		LeaseTTL: leaseTTL,
+		LeaseID:  leaseID,
+		IssuedAt: time.Now(),
+		// Revoking means releasing a lease at the source, which needs a handle to
+		// release. The IBM driver's own IAM-token paths return no leaseID; only the
+		// Vault dynamic_ibm path carries one.
+		Revocable: leaseTTL > 0 && leaseID != "",
 		Data:      data,
 		Metadata:  meta,
 	}, nil

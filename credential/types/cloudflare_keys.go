@@ -134,12 +134,17 @@ func (t *CloudflareKeysCredType) Parse(rawData, metadata map[string]interface{},
 	}
 
 	return &credential.Credential{
-		Type:      credential.TypeCloudflareKeys,
-		Category:  credential.CategoryCloudIAM,
-		LeaseTTL:  leaseTTL,
-		LeaseID:   leaseID,
-		IssuedAt:  time.Now(),
-		Revocable: leaseTTL > 0,
+		Type:     credential.TypeCloudflareKeys,
+		Category: credential.CategoryCloudIAM,
+		LeaseTTL: leaseTTL,
+		LeaseID:  leaseID,
+		IssuedAt: time.Now(),
+		// Revoking means releasing a lease at the source, which needs a handle to
+		// release. Cloudflare keys only come from a local source, which returns
+		// neither a TTL nor a leaseID, so the second condition changes nothing
+		// today — it states the invariant rather than leaving the next mint path to
+		// rediscover it.
+		Revocable: leaseTTL > 0 && leaseID != "",
 		Data:      data,
 		Metadata:  meta,
 	}, nil
