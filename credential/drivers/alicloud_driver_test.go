@@ -3,11 +3,13 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stephnangue/warden/credential"
@@ -499,6 +501,113 @@ func TestAlicloudDriver_CallSignedJSON_StopsAtMaxAttempts(t *testing.T) {
 	assert.Contains(t, err.Error(), "Throttling")
 }
 
+// 400/403/404 are marked OK statuses only so Alicloud error envelopes arrive as
+// readable bodies. A 4xx whose body is not an envelope — an intercepting proxy's
+// HTML error page, a load balancer's own JSON — must still fail. It used to be
+// read as success, which let CleanupRotation report that it had deleted a key it
+// had not touched.
+func TestAlicloudDriver_CallSignedJSON_NonEnvelope4xxIsAnError(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+		wantInErr   string
+	}{
+		{
+			name:        "html error page from a proxy",
+			status:      http.StatusForbidden,
+			contentType: "text/html",
+			body:        "<html>\n<head><title>403 Forbidden</title></head>\n<body>denied</body>\n</html>",
+			wantInErr:   "403 Forbidden",
+		},
+		{
+			name:        "json without a Code field",
+			status:      http.StatusBadRequest,
+			contentType: "application/json",
+			body:        `{"message":"malformed request"}`,
+			wantInErr:   "malformed request",
+		},
+		{
+			name:        "empty body",
+			status:      http.StatusNotFound,
+			contentType: "text/plain",
+			body:        "",
+			wantInErr:   "<empty>",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := 0
+			sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				w.Header().Set("Content-Type", tc.contentType)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer sts.Close()
+
+			f := &AlicloudDriverFactory{}
+			d, _ := f.Create(map[string]string{
+				"access_key_id":     "LTAI-mgmt",
+				"access_key_secret": "mgmt-secret",
+				"sts_endpoint":      sts.URL,
+			}, createAlicloudTestLogger())
+
+			err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
+				Config: map[string]string{
+					"mint_method": "assume_role",
+					"role_arn":    "acs:ram::123:role/proxied",
+				},
+			})
+			require.Error(t, err, "a non-envelope %d must not be treated as success", tc.status)
+			assert.Contains(t, err.Error(), fmt.Sprintf("HTTP %d", tc.status))
+			assert.Contains(t, err.Error(), tc.wantInErr, "the body should be quoted back for triage")
+			assert.Equal(t, 1, hits, "a non-envelope 4xx is not transient and must not be retried")
+		})
+	}
+}
+
+// The body excerpt is collapsed onto one line so a multi-line HTML error page
+// cannot break the error across a dozen log lines, and bounded so it cannot
+// flood them either.
+func TestAlicloudBodyPreview(t *testing.T) {
+	assert.Equal(t, "<empty>", alicloudBodyPreview(nil))
+	assert.Equal(t, "<empty>", alicloudBodyPreview([]byte("")))
+	assert.Equal(t, "a b c", alicloudBodyPreview([]byte("a\n  b\t\nc\n")))
+
+	long := alicloudBodyPreview([]byte(strings.Repeat("x", alicloudBodyPreviewLen*2)))
+	assert.Equal(t, strings.Repeat("x", alicloudBodyPreviewLen)+"...", long)
+}
+
+// The typed envelope error lets callers branch on the upstream Code instead of
+// matching substrings. Rotation cleanup relies on this to treat an
+// already-deleted key as success.
+func TestAlicloudErrorHasCodePrefix(t *testing.T) {
+	notExist := alicloudErrorFromEnvelope(alicloudErrorEnvelope{
+		Code: "EntityNotExist.User.AccessKey", Message: "gone", RequestId: "req-1",
+	})
+
+	assert.True(t, alicloudErrorHasCodePrefix(notExist, "EntityNotExist"))
+	assert.True(t, alicloudErrorHasCodePrefix(notExist, "EntityNotExist.User"))
+	assert.True(t, alicloudErrorHasCodePrefix(notExist, "EntityNotExist.User.AccessKey"))
+	assert.False(t, alicloudErrorHasCodePrefix(notExist, "NoPermission"))
+
+	// The dotted boundary keeps a prefix from matching a longer sibling code.
+	assert.False(t, alicloudErrorHasCodePrefix(
+		alicloudErrorFromEnvelope(alicloudErrorEnvelope{Code: "EntityNotExistent"}), "EntityNotExist"))
+
+	// It survives wrapping, and a plain error is simply not a match.
+	assert.True(t, alicloudErrorHasCodePrefix(fmt.Errorf("cleanup: %w", notExist), "EntityNotExist"))
+	assert.False(t, alicloudErrorHasCodePrefix(errors.New("EntityNotExist.User"), "EntityNotExist"))
+
+	// Formatting is unchanged from the untyped version operators are used to.
+	assert.Equal(t, "EntityNotExist.User.AccessKey: gone (RequestId=req-1)", notExist.Error())
+	assert.Equal(t, "NoPermission: denied",
+		alicloudErrorFromEnvelope(alicloudErrorEnvelope{Code: "NoPermission", Message: "denied"}).Error())
+}
+
 // --- Rotation ---
 
 func TestAlicloudDriver_SupportsRotation(t *testing.T) {
@@ -630,7 +739,7 @@ func TestAlicloudDriver_Rotation_HappyPath(t *testing.T) {
 
 	// Commit: swap to the new config
 	require.NoError(t, drv.CommitRotation(context.Background(), newConfig))
-	mgmtID, _ := drv.mgmtAccessKey()
+	_, mgmtID, _ := drv.ramCallConfig()
 	assert.Equal(t, "LTAI-rotated-1", mgmtID)
 
 	// Cleanup: two-step — UpdateAccessKey(Inactive) then DeleteAccessKey on the old key.
@@ -725,6 +834,104 @@ func TestAlicloudDriver_Rotation_CleanupRefusesCurrentKey(t *testing.T) {
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "currently active")
+}
+
+// The defect this PR fixes, at the level it actually bites. CleanupRotation
+// discards the response body, so when a non-envelope 4xx was classified as
+// success both steps reported done, no PendingCleanup was persisted, nothing
+// retried, and the old privileged key stayed live forever.
+func TestAlicloudDriver_Rotation_CleanupFailsOnInterceptedResponse(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("<html><body>blocked by policy</body></html>"))
+	}))
+	defer srv.Close()
+
+	f := &AlicloudDriverFactory{}
+	d, _ := f.Create(map[string]string{
+		"access_key_id":        "LTAI-new",
+		"access_key_secret":    "new-secret",
+		"management_user_name": "warden-management",
+		"ram_endpoint":         srv.URL,
+	}, createAlicloudTestLogger())
+
+	err := d.(*AlicloudDriver).CleanupRotation(context.Background(), map[string]string{
+		"access_key_id":        "LTAI-old",
+		"management_user_name": "warden-management",
+	})
+
+	require.Error(t, err, "an intercepted RAM response must not read as a completed cleanup")
+	assert.Contains(t, err.Error(), "UpdateAccessKey")
+	assert.Contains(t, err.Error(), "blocked by policy")
+	assert.Equal(t, 1, hits, "cleanup must stop at the failed Inactive step, not go on to delete")
+}
+
+// CommitRotation replaces the whole Config map while mints are reading it, so
+// every accessor must hold configMu. Run under -race: before the endpoint
+// accessors took the read lock this reported a data race on credSource.Config.
+//
+// It also pins the pairing. stsCallConfig returns the endpoint and the key from
+// one snapshot, so a mint can never sign with one config's key against another
+// config's address — which is what reading them through separate accessors
+// allowed.
+func TestAlicloudDriver_ConfigAccessIsRaceFree(t *testing.T) {
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Credentials": map[string]any{
+				"AccessKeyId":     "STS.minted",
+				"AccessKeySecret": "minted-secret",
+				"SecurityToken":   "minted-token",
+				"Expiration":      "2099-01-01T00:00:00Z",
+			},
+		})
+	}))
+	defer sts.Close()
+
+	f := &AlicloudDriverFactory{}
+	d, _ := f.Create(map[string]string{
+		"access_key_id":        "LTAI-gen-0",
+		"access_key_secret":    "secret-0",
+		"management_user_name": "warden-management",
+		"sts_endpoint":         sts.URL,
+	}, createAlicloudTestLogger())
+	drv := d.(*AlicloudDriver)
+
+	spec := &credential.CredSpec{Config: map[string]string{
+		"mint_method": "assume_role",
+		"role_arn":    "acs:ram::123:role/concurrent",
+	}}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				_, _, _, _, err := drv.MintCredential(context.Background(), spec)
+				assert.NoError(t, err)
+				drv.SupportsRotation()
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for gen := 1; gen <= 40; gen++ {
+			require.NoError(t, drv.CommitRotation(context.Background(), map[string]string{
+				"access_key_id":        fmt.Sprintf("LTAI-gen-%d", gen),
+				"access_key_secret":    fmt.Sprintf("secret-%d", gen),
+				"management_user_name": "warden-management",
+				"sts_endpoint":         sts.URL,
+			}))
+		}
+	}()
+
+	wg.Wait()
 }
 
 // --- ACS3 signing helper ---
