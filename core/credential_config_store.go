@@ -1156,8 +1156,8 @@ const authMethodOIDCFederation = "oidc_federation"
 
 // isFederationSource reports whether a source authenticates by presenting a
 // caller's identity assertion. Every such driver — aws, azure, gcp, hvault,
-// kubernetes — spells it the same way, so one predicate covers them all and covers
-// a new one the day it lands.
+// kubernetes, alicloud — spells it the same way, so one predicate covers them all
+// and covers a new one the day it lands.
 //
 // This is narrower than "holds no secret", which also describes a chained source
 // or spec (secret_spec), whose secret lives in the spec it references. Those are

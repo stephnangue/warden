@@ -35,6 +35,8 @@ func DeriveAssertionResource(sourceType string, sourceCfg, specCfg map[string]st
 		return vaultAssertionResource(sourceCfg, specCfg)
 	case credential.SourceTypeKubernetes:
 		return kubernetesAssertionResource(specCfg)
+	case credential.SourceTypeAlicloud:
+		return alicloudAssertionResource(specCfg)
 	default:
 		return "", false
 	}
@@ -63,9 +65,46 @@ func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg map[string]st
 		return vaultAssertionAudience(sourceCfg)
 	case credential.SourceTypeKubernetes:
 		return kubernetesAssertionAudience(sourceCfg)
+	case credential.SourceTypeAlicloud:
+		return alicloudAssertionAudience(sourceCfg)
 	default:
 		return "", false
 	}
+}
+
+// alicloudAssertionAudience derives the warden_identity assertion audience for a
+// keyless Alicloud source: the source's explicit `audience`, or ("", false) when
+// unset. There is no conventional default — unlike AWS, which accepts
+// sts.amazonaws.com, Alibaba matches the assertion's aud against the client_ids
+// registered on the RAM OIDC provider, which the operator chooses — so an unset
+// audience forces the spec to set assertion_audience (the spec-create gate
+// enforces this, and mint fails closed otherwise).
+//
+// Gated on auth_method=oidc_federation: only a keyless source federates, so a
+// static source supplies no derived audience even if a stored config record
+// somehow carries one.
+func alicloudAssertionAudience(sourceCfg map[string]string) (string, bool) {
+	if credential.GetString(sourceCfg, "auth_method", alicloudAuthMethodStatic) != alicloudAuthMethodOIDCFederation {
+		return "", false
+	}
+	if aud := credential.GetString(sourceCfg, "audience", ""); aud != "" {
+		return aud, true
+	}
+	return "", false
+}
+
+// alicloudAssertionResource reports the RAM role a federation spec assumes, for
+// the warden_resource claim. Pure: reads spec config only, no network or driver
+// state. The driver has a single mint path, so unlike the multi-engine sources
+// there is no mint_method to dispatch on.
+//
+// The provider prefix is human-readable sugar on an opaque value — never parse it
+// back, since a role ARN contains ':' itself.
+func alicloudAssertionResource(specCfg map[string]string) (string, bool) {
+	if arn := credential.GetString(specCfg, "role_arn", ""); arn != "" {
+		return "alicloud-ram:" + arn, true
+	}
+	return "", false
 }
 
 // kubernetesAssertionAudience derives the warden_identity assertion audience for a
