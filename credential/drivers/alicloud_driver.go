@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -67,8 +68,9 @@ type AlicloudDriver struct {
 	logger     *logger.GatedLogger
 	httpClient *http.Client
 
-	// configMu protects credSource.Config against concurrent reads and writes
-	// (for future rotation support).
+	// configMu protects credSource.Config against concurrent reads and writes:
+	// CommitRotation replaces the whole map while mint and rotation calls are
+	// reading it. Every accessor of credSource.Config must hold it.
 	configMu sync.RWMutex
 }
 
@@ -158,25 +160,30 @@ func (d *AlicloudDriver) Cleanup(_ context.Context) error {
 	return nil
 }
 
-func (d *AlicloudDriver) mgmtAccessKey() (string, string) {
+// stsCallConfig returns the STS endpoint and the management key pair from a
+// single config snapshot. Endpoint and credentials are read together rather than
+// through separate accessors so a rotation committing between two reads cannot
+// pair one config's key with another config's address.
+func (d *AlicloudDriver) stsCallConfig() (endpoint, keyID, keySecret string) {
 	d.configMu.RLock()
 	defer d.configMu.RUnlock()
-	return credential.GetString(d.credSource.Config, "access_key_id", ""),
+	return d.endpointLocked("sts_endpoint", DefaultAlicloudSTSEndpoint),
+		credential.GetString(d.credSource.Config, "access_key_id", ""),
 		credential.GetString(d.credSource.Config, "access_key_secret", "")
 }
 
-func (d *AlicloudDriver) stsEndpoint() string {
-	return strings.TrimRight(
-		credential.GetString(d.credSource.Config, "sts_endpoint", DefaultAlicloudSTSEndpoint),
-		"/",
-	)
+// ramCallConfig is stsCallConfig for the RAM management API.
+func (d *AlicloudDriver) ramCallConfig() (endpoint, keyID, keySecret string) {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	return d.endpointLocked("ram_endpoint", DefaultAlicloudRAMEndpoint),
+		credential.GetString(d.credSource.Config, "access_key_id", ""),
+		credential.GetString(d.credSource.Config, "access_key_secret", "")
 }
 
-func (d *AlicloudDriver) ramEndpoint() string {
-	return strings.TrimRight(
-		credential.GetString(d.credSource.Config, "ram_endpoint", DefaultAlicloudRAMEndpoint),
-		"/",
-	)
+// endpointLocked reads and normalises one endpoint key. Caller must hold configMu.
+func (d *AlicloudDriver) endpointLocked(key, fallback string) string {
+	return strings.TrimRight(credential.GetString(d.credSource.Config, key, fallback), "/")
 }
 
 // MintCredential returns Alicloud credentials for the given spec.
@@ -192,7 +199,7 @@ func (d *AlicloudDriver) MintCredential(ctx context.Context, spec *credential.Cr
 
 // mintAssumeRole calls STS AssumeRole to obtain temporary credentials.
 func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	mgmtID, mgmtSecret := d.mgmtAccessKey()
+	stsEndpoint, mgmtID, mgmtSecret := d.stsCallConfig()
 	if mgmtID == "" || mgmtSecret == "" {
 		return nil, nil, 0, "", fmt.Errorf("source access_key_id and access_key_secret are required for assume_role")
 	}
@@ -221,7 +228,7 @@ func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.Cr
 		params.Set("Policy", p)
 	}
 
-	respBody, err := d.callSignedJSON(ctx, http.MethodPost, d.stsEndpoint(), params, mgmtID, mgmtSecret, "")
+	respBody, err := d.callSignedJSON(ctx, http.MethodPost, stsEndpoint, params, mgmtID, mgmtSecret, "")
 	if err != nil {
 		return nil, nil, 0, "", fmt.Errorf("STS AssumeRole failed: %w", err)
 	}
@@ -281,7 +288,7 @@ func (d *AlicloudDriver) VerifySpec(ctx context.Context, spec *credential.CredSp
 		if roleARN == "" {
 			return fmt.Errorf("role_arn is required for assume_role")
 		}
-		mgmtID, mgmtSecret := d.mgmtAccessKey()
+		stsEndpoint, mgmtID, mgmtSecret := d.stsCallConfig()
 		if mgmtID == "" || mgmtSecret == "" {
 			return fmt.Errorf("source must have management access_key_id/access_key_secret for assume_role")
 		}
@@ -297,7 +304,7 @@ func (d *AlicloudDriver) VerifySpec(ctx context.Context, spec *credential.CredSp
 		params.Set("RoleSessionName", "warden-verify")
 		params.Set("DurationSeconds", fmt.Sprintf("%d", int(alicloudMinSTSDuration.Seconds())))
 
-		if _, err := d.callSignedJSON(verifyCtx, http.MethodPost, d.stsEndpoint(), params, mgmtID, mgmtSecret, ""); err != nil {
+		if _, err := d.callSignedJSON(verifyCtx, http.MethodPost, stsEndpoint, params, mgmtID, mgmtSecret, ""); err != nil {
 			return fmt.Errorf("alicloud pre-flight AssumeRole failed: %w", err)
 		}
 		return nil
@@ -337,13 +344,59 @@ func parseAlicloudEnvelope(body []byte) (alicloudErrorEnvelope, bool) {
 	return env, env.Code != ""
 }
 
-// alicloudErrorFromEnvelope wraps an Alicloud error envelope into a Go error
+// alicloudAPIError carries a parsed error envelope so callers can branch on the
+// upstream Code rather than matching substrings of a formatted message. Rotation
+// cleanup, for instance, treats an already-deleted key (EntityNotExist.*) as
+// success while still failing on anything else.
+type alicloudAPIError struct {
+	alicloudErrorEnvelope
+}
+
+// Error formats Code, Message, and RequestId for operator triage.
+func (e *alicloudAPIError) Error() string {
+	if e.RequestId != "" {
+		return fmt.Sprintf("%s: %s (RequestId=%s)", e.Code, e.Message, e.RequestId)
+	}
+	return fmt.Sprintf("%s: %s", e.Code, e.Message)
+}
+
+// alicloudErrorFromEnvelope wraps an Alicloud error envelope into a typed error
 // whose message carries Code, Message, and RequestId for operator triage.
 func alicloudErrorFromEnvelope(env alicloudErrorEnvelope) error {
-	if env.RequestId != "" {
-		return fmt.Errorf("%s: %s (RequestId=%s)", env.Code, env.Message, env.RequestId)
+	return &alicloudAPIError{alicloudErrorEnvelope: env}
+}
+
+// alicloudBodyPreviewLen bounds how much of an unrecognised response body is
+// quoted back in an error. Enough to tell an HTML error page from a JSON one and
+// read the first line of either, short enough not to flood a log line.
+const alicloudBodyPreviewLen = 256
+
+// alicloudBodyPreview renders an unrecognised response body as a single-line
+// excerpt for an error message. Whitespace is collapsed because the bodies this
+// is reached for are typically multi-line HTML, which would otherwise break the
+// error across a dozen log lines.
+func alicloudBodyPreview(body []byte) string {
+	if len(body) == 0 {
+		return "<empty>"
 	}
-	return fmt.Errorf("%s: %s", env.Code, env.Message)
+	preview := strings.Join(strings.Fields(string(body)), " ")
+	if len(preview) > alicloudBodyPreviewLen {
+		preview = preview[:alicloudBodyPreviewLen] + "..."
+	}
+	return preview
+}
+
+// alicloudErrorHasCodePrefix reports whether err carries an Alicloud error
+// envelope whose Code equals prefix or begins with prefix + ".". Alicloud groups
+// related codes that way (EntityNotExist.User, EntityNotExist.User.AccessKey),
+// so matching the family is the useful test; the dotted form keeps
+// "EntityNotExist" from also matching a hypothetical "EntityNotExistent".
+func alicloudErrorHasCodePrefix(err error, prefix string) bool {
+	var apiErr *alicloudAPIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.Code == prefix || strings.HasPrefix(apiErr.Code, prefix+".")
 }
 
 // callSignedJSON builds and sends an ACS3-signed request to an Alicloud
@@ -448,6 +501,17 @@ func (d *AlicloudDriver) callSignedJSON(
 			return nil, alicloudErrorFromEnvelope(env)
 		}
 
+		// The 4xx statuses above are marked OK only to get their bodies back for
+		// envelope classification, never to accept the outcome. A 4xx whose body
+		// is not an envelope — an HTML error page from an intercepting proxy, a
+		// load balancer's own JSON — reaches here having failed, so refusing it is
+		// the whole point: callers that discard the body (rotation cleanup) would
+		// otherwise read it as success and silently leave a live key in place.
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("alicloud %s returned HTTP %d with an unrecognised body: %s",
+				params.Get("Action"), status, alicloudBodyPreview(respBody))
+		}
+
 		return respBody, nil
 	}
 
@@ -478,6 +542,7 @@ func (d *AlicloudDriver) PrepareRotation(ctx context.Context) (map[string]string
 	mgmtSecret := credential.GetString(d.credSource.Config, "access_key_secret", "")
 	userName := credential.GetString(d.credSource.Config, "management_user_name", "")
 	activationDelay := credential.GetDuration(d.credSource.Config, "activation_delay", DefaultAlicloudActivationDelay)
+	ramEndpoint := d.endpointLocked("ram_endpoint", DefaultAlicloudRAMEndpoint)
 	configSnapshot := make(map[string]string, len(d.credSource.Config))
 	for k, v := range d.credSource.Config {
 		configSnapshot[k] = v
@@ -500,7 +565,7 @@ func (d *AlicloudDriver) PrepareRotation(ctx context.Context) (map[string]string
 	listParams.Set("Format", "JSON")
 	listParams.Set("UserName", userName)
 
-	listBody, err := d.callSignedJSON(ctx, http.MethodPost, d.ramEndpoint(), listParams, mgmtID, mgmtSecret, "")
+	listBody, err := d.callSignedJSON(ctx, http.MethodPost, ramEndpoint, listParams, mgmtID, mgmtSecret, "")
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("RAM ListAccessKeys failed: %w", err)
 	}
@@ -530,7 +595,7 @@ func (d *AlicloudDriver) PrepareRotation(ctx context.Context) (map[string]string
 		del.Set("Format", "JSON")
 		del.Set("UserName", userName)
 		del.Set(ramParamUserAccessKeyID, k.AccessKeyID)
-		if _, err := d.callSignedJSON(ctx, http.MethodPost, d.ramEndpoint(), del, mgmtID, mgmtSecret, ""); err != nil {
+		if _, err := d.callSignedJSON(ctx, http.MethodPost, ramEndpoint, del, mgmtID, mgmtSecret, ""); err != nil {
 			return nil, nil, 0, fmt.Errorf("failed to delete orphaned access key %s: %w", truncateID(k.AccessKeyID, 8), err)
 		}
 	}
@@ -542,7 +607,7 @@ func (d *AlicloudDriver) PrepareRotation(ctx context.Context) (map[string]string
 	createParams.Set("Format", "JSON")
 	createParams.Set("UserName", userName)
 
-	createBody, err := d.callSignedJSON(ctx, http.MethodPost, d.ramEndpoint(), createParams, mgmtID, mgmtSecret, "")
+	createBody, err := d.callSignedJSON(ctx, http.MethodPost, ramEndpoint, createParams, mgmtID, mgmtSecret, "")
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("RAM CreateAccessKey failed: %w", err)
 	}
@@ -608,7 +673,7 @@ func (d *AlicloudDriver) CleanupRotation(ctx context.Context, cleanupConfig map[
 		return nil
 	}
 
-	mgmtID, mgmtSecret := d.mgmtAccessKey()
+	ramEndpoint, mgmtID, mgmtSecret := d.ramCallConfig()
 	if mgmtID == "" || mgmtSecret == "" {
 		return fmt.Errorf("management access keys are required to clean up old key")
 	}
@@ -628,7 +693,7 @@ func (d *AlicloudDriver) CleanupRotation(ctx context.Context, cleanupConfig map[
 	inactivate.Set(ramParamUserAccessKeyID, oldKeyID)
 	inactivate.Set("Status", "Inactive")
 
-	if _, err := d.callSignedJSON(ctx, http.MethodPost, d.ramEndpoint(), inactivate, mgmtID, mgmtSecret, ""); err != nil {
+	if _, err := d.callSignedJSON(ctx, http.MethodPost, ramEndpoint, inactivate, mgmtID, mgmtSecret, ""); err != nil {
 		return fmt.Errorf("RAM UpdateAccessKey (Inactive) failed: %w", err)
 	}
 	d.logger.Info("disabled old management access key",
@@ -644,7 +709,7 @@ func (d *AlicloudDriver) CleanupRotation(ctx context.Context, cleanupConfig map[
 	del.Set("UserName", userName)
 	del.Set(ramParamUserAccessKeyID, oldKeyID)
 
-	if _, err := d.callSignedJSON(ctx, http.MethodPost, d.ramEndpoint(), del, mgmtID, mgmtSecret, ""); err != nil {
+	if _, err := d.callSignedJSON(ctx, http.MethodPost, ramEndpoint, del, mgmtID, mgmtSecret, ""); err != nil {
 		return fmt.Errorf("RAM DeleteAccessKey (old management key) failed: %w", err)
 	}
 
