@@ -141,12 +141,17 @@ func (t *ScalewayKeysCredType) Parse(rawData, metadata map[string]interface{}, l
 	}
 
 	return &credential.Credential{
-		Type:      credential.TypeScalewayKeys,
-		Category:  credential.CategoryCloudIAM,
-		LeaseTTL:  leaseTTL,
-		LeaseID:   leaseID,
-		IssuedAt:  time.Now(),
-		Revocable: leaseTTL > 0,
+		Type:     credential.TypeScalewayKeys,
+		Category: credential.CategoryCloudIAM,
+		LeaseTTL: leaseTTL,
+		LeaseID:  leaseID,
+		IssuedAt: time.Now(),
+		// Revoking means releasing a lease at the source, which needs a handle to
+		// release. Scaleway's static path returns no TTL and its dynamic path
+		// returns a leaseID, so the second condition changes nothing today — it
+		// states the invariant rather than leaving the next mint path to
+		// rediscover it.
+		Revocable: leaseTTL > 0 && leaseID != "",
 		Data: map[string]string{
 			"access_key": accessKey,
 			"secret_key": secretKey,

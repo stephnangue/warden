@@ -138,12 +138,15 @@ func (t *AlicloudKeysCredType) Parse(rawData, metadata map[string]interface{}, l
 	}
 
 	return &credential.Credential{
-		Type:      credential.TypeAlicloudKeys,
-		Category:  credential.CategoryCloudIAM,
-		LeaseTTL:  leaseTTL,
-		LeaseID:   leaseID,
-		IssuedAt:  time.Now(),
-		Revocable: leaseTTL > 0,
+		Type:     credential.TypeAlicloudKeys,
+		Category: credential.CategoryCloudIAM,
+		LeaseTTL: leaseTTL,
+		LeaseID:  leaseID,
+		IssuedAt: time.Now(),
+		// Revoking means releasing a lease at the source, which needs a handle to
+		// release. The alicloud driver's only mint path returns self-expiring STS
+		// session credentials and no leaseID, so this is always false here.
+		Revocable: leaseTTL > 0 && leaseID != "",
 		Data:      data,
 		Metadata:  meta,
 	}, nil

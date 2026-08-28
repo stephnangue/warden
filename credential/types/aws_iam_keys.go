@@ -246,12 +246,16 @@ func (t *AWSIAMAccessKeysCredType) Parse(rawData, metadata map[string]interface{
 	}
 
 	cred := &credential.Credential{
-		Type:      credential.TypeAWSAccessKeys,
-		Category:  credential.CategoryCloudIAM,
-		LeaseTTL:  leaseTTL,
-		LeaseID:   leaseID,
-		IssuedAt:  time.Now(),
-		Revocable: leaseTTL > 0, // STS temporary credentials are revocable
+		Type:     credential.TypeAWSAccessKeys,
+		Category: credential.CategoryCloudIAM,
+		LeaseTTL: leaseTTL,
+		LeaseID:  leaseID,
+		IssuedAt: time.Now(),
+		// Revoking means releasing a lease at the source, which needs a handle to
+		// release. Every AWS path that returns a TTL also returns a leaseID today,
+		// so the second condition changes nothing — it states the invariant rather
+		// than leaving the next mint path to rediscover it.
+		Revocable: leaseTTL > 0 && leaseID != "",
 		Data: map[string]string{
 			"access_key_id":     accessKeyID,
 			"secret_access_key": secretAccessKey,
