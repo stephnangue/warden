@@ -1908,6 +1908,7 @@ func TestCredentialConfigStore_FederationSourceRejectsRotationPeriod(t *testing.
 		credential.SourceTypeGCP,
 		credential.SourceTypeVault,
 		credential.SourceTypeKubernetes,
+		credential.SourceTypeAlicloud,
 	}
 
 	for _, sourceType := range federationTypes {

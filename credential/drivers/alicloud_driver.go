@@ -43,10 +43,26 @@ const (
 	ramParamUserAccessKeyID = "UserAccessKeyId"
 )
 
+// alicloudAuthMethodStatic and alicloudAuthMethodOIDCFederation select how the
+// source authenticates. static (default) signs every call with a long-lived RAM
+// access key pair held in config; oidc_federation holds no key at all and mints
+// only by presenting the caller's identity assertion to STS AssumeRoleWithOIDC.
+// An empty auth_method means static, so records written before federation existed
+// keep working.
+const (
+	alicloudAuthMethodStatic         = "static"
+	alicloudAuthMethodOIDCFederation = "oidc_federation"
+)
+
+// alicloudTimestampFormat is the ISO 8601 form Alibaba's RPC common Timestamp
+// parameter takes: UTC, second precision, literal Z.
+const alicloudTimestampFormat = "2006-01-02T15:04:05Z"
+
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*AlicloudDriver)(nil)
 var _ credential.SpecVerifier = (*AlicloudDriver)(nil)
 var _ credential.Rotatable = (*AlicloudDriver)(nil)
+var _ credential.ExchangeMinter = (*AlicloudDriver)(nil)
 
 // AlicloudDriver mints credentials from Alibaba Cloud STS.
 //
@@ -84,7 +100,20 @@ func (f *AlicloudDriverFactory) Type() string {
 
 // ValidateConfig validates Alicloud source configuration.
 func (f *AlicloudDriverFactory) ValidateConfig(config map[string]string) error {
-	return credential.ValidateSchema(config,
+	if err := credential.ValidateSchema(config,
+		credential.StringField("auth_method").
+			OneOf(alicloudAuthMethodStatic, alicloudAuthMethodOIDCFederation).
+			Describe("How the source authenticates: 'static' (RAM access key pair) or 'oidc_federation' (keyless, exchanges the caller's identity assertion via STS AssumeRoleWithOIDC)").
+			Example(alicloudAuthMethodStatic),
+
+		credential.StringField("oidc_provider_arn").
+			Describe("RAM OIDC provider ARN that trusts Warden's issuer (required for auth_method=oidc_federation)").
+			Example("acs:ram::123456789012:oidc-provider/warden"),
+
+		credential.StringField("audience").
+			Describe("Assertion audience; must match a client_id registered on the RAM OIDC provider (auth_method=oidc_federation)").
+			Example("https://warden.example.com"),
+
 		credential.StringField("access_key_id").
 			Describe("Management access key ID (usually starts with LTAI)").
 			Example("LTAIxxxxxxxxxxxxxxxx"),
@@ -117,7 +146,45 @@ func (f *AlicloudDriverFactory) ValidateConfig(config map[string]string) error {
 		credential.BoolField("tls_skip_verify").
 			Describe("Skip TLS certificate verification (development only)").
 			Example("false"),
-	)
+	); err != nil {
+		return err
+	}
+
+	// Cross-field rules per auth_method. Each mode rejects the other's fields, so a
+	// half-converted source fails at write rather than behaving as the mode the
+	// operator did not intend.
+	//
+	// Present-but-empty is validated as static, not skipped. GetString returns a
+	// stored "" rather than the default, and the schema pass above skips empty
+	// values too — so a switch that only matched the two named modes would let a
+	// source through carrying neither a key pair nor a federation config, and it is
+	// static that such a source then behaves as.
+	switch credential.GetString(config, "auth_method", alicloudAuthMethodStatic) {
+	case "", alicloudAuthMethodStatic:
+		// oidc_provider_arn and audience seed only the federation exchange; on a
+		// static source they would be silently ignored, so reject rather than
+		// mislead. Note the static path deliberately does not require a key pair
+		// here — the schema has never marked one required, and tightening that is
+		// a separate change.
+		for _, k := range []string{"oidc_provider_arn", "audience"} {
+			if config[k] != "" {
+				return fmt.Errorf("field '%s' is only valid for auth_method=%s", k, alicloudAuthMethodOIDCFederation)
+			}
+		}
+	case alicloudAuthMethodOIDCFederation:
+		if credential.GetString(config, "oidc_provider_arn", "") == "" {
+			return fmt.Errorf("oidc_provider_arn is required for auth_method=%s", alicloudAuthMethodOIDCFederation)
+		}
+		// A federation source holds no key of its own, so it has nothing to rotate
+		// and no RAM user to rotate as — ram_endpoint included, which only the
+		// rotation calls ever read.
+		for _, k := range []string{"access_key_id", "access_key_secret", "management_user_name", "activation_delay", "ram_endpoint"} {
+			if config[k] != "" {
+				return fmt.Errorf("field '%s' must not be set for auth_method=%s", k, alicloudAuthMethodOIDCFederation)
+			}
+		}
+	}
+	return nil
 }
 
 // SensitiveConfigFields returns source config keys that should be masked.
@@ -186,8 +253,35 @@ func (d *AlicloudDriver) endpointLocked(key, fallback string) string {
 	return strings.TrimRight(credential.GetString(d.credSource.Config, key, fallback), "/")
 }
 
+// getAuthMethod returns the source's configured auth_method, normalising both an
+// absent key and a stored empty string to static — the former so a record written
+// before federation existed keeps its old behaviour, the latter because GetString
+// hands back a stored "" rather than the default. It reads under configMu because
+// CommitRotation swaps the whole config map.
+func (d *AlicloudDriver) getAuthMethod() string {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	if method := credential.GetString(d.credSource.Config, "auth_method", alicloudAuthMethodStatic); method != "" {
+		return method
+	}
+	return alicloudAuthMethodStatic
+}
+
+// federationConfig returns the STS endpoint and the OIDC provider ARN from one
+// config snapshot, for the same reason stsCallConfig pairs its two reads.
+func (d *AlicloudDriver) federationConfig() (endpoint, providerARN string) {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	return d.endpointLocked("sts_endpoint", DefaultAlicloudSTSEndpoint),
+		credential.GetString(d.credSource.Config, "oidc_provider_arn", "")
+}
+
 // MintCredential returns Alicloud credentials for the given spec.
 func (d *AlicloudDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if d.getAuthMethod() == alicloudAuthMethodOIDCFederation {
+		return nil, nil, 0, "", fmt.Errorf("alicloud: a source with auth_method=%s mints only from a caller assertion: set subject_token_source (warden_identity or agent_identity) on the spec", alicloudAuthMethodOIDCFederation)
+	}
+
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 	switch mintMethod {
 	case "assume_role":
@@ -197,18 +291,46 @@ func (d *AlicloudDriver) MintCredential(ctx context.Context, spec *credential.Cr
 	}
 }
 
-// mintAssumeRole calls STS AssumeRole to obtain temporary credentials.
-func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	stsEndpoint, mgmtID, mgmtSecret := d.stsCallConfig()
-	if mgmtID == "" || mgmtSecret == "" {
-		return nil, nil, 0, "", fmt.Errorf("source access_key_id and access_key_secret are required for assume_role")
+// MintCredentialWithExchange mints STS session credentials over workload identity
+// federation: the caller's identity assertion is exchanged at STS for a session on
+// the spec's RAM role, so the source stores no key of its own and ActionTrail
+// records the identity behind each request rather than one shared RAM user.
+//
+// The subject token is trusted at the source — either an assertion Warden minted
+// and signed, or the agent's own verified inbound JWT — so it is forwarded to STS
+// as-is. STS validates it against the OIDC provider's registered issuer and
+// client_ids, and the role's trust policy decides what it may assume.
+func (d *AlicloudDriver) MintCredentialWithExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if d.getAuthMethod() != alicloudAuthMethodOIDCFederation {
+		return nil, nil, 0, "", fmt.Errorf("alicloud: workload identity federation requires auth_method=%s on the source", alicloudAuthMethodOIDCFederation)
+	}
+	if inputs == nil || inputs.SubjectToken == "" {
+		return nil, nil, 0, "", fmt.Errorf("alicloud: no subject token in exchange inputs")
 	}
 
+	mintMethod := credential.GetString(spec.Config, "mint_method", "")
+	if mintMethod != "assume_role" {
+		return nil, nil, 0, "", fmt.Errorf("alicloud: mint_method %q is not supported over auth_method=%s (supported: assume_role)", mintMethod, alicloudAuthMethodOIDCFederation)
+	}
+	return d.assumeRoleWithOIDC(ctx, spec, inputs.SubjectToken)
+}
+
+// alicloudAssumeRoleParams is the spec-derived half of an assume-role call, shared
+// by the static and federated paths so the two cannot drift on defaults or clamps.
+type alicloudAssumeRoleParams struct {
+	RoleARN     string
+	SessionName string
+	Duration    time.Duration
+	Policy      string
+}
+
+// resolveAssumeRoleParams reads and normalises the spec's assume-role settings.
+func resolveAssumeRoleParams(spec *credential.CredSpec) (*alicloudAssumeRoleParams, error) {
 	roleARN := credential.GetString(spec.Config, "role_arn", "")
 	if roleARN == "" {
-		return nil, nil, 0, "", fmt.Errorf("role_arn is required for assume_role")
+		return nil, fmt.Errorf("role_arn is required for assume_role")
 	}
-	sessionName := credential.GetString(spec.Config, "role_session_name", "warden-session")
+
 	duration := credential.GetDuration(spec.Config, "duration_seconds", time.Hour)
 	if duration < alicloudMinSTSDuration {
 		duration = alicloudMinSTSDuration
@@ -217,22 +339,98 @@ func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.Cr
 		duration = alicloudMaxSTSDuration
 	}
 
+	return &alicloudAssumeRoleParams{
+		RoleARN:     roleARN,
+		SessionName: credential.GetString(spec.Config, "role_session_name", "warden-session"),
+		Duration:    duration,
+		Policy:      credential.GetString(spec.Config, "policy", ""),
+	}, nil
+}
+
+// mintAssumeRole calls STS AssumeRole to obtain temporary credentials.
+func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	stsEndpoint, mgmtID, mgmtSecret := d.stsCallConfig()
+	if mgmtID == "" || mgmtSecret == "" {
+		return nil, nil, 0, "", fmt.Errorf("source access_key_id and access_key_secret are required for assume_role")
+	}
+
+	ar, err := resolveAssumeRoleParams(spec)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+
 	params := url.Values{}
 	params.Set("Action", "AssumeRole")
 	params.Set("Version", alicloudSTSVersion)
 	params.Set("Format", "JSON")
-	params.Set("RoleArn", roleARN)
-	params.Set("RoleSessionName", sessionName)
-	params.Set("DurationSeconds", fmt.Sprintf("%d", int(duration.Seconds())))
-	if p := credential.GetString(spec.Config, "policy", ""); p != "" {
-		params.Set("Policy", p)
+	params.Set("RoleArn", ar.RoleARN)
+	params.Set("RoleSessionName", ar.SessionName)
+	params.Set("DurationSeconds", fmt.Sprintf("%d", int(ar.Duration.Seconds())))
+	if ar.Policy != "" {
+		params.Set("Policy", ar.Policy)
 	}
 
 	respBody, err := d.callSignedJSON(ctx, http.MethodPost, stsEndpoint, params, mgmtID, mgmtSecret, "")
 	if err != nil {
 		return nil, nil, 0, "", fmt.Errorf("STS AssumeRole failed: %w", err)
 	}
+	return d.credentialsFromSTSResponse(respBody, ar)
+}
 
+// assumeRoleWithOIDC exchanges the caller's assertion for STS session credentials.
+//
+// The call is unsigned: AssumeRoleWithOIDC authenticates by the OIDC token itself,
+// and Alibaba documents that it takes no Signature or AccessKeyId. That is what
+// lets a source holding no key make it at all.
+//
+// The assertion travels in the POST form body, never the query string. A query
+// parameter would be printed back by *url.Error on any transport failure — the
+// full URL, token and all — into operator-visible errors and logs, and into every
+// proxy and load-balancer access log on the path. Alibaba's own RRSA credential
+// provider splits the request the same way, with Action/Version/Format in the
+// query and the token in the body.
+func (d *AlicloudDriver) assumeRoleWithOIDC(ctx context.Context, spec *credential.CredSpec, assertion string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	stsEndpoint, providerARN := d.federationConfig()
+	if providerARN == "" {
+		return nil, nil, 0, "", fmt.Errorf("alicloud: oidc_provider_arn is required on the source for auth_method=%s", alicloudAuthMethodOIDCFederation)
+	}
+
+	ar, err := resolveAssumeRoleParams(spec)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+
+	// Action/Version/Format/Timestamp are the RPC common parameters and stay in the
+	// query, exactly as Alibaba's own RRSA client sends them. Timestamp is part of
+	// that convention rather than something the body could carry, and nothing local
+	// can prove STS tolerates its absence — an httptest stub accepts whatever it is
+	// given — so it is sent rather than assumed optional.
+	query := url.Values{}
+	query.Set("Action", "AssumeRoleWithOIDC")
+	query.Set("Version", alicloudSTSVersion)
+	query.Set("Format", "JSON")
+	query.Set("Timestamp", time.Now().UTC().Format(alicloudTimestampFormat))
+
+	body := url.Values{}
+	body.Set("RoleArn", ar.RoleARN)
+	body.Set("OIDCProviderArn", providerARN)
+	body.Set("OIDCToken", assertion)
+	body.Set("RoleSessionName", ar.SessionName)
+	body.Set("DurationSeconds", fmt.Sprintf("%d", int(ar.Duration.Seconds())))
+	if ar.Policy != "" {
+		body.Set("Policy", ar.Policy)
+	}
+
+	respBody, err := d.callAnonymousJSON(ctx, stsEndpoint, query, body)
+	if err != nil {
+		return nil, nil, 0, "", d.mapFederationError(err, ar.RoleARN, providerARN)
+	}
+	return d.credentialsFromSTSResponse(respBody, ar)
+}
+
+// credentialsFromSTSResponse parses an assume-role response into the mint tuple.
+// Both assume-role paths return the same Credentials block, so they share this.
+func (d *AlicloudDriver) credentialsFromSTSResponse(respBody []byte, ar *alicloudAssumeRoleParams) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	var resp struct {
 		Credentials struct {
 			AccessKeyID     string `json:"AccessKeyId"`
@@ -248,22 +446,49 @@ func (d *AlicloudDriver) mintAssumeRole(ctx context.Context, spec *credential.Cr
 		return nil, nil, 0, "", fmt.Errorf("STS returned empty credentials")
 	}
 
-	leaseTTL, err := d.stsLeaseTTL(resp.Credentials.Expiration, duration)
+	leaseTTL, err := d.stsLeaseTTL(resp.Credentials.Expiration, ar.Duration)
 	if err != nil {
 		return nil, nil, 0, "", err
 	}
 
 	d.logger.Info("issued STS temporary credentials",
 		logger.String("access_key", truncateID(resp.Credentials.AccessKeyID, 8)),
-		logger.String("role_arn", roleARN),
+		logger.String("role_arn", ar.RoleARN),
 		logger.String("expires", resp.Credentials.Expiration),
 	)
+
+	metadata := map[string]interface{}{
+		"role_arn":     ar.RoleARN,
+		"session_name": ar.SessionName,
+		"expiration":   resp.Credentials.Expiration,
+	}
 
 	return map[string]interface{}{
 		"access_key_id":     resp.Credentials.AccessKeyID,
 		"access_key_secret": resp.Credentials.AccessKeySecret,
 		"security_token":    resp.Credentials.SecurityToken,
-	}, nil, leaseTTL, "", nil // STS tokens are self-expiring; no leaseID
+	}, metadata, leaseTTL, "", nil // STS tokens are self-expiring; no leaseID
+}
+
+// mapFederationError adds triage guidance to the STS error codes that mean the
+// trust relationship is misconfigured, since the raw envelope names none of the
+// three things an operator has to check.
+func (d *AlicloudDriver) mapFederationError(err error, roleARN, providerARN string) error {
+	switch {
+	case alicloudErrorHasCodePrefix(err, "AuthenticationFail"),
+		alicloudErrorHasCodePrefix(err, "InvalidParameter.OIDCProviderArn"),
+		alicloudErrorHasCodePrefix(err, "IDPNotFound"):
+		return fmt.Errorf("STS AssumeRoleWithOIDC rejected the assertion for provider %s: %w "+
+			"(check that the RAM OIDC provider trusts Warden's issuer URL, that the assertion's "+
+			"audience matches one of its registered client_ids, and that the trust policy on %s "+
+			"admits the assertion's subject)", providerARN, err, roleARN)
+	case alicloudErrorHasCodePrefix(err, "NoPermission"),
+		alicloudErrorHasCodePrefix(err, "EntityNotExist.Role"):
+		return fmt.Errorf("STS AssumeRoleWithOIDC could not assume %s: %w "+
+			"(check the role exists and its trust policy admits this OIDC provider)", roleARN, err)
+	default:
+		return fmt.Errorf("STS AssumeRoleWithOIDC failed: %w", err)
+	}
 }
 
 // stsLeaseTTL converts the Expiration STS reports into a lease TTL.
@@ -325,6 +550,19 @@ const alicloudVerifyTimeout = 10 * time.Second
 // STS validates the management key; a valid signature followed by any RAM
 // role resolution error validates the role_arn. A single call covers both.
 func (d *AlicloudDriver) VerifySpec(ctx context.Context, spec *credential.CredSpec) error {
+	// A federation source has no ambient credential to dry-run with — assertions
+	// are per caller, per request — so a misconfigured role surfaces at the first
+	// mint instead.
+	//
+	// This guard is defence in depth and nothing more: VerifySpec runs only inside
+	// the spec-create test-mint, which is skipped for every exchange spec, and a
+	// non-exchange spec on a keyless source is already refused by MintCredential
+	// before reaching here. Do not add config checks below expecting them to fire
+	// on a federated source.
+	if d.getAuthMethod() == alicloudAuthMethodOIDCFederation {
+		return nil
+	}
+
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 	switch mintMethod {
 	case "assume_role":
@@ -458,11 +696,55 @@ func (d *AlicloudDriver) callSignedJSON(
 	params url.Values,
 	mgmtID, mgmtSecret, securityToken string,
 ) ([]byte, error) {
+	return d.callJSON(ctx, method, endpoint, params, nil, func(req *http.Request) error {
+		// Re-sign every attempt so x-acs-date and x-acs-signature-nonce advance,
+		// staying inside ACS3's 15-minute skew window.
+		if err := signACS3(req, mgmtID, mgmtSecret, securityToken, nil); err != nil {
+			return fmt.Errorf("sign request: %w", err)
+		}
+		return nil
+	})
+}
+
+// callAnonymousJSON sends an unsigned RPC call, carrying its parameters in a
+// form-encoded POST body rather than the query string.
+//
+// STS AssumeRoleWithOIDC is the only call that takes this path. It authenticates
+// by the OIDC token it carries, so Alibaba documents that it needs no Signature
+// and no AccessKeyId — which is what a keyless source relies on, having neither.
+//
+// The body matters as much as the missing signature. httputil wraps a transport
+// failure around *url.Error, whose message prints the whole URL; a token in the
+// query string would land in operator-visible errors, in server logs, and in the
+// access log of every proxy on the path. Only Action/Version/Format stay in the
+// query, matching how Alibaba's own RRSA client splits the request.
+func (d *AlicloudDriver) callAnonymousJSON(
+	ctx context.Context,
+	endpoint string,
+	query, body url.Values,
+) ([]byte, error) {
+	return d.callJSON(ctx, http.MethodPost, endpoint, query, body, nil)
+}
+
+// callJSON owns the retry loop, backoff, and envelope classification shared by
+// the signed and anonymous paths. sign is nil for an anonymous call; body is nil
+// for a query-only one.
+func (d *AlicloudDriver) callJSON(
+	ctx context.Context,
+	method, endpoint string,
+	query, body url.Values,
+	sign func(*http.Request) error,
+) ([]byte, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid endpoint %q: %w", endpoint, err)
 	}
-	u.RawQuery = params.Encode()
+	u.RawQuery = query.Encode()
+
+	var encodedBody []byte
+	if body != nil {
+		encodedBody = []byte(body.Encode())
+	}
 
 	var lastErr error
 	for attempt := 0; attempt < alicloudMaxRetryAttempts; attempt++ {
@@ -477,25 +759,30 @@ func (d *AlicloudDriver) callSignedJSON(
 			}
 		}
 
-		// Re-sign every attempt so x-acs-date and x-acs-signature-nonce
-		// advance, staying inside ACS3's 15-minute skew window.
-		req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(nil))
+		// Rebuilt each attempt so the signer, if any, produces fresh date and
+		// nonce headers.
+		req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(encodedBody))
 		if err != nil {
 			return nil, err
 		}
 		req.Host = u.Host
 		// x-acs-action and x-acs-version are required in the signed headers for V3;
 		// mirror the Action and Version query params into them.
-		if action := params.Get("Action"); action != "" {
+		if action := query.Get("Action"); action != "" {
 			req.Header.Set("x-acs-action", action)
 		}
-		if version := params.Get("Version"); version != "" {
+		if version := query.Get("Version"); version != "" {
 			req.Header.Set("x-acs-version", version)
 		}
 		req.Header.Set("Accept", "application/json")
+		if encodedBody != nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
 
-		if err := signACS3(req, mgmtID, mgmtSecret, securityToken, nil); err != nil {
-			return nil, fmt.Errorf("sign request: %w", err)
+		if sign != nil {
+			if err := sign(req); err != nil {
+				return nil, err
+			}
 		}
 
 		headers := make(map[string]string, len(req.Header))
@@ -514,6 +801,7 @@ func (d *AlicloudDriver) callSignedJSON(
 			Method:  method,
 			URL:     u.String(),
 			Headers: headers,
+			Body:    encodedBody,
 			OKStatuses: []int{
 				http.StatusOK,
 				http.StatusBadRequest,
@@ -553,7 +841,7 @@ func (d *AlicloudDriver) callSignedJSON(
 		// otherwise read it as success and silently leave a live key in place.
 		if status != http.StatusOK {
 			return nil, fmt.Errorf("alicloud %s returned HTTP %d with an unrecognised body: %s",
-				params.Get("Action"), status, alicloudBodyPreview(respBody))
+				query.Get("Action"), status, alicloudBodyPreview(respBody))
 		}
 
 		return respBody, nil
@@ -568,6 +856,14 @@ func (d *AlicloudDriver) callSignedJSON(
 // management access key: an existing access_key_id + access_key_secret plus
 // management_user_name identifying which RAM user owns the key.
 func (d *AlicloudDriver) SupportsRotation() bool {
+	// A federation source holds no key, so there is nothing to rotate.
+	// ValidateConfig already keeps the key fields off such a source, which would
+	// make the check below false anyway; stating it here keeps the invariant
+	// independent of that.
+	if d.getAuthMethod() == alicloudAuthMethodOIDCFederation {
+		return false
+	}
+
 	d.configMu.RLock()
 	defer d.configMu.RUnlock()
 	return credential.GetString(d.credSource.Config, "access_key_id", "") != "" &&
@@ -693,6 +989,10 @@ func (d *AlicloudDriver) makeRoomForNewKey(
 // cleanup config (with the old access_key_id), and the activation delay to let
 // RAM eventual consistency propagate.
 func (d *AlicloudDriver) PrepareRotation(ctx context.Context) (map[string]string, map[string]string, time.Duration, error) {
+	if d.getAuthMethod() == alicloudAuthMethodOIDCFederation {
+		return nil, nil, 0, fmt.Errorf("alicloud: a source with auth_method=%s holds no key to rotate", alicloudAuthMethodOIDCFederation)
+	}
+
 	d.configMu.RLock()
 	mgmtID := credential.GetString(d.credSource.Config, "access_key_id", "")
 	mgmtSecret := credential.GetString(d.credSource.Config, "access_key_secret", "")
