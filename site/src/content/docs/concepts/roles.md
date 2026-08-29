@@ -2,27 +2,80 @@
 title: "Roles"
 ---
 
-A **role** is a named, reusable definition — set once by an operator on an
-[auth method](/concepts/authentication/#auth-methods) — that projects a specific slice
-of capability onto a caller. The closest analogy is a **database view**: it
-stores no authority of its own and holds no data. It is a saved definition that
-Warden **resolves on each request** into a concrete grant — *who may assume it*
-(the identity binding), *what it may do* (its [policies](/concepts/policies/)), and
-*what credential it is handed* (the [credential spec](/concepts/credentials/) Warden
-mints). And just as many views can sit over the same tables, each exposing a
-different subset of columns and rows, many roles can sit over the same provider backend,
-each exposing a different subset of its actions.
+A **role** is something a caller **asserts**, not something it holds. An operator
+defines it once on an [auth method](/concepts/authentication/#auth-methods); a caller
+then names it on an individual request — *"I am acting as `read-repo` for this
+call"* — and Warden decides, on that request, whether the assertion holds. Nothing
+is handed over and nothing is kept. What the assertion produces — a token carrying
+the role's [policies](/concepts/policies/), and the credential Warden mints from its
+[credential spec](/concepts/credentials/) — lives for that one request and no longer.
+
+A role definition has two halves. It is a **predicate** — *who may assume it*, the
+identity binding — and a **projection** — *what they may do*, and *what credential
+they are handed*. Warden evaluates both fresh on every request.
 
 This is what lets one workload hold a single identity credential yet act with **least
-privilege**: it borrows exactly the authority of whichever role it names for the
-task at hand, and nothing more.
+privilege**: it borrows exactly the authority of whichever role it names for the task
+at hand, for exactly one call, and nothing more.
+
+## Grant, Authority, or Neither?
+
+Both words get used loosely for roles, and neither one fits. Being precise about it
+explains most of what follows.
+
+An **authority** is a power a principal *holds*. A role holds nothing — it is a
+definition sitting in storage, not a capability sitting on a caller.
+
+A **grant** is a conferral that has *already happened*, to a named principal, and
+that persists until it is revoked. A role is not that either: it matches nobody
+until a request arrives carrying a credential that satisfies its binding.
+
+So a role is **neither**. It is the definition that turns a verified identity into a
+grant — and the grant is the *output*: the token and the minted credential, alive for
+the length of one request.
+
+The contrast with a cloud STS is exact, and worth holding on to. `AssumeRole` also
+resolves a role definition against an identity, but what comes back is a **held
+grant** — session credentials the caller carries for an hour, everywhere it goes,
+until they expire. In Warden the assumption never converts into something the caller
+holds.
+
+> **A role is asserted, not held. The grant is what the assertion produces, and it
+> lasts one request.**
+
+## Roles Are Per-Request
+
+Because a role is resolved on each request, authority is never fixed onto a
+connection or a session. This is the property the rest of this page builds on.
+
+**The role is supplied on every request.** For transparent callers there is no
+login and no session in which a role is set once; the role travels with each
+individual request (via the `X-Warden-Role` header, the request path, or a query
+parameter — see [Selecting a Role](#selecting-a-role)). The role is a property of
+the request, not of the connection.
+
+**Authorization happens per request, at runtime.** Warden authorizes each request
+independently against the role it names. Internally it derives a transparent
+token's identifier by hashing *credential + mount + role* together, so a request
+that names a different role resolves to a different token with different policies.
+
+**Clients can change role mid-session.** The same workload, holding the same
+credential, can present one role on one request and a different role on the next.
+This is exactly what the worked example below relies on: an agent operates under a
+least-privilege role for routine work and names a higher-privilege role only for
+the specific step that genuinely needs it, narrowing the blast radius of any
+single action without re-authenticating.
 
 ## A Role Is a View Over Your Infrastructure
 
-Calling a role "an identity" is the common shorthand, but it's misleading: an
-identity is something you *hold*, whereas a role holds nothing — like a database
-view, it is resolved fresh on every request. That is why the view analogy fits
-better, and it is worth making precise:
+Calling a role "an identity" is the common shorthand, and it misleads for the reason
+above: an identity is something you *hold*. The sharper analogy for a definition that
+holds nothing and is resolved fresh on every use is a **database view**. A view stores
+no data; it is a saved definition the database evaluates against the base tables on
+each query. And just as many views can sit over the same tables, each exposing a
+different subset of columns and rows, many roles can sit over the same provider
+backend, each exposing a different subset of its actions. The parallel runs closer
+than it first looks:
 
 | A database view… | A Warden role… |
 |------------------|----------------|
@@ -161,6 +214,15 @@ separate, isolated routes from one agent, sharing no authority. There is no
 ambient, pre-granted authority sitting on the connection waiting to be reused, so
 there is nothing to move laterally *into*.
 
+**Nothing accrues on the session for an attacker to lift.** Elsewhere, assuming a
+role produces session credentials that sit in the agent's process until they expire —
+an artifact that can be stolen and replayed for as long as it stays valid. Warden
+hands the caller no such artifact: the credential it mints is injected upstream and
+never reaches the agent, and a transparent caller never logs in at all — it presents
+the identity it already had, names a role, and Warden resolves the pair itself on
+each request. There is no assumed-role session to lift, because assuming a role here
+produces nothing that outlives the call.
+
 **A hallucinated — or injected — action can't do damage: the model can't call
 what its role doesn't grant.** Because `tools/list` is filtered to the role's
 allowed set, a destructive tool the model might invent — `delete_repo`, say — or
@@ -187,29 +249,6 @@ a subtask, the trail reads as a per-task ledger: which role searched the repo,
 which pushed, which messaged Slack — each under its own scoped credential. When
 something goes wrong, you know precisely which task did it and with what
 authority.
-
-## Roles Are Per-Request
-
-Because a role is resolved on each request — like a view evaluated fresh on each
-query — authority is never fixed onto a connection or a session.
-
-**The role is supplied on every request.** For transparent callers there is no
-login and no session in which a role is set once; the role travels with each
-individual request (via the `X-Warden-Role` header, the request path, or a query
-parameter — see [Selecting a Role](#selecting-a-role)). The role is a property of
-the request, not of the connection.
-
-**Authorization happens per request, at runtime.** Warden authorizes each request
-independently against the role it names. Internally it derives a transparent
-token's identifier by hashing *credential + mount + role* together, so a request
-that names a different role resolves to a different token with different policies.
-
-**Clients can change role mid-session.** The same workload, holding the same
-credential, can present one role on one request and a different role on the next.
-This is exactly what the worked example above relies on: an agent operates under a
-least-privilege role for routine work and names a higher-privilege role only for
-the specific step that genuinely needs it, narrowing the blast radius of any
-single action without re-authenticating.
 
 ## Where Roles Live
 
@@ -251,7 +290,9 @@ warden role list -o ndjson | jq -r .name
 
 ## Common Fields
 
-Every role, regardless of auth method, shares the same grant fields:
+Every role, regardless of auth method, shares the same definition fields. Nothing
+here is conferred at write time; this is what the assertion resolves to when a
+request names the role:
 
 | Field | Meaning |
 |-------|---------|
@@ -365,7 +406,7 @@ automatically.
 
 - [Authentication](/concepts/authentication/) — how a credential is proven before a role
   is applied.
-- [Policies](/concepts/policies/) — what a role grants.
+- [Policies](/concepts/policies/) — what a role projects onto the caller.
 - [MCP](/concepts/mcp/) — how a role's policy filters a provider's `tools/list` and gates
   each `tools/call`.
 - [Providers](/concepts/providers/) — the upstreams a role reaches.
