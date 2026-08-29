@@ -368,6 +368,28 @@ vault_api POST "secret/data/e2e/scaleway-mgmt-key" \
 vault_api POST "secret/data/e2e/scaleway-static-pair" \
   '{"data":{"access_key":"SCWE2ECHAINEDPAIR000","secret_key":"e2e-scw-chained-pair-not-a-real-secret"}}'
 
+# The OAuth2 client credential a keyless ovh source performs its grant with.
+# Both halves, because they authenticate as a pair — a chained source is refused
+# an inline client_id precisely so an id cannot name one service account while
+# the secret beside it belongs to another.
+#
+# A real Hydra client, so the chained mint performs a REAL grant against a
+# validating token endpoint: the row passes only if the pair fetched from here
+# satisfies Hydra. Every other chained row in this suite spends its secret
+# against a stand-in that would accept anything.
+#
+# Deliberately NOT e2e-agent, which every other source in the suite holds
+# inline: the minted token carries this client's id, so the row can tell the
+# chain from a routing regression that fell back to an inline credential.
+vault_api POST "secret/data/e2e/ovh-client-credential" \
+  '{"data":{"client_id":"e2e-ovh-chain","client_secret":"ovh-chain-secret"}}'
+
+# An object-storage key pair for ovh's access_keys method, which serves a pair
+# held elsewhere and calls OVH for nothing. Like the scaleway pair above this is
+# a SPEC-level chain, for the same reason: the pair IS the credential.
+vault_api POST "secret/data/e2e/ovh-access-keys" \
+  '{"data":{"access_key":"E2EOVHACCESSKEY00000","secret_key":"e2e-ovh-access-not-a-real-secret"}}'
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \
@@ -435,6 +457,17 @@ curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -H "Content-Type: application/json" \
   -d '{"client_id":"e2e-ephemeral","client_name":"E2E Ephemeral","client_secret":"ephemeral-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post","client_credentials_grant_access_token_lifespan":"2s"}' \
   >/dev/null 2>&1 && echo "  [OK] e2e-ephemeral (2s TTL)" || echo "  [SKIP] e2e-ephemeral (already exists?)"
+
+# A client of its own for the ovh chained row, so that row can prove WHICH
+# credential was spent. The chained source fetches its service account from the
+# secret store; every other source in this suite holds e2e-agent inline, so a
+# chain seeded with e2e-agent would look identical to a routing regression that
+# fell back to one of them. This client exists nowhere but the secret store, and
+# the minted token names it in its client_id claim.
+curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
+  -H "Content-Type: application/json" \
+  -d '{"client_id":"e2e-ovh-chain","client_name":"E2E OVH Chained Service Account","client_secret":"ovh-chain-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+  >/dev/null 2>&1 && echo "  [OK] e2e-ovh-chain" || echo "  [SKIP] e2e-ovh-chain (already exists?)"
 
 # Verify JWT issuance works
 echo "  Verifying JWT issuance..."

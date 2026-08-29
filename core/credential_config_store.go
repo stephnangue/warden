@@ -1081,9 +1081,12 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		// An access_keys spec's credential is the key pair the referenced spec
 		// yields, so the reference has to be its own. Reached by a source-level one
 		// it would be handed whatever that source authenticates with — a client
-		// credential, not this pair. (A spec that names its own is not here:
-		// chainedRef would be that one, and the type validator has already refused
-		// it any inline pair.)
+		// credential, not this pair.
+		//
+		// The type validator refuses this shape first, since it requires every
+		// access_keys spec to name a reference. This is the layer that holds when
+		// the type registry is unavailable and credType is nil, which is also why
+		// the store's own tests are what exercise it.
 		if source.Type == credential.SourceTypeOVH &&
 			spec.Config[credential.ConfigSecretSpec] == "" &&
 			credential.GetString(spec.Config, "mint_method", "") == "access_keys" {
