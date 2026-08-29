@@ -17,6 +17,11 @@ const (
 	// ConfigSecretField names which key of the referenced credential's Data carries
 	// the single secret value. Optional: a single-key payload auto-detects, and a
 	// typed referenced credential can fall back to its primary field.
+	//
+	// It modifies a reference rather than standing alone, so a source-level value
+	// applies only while it still describes the payload being fetched: not when the
+	// source names a secret_spec and a spec on it overrides that with a different
+	// one. See sourceModifiersApply.
 	ConfigSecretField = "secret_field"
 
 	// MaxSecretChainDepth bounds chaining: a referenced secret-spec may not itself
@@ -32,6 +37,11 @@ const (
 	// rotation-sensitive referenced secret such as a single-use refresh token). When
 	// set, the fetched material is shared across a caller's requests (per agent
 	// identity, and per user when the referenced fetch is user-scoped) for the TTL.
+	//
+	// Like ConfigSecretField it modifies a reference: a caching policy is chosen for
+	// one secret's rotation profile, so a source-level value does not carry onto a
+	// spec that overrode the source's secret_spec with a different one. See
+	// sourceModifiersApply.
 	ConfigSecretCacheTTL = "secret_cache_ttl"
 )
 
