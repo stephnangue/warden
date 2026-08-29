@@ -34,18 +34,8 @@ func TestOVHKeysCredType_ValidateConfig_OVHSource(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "valid: dynamic_s3",
-			config:  map[string]string{"mint_method": "dynamic_s3"},
-			wantErr: false,
-		},
-		{
-			name:    "valid: oauth2_token_and_s3",
-			config:  map[string]string{"mint_method": "oauth2_token_and_s3"},
-			wantErr: false,
-		},
-		{
-			name:    "valid: dynamic_s3 with project_id and user_id overrides",
-			config:  map[string]string{"mint_method": "dynamic_s3", "project_id": "proj-123", "user_id": "user-456"},
+			name:    "valid: access_keys naming the spec that yields its pair",
+			config:  map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ovh-pair"},
 			wantErr: false,
 		},
 		{
@@ -59,6 +49,57 @@ func TestOVHKeysCredType_ValidateConfig_OVHSource(t *testing.T) {
 			config:  map[string]string{"mint_method": "static_keys"},
 			wantErr: true,
 			errMsg:  "mint_method",
+		},
+		{
+			// Removed: it created an object-storage pair that outlived every lease.
+			name:    "invalid: dynamic_s3 is no longer a mint method",
+			config:  map[string]string{"mint_method": "dynamic_s3"},
+			wantErr: true,
+			errMsg:  "mint_method",
+		},
+		{
+			name:    "invalid: oauth2_token_and_s3 is no longer a mint method",
+			config:  map[string]string{"mint_method": "oauth2_token_and_s3"},
+			wantErr: true,
+			errMsg:  "mint_method",
+		},
+		{
+			// Nothing mints the pair, so without a reference there is none to serve.
+			name:    "invalid: access_keys without a reference",
+			config:  map[string]string{"mint_method": "access_keys"},
+			wantErr: true,
+			errMsg:  credential.ConfigSecretSpec,
+		},
+		{
+			// A pair parked in spec config is the standing secret this method exists
+			// to avoid, and nothing here would ever rotate it.
+			name: "invalid: access_keys with an inline pair",
+			config: map[string]string{
+				"mint_method": "access_keys", credential.ConfigSecretSpec: "ovh-pair",
+				"access_key": "a", "secret_key": "b",
+			},
+			wantErr: true,
+			errMsg:  "must be omitted for access_keys",
+		},
+		{
+			// secret_field selects one secret, and a pair is not one.
+			name: "invalid: access_keys with a secret_field",
+			config: map[string]string{
+				"mint_method": "access_keys", credential.ConfigSecretSpec: "ovh-pair",
+				credential.ConfigSecretField: "secret_key",
+			},
+			wantErr: true,
+			errMsg:  "does not apply to access_keys",
+		},
+		{
+			// The grant runs with the source's service account, so a reference here
+			// would describe a secret this spec never spends.
+			name: "invalid: oauth2_token with a spec-level reference",
+			config: map[string]string{
+				"mint_method": "oauth2_token", credential.ConfigSecretSpec: "ovh-client-cred",
+			},
+			wantErr: true,
+			errMsg:  "belongs on the source",
 		},
 	}
 	for _, tt := range tests {

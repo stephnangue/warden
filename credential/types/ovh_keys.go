@@ -28,18 +28,9 @@ func (t *OVHKeysCredType) Metadata() credential.TypeMetadata {
 func (t *OVHKeysCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
 		credential.StringField("mint_method").
-			OneOf("oauth2_token", "dynamic_s3", "oauth2_token_and_s3").
+			OneOf("oauth2_token", "access_keys").
 			Describe("Mint method for credential minting").
 			Example("oauth2_token"),
-
-		// Per-spec overrides for S3 user targeting
-		credential.StringField("project_id").
-			Describe("Public Cloud project ID (overrides source default, required for dynamic_s3/oauth2_token_and_s3)").
-			Example("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
-
-		credential.StringField("user_id").
-			Describe("Public Cloud user ID (overrides source default, required for dynamic_s3/oauth2_token_and_s3)").
-			Example("12345"),
 	}
 }
 
@@ -56,10 +47,37 @@ func (t *OVHKeysCredType) ValidateConfig(config map[string]string, sourceType st
 
 	mintMethod := config["mint_method"]
 	switch mintMethod {
-	case "oauth2_token", "dynamic_s3", "oauth2_token_and_s3":
-		// Valid — driver handles the rest
+	case "oauth2_token":
+		// The grant runs with the source's service account, so a reference parked
+		// here would describe a secret this spec never spends — and would slip past
+		// the source-level checks that gate which sources may chain at all.
+		if config[credential.ConfigSecretSpec] != "" {
+			return fmt.Errorf("for an oauth2_token spec, '%s' belongs on the source: the client credential authenticates the source's own OAuth2 calls, not this spec", credential.ConfigSecretSpec)
+		}
+
+	case "access_keys":
+		// The pair is the credential itself, so the spec must name where it comes
+		// from. Nothing mints it: this method exists precisely so that no key pair
+		// is created — and therefore left behind — on OVH's side.
+		if config[credential.ConfigSecretSpec] == "" {
+			return fmt.Errorf("'access_keys' requires '%s' naming a spec that yields its access_key and secret_key", credential.ConfigSecretSpec)
+		}
+		// Refuse an inline pair rather than quietly preferring one over the other:
+		// a key pair sitting in spec config is the standing secret this method
+		// exists to avoid, and nothing here would ever rotate it.
+		for _, key := range []string{"access_key", "secret_key"} {
+			if config[key] != "" {
+				return fmt.Errorf("'%s' must be omitted for access_keys; the referenced spec supplies the whole pair", key)
+			}
+		}
+		// secret_field selects a single secret, and a pair is not one. Both halves
+		// are read by name, so a field here could only be misleading.
+		if config[credential.ConfigSecretField] != "" {
+			return fmt.Errorf("'%s' does not apply to access_keys: the referenced credential must hold both 'access_key' and 'secret_key', read by name", credential.ConfigSecretField)
+		}
+
 	default:
-		return fmt.Errorf("'mint_method' must be 'oauth2_token', 'dynamic_s3', or 'oauth2_token_and_s3', got: %s", mintMethod)
+		return fmt.Errorf("'mint_method' must be 'oauth2_token' or 'access_keys', got: %s", mintMethod)
 	}
 
 	return nil
@@ -108,8 +126,9 @@ func (t *OVHKeysCredType) Parse(rawData, metadata map[string]interface{}, leaseT
 		LeaseID:  leaseID,
 		IssuedAt: time.Now(),
 		// Revoking means releasing a lease at the source, which needs a handle to
-		// release. The OVH driver's bare OAuth2-token path returns no leaseID; the
-		// S3 paths carry one.
+		// release. No OVH mint method returns one: a bearer token expires on its
+		// own, and an access_keys pair was never created here to be deleted. The
+		// condition stays because the field is what the rest of the system reads.
 		Revocable: leaseTTL > 0 && leaseID != "",
 		Data:      data,
 		Metadata:  meta,

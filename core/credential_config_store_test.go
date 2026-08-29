@@ -2433,3 +2433,69 @@ func TestCredentialConfigStore_ValidateSpec_ReleasesTestMintLease(t *testing.T) 
 		assert.Empty(t, factory.revoked)
 	})
 }
+
+// An OVH source and its specs chain at different levels, and the level is what
+// says which secret is meant. The source's reference, when it has one, describes
+// the service account it performs the grant with; an access_keys spec's reference
+// describes the object-storage pair that IS its credential. Getting that wrong
+// would serve a caller the wrong secret entirely, so the placement is enforced
+// rather than inferred.
+func TestCredentialConfigStore_OVHChaining(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+
+	for _, name := range []string{"ovh-client-cred", "ovh-pair"} {
+		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+			Name: name, Type: "vault_token", Source: "src",
+			Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+		}))
+	}
+
+	// A source that only ever serves access_keys specs performs no grant, so it
+	// needs no service account and no chain of its own.
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "ovh-src", Type: credential.SourceTypeOVH,
+		Config: map[string]string{"ovh_endpoint": "ovh-eu"},
+	}))
+
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "ovh-s3", Type: credential.TypeOVHKeys, Source: "ovh-src",
+		Config: map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ovh-pair"},
+	}))
+
+	// The referenced spec is now load-bearing for a live spec and cannot be
+	// deleted out from under it.
+	require.ErrorIs(t, store.DeleteSpec(ctx, "ovh-pair"), ErrSpecInUse)
+
+	t.Run("an access_keys spec may not ride a source-level reference", func(t *testing.T) {
+		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+			Name: "ovh-keyless", Type: credential.SourceTypeOVH,
+			Config: map[string]string{credential.ConfigSecretSpec: "ovh-client-cred"},
+		}))
+
+		// Inheriting the source's chain would hand this spec the client credential,
+		// which is not the pair it describes.
+		err := store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "ovh-s3-inheriting", Type: credential.TypeOVHKeys, Source: "ovh-keyless",
+			Config: map[string]string{"mint_method": "access_keys"},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must set its own secret_spec")
+
+		// Naming its own reference is fine on the very same source.
+		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "ovh-s3-own", Type: credential.TypeOVHKeys, Source: "ovh-keyless",
+			Config: map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ovh-pair"},
+		}))
+	})
+
+	t.Run("a chained spec cannot also carry a rotation period", func(t *testing.T) {
+		err := store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "ovh-s3-rotating", Type: credential.TypeOVHKeys, Source: "ovh-src",
+			Config:         map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ovh-pair"},
+			RotationPeriod: time.Hour,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rotation_period")
+	})
+}

@@ -55,8 +55,10 @@ func TestRevocableRequiresLeaseID(t *testing.T) {
 			leaseID:   "ibm/creds/role/abc123",
 		},
 		{
-			// The OVH driver's bare OAuth2-token path returns no leaseID; its S3
-			// paths carry one.
+			// No OVH mint path returns a leaseID: a bearer token expires on its own,
+			// and an access_keys pair was never created here to be deleted. The row
+			// still passes a leaseID so the invariant is asserted rather than left
+			// to whichever paths happen to exist.
 			name:      "ovh_keys",
 			reachable: true,
 			credType:  &OVHKeysCredType{},

@@ -1070,6 +1070,17 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 			credential.GetString(spec.Config, "mint_method", "") == "static_keys" {
 			return logical.ErrBadRequestf("a static_keys spec on a chained scaleway source (secret_spec %q) must set its own secret_spec naming a spec that yields its access_key and secret_key; the source's chained secret is a management key, not this credential", chainedRef)
 		}
+		// An access_keys spec's credential is the key pair the referenced spec
+		// yields, so the reference has to be its own. Reached by a source-level one
+		// it would be handed whatever that source authenticates with — a client
+		// credential, not this pair. (A spec that names its own is not here:
+		// chainedRef would be that one, and the type validator has already refused
+		// it any inline pair.)
+		if source.Type == credential.SourceTypeOVH &&
+			spec.Config[credential.ConfigSecretSpec] == "" &&
+			credential.GetString(spec.Config, "mint_method", "") == "access_keys" {
+			return logical.ErrBadRequestf("an access_keys spec must set its own secret_spec naming a spec that yields its access_key and secret_key; the source's chained secret (%q) is a client credential, not this pair", chainedRef)
+		}
 		// A chained consumer's identity normally flows through the referenced secret-spec,
 		// so its own subject/actor exchange config would be dead — reject that confusing
 		// combination. The token_exchange driver is the exception: it is itself an
