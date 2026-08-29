@@ -62,22 +62,20 @@ const nav = [
           <div>
             <h1>The secure gateway for the AI agent era</h1>
             <p class="sub">
-              Manage what your AI agents can reach and stop credentials from ever landing in
-              their hands, with identity-based access for every MCP server, cloud, code host,
-              database, and SaaS your agents now touch.
+              Decide what every AI agent may do, call by call, across every MCP server, cloud,
+              code host, database, and SaaS it touches.
             </p>
             <div class="hero-actions">
               <a class="btn btn-primary" href="/concepts/">Get started</a>
               <a class="btn btn-on-dark" href={github}>View on GitHub</a>
             </div>
             <p class="hero-note">
-              No session-scoped access. Your agent names a role on every single request, and
-              Warden authorizes every one.
+              Your agent names a role on every request, and Warden authorizes every one.
             </p>
           </div>
 
           <div class="hero-visual">
-            <svg class="flow" viewBox="0 0 340 366" role="img" aria-label="An AI agent presents its own identity and the identity of the user it acts for to Warden, which authenticates them, authorizes the call, mints a fresh short-lived credential, and proxies the request to upstream systems.">
+            <svg class="flow" viewBox="0 0 340 366" role="img" aria-label="On each request an AI agent asserts a role, presenting its own identity and the identity of the user it acts for to Warden, which authenticates them, authorizes the call, mints a fresh short-lived credential, and proxies the request to upstream systems.">
               <defs>
                 <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
                   <path d="M0 0 L10 5 L0 10 z" fill="#cdd4e6" />
@@ -85,7 +83,7 @@ const nav = [
               </defs>
               <rect class="box" x="60" y="14" width="220" height="72" rx="12" />
               <text class="t" x="170" y="46">AI Agent</text>
-              <text class="s" x="170" y="66">presents agent + user identity</text>
+              <text class="s" x="170" y="66">assert a role per request</text>
 
               <line class="line" x1="170" y1="90" x2="170" y2="142" marker-end="url(#ar)" />
               <text class="e" x="150" y="120" style="text-anchor:end">agent identity</text>
@@ -127,12 +125,11 @@ const nav = [
                 <p>
                   A short-lived token is still a secret in the agent's environment — just one
                   that expires. Warden removes it. The agent holds no upstream key: it presents
-                  only identities — its own, and (when it acts for someone) the user's — and Warden
-                  authenticates them, mints a scoped credential, and injects it on the way through.
-                  Jailbroken or prompt-injected, it has nothing to exfiltrate, because it never held
-                  anything. And in its keyless modes the gateway is no honeypot in its place:
-                  federation lets Warden hold no standing secret, and chaining fetches what it needs
-                  from an external vault per request — so there is no key-trove to breach.
+                  only identities — its own, and the user's when it acts for someone — and
+                  Warden mints a scoped credential and injects it on the way through.
+                  Jailbroken or prompt-injected, it has nothing to exfiltrate. Nor does the
+                  gateway become the honeypot: federation leaves Warden no standing secret, and
+                  chaining fetches each credential from an external vault per request.
                 </p>
                 <a class="pillar-link" href="/concepts/credentials/">How credentials work <span class="arw" aria-hidden="true">→</span></a>
               </div>
@@ -157,24 +154,70 @@ const nav = [
                 </svg>
               </div>
             </article>
-
             <article class="pillar">
               <div class="pillar-copy">
-                <p class="pillar-tag">Beyond a shared service identity</p>
+                <p class="pillar-tag">A role per request, not per session</p>
+                <h3>The role is asserted on every call — never held</h3>
+                <p>
+                  Assuming a role elsewhere means holding one: cloud STS hands back session
+                  credentials good for an hour, carried everywhere until they expire. Warden
+                  hands over nothing. The agent names a role on each request — reading a repo
+                  under one, pushing under another — and every call is re-authorized against
+                  that role's policy, with its own freshly minted credential. Nothing
+                  accumulates on the session; there is no assumed role to steal, and each role
+                  shows the agent only the tools it allows.
+                </p>
+                <a class="pillar-link" href="/concepts/roles/">How roles work <span class="arw" aria-hidden="true">→</span></a>
+              </div>
+              <div class="pillar-visual">
+                <svg viewBox="0 0 320 190" role="img" aria-label="A table of three consecutive requests on the same connection. Request 1 asserts the role read-repo, request 2 asserts push-repo, request 3 asserts send-message, and Warden mints a new credential for each one.">
+                  <g font-family="sans-serif" font-weight="700" font-size="7.5" fill="#5b6478" letter-spacing="0.5" text-anchor="middle">
+                    <text x="44" y="24">REQUEST</text>
+                    <text x="135" y="24">ROLE ASSERTED</text>
+                    <text x="248" y="24">WARDEN MINTS</text>
+                  </g>
+                  <g font-family="sans-serif">
+                    <rect x="14" y="36" width="292" height="36" rx="9" fill="#f6f7f9" stroke="#cbd2e0" stroke-width="1.3" />
+                    <circle cx="44" cy="54" r="11" fill="#0b1020" />
+                    <text x="44" y="58" text-anchor="middle" fill="#fff" font-weight="700" font-size="11">1</text>
+                    <text x="135" y="58" text-anchor="middle" fill="#1a2233" font-size="11.5" font-weight="600">read-repo</text>
+                    <rect x="200" y="44" width="96" height="20" rx="10" fill="#fff" stroke="#cbd2e0" stroke-width="1.2" />
+                    <text x="248" y="58" text-anchor="middle" fill="#1a2233" font-size="9">a new credential</text>
+
+                    <rect x="14" y="78" width="292" height="36" rx="9" fill="#f6f7f9" stroke="#cbd2e0" stroke-width="1.3" />
+                    <circle cx="44" cy="96" r="11" fill="#0b1020" />
+                    <text x="44" y="100" text-anchor="middle" fill="#fff" font-weight="700" font-size="11">2</text>
+                    <text x="135" y="100" text-anchor="middle" fill="#1a2233" font-size="11.5" font-weight="600">push-repo</text>
+                    <rect x="200" y="86" width="96" height="20" rx="10" fill="#fff" stroke="#cbd2e0" stroke-width="1.2" />
+                    <text x="248" y="100" text-anchor="middle" fill="#1a2233" font-size="9">a new credential</text>
+
+                    <rect x="14" y="120" width="292" height="36" rx="9" fill="#f6f7f9" stroke="#cbd2e0" stroke-width="1.3" />
+                    <circle cx="44" cy="138" r="11" fill="#0b1020" />
+                    <text x="44" y="142" text-anchor="middle" fill="#fff" font-weight="700" font-size="11">3</text>
+                    <text x="135" y="142" text-anchor="middle" fill="#1a2233" font-size="11.5" font-weight="600">send-message</text>
+                    <rect x="200" y="128" width="96" height="20" rx="10" fill="#fff" stroke="#cbd2e0" stroke-width="1.2" />
+                    <text x="248" y="142" text-anchor="middle" fill="#1a2233" font-size="9">a new credential</text>
+                  </g>
+                  <text x="160" y="171" text-anchor="middle" fill="#5b6478" font-family="sans-serif" font-size="8.5">each one authorized on its own · nothing carried over to the next</text>
+                </svg>
+              </div>
+            </article>
+            <article class="pillar">
+              <div class="pillar-copy">
+                <p class="pillar-tag">From impersonation to delegation</p>
                 <h3>One agent — and every user is still themselves</h3>
                 <p>
                   An agent often acts for many people at once. Warden carries each person's
                   verified identity alongside the agent's, so the upstream authorizes the real
-                  human — with their own scope — and every action is attributed to them, not a
-                  shared service account. One agent connects to every system; the person behind
-                  each request is never collapsed into it. It works even for systems with no
-                  built-in way to act on someone's behalf, and scales to a whole fleet of users
-                  without a role per person.
+                  human — the agent acting for them, not as them — and every action is
+                  attributed to the person, not to a shared service account.
+                  It works even where the upstream has no built-in way to act on someone's
+                  behalf, and scales to thousands of users without a role for each one.
                 </p>
-                <a class="pillar-link" href="/use-cases/per-user-access/">See per-user access <span class="arw" aria-hidden="true">→</span></a>
+                <a class="pillar-link" href="/concepts/delegation/">How delegation works <span class="arw" aria-hidden="true">→</span></a>
               </div>
               <div class="pillar-visual">
-                <svg viewBox="0 0 320 190" role="img" aria-label="Three users each keep their own identity; a single agent carries each identity through Warden to every system, where each user is authorized and audited as themselves.">
+                <svg viewBox="0 0 320 190" role="img" aria-label="Three users each keep their own identity. One agent carries its own identity together with each user's out to every system, so a request names both the agent and the person it acts for, and each user is authorized and audited as themselves.">
                   <!-- users converge into the agent -->
                   <line x1="35" y1="44" x2="112" y2="86" stroke="#cbd2e0" stroke-width="1.6" />
                   <line x1="35" y1="95" x2="112" y2="95" stroke="#cbd2e0" stroke-width="1.6" />
@@ -205,118 +248,34 @@ const nav = [
                     <text x="22" y="152" text-anchor="middle">C</text>
                   </g>
                   <text x="22" y="176" text-anchor="middle" fill="#5b6478" font-family="sans-serif" font-size="8" letter-spacing="0.5">USERS</text>
-                  <!-- the same identities, carried through the one agent -->
+                  <!-- both principals travel: the agent's own identity beside each user's -->
                   <g font-family="sans-serif" font-weight="700" font-size="8" fill="#1a2233">
-                    <circle cx="206" cy="78" r="8" fill="#fff" stroke="#1a2233" stroke-width="1.3" />
-                    <text x="206" y="81" text-anchor="middle">A</text>
-                    <circle cx="206" cy="95" r="8" fill="#fff" stroke="#1a2233" stroke-width="1.3" />
-                    <text x="206" y="98" text-anchor="middle">B</text>
-                    <circle cx="206" cy="112" r="8" fill="#fff" stroke="#1a2233" stroke-width="1.3" />
-                    <text x="206" y="115" text-anchor="middle">C</text>
+                    <circle cx="191" cy="78" r="5.5" fill="#0b1020" />
+                    <circle cx="210" cy="78" r="8" fill="#fff" stroke="#1a2233" stroke-width="1.3" />
+                    <text x="210" y="81" text-anchor="middle">A</text>
+                    <circle cx="191" cy="95" r="5.5" fill="#0b1020" />
+                    <circle cx="210" cy="95" r="8" fill="#fff" stroke="#1a2233" stroke-width="1.3" />
+                    <text x="210" y="98" text-anchor="middle">B</text>
+                    <circle cx="191" cy="112" r="5.5" fill="#0b1020" />
+                    <circle cx="210" cy="112" r="8" fill="#fff" stroke="#1a2233" stroke-width="1.3" />
+                    <text x="210" y="115" text-anchor="middle">C</text>
                   </g>
+                  <text x="201" y="134" text-anchor="middle" fill="#5b6478" font-family="sans-serif" font-size="7.5">agent + user</text>
                   <text x="280" y="155" text-anchor="middle" fill="#5b6478" font-family="sans-serif" font-size="8">authorized &amp; audited</text>
                   <text x="280" y="166" text-anchor="middle" fill="#5b6478" font-family="sans-serif" font-size="8">as the real user</text>
                 </svg>
               </div>
             </article>
-
             <article class="pillar">
               <div class="pillar-copy">
-                <p class="pillar-tag">Beyond static API specs</p>
-                <h3>Agents discover exactly what they can call</h3>
-                <p>
-                  An MCP server advertises its tools; a plain REST API just hands over a
-                  sprawling spec and leaves the agent to guess. Warden gives every non-MCP
-                  system the same treatment — the agent asks what it can do and gets back only
-                  the endpoints its policy allows, each with a schema scoped to the arguments it
-                  may pass. Fewer failed calls, and no ten-thousand-line spec stuffed into the
-                  context window.
-                </p>
-                <a class="pillar-link" href="/concepts/discovery-and-skills/">How discovery works <span class="arw" aria-hidden="true">→</span></a>
-              </div>
-              <div class="pillar-visual">
-                <svg viewBox="0 0 320 190" role="img" aria-label="A discovery response lists only the endpoints the agent may call, each with a schema scoped to the arguments it may pass; disallowed endpoints stay hidden.">
-                  <rect x="24" y="16" width="272" height="158" rx="12" fill="#fff" stroke="#cbd2e0" stroke-width="1.5" />
-                  <text x="44" y="42" fill="#5b6478" font-family="sans-serif" font-weight="700" font-size="10.5" letter-spacing="0.6">DISCOVER · what can I use?</text>
-                  <line x1="44" y1="52" x2="276" y2="52" stroke="#e6e8ee" stroke-width="1.3" />
-                  <g font-family="sans-serif" font-size="12">
-                    <rect x="44" y="64" width="232" height="28" rx="7" fill="#f6f7f9" stroke="#cbd2e0" stroke-width="1.2" />
-                    <text x="56" y="82" fill="#1a2233">POST /deploy</text>
-                    <text x="264" y="82" text-anchor="end" fill="#e01e1e" font-size="10.5">{"{ env, region }"}</text>
-                    <rect x="44" y="100" width="232" height="28" rx="7" fill="#f6f7f9" stroke="#cbd2e0" stroke-width="1.2" />
-                    <text x="56" y="118" fill="#1a2233">GET /logs</text>
-                    <text x="264" y="118" text-anchor="end" fill="#e01e1e" font-size="10.5">{"{ service }"}</text>
-                    <rect x="44" y="136" width="232" height="28" rx="7" fill="#fff" stroke="#e6e8ee" stroke-width="1.2" stroke-dasharray="4 4" />
-                    <text x="56" y="154" fill="#b6bccb">DELETE /records</text>
-                    <text x="264" y="154" text-anchor="end" fill="#b6bccb" font-size="10.5">not exposed</text>
-                  </g>
-                </svg>
-              </div>
-            </article>
-
-            <article class="pillar">
-              <div class="pillar-copy">
-                <p class="pillar-tag">A role per request, not per session</p>
-                <h3>The role is asserted on every call — never held</h3>
-                <p>
-                  Assuming a role elsewhere means holding one: cloud STS hands back session
-                  credentials good for an hour, and until they expire the agent carries that
-                  authority everywhere it goes. Warden hands over nothing. The agent names a
-                  role on each individual request — reading a repo under one, pushing under
-                  another, posting to Slack under a third, down the same connection without
-                  re-authenticating — and Warden re-verifies its identity, re-resolves that
-                  role's policy, and mints a fresh credential for that one call. Nothing
-                  accumulates on the session, so there is no assumed role sitting there to
-                  steal or wander around inside. And each role exposes only the tools its
-                  policy allows — the rest aren't just blocked, they're invisible.
-                </p>
-                <a class="pillar-link" href="/concepts/roles/">How roles work <span class="arw" aria-hidden="true">→</span></a>
-              </div>
-              <div class="pillar-visual">
-                <svg viewBox="0 0 320 190" role="img" aria-label="Three consecutive requests travel down one connection under one identity; each names a different role — read-repo, then push-repo, then send-message — and each is re-authorized on its own and handed its own fresh credential.">
-                  <text x="160" y="16" text-anchor="middle" fill="#5b6478" font-family="sans-serif" font-weight="700" font-size="10" letter-spacing="0.5">SAME CONNECTION · SAME IDENTITY</text>
-                  <line x1="26" y1="34" x2="26" y2="162" stroke="#0b1020" stroke-width="2" stroke-linecap="round" />
-                  <g stroke="#cbd2e0" stroke-width="1.5">
-                    <line x1="26" y1="55" x2="44" y2="55" />
-                    <line x1="26" y1="99" x2="44" y2="99" />
-                    <line x1="26" y1="143" x2="44" y2="143" />
-                  </g>
-                  <g font-family="sans-serif">
-                    <rect x="44" y="36" width="262" height="38" rx="9" fill="#f6f7f9" stroke="#cbd2e0" stroke-width="1.3" />
-                    <circle cx="66" cy="55" r="10" fill="#0b1020" />
-                    <text x="66" y="59" text-anchor="middle" fill="#fff" font-weight="700" font-size="11">1</text>
-                    <text x="86" y="59" fill="#1a2233" font-size="12" font-weight="600">read-repo</text>
-                    <circle cx="284" cy="55" r="8" fill="#0b1020" />
-                    <path d="M280 55 l3 3 l5 -6" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round" />
-
-                    <rect x="44" y="80" width="262" height="38" rx="9" fill="#f6f7f9" stroke="#cbd2e0" stroke-width="1.3" />
-                    <circle cx="66" cy="99" r="10" fill="#0b1020" />
-                    <text x="66" y="103" text-anchor="middle" fill="#fff" font-weight="700" font-size="11">2</text>
-                    <text x="86" y="103" fill="#1a2233" font-size="12" font-weight="600">push-repo</text>
-                    <circle cx="284" cy="99" r="8" fill="#0b1020" />
-                    <path d="M280 99 l3 3 l5 -6" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round" />
-
-                    <rect x="44" y="124" width="262" height="38" rx="9" fill="#f6f7f9" stroke="#cbd2e0" stroke-width="1.3" />
-                    <circle cx="66" cy="143" r="10" fill="#0b1020" />
-                    <text x="66" y="147" text-anchor="middle" fill="#fff" font-weight="700" font-size="11">3</text>
-                    <text x="86" y="147" fill="#1a2233" font-size="12" font-weight="600">send-message</text>
-                    <circle cx="284" cy="143" r="8" fill="#0b1020" />
-                    <path d="M280 143 l3 3 l5 -6" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round" />
-                  </g>
-                  <text x="160" y="180" text-anchor="middle" fill="#5b6478" font-family="sans-serif" font-size="9">each request re-authorized · its own fresh credential · nothing carried over</text>
-                </svg>
-              </div>
-            </article>
-
-            <article class="pillar">
-              <div class="pillar-copy">
-                <p class="pillar-tag">Beyond scope-based access</p>
+                <p class="pillar-tag">A scope only opens the door</p>
                 <h3>Authorize every call, down to the argument</h3>
                 <p>
-                  OAuth scopes and IAM roles hand out broad, session-wide access, then trust the
-                  agent to stay inside it. Warden decides each call as it happens — which action,
-                  which tool, which arguments, and on whose behalf it acts. Least privilege on
-                  every request, never a coarse grant the agent can wander around inside.
+                  A scope that grants write access to repositories names a category of action,
+                  not the action itself, and then trusts the agent to stay inside it. Warden
+                  decides the call instead: which tool, with which arguments, against which
+                  resource. Deploying to staging goes through; the same tool aimed at production
+                  does not — a line drawn at the gateway, not asked of the model.
                 </p>
                 <a class="pillar-link" href="/concepts/policies/">How policies work <span class="arw" aria-hidden="true">→</span></a>
               </div>
@@ -338,6 +297,39 @@ const nav = [
                     <path d="M60 129 l8 8 M68 129 l-8 8" stroke="#fff" stroke-width="1.8" fill="none" stroke-linecap="round" />
                     <text x="84" y="137" fill="#1a2233">env = "production"</text>
                     <text x="266" y="137" text-anchor="end" fill="#e01e1e" font-size="10.5">blocked</text>
+                  </g>
+                </svg>
+              </div>
+            </article>
+            <article class="pillar">
+              <div class="pillar-copy">
+                <p class="pillar-tag">Discovery for every system</p>
+                <h3>Agents discover exactly what they can call</h3>
+                <p>
+                  An MCP server can tell an agent what tools it offers. A REST API can't: it
+                  hands over a sprawling spec and leaves the agent to guess which parts it may
+                  touch. Warden answers the question for both — the agent asks what it can do
+                  here and gets back a short, typed list of exactly the calls it may make, each
+                  schema narrowed to the arguments it may pass. Fewer failed calls, and no
+                  ten-thousand-line spec stuffed into the context window.
+                </p>
+                <a class="pillar-link" href="/concepts/discovery-and-skills/">How discovery works <span class="arw" aria-hidden="true">→</span></a>
+              </div>
+              <div class="pillar-visual">
+                <svg viewBox="0 0 320 190" role="img" aria-label="A discovery response lists only the endpoints the agent may call, each with a schema scoped to the arguments it may pass; disallowed endpoints stay hidden.">
+                  <rect x="24" y="16" width="272" height="158" rx="12" fill="#fff" stroke="#cbd2e0" stroke-width="1.5" />
+                  <text x="44" y="42" fill="#5b6478" font-family="sans-serif" font-weight="700" font-size="10.5" letter-spacing="0.6">DISCOVER · what can I use?</text>
+                  <line x1="44" y1="52" x2="276" y2="52" stroke="#e6e8ee" stroke-width="1.3" />
+                  <g font-family="sans-serif" font-size="12">
+                    <rect x="44" y="64" width="232" height="28" rx="7" fill="#f6f7f9" stroke="#cbd2e0" stroke-width="1.2" />
+                    <text x="56" y="82" fill="#1a2233">POST /deploy</text>
+                    <text x="264" y="82" text-anchor="end" fill="#e01e1e" font-size="10.5">{"{ env, region }"}</text>
+                    <rect x="44" y="100" width="232" height="28" rx="7" fill="#f6f7f9" stroke="#cbd2e0" stroke-width="1.2" />
+                    <text x="56" y="118" fill="#1a2233">GET /logs</text>
+                    <text x="264" y="118" text-anchor="end" fill="#e01e1e" font-size="10.5">{"{ service }"}</text>
+                    <rect x="44" y="136" width="232" height="28" rx="7" fill="#fff" stroke="#e6e8ee" stroke-width="1.2" stroke-dasharray="4 4" />
+                    <text x="56" y="154" fill="#b6bccb">DELETE /records</text>
+                    <text x="264" y="154" text-anchor="end" fill="#b6bccb" font-size="10.5">not exposed</text>
                   </g>
                 </svg>
               </div>
