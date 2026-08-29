@@ -348,6 +348,26 @@ vault_api POST "secret/data/e2e/gitlab-pat" \
 vault_api POST "secret/data/e2e/gitlab-app-secret" \
   '{"data":{"application_id":"e2e-gl-app-id","application_secret":"e2e-gl-app-secret-not-a-real-secret"}}'
 
+# The management secret key a keyless scaleway source creates dynamic API keys
+# with. Chained like the gitlab pat above and spent the same way — on a header of
+# the driver's own mint call, X-Auth-Token on POST /iam/v1alpha1/api-keys — so
+# the dynamic row in e2e/fullchain/scaleway_test.go proves this value
+# authenticated a real key-create, having reached the driver from here and
+# nowhere else.
+vault_api POST "secret/data/e2e/scaleway-mgmt-key" \
+  '{"data":{"management_secret_key":"e2e-scw-mgmt-not-a-real-secret-key"}}'
+
+# A whole scaleway key pair, for the chain that hangs off a SPEC rather than a
+# source. Scaleway is the one provider whose two mint methods chain different
+# secrets: dynamic_keys chains the management key above, which authenticates the
+# source's own calls, while static_keys chains this pair, which IS the
+# credential and authenticates nothing of the source's.
+#
+# Both halves travel for that reason, and the access key carries the SCW prefix
+# because the credential type refuses anything else at parse — chained or not.
+vault_api POST "secret/data/e2e/scaleway-static-pair" \
+  '{"data":{"access_key":"SCWE2ECHAINEDPAIR000","secret_key":"e2e-scw-chained-pair-not-a-real-secret"}}'
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \
@@ -565,6 +585,60 @@ else
   echo "  $ISSUER_RESULT"
   exit 1
 fi
+
+# 9k. A second Vault JWT auth mount, trusting WARDEN'S OWN issuer.
+#
+# Until now every chained suite has had to use subject_token_source=
+# agent_identity, because the only Vault JWT mount trusts Hydra: a Warden-minted
+# assertion fails its signature, its iss, its sub and its aud. warden_identity —
+# the mode for a spec with no inbound agent JWT to forward — went untested.
+#
+# Static keys rather than a jwks_url, on purpose. Vault would otherwise have to
+# fetch the JWKS from a Warden node, and no compose-network path to one exists:
+# only nginx carries a host-gateway mapping. But the issuer's signing keys live
+# in THIS Vault's transit engine already (the signer stanza in every node's
+# config), so the public halves are readable right here with no network hop and
+# no certificate to pin.
+#
+# Every transit version is pinned, not just the newest: enabling the issuer
+# pre-publishes the next key alongside the active one, so pinning one would
+# start rejecting assertions the moment a cutover happened.
+#
+# This must follow 9j — the transit keys exist only once that write has run.
+echo "  Enabling Vault JWT auth for Warden-issued assertions..."
+vault_api POST "sys/auth/jwt-warden" '{"type":"jwt"}' >/dev/null
+
+WARDEN_JWT_CONFIG=$(vault_api GET "transit/keys/warden-oidc-rs256" | python3 -c "
+import sys, json
+keys = json.load(sys.stdin)['data']['keys']
+pems = [v['public_key'] for _, v in sorted(keys.items(), key=lambda kv: int(kv[0]))]
+if not pems:
+    raise SystemExit(1)
+print(json.dumps({
+    'jwt_validation_pubkeys': pems,
+    'bound_issuer': 'https://127.0.0.1:8000',
+    'jwt_supported_algs': ['RS256'],
+}))
+" 2>/dev/null || true)
+if [ -z "$WARDEN_JWT_CONFIG" ]; then
+  echo "ERROR: could not read the OIDC issuer's public keys from Vault transit"
+  exit 1
+fi
+vault_api POST "auth/jwt-warden/config" "$WARDEN_JWT_CONFIG" >/dev/null
+
+# bound_audiences is mandatory here where the Hydra role binds sub instead: a
+# Warden assertion always carries an aud, and Vault refuses a JWT whose aud the
+# role does not bind. The subject is bound on warden_sub — the raw principal —
+# rather than sub, whose composite form embeds a mount accessor regenerated on
+# every setup run. Same closed client list as the Hydra role.
+vault_api POST "auth/jwt-warden/role/warden-e2e-warden-fed" \
+  '{"role_type":"jwt","bound_audiences":["https://vault.e2e.warden"],"bound_claims":{"warden_sub":["e2e-agent","e2e-pipeline"]},"user_claim":"warden_sub","token_policies":["e2e-secrets-reader"],"token_ttl":"1h"}' >/dev/null
+
+# The federation source that logs in there. audience sits on the SOURCE so a
+# spec need not repeat assertion_audience: the driver derives it from here.
+echo "  Creating credential source 'vault-warden-fed-e2e' (Warden-identity federation)..."
+warden_api POST "sys/cred/sources/vault-warden-fed-e2e" \
+  "{\"type\":\"hvault\",\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"auth_method\":\"oidc_federation\",\"jwt_role\":\"warden-e2e-warden-fed\",\"jwt_mount\":\"jwt-warden\",\"audience\":\"https://vault.e2e.warden\"}}"
 
 # Step 10: Verify Vault integration
 echo ""
