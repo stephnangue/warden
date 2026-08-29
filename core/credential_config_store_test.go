@@ -2489,6 +2489,18 @@ func TestCredentialConfigStore_OVHChaining(t *testing.T) {
 		}))
 	})
 
+	t.Run("an oauth2_token spec may not carry a reference of its own", func(t *testing.T) {
+		// The grant runs with the source's service account, so a reference here
+		// would describe a secret this spec never spends — and would slip past the
+		// source-level checks that gate which sources may chain at all.
+		err := store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "ovh-token-chained", Type: credential.TypeOVHKeys, Source: "ovh-src",
+			Config: map[string]string{"mint_method": "oauth2_token", credential.ConfigSecretSpec: "ovh-client-cred"},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "set secret_spec on the source")
+	})
+
 	t.Run("a chained spec cannot also carry a rotation period", func(t *testing.T) {
 		err := store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "ovh-s3-rotating", Type: credential.TypeOVHKeys, Source: "ovh-src",

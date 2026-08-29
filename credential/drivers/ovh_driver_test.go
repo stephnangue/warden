@@ -3,9 +3,11 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -485,18 +487,21 @@ func TestOVHDriver_MintFromSecret_IncompletePair(t *testing.T) {
 	}
 }
 
-func TestOVHDriver_MintFromSecret_RefusesOtherMintMethods(t *testing.T) {
+// mint_method is validated at spec create, so an unknown one here means config
+// drifted. The material's meaning is defined by the method, so there is no safe
+// way to spend it.
+func TestOVHDriver_MintFromSecret_RefusesUnknownMintMethod(t *testing.T) {
 	driver := createOVHTestDriver(t, "https://unused", nil)
 
-	spec := &credential.CredSpec{Name: "api-spec", Config: map[string]string{
-		"mint_method":               "oauth2_token",
+	spec := &credential.CredSpec{Name: "drifted", Config: map[string]string{
+		"mint_method":               "dynamic_s3",
 		credential.ConfigSecretSpec: "ovh-pair",
 	}}
 	_, _, _, _, err := driver.MintFromSecret(context.Background(), spec, credential.SecretMaterial{
 		Data: map[string]string{"access_key": "a", "secret_key": "b"},
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "access_keys")
+	assert.Contains(t, err.Error(), "dynamic_s3")
 }
 
 // Routing is the minting layer's job; if a chained spec ever reaches the direct
@@ -519,4 +524,199 @@ func TestOVHDriver_MintCredential_FailsClosedForAccessKeys(t *testing.T) {
 		require.Error(t, err)
 	}
 	assert.Zero(t, calls)
+}
+
+// --- chained client credential tests ---
+
+// ovhChainedTokenServer answers the grant, recording the credential presented.
+func ovhChainedTokenServer(t *testing.T, status int) (*httptest.Server, *url.Values) {
+	t.Helper()
+	posted := &url.Values{}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		*posted = r.PostForm
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "chained-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		}))
+	}))
+	t.Cleanup(server.Close)
+	return server, posted
+}
+
+func ovhChainedDriver(t *testing.T, serverURL string) *OVHDriver {
+	t.Helper()
+	// A chained source holds neither half, so both are cleared.
+	return createOVHTestDriver(t, serverURL, map[string]string{
+		"client_id":                 "",
+		"client_secret":             "",
+		credential.ConfigSecretSpec: "ovh-client-cred",
+	})
+}
+
+func TestOVHDriverFactory_ValidateConfig_Chaining(t *testing.T) {
+	f := &OVHDriverFactory{}
+
+	t.Run("a chained source holds neither half", func(t *testing.T) {
+		assert.NoError(t, f.ValidateConfig(map[string]string{
+			credential.ConfigSecretSpec:  "ovh-client-cred",
+			credential.ConfigSecretField: "client_secret",
+		}))
+	})
+
+	// Keeping either half would leave a source that reads as keyless while storing
+	// the secret chaining removes, or that names one service account while
+	// presenting another's secret.
+	for _, key := range []string{"client_id", "client_secret"} {
+		t.Run("refuses an inline "+key, func(t *testing.T) {
+			err := f.ValidateConfig(map[string]string{
+				credential.ConfigSecretSpec: "ovh-client-cred",
+				key:                         "left-behind",
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), key+" must be omitted")
+		})
+	}
+}
+
+func TestOVHDriver_MintFromSecret_OAuth2Token(t *testing.T) {
+	server, posted := ovhChainedTokenServer(t, http.StatusOK)
+	driver := ovhChainedDriver(t, server.URL)
+	spec := &credential.CredSpec{Name: "api-spec", Config: map[string]string{"mint_method": "oauth2_token"}}
+
+	rawData, _, ttl, leaseID, err := driver.MintFromSecret(context.Background(), spec, credential.SecretMaterial{
+		Data: map[string]string{"client_id": "fetched-id", "client_secret": "fetched-secret"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "chained-token", rawData["api_token"])
+	assert.Equal(t, time.Hour, ttl)
+	assert.Empty(t, leaseID)
+
+	// The grant is made with the fetched pair, not with anything held here.
+	assert.Equal(t, "fetched-id", posted.Get("client_id"))
+	assert.Equal(t, "fetched-secret", posted.Get("client_secret"))
+}
+
+func TestOVHDriver_MintFromSecret_SecretFieldResolution(t *testing.T) {
+	spec := &credential.CredSpec{Name: "api-spec", Config: map[string]string{"mint_method": "oauth2_token"}}
+
+	t.Run("a resolved field wins over the conventional names", func(t *testing.T) {
+		server, posted := ovhChainedTokenServer(t, http.StatusOK)
+		driver := ovhChainedDriver(t, server.URL)
+
+		_, _, _, _, err := driver.MintFromSecret(context.Background(), spec, credential.SecretMaterial{
+			Field: "app_secret",
+			Data: map[string]string{
+				"client_id": "fetched-id", "app_secret": "chosen", "client_secret": "ignored",
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "chosen", posted.Get("client_secret"))
+	})
+
+	for name, data := range map[string]map[string]string{
+		"client_secret": {"client_id": "fetched-id", "client_secret": "by-convention"},
+		"secret":        {"client_id": "fetched-id", "secret": "by-convention"},
+	} {
+		t.Run("falls back to "+name+" when no field resolved", func(t *testing.T) {
+			server, posted := ovhChainedTokenServer(t, http.StatusOK)
+			driver := ovhChainedDriver(t, server.URL)
+
+			_, _, _, _, err := driver.MintFromSecret(context.Background(), spec, credential.SecretMaterial{Data: data})
+			require.NoError(t, err)
+			assert.Equal(t, "by-convention", posted.Get("client_secret"))
+		})
+	}
+
+	// A field that resolved to nothing is a misconfigured secret_field. Falling
+	// back would silently authenticate with some other value from the payload.
+	t.Run("a resolved-but-empty field does not fall back", func(t *testing.T) {
+		driver := ovhChainedDriver(t, "https://unused")
+
+		_, _, _, _, err := driver.MintFromSecret(context.Background(), spec, credential.SecretMaterial{
+			Field: "app_secret",
+			Data:  map[string]string{"client_id": "fetched-id", "client_secret": "not-this-one"},
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+		assert.Contains(t, err.Error(), "app_secret")
+	})
+}
+
+// The id travels with its secret, and a chained source is refused an inline one,
+// so there is nowhere to fall back to.
+func TestOVHDriver_MintFromSecret_MissingClientID(t *testing.T) {
+	driver := ovhChainedDriver(t, "https://unused")
+	spec := &credential.CredSpec{Name: "api-spec", Config: map[string]string{"mint_method": "oauth2_token"}}
+
+	_, _, _, _, err := driver.MintFromSecret(context.Background(), spec, credential.SecretMaterial{
+		Data: map[string]string{"client_secret": "fetched-secret"},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+	assert.Contains(t, err.Error(), "client id")
+}
+
+// A refusal from the token endpoint marks the fetched pair as possibly stale, so
+// the minting layer can evict a cached copy and fetch again. Only on the chained
+// path: with a credential held in config there is nothing to re-fetch.
+func TestOVHDriver_MintFromSecret_RejectionIsRetryable(t *testing.T) {
+	spec := &credential.CredSpec{Name: "api-spec", Config: map[string]string{"mint_method": "oauth2_token"}}
+
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(fmt.Sprintf("chained mint carries the sentinel on %d", status), func(t *testing.T) {
+			server, _ := ovhChainedTokenServer(t, status)
+			driver := ovhChainedDriver(t, server.URL)
+
+			_, _, _, _, err := driver.MintFromSecret(context.Background(), spec, credential.SecretMaterial{
+				Data: map[string]string{"client_id": "fetched-id", "client_secret": "stale"},
+			})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, credential.ErrChainedSecretRejected)
+		})
+
+		t.Run(fmt.Sprintf("direct mint does not, on %d", status), func(t *testing.T) {
+			server, _ := ovhChainedTokenServer(t, status)
+			driver := createOVHTestDriver(t, server.URL, nil)
+
+			_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+			require.Error(t, err)
+			assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+		})
+	}
+}
+
+// Routing is the minting layer's job. A chained source reaching the direct path
+// has no credential held here to fall back to, so it must refuse rather than mint
+// with an empty one.
+func TestOVHDriver_MintCredential_FailsClosedWhenChained(t *testing.T) {
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	driver := ovhChainedDriver(t, server.URL)
+	_, _, _, _, err := driver.MintCredential(context.Background(), &credential.CredSpec{
+		Name: "api-spec", Config: map[string]string{"mint_method": "oauth2_token"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
+	assert.Zero(t, calls)
+}
+
+// A chained source has no service account to check until one is fetched.
+func TestOVHDriver_VerifySpec_ChainedSourceNeedsNoServiceAccount(t *testing.T) {
+	driver := ovhChainedDriver(t, "https://unused")
+	err := driver.VerifySpec(context.Background(), &credential.CredSpec{
+		Name: "api-spec", Config: map[string]string{"mint_method": "oauth2_token"},
+	})
+	assert.NoError(t, err)
 }

@@ -1036,6 +1036,14 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				return logical.ErrBadRequestf("for a gitlab source, set secret_spec on the source (the chained secret — a personal access token, or an OAuth application secret — authenticates the source), not on the spec")
 			case credential.SourceTypeOAuth2:
 				return logical.ErrBadRequestf("for an oauth2 source, set secret_spec on the source (the chained client credential authenticates the source), not on the spec")
+			case credential.SourceTypeOVH:
+				// ovh chains at both levels, and the level says which secret is
+				// meant: an access_keys spec's own reference is the key pair it
+				// serves, while the client credential the grant is made with is a
+				// source concern like the others above.
+				if credential.GetString(spec.Config, "mint_method", "") != "access_keys" {
+					return logical.ErrBadRequestf("for an ovh source, set secret_spec on the source (the chained client credential authenticates the source's own OAuth2 calls), not on the spec; a spec-level reference is for access_keys, whose credential is the referenced pair itself")
+				}
 			}
 		}
 		// An oauth2 source that chains its client credential resolves the pair per mint,
