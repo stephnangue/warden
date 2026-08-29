@@ -1964,6 +1964,97 @@ func TestCredentialConfigStore_FederationRotationGateRunsOnUpdate(t *testing.T) 
 	require.NoError(t, store.validateSource(ctx, updated, false))
 }
 
+// unrotatableFactory opts in to RotationConfigValidator and refuses unless the
+// config names a management user, mirroring how a real driver reports that it has
+// nothing to rotate with.
+type unrotatableFactory struct{ sourceType string }
+
+func (f *unrotatableFactory) Type() string { return f.sourceType }
+func (f *unrotatableFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+	return &testDriver{}, nil
+}
+func (f *unrotatableFactory) ValidateConfig(config map[string]string) error { return nil }
+func (f *unrotatableFactory) SensitiveConfigFields() []string               { return nil }
+func (f *unrotatableFactory) InferCredentialType(_ map[string]string) (string, error) {
+	return credential.TypeAPIKey, nil
+}
+func (f *unrotatableFactory) ValidateRotationConfig(config map[string]string) error {
+	if config["management_user_name"] == "" {
+		return fmt.Errorf("management_user_name is required")
+	}
+	return nil
+}
+
+// A rotation_period the driver can never honour is refused at write time.
+//
+// Accepted, it produces no error an operator ever sees: the manager finds
+// SupportsRotation false, retries to MaxRotateAttempts, parks the entry as failed,
+// returns after FailedMinAge and repeats for the life of the source, entirely in
+// the server log.
+//
+// The check is opt-in per factory, because SupportsRotation cannot be consulted at
+// config time — some implementations probe the upstream to answer, and others
+// answer false for configurations that are required to carry a rotation_period
+// anyway.
+func TestCredentialConfigStore_UnrotatableSourceRejectsRotationPeriod(t *testing.T) {
+	newStore := func(t *testing.T) (*CredentialConfigStore, context.Context) {
+		store, ctx := setupTestCredentialConfigStore(t)
+		store.core.credentialDriverRegistry = credential.NewDriverRegistry(nil)
+		require.NoError(t, store.core.credentialDriverRegistry.RegisterFactory(
+			&unrotatableFactory{sourceType: credential.SourceTypeAlicloud}))
+		return store, ctx
+	}
+
+	t.Run("refused when the config cannot rotate", func(t *testing.T) {
+		store, ctx := newStore(t)
+		err := store.CreateSource(ctx, &credential.CredSource{
+			Name:           "unrotatable",
+			Type:           credential.SourceTypeAlicloud,
+			Config:         map[string]string{"access_key_id": "LTAI-mgmt"},
+			RotationPeriod: 48 * time.Hour,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rotation_period cannot be honoured")
+		assert.Contains(t, err.Error(), "management_user_name")
+	})
+
+	t.Run("allowed once the config can rotate", func(t *testing.T) {
+		store, ctx := newStore(t)
+		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+			Name: "rotatable",
+			Type: credential.SourceTypeAlicloud,
+			Config: map[string]string{
+				"access_key_id":        "LTAI-mgmt",
+				"management_user_name": "warden-management",
+			},
+			RotationPeriod: 48 * time.Hour,
+		}))
+	})
+
+	t.Run("not consulted without a rotation_period", func(t *testing.T) {
+		store, ctx := newStore(t)
+		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+			Name:   "no-rotation",
+			Type:   credential.SourceTypeAlicloud,
+			Config: map[string]string{"access_key_id": "LTAI-mgmt"},
+		}))
+	})
+
+	// The gate lives in the shared validator, so an edit cannot slip a
+	// rotation_period past what create would have refused.
+	t.Run("runs on update too", func(t *testing.T) {
+		store, ctx := newStore(t)
+		err := store.validateSource(ctx, &credential.CredSource{
+			Name:           "unrotatable",
+			Type:           credential.SourceTypeAlicloud,
+			Config:         map[string]string{"access_key_id": "LTAI-mgmt"},
+			RotationPeriod: 48 * time.Hour,
+		}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rotation_period cannot be honoured")
+	})
+}
+
 // TestCredentialConfigStore_ChainedSpecRejectsRotationPeriod covers the spec half
 // of the same rule.
 //

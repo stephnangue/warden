@@ -132,6 +132,28 @@ func (e *RotationEntry) clearStagedFields() {
 	e.PreparedAt = time.Time{}
 }
 
+// stagedRotation is the outcome of a slow-path prepare: credentials generated
+// upstream and waiting to be activated.
+//
+// It is returned from the prepare step rather than written straight onto the
+// entry so that every write to an entry's staged fields happens under e.mu, in
+// the job that owns the transition. Writing them from the prepare step would
+// race the tick loop's readers and persistEntry's marshal of the whole struct.
+type stagedRotation struct {
+	NewConfig       map[string]string
+	CleanupConfig   map[string]string
+	ActivationDelay time.Duration
+	PreparedAt      time.Time
+}
+
+// applyStaged copies a completed prepare onto the entry. Caller must hold e.mu.
+func (e *RotationEntry) applyStaged(s *stagedRotation) {
+	e.NewConfig = s.NewConfig
+	e.CleanupConfig = s.CleanupConfig
+	e.ActivationDelay = s.ActivationDelay
+	e.PreparedAt = s.PreparedAt
+}
+
 // GetState returns the entry's current state in a thread-safe manner.
 func (e *RotationEntry) GetState() EntryState {
 	e.mu.Lock()
@@ -400,8 +422,10 @@ func (m *RotationManager) register(entry *RotationEntry) error {
 
 	// Replace existing entry if present
 	if existing, loaded := m.entries.Load(key); loaded {
+		// The entry being replaced is live: a worker may be mutating its state
+		// right now, so read it through the accessor rather than off the field.
 		old := existing.(*RotationEntry)
-		if old.State == StateFailed {
+		if old.GetState() == StateFailed {
 			atomic.AddInt64(&m.failedCount, -1)
 		}
 		m.entries.Store(key, entry)
@@ -548,20 +572,29 @@ func (m *RotationManager) UpdateRotationPeriod(ctx context.Context, sourceName s
 		return fmt.Errorf("source %s is not registered for rotation", sourceName)
 	}
 
+	// Take the entry's lock: the schedule fields are written by worker goroutines
+	// too, and persistEntry marshals every field of the struct, so an unlocked
+	// update here races both those writes and its own persist.
 	entry := existing.(*RotationEntry)
+	entry.mu.Lock()
 	entry.RotationPeriod = newPeriod
 	entry.NextAction = time.Now().Add(newPeriod)
+	nextAction := entry.NextAction
 
+	var persistErr error
 	if m.storage != nil {
-		if err := m.persistEntry(entry); err != nil {
-			return fmt.Errorf("failed to persist updated rotation entry: %w", err)
-		}
+		persistErr = m.persistEntryIfCurrent(entry)
+	}
+	entry.mu.Unlock()
+
+	if persistErr != nil {
+		return fmt.Errorf("failed to persist updated rotation entry: %w", persistErr)
 	}
 
 	m.log.Info("updated rotation period",
 		logger.String("source", sourceName),
 		logger.String("new_period", newPeriod.String()),
-		logger.Time("next_rotation", entry.NextAction))
+		logger.Time("next_rotation", nextAction))
 
 	return nil
 }
@@ -591,6 +624,27 @@ func (m *RotationManager) persistEntry(entry *RotationEntry) error {
 	})
 }
 
+// persistEntryIfCurrent persists entry unless it has been superseded in the
+// registry, in which case it does nothing.
+//
+// register() replaces the map value for a key while a job may still be running
+// against the entry it replaced, and both entries map to the same storage path.
+// Without this check, the in-flight job's completion would write the superseded
+// entry's state over the live one's record — invisible until a restart restored
+// the stale copy.
+//
+// Only the job paths use it. register() itself persists before storing, by
+// design, so its own write must not be filtered out.
+func (m *RotationManager) persistEntryIfCurrent(entry *RotationEntry) error {
+	key := m.buildEntryKey(entry)
+	if current, ok := m.entries.Load(key); ok && current.(*RotationEntry) != entry {
+		m.log.Debug("skipping persist for a superseded rotation entry",
+			logger.String("key", key))
+		return nil
+	}
+	return m.persistEntry(entry)
+}
+
 // deleteEntry removes an entry from storage
 func (m *RotationManager) deleteEntry(entry *RotationEntry) error {
 	return m.storage.Delete(context.Background(), m.entryStoragePath(entry))
@@ -603,70 +657,71 @@ func (m *RotationManager) deleteEntry(entry *RotationEntry) error {
 // prepareSource creates new credentials and either activates them immediately (fast path)
 // or returns staged data for deferred activation (slow path).
 //
-// Returns (newConfig, cleanupConfig, activateAfter, error).
-// activateAfter == 0 means fast path (already activated inline).
-func (m *RotationManager) prepareSource(entry *RotationEntry) (activateAfter time.Duration, err error) {
+// A nil *stagedRotation means the fast path: activation already happened inline.
+// The staged data is returned rather than written onto the entry here, so the
+// caller can apply it under the entry's lock — see stagedRotation.
+func (m *RotationManager) prepareSource(entry *RotationEntry) (staged *stagedRotation, err error) {
 	ctx, cancel := context.WithTimeout(m.quitCtx, StageTimeout)
 	defer cancel()
 
 	ns, err := m.getNamespaceFromEntry(ctx, entry)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get namespace for entry: %w", err)
+		return nil, fmt.Errorf("failed to get namespace for entry: %w", err)
 	}
 	ctx = namespace.ContextWithNamespace(ctx, ns)
 
 	if m.core == nil || m.core.credConfigStore == nil {
-		return 0, fmt.Errorf("credential config store not available")
+		return nil, fmt.Errorf("credential config store not available")
 	}
 
 	source, err := m.core.credConfigStore.GetSource(ctx, entry.SourceName)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get source %s: %w", entry.SourceName, err)
+		return nil, fmt.Errorf("failed to get source %s: %w", entry.SourceName, err)
 	}
 
 	if m.core.credentialManager == nil {
-		return 0, fmt.Errorf("credential manager not available")
+		return nil, fmt.Errorf("credential manager not available")
 	}
 
 	driver, err := m.core.credentialManager.GetOrCreateDriver(ctx, entry.SourceName)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get driver for source %s: %w", entry.SourceName, err)
+		return nil, fmt.Errorf("failed to get driver for source %s: %w", entry.SourceName, err)
 	}
 
 	rotatable, ok := driver.(credential.Rotatable)
 	if !ok {
-		return 0, fmt.Errorf("driver for source %s does not support rotation", entry.SourceName)
+		return nil, fmt.Errorf("driver for source %s does not support rotation", entry.SourceName)
 	}
 
 	if !rotatable.SupportsRotation() {
-		return 0, fmt.Errorf("source %s configuration does not support rotation", entry.SourceName)
+		return nil, fmt.Errorf("source %s configuration does not support rotation", entry.SourceName)
 	}
 
 	// PREPARE: Generate new credentials (old still valid)
 	newConfig, cleanupConfig, delay, err := rotatable.PrepareRotation(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("prepare rotation failed for source %s: %w", entry.SourceName, err)
+		return nil, fmt.Errorf("prepare rotation failed for source %s: %w", entry.SourceName, err)
 	}
 
 	// Fast path: immediate activation
 	if delay == 0 {
 		if err := m.activateSourceInline(ctx, entry, source, rotatable, newConfig, cleanupConfig); err != nil {
-			return 0, err
+			return nil, err
 		}
-		return 0, nil
+		return nil, nil
 	}
 
-	// Slow path: populate staged fields on the entry
-	entry.NewConfig = newConfig
-	entry.CleanupConfig = cleanupConfig
-	entry.ActivationDelay = delay
-	entry.PreparedAt = time.Now()
-
+	// Slow path: hand the staged data back for the caller to apply under the lock.
 	m.log.Debug("prepared source rotation, activation scheduled",
 		logger.String("source", entry.SourceName),
 		logger.String("activate_after", delay.String()))
 
-	return delay, nil
+	return &stagedRotation{
+		NewConfig:       newConfig,
+		CleanupConfig:   cleanupConfig,
+		ActivationDelay: delay,
+		PreparedAt:      time.Now(),
+	}, nil
 }
 
 // activateSourceInline runs persist + commit + cleanup synchronously (fast path for activateAfter == 0).
@@ -744,69 +799,72 @@ func (m *RotationManager) activateSource(entry *RotationEntry) error {
 	return nil
 }
 
-// prepareSpec creates new spec credentials and either activates immediately or returns staged data.
-func (m *RotationManager) prepareSpec(entry *RotationEntry) (activateAfter time.Duration, err error) {
+// prepareSpec creates new spec credentials and either activates immediately or returns
+// staged data. A nil *stagedRotation means activation already happened inline. As in
+// prepareSource, the staged data is returned rather than written onto the entry so the
+// caller can apply it under the entry's lock.
+func (m *RotationManager) prepareSpec(entry *RotationEntry) (staged *stagedRotation, err error) {
 	ctx, cancel := context.WithTimeout(m.quitCtx, StageTimeout)
 	defer cancel()
 
 	ns, err := m.getNamespaceFromEntry(ctx, entry)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get namespace for entry: %w", err)
+		return nil, fmt.Errorf("failed to get namespace for entry: %w", err)
 	}
 	ctx = namespace.ContextWithNamespace(ctx, ns)
 
 	if m.core == nil || m.core.credConfigStore == nil {
-		return 0, fmt.Errorf("credential config store not available")
+		return nil, fmt.Errorf("credential config store not available")
 	}
 
 	spec, err := m.core.credConfigStore.GetSpec(ctx, entry.SpecName)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get spec %s: %w", entry.SpecName, err)
+		return nil, fmt.Errorf("failed to get spec %s: %w", entry.SpecName, err)
 	}
 
 	if m.core.credentialManager == nil {
-		return 0, fmt.Errorf("credential manager not available")
+		return nil, fmt.Errorf("credential manager not available")
 	}
 
 	driver, err := m.core.credentialManager.GetOrCreateDriver(ctx, entry.SourceName)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get driver for source %s: %w", entry.SourceName, err)
+		return nil, fmt.Errorf("failed to get driver for source %s: %w", entry.SourceName, err)
 	}
 
 	specRotatable, ok := driver.(credential.SpecRotatable)
 	if !ok {
-		return 0, fmt.Errorf("driver for source %s does not support spec rotation", entry.SourceName)
+		return nil, fmt.Errorf("driver for source %s does not support spec rotation", entry.SourceName)
 	}
 
 	if !specRotatable.SupportsSpecRotation() {
-		return 0, fmt.Errorf("source %s configuration does not support spec rotation", entry.SourceName)
+		return nil, fmt.Errorf("source %s configuration does not support spec rotation", entry.SourceName)
 	}
 
 	// PREPARE
 	newConfig, cleanupConfig, delay, err := specRotatable.PrepareSpecRotation(ctx, spec)
 	if err != nil {
-		return 0, fmt.Errorf("prepare spec rotation failed for spec %s: %w", entry.SpecName, err)
+		return nil, fmt.Errorf("prepare spec rotation failed for spec %s: %w", entry.SpecName, err)
 	}
 
 	// Fast path
 	if delay == 0 {
 		if err := m.activateSpecInline(ctx, entry, spec, specRotatable, newConfig, cleanupConfig); err != nil {
-			return 0, err
+			return nil, err
 		}
-		return 0, nil
+		return nil, nil
 	}
 
-	// Slow path: populate staged fields
-	entry.NewConfig = newConfig
-	entry.CleanupConfig = cleanupConfig
-	entry.ActivationDelay = delay
-	entry.PreparedAt = time.Now()
-
+	// Slow path: hand the staged data back for the caller to apply under the lock.
 	m.log.Info("prepared spec rotation, activation scheduled",
 		logger.String("spec", entry.SpecName),
 		logger.String("activate_after", delay.String()))
 
-	return delay, nil
+	return &stagedRotation{
+		NewConfig:       newConfig,
+		CleanupConfig:   cleanupConfig,
+		ActivationDelay: delay,
+		PreparedAt:      time.Now(),
+	}, nil
 }
 
 // activateSpecInline runs persist + commit + cleanup synchronously (fast path).

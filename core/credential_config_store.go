@@ -1247,6 +1247,20 @@ func (s *CredentialConfigStore) validateSource(ctx context.Context, source *cred
 				return logical.ErrBadRequestf("invalid config for source type '%s': %s", source.Type, err.Error())
 			}
 
+			// A rotation_period the driver could never honour is worse than one
+			// that is refused: the manager retries, parks the entry as failed,
+			// comes back after FailedMinAge and repeats for the life of the
+			// source, all of it only in the server log. Factories opt in to this
+			// check; see credential.RotationConfigValidator for why
+			// SupportsRotation cannot be consulted here instead.
+			if source.RotationPeriod > 0 {
+				if rv, ok := factory.(credential.RotationConfigValidator); ok {
+					if err := rv.ValidateRotationConfig(source.Config); err != nil {
+						return logical.ErrBadRequestf("rotation_period cannot be honoured for source type '%s': %s", source.Type, err.Error())
+					}
+				}
+			}
+
 			// Test connection by creating a temporary driver instance
 			// This validates credentials and connectivity (e.g., Vault authentication)
 			// Skipped during rotation where new credentials may not yet be propagated

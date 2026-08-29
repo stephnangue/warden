@@ -28,15 +28,17 @@ func (j *prepareJob) Execute() error {
 	m := j.manager
 	entry := j.entry
 
-	var activateAfter time.Duration
+	var staged *stagedRotation
 	var err error
 
-	// Business logic — no lock held (these do I/O)
+	// Business logic — no lock held (these do I/O). They return the staged data
+	// rather than writing it onto the entry, so every write below happens under
+	// the lock the tick loop and persistEntry read against.
 	switch entry.EntryType {
 	case EntryTypeSpec:
-		activateAfter, err = m.prepareSpec(entry)
+		staged, err = m.prepareSpec(entry)
 	default:
-		activateAfter, err = m.prepareSource(entry)
+		staged, err = m.prepareSource(entry)
 	}
 
 	if err != nil {
@@ -46,7 +48,7 @@ func (j *prepareJob) Execute() error {
 	now := time.Now()
 
 	entry.mu.Lock()
-	if activateAfter == 0 {
+	if staged == nil {
 		// Fast path: activation already done inline by prepareSource/prepareSpec
 		entry.State = StateIdle
 		entry.LastRotation = now
@@ -56,8 +58,9 @@ func (j *prepareJob) Execute() error {
 		entry.clearStagedFields()
 	} else {
 		// Slow path: staged for deferred activation
+		entry.applyStaged(staged)
 		entry.State = StateStaged
-		entry.NextAction = now.Add(jitterDuration(activateAfter, 0.10))
+		entry.NextAction = now.Add(jitterDuration(staged.ActivationDelay, 0.10))
 		entry.Attempts = 0
 		entry.LastError = ""
 	}
@@ -66,7 +69,7 @@ func (j *prepareJob) Execute() error {
 	state := entry.State
 
 	if m.storage != nil {
-		if err := m.persistEntry(entry); err != nil {
+		if err := m.persistEntryIfCurrent(entry); err != nil {
 			m.log.Error("failed to persist entry after prepare",
 				logger.String("key", j.key),
 				logger.Err(err))
@@ -145,7 +148,7 @@ func (j *prepareJob) OnFailure(err error) {
 	}
 
 	if m.storage != nil {
-		if err := m.persistEntry(entry); err != nil {
+		if err := m.persistEntryIfCurrent(entry); err != nil {
 			m.log.Error("failed to persist entry after prepare failure",
 				logger.String("key", j.key),
 				logger.Err(err))
@@ -197,7 +200,7 @@ func (j *activateJob) Execute() error {
 	nextAction := entry.NextAction
 
 	if m.storage != nil {
-		if err := m.persistEntry(entry); err != nil {
+		if err := m.persistEntryIfCurrent(entry); err != nil {
 			m.log.Error("failed to persist entry after activation",
 				logger.String("key", j.key),
 				logger.Err(err))
@@ -262,7 +265,7 @@ func (j *activateJob) OnFailure(err error) {
 	}
 
 	if m.storage != nil {
-		if err := m.persistEntry(entry); err != nil {
+		if err := m.persistEntryIfCurrent(entry); err != nil {
 			m.log.Error("failed to persist entry after activation failure",
 				logger.String("key", j.key),
 				logger.Err(err))

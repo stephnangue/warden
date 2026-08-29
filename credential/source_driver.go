@@ -100,6 +100,32 @@ type SpecVerifier interface {
 	VerifySpec(ctx context.Context, spec *CredSpec) error
 }
 
+// RotationConfigValidator is an optional interface for driver factories that can
+// tell, from source config alone, that a source will never be able to rotate.
+//
+// It exists because a source accepted with a rotation_period its driver cannot
+// honour does not fail loudly — it fails on a schedule, forever. Every cycle the
+// manager finds SupportsRotation false, errors, retries to MaxRotateAttempts,
+// parks the entry as failed, comes back after FailedMinAge and repeats, visible
+// only in server logs and never to the operator who created the source.
+//
+// SupportsRotation cannot serve this purpose at config time. It is a method on a
+// live driver, and some implementations probe the upstream to answer (Azure asks
+// Microsoft Graph whether it holds the permissions), which is not something a
+// config write should do. Others answer false for configurations that are
+// perfectly valid and required to carry a rotation_period anyway — a token-auth
+// hvault source is the standing example.
+//
+// So this is opt-in per factory and must be pure: read the config map, return an
+// error naming the missing key, touch nothing else. A factory that does not
+// implement it is simply not checked. Drivers whose SupportsRotation is already
+// pure config inspection can adopt it as the need arises.
+type RotationConfigValidator interface {
+	// ValidateRotationConfig returns an error if a rotation_period on this config
+	// could never be honoured. It is called only when a rotation_period is set.
+	ValidateRotationConfig(config map[string]string) error
+}
+
 // Rotatable is an optional interface for drivers that support credential rotation.
 // Credential sources can implement this to allow periodic rotation of their
 // authentication credentials (e.g., Vault AppRole secret_id, AWS IAM keys).
