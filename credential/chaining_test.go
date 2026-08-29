@@ -902,6 +902,166 @@ func TestChaining_CacheTTLSpecOptOut(t *testing.T) {
 	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(), "spec-level 0 opts out of source TTL")
 }
 
+// --- Source modifiers describe the source's own reference ---
+//
+// secret_field and secret_cache_ttl are not peers of secret_spec: they say how to
+// read and cache one payload. A source that chains a secret of its own has written
+// them for THAT payload, so a spec that overrides the reference must not inherit
+// them — the field would name a key its payload lacks, and the TTL would cache a
+// secret whose owner never opted in.
+
+func TestChaining_SourceSecretFieldNotInheritedAcrossReferences(t *testing.T) {
+	env := newChainingEnv(t)
+
+	// A second secret spec, with a differently-shaped payload from the source's.
+	env.store.AddSource(&CredSource{Name: "secretsource2", Type: "secretsrc", Config: map[string]string{}})
+	env.store.AddSpec(&CredSpec{Name: "other-secret-spec", Type: TypeVaultToken, Source: "secretsource2",
+		Config: map[string]string{}})
+	env.secretDriver.mintFunc = func(_ context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		if spec.Name == "other-secret-spec" {
+			return map[string]interface{}{"token": "OTHER-SECRET"}, nil, 0, "", nil
+		}
+		return map[string]interface{}{"private_key": "PEM", "app_id": "42"}, nil, 0, "", nil
+	}
+
+	// The source chains a multi-key payload and needs secret_field to pick from it.
+	env.store.AddSource(&CredSource{Name: "consumersource-chained", Type: "consumersrc",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "private_key"}})
+	// The spec overrides the reference with a payload that has no private_key.
+	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource-chained",
+		Config: map[string]string{ConfigSecretSpec: "other-secret-spec"}})
+
+	ctx := createNamespaceContext()
+	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, "private_key", env.consumerDriver.lastMaterial.Field,
+		"the source's field describes the source's payload, not this spec's")
+	assert.Equal(t, "OTHER-SECRET", env.consumerDriver.lastMaterial.Secret(),
+		"resolution falls through to single-key auto-detect on the spec's own payload")
+}
+
+// TestChaining_InheritedFieldOnMultiKeyPayloadIsTheReportedSymptom covers the shape
+// operators actually hit: the spec's payload has several keys, so auto-detect cannot
+// rescue an inherited field that names none of them. Before the fix the consumer was
+// handed Field="private_key" against a payload without it — the "secret_field is
+// empty or absent" report, citing a field the spec's operator never set.
+func TestChaining_InheritedFieldOnMultiKeyPayloadIsTheReportedSymptom(t *testing.T) {
+	env := newChainingEnv(t)
+
+	env.store.AddSource(&CredSource{Name: "secretsource2", Type: "secretsrc", Config: map[string]string{}})
+	env.store.AddSpec(&CredSpec{Name: "other-secret-spec", Type: TypeVaultToken, Source: "secretsource2",
+		Config: map[string]string{}})
+	env.secretDriver.mintFunc = func(_ context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		if spec.Name == "other-secret-spec" {
+			return map[string]interface{}{"token": "T", "expires": "later"}, nil, 0, "", nil
+		}
+		return map[string]interface{}{"private_key": "PEM", "app_id": "42"}, nil, 0, "", nil
+	}
+
+	env.store.AddSource(&CredSource{Name: "consumersource-chained", Type: "consumersrc",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "private_key"}})
+	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource-chained",
+		Config: map[string]string{ConfigSecretSpec: "other-secret-spec"}})
+
+	ctx := createNamespaceContext()
+	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
+	require.NoError(t, err)
+
+	assert.Empty(t, env.consumerDriver.lastMaterial.Field,
+		"no field resolves: the source's names another payload's key, and a multi-key payload cannot auto-detect")
+	assert.Equal(t, "T", env.consumerDriver.lastMaterial.Data["token"],
+		"the whole payload still reaches the consumer to read by name")
+}
+
+// TestChaining_SourceModifiersApplyWhenSpecRestatesTheReference: restating the
+// source's reference names the same payload, so the source's modifiers still
+// describe it. A redundant but truthful config must not lose them.
+func TestChaining_SourceModifiersApplyWhenSpecRestatesTheReference(t *testing.T) {
+	env := newChainingEnv(t)
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"alpha": "A", "beta": "B"}, nil, 0, "", nil
+	}
+	env.store.AddSource(&CredSource{Name: "consumersource-chained", Type: "consumersrc",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "beta", ConfigSecretCacheTTL: "30m"}})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource-chained",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource-chained",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "B", env.consumerDriver.lastMaterial.Secret(), "the source's field still selects")
+
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), env.secretDriver.mintCalls.Load(), "the source's TTL still caches")
+}
+
+func TestChaining_SourceSecretFieldStillInheritedAsADefault(t *testing.T) {
+	// A source with no reference of its own has no rival payload: its secret_field
+	// can only be a default for whatever its specs reference, so it still applies.
+	env := newChainingEnv(t)
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"alpha": "A", "beta": "B"}, nil, 0, "", nil
+	}
+	env.store.AddSource(&CredSource{Name: "consumersource-field", Type: "consumersrc",
+		Config: map[string]string{ConfigSecretField: "beta"}})
+	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource-field",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+
+	ctx := createNamespaceContext()
+	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "B", env.consumerDriver.lastMaterial.Secret())
+}
+
+func TestChaining_SourceCacheTTLNotInheritedAcrossReferences(t *testing.T) {
+	env := newChainingEnv(t)
+	env.store.AddSource(&CredSource{Name: "secretsource2", Type: "secretsrc", Config: map[string]string{}})
+	env.store.AddSpec(&CredSpec{Name: "other-secret-spec", Type: TypeVaultToken, Source: "secretsource2",
+		Config: map[string]string{}})
+
+	// The source caches its own chained secret for 30m. Two specs override the
+	// reference; their payload must not inherit that policy.
+	env.store.AddSource(&CredSource{Name: "consumersource-chained", Type: "consumersrc",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource-chained",
+		Config: map[string]string{ConfigSecretSpec: "other-secret-spec"}})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource-chained",
+		Config: map[string]string{ConfigSecretSpec: "other-secret-spec"}})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
+		"the spec's payload is fetched per mint — the documented default — not cached under the source's policy")
+}
+
+func TestChaining_SpecFieldStillOverridesForASourceReference(t *testing.T) {
+	// The coherent case: the source names the payload, the spec refines which key to
+	// read out of it. Both concern the same payload, so this keeps working.
+	env := newChainingEnv(t)
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"alpha": "A", "beta": "B"}, nil, 0, "", nil
+	}
+	env.store.AddSource(&CredSource{Name: "consumersource-chained", Type: "consumersrc",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "alpha"}})
+	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource-chained",
+		Config: map[string]string{ConfigSecretField: "beta"}})
+
+	ctx := createNamespaceContext()
+	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "B", env.consumerDriver.lastMaterial.Secret())
+}
+
 // TestChaining_CacheIsolatesPerRole: one principal authenticating under two roles
 // must not share a cached secret, even though everything else about its identity
 // matches.

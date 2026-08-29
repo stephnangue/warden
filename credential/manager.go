@@ -687,18 +687,51 @@ func (m *Manager) fetchUncached(ctx context.Context, caller Caller, secretRef st
 	return credB.Data, credB.Type, false, "", nil
 }
 
-// secretCacheTTL resolves ConfigSecretCacheTTL spec-then-source (matching how
-// secret_spec / secret_field resolve). Returns 0 (no caching) when unset. A spec-level
-// value is authoritative by PRESENCE, so an explicit spec-level "0" opts out of a
-// source-level TTL (e.g. a rotation-sensitive consumer under a source that caches).
+// secretCacheTTL resolves ConfigSecretCacheTTL spec-then-source. Returns 0 (no
+// caching) when unset. A spec-level value is authoritative by PRESENCE, so an
+// explicit spec-level "0" opts out of a source-level TTL (e.g. a rotation-sensitive
+// consumer under a source that caches).
+//
+// The source-level value does NOT apply when the spec overrode a reference the
+// source had of its own: see sourceModifiersApply. A caching policy is chosen for
+// one secret's rotation profile, so inheriting it across a different reference
+// caches one payload under a policy picked for another, silently opting the spec
+// into caching it never asked for.
 func (m *Manager) secretCacheTTL(ctx context.Context, spec *CredSpec) time.Duration {
 	if _, ok := spec.Config[ConfigSecretCacheTTL]; ok {
 		return GetDuration(spec.Config, ConfigSecretCacheTTL, 0)
 	}
 	if src, err := m.configStore.GetSource(ctx, spec.Source); err == nil && src != nil {
+		if !sourceModifiersApply(spec, src) {
+			return 0
+		}
 		return GetDuration(src.Config, ConfigSecretCacheTTL, 0)
 	}
 	return 0
+}
+
+// sourceModifiersApply reports whether a source's secret_field / secret_cache_ttl
+// describe the payload actually being fetched for this spec.
+//
+// Two separate questions decide a chained fetch: which payload is fetched (whoever
+// set secret_spec, spec-level winning — see secretSpecRef) and how to read and cache
+// it. The modifiers only mean anything against the payload they were written for.
+//
+// A source that sets no secret_spec of its own has no payload of its own, so its
+// modifiers can only be defaults for whatever its specs reference — apply them. A
+// spec that restates the source's reference names the same payload, so they still
+// describe it — apply them there too, rather than punishing a redundant but
+// truthful config.
+//
+// What is left is the case they cannot survive: the source names a reference AND
+// the spec overrides it with a DIFFERENT one. Then the source's field names a key
+// the spec's payload does not contain, which consuming drivers report as
+// "secret_field %q is empty or absent" citing a field the spec's operator never
+// set, and its TTL caches a secret whose owner never opted in.
+func sourceModifiersApply(spec *CredSpec, src *CredSource) bool {
+	return spec.Config[ConfigSecretSpec] == "" ||
+		src.Config[ConfigSecretSpec] == "" ||
+		spec.Config[ConfigSecretSpec] == src.Config[ConfigSecretSpec]
 }
 
 // invalidateChainedSecret evicts a cached secret and forgets any in-flight singleflight
@@ -925,15 +958,20 @@ func copyStringMap(in map[string]string) map[string]string {
 }
 
 // resolveSecretField selects which key of the referenced credential's Data carries
-// the single secret: an explicit secret_field (spec-level then source-level), else a
-// single-key payload, else the referenced type's primary field. Returns "" when it
-// cannot determine one — a multi-secret consumer reads Data directly and ignores it;
-// a single-secret consumer surfaces the "set secret_field" error at use.
+// the single secret: an explicit secret_field (spec-level, then source-level when the
+// source's modifiers still describe the payload in play), else a single-key payload,
+// else the referenced type's primary field. Returns "" when it cannot determine one —
+// a multi-secret consumer reads Data directly and ignores it; a single-secret consumer
+// surfaces the "set secret_field" error at use.
+//
+// A spec refining the field for a source-level reference is the coherent case and
+// still works: both concern the same payload. See sourceModifiersApply for the one
+// case that does not.
 func (m *Manager) resolveSecretField(ctx context.Context, spec *CredSpec, credB *Credential) string {
 	if f := spec.Config[ConfigSecretField]; f != "" {
 		return f
 	}
-	if src, err := m.configStore.GetSource(ctx, spec.Source); err == nil && src != nil {
+	if src, err := m.configStore.GetSource(ctx, spec.Source); err == nil && src != nil && sourceModifiersApply(spec, src) {
 		if f := src.Config[ConfigSecretField]; f != "" {
 			return f
 		}
