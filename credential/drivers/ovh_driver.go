@@ -294,6 +294,15 @@ func (d *OVHDriver) mintOAuth2TokenFromSecret(ctx context.Context, material cred
 			credential.ConfigSecretField, credential.ErrChainedSecretIncomplete)
 	}
 
+	// secret_field names the secret, so pointing it at the id is a misconfiguration
+	// with a confusing failure: the id would be posted as the secret, the endpoint
+	// would answer invalid_client, and that reads on this path as a stale secret —
+	// evicting a good cached credential and retrying to no purpose.
+	if material.Field == "client_id" {
+		return nil, nil, 0, "", fmt.Errorf("ovh: %s must name the client secret, not 'client_id'; the id is read by name alongside it",
+			credential.ConfigSecretField)
+	}
+
 	// The id travels with its secret. secret_field names the secret alone, so the
 	// id is read by convention — and there is nowhere to fall back to, since a
 	// chained source is refused an inline one.
@@ -390,7 +399,11 @@ func (d *OVHDriver) fetchOAuth2Token(ctx context.Context, chained *ovhChainedAut
 		clientID, clientSecret = d.getClientCredentials()
 	}
 	if clientID == "" || clientSecret == "" {
-		return "", 0, fmt.Errorf("client_id and client_secret are required on source config")
+		// The message VerifySpec would give never reaches an operator: spec
+		// validation test-mints first and reports whatever that returns. So the
+		// alternative is named here, where it is actually read.
+		return "", 0, fmt.Errorf("client_id and client_secret are required on source config, or a %s naming a spec that yields them",
+			credential.ConfigSecretSpec)
 	}
 
 	formData := url.Values{
@@ -485,7 +498,11 @@ func (d *OVHDriver) mintOAuth2Token(ctx context.Context, chained *ovhChainedAuth
 // to release, and the credential type marks these non-revocable.
 func (d *OVHDriver) Revoke(_ context.Context, leaseID string) error {
 	if leaseID != "" {
-		d.logger.Debug("ignoring revocation for an OVH lease this driver no longer issues",
+		// Not Debug: a lease this driver did not issue predates the removal of the
+		// methods that created object-storage keys. Those keys have no expiry, so
+		// this is an orphan someone has to delete by hand — and the lease id names
+		// the project, user and key they need.
+		d.logger.Warn("cannot revoke a lease from a mint method this driver no longer has; if it names an object-storage key, that key persists until deleted manually",
 			logger.String("lease_id", leaseID))
 	}
 	return nil

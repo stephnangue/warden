@@ -2342,6 +2342,7 @@ func TestCredentialConfigStore_OAuth2Chaining(t *testing.T) {
 // source. The factory keeps the record because Create hands out a fresh driver.
 type leasingDriverFactory struct {
 	leaseID   string
+	mintErr   error
 	verifyErr error
 	revoked   []string
 }
@@ -2360,7 +2361,7 @@ type leasingDriver struct{ factory *leasingDriverFactory }
 
 func (d *leasingDriver) Type() string { return "leasing_driver" }
 func (d *leasingDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	return map[string]interface{}{"token": "minted"}, nil, time.Hour, d.factory.leaseID, nil
+	return map[string]interface{}{"token": "minted"}, nil, time.Hour, d.factory.leaseID, d.factory.mintErr
 }
 func (d *leasingDriver) Revoke(ctx context.Context, leaseID string) error {
 	d.factory.revoked = append(d.factory.revoked, leaseID)
@@ -2423,6 +2424,19 @@ func TestCredentialConfigStore_ValidateSpec_ReleasesTestMintLease(t *testing.T) 
 		require.NoError(t, store.UpdateSpec(ctx, s))
 		assert.Equal(t, []string{"lease-update", "lease-update"}, factory.revoked,
 			"a spec edit test-mints again, so it must release again")
+	})
+
+	t.Run("released when the mint reports a lease and then fails", func(t *testing.T) {
+		// A driver that created the credential and then failed still leaves it at
+		// the source. Reading the lease before the error is what makes that
+		// recoverable, so the order is deliberate rather than incidental.
+		factory := &leasingDriverFactory{leaseID: "lease-partial", mintErr: fmt.Errorf("upstream hung up mid-mint")}
+		store, ctx := setup(t, factory)
+
+		err := store.CreateSpec(ctx, spec("partial"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "credential test failed")
+		assert.Equal(t, []string{"lease-partial"}, factory.revoked)
 	})
 
 	t.Run("nothing to release when the mint issues no lease", func(t *testing.T) {

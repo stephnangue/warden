@@ -45,6 +45,12 @@ func validateConfig(spec *ProviderSpec, config map[string]any) error {
 		}
 	}
 
+	if spec.ValidateExtraConfig != nil {
+		if err := spec.ValidateExtraConfig(config); err != nil {
+			return err
+		}
+	}
+
 	if err := framework.ValidateCommonConfig(config); err != nil {
 		return err
 	}

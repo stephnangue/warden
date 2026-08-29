@@ -634,6 +634,21 @@ func TestOVHDriver_MintFromSecret_SecretFieldResolution(t *testing.T) {
 		})
 	}
 
+	// The pair authenticates together, so a field pointing at the id is a
+	// misconfiguration whose failure would otherwise read as a stale secret and
+	// cost a pointless evict-and-retry.
+	t.Run("a field naming the id is refused rather than spent", func(t *testing.T) {
+		driver := ovhChainedDriver(t, "https://unused")
+
+		_, _, _, _, err := driver.MintFromSecret(context.Background(), spec, credential.SecretMaterial{
+			Field: "client_id",
+			Data:  map[string]string{"client_id": "fetched-id", "client_secret": "fetched-secret"},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must name the client secret")
+		assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+	})
+
 	// A field that resolved to nothing is a misconfigured secret_field. Falling
 	// back would silently authenticate with some other value from the payload.
 	t.Run("a resolved-but-empty field does not fall back", func(t *testing.T) {

@@ -6,7 +6,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,12 +43,17 @@ const ovhClientSecret = "agent-secret"
 
 const (
 	// Written to secret/data/e2e/ovh-client-credential by setup.sh, and the pair
-	// a chained source performs its grant with. Hydra validates it, so the
-	// chained row passes only if these values reached the driver from Vault —
+	// a chained source performs its grant with. Hydra validates it, so the chained
+	// row passes only if these values reached the driver from the secret store —
 	// unlike every other chained row here, whose secret is spent on a stand-in
 	// that would accept anything.
-	ovhChainedClientID     = "e2e-agent"
-	ovhChainedClientSecret = "agent-secret"
+	//
+	// A client of its own, deliberately. Seeded with e2e-agent — which every
+	// other source in this suite holds inline — a routing regression that fell
+	// back to one of them would present an identical credential and the row could
+	// not tell the difference. The minted token names this client instead.
+	ovhChainedClientID     = "e2e-ovh-chain"
+	ovhChainedClientSecret = "ovh-chain-secret"
 
 	// Written to secret/data/e2e/ovh-access-keys by setup.sh. Both halves,
 	// because for access_keys the pair IS the credential.
@@ -396,9 +403,15 @@ func TestOVH_OAuth2TokenChainMintsWithVaultHeldClientCredential(t *testing.T) {
 			setupOVHClientCredChain(t, subj)
 			upstream.Reset()
 
+			// Captured once: these helpers perform a fresh grant on every call, so
+			// comparing against a second call would compare against a token that
+			// was never sent — an assertion that can never fail.
+			userJWT := h.FullChainUserJWT(t)
+			agentJWT := h.GetDefaultJWT(t)
+
 			status, body, _ := h.ChainRequest(t, leaderPort, ovhEnv, h.ChainOpts{
-				AgentToken: h.GetDefaultJWT(t),
-				Bearer:     h.FullChainUserJWT(t),
+				AgentToken: agentJWT,
+				Bearer:     userJWT,
 				Role:       ovhChainAgentRole,
 				Path:       "me",
 			})
@@ -415,8 +428,23 @@ func TestOVH_OAuth2TokenChainMintsWithVaultHeldClientCredential(t *testing.T) {
 			if !ok || !strings.HasPrefix(token, "ey") {
 				t.Fatalf("upstream Authorization did not carry a minted JWT: %q", token)
 			}
-			if token == h.FullChainUserJWT(t) || token == ovhChainedClientSecret {
-				t.Error("something other than a minted token reached the upstream")
+			for what, value := range map[string]string{
+				"the user's own bearer": userJWT,
+				"the agent's own token": agentJWT,
+				"the client secret":     ovhChainedClientSecret,
+			} {
+				if token == value {
+					t.Errorf("%s reached the upstream instead of a minted credential", what)
+				}
+			}
+
+			// The claim is what makes this row load-bearing. A 200 alone proves
+			// only that SOME valid client credential was spent, and every other
+			// source here holds one inline — so a regression that routed to one of
+			// them would look identical. This client exists nowhere but the secret
+			// store, so its name in the token is proof the chain ran.
+			if got := ovhJWTClientID(t, token); got != ovhChainedClientID {
+				t.Errorf("the minted token was granted to %q, want %q — the credential did not come from the chain", got, ovhChainedClientID)
 			}
 
 			// And the source really holds nothing: the create-time refusal is
@@ -448,7 +476,8 @@ func TestOVH_AccessKeysChainReSignsWithTheVaultHeldPair(t *testing.T) {
 			upstream.Reset()
 			ovhS3.Reset()
 
-			req := signOVHS3Request(t, h.GetDefaultJWT(t), ovhAccessAgentRole, ovhS3SignedTestPath, false)
+			agentJWT := h.GetDefaultJWT(t)
+			req := signOVHS3Request(t, agentJWT, ovhAccessAgentRole, ovhS3SignedTestPath, false)
 			status, body := sendOVHS3Request(t, req)
 			if status != 200 {
 				t.Fatalf("status %d, body %s", status, body)
@@ -467,8 +496,9 @@ func TestOVH_AccessKeysChainReSignsWithTheVaultHeldPair(t *testing.T) {
 				t.Errorf("re-signed with some other access key: %q", authz)
 			}
 			// The caller's own token was the inbound SigV4 credential; it must not
-			// have been passed along as the outbound one.
-			if strings.Contains(authz, h.GetDefaultJWT(t)) {
+			// have been passed along as the outbound one. Compared against the
+			// token actually sent — these helpers mint a fresh one per call.
+			if strings.Contains(authz, agentJWT) {
 				t.Error("the caller's token was forwarded as the S3 credential")
 			}
 			// The secret half is what the signature is computed with and must
@@ -507,6 +537,11 @@ func TestOVH_S3SignatureIsVerifiedBeforeAnythingIsSpent(t *testing.T) {
 	status, body := sendOVHS3Request(t, req)
 	if status != http.StatusForbidden {
 		t.Fatalf("status %d, want 403 (body: %s)", status, body)
+	}
+	// Named, because a policy denial or a missing role is also a 403 and would
+	// let this pass with the verification never having run.
+	if !strings.Contains(body, "Signature") {
+		t.Errorf("403 body %q does not name the signature; this may be some other refusal", body)
 	}
 	if n := len(ovhS3.Requests()); n != 0 {
 		t.Errorf("a request with a bad signature reached the S3 upstream %d times", n)
@@ -637,4 +672,35 @@ func TestOVH_ChainedConfigRefusals(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ovhJWTClientID reads the client the token was granted to.
+//
+// Hydra puts the granting client in client_id on a client_credentials token, and
+// repeats it as sub. Either identifies the service account, which is what the
+// chained row needs: the 200 proves a valid credential was spent, and this
+// proves it was the one held in the secret store rather than one sitting inline
+// on some other source.
+func ovhJWTClientID(t *testing.T, token string) string {
+	t.Helper()
+
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("token is not a JWT (%d segments)", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode the token payload: %v", err)
+	}
+	var claims struct {
+		ClientID string `json:"client_id"`
+		Sub      string `json:"sub"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("parse the token claims: %v", err)
+	}
+	if claims.ClientID != "" {
+		return claims.ClientID
+	}
+	return claims.Sub
 }

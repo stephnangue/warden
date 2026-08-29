@@ -35,9 +35,24 @@ var Spec = &dualgateway.ProviderSpec{
 			Description: "Override the Object Storage host the region would resolve to, for a private egress gateway fronting it. Host or URL; the S3 leg is always https.",
 		},
 	},
+	ValidateExtraConfig: func(config map[string]any) error {
+		// Nothing else checks this key, so a typo would be stored happily and
+		// surface much later as a per-request failure against a nonsense host.
+		configured := framework.GetConfigString(config, "s3_url", "")
+		if configured == "" {
+			return nil
+		}
+		host := s3Host(configured)
+		if host == "" || strings.ContainsAny(host, "/?#") {
+			return fmt.Errorf("s3_url must name a host, optionally with a port: %q", configured)
+		}
+		return nil
+	},
+	// Keyed as the operator wrote it, so a config read reports something the
+	// config write would accept. A host is itself a valid s3_url.
 	OnConfigParsed: func(config map[string]any) map[string]any {
 		return map[string]any{
-			"s3_host": s3Host(framework.GetConfigString(config, "s3_url", "")),
+			"s3_url": s3Host(framework.GetConfigString(config, "s3_url", "")),
 		}
 	},
 	S3Endpoint: func(state map[string]any, region string) string {
@@ -45,7 +60,7 @@ var Spec = &dualgateway.ProviderSpec{
 		// traffic leaves through a private gateway needs to name it. Without
 		// this the region is the only answer and the S3 leg always addresses
 		// the public host.
-		if host, _ := state["s3_host"].(string); host != "" {
+		if host, _ := state["s3_url"].(string); host != "" {
 			return host
 		}
 		return fmt.Sprintf("s3.%s.io.cloud.ovh.net", region)

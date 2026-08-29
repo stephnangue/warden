@@ -91,7 +91,18 @@ type ProviderSpec struct {
 	// OnConfigParsed is called after standard config parsing to extract
 	// provider-specific fields. Returns a state map stored on the backend.
 	// If nil, no extra state is maintained.
+	//
+	// Keys returned here are echoed back by a config read, so name them as the
+	// operator wrote them: a read that reports a key the write path would refuse
+	// leaves no way to round-trip a mount's configuration.
 	OnConfigParsed func(config map[string]any) map[string]any
+
+	// ValidateExtraConfig checks the values behind ExtraConfigKeys at write time.
+	// The standard validation covers only the keys every provider shares, so
+	// without this an extra key is accepted with any content at all and a typo
+	// surfaces as a per-request failure long afterwards. If nil, extra keys are
+	// accepted as written.
+	ValidateExtraConfig func(config map[string]any) error
 
 	// --- Optional Credential Extraction Overrides ---
 
