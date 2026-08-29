@@ -18,43 +18,51 @@ import (
 const ovhMaxResponseBodySize = 1 << 20 // 1MB
 const ovhMaxRetryAttempts = 3
 
+// defaultOVHAccessKeysChainTTL bounds how long a served key pair stays cached
+// when the spec sets no secret_cache_ttl of its own. The pair itself does not
+// expire; this is only how often the chain is walked again to notice that the
+// referenced spec now yields a different one.
+const defaultOVHAccessKeysChainTTL = 30 * time.Minute
+
 // ovhFallbackTokenTTL bounds a token whose lifetime the endpoint declined to
 // state. The lease decides how long the bearer keeps being served from cache, so
 // a generous guess hands out a token that expired long ago, while a short one
 // costs only another mint.
 const ovhFallbackTokenTTL = 5 * time.Minute
 
-// ovhEndpoint holds the resolved API and OAuth2 token URLs for a region.
-type ovhEndpoint struct {
-	apiURL   string
-	tokenURL string
-}
-
-// ovhEndpoints maps endpoint names to their API and token URLs.
-var ovhEndpoints = map[string]ovhEndpoint{
-	"ovh-eu": {apiURL: "https://eu.api.ovh.com/1.0", tokenURL: "https://www.ovh.com/auth/oauth2/token"},
-	"ovh-ca": {apiURL: "https://ca.api.ovh.com/1.0", tokenURL: "https://ca.ovh.com/auth/oauth2/token"},
-	"ovh-us": {apiURL: "https://api.us.ovhcloud.com/1.0", tokenURL: "https://us.ovhcloud.com/auth/oauth2/token"},
+// ovhEndpoints maps a regional endpoint name to the OAuth2 token URL it stands
+// for. The regional API base URL used to live here too; nothing asks the OVH API
+// for anything any more, so the region now selects only where the grant is made.
+var ovhEndpoints = map[string]string{
+	"ovh-eu": "https://www.ovh.com/auth/oauth2/token",
+	"ovh-ca": "https://ca.ovh.com/auth/oauth2/token",
+	"ovh-us": "https://us.ovhcloud.com/auth/oauth2/token",
 }
 
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*OVHDriver)(nil)
 var _ credential.SpecVerifier = (*OVHDriver)(nil)
+var _ credential.ChainedSecretMinter = (*OVHDriver)(nil)
 
-// OVHDriver mints credentials from OVHcloud APIs.
+// OVHDriver mints credentials for OVHcloud APIs.
 //
-// Two mint methods are supported (configured per-spec via mint_method):
-//   - oauth2_token: Mints a bearer token via OAuth2 client_credentials grant (~1h TTL)
-//   - dynamic_s3: Creates S3 credentials via the OVH cloud API (static, revocable)
-//   - oauth2_token_and_s3: Mints both a bearer token and S3 credentials
+// Two mint methods are supported, configured per-spec via mint_method:
+//   - oauth2_token: a bearer token from the OAuth2 client_credentials grant,
+//     using the service account in the source config.
+//   - access_keys: the object-storage key pair a referenced spec yields. The
+//     spec names that reference itself; the pair reaches this driver as fetched
+//     secret material and no request is made to OVH at all.
 //
-// The source config holds an OAuth2 service account (client_id + client_secret)
-// and optionally default project_id + user_id for S3 credential management.
+// This driver creates nothing upstream and hands out no leases. Object-storage
+// keys have no expiry of their own, so a credential that created one would have
+// to be deleted again to be safe — and the only moment revocation runs, lease
+// expiry, has neither a caller to fetch a secret as nor a stored one to use.
+// Serving a pair that already exists sidesteps that entirely: there is nothing
+// to revoke because nothing was created.
 type OVHDriver struct {
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
 	httpClient *http.Client
-	apiURL     string // resolved API base URL
 	tokenURL   string // resolved OAuth2 token URL
 
 	// configMu protects credSource.Config reads during potential future rotation.
@@ -72,14 +80,17 @@ func (f *OVHDriverFactory) Type() string {
 // ValidateConfig validates OVH source configuration.
 func (f *OVHDriverFactory) ValidateConfig(config map[string]string) error {
 	return credential.ValidateSchema(config,
+		// Required for oauth2_token specs and refused nowhere else: a source
+		// serving only access_keys specs never performs the grant, so demanding a
+		// service account it will not use would be config kept for nothing. The
+		// spec-level check in VerifySpec is what actually holds an oauth2_token
+		// spec to a source that can mint for it.
 		credential.StringField("client_id").
-			Required().
-			Describe("OAuth2 service account client ID").
+			Describe("OAuth2 service account client ID (required for oauth2_token specs)").
 			Example("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"),
 
 		credential.StringField("client_secret").
-			Required().
-			Describe("OAuth2 service account client secret").
+			Describe("OAuth2 service account client secret (required for oauth2_token specs)").
 			Example("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
 
 		credential.StringField("ovh_endpoint").
@@ -87,23 +98,10 @@ func (f *OVHDriverFactory) ValidateConfig(config map[string]string) error {
 			Describe("OVH regional endpoint (default: ovh-eu)").
 			Example("ovh-eu"),
 
-		credential.StringField("api_url").
-			Custom(validateOVHEndpointOverride(config)).
-			Describe("Override the API base URL the endpoint would resolve to. For a private egress gateway fronting the OVH API, or a test double.").
-			Example("https://ovh-gateway.internal/1.0"),
-
 		credential.StringField("token_url").
 			Custom(validateOVHEndpointOverride(config)).
 			Describe("Override the OAuth2 token URL the endpoint would resolve to. Set it to the token endpoint of whatever issues the service account's tokens.").
 			Example("https://ovh-gateway.internal/auth/oauth2/token"),
-
-		credential.StringField("project_id").
-			Describe("Default Public Cloud project ID for S3 credential management").
-			Example("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
-
-		credential.StringField("user_id").
-			Describe("Default Public Cloud user ID for S3 credential management").
-			Example("12345"),
 
 		credential.StringField("ca_data").
 			Custom(ValidateCAData).
@@ -116,11 +114,10 @@ func (f *OVHDriverFactory) ValidateConfig(config map[string]string) error {
 	)
 }
 
-// validateOVHEndpointOverride checks a URL an operator has substituted for one
-// of the regional defaults. The client secret is posted to token_url and the
-// bearer it returns is used against api_url, so plaintext is only permitted
-// alongside the same tls_skip_verify a caller must already have set to mean it
-// — matching how the IBM source gates iam_endpoint.
+// validateOVHEndpointOverride checks a URL an operator has substituted for the
+// regional default. The client secret is posted to token_url, so plaintext is
+// only permitted alongside the same tls_skip_verify a caller must already have
+// set to mean it — matching how the IBM source gates iam_endpoint.
 func validateOVHEndpointOverride(config map[string]string) func(string) error {
 	return func(v string) error {
 		if v == "" {
@@ -154,18 +151,14 @@ func (f *OVHDriverFactory) InferCredentialType(_ map[string]string) (string, err
 // Create instantiates a new OVHDriver.
 func (f *OVHDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	endpointName := credential.GetString(config, "ovh_endpoint", "ovh-eu")
-	ep, ok := ovhEndpoints[endpointName]
+	regionTokenURL, ok := ovhEndpoints[endpointName]
 	if !ok {
 		return nil, fmt.Errorf("unknown ovh_endpoint: %s (expected ovh-eu, ovh-ca, or ovh-us)", endpointName)
 	}
 
-	// The regional endpoint is a shorthand for two URLs, and either can be
-	// pointed elsewhere: a private egress gateway fronting the OVH API, or a
-	// deployment whose service-account tokens are issued by something other
-	// than ovh.com. Overriding one leaves the other on the regional default,
-	// since the two are reached independently.
-	apiURL := credential.GetString(config, "api_url", ep.apiURL)
-	tokenURL := credential.GetString(config, "token_url", ep.tokenURL)
+	// The regional default can be pointed elsewhere: a deployment whose
+	// service-account tokens are issued by something other than ovh.com.
+	tokenURL := credential.GetString(config, "token_url", regionTokenURL)
 
 	httpClient, err := BuildHTTPClient(config, 30*time.Second)
 	if err != nil {
@@ -179,7 +172,6 @@ func (f *OVHDriverFactory) Create(config map[string]string, log *logger.GatedLog
 		},
 		logger:     log.WithSubsystem(credential.SourceTypeOVH),
 		httpClient: httpClient,
-		apiURL:     apiURL,
 		tokenURL:   tokenURL,
 	}
 
@@ -193,17 +185,80 @@ func (d *OVHDriver) Type() string {
 
 // MintCredential returns OVH credentials for the given spec.
 func (d *OVHDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	// An access_keys spec is served from fetched secret material, which arrives
+	// through MintFromSecret. Reaching here means the spec named a reference the
+	// minting layer did not route on, and there is no pair to hand back.
+	if spec.Config[credential.ConfigSecretSpec] != "" {
+		return nil, nil, 0, "", fmt.Errorf("ovh: %s is set (credential chaining); this spec mints from fetched secret material, not directly",
+			credential.ConfigSecretSpec)
+	}
+
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 	switch mintMethod {
 	case "oauth2_token":
 		return d.mintOAuth2Token(ctx)
-	case "dynamic_s3":
-		return d.mintDynamicS3(ctx, spec)
-	case "oauth2_token_and_s3":
-		return d.mintOAuth2TokenAndS3(ctx, spec)
+	case "access_keys":
+		return nil, nil, 0, "", fmt.Errorf("ovh: an access_keys spec must set %s naming a spec that yields its access_key and secret_key; the pair is served from that material, never minted here",
+			credential.ConfigSecretSpec)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method: %s (expected oauth2_token, dynamic_s3, or oauth2_token_and_s3)", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method: %s (expected oauth2_token or access_keys)", mintMethod)
 	}
+}
+
+// MintFromSecret serves the object-storage key pair the referenced spec yielded.
+//
+// It makes no request: the pair already exists, so there is nothing to create and
+// nothing to revoke. That is the whole reason this method exists in place of one
+// that asks OVH for a fresh pair — see the type comment.
+func (d *OVHDriver) MintFromSecret(_ context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	mintMethod := credential.GetString(spec.Config, "mint_method", "")
+	if mintMethod != "access_keys" {
+		return nil, nil, 0, "", fmt.Errorf("ovh: credential chaining supports mint_method=access_keys only, got %q", mintMethod)
+	}
+
+	// The spec must name the reference itself. A source-level one would describe
+	// whatever that source authenticates with, not this credential.
+	//
+	// Spec create refuses that combination, but a source converted to chaining
+	// afterwards is not re-validated against the specs already bound to it, so this
+	// is the guard that actually holds.
+	if spec.Config[credential.ConfigSecretSpec] == "" {
+		return nil, nil, 0, "", fmt.Errorf("ovh: an access_keys spec must set its own %s naming a spec that yields its access_key and secret_key",
+			credential.ConfigSecretSpec)
+	}
+
+	// Both halves are read by name. secret_field selects a single secret and a pair
+	// is not one, so the spec is refused that field at create and there is nothing
+	// here for a resolved field to mean.
+	accessKey := material.Data["access_key"]
+	secretKey := material.Data["secret_key"]
+	if accessKey == "" || secretKey == "" {
+		return nil, nil, 0, "", fmt.Errorf("ovh: fetched secret material must hold both 'access_key' and 'secret_key' for access_keys: %w",
+			credential.ErrChainedSecretIncomplete)
+	}
+
+	// The TTL is advisory. Nothing about this mint can discover that the pair was
+	// rotated upstream — it makes no request, so it never sees a rejection — and a
+	// zero TTL would pin the credential in cache for the caller's whole session.
+	// With no lease id the credential is not revocable, so this only forces the
+	// chain to be walked again.
+	ttl := credential.GetDuration(spec.Config, credential.ConfigSecretCacheTTL, 0)
+	if ttl <= 0 {
+		ttl = defaultOVHAccessKeysChainTTL
+	}
+
+	d.logger.Info("served OVH access keys from fetched secret material",
+		logger.String("access_key", truncateID(accessKey, 8)),
+		logger.String("spec", spec.Name),
+		logger.String("ttl", ttl.String()),
+	)
+
+	rawData := map[string]interface{}{
+		"access_key": accessKey,
+		"secret_key": secretKey,
+	}
+
+	return rawData, nil, ttl, "", nil
 }
 
 // getClientCredentials reads client_id and client_secret from source config under RLock.
@@ -213,31 +268,6 @@ func (d *OVHDriver) getClientCredentials() (clientID, clientSecret string) {
 	clientID = credential.GetString(d.credSource.Config, "client_id", "")
 	clientSecret = credential.GetString(d.credSource.Config, "client_secret", "")
 	return
-}
-
-// resolveProjectAndUser resolves project_id and user_id from spec config, falling back to source config.
-func (d *OVHDriver) resolveProjectAndUser(spec *credential.CredSpec) (projectID, userID string, err error) {
-	projectID = credential.GetString(spec.Config, "project_id", "")
-	if projectID == "" {
-		d.configMu.RLock()
-		projectID = credential.GetString(d.credSource.Config, "project_id", "")
-		d.configMu.RUnlock()
-	}
-	if projectID == "" {
-		return "", "", fmt.Errorf("project_id is required for S3 credential management (set on source or spec)")
-	}
-
-	userID = credential.GetString(spec.Config, "user_id", "")
-	if userID == "" {
-		d.configMu.RLock()
-		userID = credential.GetString(d.credSource.Config, "user_id", "")
-		d.configMu.RUnlock()
-	}
-	if userID == "" {
-		return "", "", fmt.Errorf("user_id is required for S3 credential management (set on source or spec)")
-	}
-
-	return projectID, userID, nil
 }
 
 // fetchOAuth2Token performs the OAuth2 client_credentials exchange and returns the access token and TTL.
@@ -322,174 +352,17 @@ func (d *OVHDriver) mintOAuth2Token(ctx context.Context) (map[string]interface{}
 	return rawData, nil, ttl, "", nil // No leaseID — token expires naturally
 }
 
-// s3CredentialResult holds the result of an S3 credential creation call.
-type s3CredentialResult struct {
-	accessKey string
-	secretKey string
-	leaseID   string // projectId/userId/accessKeyId — used for revocation
-}
-
-// createS3Credentials creates S3 credentials via the OVH cloud API.
-// The token must be a valid OAuth2 bearer token for API auth.
-func (d *OVHDriver) createS3Credentials(ctx context.Context, token, projectID, userID string) (*s3CredentialResult, error) {
-	apiURL := fmt.Sprintf("%s/cloud/project/%s/user/%s/s3Credentials", d.apiURL, projectID, userID)
-
-	retryConfig := httputil.HTTPRetryConfig{
-		MaxAttempts:       ovhMaxRetryAttempts,
-		MaxBodySize:       ovhMaxResponseBodySize,
-		RetryableStatuses: []int{http.StatusTooManyRequests, 500, 503},
-		BaseBackoff:       1 * time.Second,
-		JitterPercent:     20,
+// Revoke is a no-op: no mint method here issues a lease.
+//
+// A bearer token expires on its own, and an access_keys pair was never created by
+// this driver — it belongs to whoever owns the referenced spec, and deleting it
+// would revoke a credential this source only borrowed. So there is never a handle
+// to release, and the credential type marks these non-revocable.
+func (d *OVHDriver) Revoke(_ context.Context, leaseID string) error {
+	if leaseID != "" {
+		d.logger.Debug("ignoring revocation for an OVH lease this driver no longer issues",
+			logger.String("lease_id", leaseID))
 	}
-
-	httpReq := httputil.HTTPRequest{
-		Method: http.MethodPost,
-		URL:    apiURL,
-		Headers: map[string]string{
-			"Authorization": "Bearer " + token,
-			"Content-Type":  "application/json",
-			"Accept":        "application/json",
-		},
-	}
-
-	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create OVH S3 credentials: %w", err)
-	}
-
-	var s3Resp struct {
-		Access string `json:"access"`
-		Secret string `json:"secret"`
-	}
-	if err := json.Unmarshal(respBody, &s3Resp); err != nil {
-		return nil, fmt.Errorf("failed to parse S3 credentials response: %w", err)
-	}
-
-	if s3Resp.Access == "" || s3Resp.Secret == "" {
-		return nil, fmt.Errorf("OVH API returned empty S3 access or secret key")
-	}
-
-	return &s3CredentialResult{
-		accessKey: s3Resp.Access,
-		secretKey: s3Resp.Secret,
-		leaseID:   fmt.Sprintf("%s/%s/%s", projectID, userID, s3Resp.Access),
-	}, nil
-}
-
-// mintDynamicS3 creates S3 credentials via the OVH cloud API.
-// The TTL is derived from the OAuth2 token used for API auth — S3 keys are
-// revoked and re-created when the credential lease expires (~1h).
-func (d *OVHDriver) mintDynamicS3(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	token, tokenTTL, err := d.fetchOAuth2Token(ctx)
-	if err != nil {
-		return nil, nil, 0, "", fmt.Errorf("failed to get OAuth2 token for S3 credential creation: %w", err)
-	}
-
-	projectID, userID, err := d.resolveProjectAndUser(spec)
-	if err != nil {
-		return nil, nil, 0, "", err
-	}
-
-	s3, err := d.createS3Credentials(ctx, token, projectID, userID)
-	if err != nil {
-		return nil, nil, 0, "", err
-	}
-
-	d.logger.Info("created dynamic OVH S3 credentials",
-		logger.String("access_key", truncateID(s3.accessKey, 8)),
-		logger.String("spec", spec.Name),
-		logger.String("ttl", tokenTTL.String()),
-	)
-
-	rawData := map[string]interface{}{
-		"access_key": s3.accessKey,
-		"secret_key": s3.secretKey,
-	}
-
-	return rawData, nil, tokenTTL, s3.leaseID, nil
-}
-
-// mintOAuth2TokenAndS3 mints both a bearer token and S3 credentials.
-func (d *OVHDriver) mintOAuth2TokenAndS3(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	token, tokenTTL, err := d.fetchOAuth2Token(ctx)
-	if err != nil {
-		return nil, nil, 0, "", fmt.Errorf("failed to mint OAuth2 token for dual-mode credential: %w", err)
-	}
-
-	projectID, userID, err := d.resolveProjectAndUser(spec)
-	if err != nil {
-		return nil, nil, 0, "", err
-	}
-
-	s3, err := d.createS3Credentials(ctx, token, projectID, userID)
-	if err != nil {
-		return nil, nil, 0, "", err
-	}
-
-	d.logger.Info("minted OVH dual-mode credentials (OAuth2 token + S3)",
-		logger.String("access_key", truncateID(s3.accessKey, 8)),
-		logger.String("token_ttl", tokenTTL.String()),
-		logger.String("spec", spec.Name),
-	)
-
-	rawData := map[string]interface{}{
-		"api_token":  token,
-		"access_key": s3.accessKey,
-		"secret_key": s3.secretKey,
-	}
-
-	// TTL = token TTL (shorter-lived governs refresh; S3 keys are revoked on refresh)
-	return rawData, nil, tokenTTL, s3.leaseID, nil
-}
-
-// Revoke deletes dynamically created S3 credentials.
-// The leaseID format is: projectId/userId/accessKeyId
-func (d *OVHDriver) Revoke(ctx context.Context, leaseID string) error {
-	if leaseID == "" {
-		return nil
-	}
-
-	parts := strings.SplitN(leaseID, "/", 3)
-	if len(parts) != 3 {
-		return fmt.Errorf("invalid OVH lease ID format: %s (expected projectId/userId/accessKeyId)", leaseID)
-	}
-	projectID, userID, accessKeyID := parts[0], parts[1], parts[2]
-
-	// Mint a fresh token for API auth
-	token, _, err := d.fetchOAuth2Token(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get OAuth2 token for S3 credential revocation: %w", err)
-	}
-
-	apiURL := fmt.Sprintf("%s/cloud/project/%s/user/%s/s3Credentials/%s", d.apiURL, projectID, userID, accessKeyID)
-
-	retryConfig := httputil.HTTPRetryConfig{
-		MaxAttempts:       ovhMaxRetryAttempts,
-		MaxBodySize:       ovhMaxResponseBodySize,
-		RetryableStatuses: []int{http.StatusTooManyRequests, 500, 503},
-		BaseBackoff:       1 * time.Second,
-		JitterPercent:     20,
-	}
-
-	httpReq := httputil.HTTPRequest{
-		Method: http.MethodDelete,
-		URL:    apiURL,
-		Headers: map[string]string{
-			"Authorization": "Bearer " + token,
-			"Accept":        "application/json",
-		},
-		OKStatuses: []int{http.StatusNoContent, http.StatusOK, http.StatusNotFound},
-	}
-
-	_, _, err = httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
-	if err != nil {
-		return fmt.Errorf("failed to revoke OVH S3 credentials %s: %w", accessKeyID, err)
-	}
-
-	d.logger.Info("revoked OVH S3 credentials",
-		logger.String("access_key", truncateID(accessKeyID, 8)),
-	)
-
 	return nil
 }
 
@@ -505,12 +378,22 @@ func (d *OVHDriver) VerifySpec(_ context.Context, spec *credential.CredSpec) err
 
 	switch mintMethod {
 	case "oauth2_token":
-		// No extra config needed — uses source's client_id/secret
+		// The grant runs with the source's service account, which the source
+		// schema no longer demands — a source serving only access_keys specs has
+		// no use for one. This is where that requirement actually lands.
+		clientID, clientSecret := d.getClientCredentials()
+		if clientID == "" || clientSecret == "" {
+			return fmt.Errorf("an oauth2_token spec needs client_id and client_secret on its source")
+		}
 		return nil
-	case "dynamic_s3", "oauth2_token_and_s3":
-		_, _, err := d.resolveProjectAndUser(spec)
-		return err
+	case "access_keys":
+		// Reached only if the spec named no reference; a chained spec skips
+		// verification entirely. Without one there is no pair to serve.
+		if spec.Config[credential.ConfigSecretSpec] == "" {
+			return fmt.Errorf("an access_keys spec must set %s naming a spec that yields its access_key and secret_key", credential.ConfigSecretSpec)
+		}
+		return nil
 	default:
-		return fmt.Errorf("unsupported mint_method: %s (expected oauth2_token, dynamic_s3, or oauth2_token_and_s3)", mintMethod)
+		return fmt.Errorf("unsupported mint_method: %s (expected oauth2_token or access_keys)", mintMethod)
 	}
 }

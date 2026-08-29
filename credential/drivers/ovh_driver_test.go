@@ -29,7 +29,7 @@ func createOVHTestLogger() *logger.GatedLogger {
 }
 
 // createOVHTestDriver creates an OVHDriver pointing at a test server.
-// The driver's apiURL and tokenURL are overridden to point at the test server.
+// The driver's tokenURL is overridden to point at the test server.
 func createOVHTestDriver(t *testing.T, serverURL string, extraConfig map[string]string) *OVHDriver {
 	t.Helper()
 
@@ -55,7 +55,6 @@ func createOVHTestDriver(t *testing.T, serverURL string, extraConfig map[string]
 		},
 		logger:     log.WithSubsystem(credential.SourceTypeOVH),
 		httpClient: httpClient,
-		apiURL:     serverURL,
 		tokenURL:   serverURL + "/auth/oauth2/token",
 	}
 
@@ -88,30 +87,11 @@ func TestOVHDriverFactory_ValidateConfig(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("valid config with S3 fields", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
-			"client_id":     "test-id",
-			"client_secret": "test-secret",
-			"project_id":    "proj-123",
-			"user_id":       "user-456",
-		})
-		assert.NoError(t, err)
-	})
-
-	t.Run("missing client_id", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
-			"client_secret": "test-secret",
-		})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "client_id")
-	})
-
-	t.Run("missing client_secret", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
-			"client_id": "test-id",
-		})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "client_secret")
+	// A source serving only access_keys specs never performs the grant, so the
+	// service account is not demanded here. VerifySpec is what refuses an
+	// oauth2_token spec on a source that has none.
+	t.Run("a source with no service account is accepted", func(t *testing.T) {
+		assert.NoError(t, f.ValidateConfig(map[string]string{"ovh_endpoint": "ovh-eu"}))
 	})
 
 	t.Run("invalid endpoint", func(t *testing.T) {
@@ -152,9 +132,7 @@ func TestOVHDriverFactory_Create(t *testing.T) {
 			"client_secret": "test-secret",
 		}, log)
 		require.NoError(t, err)
-		ovhDriver := driver.(*OVHDriver)
-		assert.Equal(t, "https://eu.api.ovh.com/1.0", ovhDriver.apiURL)
-		assert.Equal(t, "https://www.ovh.com/auth/oauth2/token", ovhDriver.tokenURL)
+		assert.Equal(t, "https://www.ovh.com/auth/oauth2/token", driver.(*OVHDriver).tokenURL)
 	})
 
 	t.Run("ovh-us endpoint", func(t *testing.T) {
@@ -164,9 +142,7 @@ func TestOVHDriverFactory_Create(t *testing.T) {
 			"ovh_endpoint":  "ovh-us",
 		}, log)
 		require.NoError(t, err)
-		ovhDriver := driver.(*OVHDriver)
-		assert.Equal(t, "https://api.us.ovhcloud.com/1.0", ovhDriver.apiURL)
-		assert.Equal(t, "https://us.ovhcloud.com/auth/oauth2/token", ovhDriver.tokenURL)
+		assert.Equal(t, "https://us.ovhcloud.com/auth/oauth2/token", driver.(*OVHDriver).tokenURL)
 	})
 
 	t.Run("unknown endpoint", func(t *testing.T) {
@@ -179,45 +155,28 @@ func TestOVHDriverFactory_Create(t *testing.T) {
 		assert.Contains(t, err.Error(), "unknown ovh_endpoint")
 	})
 
-	// The regional endpoint is shorthand for two URLs reached independently, so
-	// overriding one must leave the other on its regional default — a source
-	// whose tokens come from elsewhere still talks to the regional API.
-	t.Run("token_url override leaves api_url regional", func(t *testing.T) {
+	// The grant is the only request this driver makes, so a deployment whose
+	// service-account tokens come from somewhere other than ovh.com points
+	// token_url there and the region stops mattering.
+	t.Run("token_url override replaces the regional default", func(t *testing.T) {
 		driver, err := f.Create(map[string]string{
 			"client_id":     "test-id",
 			"client_secret": "test-secret",
 			"token_url":     "https://issuer.internal/oauth2/token",
 		}, log)
 		require.NoError(t, err)
-		ovhDriver := driver.(*OVHDriver)
-		assert.Equal(t, "https://issuer.internal/oauth2/token", ovhDriver.tokenURL)
-		assert.Equal(t, "https://eu.api.ovh.com/1.0", ovhDriver.apiURL)
+		assert.Equal(t, "https://issuer.internal/oauth2/token", driver.(*OVHDriver).tokenURL)
 	})
 
-	t.Run("api_url override leaves token_url regional", func(t *testing.T) {
-		driver, err := f.Create(map[string]string{
-			"client_id":     "test-id",
-			"client_secret": "test-secret",
-			"api_url":       "https://egress.internal/1.0",
-		}, log)
-		require.NoError(t, err)
-		ovhDriver := driver.(*OVHDriver)
-		assert.Equal(t, "https://egress.internal/1.0", ovhDriver.apiURL)
-		assert.Equal(t, "https://www.ovh.com/auth/oauth2/token", ovhDriver.tokenURL)
-	})
-
-	t.Run("overrides compose with a non-default endpoint", func(t *testing.T) {
+	t.Run("an override wins over a non-default endpoint", func(t *testing.T) {
 		driver, err := f.Create(map[string]string{
 			"client_id":     "test-id",
 			"client_secret": "test-secret",
 			"ovh_endpoint":  "ovh-us",
-			"api_url":       "https://egress.internal/1.0",
 			"token_url":     "https://issuer.internal/oauth2/token",
 		}, log)
 		require.NoError(t, err)
-		ovhDriver := driver.(*OVHDriver)
-		assert.Equal(t, "https://egress.internal/1.0", ovhDriver.apiURL)
-		assert.Equal(t, "https://issuer.internal/oauth2/token", ovhDriver.tokenURL)
+		assert.Equal(t, "https://issuer.internal/oauth2/token", driver.(*OVHDriver).tokenURL)
 	})
 }
 
@@ -286,194 +245,7 @@ func TestOVHDriver_MintOAuth2Token_EmptyResponse(t *testing.T) {
 
 // --- Dynamic S3 credential tests ---
 
-func TestOVHDriver_MintDynamicS3(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/auth/oauth2/token":
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access_token": "temp-token",
-				"token_type":   "Bearer",
-				"expires_in":   3599,
-			})
-
-		case r.Method == http.MethodPost && r.URL.Path == "/cloud/project/proj-123/user/user-456/s3Credentials":
-			assert.Equal(t, "Bearer temp-token", r.Header.Get("Authorization"))
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access": "s3-access-key-123",
-				"secret": "s3-secret-key-456",
-			})
-
-		default:
-			http.Error(w, "not found", http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	driver := createOVHTestDriver(t, server.URL, map[string]string{
-		"project_id": "proj-123",
-		"user_id":    "user-456",
-	})
-
-	spec := &credential.CredSpec{
-		Name: "s3-spec",
-		Config: map[string]string{
-			"mint_method": "dynamic_s3",
-		},
-	}
-
-	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
-	require.NoError(t, err)
-	assert.Equal(t, "s3-access-key-123", rawData["access_key"])
-	assert.Equal(t, "s3-secret-key-456", rawData["secret_key"])
-	assert.Equal(t, 3599*time.Second, ttl) // TTL from OAuth2 token
-	assert.Equal(t, "proj-123/user-456/s3-access-key-123", leaseID)
-}
-
-func TestOVHDriver_MintDynamicS3_SpecOverridesSource(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/auth/oauth2/token":
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access_token": "temp-token",
-				"token_type":   "Bearer",
-				"expires_in":   3599,
-			})
-
-		case r.Method == http.MethodPost && r.URL.Path == "/cloud/project/spec-proj/user/spec-user/s3Credentials":
-			// Spec-level project_id and user_id should be used
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access": "s3-key",
-				"secret": "s3-secret",
-			})
-
-		default:
-			http.Error(w, "unexpected: "+r.URL.Path, http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	driver := createOVHTestDriver(t, server.URL, map[string]string{
-		"project_id": "source-proj",
-		"user_id":    "source-user",
-	})
-
-	spec := &credential.CredSpec{
-		Name: "s3-spec",
-		Config: map[string]string{
-			"mint_method": "dynamic_s3",
-			"project_id":  "spec-proj",
-			"user_id":     "spec-user",
-		},
-	}
-
-	rawData, _, _, leaseID, err := driver.MintCredential(context.Background(), spec)
-	require.NoError(t, err)
-	assert.Equal(t, "s3-key", rawData["access_key"])
-	assert.Equal(t, "spec-proj/spec-user/s3-key", leaseID)
-}
-
-func TestOVHDriver_MintDynamicS3_MissingProjectID(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token": "temp-token",
-			"expires_in":   3599,
-		})
-	}))
-	defer server.Close()
-
-	driver := createOVHTestDriver(t, server.URL, nil) // No project_id on source
-
-	spec := &credential.CredSpec{
-		Name: "s3-spec",
-		Config: map[string]string{
-			"mint_method": "dynamic_s3",
-			// No project_id on spec either
-			"user_id": "user-123",
-		},
-	}
-
-	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "project_id")
-}
-
-func TestOVHDriver_MintDynamicS3_MissingUserID(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token": "temp-token",
-			"expires_in":   3599,
-		})
-	}))
-	defer server.Close()
-
-	driver := createOVHTestDriver(t, server.URL, map[string]string{
-		"project_id": "proj-123",
-	})
-
-	spec := &credential.CredSpec{
-		Name: "s3-spec",
-		Config: map[string]string{
-			"mint_method": "dynamic_s3",
-		},
-	}
-
-	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "user_id")
-}
-
 // --- Dual mode (oauth2_token_and_s3) tests ---
-
-func TestOVHDriver_MintOAuth2TokenAndS3(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/auth/oauth2/token":
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access_token": "dual-token",
-				"token_type":   "Bearer",
-				"expires_in":   3599,
-			})
-
-		case r.Method == http.MethodPost && r.URL.Path == "/cloud/project/proj-123/user/user-456/s3Credentials":
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access": "dual-s3-key",
-				"secret": "dual-s3-secret",
-			})
-
-		default:
-			http.Error(w, "not found", http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	driver := createOVHTestDriver(t, server.URL, map[string]string{
-		"project_id": "proj-123",
-		"user_id":    "user-456",
-	})
-
-	spec := &credential.CredSpec{
-		Name: "dual-spec",
-		Config: map[string]string{
-			"mint_method": "oauth2_token_and_s3",
-		},
-	}
-
-	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
-	require.NoError(t, err)
-	assert.Equal(t, "dual-token", rawData["api_token"])
-	assert.Equal(t, "dual-s3-key", rawData["access_key"])
-	assert.Equal(t, "dual-s3-secret", rawData["secret_key"])
-	assert.Equal(t, 3599*time.Second, ttl) // Token TTL governs refresh
-	assert.Equal(t, "proj-123/user-456/dual-s3-key", leaseID)
-}
 
 // --- Unsupported mint method ---
 
@@ -494,61 +266,32 @@ func TestOVHDriver_MintCredential_UnsupportedMethod(t *testing.T) {
 
 // --- Revoke tests ---
 
-func TestOVHDriver_Revoke(t *testing.T) {
-	var deletedPath string
-	tokenCalled := false
-
+// No mint method issues a lease any more, so revocation has nothing to release.
+// A lease id from before that change is ignored rather than erroring: erroring
+// would only send the expiration manager into a retry ladder for a request that
+// can never succeed.
+func TestOVHDriver_Revoke_IsNoOp(t *testing.T) {
+	calls := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/auth/oauth2/token":
-			tokenCalled = true
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access_token": "revoke-token",
-				"expires_in":   3599,
-			})
-
-		case r.Method == http.MethodDelete:
-			assert.Equal(t, "Bearer revoke-token", r.Header.Get("Authorization"))
-			deletedPath = r.URL.Path
-			w.WriteHeader(http.StatusNoContent)
-
-		default:
-			http.Error(w, "not found", http.StatusNotFound)
-		}
+		calls++
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 
 	driver := createOVHTestDriver(t, server.URL, nil)
 
-	err := driver.Revoke(context.Background(), "proj-123/user-456/s3-key-789")
-	require.NoError(t, err)
-	assert.True(t, tokenCalled)
-	assert.Equal(t, "/cloud/project/proj-123/user/user-456/s3Credentials/s3-key-789", deletedPath)
-}
-
-func TestOVHDriver_Revoke_EmptyLeaseID(t *testing.T) {
-	driver := createOVHTestDriver(t, "https://unused", nil)
-	err := driver.Revoke(context.Background(), "")
-	assert.NoError(t, err)
-}
-
-func TestOVHDriver_Revoke_InvalidLeaseID(t *testing.T) {
-	driver := createOVHTestDriver(t, "https://unused", nil)
-	err := driver.Revoke(context.Background(), "invalid-format")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid OVH lease ID format")
+	for _, leaseID := range []string{"", "proj-123/user-456/s3-key-789", "not-a-lease-shape"} {
+		assert.NoError(t, driver.Revoke(context.Background(), leaseID), "leaseID %q", leaseID)
+	}
+	assert.Zero(t, calls, "revocation must not reach the network")
 }
 
 // --- VerifySpec tests ---
 
 func TestOVHDriver_VerifySpec(t *testing.T) {
-	driver := createOVHTestDriver(t, "https://unused", map[string]string{
-		"project_id": "proj-123",
-		"user_id":    "user-456",
-	})
+	driver := createOVHTestDriver(t, "https://unused", nil)
 
-	t.Run("oauth2_token - no extra config needed", func(t *testing.T) {
+	t.Run("oauth2_token - the source's service account suffices", func(t *testing.T) {
 		err := driver.VerifySpec(context.Background(), &credential.CredSpec{
 			Name:   "api-spec",
 			Config: map[string]string{"mint_method": "oauth2_token"},
@@ -556,22 +299,28 @@ func TestOVHDriver_VerifySpec(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("dynamic_s3 - source has project_id and user_id", func(t *testing.T) {
-		err := driver.VerifySpec(context.Background(), &credential.CredSpec{
-			Name:   "s3-spec",
-			Config: map[string]string{"mint_method": "dynamic_s3"},
+	// The source schema no longer demands a service account, so this is where an
+	// oauth2_token spec on a source without one is caught.
+	t.Run("oauth2_token - refused on a source with no service account", func(t *testing.T) {
+		bare := createOVHTestDriver(t, "https://unused", map[string]string{
+			"client_id":     "",
+			"client_secret": "",
 		})
-		assert.NoError(t, err)
-	})
-
-	t.Run("dynamic_s3 - missing project_id", func(t *testing.T) {
-		driverNoProject := createOVHTestDriver(t, "https://unused", nil)
-		err := driverNoProject.VerifySpec(context.Background(), &credential.CredSpec{
-			Name:   "s3-spec",
-			Config: map[string]string{"mint_method": "dynamic_s3"},
+		err := bare.VerifySpec(context.Background(), &credential.CredSpec{
+			Name:   "api-spec",
+			Config: map[string]string{"mint_method": "oauth2_token"},
 		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "project_id")
+		assert.Contains(t, err.Error(), "client_id and client_secret")
+	})
+
+	t.Run("access_keys - refused without a reference to serve", func(t *testing.T) {
+		err := driver.VerifySpec(context.Background(), &credential.CredSpec{
+			Name:   "s3-spec",
+			Config: map[string]string{"mint_method": "access_keys"},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
 	})
 
 	t.Run("unsupported mint_method", func(t *testing.T) {
@@ -648,147 +397,126 @@ func TestOVHDriver_MintOAuth2Token_MissingExpiresIn(t *testing.T) {
 	assert.Less(t, ttl, 1*time.Hour)
 }
 
-func TestOVHDriver_MintDynamicS3_EmptySecret(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/auth/oauth2/token":
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access_token": "temp-token",
-				"expires_in":   3599,
-			})
-		default:
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access": "s3-key",
-				"secret": "", // empty secret
-			})
-		}
-	}))
-	defer server.Close()
-
-	driver := createOVHTestDriver(t, server.URL, map[string]string{
-		"project_id": "proj-123",
-		"user_id":    "user-456",
-	})
-
-	spec := &credential.CredSpec{
-		Name:   "s3-spec",
-		Config: map[string]string{"mint_method": "dynamic_s3"},
-	}
-
-	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "empty S3 access or secret key")
-}
-
-func TestOVHDriver_MintDynamicS3_APIError(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/auth/oauth2/token":
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access_token": "temp-token",
-				"expires_in":   3599,
-			})
-		default:
-			http.Error(w, `{"message":"User not found"}`, http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	driver := createOVHTestDriver(t, server.URL, map[string]string{
-		"project_id": "proj-123",
-		"user_id":    "bad-user",
-	})
-
-	spec := &credential.CredSpec{
-		Name:   "s3-spec",
-		Config: map[string]string{"mint_method": "dynamic_s3"},
-	}
-
-	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create OVH S3 credentials")
-}
-
-func TestOVHDriver_MintOAuth2TokenAndS3_CallCount(t *testing.T) {
-	var tokenCalls, s3Calls int
-
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/auth/oauth2/token":
-			tokenCalls++
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access_token": "counted-token",
-				"expires_in":   3599,
-			})
-
-		case r.Method == http.MethodPost && r.URL.Path == "/cloud/project/proj-123/user/user-456/s3Credentials":
-			s3Calls++
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access": "counted-key",
-				"secret": "counted-secret",
-			})
-
-		default:
-			http.Error(w, "unexpected", http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	driver := createOVHTestDriver(t, server.URL, map[string]string{
-		"project_id": "proj-123",
-		"user_id":    "user-456",
-	})
-
-	spec := &credential.CredSpec{
-		Name:   "dual-spec",
-		Config: map[string]string{"mint_method": "oauth2_token_and_s3"},
-	}
-
-	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
-	require.NoError(t, err)
-	assert.Equal(t, 1, tokenCalls, "should make exactly 1 token call")
-	assert.Equal(t, 1, s3Calls, "should make exactly 1 S3 credential call")
-}
-
-func TestOVHDriver_MintOAuth2TokenAndS3_S3APIError(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/auth/oauth2/token":
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"access_token": "good-token",
-				"expires_in":   3599,
-			})
-		default:
-			http.Error(w, `{"message":"Forbidden"}`, http.StatusForbidden)
-		}
-	}))
-	defer server.Close()
-
-	driver := createOVHTestDriver(t, server.URL, map[string]string{
-		"project_id": "proj-123",
-		"user_id":    "user-456",
-	})
-
-	spec := &credential.CredSpec{
-		Name:   "dual-spec",
-		Config: map[string]string{"mint_method": "oauth2_token_and_s3"},
-	}
-
-	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create OVH S3 credentials")
-}
-
 // --- Cleanup test ---
 
 func TestOVHDriver_Cleanup(t *testing.T) {
 	driver := createOVHTestDriver(t, "https://unused", nil)
 	err := driver.Cleanup(context.Background())
 	assert.NoError(t, err)
+}
+
+// --- access_keys (chained) tests ---
+
+func ovhAccessKeysSpec(secretSpec string) *credential.CredSpec {
+	cfg := map[string]string{"mint_method": "access_keys"}
+	if secretSpec != "" {
+		cfg[credential.ConfigSecretSpec] = secretSpec
+	}
+	return &credential.CredSpec{Name: "s3-spec", Config: cfg}
+}
+
+// The pair is served straight from the fetched material. The point of the method
+// is that OVH is never asked for anything, so the test fails if any request is
+// made — the driver is pointed at a server that would record one.
+func TestOVHDriver_MintFromSecret_AccessKeys(t *testing.T) {
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	driver := createOVHTestDriver(t, server.URL, nil)
+	material := credential.SecretMaterial{Data: map[string]string{
+		"access_key": "held-access",
+		"secret_key": "held-secret",
+	}}
+
+	rawData, _, ttl, leaseID, err := driver.MintFromSecret(context.Background(), ovhAccessKeysSpec("ovh-pair"), material)
+	require.NoError(t, err)
+	assert.Equal(t, "held-access", rawData["access_key"])
+	assert.Equal(t, "held-secret", rawData["secret_key"])
+	assert.Zero(t, calls, "serving a pair that already exists must make no request")
+
+	// No lease: nothing was created here, so there is no handle to release and
+	// nothing for the expiration manager to try to revoke.
+	assert.Empty(t, leaseID)
+	assert.Equal(t, defaultOVHAccessKeysChainTTL, ttl)
+
+	t.Run("the spec's secret_cache_ttl bounds how long the pair is reused", func(t *testing.T) {
+		spec := ovhAccessKeysSpec("ovh-pair")
+		spec.Config[credential.ConfigSecretCacheTTL] = "2m"
+		_, _, ttl, _, err := driver.MintFromSecret(context.Background(), spec, material)
+		require.NoError(t, err)
+		assert.Equal(t, 2*time.Minute, ttl)
+	})
+}
+
+// A source-level reference describes whatever that source authenticates with, not
+// this credential. Spec create refuses the combination, but converting a source
+// afterwards does not re-validate the specs already bound to it — so this guard
+// is the one that actually holds.
+func TestOVHDriver_MintFromSecret_RequiresOwnSecretSpec(t *testing.T) {
+	driver := createOVHTestDriver(t, "https://unused", nil)
+
+	_, _, _, _, err := driver.MintFromSecret(context.Background(), ovhAccessKeysSpec(""), credential.SecretMaterial{
+		Data: map[string]string{"access_key": "a", "secret_key": "b"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
+}
+
+func TestOVHDriver_MintFromSecret_IncompletePair(t *testing.T) {
+	driver := createOVHTestDriver(t, "https://unused", nil)
+
+	for name, data := range map[string]map[string]string{
+		"no secret_key": {"access_key": "a"},
+		"no access_key": {"secret_key": "b"},
+		"neither":       {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, _, _, err := driver.MintFromSecret(context.Background(), ovhAccessKeysSpec("ovh-pair"),
+				credential.SecretMaterial{Data: data})
+			require.Error(t, err)
+			// The sentinel is what lets the minting layer evict a cached copy and
+			// fetch again, rather than serving half a credential.
+			assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+		})
+	}
+}
+
+func TestOVHDriver_MintFromSecret_RefusesOtherMintMethods(t *testing.T) {
+	driver := createOVHTestDriver(t, "https://unused", nil)
+
+	spec := &credential.CredSpec{Name: "api-spec", Config: map[string]string{
+		"mint_method":               "oauth2_token",
+		credential.ConfigSecretSpec: "ovh-pair",
+	}}
+	_, _, _, _, err := driver.MintFromSecret(context.Background(), spec, credential.SecretMaterial{
+		Data: map[string]string{"access_key": "a", "secret_key": "b"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "access_keys")
+}
+
+// Routing is the minting layer's job; if a chained spec ever reaches the direct
+// path the driver must refuse rather than mint something else.
+func TestOVHDriver_MintCredential_FailsClosedForAccessKeys(t *testing.T) {
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	driver := createOVHTestDriver(t, server.URL, nil)
+
+	for _, spec := range []*credential.CredSpec{
+		ovhAccessKeysSpec("ovh-pair"),
+		ovhAccessKeysSpec(""),
+	} {
+		_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+		require.Error(t, err)
+	}
+	assert.Zero(t, calls)
 }
