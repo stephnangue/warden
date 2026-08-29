@@ -10,6 +10,12 @@ import (
 	"github.com/stephnangue/warden/helper"
 )
 
+// scalewayMaxDescriptionLength bounds the description sent when minting a key.
+// Enforced here rather than left to the API so an over-long value — which the
+// default "warden-<spec name>" can reach on its own — is refused at spec create
+// instead of failing every mint.
+const scalewayMaxDescriptionLength = 200
+
 // ScalewayKeysCredType handles Scaleway API key credentials.
 // A single key pair serves both the standard API (secret_key as X-Auth-Token)
 // and S3 Object Storage (access_key + secret_key for SigV4 signing).
@@ -51,10 +57,29 @@ func (t *ScalewayKeysCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"),
 
 		credential.StringField("description").
+			Custom(func(v string) error {
+				if len(v) > scalewayMaxDescriptionLength {
+					return fmt.Errorf("description must be at most %d characters, got %d", scalewayMaxDescriptionLength, len(v))
+				}
+				return nil
+			}).
 			Describe("Description for dynamically created keys (max 200 chars)").
 			Example("warden-managed-key"),
 
 		credential.DurationField("ttl").
+			Custom(func(v string) error {
+				// DurationField only checks that the value parses, so "0s" and "-1h"
+				// reach the mint and produce a key that is born expired — with a lease
+				// TTL of 0, which makes it unrevocable and so never cleaned up.
+				d, err := time.ParseDuration(v)
+				if err != nil {
+					return nil // the field's own parse check reports this
+				}
+				if d <= 0 {
+					return fmt.Errorf("ttl must be positive, got %s", v)
+				}
+				return nil
+			}).
 			Describe("TTL for dynamically created keys (default: 1h)").
 			Example("1h"),
 	}

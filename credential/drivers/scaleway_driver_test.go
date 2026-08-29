@@ -3,9 +3,12 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -114,7 +117,10 @@ func TestScalewayDriver_MintStaticCredential(t *testing.T) {
 		assert.Empty(t, leaseID)
 	})
 
-	t.Run("default mint_method is static_keys", func(t *testing.T) {
+	t.Run("mint_method is not defaulted", func(t *testing.T) {
+		// The credential type refuses a spec without an explicit mint_method, so an
+		// empty one here means validation was bypassed. Minting static keys anyway
+		// would guess at what the operator meant.
 		spec := &credential.CredSpec{
 			Name: "test-spec",
 			Config: map[string]string{
@@ -123,9 +129,9 @@ func TestScalewayDriver_MintStaticCredential(t *testing.T) {
 			},
 		}
 
-		rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
-		require.NoError(t, err)
-		assert.Equal(t, "SCWXXXXXXXXXXXXXXXXX", rawData["access_key"])
+		_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "expected static_keys or dynamic_keys")
 	})
 
 	t.Run("missing access_key", func(t *testing.T) {
@@ -229,8 +235,112 @@ func TestScalewayDriver_MintDynamicCredential(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "SCWNEWKEYXXXXXXXXXX", rawData["access_key"])
 	assert.Equal(t, "new-uuid-secret-key", rawData["secret_key"])
-	assert.Equal(t, 2*time.Hour, ttl)
+	// The lease follows the server's expires_at, which the stub echoes back — so it
+	// lands just under the requested 2h by the round-trip time, never above it.
+	assert.LessOrEqual(t, ttl, 2*time.Hour)
+	assert.Greater(t, ttl, 2*time.Hour-time.Minute)
 	assert.Equal(t, "SCWNEWKEYXXXXXXXXXX", leaseID) // leaseID = access_key
+}
+
+func TestScalewayDriver_MintDynamicCredential_LeaseFollowsServerExpiry(t *testing.T) {
+	// An organization credential-duration policy can cap a key well below what was
+	// asked for. The lease has to follow the key, not the request: it bounds how
+	// long the credential is served from cache, and a lease outliving its key means
+	// later requests are handed something already dead.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_key": "SCWCLAMPEDKEYXXXXXX",
+			"secret_key": "clamped-secret",
+			"expires_at": time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339),
+		})
+	}))
+	defer server.Close()
+
+	f := &ScalewayDriverFactory{}
+	driver, err := f.Create(map[string]string{
+		"scaleway_url":          server.URL,
+		"management_secret_key": "mgmt-secret-key",
+		"tls_skip_verify":       "true",
+	}, createScalewayTestLogger())
+	require.NoError(t, err)
+
+	spec := &credential.CredSpec{
+		Name: "clamped-spec",
+		Config: map[string]string{
+			"mint_method":    "dynamic_keys",
+			"application_id": "app-123",
+			"ttl":            "24h",
+		},
+	}
+
+	_, _, ttl, _, err := driver.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Less(t, ttl, 16*time.Minute, "lease must follow the clamped expires_at, not the requested 24h")
+	assert.Greater(t, ttl, 14*time.Minute)
+}
+
+func TestScalewayDriver_MintDynamicCredential_UnparseableExpiryFallsBack(t *testing.T) {
+	// A usable key is not thrown away over a timestamp format.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_key": "SCWWEIRDEXPIRYXXXXX",
+			"secret_key": "weird-secret",
+			"expires_at": "next tuesday",
+		})
+	}))
+	defer server.Close()
+
+	f := &ScalewayDriverFactory{}
+	driver, err := f.Create(map[string]string{
+		"scaleway_url":          server.URL,
+		"management_secret_key": "mgmt-secret-key",
+		"tls_skip_verify":       "true",
+	}, createScalewayTestLogger())
+	require.NoError(t, err)
+
+	_, _, ttl, _, err := driver.MintCredential(context.Background(), &credential.CredSpec{
+		Name: "weird-spec",
+		Config: map[string]string{
+			"mint_method":    "dynamic_keys",
+			"application_id": "app-123",
+			"ttl":            "30m",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Minute, ttl)
+}
+
+func TestScalewayDriver_MintDynamicCredential_AlreadyExpiredIsAnError(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_key": "SCWDEADKEYXXXXXXXXX",
+			"secret_key": "dead-secret",
+			"expires_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		})
+	}))
+	defer server.Close()
+
+	f := &ScalewayDriverFactory{}
+	driver, err := f.Create(map[string]string{
+		"scaleway_url":          server.URL,
+		"management_secret_key": "mgmt-secret-key",
+		"tls_skip_verify":       "true",
+	}, createScalewayTestLogger())
+	require.NoError(t, err)
+
+	_, _, _, _, err = driver.MintCredential(context.Background(), &credential.CredSpec{
+		Name: "dead-spec",
+		Config: map[string]string{
+			"mint_method":    "dynamic_keys",
+			"application_id": "app-123",
+			"ttl":            "1h",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already expired")
 }
 
 func TestScalewayDriver_MintDynamicCredential_MissingManagementKey(t *testing.T) {
@@ -493,11 +603,22 @@ func TestScalewayDriver_PrepareRotation(t *testing.T) {
 				"application_id": "app-mgmt-123",
 			})
 
+		// The orphan sweep lists the bearer's keys before creating anything.
+		case r.Method == http.MethodGet && r.URL.Path == "/iam/v1alpha1/api-keys":
+			assert.Equal(t, "app-mgmt-123", r.URL.Query().Get("application_id"))
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"api_keys":    []interface{}{},
+				"total_count": 0,
+			})
+
 		case r.Method == http.MethodPost && r.URL.Path == "/iam/v1alpha1/api-keys":
 			var body map[string]interface{}
 			json.NewDecoder(r.Body).Decode(&body)
 			assert.Equal(t, "app-mgmt-123", body["application_id"])
-			assert.Equal(t, "warden-management-key-rotated", body["description"])
+			// The stamp names the key being replaced, so two sources rotating for the
+			// same bearer produce distinguishable lineages.
+			assert.Equal(t, "warden-management-key-rotated-from-SCWOLDMGMTKEY", body["description"])
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{
@@ -684,7 +805,7 @@ func TestScalewayDriver_GetScalewayURL(t *testing.T) {
 		d := &ScalewayDriver{
 			credSource: &credential.CredSource{Config: map[string]string{}},
 		}
-		assert.Equal(t, "https://api.scaleway.com", d.getScalewayURL())
+		assert.Equal(t, "https://api.scaleway.com", d.getScalewayURLLocked())
 	})
 
 	t.Run("custom URL", func(t *testing.T) {
@@ -693,6 +814,208 @@ func TestScalewayDriver_GetScalewayURL(t *testing.T) {
 				"scaleway_url": "https://api.fr-par.scaleway.com/",
 			}},
 		}
-		assert.Equal(t, "https://api.fr-par.scaleway.com", d.getScalewayURL())
+		assert.Equal(t, "https://api.fr-par.scaleway.com", d.getScalewayURLLocked())
 	})
+}
+
+// --- Defect regression tests ---
+
+func TestScalewayDriverFactory_ValidateConfig_DoesNotEchoSwappedSecret(t *testing.T) {
+	// The swap this check catches puts the SECRET key in management_access_key.
+	// Echoing the offending value would leak it into API responses and logs, where
+	// SensitiveConfigFields cannot mask it.
+	f := &ScalewayDriverFactory{}
+	secret := "11111111-2222-3333-4444-555555555555"
+
+	err := f.ValidateConfig(map[string]string{"management_access_key": secret})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), secret)
+	assert.Contains(t, err.Error(), "did you swap")
+}
+
+func TestScalewayDriverFactory_ValidateConfig_ActivationDelay(t *testing.T) {
+	f := &ScalewayDriverFactory{}
+
+	require.NoError(t, f.ValidateConfig(map[string]string{"activation_delay": "2m"}))
+
+	// Previously undeclared, so a typo passed validation and was then silently
+	// swallowed by GetDuration, leaving the operator with the 30s default.
+	err := f.ValidateConfig(map[string]string{"activation_delay": "30sec"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "activation_delay")
+}
+
+func TestScalewayDriver_Revoke_NotFoundBodyIsSuccessBareIsNot(t *testing.T) {
+	t.Run("not_found body means already gone", func(t *testing.T) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"type":"not_found","message":"api key not found"}`))
+		}))
+		defer server.Close()
+
+		f := &ScalewayDriverFactory{}
+		driver, err := f.Create(map[string]string{
+			"scaleway_url":          server.URL,
+			"management_secret_key": "mgmt-secret-key",
+			"tls_skip_verify":       "true",
+		}, createScalewayTestLogger())
+		require.NoError(t, err)
+
+		require.NoError(t, driver.Revoke(context.Background(), "SCWGONEKEYXXXXXXXXX"))
+	})
+
+	t.Run("bare 404 does not claim revocation", func(t *testing.T) {
+		// What a mistyped iam_api_path produces. Revoke still returns nil — an error
+		// would send the expiration manager into backoff and then a daily retry for a
+		// request that can never succeed — but it must not log success.
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "404 page not found", http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		f := &ScalewayDriverFactory{}
+		driver, err := f.Create(map[string]string{
+			"scaleway_url":          server.URL,
+			"management_secret_key": "mgmt-secret-key",
+			"tls_skip_verify":       "true",
+		}, createScalewayTestLogger())
+		require.NoError(t, err)
+
+		require.NoError(t, driver.Revoke(context.Background(), "SCWLIVEKEYXXXXXXXXX"))
+	})
+}
+
+func TestScalewayDriver_CleanupRotation_BareNotFoundIsAnError(t *testing.T) {
+	// The old management key carries no expiry, so reporting a failed delete as
+	// success would leave a fully privileged credential alive indefinitely.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "404 page not found", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	f := &ScalewayDriverFactory{}
+	driver, err := f.Create(map[string]string{
+		"scaleway_url":          server.URL,
+		"management_secret_key": "mgmt-secret-key",
+		"tls_skip_verify":       "true",
+	}, createScalewayTestLogger())
+	require.NoError(t, err)
+
+	err = driver.(*ScalewayDriver).CleanupRotation(context.Background(),
+		map[string]string{"access_key": "SCWOLDMGMTKEY"})
+	require.Error(t, err)
+}
+
+func TestScalewayDriver_PrepareRotation_SweepsOnlyItsOwnLineage(t *testing.T) {
+	// The sweep must reclaim orphans from a previous attempt at THIS rotation while
+	// leaving alone an operator's own key and a sibling Warden source's key, which
+	// is stamped from a different predecessor. Deleting the latter would be the
+	// delete-a-key-you-do-not-own bug re-aimed at another Warden.
+	var deleted []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/iam/v1alpha1/api-keys/SCWOLDMGMTKEY":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"access_key":     "SCWOLDMGMTKEY",
+				"application_id": "app-mgmt-123",
+			})
+
+		case r.Method == http.MethodGet && r.URL.Path == "/iam/v1alpha1/api-keys":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"api_keys": []map[string]string{
+					{"access_key": "SCWORPHANKEY", "description": "warden-management-key-rotated-from-SCWOLDMGMTKEY"},
+					{"access_key": "SCWSIBLINGKEY", "description": "warden-management-key-rotated-from-SCWOTHERKEY"},
+					{"access_key": "SCWOPERATORKEY", "description": "ops-terraform"},
+					{"access_key": "SCWOLDMGMTKEY", "description": "warden-management-key-rotated-from-SCWANCESTOR"},
+				},
+				"total_count": 4,
+			})
+
+		case r.Method == http.MethodDelete:
+			deleted = append(deleted, strings.TrimPrefix(r.URL.Path, "/iam/v1alpha1/api-keys/"))
+			w.WriteHeader(http.StatusNoContent)
+
+		case r.Method == http.MethodPost && r.URL.Path == "/iam/v1alpha1/api-keys":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"access_key": "SCWNEWMGMTKEY",
+				"secret_key": "new-mgmt-secret",
+			})
+
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	f := &ScalewayDriverFactory{}
+	driver, err := f.Create(map[string]string{
+		"scaleway_url":          server.URL,
+		"management_secret_key": "old-mgmt-secret",
+		"management_access_key": "SCWOLDMGMTKEY",
+		"tls_skip_verify":       "true",
+	}, createScalewayTestLogger())
+	require.NoError(t, err)
+
+	_, _, _, err = driver.(*ScalewayDriver).PrepareRotation(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"SCWORPHANKEY"}, deleted,
+		"only this lineage's orphan may be deleted — not a sibling source's key, an operator key, or the key in use")
+}
+
+func TestScalewayDriver_MintConcurrentWithCommitRotation(t *testing.T) {
+	// Rotation replaces the whole config map, so every read of it — including the
+	// ones behind iamURL, for keys rotation never rewrites — has to hold the lock.
+	// Meaningful under -race.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_key": "SCWRACEKEYXXXXXXXXX",
+			"secret_key": "race-secret",
+			"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		})
+	}))
+	defer server.Close()
+
+	f := &ScalewayDriverFactory{}
+	driver, err := f.Create(map[string]string{
+		"scaleway_url":          server.URL,
+		"management_secret_key": "mgmt-secret-key",
+		"management_access_key": "SCWMGMTKEY",
+		"tls_skip_verify":       "true",
+	}, createScalewayTestLogger())
+	require.NoError(t, err)
+	scw := driver.(*ScalewayDriver)
+
+	spec := &credential.CredSpec{
+		Name:   "race-spec",
+		Config: map[string]string{"mint_method": "dynamic_keys", "application_id": "app-123", "ttl": "1h"},
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, _, _, _ = scw.MintCredential(context.Background(), spec)
+			_ = scw.SupportsRotation()
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_ = scw.CommitRotation(context.Background(), map[string]string{
+				"scaleway_url":          server.URL,
+				"management_secret_key": fmt.Sprintf("rotated-secret-%d", n),
+				"management_access_key": fmt.Sprintf("SCWROTATED%d", n),
+				"tls_skip_verify":       "true",
+			})
+		}(i)
+	}
+	wg.Wait()
 }
