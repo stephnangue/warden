@@ -2,6 +2,7 @@ package types
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,6 +121,29 @@ func TestScalewayKeysCredType_ValidateConfig_ScalewaySource(t *testing.T) {
 			errMsg:  "application_id",
 		},
 		{
+			// A non-positive ttl parses, so it used to reach the mint and produce a
+			// key born expired — with a lease TTL of 0, making it unrevocable and so
+			// never cleaned up.
+			name: "dynamic_keys rejects a non-positive ttl",
+			config: map[string]string{
+				"mint_method":    "dynamic_keys",
+				"application_id": "app-123",
+				"ttl":            "0s",
+			},
+			wantErr: true,
+			errMsg:  "ttl must be positive",
+		},
+		{
+			name: "dynamic_keys rejects an over-long description",
+			config: map[string]string{
+				"mint_method":    "dynamic_keys",
+				"application_id": "app-123",
+				"description":    strings.Repeat("x", scalewayMaxDescriptionLength+1),
+			},
+			wantErr: true,
+			errMsg:  "at most 200 characters",
+		},
+		{
 			name: "missing mint_method",
 			config: map[string]string{
 				"access_key": "SCWXXXXXXXXXXXXXXXXX",
@@ -134,6 +158,71 @@ func TestScalewayKeysCredType_ValidateConfig_ScalewaySource(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "mint_method",
+		},
+
+		// --- Credential chaining ---
+		{
+			name: "chained static_keys carries no pair",
+			config: map[string]string{
+				"mint_method": "static_keys",
+				"secret_spec": "scw-pair",
+			},
+			wantErr: false,
+		},
+		{
+			name: "chained static_keys rejects an inline access_key",
+			config: map[string]string{
+				"mint_method": "static_keys",
+				"secret_spec": "scw-pair",
+				"access_key":  "SCWXXXXXXXXXXXXXXXXX",
+			},
+			wantErr: true,
+			errMsg:  "'access_key' must be omitted",
+		},
+		{
+			name: "chained static_keys rejects an inline secret_key",
+			config: map[string]string{
+				"mint_method": "static_keys",
+				"secret_spec": "scw-pair",
+				"secret_key":  "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+			},
+			wantErr: true,
+			errMsg:  "'secret_key' must be omitted",
+		},
+		{
+			// secret_field names one secret and a pair is not one, so anything set
+			// here was set deliberately and would do nothing.
+			name: "chained static_keys rejects secret_field",
+			config: map[string]string{
+				"mint_method":  "static_keys",
+				"secret_spec":  "scw-pair",
+				"secret_field": "secret_key",
+			},
+			wantErr: true,
+			errMsg:  "does not apply to static_keys",
+		},
+		{
+			// Naming both remedies is the point: on a chained source, an error that
+			// only asked for inline keys would send an operator to add config the
+			// next rule rejects.
+			name: "static_keys with neither a pair nor a reference names both remedies",
+			config: map[string]string{
+				"mint_method": "static_keys",
+			},
+			wantErr: true,
+			errMsg:  "or a 'secret_spec' naming a spec that yields them",
+		},
+		{
+			// The management key authenticates the SOURCE's IAM calls, and the driver
+			// factory only ever sees source config.
+			name: "dynamic_keys rejects a spec-level secret_spec",
+			config: map[string]string{
+				"mint_method":    "dynamic_keys",
+				"application_id": "app-123",
+				"secret_spec":    "scw-mgmt-key",
+			},
+			wantErr: true,
+			errMsg:  "set 'secret_spec' on the source",
 		},
 	}
 	for _, tt := range tests {
@@ -188,6 +277,19 @@ func TestScalewayKeysCredType_Parse(t *testing.T) {
 			wantErr:  false,
 		},
 		{
+			// What a chained mint returns: a TTL bounding how long the fetched
+			// material may be reused, but no lease — nothing here can be revoked,
+			// and registering it for revocation would schedule a call that must fail.
+			name: "TTL without a lease is not revocable",
+			rawData: map[string]interface{}{
+				"access_key": "SCWXXXXXXXXXXXXXXXXX",
+				"secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+			},
+			leaseTTL: 30 * time.Minute,
+			leaseID:  "",
+			wantErr:  false,
+		},
+		{
 			name: "missing access_key",
 			rawData: map[string]interface{}{
 				"secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
@@ -233,7 +335,10 @@ func TestScalewayKeysCredType_Parse(t *testing.T) {
 				assert.Equal(t, tt.rawData["secret_key"], cred.Data["secret_key"])
 				assert.Equal(t, tt.leaseTTL, cred.LeaseTTL)
 				assert.Equal(t, tt.leaseID, cred.LeaseID)
-				if tt.leaseTTL > 0 {
+				// Both halves matter: a chained mint reports a TTL bounding reuse of
+				// its material but hands out no leaseID, having no key of its own to
+				// revoke with.
+				if tt.leaseTTL > 0 && tt.leaseID != "" {
 					assert.True(t, cred.Revocable)
 				} else {
 					assert.False(t, cred.Revocable)
