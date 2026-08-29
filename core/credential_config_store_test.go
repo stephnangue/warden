@@ -2336,3 +2336,100 @@ func TestCredentialConfigStore_OAuth2Chaining(t *testing.T) {
 		assert.Contains(t, err.Error(), key+" must be omitted when the source sets secret_spec")
 	}
 }
+
+// leasingDriver mints a credential that carries a lease, so tests can observe
+// what becomes of the credential a spec's validation test-mint creates at the
+// source. The factory keeps the record because Create hands out a fresh driver.
+type leasingDriverFactory struct {
+	leaseID   string
+	verifyErr error
+	revoked   []string
+}
+
+func (f *leasingDriverFactory) Type() string { return "leasing_driver" }
+func (f *leasingDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+	return &leasingDriver{factory: f}, nil
+}
+func (f *leasingDriverFactory) ValidateConfig(config map[string]string) error { return nil }
+func (f *leasingDriverFactory) SensitiveConfigFields() []string               { return nil }
+func (f *leasingDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+	return "leasing_cred", nil
+}
+
+type leasingDriver struct{ factory *leasingDriverFactory }
+
+func (d *leasingDriver) Type() string { return "leasing_driver" }
+func (d *leasingDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	return map[string]interface{}{"token": "minted"}, nil, time.Hour, d.factory.leaseID, nil
+}
+func (d *leasingDriver) Revoke(ctx context.Context, leaseID string) error {
+	d.factory.revoked = append(d.factory.revoked, leaseID)
+	return nil
+}
+func (d *leasingDriver) Cleanup(ctx context.Context) error { return nil }
+func (d *leasingDriver) VerifySpec(ctx context.Context, spec *credential.CredSpec) error {
+	return d.factory.verifyErr
+}
+
+// TestCredentialConfigStore_ValidateSpec_ReleasesTestMintLease covers the
+// credential a spec write creates at the source just to prove the spec works.
+// Nothing downstream knows that lease exists — it is never cached and never
+// registered with the expiration manager — so validation is its only chance to go
+// back. A source whose credentials carry no expiry of their own would otherwise
+// accumulate one live, fully privileged credential per spec write.
+func TestCredentialConfigStore_ValidateSpec_ReleasesTestMintLease(t *testing.T) {
+	setup := func(t *testing.T, factory *leasingDriverFactory) (*CredentialConfigStore, context.Context) {
+		t.Helper()
+		store, ctx := setupTestCredentialConfigStore(t)
+		store.core.credentialDriverRegistry = credential.NewDriverRegistry(nil)
+		require.NoError(t, store.core.credentialDriverRegistry.RegisterFactory(factory))
+		store.core.credentialTypeRegistry = credential.NewTypeRegistry()
+		require.NoError(t, store.core.credentialTypeRegistry.Register(&testCredentialType{typeName: "leasing_cred"}))
+		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "leasing-src", Type: "leasing_driver"}))
+		return store, ctx
+	}
+
+	spec := func(name string) *credential.CredSpec {
+		return &credential.CredSpec{Name: name, Type: "leasing_cred", Source: "leasing-src"}
+	}
+
+	t.Run("released after the spec validates", func(t *testing.T) {
+		factory := &leasingDriverFactory{leaseID: "lease-validate"}
+		store, ctx := setup(t, factory)
+
+		require.NoError(t, store.CreateSpec(ctx, spec("ok")))
+		assert.Equal(t, []string{"lease-validate"}, factory.revoked)
+	})
+
+	t.Run("released when verification fails after the mint", func(t *testing.T) {
+		factory := &leasingDriverFactory{leaseID: "lease-verify", verifyErr: fmt.Errorf("upstream says no")}
+		store, ctx := setup(t, factory)
+
+		err := store.CreateSpec(ctx, spec("bad"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "credential verification failed")
+		// The spec is refused, but the credential it minted still exists at the
+		// source — the failure is exactly when abandoning it would be easiest.
+		assert.Equal(t, []string{"lease-verify"}, factory.revoked)
+	})
+
+	t.Run("released again on every update", func(t *testing.T) {
+		factory := &leasingDriverFactory{leaseID: "lease-update"}
+		store, ctx := setup(t, factory)
+
+		s := spec("churn")
+		require.NoError(t, store.CreateSpec(ctx, s))
+		s.Config = map[string]string{"changed": "yes"}
+		require.NoError(t, store.UpdateSpec(ctx, s))
+		assert.Equal(t, []string{"lease-update", "lease-update"}, factory.revoked,
+			"a spec edit test-mints again, so it must release again")
+	})
+
+	t.Run("nothing to release when the mint issues no lease", func(t *testing.T) {
+		factory := &leasingDriverFactory{leaseID: ""}
+		store, ctx := setup(t, factory)
+
+		require.NoError(t, store.CreateSpec(ctx, spec("leaseless")))
+		assert.Empty(t, factory.revoked)
+	})
+}
