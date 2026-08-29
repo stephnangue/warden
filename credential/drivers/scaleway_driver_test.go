@@ -818,6 +818,310 @@ func TestScalewayDriver_GetScalewayURL(t *testing.T) {
 	})
 }
 
+// --- Credential chaining ---
+
+func newChainedScalewayDriver(t *testing.T, serverURL string) *ScalewayDriver {
+	t.Helper()
+	f := &ScalewayDriverFactory{}
+	driver, err := f.Create(map[string]string{
+		"scaleway_url":    serverURL,
+		"secret_spec":     "scw-mgmt-key",
+		"secret_field":    "management_secret_key",
+		"tls_skip_verify": "true",
+	}, createScalewayTestLogger())
+	require.NoError(t, err)
+	return driver.(*ScalewayDriver)
+}
+
+func chainedDynamicKeysSpec() *credential.CredSpec {
+	return &credential.CredSpec{
+		Name: "chained-dynamic",
+		Config: map[string]string{
+			"mint_method":    "dynamic_keys",
+			"application_id": "app-123",
+			"ttl":            "1h",
+		},
+	}
+}
+
+func chainedStaticKeysSpec() *credential.CredSpec {
+	return &credential.CredSpec{
+		Name:   "chained-static",
+		Config: map[string]string{"mint_method": "static_keys", "secret_spec": "scw-pair"},
+	}
+}
+
+func TestScalewayDriverFactory_ValidateConfig_Chaining(t *testing.T) {
+	f := &ScalewayDriverFactory{}
+
+	t.Run("minimal chained config", func(t *testing.T) {
+		require.NoError(t, f.ValidateConfig(map[string]string{
+			"secret_spec":      "scw-mgmt-key",
+			"secret_field":     "management_secret_key",
+			"secret_cache_ttl": "30m",
+		}))
+	})
+
+	// A source that keeps its key while claiming to fetch one reads as keyless but
+	// still stores the very secret chaining exists to remove. The rotation keys go
+	// with it: their only consumer is rotation, which a chained source hands away.
+	for _, key := range []string{"management_secret_key", "management_access_key", "activation_delay"} {
+		t.Run("chained rejects "+key, func(t *testing.T) {
+			cfg := map[string]string{"secret_spec": "scw-mgmt-key"}
+			switch key {
+			case "management_access_key":
+				cfg[key] = "SCWXXXXXXXXXXXXXXXXX"
+			case "activation_delay":
+				cfg[key] = "2m"
+			default:
+				cfg[key] = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+			}
+			err := f.ValidateConfig(cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), key)
+		})
+	}
+
+	t.Run("non-chained config still accepts management keys", func(t *testing.T) {
+		require.NoError(t, f.ValidateConfig(map[string]string{
+			"management_access_key": "SCWXXXXXXXXXXXXXXXXX",
+			"management_secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+			"activation_delay":      "2m",
+		}))
+	})
+}
+
+func TestScalewayDriver_MintCredential_FailsClosedWhenChained(t *testing.T) {
+	t.Run("source-level", func(t *testing.T) {
+		d := newChainedScalewayDriver(t, "https://api.scaleway.com")
+		_, _, _, _, err := d.MintCredential(context.Background(), chainedDynamicKeysSpec())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "secret_spec")
+	})
+
+	t.Run("spec-level", func(t *testing.T) {
+		f := &ScalewayDriverFactory{}
+		driver, err := f.Create(map[string]string{}, createScalewayTestLogger())
+		require.NoError(t, err)
+		_, _, _, _, err = driver.MintCredential(context.Background(), chainedStaticKeysSpec())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "secret_spec")
+	})
+}
+
+func TestScalewayDriver_MintFromSecret_DynamicKeys(t *testing.T) {
+	cases := []struct {
+		name     string
+		material credential.SecretMaterial
+	}{
+		{"resolved field", credential.SecretMaterial{
+			Data:  map[string]string{"management_secret_key": "FETCHED-MGMT"},
+			Field: "management_secret_key",
+		}},
+		{"conventional management_secret_key", credential.SecretMaterial{
+			Data: map[string]string{"management_secret_key": "FETCHED-MGMT", "note": "x"},
+		}},
+		{"conventional secret_key", credential.SecretMaterial{
+			Data: map[string]string{"secret_key": "FETCHED-MGMT", "note": "x"},
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotToken string
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotToken = r.Header.Get("X-Auth-Token")
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"access_key": "SCWCHAINEDKEYXXXXXX",
+					"secret_key": "chained-minted-secret",
+					"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+				})
+			}))
+			defer server.Close()
+
+			d := newChainedScalewayDriver(t, server.URL)
+			rawData, _, ttl, leaseID, err := d.MintFromSecret(context.Background(), chainedDynamicKeysSpec(), tc.material)
+			require.NoError(t, err)
+
+			assert.Equal(t, "FETCHED-MGMT", gotToken, "the fetched key authenticates the mint")
+			assert.Equal(t, "SCWCHAINEDKEYXXXXXX", rawData["access_key"])
+			assert.Greater(t, ttl, time.Duration(0))
+			assert.Empty(t, leaseID, "a chained source cannot honour a lease it has no key to revoke with")
+		})
+	}
+}
+
+func TestScalewayDriver_MintFromSecret_StaticKeys(t *testing.T) {
+	// The static path spends the material directly; it must not call Scaleway at all.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("static_keys must not call the Scaleway API")
+	}))
+	defer server.Close()
+
+	d := newChainedScalewayDriver(t, server.URL)
+	material := credential.SecretMaterial{
+		Data: map[string]string{"access_key": "SCWFETCHEDPAIRXXXXX", "secret_key": "fetched-pair-secret"},
+		// A resolved field has no meaning for a pair; it must not derail the read.
+		Field: "management_secret_key",
+	}
+
+	rawData, _, ttl, leaseID, err := d.MintFromSecret(context.Background(), chainedStaticKeysSpec(), material)
+	require.NoError(t, err)
+	assert.Equal(t, "SCWFETCHEDPAIRXXXXX", rawData["access_key"])
+	assert.Equal(t, "fetched-pair-secret", rawData["secret_key"])
+	assert.Empty(t, leaseID)
+	assert.Equal(t, defaultScalewayStaticChainTTL, ttl,
+		"a positive TTL bounds staleness: this path can never learn the pair was rotated")
+}
+
+func TestScalewayDriver_MintFromSecret_StaticKeys_RefusesSourceLevelRouting(t *testing.T) {
+	// Converting a source to chaining does not re-validate the specs already bound
+	// to it, so an inline static_keys spec can end up routed by the SOURCE's
+	// reference. Its material is then the management key — whose payload is also a
+	// Scaleway pair — and minting from it would hand the caller a credential that
+	// can create and delete API keys, in place of the scoped one the spec describes.
+	d := newChainedScalewayDriver(t, "https://api.scaleway.com")
+
+	inlineSpec := &credential.CredSpec{
+		Name: "pre-conversion",
+		Config: map[string]string{
+			"mint_method": "static_keys",
+			"access_key":  "SCWSPECOWNKEYXXXXXX",
+			"secret_key":  "spec-own-secret",
+		},
+	}
+	managementPayload := credential.SecretMaterial{
+		Data: map[string]string{"access_key": "SCWMANAGEMENTKEYXXX", "secret_key": "management-secret"},
+	}
+
+	_, _, _, _, err := d.MintFromSecret(context.Background(), inlineSpec, managementPayload)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must set its own secret_spec")
+}
+
+func TestScalewayDriver_MintFromSecret_StaticKeys_TTLFollowsCacheTTL(t *testing.T) {
+	d := newChainedScalewayDriver(t, "https://api.scaleway.com")
+	spec := chainedStaticKeysSpec()
+	spec.Config["secret_cache_ttl"] = "5m"
+
+	_, _, ttl, _, err := d.MintFromSecret(context.Background(), spec, credential.SecretMaterial{
+		Data: map[string]string{"access_key": "SCWPAIRXXXXXXXXXXXX", "secret_key": "s"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 5*time.Minute, ttl)
+
+	// "0" opts out of caching, not out of a staleness bound: taking it literally
+	// would restore the session-long pin this TTL exists to prevent.
+	spec.Config["secret_cache_ttl"] = "0"
+	_, _, ttl, _, err = d.MintFromSecret(context.Background(), spec, credential.SecretMaterial{
+		Data: map[string]string{"access_key": "SCWPAIRXXXXXXXXXXXX", "secret_key": "s"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, defaultScalewayStaticChainTTL, ttl)
+}
+
+func TestScalewayDriver_MintFromSecret_IncompleteMaterial(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("must not reach the Scaleway API with unusable material")
+	}))
+	defer server.Close()
+	d := newChainedScalewayDriver(t, server.URL)
+
+	t.Run("dynamic: resolved field is empty", func(t *testing.T) {
+		_, _, _, _, err := d.MintFromSecret(context.Background(), chainedDynamicKeysSpec(),
+			credential.SecretMaterial{Data: map[string]string{"other": "x"}, Field: "management_secret_key"})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+		assert.Contains(t, err.Error(), "management_secret_key")
+	})
+
+	t.Run("dynamic: no field and no conventional key", func(t *testing.T) {
+		_, _, _, _, err := d.MintFromSecret(context.Background(), chainedDynamicKeysSpec(),
+			credential.SecretMaterial{Data: map[string]string{"other": "x", "more": "y"}})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+	})
+
+	for _, tc := range []struct {
+		name string
+		data map[string]string
+	}{
+		{"missing access_key", map[string]string{"secret_key": "s"}},
+		{"missing secret_key", map[string]string{"access_key": "SCWXXXXXXXXXXXXXXXXX"}},
+		{"missing both", map[string]string{"unrelated": "x"}},
+	} {
+		t.Run("static: "+tc.name, func(t *testing.T) {
+			_, _, _, _, err := d.MintFromSecret(context.Background(), chainedStaticKeysSpec(),
+				credential.SecretMaterial{Data: tc.data})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+		})
+	}
+
+	t.Run("unknown mint_method", func(t *testing.T) {
+		_, _, _, _, err := d.MintFromSecret(context.Background(),
+			&credential.CredSpec{Name: "drifted", Config: map[string]string{"mint_method": "wat"}},
+			credential.SecretMaterial{Data: map[string]string{"secret_key": "s"}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "dynamic_keys or static_keys")
+	})
+}
+
+func TestScalewayDriver_MintFromSecret_RejectionIsRetryable(t *testing.T) {
+	// A key rotated at its source must be recoverable: the minting layer evicts the
+	// cached secret and retries once, but only if the driver says it was rejected.
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, `{"type":"denied_authentication"}`, status)
+			}))
+			defer server.Close()
+
+			d := newChainedScalewayDriver(t, server.URL)
+			_, _, _, _, err := d.MintFromSecret(context.Background(), chainedDynamicKeysSpec(),
+				credential.SecretMaterial{Data: map[string]string{"management_secret_key": "STALE"}})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, credential.ErrChainedSecretRejected)
+		})
+	}
+
+	t.Run("other failures are not retryable", func(t *testing.T) {
+		// Re-fetching an identical secret cannot help, so it must not be tried.
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"type":"not_found"}`, http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		d := newChainedScalewayDriver(t, server.URL)
+		_, _, _, _, err := d.MintFromSecret(context.Background(), chainedDynamicKeysSpec(),
+			credential.SecretMaterial{Data: map[string]string{"management_secret_key": "FINE"}})
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+	})
+}
+
+func TestScalewayDriver_ChainedSourceOwnsNoRotation(t *testing.T) {
+	d := newChainedScalewayDriver(t, "https://api.scaleway.com")
+	assert.False(t, d.SupportsRotation(), "the referenced spec's owner rotates the key at its source of truth")
+
+	// A lease predating the conversion can never be revoked, and saying so with an
+	// error would only make the expiration manager retry it daily, forever.
+	require.NoError(t, d.Revoke(context.Background(), "SCWPRECONVERSIONKEY"))
+}
+
+func TestScalewayDriver_NonChainedSourceStillRotates(t *testing.T) {
+	// A plain source that merely hosts a spec-chained static spec keeps its own
+	// management key, and keeps rotating it.
+	f := &ScalewayDriverFactory{}
+	driver, err := f.Create(map[string]string{
+		"management_secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+		"management_access_key": "SCWXXXXXXXXXXXXXXXXX",
+	}, createScalewayTestLogger())
+	require.NoError(t, err)
+	assert.True(t, driver.(*ScalewayDriver).SupportsRotation())
+}
+
 // --- Defect regression tests ---
 
 func TestScalewayDriverFactory_ValidateConfig_DoesNotEchoSwappedSecret(t *testing.T) {

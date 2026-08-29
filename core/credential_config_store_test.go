@@ -2191,6 +2191,79 @@ func TestCredentialConfigStore_GitLabChaining(t *testing.T) {
 	assert.Contains(t, err.Error(), "set secret_spec on the source")
 }
 
+// TestCredentialConfigStore_ScalewayChaining covers a source type where the two mint
+// methods chain different secrets at different levels: dynamic_keys chains the
+// management key on the SOURCE (it authenticates the source's IAM calls), while
+// static_keys chains the credential pair on the SPEC (it is that spec's credential
+// and authenticates nothing of the source's).
+func TestCredentialConfigStore_ScalewayChaining(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+
+	for _, name := range []string{"scw-mgmt", "scw-pair"} {
+		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+			Name: name, Type: "vault_token", Source: "src",
+			Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+		}))
+	}
+
+	// A chained scaleway source carries no management key of its own.
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "scw-keyless", Type: credential.SourceTypeScaleway,
+		Config: map[string]string{credential.ConfigSecretSpec: "scw-mgmt"},
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "scw-inline", Type: credential.SourceTypeScaleway,
+		Config: map[string]string{"management_secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"},
+	}))
+
+	// dynamic_keys inherits the source's chain and needs no config of its own.
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "scw-dynamic", Type: credential.TypeScalewayKeys, Source: "scw-keyless",
+		Config: map[string]string{"mint_method": "dynamic_keys", "application_id": "app-1"},
+	}))
+
+	// A static_keys spec names its own reference, and may sit on the same source.
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "scw-static", Type: credential.TypeScalewayKeys, Source: "scw-keyless",
+		Config: map[string]string{"mint_method": "static_keys", credential.ConfigSecretSpec: "scw-pair"},
+	}))
+
+	// Source-level routing would hand a static_keys spec the management payload,
+	// which is not its credential.
+	err := store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "scw-static-inheriting", Type: credential.TypeScalewayKeys, Source: "scw-keyless",
+		Config: map[string]string{
+			"mint_method": "static_keys",
+			"access_key":  "SCWXXXXXXXXXXXXXXXXX",
+			"secret_key":  "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must set its own secret_spec")
+
+	// The rest of the matrix — a spec-level secret_spec on dynamic_keys, an inline
+	// pair or a secret_field alongside a chained static_keys spec — is owned by
+	// ScalewayKeysCredType.ValidateConfig, which sees everything it needs in spec
+	// config. It is covered in credential/types/scaleway_keys_test.go, and cannot be
+	// exercised here: this harness builds a Core with no credentialTypeRegistry, so
+	// the type validator never runs.
+
+	// Rotation belongs to whoever owns the referenced secret.
+	rotating := &credential.CredSource{
+		Name: "scw-rotating", Type: credential.SourceTypeScaleway,
+		Config: map[string]string{credential.ConfigSecretSpec: "scw-mgmt"},
+	}
+	rotating.RotationPeriod = 24 * time.Hour
+	err = store.CreateSource(ctx, rotating)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rotation_period does not apply to a chained source")
+
+	// A source that reads as keyless must not still store the key chaining removes.
+	// That rule belongs to the driver factory, which this harness has no registry
+	// for; it is covered by TestScalewayDriverFactory_ValidateConfig_Chaining.
+}
+
 // TestCredentialConfigStore_OAuth2Chaining covers the guards on an oauth2 source that
 // fetches its whole client credential per mint: chaining is a source concern, the pair
 // must not be half-configured, and the consent flow cannot reach chained material.

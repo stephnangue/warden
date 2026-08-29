@@ -104,16 +104,43 @@ func (t *ScalewayKeysCredType) ValidateConfig(config map[string]string, sourceTy
 
 	switch sourceType {
 	case credential.SourceTypeScaleway:
+		chained := config[credential.ConfigSecretSpec] != ""
 		mintMethod := config["mint_method"]
 		switch mintMethod {
 		case "static_keys":
-			if config["access_key"] == "" {
-				return fmt.Errorf("'access_key' is required for static_keys")
+			// The pair either lives here or is fetched from a referenced spec — never
+			// both. A half left behind would be presented against the other half
+			// fetched from the chain.
+			if chained {
+				for _, key := range []string{"access_key", "secret_key"} {
+					if config[key] != "" {
+						return fmt.Errorf("'%s' must be omitted when '%s' is set; the referenced spec supplies the whole pair",
+							key, credential.ConfigSecretSpec)
+					}
+				}
+				// secret_field names one secret, and a pair is not one: both halves are
+				// read by name. Anything set here was set deliberately and does nothing.
+				if config[credential.ConfigSecretField] != "" {
+					return fmt.Errorf("'%s' does not apply to static_keys: the credential is a pair, read from the referenced payload's 'access_key' and 'secret_key' by name",
+						credential.ConfigSecretField)
+				}
+				break
 			}
-			if config["secret_key"] == "" {
-				return fmt.Errorf("'secret_key' is required for static_keys")
+			// Naming both remedies matters: on a chained source the missing-pair error
+			// would otherwise send an operator to add inline keys that the rule above
+			// then rejects.
+			if config["access_key"] == "" || config["secret_key"] == "" {
+				return fmt.Errorf("static_keys needs 'access_key' and 'secret_key', or a '%s' naming a spec that yields them",
+					credential.ConfigSecretSpec)
 			}
 		case "dynamic_keys":
+			// The management key authenticates the SOURCE's calls to the IAM API, and
+			// the driver factory only ever sees source config — a reference parked on
+			// the spec would slip past the checks that gate a chained source.
+			if chained {
+				return fmt.Errorf("for dynamic_keys, set '%s' on the source: the chained management key authenticates the source, not this spec",
+					credential.ConfigSecretSpec)
+			}
 			if config["application_id"] == "" {
 				return fmt.Errorf("'application_id' is required for dynamic_keys")
 			}
@@ -156,10 +183,11 @@ func (t *ScalewayKeysCredType) Parse(rawData, metadata map[string]interface{}, l
 		LeaseID:  leaseID,
 		IssuedAt: time.Now(),
 		// Revoking means releasing a lease at the source, which needs a handle to
-		// release. Scaleway's static path returns no TTL and its dynamic path
-		// returns a leaseID, so the second condition changes nothing today — it
-		// states the invariant rather than leaving the next mint path to
-		// rediscover it.
+		// release. Both conditions are load-bearing: a chained mint reports a TTL
+		// bounding how long its material may be reused, but hands out no leaseID —
+		// it has no key of its own to authorise a delete with, and no caller at
+		// expiry to fetch one. Registering such a credential for revocation would
+		// schedule a call that can only fail.
 		Revocable: leaseTTL > 0 && leaseID != "",
 		Data: map[string]string{
 			"access_key": accessKey,

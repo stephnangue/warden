@@ -1030,6 +1030,19 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				}
 			}
 		}
+		// A scaleway source chains the management key that authorises creating fresh
+		// pairs, which is a dynamic_keys concern. A static_keys spec on it does not
+		// use that key at all — its credential is a pair of its own — so source-level
+		// routing would hand it the management payload and mint from the wrong secret.
+		// Such a spec must name its own reference. (A spec that already does is not
+		// here: chainedRef would be its own, and the type validator has already
+		// refused it any inline pair.)
+		if source.Type == credential.SourceTypeScaleway &&
+			source.Config[credential.ConfigSecretSpec] != "" &&
+			spec.Config[credential.ConfigSecretSpec] == "" &&
+			credential.GetString(spec.Config, "mint_method", "") == "static_keys" {
+			return logical.ErrBadRequestf("a static_keys spec on a chained scaleway source (secret_spec %q) must set its own secret_spec naming a spec that yields its access_key and secret_key; the source's chained secret is a management key, not this credential", chainedRef)
+		}
 		// A chained consumer's identity normally flows through the referenced secret-spec,
 		// so its own subject/actor exchange config would be dead — reject that confusing
 		// combination. The token_exchange driver is the exception: it is itself an
