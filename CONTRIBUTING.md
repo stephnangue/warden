@@ -4,7 +4,7 @@ We welcome contributions — use cases, documentation, code, bug reports, and fe
 
 ## Prerequisites
 
-- **Go 1.26.1 or later** — [Download Go](https://go.dev/dl/)
+- **Go 1.26.7 or later** — [Download Go](https://go.dev/dl/)
 - **Docker and Docker Compose** — [Install Docker](https://docs.docker.com/get-docker/)
 - **Make** — Pre-installed on macOS/Linux
 - **Git** — [Install Git](https://git-scm.com/downloads)
