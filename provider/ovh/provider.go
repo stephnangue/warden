@@ -2,9 +2,12 @@ package ovh
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/provider/sdk/dualgateway"
 )
 
@@ -25,9 +28,42 @@ var Spec = &dualgateway.ProviderSpec{
 		CredentialField:   "api_token",
 	},
 
-	S3Endpoint: func(_ map[string]any, region string) string {
+	ExtraConfigKeys: []string{"s3_url"},
+	ExtraConfigFields: map[string]*framework.FieldSchema{
+		"s3_url": {
+			Type:        framework.TypeString,
+			Description: "Override the Object Storage host the region would resolve to, for a private egress gateway fronting it. Host or URL; the S3 leg is always https.",
+		},
+	},
+	OnConfigParsed: func(config map[string]any) map[string]any {
+		return map[string]any{
+			"s3_host": s3Host(framework.GetConfigString(config, "s3_url", "")),
+		}
+	},
+	S3Endpoint: func(state map[string]any, region string) string {
+		// The same reason ovh_url exists on the API side: an operator whose
+		// traffic leaves through a private gateway needs to name it. Without
+		// this the region is the only answer and the S3 leg always addresses
+		// the public host.
+		if host, _ := state["s3_host"].(string); host != "" {
+			return host
+		}
 		return fmt.Sprintf("s3.%s.io.cloud.ovh.net", region)
 	},
+}
+
+// s3Host reduces an operator-set s3_url to the host S3Endpoint must return.
+// A URL is accepted because that is what the API-side key takes and operators
+// will write one either way; the scheme is dropped rather than honoured, since
+// the S3 leg re-signs and forwards over https regardless.
+func s3Host(configured string) string {
+	if configured == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(configured); err == nil && parsed.Host != "" {
+		return parsed.Host
+	}
+	return strings.TrimSuffix(configured, "/")
 }
 
 // Factory creates a new OVH provider backend.
@@ -41,7 +77,8 @@ The provider auto-detects the request type based on the Authorization header:
 - Standard API requests: injects Authorization: Bearer header with the API
   token and forwards to the configured ovh_url (default: https://eu.api.ovh.com/1.0)
 - S3 Object Storage requests (AWS SigV4): verifies the incoming signature, re-signs
-  with real OVH S3 credentials, and forwards to s3.{region}.io.cloud.ovh.net
+  with real OVH S3 credentials, and forwards to s3.{region}.io.cloud.ovh.net,
+  or to s3_url when one is set
 
 The gateway path format is:
   /ovh/gateway/{api-path}
@@ -92,6 +129,7 @@ Regional API endpoints and their matching OAuth2 token URLs:
 
 Configuration:
 - ovh_url: OVH API base URL (default: https://eu.api.ovh.com/1.0)
+- s3_url: Object Storage host override (default: s3.{region}.io.cloud.ovh.net)
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)
 - timeout: Request timeout duration (default: 30s)
 - auto_auth_path: Auth mount path for implicit authentication (e.g., 'auth/jwt/')

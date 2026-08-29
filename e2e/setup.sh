@@ -368,6 +368,24 @@ vault_api POST "secret/data/e2e/scaleway-mgmt-key" \
 vault_api POST "secret/data/e2e/scaleway-static-pair" \
   '{"data":{"access_key":"SCWE2ECHAINEDPAIR000","secret_key":"e2e-scw-chained-pair-not-a-real-secret"}}'
 
+# The OAuth2 client credential a keyless ovh source performs its grant with.
+# Both halves, because they authenticate as a pair — a chained source is refused
+# an inline client_id precisely so an id cannot name one service account while
+# the secret beside it belongs to another.
+#
+# These are the real Hydra e2e-agent client values, so the chained mint performs
+# a REAL grant against a validating token endpoint: the row passes only if the
+# pair fetched from here satisfies Hydra. Every other chained row in this suite
+# spends its secret against a stand-in.
+vault_api POST "secret/data/e2e/ovh-client-credential" \
+  '{"data":{"client_id":"e2e-agent","client_secret":"agent-secret"}}'
+
+# An object-storage key pair for ovh's access_keys method, which serves a pair
+# held elsewhere and calls OVH for nothing. Like the scaleway pair above this is
+# a SPEC-level chain, for the same reason: the pair IS the credential.
+vault_api POST "secret/data/e2e/ovh-access-keys" \
+  '{"data":{"access_key":"E2EOVHACCESSKEY00000","secret_key":"e2e-ovh-access-not-a-real-secret"}}'
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \

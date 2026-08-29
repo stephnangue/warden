@@ -46,13 +46,15 @@ import (
 // ibmcloud's source needs the IAM stub's URL, which is not known until the stub
 // is listening. Keeping all four together makes the reason legible. kubernetes
 // joins there for the same reason — its keyless source names the recording
-// upstream as its API server, so it cannot be described until that is up.
+// upstream as its API server, so it cannot be described until that is up. ovh
+// too: its mount names the S3 listener, which the S3 rows need to exist before
+// the mount config is written.
 var allEnvs = []h.ProviderEnv{
 	openaiEnv, anthropicEnv, newrelicEnv, elasticEnv, githubEnv,
 	splunkEnv, datadogEnv, restEnv, dynatraceEnv, dynatraceOAuthEnv, mcpEnv, mcpGitHubEnv,
 	mcpAWSEnv, mcpAWSWrongCredEnv, atlassianEnv, honeycombEnv,
 	prometheusEnv, prometheusBasicEnv,
-	scalewayEnv, cloudflareEnv, ovhEnv,
+	scalewayEnv, cloudflareEnv,
 	vaultEnv,
 }
 
@@ -83,6 +85,9 @@ func TestMain(m *testing.M) {
 	if ibmIAMStub != nil {
 		ibmIAMStub.Close()
 	}
+	if ovhS3 != nil {
+		ovhS3.Close()
+	}
 	os.Exit(code)
 }
 
@@ -104,6 +109,13 @@ func ensureEnv(t *testing.T) {
 		// server, so like ibmcloud its env cannot be built until the listener is up.
 		kubernetesEnv = buildKubernetesEnv(upstream.URL)
 		allEnvs = append(allEnvs, kubernetesEnv)
+
+		// ovh's mount names the S3 listener in s3_url. The S3 leg always forwards
+		// over https and would otherwise address a real public host, so without
+		// this the object-storage half of a dual-mode gateway is unreachable.
+		ovhS3 = startOVHS3Upstream()
+		ovhEnv = buildOVHEnv(ovhS3.URL)
+		allEnvs = append(allEnvs, ovhEnv)
 
 		// vault's source is the one that authenticates against something real: it
 		// verifies its AppRole role and logs in while being created, so the role
