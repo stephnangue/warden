@@ -835,6 +835,33 @@ func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credenti
 	return s.validateSpec(ctx, spec, false)
 }
 
+// revokeValidationLease releases the credential a create-time test-mint produced
+// at the source.
+//
+// Best effort, and deliberately not fatal: a spec that validated should not be
+// refused because the cleanup call failed. But the attempt has to be made and its
+// failure has to be visible, because nothing else in the system knows this lease
+// exists — it never reaches the expiration manager, so this is its only chance to
+// go back.
+//
+// Runs on a fresh context: the request's own may already be cancelled by the time
+// the deferred call fires.
+func (s *CredentialConfigStore) revokeValidationLease(driver credential.SourceDriver, leaseID, sourceName string) {
+	revokeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := driver.Revoke(revokeCtx, leaseID); err != nil {
+		s.logger.Warn("failed to release the credential minted to validate a spec; it may still exist at the source",
+			logger.String("lease_id", leaseID),
+			logger.String("source", sourceName),
+			logger.Err(err))
+		return
+	}
+	s.logger.Debug("released the credential minted to validate a spec",
+		logger.String("lease_id", leaseID),
+		logger.String("source", sourceName))
+}
+
 // validateSpec validates a spec. When skipVerification is true the test-mint and
 // SpecVerifier checks are skipped — used by the connect seal and refresh-token
 // write-back, which already hold a known-good token and must not re-mint it.
@@ -1128,8 +1155,23 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				}
 
 				if runTestMint {
-					if _, _, _, _, err := driver.MintCredential(ctx, testSpec); err != nil {
-						return logical.ErrBadRequestf("credential test failed for spec type '%s': %s", spec.Type, err.Error())
+					_, _, _, leaseID, mintErr := driver.MintCredential(ctx, testSpec)
+					// A test-mint that reaches the source creates a real credential
+					// there. Nothing downstream registers this lease with the expiration
+					// manager — it is not cached, not leased, never revoked — so without
+					// this release it is abandoned at the source. Where the source's
+					// credentials carry no expiry of their own, that is a permanent,
+					// fully privileged credential nobody tracks, one per spec write.
+					//
+					// Deferred rather than released inline: verification below can fail
+					// too, and this lease must go back either way. Registered after the
+					// Cleanup above so it runs first, while the client still has
+					// connections to use.
+					if leaseID != "" {
+						defer s.revokeValidationLease(driver, leaseID, spec.Source)
+					}
+					if mintErr != nil {
+						return logical.ErrBadRequestf("credential test failed for spec type '%s': %s", spec.Type, mintErr.Error())
 					}
 
 					// Run additional verification if the driver supports it.

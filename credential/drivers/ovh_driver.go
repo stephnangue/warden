@@ -18,6 +18,12 @@ import (
 const ovhMaxResponseBodySize = 1 << 20 // 1MB
 const ovhMaxRetryAttempts = 3
 
+// ovhFallbackTokenTTL bounds a token whose lifetime the endpoint declined to
+// state. The lease decides how long the bearer keeps being served from cache, so
+// a generous guess hands out a token that expired long ago, while a short one
+// costs only another mint.
+const ovhFallbackTokenTTL = 5 * time.Minute
+
 // ovhEndpoint holds the resolved API and OAuth2 token URLs for a region.
 type ovhEndpoint struct {
 	apiURL   string
@@ -285,7 +291,14 @@ func (d *OVHDriver) fetchOAuth2Token(ctx context.Context) (accessToken string, t
 
 	tokenTTL := time.Duration(tokenResp.ExpiresIn) * time.Second
 	if tokenTTL <= 0 {
-		tokenTTL = 1 * time.Hour // fallback if expires_in is missing
+		// Nothing here knows how long the token is actually good for, and the
+		// credential is served from cache for the whole lease. Fall back to a span
+		// short enough that a wrong guess is corrected by a re-mint rather than by
+		// an agent presenting a dead bearer.
+		d.logger.Warn("OAuth2 token response carried no usable expires_in; bounding the lease at the fallback lifetime",
+			logger.String("fallback", ovhFallbackTokenTTL.String()),
+		)
+		tokenTTL = ovhFallbackTokenTTL
 	}
 
 	return tokenResp.AccessToken, tokenTTL, nil

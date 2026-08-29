@@ -627,7 +627,7 @@ func TestOVHDriver_MintOAuth2Token_MissingExpiresIn(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": "valid-token",
 			"token_type":   "Bearer",
-			// no expires_in — should fall back to 1h
+			// no expires_in — the lease is bounded by the fallback instead
 		})
 	}))
 	defer server.Close()
@@ -641,7 +641,11 @@ func TestOVHDriver_MintOAuth2Token_MissingExpiresIn(t *testing.T) {
 	rawData, _, ttl, _, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "valid-token", rawData["api_token"])
-	assert.Equal(t, 1*time.Hour, ttl) // fallback TTL
+	// A token of unstated lifetime is served for a short span, not an assumed
+	// hour: the credential is cached for the whole lease, so guessing long hands
+	// out a bearer that is already dead.
+	assert.Equal(t, ovhFallbackTokenTTL, ttl)
+	assert.Less(t, ttl, 1*time.Hour)
 }
 
 func TestOVHDriver_MintDynamicS3_EmptySecret(t *testing.T) {
