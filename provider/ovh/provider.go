@@ -81,7 +81,9 @@ Credential source: ovh
   Storage needs one spec of each.
 
   Source config: client_id, client_secret (both required only for oauth2_token
-  specs), ovh_endpoint (ovh-eu/ovh-ca/ovh-us), token_url.
+  specs), ovh_endpoint (ovh-eu/ovh-ca/ovh-us), token_url. Set secret_spec
+  instead of the pair to fetch the service account per request, so the source
+  stores no credential of its own.
 
 Regional API endpoints and their matching OAuth2 token URLs:
 - EU:  ovh_url=https://eu.api.ovh.com/1.0   token_url=https://www.ovh.com/auth/oauth2/token
