@@ -95,7 +95,9 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          # Astro 7 requires >=22.12.0. Read from site/.node-version so CI and
+          # the Cloudflare build cannot drift onto different runtimes.
+          node-version-file: site/.node-version
           cache: npm
           cache-dependency-path: site/package-lock.json
 

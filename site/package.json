@@ -1,6 +1,9 @@
 {
   "name": "warden-site",
   "version": "0.1.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,13 +15,12 @@
     "astro": "astro"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.36.0",
-    "astro": "^5.13.0",
+    "@astrojs/starlight": "^0.41.3",
+    "astro": "^7.1.1",
     "sharp": "^0.34.0"
   },
   "allowScripts": {
-    "esbuild@0.27.7": true,
-    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true,
     "sharp@0.34.5": true
   }
 }
