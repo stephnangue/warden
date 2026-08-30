@@ -40,8 +40,8 @@ func (t *IBMCloudKeysCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("eyJraWQiOiIyMDI..."),
 
 		credential.StringField("mint_method").
-			OneOf("access_keys", "dynamic_ibm").
-			Describe("Mint method for credential minting; omit on an ibm source for a bearer-only spec").
+			OneOf("iam_token", "access_keys", "dynamic_ibm").
+			Describe("Mint method for credential minting; 'iam_token' (or omitted) on an ibm source is the bearer-only API-mode spec").
 			Example("access_keys"),
 
 		// Dynamic IBM fields (for Vault IBM secrets engine)
@@ -86,11 +86,15 @@ func (t *IBMCloudKeysCredType) ValidateConfig(config map[string]string, sourceTy
 		}
 	case credential.SourceTypeIBM:
 		switch config["mint_method"] {
-		case "":
+		case "", "iam_token":
 			// Bearer-only: the IAM token minted from the source, which is the
-			// gateway's API mode. An inline COS pair was only ever consumed by
-			// iam_with_cos, and that method existed to serve a standing secret
-			// out of spec config.
+			// gateway's API mode. iam_token is accepted explicitly as well as by
+			// omission — the driver's own errors name it, and a spec that must be
+			// typed ibmcloud_keys for the gateway to accept it should be able to
+			// say which method it uses rather than relying on a silent default.
+			//
+			// An inline COS pair was only ever consumed by iam_with_cos, and that
+			// method existed to serve a standing secret out of spec config.
 			for _, key := range []string{"access_key_id", "secret_access_key"} {
 				if config[key] != "" {
 					return fmt.Errorf("'%s' must be omitted; a COS pair is served by an access_keys spec from its %s, never stored inline",
@@ -126,7 +130,7 @@ func (t *IBMCloudKeysCredType) ValidateConfig(config map[string]string, sourceTy
 			}
 
 		default:
-			return fmt.Errorf("'mint_method' must be 'access_keys' for ibm source (or omitted for a bearer-only spec), got: %s", config["mint_method"])
+			return fmt.Errorf("'mint_method' must be 'iam_token' or 'access_keys' for ibm source (iam_token may be omitted), got: %s", config["mint_method"])
 		}
 	}
 

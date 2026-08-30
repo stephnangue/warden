@@ -26,6 +26,26 @@ const ibmMaxResponseBodySize = 1 << 20 // 1MB
 // defaultIBMIAMEndpoint is the default IBM Cloud IAM endpoint
 const defaultIBMIAMEndpoint = "https://iam.cloud.ibm.com"
 
+// ibmRotationDescriptionPrefix stamps an API key created by rotation. The id of
+// the key it replaces is appended, so the stamp names one lineage rather than
+// every key Warden ever made: a key created by rotating from K is stamped with K,
+// so the key currently in use — stamped with *its* predecessor — can never match,
+// and neither can a sibling source's key, whose lineage starts somewhere else.
+// That scoping is what makes the sweep safe to run at all.
+const ibmRotationDescriptionPrefix = "Managed by Warden credential rotation, replacing "
+
+// ibmLegacyRotationDescription is the description every rotated key carried before
+// the lineage stamp existed. Such a key names no lineage, so it cannot be matched
+// by a stamp — and a sweep that only matched stamps could therefore never reclaim
+// a single orphan that predated this scheme, which is most of them on any cluster
+// that has been rotating. It is Warden's own constant and was never applied to
+// anything but a rotation key, so matching it is as safe as matching a stamp: the
+// live key is excluded by id either way.
+const ibmLegacyRotationDescription = "Managed by Warden credential rotation"
+
+// ibmListPageSize bounds one page of the API key listing the sweep walks.
+const ibmListPageSize = 100
+
 // defaultIBMAccessKeysChainTTL bounds how long a served COS pair stays cached when
 // the spec sets no secret_cache_ttl. The pair has no expiry of its own, so this is
 // only how long Warden goes before walking the chain again to see whether the
@@ -37,6 +57,7 @@ var _ credential.SourceDriver = (*IBMDriver)(nil)
 var _ credential.Rotatable = (*IBMDriver)(nil)
 var _ credential.SpecVerifier = (*IBMDriver)(nil)
 var _ credential.ChainedSecretMinter = (*IBMDriver)(nil)
+var _ credential.RotationConfigValidator = (*IBMDriverFactory)(nil)
 
 // IBMDriver mints credentials from IBM Cloud services.
 // It exchanges an IBM Cloud API key for IAM bearer tokens.
@@ -179,6 +200,29 @@ func (f *IBMDriverFactory) ValidateConfig(config map[string]string) error {
 // SensitiveConfigFields returns the list of config keys that should be masked in output
 func (f *IBMDriverFactory) SensitiveConfigFields() []string {
 	return []string{"api_key", "ca_data"}
+}
+
+// ValidateRotationConfig rejects a rotation_period on a source that could never
+// rotate, so the operator hears about it at write time rather than never.
+//
+// It mirrors SupportsRotation exactly, from the config map instead of live driver
+// state. The two must stay in step: anything SupportsRotation requires and this
+// does not becomes a source that is accepted and then fails every cycle forever.
+//
+// This became necessary when api_key stopped being Required(): a source holding
+// neither a key nor a reference is now a legitimate shape (it serves only
+// access_keys specs), and nothing else would have caught a rotation_period on it.
+// The chained case is refused by the store, but it is checked here too so the two
+// halves of "cannot rotate" are stated in one place.
+func (f *IBMDriverFactory) ValidateRotationConfig(config map[string]string) error {
+	if credential.GetString(config, credential.ConfigSecretSpec, "") != "" {
+		return fmt.Errorf("rotation does not apply to a chained source (%s is set); the referenced spec's owner rotates the api key",
+			credential.ConfigSecretSpec)
+	}
+	if credential.GetString(config, "api_key", "") == "" {
+		return fmt.Errorf("rotating an ibm source requires api_key; a source that holds none serves only access_keys specs and the rotation manager could never complete a cycle")
+	}
+	return nil
 }
 
 // InferCredentialType infers the credential type from the spec's mint_method.
@@ -490,21 +534,26 @@ func (d *IBMDriver) VerifySpec(ctx context.Context, spec *credential.CredSpec) e
 // Rotatable Interface Implementation (Source API Key Rotation)
 // ============================================================================
 
-// SupportsRotation returns true if this driver can rotate its source API key.
-// Rotation requires the API key's IAM identity to have permission to create/delete API keys.
+// SupportsRotation returns true if this driver has a source API key to rotate.
+//
+// It reports on configuration, not on whether discovery has already succeeded. It
+// used to require a discovered iamID, which made one transient failure at driver
+// creation permanent: nothing re-ran discovery, so the manager retried to
+// MaxRotateAttempts, parked the entry, and came back to the same answer for the
+// life of the instance. PrepareRotation re-probes instead — it has a context to do
+// it with, which this method does not.
+//
+// Whether the identity may actually create keys is still IBM's to say, and it says
+// so at PrepareRotation. A permission error there is a clearer report than "source
+// configuration does not support rotation" anyway.
 func (d *IBMDriver) SupportsRotation() bool {
 	// The key lives at its source of truth, and whoever owns the referenced spec
-	// rotates it there. On a chained source iamID is never discovered, so this would
-	// be false anyway — stating it keeps the invariant independent of discovery.
-	// Taken before authMu: isChained acquires configMu, and the driver's established
-	// order is authMu then configMu, never the reverse.
+	// rotates it there. Taken before authMu: isChained acquires configMu, and the
+	// driver's established order is authMu then configMu, never the reverse.
 	if d.isChained() {
 		return false
 	}
-
-	d.authMu.Lock()
-	defer d.authMu.Unlock()
-	return d.iamID != ""
+	return d.getAPIKey() != ""
 }
 
 // PrepareRotation creates a new API key for the same IAM identity.
@@ -520,8 +569,18 @@ func (d *IBMDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
-	if d.iamID == "" {
-		return nil, nil, 0, fmt.Errorf("cannot rotate: IAM identity not discovered")
+	// Discovery is best-effort at creation time, so a blip there leaves the identity
+	// unknown. Re-probe here rather than refusing forever: this is the first point
+	// after creation that both needs the identity and has a context to fetch it with.
+	// Both ids are required: iamID names the identity the replacement is created
+	// for, and apiKeyID is what cleanup deletes and what the sweep must never touch.
+	if d.iamID == "" || d.apiKeyID == "" {
+		if err := d.discoverAPIKeyDetailsLocked(ctx); err != nil {
+			return nil, nil, 0, fmt.Errorf("cannot rotate: IAM identity not discovered: %w", err)
+		}
+		if d.iamID == "" || d.apiKeyID == "" {
+			return nil, nil, 0, fmt.Errorf("cannot rotate: IBM did not report both an iam_id and an api key id")
+		}
 	}
 
 	// Get IAM token using current API key
@@ -530,13 +589,18 @@ func (d *IBMDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 		return nil, nil, 0, fmt.Errorf("failed to get IAM token for rotation: %w", err)
 	}
 
-	// Create new API key for the same IAM identity
-	newAPIKey, newAPIKeyID, err := d.createAPIKey(ctx, iamToken)
+	oldAPIKeyID := d.apiKeyID
+
+	// Reclaim before creating, so a key this source lost track of on an earlier
+	// attempt is gone before another is made. The key in use is excluded by id.
+	d.sweepOrphanedRotationKeys(ctx, iamToken)
+
+	// Create new API key for the same IAM identity, stamped with the key it
+	// replaces so an operator reading the IBM console can see the lineage.
+	newAPIKey, newAPIKeyID, err := d.createAPIKey(ctx, iamToken, ibmRotationDescriptionPrefix+oldAPIKeyID)
 	if err != nil {
 		return nil, nil, 0, err
 	}
-
-	oldAPIKeyID := d.apiKeyID
 
 	// Build new config
 	newConfig := d.configSnapshot()
@@ -615,7 +679,11 @@ func (d *IBMDriver) CleanupRotation(ctx context.Context, cleanupConfig map[strin
 		return fmt.Errorf("failed to get IAM token for cleanup: %w", err)
 	}
 
-	if err := d.deleteAPIKey(ctx, iamToken, oldAPIKeyID); err != nil {
+	// A key that is already gone is the goal state, not a failure. Without this the
+	// cleanup retries daily for a week before being abandoned with an error, for a
+	// key nobody can find — which is what a delete that succeeded and then lost its
+	// response, or a crash between the delete and the record removal, looks like.
+	if err := d.deleteAPIKey(ctx, iamToken, oldAPIKeyID); err != nil && !isIBMNotFound(err) {
 		return fmt.Errorf("failed to delete old API key: %w", err)
 	}
 
@@ -816,15 +884,16 @@ func (d *IBMDriver) discoverAPIKeyDetailsLocked(ctx context.Context) error {
 	return nil
 }
 
-// createAPIKey creates a new API key for the same IAM identity.
+// createAPIKey creates a new API key for the same IAM identity, stamped with the
+// lineage the sweep scopes on.
 // Caller must hold authMu (PrepareRotation).
-func (d *IBMDriver) createAPIKey(ctx context.Context, iamToken string) (string, string, error) {
+func (d *IBMDriver) createAPIKey(ctx context.Context, iamToken, stamp string) (string, string, error) {
 	iamEndpoint := d.getIAMEndpoint()
 	accountID := d.accountIDLocked()
 
 	reqBody, err := json.Marshal(map[string]interface{}{
 		"name":        fmt.Sprintf("warden-rotated-%d", time.Now().Unix()),
-		"description": "Managed by Warden credential rotation",
+		"description": stamp,
 		"iam_id":      d.iamID,
 		"account_id":  accountID,
 	})
@@ -841,7 +910,7 @@ func (d *IBMDriver) createAPIKey(ctx context.Context, iamToken string) (string, 
 			"Content-Type":  "application/json",
 			"Accept":        "application/json",
 		},
-	}, defaultIBMRetryConfig())
+	}, ibmCreateRetryConfig())
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create new API key: %w", err)
 	}
@@ -859,6 +928,166 @@ func (d *IBMDriver) createAPIKey(ctx context.Context, iamToken string) (string, 
 	}
 
 	return createResp.Apikey, createResp.ID, nil
+}
+
+// isIBMRotationKey reports whether a key's description marks it as one this
+// driver's rotation created — either stamped with a lineage, or carrying the flat
+// description used before lineages existed.
+//
+// Deliberately not an exact-stamp match. Matching only the current lineage reads
+// as the safer choice, but it reclaims almost nothing: a key is orphaned precisely
+// when its rotation was abandoned, and the next rotation stamps a different
+// lineage, so the orphan's stamp is never asked for again. Every pre-lineage
+// orphan is missed for the same reason. What actually bounds the damage is the
+// caller's exclusion of the key in use, plus the listing being scoped to this
+// source's own IAM identity.
+//
+// The one case this widening does not cover safely is two sources sharing an IAM
+// identity while both rotate — there, each would sweep the other's key. That
+// configuration is already fatal without any sweep, since either source's cleanup
+// deletes the key the other is holding; this makes it fail sooner rather than
+// introducing a new way to fail.
+func isIBMRotationKey(description string) bool {
+	return description == ibmLegacyRotationDescription ||
+		strings.HasPrefix(description, ibmRotationDescriptionPrefix)
+}
+
+// sweepOrphanedRotationKeys deletes API keys this source's rotation created and
+// then lost track of — a retried create, a crash before the staged entry was
+// persisted, or a rotation abandoned after its replacement was already made.
+//
+// Failures are logged and swallowed. A rotation that works must not be failed
+// because tidying up after a previous one did not.
+// Caller must hold authMu (PrepareRotation).
+func (d *IBMDriver) sweepOrphanedRotationKeys(ctx context.Context, iamToken string) {
+	iamEndpoint := d.getIAMEndpoint()
+
+	query := url.Values{}
+	query.Set("iam_id", d.iamID)
+	query.Set("pagesize", fmt.Sprintf("%d", ibmListPageSize))
+	if accountID := d.accountIDLocked(); accountID != "" {
+		query.Set("account_id", accountID)
+	}
+
+	headers := map[string]string{
+		"Authorization": "Bearer " + iamToken,
+		"Accept":        "application/json",
+	}
+
+	for pageToken := ""; ; {
+		if pageToken != "" {
+			query.Set("pagetoken", pageToken)
+		}
+
+		respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httputil.HTTPRequest{
+			Method:  "GET",
+			URL:     iamEndpoint + "/v1/apikeys?" + query.Encode(),
+			Headers: headers,
+		}, defaultIBMRetryConfig())
+		if err != nil {
+			if d.logger != nil {
+				d.logger.Warn("could not list API keys to sweep orphaned rotation keys", logger.Err(err))
+			}
+			return
+		}
+
+		var list struct {
+			Apikeys []struct {
+				ID          string `json:"id"`
+				Description string `json:"description"`
+			} `json:"apikeys"`
+			Next string `json:"next"`
+		}
+		if err := json.Unmarshal(respBody, &list); err != nil {
+			if d.logger != nil {
+				d.logger.Warn("could not parse API key listing while sweeping orphaned rotation keys", logger.Err(err))
+			}
+			return
+		}
+
+		for _, key := range list.Apikeys {
+			// Excluding the key in use is the guard that matters, and it is checked by
+			// id rather than by description: an empty or unexpected description must
+			// never be able to make the live key look sweepable, since deleting it
+			// would lock the source out of IBM entirely.
+			if key.ID == "" || key.ID == d.apiKeyID || !isIBMRotationKey(key.Description) {
+				continue
+			}
+			if d.logger != nil {
+				d.logger.Warn("deleting an orphaned API key from a previous rotation attempt",
+					logger.String("api_key_id", truncateID(key.ID, 8)),
+				)
+			}
+			if err := d.deleteAPIKey(ctx, iamToken, key.ID); err != nil && !isIBMNotFound(err) {
+				if d.logger != nil {
+					d.logger.Warn("could not delete an orphaned API key",
+						logger.String("api_key_id", truncateID(key.ID, 8)),
+						logger.Err(err),
+					)
+				}
+			}
+		}
+
+		// IBM returns `next` as a link, not a bare token. Absent means this was the
+		// last page, which is the only signal needed to stop.
+		if list.Next == "" {
+			return
+		}
+		token := ibmPageTokenFromLink(list.Next)
+		if token == "" || token == pageToken {
+			// An unparseable or repeating link would loop forever; stop instead of
+			// sweeping the same page until the context dies.
+			return
+		}
+		pageToken = token
+	}
+}
+
+// ibmPageTokenFromLink extracts the pagetoken query parameter from the `next` link
+// IBM returns, which is a full URL rather than the bare token the next request
+// needs.
+func ibmPageTokenFromLink(link string) string {
+	parsed, err := url.Parse(link)
+	if err != nil {
+		return ""
+	}
+	return parsed.Query().Get("pagetoken")
+}
+
+// isIBMNotFound reports whether a failed delete means the key is already gone, as
+// opposed to the request never having reached a key endpoint at all.
+//
+// Both answer 404. Accepting the status alone would make a mis-set iam_endpoint
+// indistinguishable from a successful cleanup, so a live key would be reported as
+// deleted. IBM names the resource error in the body; a bare routing 404 carries no
+// such marker.
+func isIBMNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, `"code":"not_found"`) || strings.Contains(msg, `"code": "not_found"`)
+}
+
+// ibmCreateRetryConfig does not retry at all.
+//
+// Creating an API key is not idempotent, and an IBM API key carries no expiry, so
+// a request IBM committed but did not acknowledge leaves a fully privileged key
+// alive forever with nothing tracking it. Narrowing RetryableStatuses is not
+// enough: ExecuteWithRetry retries a transport error before it ever looks at that
+// list (helper/httputil/retry.go), and a connection reset or a timeout reading the
+// response is the likeliest way to lose an acknowledgement for a request that
+// arrived. MaxAttempts=1 is the only setting that makes the create happen once.
+//
+// The cost is that a genuine 429 now fails the rotation instead of backing off.
+// That is the right trade: the manager retries the whole cycle on its own
+// schedule, and a rotation deferred to the next attempt is cheaper than a key
+// nobody can find.
+func ibmCreateRetryConfig() httputil.HTTPRetryConfig {
+	cfg := defaultIBMRetryConfig()
+	cfg.MaxAttempts = 1
+	cfg.RetryableStatuses = nil
+	return cfg
 }
 
 // deleteAPIKey deletes an API key by ID

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -136,22 +137,29 @@ func TestIBMDriver_Revoke_NoOp(t *testing.T) {
 }
 
 func TestIBMDriver_SupportsRotation(t *testing.T) {
-	// The factory always sets credSource, so these mirror a real driver rather than
-	// a bare struct: SupportsRotation now reads config to see whether the source
-	// chains its key.
-	inline := func(iamID string) *IBMDriver {
+	// SupportsRotation reports on configuration, not on whether discovery has run:
+	// a source holding a key can rotate, and PrepareRotation re-probes the identity
+	// if it has to. The factory always sets credSource, so these mirror a real
+	// driver rather than a bare struct.
+	withConfig := func(cfg map[string]string, iamID string) *IBMDriver {
 		return &IBMDriver{
-			credSource: &credential.CredSource{Type: credential.SourceTypeIBM, Config: map[string]string{}},
+			credSource: &credential.CredSource{Type: credential.SourceTypeIBM, Config: cfg},
 			iamID:      iamID,
 		}
 	}
 
-	t.Run("true when iamID is set", func(t *testing.T) {
-		assert.True(t, inline("iam-1234").SupportsRotation())
+	t.Run("true when the source holds a key", func(t *testing.T) {
+		assert.True(t, withConfig(map[string]string{"api_key": "k"}, "iam-1234").SupportsRotation())
 	})
 
-	t.Run("false when iamID is empty", func(t *testing.T) {
-		assert.False(t, inline("").SupportsRotation())
+	// The point of the change: a blip during discovery at creation time must not
+	// disable rotation for the life of the driver instance.
+	t.Run("true even before discovery has run", func(t *testing.T) {
+		assert.True(t, withConfig(map[string]string{"api_key": "k"}, "").SupportsRotation())
+	})
+
+	t.Run("false when the source holds no key", func(t *testing.T) {
+		assert.False(t, withConfig(map[string]string{}, "iam-1234").SupportsRotation())
 	})
 
 	// The key lives at its source of truth; whoever owns the referenced spec rotates
@@ -486,11 +494,36 @@ func TestIBMDriver_PrepareRotation(t *testing.T) {
 	assert.Equal(t, DefaultIBMActivationDelay, activateAfter)
 }
 
-func TestIBMDriver_PrepareRotation_NoIAMID(t *testing.T) {
-	d := &IBMDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeIBM, Config: map[string]string{}},
-		iamID:      "",
-	}
+// Discovery is best-effort at creation time, so a blip there used to disable
+// rotation for the life of the driver instance — nothing ever re-ran it. Rotation
+// re-probes instead, which is the first point after creation that both needs the
+// identity and has a context to fetch it with.
+func TestIBMDriver_PrepareRotation_ReprobesDiscovery(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.iamID = "" // as if discovery had failed at Create
+	d.apiKeyID = ""
+
+	newConfig, _, _, err := d.PrepareRotation(context.TODO())
+	require.NoError(t, err)
+	assert.NotEmpty(t, newConfig["api_key"])
+	assert.Equal(t, "iam-ServiceId-abcdef", d.iamID, "the identity was recovered, not assumed")
+}
+
+// When the re-probe itself fails, the error says so rather than reporting the
+// source as unrotatable — the manager can then surface a cause an operator can act on.
+func TestIBMDriver_PrepareRotation_ReportsFailedReprobe(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.iamID = ""
+	d.tokenCache.Clear()
+
 	_, _, _, err := d.PrepareRotation(context.TODO())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "IAM identity not discovered")
@@ -1117,9 +1150,12 @@ func TestIBMDriver_MintCredential_FailsClosedWhenChained(t *testing.T) {
 // creation takes, so an unskipped probe would refuse a keyless source at write and
 // fail every mint after.
 func TestIBMDriverFactory_Create_SkipsProbeWithoutKey(t *testing.T) {
-	var hits int
+	// Atomic because the write happens on the httptest handler goroutine: the
+	// socket hop carries no happens-before edge the race detector recognises, and
+	// this counter is read precisely when the guard under test has regressed.
+	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		atomic.AddInt32(&hits, 1)
 		http.Error(w, "no source should reach me", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -1136,20 +1172,20 @@ func TestIBMDriverFactory_Create_SkipsProbeWithoutKey(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			hits = 0
+			atomic.StoreInt32(&hits, 0)
 			log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 			d, err := f.Create(config, log)
 			require.NoError(t, err)
 			require.NotNil(t, d)
-			assert.Zero(t, hits, "Create must make no upstream call without a stored key")
+			assert.Zero(t, atomic.LoadInt32(&hits), "Create must make no upstream call without a stored key")
 		})
 	}
 }
 
 func TestIBMDriver_VerifySpec_ChainedSourceNeedsNoAPIKey(t *testing.T) {
-	var hits int
+	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		atomic.AddInt32(&hits, 1)
 		http.Error(w, "no verification should reach me", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -1157,7 +1193,7 @@ func TestIBMDriver_VerifySpec_ChainedSourceNeedsNoAPIKey(t *testing.T) {
 	t.Run("chained source verifies without a call", func(t *testing.T) {
 		d := newChainedIBMDriver(t, srv.URL)
 		require.NoError(t, d.VerifySpec(context.TODO(), bearerSpec()))
-		assert.Zero(t, hits)
+		assert.Zero(t, atomic.LoadInt32(&hits))
 	})
 
 	// The schema no longer demands api_key, so this is where its absence lands --
@@ -1176,4 +1212,218 @@ func TestIBMDriver_VerifySpec_ChainedSourceNeedsNoAPIKey(t *testing.T) {
 		assert.Contains(t, err.Error(), "api_key")
 		assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
 	})
+}
+
+// ============================================================================
+// Rotation: orphan containment
+// ============================================================================
+
+// Creating an API key is not idempotent, and an IBM key carries no expiry, so a
+// retried create leaves a fully privileged credential live on the tenant with
+// nothing tracking it. Narrowing the retryable statuses is not enough — the retry
+// helper retries transport errors before it consults that list — so the create
+// must not retry at all.
+func TestIBMCreateRetryConfig_DoesNotRetryAtAll(t *testing.T) {
+	cfg := ibmCreateRetryConfig()
+	assert.Equal(t, 1, cfg.MaxAttempts, "a committed-but-unacknowledged create must not be repeated")
+	assert.Empty(t, cfg.RetryableStatuses)
+
+	// The shared config still carries the 5xx wildcard and multiple attempts, which
+	// is correct for the idempotent calls that use it — this pins that they differ.
+	assert.Contains(t, defaultIBMRetryConfig().RetryableStatuses, 500)
+	assert.Greater(t, defaultIBMRetryConfig().MaxAttempts, 1)
+}
+
+// A 502 answered after IBM committed the key must produce one key, not two: the
+// create is attempted exactly once, and the error surfaces.
+func TestIBMDriver_CreateAPIKey_IsAttemptedOnce(t *testing.T) {
+	var creates int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/identity/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "t", "expires_in": 3600})
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/apikeys" {
+			atomic.AddInt32(&creates, 1)
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		http.Error(w, "unexpected", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.authMu.Lock()
+	_, _, err := d.createAPIKey(context.TODO(), "iam-token", ibmRotationDescriptionPrefix+"ApiKey-old")
+	d.authMu.Unlock()
+
+	require.Error(t, err)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&creates),
+		"a 5xx must not be retried: IBM may already have committed the key")
+}
+
+func TestIsIBMNotFound(t *testing.T) {
+	// IBM names the resource error in the body.
+	assert.True(t, isIBMNotFound(fmt.Errorf(`status 404: {"errors":[{"code":"not_found"}]}`)))
+	assert.True(t, isIBMNotFound(fmt.Errorf(`status 404: {"errors":[{"code": "not_found"}]}`)))
+
+	// A bare routing 404 carries no such marker. Treating it as success would make
+	// a mis-set iam_endpoint indistinguishable from a completed cleanup, so a live
+	// key would be reported as deleted.
+	assert.False(t, isIBMNotFound(fmt.Errorf("status 404: 404 page not found")))
+	assert.False(t, isIBMNotFound(nil))
+}
+
+// A key that is already gone is the goal state. Without this the pending cleanup
+// retries daily for a week and is then abandoned with an error, for a key nobody
+// can find.
+func TestIBMDriver_CleanupRotation_ToleratesAlreadyDeleted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/identity/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "t", "expires_in": 3600})
+			return
+		}
+		if r.Method == http.MethodDelete {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"errors":[{"code":"not_found","message":"API key not found"}]}`))
+			return
+		}
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	require.NoError(t, d.CleanupRotation(context.TODO(), map[string]string{"api_key_id": "ApiKey-gone"}))
+}
+
+// A routing 404 is still a failure: it means the request never reached a key
+// endpoint, so the key it names may well be alive.
+func TestIBMDriver_CleanupRotation_RoutingNotFoundStillFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/identity/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "t", "expires_in": 3600})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	err := d.CleanupRotation(context.TODO(), map[string]string{"api_key_id": "ApiKey-maybe-alive"})
+	require.Error(t, err)
+}
+
+// The sweep reclaims every key this source's rotation created and lost track of —
+// not just the current lineage. Matching only the current stamp reclaimed almost
+// nothing: an orphan exists precisely because its rotation was abandoned, and the
+// next rotation stamps a different lineage, so the orphan's own stamp is never
+// asked for again. Keys predating the lineage scheme were unreachable for the same
+// reason. What bounds the damage is the live-key exclusion, checked by id.
+func TestIBMDriver_SweepOrphanedRotationKeys_ReclaimsAbandonedLineages(t *testing.T) {
+	var deleted []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apikeys":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"apikeys": []map[string]string{
+				// This lineage's orphan — a retried or crashed create.
+				{"id": "ApiKey-orphan", "description": ibmRotationDescriptionPrefix + "ApiKey-12345"},
+				// An abandoned lineage: the key left live when an activation failed
+				// after its replacement was staged. Previously unreachable forever.
+				{"id": "ApiKey-abandoned", "description": ibmRotationDescriptionPrefix + "ApiKey-older"},
+				// Created before lineage stamps existed. Also previously unreachable.
+				{"id": "ApiKey-legacy", "description": ibmLegacyRotationDescription},
+				// The live key. Excluded by id, whatever its description says.
+				{"id": "ApiKey-12345", "description": ibmRotationDescriptionPrefix + "ApiKey-ancestor"},
+				// Not ours: no Warden rotation ever created it.
+				{"id": "ApiKey-human", "description": "created by a person"},
+				{"id": "ApiKey-blank", "description": ""},
+			}})
+		case r.Method == http.MethodDelete:
+			mu.Lock()
+			deleted = append(deleted, strings.TrimPrefix(r.URL.Path, "/v1/apikeys/"))
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.authMu.Lock()
+	d.sweepOrphanedRotationKeys(context.TODO(), "iam-token")
+	d.authMu.Unlock()
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.ElementsMatch(t, []string{"ApiKey-orphan", "ApiKey-abandoned", "ApiKey-legacy"}, deleted,
+		"every rotation key this source lost track of, and nothing it did not create")
+	assert.NotContains(t, deleted, "ApiKey-12345", "the live key must never be swept")
+}
+
+func TestIsIBMRotationKey(t *testing.T) {
+	assert.True(t, isIBMRotationKey(ibmRotationDescriptionPrefix+"ApiKey-abc"))
+	assert.True(t, isIBMRotationKey(ibmLegacyRotationDescription))
+	assert.False(t, isIBMRotationKey("created by a person"))
+	assert.False(t, isIBMRotationKey(""))
+}
+
+// Tidying up after a previous rotation must never fail the one that works.
+func TestIBMDriver_SweepOrphanedRotationKeys_SwallowsFailures(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "listing is down", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	// The assertion is that this returns at all rather than panicking or blocking.
+	d.sweepOrphanedRotationKeys(context.TODO(), "iam-token")
+}
+
+func TestIBMPageTokenFromLink(t *testing.T) {
+	assert.Equal(t, "abc123",
+		ibmPageTokenFromLink("https://iam.cloud.ibm.com/v1/apikeys?pagesize=100&pagetoken=abc123"))
+	assert.Empty(t, ibmPageTokenFromLink("https://iam.cloud.ibm.com/v1/apikeys?pagesize=100"))
+	assert.Empty(t, ibmPageTokenFromLink("://not a url"))
+}
+
+// A rotation stamps the key it creates with the key it replaces, which is what
+// gives the next sweep a lineage to scope on.
+func TestIBMDriver_PrepareRotation_StampsTheReplacedKey(t *testing.T) {
+	var gotDescription string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/identity/token":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "t", "expires_in": 3600})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apikeys":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"apikeys": []map[string]string{}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apikeys":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			gotDescription, _ = body["description"].(string)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "ApiKey-new", "apikey": "new-key"})
+		default:
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	_, cleanupConfig, _, err := d.PrepareRotation(context.TODO())
+	require.NoError(t, err)
+
+	assert.Equal(t, ibmRotationDescriptionPrefix+"ApiKey-12345", gotDescription,
+		"the new key must name the one it replaces, so a later sweep can scope on it")
+	assert.Equal(t, "ApiKey-12345", cleanupConfig["api_key_id"])
 }

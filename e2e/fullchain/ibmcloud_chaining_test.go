@@ -36,7 +36,7 @@ const (
 	// json_key_map drops what it does not name.
 	ibmChainedAPIKey         = "e2e-ibm-chained-api-key"
 	ibmChainedStoredField    = "ibmcloud_api_key"
-	ibmChainedUnrelatedField = "unrelated_field"
+	ibmChainedUnrelatedValue = "must-not-be-vended"
 
 	// Written to secret/data/e2e/ibm-cos-hmac by setup.sh. Both halves, because
 	// for access_keys the pair IS the credential.
@@ -210,11 +210,15 @@ func TestIBMCloudChaining_SourceFetchesTheAPIKeyPerRequest(t *testing.T) {
 				}
 			}
 
-			// json_key_map drops what it does not name, so the companion field
-			// sharing that Vault path must never have reached the driver — which is
-			// what makes a shared secret path safe to reference.
-			if strings.Contains(strings.Join(keys, ","), ibmChainedUnrelatedField) {
-				t.Errorf("an unnamed field of the referenced secret reached the grant: %v", keys)
+			// The companion value sharing that Vault path must never be what the
+			// grant spent. json_key_map drops what it does not name, so the driver
+			// never sees it — but the projection is also what makes the mint work at
+			// all here, since the key is stored under neither conventional name.
+			// Asserting on the value, not the field name: the name never travels.
+			for _, k := range keys {
+				if k == ibmChainedUnrelatedValue {
+					t.Errorf("the companion value from the referenced secret was spent as the api key")
+				}
 			}
 		})
 	}
@@ -253,10 +257,22 @@ func setupIBMAccessKeysChain(t *testing.T, subj scalewaySubject) {
 		"create the spec-chained access_keys spec")
 }
 
-// TestIBMCloudChaining_AccessKeysServesThePairAndCallsNothing pins the property
-// that makes access_keys worth having: the pair is served from elsewhere, and IBM
-// is not contacted at all — nothing is created, so nothing is left behind.
-func TestIBMCloudChaining_AccessKeysServesThePairAndCallsNothing(t *testing.T) {
+// TestIBMCloudChaining_AccessKeysSpecWritesWithoutTouchingIBM covers what this
+// suite can reach: an access_keys spec and its grant-free source are accepted, and
+// standing the pair up costs no IBM call.
+//
+// It deliberately does NOT claim to exercise the serving path. An earlier version
+// did, on the reasoning that "the store test-mints it" — it does not: a chained
+// spec is excluded from both the test-mint and VerifySpec, so spec creation runs
+// schema and placement validation only, and the zero-call assertion below is
+// nearly free. Driving a real COS request needs the gateway's S3 leg pointed at a
+// local listener, and this provider exposes only cos_endpoint_type, whose three
+// values all resolve to real IBM hostnames — provider/ovh solves the same problem
+// with an s3_url host override, which is what makes its S3 rows possible. So
+// mintAccessKeysFromSecret and ExtractS3Credentials are covered by unit tests on
+// each side, agreeing on access_key_id and secret_access_key, but nothing checks
+// that agreement on a live request.
+func TestIBMCloudChaining_AccessKeysSpecWritesWithoutTouchingIBM(t *testing.T) {
 	ensureEnv(t)
 
 	for _, subj := range scalewaySubjects {
@@ -264,12 +280,8 @@ func TestIBMCloudChaining_AccessKeysServesThePairAndCallsNothing(t *testing.T) {
 			ibmResetGrantKeys()
 			setupIBMAccessKeysChain(t, subj)
 
-			// Creating the spec is itself the assertion here: the store test-mints it,
-			// so a spec that writes successfully is one whose chain resolved and whose
-			// pair the driver accepted. What this row adds is the negative — that
-			// reaching the pair took no IBM call whatsoever.
 			if keys := ibmObservedGrantKeys(); len(keys) != 0 {
-				t.Errorf("the IAM stub was called %d time(s) for an access_keys spec, want 0: %v", len(keys), keys)
+				t.Errorf("the IAM stub was called %d time(s) standing up an access_keys spec, want 0: %v", len(keys), keys)
 			}
 		})
 	}
