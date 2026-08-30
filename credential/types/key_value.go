@@ -40,7 +40,7 @@ func (t *KeyValueCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
 		credential.StringField("mint_method").
 			OneOf("kv2_read").
-			Describe("Mint method (kv2_read reads a Vault KV v2 secret verbatim)").
+			Describe("Mint method (kv2_read reads a Vault KV v2 secret)").
 			Example("kv2_read"),
 
 		credential.StringField("kv2_mount").
@@ -50,6 +50,15 @@ func (t *KeyValueCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("secret_path").
 			Describe("Path to the secret within the KV v2 mount").
 			Example("github/ci"),
+
+		credential.StringField("json_key_map").
+			Describe("Comma-separated 'srcKey=destKey' selection of the stored secret's fields; unnamed keys are not vended. Omit to vend the payload verbatim").
+			Example("token=api_key"),
+
+		credential.IntField("secret_version").
+			Min(1).
+			Describe("Pin a numbered revision of the secret; omit to read the current one. A pinned spec does not follow rotation").
+			Example("3"),
 	}
 }
 

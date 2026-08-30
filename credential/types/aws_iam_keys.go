@@ -92,6 +92,17 @@ func (t *AWSIAMAccessKeysCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("version_id").
 			Describe("Specific version ID to retrieve (optional)").
 			Example("uuid-version-id"),
+
+		// Field selection over the stored secret, shared by the KV read
+		// (static_aws) and the Secrets Manager read.
+		credential.StringField("json_key_map").
+			Describe("Comma-separated 'srcKey=destKey' selection of the stored secret's fields; unnamed keys are not vended. Use it when the stored keys are not named access_key_id / secret_access_key").
+			Example("accessKeyId=access_key_id,secretKey=secret_access_key"),
+
+		credential.IntField("secret_version").
+			Min(1).
+			Describe("Pin a numbered revision of the KV secret (static_aws only); omit to read the current one. A pinned spec does not follow rotation").
+			Example("3"),
 	}
 }
 

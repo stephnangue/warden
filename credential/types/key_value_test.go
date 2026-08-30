@@ -35,6 +35,29 @@ func TestKeyValueCredType_ValidateConfig(t *testing.T) {
 			wantErr:    false,
 		},
 		{
+			name:       "valid kv2_read with a field selection and a pinned version",
+			config:     map[string]string{"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "github/ci", "json_key_map": "token=api_key", "secret_version": "3"},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    false,
+		},
+		{
+			// GetInt falls back to its default on an unparseable value, so a
+			// typo'd version would silently read the current revision. The
+			// schema is what stops it reaching the driver.
+			name:       "non-numeric version",
+			config:     map[string]string{"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "github/ci", "secret_version": "latest"},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "secret_version",
+		},
+		{
+			name:       "version below the first revision",
+			config:     map[string]string{"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "github/ci", "secret_version": "0"},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "secret_version",
+		},
+		{
 			name:       "unsupported source type",
 			config:     map[string]string{"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "github/ci"},
 			sourceType: credential.SourceTypeAWS,

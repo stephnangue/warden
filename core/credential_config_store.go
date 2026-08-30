@@ -912,6 +912,14 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				return logical.ErrBadRequestf("invalid config for type '%s': %s", spec.Type, err.Error())
 			}
 
+			// The stored-secret selection keys span several credential types but
+			// hinge on the mint method, so they are checked once here rather than
+			// repeated per type. Both fail open where they are ignored, which is
+			// what makes silence the wrong answer.
+			if err := credential.ValidateSecretSelection(spec.Config, source.Type); err != nil {
+				return logical.ErrBadRequestf("invalid config for type '%s': %s", spec.Type, err.Error())
+			}
+
 			// A credential field the source will not carry is dead config: the
 			// spec mints without it and the provider takes its fallback branch,
 			// which looks like a working mount rather than a misconfigured one.

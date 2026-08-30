@@ -123,6 +123,17 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 			Describe("Specific Secrets Manager version ID (optional)").
 			Example("uuid-version-id"),
 
+		// Field selection over the stored secret, shared by the KV read
+		// (static_apikey) and the Secrets Manager read.
+		credential.StringField("json_key_map").
+			Describe("Comma-separated 'srcKey=destKey' selection of the stored secret's fields; unnamed keys are not vended. Use it when the stored key is not named api_key").
+			Example("token=api_key"),
+
+		credential.IntField("secret_version").
+			Min(1).
+			Describe("Pin a numbered revision of the KV secret (static_apikey only); omit to read the current one. A pinned spec does not follow rotation").
+			Example("3"),
+
 		// Credential chaining (apikey source): source the api_key from another cred spec
 		// instead of storing it inline, making the spec keyless.
 		credential.StringField(credential.ConfigSecretSpec).
