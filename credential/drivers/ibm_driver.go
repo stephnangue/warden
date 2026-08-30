@@ -47,8 +47,9 @@ type IBMDriver struct {
 	// HTTP client for IBM Cloud API calls
 	httpClient *http.Client
 
-	// authMu serializes rotation and protects iamID/apiKeyID. It is held across the
-	// upstream calls a rotation makes, which can run to minutes under retry.
+	// authMu serializes rotation and protects iamID/apiKeyID/discoveredAccountID. It
+	// is held across the upstream calls a rotation makes, which can run to minutes
+	// under retry.
 	authMu sync.Mutex
 
 	// configMu guards credSource.Config, which CommitRotation replaces wholesale.
@@ -66,6 +67,14 @@ type IBMDriver struct {
 	// Used for cleanup during rotation
 	// Protected by authMu
 	apiKeyID string
+
+	// discoveredAccountID is the account the source API key belongs to, learned from
+	// discovery when the operator did not configure one. It is held here rather than
+	// written back into credSource.Config because that map is not the driver's own:
+	// the factory is handed the config store's map by reference, and the store serves
+	// that same map to readers who take no driver lock. Writing to it raced them.
+	// Protected by authMu
+	discoveredAccountID string
 }
 
 // IBMDriverFactory creates IBMDriver instances
@@ -445,7 +454,7 @@ func (d *IBMDriver) getIAMToken(ctx context.Context) (string, time.Time, error) 
 
 // acquireIAMToken exchanges the source API key for an IAM bearer token.
 func (d *IBMDriver) acquireIAMToken(ctx context.Context) (string, time.Time, error) {
-	return exchangeIBMAPIKeyForIAMToken(ctx, d.httpClient, d.getAPIKey(), d.getIAMEndpoint())
+	return exchangeIBMAPIKeyForIAMToken(ctx, d.httpClient, d.getAPIKey(), d.getIAMEndpoint(), d.logger)
 }
 
 // Config accessors — single source of truth is credSource.Config, read under configMu
@@ -458,11 +467,20 @@ func (d *IBMDriver) getAPIKey() string {
 	return credential.GetString(d.credSource.Config, "api_key", "")
 }
 
-// getAccountID reads the configured or discovered account id.
-func (d *IBMDriver) getAccountID() string {
+// accountIDLocked reports the account a rotated key should be created in: the
+// operator-configured one, or else the one discovery learned. Caller must hold
+// authMu, which guards discoveredAccountID. Taking configMu underneath it follows
+// the order the rest of the driver already uses (discoverAPIKeyDetailsLocked reads
+// the api key the same way), so the two never nest the other way round.
+func (d *IBMDriver) accountIDLocked() string {
 	d.configMu.RLock()
-	defer d.configMu.RUnlock()
-	return credential.GetString(d.credSource.Config, "account_id", "")
+	configured := credential.GetString(d.credSource.Config, "account_id", "")
+	d.configMu.RUnlock()
+
+	if configured != "" {
+		return configured
+	}
+	return d.discoveredAccountID
 }
 
 // configSnapshot copies the source config, so a caller reading several keys sees one
@@ -476,19 +494,6 @@ func (d *IBMDriver) configSnapshot() map[string]string {
 		snapshot[k] = v
 	}
 	return snapshot
-}
-
-// setAccountIDIfUnset records an account id learned from discovery, leaving an
-// operator-configured one alone.
-func (d *IBMDriver) setAccountIDIfUnset(accountID string) {
-	if accountID == "" {
-		return
-	}
-	d.configMu.Lock()
-	defer d.configMu.Unlock()
-	if credential.GetString(d.credSource.Config, "account_id", "") == "" {
-		d.credSource.Config["account_id"] = accountID
-	}
 }
 
 // swapConfig publishes a config and retires every token the previous one minted, as one
@@ -565,8 +570,9 @@ func (d *IBMDriver) discoverAPIKeyDetailsLocked(ctx context.Context) error {
 	d.iamID = detailsResp.IamID
 	d.apiKeyID = detailsResp.ID
 
-	// Set account_id from discovery if not already configured
-	d.setAccountIDIfUnset(detailsResp.AccountID)
+	// Record the account discovery reported. An operator-configured account_id still
+	// wins at read time, so this is stored unconditionally rather than only when unset.
+	d.discoveredAccountID = detailsResp.AccountID
 
 	if d.logger != nil {
 		d.logger.Trace("discovered IBM API key details",
@@ -582,7 +588,7 @@ func (d *IBMDriver) discoverAPIKeyDetailsLocked(ctx context.Context) error {
 // Caller must hold authMu (PrepareRotation).
 func (d *IBMDriver) createAPIKey(ctx context.Context, iamToken string) (string, string, error) {
 	iamEndpoint := d.getIAMEndpoint()
-	accountID := d.getAccountID()
+	accountID := d.accountIDLocked()
 
 	reqBody, err := json.Marshal(map[string]interface{}{
 		"name":        fmt.Sprintf("warden-rotated-%d", time.Now().Unix()),

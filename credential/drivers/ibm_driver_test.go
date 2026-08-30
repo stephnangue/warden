@@ -402,7 +402,41 @@ func TestIBMDriver_DiscoverAPIKeyDetails(t *testing.T) {
 
 	assert.Equal(t, "iam-ServiceId-abcdef", d.iamID)
 	assert.Equal(t, "ApiKey-12345", d.apiKeyID)
-	assert.Equal(t, "acc-123456", d.credSource.Config["account_id"])
+	assert.Equal(t, "acc-123456", d.discoveredAccountID)
+
+	// The discovered account is held on the driver, never written back into the
+	// config map. That map belongs to the config store, which hands the same
+	// instance to readers taking no driver lock, so a write here raced them.
+	assert.NotContains(t, d.credSource.Config, "account_id",
+		"discovery must not mutate the source config map")
+}
+
+// An operator-configured account wins over whatever discovery reports, which is
+// what the removed write-back used to express by only filling an unset key.
+func TestIBMDriver_AccountID_ConfiguredWinsOverDiscovered(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := &IBMDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeIBM,
+			Config: map[string]string{
+				"api_key":      "test-key",
+				"iam_endpoint": srv.URL,
+				"account_id":   "acc-operator",
+			},
+		},
+		tokenCache: NewTokenCache(),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	require.NoError(t, d.discoverAPIKeyDetails(context.TODO()))
+
+	assert.Equal(t, "acc-123456", d.discoveredAccountID, "discovery still records what it saw")
+
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	assert.Equal(t, "acc-operator", d.accountIDLocked())
 }
 
 func TestIBMDriver_PrepareRotation(t *testing.T) {

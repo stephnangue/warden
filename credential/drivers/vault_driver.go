@@ -1013,7 +1013,7 @@ func (d *VaultDriver) fetchDynamicIBMCreds(ctx context.Context, client *api.Clie
 	// that Warden can't use. Use a fresh context for revocation so it still fires
 	// if the caller's context is already canceled.
 	iamEndpoint := credential.GetString(spec.Config, "iam_endpoint", defaultIBMIAMEndpoint)
-	accessToken, tokenExpiry, err := exchangeIBMAPIKeyForIAMToken(ctx, d.httpClient, apiKey, iamEndpoint)
+	accessToken, tokenExpiry, err := exchangeIBMAPIKeyForIAMToken(ctx, d.httpClient, apiKey, iamEndpoint, d.logger)
 	if err != nil {
 		if secret.LeaseID != "" {
 			revokeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
