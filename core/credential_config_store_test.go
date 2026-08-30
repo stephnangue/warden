@@ -2585,3 +2585,128 @@ func TestCredentialConfigStore_IBMAccessKeysNeedsItsOwnReference(t *testing.T) {
 		assert.Contains(t, err.Error(), "rotation_period")
 	})
 }
+
+// A driver is built from its source's Config and nothing else — Name keys it, Type
+// is immutable, and RotationPeriod belongs to the manager. So an update that leaves
+// Config alone must leave the instance alone: rebuilding it would discard cached
+// tokens, discovered identity and pooled connections to produce something
+// identical. This matters now that a rotation period can be updated on its own.
+func TestCredentialConfigStore_UpdateSourceClosesDriverOnlyOnConfigChange(t *testing.T) {
+	core := createTestCore(t)
+	store := core.credConfigStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	src := &credential.CredSource{
+		Name: "driver-src", Type: "local",
+		Config:         map[string]string{"key": "v1"},
+		RotationPeriod: 48 * time.Hour,
+	}
+	require.NoError(t, store.CreateSource(ctx, src))
+
+	first, err := core.credentialManager.GetOrCreateDriver(ctx, "driver-src")
+	require.NoError(t, err)
+	require.NotNil(t, first)
+
+	// Rotation period only: same config, so the instance must survive.
+	src.RotationPeriod = 26 * time.Hour
+	require.NoError(t, store.UpdateSource(ctx, src))
+
+	afterPeriodChange, err := core.credentialManager.GetOrCreateDriver(ctx, "driver-src")
+	require.NoError(t, err)
+	assert.Same(t, first, afterPeriodChange,
+		"an update that changes no driver input must not tear the driver down")
+
+	// Config changed: the instance must be rebuilt from it.
+	src.Config = map[string]string{"key": "v2"}
+	require.NoError(t, store.UpdateSource(ctx, src))
+
+	afterConfigChange, err := core.credentialManager.GetOrCreateDriver(ctx, "driver-src")
+	require.NoError(t, err)
+	assert.NotSame(t, first, afterConfigChange,
+		"a changed config must produce a driver built from it")
+}
+
+// The rotation manager used to learn about a source or spec only at create and
+// delete. A period changed in place therefore kept firing on the old schedule, and
+// a period cleared in place kept firing at all — the stored config said one thing
+// and the manager did another, with nothing to surface the disagreement.
+func TestCredentialConfigStore_RotationScheduleFollowsUpdates(t *testing.T) {
+	// The lighter store harness builds a Core with no credential manager, and
+	// UpdateSource closes the source's driver — so this needs the full one.
+	core := createTestCore(t)
+	store := core.credConfigStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	rm := NewRotationManager(core, core.logger.WithSubsystem("rotation"), nil)
+	rm.Start()
+	defer rm.Stop()
+	store.rotationManager = rm
+
+	ns, err := store.getNamespaceFromContext(ctx)
+	require.NoError(t, err)
+
+	t.Run("source", func(t *testing.T) {
+		src := &credential.CredSource{
+			Name: "rot-src", Type: "local",
+			Config:         map[string]string{"key": "v"},
+			RotationPeriod: 48 * time.Hour,
+		}
+		require.NoError(t, store.CreateSource(ctx, src))
+
+		entry := rm.GetEntry(ns.UUID, "rot-src")
+		require.NotNil(t, entry, "create must enrol a source that carries a period")
+		require.Equal(t, 48*time.Hour, entry.RotationPeriod)
+		firstAction := entry.NextAction
+
+		// Shortening must bring the next rotation forward rather than waiting out
+		// the period the entry was created with.
+		src.RotationPeriod = 26 * time.Hour
+		require.NoError(t, store.UpdateSource(ctx, src))
+
+		entry = rm.GetEntry(ns.UUID, "rot-src")
+		require.NotNil(t, entry)
+		assert.Equal(t, 26*time.Hour, entry.RotationPeriod)
+		assert.True(t, entry.NextAction.Before(firstAction),
+			"a shortened period must reschedule from now")
+
+		// Clearing it must remove the entry, not leave one firing on a period the
+		// source no longer carries.
+		src.RotationPeriod = 0
+		require.NoError(t, store.UpdateSource(ctx, src))
+		assert.Nil(t, rm.GetEntry(ns.UUID, "rot-src"),
+			"a source with no rotation period must not stay enrolled")
+
+		// And setting one again must re-enrol it.
+		src.RotationPeriod = 30 * time.Hour
+		require.NoError(t, store.UpdateSource(ctx, src))
+		assert.NotNil(t, rm.GetEntry(ns.UUID, "rot-src"))
+	})
+
+	// Specs reached this state through the API long before sources could: the spec
+	// update handler has always carried rotation_period.
+	t.Run("spec", func(t *testing.T) {
+		specEntry := func() *RotationEntry {
+			if v, ok := rm.entries.Load(buildSpecKey(ns.UUID, "rot-spec")); ok {
+				return v.(*RotationEntry)
+			}
+			return nil
+		}
+
+		spec := &credential.CredSpec{
+			Name: "rot-spec", Type: credential.TypeAPIKey, Source: "rot-src",
+			Config:         map[string]string{"api_key": "v"},
+			RotationPeriod: 48 * time.Hour,
+		}
+		require.NoError(t, store.CreateSpec(ctx, spec))
+		require.NotNil(t, specEntry(), "create must enrol a spec that carries a period")
+
+		spec.RotationPeriod = 26 * time.Hour
+		require.NoError(t, store.UpdateSpec(ctx, spec))
+		require.NotNil(t, specEntry())
+		assert.Equal(t, 26*time.Hour, specEntry().RotationPeriod)
+
+		spec.RotationPeriod = 0
+		require.NoError(t, store.UpdateSpec(ctx, spec))
+		assert.Nil(t, specEntry(), "a spec with no rotation period must not stay enrolled")
+	})
+}

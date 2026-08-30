@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -353,7 +354,8 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 
 	// Check if spec exists
 	cacheKey := s.buildSpecCacheKey(ns.UUID, spec.Name)
-	if _, err := s.loadSpec(ns.UUID, spec.Name); err != nil {
+	existing, err := s.loadSpec(ns.UUID, spec.Name)
+	if err != nil {
 		return ErrSpecNotFound
 	}
 
@@ -366,12 +368,51 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 	s.specsByID.Set(cacheKey, spec, 1)
 	s.specsByID.Wait()
 
+	// Same reconciliation the source path does, for the same reason: the spec
+	// update API has always carried rotation_period, so a period could be changed
+	// or cleared in place while the manager kept the schedule it was given at
+	// create.
+	s.reconcileSpecRotation(ctx, spec, existing.RotationPeriod)
+
 	s.logger.Debug("updated credential spec",
 		logger.String("namespace", ns.UUID),
 		logger.String("spec_name", spec.Name),
 	)
 
 	return nil
+}
+
+// reconcileSpecRotation brings the rotation manager in line with a spec's
+// persisted rotation period.
+//
+// A changed period re-registers rather than editing in place: RotationManager's
+// UpdateRotationPeriod addresses entries by the source key, so it cannot reach a
+// spec entry at all, and register replaces an existing entry outright — which
+// reschedules the next action from now, so a shortened period does not wait out
+// the old one.
+//
+// Failures are logged, not returned: the spec is already persisted.
+func (s *CredentialConfigStore) reconcileSpecRotation(ctx context.Context, spec *credential.CredSpec, oldPeriod time.Duration) {
+	if s.rotationManager == nil {
+		return
+	}
+
+	switch {
+	case spec.RotationPeriod <= 0 && oldPeriod > 0:
+		if err := s.rotationManager.UnregisterSpec(ctx, spec.Name); err != nil {
+			s.logger.Warn("failed to unregister spec from rotation after update",
+				logger.String("spec_name", spec.Name), logger.Err(err))
+		} else {
+			s.logger.Info("rotation disabled for spec",
+				logger.String("spec_name", spec.Name))
+		}
+
+	case spec.RotationPeriod > 0 && spec.RotationPeriod != oldPeriod:
+		if err := s.rotationManager.RegisterSpec(ctx, spec.Name, spec.Source, spec.RotationPeriod); err != nil {
+			s.logger.Warn("failed to re-register spec for rotation after update",
+				logger.String("spec_name", spec.Name), logger.Err(err))
+		}
+	}
 }
 
 // DeleteSpec removes a spec by name
@@ -629,13 +670,23 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 		return err
 	}
 
-	// Close old driver instance since config has changed
-	// This ensures the driver will be recreated with the new config on next use
-	if err := s.core.credentialManager.CloseDriver(ctx, source.Name); err != nil {
-		s.logger.Warn("failed to close driver during source update",
-			logger.String("source_name", source.Name),
-			logger.Err(err))
-		// Continue with update even if driver cleanup fails
+	// Close the old driver instance only when the config it was built from actually
+	// changed, so it is rebuilt from the new one on next use.
+	//
+	// Config is the only field a driver reads: Name keys it, Type is immutable
+	// (refused above), and RotationPeriod is the manager's state, not the driver's.
+	// So an update that touches only the rotation period leaves every driver input
+	// identical, and tearing the instance down would discard live state — cached
+	// tokens, discovered identity, pooled connections — to rebuild something byte
+	// for byte the same. That case stopped being hypothetical when the update path
+	// began accepting a rotation period on its own.
+	if !maps.Equal(existing.Config, source.Config) {
+		if err := s.core.credentialManager.CloseDriver(ctx, source.Name); err != nil {
+			s.logger.Warn("failed to close driver during source update",
+				logger.String("source_name", source.Name),
+				logger.Err(err))
+			// Continue with update even if driver cleanup fails
+		}
 	}
 
 	// Persist to storage
@@ -647,12 +698,64 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	s.sourcesByID.Set(cacheKey, source, 1)
 	s.sourcesByID.Wait()
 
+	// Reconcile the rotation schedule with what was just persisted. Until this
+	// existed the manager was told about a source only at create and delete, so a
+	// period changed in place kept firing on the old schedule and a period cleared
+	// in place kept firing at all — the config said one thing and the manager did
+	// another, with nothing to reveal the disagreement.
+	s.reconcileSourceRotation(ctx, source, existing.RotationPeriod)
+
 	s.logger.Debug("updated credential source",
 		logger.String("namespace", ns.UUID),
 		logger.String("source_name", source.Name),
 	)
 
 	return nil
+}
+
+// reconcileSourceRotation brings the rotation manager in line with a source's
+// persisted rotation period.
+//
+// Enrolment eligibility is re-evaluated, not assumed: a source that gains a
+// secret_spec, or is otherwise converted to holding no secret of its own, must
+// leave the schedule even if its period were somehow still set — validateSource
+// refuses that combination, so in practice the period arrives as zero and the
+// unregister below is what actually removes the entry.
+//
+// Failures are logged, not returned: the source is already persisted, and failing
+// the update here would report an error for a write that happened.
+func (s *CredentialConfigStore) reconcileSourceRotation(ctx context.Context, source *credential.CredSource, oldPeriod time.Duration) {
+	if s.rotationManager == nil {
+		return
+	}
+
+	eligible := source.RotationPeriod > 0 &&
+		!isFederationSource(source.Config) &&
+		source.Config[credential.ConfigSecretSpec] == ""
+
+	switch {
+	case !eligible && oldPeriod > 0:
+		if err := s.rotationManager.UnregisterSource(ctx, source.Name); err != nil {
+			s.logger.Warn("failed to unregister source from rotation after update",
+				logger.String("source_name", source.Name), logger.Err(err))
+		} else {
+			s.logger.Info("rotation disabled for source",
+				logger.String("source_name", source.Name))
+		}
+
+	case eligible && oldPeriod <= 0:
+		if err := s.rotationManager.RegisterSource(ctx, source.Name, source.Type, source.RotationPeriod); err != nil {
+			s.logger.Warn("failed to register source for rotation after update",
+				logger.String("source_name", source.Name), logger.Err(err))
+		}
+
+	case eligible && source.RotationPeriod != oldPeriod:
+		// Reschedules from now, so a shortened period does not wait out the old one.
+		if err := s.rotationManager.UpdateRotationPeriod(ctx, source.Name, source.RotationPeriod); err != nil {
+			s.logger.Warn("failed to update rotation period after source update",
+				logger.String("source_name", source.Name), logger.Err(err))
+		}
+	}
 }
 
 // DeleteSource removes a source by name

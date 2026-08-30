@@ -427,16 +427,29 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 		}
 	}
 
-	// Create updated source for validation and persistence. RotationPeriod
-	// is preserved from the existing entry — the typed UpdateCredentialSource
-	// API only carries Config, so dropping it here would (1) fail hvault
-	// validation (rotation_period required) on every update, and (2)
-	// silently strip rotation config from non-hvault sources too.
+	// RotationPeriod is preserved from the existing entry unless the caller names
+	// it. Preserving on absence is what keeps an ordinary config-only update from
+	// (1) failing hvault validation, which requires a rotation_period, and (2)
+	// silently stripping rotation config from every other source type.
+	//
+	// Honouring it when supplied is what makes a rotating source convertible. A
+	// source that holds no secret of its own is refused a rotation_period, so
+	// moving a keyed source onto a referenced spec means clearing the period in the
+	// same write — and with no way to express that, the conversion was impossible
+	// in place and delete-and-recreate is blocked while specs reference the source.
+	rotationPeriod := existingSource.RotationPeriod
+	if raw, ok := d.GetOk("rotation_period"); ok {
+		if seconds, isInt := raw.(int); isInt {
+			rotationPeriod = time.Duration(seconds) * time.Second
+		}
+	}
+
+	// Create updated source for validation and persistence.
 	updatedSource := &credential.CredSource{
 		Name:           existingSource.Name,
 		Type:           existingSource.Type,
 		Config:         mergedConfig,
-		RotationPeriod: existingSource.RotationPeriod,
+		RotationPeriod: rotationPeriod,
 	}
 
 	// Update via credential config store (validates and tests connection before persisting)

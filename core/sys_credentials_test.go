@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
@@ -171,6 +172,69 @@ func TestSystemBackend_HandleCredentialSourceUpdate(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Data["message"], "Successfully updated")
+}
+
+// A config-only update must not disturb the rotation period — that is what lets an
+// ordinary edit leave rotation alone — but a caller that names it must be able to
+// change it, including to zero. Without the second half, a rotating source can
+// never be converted to draw its secret from a referenced spec: such a source is
+// refused a rotation_period, and delete-and-recreate is blocked while specs
+// reference it.
+func TestSystemBackend_HandleCredentialSourceUpdate_RotationPeriod(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	schema := backend.pathCredentials()[0].Fields
+
+	createRaw := map[string]interface{}{
+		"name":   "rotating-source",
+		"type":   "local",
+		"config": map[string]interface{}{"key": "value1"},
+		// Above DefaultMinCredSourceRotationPeriod; a shorter one is refused, and the
+		// handler reports that as a response rather than an error.
+		"rotation_period": int(48 * time.Hour / time.Second),
+	}
+	req := createTestRequest(logical.CreateOperation, "cred/sources/rotating-source", createRaw)
+	createResp, err := backend.handleCredentialSourceCreate(ctx, req, createFieldData(schema, createRaw))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, createResp.StatusCode, "create failed: %v", createResp.Data)
+
+	readBack := func(t *testing.T) time.Duration {
+		t.Helper()
+		src, err := backend.core.credConfigStore.GetSource(ctx, "rotating-source")
+		require.NoError(t, err)
+		return src.RotationPeriod
+	}
+	require.Equal(t, 48*time.Hour, readBack(t))
+
+	t.Run("absent leaves it alone", func(t *testing.T) {
+		raw := map[string]interface{}{
+			"name":   "rotating-source",
+			"config": map[string]interface{}{"key": "value2"},
+		}
+		_, err := backend.handleCredentialSourceUpdate(ctx, req, createFieldData(schema, raw))
+		require.NoError(t, err)
+		assert.Equal(t, 48*time.Hour, readBack(t))
+	})
+
+	t.Run("supplied changes it", func(t *testing.T) {
+		raw := map[string]interface{}{
+			"name":            "rotating-source",
+			"rotation_period": int(72 * time.Hour / time.Second),
+		}
+		_, err := backend.handleCredentialSourceUpdate(ctx, req, createFieldData(schema, raw))
+		require.NoError(t, err)
+		assert.Equal(t, 72*time.Hour, readBack(t))
+	})
+
+	// The case the chaining migration needs.
+	t.Run("zero clears it", func(t *testing.T) {
+		raw := map[string]interface{}{
+			"name":            "rotating-source",
+			"rotation_period": 0,
+		}
+		_, err := backend.handleCredentialSourceUpdate(ctx, req, createFieldData(schema, raw))
+		require.NoError(t, err)
+		assert.Zero(t, readBack(t))
+	})
 }
 
 func TestSystemBackend_HandleCredentialSourceDelete(t *testing.T) {
