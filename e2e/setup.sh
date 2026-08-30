@@ -390,6 +390,21 @@ vault_api POST "secret/data/e2e/ovh-client-credential" \
 vault_api POST "secret/data/e2e/ovh-access-keys" \
   '{"data":{"access_key":"E2EOVHACCESSKEY00000","secret_key":"e2e-ovh-access-not-a-real-secret"}}'
 
+# The IBM api key an ibm source fetches per request instead of storing. IBM has no
+# assertion grant to federate against, so this SOURCE-level chain is what keyless
+# means there. Stored under a name that is neither of the driver's conventional
+# ones, so the row has to project it with json_key_map to be read at all — which is
+# also what pins that unnamed fields are dropped, since the companion key below
+# must not reach the driver.
+vault_api POST "secret/data/e2e/ibm-api-key" \
+  '{"data":{"ibmcloud_api_key":"e2e-ibm-chained-api-key","unrelated_field":"must-not-be-vended"}}'
+
+# A COS HMAC pair for ibm's access_keys method, which serves a pair held elsewhere
+# and calls IBM for nothing. A SPEC-level chain, like the ovh and scaleway pairs
+# above and for the same reason: the pair IS the credential.
+vault_api POST "secret/data/e2e/ibm-cos-hmac" \
+  '{"data":{"access_key_id":"E2EIBMCOSACCESSKEY00","secret_access_key":"e2e-ibm-cos-not-a-real-secret"}}'
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \

@@ -26,7 +26,15 @@ import (
 // bearer token. IBM IAM's grant is vendor-specific, so a stub stands in via the
 // source's own iam_endpoint.
 
-const ibmIAMToken = "fc-ibm-not-a-real-iam-token"
+// The api key this mount's source holds inline, and the token the stub answers it
+// with. The stub derives the token from the key it was handed, so a row can prove
+// which key reached the grant — which is the whole assertion the chained rows make,
+// where the key comes from a referenced spec rather than from config.
+const (
+	ibmInlineAPIKey = "fc-ibm-not-a-real-api-key"
+	ibmTokenPrefix  = "fc-ibm-token-for-"
+	ibmIAMToken     = ibmTokenPrefix + ibmInlineAPIKey
+)
 
 // ibmIAMStub serves the one IBM IAM call the mint makes. Started for the whole
 // package alongside the recording upstream, since the source is configured with
@@ -50,13 +58,18 @@ func startIBMIAMStub() *httptest.Server {
 			http.Error(w, "invalid grant_type", http.StatusBadRequest)
 			return
 		}
-		if r.FormValue("apikey") == "" {
+		apiKey := r.FormValue("apikey")
+		if apiKey == "" {
 			http.Error(w, "missing apikey", http.StatusBadRequest)
 			return
 		}
+		// Record it, and derive the token from it. Both exist for the chained rows:
+		// the recording says which key was spent, and the derivation carries that
+		// answer all the way to the header the gateway injects.
+		ibmRecordGrantKey(apiKey)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"access_token":"` + ibmIAMToken + `","token_type":"Bearer","expires_in":3600}`))
+		_, _ = w.Write([]byte(`{"access_token":"` + ibmTokenPrefix + apiKey + `","token_type":"Bearer","expires_in":3600}`))
 	})
 	return httptest.NewServer(mux)
 }
