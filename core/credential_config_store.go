@@ -1052,6 +1052,13 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				if credential.GetString(spec.Config, "mint_method", "") != "access_keys" {
 					return logical.ErrBadRequestf("for an ovh source, set secret_spec on the source (the chained client credential authenticates the source's own OAuth2 calls), not on the spec; a spec-level reference is for access_keys, whose credential is the referenced pair itself")
 				}
+			case credential.SourceTypeIBM:
+				// ibm chains at both levels too: an access_keys spec's own reference
+				// is the COS pair it serves, while the api key the IAM token grant is
+				// made with is a source concern like the others above.
+				if credential.GetString(spec.Config, "mint_method", "") != "access_keys" {
+					return logical.ErrBadRequestf("for an ibm source, set secret_spec on the source (the chained api key authenticates the source's own IAM token grant), not on the spec; a spec-level reference is for access_keys, whose credential is the referenced pair itself")
+				}
 			}
 		}
 		// An oauth2 source that chains its client credential resolves the pair per mint,
@@ -1252,6 +1259,10 @@ const authMethodOIDCFederation = "oidc_federation"
 // caller's identity assertion. Every such driver — aws, azure, gcp, hvault,
 // kubernetes, alicloud — spells it the same way, so one predicate covers them all
 // and covers a new one the day it lands.
+//
+// Not every keyless source federates: ibm, ovh and scaleway have no assertion grant
+// to exchange against, so they remove their stored secret by chaining instead and
+// are gated by the secret_spec rules rather than by this predicate.
 //
 // This is narrower than "holds no secret", which also describes a chained source
 // or spec (secret_spec), whose secret lives in the spec it references. Those are

@@ -92,17 +92,64 @@ func (f *IBMDriverFactory) Type() string {
 	return credential.SourceTypeIBM
 }
 
+// validateIBMChainedConfig rejects source config that contradicts chaining.
+//
+// A chained source stores no api key: keeping one would leave a source that reads
+// as keyless while storing the very secret chaining exists to remove. account_id
+// and activation_delay go for a different reason — their only consumer is rotation
+// (the account a replacement key is created in, and how long to overlap it), which
+// a chained source hands to whoever owns the referenced spec, so leaving them is
+// dead config describing a job this source no longer does.
+func validateIBMChainedConfig(config map[string]string) error {
+	if credential.GetString(config, credential.ConfigSecretSpec, "") == "" {
+		return nil
+	}
+	for _, key := range []string{"api_key", "account_id", "activation_delay"} {
+		if credential.GetString(config, key, "") != "" {
+			return fmt.Errorf("%s must be omitted when %s is set; the api key is supplied by the referenced spec, and rotation belongs to whoever owns it",
+				key, credential.ConfigSecretSpec)
+		}
+	}
+	return nil
+}
+
 // ValidateConfig validates IBM Cloud driver configuration using declarative schema
 func (f *IBMDriverFactory) ValidateConfig(config map[string]string) error {
+	if err := validateIBMChainedConfig(config); err != nil {
+		return err
+	}
+
 	return credential.ValidateSchema(config,
+		// Not Required(): a source serving only access_keys specs never performs the
+		// grant, so demanding a key it will not use would be config kept for nothing,
+		// and a chained source is refused one outright. VerifySpec is what actually
+		// holds an iam_token spec to a source that can mint for it.
 		credential.StringField("api_key").
-			Required().
-			Describe("IBM Cloud API key").
+			Describe("IBM Cloud API key (required for iam_token specs, unless the source sets secret_spec)").
 			Example("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
 
 		credential.StringField("account_id").
 			Describe("IBM Cloud account ID (optional, discovered from API key if omitted)").
 			Example("abcdef1234567890abcdef1234567890"),
+
+		credential.StringField(credential.ConfigSecretSpec).
+			Describe("Cred spec yielding the IAM api key, instead of storing one here").
+			Example("ibm-api-key"),
+
+		credential.StringField(credential.ConfigSecretField).
+			Describe("Field of the referenced credential holding the api key (defaults: 'api_key', then 'apikey')").
+			Example("api_key"),
+
+		credential.DurationField(credential.ConfigSecretCacheTTL).
+			Describe("How long to reuse the fetched api key before re-fetching (default: no caching)").
+			Example("30m"),
+
+		// Read by PrepareRotation but never declared until now, so a typo'd duration
+		// was silently replaced by the default. The chained validator refuses it by
+		// name, which makes it a key that has to be documented.
+		credential.DurationField("activation_delay").
+			Describe("Overlap before a rotated api key becomes active (default: 2m)").
+			Example("2m"),
 
 		credential.StringField("iam_endpoint").
 			Custom(func(v string) error {
@@ -164,6 +211,17 @@ func (f *IBMDriverFactory) Create(config map[string]string, log *logger.GatedLog
 	}
 	driver.httpClient = httpClient
 
+	// A source without a stored key has nothing to probe and nothing to discover: a
+	// chained source fetches its key per request, as the caller — and there is no
+	// caller here — while a source serving only access_keys specs never performs the
+	// grant at all. Both checks below exist to catch a bad stored key early; with no
+	// stored key they could only refuse config that is absent on purpose. This
+	// matters twice over, since Create is both the store's source connection test
+	// and the path every lazy driver creation takes.
+	if credential.GetString(config, "api_key", "") == "" {
+		return driver, nil
+	}
+
 	// Validate source credentials by acquiring a token
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -191,6 +249,14 @@ func (f *IBMDriverFactory) Create(config map[string]string, log *logger.GatedLog
 
 // MintCredential mints credentials based on the spec's mint_method.
 func (d *IBMDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	// A chained spec or source mints through MintFromSecret, which the minting layer
+	// routes it to. Reaching here means the routing was bypassed, so fail closed
+	// rather than falling back to a key this source may not even hold.
+	if spec.Config[credential.ConfigSecretSpec] != "" || d.isChained() {
+		return nil, nil, 0, "", fmt.Errorf("ibm: %s is set (credential chaining); this spec mints from fetched secret material, not directly",
+			credential.ConfigSecretSpec)
+	}
+
 	mintMethod := credential.GetString(spec.Config, "mint_method", "iam_token")
 
 	switch mintMethod {
@@ -209,6 +275,14 @@ func (d *IBMDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 
 // mintIAMToken exchanges the source API key for an IAM bearer token
 func (d *IBMDriver) mintIAMToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	// The schema no longer demands a key, so this is where its absence is reported.
+	// Naming the alternative matters: "api_key is empty" from the exchange helper
+	// tells an operator nothing about the reference they could have set instead.
+	if d.getAPIKey() == "" {
+		return nil, nil, 0, "", fmt.Errorf("api_key is required on source config, or a %s naming a spec that yields it",
+			credential.ConfigSecretSpec)
+	}
+
 	token, expiry, err := d.getIAMToken(ctx)
 	if err != nil {
 		return nil, nil, 0, "", fmt.Errorf("failed to acquire IBM IAM token: %w", err)
@@ -231,20 +305,94 @@ func (d *IBMDriver) mintIAMToken(ctx context.Context, spec *credential.CredSpec)
 }
 
 // MintFromSecret mints from secret material fetched through credential chaining.
-// access_keys receives the COS HMAC pair itself, which it serves unchanged: no
-// request is made to IBM, nothing is created, and there is nothing to revoke.
-func (d *IBMDriver) MintFromSecret(_ context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	if mintMethod := credential.GetString(spec.Config, "mint_method", ""); mintMethod != "access_keys" {
-		return nil, nil, 0, "", fmt.Errorf("ibm: credential chaining supports mint_method=access_keys, got %q", mintMethod)
+// What the material means depends on the mint method, so each arm reads it
+// differently: iam_token receives the api key the token grant is made with,
+// access_keys receives the COS HMAC pair itself.
+func (d *IBMDriver) MintFromSecret(ctx context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	switch mintMethod := credential.GetString(spec.Config, "mint_method", ""); mintMethod {
+	case "iam_token", "":
+		return d.mintIAMTokenFromSecret(ctx, spec, material)
+	case "access_keys":
+		return d.mintAccessKeysFromSecret(spec, material)
+	default:
+		// mint_method is validated at spec create, so reaching here means config
+		// drifted. The material's meaning is defined by the method, so with an
+		// unknown one there is no safe way to spend it.
+		return nil, nil, 0, "", fmt.Errorf("ibm: credential chaining supports mint_method=iam_token or access_keys, got %q", mintMethod)
+	}
+}
+
+// mintIAMTokenFromSecret performs the apikey grant with an api key fetched through
+// the chain, for a source that stores none.
+//
+// It deliberately does NOT call getIAMToken. That cache files every bearer under
+// one fixed key, which is right when a single stored key mints every token — but a
+// fetched key is resolved per caller, and the referenced spec may legitimately hand
+// different callers different keys, so the shared slot would serve one caller's IAM
+// token to another. Per-caller reuse lives where it is safe: the minting layer
+// caches the finished credential per session token, and the fetched key per agent
+// identity.
+func (d *IBMDriver) mintIAMTokenFromSecret(ctx context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	apiKey := material.Secret()
+
+	// Fall back to conventional names ONLY when no field was resolved. A field that
+	// resolved to nothing is a misconfigured secret_field — say so, rather than
+	// silently authenticating with some other value from the payload.
+	if apiKey == "" && material.Field == "" {
+		if apiKey = material.Data["api_key"]; apiKey == "" {
+			apiKey = material.Data["apikey"]
+		}
+	}
+	if apiKey == "" {
+		if material.Field != "" {
+			return nil, nil, 0, "", fmt.Errorf("ibm: %s %q is empty or absent in the fetched secret material: %w",
+				credential.ConfigSecretField, material.Field, credential.ErrChainedSecretIncomplete)
+		}
+		return nil, nil, 0, "", fmt.Errorf("ibm: no api key in fetched secret material (set %s, or store it under 'api_key'): %w",
+			credential.ConfigSecretField, credential.ErrChainedSecretIncomplete)
 	}
 
-	// The spec must name the reference itself. Routed here by a source-level one,
-	// the material would be whatever the source authenticates with, not this
-	// credential. Spec create refuses that combination, but a source converted to
-	// chaining afterwards is not re-validated against the specs already bound to
-	// it, so this is the guard that actually holds.
+	token, expiry, status, err := exchangeIBMAPIKeyForIAMTokenWithStatus(ctx, d.httpClient, apiKey, d.getIAMEndpoint(), d.logger)
+	if err != nil {
+		// On the chained path an authentication refusal marks the fetched key as
+		// possibly stale, so the minting layer evicts a cached copy and retries once
+		// with a fresh fetch. IBM answers a bad, deleted or locked api key with 400
+		// and a BXNIM error envelope, and the key is the only thing in this request
+		// that varies per mint — the grant type is a constant — so a refusal is about
+		// the credential or about nothing. Throttling and outages were already
+		// retried and arrive with other statuses, unmapped: an IBM outage is not a
+		// stale key, and a 404 is a mis-set iam_endpoint.
+		switch status {
+		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
+			return nil, nil, 0, "", fmt.Errorf("ibm: IAM token endpoint rejected the chained api key: %w (%w)",
+				credential.ErrChainedSecretRejected, err)
+		}
+		return nil, nil, 0, "", fmt.Errorf("failed to acquire IBM IAM token: %w", err)
+	}
+
+	ttl := time.Until(expiry)
+	if d.logger != nil {
+		d.logger.Debug("minted IBM IAM bearer token from fetched secret material",
+			logger.String("spec", spec.Name),
+			logger.String("ttl", ttl.String()),
+		)
+	}
+
+	// No leaseID — IAM tokens expire naturally and cannot be revoked
+	return map[string]interface{}{"access_token": token}, nil, ttl, "", nil
+}
+
+// mintAccessKeysFromSecret serves the COS HMAC pair a referenced spec yields: no
+// request is made to IBM, nothing is created, and there is nothing to revoke.
+func (d *IBMDriver) mintAccessKeysFromSecret(spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	// The spec must name the reference itself. Routed here by a source-level one, the
+	// material would be the api key that source authenticates with, not this
+	// credential — and an operator's referenced payload may well carry both. Spec
+	// create refuses that combination, but a source converted to chaining afterwards
+	// is not re-validated against the specs already bound to it, so this is the guard
+	// that actually holds.
 	if spec.Config[credential.ConfigSecretSpec] == "" {
-		return nil, nil, 0, "", fmt.Errorf("ibm: an access_keys spec must set its own %s naming a spec that yields its access_key_id and secret_access_key",
+		return nil, nil, 0, "", fmt.Errorf("ibm: an access_keys spec must set its own %s naming a spec that yields its access_key_id and secret_access_key; this source's chained secret is its IAM api key, not this credential",
 			credential.ConfigSecretSpec)
 	}
 
@@ -306,6 +454,17 @@ func (d *IBMDriver) Cleanup(ctx context.Context) error {
 func (d *IBMDriver) VerifySpec(ctx context.Context, spec *credential.CredSpec) error {
 	switch mintMethod := credential.GetString(spec.Config, "mint_method", "iam_token"); mintMethod {
 	case "iam_token":
+		// The grant runs with the source's api key, which the source schema no longer
+		// demands — a source serving only access_keys specs has no use for one. This
+		// is where that requirement actually lands, unless the source fetches its key
+		// per request, in which case there is nothing to check until one is fetched.
+		if d.isChained() {
+			return nil
+		}
+		if d.getAPIKey() == "" {
+			return fmt.Errorf("an iam_token spec needs api_key on its source, or a %s naming a spec that yields it",
+				credential.ConfigSecretSpec)
+		}
 		// Verify the source API key can mint an IAM token
 		if _, _, err := d.getIAMToken(ctx); err != nil {
 			return fmt.Errorf("IBM spec verification failed: %w", err)
@@ -334,6 +493,15 @@ func (d *IBMDriver) VerifySpec(ctx context.Context, spec *credential.CredSpec) e
 // SupportsRotation returns true if this driver can rotate its source API key.
 // Rotation requires the API key's IAM identity to have permission to create/delete API keys.
 func (d *IBMDriver) SupportsRotation() bool {
+	// The key lives at its source of truth, and whoever owns the referenced spec
+	// rotates it there. On a chained source iamID is never discovered, so this would
+	// be false anyway — stating it keeps the invariant independent of discovery.
+	// Taken before authMu: isChained acquires configMu, and the driver's established
+	// order is authMu then configMu, never the reverse.
+	if d.isChained() {
+		return false
+	}
+
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 	return d.iamID != ""
@@ -342,6 +510,13 @@ func (d *IBMDriver) SupportsRotation() bool {
 // PrepareRotation creates a new API key for the same IAM identity.
 // Returns activateAfter to allow time for IBM Cloud propagation.
 func (d *IBMDriver) PrepareRotation(ctx context.Context) (map[string]string, map[string]string, time.Duration, error) {
+	// Same ordering note as SupportsRotation: configMu is taken before authMu here,
+	// never nested inside it.
+	if d.isChained() {
+		return nil, nil, 0, fmt.Errorf("rotation does not apply to a chained source (%s is set); the referenced spec's owner rotates the api key",
+			credential.ConfigSecretSpec)
+	}
+
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
@@ -534,6 +709,23 @@ func (d *IBMDriver) configSnapshot() map[string]string {
 		snapshot[k] = v
 	}
 	return snapshot
+}
+
+// isChainedLocked reports whether this source draws its api key from a referenced
+// cred spec rather than holding one inline.
+// Caller must hold configMu (read or write).
+func (d *IBMDriver) isChainedLocked() bool {
+	return credential.GetString(d.credSource.Config, credential.ConfigSecretSpec, "") != ""
+}
+
+// isChained is isChainedLocked for callers holding no lock. Read locks are not
+// re-entrant — a writer queued between two acquisitions on one goroutine
+// deadlocks — so anything already inside a configMu block must call the Locked
+// form instead.
+func (d *IBMDriver) isChained() bool {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	return d.isChainedLocked()
 }
 
 // swapConfig publishes a config and retires every token the previous one minted, as one

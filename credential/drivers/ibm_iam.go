@@ -35,8 +35,19 @@ type ibmIAMTokenResponse struct {
 // (custom CA, skip verify) should pass a client built via BuildHTTPClient. log may be
 // nil; it carries the one case worth reporting, a response that stated no lifetime.
 func exchangeIBMAPIKeyForIAMToken(ctx context.Context, httpClient *http.Client, apiKey, iamEndpoint string, log *logger.GatedLogger) (string, time.Time, error) {
+	token, expiry, _, err := exchangeIBMAPIKeyForIAMTokenWithStatus(ctx, httpClient, apiKey, iamEndpoint, log)
+	return token, expiry, err
+}
+
+// exchangeIBMAPIKeyForIAMTokenWithStatus is exchangeIBMAPIKeyForIAMToken plus the
+// HTTP status the endpoint answered with, which ExecuteWithRetry reports even on
+// error. Only the chained mint path reads it: there the fetched key is the one
+// thing that varies per request, so an authentication refusal is worth telling the
+// minting layer about. A key held in config has nothing to re-fetch, so every other
+// caller uses the wrapper above.
+func exchangeIBMAPIKeyForIAMTokenWithStatus(ctx context.Context, httpClient *http.Client, apiKey, iamEndpoint string, log *logger.GatedLogger) (string, time.Time, int, error) {
 	if apiKey == "" {
-		return "", time.Time{}, fmt.Errorf("api_key is empty")
+		return "", time.Time{}, 0, fmt.Errorf("api_key is empty")
 	}
 	if iamEndpoint == "" {
 		iamEndpoint = defaultIBMIAMEndpoint
@@ -50,7 +61,7 @@ func exchangeIBMAPIKeyForIAMToken(ctx context.Context, httpClient *http.Client, 
 		"apikey":     {apiKey},
 	}
 
-	respBody, _, err := httputil.ExecuteWithRetry(ctx, httpClient, httputil.HTTPRequest{
+	respBody, status, err := httputil.ExecuteWithRetry(ctx, httpClient, httputil.HTTPRequest{
 		Method: "POST",
 		URL:    iamEndpoint + "/identity/token",
 		Body:   []byte(form.Encode()),
@@ -60,15 +71,15 @@ func exchangeIBMAPIKeyForIAMToken(ctx context.Context, httpClient *http.Client, 
 		},
 	}, defaultIBMRetryConfig())
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("IBM IAM token request failed: %w", err)
+		return "", time.Time{}, status, fmt.Errorf("IBM IAM token request failed: %w", err)
 	}
 
 	var tokenResp ibmIAMTokenResponse
 	if err := json.Unmarshal(respBody, &tokenResp); err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to decode IAM token response: %w", err)
+		return "", time.Time{}, status, fmt.Errorf("failed to decode IAM token response: %w", err)
 	}
 	if tokenResp.AccessToken == "" {
-		return "", time.Time{}, fmt.Errorf("IAM token response missing access_token")
+		return "", time.Time{}, status, fmt.Errorf("IAM token response missing access_token")
 	}
 
 	// Compute expiry from either expiration (Unix timestamp) or expires_in (seconds)
@@ -91,5 +102,5 @@ func exchangeIBMAPIKeyForIAMToken(ctx context.Context, httpClient *http.Client, 
 		expiry = time.Now().Add(ibmFallbackTokenTTL)
 	}
 
-	return tokenResp.AccessToken, expiry, nil
+	return tokenResp.AccessToken, expiry, status, nil
 }
