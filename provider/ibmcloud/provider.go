@@ -289,13 +289,18 @@ Credential type: ibmcloud_keys (at least one mode required)
   - secret_access_key: COS HMAC secret access key for Object Storage (COS mode)
 
 Two credential source types are supported:
-- ibm (mint_method omitted): IAM token minted from the source API key, for API mode
+- ibm (iam_token): IAM token minted from the source API key, for API mode
 - ibm (access_keys): the COS HMAC pair a referenced spec yields, for COS mode
 - hvault (dynamic_ibm): Dynamic API key from Vault IBM engine + IAM token exchange + static COS HMAC
 
-A spec serves one mode, so a role fronting both API and COS traffic needs one spec
-of each. The COS pair is never stored on the spec: access_keys names a secret_spec
-that yields it, and nothing here creates or deletes a pair at IBM.
+Specs for this mount must be typed ibmcloud_keys explicitly. A spec created without
+a type is inferred from its mint_method, and iam_token infers oauth_bearer_token —
+which this mount refuses at request time, after the spec has written successfully.
+
+A spec serves one mode, and a role binds one spec, so serving both API and COS
+traffic takes two roles, one per spec. The COS pair is never stored on the spec:
+access_keys names a secret_spec that yields it, and nothing here creates or deletes
+a pair at IBM.
 
 Configuration:
 - ibmcloud_url: Egress base. Left unset, API mode connects to the host named in the
