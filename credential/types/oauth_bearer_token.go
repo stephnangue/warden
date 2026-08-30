@@ -146,6 +146,12 @@ func (t *OAuthBearerTokenCredType) ValidateConfig(config map[string]string, sour
 		if mm := config["mint_method"]; mm != "" && mm != "iam_token" {
 			return fmt.Errorf("'mint_method' must be 'iam_token' for ibm source, got: %s", mm)
 		}
+		// The grant runs with the source's api key, so a reference parked here would
+		// describe a secret this spec never spends — and would slip past the
+		// source-level checks that gate which sources may chain at all.
+		if config[credential.ConfigSecretSpec] != "" {
+			return fmt.Errorf("for an ibm source, '%s' belongs on the source: the chained api key authenticates the source's own IAM token grant, not this spec", credential.ConfigSecretSpec)
+		}
 	case credential.SourceTypeTokenExchange:
 		// The token_exchange driver is exchange-only: it mints solely from a
 		// caller-derived subject. A spec that opts out (subject_token_source absent

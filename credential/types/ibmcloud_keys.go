@@ -97,6 +97,12 @@ func (t *IBMCloudKeysCredType) ValidateConfig(config map[string]string, sourceTy
 						key, credential.ConfigSecretSpec)
 				}
 			}
+			// The grant runs with the source's api key, so a reference here would
+			// describe a secret this spec never spends. On an ibm source a
+			// spec-level reference means access_keys and nothing else.
+			if config[credential.ConfigSecretSpec] != "" {
+				return fmt.Errorf("for a bearer-only spec, '%s' belongs on the source: the chained api key authenticates the source's own IAM token grant; a spec-level reference is for access_keys", credential.ConfigSecretSpec)
+			}
 
 		case "access_keys":
 			// The pair is the credential itself, so the spec must name where it

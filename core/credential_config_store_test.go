@@ -2561,4 +2561,27 @@ func TestCredentialConfigStore_IBMAccessKeysNeedsItsOwnReference(t *testing.T) {
 		Name: "ibm-cos-own", Type: credential.TypeIBMCloudKeys, Source: "ibm-src",
 		Config: map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ibm-cos-pair"},
 	}))
+
+	// The other direction: a bearer spec's api key is a source concern, so a
+	// reference parked on the spec describes a secret it never spends.
+	t.Run("a bearer spec may not carry a reference of its own", func(t *testing.T) {
+		err := store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "ibm-bearer-chained", Type: credential.TypeIBMCloudKeys, Source: "ibm-src",
+			Config: map[string]string{credential.ConfigSecretSpec: "ibm-api-key"},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "set secret_spec on the source")
+	})
+
+	// A chained source holds no secret of its own to rotate; that passes to whoever
+	// owns the referenced spec.
+	t.Run("a chained source may not carry a rotation period", func(t *testing.T) {
+		err := store.CreateSource(ctx, &credential.CredSource{
+			Name: "ibm-rotating", Type: credential.SourceTypeIBM,
+			Config:         map[string]string{credential.ConfigSecretSpec: "ibm-api-key"},
+			RotationPeriod: time.Hour,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rotation_period")
+	})
 }
