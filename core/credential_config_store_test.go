@@ -2525,3 +2525,40 @@ func TestCredentialConfigStore_OVHChaining(t *testing.T) {
 		assert.Contains(t, err.Error(), "rotation_period")
 	})
 }
+
+// The same placement rule on an ibm source, whose access_keys spec serves a COS
+// HMAC pair. This is the layer that holds when the type registry is unavailable
+// and credType is nil, which is why the store's own test exercises it.
+func TestCredentialConfigStore_IBMAccessKeysNeedsItsOwnReference(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+
+	for _, name := range []string{"ibm-api-key", "ibm-cos-pair"} {
+		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+			Name: name, Type: "vault_token", Source: "src",
+			Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+		}))
+	}
+
+	// A source whose own secret is chained: its reference describes the api key
+	// the IAM token grant is made with, not any spec's credential.
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "ibm-src", Type: credential.SourceTypeIBM,
+		Config: map[string]string{credential.ConfigSecretSpec: "ibm-api-key"},
+	}))
+
+	// Inheriting that reference would hand this spec the api key, which is not the
+	// pair it describes — it would mint from the wrong secret entirely.
+	err := store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "ibm-cos-inheriting", Type: credential.TypeIBMCloudKeys, Source: "ibm-src",
+		Config: map[string]string{"mint_method": "access_keys"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must set its own secret_spec")
+
+	// Naming its own reference is fine on the very same source.
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "ibm-cos-own", Type: credential.TypeIBMCloudKeys, Source: "ibm-src",
+		Config: map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ibm-cos-pair"},
+	}))
+}
