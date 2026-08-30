@@ -99,28 +99,57 @@ func TestIBMCloudKeysCredType_ValidateConfig_IBMSource(t *testing.T) {
 		errMsg  string
 	}{
 		{
-			name: "valid iam_with_cos",
+			name: "valid access_keys with a reference",
 			config: map[string]string{
-				"mint_method":       "iam_with_cos",
-				"access_key_id":     "cos-key",
-				"secret_access_key": "cos-secret",
+				"mint_method":               "access_keys",
+				credential.ConfigSecretSpec: "cos-pair",
 			},
 			wantErr: false,
 		},
 		{
-			name: "valid iam_with_cos API-only",
-			config: map[string]string{
-				"mint_method": "iam_with_cos",
-			},
+			name:    "bearer-only spec (mint_method omitted)",
+			config:  map[string]string{},
 			wantErr: false,
 		},
 		{
-			name: "default mint_method for ibm source",
+			name: "access_keys without a reference",
+			config: map[string]string{
+				"mint_method": "access_keys",
+			},
+			wantErr: true,
+			errMsg:  credential.ConfigSecretSpec,
+		},
+		{
+			// The pair sitting in spec config is the standing secret this method
+			// exists to remove, so it is refused rather than quietly preferred.
+			name: "access_keys with an inline pair",
+			config: map[string]string{
+				"mint_method":               "access_keys",
+				credential.ConfigSecretSpec: "cos-pair",
+				"access_key_id":             "cos-key",
+				"secret_access_key":         "cos-secret",
+			},
+			wantErr: true,
+			errMsg:  "must be omitted for access_keys",
+		},
+		{
+			name: "access_keys with secret_field",
+			config: map[string]string{
+				"mint_method":                "access_keys",
+				credential.ConfigSecretSpec:  "cos-pair",
+				credential.ConfigSecretField: "whole_pair",
+			},
+			wantErr: true,
+			errMsg:  "does not apply to access_keys",
+		},
+		{
+			name: "bearer-only spec refuses an inline pair",
 			config: map[string]string{
 				"access_key_id":     "cos-key",
 				"secret_access_key": "cos-secret",
 			},
-			wantErr: false,
+			wantErr: true,
+			errMsg:  "never stored inline",
 		},
 		{
 			name: "wrong mint_method for ibm source",
@@ -131,13 +160,12 @@ func TestIBMCloudKeysCredType_ValidateConfig_IBMSource(t *testing.T) {
 			errMsg:  "mint_method",
 		},
 		{
-			name: "partial COS - missing secret_access_key",
+			name: "iam_with_cos is refused on the next write",
 			config: map[string]string{
-				"mint_method":   "iam_with_cos",
-				"access_key_id": "cos-key",
+				"mint_method": "iam_with_cos",
 			},
 			wantErr: true,
-			errMsg:  "secret_access_key",
+			errMsg:  "mint_method",
 		},
 	}
 	for _, tt := range tests {

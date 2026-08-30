@@ -77,7 +77,10 @@ func buildIBMCloudEnv(iamURL string) h.ProviderEnv {
 			"iam_endpoint":    iamURL,
 			"tls_skip_verify": "true",
 		},
-		CredConfig: map[string]string{"mint_method": "iam_with_cos"},
+		// Bearer-only: mint_method omitted is the gateway's API mode, which is all
+		// these rows drive. The COS half is a separate spec now — access_keys, whose
+		// pair comes from a referenced spec rather than from config.
+		CredConfig: map[string]string{},
 	}
 }
 

@@ -26,10 +26,17 @@ const ibmMaxResponseBodySize = 1 << 20 // 1MB
 // defaultIBMIAMEndpoint is the default IBM Cloud IAM endpoint
 const defaultIBMIAMEndpoint = "https://iam.cloud.ibm.com"
 
+// defaultIBMAccessKeysChainTTL bounds how long a served COS pair stays cached when
+// the spec sets no secret_cache_ttl. The pair has no expiry of its own, so this is
+// only how long Warden goes before walking the chain again to see whether the
+// referenced spec now yields a different one.
+const defaultIBMAccessKeysChainTTL = 30 * time.Minute
+
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*IBMDriver)(nil)
 var _ credential.Rotatable = (*IBMDriver)(nil)
 var _ credential.SpecVerifier = (*IBMDriver)(nil)
+var _ credential.ChainedSecretMinter = (*IBMDriver)(nil)
 
 // IBMDriver mints credentials from IBM Cloud services.
 // It exchanges an IBM Cloud API key for IAM bearer tokens.
@@ -133,7 +140,7 @@ func (f *IBMDriverFactory) InferCredentialType(specConfig map[string]string) (st
 	switch mintMethod {
 	case "iam_token", "":
 		return credential.TypeOAuthBearerToken, nil
-	case "iam_with_cos":
+	case "access_keys":
 		return credential.TypeIBMCloudKeys, nil
 	default:
 		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
@@ -189,10 +196,14 @@ func (d *IBMDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	switch mintMethod {
 	case "iam_token":
 		return d.mintIAMToken(ctx, spec)
-	case "iam_with_cos":
-		return d.mintIAMWithCOS(ctx, spec)
+	case "access_keys":
+		// Reached only when the spec named no reference: a chained spec is routed
+		// to MintFromSecret instead. Without one there is no pair to serve, and
+		// nothing here creates one.
+		return nil, nil, 0, "", fmt.Errorf("ibm: an access_keys spec must set %s naming a spec that yields its access_key_id and secret_access_key; the pair is served from that material, never minted here",
+			credential.ConfigSecretSpec)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for IBM driver; use 'iam_token' or 'iam_with_cos'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for IBM driver; use 'iam_token' or 'access_keys'", mintMethod)
 	}
 }
 
@@ -219,36 +230,55 @@ func (d *IBMDriver) mintIAMToken(ctx context.Context, spec *credential.CredSpec)
 	return rawData, nil, ttl, "", nil
 }
 
-// mintIAMWithCOS mints an IAM bearer token and combines it with static COS HMAC keys from spec config.
-func (d *IBMDriver) mintIAMWithCOS(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	token, expiry, err := d.getIAMToken(ctx)
-	if err != nil {
-		return nil, nil, 0, "", fmt.Errorf("failed to acquire IBM IAM token: %w", err)
+// MintFromSecret mints from secret material fetched through credential chaining.
+// access_keys receives the COS HMAC pair itself, which it serves unchanged: no
+// request is made to IBM, nothing is created, and there is nothing to revoke.
+func (d *IBMDriver) MintFromSecret(_ context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if mintMethod := credential.GetString(spec.Config, "mint_method", ""); mintMethod != "access_keys" {
+		return nil, nil, 0, "", fmt.Errorf("ibm: credential chaining supports mint_method=access_keys, got %q", mintMethod)
 	}
 
-	ttl := time.Until(expiry)
-	rawData := map[string]interface{}{
-		"access_token": token,
+	// The spec must name the reference itself. Routed here by a source-level one,
+	// the material would be whatever the source authenticates with, not this
+	// credential. Spec create refuses that combination, but a source converted to
+	// chaining afterwards is not re-validated against the specs already bound to
+	// it, so this is the guard that actually holds.
+	if spec.Config[credential.ConfigSecretSpec] == "" {
+		return nil, nil, 0, "", fmt.Errorf("ibm: an access_keys spec must set its own %s naming a spec that yields its access_key_id and secret_access_key",
+			credential.ConfigSecretSpec)
 	}
 
-	// Add optional COS HMAC keys from spec config (API-only mode is valid)
-	accessKeyID := credential.GetString(spec.Config, "access_key_id", "")
-	secretAccessKey := credential.GetString(spec.Config, "secret_access_key", "")
-	if accessKeyID != "" && secretAccessKey != "" {
-		rawData["access_key_id"] = accessKeyID
-		rawData["secret_access_key"] = secretAccessKey
+	// Both halves are read by name, from IBM's own spelling for them — the
+	// cos_hmac_keys fields of a service credential — so a pair stored from IBM's
+	// export is read unrenamed. A payload using other names is projected by the
+	// referenced spec's json_key_map, which is where that belongs.
+	accessKeyID := material.Data["access_key_id"]
+	secretAccessKey := material.Data["secret_access_key"]
+	if accessKeyID == "" || secretAccessKey == "" {
+		return nil, nil, 0, "", fmt.Errorf("ibm: fetched secret material must hold both 'access_key_id' and 'secret_access_key' for access_keys: %w",
+			credential.ErrChainedSecretIncomplete)
+	}
+
+	// Advisory TTL, no lease id: nothing was created, so nothing is revocable.
+	// Making no request, this path can never be told the pair was rotated, so
+	// without a TTL the credential would sit in cache for the caller's whole
+	// session. The TTL only forces the chain to be walked again.
+	ttl := credential.GetDuration(spec.Config, credential.ConfigSecretCacheTTL, 0)
+	if ttl <= 0 {
+		ttl = defaultIBMAccessKeysChainTTL
 	}
 
 	if d.logger != nil {
-		hasCOS := accessKeyID != "" && secretAccessKey != ""
-		d.logger.Debug("minted IBM Cloud keys (IAM token + COS HMAC)",
+		d.logger.Debug("served IBM COS keys from fetched secret material",
 			logger.String("spec", spec.Name),
 			logger.String("ttl", ttl.String()),
-			logger.Bool("has_cos", hasCOS),
 		)
 	}
 
-	return rawData, nil, ttl, "", nil
+	return map[string]interface{}{
+		"access_key_id":     accessKeyID,
+		"secret_access_key": secretAccessKey,
+	}, nil, ttl, "", nil
 }
 
 // Revoke is a no-op for IBM credentials (IAM tokens expire naturally)
@@ -271,20 +301,30 @@ func (d *IBMDriver) Cleanup(ctx context.Context) error {
 	return nil
 }
 
-// VerifySpec validates that an IBM spec's configuration is functional by performing
-// a lightweight IAM token exchange. Called during spec creation/update only.
+// VerifySpec validates that an IBM spec's configuration is functional. Called
+// during spec creation/update only.
 func (d *IBMDriver) VerifySpec(ctx context.Context, spec *credential.CredSpec) error {
-	mintMethod := credential.GetString(spec.Config, "mint_method", "iam_token")
-	if mintMethod != "iam_token" {
+	switch mintMethod := credential.GetString(spec.Config, "mint_method", "iam_token"); mintMethod {
+	case "iam_token":
+		// Verify the source API key can mint an IAM token
+		if _, _, err := d.getIAMToken(ctx); err != nil {
+			return fmt.Errorf("IBM spec verification failed: %w", err)
+		}
 		return nil
-	}
 
-	// Verify the source API key can mint an IAM token
-	_, _, err := d.getIAMToken(ctx)
-	if err != nil {
-		return fmt.Errorf("IBM spec verification failed: %w", err)
+	case "access_keys":
+		// Reached only if the spec named no reference; a chained spec skips
+		// verification entirely. Without one there is no pair to serve, and this
+		// path makes no request, so there is nothing else to check.
+		if spec.Config[credential.ConfigSecretSpec] == "" {
+			return fmt.Errorf("an access_keys spec must set %s naming a spec that yields its access_key_id and secret_access_key",
+				credential.ConfigSecretSpec)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unsupported mint_method: %s (expected iam_token or access_keys)", mintMethod)
 	}
-	return nil
 }
 
 // ============================================================================

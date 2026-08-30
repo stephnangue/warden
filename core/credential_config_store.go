@@ -1100,6 +1100,15 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 			credential.GetString(spec.Config, "mint_method", "") == "access_keys" {
 			return logical.ErrBadRequestf("an access_keys spec must set its own secret_spec naming a spec that yields its access_key and secret_key; the source's chained secret (%q) is a client credential, not this pair", chainedRef)
 		}
+		// The same rule for ibm, whose access_keys spec serves a COS HMAC pair. A
+		// source-level reference on an ibm source describes the api key its own IAM
+		// token grant is made with, so routing this spec by it would mint from the
+		// wrong secret entirely.
+		if source.Type == credential.SourceTypeIBM &&
+			spec.Config[credential.ConfigSecretSpec] == "" &&
+			credential.GetString(spec.Config, "mint_method", "") == "access_keys" {
+			return logical.ErrBadRequestf("an access_keys spec must set its own secret_spec naming a spec that yields its access_key_id and secret_access_key; the source's chained secret (%q) is its IAM api key, not this pair", chainedRef)
+		}
 		// A chained consumer's identity normally flows through the referenced secret-spec,
 		// so its own subject/actor exchange config would be dead — reject that confusing
 		// combination. The token_exchange driver is the exception: it is itself an
