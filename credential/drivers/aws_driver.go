@@ -696,11 +696,8 @@ func (d *AWSDriver) fetchSecret(ctx context.Context, sm *secretsmanager.Client, 
 		return nil, nil, 0, "", fmt.Errorf("failed to parse secret JSON: %w", err)
 	}
 
-	// Apply json_key_map if provided (remap keys)
-	jsonKeyMap := credential.GetString(spec.Config, "json_key_map", "")
-	if jsonKeyMap != "" {
-		secretData = applyKeyMap(secretData, jsonKeyMap)
-	}
+	// Project through the spec's field selection, when it declares one.
+	secretData = credential.ApplyKeyMap(secretData, credential.GetString(spec.Config, "json_key_map", ""))
 
 	if d.logger != nil {
 		d.logger.Debug("fetched secret from AWS Secrets Manager",
@@ -721,23 +718,6 @@ func accountIDFromARN(arn string) string {
 		return ""
 	}
 	return parts[4]
-}
-
-// applyKeyMap remaps keys in data according to a comma-separated "srcKey=destKey" map
-func applyKeyMap(data map[string]interface{}, keyMapStr string) map[string]interface{} {
-	result := make(map[string]interface{})
-	pairs := strings.Split(keyMapStr, ",")
-	for _, pair := range pairs {
-		parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
-		if len(parts) == 2 {
-			srcKey := strings.TrimSpace(parts[0])
-			destKey := strings.TrimSpace(parts[1])
-			if val, ok := data[srcKey]; ok {
-				result[destKey] = val
-			}
-		}
-	}
-	return result
 }
 
 // mintViaRDSIAMToken generates a short-lived IAM authentication token for RDS.

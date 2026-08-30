@@ -227,7 +227,7 @@ func TestIsReservedSpecConfigKey(t *testing.T) {
 		ConfigAssertionAudience, ConfigAssertionMetadataClaims,
 		ConfigAssertionUserClaims, ConfigAssertionAlgorithm, ConfigAssertionResource,
 		"mint_method", "kv2_mount", "secret_path", "secret_id", "role_arn",
-		"version_stage", "version_id", "credential_type", "json_key_map",
+		"version_stage", "version_id", "secret_version", "credential_type", "json_key_map",
 		RawAdjunctFieldsKey, RawRotatedRefreshTokenKey, "__anything",
 	}
 	for _, k := range reserved {

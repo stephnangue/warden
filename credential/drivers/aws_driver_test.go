@@ -210,55 +210,6 @@ func TestAWSDriver_SupportsRotation(t *testing.T) {
 	}
 }
 
-func TestApplyKeyMap(t *testing.T) {
-	tests := []struct {
-		name     string
-		data     map[string]interface{}
-		keyMap   string
-		expected map[string]interface{}
-	}{
-		{
-			name: "basic remapping",
-			data: map[string]interface{}{
-				"accessKeyId": "AKIA123",
-				"secretKey":   "secret123",
-			},
-			keyMap: "accessKeyId=access_key_id,secretKey=secret_access_key",
-			expected: map[string]interface{}{
-				"access_key_id":     "AKIA123",
-				"secret_access_key": "secret123",
-			},
-		},
-		{
-			name: "missing source key",
-			data: map[string]interface{}{
-				"accessKeyId": "AKIA123",
-			},
-			keyMap: "accessKeyId=access_key_id,missing=other",
-			expected: map[string]interface{}{
-				"access_key_id": "AKIA123",
-			},
-		},
-		{
-			name: "whitespace handling",
-			data: map[string]interface{}{
-				"key1": "val1",
-			},
-			keyMap: " key1 = mapped_key1 ",
-			expected: map[string]interface{}{
-				"mapped_key1": "val1",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := applyKeyMap(tt.data, tt.keyMap)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 func TestAccountIDFromARN(t *testing.T) {
 	tests := []struct {
 		name     string

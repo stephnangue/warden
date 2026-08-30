@@ -9,12 +9,29 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"math/big"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// assertHTTP2Enabled checks that HTTP/2 survived the TLS customization, whichever
+// mechanism the compiling toolchain records it with. From Go 1.27 the http2 helper
+// delegates to the standard library's native HTTP/2 and flips Transport.Protocols;
+// before that it prepended "h2" to the TLS config's NextProtos. Which one applies is
+// decided by the installed toolchain's release tags, not by the module's go
+// directive, so asserting either alone makes the test pass or fail by toolchain.
+func assertHTTP2Enabled(t *testing.T, transport *http.Transport) {
+	t.Helper()
+
+	if transport.Protocols != nil && transport.Protocols.HTTP2() {
+		return
+	}
+	assert.Contains(t, transport.TLSClientConfig.NextProtos, "h2",
+		"HTTP/2 enabled through neither Transport.Protocols nor TLSClientConfig.NextProtos")
+}
 
 // generateTestCACert creates a self-signed CA certificate for testing and
 // returns its PEM-encoded bytes.
@@ -58,7 +75,7 @@ func TestNewTransportWithTLS_ValidCAData(t *testing.T) {
 	assert.False(t, transport.TLSClientConfig.InsecureSkipVerify)
 	assert.NotNil(t, transport.TLSClientConfig.RootCAs)
 	// Verify HTTP/2 is properly configured after TLS customization
-	assert.Contains(t, transport.TLSClientConfig.NextProtos, "h2")
+	assertHTTP2Enabled(t, transport)
 }
 
 func TestNewTransportWithTLS_InvalidBase64(t *testing.T) {

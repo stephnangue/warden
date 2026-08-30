@@ -70,8 +70,10 @@ func NewTransportWithTLS(caData string, skipVerify bool) (*http.Transport, error
 
 	t.TLSClientConfig = tlsConfig
 
-	// Configure HTTP/2 after TLSClientConfig is set so the h2 wiring
-	// (NextProtos, internal state) binds to the correct tls.Config.
+	// Configure HTTP/2 after TLSClientConfig is set so the h2 wiring binds to the
+	// correct tls.Config. How that wiring is recorded depends on the compiling
+	// toolchain — a protocol set on the transport, or an ALPN entry on the TLS
+	// config — so read it back through a helper rather than by field.
 	if err := http2.ConfigureTransport(t); err != nil {
 		log.Printf("Failed to configure HTTP/2 for httpproxy TLS transport: %v", err)
 	}

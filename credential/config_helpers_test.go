@@ -8,6 +8,204 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestApplyKeyMap(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     map[string]interface{}
+		keyMap   string
+		expected map[string]interface{}
+	}{
+		{
+			name: "basic remapping",
+			data: map[string]interface{}{
+				"accessKeyId": "AKIA123",
+				"secretKey":   "secret123",
+			},
+			keyMap: "accessKeyId=access_key_id,secretKey=secret_access_key",
+			expected: map[string]interface{}{
+				"access_key_id":     "AKIA123",
+				"secret_access_key": "secret123",
+			},
+		},
+		{
+			name: "missing source key",
+			data: map[string]interface{}{
+				"accessKeyId": "AKIA123",
+			},
+			keyMap: "accessKeyId=access_key_id,missing=other",
+			expected: map[string]interface{}{
+				"access_key_id": "AKIA123",
+			},
+		},
+		{
+			name: "whitespace handling",
+			data: map[string]interface{}{
+				"key1": "val1",
+			},
+			keyMap: " key1 = mapped_key1 ",
+			expected: map[string]interface{}{
+				"mapped_key1": "val1",
+			},
+		},
+		{
+			// The selection is a disclosure boundary: what it does not name, it
+			// does not vend.
+			name: "unnamed keys are dropped",
+			data: map[string]interface{}{
+				"api_key":     "sk-abc",
+				"admin_token": "root-secret",
+				"note":        "internal",
+			},
+			keyMap:   "api_key=api_key",
+			expected: map[string]interface{}{"api_key": "sk-abc"},
+		},
+		{
+			name: "no selection passes the payload through untouched",
+			data: map[string]interface{}{
+				"api_key": "sk-abc",
+				"note":    "internal",
+			},
+			keyMap: "",
+			expected: map[string]interface{}{
+				"api_key": "sk-abc",
+				"note":    "internal",
+			},
+		},
+		{
+			name:     "no pair matches yields an empty payload",
+			data:     map[string]interface{}{"api_key": "sk-abc"},
+			keyMap:   "typo=api_key",
+			expected: map[string]interface{}{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, ApplyKeyMap(tt.data, tt.keyMap))
+		})
+	}
+}
+
+func TestValidateSecretSelection(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     map[string]string
+		sourceType string
+		wantErr    string
+	}{
+		{
+			name:       "json_key_map on a KV read",
+			config:     map[string]string{"mint_method": "kv2_read", "json_key_map": "token=api_key"},
+			sourceType: SourceTypeVault,
+		},
+		{
+			name:       "json_key_map on a Secrets Manager read",
+			config:     map[string]string{"mint_method": "secrets_manager", "json_key_map": "token=api_key"},
+			sourceType: SourceTypeAWS,
+		},
+		{
+			name:       "secret_version on a KV read",
+			config:     map[string]string{"mint_method": "static_aws", "secret_version": "3"},
+			sourceType: SourceTypeVault,
+		},
+		{
+			// secret_version predates this check on the Key Vault fetch, where it
+			// is an opaque identifier rather than a number. Rejecting it there
+			// would break every pinned Key Vault spec already written.
+			name:       "secret_version on a Key Vault read",
+			config:     map[string]string{"mint_method": "key_vault_secret", "secret_version": "abc123def456"},
+			sourceType: SourceTypeAzure,
+		},
+		{
+			// The Key Vault fetch returns one secret, not a document to pick from.
+			name:       "json_key_map on a Key Vault read",
+			config:     map[string]string{"mint_method": "key_vault_secret", "json_key_map": "a=b"},
+			sourceType: SourceTypeAzure,
+			wantErr:    "'json_key_map' selects fields of a stored secret",
+		},
+		{
+			name:       "neither key set is always fine",
+			config:     map[string]string{"mint_method": "dynamic_gcp"},
+			sourceType: SourceTypeVault,
+		},
+		{
+			name:       "json_key_map on a mint method that builds its own payload",
+			config:     map[string]string{"mint_method": "dynamic_aws", "json_key_map": "a=b"},
+			sourceType: SourceTypeVault,
+			wantErr:    "'json_key_map' selects fields of a stored secret",
+		},
+		{
+			name:       "json_key_map on an STS mint",
+			config:     map[string]string{"mint_method": "sts_assume_role", "json_key_map": "a=b"},
+			sourceType: SourceTypeAWS,
+			wantErr:    "'json_key_map' selects fields of a stored secret",
+		},
+		{
+			// Secrets Manager addresses revisions as version_id / version_stage,
+			// so a numbered version there would silently do nothing.
+			name:       "secret_version on a Secrets Manager read",
+			config:     map[string]string{"mint_method": "secrets_manager", "secret_version": "3"},
+			sourceType: SourceTypeAWS,
+			wantErr:    "'secret_version' pins a revision",
+		},
+		{
+			name:       "secret_version on a dynamic mint",
+			config:     map[string]string{"mint_method": "dynamic_ibm", "secret_version": "3"},
+			sourceType: SourceTypeVault,
+			wantErr:    "'secret_version' pins a revision",
+		},
+		{
+			// ApplyKeyMap skips a pair it cannot split, so without this check the
+			// spec would write, mint, and quietly omit organization_id.
+			name:       "key map entry missing its separator",
+			config:     map[string]string{"mint_method": "kv2_read", "json_key_map": "token=api_key,org_id:organization_id"},
+			sourceType: SourceTypeVault,
+			wantErr:    "must read 'srcKey=destKey'",
+		},
+		{
+			name:       "key map entry with an empty destination",
+			config:     map[string]string{"mint_method": "kv2_read", "json_key_map": "token="},
+			sourceType: SourceTypeVault,
+			wantErr:    "must read 'srcKey=destKey'",
+		},
+		{
+			name:       "key map entry with an empty source",
+			config:     map[string]string{"mint_method": "kv2_read", "json_key_map": "=api_key"},
+			sourceType: SourceTypeVault,
+			wantErr:    "must read 'srcKey=destKey'",
+		},
+		{
+			name:       "key map with a trailing comma",
+			config:     map[string]string{"mint_method": "kv2_read", "json_key_map": "token=api_key,"},
+			sourceType: SourceTypeVault,
+			wantErr:    "empty entry",
+		},
+		{
+			name:       "key map with a duplicated destination",
+			config:     map[string]string{"mint_method": "kv2_read", "json_key_map": "token=api_key,pat=api_key"},
+			sourceType: SourceTypeVault,
+			wantErr:    "more than one field to 'api_key'",
+		},
+		{
+			name:       "well-formed multi-pair key map with padding",
+			config:     map[string]string{"mint_method": "kv2_read", "json_key_map": " token = api_key , org_id = organization_id "},
+			sourceType: SourceTypeVault,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSecretSelection(tt.config, tt.sourceType)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func TestGetString(t *testing.T) {
 	cfg := map[string]string{"key": "value"}
 	assert.Equal(t, "value", GetString(cfg, "key", "default"))

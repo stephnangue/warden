@@ -1303,3 +1303,194 @@ func TestResolveSecretPath_UntemplatedIsByteIdentical(t *testing.T) {
 		})
 	}
 }
+
+// staticKVServer serves one multi-key secret, recording the version query the driver
+// sent so a pinned read can be told apart from a current-revision one.
+func staticKVServer(t *testing.T, gotVersion *string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/jwt/login":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"auth": map[string]interface{}{"client_token": "hvs.childtoken", "accessor": "acc-123", "lease_duration": 900},
+			})
+		case "/v1/secret/data/team/shared":
+			*gotVersion = r.URL.Query().Get("version")
+			if *gotVersion == "99" {
+				// A destroyed or never-written revision comes back as a 404 with
+				// no body, which the client surfaces as "secret not found".
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"errors": []string{}})
+				return
+			}
+			if *gotVersion == "42" {
+				// A soft-deleted revision answers 200 with its metadata and a null
+				// data block, so the read succeeds and carries nothing.
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"data": map[string]interface{}{
+						"data": nil,
+						"metadata": map[string]interface{}{
+							"version":       42,
+							"deletion_time": "2026-01-02T03:04:05Z",
+						},
+					},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"data": map[string]interface{}{
+						"token":       "sk-abc123",
+						"accessKeyId": "AKIA123",
+						"admin_token": "root-secret",
+					},
+					"metadata": map[string]interface{}{"version": 1},
+				},
+			})
+		case "/v1/auth/token/revoke-self":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+}
+
+// A static KV read projects through json_key_map: the spec selects which of the
+// stored secret's fields it vends and renames them to what the credential type
+// expects. Fields the spec does not name are not vended at all. The same body backs
+// static_aws, static_apikey and kv2_read, so all three are covered here.
+func TestVaultDriver_StaticKVSecret_JSONKeyMap(t *testing.T) {
+	tests := []struct {
+		name       string
+		mintMethod string
+		keyMap     string
+		expected   map[string]interface{}
+	}{
+		{
+			name:       "kv2_read selects one field out of a shared path",
+			mintMethod: "kv2_read",
+			keyMap:     "token=slack_token",
+			expected:   map[string]interface{}{"slack_token": "sk-abc123"},
+		},
+		{
+			name:       "static_apikey renames into the type's primary field",
+			mintMethod: "static_apikey",
+			keyMap:     "token=api_key",
+			expected:   map[string]interface{}{"api_key": "sk-abc123"},
+		},
+		{
+			name:       "static_aws renames into the type's fields",
+			mintMethod: "static_aws",
+			keyMap:     "accessKeyId=access_key_id,token=secret_access_key",
+			expected:   map[string]interface{}{"access_key_id": "AKIA123", "secret_access_key": "sk-abc123"},
+		},
+		{
+			name:       "no selection vends the stored payload verbatim",
+			mintMethod: "kv2_read",
+			keyMap:     "",
+			expected: map[string]interface{}{
+				"token":       "sk-abc123",
+				"accessKeyId": "AKIA123",
+				"admin_token": "root-secret",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotVersion string
+			srv := staticKVServer(t, &gotVersion)
+			defer srv.Close()
+
+			driver := federationDriver(t, srv.URL)
+			spec := &credential.CredSpec{
+				Name: "kv-mapped",
+				Config: map[string]string{
+					"mint_method":  tt.mintMethod,
+					"kv2_mount":    "secret",
+					"secret_path":  "team/shared",
+					"json_key_map": tt.keyMap,
+				},
+			}
+
+			rawData, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, rawData)
+			// Unpinned specs read the current revision.
+			assert.Empty(t, gotVersion)
+		})
+	}
+}
+
+// A spec may pin a numbered revision of the stored secret; without one it reads the
+// current revision.
+func TestVaultDriver_StaticKVSecret_Version(t *testing.T) {
+	t.Run("pinned revision is requested", func(t *testing.T) {
+		var gotVersion string
+		srv := staticKVServer(t, &gotVersion)
+		defer srv.Close()
+
+		driver := federationDriver(t, srv.URL)
+		spec := &credential.CredSpec{
+			Name: "kv-pinned",
+			Config: map[string]string{
+				"mint_method":    "kv2_read",
+				"kv2_mount":      "secret",
+				"secret_path":    "team/shared",
+				"secret_version": "3",
+			},
+		}
+
+		rawData, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+		require.NoError(t, err)
+		assert.Equal(t, "3", gotVersion)
+		assert.Equal(t, "sk-abc123", rawData["token"])
+	})
+
+	t.Run("a missing revision surfaces the error", func(t *testing.T) {
+		var gotVersion string
+		srv := staticKVServer(t, &gotVersion)
+		defer srv.Close()
+
+		driver := federationDriver(t, srv.URL)
+		spec := &credential.CredSpec{
+			Name: "kv-pinned",
+			Config: map[string]string{
+				"mint_method":    "kv2_read",
+				"kv2_mount":      "secret",
+				"secret_path":    "team/shared",
+				"secret_version": "99",
+			},
+		}
+
+		_, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "version 99")
+	})
+
+	// A soft-deleted revision reads back successfully with no data, so the failure
+	// has to name the revision — the path it was read from is fine, and pointing at
+	// the path sends the operator looking in the wrong place.
+	t.Run("a soft-deleted revision names the revision, not the path", func(t *testing.T) {
+		var gotVersion string
+		srv := staticKVServer(t, &gotVersion)
+		defer srv.Close()
+
+		driver := federationDriver(t, srv.URL)
+		spec := &credential.CredSpec{
+			Name: "kv-pinned",
+			Config: map[string]string{
+				"mint_method":    "kv2_read",
+				"kv2_mount":      "secret",
+				"secret_path":    "team/shared",
+				"secret_version": "42",
+			},
+		}
+
+		_, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "version 42")
+		assert.Contains(t, err.Error(), "deleted")
+	})
+}

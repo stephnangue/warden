@@ -105,6 +105,7 @@ var reservedSpecConfigKeys = map[string]struct{}{
 	"role_arn":        {},
 	"version_stage":   {},
 	"version_id":      {},
+	"secret_version":  {},
 	"credential_type": {},
 	"json_key_map":    {},
 }

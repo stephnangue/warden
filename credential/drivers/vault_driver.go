@@ -703,12 +703,32 @@ func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, client *api.Clien
 		return nil, nil, 0, "", err
 	}
 
-	secret, err := client.KVv2(kv2Mount).Get(ctx, secretPath)
+	// A spec may pin a numbered revision; without one it reads the current revision.
+	// Pinning does not follow rotation — a pinned spec keeps vending the revision it
+	// names until an operator moves it.
+	kv := client.KVv2(kv2Mount)
+	secretVersion := credential.GetInt(spec.Config, "secret_version", 0)
+
+	var secret *api.KVSecret
+	if secretVersion > 0 {
+		secret, err = kv.GetVersion(ctx, secretPath, secretVersion)
+	} else {
+		secret, err = kv.Get(ctx, secretPath)
+	}
 	if err != nil {
+		if secretVersion > 0 {
+			return nil, nil, 0, "", fmt.Errorf("failed to read version %d of KV secret: %w", secretVersion, err)
+		}
 		return nil, nil, 0, "", fmt.Errorf("failed to read KV secret: %w", err)
 	}
 
 	if secret == nil || secret.Data == nil {
+		// A deleted revision still answers, carrying its metadata and no data. The
+		// path is fine in that case, so blaming the path would send the operator
+		// looking in the wrong place.
+		if secretVersion > 0 {
+			return nil, nil, 0, "", fmt.Errorf("version %d of the secret at path '%s' on mount '%s' holds no data (the revision may have been deleted)", secretVersion, secretPath, kv2Mount)
+		}
 		return nil, nil, 0, "", fmt.Errorf("no secret found at path '%s' on mount '%s'", secretPath, kv2Mount)
 	}
 
@@ -717,11 +737,17 @@ func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, client *api.Clien
 			logger.String("spec", spec.Name),
 			logger.String("mount", kv2Mount),
 			logger.String("path", secretPath),
+			logger.Int("secret_version", secretVersion),
 		)
 	}
 
+	// Project through the spec's field selection, when it declares one. A stored
+	// secret may hold more keys than this spec should vend, and their names are
+	// chosen by whoever wrote the secret rather than by the credential type.
+	data := credential.ApplyKeyMap(secret.Data, credential.GetString(spec.Config, "json_key_map", ""))
+
 	// Return raw data (static, no lease)
-	return secret.Data, nil, 0, "", nil
+	return data, nil, 0, "", nil
 }
 
 // fetchDynamicAWSCreds fetches dynamic AWS credentials from Vault AWS engine
