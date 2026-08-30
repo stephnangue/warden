@@ -9,7 +9,14 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/helper/httputil"
+	"github.com/stephnangue/warden/logger"
 )
+
+// ibmFallbackTokenTTL bounds a token whose lifetime the endpoint declined to state.
+// The lease decides how long the bearer keeps being served from cache, so a generous
+// guess hands out a token that expired long ago, while a short one costs only another
+// mint.
+const ibmFallbackTokenTTL = 5 * time.Minute
 
 // ibmIAMTokenResponse represents the IBM Cloud IAM token endpoint response.
 type ibmIAMTokenResponse struct {
@@ -25,8 +32,9 @@ type ibmIAMTokenResponse struct {
 // dynamic API keys).
 //
 // If httpClient is nil, http.DefaultClient is used. Callers that need TLS configuration
-// (custom CA, skip verify) should pass a client built via BuildHTTPClient.
-func exchangeIBMAPIKeyForIAMToken(ctx context.Context, httpClient *http.Client, apiKey, iamEndpoint string) (string, time.Time, error) {
+// (custom CA, skip verify) should pass a client built via BuildHTTPClient. log may be
+// nil; it carries the one case worth reporting, a response that stated no lifetime.
+func exchangeIBMAPIKeyForIAMToken(ctx context.Context, httpClient *http.Client, apiKey, iamEndpoint string, log *logger.GatedLogger) (string, time.Time, error) {
 	if apiKey == "" {
 		return "", time.Time{}, fmt.Errorf("api_key is empty")
 	}
@@ -65,12 +73,22 @@ func exchangeIBMAPIKeyForIAMToken(ctx context.Context, httpClient *http.Client, 
 
 	// Compute expiry from either expiration (Unix timestamp) or expires_in (seconds)
 	var expiry time.Time
-	if tokenResp.Expiration > 0 {
+	switch {
+	case tokenResp.Expiration > 0:
 		expiry = time.Unix(tokenResp.Expiration, 0)
-	} else if tokenResp.ExpiresIn > 0 {
+	case tokenResp.ExpiresIn > 0:
 		expiry = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
-	} else {
-		expiry = time.Now().Add(1 * time.Hour) // IBM IAM tokens have ~1h TTL
+	default:
+		// Nothing here knows how long the token is actually good for, and the
+		// credential is served from cache for the whole lease. Fall back to a span
+		// short enough that a wrong guess is corrected by a re-mint rather than by
+		// an agent presenting a dead bearer.
+		if log != nil {
+			log.Warn("IAM token response carried no usable expiry; bounding the lease at the fallback lifetime",
+				logger.String("fallback", ibmFallbackTokenTTL.String()),
+			)
+		}
+		expiry = time.Now().Add(ibmFallbackTokenTTL)
 	}
 
 	return tokenResp.AccessToken, expiry, nil

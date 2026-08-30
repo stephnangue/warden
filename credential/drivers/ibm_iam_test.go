@@ -32,14 +32,14 @@ func TestExchangeIBMAPIKeyForIAMToken_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	token, expiry, err := exchangeIBMAPIKeyForIAMToken(context.Background(), srv.Client(), "my-api-key", srv.URL)
+	token, expiry, err := exchangeIBMAPIKeyForIAMToken(context.Background(), srv.Client(), "my-api-key", srv.URL, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "token-abc", token)
 	assert.True(t, expiry.After(time.Now()))
 }
 
 func TestExchangeIBMAPIKeyForIAMToken_EmptyAPIKey(t *testing.T) {
-	_, _, err := exchangeIBMAPIKeyForIAMToken(context.Background(), nil, "", "https://iam.cloud.ibm.com")
+	_, _, err := exchangeIBMAPIKeyForIAMToken(context.Background(), nil, "", "https://iam.cloud.ibm.com", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "api_key is empty")
 }
@@ -52,7 +52,7 @@ func TestExchangeIBMAPIKeyForIAMToken_EmptyEndpointUsesDefault(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
-	_, _, err := exchangeIBMAPIKeyForIAMToken(ctx, &http.Client{Timeout: 10 * time.Millisecond}, "some-key", "")
+	_, _, err := exchangeIBMAPIKeyForIAMToken(ctx, &http.Client{Timeout: 10 * time.Millisecond}, "some-key", "", nil)
 	require.Error(t, err)
 	// Either context deadline or DNS/connect error is acceptable — we just want to confirm
 	// it attempted to call the default endpoint rather than failing early.
@@ -69,7 +69,7 @@ func TestExchangeIBMAPIKeyForIAMToken_MissingAccessToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := exchangeIBMAPIKeyForIAMToken(context.Background(), srv.Client(), "key", srv.URL)
+	_, _, err := exchangeIBMAPIKeyForIAMToken(context.Background(), srv.Client(), "key", srv.URL, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing access_token")
 }
@@ -86,14 +86,18 @@ func TestExchangeIBMAPIKeyForIAMToken_ExpiresInFallback(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, expiry, err := exchangeIBMAPIKeyForIAMToken(context.Background(), srv.Client(), "key", srv.URL)
+	_, expiry, err := exchangeIBMAPIKeyForIAMToken(context.Background(), srv.Client(), "key", srv.URL, nil)
 	require.NoError(t, err)
 	remaining := time.Until(expiry)
 	assert.True(t, remaining > 30*time.Second && remaining <= 61*time.Second,
 		"expiry should be ~60s from now, got %s", remaining)
 }
 
-func TestExchangeIBMAPIKeyForIAMToken_NoExpiryInfoFallbackTo1h(t *testing.T) {
+// A response stating no lifetime is bounded at the short fallback, not guessed
+// generously. The lease is what decides how long the bearer keeps being served, so
+// an hour-long guess against a token good for minutes hands out a dead credential
+// for the rest of the lease; a short one costs a re-mint and nothing else.
+func TestExchangeIBMAPIKeyForIAMToken_NoExpiryInfoBoundsAtFallback(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -103,11 +107,11 @@ func TestExchangeIBMAPIKeyForIAMToken_NoExpiryInfoFallbackTo1h(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, expiry, err := exchangeIBMAPIKeyForIAMToken(context.Background(), srv.Client(), "key", srv.URL)
+	_, expiry, err := exchangeIBMAPIKeyForIAMToken(context.Background(), srv.Client(), "key", srv.URL, nil)
 	require.NoError(t, err)
 	remaining := time.Until(expiry)
-	assert.True(t, remaining > 50*time.Minute && remaining <= 61*time.Minute,
-		"expiry should fall back to ~1h, got %s", remaining)
+	assert.True(t, remaining > ibmFallbackTokenTTL-time.Minute && remaining <= ibmFallbackTokenTTL,
+		"expiry should be bounded at %s, got %s", ibmFallbackTokenTTL, remaining)
 }
 
 func TestExchangeIBMAPIKeyForIAMToken_InvalidJSON(t *testing.T) {
@@ -117,7 +121,7 @@ func TestExchangeIBMAPIKeyForIAMToken_InvalidJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := exchangeIBMAPIKeyForIAMToken(context.Background(), srv.Client(), "key", srv.URL)
+	_, _, err := exchangeIBMAPIKeyForIAMToken(context.Background(), srv.Client(), "key", srv.URL, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to decode IAM token response")
 }
