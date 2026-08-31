@@ -1585,8 +1585,10 @@ func (s *CredentialConfigStore) CheckSpecReferences(ctx context.Context, specNam
 //
 // It deliberately does NOT assert the referenced spec is leaseless here: that would
 // need per-type mint-method introspection this layer lacks, and the authoritative
-// guard is at mint time — issueChained revokes and fails closed if a referenced spec
-// ever returns a lease (including after a config-drift edit this check couldn't see).
+// guard is at mint time — the chaining path revokes and fails closed if a referenced
+// spec ever returns a lease (including after a config-drift edit this check couldn't
+// see). A referenced credential with a lifetime but no lease is permitted; it orphans
+// nothing, and the chaining cache bounds its entry to that lifetime.
 func (s *CredentialConfigStore) validateSecretSpecRef(ctx context.Context, ref string) error {
 	refSpec, err := s.GetSpec(ctx, ref)
 	if err != nil {

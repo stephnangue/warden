@@ -297,7 +297,89 @@ func TestChaining_LeaselessBackstop(t *testing.T) {
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "static/leaseless")
+	assert.Contains(t, err.Error(), "leaseless")
+}
+
+// TestChaining_TTLWithoutLeaseAccepted: a referenced secret-spec may report a lifetime of
+// its own so long as it holds no lease. The backstop above exists because the chaining
+// path skips expiration registration and would orphan a lease; a lifetime WITHOUT a lease
+// id has nothing to orphan — nothing downstream must be told to release it, the material
+// just stops being valid — so refusing it would rule out an entire class of referenced
+// spec for no benefit.
+func TestChaining_TTLWithoutLeaseAccepted(t *testing.T) {
+	env := newChainingEnv(t)
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"token": "THE-SECRET"}, nil, time.Hour, "", nil
+	}
+	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
+		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+
+	ctx := createNamespaceContext()
+	cred, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "consumer-token:THE-SECRET", cred.Data["token"])
+}
+
+// TestChaining_CacheEntryClampedToReferencedTTL: a cached payload never outlives the
+// credential it was minted from. Holding it for the full secret_cache_ttl would keep
+// vending material that already stopped being valid, and the consumer would not find out
+// until the downstream refused it — one failed mint per entry for the rest of the window.
+func TestChaining_CacheEntryClampedToReferencedTTL(t *testing.T) {
+	env := newChainingEnv(t)
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"token": "THE-SECRET"}, nil, 100 * time.Millisecond, "", nil
+	}
+	// A cache TTL far longer than the referenced credential's own lifetime.
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), env.secretDriver.mintCalls.Load())
+
+	// Past the referenced credential's lifetime but far inside secret_cache_ttl: the
+	// entry is gone, so the second consumer re-fetches instead of being served a
+	// payload the source has already expired.
+	time.Sleep(200 * time.Millisecond)
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
+		"entry expired with the referenced credential, not with secret_cache_ttl")
+}
+
+// TestChaining_CacheEntryKeepsShorterConfiguredTTL is the other direction: the clamp
+// takes the SHORTER of the two, so a long-lived referenced credential does not pin the
+// entry to its own lifetime and override a shorter secret_cache_ttl.
+//
+// The configured TTL is the short one here and the entry is read after it has passed, so
+// the row fails if the clamp ever took the max — or the referenced lifetime — instead.
+// Asserting a hit at t=0 would have passed under all three.
+func TestChaining_CacheEntryKeepsShorterConfiguredTTL(t *testing.T) {
+	env := newChainingEnv(t)
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"token": "THE-SECRET"}, nil, time.Hour, "", nil
+	}
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "100ms"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), env.secretDriver.mintCalls.Load())
+
+	// Past the configured TTL but far inside the referenced credential's own hour.
+	time.Sleep(200 * time.Millisecond)
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
+		"the shorter configured TTL governs; a long referenced lifetime must not extend the entry")
 }
 
 // TestChaining_SecretFieldSelection covers multi-key payloads: an explicit
