@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -411,5 +413,190 @@ func TestKMSClientAssertion_RefusesAKeyItCannotUse(t *testing.T) {
 	}
 	if n := len(assertions()); n != 0 {
 		t.Errorf("the STS saw %d assertions; the mismatch should have failed before anything was sent", n)
+	}
+}
+
+// Names for the cached-capability row. It needs its own source pointing at a counting
+// proxy, so it cannot share the objects the rows above build.
+const (
+	kmsProxiedVaultSource   = "fc-kms-vault-proxied"
+	kmsCachedSignerSpec     = "fc-kms-cached-signer"
+	kmsCachedExchangeSource = "fc-kms-cached-tx-src"
+	kmsCachedExchangeSpec   = "fc-kms-cached-tx-cred"
+	kmsCachedRole           = "fc-kms-cached-tx"
+)
+
+// vaultCallCounts is what reached the store, by kind of call.
+type vaultCallCounts struct {
+	logins   int // federated logins: one per capability minted
+	keyReads int // key validation: one per capability minted
+	signs    int // signatures: one per assertion
+}
+
+// serveCountingVaultProxy forwards to the store and counts the calls that distinguish
+// "minted a new capability" from "reused a cached one". Warden reaches the store only
+// through the address on its source, so pointing a source here makes those counts
+// observable — which they are not from the outside otherwise.
+func serveCountingVaultProxy(t *testing.T) (*httptest.Server, func() vaultCallCounts) {
+	t.Helper()
+
+	target, err := url.Parse("http://127.0.0.1:8200")
+	if err != nil {
+		t.Fatalf("parsing the store address: %v", err)
+	}
+	rp := httputil.NewSingleHostReverseProxy(target)
+
+	var (
+		mu sync.Mutex
+		c  vaultCallCounts
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		switch {
+		case strings.Contains(r.URL.Path, "/auth/jwt-warden/login"):
+			c.logins++
+		case strings.Contains(r.URL.Path, "/transit/sign/"):
+			c.signs++
+		case strings.Contains(r.URL.Path, "/transit/keys/"):
+			c.keyReads++
+		}
+		mu.Unlock()
+		rp.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv, func() vaultCallCounts {
+		mu.Lock()
+		defer mu.Unlock()
+		return c
+	}
+}
+
+// setupCachedCapabilityChain builds the same arrangement as the rows above, but reaching
+// the store through the counting proxy and with the consuming source opting into caching
+// the fetched capability.
+func setupCachedCapabilityChain(t *testing.T, stsURL, vaultProxyURL, secretCacheTTL string) {
+	t.Helper()
+
+	mustWrite := func(method, path, body, what string) {
+		t.Helper()
+		switch status, resp := h.APIRequest(t, method, path, leaderPort, body); status {
+		case 200, 201, 204:
+		default:
+			t.Fatalf("%s (status %d): %s", what, status, resp)
+		}
+	}
+
+	clear := func() {
+		h.APIRequest(t, "DELETE", "auth/jwt/role/"+kmsCachedRole, leaderPort, "")
+		h.APIRequest(t, "DELETE", "sys/cred/specs/"+kmsCachedExchangeSpec, leaderPort, "")
+		h.APIRequest(t, "DELETE", "sys/cred/sources/"+kmsCachedExchangeSource, leaderPort, "")
+		h.APIRequest(t, "DELETE", "sys/cred/specs/"+kmsCachedSignerSpec, leaderPort, "")
+		h.APIRequest(t, "DELETE", "sys/cred/sources/"+kmsProxiedVaultSource, leaderPort, "")
+	}
+	clear()
+	t.Cleanup(clear)
+
+	// Same federation as the shared source, reached through the proxy so every call the
+	// capability costs is counted. The narrow role is still pinned on the spec.
+	mustWrite("POST", "sys/cred/sources/"+kmsProxiedVaultSource, fmt.Sprintf(`{
+		"type":"hvault","config":{
+			"vault_address":%q,"auth_method":"oidc_federation",
+			"jwt_role":"warden-e2e-warden-fed","jwt_mount":"jwt-warden",
+			"audience":"https://vault.e2e.warden"}}`, vaultProxyURL),
+		"create the proxied federation source")
+
+	mustWrite("POST", "sys/cred/specs/"+kmsCachedSignerSpec, fmt.Sprintf(`{
+		"type":"key_value","source":%q,"config":{
+			"mint_method":"transit_signer","jwt_role":%q,"transit_mount":"transit",
+			"transit_key":%q,"signing_alg":"RS256","payload.client_id":%q,
+			"subject_token_source":"warden_identity"}}`,
+		kmsProxiedVaultSource, kmsSignerRole, kmsTransitKey, kmsClientID),
+		"create the cached signing-capability spec")
+
+	mustWrite("POST", "sys/cred/sources/"+kmsCachedExchangeSource, fmt.Sprintf(`{
+		"type":"token_exchange","config":{
+			"token_url":%q,"grant":"rfc8693","client_auth":"kms_private_key_jwt",
+			"tls_skip_verify":"true","secret_spec":%q,"secret_cache_ttl":%q}}`,
+		stsURL+txTokenPath, kmsCachedSignerSpec, secretCacheTTL),
+		"create the caching token_exchange source")
+
+	mustWrite("POST", "sys/cred/specs/"+kmsCachedExchangeSpec, fmt.Sprintf(`{
+		"type":"oauth_bearer_token","source":%q,"config":{
+			"subject_token_source":"agent_identity",
+			"audience":"https://api.internal.example.com"}}`, kmsCachedExchangeSource),
+		"create the cached consuming spec")
+
+	mustWrite("POST", "auth/jwt/role/"+kmsCachedRole, fmt.Sprintf(`{
+		"token_policies":["%s"],"cred_spec_name":%q,
+		"user_claim":"sub","token_ttl":3600}`, restEnv.Policy(), kmsCachedExchangeSpec),
+		"create the cached consuming role")
+}
+
+// TestKMSClientAssertion_CachedCapabilityIsReusedAndStillSigns covers the arrangement the
+// other rows deliberately avoid: secret_cache_ttl set, so one signing capability serves
+// more than one exchange.
+//
+// It rests on the two caches being keyed differently. The minted bearer is keyed by
+// session, so a second session misses it and must exchange again; the fetched capability
+// is keyed by agent identity, so the same agent's second exchange hits it. Two sessions
+// for one agent therefore mean two exchanges but one capability — which is only visible
+// by counting what reached the store, hence the proxy.
+//
+// The property worth having is the second half: a capability that has been through the
+// cache still signs, and the assertion it produces still verifies. Nothing about the
+// round trip may disturb the token, the pinned version, or the key id.
+func TestKMSClientAssertion_CachedCapabilityIsReusedAndStillSigns(t *testing.T) {
+	ensureEnv(t)
+	useJWTAgentLeg(t, restEnv)
+
+	pubPEM, version := provisionSigningKey(t)
+	sts, assertions := serveAssertionVerifyingSTS(t, pubPEM)
+	proxy, counts := serveCountingVaultProxy(t)
+	// Far longer than the capability's own lifetime, so the clamp — not this value —
+	// is what bounds the entry.
+	setupCachedCapabilityChain(t, sts.URL, proxy.URL, "10m")
+	upstream.Reset()
+
+	// Two sessions, one agent: distinct session tokens miss the credential cache, while
+	// the agent identity behind them hits the capability cache.
+	for i, what := range []string{"first session", "second session"} {
+		status, body, _ := h.ChainRequest(t, leaderPort, restEnv, h.ChainOpts{
+			AgentToken: h.GetJWT(t, txAgentA, "agent-secret"),
+			Role:       kmsCachedRole,
+		})
+		if status != 200 {
+			t.Fatalf("%s (request %d) got status %d: %s", what, i+1, status, body)
+		}
+	}
+
+	got := assertions()
+	if len(got) != 2 {
+		t.Fatalf("the STS saw %d exchanges, want 2 (one per session)", len(got))
+	}
+	for i, a := range got {
+		if !a.verified {
+			t.Fatalf("assertion %d was refused: %s — a capability that has been through the cache must still sign", i, a.reason)
+		}
+	}
+
+	// Both exchanges presented the same key and version, which is what being served the
+	// same capability means on the wire.
+	wantKid := fmt.Sprintf("%s-v%d", kmsTransitKey, version)
+	for i, a := range got {
+		if a.kid != wantKid {
+			t.Errorf("assertion %d carried kid %q, want %q", i, a.kid, wantKid)
+		}
+	}
+
+	c := counts()
+	if c.signs != 2 {
+		t.Errorf("the store performed %d signatures, want 2 — one per exchange", c.signs)
+	}
+	if c.logins != 1 {
+		t.Errorf("the store saw %d federated logins, want 1 — the second exchange should have reused the cached capability, not minted another", c.logins)
+	}
+	if c.keyReads != 1 {
+		t.Errorf("the store saw %d key validations, want 1 — a reused capability is not re-validated", c.keyReads)
 	}
 }
