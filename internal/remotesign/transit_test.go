@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/vault/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -399,4 +400,128 @@ func TestSigner_RoutesToBackend(t *testing.T) {
 	sig, err := s.Sign(rand.Reader, digest[:], crypto.SHA256)
 	require.NoError(t, err)
 	require.NoError(t, rsa.VerifyPKCS1v15(info.Public.(*rsa.PublicKey), crypto.SHA256, digest[:], sig))
+}
+
+// newClientTestBackend builds the client-injected backend the credential drivers use:
+// an existing client, no key-name prefix, no renewal.
+func newClientTestBackend(t *testing.T, f *fakeTransit) *TransitBackend {
+	t.Helper()
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	cfg := api.DefaultConfig()
+	cfg.Address = srv.URL
+	c, err := api.NewClient(cfg)
+	require.NoError(t, err)
+	c.SetToken("test-token")
+	b, err := NewTransitClientBackend(c, "transit", 5*time.Second, nil)
+	require.NoError(t, err)
+	t.Cleanup(b.Close)
+	return b
+}
+
+// TestTransitClientBackend_NoRenewalRequest is the property that makes this constructor
+// safe to call per request: it must not renew. The wrapped token is short-lived and
+// owned by whoever obtained it, so a renew here would be a wasted round trip and would
+// leave a watcher goroutine behind on every mint.
+func TestTransitClientBackend_NoRenewalRequest(t *testing.T) {
+	f := newFakeTransit(t)
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		f.handler().ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := api.DefaultConfig()
+	cfg.Address = srv.URL
+	c, err := api.NewClient(cfg)
+	require.NoError(t, err)
+	c.SetToken("test-token")
+
+	b, err := NewTransitClientBackend(c, "transit", 5*time.Second, nil)
+	require.NoError(t, err)
+	assert.Nil(t, b.watcher, "no lifetime watcher, so no goroutine to leak")
+	b.Close() // safe with a nil watcher
+	for _, p := range paths {
+		assert.NotContains(t, p, "auth/token/renew-self", "construction issues no renewal request")
+	}
+}
+
+func TestTransitClientBackend_RequiresClientAndMount(t *testing.T) {
+	_, err := NewTransitClientBackend(nil, "transit", 0, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "client is required")
+
+	c, err := api.NewClient(api.DefaultConfig())
+	require.NoError(t, err)
+	_, err = NewTransitClientBackend(c, "  ", 0, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mount_path is required")
+}
+
+// TestTransitClientBackend_PrefixlessOpsRefused: without a prefix there is no algorithm
+// -> key-name mapping, so the deriving operations must say so rather than address a key
+// literally named "-rs256".
+func TestTransitClientBackend_PrefixlessOpsRefused(t *testing.T) {
+	f := newFakeTransit(t)
+	b := newClientTestBackend(t, f)
+
+	_, err := b.EnsureKey(context.Background(), "RS256")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "explicit name")
+
+	_, err = b.NewVersion(context.Background(), "RS256")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "explicit name")
+}
+
+// TestNamedKeyInfo_ResolvesLatestAndPinned: version 0 resolves to a concrete latest, and
+// an explicit version is honoured. Resolving to a number is what lets a caller keep
+// signing with the version it validated instead of whatever is newest later.
+func TestNamedKeyInfo_ResolvesLatestAndPinned(t *testing.T) {
+	f := newFakeTransit(t)
+	f.keys["client-assertion"] = &fakeKey{keyType: "rsa-2048",
+		versions: []crypto.Signer{genKey(t, "rsa-2048"), genKey(t, "rsa-2048")}}
+	b := newClientTestBackend(t, f)
+
+	latest, err := b.NamedKeyInfo(context.Background(), "client-assertion", "RS256", 0)
+	require.NoError(t, err)
+	assert.Equal(t, 2, latest.Ref.Version, "0 resolves to the concrete latest version")
+	assert.Equal(t, "client-assertion", latest.Ref.KeyName)
+	assert.NotNil(t, latest.Public)
+
+	pinned, err := b.NamedKeyInfo(context.Background(), "client-assertion", "RS256", 1)
+	require.NoError(t, err)
+	assert.Equal(t, 1, pinned.Ref.Version)
+
+	_, err = b.NamedKeyInfo(context.Background(), "client-assertion", "RS256", 99)
+	require.Error(t, err, "a version that does not exist is refused at validation time")
+
+	_, err = b.NamedKeyInfo(context.Background(), "", "RS256", 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "key name is required")
+}
+
+// TestNamedKeyInfo_RelaxedRSASizeButExactCurve: the operator provisions this key, so any
+// RSA size may sign any RS* alg — refusing rsa-4096 for RS256 would reject a stronger
+// key for no reason. Curves stay exact, since ES256 only verifies against P-256.
+func TestNamedKeyInfo_RelaxedRSASizeButExactCurve(t *testing.T) {
+	f := newFakeTransit(t)
+	// A larger RSA key than the alg's nominal type, signing RS256.
+	f.keys["big-rsa"] = &fakeKey{keyType: "rsa-3072", versions: []crypto.Signer{genKey(t, "rsa-3072")}}
+	f.keys["p384"] = &fakeKey{keyType: "ecdsa-p384", versions: []crypto.Signer{genKey(t, "ecdsa-p384")}}
+	f.keys["exportable"] = &fakeKey{keyType: "rsa-2048", exportable: true,
+		versions: []crypto.Signer{genKey(t, "rsa-2048")}}
+	b := newClientTestBackend(t, f)
+
+	_, err := b.NamedKeyInfo(context.Background(), "big-rsa", "RS256", 0)
+	require.NoError(t, err, "any RSA size signs any RS* alg")
+
+	_, err = b.NamedKeyInfo(context.Background(), "p384", "ES256", 0)
+	require.Error(t, err, "the curve must match the alg exactly")
+	assert.Contains(t, err.Error(), "expected")
+
+	_, err = b.NamedKeyInfo(context.Background(), "exportable", "RS256", 0)
+	require.Error(t, err, "non-exportability is the premise of remote signing")
+	assert.Contains(t, err.Error(), "exportable")
 }
