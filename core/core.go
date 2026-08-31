@@ -25,13 +25,13 @@ import (
 	"github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/config"
-	"github.com/stephnangue/warden/core/oidcsign"
 	"github.com/stephnangue/warden/core/seal"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/credential/types"
 	"github.com/stephnangue/warden/internal/locking"
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	phy "github.com/stephnangue/warden/physical"
@@ -236,7 +236,7 @@ type Core struct {
 	// lazily on the active serving path in setupOIDCIssuer and closed in
 	// stopOIDCIssuer, so a standby holds no idle KMS token. Guarded by oidcSetupMu.
 	// oidcSignTimeout is its per-call timeout.
-	oidcSignBackend oidcsign.Backend
+	oidcSignBackend remotesign.Backend
 	oidcSignTimeout time.Duration
 
 	// oidcRotationCancel stops the active node's signing-key rotation loop, and
@@ -888,7 +888,7 @@ func parseConfigBool(s string) bool {
 // is configured (the default: in-process keys). A construction failure is a
 // config error (bad TLS/address); transit being unreachable is not detected here.
 // Called under oidcSetupMu.
-func (c *Core) ensureOIDCSignBackend() (oidcsign.Backend, time.Duration, error) {
+func (c *Core) ensureOIDCSignBackend() (remotesign.Backend, time.Duration, error) {
 	if c.oidcSignBackend != nil {
 		return c.oidcSignBackend, c.oidcSignTimeout, nil
 	}
@@ -909,7 +909,7 @@ func (c *Core) ensureOIDCSignBackend() (oidcsign.Backend, time.Duration, error) 
 	if prefix == "" {
 		prefix = defaultOIDCKeyNamePrefix
 	}
-	backend, err := oidcsign.NewTransitBackend(oidcsign.TransitConfig{
+	backend, err := remotesign.NewTransitBackend(remotesign.TransitConfig{
 		Address:        s.Address,
 		Token:          s.Token,
 		MountPath:      s.MountPath,
@@ -1012,7 +1012,7 @@ func (c *Core) setupOIDCIssuer(ctx context.Context, standby, configWrite bool) e
 	// external signer when the `signer` stanza is configured; a standby uses no
 	// backend (it holds no KMS token) and reconstructs any remote keys as
 	// verification-only.
-	var backend oidcsign.Backend
+	var backend remotesign.Backend
 	var signTimeout time.Duration
 	if !standby {
 		b, to, berr := c.ensureOIDCSignBackend()

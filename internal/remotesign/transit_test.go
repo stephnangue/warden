@@ -1,4 +1,4 @@
-package oidcsign
+package remotesign
 
 import (
 	"context"

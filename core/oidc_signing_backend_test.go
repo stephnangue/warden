@@ -15,13 +15,13 @@ import (
 
 	"github.com/hashicorp/cap/jwt"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
-	"github.com/stephnangue/warden/core/oidcsign"
+	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// fakeSignBackend is an in-memory oidcsign.Backend for tests: it holds a real
+// fakeSignBackend is an in-memory remotesign.Backend for tests: it holds a real
 // RSA/ECDSA key per alg version and signs by delegating to the underlying
 // crypto.Signer, so its output matches the crypto.Signer contract exactly (RSA
 // PKCS#1 v1.5, ECDSA ASN.1 DER) and minted assertions verify against the JWKS.
@@ -55,21 +55,21 @@ func genForAlg(t *testing.T, alg string) crypto.Signer {
 
 func (f *fakeSignBackend) Type() string { return "transit" }
 
-func (f *fakeSignBackend) infoLocked(alg string) oidcsign.KeyInfo {
+func (f *fakeSignBackend) infoLocked(alg string) remotesign.KeyInfo {
 	vers := f.versions[alg]
 	ver := len(vers)
-	return oidcsign.KeyInfo{
-		Ref:       oidcsign.KeyRef{KeyName: "fake-" + alg, Version: ver, Alg: alg},
+	return remotesign.KeyInfo{
+		Ref:       remotesign.KeyRef{KeyName: "fake-" + alg, Version: ver, Alg: alg},
 		Public:    vers[ver-1].Public(),
 		CreatedAt: time.Now().Add(time.Duration(ver) * time.Second),
 	}
 }
 
-func (f *fakeSignBackend) EnsureKey(_ context.Context, alg string) (oidcsign.KeyInfo, error) {
+func (f *fakeSignBackend) EnsureKey(_ context.Context, alg string) (remotesign.KeyInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.opErr != nil {
-		return oidcsign.KeyInfo{}, f.opErr
+		return remotesign.KeyInfo{}, f.opErr
 	}
 	if len(f.versions[alg]) == 0 {
 		f.versions[alg] = []crypto.Signer{genForAlg(f.t, alg)}
@@ -77,23 +77,23 @@ func (f *fakeSignBackend) EnsureKey(_ context.Context, alg string) (oidcsign.Key
 	return f.infoLocked(alg), nil
 }
 
-func (f *fakeSignBackend) NewVersion(_ context.Context, alg string) (oidcsign.KeyInfo, error) {
+func (f *fakeSignBackend) NewVersion(_ context.Context, alg string) (remotesign.KeyInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.opErr != nil {
-		return oidcsign.KeyInfo{}, f.opErr
+		return remotesign.KeyInfo{}, f.opErr
 	}
 	f.versions[alg] = append(f.versions[alg], genForAlg(f.t, alg))
 	return f.infoLocked(alg), nil
 }
 
-func (f *fakeSignBackend) PublicKey(_ context.Context, ref oidcsign.KeyRef) (crypto.PublicKey, error) {
+func (f *fakeSignBackend) PublicKey(_ context.Context, ref remotesign.KeyRef) (crypto.PublicKey, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.versions[ref.Alg][ref.Version-1].Public(), nil
 }
 
-func (f *fakeSignBackend) Sign(_ context.Context, ref oidcsign.KeyRef, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+func (f *fakeSignBackend) Sign(_ context.Context, ref remotesign.KeyRef, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
 	f.mu.Lock()
 	signer := f.versions[ref.Alg][ref.Version-1]
 	f.mu.Unlock()
@@ -131,7 +131,7 @@ func TestStorageV4_RemoteRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	kid, err := signingKeyID(info.Public)
 	require.NoError(t, err)
-	sk := &signingKey{key: oidcsign.NewSigner(fake, info.Ref, info.Public, time.Second), alg: oidcAlgRS256, kid: kid, createdAt: info.CreatedAt}
+	sk := &signingKey{key: remotesign.NewSigner(fake, info.Ref, info.Public, time.Second), alg: oidcAlgRS256, kid: kid, createdAt: info.CreatedAt}
 
 	stored, err := toStored(sk)
 	require.NoError(t, err)
@@ -144,13 +144,13 @@ func TestStorageV4_RemoteRoundTrip(t *testing.T) {
 	back, err := fromStored(stored, fake, time.Second)
 	require.NoError(t, err)
 	assert.Equal(t, kid, back.kid)
-	rs := back.key.(*oidcsign.Signer)
+	rs := back.key.(*remotesign.Signer)
 	assert.True(t, rs.CanSign())
 
 	// With no backend -> verification-only (fails closed on Sign) but same public key/kid.
 	vonly, err := fromStored(stored, nil, 0)
 	require.NoError(t, err)
-	assert.False(t, vonly.key.(*oidcsign.Signer).CanSign())
+	assert.False(t, vonly.key.(*remotesign.Signer).CanSign())
 	assert.Equal(t, kid, vonly.kid)
 
 	// A tampered kid is rejected (the kid is a pure function of the public key).
@@ -194,9 +194,9 @@ func TestOIDCActiveKeyNeedsCutover(t *testing.T) {
 	require.NoError(t, err)
 
 	local := mustGen(t, oidcAlgRS256)
-	remoteSigning := &signingKey{key: oidcsign.NewSigner(fake, info.Ref, info.Public, time.Second)}
+	remoteSigning := &signingKey{key: remotesign.NewSigner(fake, info.Ref, info.Public, time.Second)}
 	// A remote key whose backend is absent/different — reconstructed verify-only.
-	remoteVerifyOnly := &signingKey{key: oidcsign.NewVerifyingSigner("transit", info.Ref, info.Public)}
+	remoteVerifyOnly := &signingKey{key: remotesign.NewVerifyingSigner("transit", info.Ref, info.Public)}
 
 	// Local config: only remote keys need to go.
 	assert.False(t, oidcActiveKeyNeedsCutover(local, false))
@@ -213,7 +213,7 @@ func TestOIDCActiveKeyNeedsCutover(t *testing.T) {
 
 // setupRemoteIssuer enables the issuer and installs the fake backend on core, then
 // runs an active setup. Returns the storage view for assertions.
-func setupRemoteIssuer(t *testing.T, core *Core, fake oidcsign.Backend) {
+func setupRemoteIssuer(t *testing.T, core *Core, fake remotesign.Backend) {
 	t.Helper()
 	ctx := context.Background()
 	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
