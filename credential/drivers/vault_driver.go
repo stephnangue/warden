@@ -251,6 +251,10 @@ func (f *VaultDriverFactory) InferCredentialType(specConfig map[string]string) (
 		return credential.TypeOAuthBearerToken, nil
 	case "vault_token", "":
 		return credential.TypeVaultToken, nil
+	case mintMethodTransitSigner:
+		// A multi-field payload with no single primary field, which is what makes a
+		// consumer read it by name rather than having one value picked out for it.
+		return credential.TypeKeyValue, nil
 	default:
 		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
 	}
@@ -373,8 +377,15 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 		// credential_name here fails closed in resolveClaimTemplate (nothing to
 		// satisfy {{user.…}} or {{agent.…}} with).
 		return d.fetchOAuth2Creds(ctx, d.vault, spec, nil, nil)
+	case mintMethodTransitSigner:
+		// Refused rather than served from the shared source session: the capability is
+		// minted as the caller so it can be pinned to a narrow per-caller role, and the
+		// signing key stays reachable by nothing that outlives the request.
+		return nil, nil, 0, "", fmt.Errorf(
+			"vault: mint_method=%s requires auth_method=%s on the source and subject_token_source on the spec, so the capability is minted as the caller",
+			mintMethodTransitSigner, vaultAuthMethodOIDCFederation)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'kv2_read', 'dynamic_aws', 'dynamic_gcp', 'dynamic_ibm', 'vault_token', 'oauth2'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'kv2_read', 'dynamic_aws', 'dynamic_gcp', 'dynamic_ibm', 'vault_token', 'oauth2', 'transit_signer'", mintMethod)
 	}
 }
 
@@ -400,14 +411,22 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	if inputs == nil || inputs.SubjectToken == "" {
 		return nil, nil, 0, "", fmt.Errorf("vault: no subject token in exchange inputs")
 	}
+	mintMethod := credential.GetString(spec.Config, "mint_method", "")
+
+	// Checked BEFORE logging in, not inside the mint: the login is what obtains the
+	// token, so a check that ran afterwards would already have minted one under
+	// whatever role the source names — the broad token this requirement exists to
+	// prevent — and only then refused to use it.
+	if err := validateTransitSignerSpec(mintMethod, spec); err != nil {
+		return nil, nil, 0, "", err
+	}
+
 	// Exchange the assertion for a per-request Vault token on an isolated client.
 	client, loginAuth, err := d.loginViaJWT(ctx, spec, inputs.SubjectToken)
 	if err != nil {
 		return nil, nil, 0, "", err
 	}
 	loginTTL := time.Duration(loginAuth.LeaseDuration) * time.Second
-
-	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 
 	// The JWT-login token itself is the credential — never revoke it here.
 	if mintMethod == "vault_token" {
@@ -443,6 +462,12 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 		return rawData, metadata, loginTTL, "", nil
 	}
 
+	// Like vault_token, the login token is itself the credential — it carries the
+	// capability — so this returns before the revoke-on-exit paths below.
+	if mintMethod == mintMethodTransitSigner {
+		return d.mintTransitSigner(ctx, client, spec, loginAuth, loginTTL, inputs.UserClaims, inputs.AgentClaims)
+	}
+
 	// Downstream engines: broker with the per-request login token.
 	var (
 		rawData  map[string]interface{}
@@ -464,7 +489,7 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	case "oauth2":
 		rawData, metadata, leaseTTL, _, err = d.fetchOAuth2Creds(ctx, client, spec, inputs.UserClaims, inputs.AgentClaims)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("vault: mint_method %q is not supported over auth_method=%s (supported: vault_token, static_aws, static_apikey, kv2_read, dynamic_aws, dynamic_gcp, dynamic_ibm, oauth2)", mintMethod, vaultAuthMethodOIDCFederation)
+		return nil, nil, 0, "", fmt.Errorf("vault: mint_method %q is not supported over auth_method=%s (supported: vault_token, transit_signer, static_aws, static_apikey, kv2_read, dynamic_aws, dynamic_gcp, dynamic_ibm, oauth2)", mintMethod, vaultAuthMethodOIDCFederation)
 	}
 	if err != nil {
 		return nil, nil, 0, "", err

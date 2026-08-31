@@ -39,8 +39,8 @@ func (t *KeyValueCredType) Metadata() credential.TypeMetadata {
 func (t *KeyValueCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
 		credential.StringField("mint_method").
-			OneOf("kv2_read").
-			Describe("Mint method (kv2_read reads a Vault KV v2 secret)").
+			OneOf("kv2_read", "transit_signer").
+			Describe("Mint method (kv2_read reads a Vault KV v2 secret; transit_signer mints a scoped signing capability)").
 			Example("kv2_read"),
 
 		credential.StringField("kv2_mount").
@@ -73,14 +73,31 @@ func (t *KeyValueCredType) ValidateConfig(config map[string]string, sourceType s
 		return err
 	}
 
-	if config["mint_method"] != "kv2_read" {
-		return fmt.Errorf("'mint_method' must be 'kv2_read' for a key_value credential, got: %s", config["mint_method"])
-	}
-	if config["kv2_mount"] == "" {
-		return fmt.Errorf("'kv2_mount' is required for mint_method=kv2_read")
-	}
-	if config["secret_path"] == "" {
-		return fmt.Errorf("'secret_path' is required for mint_method=kv2_read")
+	// Both mint methods produce a multi-field payload with no primary field, which is
+	// what this type exists to carry. What they need from the config differs entirely,
+	// so each states its own requirements; the driver checks the rest against the
+	// store, where a locator can actually be resolved.
+	switch config["mint_method"] {
+	case "kv2_read":
+		if config["kv2_mount"] == "" {
+			return fmt.Errorf("'kv2_mount' is required for mint_method=kv2_read")
+		}
+		if config["secret_path"] == "" {
+			return fmt.Errorf("'secret_path' is required for mint_method=kv2_read")
+		}
+	case "transit_signer":
+		if config["transit_key"] == "" {
+			return fmt.Errorf("'transit_key' is required for mint_method=transit_signer")
+		}
+		// Checked here as well as at mint time so the mistake surfaces when the spec is
+		// written, rather than on the first request that needs it. A spec without its
+		// own role would otherwise inherit the source's, which is the one thing this
+		// mint method must never do.
+		if config["jwt_role"] == "" {
+			return fmt.Errorf("'jwt_role' is required for mint_method=transit_signer: it must name a role whose policy grants only signing with the key, and inheriting the source's role would grant more")
+		}
+	default:
+		return fmt.Errorf("'mint_method' must be 'kv2_read' or 'transit_signer' for a key_value credential, got: %s", config["mint_method"])
 	}
 
 	return nil
