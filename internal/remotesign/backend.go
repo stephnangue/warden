@@ -1,14 +1,16 @@
-// Package oidcsign provides remote signing backends for the OIDC issuer's
-// signing keys, so an operator can hold the private key in an external KMS (e.g.
-// an OpenBao/Vault transit engine) where it never leaves the KMS. Warden keeps
-// only a handle plus the public key and asks the KMS to sign each assertion.
+// Package remotesign provides signing backends whose private key is held in an
+// external KMS and never leaves it. Warden keeps only a handle plus the public
+// key, and asks the KMS to sign each digest.
 //
-// The package has no dependency on the core package: a Backend produces a
-// crypto.Signer (Signer) that drops into the issuer's signingKey.key seam, and
-// signing/verification flow through the standard crypto.Signer / crypto.PublicKey
-// interfaces. Cloud KMS and PKCS#11/HSM backends can be added by implementing
-// Backend without touching the issuer.
-package oidcsign
+// A Backend produces a crypto.Signer (Signer), so remote signing substitutes
+// wherever a caller already holds one — the OIDC issuer's signing key today —
+// and signing and verification flow through the standard crypto.Signer /
+// crypto.PublicKey interfaces. Cloud KMS and PKCS#11/HSM backends can be added by
+// implementing Backend without touching any caller.
+//
+// The package deliberately depends on no other Warden package beyond logging, so
+// callers in any layer can use it without inverting their dependencies.
+package remotesign
 
 import (
 	"context"
@@ -22,7 +24,7 @@ import (
 // rotated out-of-band (e.g. an HSM referenced by label): NewVersion is not a
 // programmatic operation there, and the caller degrades to operator-managed
 // rotation. The transit backend supports rotation and never returns this.
-var ErrRotationUnsupported = errors.New("oidcsign: backend does not support programmatic key rotation")
+var ErrRotationUnsupported = errors.New("remotesign: backend does not support programmatic key rotation")
 
 // KeyRef names one immutable key version in the backend. Alg is carried so a
 // stateless Sign call can select the signing parameters (hash, and PKCS#1 v1.5
@@ -128,7 +130,7 @@ func (s *Signer) CanSign() bool { return s.backend != nil }
 // timeout bounded further by any context bound via WithContext.
 func (s *Signer) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
 	if s.backend == nil {
-		return nil, errors.New("oidcsign: no signing backend for this key (verification-only)")
+		return nil, errors.New("remotesign: no signing backend for this key (verification-only)")
 	}
 	ctx := s.ctx
 	if ctx == nil {

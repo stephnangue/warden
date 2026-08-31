@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stephnangue/warden/core/oidcsign"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -230,7 +230,7 @@ func (b *SystemBackend) signerSummary() map[string]any {
 			if ks == nil || ks.active == nil {
 				continue
 			}
-			if rs, ok := ks.active.key.(*oidcsign.Signer); ok {
+			if rs, ok := ks.active.key.(*remotesign.Signer); ok {
 				out["mode"] = "external_kms"
 				out["backend"] = rs.BackendType()
 				break

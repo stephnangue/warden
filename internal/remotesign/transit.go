@@ -1,4 +1,4 @@
-package oidcsign
+package remotesign
 
 import (
 	"context"
@@ -40,7 +40,7 @@ type TransitConfig struct {
 	TLSSkipVerify bool
 }
 
-// TransitBackend signs OIDC assertions via an OpenBao/Vault transit engine, where
+// TransitBackend signs via a transit secrets engine, where
 // the private key is created non-exportable and never leaves the KMS.
 type TransitBackend struct {
 	client        *api.Client
@@ -58,10 +58,10 @@ var _ Backend = (*TransitBackend)(nil)
 // transit being unreachable is not detected until a key operation. log may be nil.
 func NewTransitBackend(cfg TransitConfig, log *logger.GatedLogger) (*TransitBackend, error) {
 	if strings.TrimSpace(cfg.MountPath) == "" {
-		return nil, fmt.Errorf("oidcsign: transit mount_path is required")
+		return nil, fmt.Errorf("remotesign: transit mount_path is required")
 	}
 	if strings.TrimSpace(cfg.KeyNamePrefix) == "" {
-		return nil, fmt.Errorf("oidcsign: transit key_name_prefix is required")
+		return nil, fmt.Errorf("remotesign: transit key_name_prefix is required")
 	}
 
 	apiCfg := api.DefaultConfig()
@@ -79,13 +79,13 @@ func NewTransitBackend(cfg TransitConfig, log *logger.GatedLogger) (*TransitBack
 			Insecure:      cfg.TLSSkipVerify,
 		}
 		if err := apiCfg.ConfigureTLS(tls); err != nil {
-			return nil, fmt.Errorf("oidcsign: configure transit TLS: %w", err)
+			return nil, fmt.Errorf("remotesign: configure transit TLS: %w", err)
 		}
 	}
 
 	client, err := api.NewClient(apiCfg)
 	if err != nil {
-		return nil, fmt.Errorf("oidcsign: create transit client: %w", err)
+		return nil, fmt.Errorf("remotesign: create transit client: %w", err)
 	}
 	if cfg.Token != "" {
 		client.SetToken(cfg.Token)
@@ -123,12 +123,12 @@ func (b *TransitBackend) startRenewal(disable bool) {
 	defer cancel()
 	secret, err := b.client.Auth().Token().RenewTokenAsSelfWithContext(ctx, b.client.Token(), 0)
 	if err != nil {
-		b.logInfo("oidcsign: transit token not renewable, disabling renewal", logger.Err(err))
+		b.logInfo("remotesign: transit token not renewable, disabling renewal", logger.Err(err))
 		return
 	}
 	watcher, err := b.client.NewLifetimeWatcher(&api.LifetimeWatcherInput{Secret: secret})
 	if err != nil {
-		b.logInfo("oidcsign: failed to start transit token renewal", logger.Err(err))
+		b.logInfo("remotesign: failed to start transit token renewal", logger.Err(err))
 		return
 	}
 	b.watcher = watcher
@@ -137,7 +137,7 @@ func (b *TransitBackend) startRenewal(disable bool) {
 			select {
 			case err := <-watcher.DoneCh():
 				if err != nil {
-					b.logError("oidcsign: transit token renewal stopped", logger.Err(err))
+					b.logError("remotesign: transit token renewal stopped", logger.Err(err))
 				}
 				return
 			case <-watcher.RenewCh():
@@ -165,7 +165,7 @@ func (b *TransitBackend) keyNameFor(alg string) string {
 func (b *TransitBackend) EnsureKey(ctx context.Context, alg string) (KeyInfo, error) {
 	p, ok := algParamsByAlg[alg]
 	if !ok {
-		return KeyInfo{}, fmt.Errorf("oidcsign: unsupported signing algorithm %q", alg)
+		return KeyInfo{}, fmt.Errorf("remotesign: unsupported signing algorithm %q", alg)
 	}
 	name := b.keyNameFor(alg)
 	ctx, cancel := b.withTimeout(ctx)
@@ -173,7 +173,7 @@ func (b *TransitBackend) EnsureKey(ctx context.Context, alg string) (KeyInfo, er
 	if _, err := b.client.Logical().WriteWithContext(ctx, b.keysPath(name), map[string]interface{}{
 		"type": p.transitKeyType,
 	}); err != nil {
-		return KeyInfo{}, fmt.Errorf("oidcsign: ensure transit key %q: %w", name, err)
+		return KeyInfo{}, fmt.Errorf("remotesign: ensure transit key %q: %w", name, err)
 	}
 	return b.latestKeyInfo(ctx, alg)
 }
@@ -181,13 +181,13 @@ func (b *TransitBackend) EnsureKey(ctx context.Context, alg string) (KeyInfo, er
 // NewVersion rotates alg's key and returns the new latest version.
 func (b *TransitBackend) NewVersion(ctx context.Context, alg string) (KeyInfo, error) {
 	if _, ok := algParamsByAlg[alg]; !ok {
-		return KeyInfo{}, fmt.Errorf("oidcsign: unsupported signing algorithm %q", alg)
+		return KeyInfo{}, fmt.Errorf("remotesign: unsupported signing algorithm %q", alg)
 	}
 	name := b.keyNameFor(alg)
 	ctx, cancel := b.withTimeout(ctx)
 	defer cancel()
 	if _, err := b.client.Logical().WriteWithContext(ctx, b.keysPath(name)+"/rotate", nil); err != nil {
-		return KeyInfo{}, fmt.Errorf("oidcsign: rotate transit key %q: %w", name, err)
+		return KeyInfo{}, fmt.Errorf("remotesign: rotate transit key %q: %w", name, err)
 	}
 	return b.latestKeyInfo(ctx, alg)
 }
@@ -214,13 +214,13 @@ func (b *TransitBackend) PublicKey(ctx context.Context, ref KeyRef) (crypto.Publ
 func validateTransitKey(kd *transitKeyData, name, alg string) error {
 	p, ok := algParamsByAlg[alg]
 	if !ok {
-		return fmt.Errorf("oidcsign: unsupported signing algorithm %q", alg)
+		return fmt.Errorf("remotesign: unsupported signing algorithm %q", alg)
 	}
 	if kd.Type != p.transitKeyType {
-		return fmt.Errorf("oidcsign: transit key %q has type %q, expected %q for %s", name, kd.Type, p.transitKeyType, alg)
+		return fmt.Errorf("remotesign: transit key %q has type %q, expected %q for %s", name, kd.Type, p.transitKeyType, alg)
 	}
 	if kd.Exportable {
-		return fmt.Errorf("oidcsign: transit key %q is exportable; the OIDC issuer key must be non-exportable (recreate with exportable=false)", name)
+		return fmt.Errorf("remotesign: transit key %q is exportable; the OIDC issuer key must be non-exportable (recreate with exportable=false)", name)
 	}
 	return nil
 }
@@ -230,25 +230,25 @@ func validateTransitKey(kd *transitKeyData, name, alg string) error {
 // requested in ASN.1 form, matching the crypto.Signer contract.
 func (b *TransitBackend) Sign(ctx context.Context, ref KeyRef, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
 	if _, ok := opts.(*rsa.PSSOptions); ok {
-		return nil, fmt.Errorf("oidcsign: RSA-PSS is not supported by the transit signer")
+		return nil, fmt.Errorf("remotesign: RSA-PSS is not supported by the transit signer")
 	}
 	p, ok := algParamsByAlg[ref.Alg]
 	if !ok {
-		return nil, fmt.Errorf("oidcsign: unsupported signing algorithm %q", ref.Alg)
+		return nil, fmt.Errorf("remotesign: unsupported signing algorithm %q", ref.Alg)
 	}
 	if ref.Version < 1 {
 		// A zero version resolves to "latest" server-side, so refuse it up front
 		// rather than sign with the wrong (pre-published next) key.
-		return nil, fmt.Errorf("oidcsign: key version must be >= 1, got %d", ref.Version)
+		return nil, fmt.Errorf("remotesign: key version must be >= 1, got %d", ref.Version)
 	}
 	// Guard the digest against an alg/hash mismatch. For ECDSA transit signs
 	// whatever prehashed bytes arrive, so a wrong-hash digest would produce a
 	// well-formed but permanently unverifiable signature — fail fast instead.
 	if opts.HashFunc() != p.hash {
-		return nil, fmt.Errorf("oidcsign: %s requires a %v digest, got %v", ref.Alg, p.hash, opts.HashFunc())
+		return nil, fmt.Errorf("remotesign: %s requires a %v digest, got %v", ref.Alg, p.hash, opts.HashFunc())
 	}
 	if len(digest) != p.hash.Size() {
-		return nil, fmt.Errorf("oidcsign: %s digest must be %d bytes, got %d", ref.Alg, p.hash.Size(), len(digest))
+		return nil, fmt.Errorf("remotesign: %s digest must be %d bytes, got %d", ref.Alg, p.hash.Size(), len(digest))
 	}
 
 	data := map[string]interface{}{
@@ -265,15 +265,15 @@ func (b *TransitBackend) Sign(ctx context.Context, ref KeyRef, digest []byte, op
 	defer cancel()
 	secret, err := b.client.Logical().WriteWithContext(ctx, b.signPath(ref.KeyName), data)
 	if err != nil {
-		return nil, fmt.Errorf("oidcsign: transit sign %q: %w", ref.KeyName, err)
+		return nil, fmt.Errorf("remotesign: transit sign %q: %w", ref.KeyName, err)
 	}
 	if secret == nil || secret.Data == nil {
-		return nil, fmt.Errorf("oidcsign: transit sign %q returned no data", ref.KeyName)
+		return nil, fmt.Errorf("remotesign: transit sign %q returned no data", ref.KeyName)
 	}
 	// The response's key_version is the authoritative, template-independent proof
 	// of which version signed; verify it pinned to the version we asked for.
 	if signedVer, err := asInt(secret.Data["key_version"]); err == nil && signedVer != ref.Version {
-		return nil, fmt.Errorf("oidcsign: transit signed with key version %d, expected %d", signedVer, ref.Version)
+		return nil, fmt.Errorf("remotesign: transit signed with key version %d, expected %d", signedVer, ref.Version)
 	}
 	raw, _ := secret.Data["signature"].(string)
 	return decodeTransitSignature(raw)
@@ -343,17 +343,17 @@ type transitKeyVersion struct {
 func (b *TransitBackend) readKey(ctx context.Context, name string) (*transitKeyData, error) {
 	secret, err := b.client.Logical().ReadWithContext(ctx, b.keysPath(name))
 	if err != nil {
-		return nil, fmt.Errorf("oidcsign: read transit key %q: %w", name, err)
+		return nil, fmt.Errorf("remotesign: read transit key %q: %w", name, err)
 	}
 	if secret == nil || secret.Data == nil {
-		return nil, fmt.Errorf("oidcsign: transit key %q not found", name)
+		return nil, fmt.Errorf("remotesign: transit key %q not found", name)
 	}
 	kd := &transitKeyData{}
 	kd.Type, _ = secret.Data["type"].(string)
 	kd.Exportable, _ = secret.Data["exportable"].(bool)
 	lv, err := asInt(secret.Data["latest_version"])
 	if err != nil {
-		return nil, fmt.Errorf("oidcsign: transit key %q: bad latest_version: %w", name, err)
+		return nil, fmt.Errorf("remotesign: transit key %q: bad latest_version: %w", name, err)
 	}
 	kd.LatestVersion = lv
 	// Re-marshal the versions map through JSON to decode into typed structs. This
@@ -371,7 +371,7 @@ func (b *TransitBackend) readKey(ctx context.Context, name string) (*transitKeyD
 func (kd *transitKeyData) versionEntry(version int) (transitKeyVersion, error) {
 	v, ok := kd.Keys[strconv.Itoa(version)]
 	if !ok {
-		return transitKeyVersion{}, fmt.Errorf("oidcsign: transit key has no version %d", version)
+		return transitKeyVersion{}, fmt.Errorf("remotesign: transit key has no version %d", version)
 	}
 	return v, nil
 }
@@ -391,7 +391,7 @@ func (kd *transitKeyData) creationTimeForVersion(version int) (time.Time, error)
 	}
 	t, err := time.Parse(time.RFC3339Nano, v.CreationTime)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("oidcsign: parse transit key creation_time %q: %w", v.CreationTime, err)
+		return time.Time{}, fmt.Errorf("remotesign: parse transit key creation_time %q: %w", v.CreationTime, err)
 	}
 	return t, nil
 }
@@ -399,21 +399,21 @@ func (kd *transitKeyData) creationTimeForVersion(version int) (time.Time, error)
 // ParsePublicKeyPEM decodes a PKIX PEM public key and ensures it is RSA or ECDSA.
 func ParsePublicKeyPEM(pemStr string) (crypto.PublicKey, error) {
 	if pemStr == "" {
-		return nil, fmt.Errorf("oidcsign: empty public key")
+		return nil, fmt.Errorf("remotesign: empty public key")
 	}
 	block, _ := pem.Decode([]byte(pemStr))
 	if block == nil {
-		return nil, fmt.Errorf("oidcsign: public key is not valid PEM")
+		return nil, fmt.Errorf("remotesign: public key is not valid PEM")
 	}
 	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("oidcsign: parse public key: %w", err)
+		return nil, fmt.Errorf("remotesign: parse public key: %w", err)
 	}
 	switch pub.(type) {
 	case *rsa.PublicKey, *ecdsa.PublicKey:
 		return pub, nil
 	default:
-		return nil, fmt.Errorf("oidcsign: unsupported public key type %T", pub)
+		return nil, fmt.Errorf("remotesign: unsupported public key type %T", pub)
 	}
 }
 
@@ -422,7 +422,7 @@ func ParsePublicKeyPEM(pemStr string) (crypto.PublicKey, error) {
 func MarshalPublicKeyPEM(pub crypto.PublicKey) (string, error) {
 	der, err := x509.MarshalPKIXPublicKey(pub)
 	if err != nil {
-		return "", fmt.Errorf("oidcsign: marshal public key: %w", err)
+		return "", fmt.Errorf("remotesign: marshal public key: %w", err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
 }
@@ -435,18 +435,18 @@ func MarshalPublicKeyPEM(pub crypto.PublicKey) (string, error) {
 // uses standard base64.
 func decodeTransitSignature(sig string) ([]byte, error) {
 	if sig == "" {
-		return nil, fmt.Errorf("oidcsign: transit returned an empty signature")
+		return nil, fmt.Errorf("remotesign: transit returned an empty signature")
 	}
 	i := strings.LastIndex(sig, ":")
 	if i < 0 || i == len(sig)-1 {
-		return nil, fmt.Errorf("oidcsign: malformed transit signature")
+		return nil, fmt.Errorf("remotesign: malformed transit signature")
 	}
 	raw, err := base64.StdEncoding.DecodeString(sig[i+1:])
 	if err != nil {
-		return nil, fmt.Errorf("oidcsign: decode transit signature: %w", err)
+		return nil, fmt.Errorf("remotesign: decode transit signature: %w", err)
 	}
 	if len(raw) == 0 {
-		return nil, fmt.Errorf("oidcsign: transit returned an empty signature payload")
+		return nil, fmt.Errorf("remotesign: transit returned an empty signature payload")
 	}
 	return raw, nil
 }

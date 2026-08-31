@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/stephnangue/warden/core/oidcsign"
+	"github.com/stephnangue/warden/internal/remotesign"
 )
 
 // oidcKeySource abstracts where the issuer's signing keys come from: local
@@ -51,7 +51,7 @@ func (localKeySource) remote() bool { return false }
 // active/next/retired model maps onto KMS key versions, and the private key never
 // enters Warden. active/next are two distinct versions of the alg's key.
 type remoteKeySource struct {
-	backend oidcsign.Backend
+	backend remotesign.Backend
 	timeout time.Duration
 }
 
@@ -91,12 +91,12 @@ func (r remoteKeySource) remote() bool { return true }
 // is the RFC 7638 thumbprint of the public key — identical to a local key's kid
 // and stable across restarts — and createdAt is the KMS-side creation time, so the
 // rotation scheduler's anchor survives restarts.
-func (r remoteKeySource) newRemoteSigningKey(info oidcsign.KeyInfo) (*signingKey, error) {
+func (r remoteKeySource) newRemoteSigningKey(info remotesign.KeyInfo) (*signingKey, error) {
 	kid, err := signingKeyID(info.Public)
 	if err != nil {
 		return nil, err
 	}
-	signer := oidcsign.NewSigner(r.backend, info.Ref, info.Public, r.timeout)
+	signer := remotesign.NewSigner(r.backend, info.Ref, info.Public, r.timeout)
 	return &signingKey{key: signer, alg: info.Ref.Alg, kid: kid, createdAt: info.CreatedAt}, nil
 }
 
@@ -105,7 +105,7 @@ func isRemoteSigningKey(sk *signingKey) bool {
 	if sk == nil {
 		return false
 	}
-	_, ok := sk.key.(*oidcsign.Signer)
+	_, ok := sk.key.(*remotesign.Signer)
 	return ok
 }
 
@@ -131,7 +131,7 @@ func oidcKeySetSourceMismatch(keysets map[string]*algKeyset, wantRemote bool) bo
 // sign (a different or removed backend left it verification-only) must go too, so
 // adding a second backend type later cannot silently install an unusable key.
 func oidcActiveKeyNeedsCutover(active *signingKey, wantRemote bool) bool {
-	rs, isRemote := active.key.(*oidcsign.Signer)
+	rs, isRemote := active.key.(*remotesign.Signer)
 	if !wantRemote {
 		return isRemote
 	}
