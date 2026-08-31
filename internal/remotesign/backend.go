@@ -15,6 +15,7 @@ package remotesign
 import (
 	"context"
 	"crypto"
+	"crypto/elliptic"
 	"errors"
 	"io"
 	"time"
@@ -68,17 +69,18 @@ type Backend interface {
 // from the core alg table by value (these are standard wire constants) to keep
 // this package free of a core import.
 type algParams struct {
-	transitKeyType string      // transit key type, e.g. "rsa-2048"
-	hashName       string      // transit hash_algorithm, e.g. "sha2-256"
-	hash           crypto.Hash // the digest the caller must have used
-	isRSA          bool
+	transitKeyType string         // transit key type, e.g. "rsa-2048"
+	hashName       string         // transit hash_algorithm, e.g. "sha2-256"
+	hash           crypto.Hash    // the digest the caller must have used
+	isRSA          bool           //
+	curve          elliptic.Curve // nil for RSA; the curve whose width an ES* signature is padded to
 }
 
 var algParamsByAlg = map[string]algParams{
 	"RS256": {transitKeyType: "rsa-2048", hashName: "sha2-256", hash: crypto.SHA256, isRSA: true},
 	"RS384": {transitKeyType: "rsa-3072", hashName: "sha2-384", hash: crypto.SHA384, isRSA: true},
-	"ES256": {transitKeyType: "ecdsa-p256", hashName: "sha2-256", hash: crypto.SHA256, isRSA: false},
-	"ES384": {transitKeyType: "ecdsa-p384", hashName: "sha2-384", hash: crypto.SHA384, isRSA: false},
+	"ES256": {transitKeyType: "ecdsa-p256", hashName: "sha2-256", hash: crypto.SHA256, isRSA: false, curve: elliptic.P256()},
+	"ES384": {transitKeyType: "ecdsa-p384", hashName: "sha2-384", hash: crypto.SHA384, isRSA: false, curve: elliptic.P384()},
 }
 
 // Signer adapts one (Backend, KeyRef) pair to crypto.Signer, so it drops into the
