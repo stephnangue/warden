@@ -115,8 +115,9 @@ type ExpirationRegistrar interface {
 // chainedSecret is the cached payload of a referenced secret-spec: the minted
 // credential's Data plus its Type. Type is retained because resolveSecretField uses it
 // for the PrimaryFieldProvider fallback, so a cache hit resolves the secret_field
-// identically to a fresh fetch. It never contains a lease (the referenced spec is
-// static/leaseless) and is held in memory only, never persisted.
+// identically to a fresh fetch. It never contains a lease (a referenced spec that
+// returns one is refused) and is held in memory only, never persisted. When the
+// referenced credential has a lifetime of its own, the entry is bounded by it.
 type chainedSecret struct {
 	Data map[string]string
 	Type string
@@ -553,7 +554,7 @@ func (m *Manager) buildSecretMaterial(ctx context.Context, spec *CredSpec, data 
 // credential. The caller owns the one-hop depth guard and building inputsB (via
 // caller.ResolveInputs); this function materializes any lazily-minted subject/actor
 // tokens, mints via the non-caching internal path (so the fetched secret is never
-// cached), and enforces that the referenced credential is static/leaseless.
+// cached), and enforces that the referenced credential holds no lease.
 func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretRef string, inputsB *ExchangeInputs) (*Credential, error) {
 	// Materialize any lazily-minted subject/actor tokens here: the referenced spec is
 	// minted via the non-caching internal path, which — unlike the caching wrapper —
@@ -582,26 +583,26 @@ func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretR
 		return nil, fmt.Errorf("secret_spec %q: %w", secretRef, err)
 	}
 
-	// A referenced secret-spec must be static/leaseless: this path skips expiration
-	// registration, so a leased credential would orphan its lease. The create-time
-	// guard forbids this; fail closed (best-effort revoke) if config drift produced
-	// one anyway.
-	if credB.LeaseID != "" || credB.LeaseTTL > 0 {
-		if credB.LeaseID != "" {
-			// Best-effort revoke on a fresh context (the request ctx may be near its
-			// issuance deadline); log rather than drop the outcome.
-			revokeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if drv, derr := m.driverCoordinator.GetOrCreateDriver(ctx, credB.SourceName); derr == nil {
-				if rerr := drv.Revoke(revokeCtx, credB.LeaseID); rerr != nil {
-					m.log.Warn("failed to revoke orphaned lease from a leased secret_spec",
-						logger.String("secret_spec", secretRef),
-						logger.String("lease_id", credB.LeaseID),
-						logger.Err(rerr))
-				}
+	// A referenced secret-spec must hold no lease: this path skips expiration
+	// registration, so a leased credential would orphan its lease. A lifetime WITHOUT a
+	// lease id orphans nothing — nothing downstream has to be told to release it, the
+	// material simply stops being valid — so it is allowed through, and the caller
+	// bounds any cache entry to it. The create-time guard forbids a lease; fail closed
+	// (best-effort revoke) if config drift produced one anyway.
+	if credB.LeaseID != "" {
+		// Best-effort revoke on a fresh context (the request ctx may be near its
+		// issuance deadline); log rather than drop the outcome.
+		revokeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if drv, derr := m.driverCoordinator.GetOrCreateDriver(ctx, credB.SourceName); derr == nil {
+			if rerr := drv.Revoke(revokeCtx, credB.LeaseID); rerr != nil {
+				m.log.Warn("failed to revoke orphaned lease from a leased secret_spec",
+					logger.String("secret_spec", secretRef),
+					logger.String("lease_id", credB.LeaseID),
+					logger.Err(rerr))
 			}
-			cancel()
 		}
-		return nil, fmt.Errorf("secret_spec %q must reference a static/leaseless credential, but it returned a lease", secretRef)
+		cancel()
+		return nil, fmt.Errorf("secret_spec %q must reference a leaseless credential, but it returned a lease", secretRef)
 	}
 
 	return credB, nil
@@ -613,7 +614,8 @@ func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretR
 // caller retries on a downstream rejection only when a stale cached value could be the
 // cause). key is the cache key (empty when caching is disabled), for invalidation on
 // retry. A ttl <= 0, or a context without a namespace, disables caching and fetches
-// directly — the behaviour-preserving default.
+// directly — the behaviour-preserving default. An entry never outlives the referenced
+// credential: a lifetime reported by the fetch caps the configured ttl.
 func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, spec *CredSpec, secretRef string, inputsB *ExchangeInputs) (data map[string]string, typ string, fromCache bool, key string, err error) {
 	ttl := m.secretCacheTTL(ctx, spec)
 	if ttl <= 0 {
@@ -665,7 +667,15 @@ func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, s
 			return nil, e
 		}
 		cs := chainedSecret{Data: credB.Data, Type: credB.Type}
-		m.secretCache.SetWithTTL(key, cs, 1, ttl)
+		// A referenced credential carrying its own lifetime bounds the entry. Holding it
+		// for the full secret_cache_ttl would keep vending material that already stopped
+		// being valid, and the consumer would not discover that until the downstream
+		// refused it — one failed mint per entry, for the rest of the window.
+		entryTTL := ttl
+		if credB.LeaseTTL > 0 && credB.LeaseTTL < entryTTL {
+			entryTTL = credB.LeaseTTL
+		}
+		m.secretCache.SetWithTTL(key, cs, 1, entryTTL)
 		m.secretCache.Wait() // Ristretto sets are async; shrink the window vs a concurrent Del.
 		return cs, nil
 	})
