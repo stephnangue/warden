@@ -29,6 +29,38 @@ func TestKeyValueCredType_ValidateConfig(t *testing.T) {
 		errMsg     string
 	}{
 		{
+			// The narrow role is mandatory: without its own, the spec would inherit the
+			// source's, which is the one thing this mint method must not do.
+			name:       "transit_signer without a role",
+			config:     map[string]string{"mint_method": "transit_signer", "transit_key": "k"},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "'jwt_role' is required",
+		},
+		{
+			// transit_signer produces the same multi-field, no-primary-field payload
+			// this type exists to carry, but needs none of the kv2 locators.
+			name:       "valid transit_signer",
+			config:     map[string]string{"mint_method": "transit_signer", "transit_key": "client-assertion", "jwt_role": "warden-transit-signer"},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    false,
+		},
+		{
+			name:       "transit_signer without a key",
+			config:     map[string]string{"mint_method": "transit_signer", "jwt_role": "r"},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "'transit_key' is required",
+		},
+		{
+			// The kv2 locators belong to kv2_read alone; requiring them of every mint
+			// method is what kept transit_signer from being expressible at all.
+			name:       "transit_signer needs no kv2 locators",
+			config:     map[string]string{"mint_method": "transit_signer", "transit_key": "k", "jwt_role": "r", "kv2_mount": "", "secret_path": ""},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    false,
+		},
+		{
 			name:       "valid kv2_read",
 			config:     map[string]string{"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "github/ci"},
 			sourceType: credential.SourceTypeVault,
