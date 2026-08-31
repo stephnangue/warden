@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/helper"
+	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -37,11 +40,17 @@ func TokenExchangeSupportsActor(sourceCfg map[string]string) bool {
 }
 
 // Client-authentication methods selected by the source's `client_auth` config.
-// private_key_jwt is added in a later change; the secret methods ship here.
+//
+// kms_private_key_jwt puts the same assertion on the wire as private_key_jwt — the
+// authorization server cannot tell them apart — but the key is held in a KMS and Warden
+// never sees it. It is a separate method rather than a modifier because the two are
+// configured from opposite ends: one takes a key, the other takes a reference to a
+// capability, and nothing an operator sets for one is meaningful for the other.
 const (
-	clientAuthSecretBasic   = "client_secret_basic"
-	clientAuthSecretPost    = "client_secret_post"
-	clientAuthPrivateKeyJWT = "private_key_jwt"
+	clientAuthSecretBasic      = "client_secret_basic"
+	clientAuthSecretPost       = "client_secret_post"
+	clientAuthPrivateKeyJWT    = "private_key_jwt"
+	clientAuthKMSPrivateKeyJWT = "kms_private_key_jwt"
 )
 
 // clientAssertionType is the RFC 7523 client-assertion type for private_key_jwt.
@@ -73,6 +82,29 @@ type tokenExchangeChainedAuth struct {
 	clientID string
 	secret   string
 	kid      string
+	// kms is set instead of secret when the referenced spec minted a signing
+	// capability rather than a key. The two are mutually exclusive: one carries the
+	// key, the other carries permission to use a key it will never see.
+	kms *kmsSignerMaterial
+}
+
+// kmsSignerMaterial is a signing capability fetched through chaining: which key, which
+// version, where it lives, and a token that may sign with it. It holds no key material —
+// that absence is the entire point of the method.
+type kmsSignerMaterial struct {
+	backend    string
+	token      string
+	address    string
+	namespace  string
+	mount      string
+	keyName    string
+	keyVersion int
+	alg        string
+	kid        string
+	// expiresAt is the capability token's expiry, when the producer reported one. It
+	// lets a spent capability be recognised without spending a round trip discovering
+	// it, and told apart from a broken one.
+	expiresAt time.Time
 }
 
 // TokenExchangeDriver exchanges a caller-derived identity (a subject token, and
@@ -84,6 +116,10 @@ type TokenExchangeDriver struct {
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
 	httpClient *http.Client
+	// kmsClients pools one token-less base client per signing backend address, cloned
+	// per assertion so the capability token never touches a shared client. In practice
+	// it holds a single entry.
+	kmsClients sync.Map
 }
 
 // TokenExchangeDriverFactory creates TokenExchangeDriver instances.
@@ -121,8 +157,8 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 			Example("https://auth.resourceapp.example.com/oauth2/token"),
 
 		credential.StringField("client_auth").
-			OneOf(clientAuthSecretBasic, clientAuthSecretPost, clientAuthPrivateKeyJWT).
-			Describe("How Warden authenticates to the token endpoint").
+			OneOf(clientAuthSecretBasic, clientAuthSecretPost, clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT).
+			Describe("How Warden authenticates to the token endpoint; kms_private_key_jwt signs the same assertion with a key held in a KMS, reached through secret_spec").
 			Example("client_secret_post"),
 
 		credential.StringField("client_id").
@@ -227,6 +263,27 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 		}
 		if credential.GetString(config, "private_key", "") == "" {
 			return fmt.Errorf("private_key (or secret_spec) is required for client_auth=private_key_jwt")
+		}
+	case clientAuthKMSPrivateKeyJWT:
+		// The signing capability IS the referenced material, so there is no inline
+		// form of this method: without secret_spec there is nothing to sign with.
+		if !chained {
+			return fmt.Errorf("client_auth=%s requires secret_spec naming the spec that mints the signing capability", clientAuthKMSPrivateKeyJWT)
+		}
+		// Same rule as private_key_jwt, and for the same reason: everything naming the
+		// client travels with the key it belongs to.
+		if err := rejectInlineClientCredential(config, "private_key", "client_assertion_kid"); err != nil {
+			return err
+		}
+		// The payload is read by fixed field names, so a field selector would either be
+		// ignored or point at one coordinate as though it were the secret.
+		if credential.GetString(config, credential.ConfigSecretField, "") != "" {
+			return fmt.Errorf("secret_field must be omitted for client_auth=%s; the referenced payload is read by its own field names", clientAuthKMSPrivateKeyJWT)
+		}
+		// The algorithm is a property of the key, checked against it when the capability
+		// is minted. Naming it again here could only ever disagree.
+		if credential.GetString(config, "client_assertion_alg", "") != "" {
+			return fmt.Errorf("client_assertion_alg must be omitted for client_auth=%s; the algorithm travels with the key in the referenced payload", clientAuthKMSPrivateKeyJWT)
 		}
 	}
 
@@ -340,8 +397,19 @@ func tokenExchangeChainedAuthFromMaterial(cfg map[string]string, material creden
 
 	secret := material.Secret()
 	var kid string
+	var kms *kmsSignerMaterial
 
 	switch credential.GetString(cfg, "client_auth", clientAuthSecretPost) {
+	case clientAuthKMSPrivateKeyJWT:
+		// Nothing secret is selected here: the payload is a set of coordinates read by
+		// name, so material.Field plays no part. Clear whatever the generic selector
+		// picked out — leaving a coordinate sitting in the secret slot would present it
+		// as key material to anything that later reads the struct.
+		secret = ""
+		var err error
+		if kms, err = kmsSignerFromMaterial(material); err != nil {
+			return nil, err
+		}
 	case clientAuthSecretPost, clientAuthSecretBasic, "":
 		if secret == "" && material.Field == "" {
 			secret = material.Data["client_secret"]
@@ -373,8 +441,8 @@ func tokenExchangeChainedAuthFromMaterial(cfg map[string]string, material creden
 	default:
 		// A source-config error, not a payload one: refetching cannot change the answer,
 		// so this must not carry the sentinel that asks the manager to try again.
-		return nil, fmt.Errorf("token_exchange: credential chaining supports client_auth=%s, %s or %s, got %q",
-			clientAuthSecretPost, clientAuthSecretBasic, clientAuthPrivateKeyJWT,
+		return nil, fmt.Errorf("token_exchange: credential chaining supports client_auth=%s, %s, %s or %s, got %q",
+			clientAuthSecretPost, clientAuthSecretBasic, clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT,
 			credential.GetString(cfg, "client_auth", ""))
 	}
 
@@ -383,7 +451,68 @@ func tokenExchangeChainedAuthFromMaterial(cfg map[string]string, material creden
 		return nil, fmt.Errorf("token_exchange: no client id in fetched secret material (store it under 'client_id' alongside the secret): %w", credential.ErrChainedSecretIncomplete)
 	}
 
-	return &tokenExchangeChainedAuth{clientID: clientID, secret: secret, kid: kid}, nil
+	return &tokenExchangeChainedAuth{clientID: clientID, secret: secret, kid: kid, kms: kms}, nil
+}
+
+// kmsSignerFromMaterial reads a signing capability out of the referenced payload. Every
+// coordinate is required and read by its own name — the producer writes them all
+// together, so any one missing means a payload written by something else, or by an
+// older version of the producer.
+//
+// Those failures carry ErrChainedSecretIncomplete so a cached payload predating a field
+// is refetched once, rather than failing every mint for the rest of its cache window.
+func kmsSignerFromMaterial(material credential.SecretMaterial) (*kmsSignerMaterial, error) {
+	need := func(key string) (string, error) {
+		if v := material.Data[key]; v != "" {
+			return v, nil
+		}
+		return "", fmt.Errorf("token_exchange: the fetched signing capability has no %q: %w", key, credential.ErrChainedSecretIncomplete)
+	}
+
+	backend, err := need("kms_backend")
+	if err != nil {
+		return nil, err
+	}
+	if backend != remotesign.BackendTypeTransit {
+		// A backend this build cannot drive. Not a payload-freshness problem — refetching
+		// yields the same answer — so it must not ask the manager to retry.
+		return nil, fmt.Errorf("token_exchange: unsupported signing backend %q in the fetched capability", backend)
+	}
+
+	m := &kmsSignerMaterial{backend: backend, namespace: material.Data["vault_namespace"], kid: material.Data["kid"]}
+	for _, f := range []struct {
+		key string
+		dst *string
+	}{
+		{"vault_token", &m.token},
+		{"vault_address", &m.address},
+		{"transit_mount", &m.mount},
+		{"transit_key", &m.keyName},
+		{"signing_alg", &m.alg},
+	} {
+		if *f.dst, err = need(f.key); err != nil {
+			return nil, err
+		}
+	}
+
+	rawVersion, err := need("transit_key_version")
+	if err != nil {
+		return nil, err
+	}
+	// The producer always writes a concrete version, so an unusable one means a stale or
+	// foreign payload — something a refetch can fix.
+	if m.keyVersion, err = strconv.Atoi(rawVersion); err != nil || m.keyVersion < 1 {
+		return nil, fmt.Errorf("token_exchange: the fetched signing capability has an unusable key version %q: %w", rawVersion, credential.ErrChainedSecretIncomplete)
+	}
+
+	// Optional: without it the expiry preflight is simply skipped, and a spent
+	// capability is discovered by the store refusing to sign with it instead.
+	if raw := material.Data["token_expires_at"]; raw != "" {
+		if ts, perr := time.Parse(time.RFC3339, raw); perr == nil {
+			m.expiresAt = ts
+		}
+	}
+	return m, nil
 }
 
 // mintExchange runs the exchange for the configured grant. chained, when non-nil,
@@ -433,7 +562,7 @@ func (d *TokenExchangeDriver) exchangeOnce(ctx context.Context, spec *credential
 	}
 	tokenURL := credential.GetString(d.credSource.Config, "token_url", "")
 	headers := map[string]string{}
-	if err := d.applyClientAuth(form, headers, tokenURL, chained); err != nil {
+	if err := d.applyClientAuth(ctx, form, headers, tokenURL, chained); err != nil {
 		return nil, err
 	}
 	resp, err := postOAuthTokenForm(ctx, d.httpClient, tokenURL, form, headers)
@@ -477,7 +606,7 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 		leg1.Set(k, v)
 	}
 	h1 := map[string]string{}
-	if err := d.applyClientAuth(leg1, h1, idpURL, chained); err != nil {
+	if err := d.applyClientAuth(ctx, leg1, h1, idpURL, chained); err != nil {
 		return nil, err
 	}
 	jag, err := postOAuthTokenForm(ctx, d.httpClient, idpURL, leg1, h1)
@@ -504,7 +633,7 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 	// leg 2 (the resource-AS redemption), not leg 1 (which mints the ID-JAG).
 	d.addResources(leg2, spec)
 	h2 := map[string]string{}
-	if err := d.applyClientAuth(leg2, h2, resURL, chained); err != nil {
+	if err := d.applyClientAuth(ctx, leg2, h2, resURL, chained); err != nil {
 		return nil, err
 	}
 	final, err := postOAuthTokenForm(ctx, d.httpClient, resURL, leg2, h2)
@@ -565,7 +694,7 @@ func (d *TokenExchangeDriver) buildExchangeForm(spec *credential.CredSpec, input
 // Both halves move together: an id from config beside a secret from the chain would
 // name one client while presenting another's, which the token endpoint answers with
 // invalid_client.
-func (d *TokenExchangeDriver) applyClientAuth(form url.Values, headers map[string]string, tokenEndpoint string, chained *tokenExchangeChainedAuth) error {
+func (d *TokenExchangeDriver) applyClientAuth(ctx context.Context, form url.Values, headers map[string]string, tokenEndpoint string, chained *tokenExchangeChainedAuth) error {
 	cfg := d.credSource.Config
 	clientID := credential.GetString(cfg, "client_id", "")
 	clientSecret := credential.GetString(cfg, "client_secret", "")
@@ -582,8 +711,10 @@ func (d *TokenExchangeDriver) applyClientAuth(form url.Values, headers map[strin
 		// RFC 6749 §2.3.1: client id/secret are form-urlencoded, then Basic-encoded.
 		creds := url.QueryEscape(clientID) + ":" + url.QueryEscape(clientSecret)
 		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
-	case clientAuthPrivateKeyJWT:
-		assertion, err := d.buildClientAssertion(clientID, tokenEndpoint, chained)
+	case clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT:
+		// One case for both: the assertion, and everything the endpoint sees, is
+		// identical. Only where the signature comes from differs.
+		assertion, err := d.buildClientAssertion(ctx, clientID, tokenEndpoint, chained)
 		if err != nil {
 			return err
 		}
@@ -602,7 +733,28 @@ func (d *TokenExchangeDriver) applyClientAuth(form url.Values, headers map[strin
 // credential chaining in place of the source-configured ones; clientID is then the
 // chained id its caller already substituted, so the assertion names the client whose key
 // signs it, under the key id that key was stored beside.
-func (d *TokenExchangeDriver) buildClientAssertion(clientID, tokenEndpoint string, chained *tokenExchangeChainedAuth) (string, error) {
+func (d *TokenExchangeDriver) buildClientAssertion(ctx context.Context, clientID, tokenEndpoint string, chained *tokenExchangeChainedAuth) (string, error) {
+	jti, err := newJTI()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss": clientID,
+		"sub": clientID,
+		"aud": tokenEndpoint,
+		"jti": jti,
+		"iat": now.Unix(),
+		"exp": now.Add(clientAssertionTTL).Unix(),
+	}
+
+	// A chained signing capability signs the very same claims elsewhere. Built here
+	// rather than in the remote path so the two methods cannot drift into producing
+	// different assertions.
+	if chained != nil && chained.kms != nil {
+		return d.signAssertionWithCapability(ctx, chained.kms, claims)
+	}
+
 	pemKey := credential.GetString(d.credSource.Config, "private_key", "")
 	kid := credential.GetString(d.credSource.Config, "client_assertion_kid", "")
 	if chained != nil {
@@ -612,22 +764,9 @@ func (d *TokenExchangeDriver) buildClientAssertion(clientID, tokenEndpoint strin
 	if err != nil {
 		return "", fmt.Errorf("token_exchange: invalid private_key: %w", err)
 	}
-	jti, err := newJTI()
-	if err != nil {
-		return "", err
-	}
-	now := time.Now()
 	header := map[string]string{}
 	if kid != "" {
 		header["kid"] = kid
-	}
-	claims := map[string]interface{}{
-		"iss": clientID,
-		"sub": clientID,
-		"aud": tokenEndpoint,
-		"jti": jti,
-		"iat": now.Unix(),
-		"exp": now.Add(clientAssertionTTL).Unix(),
 	}
 	assertion, err := signRS256JWT(key, header, claims)
 	if err != nil {
@@ -764,9 +903,11 @@ func classifyExchangeError(err error) error {
 func chainedClientAuthError(err error, chained bool) error {
 	// The rejection test itself is shared with the oauth2 driver
 	// (isChainedClientAuthRejection); here it covers client_secret_post's 400,
-	// client_secret_basic's 401, and a rejected private_key_jwt assertion. Keep the
-	// underlying error (the IdP's code / description) in the chain alongside the sentinel
-	// for legible diagnostics.
+	// client_secret_basic's 401, and a rejected assertion under either private_key_jwt
+	// method. For a KMS-held key that last case is how an authorization server holding
+	// only the previous public key recovers: the eviction re-mints the capability, which
+	// resolves the current key version. Keep the underlying error (the IdP's code /
+	// description) in the chain alongside the sentinel for legible diagnostics.
 	if chained && isChainedClientAuthRejection(err) {
 		return fmt.Errorf("token_exchange: client authentication rejected: %w (%w)", credential.ErrChainedSecretRejected, err)
 	}
