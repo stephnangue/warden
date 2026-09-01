@@ -395,13 +395,27 @@ func TestElasticDriver_Cleanup(t *testing.T) {
 }
 
 func TestElasticDriver_SupportsRotation(t *testing.T) {
+	newDriver := func(config map[string]string, keyID string) *ElasticDriver {
+		return &ElasticDriver{
+			credSource:     &credential.CredSource{Type: credential.SourceTypeElastic, Config: config},
+			sourceAPIKeyID: keyID,
+		}
+	}
+
 	t.Run("true when sourceAPIKeyID is set", func(t *testing.T) {
-		d := &ElasticDriver{sourceAPIKeyID: "key-123"}
+		d := newDriver(map[string]string{"api_key": "k"}, "key-123")
 		assert.True(t, d.SupportsRotation())
 	})
 
 	t.Run("false when sourceAPIKeyID is empty", func(t *testing.T) {
-		d := &ElasticDriver{}
+		d := newDriver(map[string]string{}, "")
+		assert.False(t, d.SupportsRotation())
+	})
+
+	// A chained source holds no key of its own to rotate: it lives at its source
+	// of truth, and whoever owns the referenced spec rotates it there.
+	t.Run("false when the cluster key is chained", func(t *testing.T) {
+		d := newDriver(map[string]string{credential.ConfigSecretSpec: "es-key"}, "key-123")
 		assert.False(t, d.SupportsRotation())
 	})
 }
@@ -908,7 +922,13 @@ func TestElasticDriver_RequestIncludesApiKeyHeader(t *testing.T) {
 // ============================================================================
 
 func TestElasticDriver_ConcurrentSupportsRotation(t *testing.T) {
-	d := &ElasticDriver{sourceAPIKeyID: "key-123"}
+	d := &ElasticDriver{
+		credSource: &credential.CredSource{
+			Type:   credential.SourceTypeElastic,
+			Config: map[string]string{"api_key": "k"},
+		},
+		sourceAPIKeyID: "key-123",
+	}
 
 	done := make(chan bool, 10)
 	for i := 0; i < 10; i++ {
@@ -1239,4 +1259,291 @@ func TestElasticDriver_MintCredential_ReturnsKeyMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, metadata, "the audit record should name the key that was created")
 	assert.Equal(t, "new-key-id-123", metadata["key_id"])
+}
+
+// ============================================================================
+// Credential chaining
+// ============================================================================
+
+func newChainedElasticDriver(t *testing.T, serverURL string) *ElasticDriver {
+	t.Helper()
+	return &ElasticDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeElastic,
+			Config: map[string]string{
+				"elastic_url":                serverURL,
+				credential.ConfigSecretSpec:  "es-cluster-key",
+				credential.ConfigSecretField: "api_key",
+			},
+		},
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+func TestElasticDriverFactory_ValidateConfig_Chained(t *testing.T) {
+	f := &ElasticDriverFactory{}
+
+	t.Run("a chained source needs no api_key", func(t *testing.T) {
+		require.NoError(t, f.ValidateConfig(map[string]string{
+			"elastic_url":               "https://elastic.example.com",
+			credential.ConfigSecretSpec: "es-cluster-key",
+		}))
+	})
+
+	// Keeping the key would leave a source that reads as keyless while storing
+	// the very secret chaining removes.
+	t.Run("api_key beside secret_spec is refused", func(t *testing.T) {
+		err := f.ValidateConfig(map[string]string{
+			"elastic_url":               "https://elastic.example.com",
+			"api_key":                   testEncodedAPIKey("id1", "secret"),
+			credential.ConfigSecretSpec: "es-cluster-key",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be omitted")
+	})
+
+	// The id is derived from the key; one kept here beside a fetched key would
+	// name one key while presenting another's.
+	t.Run("api_key_id beside secret_spec is refused", func(t *testing.T) {
+		err := f.ValidateConfig(map[string]string{
+			"elastic_url":               "https://elastic.example.com",
+			"api_key_id":                "id1",
+			credential.ConfigSecretSpec: "es-cluster-key",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "api_key_id must be omitted")
+	})
+
+	t.Run("api_key is still required without secret_spec", func(t *testing.T) {
+		err := f.ValidateConfig(map[string]string{"elastic_url": "https://elastic.example.com"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "api_key is required")
+	})
+}
+
+// A chained source has no key to probe with and no caller to fetch one as, so
+// construction must not reach the cluster at all.
+func TestElasticDriverFactory_Create_ChainedMakesNoRequest(t *testing.T) {
+	var reached int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	f := &ElasticDriverFactory{}
+
+	driver, err := f.Create(map[string]string{
+		"elastic_url":               srv.URL,
+		credential.ConfigSecretSpec: "es-cluster-key",
+	}, log)
+	require.NoError(t, err)
+	require.NotNil(t, driver)
+	assert.Zero(t, reached, "creating a chained source must not authenticate")
+}
+
+func TestResolveChainedElasticAuth(t *testing.T) {
+	const id = "source-key-id"
+	const raw = "raw-api-key-half"
+	encoded := testEncodedAPIKey(id, raw)
+
+	t.Run("pre-encoded value with no id beside it", func(t *testing.T) {
+		auth, err := resolveChainedElasticAuth("https://es", credential.SecretMaterial{
+			Data:  map[string]string{"api_key": encoded},
+			Field: "api_key",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, encoded, auth.encoded)
+	})
+
+	t.Run("raw half composed with the id beside it", func(t *testing.T) {
+		auth, err := resolveChainedElasticAuth("https://es", credential.SecretMaterial{
+			Data:  map[string]string{"api_key": raw, "id": id},
+			Field: "api_key",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, encoded, auth.encoded, "the pair should be encoded here")
+	})
+
+	t.Run("pre-encoded value that already carries the id beside it", func(t *testing.T) {
+		auth, err := resolveChainedElasticAuth("https://es", credential.SecretMaterial{
+			Data:  map[string]string{"api_key": encoded, "id": id},
+			Field: "api_key",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, encoded, auth.encoded, "already encoded, so used as it stands")
+	})
+
+	t.Run("api_key_id is accepted as the id's name", func(t *testing.T) {
+		auth, err := resolveChainedElasticAuth("https://es", credential.SecretMaterial{
+			Data:  map[string]string{"api_key": raw, "api_key_id": id},
+			Field: "api_key",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, encoded, auth.encoded)
+	})
+
+	// The classification must not rest on whether a value happens to decode. A
+	// raw half that decodes to something with a colon would otherwise be sent
+	// verbatim with a garbage id, draw a 401, and be misread as a stale secret.
+	t.Run("a raw half that decodes to id:key shape is still composed", func(t *testing.T) {
+		decoyRaw := testEncodedAPIKey("someone-else", "value")
+		auth, err := resolveChainedElasticAuth("https://es", credential.SecretMaterial{
+			Data:  map[string]string{"api_key": decoyRaw, "id": id},
+			Field: "api_key",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, testEncodedAPIKey(id, decoyRaw), auth.encoded,
+			"the id beside it says this is the raw half, whatever it decodes to")
+	})
+
+	t.Run("conventional names when no field was resolved", func(t *testing.T) {
+		auth, err := resolveChainedElasticAuth("https://es", credential.SecretMaterial{
+			Data: map[string]string{"encoded": encoded},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, encoded, auth.encoded)
+	})
+
+	// A field that resolved to nothing is a misconfigured secret_field. Falling
+	// back would silently authenticate with some other value from the payload.
+	t.Run("a resolved-but-empty field is reported, not worked around", func(t *testing.T) {
+		_, err := resolveChainedElasticAuth("https://es", credential.SecretMaterial{
+			Data:  map[string]string{"wrong_name": encoded},
+			Field: "api_key",
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+		assert.Contains(t, err.Error(), "secret_field")
+	})
+
+	t.Run("secret_field naming the id is refused", func(t *testing.T) {
+		_, err := resolveChainedElasticAuth("https://es", credential.SecretMaterial{
+			Data:  map[string]string{"id": id, "api_key": raw},
+			Field: "id",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must name the api key")
+	})
+
+	t.Run("a raw half with no id is incomplete", func(t *testing.T) {
+		_, err := resolveChainedElasticAuth("https://es", credential.SecretMaterial{
+			Data:  map[string]string{"api_key": raw},
+			Field: "api_key",
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+	})
+
+	t.Run("empty material is incomplete", func(t *testing.T) {
+		_, err := resolveChainedElasticAuth("https://es", credential.SecretMaterial{
+			Data: map[string]string{},
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+	})
+}
+
+func TestElasticDriver_MintFromSecret(t *testing.T) {
+	var sawAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_security/api_key", func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":         "minted-key",
+			"name":       "warden-chained",
+			"encoded":    testEncodedAPIKey("minted-key", "minted-secret"),
+			"expiration": time.Now().Add(time.Hour).UnixMilli(),
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	d := newChainedElasticDriver(t, srv.URL)
+
+	rawData, _, ttl, leaseID, err := d.MintFromSecret(context.TODO(),
+		&credential.CredSpec{Name: "chained-spec", Config: map[string]string{}},
+		credential.SecretMaterial{
+			Data:  map[string]string{"api_key": testEncodedAPIKey("cluster-id", "cluster-secret")},
+			Field: "api_key",
+		})
+	require.NoError(t, err)
+
+	assert.Equal(t, "ApiKey "+testEncodedAPIKey("cluster-id", "cluster-secret"), sawAuth,
+		"the fetched key is what authenticates the create")
+	assert.Equal(t, testEncodedAPIKey("minted-key", "minted-secret"), rawData["api_key"])
+	assert.Equal(t, "elastic:minted-key", leaseID)
+	assert.Positive(t, ttl)
+}
+
+// A refusal on the chained path marks the fetched key as stale so the minting
+// layer evicts what it cached and retries once. An inline source has nothing to
+// evict, so it must not carry the marker.
+func TestElasticDriver_MintFromSecret_MarksRejectedKey(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_security/api_key", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	spec := &credential.CredSpec{Name: "chained-spec", Config: map[string]string{}}
+
+	d := newChainedElasticDriver(t, srv.URL)
+	_, _, _, _, err := d.MintFromSecret(context.TODO(), spec, credential.SecretMaterial{
+		Data:  map[string]string{"api_key": testEncodedAPIKey("cluster-id", "stale")},
+		Field: "api_key",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, credential.ErrChainedSecretRejected)
+
+	inline := newTestElasticDriver(t, srv.URL)
+	_, _, _, _, err = inline.MintCredential(context.TODO(), spec)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected,
+		"an inline source has no fetched secret to evict")
+}
+
+// A chained spec routes through MintFromSecret. Reaching MintCredential means
+// that routing was bypassed, and there is no inline key here to fall back to.
+func TestElasticDriver_MintCredential_RefusesChained(t *testing.T) {
+	d := newChainedElasticDriver(t, "https://unused.example.com")
+
+	_, _, _, _, err := d.MintCredential(context.TODO(),
+		&credential.CredSpec{Name: "chained-spec", Config: map[string]string{}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential chaining")
+}
+
+// Revocation runs at lease expiry, where a chained source has neither a stored
+// key to authorise the delete nor a caller to walk the chain with. Returning an
+// error would only buy a week of retries for a request that cannot succeed.
+func TestElasticDriver_Revoke_ChainedIsANoOp(t *testing.T) {
+	var reached int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d := newChainedElasticDriver(t, srv.URL)
+
+	require.NoError(t, d.Revoke(context.TODO(), "elastic:minted-key"))
+	assert.Zero(t, reached, "there is nothing to revoke with")
+}
+
+func TestElasticDriver_VerifySpec_ChainedIsANoOp(t *testing.T) {
+	var reached int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	d := newChainedElasticDriver(t, srv.URL)
+
+	require.NoError(t, d.VerifySpec(context.TODO(), &credential.CredSpec{Name: "s"}))
+	assert.Zero(t, reached, "a chained source holds no key to verify")
 }

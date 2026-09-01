@@ -198,6 +198,16 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			errMsg:     "role_descriptors",
 		},
 		{
+			// elastic chains at the source, not the spec: the fetched key
+			// authenticates the source's own Security API calls. "not supported"
+			// would be false, so the message says where it belongs.
+			name:       "elastic source - spec-level secret_spec points at the source",
+			config:     map[string]string{credential.ConfigSecretSpec: "es-cluster-key"},
+			sourceType: credential.SourceTypeElastic,
+			wantErr:    true,
+			errMsg:     "set secret_spec on the source",
+		},
+		{
 			name:       "grafana source - no api_key required",
 			config:     map[string]string{"role": "Viewer"},
 			sourceType: credential.SourceTypeGrafana,

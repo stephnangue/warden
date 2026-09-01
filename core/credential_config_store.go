@@ -1162,6 +1162,15 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				if credential.GetString(spec.Config, "mint_method", "") != "access_keys" {
 					return logical.ErrBadRequestf("for an ibm source, set secret_spec on the source (the chained api key authenticates the source's own IAM token grant), not on the spec; a spec-level reference is for access_keys, whose credential is the referenced pair itself")
 				}
+			case credential.SourceTypeElastic:
+				// elastic chains only at the source: the fetched key authenticates
+				// its own Security API calls, and every spec on it creates a fresh
+				// cluster key rather than serving a stored one.
+				//
+				// The api_key type refuses this first and with the same guidance, so
+				// this is the layer that holds when the type registry is unavailable
+				// and credType is nil — the same reason the ovh arm below exists.
+				return logical.ErrBadRequestf("for an elastic source, set secret_spec on the source (the chained api key authenticates the source's own Security API calls), not on the spec")
 			}
 		}
 		// An oauth2 source that chains its client credential resolves the pair per mint,
