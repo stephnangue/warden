@@ -4,14 +4,9 @@ package fullchain
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
@@ -26,9 +21,9 @@ import (
 // fresh cluster key rather than serving a stored one — so a spec-level reference
 // means nothing and is refused, with the guidance to move it to the source.
 //
-// These rows are also the first end-to-end exercise of the elastic source driver
-// at all. The mount in elastic_test.go drives the *provider* off a local source,
-// which never reaches this code.
+// The inline half of this driver is next door in elastic_source_test.go. Neither
+// is reached by the mount in elastic_test.go, which drives the *provider* off a
+// local source and never enters the driver at all.
 
 const (
 	// Written to secret/data/e2e/elastic-cluster-key and -pair by setup.sh, in
@@ -52,81 +47,6 @@ const (
 // cluster as exactly this, which is what makes the two rows below comparable.
 var elasticChainedClusterEncoded = base64.StdEncoding.EncodeToString(
 	[]byte(elasticChainedClusterID + ":" + elasticChainedClusterKey))
-
-// elasticMintedFor derives the key the stub issues from the cluster key that
-// authenticated the create. Deriving rather than returning a constant is what
-// carries "which secret was spent" all the way to the header the gateway
-// injects — a fixed value would look identical whichever key performed the call.
-func elasticMintedFor(clusterKey string) string {
-	return base64.StdEncoding.EncodeToString([]byte("fc-es-minted:" + clusterKey))
-}
-
-// elasticClusterStub serves the one Security API call a mint makes, and records
-// which cluster key was presented so a row can assert what was actually spent
-// rather than inferring it from the injected header alone.
-type elasticClusterStub struct {
-	*httptest.Server
-
-	mu        sync.Mutex
-	presented []string
-}
-
-func (s *elasticClusterStub) record(key string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.presented = append(s.presented, key)
-}
-
-func (s *elasticClusterStub) observed() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.presented...)
-}
-
-func startElasticClusterStub(t *testing.T) *elasticClusterStub {
-	t.Helper()
-
-	stub := &elasticClusterStub{}
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/_security/api_key", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		clusterKey, ok := strings.CutPrefix(r.Header.Get("Authorization"), "ApiKey ")
-		if !ok || clusterKey == "" {
-			http.Error(w, "missing ApiKey credential", http.StatusUnauthorized)
-			return
-		}
-
-		var body map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "bad json", http.StatusBadRequest)
-			return
-		}
-		// A key created without an expiration never expires, and nothing revokes a
-		// chained mint's key at lease end — so refuse here too. A cluster that
-		// accepted it would let that regression pass as a green row.
-		if exp, _ := body["expiration"].(string); exp == "" {
-			http.Error(w, "refusing to create a key with no expiration", http.StatusBadRequest)
-			return
-		}
-
-		stub.record(clusterKey)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"id":         "fc-es-minted",
-			"name":       body["name"],
-			"encoded":    elasticMintedFor(clusterKey),
-			"expiration": time.Now().Add(time.Hour).UnixMilli(),
-		})
-	})
-
-	stub.Server = httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	return stub
-}
 
 func elasticMustWrite(t *testing.T, method, path, body, what string) {
 	t.Helper()
