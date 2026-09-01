@@ -97,6 +97,22 @@ func TestRevocableRequiresLeaseID(t *testing.T) {
 			rawData:   map[string]interface{}{"api_token": "v1.0-test-token"},
 			leaseID:   "cf-lease",
 		},
+		{
+			// api_key is served by two families, and the leaseID is what tells
+			// them apart. The store-backed readers — the apikey and local specs,
+			// the vault static_apikey read, the aws secrets_manager read — return
+			// neither a TTL nor a leaseID, and must stay non-revocable: the key is
+			// someone else's to destroy. The drivers that create a key upstream
+			// (elastic, grafana, honeycomb) return both, and are revoked at
+			// session end.
+			//
+			// Not reachable: no api_key path returns a TTL without a leaseID.
+			name:      "api_key",
+			reachable: false,
+			credType:  NewAPIKeyCredType(),
+			rawData:   map[string]interface{}{"api_key": "sk-xxxxxxxxxxxxxxxxxxxx"},
+			leaseID:   "elastic:abc123",
+		},
 	}
 
 	for _, tt := range tests {

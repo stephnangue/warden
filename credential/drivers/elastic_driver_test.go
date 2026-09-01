@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -247,7 +248,109 @@ func newElasticMockServer(t *testing.T) *httptest.Server {
 		}
 	})
 
+	// Query API keys, which the rotation orphan sweep uses. The default cluster
+	// holds no orphans; tests that want some use newElasticSweepServer.
+	mux.HandleFunc("/_security/_query/api_key", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"api_keys": []interface{}{},
+			"total":    0,
+			"count":    0,
+		})
+	})
+
 	return httptest.NewServer(mux)
+}
+
+// elasticSweepServer is a cluster that holds rotation keys and records what the
+// sweep asked of it, so a test can assert both the scoping of the query and the
+// set of keys the sweep chose to invalidate.
+type elasticSweepServer struct {
+	*httptest.Server
+
+	// keys are the api keys the query endpoint reports, by id.
+	keys []string
+
+	lastQuery       map[string]interface{}
+	lastInvalidated []string
+}
+
+func newElasticSweepServer(t *testing.T, keys ...string) *elasticSweepServer {
+	t.Helper()
+
+	s := &elasticSweepServer{keys: keys}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/_security/_authenticate", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"username": "warden-service",
+			"enabled":  true,
+			"api_key":  map[string]interface{}{"id": "source-key-id"},
+		})
+	})
+
+	mux.HandleFunc("/_security/_query/api_key", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&s.lastQuery)
+
+		found := make([]interface{}, 0, len(s.keys))
+		for _, id := range s.keys {
+			found = append(found, map[string]interface{}{"id": id, "name": "warden-source-rotated-1"})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"api_keys": found})
+	})
+
+	mux.HandleFunc("/_security/api_key", func(w http.ResponseWriter, r *http.Request) {
+		var reqBody map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&reqBody)
+
+		switch r.Method {
+		case http.MethodDelete:
+			ids, _ := reqBody["ids"].([]interface{})
+			s.lastInvalidated = nil
+			for _, id := range ids {
+				if v, ok := id.(string); ok {
+					s.lastInvalidated = append(s.lastInvalidated, v)
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"invalidated_api_keys":            s.lastInvalidated,
+				"previously_invalidated_api_keys": []string{},
+				"error_count":                     0,
+			})
+		default:
+			name, _ := reqBody["name"].(string)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":      "new-key-id-123",
+				"name":    name,
+				"encoded": testEncodedAPIKey("new-key-id-123", "new-secret"),
+			})
+		}
+	})
+
+	s.Server = httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	return s
+}
+
+// newElasticInvalidateServer answers every invalidate with a fixed body, so the
+// per-key outcomes the cluster reports under a 200 can be driven directly.
+func newElasticInvalidateServer(t *testing.T, body map[string]interface{}) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_security/api_key", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(body)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 func newTestElasticDriver(t *testing.T, serverURL string) *ElasticDriver {
@@ -262,6 +365,7 @@ func newTestElasticDriver(t *testing.T, serverURL string) *ElasticDriver {
 		},
 		httpClient:     &http.Client{Timeout: 5 * time.Second},
 		sourceAPIKeyID: "source-key-id",
+		sourceUsername: "warden-service",
 	}
 }
 
@@ -582,13 +686,16 @@ func TestElasticDriver_CommitRotation(t *testing.T) {
 	assert.NotEqual(t, oldAPIKeyID, d.sourceAPIKeyID)
 }
 
-func TestElasticDriver_CommitRotation_RollbackOnFailure(t *testing.T) {
+// A failed commit must NOT put the old config back. The rotation manager
+// persists the new config before calling CommitRotation, so restoring the old
+// one here would leave this instance authenticating as a key storage no longer
+// records — and the next cycle would then mint a replacement for that key,
+// stranding a new one every time it failed.
+func TestElasticDriver_CommitRotation_KeepsNewConfigOnFailure(t *testing.T) {
 	srv := newElasticMockServer(t)
 	defer srv.Close()
 
 	d := newTestElasticDriver(t, srv.URL)
-	originalConfig := d.credSource.Config
-	originalKeyID := d.sourceAPIKeyID
 
 	// Provide an invalid key so authentication fails
 	newConfig := map[string]string{
@@ -601,9 +708,9 @@ func TestElasticDriver_CommitRotation_RollbackOnFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to authenticate")
 
-	// Config should be rolled back
-	assert.Equal(t, originalConfig["api_key"], d.credSource.Config["api_key"])
-	assert.Equal(t, originalKeyID, d.sourceAPIKeyID)
+	assert.Equal(t, "invalid-key", d.credSource.Config["api_key"],
+		"driver must keep the config the manager already persisted")
+	assert.Equal(t, "bad-key-id", d.sourceAPIKeyID)
 }
 
 func TestElasticDriver_CleanupRotation(t *testing.T) {
@@ -683,17 +790,34 @@ func TestElasticDriverFactory_Create_WithExplicitKeyID(t *testing.T) {
 	defer srv.Close()
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-
 	f := &ElasticDriverFactory{}
-	driver, err := f.Create(map[string]string{
-		"elastic_url": srv.URL,
-		"api_key":     testEncodedAPIKey("source-key-id", "source-secret"),
-		"api_key_id":  "explicit-id",
-	}, log)
-	require.NoError(t, err)
 
-	elasticDriver := driver.(*ElasticDriver)
-	assert.Equal(t, "explicit-id", elasticDriver.sourceAPIKeyID, "should use explicit api_key_id over decoded")
+	t.Run("agreeing with the encoded key", func(t *testing.T) {
+		driver, err := f.Create(map[string]string{
+			"elastic_url": srv.URL,
+			"api_key":     testEncodedAPIKey("source-key-id", "source-secret"),
+			"api_key_id":  "source-key-id",
+		}, log)
+		require.NoError(t, err)
+
+		elasticDriver := driver.(*ElasticDriver)
+		assert.Equal(t, "source-key-id", elasticDriver.sourceAPIKeyID)
+		assert.Equal(t, "warden-service", elasticDriver.sourceUsername,
+			"the sweep is scoped by this, so it must be discovered at create")
+	})
+
+	// Nothing downstream re-derives the id, and rotation cleanup spends it on a
+	// DELETE — so an id that names a different key than the one being
+	// authenticated with would invalidate whatever key it does name.
+	t.Run("disagreeing with the encoded key is refused", func(t *testing.T) {
+		_, err := f.Create(map[string]string{
+			"elastic_url": srv.URL,
+			"api_key":     testEncodedAPIKey("source-key-id", "source-secret"),
+			"api_key_id":  "explicit-id",
+		}, log)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not match the id encoded in api_key")
+	})
 }
 
 func TestElasticDriverFactory_Create_InvalidKey(t *testing.T) {
@@ -845,4 +969,274 @@ func TestElasticDriver_ImplementsInterfaces(t *testing.T) {
 	var _ credential.SourceDriver = (*ElasticDriver)(nil)
 	var _ credential.Rotatable = (*ElasticDriver)(nil)
 	var _ credential.SpecVerifier = (*ElasticDriver)(nil)
+}
+
+// ============================================================================
+// Invalidation outcome tests
+//
+// Elasticsearch answers an invalidate request with 200 and reports the per-key
+// outcome in the body, so the status alone says nothing about whether anything
+// was actually invalidated.
+// ============================================================================
+
+func TestElasticDriver_Revoke_ReportsClusterRefusal(t *testing.T) {
+	srv := newElasticInvalidateServer(t, map[string]interface{}{
+		"invalidated_api_keys":            []string{},
+		"previously_invalidated_api_keys": []string{},
+		"error_count":                     1,
+		"error_details": []map[string]interface{}{
+			{"type": "security_exception", "reason": "unauthorized for user [warden-service]"},
+		},
+	})
+
+	d := newTestElasticDriver(t, srv.URL)
+
+	err := d.Revoke(context.TODO(), "elastic:some-key-id")
+	require.Error(t, err, "a refused invalidation must not read as success")
+	assert.Contains(t, err.Error(), "security_exception")
+	assert.Contains(t, err.Error(), "unauthorized")
+}
+
+func TestElasticDriver_CleanupRotation_ReportsClusterRefusal(t *testing.T) {
+	srv := newElasticInvalidateServer(t, map[string]interface{}{
+		"invalidated_api_keys":            []string{},
+		"previously_invalidated_api_keys": []string{},
+		"error_count":                     1,
+		"error_details": []map[string]interface{}{
+			{"type": "security_exception", "reason": "unauthorized"},
+		},
+	})
+
+	d := newTestElasticDriver(t, srv.URL)
+
+	// This is the case that matters most: a cleanup reported as done while the
+	// old source key is still live is a rotation that did not rotate.
+	err := d.CleanupRotation(context.TODO(), map[string]string{"api_key_id": "old-key-id"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to invalidate old API key")
+}
+
+func TestElasticDriver_Revoke_AcceptsAlreadyInvalidatedKey(t *testing.T) {
+	srv := newElasticInvalidateServer(t, map[string]interface{}{
+		"invalidated_api_keys":            []string{},
+		"previously_invalidated_api_keys": []string{"some-key-id"},
+		"error_count":                     0,
+	})
+
+	d := newTestElasticDriver(t, srv.URL)
+
+	require.NoError(t, d.Revoke(context.TODO(), "elastic:some-key-id"),
+		"a key that is already invalidated leaves nothing live, so this is success")
+}
+
+// A key that is gone entirely must not fail either. Cleanup failures are
+// retried daily for a week before being abandoned, so calling this a failure
+// buys a week of retries for a request that can never succeed.
+func TestElasticDriver_CleanupRotation_AcceptsMissingKey(t *testing.T) {
+	srv := newElasticInvalidateServer(t, map[string]interface{}{
+		"invalidated_api_keys":            []string{},
+		"previously_invalidated_api_keys": []string{},
+		"error_count":                     1,
+		"error_details": []map[string]interface{}{
+			{"type": "resource_not_found_exception", "reason": "no API key owned by requesting user found for id [old-key-id]"},
+		},
+	})
+
+	d := newTestElasticDriver(t, srv.URL)
+
+	require.NoError(t, d.CleanupRotation(context.TODO(), map[string]string{"api_key_id": "old-key-id"}))
+}
+
+func TestElasticDriver_Revoke_RejectsEmptyKeyID(t *testing.T) {
+	d := newTestElasticDriver(t, "https://unused.example.com")
+
+	// "elastic:" clears a naive TrimPrefix guard and would post {"ids":[""]}.
+	err := d.Revoke(context.TODO(), "elastic:")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid lease ID format")
+}
+
+// ============================================================================
+// Rotation orphan sweep
+// ============================================================================
+
+func TestElasticDriver_PrepareRotation_SweepsOrphansButNotTheLiveKey(t *testing.T) {
+	srv := newElasticSweepServer(t, "source-key-id", "abandoned-1", "abandoned-2")
+
+	d := newTestElasticDriver(t, srv.URL)
+
+	_, _, _, err := d.PrepareRotation(context.TODO())
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, []string{"abandoned-1", "abandoned-2"}, srv.lastInvalidated,
+		"every rotation key but the one in use should be reclaimed")
+	assert.NotContains(t, srv.lastInvalidated, "source-key-id",
+		"the key this source authenticates with must be excluded by id")
+}
+
+// The sweep issues an authenticated bulk DELETE, so what it is allowed to match
+// is the whole of its safety. A filter that is not bound to this source's own
+// cluster principal would reach the mid-rotation keys of every other elastic
+// source sharing the cluster.
+func TestElasticDriver_PrepareRotation_SweepIsScopedToThisPrincipal(t *testing.T) {
+	srv := newElasticSweepServer(t, "source-key-id")
+
+	d := newTestElasticDriver(t, srv.URL)
+
+	_, _, _, err := d.PrepareRotation(context.TODO())
+	require.NoError(t, err)
+
+	require.NotNil(t, srv.lastQuery, "the sweep must query before it deletes")
+	encoded, err := json.Marshal(srv.lastQuery)
+	require.NoError(t, err)
+	query := string(encoded)
+
+	assert.Contains(t, query, `"username":"warden-service"`)
+	assert.Contains(t, query, `"invalidated":false`)
+	assert.Contains(t, query, `"metadata.managed_by":"warden"`)
+	assert.Contains(t, query, `"metadata.purpose":"source_rotation"`)
+}
+
+// A cluster that cannot answer the listing must not block the rotation: the
+// sweep is a reclamation, not a precondition.
+func TestElasticDriver_PrepareRotation_SucceedsWhenSweepCannotList(t *testing.T) {
+	srv := newElasticMockServer(t) // has no orphans, and answers the query with none
+	defer srv.Close()
+
+	d := newTestElasticDriver(t, srv.URL)
+	d.sourceUsername = "" // as if the username were never discovered
+
+	newConfig, cleanupConfig, _, err := d.PrepareRotation(context.TODO())
+	require.NoError(t, err)
+	assert.Equal(t, "new-key-id-123", newConfig["api_key_id"])
+	assert.Equal(t, "source-key-id", cleanupConfig["api_key_id"])
+}
+
+// ============================================================================
+// Concurrency
+// ============================================================================
+
+// Mint reads the config while a commit replaces it. Run under -race, this is
+// what pins the snapshot: the config is a whole map that rotation swaps, and
+// reading it unsynchronised from the request path is a data race however benign
+// the values look.
+func TestElasticDriver_MintRacesCommitRotation(t *testing.T) {
+	srv := newElasticMockServer(t)
+	defer srv.Close()
+
+	d := newTestElasticDriver(t, srv.URL)
+
+	spec := &credential.CredSpec{Name: "race-spec", Config: map[string]string{}}
+
+	// Each goroutine loops: the unsynchronised read was a narrow window at the
+	// top of the mint, so a single pass each could pass on timing alone.
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				// The error is not the point; reaching the config safely is.
+				_, _, _, _, _ = d.MintCredential(context.TODO(), spec)
+			}
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				_ = d.CommitRotation(context.TODO(), map[string]string{
+					"elastic_url": srv.URL,
+					"api_key":     testEncodedAPIKey(fmt.Sprintf("rotated-%d-%d", n, j), "secret"),
+					"api_key_id":  fmt.Sprintf("rotated-%d-%d", n, j),
+				})
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+// ============================================================================
+// Authentication and URL handling
+// ============================================================================
+
+func TestElasticDriver_VerifyRejectsDisabledPrincipal(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_security/_authenticate", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"username": "warden-service",
+			"enabled":  false,
+			"api_key":  map[string]interface{}{"id": "source-key-id"},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	d := newTestElasticDriver(t, srv.URL)
+
+	err := d.VerifySpec(context.TODO(), &credential.CredSpec{Name: "s"})
+	require.Error(t, err, "a disabled principal answers _authenticate but cannot mint")
+	assert.Contains(t, err.Error(), "disabled")
+}
+
+func TestElasticDriver_TrailingSlashInURLIsTrimmed(t *testing.T) {
+	var paths []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"username": "warden-service",
+			"enabled":  true,
+			"api_key":  map[string]interface{}{"id": "source-key-id"},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	d := newTestElasticDriver(t, srv.URL+"/")
+
+	require.NoError(t, d.VerifySpec(context.TODO(), &credential.CredSpec{Name: "s"}))
+	require.Len(t, paths, 1)
+	assert.Equal(t, "/_security/_authenticate", paths[0],
+		"a configured trailing slash must not reach the cluster as a doubled separator")
+}
+
+// ============================================================================
+// Expiration
+// ============================================================================
+
+// A key created without an expiration never expires. The driver's 1h default
+// only applies when the field is absent, so a set-but-empty value would reach
+// the cluster as "no expiration" — a permanent key from a spec that looks like
+// it asked for a lifetime.
+func TestElasticDriver_MintCredential_RejectsEmptyExpiration(t *testing.T) {
+	srv := newElasticMockServer(t)
+	defer srv.Close()
+
+	d := newTestElasticDriver(t, srv.URL)
+
+	_, _, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
+		Name:   "test-spec",
+		Config: map[string]string{"expiration": ""},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty expiration")
+}
+
+func TestElasticDriver_MintCredential_ReturnsKeyMetadata(t *testing.T) {
+	srv := newElasticMockServer(t)
+	defer srv.Close()
+
+	d := newTestElasticDriver(t, srv.URL)
+
+	_, metadata, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
+		Name:   "test-spec",
+		Config: map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, metadata, "the audit record should name the key that was created")
+	assert.Equal(t, "new-key-id-123", metadata["key_id"])
 }

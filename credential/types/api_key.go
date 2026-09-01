@@ -1,7 +1,10 @@
 package types
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/stephnangue/warden/credential"
 )
@@ -44,7 +47,21 @@ func NewAPIKeyCredType() *APIKeyCredType {
 					},
 				},
 			},
-			Revocable: false, // Static API keys are not revocable via lease
+			// Revocable where a lease exists. Parse gates this on a non-empty
+			// leaseID, so the sources that read a key out of a store — the apikey
+			// and local specs, the vault static_apikey read, the aws
+			// secrets_manager read — stay non-revocable: they hand back a key they
+			// did not create and return no lease, and revoking one would destroy a
+			// secret somebody else owns.
+			//
+			// The sources that CREATE a key upstream do return one, and every one
+			// of them implements a Revoke that invalidates it. Left false, that
+			// lease reached nothing: the expiration manager is only told about a
+			// credential the type calls revocable, so a key minted for a caller
+			// outlived the session it was minted for and sat at the upstream until
+			// its own expiry — which an elastic spec may set to 30d, and which a
+			// grafana service-account token does not have at all.
+			Revocable: true,
 		},
 	}
 }
@@ -85,6 +102,53 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("application_key").
 			Describe("Second API key some providers require alongside api_key (optional; datadog)").
 			Example("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+
+		// Mint parameters for the sources that create a key upstream rather than
+		// reading one out of a store. They shape the request the driver makes;
+		// none of them is part of the credential.
+		//
+		// Declared for the same reason as the adjuncts above: an undeclared
+		// spec-config key is masked on read, since the type has no basis for
+		// calling an unrecognised key public. Left undeclared, an operator reading
+		// back a spec would find the indices their key is scoped to displayed as a
+		// secret.
+		credential.StringField("expiration").
+			Describe("Key lifetime, as an Elasticsearch time value (elastic; default 1h)").
+			Example("24h"),
+
+		credential.StringField("role_descriptors").
+			Describe("JSON role descriptors scoping the key's privileges (elastic)").
+			Example(`{"reader":{"indices":[{"names":["logs-*"],"privileges":["read"]}]}}`),
+
+		credential.StringField("role").
+			OneOf("Viewer", "Editor", "Admin").
+			Describe("Service-account role (grafana)").
+			Example("Viewer"),
+
+		credential.StringField("name_prefix").
+			Describe("Prefix for the generated service-account name (grafana)").
+			Example("warden"),
+
+		credential.StringField("org_id").
+			Describe("Organization the service account is created in (grafana)").
+			Example("1"),
+
+		credential.StringField("key_type").
+			OneOf("ingest", "configuration").
+			Describe("Which kind of key to create (honeycomb)").
+			Example("ingest"),
+
+		credential.StringField("key_name_prefix").
+			Describe("Prefix for the generated key name (honeycomb)").
+			Example("warden"),
+
+		credential.StringField("environment_id").
+			Describe("Environment the key is created in (honeycomb)").
+			Example("hcaen_xxxxxxxxxxxx"),
+
+		credential.StringField("permissions").
+			Describe("JSON permissions for a configuration key (honeycomb)").
+			Example(`{"create_datasets":true}`),
 
 		// Store-backed sources (vault static_apikey, aws secrets_manager)
 		credential.StringField("mint_method").
@@ -155,12 +219,23 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 // holds connection info (api_url). This allows multiple specs with different
 // API keys to share one source.
 func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType string) error {
-	// Step 1: Validate source type compatibility
+	// Step 1: Validate source type compatibility.
+	//
+	// Two families reach this type. One holds the key in the spec or reads it out
+	// of a store; the other creates a fresh key at the upstream on every mint, and
+	// so carries no key in the spec at all — which is why the required-api_key
+	// check below is not reached for them.
+	//
+	// The second family was missing here, and its absence made all three of those
+	// drivers unreachable: their factories infer this type, no other type accepts
+	// their source, and so every spec written against one was refused. There is no
+	// second path to reach them.
 	switch sourceType {
-	case credential.SourceTypeAPIKey, credential.SourceTypeLocal, credential.SourceTypeVault, credential.SourceTypeAWS:
+	case credential.SourceTypeAPIKey, credential.SourceTypeLocal, credential.SourceTypeVault, credential.SourceTypeAWS,
+		credential.SourceTypeElastic, credential.SourceTypeGrafana, credential.SourceTypeHoneycomb:
 		// Supported
 	default:
-		return fmt.Errorf("api_key credentials require an apikey, local, vault, or aws source, got: %s", sourceType)
+		return fmt.Errorf("api_key credentials require an apikey, local, vault, aws, elastic, grafana, or honeycomb source, got: %s", sourceType)
 	}
 
 	// Step 2: Validate config against schema
@@ -198,6 +273,28 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 			return fmt.Errorf("'mint_method' must be 'secrets_manager' for an aws source, got: %s", config["mint_method"])
 		}
 		return validateAWSSecretsManagerSpecConfig(config)
+	case credential.SourceTypeElastic:
+		// The key is created at the cluster on every mint, so the spec carries
+		// none. What it carries is the shape of the key to create.
+		//
+		// An expiration is checked here rather than left to the cluster because a
+		// key minted without one never expires, and the driver's default is only
+		// applied when the field is absent: set-but-empty reaches the cluster as
+		// "no expiration". A spec that says expiration= reads as though it asked
+		// for something.
+		if raw, present := config["expiration"]; present {
+			if err := validateElasticTimeValue(raw); err != nil {
+				return fmt.Errorf("'expiration': %w", err)
+			}
+		}
+		if rd := config["role_descriptors"]; rd != "" {
+			if !json.Valid([]byte(rd)) {
+				return fmt.Errorf("'role_descriptors' is not valid JSON")
+			}
+		}
+	case credential.SourceTypeGrafana, credential.SourceTypeHoneycomb:
+		// As above: the key is created upstream per mint and the spec holds no
+		// key. Their mint parameters are validated by their own drivers.
 	default:
 		// apikey source: the api_key lives inline in the spec, unless it is sourced from
 		// another cred spec via credential chaining (secret_spec) — the two are mutually
@@ -213,6 +310,40 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 	}
 
 	return nil
+}
+
+// elasticTimeUnits are the suffixes an Elasticsearch time value may carry,
+// longest first so "ms" is matched before "s" and "micros" before "s".
+var elasticTimeUnits = []string{"nanos", "micros", "ms", "d", "h", "m", "s"}
+
+// validateElasticTimeValue checks a duration written the way Elasticsearch
+// writes them: an integer and a unit, no sign, no fractional part.
+//
+// This deliberately does not use time.ParseDuration. The two notations overlap
+// enough to look interchangeable and disagree exactly where it costs: Go rejects
+// "30d", the single most likely value for a key lifetime and the one the driver
+// documentation uses, while accepting "1.5h" and "-1h", which the cluster does
+// not.
+func validateElasticTimeValue(v string) error {
+	if v == "" {
+		return fmt.Errorf("must not be empty; omit it to take the default, or give a lifetime such as 24h or 30d")
+	}
+	for _, unit := range elasticTimeUnits {
+		digits, ok := strings.CutSuffix(v, unit)
+		if !ok || digits == "" {
+			continue
+		}
+		n, err := strconv.Atoi(digits)
+		if err != nil {
+			break
+		}
+		if n <= 0 {
+			return fmt.Errorf("must be positive, got: %s", v)
+		}
+		return nil
+	}
+	return fmt.Errorf("is not an Elasticsearch time value (an integer and one of %s), got: %s",
+		strings.Join(elasticTimeUnits, ", "), v)
 }
 
 // RequiresSpecRotation returns false — API keys live in source config, not spec.

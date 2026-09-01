@@ -10,6 +10,7 @@ import (
 
 	"github.com/openbao/openbao/sdk/v2/physical/inmem"
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/types"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
@@ -2709,4 +2710,90 @@ func TestCredentialConfigStore_RotationScheduleFollowsUpdates(t *testing.T) {
 		require.NoError(t, store.UpdateSpec(ctx, spec))
 		assert.Nil(t, specEntry(), "a spec with no rotation period must not stay enrolled")
 	})
+}
+
+// TestCredentialConfigStore_ValidateSpec_UpstreamMintingSources covers the
+// sources that create their credential at the upstream rather than holding one:
+// elastic, grafana and honeycomb. Their factories infer the api_key credential
+// type, and nothing else accepts their source type, so a gap in that type's
+// source allowlist made every spec written against them impossible to create —
+// the documented flow for all three failed at write time with no other route to
+// reach the driver.
+//
+// The driver registry is left nil so the create-time test mint is skipped: what
+// is under test is the validation chain, which needs no cluster.
+func TestCredentialConfigStore_ValidateSpec_UpstreamMintingSources(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	store.core.credentialTypeRegistry = credential.NewTypeRegistry()
+	require.NoError(t, types.RegisterBuiltinTypes(store.core.credentialTypeRegistry))
+	store.core.credentialDriverRegistry = nil
+
+	for _, sourceType := range []string{
+		credential.SourceTypeElastic,
+		credential.SourceTypeGrafana,
+		credential.SourceTypeHoneycomb,
+	} {
+		t.Run(sourceType, func(t *testing.T) {
+			source := &credential.CredSource{Name: sourceType + "-src", Type: sourceType}
+			require.NoError(t, store.CreateSource(ctx, source))
+
+			spec := &credential.CredSpec{
+				Name:   sourceType + "-spec",
+				Type:   credential.TypeAPIKey,
+				Source: source.Name,
+				MinTTL: 5 * time.Minute,
+				MaxTTL: 1 * time.Hour,
+				Config: map[string]string{},
+			}
+			require.NoError(t, store.CreateSpec(ctx, spec),
+				"a spec against a %s source must be creatable", sourceType)
+		})
+	}
+}
+
+// An elastic spec naming the key to create must be accepted. key_name is also a
+// credential field on an apikey source, and the adjunct check rejects credential
+// fields on a source that cannot carry them — so without an exemption this
+// documented mint parameter is refused, and the error tells the operator to
+// switch to an apikey source, which would not mint anything at all.
+func TestCredentialConfigStore_ValidateSpec_ElasticKeyNameIsAMintParameter(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	store.core.credentialTypeRegistry = credential.NewTypeRegistry()
+	require.NoError(t, types.RegisterBuiltinTypes(store.core.credentialTypeRegistry))
+	store.core.credentialDriverRegistry = nil
+
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "es-src", Type: credential.SourceTypeElastic,
+	}))
+
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name:   "es-scoped",
+		Type:   credential.TypeAPIKey,
+		Source: "es-src",
+		MinTTL: 5 * time.Minute,
+		MaxTTL: 1 * time.Hour,
+		Config: map[string]string{
+			"key_name":         "ingest-writer",
+			"expiration":       "24h",
+			"role_descriptors": `{"reader":{"indices":[{"names":["logs-*"],"privileges":["read"]}]}}`,
+		},
+	}))
+
+	// The same key on an apikey source is a credential field, and is still held
+	// to the declaration rule.
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "ak-src", Type: credential.SourceTypeAPIKey,
+	}))
+	err := store.CreateSpec(ctx, &credential.CredSpec{
+		Name:   "ak-spec",
+		Type:   credential.TypeAPIKey,
+		Source: "ak-src",
+		MinTTL: 5 * time.Minute,
+		MaxTTL: 1 * time.Hour,
+		Config: map[string]string{"api_key": "sk-test", "key_name": "prod"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential_fields")
 }
