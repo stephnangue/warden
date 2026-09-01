@@ -405,6 +405,24 @@ vault_api POST "secret/data/e2e/ibm-api-key" \
 vault_api POST "secret/data/e2e/ibm-cos-hmac" \
   '{"data":{"access_key_id":"E2EIBMCOSACCESSKEY00","secret_access_key":"e2e-ibm-cos-not-a-real-secret"}}'
 
+# The Elasticsearch cluster key an elastic source fetches per request instead of
+# storing. Two secrets, because the driver accepts the two shapes a vault holds
+# such a key in and chooses between them by whether an id travels alongside — a
+# branch worth driving through a real chain rather than only in unit tests.
+#
+# Pre-encoded: the base64 of "id:api_key" the cluster hands out as `encoded`,
+# which is what an operator copying from a create-key response will have.
+# Assembled with base64 rather than written out, for the reason elastic_test.go
+# gives: a literal blob of this length reads as a real credential to a secret
+# scanner however synthetic its contents.
+vault_api POST "secret/data/e2e/elastic-cluster-key" \
+  "{\"data\":{\"encoded\":\"$(printf 'e2e-es-cluster-id:e2e-es-cluster-not-a-real-secret' | base64)\"}}"
+
+# The pair shape: the raw key half beside its id, which is how a vault holds it
+# when the two were filed as separate fields.
+vault_api POST "secret/data/e2e/elastic-cluster-pair" \
+  '{"data":{"api_key":"e2e-es-cluster-not-a-real-secret","id":"e2e-es-cluster-id"}}'
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \
