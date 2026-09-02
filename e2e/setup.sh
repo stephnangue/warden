@@ -423,6 +423,14 @@ vault_api POST "secret/data/e2e/elastic-cluster-key" \
 vault_api POST "secret/data/e2e/elastic-cluster-pair" \
   '{"data":{"api_key":"e2e-es-cluster-not-a-real-secret","id":"e2e-es-cluster-id"}}'
 
+# The same pair under names the driver does not look for, plus a companion field
+# that must never be vended. The driver reads the id by name and secret_field
+# renames only the single secret, so a payload shaped like this is unusable until
+# the referenced spec projects it with json_key_map — which is the one way to
+# rename the id, and the reason this fixture exists.
+vault_api POST "secret/data/e2e/elastic-cluster-odd" \
+  '{"data":{"key":"e2e-es-cluster-not-a-real-secret","key_id":"e2e-es-cluster-id","unrelated_field":"must-not-be-vended"}}'
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \

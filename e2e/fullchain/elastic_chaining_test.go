@@ -37,6 +37,7 @@ const (
 	// setup before it reaches the cleanup that would have cleared it.
 	elasticEncodedSecretSpec = "fc-es-key-from-vault"
 	elasticPairSecretSpec    = "fc-es-pair-from-vault"
+	elasticOddSecretSpec     = "fc-es-odd-from-vault"
 	elasticChainSource       = "fc-es-keyless-src"
 	elasticChainSpec         = "fc-es-chain-cred"
 	elasticChainAgentRole    = "fc-es-chain-agent"
@@ -75,7 +76,7 @@ func elasticMustRefuse(t *testing.T, path, body, wantIn, what string) {
 // setupElasticChain stands up one chain: a referenced spec over the given Vault
 // secret, a source holding no key that names it, an ordinary spec, and a role
 // selecting that spec.
-func setupElasticChain(t *testing.T, subj scalewaySubject, secretSpec, secretPath, secretField string, stub *elasticClusterStub) {
+func setupElasticChain(t *testing.T, subj scalewaySubject, secretSpec, secretPath, secretField, keyMap string, stub *elasticClusterStub) {
 	t.Helper()
 
 	// The referenced spec is minted as the calling agent, and both subjects derive
@@ -93,10 +94,17 @@ func setupElasticChain(t *testing.T, subj scalewaySubject, secretSpec, secretPat
 	clear()
 	t.Cleanup(clear)
 
-	elasticMustWrite(t, "POST", "sys/cred/specs/"+secretSpec, fmt.Sprintf(`{
-		"type":"key_value","source":%q,"config":{
-			"mint_method":"kv2_read","kv2_mount":"secret","secret_path":%q,
-			"subject_token_source":%q}}`, subj.source, secretPath, subj.name),
+	// json_key_map projects the stored payload before it ever reaches the elastic
+	// driver. It is a kv2_read concern, not an elastic one — an elastic spec is
+	// refused the key outright — which is exactly why the projection has to happen
+	// on the referenced spec.
+	refCfg := fmt.Sprintf(`"mint_method":"kv2_read","kv2_mount":"secret","secret_path":%q,"subject_token_source":%q`,
+		secretPath, subj.name)
+	if keyMap != "" {
+		refCfg += fmt.Sprintf(`,"json_key_map":%q`, keyMap)
+	}
+	elasticMustWrite(t, "POST", "sys/cred/specs/"+secretSpec,
+		fmt.Sprintf(`{"type":"key_value","source":%q,"config":{%s}}`, subj.source, refCfg),
 		"create the referenced secret spec "+secretSpec)
 
 	// No api_key and no api_key_id: validation refuses a source that keeps either
@@ -136,16 +144,23 @@ func TestElasticChaining_SourceFetchesTheClusterKeyPerRequest(t *testing.T) {
 		secretSpec string
 		secretPath string
 		field      string
+		keyMap     string
 	}{
-		{"pre_encoded", elasticEncodedSecretSpec, "e2e/elastic-cluster-key", "encoded"},
-		{"raw_half_beside_its_id", elasticPairSecretSpec, "e2e/elastic-cluster-pair", "api_key"},
+		{"pre_encoded", elasticEncodedSecretSpec, "e2e/elastic-cluster-key", "encoded", ""},
+		{"raw_half_beside_its_id", elasticPairSecretSpec, "e2e/elastic-cluster-pair", "api_key", ""},
+		// Stored under names the driver does not look for. secret_field renames
+		// only the single secret, and the id is read by name — so this payload is
+		// unusable until the referenced spec projects it, which makes json_key_map
+		// the one way to rename the id. The companion field is dropped by the same
+		// projection and must never be spent as a credential.
+		{"odd_names_projected", elasticOddSecretSpec, "e2e/elastic-cluster-odd", "api_key", "key=api_key,key_id=id"},
 	}
 
 	for _, subj := range scalewaySubjects {
 		for _, shape := range shapes {
 			t.Run(subj.name+"/"+shape.name, func(t *testing.T) {
 				stub := startElasticClusterStub(t)
-				setupElasticChain(t, subj, shape.secretSpec, shape.secretPath, shape.field, stub)
+				setupElasticChain(t, subj, shape.secretSpec, shape.secretPath, shape.field, shape.keyMap, stub)
 				upstream.Reset()
 
 				status, body, _ := h.ChainRequest(t, leaderPort, elasticEnv, h.ChainOpts{
@@ -193,7 +208,7 @@ func TestElasticChaining_PlacementAndShapeAreEnforced(t *testing.T) {
 
 	stub := startElasticClusterStub(t)
 	setupElasticChain(t, scalewaySubjects[0], elasticEncodedSecretSpec,
-		"e2e/elastic-cluster-key", "encoded", stub)
+		"e2e/elastic-cluster-key", "encoded", "", stub)
 
 	t.Run("a spec may not carry a reference of its own", func(t *testing.T) {
 		elasticMustRefuse(t, "sys/cred/specs/fc-es-spec-chained",
@@ -242,4 +257,54 @@ func TestElasticChaining_InlineSourceStillNeedsAKey(t *testing.T) {
 		fmt.Sprintf(`{"type":"elastic","config":{"elastic_url":%q,"tls_skip_verify":"true"}}`, stub.URL),
 		"api_key",
 		"a source with neither a key nor a reference")
+}
+
+// TestElasticChaining_UnprojectedPayloadIsRefusedBeforeAnyClusterCall is the
+// other half of the projected row above: the same Vault secret, the same
+// consuming source, and no json_key_map.
+//
+// It pins that the projection is load-bearing rather than incidental. Without it
+// the payload fails at the first hurdle — secret_field names api_key and the
+// stored field is called key — and would fail at the second even if it did not,
+// since the id is read by name and secret_field renames only the single secret.
+//
+// What it asserts is where the failure lands. The resolver refuses on the
+// material alone, before authenticating, so the cluster is never called: an
+// incomplete secret must not be spent as a credential to find out it was
+// incomplete. That is also what separates this from a stale-secret refusal,
+// which would have reached the cluster and been told no — and which the minting
+// layer would then retry, having evicted a perfectly good cached secret.
+func TestElasticChaining_UnprojectedPayloadIsRefusedBeforeAnyClusterCall(t *testing.T) {
+	ensureEnv(t)
+
+	stub := startElasticClusterStub(t)
+	setupElasticChain(t, scalewaySubjects[0], elasticOddSecretSpec,
+		"e2e/elastic-cluster-odd", "api_key", "", stub)
+	stub.reset()
+	upstream.Reset()
+
+	status, body, _ := h.ChainRequest(t, leaderPort, elasticEnv, h.ChainOpts{
+		AgentToken: h.GetDefaultJWT(t),
+		Bearer:     h.FullChainUserJWT(t),
+		Role:       elasticChainAgentRole,
+		Path:       h.ProbePath("elastic-chained-unprojected"),
+	})
+	if status == 200 {
+		t.Fatalf("the request succeeded on a payload that carries no usable id: %s", string(body))
+	}
+	// Named specifically: any other 500 would pass a bare status check while
+	// meaning something entirely different.
+	if !strings.Contains(string(body), "chained secret material is incomplete") {
+		t.Errorf("the refusal did not name the incomplete material: %s", string(body))
+	}
+
+	if creates := stub.createdKeys(); len(creates) != 0 {
+		t.Errorf("the cluster was asked to create %d key(s) with material the driver could not resolve: %+v",
+			len(creates), creates)
+	}
+	// And nothing reached the upstream either, since there was no credential to
+	// inject.
+	if n := len(upstream.Requests()); n != 0 {
+		t.Errorf("the upstream saw %d request(s), want 0", n)
+	}
 }
