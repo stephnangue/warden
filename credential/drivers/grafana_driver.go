@@ -40,9 +40,25 @@ const (
 	grafanaSweepTimeout       = 2 * time.Minute
 )
 
+// GrafanaChainedMaxTokenExpiry bounds how long a token minted from a chained
+// source may live.
+//
+// Exported because the config store applies the same rule at spec-write time,
+// where an operator can act on it — it is the only layer that can see both the
+// spec's lifetime and whether its source is chained.
+//
+// Such a source cannot revoke: revocation runs at lease expiry, where there is no
+// caller to fetch the chained token as. So a minted token stays valid until its
+// own expiry however the lease ended — and a lease can end early, well before
+// token_expiry, leaving a live credential nothing will take back until the sweep
+// sees Grafana report it expired. That window is the exposure, and an operator
+// asking for 720h would be asking for a month of it.
+const GrafanaChainedMaxTokenExpiry = 24 * time.Hour
+
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*GrafanaDriver)(nil)
 var _ credential.SpecVerifier = (*GrafanaDriver)(nil)
+var _ credential.ChainedSecretMinter = (*GrafanaDriver)(nil)
 var _ credential.RotationConfigValidator = (*GrafanaDriverFactory)(nil)
 
 // GrafanaDriver mints tokens on a service account an operator provisioned.
@@ -58,6 +74,13 @@ var _ credential.RotationConfigValidator = (*GrafanaDriverFactory)(nil)
 // spec cannot ask for privilege the operator did not already grant. MintCredential
 // creates one token on the named account; Revoke deletes that one token, leaving
 // the account and every other token on it untouched.
+//
+// Held inline, the privileged token authenticates every call. Chained
+// (secret_spec), it is fetched per mint from a referenced spec as the calling
+// agent and kept nowhere — which leaves nothing to revoke with once the request
+// is over, since revocation runs at lease expiry where there is no caller to walk
+// the chain as. The minted token still expires on its own, and the sweep reclaims
+// what it leaves behind.
 type GrafanaDriver struct {
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
@@ -81,6 +104,9 @@ func (f *GrafanaDriverFactory) Type() string {
 
 // ValidateConfig validates Grafana source configuration using declarative schema.
 func (f *GrafanaDriverFactory) ValidateConfig(config map[string]string) error {
+	if err := validateGrafanaChainedConfig(config); err != nil {
+		return err
+	}
 	return credential.ValidateSchema(config,
 		credential.StringField("grafana_url").
 			Required().
@@ -90,9 +116,11 @@ func (f *GrafanaDriverFactory) ValidateConfig(config map[string]string) error {
 			Describe("Grafana API base URL").
 			Example("https://mystack.grafana.net"),
 
+		// Required only when the source holds its own token; a chained source is
+		// refused one outright. validateGrafanaChainedConfig enforces both halves of
+		// that, since the schema can express neither.
 		credential.StringField("admin_token").
-			Required().
-			Describe("Service-account token able to manage tokens on the provisioned account"),
+			Describe("Service-account token able to manage tokens on the provisioned account; required unless secret_spec is set"),
 
 		credential.StringField("service_account_id").
 			Custom(validateGrafanaServiceAccountID).
@@ -105,7 +133,42 @@ func (f *GrafanaDriverFactory) ValidateConfig(config map[string]string) error {
 
 		credential.BoolField("tls_skip_verify").
 			Describe("Skip TLS certificate verification (development only)"),
+
+		credential.StringField(credential.ConfigSecretSpec).
+			Describe("Cred spec yielding the privileged token, instead of storing one here").
+			Example("grafana-admin-token"),
+
+		credential.StringField(credential.ConfigSecretField).
+			Describe("Field of the referenced credential holding the privileged token").
+			Example("admin_token"),
+
+		credential.DurationField(credential.ConfigSecretCacheTTL).
+			Describe("How long to reuse the fetched token before re-fetching (default: no caching)").
+			Example("30m"),
 	)
+}
+
+// validateGrafanaChainedConfig holds a source to exactly one way of getting its
+// privileged token.
+//
+// A chained source keeps none of its own: keeping one would leave a source that
+// reads as keyless while storing the very secret chaining removes, and there is
+// nothing here that could use it — the fetched token authenticates every call, and
+// the paths that run without a caller are disabled rather than falling back to it.
+func validateGrafanaChainedConfig(config map[string]string) error {
+	if credential.GetString(config, credential.ConfigSecretSpec, "") == "" {
+		// The schema cannot express "required unless another key is set", so the
+		// non-chained requirement lands here alongside its opposite.
+		if credential.GetString(config, "admin_token", "") == "" {
+			return fmt.Errorf("admin_token is required unless %s is set", credential.ConfigSecretSpec)
+		}
+		return nil
+	}
+	if credential.GetString(config, "admin_token", "") != "" {
+		return fmt.Errorf("admin_token must be omitted when %s is set; the referenced spec supplies the privileged token",
+			credential.ConfigSecretSpec)
+	}
+	return nil
 }
 
 // SensitiveConfigFields returns source config keys that should be masked.
@@ -169,6 +232,12 @@ func (d *GrafanaDriver) warn(msg string, fields ...logger.TypedField) {
 	}
 }
 
+// isChained reports whether this source fetches its privileged token per mint
+// rather than holding one.
+func (d *GrafanaDriver) isChained() bool {
+	return credential.GetString(d.credSource.Config, credential.ConfigSecretSpec, "") != ""
+}
+
 // resolveGrafanaServiceAccountID returns the account a spec mints against: its own
 // service_account_id, or the source's default.
 //
@@ -196,6 +265,62 @@ func (d *GrafanaDriver) resolveGrafanaServiceAccountID(spec *credential.CredSpec
 // itself, and that id is what the lease carries: revocation deletes the one token,
 // not the account it hangs off.
 func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	// A chained spec mints through MintFromSecret, which the minting layer routes
+	// it to. Arriving here means that routing was bypassed, so fail rather than
+	// fall through to an inline token this source does not have.
+	if d.isChained() || spec.Config[credential.ConfigSecretSpec] != "" {
+		return nil, nil, 0, "", fmt.Errorf("grafana: %s is set (credential chaining); this spec mints from fetched secret material, not directly",
+			credential.ConfigSecretSpec)
+	}
+	return d.mintToken(ctx, d.getAdminToken(), spec, false)
+}
+
+// MintFromSecret mints from a privileged token fetched through credential
+// chaining, for a source that stores none of its own.
+func (d *GrafanaDriver) MintFromSecret(ctx context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	token, err := resolveChainedGrafanaToken(material)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+	return d.mintToken(ctx, token, spec, true)
+}
+
+// resolveChainedGrafanaToken reads the privileged token out of fetched secret
+// material.
+//
+// Grafana has one wire shape for this — an opaque bearer token — so unlike elastic
+// there is nothing here to disambiguate; the only question is which key of the
+// payload holds it.
+func resolveChainedGrafanaToken(material credential.SecretMaterial) (string, error) {
+	token := material.Secret()
+
+	// Fall back to conventional names ONLY when no field was resolved. A field that
+	// resolved to nothing is a misconfigured secret_field — say so, rather than
+	// silently authenticating with some other value from the payload.
+	if token == "" && material.Field == "" {
+		for _, key := range []string{"admin_token", "api_key", "token"} {
+			if token = material.Data[key]; token != "" {
+				break
+			}
+		}
+	}
+	if token == "" {
+		if material.Field != "" {
+			return "", fmt.Errorf("grafana: %s %q is empty or absent in the fetched secret material: %w",
+				credential.ConfigSecretField, material.Field, credential.ErrChainedSecretIncomplete)
+		}
+		return "", fmt.Errorf("grafana: no privileged token in fetched secret material (set %s, or store it under 'admin_token', 'api_key' or 'token'): %w",
+			credential.ConfigSecretField, credential.ErrChainedSecretIncomplete)
+	}
+	return token, nil
+}
+
+// mintToken creates one token on the spec's account.
+//
+// chained says where the privileged token it authenticates with came from, which
+// decides only how an authentication refusal is reported: a fetched token can be
+// stale and worth re-fetching, an inline one cannot.
+func (d *GrafanaDriver) mintToken(ctx context.Context, adminToken string, spec *credential.CredSpec, chained bool) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	saID, err := d.resolveGrafanaServiceAccountID(spec)
 	if err != nil {
 		return nil, nil, 0, "", err
@@ -233,6 +358,16 @@ func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.Cre
 		return nil, nil, 0, "", fmt.Errorf("token_expiry %s is under one second, which Grafana would read as a token that never expires; give a lifetime of 1s or more", tokenExpiry)
 	}
 
+	// A chained source cannot revoke, so a token it mints stays live until its own
+	// expiry — including when the lease ends early, which the sweep cannot help
+	// with because it only reclaims tokens Grafana already reports as expired.
+	// That window is the whole exposure, so it is bounded here rather than left to
+	// whatever an operator typed.
+	if chained && tokenExpiry > GrafanaChainedMaxTokenExpiry {
+		return nil, nil, 0, "", fmt.Errorf("token_expiry %s exceeds the %s ceiling for a chained source: revocation cannot run without a caller to fetch the token as, so a minted token stays live until it expires",
+			tokenExpiry, GrafanaChainedMaxTokenExpiry)
+	}
+
 	// Token names are unique per service account, and every spec now mints against
 	// an account it may share — so the name carries a random suffix as well as a
 	// timestamp. Two mints of the same spec in the same millisecond would otherwise
@@ -253,8 +388,16 @@ func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.Cre
 	// that refusal and report a failed mint while the token the first attempt
 	// created stands — unknown to Warden, and unrevokable until it expires.
 	path := fmt.Sprintf("/api/serviceaccounts/%s/tokens", url.PathEscape(saID))
-	respBody, _, err := d.doGrafanaRequestWith(ctx, http.MethodPost, path, body, grafanaCreateRetryConfig)
+	respBody, status, err := d.doGrafanaRequestWith(ctx, adminToken, http.MethodPost, path, body, grafanaCreateRetryConfig)
 	if err != nil {
+		// On the chained path a refusal to authenticate marks the fetched token as
+		// stale, so the minting layer evicts what it cached and retries once with a
+		// fresh read. An inline source has nothing to evict, and saying so would only
+		// send it round a loop that cannot change the outcome.
+		if chained && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+			return nil, nil, 0, "", fmt.Errorf("grafana: the server rejected the chained privileged token: %w (%w)",
+				credential.ErrChainedSecretRejected, err)
+		}
 		return nil, nil, 0, "", fmt.Errorf("failed to create token on service account %s: %w", saID, err)
 	}
 
@@ -305,7 +448,7 @@ func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.Cre
 		)
 	}
 
-	d.startSweep(saID)
+	d.startSweep(adminToken, saID)
 
 	return rawData, metadata, leaseTTL, leaseID, nil
 }
@@ -322,11 +465,24 @@ func (d *GrafanaDriver) Revoke(ctx context.Context, leaseID string) error {
 		return err
 	}
 
+	// A chained source holds no token to authorise the delete, and revocation runs
+	// at lease expiry, where there is no caller to walk the chain as. That will
+	// never change, so returning an error would only send the expiration manager
+	// into backoff and then a daily retry, forever, for a request that cannot
+	// succeed. The minted token carries its own expiry — which is why a mint is
+	// refused a lifetime Grafana would round to "never" — and a later mint's sweep
+	// reclaims it.
+	if d.isChained() {
+		d.warn("cannot revoke a token minted from a chained privileged token; it expires on its own and is swept on a later mint",
+			logger.String("lease", leaseID))
+		return nil
+	}
+
 	// 200 = deleted, 404 = already gone — both are success. Returning an error for a
 	// token that is no longer there would send the expiration manager into backoff
 	// and then a daily retry, forever, for a request that can never succeed.
 	path := fmt.Sprintf("/api/serviceaccounts/%s/tokens/%s", url.PathEscape(saID), url.PathEscape(tokenID))
-	if _, _, err := d.doGrafanaRequest(ctx, http.MethodDelete, path, nil, 200, 204, 404); err != nil {
+	if _, _, err := d.doGrafanaRequest(ctx, d.getAdminToken(), http.MethodDelete, path, nil, 200, 204, 404); err != nil {
 		return fmt.Errorf("failed to delete token %s: %w", leaseID, err)
 	}
 
@@ -366,8 +522,16 @@ func (d *GrafanaDriver) VerifySpec(ctx context.Context, spec *credential.CredSpe
 		return err
 	}
 
+	// A chained source holds no token to probe with — it is fetched per mint, as
+	// the caller, and there is no caller here. Belt and braces: the store does not
+	// call this for a chained spec at all, which is why the account id above is
+	// checked by the store rather than relied on here.
+	if d.isChained() {
+		return nil
+	}
+
 	path := fmt.Sprintf("/api/serviceaccounts/%s", url.PathEscape(saID))
-	respBody, status, err := d.doGrafanaRequest(ctx, http.MethodGet, path, nil)
+	respBody, status, err := d.doGrafanaRequest(ctx, d.getAdminToken(), http.MethodGet, path, nil)
 	if err != nil {
 		// Reading an account takes a scope that minting a token on it does not, so a
 		// deliberately write-scoped privileged token is a legitimate configuration.
@@ -423,17 +587,21 @@ var grafanaCreateRetryConfig = httputil.HTTPRetryConfig{
 // doGrafanaRequest executes an authenticated HTTP request to the Grafana API with
 // the default retry policy. Optional okStatuses override the default 2xx success
 // check (e.g. pass 200, 204, 404 to treat an already-deleted token as success).
-func (d *GrafanaDriver) doGrafanaRequest(ctx context.Context, method, path string, body []byte, okStatuses ...int) ([]byte, int, error) {
-	return d.doGrafanaRequestWith(ctx, method, path, body, defaultGrafanaRetryConfig, okStatuses...)
+func (d *GrafanaDriver) doGrafanaRequest(ctx context.Context, adminToken, method, path string, body []byte, okStatuses ...int) ([]byte, int, error) {
+	return d.doGrafanaRequestWith(ctx, adminToken, method, path, body, defaultGrafanaRetryConfig, okStatuses...)
 }
 
 // doGrafanaRequestWith is doGrafanaRequest with an explicit retry policy.
-func (d *GrafanaDriver) doGrafanaRequestWith(ctx context.Context, method, path string, body []byte, retry httputil.HTTPRetryConfig, okStatuses ...int) ([]byte, int, error) {
+//
+// The privileged token is passed in rather than read from config: a chained
+// source holds none, and the one it authenticates with belongs to the request
+// that fetched it.
+func (d *GrafanaDriver) doGrafanaRequestWith(ctx context.Context, adminToken, method, path string, body []byte, retry httputil.HTTPRetryConfig, okStatuses ...int) ([]byte, int, error) {
 	apiURL := d.getGrafanaURL() + path
 
 	headers := map[string]string{
 		"Accept":        "application/json",
-		"Authorization": "Bearer " + d.getAdminToken(),
+		"Authorization": "Bearer " + adminToken,
 	}
 	if body != nil {
 		headers["Content-Type"] = "application/json"
@@ -471,7 +639,7 @@ func (d *GrafanaDriver) doGrafanaRequestWith(ctx context.Context, method, path s
 // It runs detached, on its own context: a sweep is a list plus a delete per
 // reclaimed token, and run inline on the caller's context it would add that to the
 // tail of a live request, or be cancelled the moment the mint returns.
-func (d *GrafanaDriver) startSweep(saID string) {
+func (d *GrafanaDriver) startSweep(adminToken, saID string) {
 	// Claimed under the lock rather than with a check-then-set pair: concurrent
 	// mints on one account are the normal case, and a gap between them lets every
 	// one of them launch a sweep.
@@ -492,7 +660,7 @@ func (d *GrafanaDriver) startSweep(saID string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), grafanaSweepTimeout)
 		defer cancel()
-		if !d.sweepExpiredTokens(ctx, saID) {
+		if !d.sweepExpiredTokens(ctx, adminToken, saID) {
 			// Bring the next attempt forward. The interval above exists to stop a
 			// busy spec sweeping on every request, not to sit out an outage.
 			d.sweepMu.Lock()
@@ -514,9 +682,9 @@ func (d *GrafanaDriver) startSweep(saID string) {
 // token would be destroying objects this source does not own.
 // It reports whether the listing succeeded. A sweep that could not even read the
 // account has not done its job, and the caller brings the next attempt forward.
-func (d *GrafanaDriver) sweepExpiredTokens(ctx context.Context, saID string) bool {
+func (d *GrafanaDriver) sweepExpiredTokens(ctx context.Context, adminToken, saID string) bool {
 	path := fmt.Sprintf("/api/serviceaccounts/%s/tokens", url.PathEscape(saID))
-	respBody, _, err := d.doGrafanaRequest(ctx, http.MethodGet, path, nil)
+	respBody, _, err := d.doGrafanaRequest(ctx, adminToken, http.MethodGet, path, nil)
 	if err != nil {
 		d.warn("could not list service account tokens to reclaim expired ones",
 			logger.String("service_account_id", saID),
@@ -542,7 +710,7 @@ func (d *GrafanaDriver) sweepExpiredTokens(ctx context.Context, saID string) boo
 			continue
 		}
 		delPath := fmt.Sprintf("/api/serviceaccounts/%s/tokens/%d", url.PathEscape(saID), token.ID)
-		if _, _, err := d.doGrafanaRequest(ctx, http.MethodDelete, delPath, nil, 200, 204, 404); err != nil {
+		if _, _, err := d.doGrafanaRequest(ctx, adminToken, http.MethodDelete, delPath, nil, 200, 204, 404); err != nil {
 			// Another node sweeping the same account is expected and harmless; a
 			// real failure just leaves the token for the next sweep.
 			d.warn("could not reclaim an expired token",
