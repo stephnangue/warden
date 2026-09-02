@@ -155,6 +155,60 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			wantErr:    true,
 			errMsg:     "api_key",
 		},
+		// --- Sources that create the key upstream ---
+		//
+		// These carry no api_key in the spec: the driver creates a fresh key at
+		// the upstream on every mint. Their absence from the allowlist made all
+		// three drivers unreachable, since nothing else accepts their source.
+		{
+			name:       "elastic source - no api_key required",
+			config:     map[string]string{},
+			sourceType: credential.SourceTypeElastic,
+			wantErr:    false,
+		},
+		{
+			name: "elastic source - full mint config",
+			config: map[string]string{
+				"key_name":         "ingest-writer",
+				"expiration":       "30d",
+				"role_descriptors": `{"reader":{"indices":[{"names":["logs-*"],"privileges":["read"]}]}}`,
+			},
+			sourceType: credential.SourceTypeElastic,
+			wantErr:    false,
+		},
+		{
+			name:       "elastic source - empty expiration is refused",
+			config:     map[string]string{"expiration": ""},
+			sourceType: credential.SourceTypeElastic,
+			wantErr:    true,
+			errMsg:     "must not be empty",
+		},
+		{
+			name:       "elastic source - Go duration notation is refused",
+			config:     map[string]string{"expiration": "1h30m"},
+			sourceType: credential.SourceTypeElastic,
+			wantErr:    true,
+			errMsg:     "not an Elasticsearch time value",
+		},
+		{
+			name:       "elastic source - malformed role_descriptors",
+			config:     map[string]string{"role_descriptors": "{not json"},
+			sourceType: credential.SourceTypeElastic,
+			wantErr:    true,
+			errMsg:     "role_descriptors",
+		},
+		{
+			name:       "grafana source - no api_key required",
+			config:     map[string]string{"role": "Viewer"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    false,
+		},
+		{
+			name:       "honeycomb source - no api_key required",
+			config:     map[string]string{"key_type": "ingest"},
+			sourceType: credential.SourceTypeHoneycomb,
+			wantErr:    false,
+		},
 		// --- Unsupported source types ---
 		{
 			name: "unsupported source type - github",
@@ -163,7 +217,7 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: "github",
 			wantErr:    true,
-			errMsg:     "require an apikey, local, vault, or aws source",
+			errMsg:     "require an apikey, local, vault, aws, elastic, grafana, or honeycomb source",
 		},
 		// --- Vault source ---
 		{
@@ -536,5 +590,24 @@ func TestAPIKeyCredType_KnownAdjunctFieldsAreDeclared(t *testing.T) {
 
 	for _, field := range ct.KnownAdjunctFields() {
 		assert.True(t, declared[field], "adjunct %q must be declared in ConfigSchema", field)
+	}
+}
+
+func TestValidateElasticTimeValue(t *testing.T) {
+	valid := []string{"1h", "24h", "30d", "90m", "45s", "500ms", "1000micros", "5nanos"}
+	for _, v := range valid {
+		t.Run("valid/"+v, func(t *testing.T) {
+			assert.NoError(t, validateElasticTimeValue(v))
+		})
+	}
+
+	// The Go-notation values are the point of having a parser of our own:
+	// time.ParseDuration accepts the last three and rejects "30d", which is the
+	// value the driver documentation leads with.
+	invalid := []string{"", "30", "d", "1.5h", "-1h", "1h30m", "30 days", "forever", "0h"}
+	for _, v := range invalid {
+		t.Run("invalid/"+v, func(t *testing.T) {
+			assert.Error(t, validateElasticTimeValue(v))
+		})
 	}
 }

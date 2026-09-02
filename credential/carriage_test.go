@@ -290,6 +290,32 @@ func TestUncarriedAdjunctFields(t *testing.T) {
 	assert.True(t, carriable)
 }
 
+// key_name is a credential field on an apikey source and the name of the key an
+// elastic source is about to create. Reporting the elastic one as uncarried
+// refuses a documented mint parameter, and tells the operator to move to an
+// apikey source to fix it.
+func TestUncarriedAdjunctFields_MintParametersAreNotCredentialFields(t *testing.T) {
+	carrier := stubAdjunctCarrier{fields: []string{"key_name", "organization_id"}}
+
+	fields, _ := UncarriedAdjunctFields(carrier,
+		map[string]string{"key_name": "ingest-writer"},
+		map[string]string{}, SourceTypeElastic)
+	assert.Empty(t, fields, "key_name is what the elastic driver names the key it creates")
+
+	// The exemption is scoped to the source that spends it on the mint, and to
+	// that name alone.
+	fields, _ = UncarriedAdjunctFields(carrier,
+		map[string]string{"key_name": "prod", "organization_id": "org"},
+		map[string]string{}, SourceTypeElastic)
+	assert.Equal(t, []string{"organization_id"}, fields)
+
+	fields, _ = UncarriedAdjunctFields(carrier,
+		map[string]string{"key_name": "prod"},
+		map[string]string{}, SourceTypeAPIKey)
+	assert.Equal(t, []string{"key_name"}, fields,
+		"on an apikey source key_name really is a credential field")
+}
+
 type stubAdjunctCarrier struct{ fields []string }
 
 func (s stubAdjunctCarrier) KnownAdjunctFields() []string { return s.fields }

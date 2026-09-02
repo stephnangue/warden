@@ -61,12 +61,38 @@ func UncarriedAdjunctFields(credType interface{}, specConfig, sourceConfig map[s
 		}
 	}
 
+	mintParams := mintParameterFields[sourceType]
+
 	for _, field := range carrier.KnownAdjunctFields() {
-		if specConfig[field] != "" && !declared[field] {
-			fields = append(fields, field)
+		if specConfig[field] == "" || declared[field] {
+			continue
 		}
+		// The same name means different things to different sources, so whether it
+		// describes the credential is not a property of the name alone. Skipping
+		// here rather than trimming the type's list keeps the helpful error for
+		// every source that does treat it as a credential field.
+		if _, isMintParam := mintParams[field]; isMintParam {
+			continue
+		}
+		fields = append(fields, field)
 	}
 	return fields, carriable
+}
+
+// mintParameterFields names, per source type, the spec-config keys that a
+// credential type lists as adjuncts but that this source spends on the mint
+// instead — so they are neither carried nor missing, and rejecting a spec for
+// setting one would refuse a documented parameter.
+//
+// It is deliberately keyed on the source type rather than added to
+// reservedSpecConfigKeys, because these names are not globally reserved. An
+// apikey spec's key_name really is a credential field: an operator names it in
+// credential_fields and a provider reads it. An elastic spec's key_name is the
+// name the cluster will give the key it creates, and never reaches the
+// credential at all. Reserving it globally would delete the check for the source
+// that needs it.
+var mintParameterFields = map[string]map[string]struct{}{
+	SourceTypeElastic: {"key_name": {}},
 }
 
 // reservedSpecConfigKeys are spec-config keys that address the mint itself —
