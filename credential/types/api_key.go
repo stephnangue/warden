@@ -244,11 +244,21 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 		return err
 	}
 
-	// Credential chaining is only meaningful for the apikey source, whose key is
-	// otherwise stored inline in the spec. The other source types fetch the key from
-	// their own backend (Vault KV / Secrets Manager), and local has no keyless path —
-	// reject secret_spec there rather than letting it fail late at mint time.
+	// Credential chaining at the SPEC level is only meaningful for the apikey
+	// source, whose key is otherwise stored inline in the spec. The store-backed
+	// sources fetch the key from their own backend, and local has no keyless path
+	// — reject secret_spec there rather than letting it fail late at mint time.
+	//
+	// An elastic source does chain, but the secret being chained is the cluster
+	// key that authenticates the source's own Security API calls, not this
+	// credential — so it belongs on the source, and a spec-level reference would
+	// leave the source's own setting unused at mint. Say which, since "not
+	// supported" would be false.
 	if config[credential.ConfigSecretSpec] != "" && sourceType != credential.SourceTypeAPIKey {
+		if sourceType == credential.SourceTypeElastic {
+			return fmt.Errorf("for an elastic source, set %s on the source (the chained api key authenticates the source's own Security API calls), not on the spec",
+				credential.ConfigSecretSpec)
+		}
 		return fmt.Errorf("secret_spec (credential chaining) is not supported with a %s source", sourceType)
 	}
 

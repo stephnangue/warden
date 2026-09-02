@@ -35,14 +35,17 @@ const elasticSweepPageSize = 100
 var _ credential.SourceDriver = (*ElasticDriver)(nil)
 var _ credential.Rotatable = (*ElasticDriver)(nil)
 var _ credential.SpecVerifier = (*ElasticDriver)(nil)
+var _ credential.ChainedSecretMinter = (*ElasticDriver)(nil)
 
-// ElasticDriver mints credentials from Elasticsearch clusters.
-// It creates API keys via the /_security/api_key endpoint and supports
-// rotation of the driver's own source API key.
+// ElasticDriver mints credentials from Elasticsearch clusters. Every spec on it
+// creates a scoped, expiring API key via /_security/api_key.
 //
-// The driver's source credentials (a pre-encoded API key) are used for:
-// - Minting new API keys for credential specs
-// - Rotating the source API key via the Security API
+// The cluster key those calls authenticate with comes from one of two places.
+// Held inline, it also rotates: the driver mints its own replacement through the
+// Security API and invalidates the old one. Chained (secret_spec), it is fetched
+// per mint from a referenced spec as the calling agent and kept nowhere, which
+// leaves nothing here to rotate — and nothing to revoke a minted key with once
+// the request is over, so those keys are left to their own expiration.
 type ElasticDriver struct {
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
@@ -96,6 +99,9 @@ func (f *ElasticDriverFactory) Type() string {
 
 // ValidateConfig validates Elasticsearch driver configuration using declarative schema
 func (f *ElasticDriverFactory) ValidateConfig(config map[string]string) error {
+	if err := validateElasticChainedConfig(config); err != nil {
+		return err
+	}
 	return credential.ValidateSchema(config,
 		credential.StringField("elastic_url").
 			Required().
@@ -119,9 +125,11 @@ func (f *ElasticDriverFactory) ValidateConfig(config map[string]string) error {
 			Describe("Elasticsearch cluster URL").
 			Example("https://my-cluster.es.us-east-1.aws.cloud.es.io"),
 
+		// Required only when the source holds its own key; a chained source is
+		// refused one outright. validateElasticChainedConfig enforces both halves
+		// of that, since the schema can express neither.
 		credential.StringField("api_key").
-			Required().
-			Describe("Pre-encoded Elasticsearch API key (base64 of id:api_key)").
+			Describe("Pre-encoded Elasticsearch API key (base64 of id:api_key); required unless secret_spec is set").
 			Example("dXNlcjpwYXNzd29yZA=="),
 
 		credential.StringField("api_key_id").
@@ -150,7 +158,45 @@ func (f *ElasticDriverFactory) ValidateConfig(config map[string]string) error {
 		credential.BoolField("tls_skip_verify").
 			Describe("Skip TLS certificate verification (development only)").
 			Example("false"),
+
+		credential.StringField(credential.ConfigSecretSpec).
+			Describe("Cred spec yielding the cluster API key, instead of storing one here").
+			Example("es-cluster-key"),
+
+		credential.StringField(credential.ConfigSecretField).
+			Describe("Field of the referenced credential holding the api key; an id, when one is needed, travels beside it under 'id'").
+			Example("api_key"),
+
+		credential.DurationField(credential.ConfigSecretCacheTTL).
+			Describe("How long to reuse the fetched cluster key before re-fetching (default: no caching)").
+			Example("30m"),
 	)
+}
+
+// validateElasticChainedConfig holds a source to exactly one way of getting its
+// cluster key.
+//
+// A chained source keeps neither the key — keeping it would leave a source that
+// reads as keyless while storing the very secret chaining removes — nor the id,
+// which is derived from the key and, kept beside a fetched one, would name one
+// key while presenting another's. There is nothing here for it to be used by
+// either: the id serves rotation cleanup, and a chained source does not rotate.
+func validateElasticChainedConfig(config map[string]string) error {
+	if credential.GetString(config, credential.ConfigSecretSpec, "") == "" {
+		// The schema cannot express "required unless another key is set", so the
+		// non-chained requirement lands here alongside its opposite.
+		if credential.GetString(config, "api_key", "") == "" {
+			return fmt.Errorf("api_key is required unless %s is set", credential.ConfigSecretSpec)
+		}
+		return nil
+	}
+	for _, key := range []string{"api_key", "api_key_id"} {
+		if credential.GetString(config, key, "") != "" {
+			return fmt.Errorf("%s must be omitted when %s is set; the referenced spec supplies the cluster key",
+				key, credential.ConfigSecretSpec)
+		}
+	}
+	return nil
 }
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
@@ -178,6 +224,14 @@ func (f *ElasticDriverFactory) Create(config map[string]string, log *logger.Gate
 		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 	}
 	driver.httpClient = httpClient
+
+	// A chained source holds nothing to decode and nothing to verify: the cluster
+	// key is fetched per mint, as the caller, and there is no caller at
+	// construction. Probing here would authenticate as whatever this source does
+	// not have, and fail every source create.
+	if driver.isChainedLocked() {
+		return driver, nil
+	}
 
 	encoded := credential.GetString(config, "api_key", "")
 
@@ -237,6 +291,41 @@ func (f *ElasticDriverFactory) Create(config map[string]string, log *logger.Gate
 func (d *ElasticDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	d.configMu.RLock()
 	auth := d.authSnapshotLocked()
+	chained := d.isChainedLocked()
+	d.configMu.RUnlock()
+
+	// A chained spec mints through MintFromSecret, which the minting layer routes
+	// it to. Arriving here means that routing was bypassed, so fail rather than
+	// fall through to an inline key this source does not have.
+	if chained || spec.Config[credential.ConfigSecretSpec] != "" {
+		return nil, nil, 0, "", fmt.Errorf("elastic: %s is set (credential chaining); this spec mints from fetched secret material, not directly",
+			credential.ConfigSecretSpec)
+	}
+
+	return d.mintAPIKey(ctx, auth, spec, false)
+}
+
+// MintFromSecret mints from a cluster API key fetched through credential
+// chaining, for a source that stores none of its own.
+func (d *ElasticDriver) MintFromSecret(ctx context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	d.configMu.RLock()
+	baseURL := d.authSnapshotLocked().baseURL
+	d.configMu.RUnlock()
+
+	auth, err := resolveChainedElasticAuth(baseURL, material)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+
+	return d.mintAPIKey(ctx, auth, spec, true)
+}
+
+// mintAPIKey creates one API key at the cluster. chained says where the
+// credential it authenticates with came from, which decides only how an
+// authentication refusal is reported: a fetched secret can be stale and worth
+// re-fetching, an inline one cannot.
+func (d *ElasticDriver) mintAPIKey(ctx context.Context, auth elasticAuth, spec *credential.CredSpec, chained bool) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	d.configMu.RLock()
 	prefix := credential.GetString(d.credSource.Config, "key_name_prefix", "warden")
 	d.configMu.RUnlock()
 
@@ -276,8 +365,16 @@ func (d *ElasticDriver) MintCredential(ctx context.Context, spec *credential.Cre
 		return nil, nil, 0, "", fmt.Errorf("failed to marshal create API key request: %w", err)
 	}
 
-	respBody, _, err := d.doElasticRequestWith(ctx, auth, http.MethodPost, "/_security/api_key", body, defaultElasticRetryConfig())
+	respBody, status, err := d.doElasticRequestWith(ctx, auth, http.MethodPost, "/_security/api_key", body, defaultElasticRetryConfig())
 	if err != nil {
+		// On the chained path a refusal to authenticate marks the fetched key as
+		// stale, so the minting layer evicts what it cached and retries once with
+		// a fresh read. An inline source has nothing to evict, and saying so would
+		// only send it round a loop that cannot change the outcome.
+		if chained && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+			return nil, nil, 0, "", fmt.Errorf("elastic: the cluster rejected the chained api key: %w (%w)",
+				credential.ErrChainedSecretRejected, err)
+		}
 		return nil, nil, 0, "", fmt.Errorf("failed to create Elasticsearch API key: %w", err)
 	}
 
@@ -342,7 +439,20 @@ func (d *ElasticDriver) Revoke(ctx context.Context, leaseID string) error {
 
 	d.configMu.RLock()
 	auth := d.authSnapshotLocked()
+	chained := d.isChainedLocked()
 	d.configMu.RUnlock()
+
+	// A chained source holds no key to authorise the delete, and revocation runs
+	// at lease expiry, where there is no caller to walk the chain as. That will
+	// never change, so returning an error would only send the expiration manager
+	// into backoff and then a daily retry, forever, for a request that cannot
+	// succeed. The key carries its own expiration — which is why a chained mint
+	// is refused an empty one.
+	if chained {
+		d.warn("cannot revoke a key minted from a chained cluster credential; it will live until it expires",
+			logger.String("key_id", truncateID(keyID, 8)))
+		return nil
+	}
 
 	if err := d.invalidateKeys(ctx, auth, []string{keyID}); err != nil {
 		return fmt.Errorf("failed to invalidate Elasticsearch API key %s: %w", truncateID(keyID, 8), err)
@@ -373,7 +483,15 @@ func (d *ElasticDriver) Cleanup(_ context.Context) error {
 func (d *ElasticDriver) VerifySpec(ctx context.Context, _ *credential.CredSpec) error {
 	d.configMu.RLock()
 	auth := d.authSnapshotLocked()
+	chained := d.isChainedLocked()
 	d.configMu.RUnlock()
+
+	// A chained source holds no key to verify — it is fetched per mint, as the
+	// caller, and there is no caller here. Reporting a missing api_key would
+	// describe config that is absent on purpose.
+	if chained {
+		return nil
+	}
 
 	if _, err := d.verifyAuthenticationWith(ctx, auth); err != nil {
 		return fmt.Errorf("Elasticsearch spec verification failed: %w", err)
@@ -391,6 +509,11 @@ func (d *ElasticDriver) VerifySpec(ctx context.Context, _ *credential.CredSpec) 
 func (d *ElasticDriver) SupportsRotation() bool {
 	d.configMu.RLock()
 	defer d.configMu.RUnlock()
+	// A chained source holds no key of its own: it lives at its source of truth,
+	// and whoever owns the referenced spec rotates it there.
+	if d.isChainedLocked() {
+		return false
+	}
 	return d.sourceAPIKeyID != ""
 }
 
@@ -534,6 +657,91 @@ func (d *ElasticDriver) CleanupRotation(ctx context.Context, cleanupConfig map[s
 // ============================================================================
 // Helpers
 // ============================================================================
+
+// isChained reports whether this source fetches its cluster key per mint rather
+// than holding one.
+func (d *ElasticDriver) isChained() bool {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	return d.isChainedLocked()
+}
+
+// isChainedLocked is isChained for callers already holding configMu. Read locks
+// are not reentrant, so the two cannot be collapsed.
+func (d *ElasticDriver) isChainedLocked() bool {
+	return credential.GetString(d.credSource.Config, credential.ConfigSecretSpec, "") != ""
+}
+
+// resolveChainedElasticAuth turns fetched secret material into the credential a
+// request authenticates with.
+//
+// Elasticsearch hands a key out in two shapes and vaults store both: the
+// pre-encoded base64 of "id:api_key" that the cluster returns as `encoded`, and
+// the raw `api_key` half beside its `id`. Both are accepted, and which one is
+// present decides how the value is read — deliberately, rather than by testing
+// whether the value happens to base64-decode.
+//
+// That sniff is the tempting version and it is wrong: a raw half that decodes to
+// bytes containing a colon would be used verbatim with a garbage id, draw a 401,
+// and be reported as a stale secret — evicting a good cached entry and retrying
+// to no purpose. It reads as safe today only because Elasticsearch's raw halves
+// are unpadded base64url that the padded decoders reject, which is a property of
+// the cluster's current key length and not something to depend on.
+func resolveChainedElasticAuth(baseURL string, material credential.SecretMaterial) (elasticAuth, error) {
+	secret := material.Secret()
+
+	// Fall back to conventional names ONLY when no field was resolved. A field
+	// that resolved to nothing is a misconfigured secret_field — say so, rather
+	// than silently authenticating with some other value from the payload.
+	if secret == "" && material.Field == "" {
+		if secret = material.Data["api_key"]; secret == "" {
+			secret = material.Data["encoded"]
+		}
+	}
+	if secret == "" {
+		if material.Field != "" {
+			return elasticAuth{}, fmt.Errorf("elastic: %s %q is empty or absent in the fetched secret material: %w",
+				credential.ConfigSecretField, material.Field, credential.ErrChainedSecretIncomplete)
+		}
+		return elasticAuth{}, fmt.Errorf("elastic: no api key in fetched secret material (set %s, or store it under 'api_key' or 'encoded'): %w",
+			credential.ConfigSecretField, credential.ErrChainedSecretIncomplete)
+	}
+
+	// secret_field names the key, so pointing it at the id is a misconfiguration
+	// with a confusing failure: the id would be presented as the key, the cluster
+	// would answer 401, and that reads on this path as a stale secret.
+	if material.Field == "id" || material.Field == "api_key_id" {
+		return elasticAuth{}, fmt.Errorf("elastic: %s must name the api key, not %q; the id is read by name alongside it",
+			credential.ConfigSecretField, material.Field)
+	}
+
+	id := material.Data["id"]
+	if id == "" {
+		id = material.Data["api_key_id"]
+	}
+
+	if id != "" {
+		// An id travels with the key. If the value already encodes that same id it
+		// is the pre-encoded form and is used as it stands; otherwise it is the raw
+		// half and the pair is encoded here.
+		if decoded, err := decodeElasticAPIKeyID(secret); err == nil && decoded == id {
+			return elasticAuth{baseURL: baseURL, encoded: secret}, nil
+		}
+		return elasticAuth{
+			baseURL: baseURL,
+			encoded: base64.StdEncoding.EncodeToString([]byte(id + ":" + secret)),
+		}, nil
+	}
+
+	// With no id beside it, the value can only be the pre-encoded form — a raw
+	// half alone is not enough to authenticate with, and guessing is what this
+	// function exists to avoid.
+	if _, err := decodeElasticAPIKeyID(secret); err != nil {
+		return elasticAuth{}, fmt.Errorf("elastic: the fetched secret is not a pre-encoded api key and no id travels with it; store the pre-encoded 'encoded' value, or store the raw key beside its 'id': %w",
+			credential.ErrChainedSecretIncomplete)
+	}
+	return elasticAuth{baseURL: baseURL, encoded: secret}, nil
+}
 
 // warn logs a recoverable problem, if this driver has a logger at all. The
 // best-effort paths below — a sweep that could not list, an invalidation the

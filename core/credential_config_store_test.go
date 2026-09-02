@@ -2797,3 +2797,45 @@ func TestCredentialConfigStore_ValidateSpec_ElasticKeyNameIsAMintParameter(t *te
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential_fields")
 }
+
+// An elastic source chains the cluster key that authenticates its own Security
+// API calls, so the reference belongs on the source. A spec-level one would
+// leave the source's own setting unused at mint, so it is refused with guidance
+// rather than accepted and quietly ignored.
+//
+// The api_key type refuses this first and says the same thing; this is the
+// layer that holds when the type registry is unavailable, so the registry is
+// deliberately left unset here — which is also the only way to reach this arm.
+func TestCredentialConfigStore_ValidateSpec_ElasticChainsAtTheSource(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "es-cluster-key", Type: "vault_token", Source: "src",
+		Config: map[string]string{
+			"subject_token_source": "warden_identity",
+			"assertion_audience":   "test-aud",
+		},
+	}))
+
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "es-chained", Type: credential.SourceTypeElastic,
+		Config: map[string]string{credential.ConfigSecretSpec: "es-cluster-key"},
+	}))
+
+	t.Run("a spec on a chained source needs no reference of its own", func(t *testing.T) {
+		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "es-chained-spec", Type: credential.TypeAPIKey, Source: "es-chained",
+			Config: map[string]string{"expiration": "1h"},
+		}))
+	})
+
+	t.Run("a spec-level reference is refused with guidance", func(t *testing.T) {
+		err := store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "es-spec-level", Type: credential.TypeAPIKey, Source: "es-chained",
+			Config: map[string]string{credential.ConfigSecretSpec: "es-cluster-key"},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "set secret_spec on the source")
+	})
+}
