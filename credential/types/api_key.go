@@ -261,6 +261,14 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 			return fmt.Errorf("for an elastic source, set %s on the source (the chained api key authenticates the source's own Security API calls), not on the spec",
 				credential.ConfigSecretSpec)
 		}
+		// Grafana chains for the same reason and at the same level: the fetched
+		// secret is the privileged token its own token-management calls are made
+		// with, and every spec on it mints a fresh token rather than serving a
+		// stored one.
+		if sourceType == credential.SourceTypeGrafana {
+			return fmt.Errorf("for a grafana source, set %s on the source (the chained token authenticates the source's own service-account calls), not on the spec",
+				credential.ConfigSecretSpec)
+		}
 		return fmt.Errorf("secret_spec (credential chaining) is not supported with a %s source", sourceType)
 	}
 
