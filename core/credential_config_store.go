@@ -1113,6 +1113,18 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		}
 	}
 
+	// A grafana spec mints tokens on a service account the operator provisioned, so
+	// it must name one — its own, or the source's default. This is the layer that
+	// can see both: the credential type is handed the source's TYPE but never its
+	// config, so it validates the value's shape and cannot check that a value
+	// exists at all. Checked here rather than left to mint time because a spec
+	// naming no account fails every request it ever serves.
+	if source.Type == credential.SourceTypeGrafana &&
+		credential.GetString(spec.Config, "service_account_id", "") == "" &&
+		credential.GetString(source.Config, "service_account_id", "") == "" {
+		return logical.ErrBadRequestf("service_account_id is required for a grafana spec: set it on the spec, or on the source as a default; Warden mints tokens on an account you provision in Grafana, it does not create one")
+	}
+
 	// Credential chaining: when this spec (spec-level, wins) or its source
 	// (source-level) references another cred spec as its secret source, validate the
 	// referenced secret-spec. The consuming driver's eligibility (it must implement
@@ -1550,6 +1562,20 @@ func (s *CredentialConfigStore) checkBoundSpecsStillCarried(ctx context.Context,
 			return logical.ErrBadRequestf(
 				"spec %q sets credential field(s) %s that this source would no longer carry: keep them in credential_fields, or remove them from the spec first",
 				spec.Name, strings.Join(missing, ", "))
+		}
+
+		// A grafana spec may take its service account from the source's default.
+		// Dropping that default is accepted by source validation on its own — the
+		// key is optional there — and would leave every silent spec failing at
+		// mint with nothing at write time having said so. The spec-level guard
+		// cannot catch it either: it runs when a SPEC is written, and nothing is
+		// being written here.
+		if source.Type == credential.SourceTypeGrafana &&
+			credential.GetString(source.Config, "service_account_id", "") == "" &&
+			credential.GetString(spec.Config, "service_account_id", "") == "" {
+			return logical.ErrBadRequestf(
+				"spec %q relies on this source's service_account_id default, which this update would remove: set service_account_id on the spec first, or keep the default",
+				spec.Name)
 		}
 	}
 	return nil

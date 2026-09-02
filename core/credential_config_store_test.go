@@ -2729,27 +2729,74 @@ func TestCredentialConfigStore_ValidateSpec_UpstreamMintingSources(t *testing.T)
 	require.NoError(t, types.RegisterBuiltinTypes(store.core.credentialTypeRegistry))
 	store.core.credentialDriverRegistry = nil
 
-	for _, sourceType := range []string{
-		credential.SourceTypeElastic,
-		credential.SourceTypeGrafana,
-		credential.SourceTypeHoneycomb,
+	for _, tc := range []struct {
+		sourceType string
+		// grafana mints on an account the operator provisioned, so its spec must
+		// name one; the others create the credential's container themselves.
+		specConfig map[string]string
+	}{
+		{sourceType: credential.SourceTypeElastic, specConfig: map[string]string{}},
+		{sourceType: credential.SourceTypeGrafana, specConfig: map[string]string{"service_account_id": "42"}},
+		{sourceType: credential.SourceTypeHoneycomb, specConfig: map[string]string{}},
 	} {
-		t.Run(sourceType, func(t *testing.T) {
-			source := &credential.CredSource{Name: sourceType + "-src", Type: sourceType}
+		t.Run(tc.sourceType, func(t *testing.T) {
+			source := &credential.CredSource{Name: tc.sourceType + "-src", Type: tc.sourceType}
 			require.NoError(t, store.CreateSource(ctx, source))
 
 			spec := &credential.CredSpec{
-				Name:   sourceType + "-spec",
+				Name:   tc.sourceType + "-spec",
 				Type:   credential.TypeAPIKey,
 				Source: source.Name,
 				MinTTL: 5 * time.Minute,
 				MaxTTL: 1 * time.Hour,
-				Config: map[string]string{},
+				Config: tc.specConfig,
 			}
 			require.NoError(t, store.CreateSpec(ctx, spec),
-				"a spec against a %s source must be creatable", sourceType)
+				"a spec against a %s source must be creatable", tc.sourceType)
 		})
 	}
+}
+
+// A grafana spec mints tokens on a provisioned service account, so it must name
+// one — its own, or the source's default. Only this layer sees both configs: the
+// credential type is handed the source's TYPE but never its config, so it can
+// check the value's shape and not whether a value exists at all.
+func TestCredentialConfigStore_ValidateSpec_GrafanaNeedsAServiceAccount(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	store.core.credentialTypeRegistry = credential.NewTypeRegistry()
+	require.NoError(t, types.RegisterBuiltinTypes(store.core.credentialTypeRegistry))
+	store.core.credentialDriverRegistry = nil
+
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "g-bare", Type: credential.SourceTypeGrafana,
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "g-default", Type: credential.SourceTypeGrafana,
+		Config: map[string]string{"service_account_id": "7"},
+	}))
+
+	newSpec := func(name, source string, config map[string]string) *credential.CredSpec {
+		return &credential.CredSpec{
+			Name: name, Type: credential.TypeAPIKey, Source: source,
+			MinTTL: 5 * time.Minute, MaxTTL: time.Hour, Config: config,
+		}
+	}
+
+	t.Run("neither level names an account", func(t *testing.T) {
+		err := store.CreateSpec(ctx, newSpec("g1", "g-bare", map[string]string{}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "service_account_id is required")
+	})
+
+	t.Run("the spec names one", func(t *testing.T) {
+		require.NoError(t, store.CreateSpec(ctx, newSpec("g2", "g-bare",
+			map[string]string{"service_account_id": "42"})))
+	})
+
+	t.Run("the source's default covers a silent spec", func(t *testing.T) {
+		require.NoError(t, store.CreateSpec(ctx, newSpec("g3", "g-default", map[string]string{})))
+	})
 }
 
 // An elastic spec naming the key to create must be accepted. key_name is also a
@@ -2837,5 +2884,54 @@ func TestCredentialConfigStore_ValidateSpec_ElasticChainsAtTheSource(t *testing.
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "set secret_spec on the source")
+	})
+}
+
+// Dropping a grafana source's service_account_id default strands every spec that
+// relied on it: source validation accepts the edit on its own (the key is
+// optional there), and the spec-level guard runs only when a spec is written.
+func TestCredentialConfigStore_UpdateSource_GrafanaDefaultAccountIsLoadBearing(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	store.core.credentialTypeRegistry = credential.NewTypeRegistry()
+	require.NoError(t, types.RegisterBuiltinTypes(store.core.credentialTypeRegistry))
+	store.core.credentialDriverRegistry = nil
+
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "gf-default", Type: credential.SourceTypeGrafana,
+		Config: map[string]string{"admin_token": "glsa_x", "service_account_id": "42"},
+	}))
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "gf-silent", Type: credential.TypeAPIKey, Source: "gf-default",
+		MinTTL: 5 * time.Minute, MaxTTL: time.Hour, Config: map[string]string{},
+	}))
+
+	t.Run("removing the default a silent spec relies on is refused", func(t *testing.T) {
+		err := store.UpdateSource(ctx, &credential.CredSource{
+			Name: "gf-default", Type: credential.SourceTypeGrafana,
+			Config: map[string]string{"admin_token": "glsa_x"},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "relies on this source's service_account_id default")
+	})
+
+	// The accepting half is not reachable here: a config change that passes
+	// validation goes on to tear the cached driver down through
+	// core.credentialManager, which this harness does not build. The e2e suite
+	// covers a spec naming its own account.
+	t.Run("a spec naming its own account does not rely on the default", func(t *testing.T) {
+		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "gf-explicit", Type: credential.TypeAPIKey, Source: "gf-default",
+			MinTTL: 5 * time.Minute, MaxTTL: time.Hour,
+			Config: map[string]string{"service_account_id": "57"},
+		}))
+		err := store.UpdateSource(ctx, &credential.CredSource{
+			Name: "gf-default", Type: credential.SourceTypeGrafana,
+			Config: map[string]string{"admin_token": "glsa_x"},
+		})
+		// Still refused, but for gf-silent — never for gf-explicit.
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "gf-silent")
+		assert.NotContains(t, err.Error(), "gf-explicit")
 	})
 }
