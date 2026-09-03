@@ -431,6 +431,13 @@ vault_api POST "secret/data/e2e/elastic-cluster-pair" \
 vault_api POST "secret/data/e2e/elastic-cluster-odd" \
   '{"data":{"key":"e2e-es-cluster-not-a-real-secret","key_id":"e2e-es-cluster-id","unrelated_field":"must-not-be-vended"}}'
 
+# The privileged token a keyless grafana source fetches instead of storing. Under
+# its conventional name, so the chaining rows can drive both the secret_field path
+# and the fallback the driver takes when no field is set. Assembled rather than
+# written out, for the reason the elastic fixtures above give.
+vault_api POST "secret/data/e2e/grafana-admin-token" \
+  "{\"data\":{\"admin_token\":\"glsa_$(printf 'e2e-grafana-not-a-real-admin-token')\"}}"
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \
