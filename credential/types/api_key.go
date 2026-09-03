@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 )
@@ -60,7 +61,7 @@ func NewAPIKeyCredType() *APIKeyCredType {
 			// credential the type calls revocable, so a key minted for a caller
 			// outlived the session it was minted for and sat at the upstream until
 			// its own expiry — which an elastic spec may set to 30d, and which a
-			// grafana service-account token does not have at all.
+			// grafana spec may set to as long as the operator likes.
 			Revocable: true,
 		},
 	}
@@ -120,18 +121,19 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 			Describe("JSON role descriptors scoping the key's privileges (elastic)").
 			Example(`{"reader":{"indices":[{"names":["logs-*"],"privileges":["read"]}]}}`),
 
-		credential.StringField("role").
-			OneOf("Viewer", "Editor", "Admin").
-			Describe("Service-account role (grafana)").
-			Example("Viewer"),
+		credential.StringField("service_account_id").
+			Custom(validateGrafanaServiceAccountID).
+			Describe("Provisioned service account to mint tokens on (grafana); overrides the source's default").
+			Example("42"),
 
 		credential.StringField("name_prefix").
-			Describe("Prefix for the generated service-account name (grafana)").
-			Example("warden"),
+			Custom(validateGrafanaNamePrefix).
+			Describe("Prefix for the generated token name (grafana); must itself start with 'warden-'").
+			Example("warden-team-a-"),
 
-		credential.StringField("org_id").
-			Describe("Organization the service account is created in (grafana)").
-			Example("1"),
+		credential.StringField("token_expiry").
+			Describe("Lifetime of the minted service-account token (grafana; default 1h)").
+			Example("1h"),
 
 		credential.StringField("key_type").
 			OneOf("ingest", "configuration").
@@ -302,9 +304,37 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 				return fmt.Errorf("'role_descriptors' is not valid JSON")
 			}
 		}
-	case credential.SourceTypeGrafana, credential.SourceTypeHoneycomb:
+	case credential.SourceTypeGrafana:
+		// As above: the token is created upstream per mint and the spec holds no
+		// key. What it holds is which provisioned service account to mint on, and
+		// the shape of the token.
+		//
+		// This arm is where grafana's spec validation has to live. The driver's
+		// VerifySpec runs only inside the store's test-mint block, which is skipped
+		// for a chained spec — so a check placed there would be dead on exactly the
+		// keyless path. This runs for every spec.
+		//
+		// service_account_id is validated by the schema when present. It cannot be
+		// required here: it may come from the source instead, and this method is
+		// handed the source's type but never its config. The store checks that.
+		if raw, present := config["token_expiry"]; present {
+			if err := validateGrafanaTokenExpiry(raw); err != nil {
+				return fmt.Errorf("'token_expiry': %w", err)
+			}
+		}
+		// ValidateSchema ignores keys it does not declare, so a removed field is
+		// not a refused one: left alone, role would be accepted here and then
+		// masked on read as an unrecognised key, showing an operator their role
+		// displayed as a secret and telling them nothing.
+		if _, present := config["role"]; present {
+			return fmt.Errorf("'role' is not settable: a minted token carries the role of the service account it is issued on, which you set in Grafana when provisioning that account. Point service_account_id at an account with the role you want")
+		}
+		if _, present := config["org_id"]; present {
+			return fmt.Errorf("'org_id' is not settable: a service account belongs to one organization, so naming the account in service_account_id already says which. Use one source per organization")
+		}
+	case credential.SourceTypeHoneycomb:
 		// As above: the key is created upstream per mint and the spec holds no
-		// key. Their mint parameters are validated by their own drivers.
+		// key. Its mint parameters are validated by its own driver.
 	default:
 		// apikey source: the api_key lives inline in the spec, unless it is sourced from
 		// another cred spec via credential chaining (secret_spec) — the two are mutually
@@ -354,6 +384,65 @@ func validateElasticTimeValue(v string) error {
 	}
 	return fmt.Errorf("is not an Elasticsearch time value (an integer and one of %s), got: %s",
 		strings.Join(elasticTimeUnits, ", "), v)
+}
+
+// validateGrafanaTokenExpiry checks the lifetime a grafana spec asks for.
+//
+// The lower bound is the point of it. The driver passes this to Grafana as an
+// integer number of seconds, and Grafana reads 0 as "this token never expires" —
+// so anything under a second truncates into a permanent token carrying the
+// provisioned account's role. Warden would not catch it either: a zero lease TTL
+// reads as a static credential and is registered as nonexpiring.
+//
+// credential.GetDuration swallows a parse error and returns the default, so an
+// unchecked "60" here would mint a 1h token while the spec says otherwise. Unlike
+// elastic's expiration this is a Go duration — the driver parses it with
+// time.ParseDuration, so that is what validates it.
+func validateGrafanaTokenExpiry(v string) error {
+	if v == "" {
+		return fmt.Errorf("must not be empty; omit it to take the 1h default, or give a lifetime such as 30m")
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fmt.Errorf("is not a duration (an integer and a unit, such as 30m or 24h), got: %s", v)
+	}
+	if d < time.Second {
+		return fmt.Errorf("must be at least 1s, got: %s; Grafana reads a shorter lifetime as a token that never expires", v)
+	}
+	return nil
+}
+
+// validateGrafanaNamePrefix keeps a spec's token names inside the namespace the
+// driver's sweep recognises.
+//
+// The sweep covers a whole service account, which several specs may share with
+// the account's own operator, so it reclaims only names that announce themselves
+// as Warden's. A spec free to pick any prefix could therefore mint tokens the
+// sweep will never look at, and nothing else would ever remove them. Requiring
+// the prefix to extend the default keeps per-spec naming useful
+// ("warden-team-a-") without letting a spec opt out of being cleaned up.
+func validateGrafanaNamePrefix(v string) error {
+	const wardenPrefix = "warden-"
+	if !strings.HasPrefix(v, wardenPrefix) {
+		return fmt.Errorf("must start with %q so the driver's sweep recognises the tokens it names (it reclaims only Warden's own), got: %s",
+			wardenPrefix, v)
+	}
+	return nil
+}
+
+// validateGrafanaServiceAccountID checks an account id is what Grafana issues: a
+// positive integer. The driver interpolates it into a request path, where a value
+// that is not a number is answered with an opaque 404 at mint time.
+//
+// Deliberately duplicated from the driver rather than shared: credential/types
+// does not import credential/drivers, and one small predicate is a better price
+// than that edge.
+func validateGrafanaServiceAccountID(v string) error {
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return fmt.Errorf("must be a positive integer (the numeric id Grafana gives the account), got: %s", v)
+	}
+	return nil
 }
 
 // RequiresSpecRotation returns false — API keys live in source config, not spec.

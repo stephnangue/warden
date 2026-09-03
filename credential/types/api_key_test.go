@@ -209,13 +209,104 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 		},
 		{
 			name:       "grafana source - no api_key required",
-			config:     map[string]string{"role": "Viewer"},
+			config:     map[string]string{"service_account_id": "42"},
 			sourceType: credential.SourceTypeGrafana,
 			wantErr:    false,
 		},
 		{
+			name: "grafana source - full mint config",
+			config: map[string]string{
+				"service_account_id": "42",
+				"token_expiry":       "30m",
+				"name_prefix":        "warden-team-a-",
+			},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    false,
+		},
+		{
+			// The sweep reclaims only names carrying the default prefix, so a
+			// prefix outside it mints tokens nothing ever removes.
+			name:       "grafana source - a name_prefix outside the swept namespace is refused",
+			config:     map[string]string{"service_account_id": "42", "name_prefix": "acme-"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "must start with",
+		},
+		{
+			// The id may come from the source instead, which this method cannot
+			// see — so presence is the store's check, shape is this one's.
+			name:       "grafana source - a silent spec is fine here",
+			config:     map[string]string{},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    false,
+		},
+		{
+			name:       "grafana source - non-numeric service_account_id",
+			config:     map[string]string{"service_account_id": "my-account"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "positive integer",
+		},
+		{
+			// Warden mints on an account the operator provisioned, and that
+			// account's role is the credential's privilege. Removing the field from
+			// the schema would only make it unrecognised — and therefore masked on
+			// read — so it is refused by name.
+			name:       "grafana source - role is refused with guidance",
+			config:     map[string]string{"service_account_id": "42", "role": "Admin"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "'role' is not settable",
+		},
+		{
+			name:       "grafana source - org_id is refused with guidance",
+			config:     map[string]string{"service_account_id": "42", "org_id": "1"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "'org_id' is not settable",
+		},
+		{
+			// GetDuration swallows a parse error and hands back the default, so an
+			// unchecked "60" mints a 1h token while the spec says otherwise.
+			name:       "grafana source - unitless token_expiry is refused",
+			config:     map[string]string{"service_account_id": "42", "token_expiry": "60"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "is not a duration",
+		},
+		{
+			// Grafana reads secondsToLive=0 as "never expires".
+			name:       "grafana source - zero token_expiry is refused",
+			config:     map[string]string{"service_account_id": "42", "token_expiry": "0s"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "must be at least 1s",
+		},
+		{
+			name:       "grafana source - sub-second token_expiry is refused",
+			config:     map[string]string{"service_account_id": "42", "token_expiry": "500ms"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "must be at least 1s",
+		},
+		{
+			name:       "grafana source - empty token_expiry is refused",
+			config:     map[string]string{"service_account_id": "42", "token_expiry": ""},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "must not be empty",
+		},
+		{
 			name:       "honeycomb source - no api_key required",
 			config:     map[string]string{"key_type": "ingest"},
+			sourceType: credential.SourceTypeHoneycomb,
+			wantErr:    false,
+		},
+		{
+			// The grafana arm was split out of the shared one; honeycomb keeps its
+			// own mint parameters and must not pick up grafana's checks.
+			name:       "honeycomb source - unaffected by the grafana arm split",
+			config:     map[string]string{"key_type": "configuration", "key_name_prefix": "warden"},
 			sourceType: credential.SourceTypeHoneycomb,
 			wantErr:    false,
 		},
@@ -600,6 +691,46 @@ func TestAPIKeyCredType_KnownAdjunctFieldsAreDeclared(t *testing.T) {
 
 	for _, field := range ct.KnownAdjunctFields() {
 		assert.True(t, declared[field], "adjunct %q must be declared in ConfigSchema", field)
+	}
+}
+
+// A mint parameter reads back in the clear only because it is declared. Left out
+// of the schema, grafana's token_expiry was displayed to an operator as a secret.
+func TestAPIKeyCredType_SensitiveConfigFieldsFor_GrafanaMintParams(t *testing.T) {
+	ct := NewAPIKeyCredType()
+
+	fields := ct.SensitiveConfigFieldsFor(map[string]string{
+		"service_account_id": "42",
+		"name_prefix":        "warden-team-a-",
+		"token_expiry":       "1h",
+	})
+
+	for _, key := range []string{"service_account_id", "name_prefix", "token_expiry"} {
+		assert.NotContains(t, fields, key, "%s shapes the mint and is not a secret", key)
+	}
+}
+
+func TestValidateGrafanaTokenExpiry(t *testing.T) {
+	for _, v := range []string{"1s", "30m", "1h", "24h", "90s500ms"} {
+		t.Run("valid/"+v, func(t *testing.T) {
+			assert.NoError(t, validateGrafanaTokenExpiry(v))
+		})
+	}
+	// "" is the key present and empty, "60" is the unitless trap GetDuration would
+	// swallow, and anything under a second becomes a token Grafana never expires.
+	for _, v := range []string{"", "60", "1hour", "0s", "0", "500ms", "-1h"} {
+		t.Run("invalid/"+v, func(t *testing.T) {
+			assert.Error(t, validateGrafanaTokenExpiry(v))
+		})
+	}
+}
+
+func TestValidateGrafanaServiceAccountID(t *testing.T) {
+	for _, v := range []string{"1", "42", "999999"} {
+		assert.NoError(t, validateGrafanaServiceAccountID(v), "id %q", v)
+	}
+	for _, v := range []string{"", "0", "-1", "abc", "4.2", "../42"} {
+		assert.Error(t, validateGrafanaServiceAccountID(v), "id %q must be refused", v)
 	}
 }
 
