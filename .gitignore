@@ -83,3 +83,15 @@ e2e/.certs/
 e2e/.logs/
 e2e/.pids/
 e2e/.root_token
+# Local working files: agent configuration, scratch analyses, and a throwaway
+# compose stack. They live in the repo root for convenience but belong to one
+# machine, not to the project.
+.claude/
+dirk-*.md
+eu-ai-act-analysis.md
+per-user-oauth-cert-dex/
+
+# The e2e findings log. It records production gaps the e2e suites surface, and
+# is kept alongside the run rather than committed: entries are resolved by
+# fixing the gap, not by editing the list in a review.
+e2e/FINDINGS.md
