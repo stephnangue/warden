@@ -1119,10 +1119,26 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 	// config, so it validates the value's shape and cannot check that a value
 	// exists at all. Checked here rather than left to mint time because a spec
 	// naming no account fails every request it ever serves.
-	if source.Type == credential.SourceTypeGrafana &&
-		credential.GetString(spec.Config, "service_account_id", "") == "" &&
-		credential.GetString(source.Config, "service_account_id", "") == "" {
-		return logical.ErrBadRequestf("service_account_id is required for a grafana spec: set it on the spec, or on the source as a default; Warden mints tokens on an account you provision in Grafana, it does not create one")
+	if source.Type == credential.SourceTypeGrafana {
+		if credential.GetString(spec.Config, "service_account_id", "") == "" &&
+			credential.GetString(source.Config, "service_account_id", "") == "" {
+			return logical.ErrBadRequestf("service_account_id is required for a grafana spec: set it on the spec, or on the source as a default; Warden mints tokens on an account you provision in Grafana, it does not create one")
+		}
+		// A chained grafana source cannot revoke — there is no caller at lease
+		// expiry to fetch its token as — so a token it mints stays live until its
+		// own expiry however the lease ended. The driver refuses an over-long one
+		// at mint; this is the same rule where an operator can act on it, at the
+		// write that introduces it. Only this layer can apply it: the credential
+		// type is handed the source's TYPE but never its config, so it cannot tell
+		// a chained source from an inline one.
+		if source.Config[credential.ConfigSecretSpec] != "" {
+			if raw := credential.GetString(spec.Config, "token_expiry", ""); raw != "" {
+				if d, err := time.ParseDuration(raw); err == nil && d > drivers.GrafanaChainedMaxTokenExpiry {
+					return logical.ErrBadRequestf("'token_expiry' %s exceeds the %s ceiling for a chained grafana source: revocation cannot run without a caller to fetch the token as, so a minted token stays live until it expires",
+						raw, drivers.GrafanaChainedMaxTokenExpiry)
+				}
+			}
+		}
 	}
 
 	// Credential chaining: when this spec (spec-level, wins) or its source
@@ -1183,6 +1199,11 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				// this is the layer that holds when the type registry is unavailable
 				// and credType is nil — the same reason the ovh arm below exists.
 				return logical.ErrBadRequestf("for an elastic source, set secret_spec on the source (the chained api key authenticates the source's own Security API calls), not on the spec")
+			case credential.SourceTypeGrafana:
+				// Same shape as elastic: the fetched token authenticates the source's
+				// own service-account calls, and every spec on it mints a fresh token
+				// rather than serving a stored one.
+				return logical.ErrBadRequestf("for a grafana source, set secret_spec on the source (the chained token authenticates the source's own service-account calls), not on the spec")
 			}
 		}
 		// An oauth2 source that chains its client credential resolves the pair per mint,

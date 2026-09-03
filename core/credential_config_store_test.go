@@ -2935,3 +2935,123 @@ func TestCredentialConfigStore_UpdateSource_GrafanaDefaultAccountIsLoadBearing(t
 		assert.NotContains(t, err.Error(), "gf-explicit")
 	})
 }
+
+// A grafana source chains the privileged token that authenticates its own
+// service-account calls, so the reference belongs on the source — the same shape
+// as elastic above, and refused at this layer for the same reason: the api_key
+// type says it first, and this is what holds when the type registry is
+// unavailable and credType is nil.
+func TestCredentialConfigStore_ValidateSpec_GrafanaChainsAtTheSource(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "grafana-admin-token", Type: "vault_token", Source: "src",
+		Config: map[string]string{
+			"subject_token_source": "warden_identity",
+			"assertion_audience":   "test-aud",
+		},
+	}))
+
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "grafana-chained", Type: credential.SourceTypeGrafana,
+		Config: map[string]string{
+			credential.ConfigSecretSpec: "grafana-admin-token",
+			"service_account_id":        "42",
+		},
+	}))
+
+	t.Run("a spec on a chained source needs no reference of its own", func(t *testing.T) {
+		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "grafana-chained-spec", Type: credential.TypeAPIKey, Source: "grafana-chained",
+			Config: map[string]string{"token_expiry": "1h"},
+		}))
+	})
+
+	t.Run("a spec-level reference is refused with guidance", func(t *testing.T) {
+		err := store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "grafana-spec-level", Type: credential.TypeAPIKey, Source: "grafana-chained",
+			Config: map[string]string{credential.ConfigSecretSpec: "grafana-admin-token"},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "set secret_spec on the source")
+	})
+
+	// A chained source holds no privileged token to rotate; the referenced spec's
+	// owner rotates it at the source of truth.
+	t.Run("rotation_period on a chained source is refused", func(t *testing.T) {
+		err := store.CreateSource(ctx, &credential.CredSource{
+			Name: "grafana-chained-rotating", Type: credential.SourceTypeGrafana,
+			RotationPeriod: time.Hour,
+			Config:         map[string]string{credential.ConfigSecretSpec: "grafana-admin-token"},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rotation_period does not apply to a chained source")
+	})
+
+	// The account still has to be named: chaining supplies the token that manages
+	// tokens, not the account they are minted on.
+	t.Run("a chained source still needs a service account", func(t *testing.T) {
+		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+			Name: "grafana-chained-bare", Type: credential.SourceTypeGrafana,
+			Config: map[string]string{credential.ConfigSecretSpec: "grafana-admin-token"},
+		}))
+		err := store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "grafana-no-account", Type: credential.TypeAPIKey, Source: "grafana-chained-bare",
+			Config: map[string]string{},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "service_account_id is required")
+	})
+}
+
+// A chained grafana source cannot revoke, so a token it mints stays live until
+// its own expiry however the lease ended. The driver refuses an over-long one at
+// mint; this is the same rule at the write that introduces it, and only this
+// layer can apply it — the credential type is handed the source's TYPE but never
+// its config, so it cannot tell a chained source from an inline one.
+func TestCredentialConfigStore_ValidateSpec_GrafanaChainedTokenExpiryIsCapped(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "gf-token", Type: "vault_token", Source: "src",
+		Config: map[string]string{
+			"subject_token_source": "warden_identity",
+			"assertion_audience":   "test-aud",
+		},
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "gf-chained", Type: credential.SourceTypeGrafana,
+		Config: map[string]string{
+			credential.ConfigSecretSpec: "gf-token",
+			"service_account_id":        "42",
+		},
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "gf-inline", Type: credential.SourceTypeGrafana,
+		Config: map[string]string{"admin_token": "glsa_x", "service_account_id": "42"},
+	}))
+
+	spec := func(name, source, expiry string) *credential.CredSpec {
+		return &credential.CredSpec{
+			Name: name, Type: credential.TypeAPIKey, Source: source,
+			MinTTL: 5 * time.Minute, MaxTTL: time.Hour,
+			Config: map[string]string{"token_expiry": expiry},
+		}
+	}
+
+	t.Run("an over-long lifetime on a chained source is refused", func(t *testing.T) {
+		err := store.CreateSpec(ctx, spec("gf-long", "gf-chained", "720h"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ceiling for a chained grafana source")
+	})
+
+	t.Run("the same lifetime is fine inline, where revocation is precise", func(t *testing.T) {
+		require.NoError(t, store.CreateSpec(ctx, spec("gf-long-inline", "gf-inline", "720h")))
+	})
+
+	t.Run("a lifetime within the ceiling is accepted", func(t *testing.T) {
+		require.NoError(t, store.CreateSpec(ctx, spec("gf-short", "gf-chained", "1h")))
+	})
+}

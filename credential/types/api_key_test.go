@@ -297,6 +297,15 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			errMsg:     "must not be empty",
 		},
 		{
+			// grafana chains at the source, not the spec: the fetched token
+			// authenticates the source's own service-account calls.
+			name:       "grafana source - spec-level secret_spec points at the source",
+			config:     map[string]string{credential.ConfigSecretSpec: "grafana-admin-token"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "set secret_spec on the source",
+		},
+		{
 			name:       "honeycomb source - no api_key required",
 			config:     map[string]string{"key_type": "ingest"},
 			sourceType: credential.SourceTypeHoneycomb,

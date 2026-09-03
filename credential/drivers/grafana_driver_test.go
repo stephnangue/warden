@@ -361,9 +361,10 @@ func TestGrafanaDriver_MintCredential_TokenNamesAreUnique(t *testing.T) {
 		mu.Unlock()
 
 		if duplicate {
-			// What Grafana does with a name already on the account.
+			// What Grafana does with a name already on the account: ErrDuplicateToken,
+			// an errutil.BadRequest, so 400 and never retryable.
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`{"message":"service account token with given name already exists"}`))
+			w.Write([]byte(`{"messageId":"serviceaccounts.ErrTokenAlreadyExists","message":"service account token with name busy already exists in the organization"}`))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -550,13 +551,13 @@ func TestGrafanaDriver_SweepRetriesSoonerAfterAFailedListing(t *testing.T) {
 	defer server.Close()
 
 	driver := grafanaTestDriver(server, nil)
-	require.False(t, driver.sweepExpiredTokens(context.Background(), "42"),
+	require.False(t, driver.sweepExpiredTokens(context.Background(), "glsa_admin", "42"),
 		"a listing that failed must not report success")
 
 	// Now through startSweep, which is what owns the backoff. It stamps the full
 	// interval up front to stop a stampede, then brings it back in when the sweep
 	// reports failure — so the value read here is the driver's, not this test's.
-	driver.startSweep("42")
+	driver.startSweep("glsa_admin", "42")
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -765,7 +766,7 @@ func TestGrafanaDriver_SweepExpiredTokens(t *testing.T) {
 	defer server.Close()
 
 	driver := grafanaTestDriver(server, nil)
-	driver.sweepExpiredTokens(context.Background(), "42")
+	driver.sweepExpiredTokens(context.Background(), "glsa_admin", "42")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -781,7 +782,7 @@ func TestGrafanaDriver_SweepExpiredTokens_ListFailureIsHarmless(t *testing.T) {
 
 	driver := grafanaTestDriver(server, nil)
 	assert.NotPanics(t, func() {
-		driver.sweepExpiredTokens(context.Background(), "42")
+		driver.sweepExpiredTokens(context.Background(), "glsa_admin", "42")
 	}, "a driver without a logger must not panic on the warn path")
 }
 
@@ -803,9 +804,9 @@ func TestGrafanaDriver_SweepRateLimitIsPerAccount(t *testing.T) {
 	defer server.Close()
 
 	driver := grafanaTestDriver(server, nil)
-	driver.startSweep("42")
-	driver.startSweep("57")
-	driver.startSweep("42") // inside the interval; must not sweep again
+	driver.startSweep("glsa_admin", "42")
+	driver.startSweep("glsa_admin", "57")
+	driver.startSweep("glsa_admin", "42") // inside the interval; must not sweep again
 
 	for i := 0; i < 2; i++ {
 		select {
@@ -837,6 +838,251 @@ func TestIsGrafanaWardenTokenName(t *testing.T) {
 	assert.False(t, isGrafanaWardenTokenName("my-warden-token"))
 }
 
+// --- Credential chaining (keyless source) ---
+
+func TestGrafanaDriverFactory_ValidateConfig_Chained(t *testing.T) {
+	factory := &GrafanaDriverFactory{}
+
+	tests := []struct {
+		name    string
+		config  map[string]string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "secret_spec without admin_token",
+			config: map[string]string{
+				"grafana_url":               "https://mystack.grafana.net",
+				credential.ConfigSecretSpec: "grafana-admin-token",
+			},
+		},
+		{
+			name: "secret_spec with the modifiers",
+			config: map[string]string{
+				"grafana_url":                   "https://mystack.grafana.net",
+				"service_account_id":            "42",
+				credential.ConfigSecretSpec:     "grafana-admin-token",
+				credential.ConfigSecretField:    "admin_token",
+				credential.ConfigSecretCacheTTL: "30m",
+			},
+		},
+		{
+			// Keeping the token would leave a source that reads as keyless while
+			// storing the very secret chaining removes.
+			name: "admin_token alongside secret_spec is refused",
+			config: map[string]string{
+				"grafana_url":               "https://mystack.grafana.net",
+				"admin_token":               "glsa_still_here",
+				credential.ConfigSecretSpec: "grafana-admin-token",
+			},
+			wantErr: true,
+			errMsg:  "admin_token must be omitted",
+		},
+		{
+			name:    "neither admin_token nor secret_spec is refused",
+			config:  map[string]string{"grafana_url": "https://mystack.grafana.net"},
+			wantErr: true,
+			errMsg:  "admin_token is required unless",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := factory.ValidateConfig(tt.config)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestResolveChainedGrafanaToken(t *testing.T) {
+	tests := []struct {
+		name     string
+		material credential.SecretMaterial
+		want     string
+		wantErr  bool
+		errMsg   string
+	}{
+		{
+			name:     "secret_field names the token",
+			material: credential.SecretMaterial{Data: map[string]string{"admin_token": "glsa_a", "other": "x"}, Field: "admin_token"},
+			want:     "glsa_a",
+		},
+		{
+			name:     "conventional name admin_token",
+			material: credential.SecretMaterial{Data: map[string]string{"admin_token": "glsa_b"}},
+			want:     "glsa_b",
+		},
+		{
+			name:     "conventional name api_key",
+			material: credential.SecretMaterial{Data: map[string]string{"api_key": "glsa_c"}},
+			want:     "glsa_c",
+		},
+		{
+			name:     "conventional name token",
+			material: credential.SecretMaterial{Data: map[string]string{"token": "glsa_d"}},
+			want:     "glsa_d",
+		},
+		{
+			// A field that resolved to nothing is a misconfigured secret_field. Say
+			// so, rather than silently authenticating with some other value from the
+			// payload — admin_token is present here and must NOT be used.
+			name:     "a resolved-to-nothing secret_field does not fall back",
+			material: credential.SecretMaterial{Data: map[string]string{"admin_token": "glsa_e"}, Field: "wrong_name"},
+			wantErr:  true,
+			errMsg:   "is empty or absent",
+		},
+		{
+			name:     "no token at all",
+			material: credential.SecretMaterial{Data: map[string]string{"unrelated": "x"}},
+			wantErr:  true,
+			errMsg:   "no privileged token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveChainedGrafanaToken(tt.material)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+				assert.Contains(t, err.Error(), tt.errMsg)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestGrafanaDriver_MintFromSecret(t *testing.T) {
+	var gotAuth, gotPath string
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			gotAuth, gotPath = r.Header.Get("Authorization"), r.URL.Path
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"id": 31, "key": "glsa_minted"})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `[]`)
+	}))
+	defer server.Close()
+
+	driver := grafanaTestDriver(server, map[string]string{
+		"admin_token":               "", // a chained source holds none
+		credential.ConfigSecretSpec: "grafana-admin-token",
+	})
+
+	rawData, metadata, ttl, leaseID, err := driver.MintFromSecret(context.Background(),
+		grafanaSpec("kv", map[string]string{"service_account_id": "42"}),
+		credential.SecretMaterial{Data: map[string]string{"admin_token": "glsa_chained_admin"}})
+	require.NoError(t, err)
+
+	assert.Equal(t, "glsa_minted", rawData["api_key"])
+	assert.Equal(t, time.Hour, ttl)
+	assert.Equal(t, "42:31", leaseID)
+	assert.Equal(t, "42", metadata["service_account_id"])
+	assert.Equal(t, "/api/serviceaccounts/42/tokens", gotPath)
+	assert.Equal(t, "Bearer glsa_chained_admin", gotAuth,
+		"the chained token must authenticate, not a stored one")
+}
+
+// Routing a chained spec is the minting layer's job. Arriving at MintCredential
+// means it was bypassed, and falling through would authenticate with an empty
+// token.
+func TestGrafanaDriver_MintCredential_RefusesChainedSource(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("nothing should reach Grafana")
+	}))
+	defer server.Close()
+
+	driver := grafanaTestDriver(server, map[string]string{
+		"admin_token":               "",
+		credential.ConfigSecretSpec: "grafana-admin-token",
+	})
+
+	_, _, _, _, err := driver.MintCredential(context.Background(),
+		grafanaSpec("x", map[string]string{"service_account_id": "42"}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential chaining")
+}
+
+// A fetched token can be stale and worth re-fetching; an inline one cannot, and
+// saying so would send it round a loop that cannot change the outcome.
+func TestGrafanaDriver_ChainedRejectionMarksSecretStale(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"message":"Unauthorized"}`))
+	}))
+	defer server.Close()
+
+	spec := grafanaSpec("x", map[string]string{"service_account_id": "42"})
+
+	chained := grafanaTestDriver(server, map[string]string{
+		"admin_token":               "",
+		credential.ConfigSecretSpec: "grafana-admin-token",
+	})
+	_, _, _, _, err := chained.MintFromSecret(context.Background(), spec,
+		credential.SecretMaterial{Data: map[string]string{"admin_token": "glsa_stale"}})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, credential.ErrChainedSecretRejected)
+
+	inline := grafanaTestDriver(server, nil)
+	_, _, _, _, err = inline.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected,
+		"an inline source has nothing to evict")
+}
+
+// Revocation runs at lease expiry, where a chained source has no caller to fetch
+// its privileged token as. An error there would only feed the daily irrevocable
+// loop.
+func TestGrafanaDriver_Revoke_ChainedIsNoOp(t *testing.T) {
+	var called atomic.Int32
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	driver := grafanaTestDriver(server, map[string]string{
+		"admin_token":               "",
+		credential.ConfigSecretSpec: "grafana-admin-token",
+	})
+
+	require.NoError(t, driver.Revoke(context.Background(), "42:7"))
+	assert.Equal(t, int32(0), called.Load(), "nothing should reach Grafana")
+
+	// A malformed lease is still refused: that check does not depend on a token.
+	require.Error(t, driver.Revoke(context.Background(), "42"))
+}
+
+func TestGrafanaDriver_VerifySpec_ChainedIsNoOp(t *testing.T) {
+	var called atomic.Int32
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	driver := grafanaTestDriver(server, map[string]string{
+		"admin_token":               "",
+		credential.ConfigSecretSpec: "grafana-admin-token",
+	})
+
+	require.NoError(t, driver.VerifySpec(context.Background(),
+		grafanaSpec("x", map[string]string{"service_account_id": "42"})))
+	assert.Equal(t, int32(0), called.Load())
+}
+
 // --- Helpers ---
 
 func TestValidateGrafanaServiceAccountID(t *testing.T) {
@@ -858,7 +1104,7 @@ func TestGrafanaDriver_AuthorizationHeader(t *testing.T) {
 	defer server.Close()
 
 	driver := grafanaTestDriver(server, map[string]string{"admin_token": "glsa_my_admin_token"})
-	_, _, err := driver.doGrafanaRequest(context.Background(), http.MethodGet, "/api/serviceaccounts/42", nil)
+	_, _, err := driver.doGrafanaRequest(context.Background(), driver.getAdminToken(), http.MethodGet, "/api/serviceaccounts/42", nil)
 	require.NoError(t, err)
 }
 
@@ -893,4 +1139,36 @@ func TestValidateGrafanaURL_TLSSkipVerify(t *testing.T) {
 	require.NoError(t, validateGrafanaURL("http://grafana.local", true))
 	require.NoError(t, validateGrafanaURL("https://grafana.local", true))
 	require.Error(t, validateGrafanaURL("ftp://grafana.local", true))
+}
+
+// A chained source cannot revoke, so a token it mints stays live until its own
+// expiry however the lease ended. That window is bounded; the inline path, which
+// revokes precisely, is not.
+func TestGrafanaDriver_ChainedTokenExpiryIsCapped(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{"id": 4, "key": "glsa_x"})
+	}))
+	defer server.Close()
+
+	spec := grafanaSpec("long", map[string]string{
+		"service_account_id": "42",
+		"token_expiry":       "720h",
+	})
+
+	chained := grafanaTestDriver(server, map[string]string{
+		"admin_token":               "",
+		credential.ConfigSecretSpec: "grafana-admin-token",
+	})
+	_, _, _, _, err := chained.MintFromSecret(context.Background(), spec,
+		credential.SecretMaterial{Data: map[string]string{"admin_token": "glsa_chained"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ceiling for a chained source")
+
+	// The same lifetime is fine inline, where revocation removes the token
+	// precisely when the lease ends.
+	inline := grafanaTestDriver(server, nil)
+	_, _, ttl, _, err := inline.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, 720*time.Hour, ttl)
 }
