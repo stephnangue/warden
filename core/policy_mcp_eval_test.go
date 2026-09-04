@@ -1200,3 +1200,83 @@ func buildStressPolicy(sets, patternsPerList int) string {
 	}
 	return sb.String()
 }
+
+// BenchmarkAllowOperation_MCPNoContract measures the absence deny: an
+// MCP-shaped request on a granted path with no contract in scope. This is the
+// cost of the second index lookup missing, which every ungoverned MCP request
+// now pays before being refused.
+func BenchmarkAllowOperation_MCPNoContract(b *testing.B) {
+	cbp := buildBenchCBP(b, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`)
+	req := newMCPRequest(b, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "get_repository"},
+		"id":      1
+	}`)
+	ctx := testContext()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, nil, false)
+	}
+}
+
+// BenchmarkAllowOperation_MCPNoCondition isolates the contract's structural
+// gates from CEL. Paired with TypicalMCP — same shape, minus the condition —
+// it says how much of an MCP request's cost is the condition rather than the
+// method and name matching.
+func BenchmarkAllowOperation_MCPNoCondition(b *testing.B) {
+	cbp := buildBenchCBPWithMCP(b, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call", "resources/list", "resources/read", "prompts/get"] }
+  tools { allowed = [
+      "get_repository", "get_pull_request", "list_issues", "list_pull_requests",
+      "search_code", "search_issues", "search_repositories", "list_workflows",
+      "list_commits", "get_file_contents",
+    ] }
+}
+`)
+	req := newMCPRequest(b, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params": {
+			"name": "get_repository",
+			"arguments": {"path": "docs/api.md", "mode": "0644", "region": "us-west1"}
+		},
+		"id": 1
+	}`)
+	ctx := testContext()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, nil, false)
+	}
+}
+
+// BenchmarkAllowOperation_NonMCPWithContractAttached measures what a contract
+// costs a request it does not govern — a plain path read by a token that also
+// carries an MCP policy. The index is built but never consulted for this path.
+func BenchmarkAllowOperation_NonMCPWithContractAttached(b *testing.B) {
+	cbp := buildBenchCBPWithMCP(b, `
+path "secret/data/*" {
+  capabilities = ["read"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["get_repository"] }
+}
+`)
+	req := &logical.Request{Path: "secret/data/app", Operation: logical.ReadOperation}
+	ctx := testContext()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, nil, false)
+	}
+}
