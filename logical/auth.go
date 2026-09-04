@@ -101,9 +101,25 @@ type MCPDecision struct {
 	// produced before the name gate ran.
 	Name string `json:"name,omitempty"`
 
-	// Decision is "allow" or "deny". Always populated when an mcp { }
-	// block was consulted.
+	// Decision is "allow" or "deny". Always populated when an MCP
+	// rule-set was consulted.
 	Decision string `json:"decision"`
+
+	// PolicyName is the MCP policy that MatchedRule and RuleType came from.
+	// Tool contracts are separately-owned documents, so a record carrying only
+	// the rule cannot say which document to edit.
+	//
+	// Several contracts can cover one path, and the two outcomes differ in what
+	// this names. On allow, evaluation stops at the first rule-set that permits
+	// the call, so this is *a* contract that allowed it — others may also have
+	// allowed it and were never consulted. On deny, every rule-set refused and
+	// the most informative refusal is reported, so this names the source of the
+	// reported reason rather than the sole cause: editing that one policy need
+	// not lift the denial, because the others denied too.
+	//
+	// Empty on structural denies (malformed body, oversized, and so on), which
+	// are produced before any rule-set is chosen.
+	PolicyName string `json:"policy_name,omitempty"`
 
 	// MatchedRule is the pattern from the policy (allow- or deny-list
 	// entry) that fired. For a literal match it equals the request's

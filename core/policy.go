@@ -196,6 +196,12 @@ type CBPMCPRules struct {
 	// compiled against the MCP env (call.* available). The set allows a call
 	// only if its structural gates pass AND this condition evaluates true.
 	Condition *compiledCondition
+
+	// SourcePolicy names the MCP policy this rule-set came from, stamped onto
+	// the decision for audit. Contracts are separately-owned documents, so
+	// "which policy denied this?" is not answerable from the matched rule
+	// alone. Set by the index at compile time, not by the parser.
+	SourcePolicy string
 }
 
 // Clone returns a deep copy of the CBPMCPRules. Safe to call on a nil
@@ -205,7 +211,7 @@ func (m *CBPMCPRules) Clone() *CBPMCPRules {
 	if m == nil {
 		return nil
 	}
-	clone := &CBPMCPRules{}
+	clone := &CBPMCPRules{SourcePolicy: m.SourcePolicy}
 	if m.AllowedMethods != nil {
 		clone.AllowedMethods = append([]string(nil), m.AllowedMethods...)
 	}
@@ -383,6 +389,23 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 
 		if err := hcl.DecodeObject(&pc, item.Val); err != nil {
 			return multierror.Prefix(err, fmt.Sprintf("path %q:", key))
+		}
+
+		// Checked here rather than beside the other rule handling further down:
+		// the deny capability jumps to PathFinished, which would skip a check
+		// placed there and let a denying stanza carry the removed block forever.
+		if pc.MCPHCL != nil {
+			return fmt.Errorf("path %q: the mcp { } block has been removed from capability policies — "+
+				"MCP rules now live in their own policy, written to sys/policies/mcp/<name>, whose "+
+				"path stanzas group rules by what they govern:\n"+
+				"    path %q {\n"+
+				"      methods { allowed = [\"tools/call\"] }\n"+
+				"      tools {\n"+
+				"        allowed = [\"get_repository\"]\n"+
+				"        denied  = [\"delete_*\"]\n"+
+				"      }\n"+
+				"    }\n"+
+				"Create one and attach it to the token alongside this policy", key, key)
 		}
 
 		if len(pc.ExpirationRaw) > 0 {

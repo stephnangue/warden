@@ -16,17 +16,17 @@ import (
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
-// Compile-time assertion: mcp_aws opts into CBP `mcp { }` body-authoritative
-// policy enforcement. Without this assertion the core's request handler type-
+// Compile-time assertion: mcp_aws opts into body-authoritative MCP policy
+// enforcement. Without this assertion the core's request handler type-
 // asserts to logical.MCPPolicyEnforced, fails silently, skips body extraction,
-// and any mcp { } block bound to an mcp_aws path becomes a no-op. The unit
+// and any MCP stanza covering an mcp_aws path becomes a no-op. The unit
 // test in provider_test.go also asserts this at the type level so an
 // accidental refactor that drops the method surfaces as a compile error in
 // the test, not as a quiet over-permission at runtime.
 var _ logical.MCPPolicyEnforced = (*mcpAWSBackend)(nil)
 
-// ShouldEnforceMCPPolicy reports whether this request is subject to mcp { }
-// body-authoritative policy enforcement. The gate matches the generic mcp
+// ShouldEnforceMCPPolicy reports whether this request is subject to
+// body-authoritative MCP policy enforcement. The gate matches the generic mcp
 // provider exactly: JSON-RPC POSTs only. GET (SSE reconnect) and DELETE (session
 // close), and any non-JSON Content-Type, decline and pass through under
 // credential-scope-only enforcement (IAM here, bearer-token scopes there).

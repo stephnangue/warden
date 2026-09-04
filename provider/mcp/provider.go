@@ -90,9 +90,9 @@ func extractBearerToken(req *logical.Request) (map[string]string, error) {
 	return map[string]string{"Authorization": "Bearer " + token}, nil
 }
 
-// shouldEnforceMCPPolicy opts the generic mcp provider into CBP
-// body-authoritative mcp { } enforcement for the subset of traffic where it is
-// meaningful: JSON-RPC POSTs. GET (SSE reconnect) and DELETE (session close),
+// shouldEnforceMCPPolicy opts the generic mcp provider into
+// body-authoritative MCP policy enforcement for the subset of traffic where it
+// is meaningful: JSON-RPC POSTs. GET (SSE reconnect) and DELETE (session close),
 // and any non-JSON Content-Type, decline and pass through under
 // token-scope-only enforcement.
 func shouldEnforceMCPPolicy(req *logical.Request) bool {
@@ -170,10 +170,13 @@ check the upstream's MCP auth before assuming a credspec can be reused.
 Policy:
 Two layers of authorization apply to MCP traffic. The minted bearer token is
 the security boundary — its scopes bound what the agent can actually do at the
-upstream regardless of what Warden lets through. On top of that, Warden's CBP
-policies support an mcp { } block for governance-style restrictions enforced at
-the gateway: allow- and deny-lists for JSON-RPC methods, tool names, resource
-URIs, prompt names, and selected tool arguments. Enforcement is
+upstream regardless of what Warden lets through. On top of that, Warden supports
+MCP policies for governance-style restrictions enforced at the gateway: a
+document of its own, written to sys/policies/mcp/<name> and attached to the
+token alongside the capability policy that grants the path, whose stanzas group
+allow- and deny-lists by what they govern — methods, tools, resources, prompts —
+plus a CEL condition over the call arguments. An MCP policy only ever narrows:
+the request must already be allowed by a capability policy. Enforcement is
 body-authoritative — Warden strict-parses the JSON-RPC request body and matches
 against the parsed body, never against client-supplied request headers. The
 parser rejects malformed bodies, duplicate keys at any depth, empty batches, and
@@ -185,12 +188,12 @@ structured tool-call failure.
 
 Body parsing runs only for POST requests carrying Content-Type
 application/json. Other request shapes do not produce a parsed body descriptor:
-when a policy in scope binds an mcp { } block to a path that also receives
-non-POST or non-JSON traffic, those requests deny with rule_type missing_body.
-Operators scope mcp { } blocks to paths they expect to carry JSON-RPC POSTs.
+when an MCP policy stanza covers a path that also receives non-POST or non-JSON
+traffic, those requests deny with rule_type missing_body. Operators scope MCP
+stanzas to paths they expect to carry JSON-RPC POSTs.
 
-Policies without an mcp { } block in scope skip the strict parser entirely
-— no body buffering or parsing is performed on those paths.
+Paths with no MCP stanza in scope skip the strict parser entirely — no body
+buffering or parsing is performed on them.
 
 Configuration:
 - mcp_url: MCP server base URL (required; no default)

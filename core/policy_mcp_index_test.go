@@ -174,9 +174,11 @@ path "mcp/gateway/*" {
 		toolsOf(cbp.mcpRulesForPath("mcp/gateway/call")))
 }
 
-// TestMCPIndex_AllowOperationUnaffected is the inert-by-design pin for this PR:
-// attaching an MCP policy must not change any request-time decision yet.
-func TestMCPIndex_AllowOperationUnaffected(t *testing.T) {
+// TestMCPIndex_AllowOperationConsultsIndex is the other side of the grammar
+// move: an attached contract now decides the call, where the capability grant
+// alone used to. A path with no contract in scope still passes — that inversion
+// is the absence deny-by-default, which lands separately.
+func TestMCPIndex_AllowOperationConsultsIndex(t *testing.T) {
 	cbpPolicy := testParsePolicy(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -186,7 +188,8 @@ path "mcp/gateway/*" {
 
 	mcpPolicy := testParseMCPPolicy(t, `
 path "mcp/gateway/*" {
-  tools { allowed = ["nothing-matches-this"] }
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["permitted"] }
 }
 `)
 	mcpPolicy.Name = "contract"
@@ -196,15 +199,22 @@ path "mcp/gateway/*" {
 	withMCP, err := NewCBP(testContext(), []*Policy{cbpPolicy, mcpPolicy})
 	require.NoError(t, err)
 
-	req := newMCPRequest(t, "mcp/gateway/",
-		`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"anything"},"id":1}`)
+	denied := newMCPRequest(t, "mcp/gateway/",
+		`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"forbidden"},"id":1}`)
 
-	base := withoutMCP.AllowOperation(testContext(), req, nil, false)
-	withIndex := withMCP.AllowOperation(testContext(), req, nil, false)
+	base := withoutMCP.AllowOperation(testContext(), denied, nil, false)
+	assert.True(t, base.Allowed, "no contract in scope: the grant alone still decides")
+	assert.Nil(t, base.MCPDecision)
 
-	assert.Equal(t, base.Allowed, withIndex.Allowed)
-	assert.Equal(t, base.MCPDecision, withIndex.MCPDecision)
-	assert.True(t, base.Allowed, "the capability grant alone still decides in this PR")
+	gated := withMCP.AllowOperation(testContext(), denied, nil, false)
+	assert.False(t, gated.Allowed, "the contract is consulted through the index")
+	require.NotNil(t, gated.MCPDecision)
+	assert.Equal(t, mcpRuleTypeAllowedTools, gated.MCPDecision.RuleType)
+
+	permitted := newMCPRequest(t, "mcp/gateway/",
+		`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"permitted"},"id":1}`)
+	ok := withMCP.AllowOperation(testContext(), permitted, nil, false)
+	assert.True(t, ok.Allowed)
 }
 
 // TestGetPolicyAnyType_ResolvesBothTypes covers the flat-name resolution that
@@ -420,6 +430,82 @@ func TestNewCBP_RootWithAnotherGrantStillRejected(t *testing.T) {
 	_, err := NewCBP(testContext(), []*Policy{rootPolicy, other})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "other policies present along with root")
+}
+
+// TestMCPDecision_PolicyName_MultiplePolicies pins what PolicyName means when
+// several contracts cover one path — the case where a single name could
+// mislead. It always names the source of the reported rule.
+func TestMCPDecision_PolicyName_MultiplePolicies(t *testing.T) {
+	grant := testParsePolicy(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`)
+	grant.Name = "grant"
+
+	narrow := testParseMCPPolicy(t, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["alpha"] }
+}
+`)
+	narrow.Name = "narrow-contract"
+
+	wide := testParseMCPPolicy(t, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["beta"] }
+}
+`)
+	wide.Name = "wide-contract"
+
+	cbp, err := NewCBP(testContext(), []*Policy{grant, narrow, wide})
+	require.NoError(t, err)
+
+	// Allowed by the second contract only: evaluation stops there, and the
+	// record names the contract that permitted it.
+	allowed := cbp.AllowOperation(testContext(),
+		newMCPRequest(t, "mcp/gateway/",
+			`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"beta"},"id":1}`),
+		nil, false)
+	require.True(t, allowed.Allowed)
+	require.NotNil(t, allowed.MCPDecision)
+	assert.Equal(t, "wide-contract", allowed.MCPDecision.PolicyName)
+
+	// Denied by both: the reported rule comes from one of them, and PolicyName
+	// agrees with it. It is the source of the reason, not the sole cause —
+	// editing only that policy would not lift the denial.
+	denied := cbp.AllowOperation(testContext(),
+		newMCPRequest(t, "mcp/gateway/",
+			`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"gamma"},"id":1}`),
+		nil, false)
+	require.False(t, denied.Allowed)
+	require.NotNil(t, denied.MCPDecision)
+	assert.Contains(t, []string{"narrow-contract", "wide-contract"},
+		denied.MCPDecision.PolicyName)
+	assert.Equal(t, mcpRuleTypeAllowedTools, denied.MCPDecision.RuleType)
+}
+
+// TestMCPDecision_PolicyName_EmptyOnStructuralDeny pins the carve-out: a body
+// that never parses is refused before any contract is chosen, so there is no
+// policy to name.
+func TestMCPDecision_PolicyName_EmptyOnStructuralDeny(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+}
+`)
+	res := cbp.AllowOperation(testContext(),
+		newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":`), nil, false)
+
+	require.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeMalformedJSONRPC, res.MCPDecision.RuleType)
+	assert.Empty(t, res.MCPDecision.PolicyName)
 }
 
 func testPastTime() time.Time {

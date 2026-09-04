@@ -24,13 +24,16 @@ func filterKeeps(t *testing.T, cbp *CBP, path, body, listMethod string) func(str
 }
 
 func TestListFilter_ToolsList_KeepsOnlyCallableTools(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["get_*"]
-    denied_tools    = ["get_secret"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools {
+    allowed = ["get_*"]
+    denied = ["get_secret"]
   }
 }
 `)
@@ -46,12 +49,13 @@ path "mcp/gateway/*" {
 func TestListFilter_NoAllowedTools_KeepsNothing(t *testing.T) {
 	// Deny-by-default: tools/list is permitted as a method, but with no
 	// allowed_tools every item is filtered out — the list comes back empty.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list"] }
 }
 `)
 	keep := filterKeeps(t, cbp, "mcp/gateway/",
@@ -62,13 +66,14 @@ path "mcp/gateway/*" {
 }
 
 func TestListFilter_StarKeepsEverything(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["*"] }
 }
 `)
 	keep := filterKeeps(t, cbp, "mcp/gateway/",
@@ -80,13 +85,14 @@ path "mcp/gateway/*" {
 func TestListFilter_ToolsListAllowedButNotToolsCall_EmptyList(t *testing.T) {
 	// allowed_methods permits tools/list but not tools/call, so nothing is
 	// callable → the filter keeps nothing. "Visible == callable."
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list"]
-    allowed_tools   = ["get_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list"] }
+  tools { allowed = ["get_*"] }
 }
 `)
 	keep := filterKeeps(t, cbp, "mcp/gateway/",
@@ -96,13 +102,14 @@ path "mcp/gateway/*" {
 }
 
 func TestListFilter_ResourcesList_MatchesByUri(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods   = ["resources/list", "resources/read"]
-    allowed_resources = ["github://repo/*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["resources/list", "resources/read"] }
+  resources { allowed = ["github://repo/*"] }
 }
 `)
 	keep := filterKeeps(t, cbp, "mcp/gateway/",
@@ -113,13 +120,14 @@ path "mcp/gateway/*" {
 }
 
 func TestListFilter_PromptsList_MatchesByName(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["prompts/list", "prompts/get"]
-    allowed_prompts = ["safe_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["prompts/list", "prompts/get"] }
+  prompts { allowed = ["safe_*"] }
 }
 `)
 	keep := filterKeeps(t, cbp, "mcp/gateway/",
@@ -132,21 +140,22 @@ path "mcp/gateway/*" {
 func TestListFilter_CrossSetOR(t *testing.T) {
 	// Two stanzas: one allows get_*, the other allows list_*. A tool is kept
 	// if either set would allow the call (cross-set OR).
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["get_*"]
-  }
 }
 
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["list_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["get_*"] }
+}
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["list_*"] }
 }
 `)
 	keep := filterKeeps(t, cbp, "mcp/gateway/",
@@ -163,14 +172,15 @@ func TestListFilter_ConditionGatedToolStaysListed(t *testing.T) {
 	// list time and enforced at call time. The condition is scoped with
 	// call.method so it doesn't deny the argument-less tools/list request
 	// itself (a set-wide call.args condition would — see docs/concepts/mcp.md).
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["create_payment"]
-    condition       = "call.method != 'tools/call' || call.args.amount <= 1500"
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["create_payment"] }
+  condition = "call.method != 'tools/call' || call.args.amount <= 1500"
 }
 `)
 	keep := filterKeeps(t, cbp, "mcp/gateway/",
@@ -181,13 +191,14 @@ path "mcp/gateway/*" {
 
 func TestListFilter_NotAttachedForToolsCall(t *testing.T) {
 	// A non-list call gets no filter — only list methods are filtered.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["get_repo"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["get_repo"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/",
@@ -200,13 +211,14 @@ path "mcp/gateway/*" {
 
 func TestListFilter_NotAttachedOnCapCheckOnly(t *testing.T) {
 	// The cap-check-only pass must not leave a filter behind.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/",

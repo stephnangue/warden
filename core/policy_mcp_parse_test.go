@@ -175,6 +175,79 @@ func TestParseMCPPolicy_RejectsBadPatterns(t *testing.T) {
 	}
 }
 
+func TestParseMCPPolicy_TrailingStarAccepted(t *testing.T) {
+	p := testParseMCPPolicy(t, `
+path "mcp/gateway/*" {
+  tools { denied = ["delete_*"] }
+}
+`)
+	assert.Equal(t, []string{"delete_*"}, p.Paths[0].Permissions.MCP[0].DeniedTools)
+}
+
+func TestParseMCPPolicy_BareStarAccepted(t *testing.T) {
+	// The bare `*` is a zero-prefix trailing-star and matches everything. Used
+	// to express "any value" without enumerating.
+	p := testParseMCPPolicy(t, `
+path "mcp/gateway/*" {
+  prompts { allowed = ["*"] }
+}
+`)
+	assert.Equal(t, []string{"*"}, p.Paths[0].Permissions.MCP[0].AllowedPrompts)
+}
+
+// TestParseMCPPolicy_MultipleStanzasSamePath pins that two stanzas at one path
+// each become their own PathRules carrying a one-entry rule-set. Folding them
+// into a single slice is the index's job, not the parser's.
+func TestParseMCPPolicy_MultipleStanzasSamePath(t *testing.T) {
+	p := testParseMCPPolicy(t, `
+path "mcp/gateway/*" {
+  methods { allowed = ["resources/read"] }
+  resources { allowed = ["github://repo/A/*"] }
+}
+
+path "mcp/gateway/*" {
+  methods { allowed = ["resources/list"] }
+}
+`)
+	require.Len(t, p.Paths, 2)
+	require.Len(t, p.Paths[0].Permissions.MCP, 1)
+	require.Len(t, p.Paths[1].Permissions.MCP, 1)
+	assert.Equal(t, []string{"resources/read"}, p.Paths[0].Permissions.MCP[0].AllowedMethods)
+	assert.Equal(t, []string{"resources/list"}, p.Paths[1].Permissions.MCP[0].AllowedMethods)
+}
+
+// TestParseCBPPolicy_RejectsMCPBlock pins the removal itself: the old nested
+// block must fail at parse with a message naming its replacement.
+func TestParseCBPPolicy_RejectsMCPBlock(t *testing.T) {
+	_, err := ParseCBPPolicy(namespace.RootNamespace, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+  mcp {
+    allowed_tools = ["get_repository"]
+  }
+}
+`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "has been removed from capability policies")
+	assert.Contains(t, err.Error(), "sys/policies/mcp/")
+}
+
+// TestParseCBPPolicy_RejectsMCPBlockOnDenyStanza covers the case a check placed
+// beside the other rule handling would miss: the deny capability jumps to
+// PathFinished, skipping everything after it.
+func TestParseCBPPolicy_RejectsMCPBlockOnDenyStanza(t *testing.T) {
+	_, err := ParseCBPPolicy(namespace.RootNamespace, `
+path "mcp/gateway/*" {
+  capabilities = ["deny"]
+  mcp {
+    allowed_tools = ["get_repository"]
+  }
+}
+`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "has been removed from capability policies")
+}
+
 // TestParseMCPPolicy_JSONDocument covers the "HCL or JSON format" contract the
 // policy API advertises, which the v2 parser serves from its own json package.
 func TestParseMCPPolicy_JSONDocument(t *testing.T) {
