@@ -42,9 +42,7 @@ const (
 	SourceTypeKubernetes    = "kubernetes"
 	SourceTypeScaleway      = "scaleway"
 	SourceTypeOVH           = "ovh"
-	SourceTypeCloudflare    = "cloudflare"
 	SourceTypeGrafana       = "grafana"
-	SourceTypeHoneycomb     = "honeycomb"
 	SourceTypeAlicloud      = "alicloud"
 	SourceTypeTokenExchange = "token_exchange"
 )

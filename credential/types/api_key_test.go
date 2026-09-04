@@ -305,20 +305,6 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			wantErr:    true,
 			errMsg:     "set secret_spec on the source",
 		},
-		{
-			name:       "honeycomb source - no api_key required",
-			config:     map[string]string{"key_type": "ingest"},
-			sourceType: credential.SourceTypeHoneycomb,
-			wantErr:    false,
-		},
-		{
-			// The grafana arm was split out of the shared one; honeycomb keeps its
-			// own mint parameters and must not pick up grafana's checks.
-			name:       "honeycomb source - unaffected by the grafana arm split",
-			config:     map[string]string{"key_type": "configuration", "key_name_prefix": "warden"},
-			sourceType: credential.SourceTypeHoneycomb,
-			wantErr:    false,
-		},
 		// --- Unsupported source types ---
 		{
 			name: "unsupported source type - github",
@@ -327,7 +313,17 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: "github",
 			wantErr:    true,
-			errMsg:     "require an apikey, local, vault, aws, elastic, grafana, or honeycomb source",
+			errMsg:     "require an apikey, local, vault, aws, elastic, or grafana source",
+		},
+		{
+			// The honeycomb source driver was removed: its keys are served from a
+			// vault through an apikey source instead. A spec still naming it must be
+			// refused here rather than reaching a driver that no longer registers.
+			name:       "unsupported source type - honeycomb",
+			config:     map[string]string{"key_type": "ingest"},
+			sourceType: "honeycomb",
+			wantErr:    true,
+			errMsg:     "require an apikey, local, vault, aws, elastic, or grafana source",
 		},
 		// --- Vault source ---
 		{
