@@ -400,7 +400,14 @@ func (a *CBP) Capabilities(ctx context.Context, path string) (pathCapabilities [
 func (a *CBP) AllowOperation(ctx context.Context, req *logical.Request, te *logical.TokenEntry, capCheckOnly bool) (ret *CBPResults) {
 	ret = new(CBPResults)
 
-	// Fast-path root
+	// Fast-path root.
+	//
+	// This returns before the MCP gate, so a root token is not subject to tool
+	// contracts — deliberately, and consistently with root already bypassing
+	// explicit deny capabilities and path conditions. Root is the break-glass
+	// path: making it answer to a contract would mean a misconfigured MCP
+	// policy could lock an operator out of the mount that has to be used to fix
+	// it. Agents hold real tokens, not root.
 	if a.root {
 		ret.Allowed = true
 		ret.RootPrivs = true
@@ -559,7 +566,9 @@ CHECK:
 	// logical.MCPPolicyEnforced. A nil descriptor here means either
 	// the routed backend doesn't implement the marker, or it declined
 	// the request (wrong method / Content-Type) — fail closed.
-	if mcpSets := a.mcpRulesForPath(path); len(mcpSets) > 0 {
+	mcpSets := a.mcpRulesForPath(path)
+	switch {
+	case len(mcpSets) > 0:
 		ret.MCPDecision = decideMCP(mcpSets, req, te, now, ns.Path)
 		if ret.MCPDecision != nil && ret.MCPDecision.Decision == "deny" {
 			return ret
@@ -574,6 +583,20 @@ CHECK:
 				return ret
 			}
 		}
+
+	case mcpDescriptorPopulated(req):
+		// An MCP-shaped request with no contract in scope. The capability
+		// grant said the caller may reach this mount; nothing has said which
+		// calls are permitted on it, so none are. Opening a mount deliberately
+		// is an explicit wildcard MCP policy, which stays visible in a policy
+		// listing and in audit — unlike the absence this replaces, which used
+		// to read as "unrestricted" and was indistinguishable from an operator
+		// forgetting to attach the contract.
+		ret.MCPDecision = &logical.MCPDecision{
+			Decision: "deny",
+			RuleType: mcpRuleTypeNoMCPPolicy,
+		}
+		return ret
 	}
 
 	ret.GrantingPolicies = grantingPolicies

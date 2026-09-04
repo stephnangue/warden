@@ -56,6 +56,23 @@ var mcpGitHubEnv = h.ProviderEnv{
 	URLKey:     "mcp_url",
 	CredType:   "github_token",
 	CredConfig: map[string]string{"token": mcpGitHubToken},
+	// This mount is about credential extraction, not authorization, so it wants
+	// every call to reach the upstream. Since an MCP-enforcing mount now
+	// refuses traffic with no contract in scope, "unrestricted" has to be said
+	// out loud — which is the point: it stays visible in a policy listing.
+	MCPPolicyRules: h.MCPUnrestricted,
+}
+
+// mcpNoContractEnv is an MCP mount with a capability grant and deliberately no
+// tool contract. It exists to prove the absence deny end to end: the shape an
+// operator lands in by granting a mount and forgetting the contract used to be
+// indistinguishable from meaning "unrestricted".
+var mcpNoContractEnv = h.ProviderEnv{
+	Mount:      "fc-mcp-nocontract",
+	Type:       "mcp",
+	URLKey:     "mcp_url",
+	CredType:   "api_key",
+	CredConfig: map[string]string{"api_key": mcpAPIKey},
 }
 
 func mcpToolCall(tool string) string {

@@ -286,9 +286,12 @@ path "mcp/gateway/*" {
 	assert.Equal(t, mcpRuleTypeDeniedMethods, res.MCPDecision.RuleType)
 }
 
-func TestMCPEval_NoMCPBlock_PassesThrough(t *testing.T) {
-	// A policy with no mcp { } block leaves MCPDecision nil — the
-	// MCP gate doesn't run, the request goes through to the proxy.
+func TestMCPEval_NoMCPPolicy_Denies(t *testing.T) {
+	// A capability grant with no contract in scope refuses MCP-shaped traffic.
+	// The grant says the caller may reach the mount; nothing says which calls
+	// are permitted on it, so none are. (Was a clean pass-through before the
+	// absence flip — that default was indistinguishable from an operator
+	// forgetting to attach the contract.)
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -301,8 +304,29 @@ path "mcp/gateway/*" {
 	}`)
 	res := cbp.AllowOperation(testContext(), req, nil, false)
 
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "deny", res.MCPDecision.Decision)
+	assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
+	assert.Empty(t, res.MCPDecision.MatchedRule, "no rule-set was chosen")
+	assert.Empty(t, res.MCPDecision.PolicyName, "no policy to name")
+}
+
+func TestMCPEval_NoMCPPolicy_NonMCPTrafficUnaffected(t *testing.T) {
+	// The absence deny keys on an MCP-shaped body, not on the path. A request
+	// with no descriptor at all — every non-MCP mount — is untouched.
+	cbp := mustCBP(t, `
+path "secret/data/*" {
+  capabilities = ["read"]
+}
+`)
+	res := cbp.AllowOperation(testContext(), &logical.Request{
+		Path:      "secret/data/app",
+		Operation: logical.ReadOperation,
+	}, nil, false)
+
 	assert.True(t, res.Allowed)
-	assert.Nil(t, res.MCPDecision, "no mcp block → no decision recorded")
+	assert.Nil(t, res.MCPDecision)
 }
 
 // =============================================================================

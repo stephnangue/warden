@@ -168,6 +168,15 @@ func (p ProviderEnv) DenyPolicy() string { return p.Mount + "-denied" }
 // distinctly because policy names are unique across types.
 func (p ProviderEnv) MCPPolicy() string { return p.Mount + "-mcp" }
 
+// MCPUnrestricted is the sanctioned escape hatch for a mount that means to
+// permit every call: an MCP-enforcing mount refuses traffic with no contract in
+// scope, so "unrestricted" is stated rather than implied by an absence. Use it
+// for mounts whose tests are about something other than authorization.
+const MCPUnrestricted = `  methods   { allowed = ["*"] }
+  tools     { allowed = ["*"] }
+  resources { allowed = ["*"] }
+  prompts   { allowed = ["*"] }`
+
 // JWTAgentRole authenticates the agent by bearer token instead of certificate.
 // Needed for every shape where the agent arrives in a header — the dedicated
 // agent channel, or a provider's own native channel — because those carry a

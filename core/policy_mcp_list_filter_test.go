@@ -65,7 +65,12 @@ path "mcp/gateway/*" {
 	assert.False(t, keep("anything"))
 }
 
-func TestListFilter_StarKeepsEverything(t *testing.T) {
+// TestListFilter_WildcardContractAttachesNoFilter covers the deliberately
+// unrestricted mount. A keep-everything predicate is not free — the gateway
+// buffers the whole upstream response to rewrite it, and fails closed above
+// max_body_size — so the wildcard contract must leave the response streaming
+// exactly as an ungoverned path used to.
+func TestListFilter_WildcardContractAttachesNoFilter(t *testing.T) {
 	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -76,10 +81,60 @@ path "mcp/gateway/*" {
   tools { allowed = ["*"] }
 }
 `)
+	req := newMCPRequest(t, "mcp/gateway/",
+		`{"jsonrpc":"2.0","method":"tools/list","id":1}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.True(t, res.Allowed)
+	assert.Nil(t, req.MCPListFilter,
+		"a filter that keeps everything is skipped, not attached")
+}
+
+// TestListFilter_PartialWildcardStillFilters is the other half: a deny entry
+// anywhere in the family means some name can be excluded, so the filter stays.
+func TestListFilter_PartialWildcardStillFilters(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools {
+    allowed = ["*"]
+    denied  = ["delete_everything"]
+  }
+}
+`)
 	keep := filterKeeps(t, cbp, "mcp/gateway/",
 		`{"jsonrpc":"2.0","method":"tools/list","id":1}`, "tools/list")
 
-	assert.True(t, keep("delete_everything"))
+	assert.True(t, keep("get_repository"))
+	assert.False(t, keep("delete_everything"))
+}
+
+// TestListFilter_WildcardWithConditionStillFilters pins the other exclusion: a
+// per-call condition can refuse a name at call time, so "visible == callable"
+// requires the filter to stay even though the allow-list is a bare star.
+func TestListFilter_WildcardWithConditionStillFilters(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["*"] }
+  condition = "call.args.?env.orValue('') != 'prod'"
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/",
+		`{"jsonrpc":"2.0","method":"tools/list","id":1}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.True(t, res.Allowed)
+	assert.NotNil(t, req.MCPListFilter,
+		"a conditioned contract is not unconstrained, so the filter stays")
 }
 
 func TestListFilter_ToolsListAllowedButNotToolsCall_EmptyList(t *testing.T) {
@@ -228,9 +283,11 @@ path "mcp/gateway/*" {
 	assert.Nil(t, req.MCPListFilter, "cap-check-only must not attach a filter")
 }
 
-func TestListFilter_NotAttachedWithoutMCPBlock(t *testing.T) {
-	// A path without an mcp{} block imposes no MCP governance (opt-in), so a
-	// tools/list request streams through unfiltered.
+func TestListFilter_NoMCPPolicyDeniesTheListing(t *testing.T) {
+	// A path with no contract in scope refuses the listing outright rather than
+	// streaming it unfiltered. An agent gets an explicit misconfiguration
+	// signal instead of a catalog it was never meant to see. (Before the
+	// absence flip this passed through with no filter attached.)
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -240,6 +297,8 @@ path "mcp/gateway/*" {
 		`{"jsonrpc":"2.0","method":"tools/list","id":1}`)
 	res := cbp.AllowOperation(testContext(), req, nil, false)
 
-	assert.True(t, res.Allowed)
-	assert.Nil(t, req.MCPListFilter, "no mcp{} block → no filter")
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
+	assert.Nil(t, req.MCPListFilter, "a denied listing never reaches the filter")
 }

@@ -5,6 +5,7 @@ package core
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -57,6 +58,17 @@ const (
 	// than stream an unfiltered list. (JSON-RPC batching was dropped from
 	// the MCP spec in 2025-06-18.)
 	mcpRuleTypeBatchListUnfilterable = "batch_list_unfilterable"
+
+	// mcpRuleTypeNoMCPPolicy denies an MCP-shaped request on a path with no
+	// MCP policy in scope. It is produced by AllowOperation before any
+	// rule-set is chosen — there is none — so unlike every other rule type it
+	// carries no matched rule and no policy name.
+	//
+	// This is the absence rule, distinct from the deny-by-default *inside* a
+	// rule-set: an empty allow-list refuses every call the set covers, while
+	// this refuses calls no set covers at all. Together they mean MCP traffic
+	// always answers to an explicit contract.
+	mcpRuleTypeNoMCPPolicy = "no_mcp_policy"
 )
 
 // MCP JSON-RPC method names that carry name-bearing semantics. For
@@ -193,6 +205,16 @@ func attachMCPListFilter(req *logical.Request, sets []*CBPMCPRules) *logical.MCP
 	if !ok {
 		return nil
 	}
+
+	// A filter that keeps everything is not free: the gateway has to buffer the
+	// whole upstream response to rewrite it, and fails closed above
+	// max_body_size. Attaching one to a deliberately unrestricted mount would
+	// make the sanctioned wildcard contract more brittle than the absence it
+	// replaces, so skip it and leave the response streaming.
+	if mcpKeepsEveryItem(sets, callMethod) {
+		return nil
+	}
+
 	req.MCPListFilter = &logical.MCPListFilter{
 		ListMethod: method,
 		Keep: func(name string) bool {
@@ -200,6 +222,50 @@ func attachMCPListFilter(req *logical.Request, sets []*CBPMCPRules) *logical.MCP
 		},
 	}
 	return nil
+}
+
+// mcpKeepsEveryItem reports whether the keep-predicate would admit every
+// possible name, making the filter a no-op.
+//
+// Because mcpListItemAllowed ORs across sets, one unconstrained set is enough:
+// its method gate must pass for the mapped call method, its allow-list must
+// carry the bare `*`, and its deny-list must be empty. A deny entry anywhere in
+// that set can exclude a name, so the filter stays.
+func mcpKeepsEveryItem(sets []*CBPMCPRules, callMethod string) bool {
+	for _, set := range sets {
+		if len(set.DeniedMethods) > 0 || set.Condition != nil {
+			continue
+		}
+		if matchMCPAny(callMethod, set.AllowedMethods) == "" {
+			continue
+		}
+		denyList, allowList := nameListForMethod(set, callMethod)
+		if len(denyList) > 0 {
+			continue
+		}
+		if slices.Contains(allowList, "*") {
+			return true
+		}
+	}
+	return false
+}
+
+// mcpDescriptorPopulated reports whether the extractor produced a descriptor
+// carrying an actual JSON-RPC body — parsed calls, or a typed parse failure.
+//
+// This is the predicate that separates "MCP-shaped request" from everything
+// else, and it is deliberately narrow. A nil descriptor means the routed
+// backend does not implement MCPPolicyEnforced at all, which covers every
+// non-MCP mount. The empty sentinel means the backend declined this particular
+// request — the body-less verbs MCP Streamable HTTP puts on the same URL as the
+// POST (GET for the notification stream, DELETE to close the session), and
+// every httpproxy provider whose spec leaves the enforcement hook unset.
+// Neither can be judged against a tool contract, so neither is treated as one.
+func mcpDescriptorPopulated(req *logical.Request) bool {
+	if req == nil || req.MCPDescriptor == nil {
+		return false
+	}
+	return req.MCPDescriptor.Calls != nil || req.MCPDescriptor.ParseErr != nil
 }
 
 // decideMCP is the production entry point called from
@@ -566,7 +632,11 @@ func mcpDenyRank(ruleType string) int {
 		mcpRuleTypeOversizedBody,
 		mcpRuleTypeBatchEmpty,
 		mcpRuleTypeMalformedParams,
-		mcpRuleTypeBatchListUnfilterable:
+		mcpRuleTypeBatchListUnfilterable,
+		// Never actually competes — it is produced outside evaluateMCPCall,
+		// where there are no rule-sets to rank against. Listed so the ranking
+		// stays total over the rule-type domain.
+		mcpRuleTypeNoMCPPolicy:
 		return 4
 	case mcpRuleTypeDeniedMethods,
 		mcpRuleTypeDeniedTools,
@@ -650,6 +720,13 @@ func BuildMCPDenyDescription(d *logical.MCPDecision) string {
 		return "Batched list requests are not supported."
 	case mcpRuleTypeMissingMethod:
 		return "Request method required."
+	case mcpRuleTypeNoMCPPolicy:
+		// Names the misconfiguration rather than the call. Every other message
+		// answers "what did I ask for that was refused?"; this one answers
+		// "nothing here is permitted yet", which is the actionable difference
+		// between a too-narrow contract and no contract at all. It discloses
+		// only that none is attached, never any rule shape.
+		return "No MCP policy permits this request."
 	}
 	return "Request denied by policy."
 }
