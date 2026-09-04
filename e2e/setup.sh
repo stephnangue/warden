@@ -438,6 +438,30 @@ vault_api POST "secret/data/e2e/elastic-cluster-odd" \
 vault_api POST "secret/data/e2e/grafana-admin-token" \
   "{\"data\":{\"admin_token\":\"glsa_$(printf 'e2e-grafana-not-a-real-admin-token')\"}}"
 
+# The three Honeycomb keys a keyless apikey source fetches per request. Honeycomb
+# has no dynamic-key source of its own: the operator provisions a key and files it
+# here, and what the mount does with it is decided by the payload's shape.
+#
+# An ingest key, as Honeycomb hands one over: its ID and secret already
+# concatenated, which is the only form X-Honeycomb-Team accepts. Assembled rather
+# than written out, for the reason the elastic fixtures above give.
+vault_api POST "secret/data/e2e/honeycomb-ingest-key" \
+  "{\"data\":{\"api_key\":\"hcxik_$(printf 'e2e-honeycomb-not-a-real-ingest-key')\"}}"
+
+# A management key: the two halves apart, since the Bearer form joins them with a
+# colon. key_id travelling beside the secret is what flips the mount to management
+# mode, so this payload and the one above differ by exactly the field that decides
+# the header.
+vault_api POST "secret/data/e2e/honeycomb-mgmt-key" \
+  "{\"data\":{\"api_key\":\"$(printf 'e2e-honeycomb-not-a-real-key-secret')\",\"key_id\":\"hcxmk_e2e-key-id\"}}"
+
+# The same kind of key under a name nothing looks for, plus a companion field that
+# must never be vended. Unusable until a spec names it with secret_field, which is
+# what this fixture exists to drive — and what makes the row where the field names
+# nothing mean something.
+vault_api POST "secret/data/e2e/honeycomb-odd-key" \
+  "{\"data\":{\"hc_key\":\"hcxik_$(printf 'e2e-honeycomb-odd-not-a-real-key')\",\"unrelated_field\":\"must-not-be-vended\"}}"
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \
