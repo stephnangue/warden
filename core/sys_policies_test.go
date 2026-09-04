@@ -14,7 +14,8 @@ func TestSystemBackend_PathPolicies(t *testing.T) {
 	backend, _, _ := setupTestSystemBackend(t)
 
 	paths := backend.pathPolicies()
-	require.Len(t, paths, 2)
+	// One CRUD path and one list path per policy type.
+	require.Len(t, paths, 4)
 
 	// Check policies/cbp/{name} path
 	assert.Equal(t, "policies/cbp/"+framework.GenericNameRegex("name"), paths[0].Pattern)
@@ -25,6 +26,16 @@ func TestSystemBackend_PathPolicies(t *testing.T) {
 	// Check policies/cbp/ list path
 	assert.Equal(t, "policies/cbp/?$", paths[1].Pattern)
 	assert.Contains(t, paths[1].Fields, "prefix")
+
+	// Check policies/mcp/{name} path
+	assert.Equal(t, "policies/mcp/"+framework.GenericNameRegex("name"), paths[2].Pattern)
+	assert.Contains(t, paths[2].Fields, "name")
+	assert.Contains(t, paths[2].Fields, "policy")
+	assert.Contains(t, paths[2].Fields, "cas")
+
+	// Check policies/mcp/ list path
+	assert.Equal(t, "policies/mcp/?$", paths[3].Pattern)
+	assert.Contains(t, paths[3].Fields, "prefix")
 }
 
 func TestSystemBackend_HandlePolicyCreate(t *testing.T) {
@@ -43,11 +54,99 @@ path "secret/*" {
 	req := createTestRequest(logical.CreateOperation, "policies/cbp/test-policy", raw)
 	fieldData := createFieldData(schema, raw)
 
-	resp, err := backend.handlePolicyCreate(ctx, req, fieldData)
+	resp, err := backend.handlePolicyCreate(PolicyTypeCBP)(ctx, req, fieldData)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 	assert.Equal(t, "test-policy", resp.Data["name"])
+}
+
+// TestSystemBackend_HandleMCPPolicyRoundTrip drives an MCP document through the
+// real handlers rather than calling ParseMCPPolicy directly, so the type
+// actually reaches the parser and the store. Without this, deleting the MCP arm
+// of parsePolicyForType would fall through to the CBP parser unnoticed.
+func TestSystemBackend_HandleMCPPolicyRoundTrip(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	// paths[2] is the MCP CRUD path; see TestSystemBackend_PathPolicies.
+	schema := backend.pathPolicies()[2].Fields
+	document := `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list"] }
+  tools   { allowed = ["get_repository"] }
+}
+`
+	raw := map[string]interface{}{"name": "gw-tools", "policy": document}
+
+	req := createTestRequest(logical.CreateOperation, "policies/mcp/gw-tools", raw)
+	resp, err := backend.handlePolicyCreate(PolicyTypeMCP)(ctx, req, createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	// It must land in the MCP view, parsed by the MCP parser.
+	stored, err := backend.core.policyStore.GetPolicy(ctx, "gw-tools", PolicyTypeMCP)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, PolicyTypeMCP, stored.Type)
+	require.Len(t, stored.Paths, 1)
+	require.Len(t, stored.Paths[0].Permissions.MCP, 1)
+	assert.Equal(t, []string{"get_repository"}, stored.Paths[0].Permissions.MCP[0].AllowedTools)
+
+	readReq := createTestRequest(logical.ReadOperation, "policies/mcp/gw-tools", raw)
+	readResp, err := backend.handlePolicyRead(PolicyTypeMCP)(ctx, readReq, createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, readResp)
+	assert.Equal(t, document, readResp.Data["policy"])
+}
+
+// TestSystemBackend_HandleMCPPolicyRejectsCBPGrammar proves the MCP endpoint is
+// really parsed as MCP: a capabilities stanza is a valid CBP policy and must
+// still be refused here.
+func TestSystemBackend_HandleMCPPolicyRejectsCBPGrammar(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	schema := backend.pathPolicies()[2].Fields
+	raw := map[string]interface{}{
+		"name":   "wrong-grammar",
+		"policy": "path \"mcp/gateway/*\" {\n  capabilities = [\"update\"]\n}\n",
+	}
+
+	req := createTestRequest(logical.CreateOperation, "policies/mcp/wrong-grammar", raw)
+	resp, err := backend.handlePolicyCreate(PolicyTypeMCP)(ctx, req, createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.NotNil(t, resp.Err, "a CBP document must not be accepted on the MCP endpoint")
+}
+
+// TestSystemBackend_HandleMCPPolicyNameConflict exercises the cross-type
+// uniqueness guard through the wire mapping, so the operator-facing status is
+// pinned alongside the store-level behavior.
+func TestSystemBackend_HandleMCPPolicyNameConflict(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	cbpSchema := backend.pathPolicies()[0].Fields
+	cbpRaw := map[string]interface{}{
+		"name":   "shared",
+		"policy": "path \"mcp/gateway/*\" {\n  capabilities = [\"update\"]\n}\n",
+	}
+	resp, err := backend.handlePolicyCreate(PolicyTypeCBP)(ctx,
+		createTestRequest(logical.CreateOperation, "policies/cbp/shared", cbpRaw),
+		createFieldData(cbpSchema, cbpRaw))
+	require.NoError(t, err)
+	require.Nil(t, resp.Err)
+
+	mcpSchema := backend.pathPolicies()[2].Fields
+	mcpRaw := map[string]interface{}{
+		"name":   "shared",
+		"policy": "path \"mcp/gateway/*\" {\n  methods { allowed = [\"tools/list\"] }\n}\n",
+	}
+	conflict, err := backend.handlePolicyCreate(PolicyTypeMCP)(ctx,
+		createTestRequest(logical.CreateOperation, "policies/mcp/shared", mcpRaw),
+		createFieldData(mcpSchema, mcpRaw))
+	require.NoError(t, err)
+	require.NotNil(t, conflict.Err)
+	assert.Contains(t, conflict.Err.Error(), "already in use by a cbp policy")
 }
 
 func TestSystemBackend_HandlePolicyCreate_InvalidPolicy(t *testing.T) {
@@ -62,7 +161,7 @@ func TestSystemBackend_HandlePolicyCreate_InvalidPolicy(t *testing.T) {
 	req := createTestRequest(logical.CreateOperation, "policies/cbp/test-policy", raw)
 	fieldData := createFieldData(schema, raw)
 
-	resp, err := backend.handlePolicyCreate(ctx, req, fieldData)
+	resp, err := backend.handlePolicyCreate(PolicyTypeCBP)(ctx, req, fieldData)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.NotNil(t, resp.Err)
@@ -85,11 +184,11 @@ path "secret/*" {
 	req := createTestRequest(logical.CreateOperation, "policies/cbp/test-policy", raw)
 	fieldData := createFieldData(schema, raw)
 
-	_, err := backend.handlePolicyCreate(ctx, req, fieldData)
+	_, err := backend.handlePolicyCreate(PolicyTypeCBP)(ctx, req, fieldData)
 	require.NoError(t, err)
 
 	// Now read it
-	resp, err := backend.handlePolicyRead(ctx, req, fieldData)
+	resp, err := backend.handlePolicyRead(PolicyTypeCBP)(ctx, req, fieldData)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -108,7 +207,7 @@ func TestSystemBackend_HandlePolicyRead_NotFound(t *testing.T) {
 	req := createTestRequest(logical.ReadOperation, "policies/cbp/nonexistent", raw)
 	fieldData := createFieldData(schema, raw)
 
-	resp, err := backend.handlePolicyRead(ctx, req, fieldData)
+	resp, err := backend.handlePolicyRead(PolicyTypeCBP)(ctx, req, fieldData)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
@@ -131,7 +230,7 @@ path "secret/*" {
 	req := createTestRequest(logical.CreateOperation, "policies/cbp/test-policy", createRaw)
 	fieldData := createFieldData(schema, createRaw)
 
-	_, err := backend.handlePolicyCreate(ctx, req, fieldData)
+	_, err := backend.handlePolicyCreate(PolicyTypeCBP)(ctx, req, fieldData)
 	require.NoError(t, err)
 
 	// Now update it
@@ -145,7 +244,7 @@ path "secret/*" {
 	}
 	fieldData = createFieldData(schema, updateRaw)
 
-	resp, err := backend.handlePolicyUpdate(ctx, req, fieldData)
+	resp, err := backend.handlePolicyUpdate(PolicyTypeCBP)(ctx, req, fieldData)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -169,11 +268,11 @@ path "secret/*" {
 	req := createTestRequest(logical.CreateOperation, "policies/cbp/test-policy", raw)
 	fieldData := createFieldData(schema, raw)
 
-	_, err := backend.handlePolicyCreate(ctx, req, fieldData)
+	_, err := backend.handlePolicyCreate(PolicyTypeCBP)(ctx, req, fieldData)
 	require.NoError(t, err)
 
 	// Now delete it
-	resp, err := backend.handlePolicyDelete(ctx, req, fieldData)
+	resp, err := backend.handlePolicyDelete(PolicyTypeCBP)(ctx, req, fieldData)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -196,7 +295,7 @@ path "secret/*" {
 		}
 		fieldData := createFieldData(schema, raw)
 		req := createTestRequest(logical.CreateOperation, "policies/cbp/"+name, raw)
-		_, err := backend.handlePolicyCreate(ctx, req, fieldData)
+		_, err := backend.handlePolicyCreate(PolicyTypeCBP)(ctx, req, fieldData)
 		require.NoError(t, err)
 	}
 
@@ -206,7 +305,7 @@ path "secret/*" {
 	req := createTestRequest(logical.ListOperation, "policies/cbp/", listRaw)
 	fieldData := createFieldData(listSchema, listRaw)
 
-	resp, err := backend.handlePolicyList(ctx, req, fieldData)
+	resp, err := backend.handlePolicyList(PolicyTypeCBP)(ctx, req, fieldData)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -232,7 +331,7 @@ path "secret/*" {
 		}
 		fieldData := createFieldData(schema, raw)
 		req := createTestRequest(logical.CreateOperation, "policies/cbp/"+name, raw)
-		_, err := backend.handlePolicyCreate(ctx, req, fieldData)
+		_, err := backend.handlePolicyCreate(PolicyTypeCBP)(ctx, req, fieldData)
 		require.NoError(t, err)
 	}
 
@@ -244,7 +343,7 @@ path "secret/*" {
 	req := createTestRequest(logical.ListOperation, "policies/cbp/", listRaw)
 	fieldData := createFieldData(listSchema, listRaw)
 
-	resp, err := backend.handlePolicyList(ctx, req, fieldData)
+	resp, err := backend.handlePolicyList(PolicyTypeCBP)(ctx, req, fieldData)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)

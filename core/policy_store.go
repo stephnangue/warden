@@ -26,6 +26,10 @@ const (
 	// nested under policySubPath.
 	cbpSubPath = "cbp/"
 
+	// mcpSubPath is the sub-path used for the policy of type MCP. This is
+	// nested under policySubPath, beside cbpSubPath.
+	mcpSubPath = "mcp/"
+
 	// policyCacheSize is the number of policies that are kept cached
 	policyCacheSize = 1024
 )
@@ -133,7 +137,7 @@ func (ps *PolicyStore) invalidate(ctx context.Context, name string, policyType P
 
 	// This may come with a prefixed "/" due to joining the file path
 	saneName := strings.TrimPrefix(name, "/")
-	index := ps.cacheKey(ns, saneName)
+	index := ps.cacheKey(ns, saneName, policyType)
 
 	ps.modifyLock.Lock()
 	defer ps.modifyLock.Unlock()
@@ -141,13 +145,13 @@ func (ps *PolicyStore) invalidate(ctx context.Context, name string, policyType P
 	// We don't lock before removing from the LRU here because the worst that
 	// can happen is we load again if something since added it
 	switch policyType {
-	case PolicyTypeCBP:
+	case PolicyTypeCBP, PolicyTypeMCP:
 		if ps.tokenPoliciesLRU != nil {
 			ps.tokenPoliciesLRU.Remove(index)
 		}
 
 	default:
-		return fmt.Errorf("unknown policy type: %w", err)
+		return fmt.Errorf("unknown policy type %d", policyType)
 	}
 
 	return nil
@@ -176,6 +180,29 @@ func (ps *PolicyStore) setPolicyInternal(ctx context.Context, p *Policy, casVers
 
 	// Get the appropriate view based on policy type and namespace
 	view := ps.getBarrierView(p.namespace, p.Type)
+	if view == nil {
+		return errors.New("unknown policy type, cannot set")
+	}
+
+	// Policy names are unique across types. Token attachment is a flat list of
+	// names with no type dimension, so a name resolving in both views would
+	// attach ambiguously. Read the other type's view directly: modifyLock is
+	// already held exclusively here, and switchedGetPolicy would take it again.
+	otherType := PolicyTypeMCP
+	if p.Type == PolicyTypeMCP {
+		otherType = PolicyTypeCBP
+	}
+	if otherView := ps.getBarrierView(p.namespace, otherType); otherView != nil {
+		conflict, err := otherView.Get(ctx, p.Name)
+		if err != nil {
+			return fmt.Errorf("unable to check policy name against %s policies: %w", otherType, err)
+		}
+		if conflict != nil {
+			return logical.ErrBadRequest(fmt.Sprintf(
+				"policy name %q is already in use by a %s policy; policy names are unique across %s and %s types",
+				p.Name, otherType, PolicyTypeCBP, PolicyTypeMCP))
+		}
+	}
 
 	p.Modified = time.Now()
 
@@ -226,10 +253,10 @@ func (ps *PolicyStore) setPolicyInternal(ctx context.Context, p *Policy, casVers
 	}
 
 	// Construct the cache key
-	index := ps.cacheKey(p.namespace, p.Name)
+	index := ps.cacheKey(p.namespace, p.Name, p.Type)
 
 	switch p.Type {
-	case PolicyTypeCBP:
+	case PolicyTypeCBP, PolicyTypeMCP:
 		if err := view.Put(ctx, entry); err != nil {
 			return fmt.Errorf("failed to persist policy: %w", err)
 		}
@@ -253,10 +280,26 @@ func (ps *PolicyStore) getCBPView(ns *namespace.Namespace) BarrierView {
 	return ps.core.namespaceMountEntryView(ns, systemBarrierPrefix+policySubPath+cbpSubPath)
 }
 
-// getBarrierView returns the appropriate barrier view for the given namespace and policy type.
-// Currently, this only supports CBP policies, so it delegates to getCBPView.
-func (ps *PolicyStore) getBarrierView(ns *namespace.Namespace, _ PolicyType) BarrierView {
-	return ps.getCBPView(ns)
+// getMCPView returns the MCP view for the given namespace
+func (ps *PolicyStore) getMCPView(ns *namespace.Namespace) BarrierView {
+	if ns.ID == namespace.RootNamespaceID {
+		return ps.core.systemBarrierView.SubView(policySubPath + mcpSubPath)
+	}
+
+	return ps.core.namespaceMountEntryView(ns, systemBarrierPrefix+policySubPath+mcpSubPath)
+}
+
+// getBarrierView returns the appropriate barrier view for the given namespace
+// and policy type, or nil for a type that has no view.
+func (ps *PolicyStore) getBarrierView(ns *namespace.Namespace, policyType PolicyType) BarrierView {
+	switch policyType {
+	case PolicyTypeCBP:
+		return ps.getCBPView(ns)
+	case PolicyTypeMCP:
+		return ps.getMCPView(ns)
+	}
+
+	return nil
 }
 
 // GetPolicy is used to fetch the named policy
@@ -272,16 +315,17 @@ func (ps *PolicyStore) switchedGetPolicy(ctx context.Context, name string, polic
 
 	// Policies are normalized to lower-case
 	name = ps.sanitizeName(name)
-	index := ps.cacheKey(ns, name)
+	index := ps.cacheKey(ns, name, policyType)
 
 	var cache *lru.TwoQueueCache[string, *Policy]
 	var view BarrierView
 
 	switch policyType {
-	case PolicyTypeCBP:
+	case PolicyTypeCBP, PolicyTypeMCP:
 		cache = ps.tokenPoliciesLRU
-		view = ps.getCBPView(ns)
-		policyType = PolicyTypeCBP
+		view = ps.getBarrierView(ns, policyType)
+	default:
+		return nil, fmt.Errorf("unknown policy type %d", policyType)
 	}
 
 	if cache != nil {
@@ -397,8 +441,17 @@ func (ps *PolicyStore) switchedGetPolicy(ctx context.Context, name string, polic
 
 		// Reset this in case they set the name in the policy itself
 		policy.Name = name
+	case PolicyTypeMCP:
+		p, err := ParseMCPPolicy(ns, policyEntry.Raw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse policy: %w", err)
+		}
+		policy.Paths = p.Paths
+
+		// Reset this in case they set the name in the policy itself
+		policy.Name = name
 	default:
-		return nil, fmt.Errorf("unknown policy type %q", policyEntry.Type.String())
+		return nil, fmt.Errorf("unknown policy type %d", policyEntry.Type)
 	}
 
 	if cache != nil {
@@ -433,10 +486,10 @@ func (ps *PolicyStore) ListPoliciesWithPrefix(ctx context.Context, policyType Po
 	// key names.
 	var keys []string
 	switch policyType {
-	case PolicyTypeCBP:
+	case PolicyTypeCBP, PolicyTypeMCP:
 		keys, err = sdklogical.CollectKeysWithPrefix(ctx, view, prefix)
 	default:
-		return nil, fmt.Errorf("unknown policy type %q", policyType)
+		return nil, fmt.Errorf("unknown policy type %d", policyType)
 	}
 
 	if omitNonAssignable {
@@ -475,17 +528,18 @@ func (ps *PolicyStore) switchedDeletePolicy(ctx context.Context, name string, po
 
 	// Policies are normalized to lower-case
 	name = ps.sanitizeName(name)
-	index := ps.cacheKey(ns, name)
+	index := ps.cacheKey(ns, name, policyType)
 
 	view := ps.getBarrierView(ns, policyType)
 
 	switch policyType {
-	case PolicyTypeCBP:
+	case PolicyTypeCBP, PolicyTypeMCP:
 		if !force {
 			if slices.Contains(immutablePolicies, name) {
 				return fmt.Errorf("cannot delete %q policy", name)
 			}
-			if name == "default" {
+			// "default" is a CBP-only singleton; an MCP policy may use the name.
+			if policyType == PolicyTypeCBP && name == "default" {
 				return errors.New("cannot delete default policy")
 			}
 		}
@@ -501,6 +555,10 @@ func (ps *PolicyStore) switchedDeletePolicy(ctx context.Context, name string, po
 			// Clear the cache
 			ps.tokenPoliciesLRU.Remove(index)
 		}
+	default:
+		// Previously an unrouted type fell out of this switch reporting success
+		// while deleting nothing.
+		return fmt.Errorf("unknown policy type %d", policyType)
 	}
 
 	return nil
@@ -589,8 +647,13 @@ func (ps *PolicyStore) sanitizeName(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
 
-func (ps *PolicyStore) cacheKey(ns *namespace.Namespace, name string) string {
-	return path.Join(ns.UUID, name)
+// cacheKey builds the LRU key for a policy. The type is part of the key
+// because CBP and MCP policies live in separate storage views and share one
+// cache — without it, a CBP and an MCP policy of the same name would collide.
+// The namespace UUID stays first so invalidateNamespace's prefix sweep keeps
+// matching every type at once.
+func (ps *PolicyStore) cacheKey(ns *namespace.Namespace, name string, policyType PolicyType) string {
+	return path.Join(ns.UUID, policyType.String(), name)
 }
 
 // loadDefaultPolicies loads default policies for the namespace in the provided context

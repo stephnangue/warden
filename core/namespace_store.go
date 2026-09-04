@@ -993,15 +993,19 @@ func (ns *NamespaceStore) clearNamespaceResources(nsCtx context.Context, namespa
 		}
 	}
 
-	// clear CBP policies
-	policiesToClear, err := ns.core.policyStore.ListPolicies(nsCtx, PolicyTypeCBP, false)
-	if err != nil {
-		return fmt.Errorf("failed to retrieve namespace policies: %w", err)
-	}
-	for _, policy := range policiesToClear {
-		err := ns.core.policyStore.deletePolicyForce(nsCtx, policy, PolicyTypeCBP)
+	// Clear policies of every type. Each type lives in its own storage view and
+	// the deletion job never clears the namespace prefix wholesale, so a type
+	// missing from this loop is orphaned in storage forever.
+	for _, policyType := range []PolicyType{PolicyTypeCBP, PolicyTypeMCP} {
+		policiesToClear, err := ns.core.policyStore.ListPolicies(nsCtx, policyType, false)
 		if err != nil {
-			return fmt.Errorf("failed to delete policy: %w", err)
+			return fmt.Errorf("failed to retrieve namespace %s policies: %w", policyType, err)
+		}
+		for _, policy := range policiesToClear {
+			err := ns.core.policyStore.deletePolicyForce(nsCtx, policy, policyType)
+			if err != nil {
+				return fmt.Errorf("failed to delete %s policy: %w", policyType, err)
+			}
 		}
 	}
 

@@ -79,7 +79,7 @@ func TestCBP_CompiledConditionSharedAcrossCallers(t *testing.T) {
 
 	// Both assemblies drew on the same parsed policy, which is what holds the
 	// compiled CEL program — so the condition was compiled once, not per call.
-	cached, ok := ps.tokenPoliciesLRU.Get(ps.cacheKey(namespace.RootNamespace, "cond"))
+	cached, ok := ps.tokenPoliciesLRU.Get(ps.cacheKey(namespace.RootNamespace, "cond", PolicyTypeCBP))
 	require.True(t, ok, "the parsed policy must stay cached")
 	require.Len(t, cached.Paths, 1)
 	assert.NotEmpty(t, cached.Paths[0].Permissions.Conditions,
@@ -1168,7 +1168,7 @@ func TestCBP_ReusesCachedParse(t *testing.T) {
 
 	// Seed the LRU directly so GetPolicy returns this cached *Policy on the
 	// cache-hit path (storage is never consulted).
-	idx := ps.cacheKey(namespace.RootNamespace, "diverged")
+	idx := ps.cacheKey(namespace.RootNamespace, "diverged", PolicyTypeCBP)
 	ps.tokenPoliciesLRU.Add(idx, cached)
 
 	cbp, err := ps.CBP(ctx, map[string][]string{namespace.RootNamespaceID: {"diverged"}})
@@ -1315,7 +1315,7 @@ func TestCBP_ExpiredPathIsDropped(t *testing.T) {
 			Expiration:   time.Now().Add(50 * time.Millisecond),
 		}},
 	}
-	ps.tokenPoliciesLRU.Add(ps.cacheKey(namespace.RootNamespace, "expiring"), p)
+	ps.tokenPoliciesLRU.Add(ps.cacheKey(namespace.RootNamespace, "expiring", PolicyTypeCBP), p)
 
 	names := map[string][]string{namespace.RootNamespaceID: {"expiring"}}
 	first, err := ps.CBP(ctx, names)
