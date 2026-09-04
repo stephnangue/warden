@@ -103,8 +103,7 @@ func TestRevocableRequiresLeaseID(t *testing.T) {
 			// the vault static_apikey read, the aws secrets_manager read — return
 			// neither a TTL nor a leaseID, and must stay non-revocable: the key is
 			// someone else's to destroy. The drivers that create a key upstream
-			// (elastic, grafana, honeycomb) return both, and are revoked at
-			// session end.
+			// (elastic, grafana) return both, and are revoked at session end.
 			//
 			// Not reachable: no api_key path returns a TTL without a leaseID.
 			name:      "api_key",

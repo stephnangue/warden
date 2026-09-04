@@ -264,6 +264,6 @@ The gateway path format is:
   /<mount>/gateway/{api-path}
   /<mount>/role/{role}/gateway/{api-path}
 
-Supported credential types: api_key (apikey/grafana/honeycomb/elastic sources)
+Supported credential types: api_key (apikey/grafana/elastic sources)
 and oauth_bearer_token (oauth2 source). Both carry the token in the api_key field.
 `

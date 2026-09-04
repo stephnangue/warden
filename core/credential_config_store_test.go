@@ -2714,11 +2714,11 @@ func TestCredentialConfigStore_RotationScheduleFollowsUpdates(t *testing.T) {
 
 // TestCredentialConfigStore_ValidateSpec_UpstreamMintingSources covers the
 // sources that create their credential at the upstream rather than holding one:
-// elastic, grafana and honeycomb. Their factories infer the api_key credential
-// type, and nothing else accepts their source type, so a gap in that type's
-// source allowlist made every spec written against them impossible to create —
-// the documented flow for all three failed at write time with no other route to
-// reach the driver.
+// elastic and grafana. Their factories infer the api_key credential type, and
+// nothing else accepts their source type, so a gap in that type's source
+// allowlist made every spec written against them impossible to create — the
+// documented flow for both failed at write time with no other route to reach
+// the driver.
 //
 // The driver registry is left nil so the create-time test mint is skipped: what
 // is under test is the validation chain, which needs no cluster.
@@ -2737,7 +2737,6 @@ func TestCredentialConfigStore_ValidateSpec_UpstreamMintingSources(t *testing.T)
 	}{
 		{sourceType: credential.SourceTypeElastic, specConfig: map[string]string{}},
 		{sourceType: credential.SourceTypeGrafana, specConfig: map[string]string{"service_account_id": "42"}},
-		{sourceType: credential.SourceTypeHoneycomb, specConfig: map[string]string{}},
 	} {
 		t.Run(tc.sourceType, func(t *testing.T) {
 			source := &credential.CredSource{Name: tc.sourceType + "-src", Type: tc.sourceType}

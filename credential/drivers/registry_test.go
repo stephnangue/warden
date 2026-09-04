@@ -27,7 +27,6 @@ func TestRegisterBuiltinDrivers(t *testing.T) {
 		credential.SourceTypeAlicloud,
 		credential.SourceTypeElastic,
 		credential.SourceTypeGrafana,
-		credential.SourceTypeHoneycomb,
 		credential.SourceTypeIBM,
 		credential.SourceTypeKubernetes,
 		credential.SourceTypeOVH,

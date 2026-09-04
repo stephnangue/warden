@@ -89,7 +89,7 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("proj-xxxxxxxxxxxx"),
 
 		credential.StringField("key_id").
-			Describe("Key identifier (optional; honeycomb uses it to select management-key mode)").
+			Describe("Key identifier travelling beside the key (optional; the honeycomb mount reads its presence as the selector for management-key mode)").
 			Example("hcaik_xxxxxxxxxxxx"),
 
 		credential.StringField("key_name").
@@ -134,23 +134,6 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("token_expiry").
 			Describe("Lifetime of the minted service-account token (grafana; default 1h)").
 			Example("1h"),
-
-		credential.StringField("key_type").
-			OneOf("ingest", "configuration").
-			Describe("Which kind of key to create (honeycomb)").
-			Example("ingest"),
-
-		credential.StringField("key_name_prefix").
-			Describe("Prefix for the generated key name (honeycomb)").
-			Example("warden"),
-
-		credential.StringField("environment_id").
-			Describe("Environment the key is created in (honeycomb)").
-			Example("hcaen_xxxxxxxxxxxx"),
-
-		credential.StringField("permissions").
-			Describe("JSON permissions for a configuration key (honeycomb)").
-			Example(`{"create_datasets":true}`),
 
 		// Store-backed sources (vault static_apikey, aws secrets_manager)
 		credential.StringField("mint_method").
@@ -228,16 +211,16 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 	// so carries no key in the spec at all — which is why the required-api_key
 	// check below is not reached for them.
 	//
-	// The second family was missing here, and its absence made all three of those
-	// drivers unreachable: their factories infer this type, no other type accepts
-	// their source, and so every spec written against one was refused. There is no
+	// The second family was missing here, and its absence made those drivers
+	// unreachable: their factories infer this type, no other type accepts their
+	// source, and so every spec written against one was refused. There is no
 	// second path to reach them.
 	switch sourceType {
 	case credential.SourceTypeAPIKey, credential.SourceTypeLocal, credential.SourceTypeVault, credential.SourceTypeAWS,
-		credential.SourceTypeElastic, credential.SourceTypeGrafana, credential.SourceTypeHoneycomb:
+		credential.SourceTypeElastic, credential.SourceTypeGrafana:
 		// Supported
 	default:
-		return fmt.Errorf("api_key credentials require an apikey, local, vault, aws, elastic, grafana, or honeycomb source, got: %s", sourceType)
+		return fmt.Errorf("api_key credentials require an apikey, local, vault, aws, elastic, or grafana source, got: %s", sourceType)
 	}
 
 	// Step 2: Validate config against schema
@@ -340,9 +323,6 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 		if _, present := config["org_id"]; present {
 			return fmt.Errorf("'org_id' is not settable: a service account belongs to one organization, so naming the account in service_account_id already says which. Use one source per organization")
 		}
-	case credential.SourceTypeHoneycomb:
-		// As above: the key is created upstream per mint and the spec holds no
-		// key. Its mint parameters are validated by its own driver.
 	default:
 		// apikey source: the api_key lives inline in the spec, unless it is sourced from
 		// another cred spec via credential chaining (secret_spec) — the two are mutually
