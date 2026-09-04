@@ -4,6 +4,8 @@
 package core
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -20,7 +22,7 @@ func mustMCPIndex(t testing.TB, documents ...string) *CBP {
 	policies := make([]*Policy, 0, len(documents))
 	for i, doc := range documents {
 		p := testParseMCPPolicy(t, doc)
-		p.Name = string(rune('a' + i))
+		p.Name = fmt.Sprintf("p%d", i)
 		policies = append(policies, p)
 	}
 	cbp, err := NewCBP(testContext(), policies)
@@ -292,6 +294,132 @@ path "mcp/gateway/*" {
 
 	assert.Equal(t, []string{"get_repository"},
 		toolsOf(cbp.mcpRulesForPath("mcp/gateway/call")))
+}
+
+// TestCBP_RepeatedCompileDoesNotAccumulate is the regression guard for the
+// sharpest hazard in the index: CBP() hands out cached *Policy pointers from
+// the LRU, so if the same-key merge appended to a CBPPermissions still owned by
+// a cached policy, every compile would grow the rule-sets and corrupt the
+// cache. Building the index twice from the same cached policies must be
+// idempotent, and the source policies must come back unchanged.
+func TestCBP_RepeatedCompileDoesNotAccumulate(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	ctx := testContext()
+
+	for i, doc := range []string{
+		`
+path "mcp/gateway/*" {
+  tools { allowed = ["first"] }
+}
+`,
+		`
+path "mcp/gateway/*" {
+  tools { allowed = ["second"] }
+}
+`,
+	} {
+		p := testParseMCPPolicy(t, doc)
+		p.Name = fmt.Sprintf("contract-%d", i)
+		require.NoError(t, ps.SetPolicy(ctx, p, nil))
+	}
+
+	names := map[string][]string{
+		namespace.RootNamespaceID: {"contract-0", "contract-1"},
+	}
+
+	first, err := ps.CBP(ctx, names)
+	require.NoError(t, err)
+	require.Len(t, first.mcpRulesForPath("mcp/gateway/call"), 2)
+
+	second, err := ps.CBP(ctx, names)
+	require.NoError(t, err)
+	assert.Len(t, second.mcpRulesForPath("mcp/gateway/call"), 2,
+		"a second compile over the same cached policies must not accumulate rule-sets")
+
+	// And the cached policies themselves must still hold one rule-set each.
+	for _, name := range []string{"contract-0", "contract-1"} {
+		cached, err := ps.GetPolicy(ctx, name, PolicyTypeMCP)
+		require.NoError(t, err)
+		require.Len(t, cached.Paths, 1)
+		assert.Len(t, cached.Paths[0].Permissions.MCP, 1,
+			"compiling must not mutate the cached policy %q", name)
+	}
+}
+
+// TestMCPIndex_NamespaceScoped covers the namespace-prefixed path key and the
+// child-namespace MCP view, neither of which the root-namespace tests exercise.
+func TestMCPIndex_NamespaceScoped(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	rootCtx := testContext()
+
+	child := &namespace.Namespace{Path: "team-a/"}
+	require.NoError(t, core.namespaceStore.SetNamespace(rootCtx, child))
+	nsCtx := namespace.ContextWithNamespace(context.Background(), child)
+
+	p, err := ParseMCPPolicy(child, `
+path "mcp/gateway/*" {
+  tools { allowed = ["scoped"] }
+}
+`)
+	require.NoError(t, err)
+	p.Name = "ns-contract"
+	require.NoError(t, ps.SetPolicy(nsCtx, p, nil))
+
+	// The stanza key carries the namespace path, so it matches only there.
+	require.Len(t, p.Paths, 1)
+	assert.Equal(t, "team-a/mcp/gateway/", p.Paths[0].Path)
+
+	cbp, err := ps.CBP(nsCtx, map[string][]string{child.ID: {"ns-contract"}})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"scoped"},
+		toolsOf(cbp.mcpRulesForPath("team-a/mcp/gateway/call")))
+	assert.Nil(t, cbp.mcpRulesForPath("mcp/gateway/call"),
+		"a namespaced contract must not match the unprefixed path")
+}
+
+// TestNewCBP_RootWithMCPPolicy pins that an MCP policy alongside root is inert
+// rather than fatal. Root bypasses the MCP gate entirely, so counting a
+// contract as a competing grant would turn a harmless attachment into a 500 on
+// every request the token makes.
+func TestNewCBP_RootWithMCPPolicy(t *testing.T) {
+	rootPolicy := &Policy{Name: "root", Type: PolicyTypeCBP, namespace: namespace.RootNamespace}
+
+	contract := testParseMCPPolicy(t, `
+path "mcp/gateway/*" {
+  tools { allowed = ["ignored"] }
+}
+`)
+	contract.Name = "contract"
+
+	cbp, err := NewCBP(testContext(), []*Policy{rootPolicy, contract})
+	require.NoError(t, err, "an MCP policy must not collide with root")
+	assert.True(t, cbp.root)
+
+	// The contract is still indexed; root simply never consults it.
+	assert.Equal(t, []string{"ignored"}, toolsOf(cbp.mcpRulesForPath("mcp/gateway/call")))
+
+	res := cbp.AllowOperation(testContext(), &logical.Request{
+		Path:      "mcp/gateway/call",
+		Operation: logical.UpdateOperation,
+	}, nil, false)
+	assert.True(t, res.Allowed)
+	assert.True(t, res.IsRoot)
+}
+
+// TestNewCBP_RootWithAnotherGrantStillRejected proves the exclusivity rule
+// still holds for the case it was written for: a second capability policy.
+func TestNewCBP_RootWithAnotherGrantStillRejected(t *testing.T) {
+	rootPolicy := &Policy{Name: "root", Type: PolicyTypeCBP, namespace: namespace.RootNamespace}
+
+	other := testParsePolicy(t, `path "secret/*" { capabilities = ["read"] }`)
+	other.Name = "other"
+
+	_, err := NewCBP(testContext(), []*Policy{rootPolicy, other})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "other policies present along with root")
 }
 
 func testPastTime() time.Time {

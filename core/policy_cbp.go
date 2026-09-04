@@ -105,6 +105,19 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 		return nil, namespace.ErrNoNamespace
 	}
 
+	// The root policy must stand alone among *grants*. MCP policies are counted
+	// out of that: they grant nothing, and AllowOperation's root fast path
+	// returns before the MCP gate anyway, so attaching one to a root token is
+	// inert rather than contradictory. Counting them would turn a harmless
+	// attachment into a compile failure, which surfaces as a 500 on every
+	// request the token makes.
+	grantingPolicyCount := 0
+	for _, policy := range policies {
+		if policy != nil && policy.Type == PolicyTypeCBP {
+			grantingPolicyCount++
+		}
+	}
+
 	// Inject each policy
 	for _, policy := range policies {
 		// Ignore a nil policy object
@@ -132,7 +145,7 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 				return nil, errors.New("root policy is only allowed in root namespace")
 			}
 
-			if len(policies) != 1 {
+			if grantingPolicyCount != 1 {
 				return nil, errors.New("other policies present along with root")
 			}
 			a.root = true
@@ -287,6 +300,11 @@ func (a *CBP) insertMCPPolicy(policy *Policy) error {
 		}
 
 		if !ok {
+			// Clone before inserting: CBP() compiles from *Policy values held in
+			// the LRU and shared across requests, so the index must never hold
+			// a CBPPermissions the cached policy still owns — the same-key
+			// append below would otherwise grow the cached rule-sets on every
+			// compile.
 			clonedPerms, err := pc.Permissions.Clone()
 			if err != nil {
 				return fmt.Errorf("error cloning MCP permissions: %w", err)
@@ -318,12 +336,16 @@ func (a *CBP) insertMCPPolicy(policy *Policy) error {
 // Resolution mirrors the capability index: an exact hit wins outright,
 // otherwise the shared wildcard resolver picks one candidate by the same
 // ranking. The List/Scan trailing-slash retries AllowOperation performs are
-// deliberately absent — a populated MCP descriptor only ever exists on a POST.
+// deliberately absent — a populated MCP descriptor only ever exists on a POST,
+// because every MCPPolicyEnforced implementer gates on POST plus a JSON
+// content type.
+//
+// The returned slice is owned by the compiled index and shared by every request
+// evaluated against it. Callers must treat it as read-only: sorting or
+// appending would corrupt the CBP for every other caller holding it.
 func (a *CBP) mcpRulesForPath(path string) []*CBPMCPRules {
 	if raw, ok := a.mcpExactRules.Get(path); ok {
-		if perms, castOK := raw.(*CBPPermissions); castOK {
-			return perms.MCP
-		}
+		return raw.(*CBPPermissions).MCP
 	}
 
 	if perms := checkAllowedFromNonExactPaths(
