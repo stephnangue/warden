@@ -75,6 +75,27 @@ var mcpNoContractEnv = h.ProviderEnv{
 	CredConfig: map[string]string{"api_key": mcpAPIKey},
 }
 
+// mcpBodyCapBytes is small enough that an ordinary tool catalog exceeds it, so
+// a test can tell buffering from streaming. The default cap is 10MB, which no
+// plausible fixture reaches — a listing sized against it would prove nothing.
+const mcpBodyCapBytes = 65536
+
+// mcpUnrestrictedSmallCapEnv pairs the wildcard contract with a deliberately
+// tight max_body_size. Attaching a keep-everything filter makes the gateway
+// buffer the whole upstream response against that cap and fail closed above it,
+// so this mount is what separates "the filter was skipped" from "the filter ran
+// and happened to keep everything" — two outcomes that are otherwise identical
+// on the wire.
+var mcpUnrestrictedSmallCapEnv = h.ProviderEnv{
+	Mount:          "fc-mcp-bigcatalog",
+	Type:           "mcp",
+	URLKey:         "mcp_url",
+	CredType:       "api_key",
+	CredConfig:     map[string]string{"api_key": mcpAPIKey},
+	MCPPolicyRules: h.MCPUnrestricted,
+	ExtraConfig:    map[string]any{"max_body_size": mcpBodyCapBytes},
+}
+
 func mcpToolCall(tool string) string {
 	return mcpToolCallID(tool, 1)
 }
@@ -255,8 +276,12 @@ func TestMCP_MalformedBodyIsRefused(t *testing.T) {
 //
 // That is the property worth pinning: a body the filter cannot interpret is
 // denied rather than waved through as "no rule matched", which is how a filter
-// of this shape usually breaks. This row would pass differently with no MCP
-// contract attached to the mount.
+// of this shape usually breaks.
+//
+// Note the status alone no longer distinguishes this from an ungoverned mount —
+// both answer 403 with the same challenge. What makes this row specific is the
+// contract being attached: the refusal comes from the body failing to parse
+// against rules that exist, not from there being no rules.
 func TestMCP_ValidJSONButInvalidJSONRPCIsDeniedByPolicy(t *testing.T) {
 	ensureEnv(t)
 

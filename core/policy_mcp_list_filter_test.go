@@ -113,10 +113,15 @@ path "mcp/gateway/*" {
 	assert.False(t, keep("delete_everything"))
 }
 
-// TestListFilter_WildcardWithConditionStillFilters pins the other exclusion: a
-// per-call condition can refuse a name at call time, so "visible == callable"
-// requires the filter to stay even though the allow-list is a bare star.
-func TestListFilter_WildcardWithConditionStillFilters(t *testing.T) {
+// TestListFilter_WildcardWithConditionAttachesNoFilter pins that a per-call
+// condition does not by itself keep the filter.
+//
+// It is tempting to reason that a condition can refuse a call, so the listing
+// should be pruned — but list filtering deliberately skips CEL, because a
+// listing carries no call arguments to evaluate against. A condition-gated tool
+// stays listed either way and is refused at call time. Keeping the filter here
+// would buffer the whole response to prune nothing.
+func TestListFilter_WildcardWithConditionAttachesNoFilter(t *testing.T) {
 	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -133,8 +138,57 @@ path "mcp/gateway/*" {
 	res := cbp.AllowOperation(testContext(), req, nil, false)
 
 	assert.True(t, res.Allowed)
-	assert.NotNil(t, req.MCPListFilter,
-		"a conditioned contract is not unconstrained, so the filter stays")
+	assert.Nil(t, req.MCPListFilter,
+		"the keep-predicate ignores conditions, so this filter would prune nothing")
+}
+
+// TestListFilter_UnrelatedDeniedMethodStillSkips pins the other refinement: a
+// denied_methods entry that cannot match the mapped call method cannot exclude
+// a name either, so it does not force the filter back on.
+func TestListFilter_UnrelatedDeniedMethodStillSkips(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods {
+    allowed = ["tools/list", "tools/call"]
+    denied  = ["prompts/get"]
+  }
+  tools { allowed = ["*"] }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/",
+		`{"jsonrpc":"2.0","method":"tools/list","id":1}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.True(t, res.Allowed)
+	assert.Nil(t, req.MCPListFilter,
+		"a deny on an unrelated method cannot exclude a tool name")
+}
+
+// TestListFilter_DeniedCallMethodKeepsFilter is the boundary of the above: when
+// the deny entry does match the mapped call method, nothing is callable, so the
+// filter stays and empties the listing.
+func TestListFilter_DeniedCallMethodKeepsFilter(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods {
+    allowed = ["tools/list", "tools/call"]
+    denied  = ["tools/call"]
+  }
+  tools { allowed = ["*"] }
+}
+`)
+	keep := filterKeeps(t, cbp, "mcp/gateway/",
+		`{"jsonrpc":"2.0","method":"tools/list","id":1}`, "tools/list")
+
+	assert.False(t, keep("anything"), "tools/call is denied, so no tool is callable")
 }
 
 func TestListFilter_ToolsListAllowedButNotToolsCall_EmptyList(t *testing.T) {

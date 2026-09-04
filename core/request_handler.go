@@ -994,6 +994,14 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 	// ShouldEnforceMCPPolicy. One future spec setting both makes this live, so
 	// it fails closed and loudly rather than passing traffic silently.
 	if req.StreamUnauthenticated && mcpDescriptorPopulated(req) {
+		// Logged because this branch firing means one specific thing — a
+		// provider spec now sets both IsUnauthenticatedRequest and
+		// ShouldEnforceMCPPolicy — and the operator should learn it here
+		// rather than from a client reporting refusals. Audit is skipped for
+		// this path by design (no principal exists to attribute it to), so the
+		// operational log is the only signal.
+		c.logger.Warn("refusing MCP request on an unauthenticated streaming path",
+			logger.String("path", req.Path))
 		return logical.ErrorResponse(logical.ErrForbidden(
 			"MCP requests cannot use unauthenticated streaming paths")), nil, nil
 	}

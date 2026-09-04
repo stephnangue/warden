@@ -52,7 +52,8 @@ import (
 var allEnvs = []h.ProviderEnv{
 	openaiEnv, anthropicEnv, newrelicEnv, elasticEnv, githubEnv,
 	splunkEnv, datadogEnv, restEnv, dynatraceEnv, dynatraceOAuthEnv, mcpEnv, mcpGitHubEnv,
-	mcpAWSEnv, mcpAWSWrongCredEnv, mcpNoContractEnv, atlassianEnv, honeycombEnv, grafanaEnv,
+	mcpAWSEnv, mcpAWSWrongCredEnv, mcpNoContractEnv, mcpUnrestrictedSmallCapEnv,
+	atlassianEnv, honeycombEnv, grafanaEnv,
 	prometheusEnv, prometheusBasicEnv,
 	scalewayEnv, cloudflareEnv,
 	vaultEnv,

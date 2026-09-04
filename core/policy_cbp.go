@@ -64,11 +64,12 @@ type CBPResults struct {
 	GrantingPolicies       []sdklogical.PolicyInfo
 	ResponseKeysFilterPath string
 
-	// MCPDecision is populated whenever an mcp { } rule-set was
-	// consulted during AllowOperation, on every branch (allow and
-	// deny) so the audit and deny-response layers can render the
-	// decision unconditionally. Nil when no rule-set applied (the
-	// vast majority of requests — every non-MCP provider).
+	// MCPDecision is populated on every branch of the MCP gate, allow and
+	// deny, so the audit and deny-response layers can render the decision
+	// unconditionally. That covers two cases: a rule-set was consulted, or an
+	// MCP-shaped request met no rule-set at all and was denied with
+	// no_mcp_policy. Nil for everything else — every non-MCP provider, and the
+	// body-less verbs an MCP mount serves alongside its JSON-RPC POSTs.
 	//
 	// Invariant: when MCPDecision.Decision == "deny", Allowed is
 	// false. The reverse (Allowed=false with Decision="allow") is
@@ -552,8 +553,8 @@ CHECK:
 
 	// MCP rule-set evaluation, body-authoritative. Runs after
 	// conditions (so source-IP / time gates apply first) and before
-	// parameter validation. Populates ret.MCPDecision on every branch
-	// when a rule-set was consulted, so the audit layer sees the
+	// parameter validation. Populates ret.MCPDecision on every branch it
+	// takes — including the absence deny below — so the audit layer sees the
 	// decision whether the request was allowed or denied.
 	//
 	// The rule-sets come from the MCP index, a lookup independent of the one

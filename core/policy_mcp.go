@@ -225,15 +225,25 @@ func attachMCPListFilter(req *logical.Request, sets []*CBPMCPRules) *logical.MCP
 }
 
 // mcpKeepsEveryItem reports whether the keep-predicate would admit every
-// possible name, making the filter a no-op.
+// possible name, making the filter a no-op worth skipping.
 //
-// Because mcpListItemAllowed ORs across sets, one unconstrained set is enough:
-// its method gate must pass for the mapped call method, its allow-list must
-// carry the bare `*`, and its deny-list must be empty. A deny entry anywhere in
-// that set can exclude a name, so the filter stays.
+// It models mcpListItemAllowed exactly, and must keep doing so: that predicate
+// runs evaluateMCPGates only, which for a fixed callMethod can refuse a name in
+// three ways — a denied_methods match, an allowed_methods miss, or the family
+// gate. One set clearing all three admits every name, and since the predicate
+// ORs across sets, one is enough.
+//
+// Conditions are deliberately not considered, because the predicate does not
+// consider them either: list responses carry no call arguments, so a
+// condition-gated tool stays listed and is refused at call time instead.
+// Treating a condition as a reason to keep the filter would buffer the whole
+// response to prune nothing. If list filtering ever becomes condition-aware,
+// this has to change with it.
 func mcpKeepsEveryItem(sets []*CBPMCPRules, callMethod string) bool {
 	for _, set := range sets {
-		if len(set.DeniedMethods) > 0 || set.Condition != nil {
+		// Only a deny entry that can actually match this method excludes a
+		// name; an unrelated one cannot.
+		if matchMCPAny(callMethod, set.DeniedMethods) != "" {
 			continue
 		}
 		if matchMCPAny(callMethod, set.AllowedMethods) == "" {
@@ -269,24 +279,24 @@ func mcpDescriptorPopulated(req *logical.Request) bool {
 }
 
 // decideMCP is the production entry point called from
-// AllowOperation when the matched permissions carry a non-empty
-// mcp { } rule-set slice. It bridges req.MCPDescriptor's four
+// AllowOperation when the MCP index returned a non-empty rule-set
+// slice for the request path. It bridges req.MCPDescriptor's four
 // terminal states to MCPDecision (see extractMCPDescriptor for how
 // each state is produced):
 //
 //   - Nil descriptor — no MCP-aware backend handled this request.
-//     If an operator bound mcp{} to a non-MCP path, that's a misconfig
-//     and we fail closed with missing_body. This is the safety net.
+//     If an operator bound a contract to a non-MCP path, that's a
+//     misconfig and we fail closed with missing_body. The safety net.
 //
 //   - Non-nil, empty descriptor (Calls nil, ParseErr nil) — the
 //     backend is MCP-aware but ShouldEnforceMCPPolicy declined for
 //     this request (typically a non-POST verb, or a non-JSON
-//     Content-Type). The mcp{} block is body-authoritative; a verb
-//     with no body cannot be governed by method/tool/param allow-
-//     lists, so we return nil to skip mcp{} evaluation and let the
-//     cap-level check decide. This is what makes MCP Streamable
-//     HTTP's GET (notification SSE stream) and DELETE (session
-//     terminate) work on the same URL that POST gates.
+//     Content-Type). A contract is body-authoritative; a verb with no
+//     body cannot be governed by method/tool allow-lists, so we
+//     return nil to skip evaluation and let the cap-level check
+//     decide. This is what makes MCP Streamable HTTP's GET
+//     (notification SSE stream) and DELETE (session terminate) work
+//     on the same URL that POST gates.
 //
 //   - descriptor.ParseErr non-nil — strict JSON-RPC parse failed.
 //     Deny with the typed rule_type (malformed_jsonrpc, duplicate_key,

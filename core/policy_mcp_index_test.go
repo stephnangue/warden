@@ -566,6 +566,19 @@ path "mcp/gateway/*" {
 		assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
 	})
 
+	t.Run("batch denies", func(t *testing.T) {
+		// A batch is as MCP-shaped as a single call; nothing about the absence
+		// deny depends on there being exactly one.
+		req := newMCPRequest(t, "mcp/gateway/", `[
+			{"jsonrpc":"2.0","method":"tools/call","params":{"name":"a"},"id":1},
+			{"jsonrpc":"2.0","method":"tools/call","params":{"name":"b"},"id":2}
+		]`)
+		res := cbp.AllowOperation(testContext(), req, nil, false)
+		assert.False(t, res.Allowed)
+		require.NotNil(t, res.MCPDecision)
+		assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
+	})
+
 	t.Run("parse failure denies", func(t *testing.T) {
 		// A malformed body is populated too, so it is refused rather than
 		// proxied. It reports the absence, not the malformation — the contract
@@ -576,6 +589,55 @@ path "mcp/gateway/*" {
 		require.NotNil(t, res.MCPDecision)
 		assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
 	})
+}
+
+// TestMCPAbsenceDeny_NamespaceScoped covers the absence deny where the path key
+// carries a namespace prefix. PR 4 is the first place absence itself decides an
+// outcome, so the namespaced lookup is worth pinning on both sides: a contract
+// in the namespace governs, and the same mount without one refuses.
+func TestMCPAbsenceDeny_NamespaceScoped(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	rootCtx := testContext()
+
+	child := &namespace.Namespace{Path: "team-a/"}
+	require.NoError(t, core.namespaceStore.SetNamespace(rootCtx, child))
+	nsCtx := namespace.ContextWithNamespace(context.Background(), child)
+
+	grant, err := ParseCBPPolicy(child, `path "mcp/gateway/*" { capabilities = ["update"] }`)
+	require.NoError(t, err)
+	grant.Name = "ns-grant"
+	require.NoError(t, ps.SetPolicy(nsCtx, grant, nil))
+
+	// The request path is namespace-relative; AllowOperation prefixes it.
+	req := func() *logical.Request {
+		return newMCPRequest(t, "mcp/gateway/",
+			`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"x"},"id":1}`)
+	}
+
+	ungoverned, err := ps.CBP(nsCtx, map[string][]string{child.ID: {"ns-grant"}})
+	require.NoError(t, err)
+	res := ungoverned.AllowOperation(nsCtx, req(), nil, false)
+	assert.False(t, res.Allowed, "a namespaced mount with no contract refuses too")
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
+
+	contract, err := ParseMCPPolicy(child, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["x"] }
+}
+`)
+	require.NoError(t, err)
+	contract.Name = "ns-contract"
+	require.NoError(t, ps.SetPolicy(nsCtx, contract, nil))
+
+	governed, err := ps.CBP(nsCtx, map[string][]string{child.ID: {"ns-grant", "ns-contract"}})
+	require.NoError(t, err)
+	ok := governed.AllowOperation(nsCtx, req(), nil, false)
+	assert.True(t, ok.Allowed, "the namespaced contract governs the namespaced path")
+	require.NotNil(t, ok.MCPDecision)
+	assert.Equal(t, "allow", ok.MCPDecision.Decision)
 }
 
 func testPastTime() time.Time {
