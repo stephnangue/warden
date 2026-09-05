@@ -1396,6 +1396,52 @@ path "other/*" { capabilities = ["read"] }
 			}
 		})
 	}
+
+	// A compile is per request — CBP() rebuilds from cached policies every
+	// time — so what a contract adds here is paid on every call, not once.
+	// Compared against 2-policies rather than 3, this isolates the second
+	// index from the extra document.
+	mcpRules := `
+path "prov/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["get_repository", "list_issues"] }
+}
+path "prov/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["get_repository", "list_issues"] }
+}
+`
+	mixed := make([]*Policy, 0, 3)
+	for i := 0; i < 2; i++ {
+		p, err := ParseCBPPolicy(namespace.RootNamespace, rules)
+		if err != nil {
+			b.Fatal(err)
+		}
+		p.Name = fmt.Sprintf("p%d", i)
+		mixed = append(mixed, p)
+	}
+	contract, err := ParseMCPPolicy(namespace.RootNamespace, mcpRules)
+	if err != nil {
+		b.Fatal(err)
+	}
+	contract.Name = "contract"
+
+	b.Run("2-policies", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, err := NewCBP(ctx, mixed); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	withContract := append(append([]*Policy(nil), mixed...), contract)
+	b.Run("2-policies+1-mcp", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, err := NewCBP(ctx, withContract); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 // TestCBP_CompilationIsOrderIndependent pins that a token's policies compile to

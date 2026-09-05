@@ -203,8 +203,9 @@ path "mcp/gateway/*" {
 		`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"forbidden"},"id":1}`)
 
 	base := withoutMCP.AllowOperation(testContext(), denied, nil, false)
-	assert.True(t, base.Allowed, "no contract in scope: the grant alone still decides")
-	assert.Nil(t, base.MCPDecision)
+	assert.False(t, base.Allowed, "no contract in scope: nothing permits the call")
+	require.NotNil(t, base.MCPDecision)
+	assert.Equal(t, mcpRuleTypeNoMCPPolicy, base.MCPDecision.RuleType)
 
 	gated := withMCP.AllowOperation(testContext(), denied, nil, false)
 	assert.False(t, gated.Allowed, "the contract is consulted through the index")
@@ -506,6 +507,137 @@ path "mcp/gateway/*" {
 	require.NotNil(t, res.MCPDecision)
 	assert.Equal(t, mcpRuleTypeMalformedJSONRPC, res.MCPDecision.RuleType)
 	assert.Empty(t, res.MCPDecision.PolicyName)
+}
+
+// TestMCPAbsenceDeny_RootBypasses pins that a root token still reaches an
+// MCP-shaped request with no contract in scope. Root is the break-glass path:
+// making it answer to a contract would let a misconfigured MCP policy lock an
+// operator out of the mount they need to fix it.
+func TestMCPAbsenceDeny_RootBypasses(t *testing.T) {
+	rootPolicy := &Policy{Name: "root", Type: PolicyTypeCBP, namespace: namespace.RootNamespace}
+	cbp, err := NewCBP(testContext(), []*Policy{rootPolicy})
+	require.NoError(t, err)
+
+	req := newMCPRequest(t, "mcp/gateway/",
+		`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"anything"},"id":1}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.True(t, res.Allowed)
+	assert.True(t, res.IsRoot)
+	assert.Nil(t, res.MCPDecision, "root returns before the MCP gate")
+	assert.Nil(t, req.MCPListFilter)
+}
+
+// TestMCPAbsenceDeny_DescriptorStates walks the states the extractor can
+// produce against a path with no contract, because only one of them denies.
+func TestMCPAbsenceDeny_DescriptorStates(t *testing.T) {
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`)
+	base := func() *logical.Request {
+		return &logical.Request{Path: "mcp/gateway/", Operation: logical.UpdateOperation}
+	}
+
+	t.Run("nil descriptor passes", func(t *testing.T) {
+		// Every non-MCP mount: the backend does not implement the marker.
+		res := cbp.AllowOperation(testContext(), base(), nil, false)
+		assert.True(t, res.Allowed)
+		assert.Nil(t, res.MCPDecision)
+	})
+
+	t.Run("empty sentinel passes", func(t *testing.T) {
+		// The body-less verbs on an MCP URL, and every httpproxy provider whose
+		// spec leaves the enforcement hook unset.
+		req := base()
+		req.MCPDescriptor = &logical.MCPRequestDescriptor{}
+		res := cbp.AllowOperation(testContext(), req, nil, false)
+		assert.True(t, res.Allowed)
+		assert.Nil(t, res.MCPDecision)
+	})
+
+	t.Run("populated denies", func(t *testing.T) {
+		req := newMCPRequest(t, "mcp/gateway/",
+			`{"jsonrpc":"2.0","method":"tools/list","id":1}`)
+		res := cbp.AllowOperation(testContext(), req, nil, false)
+		assert.False(t, res.Allowed)
+		require.NotNil(t, res.MCPDecision)
+		assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
+	})
+
+	t.Run("batch denies", func(t *testing.T) {
+		// A batch is as MCP-shaped as a single call; nothing about the absence
+		// deny depends on there being exactly one.
+		req := newMCPRequest(t, "mcp/gateway/", `[
+			{"jsonrpc":"2.0","method":"tools/call","params":{"name":"a"},"id":1},
+			{"jsonrpc":"2.0","method":"tools/call","params":{"name":"b"},"id":2}
+		]`)
+		res := cbp.AllowOperation(testContext(), req, nil, false)
+		assert.False(t, res.Allowed)
+		require.NotNil(t, res.MCPDecision)
+		assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
+	})
+
+	t.Run("parse failure denies", func(t *testing.T) {
+		// A malformed body is populated too, so it is refused rather than
+		// proxied. It reports the absence, not the malformation — the contract
+		// that would have judged the body does not exist.
+		req := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":`)
+		res := cbp.AllowOperation(testContext(), req, nil, false)
+		assert.False(t, res.Allowed)
+		require.NotNil(t, res.MCPDecision)
+		assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
+	})
+}
+
+// TestMCPAbsenceDeny_NamespaceScoped covers the absence deny where the path key
+// carries a namespace prefix. PR 4 is the first place absence itself decides an
+// outcome, so the namespaced lookup is worth pinning on both sides: a contract
+// in the namespace governs, and the same mount without one refuses.
+func TestMCPAbsenceDeny_NamespaceScoped(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	rootCtx := testContext()
+
+	child := &namespace.Namespace{Path: "team-a/"}
+	require.NoError(t, core.namespaceStore.SetNamespace(rootCtx, child))
+	nsCtx := namespace.ContextWithNamespace(context.Background(), child)
+
+	grant, err := ParseCBPPolicy(child, `path "mcp/gateway/*" { capabilities = ["update"] }`)
+	require.NoError(t, err)
+	grant.Name = "ns-grant"
+	require.NoError(t, ps.SetPolicy(nsCtx, grant, nil))
+
+	// The request path is namespace-relative; AllowOperation prefixes it.
+	req := func() *logical.Request {
+		return newMCPRequest(t, "mcp/gateway/",
+			`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"x"},"id":1}`)
+	}
+
+	ungoverned, err := ps.CBP(nsCtx, map[string][]string{child.ID: {"ns-grant"}})
+	require.NoError(t, err)
+	res := ungoverned.AllowOperation(nsCtx, req(), nil, false)
+	assert.False(t, res.Allowed, "a namespaced mount with no contract refuses too")
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
+
+	contract, err := ParseMCPPolicy(child, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["x"] }
+}
+`)
+	require.NoError(t, err)
+	contract.Name = "ns-contract"
+	require.NoError(t, ps.SetPolicy(nsCtx, contract, nil))
+
+	governed, err := ps.CBP(nsCtx, map[string][]string{child.ID: {"ns-grant", "ns-contract"}})
+	require.NoError(t, err)
+	ok := governed.AllowOperation(nsCtx, req(), nil, false)
+	assert.True(t, ok.Allowed, "the namespaced contract governs the namespaced path")
+	require.NotNil(t, ok.MCPDecision)
+	assert.Equal(t, "allow", ok.MCPDecision.Decision)
 }
 
 func testPastTime() time.Time {

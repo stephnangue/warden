@@ -56,6 +56,10 @@ var mcpAWSEnv = h.ProviderEnv{
 		"secret_access_key": mcpAWSSecretKey,
 	},
 	ExtraConfig: map[string]any{"region": mcpAWSRegion},
+	// mcp_aws is MCP-enforcing and these tests POST JSON-RPC to assert on
+	// request signing, not on authorization. With no contract in scope the
+	// policy layer would refuse them before a signature was ever computed.
+	MCPPolicyRules: h.MCPUnrestricted,
 }
 
 // mcpAWSWrongCredEnv is the same provider bound to a credential it cannot sign
@@ -72,6 +76,10 @@ var mcpAWSWrongCredEnv = h.ProviderEnv{
 	CredType:    "api_key",
 	CredConfig:  map[string]string{"api_key": "fc-mcp-aws-wrong-type"},
 	ExtraConfig: map[string]any{"region": mcpAWSRegion},
+	// Needed for the test's premise to survive: policy evaluation runs before
+	// credential minting, so with no contract in scope the request would 403 at
+	// the policy layer rather than reaching the minting failure this asserts.
+	MCPPolicyRules: h.MCPUnrestricted,
 }
 
 // TestMCPAWS_RequestIsSigned checks the upstream received a signature derived

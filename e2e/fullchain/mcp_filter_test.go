@@ -223,3 +223,120 @@ func tryToolNames(body []byte) []string {
 	}
 	return names
 }
+
+// TestMCPFilter_NoContractDeniesTheListing is the absence deny proven end to
+// end, and it is the row that changed direction. A mount with a capability
+// grant and no tool contract used to return the upstream's whole catalog; it
+// now refuses, and the upstream is never reached at all.
+//
+// That inversion is the point of the contract being a separate document: the
+// state an operator lands in by forgetting to attach one is no longer
+// indistinguishable from deliberately opening the mount.
+func TestMCPFilter_NoContractDeniesTheListing(t *testing.T) {
+	ensureEnv(t)
+	upstream.SetHandler(t, mcpToolsListUpstream(mcpToolsListBody(), "application/json"))
+
+	status, body, _ := h.ChainRequest(t, leaderPort, mcpNoContractEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         mcpNoContractEnv.CertRole(),
+		Body:         `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+	})
+
+	if status != http.StatusForbidden {
+		t.Fatalf("status: got %d, want 403 (body: %s)", status, body)
+	}
+	// The status alone would also be satisfied by a contract that exists and
+	// refuses, or by an auth failure. The description is what says the refusal
+	// was the *absence* — and it is the sentence pointing the operator at the
+	// missing contract rather than at the call they made.
+	if !strings.Contains(string(body), "No MCP policy permits this request") {
+		t.Errorf("body: got %s, want the absence-deny description — a bare 403 does not "+
+			"distinguish a missing contract from a restrictive one", body)
+	}
+	if names := tryToolNames(body); len(names) != 0 {
+		t.Errorf("a refused listing advertised %v — nothing may be disclosed", names)
+	}
+	if n := len(upstream.Requests()); n != 0 {
+		t.Errorf("upstream served %d requests, want 0 — the denial must precede the proxy", n)
+	}
+}
+
+// TestMCPFilter_UnrestrictedContractServesTheWholeListing is the escape hatch.
+// A wildcard contract must be equivalent to the ungoverned mount it replaces:
+// the caller sees every tool the upstream advertises, unmodified.
+func TestMCPFilter_UnrestrictedContractServesTheWholeListing(t *testing.T) {
+	ensureEnv(t)
+	upstream.SetHandler(t, mcpToolsListUpstream(mcpToolsListBody(), "application/json"))
+
+	status, body, _ := h.ChainRequest(t, leaderPort, mcpGitHubEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         mcpGitHubEnv.CertRole(),
+		Body:         `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+	})
+
+	if status != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body: %s)", status, body)
+	}
+	got := toolNames(t, body)
+	if len(got) != 2 {
+		t.Errorf("advertised tools: got %v, want both — a wildcard contract must not prune", got)
+	}
+	assertUpstreamServed(t)
+}
+
+// TestMCPFilter_UnrestrictedContractDoesNotBufferLargeListings is the guard on
+// the no-op short-circuit, and the row most likely to be found in production
+// rather than in CI without it.
+//
+// Attaching a keep-everything filter is not free: the gateway buffers the whole
+// upstream response to rewrite it, and fails closed above max_body_size. So a
+// wildcard contract — the sanctioned way to open a mount — would be *more*
+// brittle than the ungoverned mount it replaces, on exactly the catalogs a real
+// MCP server serves.
+//
+// The mount caps bodies deliberately low and the listing is sized well past it,
+// because the two outcomes are otherwise indistinguishable: a filter that keeps
+// everything and no filter at all produce the same bytes. Only the cap
+// separates them. Remove the short-circuit and this row answers 502.
+func TestMCPFilter_UnrestrictedContractDoesNotBufferLargeListings(t *testing.T) {
+	ensureEnv(t)
+
+	// Built from tools the wildcard contract permits, so nothing but the
+	// buffering could refuse it.
+	var sb strings.Builder
+	sb.WriteString(`{"jsonrpc":"2.0","id":1,"result":{"tools":[`)
+	for i := 0; sb.Len() < 4*mcpBodyCapBytes; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, `{"name":"tool_%d","description":"a tool"}`, i)
+	}
+	sb.WriteString(`]}}`)
+	listing := sb.String()
+	if len(listing) <= mcpBodyCapBytes {
+		t.Fatalf("fixture is %d bytes, which does not exceed the mount's %d-byte cap — "+
+			"this row would pass whether or not the filter was skipped",
+			len(listing), mcpBodyCapBytes)
+	}
+	upstream.SetHandler(t, mcpToolsListUpstream(listing, "application/json"))
+
+	env := mcpUnrestrictedSmallCapEnv
+	status, body, _ := h.ChainRequest(t, leaderPort, env, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         env.CertRole(),
+		Body:         `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+	})
+
+	if status != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body: %.200s) — an unrestricted contract must "+
+			"stream rather than buffer, or a large catalog fails above max_body_size",
+			status, body)
+	}
+	assertUpstreamServed(t)
+	if got := len(toolNames(t, body)); got == 0 {
+		t.Errorf("the caller received no tools from a listing the contract permits in full")
+	}
+}

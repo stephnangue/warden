@@ -56,6 +56,44 @@ var mcpGitHubEnv = h.ProviderEnv{
 	URLKey:     "mcp_url",
 	CredType:   "github_token",
 	CredConfig: map[string]string{"token": mcpGitHubToken},
+	// This mount is about credential extraction, not authorization, so it wants
+	// every call to reach the upstream. Since an MCP-enforcing mount now
+	// refuses traffic with no contract in scope, "unrestricted" has to be said
+	// out loud — which is the point: it stays visible in a policy listing.
+	MCPPolicyRules: h.MCPUnrestricted,
+}
+
+// mcpNoContractEnv is an MCP mount with a capability grant and deliberately no
+// tool contract. It exists to prove the absence deny end to end: the shape an
+// operator lands in by granting a mount and forgetting the contract used to be
+// indistinguishable from meaning "unrestricted".
+var mcpNoContractEnv = h.ProviderEnv{
+	Mount:      "fc-mcp-nocontract",
+	Type:       "mcp",
+	URLKey:     "mcp_url",
+	CredType:   "api_key",
+	CredConfig: map[string]string{"api_key": mcpAPIKey},
+}
+
+// mcpBodyCapBytes is small enough that an ordinary tool catalog exceeds it, so
+// a test can tell buffering from streaming. The default cap is 10MB, which no
+// plausible fixture reaches — a listing sized against it would prove nothing.
+const mcpBodyCapBytes = 65536
+
+// mcpUnrestrictedSmallCapEnv pairs the wildcard contract with a deliberately
+// tight max_body_size. Attaching a keep-everything filter makes the gateway
+// buffer the whole upstream response against that cap and fail closed above it,
+// so this mount is what separates "the filter was skipped" from "the filter ran
+// and happened to keep everything" — two outcomes that are otherwise identical
+// on the wire.
+var mcpUnrestrictedSmallCapEnv = h.ProviderEnv{
+	Mount:          "fc-mcp-bigcatalog",
+	Type:           "mcp",
+	URLKey:         "mcp_url",
+	CredType:       "api_key",
+	CredConfig:     map[string]string{"api_key": mcpAPIKey},
+	MCPPolicyRules: h.MCPUnrestricted,
+	ExtraConfig:    map[string]any{"max_body_size": mcpBodyCapBytes},
 }
 
 func mcpToolCall(tool string) string {
@@ -238,8 +276,12 @@ func TestMCP_MalformedBodyIsRefused(t *testing.T) {
 //
 // That is the property worth pinning: a body the filter cannot interpret is
 // denied rather than waved through as "no rule matched", which is how a filter
-// of this shape usually breaks. This row would pass differently with no MCP
-// contract attached to the mount.
+// of this shape usually breaks.
+//
+// Note the status alone no longer distinguishes this from an ungoverned mount —
+// both answer 403 with the same challenge. What makes this row specific is the
+// contract being attached: the refusal comes from the body failing to parse
+// against rules that exist, not from there being no rules.
 func TestMCP_ValidJSONButInvalidJSONRPCIsDeniedByPolicy(t *testing.T) {
 	ensureEnv(t)
 

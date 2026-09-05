@@ -64,11 +64,12 @@ type CBPResults struct {
 	GrantingPolicies       []sdklogical.PolicyInfo
 	ResponseKeysFilterPath string
 
-	// MCPDecision is populated whenever an mcp { } rule-set was
-	// consulted during AllowOperation, on every branch (allow and
-	// deny) so the audit and deny-response layers can render the
-	// decision unconditionally. Nil when no rule-set applied (the
-	// vast majority of requests — every non-MCP provider).
+	// MCPDecision is populated on every branch of the MCP gate, allow and
+	// deny, so the audit and deny-response layers can render the decision
+	// unconditionally. That covers two cases: a rule-set was consulted, or an
+	// MCP-shaped request met no rule-set at all and was denied with
+	// no_mcp_policy. Nil for everything else — every non-MCP provider, and the
+	// body-less verbs an MCP mount serves alongside its JSON-RPC POSTs.
 	//
 	// Invariant: when MCPDecision.Decision == "deny", Allowed is
 	// false. The reverse (Allowed=false with Decision="allow") is
@@ -400,7 +401,14 @@ func (a *CBP) Capabilities(ctx context.Context, path string) (pathCapabilities [
 func (a *CBP) AllowOperation(ctx context.Context, req *logical.Request, te *logical.TokenEntry, capCheckOnly bool) (ret *CBPResults) {
 	ret = new(CBPResults)
 
-	// Fast-path root
+	// Fast-path root.
+	//
+	// This returns before the MCP gate, so a root token is not subject to tool
+	// contracts — deliberately, and consistently with root already bypassing
+	// explicit deny capabilities and path conditions. Root is the break-glass
+	// path: making it answer to a contract would mean a misconfigured MCP
+	// policy could lock an operator out of the mount that has to be used to fix
+	// it. Agents hold real tokens, not root.
 	if a.root {
 		ret.Allowed = true
 		ret.RootPrivs = true
@@ -545,8 +553,8 @@ CHECK:
 
 	// MCP rule-set evaluation, body-authoritative. Runs after
 	// conditions (so source-IP / time gates apply first) and before
-	// parameter validation. Populates ret.MCPDecision on every branch
-	// when a rule-set was consulted, so the audit layer sees the
+	// parameter validation. Populates ret.MCPDecision on every branch it
+	// takes — including the absence deny below — so the audit layer sees the
 	// decision whether the request was allowed or denied.
 	//
 	// The rule-sets come from the MCP index, a lookup independent of the one
@@ -559,7 +567,9 @@ CHECK:
 	// logical.MCPPolicyEnforced. A nil descriptor here means either
 	// the routed backend doesn't implement the marker, or it declined
 	// the request (wrong method / Content-Type) — fail closed.
-	if mcpSets := a.mcpRulesForPath(path); len(mcpSets) > 0 {
+	mcpSets := a.mcpRulesForPath(path)
+	switch {
+	case len(mcpSets) > 0:
 		ret.MCPDecision = decideMCP(mcpSets, req, te, now, ns.Path)
 		if ret.MCPDecision != nil && ret.MCPDecision.Decision == "deny" {
 			return ret
@@ -574,6 +584,20 @@ CHECK:
 				return ret
 			}
 		}
+
+	case mcpDescriptorPopulated(req):
+		// An MCP-shaped request with no contract in scope. The capability
+		// grant said the caller may reach this mount; nothing has said which
+		// calls are permitted on it, so none are. Opening a mount deliberately
+		// is an explicit wildcard MCP policy, which stays visible in a policy
+		// listing and in audit — unlike the absence this replaces, which used
+		// to read as "unrestricted" and was indistinguishable from an operator
+		// forgetting to attach the contract.
+		ret.MCPDecision = &logical.MCPDecision{
+			Decision: "deny",
+			RuleType: mcpRuleTypeNoMCPPolicy,
+		}
+		return ret
 	}
 
 	ret.GrantingPolicies = grantingPolicies
