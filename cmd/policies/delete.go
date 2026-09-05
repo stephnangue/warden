@@ -21,7 +21,7 @@ var (
 		Long: `
 Usage: warden policy delete <name> [flags]
 
-  Deletes a capability-based policy.
+  Deletes a policy. Use -type to select which kind: "cbp" (default) or "mcp".
 
   WARNING: This is a destructive operation and cannot be undone!
 
@@ -30,9 +30,13 @@ Usage: warden policy delete <name> [flags]
 
   Examples:
 
-    Delete a policy (with confirmation):
+    Delete a capability-based policy (with confirmation):
 
       $ warden policy delete my-policy
+
+    Delete an MCP policy:
+
+      $ warden policy delete -type mcp github-tools
 
     Delete a policy (skip confirmation):
 
@@ -45,11 +49,17 @@ Usage: warden policy delete <name> [flags]
 
 func init() {
 	DeleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Skip confirmation prompt")
+	addTypeFlag(DeleteCmd)
 }
 
 func runDelete(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	if err := helpers.ValidatePath(name); err != nil {
+		return err
+	}
+
+	pType, err := resolvePolicyType()
+	if err != nil {
 		return err
 	}
 
@@ -59,12 +69,12 @@ func runDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	if helpers.ResolveDryRun() {
-		return helpers.DryRun(c, "DELETE", "sys/policies/{name}", nil)
+		return helpers.DryRun(c, "DELETE", "sys/policies/"+pType+"/{name}", nil)
 	}
 
 	// Confirmation prompt (unless -force is used)
 	if !deleteForce {
-		fmt.Printf("Are you sure you want to delete policy '%s'? (yes/no): ", name)
+		fmt.Printf("Are you sure you want to delete %s policy '%s'? (yes/no): ", pType, name)
 
 		reader := bufio.NewReader(os.Stdin)
 		response, err := reader.ReadString('\n')
@@ -80,12 +90,12 @@ func runDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	// Delete the policy
-	err = c.Sys().DeletePolicy(name)
+	err = c.Sys().DeletePolicyOfType(pType, name)
 	if err != nil {
 		return fmt.Errorf("error deleting policy: %w", err)
 	}
 
-	return helpers.RenderMap(map[string]any{"name": name, "deleted": true}, func() {
-		fmt.Printf("Success! Deleted policy: %s\n", name)
+	return helpers.RenderMap(map[string]any{"name": name, "type": pType, "deleted": true}, func() {
+		fmt.Printf("Success! Deleted %s policy: %s\n", pType, name)
 	})
 }

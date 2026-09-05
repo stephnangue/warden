@@ -44,15 +44,23 @@ const (
 
 type PolicyType uint32
 
-// CPB is meant for Capability-Based Policy
+// CBP is meant for Capability-Based Policy. MCP policies are purely
+// restrictive: they grant nothing on their own and are ANDed with the CBP
+// decision at request time.
+//
+// These values are persisted verbatim in PolicyEntry.Type, so the ordering is
+// storage-stable: append new types at the end, never reorder or reuse a value.
 const (
 	PolicyTypeCBP PolicyType = iota
+	PolicyTypeMCP
 )
 
 func (p PolicyType) String() string {
 	switch p {
 	case PolicyTypeCBP:
 		return "cbp"
+	case PolicyTypeMCP:
+		return "mcp"
 	}
 
 	return ""
@@ -394,31 +402,13 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			}
 		}
 
-		// Strip a leading '/' as paths in Vault start after the / in the API path
-		if len(pc.Path) > 0 && pc.Path[0] == '/' {
-			pc.Path = pc.Path[1:]
+		normPath, isPrefix, hasSegmentWildcards, err := normalizePathPattern(result.namespace, pc.Path)
+		if err != nil {
+			return err
 		}
-
-		// Ensure we are using the full request path internally
-		pc.Path = result.namespace.Path + pc.Path
-
-		if strings.Contains(pc.Path, "+*") {
-			return fmt.Errorf("path %q: invalid use of wildcards ('+*' is forbidden)", pc.Path)
-		}
-
-		if pc.Path == "+" || strings.Count(pc.Path, "/+") > 0 || strings.HasPrefix(pc.Path, "+/") {
-			pc.HasSegmentWildcards = true
-		}
-
-		if strings.HasSuffix(pc.Path, "*") {
-			// If there are segment wildcards, don't actually strip the
-			// trailing asterisk, but don't want to hit the default case
-			if !pc.HasSegmentWildcards {
-				// Strip the glob character if found
-				pc.Path = strings.TrimSuffix(pc.Path, "*")
-				pc.IsPrefix = true
-			}
-		}
+		pc.Path = normPath
+		pc.IsPrefix = isPrefix
+		pc.HasSegmentWildcards = hasSegmentWildcards
 
 		// Initialize the map
 		pc.Permissions.CapabilitiesBitmap = 0
@@ -513,6 +503,45 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 
 	result.Paths = paths
 	return nil
+}
+
+// normalizePathPattern canonicalises a `path "..."` stanza key into the form
+// the policy indexes are keyed on: leading slash stripped, namespace path
+// prefixed, segment wildcards and trailing-glob prefixes detected.
+//
+// Both the CBP and the MCP parser call this. Sharing it is what guarantees the
+// two indexes can never disagree on a path key — a divergence there would make
+// MCP stanzas silently miss the requests they were written for.
+func normalizePathPattern(ns *namespace.Namespace, key string) (path string, isPrefix, hasSegmentWildcards bool, err error) {
+	path = key
+
+	// Strip a leading '/' as paths start after the / in the API path
+	if len(path) > 0 && path[0] == '/' {
+		path = path[1:]
+	}
+
+	// Ensure we are using the full request path internally
+	path = ns.Path + path
+
+	if strings.Contains(path, "+*") {
+		return "", false, false, fmt.Errorf("path %q: invalid use of wildcards ('+*' is forbidden)", path)
+	}
+
+	if path == "+" || strings.Count(path, "/+") > 0 || strings.HasPrefix(path, "+/") {
+		hasSegmentWildcards = true
+	}
+
+	if strings.HasSuffix(path, "*") {
+		// If there are segment wildcards, don't actually strip the trailing
+		// asterisk, but don't want to hit the default case
+		if !hasSegmentWildcards {
+			// Strip the glob character if found
+			path = strings.TrimSuffix(path, "*")
+			isPrefix = true
+		}
+	}
+
+	return path, isPrefix, hasSegmentWildcards, nil
 }
 
 // canonicaliseMCPRules converts a parsed mcp { } HCL block into the

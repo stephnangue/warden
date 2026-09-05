@@ -25,7 +25,7 @@ func writePolicy(t *testing.T, backend *SystemBackend, ctx context.Context, name
 		raw[k] = v
 	}
 	schema := backend.pathPolicies()[0].Fields
-	resp, err := backend.handlePolicyUpdate(ctx,
+	resp, err := backend.handlePolicyUpdate(PolicyTypeCBP)(ctx,
 		createTestRequest(logical.UpdateOperation, "policies/cbp/"+name, raw),
 		createFieldData(schema, raw))
 	require.NoError(t, err)
@@ -43,7 +43,7 @@ func createPolicy(t *testing.T, backend *SystemBackend, ctx context.Context, nam
 		raw[k] = v
 	}
 	schema := backend.pathPolicies()[0].Fields
-	resp, err := backend.handlePolicyCreate(ctx,
+	resp, err := backend.handlePolicyCreate(PolicyTypeCBP)(ctx,
 		createTestRequest(logical.CreateOperation, "policies/cbp/"+name, raw),
 		createFieldData(schema, raw))
 	require.NoError(t, err)
@@ -54,7 +54,7 @@ func readPolicyVersion(t *testing.T, backend *SystemBackend, ctx context.Context
 	t.Helper()
 	raw := map[string]interface{}{"name": name}
 	schema := backend.pathPolicies()[0].Fields
-	resp, err := backend.handlePolicyRead(ctx,
+	resp, err := backend.handlePolicyRead(PolicyTypeCBP)(ctx,
 		createTestRequest(logical.ReadOperation, "policies/cbp/"+name, raw),
 		createFieldData(schema, raw))
 	require.NoError(t, err)
