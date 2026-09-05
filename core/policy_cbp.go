@@ -29,6 +29,16 @@ type CBP struct {
 
 	segmentWildcardPaths map[string]interface{}
 
+	// The MCP index mirrors the three above for PolicyTypeMCP policies. It is
+	// keyed and ranked identically — same normalized path keys, same
+	// single-winner resolution — but consulted separately, so a request's
+	// capability grant and its tool contract can come from different documents
+	// whose stanzas need not be spelled the same way. Values are
+	// *CBPPermissions carrying only .MCP.
+	mcpExactRules           *radix.Tree
+	mcpPrefixRules          *radix.Tree
+	mcpSegmentWildcardPaths map[string]interface{}
+
 	// root is enabled if the "root" named policy is present.
 	root bool
 }
@@ -78,10 +88,13 @@ const limitParameterName = "limit"
 func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 	// Initialize
 	a := &CBP{
-		exactRules:           radix.New(),
-		prefixRules:          radix.New(),
-		segmentWildcardPaths: make(map[string]interface{}, len(policies)),
-		root:                 false,
+		exactRules:              radix.New(),
+		prefixRules:             radix.New(),
+		segmentWildcardPaths:    make(map[string]interface{}, len(policies)),
+		mcpExactRules:           radix.New(),
+		mcpPrefixRules:          radix.New(),
+		mcpSegmentWildcardPaths: make(map[string]interface{}, len(policies)),
+		root:                    false,
 	}
 
 	ns, err := namespace.FromContext(ctx)
@@ -90,6 +103,19 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 	}
 	if ns == nil {
 		return nil, namespace.ErrNoNamespace
+	}
+
+	// The root policy must stand alone among *grants*. MCP policies are counted
+	// out of that: they grant nothing, and AllowOperation's root fast path
+	// returns before the MCP gate anyway, so attaching one to a root token is
+	// inert rather than contradictory. Counting them would turn a harmless
+	// attachment into a compile failure, which surfaces as a 500 on every
+	// request the token makes.
+	grantingPolicyCount := 0
+	for _, policy := range policies {
+		if policy != nil && policy.Type == PolicyTypeCBP {
+			grantingPolicyCount++
+		}
 	}
 
 	// Inject each policy
@@ -101,6 +127,14 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 
 		switch policy.Type {
 		case PolicyTypeCBP:
+		case PolicyTypeMCP:
+			// MCP policies go into their own index and never touch the
+			// capability trees, the granting-policies map or the deny-collapse
+			// path below — they carry no capabilities to collapse.
+			if err := a.insertMCPPolicy(policy); err != nil {
+				return nil, err
+			}
+			continue
 		default:
 			return nil, errors.New("unable to parse policy (wrong type)")
 		}
@@ -111,7 +145,7 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 				return nil, errors.New("root policy is only allowed in root namespace")
 			}
 
-			if len(policies) != 1 {
+			if grantingPolicyCount != 1 {
 				return nil, errors.New("other policies present along with root")
 			}
 			a.root = true
@@ -232,6 +266,95 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 		}
 	}
 	return a, nil
+}
+
+// insertMCPPolicy adds one MCP policy's stanzas to the MCP index.
+//
+// Stanzas at the same normalized path key merge additively, so several MCP
+// policies covering one path contribute several rule-sets and evaluateMCPCall's
+// cross-set OR decides between them — the same shape the mcp { } block had when
+// two CBP policies named the same path.
+func (a *CBP) insertMCPPolicy(policy *Policy) error {
+	for _, pc := range policy.Paths {
+		if !pc.Expiration.IsZero() && time.Now().After(pc.Expiration) {
+			// Skip expired stanzas, as the capability index does.
+			continue
+		}
+		if pc.Permissions == nil || len(pc.Permissions.MCP) == 0 {
+			continue
+		}
+
+		var raw interface{}
+		var ok bool
+		var tree *radix.Tree
+
+		switch {
+		case pc.HasSegmentWildcards:
+			raw, ok = a.mcpSegmentWildcardPaths[pc.Path]
+		default:
+			tree = a.mcpExactRules
+			if pc.IsPrefix {
+				tree = a.mcpPrefixRules
+			}
+			raw, ok = tree.Get(pc.Path)
+		}
+
+		if !ok {
+			// Clone before inserting: CBP() compiles from *Policy values held in
+			// the LRU and shared across requests, so the index must never hold
+			// a CBPPermissions the cached policy still owns — the same-key
+			// append below would otherwise grow the cached rule-sets on every
+			// compile.
+			clonedPerms, err := pc.Permissions.Clone()
+			if err != nil {
+				return fmt.Errorf("error cloning MCP permissions: %w", err)
+			}
+			switch {
+			case pc.HasSegmentWildcards:
+				a.mcpSegmentWildcardPaths[pc.Path] = clonedPerms
+			default:
+				tree.Insert(pc.Path, clonedPerms)
+			}
+			continue
+		}
+
+		existingPerms, castOK := raw.(*CBPPermissions)
+		if !castOK {
+			return errors.New("error type casting MCP permissions")
+		}
+		for _, m := range pc.Permissions.MCP {
+			existingPerms.MCP = append(existingPerms.MCP, m.Clone())
+		}
+	}
+
+	return nil
+}
+
+// mcpRulesForPath returns the rule-sets of the single MCP stanza that wins for
+// the given canonicalized request path, or nil when none matches.
+//
+// Resolution mirrors the capability index: an exact hit wins outright,
+// otherwise the shared wildcard resolver picks one candidate by the same
+// ranking. The List/Scan trailing-slash retries AllowOperation performs are
+// deliberately absent — a populated MCP descriptor only ever exists on a POST,
+// because every MCPPolicyEnforced implementer gates on POST plus a JSON
+// content type.
+//
+// The returned slice is owned by the compiled index and shared by every request
+// evaluated against it. Callers must treat it as read-only: sorting or
+// appending would corrupt the CBP for every other caller holding it.
+func (a *CBP) mcpRulesForPath(path string) []*CBPMCPRules {
+	if raw, ok := a.mcpExactRules.Get(path); ok {
+		return raw.(*CBPPermissions).MCP
+	}
+
+	if perms := checkAllowedFromNonExactPaths(
+		a.mcpPrefixRules, a.mcpSegmentWildcardPaths, path, false,
+	); perms != nil {
+		return perms.MCP
+	}
+
+	return nil
 }
 
 func (a *CBP) Capabilities(ctx context.Context, path string) (pathCapabilities []string) {
@@ -521,7 +644,20 @@ type wcPathDescr struct {
 // of permissions from some allowed path underneath the mount (for use in mount
 // access checks), or nil indicating no non-deny permissions were found.
 func (a *CBP) CheckAllowedFromNonExactPaths(path string, bareMount bool) *CBPPermissions {
-	wcPathDescrs := make([]wcPathDescr, 0, len(a.segmentWildcardPaths)+1)
+	return checkAllowedFromNonExactPaths(a.prefixRules, a.segmentWildcardPaths, path, bareMount)
+}
+
+// checkAllowedFromNonExactPaths is the resolution itself, taking the two
+// indexes it reads rather than a receiver so the capability index and the MCP
+// index resolve by exactly the same ranking. Duplicating this logic per index
+// is how the two would drift apart on which stanza wins a request.
+func checkAllowedFromNonExactPaths(
+	prefixRules *radix.Tree,
+	segmentWildcardPaths map[string]interface{},
+	path string,
+	bareMount bool,
+) *CBPPermissions {
+	wcPathDescrs := make([]wcPathDescr, 0, len(segmentWildcardPaths)+1)
 
 	less := func(i, j int) bool {
 		// In the case of multiple matches, we use this priority order,
@@ -581,9 +717,9 @@ func (a *CBP) CheckAllowedFromNonExactPaths(path string, bareMount bool) *CBPPer
 
 	// Find a prefix rule if any.
 	{
-		prefix, raw, ok := a.prefixRules.LongestPrefix(path)
+		prefix, raw, ok := prefixRules.LongestPrefix(path)
 		if ok {
-			if len(a.segmentWildcardPaths) == 0 {
+			if len(segmentWildcardPaths) == 0 {
 				return raw.(*CBPPermissions)
 			}
 			wcPathDescrs = append(wcPathDescrs, wcPathDescr{
@@ -595,14 +731,14 @@ func (a *CBP) CheckAllowedFromNonExactPaths(path string, bareMount bool) *CBPPer
 		}
 	}
 
-	if len(a.segmentWildcardPaths) == 0 {
+	if len(segmentWildcardPaths) == 0 {
 		return nil
 	}
 
 	pathParts := strings.Split(path, "/")
 
 SWCPATH:
-	for fullWCPath := range a.segmentWildcardPaths {
+	for fullWCPath := range segmentWildcardPaths {
 		if fullWCPath == "" {
 			continue
 		}
@@ -650,7 +786,7 @@ SWCPATH:
 				// Check the current joined path so far. If we find a prefix,
 				// check permissions. If they're defined but not deny, success.
 				if strings.HasPrefix(joinedPath, path) {
-					permissions := a.segmentWildcardPaths[fullWCPath].(*CBPPermissions)
+					permissions := segmentWildcardPaths[fullWCPath].(*CBPPermissions)
 					if permissions.CapabilitiesBitmap&DenyCapabilityInt == 0 && permissions.CapabilitiesBitmap > 0 {
 						return permissions
 					}
@@ -658,7 +794,7 @@ SWCPATH:
 				continue SWCPATH
 			}
 		}
-		pd.perms = a.segmentWildcardPaths[fullWCPath].(*CBPPermissions)
+		pd.perms = segmentWildcardPaths[fullWCPath].(*CBPPermissions)
 		wcPathDescrs = append(wcPathDescrs, pd)
 	}
 

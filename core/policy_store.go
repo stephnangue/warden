@@ -564,6 +564,57 @@ func (ps *PolicyStore) switchedDeletePolicy(ctx context.Context, name string, po
 	return nil
 }
 
+// getPolicyAnyType resolves a token-attached policy name across both policy
+// types. Token attachment is a flat list of names with no type dimension, so a
+// name has to be looked for in each view; names are unique across types, so at
+// most one view can answer.
+//
+// It resolves through GetPolicy rather than reading the barrier views
+// directly. That path owns two things a raw read would lose: the root policy is
+// synthesized and never stored, so a direct view read returns nil for it and
+// every root token would end up with an empty CBP; and the locked branch
+// deletes an expired policy from the correct typed view.
+//
+// The cache is probed under both typed keys first so a warm MCP name costs one
+// extra map lookup instead of a miss against the CBP view on every request.
+// Only a name in neither view reaches storage twice, and such a name grants and
+// restricts nothing either way.
+func (ps *PolicyStore) getPolicyAnyType(ctx context.Context, name string) (*Policy, error) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	saneName := ps.sanitizeName(name)
+
+	if ps.tokenPoliciesLRU != nil {
+		for _, policyType := range []PolicyType{PolicyTypeCBP, PolicyTypeMCP} {
+			raw, ok := ps.tokenPoliciesLRU.Get(ps.cacheKey(ns, saneName, policyType))
+			if !ok {
+				continue
+			}
+			if !raw.Expiration.IsZero() && time.Now().After(raw.Expiration) {
+				// Leave the eviction to the locked path below, which also
+				// removes it from storage.
+				break
+			}
+			return raw, nil
+		}
+	}
+
+	for _, policyType := range []PolicyType{PolicyTypeCBP, PolicyTypeMCP} {
+		p, err := ps.GetPolicy(ctx, saneName, policyType)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			return p, nil
+		}
+	}
+
+	return nil, nil
+}
+
 // policyNamespaceUUID returns a policy's namespace UUID, or "" when it carries
 // no namespace, so ordering stays total over a mixed set.
 func policyNamespaceUUID(p *Policy) string {
@@ -589,7 +640,7 @@ func (ps *PolicyStore) CBP(ctx context.Context, policyNames map[string][]string,
 		}
 		policyCtx := namespace.ContextWithNamespace(ctx, policyNS)
 		for _, nsPolicyName := range nsPolicyNames {
-			p, err := ps.GetPolicy(policyCtx, nsPolicyName, PolicyTypeCBP)
+			p, err := ps.getPolicyAnyType(policyCtx, nsPolicyName)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get policy: %w", err)
 			}
@@ -619,17 +670,28 @@ func (ps *PolicyStore) CBP(ctx context.Context, policyNames map[string][]string,
 
 	for i, policy := range allPolicies {
 		// Reuse the parse already performed and cached by GetPolicy. Re-parse
-		// only when a prefetched policy arrived without parsed paths. CBP
-		// policies carry no per-request templating, so a cached parse is always
-		// reusable and never identity-dependent.
-		if policy.Type == PolicyTypeCBP && policy.Paths == nil {
-			p, err := parseCBPPolicy(policy.namespace, policy.Raw)
-			if err != nil {
-				return nil, fmt.Errorf("error parsing policy %q: %w", policy.Name, err)
-			}
-			p.Name = policy.Name
-			allPolicies[i] = p
+		// only when a prefetched policy arrived without parsed paths. Neither
+		// policy type carries per-request templating, so a cached parse is
+		// always reusable and never identity-dependent.
+		if policy.Paths != nil {
+			continue
 		}
+
+		var p *Policy
+		var err error
+		switch policy.Type {
+		case PolicyTypeCBP:
+			p, err = parseCBPPolicy(policy.namespace, policy.Raw)
+		case PolicyTypeMCP:
+			p, err = ParseMCPPolicy(policy.namespace, policy.Raw)
+		default:
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error parsing policy %q: %w", policy.Name, err)
+		}
+		p.Name = policy.Name
+		allPolicies[i] = p
 	}
 
 	// Compiled fresh every time. The policies themselves come from a cache; only
