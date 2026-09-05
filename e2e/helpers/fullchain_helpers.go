@@ -109,9 +109,18 @@ type ProviderEnv struct {
 	SourceRotationPeriod int
 
 	// ExtraPolicyRules are appended inside the mount's gateway path stanza,
-	// for providers whose authorization is finer-grained than a capability —
-	// a body-authoritative rule set, say, which cannot be expressed as one.
+	// for providers whose authorization is finer-grained than a capability and
+	// still belongs in the capability document — a path-level CEL condition,
+	// say.
 	ExtraPolicyRules string
+
+	// MCPPolicyRules is the body of an MCP policy stanza — methods, tools,
+	// resources, prompts, condition. When set, a second policy is written to
+	// sys/policies/mcp/ covering the same gateway shapes and attached to every
+	// role alongside the capability policy. Left empty, the mount gets no MCP
+	// contract at all, which is what a test wants when it means to exercise an
+	// ungoverned path.
+	MCPPolicyRules string
 
 	// CredConfig is the spec config. For a local source these values are copied
 	// verbatim into the minted credential, which is what lets a test assert on
@@ -154,6 +163,10 @@ func (p ProviderEnv) DenyRole() string { return p.Mount + "-agent-denied" }
 
 // DenyPolicy is the policy DenyRole carries.
 func (p ProviderEnv) DenyPolicy() string { return p.Mount + "-denied" }
+
+// MCPPolicy is the mount's tool contract, attached alongside Policy. Named
+// distinctly because policy names are unique across types.
+func (p ProviderEnv) MCPPolicy() string { return p.Mount + "-mcp" }
 
 // JWTAgentRole authenticates the agent by bearer token instead of certificate.
 // Needed for every shape where the agent arrives in a header — the dedicated
@@ -372,10 +385,21 @@ func SetupFullChainProvider(t *testing.T, port int, upstreamURL string, p Provid
 		mustJSON(t, map[string]any{"policy": gatewayPolicy(p.Mount, p.ExtraPolicyRules)}),
 		"create policy for "+p.Mount)
 
+	// The tool contract, when the provider wants one. It is a second document
+	// attached alongside the capability policy: it grants nothing by itself and
+	// only narrows what may be called on the paths already granted above.
+	tokenPolicies := []string{p.Policy()}
+	if p.MCPPolicyRules != "" {
+		mustAPI(t, port, "POST", "sys/policies/mcp/"+p.MCPPolicy(),
+			mustJSON(t, map[string]any{"policy": gatewayMCPPolicy(p.Mount, p.MCPPolicyRules)}),
+			"create mcp policy for "+p.Mount)
+		tokenPolicies = append(tokenPolicies, p.MCPPolicy())
+	}
+
 	mustAPI(t, port, "POST", "auth/cert/role/"+p.CertRole(),
 		mustJSON(t, map[string]any{
 			"allowed_common_names": []string{FullChainAgentCN},
-			"token_policies":       []string{p.Policy()},
+			"token_policies":       tokenPolicies,
 			"cred_spec_name":       p.Spec(),
 			"token_ttl":            3600,
 		}),
@@ -405,7 +429,7 @@ func SetupFullChainProvider(t *testing.T, port int, upstreamURL string, p Provid
 	APIRequest(t, "DELETE", "auth/jwt/role/"+p.JWTAgentRole(), port, "")
 	mustAPI(t, port, "POST", "auth/jwt/role/"+p.JWTAgentRole(),
 		mustJSON(t, map[string]any{
-			"token_policies": []string{p.Policy()},
+			"token_policies": tokenPolicies,
 			"cred_spec_name": p.Spec(),
 			"user_claim":     "sub",
 			"token_ttl":      3600,
@@ -427,7 +451,7 @@ func SetupFullChainProvider(t *testing.T, port int, upstreamURL string, p Provid
 		mustAPI(t, port, "POST", "auth/cert/role/"+p.VariantRole(name),
 			mustJSON(t, map[string]any{
 				"allowed_common_names": []string{FullChainAgentCN},
-				"token_policies":       []string{p.Policy()},
+				"token_policies":       tokenPolicies,
 				"cred_spec_name":       p.VariantSpec(name),
 				"token_ttl":            3600,
 			}),
@@ -446,6 +470,17 @@ func gatewayPolicy(mount, extraRules string) string {
 			body += extraRules + "\n"
 		}
 		return fmt.Sprintf("path %q {\n%s}\n", path, body)
+	}
+	return stanza(mount+"/gateway*") + stanza(mount+"/role/+/gateway*")
+}
+
+// gatewayMCPPolicy is gatewayPolicy's counterpart for the tool contract. It
+// covers both gateway shapes for the same reason: the contract has to apply
+// however the role was selected, and the two indexes are matched against the
+// request path independently.
+func gatewayMCPPolicy(mount, rules string) string {
+	stanza := func(path string) string {
+		return fmt.Sprintf("path %q {\n%s\n}\n", path, rules)
 	}
 	return stanza(mount+"/gateway*") + stanza(mount+"/role/+/gateway*")
 }
@@ -933,6 +968,7 @@ func TeardownFullChainProviderBestEffort(port int, p ProviderEnv) {
 	del("sys/policies/cbp/" + p.DenyPolicy())
 	del("auth/cert/role/" + p.CertRole())
 	del("sys/policies/cbp/" + p.Policy())
+	del("sys/policies/mcp/" + p.MCPPolicy())
 	del("sys/cred/specs/" + p.Spec())
 	del("sys/cred/sources/" + p.Source())
 	del("sys/providers/" + p.Mount)

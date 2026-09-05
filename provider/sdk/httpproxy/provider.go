@@ -179,8 +179,8 @@ type ProviderSpec struct {
 	// StreamUnauthenticated guard).
 	IsUnauthenticatedRequest func(r *http.Request, path string) bool
 
-	// ShouldEnforceMCPPolicy optionally opts this provider into CBP
-	// `mcp { }` body-authoritative policy enforcement. When set, the
+	// ShouldEnforceMCPPolicy optionally opts this provider into
+	// body-authoritative MCP policy enforcement. When set, the
 	// core handler calls this hook on every request matched to this
 	// backend; if it returns true the request body is buffered and
 	// strict-parsed as JSON-RPC before policy evaluation runs. The

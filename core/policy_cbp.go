@@ -242,20 +242,6 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 				existingPerms.Conditions = append(existingPerms.Conditions, pc.Permissions.Conditions...)
 			}
 
-			// MCP rule-set merging: additive OR across policies. Unlike
-			// conditions, an absent mcp block in one source does NOT
-			// disable enforcement contributed by another source — each
-			// stanza's mcp { } adds one entry to the slice and the
-			// per-set OR in evaluateMCPDescriptor means more entries
-			// can only admit more requests (never fewer). The clone
-			// protects against later mutation of the shared underlying
-			// slices.
-			if len(pc.Permissions.MCP) > 0 {
-				for _, m := range pc.Permissions.MCP {
-					existingPerms.MCP = append(existingPerms.MCP, m.Clone())
-				}
-			}
-
 		INSERT:
 			switch {
 			case pc.HasSegmentWildcards:
@@ -309,6 +295,9 @@ func (a *CBP) insertMCPPolicy(policy *Policy) error {
 			if err != nil {
 				return fmt.Errorf("error cloning MCP permissions: %w", err)
 			}
+			for _, m := range clonedPerms.MCP {
+				m.SourcePolicy = policy.Name
+			}
 			switch {
 			case pc.HasSegmentWildcards:
 				a.mcpSegmentWildcardPaths[pc.Path] = clonedPerms
@@ -323,7 +312,9 @@ func (a *CBP) insertMCPPolicy(policy *Policy) error {
 			return errors.New("error type casting MCP permissions")
 		}
 		for _, m := range pc.Permissions.MCP {
-			existingPerms.MCP = append(existingPerms.MCP, m.Clone())
+			clone := m.Clone()
+			clone.SourcePolicy = policy.Name
+			existingPerms.MCP = append(existingPerms.MCP, clone)
 		}
 	}
 
@@ -555,16 +546,21 @@ CHECK:
 	// MCP rule-set evaluation, body-authoritative. Runs after
 	// conditions (so source-IP / time gates apply first) and before
 	// parameter validation. Populates ret.MCPDecision on every branch
-	// when an mcp block was consulted, so the audit layer sees the
+	// when a rule-set was consulted, so the audit layer sees the
 	// decision whether the request was allowed or denied.
+	//
+	// The rule-sets come from the MCP index, a lookup independent of the one
+	// that chose `permissions` above: a request's capability grant and its tool
+	// contract live in separate documents whose stanzas need not be spelled the
+	// same way. The canonicalized `path` is the common key.
 	//
 	// req.MCPDescriptor is populated by the core/request_handler_mcp
 	// extractor on streaming MCP backends that opt into
 	// logical.MCPPolicyEnforced. A nil descriptor here means either
 	// the routed backend doesn't implement the marker, or it declined
 	// the request (wrong method / Content-Type) — fail closed.
-	if len(permissions.MCP) > 0 {
-		ret.MCPDecision = decideMCP(permissions.MCP, req, te, now, ns.Path)
+	if mcpSets := a.mcpRulesForPath(path); len(mcpSets) > 0 {
+		ret.MCPDecision = decideMCP(mcpSets, req, te, now, ns.Path)
 		if ret.MCPDecision != nil && ret.MCPDecision.Decision == "deny" {
 			return ret
 		}
@@ -572,7 +568,7 @@ CHECK:
 		// response-side list filtering: attach a keep-filter for a single
 		// list request, or fail closed on a batched list (unfilterable).
 		if !capCheckOnly && ret.MCPDecision != nil && ret.MCPDecision.Decision == "allow" {
-			if d := attachMCPListFilter(req, permissions.MCP); d != nil {
+			if d := attachMCPListFilter(req, mcpSets); d != nil {
 				sanitizeMCPDecision(d)
 				ret.MCPDecision = d
 				return ret

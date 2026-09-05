@@ -96,13 +96,14 @@ func runExtract(req *logical.Request, backend logical.Backend) {
 // =============================================================================
 
 func TestMCPE2E_ToolsCallAllow(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["search_repos"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["search_repos"] }
 }
 `)
 	req := buildE2ERequest(t, `{
@@ -123,13 +124,14 @@ path "mcp/gateway/*" {
 }
 
 func TestMCPE2E_BatchAllAllowed(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["search_repos"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["search_repos"] }
 }
 `)
 	req := buildE2ERequest(t, `[
@@ -150,13 +152,14 @@ path "mcp/gateway/*" {
 func TestMCPE2E_BatchWithListMethodDenied(t *testing.T) {
 	// End-to-end: a batch carrying a list method is denied by the
 	// response-filter guard even when every call would otherwise pass.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["search_repos"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["search_repos"] }
 }
 `)
 	req := buildE2ERequest(t, `[
@@ -204,13 +207,14 @@ func TestMCPE2E_BodyByteIdentityAfterExtraction(t *testing.T) {
 // =============================================================================
 
 func TestMCPE2E_DeniedToolFiresCorrectly(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    denied_tools    = ["delete_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { denied = ["delete_*"] }
 }
 `)
 	req := buildE2ERequest(t, `{
@@ -231,13 +235,14 @@ path "mcp/gateway/*" {
 }
 
 func TestMCPE2E_BatchDenyStampsBatchIndex(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    denied_tools    = ["delete_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { denied = ["delete_*"] }
 }
 `)
 	req := buildE2ERequest(t, `[
@@ -260,12 +265,13 @@ path "mcp/gateway/*" {
 // =============================================================================
 
 func TestMCPE2E_MalformedBody_DeniesMalformedJSONRPC(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list"] }
 }
 `)
 	req := buildE2ERequest(t, `{ not json`)
@@ -278,12 +284,13 @@ path "mcp/gateway/*" {
 }
 
 func TestMCPE2E_DuplicateKey_DeniesDuplicateKey(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list"] }
 }
 `)
 	req := buildE2ERequest(t, `{
@@ -301,12 +308,13 @@ path "mcp/gateway/*" {
 }
 
 func TestMCPE2E_OversizedBody_DeniesOversizedBody(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
 }
 `)
 	const cap = int64(64)
@@ -342,12 +350,13 @@ path "mcp/gateway/*" {
 // the same RuleType. Pins the symmetry with malformed_jsonrpc /
 // duplicate_key / batch_empty through the production pipeline.
 func TestMCPE2E_MalformedParams_DeniesMalformedParams(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
 }
 `)
 	req := buildE2ERequest(t, `{
@@ -365,12 +374,13 @@ path "mcp/gateway/*" {
 }
 
 func TestMCPE2E_EmptyBatch_DeniesBatchEmpty(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list"] }
 }
 `)
 	req := buildE2ERequest(t, `[]`)
@@ -397,12 +407,13 @@ path "mcp/gateway/*" {
 // every MCP-spec-compliant client that opens an SSE notification
 // stream would hit missing_body.
 func TestMCPE2E_PerRequestOptOut_WithMCPBlock_PassesThrough(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list"] }
 }
 `)
 	req := buildE2ERequest(t, `{"jsonrpc":"2.0","method":"tools/list","id":1}`)
@@ -448,14 +459,15 @@ path "mcp/gateway/*" {
 
 // Backend doesn't implement MCPPolicyEnforced at all → same as
 // per-request opt-out from the extractor's perspective. Pins the
-// "operator bound mcp{} to a non-MCP path" misconfiguration scenario.
+// "operator bound an MCP contract to a non-MCP path" misconfiguration.
 func TestMCPE2E_NonMCPBackend_WithMCPBlock_DeniesMissingBody(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list"] }
 }
 `)
 	req := buildE2ERequest(t, `{"jsonrpc":"2.0","method":"tools/list","id":1}`)
@@ -481,13 +493,14 @@ path "mcp/gateway/*" {
 // is truly provider-agnostic and that future mcp_* providers inherit
 // enforcement by implementing one method.
 func TestMCPE2E_ProviderAgnostic_TwoBackendsSameOutcome(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    denied_tools    = ["delete_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { denied = ["delete_*"] }
 }
 `)
 	body := `{

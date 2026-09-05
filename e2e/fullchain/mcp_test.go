@@ -15,8 +15,8 @@ import (
 // names the tools a caller may invoke, and the decision needs the JSON-RPC call
 // itself.
 //
-// The decision logic is covered thoroughly in-process — core has seven files on
-// mcp { } parsing, evaluation and list filtering. What none of them exercise is
+// The decision logic is covered thoroughly in-process — core has several files
+// on MCP policy parsing, evaluation and list filtering. What none of them cover is
 // the wiring: that a policy written through the API, stored, attached to a token
 // minted for a certificate agent, and evaluated against a real request body,
 // actually reaches the enforcement point. Those tests construct a Core directly.
@@ -40,12 +40,10 @@ var mcpEnv = h.ProviderEnv{
 	CredType:   "api_key",
 	CredConfig: map[string]string{"api_key": mcpAPIKey},
 	// Naming one tool is what opts the mount into body-authoritative
-	// enforcement; without an mcp { } block the body is never inspected and
-	// every JSON-RPC call the capability allows would go through.
-	ExtraPolicyRules: `  mcp {
-    allowed_methods = ["tools/call", "tools/list"]
-    allowed_tools   = ["` + mcpAllowedTool + `"]
-  }`,
+	// enforcement; with no MCP contract in scope the body is never inspected
+	// and every JSON-RPC call the capability allows would go through.
+	MCPPolicyRules: `  methods { allowed = ["tools/call", "tools/list"] }
+  tools { allowed = ["` + mcpAllowedTool + `"] }`,
 }
 
 // The github_token arm needs its own mount: a role binds one spec, and a variant
@@ -240,8 +238,8 @@ func TestMCP_MalformedBodyIsRefused(t *testing.T) {
 //
 // That is the property worth pinning: a body the filter cannot interpret is
 // denied rather than waved through as "no rule matched", which is how a filter
-// of this shape usually breaks. This row would pass differently with the
-// mcp { } block removed.
+// of this shape usually breaks. This row would pass differently with no MCP
+// contract attached to the mount.
 func TestMCP_ValidJSONButInvalidJSONRPCIsDeniedByPolicy(t *testing.T) {
 	ensureEnv(t)
 

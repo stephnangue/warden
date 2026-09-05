@@ -362,6 +362,9 @@ func evaluateMCPCall(sets []*CBPMCPRules, call *logical.MCPCall, act *celActivat
 
 	for _, set := range sets {
 		setDecision := evaluateMCPSetForCall(set, method, name, call, act)
+		// Stamp which contract decided, so an audit record can name the policy
+		// rather than only the rule that fired.
+		setDecision.PolicyName = set.SourcePolicy
 		if setDecision.Decision == "allow" {
 			return setDecision
 		}
@@ -667,6 +670,7 @@ func sanitizeMCPDecision(d *logical.MCPDecision) {
 	d.MatchedRule = stripCTL(d.MatchedRule)
 	d.ParamName = stripCTL(d.ParamName)
 	d.ParamValue = stripCTL(d.ParamValue)
+	d.PolicyName = stripCTL(d.PolicyName)
 	d.Condition.Sanitize()
 }
 
