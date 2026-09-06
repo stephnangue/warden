@@ -81,6 +81,12 @@ const (
 	mcpMethodPromptsGet    = "prompts/get"
 )
 
+// mcpMethodServerDiscover is the 2026-07-28 revision's MUST-implement
+// discovery RPC, which a modern client sends as the first request of every
+// HTTP connection. It replaces initialize's role at the head of a session
+// without establishing one.
+const mcpMethodServerDiscover = "server/discover"
+
 // ErrMCPPolicyDenied carries the MCPDecision that produced a deny so
 // the HTTP response layer can render the OAuth-shaped 403 body and the
 // WWW-Authenticate header. Unwraps to sdklogical.ErrPermissionDenied
@@ -461,9 +467,28 @@ func evaluateMCPCall(sets []*CBPMCPRules, call *logical.MCPCall, act *celActivat
 // improving the security posture. An explicit denied_methods entry still
 // blocks them, because the deny gate runs first. method is expected
 // lowercased.
+//
+// The set spans two protocol eras. initialize and ping open and maintain a
+// session in the legacy revisions; server/discover is what the 2026-07-28
+// revision sends instead, as the first request of every HTTP connection.
+// Without the exemption a modern client is forced into a legacy downgrade to
+// initialize on every mount, or fails outright against an upstream that
+// speaks only the modern revision. It discloses protocol versions, coarse
+// capabilities and serverInfo — never tool, resource or prompt names — so
+// exempting it leaks nothing the gate was protecting.
+//
+// subscriptions/listen is deliberately NOT here despite also being new in
+// 2026-07-28: it opens a stream of server notifications, which is data
+// access, and its resource URIs answer to the resources family.
+//
+// Neither is this an exemption from absence-deny. A path with no MCP
+// contract in scope refuses every MCP-shaped request, these included, before
+// any gate runs — otherwise a caller holding no contract could probe which
+// mounts exist. The fix there is attaching a contract, not widening this.
 func isLifecycleMethod(method string) bool {
 	return method == "initialize" ||
 		method == "ping" ||
+		method == mcpMethodServerDiscover ||
 		strings.HasPrefix(method, "notifications/")
 }
 
@@ -490,7 +515,8 @@ func isNameBearingMethod(method string) bool {
 // Deny-by-default: an empty allowed_methods denies every non-lifecycle
 // method, and an empty allowed_<family> denies every tool/resource/prompt.
 // Operators open a mount with allowed_* = ["*"]. Session-lifecycle methods
-// (initialize, ping, notifications/*) are exempt from the method gate.
+// (initialize, ping, server/discover, notifications/*) are exempt from the
+// method gate.
 func evaluateMCPGates(set *CBPMCPRules, method, name string) *logical.MCPDecision {
 	// (a) Missing method → deny. The body-authoritative parser rejects an
 	// empty method as malformed_jsonrpc before we get here, so this branch
