@@ -193,7 +193,18 @@ func (c *Core) CheckToken(ctx context.Context, req *logical.Request, unauth bool
 			// errors.Is(err, ErrPermissionDenied) call site keeps
 			// working unchanged.
 			if auth.MCPDecision != nil && auth.MCPDecision.Decision == "deny" {
-				retErr = multierror.Append(retErr, &ErrMCPPolicyDenied{Decision: auth.MCPDecision})
+				// A header mismatch is a protocol-level disagreement, not an
+				// authorization failure, and the HTTP layer renders it as
+				// one. It must be split out here: both arrive as a deny
+				// MCPDecision, and the generic wrapper below would send it
+				// out as the OAuth-shaped 403 — which a dual-era client
+				// reads as "not permitted" and answers by downgrading to
+				// initialize, rather than by fixing its headers.
+				if auth.MCPDecision.RuleType == mcpRuleTypeHeaderMismatch {
+					retErr = multierror.Append(retErr, mcpHeaderMismatchError(req, auth.MCPDecision))
+				} else {
+					retErr = multierror.Append(retErr, &ErrMCPPolicyDenied{Decision: auth.MCPDecision})
+				}
 			} else {
 				retErr = multierror.Append(retErr, sdklogical.ErrPermissionDenied)
 			}

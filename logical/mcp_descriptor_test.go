@@ -1,6 +1,7 @@
 package logical
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -55,4 +56,24 @@ func TestMCPRequestDescriptor_Clone_NilAndParseErr(t *testing.T) {
 	clone := orig.Clone()
 	clone.ParseErr.Msg = "mutated"
 	assert.Equal(t, "bad", orig.ParseErr.Msg)
+}
+
+// RawID is bytes the client controls, and the audit layer's clone must not
+// share them with the live request.
+func TestMCPCall_Clone_BreaksRawIDAliasing(t *testing.T) {
+	orig := MCPCall{Method: "tools/call", RawID: json.RawMessage(`"req-1"`), IDPresent: true}
+
+	clone := orig.Clone()
+	require.Equal(t, orig.RawID, clone.RawID)
+	assert.True(t, clone.IDPresent)
+
+	clone.RawID[1] = 'X'
+	assert.Equal(t, `"req-1"`, string(orig.RawID), "clone shares the RawID backing array")
+}
+
+func TestMCPCall_Clone_NilRawIDStaysNil(t *testing.T) {
+	clone := MCPCall{Method: "notifications/initialized"}.Clone()
+
+	assert.Nil(t, clone.RawID, "a notification must not gain an empty id")
+	assert.False(t, clone.IDPresent)
 }

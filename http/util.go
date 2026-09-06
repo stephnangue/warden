@@ -61,6 +61,56 @@ type mcpDenyResponse struct {
 // Description templates per RuleType live in core/policy_mcp.go's
 // BuildMCPDenyDescription so the wire shape and the audit JSON tags
 // stay in lockstep.
+// jsonRPCCodeHeaderMismatch is the spec's error code for a request whose
+// transport headers contradict its body.
+const jsonRPCCodeHeaderMismatch = -32020
+
+// jsonRPCError is a JSON-RPC 2.0 error response. Unlike a policy denial,
+// which the MCP spec handles at the HTTP layer, a header mismatch is a
+// protocol-level fault and gets a real JSON-RPC envelope with the request's
+// id echoed back.
+type jsonRPCError struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Error   jsonRPCErrorObj `json:"error"`
+}
+
+type jsonRPCErrorObj struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// respondMCPHeaderMismatch renders a transport-header refusal as HTTP 400
+// with a JSON-RPC -32020 body.
+//
+// Returning the error the modern spec defines, rather than the 403 a policy
+// denial gets, is what stops a dual-era client reading the refusal as "not
+// permitted" and answering by downgrading to initialize. The message names
+// no header and no value: the client already knows what it sent, and an
+// attacker should not be handed a probe for which half of the check fired.
+//
+// The id is echoed verbatim from the request. A body with no id is a
+// notification, which by JSON-RPC takes no response at all — but one that
+// reaches here failed validation, so the status still carries the refusal
+// and the id renders as null.
+func respondMCPHeaderMismatch(w http.ResponseWriter, rawID json.RawMessage, idPresent bool) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+
+	id := json.RawMessage("null")
+	if idPresent && len(rawID) > 0 {
+		id = rawID
+	}
+	_ = json.NewEncoder(w).Encode(&jsonRPCError{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error: jsonRPCErrorObj{
+			Code:    jsonRPCCodeHeaderMismatch,
+			Message: "MCP transport headers do not match the request body",
+		},
+	})
+}
+
 func respondMCPDeny(w http.ResponseWriter, status int, d *logical.MCPDecision) {
 	desc := core.BuildMCPDenyDescription(d)
 	w.Header().Set("Content-Type", "application/json")

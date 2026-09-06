@@ -57,6 +57,19 @@ func handleLogical(c *core.Core, log *logger.GatedLogger, forwarder *standbyForw
 			// generic Warden error body unchanged. The typed error
 			// Unwraps to sdklogical.ErrPermissionDenied so the status
 			// code is still 403 from errorToStatusCode above.
+			// Branched ahead of the policy-denial case below: a header
+			// mismatch is a protocol fault, not an authorization decision,
+			// and answering it with the 403 would tell a dual-era client to
+			// downgrade rather than to fix its headers. It gets a real
+			// JSON-RPC error and a 400, overriding the 403 that
+			// errorToStatusCode derives from the shared ErrPermissionDenied
+			// unwrap.
+			var mcpHeaderErr *core.ErrMCPHeaderMismatch
+			if errors.As(err, &mcpHeaderErr) {
+				respondMCPHeaderMismatch(w, mcpHeaderErr.RawID, mcpHeaderErr.IDPresent)
+				return
+			}
+
 			var mcpErr *core.ErrMCPPolicyDenied
 			if errors.As(err, &mcpErr) {
 				respondMCPDeny(w, statusCode, mcpErr.Decision)
