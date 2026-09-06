@@ -59,6 +59,16 @@ func (b *mcpAWSBackend) handleGateway(ctx context.Context, req *logical.Request)
 	r := req.HTTPRequest
 	w := req.ResponseWriter
 
+	// Warden judged this body for one principal, so the answer is that
+	// principal's and not a document to hand to the next caller. This mount
+	// writes upstream headers straight onto the client's writer rather than
+	// through a reverse proxy's response hook, so the declaration is made by
+	// wrapping the writer — which catches both the streaming and the filtered
+	// paths, and the listing where nothing was pruned.
+	if req.MCPDescriptor != nil {
+		w = newCachePrivateWriter(w)
+	}
+
 	snap := b.snapshot()
 	if snap.upstreamURL == nil {
 		http.Error(w, "mcp_aws not configured", http.StatusServiceUnavailable)
@@ -162,6 +172,54 @@ func (b *mcpAWSBackend) handleGateway(ctx context.Context, req *logical.Request)
 		return
 	}
 	sigv4.ForwardDirect(b.Logger, w, r, bodyBytes, transport)
+}
+
+// cachePrivateWriter narrows Cache-Control on its way out, at the moment the
+// status line is written — which is after the upstream's own headers have
+// been copied in, and before anything reaches the client.
+//
+// A wrapper rather than a pre-set header: the copy loop Adds upstream values,
+// so a Cache-Control set beforehand would sit alongside the upstream's rather
+// than replace it, and a client would see two directives that disagree.
+type cachePrivateWriter struct {
+	http.ResponseWriter
+	marked bool
+}
+
+func newCachePrivateWriter(w http.ResponseWriter) *cachePrivateWriter {
+	return &cachePrivateWriter{ResponseWriter: w}
+}
+
+// Unwrap exposes the underlying writer to http.ResponseController, which the
+// streaming paths use to shed connection deadlines.
+func (w *cachePrivateWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *cachePrivateWriter) WriteHeader(code int) {
+	w.mark()
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// Write covers a handler that never calls WriteHeader explicitly; net/http
+// would otherwise send the headers as they stand on the first write.
+func (w *cachePrivateWriter) Write(b []byte) (int, error) {
+	w.mark()
+	return w.ResponseWriter.Write(b)
+}
+
+// Flush implements http.Flusher — the SSE path flushes per read, and losing
+// it would buffer a stream that is supposed to arrive incrementally.
+func (w *cachePrivateWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *cachePrivateWriter) mark() {
+	if w.marked {
+		return
+	}
+	w.marked = true
+	httpproxy.MarkMCPResponsePrivate(w.Header())
 }
 
 // rewriteUpstreamURL mutates r in place to target the upstream MCP endpoint.

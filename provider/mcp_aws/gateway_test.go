@@ -461,3 +461,78 @@ func remainingDeadline(t *testing.T, req *logical.Request) time.Duration {
 	require.True(t, ok, "handleGateway must arm a deadline on the proxied request")
 	return time.Until(dl)
 }
+
+// --- cache hygiene ---
+
+// mcp_aws writes upstream headers straight onto the client's writer rather
+// than through a reverse proxy's response hook, so its declaration rides a
+// writer wrapper. Both response shapes must carry it: the streaming path and
+// the filtered one.
+func TestHandleGateway_MarksResponsePrivate(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_x"}]}}`))
+	}))
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		name   string
+		filter *logical.MCPListFilter
+	}{
+		{name: "streamed response"},
+		{name: "filtered response", filter: &logical.MCPListFilter{
+			ListMethod: "tools/list",
+			Keep:       func(string) bool { return true },
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := setupBackend(t)
+			configureBackendForUpstream(t, b, srv)
+
+			req, rec := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, stsCredential())
+			req.MCPDescriptor = &logical.MCPRequestDescriptor{
+				Calls: []logical.MCPCall{{Method: "tools/list"}},
+			}
+			req.MCPListFilter = tc.filter
+
+			b.handleGateway(context.Background(), req)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, "public, max-age=300, private", rec.Header().Get("Cache-Control"),
+				"a listing pruned per principal must not be served to another from a shared cache")
+		})
+	}
+}
+
+// A request this mount did not judge as MCP is left alone.
+func TestHandleGateway_NonMCPResponseUnmarked(t *testing.T) {
+	srv, _ := newCapturingUpstream(t)
+	defer srv.Close()
+
+	b := setupBackend(t)
+	configureBackendForUpstream(t, b, srv)
+
+	req, rec := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, stsCredential())
+
+	b.handleGateway(context.Background(), req)
+
+	assert.Empty(t, rec.Header().Get("Cache-Control"))
+}
+
+// The wrapper must not cost the SSE path its incremental delivery.
+func TestCachePrivateWriter_PreservesFlusher(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w := newCachePrivateWriter(rec)
+
+	_, ok := interface{}(w).(http.Flusher)
+	require.True(t, ok, "the SSE loop selects on http.Flusher")
+
+	_, _ = w.Write([]byte("event: ping\n\n"))
+	w.Flush()
+
+	assert.Equal(t, "private", rec.Header().Get("Cache-Control"),
+		"a handler that never calls WriteHeader must still get the declaration")
+	assert.Equal(t, "event: ping\n\n", rec.Body.String())
+}
