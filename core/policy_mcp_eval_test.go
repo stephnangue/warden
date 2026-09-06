@@ -176,7 +176,12 @@ path "mcp/gateway/*" {
   tools { allowed = ["*"] }
 }
 `)
-	for _, method := range []string{"initialize", "ping", "notifications/initialized"} {
+	// server/discover joins the set from the 2026-07-28 revision: a modern
+	// client sends it as the first request of every HTTP connection, so
+	// without the exemption every one of them is forced into a legacy
+	// downgrade to initialize — or fails outright against a modern-only
+	// upstream.
+	for _, method := range []string{"initialize", "ping", "notifications/initialized", "server/discover"} {
 		body := `{"jsonrpc":"2.0","method":"` + method + `","id":1}`
 		if strings.HasPrefix(method, "notifications/") {
 			body = `{"jsonrpc":"2.0","method":"` + method + `"}` // notification, no id
@@ -284,6 +289,50 @@ path "mcp/gateway/*" {
 	assert.Equal(t, "deny", res.MCPDecision.Decision)
 	assert.Equal(t, "tools/call", res.MCPDecision.MatchedRule)
 	assert.Equal(t, mcpRuleTypeDeniedMethods, res.MCPDecision.RuleType)
+}
+
+func TestMCPEval_ServerDiscover_ExplicitDenyStillBlocks(t *testing.T) {
+	// The exemption only rescues server/discover from deny-by-default. An
+	// operator who names it in denied_methods still blocks it, because the
+	// deny gate runs first — that ordering is what makes the exemption narrow
+	// enough to be safe.
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods {
+    allowed = ["tools/list"]
+    denied  = ["server/discover"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"server/discover","id":1}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeDeniedMethods, res.MCPDecision.RuleType)
+	assert.Equal(t, "server/discover", res.MCPDecision.MatchedRule)
+}
+
+func TestMCPEval_ServerDiscover_AbsenceDenyStillRefuses(t *testing.T) {
+	// The lifecycle exemption is not an exemption from absence-deny. On a
+	// path with a capability grant but no contract, server/discover is
+	// refused like everything else — otherwise a caller holding no MCP
+	// contract could probe which mounts exist by watching which ones answer.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"server/discover","id":1}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
 }
 
 func TestMCPEval_NoMCPPolicy_Denies(t *testing.T) {
